@@ -67,8 +67,8 @@ pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
 pub(crate) fn load_info(v: &Values, i: &Info) -> Option<Arc<Loaded>> {
     let file = i.file?;
     let l = match i.ls {
-        Some(ls) => load_spaced(v, file, i.s, ls.dw, ls.nolig),
-        None => load(v, file, i.s),
+        Some(ls) => load_spaced(v, file, i.s, ls.dw, ls.nolig || i.nolig),
+        None => load_spaced(v, file, i.s, 0, i.nolig),
     }?;
     match i.ex {
         Some((_, e, _)) => Some(expanded(&l, e)),
@@ -310,6 +310,9 @@ pub(crate) struct Info {
     pub s: i32,
     pub ls: Option<Ls>,
     pub ex: Option<(i64, i32, bool)>,
+    /// `\pdfnoligatures` (pdfTeX's `set_no_ligatures`): no character's
+    /// lig/kern program is reached, so no ligature and no kern.
+    pub nolig: bool,
 }
 
 pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
@@ -331,6 +334,7 @@ pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
             let g = |k: usize| ys.get(k).map(|&z| int_of(v, z));
             Some((g(0)?, i32::try_from(g(1)?).ok()?, g(2)? != 0))
         }),
+        nolig: n(7) != 0,
     })
 }
 

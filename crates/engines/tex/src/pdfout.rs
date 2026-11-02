@@ -1687,6 +1687,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
                         s: fs,
                         ls: None,
                         ex: None,
+                        nolig: false,
                     },
                 ));
                 g
@@ -1781,6 +1782,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
                 s: -1000,
                 ls: None,
                 ex: None,
+                nolig: false,
             },
         ));
         out.space = Some(id);

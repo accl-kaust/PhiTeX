@@ -496,6 +496,17 @@ fn raw_objects_in_object_streams() {
     check_threads("raw_objects_in_object_streams", "pdf");
 }
 
+/// `\pdfnoligatures` (pdfTeX's `set_no_ligatures`): the font's
+/// characters lose their lig/kern programs, no ligature and no kern. The
+/// primitive set a mark nothing read, so microtype's tracked small caps
+/// kept their ligatures: lie-hasse's section title "Three dimensional
+/// effect" had the ff ligature and sat 0.275bp off pdfTeX's, centred
+/// (accl 22608, 22724). At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdfnoligatures() {
+    check_threads("pdfnoligatures", "pdf");
+}
+
 /// `\pdffontattr` and `\pdfnobuiltintounicode` of a virtual font (cmap's,
 /// for every font it loads; libertine's T1 fonts are virtual) set its
 /// fields without reading it in (no `do_vf`): pdfTeX numbers its local

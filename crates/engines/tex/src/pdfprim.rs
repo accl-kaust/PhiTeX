@@ -2032,8 +2032,22 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
     if c == cmd::ASSIGN_FONT_INT && chr >= 2 {
         let f = r.scan_font_ident()?;
         if chr == NO_LIG {
-            // \pdfnoligatures (pdfTeX §1253)
+            // \pdfnoligatures (pdfTeX §1253, `set_no_ligatures`): the
+            // font's characters lose their lig/kern programs (the font's
+            // info marked, [`crate::fonts::Info::nolig`]; the mark was
+            // set and nothing read it: microtype's tracked small caps kept
+            // their ligatures, lie-hasse's "ff" in a section title)
             r.set(&format!("fcode:nolig:{f}"), v.int(1), true);
+            let x = r.font_get(f, crate::fields::FontCell::Info)?;
+            if let Some(x) = x {
+                let mut xs = list_of(v, x);
+                if xs.len() >= 4 {
+                    xs.resize(7, ValueId::UNIT);
+                    xs.push(v.int(1));
+                    xs.truncate(8);
+                    r.font_set(f, crate::fields::FontCell::Info, v.list(xs), true);
+                }
+            }
             return Ok(true);
         }
         let ch = scan_code_index(r, f)?;
