@@ -14,7 +14,7 @@ use crate::prelude::*;
 use crate::specials::{SpcArg, SpcEnv, SpcHandler, SpcHandlerFn};
 
 /// spc_dvips.c's `static` state (what the ported handlers use).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     pub block_pending: i32,
     pub pending_x: f64,

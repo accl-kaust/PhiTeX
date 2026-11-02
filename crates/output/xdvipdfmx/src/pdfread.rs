@@ -11,7 +11,7 @@ use crate::obj::{DecodeParms, Obj, PDF_INDIRECT, PDF_OBJ_MAX_DEPTH, PdfOut};
 use crate::parse::{parse_number, parse_unsigned, skip_white};
 use crate::some;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct XrefIn {
     pub kind: u8,
     pub field2: u32,
@@ -21,7 +21,7 @@ pub struct XrefIn {
 }
 
 /// A PDF file read for its objects.
-#[derive(Clone)]
+#[derive(PartialEq, Clone)]
 pub struct PdfFile {
     pub ident: Vec<u8>,
     pub data: Arc<[u8]>,

@@ -95,7 +95,7 @@ pub struct FontmapRec {
 }
 
 /// fontmap.c's statics.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `fontmap` (NULL before `pdf_init_fontmaps`): the records put since
     /// the session's start, a removed one as `None`.

@@ -8,7 +8,7 @@ use crate::spc_util::spc_util_read_numbers;
 use crate::specials::{SpcArg, SpcEnv, SpcHandler, cstr};
 
 /// spc_xtx.c's `static` state.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct State {
     /// `scaleFactors`: the `bscale` stack (C's array; `escale` pops).
     pub scale_factors: Vec<PdfCoord>,

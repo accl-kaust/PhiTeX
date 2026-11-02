@@ -84,6 +84,17 @@ pub type UsedChars = Arc<Used>;
 #[derive(Debug, Default)]
 pub struct Used(Vec<AtomicU8>);
 
+impl PartialEq for Used {
+    fn eq(&self, o: &Self) -> bool {
+        self.0.len() == o.0.len()
+            && self
+                .0
+                .iter()
+                .zip(&o.0)
+                .all(|(a, b)| a.load(Ordering::Relaxed) == b.load(Ordering::Relaxed))
+    }
+}
+
 impl Used {
     /// `n` bytes, zero.
     #[must_use]
@@ -154,7 +165,7 @@ pub struct CidSysInfo {
 }
 
 /// `cid_opt`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct CidOpt {
     pub csi: CidSysInfo,
     pub style: i32,
@@ -163,7 +174,7 @@ pub struct CidOpt {
 }
 
 /// `pdf_font`'s `type0`.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct PdfFontType0 {
     /// Only a single descendant is allowed (a font_id).
     pub descendant: i32,
@@ -180,7 +191,7 @@ impl Default for PdfFontType0 {
 }
 
 /// `pdf_font`'s `cid`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfFontCid {
     /// Character collection.
     pub csi: CidSysInfo,
@@ -191,7 +202,7 @@ pub struct PdfFontCid {
 }
 
 /// `pdf_font`. `Default` is `pdf_init_font_struct`.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct PdfFont {
     /// Map name.
     pub ident: Option<Vec<u8>>,
@@ -242,7 +253,7 @@ impl Default for PdfFont {
 }
 
 /// pdffont.c's statics.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `font_cache.fonts` (count = `len()`).
     pub fonts: Vec<PdfFont>,

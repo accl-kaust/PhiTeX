@@ -20,7 +20,7 @@ pub enum CompatMode {
     Mpost,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct DpxConf {
     pub is_xbb: bool,
     pub verbose_level: i32,
@@ -30,7 +30,7 @@ pub struct DpxConf {
 }
 
 /// The whole program.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Dpx {
     /// The objects and the writer (pdfobj.c).
     pub o: PdfOut,
@@ -178,6 +178,13 @@ impl Dpx {
 /// The host's files, shared by a session's snapshots.
 #[derive(Clone)]
 pub struct FilesRef(pub alloc::sync::Arc<dyn Files>);
+
+/// The host's files are not the session's state: any two are equal.
+impl PartialEq for FilesRef {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
 
 impl FilesRef {
     /// [`Files::find`].

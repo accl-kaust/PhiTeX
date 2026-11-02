@@ -46,7 +46,7 @@ const PDF_NUM_INDIRECT_MAX: u32 = 8_388_607;
 const BINARY_MARKER: &[u8] = b"%\xe4\xf0\xed\xf8\n";
 
 /// `DecodeParms` of a stream with a predictor.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct DecodeParms {
     pub predictor: i32,
     pub colors: i32,
@@ -54,7 +54,7 @@ pub struct DecodeParms {
     pub columns: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct Stream {
     pub dict: Obj,
     pub data: Vec<u8>,
@@ -65,7 +65,7 @@ pub struct Stream {
     pub parms: DecodeParms,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub struct Indirect {
     /// The file it refers into (`pdf_file *`), or none for this output.
     pub pf: Option<u32>,
@@ -75,7 +75,7 @@ pub struct Indirect {
     pub generation: u16,
 }
 
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub enum Data {
     Boolean(bool),
     Number(f64),
@@ -92,7 +92,7 @@ pub enum Data {
     Free,
 }
 
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 struct Slot {
     data: Data,
     label: u32,
@@ -101,7 +101,7 @@ struct Slot {
     flags: i32,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct XrefEntry {
     pub kind: u8,
     pub field2: u32,
@@ -118,7 +118,7 @@ pub type BatchDeflate = Box<dyn Fn(&[(i32, &[u8])]) -> Vec<Vec<u8>> + Send + Syn
 
 /// A stream whose compression waits for the batch
 /// ([`PdfOut::defer_streams`]): its bytes go in at `at` once compressed.
-#[derive(Clone)]
+#[derive(PartialEq, Clone)]
 struct Pending {
     /// Where in `out` the stream's bytes go.
     at: usize,
@@ -131,6 +131,61 @@ struct Pending {
     dicts: Vec<(Vec<u8>, usize)>,
     level: i32,
     data: Vec<u8>,
+}
+
+/// Two writers are equal when what they write from here on is the same,
+/// wherever in the file they stand: their objects, their labels, the
+/// object stream they fill, the bytes not yet taken and the line they
+/// write on, each object written so far kept in the same way (directly,
+/// or in which object stream); not the bytes already written, their
+/// count (`file_position`) nor so the places in the file of the objects
+/// written directly, nor the host's deflaters. A session whose state is
+/// equal to another's but for where it stands writes the same pages,
+/// each object placed as far again from the other's
+/// (`crate::api::Session::converged`).
+impl PartialEq for PdfOut {
+    fn eq(&self, o: &Self) -> bool {
+        let entry = |a: &XrefEntry, b: &XrefEntry| {
+            a.kind == b.kind && a.field3 == b.field3 && (a.kind == 1 || a.field2 == b.field2)
+        };
+        let pending = |a: &Pending, b: &Pending| {
+            (a.at, &a.dicts, a.level, &a.data) == (b.at, &b.dicts, b.level, &b.data)
+        };
+        self.slots == o.slots
+            && self.free_slots == o.free_slots
+            && (
+                self.version_major,
+                self.version_minor,
+                self.compression_level,
+            ) == (o.version_major, o.version_minor, o.compression_level)
+            && (self.use_predictor, self.enable_encrypt, self.use_objstm)
+                == (o.use_predictor, o.enable_encrypt, o.use_objstm)
+            && self.out == o.out
+            && self.line_position == o.line_position
+            && self.output_stream == o.output_stream
+            && self.open == o.open
+            && self.next_label == o.next_label
+            && self.trailer == o.trailer
+            && self.startxref == o.startxref
+            && self.xref.len() == o.xref.len()
+            && self.xref.iter().zip(&o.xref).all(|(a, b)| entry(a, b))
+            && self.xref_stream == o.xref_stream
+            && self.current_objstm == o.current_objstm
+            && self.free_list == o.free_list
+            && self.pending.len() == o.pending.len()
+            && self
+                .pending
+                .iter()
+                .zip(&o.pending)
+                .all(|(a, b)| pending(a, b))
+            && self.deferring == o.deferring
+            && self.files == o.files
+            && self.trailer_pos == o.trailer_pos
+            && self.xref_written == o.xref_written
+            && self.live == o.live
+            && self.rec == o.rec
+            && self.rec_depth == o.rec_depth
+    }
 }
 
 /// The arena and the writer (`struct pdf_out`).
@@ -193,7 +248,7 @@ pub struct PdfOut {
 /// An object written, as [`PdfOut::record_begin`] records it: what
 /// [`PdfOut::replay`] writes again, the same bytes in the same order,
 /// offsets from where the replay stands.
-#[derive(Clone)]
+#[derive(PartialEq, Clone)]
 enum Wrote {
     /// Written directly: the label the session would give next before
     /// it, the object's number and generation, its bytes (a deferred
@@ -242,7 +297,7 @@ pub struct WriterMark {
 /// The labels of pages written again ([`PdfOut::live_begin`]): from
 /// `from` (the file's `/Size`) up to `high`; the labels the session
 /// would number from where it stood (`resume`) skip them.
-#[derive(Clone, Copy, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 struct LiveLabels {
     from: u32,
     high: u32,
@@ -258,7 +313,7 @@ const LIVE_LEVEL: i32 = 1;
 
 /// The file's objects as its cross-reference section gives them, and
 /// its trailer's entries: what an update section repeats.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct XrefWritten {
     /// By object number: kind 0 free, 1 at offset `field2`, 2 in object
     /// stream `field2` at index `field3`.
@@ -560,6 +615,53 @@ impl PdfOut {
     #[must_use]
     pub fn next_label(&self) -> u32 {
         self.next_label
+    }
+
+    /// The labels of the objects written directly so far (a bit each).
+    pub(crate) fn direct_labels(&self) -> Vec<u64> {
+        let mut b = vec![0u64; self.xref.len().div_ceil(64)];
+        for (i, e) in self.xref.iter().enumerate() {
+            if e.kind == 1 {
+                b[i / 64] |= 1 << (i % 64);
+            }
+        }
+        b
+    }
+
+    /// The objects written directly whose place differs from `o`'s, with
+    /// this writer's entry for each.
+    pub(crate) fn moved_from(&self, o: &PdfOut) -> Vec<(u32, XrefEntry)> {
+        self.xref
+            .iter()
+            .zip(&o.xref)
+            .enumerate()
+            .filter(|(_, (a, b))| a.kind == 1 && a.field2 != b.field2)
+            .filter_map(|(i, (a, _))| Some((u32::try_from(i).ok()?, *a)))
+            .collect()
+    }
+
+    /// Where the writer stands moved by `delta` bytes, and with it each
+    /// object written directly that is not among `direct` (the objects
+    /// written directly by the point the graft is from); those of
+    /// `direct` among `moved` placed as there ([`crate::api::Graft`]).
+    pub(crate) fn graft(&mut self, delta: i64, direct: &[u64], moved: &[(u32, XrefEntry)]) {
+        let shift =
+            |x: usize| usize::try_from(i64::try_from(x).unwrap_or(i64::MAX) + delta).unwrap_or(0);
+        for (i, e) in self.xref.iter_mut().enumerate() {
+            let before = direct.get(i / 64).is_some_and(|w| w & (1 << (i % 64)) != 0);
+            if e.kind == 1 && !before {
+                e.field2 = u32::try_from(shift(e.field2 as usize)).unwrap_or(u32::MAX);
+            }
+        }
+        for &(l, e) in moved {
+            if let Some(x) = self.xref.get_mut(l as usize) {
+                *x = e;
+            }
+        }
+        self.file_position = shift(self.file_position);
+        for p in &mut self.pending {
+            p.pos = shift(p.pos);
+        }
     }
 
     /// Pages are written again into a file whose objects are numbered
