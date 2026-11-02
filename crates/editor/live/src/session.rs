@@ -855,6 +855,18 @@ impl Session {
                     self.host.bibtex(),
                 );
                 phitex_tex::timeline::lap("session: the content key, tools, bibtex");
+                // (pdfTeX's TCX: the one a `%&` first line names, web2c's
+                // `parse_first_line`, which TeX Live's texmf.cnf turns off
+                // for `tex` only; found as kpathsea's `web2c files`)
+                let tcx = if xe || self.job.engine.name == "tex" {
+                    None
+                } else {
+                    text.lines()
+                        .next()
+                        .and_then(phitex_tex::translate_file)
+                        .and_then(|n| tool_finder.as_ref()?(phitex_tex::ToolSearch::Web2c, &n))
+                        .map(|(_, b)| b)
+                };
                 let shell_hook = self.host.shell_hook(&self.job);
                 phitex_tex::timeline::lap("session: the shell hook");
                 let opts = Options {
@@ -869,6 +881,7 @@ impl Session {
                     // name; its PDF written from the pages, as xelatex has
                     // xdvipdfmx make it, unless the XDV is the output)
                     xetex,
+                    tcx,
                     finder,
                     prelude_finder,
                     content_key,

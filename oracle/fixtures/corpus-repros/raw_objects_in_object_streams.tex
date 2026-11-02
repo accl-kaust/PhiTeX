@@ -1,0 +1,16 @@
+% a raw object a page names with \pdfrefobj (not a stream, not
+% \immediate) is written with the page, into an object stream: it counts
+% toward the stream's 100 objects, so an object number TeX reads later
+% counts the next stream's number where it falls (iacrj: /Metadata 183
+% for the XMP stream 184)
+\documentclass{article}
+\newcount\k
+\def\raw{\pdfobj{<< /R \the\k >>}\pdfrefobj\pdflastobj}
+\begin{document}
+\loop
+  \raw\raw\raw
+  \immediate\pdfobj{<< /P \the\k >>}Page \the\k: object \the\pdflastobj.
+  \newpage
+  \advance\k1
+\ifnum\k<40 \repeat
+\end{document}

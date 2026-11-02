@@ -516,7 +516,15 @@ impl Run<'_, '_> {
         // what the PDF writer makes of the page's pdfTeX whatsits
         let mut pdf_data = Vec::new();
         // §1366: the whatsits in the order `hlist_out`/`vlist_out` meet them
+        // (those it meets: not a discretionary's pre-break or post-break
+        // text, which a line keeps where it did not break there, nor an
+        // insertion's or `\vadjust`'s material, §622, §631)
+        let mut shipped = vec![false; side.whats.len()];
+        shipped_whats(&bx.list, &side, &mut shipped);
         for (wi, w) in side.whats.clone().into_iter().enumerate() {
+            if !shipped.get(wi).copied().unwrap_or(true) {
+                continue;
+            }
             let xs = list_of(v, w);
             let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
             match kind.as_str() {
@@ -657,6 +665,41 @@ impl Run<'_, '_> {
         }
         xs.push(v.int(i64::from(self.param("pdfpkresolution")?)));
         Ok(v.list(xs))
+    }
+}
+
+/// The whatsits of `list` that shipping meets (`hlist_out`, `vlist_out`,
+/// §619–§640), marked in `out` by their handles: a box's, a leader's
+/// box, a discretionary's text present when it did not break (its
+/// `replace`), a sealed line's skeleton's ([`nodes::Side::skel`]); not
+/// its pre-break and post-break text, an insertion's or
+/// a `\vadjust`'s.
+pub(crate) fn shipped_whats(list: &List, side: &Side, out: &mut [bool]) {
+    for n in list {
+        match n {
+            Node::Whatsit(i, _) => {
+                if let Some(x) = out.get_mut(*i as usize) {
+                    *x = true;
+                } else if let Some(sk) = side
+                    .skel
+                    .iter()
+                    .find(|sk| Some(sk.k) == i.checked_sub(nodes::LAZY))
+                {
+                    // (a sealed line's whatsits, on its skeleton)
+                    shipped_whats(&sk.list, side, out);
+                }
+            }
+            Node::Box(b) => shipped_whats(&b.list, side, out),
+            Node::Disc(d) => shipped_whats(&d.replace, side, out),
+            Node::Glue(g) => {
+                if let Some(l) = &g.leader
+                    && let Node::Box(b) = &**l
+                {
+                    shipped_whats(&b.list, side, out);
+                }
+            }
+            _ => {}
+        }
     }
 }
 

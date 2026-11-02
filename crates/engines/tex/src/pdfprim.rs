@@ -434,13 +434,8 @@ fn hex_upper(b: &[u8]) -> String {
 /// File `name` as `\\pdffilesize` and its kin find it (`name.tex` first
 /// where it has no extension): `[path, text]`.
 fn file_found(r: &mut Run<'_, '_>, name: &str) -> R<Option<ValueId>> {
-    let key = crate::run::tex_names(name).0;
-    let name = crate::run::same_dir(name);
-    let mut found = r.read_file(&key)?;
-    if found.is_none() && key != name {
-        found = r.read_file(name)?;
-    }
-    Ok(found)
+    let key = r.tex_key(name)?;
+    r.read_file(&key)
 }
 
 fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
@@ -466,7 +461,7 @@ fn file_bytes_shared(r: &mut Run<'_, '_>, name: &str) -> R<Option<std::sync::Arc
 /// beside it (`fsize:<name>`), so the run reads not its text: an edit
 /// inside the file that keeps its length reaches only its pieces.
 fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
-    let key = r.tex_lookup(name)?;
+    let key = r.tex_key(name)?;
     if r.read_cut(&key)?.is_some() {
         let v = r.v;
         if let Some(n) = r.cx.env(v.field(&format!("fsize:{key}")))? {
@@ -676,7 +671,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             let job = r
                 .get_loc(crate::fields::cell::JOBNAME)?
                 .map_or_else(|| "texput".to_owned(), |x| str_of(r.v, x));
-            let key = r.tex_lookup(&name)?;
+            let key = r.tex_key(&name)?;
             // (a file found: the build's clock too, as pdfTeX's under
             // FORCE_SOURCE_DATE gives SOURCE_DATE_EPOCH for every file
             // (utils.c `getfilemoddate`); epstopdf-base compares an EPS's
@@ -1035,7 +1030,9 @@ pub(crate) fn rt_before(r: &mut Run<'_, '_>, at: u64) -> R<i64> {
 /// ([`rt_before`]: the cell's, those only PDF bytes name) and this
 /// run's, and the objects the pages shipped before this run made
 /// (`pdfout::page_offset`, a fold of their write sides' allocations).
+#[track_caller]
 fn alloc_obj(r: &mut Run<'_, '_>) -> R<i64> {
+    let caller = std::panic::Location::caller();
     if r.param("pdfoutput")? > 0 {
         let me = r.cx.node().raw();
         let before = rt_before(r, me)?;
@@ -1044,7 +1041,7 @@ fn alloc_obj(r: &mut Run<'_, '_>) -> R<i64> {
         let n = before + r.rt_made + off;
         if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
             eprintln!(
-                "alloc-obj: node {me} number {n}: read-time before {before}, this run's {}, the pages' {off}",
+                "alloc-obj: node {me} number {n}: read-time before {before}, this run's {}, the pages' {off} at {caller}",
                 r.rt_made
             );
         }
@@ -1953,6 +1950,32 @@ pub(crate) fn code_table(r: &mut Run<'_, '_>, m: i32, f: i64) -> R<Vec<(u16, i32
         .collect())
 }
 
+/// Field `k` of font `f`'s info ([`crate::fonts::info`]) made `make` of
+/// its value there (none: past the list's end); the fields before it
+/// filled with `UNIT`.
+fn font_info_set(
+    r: &mut Run<'_, '_>,
+    f: i64,
+    k: usize,
+    make: impl FnOnce(Option<ValueId>) -> ValueId,
+) -> R<()> {
+    let v = r.v;
+    let Some(x) = r.font_get(f, crate::fields::FontCell::Info)? else {
+        return Ok(());
+    };
+    let mut xs = list_of(v, x);
+    if xs.len() < 4 {
+        return Ok(());
+    }
+    let old = xs.get(k).copied().filter(|&y| y != ValueId::UNIT);
+    if xs.len() <= k {
+        xs.resize(k + 1, ValueId::UNIT);
+    }
+    xs[k] = make(old);
+    r.font_set(f, crate::fields::FontCell::Info, v.list(xs), true);
+    Ok(())
+}
+
 /// `\lpcode` and the other font codes, read (pdfTeX §426).
 /// The character a font code of font `f` is for: XeTeX's
 /// `scan_glyph_number` for a native font (a glyph id: `/name`, `u`
@@ -2032,8 +2055,14 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
     if c == cmd::ASSIGN_FONT_INT && chr >= 2 {
         let f = r.scan_font_ident()?;
         if chr == NO_LIG {
-            // \pdfnoligatures (pdfTeX §1253)
+            // \pdfnoligatures (pdfTeX §1253, `set_no_ligatures`): the
+            // font's characters lose their lig/kern programs (the font's
+            // info marked, [`crate::fonts::Info::nolig`]; the mark was
+            // set and nothing read it: microtype's tracked small caps kept
+            // their ligatures, lie-hasse's "ff" in a section title)
             r.set(&format!("fcode:nolig:{f}"), v.int(1), true);
+            let one = v.int(1);
+            font_info_set(r, f, 7, |_| one)?;
             return Ok(true);
         }
         let ch = scan_code_index(r, f)?;
@@ -2046,6 +2075,33 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
         } else {
             n.clamp(-1000, 1000)
         };
+        // (`\tagcode` below 0, pdfTeX's `set_tag_code`: the character's
+        // tags `-n` names taken off for good, 1 its lig/kern program, 2
+        // its next larger, 4 its extensible; the font's info keeps each
+        // character's taken tags, [`crate::fonts::Info::untagged`].
+        // Kept as the code only, microtype's `no ligatures={f}` of a
+        // tracked font kept the ff ligature: lie-hasse's section title)
+        if chr == TAG && n < 0 {
+            let bits = n.clamp(-7, 0).abs();
+            let c = i64::from(ch);
+            font_info_set(r, f, 8, |old| {
+                let mut xs = old.map(|x| list_of(v, x)).unwrap_or_default();
+                let mut done = false;
+                for p in xs.chunks_mut(2) {
+                    if let [k, m] = p
+                        && int_of(v, *k) == c
+                    {
+                        *m = v.int(int_of(v, *m) | i64::from(bits));
+                        done = true;
+                    }
+                }
+                if !done {
+                    xs.push(v.int(c));
+                    xs.push(v.int(i64::from(bits)));
+                }
+                v.list(xs)
+            })?;
+        }
         if tabled(chr) {
             let mut t = code_table(r, chr, f)?;
             let c = u16::try_from(ch).unwrap_or(0);
@@ -2635,6 +2691,7 @@ fn num_of(got: Option<crate::pdfout::CmdOut>) -> Option<usize> {
         .and_then(|n| usize::try_from(n).ok())
 }
 
+#[track_caller]
 fn or_alloc(r: &mut Run<'_, '_>, n: Option<usize>) -> R<i64> {
     match n {
         Some(n) => Ok(i64::try_from(n).unwrap_or(0)),
@@ -2855,7 +2912,11 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     None => alloc_obj(r)?,
                 },
             };
-            r.set(&format!("pdf:objbody:{n}"), v.int(1), true);
+            // (1, with 2 for a stream and 4 for `\immediate`: a page that
+            // names it with `\pdfrefobj` writes a raw object that is
+            // neither into an object stream, `page_allocs`)
+            let kind = 1 + 2 * i64::from(stream) + 4 * i64::from(immediate);
+            r.set(&format!("pdf:objbody:{n}"), v.int(kind), true);
             if immediate && pdf_mode(r)? {
                 opened(r);
             }
@@ -3565,6 +3626,17 @@ fn ximage_own_info(
     // (from the objects reading made on: a PNG's transparency group is
     // the read's, counted where it is read)
     let before = st.objects_numbered();
+    // (an included PDF page's `/Group`: the page that first shows the
+    // image numbers its object (`out_image`), and the image's write
+    // writes the group as that object, into an object stream at
+    // `\pdfobjcompresslevel` 2 and more (`pdf_begin_obj(group, 2)`).
+    // Shown here as there, so this writer writes it so too: one showing
+    // no page copied the group into the image's dictionary, no object
+    // for a direct one (iacrj's logo: every read-time number after page
+    // 1 one short, /Metadata 183 for 184), its object copied for one the
+    // page names indirectly (counted again on top of that: every number
+    // after the page one past pdfTeX's))
+    st.show_ximage_group(n);
     let (objs, os) = match st.write_ximage(n, fonts) {
         Ok(()) => st.objects_after(before),
         Err(_) => (0, 0),
@@ -4206,6 +4278,69 @@ pub(crate) fn writer_data(r: &mut Run<'_, '_>, xs: &[ValueId]) -> R<Option<Value
 #[cfg(test)]
 mod tests {
     use super::obj_cmd;
+
+    /// An RGBA PNG, `w` by 1, as bytes.
+    fn rgba_png(w: u32) -> Vec<u8> {
+        let chunk = |out: &mut Vec<u8>, kind: &[u8], data: &[u8]| {
+            out.extend_from_slice(&u32::try_from(data.len()).expect("a length").to_be_bytes());
+            let mut c = kind.to_vec();
+            c.extend_from_slice(data);
+            out.extend_from_slice(&c);
+            out.extend_from_slice(&phitex_codecs::zlib::crc32(&c).to_be_bytes());
+        };
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = w.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&1u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        chunk(&mut png, b"IHDR", &ihdr);
+        let mut raw = vec![0u8];
+        for x in 0..w {
+            raw.extend_from_slice(&[u8::try_from(x % 256).expect("a byte"), 0, 0, 128]);
+        }
+        chunk(
+            &mut png,
+            b"IDAT",
+            &phitex_codecs::deflate::compress(&raw, 6),
+        );
+        chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
+    /// Writing a PNG with an alpha channel makes one object after its
+    /// own, its soft mask; its transparency group, numbered where it was
+    /// read, goes into the document's object stream at
+    /// `\\pdfobjcompresslevel` 2 (an object in a stream, none of its
+    /// own). The stream it opened on the image's writer was counted as an
+    /// object: every read-time number after a page that first showed such
+    /// a PNG was one past pdfTeX's (beautybook's `/pgfsmask146` for 144).
+    #[test]
+    fn png_alpha_objects_after() {
+        let spec = phitex_pdf::ImageSpec {
+            width: -(1 << 30),
+            height: -(1 << 30),
+            depth: -(1 << 30),
+            attr: None,
+            page: 1,
+            named: None,
+            colorspace: 0,
+            page_box: phitex_pdf::PageBox::Crop,
+            name: b"a.png".to_vec(),
+            data: rgba_png(4).into(),
+            image_resolution: 0,
+            inclusion_errorlevel: 0,
+        };
+        let fonts = crate::pdfout::Fonts::default();
+        for (ocl, want) in [
+            ((2, 1, 5), (1, 1)),
+            ((0, 1, 5), (1, 0)),
+            ((2, 1, 7), (1, 1)),
+        ] {
+            let got = super::ximage_own_info(&spec, |_| {}, ocl, &fonts)
+                .map(|(_, o, s)| (o, s))
+                .expect("the image");
+            assert_eq!(got, want, "at {ocl:?}");
+        }
+    }
 
     /// `\pdfobj useobjnum n` names the object the link's writer made for
     /// the `reserveobjnum` TeX read back as `n`: TeX's number mapped

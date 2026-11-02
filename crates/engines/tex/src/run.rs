@@ -116,6 +116,9 @@ pub(crate) struct Ops {
     /// The engine is XeTeX (set once, before the first evaluation):
     /// `crate::xetex`.
     pub xe: std::sync::Arc<std::sync::OnceLock<crate::xetex::XeTeX>>,
+    /// The job's TCX tables, parsed from the `tcx` field's value once
+    /// (`crate::tcx`).
+    pub tcx: std::sync::Arc<crate::tcx::TcxCell>,
     /// The format's definitions the build analyses document texts with
     /// (set by `api::Build::with`; none while a format is built): a
     /// document file `\input` is sliced with them ([`Run::leftover`]).
@@ -892,6 +895,11 @@ pub(crate) struct Run<'c, 'a> {
     /// read back here next round, where the lines written to it are read
     /// ([`Run::note_absent_read_point`]), as when the file is there.
     pub vain_after_point: Vec<String>,
+    /// The state (§303) a line a node boundary cut was left in, for the
+    /// continuation of it the next sibling's text begins with
+    /// ([`Run::next_tok`]): a space after a control word the cut ends
+    /// with is skipped there as on one line (§354).
+    pub cut_state: Option<u8>,
     /// The tool failures this run reported ([`Run::tool_output`]): each
     /// once.
     pub tool_failures: Vec<String>,
@@ -1188,6 +1196,7 @@ impl<'c, 'a> Run<'c, 'a> {
             close_cont: None,
             read_point_pending: None,
             vain_after_point: Vec::new(),
+            cut_state: None,
             tool_failures: Vec::new(),
             pending_pre: Vec::new(),
             pending_locs: phitex_defuse::FxHashSet::default(),
@@ -2321,18 +2330,37 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(Some(x))
     }
 
-    /// The file `\\pdffilesize` and `\\filemoddate` find for `name`
-    /// ([`tex_names`]): `name.tex` where kpathsea tries it first and it is
-    /// there (the client's, cut, or one the job writes), else `name`.
-    pub(crate) fn tex_lookup(&mut self, name: &str) -> R<String> {
+    /// The file TeX's lookups (`\\input`, `\\openin`, `\\pdffilesize`,
+    /// `\\pdfximage`, `\\filemoddate`) find for `name`: the first of
+    /// kpathsea's names for it ([`tex_names`]: `name.tex` first, then
+    /// `name`) that is there (open for writing in this run, cut, the
+    /// client's, or one the job writes); neither there, the one
+    /// `\\openout` writes for `name` (`name` where it has an extension,
+    /// else `name.tex`), whose lookup in vain is where the job's file is
+    /// read back once it writes it. The lookup reads the file by this
+    /// name, and so does all it keeps of it: its read-back, its read-back
+    /// point, its cut, its seed.
+    pub(crate) fn tex_key(&mut self, name: &str) -> R<String> {
         let (key, alt) = tex_names(name);
-        let Some(alt) = alt else {
-            return Ok(key);
-        };
-        if self.read_cut(&key)?.is_some() || self.file_lazy(&key)?.is_some() {
+        let bare = same_dir(name);
+        if self.tex_there(&key)? {
             return Ok(key);
         }
-        Ok(alt)
+        if let Some(alt) = alt {
+            return Ok(alt);
+        }
+        if key != bare && self.tex_there(bare)? {
+            return Ok(bare.to_owned());
+        }
+        Ok(key)
+    }
+
+    /// Whether TeX's file `key` is there for [`Run::tex_key`].
+    fn tex_there(&mut self, key: &str) -> R<bool> {
+        if self.get(&format!("wopen:{key}"))?.is_some() || self.read_cut(key)?.is_some() {
+            return Ok(true);
+        }
+        Ok(self.file_lazy(key)?.is_some())
     }
 
     /// Font file `name` as the font side finds it (a TFM, a VF, a map,
@@ -4552,11 +4580,26 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(text) = self.cx.read(field)?.map(|t| str_of(v, t)) else {
             return Ok(false);
         };
+        // (XeTeX: the comment's bytes made characters in the line's file's
+        // mode, as `input_line` made the line's own: the line was read,
+        // and decoded, with its mark in the comment's place)
+        let mut chars: Vec<u32> = text.chars().map(u32::from).collect();
+        if self.xe {
+            let name = self
+                .input
+                .top_line()
+                .and_then(|s| s.origin)
+                .map_or(ValueId::UNIT, |o| o.0);
+            let m = self.input_mode(name)?;
+            crate::xetex::decode_line(&mut chars, m, false);
+        } else if let Some(t) = self.tcx()? {
+            t.decode(&mut chars);
+        }
         let Some(s) = self.input.top_line_mut() else {
             return Ok(false);
         };
         let i = s.loc - 1;
-        s.buf.splice(i..i + 17, text.chars().map(u32::from));
+        s.buf.splice(i..i + 17, chars);
         s.loc = i;
         Ok(true)
     }

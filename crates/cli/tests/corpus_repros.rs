@@ -440,6 +440,20 @@ fn input_dotted_name() {
     check_threads("input_dotted_name", "pdf");
 }
 
+/// `\input` of a name with an extension the `tex` format does not know,
+/// a file the job writes: kpathsea finds `name` (no `name.tex`), and
+/// what TeX keeps of the file is that one's. The lookup found `name` but
+/// kept its read-back, read-back point and seed under `name.tex`, so a
+/// `.dat` read back from the run before defined nothing (phitex-tex's
+/// auxloop::a_file_of_definitions_is_read_back_per_field_whatever_its_name),
+/// conv-xkv's `.cut` written and read in one run left `\fname`
+/// undefined, and hyperref's `.out` and probsoln's `excluded.tex` never
+/// settled. At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn input_dotted_read_back() {
+    check_threads("input_dotted_read_back", "pdf");
+}
+
 /// pdfTeX 1.40.26's structure destinations: `\pdfdest struct n` (a
 /// destination naming structure element `n`'s object, not its page's)
 /// and a `goto` action's `struct` (its `/SD`, with `file` the text as
@@ -480,6 +494,98 @@ fn read_back_after_vain_lookup() {
 #[test]
 fn interword_space_font_object() {
     check_threads("interword_space_font_object", "pdf");
+}
+
+/// A raw object a page names with `\pdfrefobj`, neither a stream nor
+/// `\immediate`, is written with the page ("Write out pending raw
+/// objects", `pdf_begin_obj(k, 1)`), into an object stream. The pages'
+/// fold of the objects counted the page's dictionary, resources and
+/// annotations toward a stream's 100 but not those, so the next stream's
+/// number fell later and every object number TeX read after it was one
+/// short: iacrj's `/Metadata 183 0 R` for pdfTeX's 184 (its raw /Group
+/// and info objects on page 1; `PHITEX_ALLOC_TRACE`, accl 22639). At -j1
+/// and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn raw_objects_in_object_streams() {
+    check_threads("raw_objects_in_object_streams", "pdf");
+}
+
+/// An included PDF page with a `/Group`: the page that first shows it
+/// numbers the group's object (`out_image`), and the image's write puts
+/// it into an object stream. The image's own writer (`ximage_own_info`),
+/// showing no page, wrote the group in the image's dictionary and
+/// counted no object for it, so every object number TeX read after that
+/// page was one short: iacrj's logo, `/Metadata 183 0 R` for pdfTeX's 184
+/// (`PHITEX_ALLOC_TRACE`, page 1's objects in object streams 21 for 22,
+/// accl 22754). At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdf_image_page_group() {
+    check_threads("pdf_image_page_group", "pdf");
+}
+
+/// An included PDF page whose `/Group` is an indirect object: the image's
+/// own writer, showing no page, copied the group's object into the
+/// image (an object), and the count of the page's group was added on
+/// top, so every object number TeX read after the page was one past
+/// pdfTeX's (df0d049ac counted the group for every included page with
+/// one). The own writer now shows the image as the page does
+/// (`out_image` numbers the group), and the write makes what pdfTeX's
+/// makes. At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdf_image_page_group_ref() {
+    check_threads("pdf_image_page_group_ref", "pdf");
+}
+
+/// A PNG with an alpha channel: reading it numbers the document's
+/// transparency group, and its write writes the group into an object
+/// stream, which that write opens. The image's own writer counted the
+/// stream with the image's objects (`PdfState::objects_after` took only
+/// the streams its later objects went into for streams), so every
+/// object number TeX read after the page showing it was one past
+/// pdfTeX's (beautynote's `/pgfsmask76` for 75, elegantnote-en; hidden
+/// there until df0d049ac counted the included PDF's page group, one
+/// short, beside it; `objects_after`'s fix is 9dd4e3020's, as
+/// png_alpha_objects_counted's). At -j1 and -j4 (oracle: pdflatex in the
+/// CI image).
+#[test]
+fn pdf_image_png_group() {
+    check_threads("pdf_image_png_group", "pdf");
+}
+
+/// A line a node boundary cuts right after a control word: its
+/// continuation, the next sibling's first segment, began in a state of
+/// its own, so the space after the name (skipped on one line, §354) was a
+/// space token there. smartunits' `pdfinfo={Title={ smartunits -
+/// \smart@version }}` ended in a space (`/Title <...0020>`), the cut
+/// falling there once a `\NewDocumentCommand` was in the preamble
+/// (`\showtokens` of the line: `\smart@version  .`, accl 22792). At -j1
+/// and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn cut_after_control_word() {
+    check_threads("cut_after_control_word", "pdf");
+}
+
+/// `\pdfnoligatures` (pdfTeX's `set_no_ligatures`): the font's
+/// characters lose their lig/kern programs, no ligature and no kern. The
+/// primitive set a mark nothing read, so microtype's tracked small caps
+/// kept their ligatures: lie-hasse's section title "Three dimensional
+/// effect" had the ff ligature and sat 0.275bp off pdfTeX's, centred
+/// (accl 22608, 22724). At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdfnoligatures() {
+    check_threads("pdfnoligatures", "pdf");
+}
+
+/// `\tagcode` below 0 (pdfTeX's `set_tag_code`): the character's tags
+/// taken off for good, -1 its lig/kern program. The code was kept and
+/// read back, but the font kept its tags, so microtype's tracked small
+/// caps (`no ligatures={f}`, a `\tagcode` of the f) kept the ff
+/// ligature: lie-hasse's section title "Three dimensional effect" sat
+/// 0.275bp off pdfTeX's (accl 22825, its own preamble). At -j1 and -j4
+/// (oracle: pdflatex in the CI image).
+#[test]
+fn tagcode_ligatures() {
+    check_threads("tagcode_ligatures", "pdf");
 }
 
 /// `\pdffontattr` and `\pdfnobuiltintounicode` of a virtual font (cmap's,
@@ -653,3 +759,70 @@ repro!(
     marginpar_after_display,
     "manuals (hep-paper, verifiche: 'Float(s) lost'): a \\marginpar before a display in a paragraph and another after it; the first one's -10004 fires at the display's start (§1145's build_page) and its routine takes it off \\@currlist before the text after the display conses the second on. The piece ran on through the display's start (a list of its own open), its \\@currlist still holding the first, and that definition stood over the routine's: the second was never output. A display's start is now a cut where a page is made to fire, as a paragraph's start is (oracle: pdflatex in the CI image, accl 22589)"
 );
+
+/// TeX Live manual proofread: soul's highlighting puts a `TikZ` mark
+/// (`\pdfsavepos` and a `\write` of `\pgfsyspdfmark`) into the pre-break
+/// text of a discretionary at each hyphenation point; where the line does
+/// not break there, `hlist_out` never meets it (§622) and nothing is
+/// written. The shipout ran every whatsit the page's decoding held, a
+/// discretionary's pre-break and post-break text's too: the .aux had a
+/// mark at x 0 for each (oracle: pdflatex in the CI image, accl 22640).
+#[test]
+fn write_in_unbroken_discretionary() {
+    check_aux("write_in_unbroken_discretionary");
+    check_threads("write_in_unbroken_discretionary", "pdf");
+}
+
+/// TeX Live manuals hfutthesis, zhlineskip, highlightx, caspervector
+/// (xelatex): a document line's comment read as text (verbatim's `%` is
+/// no comment) is spliced back from the canonical text's mark as the
+/// file's bytes; under XeTeX they are decoded in the file's input mode as
+/// the line around them was. They were the bytes' characters ("Missing
+/// character: There is no ^^80"). At -j1 and -j4 (oracle: xelatex in the
+/// CI image, accl 22729; the base differs).
+#[test]
+fn xe_verbatim_comment() {
+    check_threads("xe_verbatim_comment", "pdf");
+}
+
+/// TeX Live manual tkz-tab (xelatex): etoc reads the .toc with `\read`;
+/// XeTeX's `input_line` decodes a `\read` or `\readline` line from UTF-8
+/// (the input mode `\XeTeXdefaultencoding` named when the stream
+/// opened), and the line's bytes were its characters: "DÃ©finition" in
+/// the contents. At -j1 and -j4 (oracle: xelatex in the CI image, accl
+/// 22748; the base differs).
+#[test]
+fn xe_read_utf8() {
+    check_threads("xe_read_utf8", "pdf");
+}
+repro!(
+    box_registers_past_255,
+    "manuals (milsymb: forest's directory tree drawn without its node texts): \\setbox<n> past 255 was read with TeX82's box contexts (global_box_flag box_flag+256, ship_out_flag box_flag+512), so \\setbox300 set register 44 globally and \\setbox600 shipped its box; e-TeX's are box_flag+32768 and box_flag+65536 (etex.ch §1071). forest's node boxes are \\locbox registers counted down from 32767 (oracle: pdflatex in the CI image, accl 22653)"
+);
+
+/// TeX Live manual sample-polski (pdflatex): its first line is
+/// `%& --translate-file=il2-pl`, a TCX web2c's `parse_first_line` reads
+/// and pdfTeX applies: each byte of a file's line through its `xord` (the
+/// ISO-8859-2 text in T1's codes), each written character through its
+/// `xchr` where `xprn` says it prints, else in `^^` form, read back
+/// through `xord` (the .toc, a `\read`). The TCX was not read, the bytes
+/// were their own characters ("tre\xb6ci" for "treści"). At -j1 and -j4
+/// (oracle: pdftex in the CI image, accl 22852; the base differs).
+#[test]
+fn tcx_first_line() {
+    check_threads("tcx_il2pl", "pdf");
+}
+
+/// TeX Live manual beautybook-en (pdflatex): a PNG with an alpha channel
+/// shown on a page; pdfTeX writes its soft mask after the page (an object
+/// of its own) and its transparency group, numbered when it was read,
+/// into the document's object stream. The image's own writer, measuring
+/// what writing it makes, counted the object stream it opened for the
+/// group as an object: every read-time number after the page was one
+/// past pdfTeX's (pgf's `/pgfsmask146` for 144; here the `\pdflastobj`
+/// typeset). At -j1 and -j4 (oracle: pdftex in the CI image, accl 22935;
+/// the base differs).
+#[test]
+fn png_alpha_objects_counted() {
+    check_threads("png_alpha_count", "pdf");
+}

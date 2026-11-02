@@ -839,6 +839,29 @@ impl PdfState {
         self.aux.ximages.get(&n).map(XImage::info)
     }
 
+    /// `out_image`'s page group for an included PDF page `n` shown where
+    /// no image set the page's group before: its `/Group`'s object
+    /// numbered here the first time (`pdf_new_objnum`), then the image's
+    /// write writes the group as that object (`pdf_begin_obj(group, 2)`)
+    /// in place of copying it into its dictionary.
+    pub fn show_ximage_group(&mut self, n: usize) {
+        let Some(x) = self.aux.ximages.get(&n) else {
+            return;
+        };
+        let group_ref = x.group_ref;
+        if group_ref != 0 && self.page_group_val == 0 {
+            if group_ref == -1 {
+                self.page_group_val = self.new_objnum_();
+                let g = i32::try_from(self.page_group_val).unwrap_or(0);
+                if let Some(x) = self.aux.ximages.get_mut(&n) {
+                    x.group_ref = g;
+                }
+            } else {
+                self.page_group_val = usize::try_from(group_ref).unwrap_or(0);
+            }
+        }
+    }
+
     /// Whether `n` is a `\pdfximage` (`pdf_check_obj(obj_type_ximage, n)`).
     #[must_use]
     pub fn is_ximage(&self, n: usize) -> bool {
@@ -892,17 +915,7 @@ impl PdfState {
         let py = self.origin_v - self.cur_v;
         let total = height + depth;
         if let Kind::Pdf(p) = &image.kind {
-            if group_ref != 0 && self.page_group_val == 0 {
-                if group_ref == -1 {
-                    self.page_group_val = self.new_objnum_();
-                    let g = i32::try_from(self.page_group_val).unwrap_or(0);
-                    if let Some(x) = self.aux.ximages.get_mut(&n) {
-                        x.group_ref = g;
-                    }
-                } else {
-                    self.page_group_val = usize::try_from(group_ref).unwrap_or(0);
-                }
-            }
+            self.show_ximage_group(n);
             self.print_real(ext_xn_over_d(width, TEN_POW[6], i64::from(img_w)), 6);
             self.print(b" 0 0 ");
             self.print_real(ext_xn_over_d(total, TEN_POW[6], i64::from(img_h)), 6);

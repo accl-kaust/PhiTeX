@@ -225,6 +225,8 @@ impl Run<'_, '_> {
                         s: -1000,
                         ls: None,
                         ex: None,
+                        nolig: false,
+                        untagged: Vec::new(),
                     };
                     let chars = char_bits(crate::fonts::load_info(v, &i).as_deref());
                     Arc::new(VNode {

@@ -26,8 +26,12 @@ const LAZY_OPEN: i64 = 3;
 /// alone, through a path into its lines ([`crate::tools::lines_field`]),
 /// so that the run depends on the lines it read, not the whole text.
 const LAZY_LINES: i64 = 4;
-pub(crate) const SHIP_OUT_FLAG: i64 = BOX_FLAG + 512;
-pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 513;
+/// e-TeX's box contexts (etex.ch, §1071): `\setbox` of its 32768
+/// registers, local below `global_box_flag`, global from it, then
+/// `\shipout` and the leaders.
+pub(crate) const GLOBAL_BOX_FLAG: i64 = BOX_FLAG + 32768;
+pub(crate) const SHIP_OUT_FLAG: i64 = BOX_FLAG + 65536;
+pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 65537;
 
 /// `PHITEX_HEARTBEAT_FROM`: the command count the per-command trace starts at.
 static HEARTBEAT_FROM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -1082,7 +1086,7 @@ impl Run<'_, '_> {
                 let n = self.scan_eight_bit_int()?;
                 self.scan_optional_equals()?;
                 let md = self.mode()?;
-                let ctx = BOX_FLAG + i64::from(n) + if global { 256 } else { 0 };
+                let ctx = if global { GLOBAL_BOX_FLAG } else { BOX_FLAG } + i64::from(n);
                 self.scan_box(&md, ctx)?;
             }
             cmd::SET_AUX => {
@@ -1766,6 +1770,15 @@ impl Run<'_, '_> {
         if c != 0 {
             self.scan_optional_equals()?;
             let name = self.scan_file_name()?;
+            // (XeTeX: the stream's lines read in the input mode
+            // `\XeTeXdefaultencoding` names now, `u_open_in`'s
+            // `XeTeX_default_input_mode`; `auto` where none was)
+            if self.xe {
+                let m = self
+                    .get("xdefenc")?
+                    .map_or(crate::xetex::mode::AUTO, |x| crate::val::int_of(v, x));
+                self.set(&format!("{field}:enc"), v.int(m), true);
+            }
             // (a pipe, with shell escape on: the command's output read as
             // the stream's lines, `open_in_or_pipe`; a pipe that does not
             // open leaves the stream closed)
@@ -1782,14 +1795,9 @@ impl Run<'_, '_> {
                 return Ok(());
             }
             // (kpathsea's `tex` format: `name.tex` first unless the name has
-            // one of its suffixes, then a name with another extension as
-            // it is, [`crate::run::tex_names`])
-            let (key, alt) = crate::run::tex_names(&name);
-            if !self.open_in_at(&field, &key)?
-                && let Some(alt) = alt
-            {
-                self.open_in_at(&field, &alt)?;
-            }
+            // one of its suffixes, then `name`, [`Run::tex_key`])
+            let key = self.tex_key(&name)?;
+            self.open_in_at(&field, &key)?;
         }
         Ok(())
     }
@@ -1841,6 +1849,38 @@ impl Run<'_, '_> {
             self.set(field, st, true);
         }
         Ok(true)
+    }
+
+    /// [`Run::next_read_line`], its bytes made characters as XeTeX's
+    /// `input_line` makes a `\read` file's: in the mode the stream was
+    /// opened in (a UTF-8 byte-order mark skipped on its first line in
+    /// `auto`, [`crate::xetex::decode_line`]). pdfTeX's lines are bytes.
+    pub(crate) fn next_read_line_decoded(&mut self, field: &str, st: ValueId) -> R<Option<String>> {
+        if !self.xe {
+            // (pdfTeX's: through a TCX's `xord`)
+            let t = self.tcx()?;
+            return Ok(self.next_read_line(field, st)?.map(|text| match t {
+                Some(t) => t.reread(&text),
+                None => text,
+            }));
+        }
+        let v = self.v;
+        let first = match &*v.get(st) {
+            Value::List(xs) => match xs.first().map(|&c| crate::val::int_of(v, c)) {
+                Some(LAZY_OPEN | 1) => true,
+                Some(LAZY_LINES) => xs.get(2).is_some_and(|&p| crate::val::int_of(v, p) == 0),
+                _ => xs.get(2).is_none_or(|&p| crate::val::int_of(v, p) == 0),
+            },
+            _ => false,
+        };
+        let m = self
+            .get(&format!("{field}:enc"))?
+            .map_or(crate::xetex::mode::AUTO, |x| crate::val::int_of(v, x));
+        Ok(self.next_read_line(field, st)?.map(|text| {
+            let mut buf: Vec<u32> = text.chars().map(u32::from).collect();
+            crate::xetex::decode_line(&mut buf, m, first);
+            buf.into_iter().filter_map(char::from_u32).collect()
+        }))
     }
 
     /// The next line of the open stream whose state `st` field `field`
@@ -1927,7 +1967,7 @@ impl Run<'_, '_> {
                 // modes; a build has no terminal ([`Run::fatal`])
                 return self.fatal("*** (cannot \\read from terminal in nonstop modes)");
             };
-            let line = self.next_read_line(&field, st)?;
+            let line = self.next_read_line_decoded(&field, st)?;
             let text = line.unwrap_or_default();
             let e = i64::from(self.ipar(Par::endlinechar)?);
             let line = crate::input::Line::of_str(&text, e, true);
@@ -2236,8 +2276,22 @@ impl Run<'_, '_> {
             line.push('\n');
             // (XeTeX writes UTF-8, controls in `^^` form; the line read
             // back here is those bytes read as XeTeX reads them)
+            // (pdfTeX under a TCX: each character its `xchr` byte where
+            // printable, else in `^^` form; the line read back through
+            // `xord`)
             let line = if self.xe {
                 crate::xetex::file_text(&line)
+            } else if let Some(t) = self.tcx()? {
+                let mut out = String::with_capacity(line.len());
+                for c in s.chars() {
+                    if i64::from(u32::from(c)) == nl {
+                        out.push('\n');
+                    } else {
+                        t.print_file_char(&mut out, u32::from(c));
+                    }
+                }
+                out.push('\n');
+                out
             } else {
                 line
             };
@@ -2265,6 +2319,8 @@ impl Run<'_, '_> {
                 self.interp_point = self.read_point_of(&name)?;
                 let r = if self.xe {
                     self.interpret_line(&crate::xetex::reread(&text))
+                } else if let Some(t) = self.tcx()? {
+                    self.interpret_line(&t.reread(&text))
                 } else {
                     self.interpret_line(&text)
                 };

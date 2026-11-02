@@ -67,9 +67,14 @@ pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
 pub(crate) fn load_info(v: &Values, i: &Info) -> Option<Arc<Loaded>> {
     let file = i.file?;
     let l = match i.ls {
-        Some(ls) => load_spaced(v, file, i.s, ls.dw, ls.nolig),
-        None => load(v, file, i.s),
+        Some(ls) => load_spaced(v, file, i.s, ls.dw, ls.nolig || i.nolig),
+        None => load_spaced(v, file, i.s, 0, i.nolig),
     }?;
+    let l = if i.untagged.is_empty() {
+        l
+    } else {
+        untagged(&l, &i.untagged)
+    };
     match i.ex {
         Some((_, e, _)) => Some(expanded(&l, e)),
         None => Some(l),
@@ -100,6 +105,27 @@ pub(crate) fn expanded(l: &Arc<Loaded>, e: i32) -> Arc<Loaded> {
     let x = Arc::new(Loaded {
         tfm: l.tfm.clone(),
         at,
+        at_hash: OnceLock::new(),
+        whd: OnceLock::new(),
+    });
+    m.locked().insert(key, x.clone());
+    x
+}
+
+/// Font `l` with the tags `\tagcode` took off its characters
+/// (`set_tag_code`, pdfTeX); a memo by the font and the tags.
+fn untagged(l: &Arc<Loaded>, tags: &[(u8, u8)]) -> Arc<Loaded> {
+    type Memo = Mutex<FxHashMap<(usize, Vec<(u8, u8)>), Arc<Loaded>>>;
+    static M: OnceLock<Memo> = OnceLock::new();
+    let key = (Arc::as_ptr(l) as usize, tags.to_vec());
+    let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Some(x) = m.locked().get(&key) {
+        return x.clone();
+    }
+    let tfm = l.tfm.clone().without_tags(tags);
+    let x = Arc::new(Loaded {
+        tfm,
+        at: l.at.clone(),
         at_hash: OnceLock::new(),
         whd: OnceLock::new(),
     });
@@ -310,6 +336,13 @@ pub(crate) struct Info {
     pub s: i32,
     pub ls: Option<Ls>,
     pub ex: Option<(i64, i32, bool)>,
+    /// `\pdfnoligatures` (pdfTeX's `set_no_ligatures`): no character's
+    /// lig/kern program is reached, so no ligature and no kern.
+    pub nolig: bool,
+    /// `\tagcode` below 0 (pdfTeX's `set_tag_code`): by character, the
+    /// tags taken off (1 its lig/kern program, 2 its next larger, 4 its
+    /// extensible), in character order.
+    pub untagged: Vec<(u8, u8)>,
 }
 
 pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
@@ -331,6 +364,21 @@ pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
             let g = |k: usize| ys.get(k).map(|&z| int_of(v, z));
             Some((g(0)?, i32::try_from(g(1)?).ok()?, g(2)? != 0))
         }),
+        nolig: n(7) != 0,
+        untagged: {
+            let ys = xs.get(8).map(|&y| list_of(v, y)).unwrap_or_default();
+            let mut t: Vec<(u8, u8)> = ys
+                .chunks(2)
+                .filter_map(|p| {
+                    Some((
+                        u8::try_from(int_of(v, *p.first()?)).ok()?,
+                        u8::try_from(int_of(v, *p.get(1)?)).ok()?,
+                    ))
+                })
+                .collect();
+            t.sort_unstable();
+            t
+        },
     })
 }
 

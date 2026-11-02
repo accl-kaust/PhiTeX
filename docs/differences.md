@@ -63,8 +63,15 @@ where the target is. With pdfTeX it lands at a point that has nothing to
 do with the target, often above the page, so the viewer scrolls to the
 top of the page or past it.
 
-**Manuals.** `latex_heria_heria-proposal`; its summary canvases are
-`\rotatebox{90}` boxes containing `\hypertarget`s.
+**Manuals.** `latex_heria_heria-proposal` (its summary canvases are
+`\rotatebox{90}` boxes containing `\hypertarget`s),
+`generic_hologo_hologo-example`, `latex_cje_cjeguide`,
+`latex_mnras_mnras_guide` and `latex_tablefootnote_tablefootnote-example`
+(targets on rotated pages: pdfTeX's y is near 4100 on pages with a
+`0 1 -1 0` matrix). In each, the page content is identical to
+pdfTeX's, so the destination's own position is the same in both
+programs, and the two programs write the same point unless the
+destination is under a matrix.
 
 **Repro.**
 
