@@ -1201,6 +1201,28 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
         None => cut(text),
     };
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+        let at_line = ends
+            .iter()
+            .filter(|&&e| e == 0 || text.as_bytes().get(e - 1) == Some(&b'\n'))
+            .count();
+        let show = |e: usize| {
+            let a = text.floor_char_boundary(e.saturating_sub(12));
+            let b = text.ceil_char_boundary((e + 12).min(text.len()));
+            format!(
+                "{:?}|{:?}",
+                &text[a..e.min(text.len()).max(a)],
+                &text[e.min(text.len()).max(a)..b]
+            )
+        };
+        eprintln!(
+            "files-node: {name}: {} units, {at_line} ending a line; ends {}",
+            ends.len(),
+            ends.iter()
+                .take(6)
+                .map(|&e| show(e))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         eprintln!(
             "files-node: {name}: cut {} ({} bytes) in {:?}",
             if before.is_some() {
