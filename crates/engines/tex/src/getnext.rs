@@ -623,7 +623,17 @@ impl Run<'_, '_> {
                     if let Some(t) = self.src_next()? {
                         return Ok(Some(t));
                     }
+                    // (a line a node boundary cut: its continuation, the
+                    // next segment of the text or of the sibling pulled
+                    // next, goes on in the state it was left in, §303; it
+                    // began in its own, so a space after a control word
+                    // the cut ended with was a space token: smartunits'
+                    // `Title={ ... \smart@version }` cut after the name)
+                    let carried = self.input.top_line().filter(|s| !s.ends).map(|s| s.state);
                     self.pop_input_level();
+                    if let Some(st) = carried {
+                        self.carry_cut_state(st);
+                    }
                 }
                 _ => {
                     // (a document file's lines are paragraph-region
@@ -644,6 +654,20 @@ impl Run<'_, '_> {
                 }
             }
         }
+    }
+
+    /// The state a cut line was left in given to its continuation: the
+    /// text's next segment where it is there, else the first segment of
+    /// the sibling pulled next ([`Run::pull`]).
+    fn carry_cut_state(&mut self, st: u8) {
+        let at = self.input.text_at;
+        if let Some(crate::input::Seg::Line(l)) = self.input.text.get_mut(at) {
+            if !l.starts {
+                l.state = st;
+            }
+            return;
+        }
+        self.cut_state = Some(st);
     }
 
     /// Pops the level on top, keeping what the command in progress found
@@ -742,6 +766,14 @@ impl Run<'_, '_> {
                 }
                 let args = self.resolve_units(&args)?;
                 let mut segs = crate::run::decode_segs(self.v, &args);
+                // (a line cut before this sibling, left in its state:
+                // [`Run::carry_cut_state`])
+                if let Some(st) = self.cut_state.take()
+                    && let Some(crate::input::Seg::Line(l)) = segs.first_mut()
+                    && !l.starts
+                {
+                    l.state = st;
+                }
                 if let Some(n) = self.cx.followed(self.pulled) {
                     crate::run::own_lines(&mut segs, n.raw());
                 }

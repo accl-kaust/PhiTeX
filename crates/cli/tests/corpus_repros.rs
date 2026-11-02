@@ -509,6 +509,19 @@ fn pdf_image_page_group() {
     check_threads("pdf_image_page_group", "pdf");
 }
 
+/// A line a node boundary cuts right after a control word: its
+/// continuation, the next sibling's first segment, began in a state of
+/// its own, so the space after the name (skipped on one line, §354) was a
+/// space token there. smartunits' `pdfinfo={Title={ smartunits -
+/// \smart@version }}` ended in a space (`/Title <...0020>`), the cut
+/// falling there once a `\NewDocumentCommand` was in the preamble
+/// (`\showtokens` of the line: `\smart@version  .`, accl 22792). At -j1
+/// and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn cut_after_control_word() {
+    check_threads("cut_after_control_word", "pdf");
+}
+
 /// `\pdfnoligatures` (pdfTeX's `set_no_ligatures`): the font's
 /// characters lose their lig/kern programs, no ligature and no kern. The
 /// primitive set a mark nothing read, so microtype's tracked small caps

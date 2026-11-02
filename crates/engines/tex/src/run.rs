@@ -892,6 +892,11 @@ pub(crate) struct Run<'c, 'a> {
     /// read back here next round, where the lines written to it are read
     /// ([`Run::note_absent_read_point`]), as when the file is there.
     pub vain_after_point: Vec<String>,
+    /// The state (§303) a line a node boundary cut was left in, for the
+    /// continuation of it the next sibling's text begins with
+    /// ([`Run::next_tok`]): a space after a control word the cut ends
+    /// with is skipped there as on one line (§354).
+    pub cut_state: Option<u8>,
     /// The tool failures this run reported ([`Run::tool_output`]): each
     /// once.
     pub tool_failures: Vec<String>,
@@ -1188,6 +1193,7 @@ impl<'c, 'a> Run<'c, 'a> {
             close_cont: None,
             read_point_pending: None,
             vain_after_point: Vec::new(),
+            cut_state: None,
             tool_failures: Vec::new(),
             pending_pre: Vec::new(),
             pending_locs: phitex_defuse::FxHashSet::default(),

@@ -70,7 +70,6 @@ latex_rvwrite_rvwrite-doc	differs: page 2: obj 63 (page 2, untyped) line 13: ora
 latex_ryethesis_ryesample	differs: page 11: obj 422 (Catalog) line 22: oracle "<end>", phitex "<end>" (pages 35 vs 33)
 latex_semioneside_example	differs: page 2: obj 28 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 5 vs 3)
 latex_showexpl_showexpl-test	differs: page 1: obj 24 (page 1, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g BT /F1 14.3462 ", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g BT /F1 14.3462 "
-latex_smartunits_smartunits	differs: page 1: obj 340 (untyped) line 11: oracle "/Title <feff00200073006d0061007200740075006e0069007400730020002d002000", phitex "/Title <feff00200073006d0061007200740075006e0069007400730020002d002000"
 latex_snaptodo_snaptodo	differs: page 3: obj 79 (page 3, untyped) line 194: oracle "1 0 0 1 71.499 17.412 cm", phitex "1 0 0 1 76.204 17.412 cm"
 latex_soulpos_soulpos	differs: page 2: obj 23 (page 2, untyped) line 196: oracle "242.85463 0.99628 l", phitex "27.0695 0.99628 l"
 latex_spath3_spath3	differs: obj 2 (untyped) line 2: oracle "/pgfpat11 280 0 R", phitex "/pgfpat11 152 0 R"
