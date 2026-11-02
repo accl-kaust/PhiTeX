@@ -94,3 +94,59 @@ fn an_effect_waits_for_every_node_before_it_to_settle() {
         }
     }
 }
+
+/// `[]`: runs only once the line is quiet (`Operation::final_only`), as
+/// a page's PDF side does; defines nothing.
+struct Writer;
+
+impl Operation for Writer {
+    fn name(&self) -> &'static str {
+        "writer"
+    }
+
+    fn final_only(&self) -> bool {
+        true
+    }
+
+    fn run(&self, _cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A node of an operation that runs only once the line is quiet stands
+/// before the effect, dirty until then: the effect does not wait for it
+/// (nothing an evaluation needs may wait on one), it is made once and the
+/// evaluation ends. Before, the effect parked on it, the quiet point let
+/// the effect go, it parked on it again, for ever (a minted listing's
+/// `\write18` after a page shipped as PDF, its PDF side before it: the
+/// gate's latexmk_minted past 300 s, lectures and handin-doc "ran N
+/// times").
+#[test]
+fn an_effect_does_not_wait_for_a_node_that_runs_once_the_line_is_quiet() {
+    for threads in [1, 2, 8] {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let e = Engine::new();
+            let v = e.values();
+            let def = e.register(Arc::new(SlowDef));
+            let writer = e.register(Arc::new(Writer));
+            let eff = Arc::new(Effect(Mutex::new(Vec::new()), AtomicU64::new(0)));
+            let eop = e.register(eff.clone());
+            let g = v.field("g");
+            let u = e.new_unit();
+            e.push(u, def, vec![g.0, v.int(5), v.int(5)]);
+            e.push(u, writer, Vec::new());
+            e.push(u, eop, vec![g.0]);
+            let ok = e.evaluate(threads).is_ok();
+            let made = eff.0.lock().unwrap().clone();
+            let _ = tx.send((ok, made == vec![v.int(5)], e.check_invariants().is_empty()));
+        });
+        let (ok, once, inv) = rx
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap_or_else(|_| panic!("-j{threads}: the evaluation did not end in 60 s"));
+        assert!(
+            ok && once && inv,
+            "-j{threads}: ended {ok}, made once on 5 {once}, invariants {inv}"
+        );
+    }
+}

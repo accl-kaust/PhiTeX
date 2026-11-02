@@ -482,3 +482,42 @@ fn the_evaluation_goes_on_while_a_command_runs() {
         "jobs finished while it slept: {during:?}"
     );
 }
+
+/// A command after a page shipped as PDF (`\pdfoutput=1`), whose PDF side
+/// is a node that runs only once the line is quiet, standing before the
+/// command: the command runs once, on the file the job wrote, and the
+/// build ends. Before, the command waited for that node, which never ran
+/// before the quiet point, and the quiet point let the command go only to
+/// wait again, for ever (minted's `\write18` at the end of a document:
+/// latexmk_minted past 300 s at -j1 and -j8, lectures and handin-doc). At
+/// -j1 and -j8.
+#[test]
+fn a_command_after_a_pdf_page_runs_once() {
+    let doc = r"\pdfoutput=1 \def\made{none}
+Page one.\vfill\eject
+\immediate\openout3=ina.txt \immediate\write3{alpha}\immediate\closeout3
+\immediate\write18{fakecmd up ina.txt outa.tex}
+\openin1=outa.tex \ifeof1 \else\closein1 \input outa.tex \fi
+\immediate\write16{GOT:\made}
+\bye
+";
+    for threads in [1, 8] {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let fake = Arc::new(Fake::default());
+            let b = common::build(
+                options("pdfpage", Some(fake.clone()), threads),
+                Some(&common::plain()),
+                doc,
+            );
+            let (_, log) = b.output();
+            let calls = fake.calls.lock().unwrap().len();
+            let _ = tx.send((got(&log), calls, log));
+        });
+        let (got, calls, log) = rx
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .unwrap_or_else(|_| panic!("-j{threads}: the build did not end in 120 s"));
+        assert_eq!(got, ["ALPHA"], "-j{threads}: {log}");
+        assert_eq!(calls, 1, "-j{threads}");
+    }
+}

@@ -962,7 +962,16 @@ pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
 /// commit in this pass: to run, again or for the first time, or running,
 /// its commit's walks still going (`Ctx::wait_settled`). A node taken by
 /// a claim, its run ending (`RunningInert`), is not: its claimer holds its
-/// text, and it commits nothing.
+/// text, and it commits nothing. Nor is a node of an operation that runs
+/// only once the line is quiet (`Operation::final_only`: the output's
+/// writers, a page's PDF side), which nothing an evaluation needs may
+/// wait on, nor one whose run panicked on inputs that hold
+/// (`Node::held_panic`), whose commit no run of this pool brings: waited
+/// for, each was dirty until the line was quiet, the waiting run was let
+/// go there, parked on it again and the quiet point let it go again, for
+/// ever (a minted listing's `\write18` after a page shipped as PDF: its
+/// page's PDF side stands before it; the gate's latexmk_minted at -j1
+/// and -j8 past 300 s, lectures and handin-doc at -j1 "ran N times").
 pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     let to = pos_of(eng, me.id)?;
     let from = unit_start(eng, me);
@@ -979,6 +988,8 @@ pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
                 if *id != me.id
                     && n.unit == me.unit
                     && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
+                    && !eng.op(n.op()).final_only()
+                    && !n.held_panic.load(Ordering::Acquire)
                 {
                     return Some(*id);
                 }
