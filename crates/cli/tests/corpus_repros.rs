@@ -440,6 +440,20 @@ fn input_dotted_name() {
     check_threads("input_dotted_name", "pdf");
 }
 
+/// `\input` of a name with an extension the `tex` format does not know,
+/// a file the job writes: kpathsea finds `name` (no `name.tex`), and
+/// what TeX keeps of the file is that one's. The lookup found `name` but
+/// kept its read-back, read-back point and seed under `name.tex`, so a
+/// `.dat` read back from the run before defined nothing (phitex-tex's
+/// auxloop::a_file_of_definitions_is_read_back_per_field_whatever_its_name),
+/// conv-xkv's `.cut` written and read in one run left `\fname`
+/// undefined, and hyperref's `.out` and probsoln's `excluded.tex` never
+/// settled. At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn input_dotted_read_back() {
+    check_threads("input_dotted_read_back", "pdf");
+}
+
 /// pdfTeX 1.40.26's structure destinations: `\pdfdest struct n` (a
 /// destination naming structure element `n`'s object, not its page's)
 /// and a `goto` action's `struct` (its `/SD`, with `file` the text as

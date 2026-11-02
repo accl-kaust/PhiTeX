@@ -1,0 +1,18 @@
+% \input of a name with an extension TeX's format does not know, a file
+% the job writes: kpathsea finds `name' (no `name.tex'), and its
+% read-back is that file's (conv-xkv's .cut file written and read in the
+% same run; a .dat file read back from the run before, as LaTeX's .aux)
+\documentclass{article}
+\newwrite\w
+\begin{document}
+\InputIfFileExists{\jobname.dat}{}{\gdef\last{none}}
+Last run: \last.
+\immediate\openout\w=\jobname.dat
+\immediate\write\w{\string\gdef\string\last{page \thepage}}
+\immediate\closeout\w
+\immediate\openout\w=\jobname.cut
+\immediate\write\w{\string\gdef\string\fname{Ann}}
+\immediate\closeout\w
+\input{\jobname.cut}
+Name: \fname.
+\end{document}
