@@ -3023,6 +3023,14 @@ fn reask_range(
     if !live(eng, r.node, r.serial) {
         return;
     }
+    // (a reader queued to run, gone back before this change already: its
+    // run reads it, and asking again changes nothing; the fold that would
+    // say whether its answer moved is not made. openmoji: a run claiming
+    // a sibling asked every `lines` reader after it, 4292 folds of every
+    // file's counts at each of 7129 claims, accl 23273)
+    if !r.next && crate::sched::wake_redundant(eng, eng.node(r.node), &Cause::Range { field: f, by }) {
+        return;
+    }
     // a `next` whose answer stands but whose search now stops further on
     // (the node it stopped at committed with nothing for it): filed again
     // up to its new stop, which re-asks it in turn
