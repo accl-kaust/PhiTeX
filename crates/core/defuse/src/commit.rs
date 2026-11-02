@@ -1661,6 +1661,26 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 && o.defs.iter().zip(&rec.defs).all(|(a, b)| a.f == b.f && a.value == b.value && a.rel == b.rel);
             eprintln!("redo:\t{}\t{}\t{}", node.id.raw(), eng.op(node.op()).name(), u8::from(same));
         }
+        // (`PHITEX_KREAD_KEYS=a|b|…` or `*`, with `PHITEX_REFUTE_LOG`: each
+        // committed text run's reads of those fields, the value's id, for
+        // the scaling report's predictor test: what a paragraph start would
+        // have had to guess)
+        if refute_log() && eng.op(node.op()).text() {
+            let keys = kread_keys();
+            for r in &rec.reads {
+                if let ReadKind::Field { f, at: Anchor::Me } = r.kind
+                    && let Some(name) = eng.values().as_str(f.0)
+                    && (keys.is_empty() || keys.iter().any(|k| *k == name))
+                {
+                    eprintln!(
+                        "kread:\t{}\t{}\t{name}\t{}",
+                        node.id.raw(),
+                        pos.0,
+                        r.seen.map_or(0, ValueId::raw)
+                    );
+                }
+            }
+        }
         if let Some(o) = &old {
             eng.stale_reads.fetch_add(o.reads.len() as u64, Ordering::Relaxed);
         }
@@ -2770,6 +2790,18 @@ fn refute_log() -> bool {
     *ON.get_or_init(|| crate::obs::enabled() && std::env::var_os("PHITEX_REFUTE_LOG").is_some())
 }
 
+/// (`PHITEX_KREAD_KEYS`) The fields whose committed reads are printed;
+/// empty for `*`.
+fn kread_keys() -> &'static [String] {
+    static K: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    K.get_or_init(|| {
+        std::env::var("PHITEX_KREAD_KEYS").map_or_else(
+            |_| vec!["\u{0}".to_owned()],
+            |v| if v == "*" { Vec::new() } else { v.split('|').map(str::to_owned).collect() },
+        )
+    })
+}
+
 fn note_refute(eng: &Engine, f: Field, reader: NodeId, by: Option<NodeId>, seen: Option<ValueId>, now: Option<ValueId>) {
     if !refute_log() {
         return;
@@ -2793,7 +2825,7 @@ fn note_refute(eng: &Engine, f: Field, reader: NodeId, by: Option<NodeId>, seen:
     };
     let op = |n: NodeId| eng.op(eng.node(n).op()).name();
     eprintln!(
-        "refute:\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{at}",
+        "refute:\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{at}\t{}\t{}",
         v.as_str(f.0).unwrap_or_default(),
         reader.raw(),
         op(reader),
@@ -2802,7 +2834,9 @@ fn note_refute(eng: &Engine, f: Field, reader: NodeId, by: Option<NodeId>, seen:
         by.map_or(0, |b| eng.node(b).runs.load(std::sync::atomic::Ordering::Relaxed)),
         u8::from(seen == now),
         show(seen),
-        show(now)
+        show(now),
+        seen.map_or(0, ValueId::raw),
+        now.map_or(0, ValueId::raw)
     );
 }
 
