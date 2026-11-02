@@ -998,7 +998,7 @@ pub(crate) struct Run<'c, 'a> {
     /// The scope kind the node runs in, once read ([`Run::scope_kind`]):
     /// it does not change during the run.
     #[allow(clippy::option_option)]
-    scope_kind_memo: Option<Option<ValueId>>,
+    pub(crate) scope_kind_memo: Option<Option<ValueId>>,
     /// What the run publishes, made before it finishes
     /// ([`Run::prepare_publication`]), with the table's state then and
     /// the locations it restored.

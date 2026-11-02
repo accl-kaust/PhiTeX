@@ -342,7 +342,7 @@ impl Run<'_, '_> {
     /// put on the list since the last candidate, the registers' first
     /// definitions and first values read, XeTeX's input modes, scripts
     /// and character classes, the files written as text, where the lines
-    /// read went ([`Run::ck_run_restore`]).
+    /// read went, the scope kind read ([`Run::ck_run_restore`]).
     fn ck_run_state(&mut self) -> ValueId {
         let v = self.v;
         let int = |x: i64| v.int(x);
@@ -388,6 +388,14 @@ impl Run<'_, '_> {
             int(i64::from(self.ic_space)),
             v.list(self.text_written.iter().map(|t| v.str(t)).collect()),
             int(i64::from(lt.hit) | i64::from(lt.weak) << 1 | i64::from(lt.strong) << 2),
+            // (the scope kind read, if it was: whether the run stands at
+            // the top level decides which of its definitions it publishes,
+            // `Run::publication`; read before the checkpoint, it is not
+            // read again)
+            match self.scope_kind_memo {
+                None => v.list(Vec::new()),
+                Some(k) => v.list(vec![v.list(k.into_iter().collect())]),
+            },
         ])
     }
 
@@ -395,7 +403,19 @@ impl Run<'_, '_> {
     fn ck_run_restore(&mut self, x: ValueId) {
         let v = self.v;
         let xs = list_of(v, x);
-        let [pend, first, based, xenc, xdirs, icp, ics, written, lt] = xs[..] else {
+        let [
+            pend,
+            first,
+            based,
+            xenc,
+            xdirs,
+            icp,
+            ics,
+            written,
+            lt,
+            skind,
+        ] = xs[..]
+        else {
             return;
         };
         let pair = |e: ValueId| match list_of(v, e)[..] {
@@ -440,6 +460,9 @@ impl Run<'_, '_> {
             .map(|&t| crate::val::str_of(v, t))
             .collect();
         let b = int_of(v, lt);
+        self.scope_kind_memo = list_of(v, skind)
+            .first()
+            .map(|&k| list_of(v, k).first().copied());
         self.lt.hit = b & 1 != 0;
         self.lt.weak = b & 2 != 0;
         self.lt.strong = b & 4 != 0;
