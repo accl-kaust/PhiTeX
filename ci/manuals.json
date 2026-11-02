@@ -9606,6 +9606,8 @@
    "oracle_wall_s": 530.029,
    "passes": 4,
    "path": "latex/circuitikz/circuitikzmanual.tex",
+   "time_limit_s": 508,
+   "time_limit_why": "pdflatex's own wall on the gate's runner: 508 s (manuals.py's oracle loop, 4 passes and makeindex, in the -doc image on GitHub's ubuntu-24.04, 4 CPUs, AMD EPYC 7763; run 41437495699, 2026-11-02). PhiTeX is held to it, not to the sweep's 300 s; it is identical, 338 s at -j1 on accl against pdflatex's 501 s there (corpus)",
    "tools": [
     "makeindex"
    ]
