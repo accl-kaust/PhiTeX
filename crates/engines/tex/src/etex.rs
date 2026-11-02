@@ -81,6 +81,9 @@ pub(crate) const END_R: i32 = 11;
 /// Parameters: modifiers past every `TeX82` one of their command.
 const P: i32 = 1000;
 
+/// `\\savinghyphcodes`'s code among the integer parameters.
+pub(crate) const SAVING_HYPH_CODES: i32 = P + 8;
+
 /// The e-TeX primitives (pdfTeX §1650–§1880 `primitive` calls).
 pub(crate) const PRIMS: &[(&str, u8, i32)] = &[
     ("lastnodetype", cmd::LAST_ITEM, li::LAST_NODE_TYPE),

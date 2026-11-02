@@ -1705,8 +1705,39 @@ impl Run<'_, '_> {
         let old = self.get_loc(crate::fields::cell::PATTERNS)?;
         let mut all = old.map(|x| list_of(v, x)).unwrap_or_default();
         all.push(v.list(vec![v.int(i64::from(lang)), v.str("p"), v.list(words)]));
+        // (e-TeX: `\savinghyphcodes` positive, the language's hyphenation
+        // codes are the `\lccode`s now, used in its words' place of the
+        // `\lccode`s in force where they are hyphenated: etex.ch's
+        // `store_hyph_codes`)
+        let saving = self.quantity_loc(cmd::ASSIGN_INT, crate::etex::SAVING_HYPH_CODES);
+        if self.int_loc(saving)? > 0 {
+            let mut codes = Vec::with_capacity(256);
+            for c in 0..256u32 {
+                codes.push(v.int(i64::from(self.code(0, c)?)));
+            }
+            all.push(v.list(vec![v.int(i64::from(lang)), v.str("c"), v.list(codes)]));
+        }
         self.set_cell(crate::fields::cell::PATTERNS, v.list(all), true);
         Ok(())
+    }
+
+    /// The hyphenation codes e-TeX saved for language `lang`
+    /// (`\savinghyphcodes`, the last `\patterns` that saved them).
+    fn saved_hyph_codes(&mut self, lang: u16) -> R<Option<Vec<i64>>> {
+        let v = self.v;
+        let Some(x) = self.get_loc(crate::fields::cell::PATTERNS)? else {
+            return Ok(None);
+        };
+        Ok(list_of(v, x).into_iter().rev().find_map(|e| {
+            let xs = list_of(v, e);
+            (xs.first().map(|&l| int_of(v, l)) == Some(i64::from(lang))
+                && xs.get(1).is_some_and(|&k| crate::val::str_of(v, k) == "c"))
+            .then(|| {
+                xs.get(2)
+                    .map(|&l| list_of(v, l).iter().map(|&c| int_of(v, c)).collect())
+                    .unwrap_or_default()
+            })
+        }))
     }
 
     /// `\hyphenation` (§934–§939).
@@ -1714,6 +1745,9 @@ impl Run<'_, '_> {
         self.scan_left_brace()?;
         let lang = phitex_typeset::hyph::cur_lang(self.ipar(Par::language)?);
         let v = self.v;
+        // (e-TeX: the language's saved codes where it has them, in the
+        // `\lccode`s' place: `set_lc_code` with `hyph_index`)
+        let saved = self.saved_hyph_codes(lang)?;
         let mut words: Vec<ValueId> = Vec::new();
         let mut word = String::new();
         loop {
@@ -1725,7 +1759,10 @@ impl Run<'_, '_> {
                         word.push('-');
                     } else {
                         let c = u32::try_from(self.cur.chr).unwrap_or(0);
-                        let lc = i64::from(self.code(0, c)?);
+                        let lc = match &saved {
+                            Some(t) => t.get(c as usize).copied().unwrap_or(0),
+                            None => i64::from(self.code(0, c)?),
+                        };
                         if lc != 0 {
                             word.push(
                                 char::from_u32(u32::try_from(lc).unwrap_or(0)).unwrap_or('?'),
@@ -1735,7 +1772,13 @@ impl Run<'_, '_> {
                 }
                 cmd::CHAR_NUM => {
                     let c = self.scan_char_num()?;
-                    let lc = i64::from(self.code(0, c)?);
+                    let lc = match &saved {
+                        Some(t) => usize::try_from(c)
+                            .ok()
+                            .and_then(|i| t.get(i).copied())
+                            .unwrap_or(0),
+                        None => i64::from(self.code(0, c)?),
+                    };
                     if lc != 0 {
                         word.push(char::from_u32(u32::try_from(lc).unwrap_or(0)).unwrap_or('?'));
                     }

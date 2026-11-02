@@ -16,7 +16,6 @@ latex_els-cas-templates_doc_elsdoc-cas	differs: page 9: obj 203 (page 9, untyped
 latex_elsarticle_elsdoc	differs: page 12: obj 344 (page 12, untyped) line 14: oracle "0.75 0.5 0.25 rg 0.75 0.5 0.25 RG", phitex "0 g 0 G"
 latex_fariscovernew_guide_fariscovernew_full	differs: page 3: obj 57 (page 3, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 17.2154 Tf 212.5", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 17.2154 Tf 212.5"
 latex_highlightx_highlightx-doc	differs: page 1: obj 25 (page 1, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g"
-latex_ibycus-babel_ibycus-babel-test	differs: page 1: obj 3 (page 1, untyped) line 6: oracle "/F42 11.9552 Tf 224.346 685.004 Td [<c3>167(Hrodìtou)-309(Qour)-28<d0>", phitex "/F42 11.9552 Tf 224.346 685.004 Td [<c3>167(Hrodìtou)-223(Qour)-27<d0>"
 latex_icite_samples_icite-biblatex	differs: page 2: obj 16 (Link) line 19: oracle "155.551", phitex "213.113"
 latex_knowledge_knowledge	-j1 error: error: You can't use `&' in restricted horizontal mode; -j4 error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 error, -j4 timeout)
 latex_kotex-utf_kotex-utf-doc	differs: page 16: obj 583 (page 16, untyped) line 7: oracle "[-316<c8>]TJ", phitex "[<c8>]TJ" (past CJK.enc, accl 22513)
