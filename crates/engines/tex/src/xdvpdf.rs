@@ -448,6 +448,8 @@ struct Fold<'a> {
 #[derive(Default)]
 struct Times {
     from: usize,
+    start: std::time::Duration,
+    layout: std::time::Duration,
     walk: std::time::Duration,
     pages: std::time::Duration,
     snaps: std::time::Duration,
@@ -460,6 +462,7 @@ struct Times {
 /// bytes, a page whose bytes are the base's its chunk).
 #[allow(clippy::too_many_lines)]
 fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times), String> {
+    let t_fold = std::time::Instant::now();
     let n = walks.len();
     let same = f.base.map_or(0, |b| {
         b.ids.iter().zip(ids).take_while(|(a, c)| a == c).count()
@@ -509,6 +512,7 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
             &[][..],
         ),
     };
+    t.start = t_fold.elapsed();
     let every = n.div_ceil(SNAPS).max(1);
     for (i, p) in walks.iter().enumerate().skip(k) {
         if i.is_multiple_of(every) {
@@ -547,8 +551,10 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
     let t0 = std::time::Instant::now();
     let (tail, end) = s.finish_recorded().map_err(|e| fatal(&e))?;
     t.end = t0.elapsed();
+    let t0 = std::time::Instant::now();
     let layout = layout(&chunks, &tail, &s)
         .ok_or("xdvipdfmx: the file's cross-reference section was not written")?;
+    t.layout = t0.elapsed();
     Ok((
         Base {
             ids: ids.to_vec(),
@@ -842,12 +848,14 @@ pub(crate) fn file(
         date: p.date,
     };
     let ids: Vec<u64> = pages.iter().map(|x| x.raw()).collect();
+    let t_head = t0.elapsed();
     // (the pages' fonts by id, read before the last link's state is taken:
     // a read that stops the node leaves it in place)
     let mut defs = Defs::default();
     for &page in pages {
         crate::assemble::page_defs(cx, page, xe, &mut defs)?;
     }
+    let t_defs = t0.elapsed().saturating_sub(t_head);
     let files = (p.files)();
     // (the last link's state, taken: a build linking meanwhile starts
     // its own; another head of the same session's start (a font loaded
@@ -1001,8 +1009,10 @@ pub(crate) fn file(
         Ok(x) => x,
         Err(e) => return Ok(failed(cx, &e)),
     };
+    let t_fold = t0.elapsed();
     let l = nb.layout.clone();
     let x = crate::assemble::layout_value(v, l.clone());
+    let t_value = t0.elapsed();
     *memo().locked() = Some(Memo {
         head,
         start,
@@ -1013,13 +1023,17 @@ pub(crate) fn file(
     shown(cx, pages, &walks, &defs, &nums, inst);
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
-            "xdv pdf: from page {} of {}: files checked {t_files:?}, start {t_start:?}, pages decoded {t_decode:?}, walk {:?}, xdvipdfmx pages {:?}, snapshots {:?}, end {:?}, in all {:?}",
+            "xdv pdf: from page {} of {}: head {t_head:?}, fonts {t_defs:?}, files checked {t_files:?}, start {t_start:?}, pages decoded {t_decode:?}, fold's start {:?}, walk {:?}, xdvipdfmx pages {:?}, snapshots {:?}, end {:?}, layout {:?}, value {:?}, shown {:?}, in all {:?}",
             t.from + 1,
             pages.len(),
+            t.start,
             t.walk,
             t.pages,
             t.snaps,
             t.end,
+            t.layout,
+            t_value.saturating_sub(t_fold),
+            t0.elapsed().saturating_sub(t_value),
             t0.elapsed()
         );
     }

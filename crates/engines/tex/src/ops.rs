@@ -812,13 +812,21 @@ impl Operation for Files {
             Some(&n) => {
                 let name = str_of(v, n);
                 let shared = ops(&self.0);
+                let t0 = std::time::Instant::now();
                 file_node(cx, &name, &shared.defs)?;
+                let t_file = t0.elapsed();
                 // (what a tool makes of it by default: run here, on the
                 // text as the job writes it, so a reader of the output
                 // depends on what the tool makes, not on its input)
                 for (o, args) in crate::tools::made_from(cx, &name)? {
                     let x = cx.apply(shared.tool, args)?;
                     define_traced(cx, crate::tools::made_field(v, &o), x);
+                }
+                if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+                    eprintln!(
+                        "files-node: {name}: in all {:?}, the file {t_file:?}",
+                        t0.elapsed()
+                    );
                 }
                 Ok(ValueId::UNIT)
             }

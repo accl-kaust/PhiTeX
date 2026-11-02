@@ -48,7 +48,14 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
             .unwrap_or_else(|| v.str("")))
     } else {
         let pages = v.seq_to_vec(cx.fold(v.field("pages"), None, None)?);
+        let t_fill = std::time::Instant::now();
         let (pages, ids) = fill_sealed_pages(cx, pages)?;
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "output file: the pages' sealed lines filled in {:?}",
+                t_fill.elapsed()
+            );
+        }
         n = pages.len();
         let origins = o.origins.load(std::sync::atomic::Ordering::Relaxed);
         // (XeTeX's PDF written from the pages, where the client asks for
