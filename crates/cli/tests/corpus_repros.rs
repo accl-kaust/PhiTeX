@@ -445,7 +445,7 @@ fn input_dotted_name() {
 /// what TeX keeps of the file is that one's. The lookup found `name` but
 /// kept its read-back, read-back point and seed under `name.tex`, so a
 /// `.dat` read back from the run before defined nothing (phitex-tex's
-/// auxloop::a_file_of_definitions_is_read_back_per_field_whatever_its_name),
+/// `auxloop::a_file_of_definitions_is_read_back_per_field_whatever_its_name`),
 /// conv-xkv's `.cut` written and read in one run left `\fname`
 /// undefined, and hyperref's `.out` and probsoln's `excluded.tex` never
 /// settled. At -j1 and -j4 (oracle: pdflatex in the CI image).
@@ -545,7 +545,7 @@ fn pdf_image_page_group_ref() {
 /// pdfTeX's (beautynote's `/pgfsmask76` for 75, elegantnote-en; hidden
 /// there until df0d049ac counted the included PDF's page group, one
 /// short, beside it; `objects_after`'s fix is 9dd4e3020's, as
-/// png_alpha_objects_counted's). At -j1 and -j4 (oracle: pdflatex in the
+/// `png_alpha_objects_counted`'s). At -j1 and -j4 (oracle: pdflatex in the
 /// CI image).
 #[test]
 fn pdf_image_png_group() {
