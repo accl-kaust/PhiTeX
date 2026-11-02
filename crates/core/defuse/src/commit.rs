@@ -929,6 +929,25 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             .flat_map(|(a, b)| foreign_between(eng, node.id, a, b))
             .collect()
     };
+    // (the definitions its last run made that this run does not, for the
+    // first text node it places anew: a run that now ends earlier, its
+    // rest made after it (a recut), left those to the rest, whose first
+    // run makes them again; filed as the rest's prediction, a reader after
+    // it whose answer stays is not run again while the rest has not run,
+    // and the rest's commit asks again those whose answer moved,
+    // `settle_predictions`)
+    let dropped: Vec<DefRec> = last
+        .as_ref()
+        .filter(|r| !r.provisional)
+        .map(|r| {
+            r.defs
+                .iter()
+                .filter(|d| d.rel.is_none() && !defs.iter().any(|x| x.f == d.f))
+                .copied()
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut rest_taken = dropped.is_empty();
     // everything a placement needs but its label, made before the lock
     let mut fresh: Vec<Option<(Arc<Node>, Predicted)>> = p
         .placements
@@ -954,6 +973,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 && let Some(r) = on.record()
             {
                 pred.inherit(&r.defs);
+            }
+            if !rest_taken && k.is_none() && eng.op(op).text() {
+                rest_taken = true;
+                let more: Vec<DefRec> = dropped
+                    .iter()
+                    .filter(|d| !pred.fields().any(|f| f == d.f))
+                    .copied()
+                    .collect();
+                pred.inherit(&more);
             }
             Some((n, pred))
         })

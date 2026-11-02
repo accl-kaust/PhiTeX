@@ -185,8 +185,8 @@ fn stands(eng: &Engine, m: &Met) -> bool {
     }
 }
 
-/// (tests) The reads on one layout computed again on this thread so far.
-#[cfg(test)]
+/// The reads on one layout computed again on this thread so far (tests,
+/// and `PHITEX_RUN_LOG`'s count per run).
 pub(crate) fn retries() -> u64 {
     RETRIES.get()
 }

@@ -1601,6 +1601,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     let version = eng.version.load(Ordering::Acquire);
     node.held_panic.store(false, Ordering::Release);
     let mut cx = Ctx::new(eng, Some(w), node);
+    let retries0 = crate::read::retries();
     let r = catch_unwind(AssertUnwindSafe(|| op.run(&mut cx)));
     if run_log() {
         let how = match &r {
@@ -1642,6 +1643,14 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         if let Some(wf) = wf {
             eprintln!("runf: node {} field {wf}", n.raw());
         }
+        // (the reads it computed again on a moved layout, and the reads it
+        // filed)
+        eprintln!(
+            "runr: node {} retries {} reads {}",
+            n.raw(),
+            crate::read::retries() - retries0,
+            cx.product.reads.len()
+        );
     }
     // (a resumption: the run woken by the answer its node's last run
     // parked on, going on from there; else the last run's work, if any,
