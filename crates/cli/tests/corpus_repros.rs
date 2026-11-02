@@ -523,6 +523,33 @@ fn pdf_image_page_group() {
     check_threads("pdf_image_page_group", "pdf");
 }
 
+/// An included PDF page whose `/Group` is an indirect object: the image's
+/// own writer, showing no page, copied the group's object into the
+/// image (an object), and the count of the page's group was added on
+/// top, so every object number TeX read after the page was one past
+/// pdfTeX's (df0d049ac counted the group for every included page with
+/// one). The own writer now shows the image as the page does
+/// (`out_image` numbers the group), and the write makes what pdfTeX's
+/// makes. At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdf_image_page_group_ref() {
+    check_threads("pdf_image_page_group_ref", "pdf");
+}
+
+/// A PNG with an alpha channel: reading it numbers the document's
+/// transparency group, and its write writes the group into an object
+/// stream, which that write opens. The image's own writer counted the
+/// stream with the image's objects (`PdfState::objects_after` took only
+/// the streams its later objects went into for streams), so every
+/// object number TeX read after the page showing it was one past
+/// pdfTeX's (beautynote's `/pgfsmask76` for 75, elegantnote-en; hidden
+/// there until df0d049ac counted the included PDF's page group, one
+/// short, beside it). At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdf_image_png_group() {
+    check_threads("pdf_image_png_group", "pdf");
+}
+
 /// A line a node boundary cuts right after a control word: its
 /// continuation, the next sibling's first segment, began in a state of
 /// its own, so the space after the name (skipped on one line, §354) was a

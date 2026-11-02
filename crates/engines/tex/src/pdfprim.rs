@@ -3624,23 +3624,18 @@ fn ximage_own_info(
     // the read's, counted where it is read)
     let before = st.objects_numbered();
     // (an included PDF page's `/Group`: the page that first shows the
-    // image numbers its object (`out_image`, `pdf_new_objnum`), and the
-    // image's write puts it into an object stream at
-    // `\pdfobjcompresslevel` 2 and more (`pdf_begin_obj(group, 2)`). This
-    // writer shows no page, so it writes the group in the image's
-    // dictionary: counted here. Not counted, iacrj's logo's group (object
-    // 63, in stream 24) left every read-time number after page 1 one
-    // short and the second stream's number late: the XMP stream's
-    // number TeX read, 184, was 183)
-    let group = st.ximage_page_group(n);
+    // image numbers its object (`out_image`), and the image's write
+    // writes the group as that object, into an object stream at
+    // `\pdfobjcompresslevel` 2 and more (`pdf_begin_obj(group, 2)`).
+    // Shown here as there, so this writer writes it so too: one showing
+    // no page copied the group into the image's dictionary, no object
+    // for a direct one (iacrj's logo: every read-time number after page
+    // 1 one short, /Metadata 183 for 184), its object copied for one the
+    // page names indirectly (counted again on top of that: every number
+    // after the page one past pdfTeX's))
+    st.show_ximage_group(n);
     let (objs, os) = match st.write_ximage(n, fonts) {
-        Ok(()) => {
-            let (objs, os) = st.objects_after(before);
-            (
-                objs + usize::from(group),
-                os + usize::from(group && ocl.0 >= 2),
-            )
-        }
+        Ok(()) => st.objects_after(before),
         Err(_) => (0, 0),
     };
     Ok((
