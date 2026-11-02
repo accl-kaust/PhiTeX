@@ -99,7 +99,9 @@ rebuilds on every save. Double-click the page to jump to the source.
 One build, start to finish. `\ref`, `\cite`, the table of contents and the
 index settle in a single run: no "run it twice", no latexmk. BibTeX, biber
 and makeindex run inside the build, and run again only when their input
-changes.
+changes. The glossaries package's lists are made as `makeglossaries` makes
+them (makeindex on `STEM.glo` and `STEM.acn` in the style `STEM.ist`),
+where `STEM.ist` exists.
 
 ```sh
 phitex build paper.tex                    # the finished PDF, like latexmk -pdf

@@ -66,6 +66,12 @@ pub(crate) struct CandMark {
     /// page fires at that the run read the page after
     /// ([`Run::order_after_own_page`]).
     pub open_cut: bool,
+    /// Whether a second pass can end the run here at a paragraph's start
+    /// inside conditionals of its own: the continuation carries them, as
+    /// at a forced one (amsmath's display in `\ifmmode`'s `\else`); a
+    /// read of the pages' objects after it ends here where a page fires
+    /// ([`Run::order_after_pages`]).
+    pub par_cut: bool,
 }
 
 /// The start of [`Run::order_after_pages`]' engine diagnostic.
@@ -145,6 +151,7 @@ impl Run<'_, '_> {
                     && below.iter().all(|l| !l.owns && l.group != 0)
             });
         let restartable = can || (par_start && self.conds.is_empty());
+        let par_cut = par_start && !self.conds.is_empty();
         // (a rest of blank input makes no node: the piece runs it, spaces
         // and an empty line's `\par` in vertical mode, §1070)
         let open_cut = self.open_span() && self.cuttable_open();
@@ -162,7 +169,7 @@ impl Run<'_, '_> {
                 || (self.cand_marks.is_empty() && self.forced_pending_before()?));
         let cuttable = fresh
             && (((can || forced_par) && !self.rest_blank()?)
-                || ((restartable || open_cut || forced_par) && self.stop_at == Some(k)));
+                || ((restartable || open_cut || par_cut || forced_par) && self.stop_at == Some(k)));
         self.cand_marks.push(CandMark {
             k,
             stamp: self.st.stamp(),
@@ -176,6 +183,7 @@ impl Run<'_, '_> {
             fresh,
             restartable,
             open_cut,
+            par_cut,
         });
         self.st.mark_candidate();
         if fresh {
@@ -357,7 +365,7 @@ impl Run<'_, '_> {
     /// such candidate ([`Halt::Recut`], [`Run::finish_candidate`])
     /// whether or not a page fires there (the piece's boundaries are its
     /// text's alone), its rest a resume placed after the pages firing
-    /// there, which reads their objects. Where no pass can end at it (inside a conditional of the
+    /// there, which reads their objects. Where no pass can end at it (inside a list of the
     /// run's own), the read stands where no page fires at the run's
     /// candidates ([`Run::page_fires_in_own`]). (`why`: the reader, for
     /// the trace.)
@@ -379,16 +387,23 @@ impl Run<'_, '_> {
         let Some(m) = self.cand_marks.iter().find(|m| m.fresh) else {
             return Ok(());
         };
-        let (k, restartable) = (m.k, m.restartable);
-        // (no pass can end there: complete where no page fires at any of
-        // the run's candidates, the page builder's fold over the profiles
-        // to its own says: a read of the page state, [`Feedback::PageSoFar`];
-        // where one can, it ends there whatever the pages do)
+        let (k, restartable, open_cut) = (m.k, m.restartable, m.open_cut || m.par_cut);
+        // (inside a span of the run's own: complete where no page fires
+        // at any of the run's candidates, the page builder's fold over the
+        // profiles to its own says: a read of the page state,
+        // [`Feedback::PageSoFar`]; where a pass can end outside one, it
+        // ends there whatever the pages do)
         if !restartable && !self.page_fires_in_own()? {
             return Ok(());
         }
-        if !restartable {
-            // (a candidate inside a span of the run's own no pass can end
+        // (a page fires at one: a second pass can end inside groups or
+        // conditionals of the run's own that own no list, the continuation
+        // carrying them ([`CandMark::open_cut`]; a paragraph's start,
+        // [`CandMark::par_cut`]): tex-vpat's resume cut inside four
+        // conditionals, an `\item`'s object numbers read after its first
+        // candidate; spath3's pgf `\immediate\pdfobj`)
+        if !restartable && !open_cut {
+            // (a candidate inside a list of the run's own no pass can end
             // at: a page firing there would be missing from the number)
             let msg = format!(
                 "{PAGES_OBJECTS_DEFECT} ({why}, candidate {k}): a number here may miss that page's objects (node {})",
@@ -1284,6 +1299,19 @@ impl Run<'_, '_> {
     /// with no saves or definitions below them.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn cont_encode_as(&mut self, closed: bool) -> R<(ValueId, Vec<ValueId>)> {
+        self.cont_encode_with(closed, true)
+    }
+
+    /// [`Run::cont_encode_as`]; `frames` false: no input (a checkpoint's,
+    /// whose input is the node's text from its place, `crate::resume`:
+    /// the rest encoded at every checkpoint would cost the text's length
+    /// at each).
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn cont_encode_with(
+        &mut self,
+        closed: bool,
+        with_frames: bool,
+    ) -> R<(ValueId, Vec<ValueId>)> {
         let v = self.v;
         // (each token level's file line: of the innermost file read
         // below it, §304, a file it is inside staying open until the
@@ -1323,7 +1351,8 @@ impl Run<'_, '_> {
         };
         let base_here = here_of(base);
         let mut frames = Vec::new();
-        for (i, l) in self.input.levels.iter().enumerate().rev() {
+        let levels: &[crate::input::Level] = if with_frames { &self.input.levels } else { &[] };
+        for (i, l) in levels.iter().enumerate().rev() {
             match l.kind {
                 crate::input::kind::TOKS => {
                     let r = self.input.arena.get(l.rest());
@@ -1339,7 +1368,11 @@ impl Run<'_, '_> {
                 _ => frames.extend(file_frames(v, self.input.file(*l))),
             }
         }
-        for s in self.input.text_rest() {
+        for s in if with_frames {
+            self.input.text_rest()
+        } else {
+            &[]
+        } {
             match s {
                 Seg::Line(l) => {
                     if let Some(f) = line_frame(v, l) {
@@ -1589,17 +1622,12 @@ impl Run<'_, '_> {
         Ok((cont, locals))
     }
 
-    /// A resume piece's start: the continuation `x` ([`Run::cont_encode`])
-    /// loaded; the base-level values the open groups' bindings hide
-    /// checked against the engine's reaching here (a global definition
-    /// between the cut and here, the finisher's, replaces the binding and
-    /// makes the groups' saves inert, §283).
-    #[allow(clippy::too_many_lines)]
-    pub(crate) fn cont_load(&mut self, x: ValueId, pid: ValueId) -> R<()> {
+    /// The continuation `x`'s text as the run's input, from its start,
+    /// with each segment's file line ([`Run::cont_load`]).
+    pub(crate) fn cont_text(&mut self, x: ValueId) -> R<()> {
         let v = self.v;
         let xs = list_of(v, x);
-        let a = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
-        let frames = self.resolve_units(&[a(0)])?;
+        let frames = self.resolve_units(&[xs.first().copied().unwrap_or(ValueId::UNIT)])?;
         self.input.text = crate::run::decode_segs(v, &frames);
         // (where each segment was read: a token frame's file line)
         self.cont_lines = frames
@@ -1611,6 +1639,26 @@ impl Run<'_, '_> {
             .map(|&f| crate::run::frame_line(v, f))
             .collect();
         self.input.text_at = 0;
+        Ok(())
+    }
+
+    /// A resume piece's start: the continuation `x` ([`Run::cont_encode`])
+    /// loaded; the base-level values the open groups' bindings hide
+    /// checked against the engine's reaching here (a global definition
+    /// between the cut and here, the finisher's, replaces the binding and
+    /// makes the groups' saves inert, §283).
+    pub(crate) fn cont_load(&mut self, x: ValueId, pid: ValueId) -> R<()> {
+        self.cont_text(x)?;
+        self.cont_state(x, pid)
+    }
+
+    /// [`Run::cont_load`] past the text: the state, the nest, the
+    /// conditionals and the rest the continuation carries.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn cont_state(&mut self, x: ValueId, pid: ValueId) -> R<()> {
+        let v = self.v;
+        let xs = list_of(v, x);
+        let a = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
         // the state table first: the levels index its saves
         let st = list_of(v, a(4));
         let sa = |i: usize| st.get(i).copied().unwrap_or(ValueId::UNIT);

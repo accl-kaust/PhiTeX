@@ -826,3 +826,47 @@ fn tcx_first_line() {
 fn png_alpha_objects_counted() {
     check_threads("png_alpha_count", "pdf");
 }
+
+/// manuals (spath3: pgf's `\immediate\pdfobj` numbered 404 for pdfTeX's
+/// 429, the 25 objects of the page firing before it missing; tex-vpat):
+/// an object number read inside a conditional the text's run opens,
+/// after a candidate inside it where a page fires. No pass of the run
+/// could end at a paragraph's start or a paragraph's end inside its own
+/// conditionals, so the number missed that page's objects
+/// (`PAGES_OBJECTS_DEFECT`). Now, where a page fires at one of its
+/// candidates, the run ends at the first such candidate a second pass
+/// can end at, the continuation carrying the conditionals
+/// (`Run::order_after_pages`; oracle: pdftex in the CI image, accl 23046,
+/// 23055).
+#[test]
+fn pages_objects_in_conditional() {
+    check_threads("pages_objects_in_conditional", "pdf");
+}
+
+/// TeX Live manual huaz (pdflatex): the text analysis took `\lstinline`
+/// in `\newcommand{\code}{\lstinline}` for a verbatim run and cut the
+/// body into pieces of a few tokens, one cut inside the word `''.` that
+/// `\huqq{az asztal}.` makes. A run ending its piece inside a character
+/// run (§1038's lookahead at the end of the node's text) ended the word
+/// there, as if no character followed, and read the next piece on only
+/// after: pdfTeX's kern between `''` (the ligature) and `.` was missing.
+/// The run now reads the next piece on inside the lookahead, so a cut the
+/// analysis put inside a word costs nothing. At -j1 and -j4 (oracle:
+/// pdftex in the CI image, accl 23105; the base differs).
+#[test]
+fn word_across_cut() {
+    check_threads("word_across_cut", "pdf");
+}
+
+/// TeX Live manual ryesample (pdflatex): the glossaries package's lists,
+/// `STEM.glo` and `STEM.acn`, made into `STEM.gls` and `STEM.acr` by
+/// makeindex in the style `STEM.ist` the package writes, as the corpus
+/// loop runs them (`makeglossaries`'s calls; latexmk with that custom
+/// dependency). No tool claimed them: the glossaries were empty and the
+/// pages two short. At -j1 and -j4 (oracle: pdflatex and makeindex in
+/// the CI image, latexmk with the loop's rule, accl 23161; the base
+/// differs).
+#[test]
+fn glossaries_made() {
+    check_threads("glossaries_tool", "pdf");
+}

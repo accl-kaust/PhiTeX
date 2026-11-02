@@ -3318,6 +3318,25 @@ impl Run<'_, '_> {
         }
     }
 
+    /// At the end of the node's text in a character run's lookahead
+    /// (§1038), with the paragraph (or a group, a conditional) open: the
+    /// next sibling's text read on into now, as the run would after the
+    /// run ends, so the lookahead sees the character that follows (its
+    /// ligature or kern with the last one, the right boundary only where
+    /// none follows). The cut between the nodes is the analysis', a bound
+    /// it does not verify: a cut inside a word (huaz's `''.`, cut after
+    /// `\huqq{az asztal}` where the analysis took `\code`'s `\lstinline`
+    /// for a verbatim run) lost the kern pdfTeX puts between `''` and `.`.
+    /// True when there is input now.
+    fn read_on_in_word(&mut self) -> R<bool> {
+        while self.open_span() && !self.eof && self.pull()? {
+            if self.has_input() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// `main_loop` (§1034–§1040) from character `ch`: true when the
     /// token after the characters is in `cur` (`goto reswitch`), false
     /// at `goto big_switch` (or at the end of the node's text).
@@ -3550,7 +3569,7 @@ impl Run<'_, '_> {
                         if self.cur.cmd != cmd::SPACER {
                             got = Some(self.cur.chr.cast_unsigned());
                         }
-                    } else if !self.has_input() {
+                    } else if !self.has_input() && !self.read_on_in_word()? {
                         input_done = true;
                     } else if self.next_ck()? {
                         // (§1038: the characters so far are on the list, the

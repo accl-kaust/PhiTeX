@@ -161,8 +161,13 @@ impl Run<'_, '_> {
 
     /// The run's progress, every [`Run::HB_BATCH`] commands (always: a
     /// clock read, a walk of the input's levels and a few compares): a run
-    /// that reads no new line of its input (a document line, or a file's
-    /// read here) for `Limits::stall`, that runs 20 million commands
+    /// of an edit's evaluation that reads no new line of its input (a
+    /// document line, or a file's read here) for the edit's bound
+    /// ([`crate::Build::set_stuck_after`], from the cold build's time; a
+    /// cold build has none: from inside a run, a long computation that
+    /// reads no input, lisp-on-tex's div2 for minutes, cannot be told from
+    /// a loop, and pdflatex stops neither: the build's time limit does),
+    /// that runs 20 million commands
     /// without an assignment or a new line, or past `Limits::memory_bytes`
     /// of its own values, or past the build's time
     /// limit (`Limits::time`), is stuck, and the evaluation
@@ -216,7 +221,12 @@ impl Run<'_, '_> {
                 "the build passed its time limit of {} s",
                 t.as_secs()
             ))
-        } else if lim.stall.is_some_and(|s| since >= s) {
+        } else if let ms @ 1.. = self
+            .ops
+            .edit_stall_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && since >= std::time::Duration::from_millis(ms)
+        {
             Some(format!(
                 "it read no new line of its input for {} s",
                 since.as_secs()

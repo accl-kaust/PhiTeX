@@ -9830,6 +9830,8 @@
    "oracle_wall_s": 700.27,
    "passes": 3,
    "path": "latex/codehigh/codehigh.tex",
+   "time_limit_s": 700,
+   "time_limit_why": "pdflatex itself takes 700 s on it (oracle_wall_s, its 3 passes): PhiTeX is held to pdflatex's own time here, not to the sweep's 300 s and the engine's 600 s (accl 23041, limit raised for diagnosis: identical at -j1 in 307 s and at -j4 in 303 s; the gate's 300 s cut both off on GitHub's runner)",
    "tools": []
   },
   {
@@ -14515,6 +14517,8 @@
    "oracle_wall_s": 850.56,
    "passes": 2,
    "path": "latex/lisp-on-tex/examples/div2.tex",
+   "time_limit_s": 850,
+   "time_limit_why": "pdflatex itself takes 850 s on it (oracle_wall_s, its 2 passes): PhiTeX is held to pdflatex's own time here, not to the sweep's 300 s and the engine's 600 s (accl 23043, limit raised for diagnosis: identical at -j1 in 165 s; the gate's 300 s cut -j1 off on GitHub's runner)",
    "tools": []
   },
   {

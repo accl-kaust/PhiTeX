@@ -4,8 +4,9 @@
 //! `upper_before_lower`) and the level-1 `viewSortKey` behind
 //! `sortinithash` (default options: `shifted`, NFD).
 //!
-//! Only untailored locales: Unicode::Collate::Locale has no tailoring for
-//! them, so they collate with the plain DUCET.
+//! Locales: Unicode::Collate::Locale's (`_locale`, its `entry` tailorings
+//! added to the DUCET, [`Table::tailor`]); a locale whose file sets more
+//! than an `entry`, or a CJK one, is not supported.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -15,12 +16,206 @@ use crate::unicode;
 
 static DUCET: &[u8] = include_bytes!("../data/ducet.bin");
 
+/// Unicode::Collate::Locale's `entry` tailorings: `@NAME` lines, each
+/// followed by its entry's lines (data/tailorings.txt).
+static TAILORINGS: &str = include_str!("../data/tailorings.txt");
+
+/// Unicode::Collate::Locale 1.31's `%LocaleFile` (the locale names it
+/// knows, aliases and short file names): `(name, file)`.
+const LOCALE_FILES: &[(&str, &str)] = &[
+    ("af", "af"),
+    ("ar", "ar"),
+    ("as", "as"),
+    ("az", "az"),
+    ("be", "be"),
+    ("bn", "bn"),
+    ("ca", "ca"),
+    ("cs", "cs"),
+    ("cu", "cu"),
+    ("cy", "cy"),
+    ("da", "da"),
+    ("dsb", "dsb"),
+    ("ee", "ee"),
+    ("eo", "eo"),
+    ("es", "es"),
+    ("et", "et"),
+    ("fa", "fa"),
+    ("fi", "fi"),
+    ("fil", "fil"),
+    ("fo", "fo"),
+    ("gu", "gu"),
+    ("ha", "ha"),
+    ("haw", "haw"),
+    ("he", "he"),
+    ("hi", "hi"),
+    ("hr", "hr"),
+    ("hu", "hu"),
+    ("hy", "hy"),
+    ("ig", "ig"),
+    ("is", "is"),
+    ("ja", "ja"),
+    ("kk", "kk"),
+    ("kl", "kl"),
+    ("kn", "kn"),
+    ("ko", "ko"),
+    ("kok", "kok"),
+    ("lkt", "lkt"),
+    ("ln", "ln"),
+    ("lt", "lt"),
+    ("lv", "lv"),
+    ("mk", "mk"),
+    ("ml", "ml"),
+    ("mr", "mr"),
+    ("mt", "mt"),
+    ("nb", "nb"),
+    ("nn", "nn"),
+    ("nso", "nso"),
+    ("om", "om"),
+    ("or", "or"),
+    ("pa", "pa"),
+    ("pl", "pl"),
+    ("ro", "ro"),
+    ("sa", "sa"),
+    ("se", "se"),
+    ("si", "si"),
+    ("sk", "sk"),
+    ("sl", "sl"),
+    ("sq", "sq"),
+    ("sr", "sr"),
+    ("sv", "sv"),
+    ("ta", "ta"),
+    ("te", "te"),
+    ("th", "th"),
+    ("tn", "tn"),
+    ("to", "to"),
+    ("tr", "tr"),
+    ("uk", "uk"),
+    ("ur", "ur"),
+    ("vi", "vi"),
+    ("vo", "vo"),
+    ("wae", "wae"),
+    ("wo", "wo"),
+    ("yo", "yo"),
+    ("zh", "zh"),
+    ("default", ""),
+    ("bs", "hr"),
+    ("bs_Cyrl", "sr"),
+    ("sr_Latn", "hr"),
+    ("de__phonebook", "de_phone"),
+    ("de_AT_phonebook", "de_at_ph"),
+    ("es__traditional", "es_trad"),
+    ("fr_CA", "fr_ca"),
+    ("fi__phonebook", "fi_phone"),
+    ("si__dictionary", "si_dict"),
+    ("sv__reformed", "sv_refo"),
+    ("ug_Cyrl", "ug_cyrl"),
+    ("zh__big5han", "zh_big5"),
+    ("zh__gb2312han", "zh_gb"),
+    ("zh__pinyin", "zh_pin"),
+    ("zh__stroke", "zh_strk"),
+    ("zh__zhuyin", "zh_zhu"),
+];
+
+fn locale_file(name: &str) -> Option<&'static str> {
+    LOCALE_FILES.iter().find(|e| e.0 == name).map(|e| e.1)
+}
+
+/// Unicode::Collate::Locale's `_locale`: the locale name it accepts for
+/// `l` (lower-cased, `-`, space and `.` made `_`, a type alias spelled
+/// out; then the name, else its language, script, region and variant
+/// tried from the longest), `default` where none is known.
+#[must_use]
+pub fn accepted_locale(l: &str) -> String {
+    if l.is_empty() || l == "0" {
+        return "default".into();
+    }
+    let mut loc: String = l
+        .to_lowercase()
+        .chars()
+        .map(|c| if matches!(c, '-' | ' ' | '.') { '_' } else { c })
+        .collect();
+    if let Some((head, last)) = loc.rsplit_once('_')
+        && !last.is_empty()
+        && last.bytes().all(|b| b.is_ascii_alphanumeric())
+    {
+        let alias = match last {
+            "phone" | "phonebk" => Some("phonebook"),
+            "dict" => Some("dictionary"),
+            "reform" => Some("reformed"),
+            "trad" => Some("traditional"),
+            "big5" => Some("big5han"),
+            "gb2312" => Some("gb2312han"),
+            _ => None,
+        };
+        if let Some(a) = alias {
+            loc = alloc::format!("{head}_{a}");
+        }
+    }
+    if locale_file(&loc).is_some() {
+        return loc;
+    }
+    let mut code = loc.split('_');
+    let lan = code.next().unwrap_or("");
+    let mut rest: Vec<&str> = code.collect();
+    let scr = if rest.first().is_some_and(|c| c.len() == 4) {
+        let c = rest.remove(0);
+        let mut u: String = c[..1].to_uppercase();
+        u.push_str(&c[1..]);
+        u
+    } else {
+        String::new()
+    };
+    let reg = if rest.first().is_some_and(|c| c.len() < 4) {
+        rest.remove(0).to_uppercase()
+    } else {
+        String::new()
+    };
+    let var = if rest.is_empty() { "" } else { rest.remove(0) };
+    let mut list = Vec::new();
+    if !var.is_empty() {
+        list.push(alloc::format!("{lan}_{scr}_{reg}_{var}"));
+        list.push(alloc::format!("{lan}_{scr}__{var}"));
+        list.push(alloc::format!("{lan}_{reg}_{var}"));
+        list.push(alloc::format!("{lan}__{var}"));
+    }
+    list.push(alloc::format!("{lan}_{scr}_{reg}"));
+    list.push(alloc::format!("{lan}_{scr}"));
+    list.push(alloc::format!("{lan}_{reg}"));
+    list.push(lan.into());
+    for l in list {
+        if locale_file(&l).is_some() {
+            return l;
+        }
+    }
+    "default".into()
+}
+
+/// The `entry` tailoring of accepted locale `accepted`: `Some("")` for
+/// `default` (none), `None` where this crate does not have its file's
+/// tailoring (more than an `entry`, or a CJK one).
+#[must_use]
+pub fn tailoring(accepted: &str) -> Option<&'static str> {
+    let file = locale_file(accepted)?;
+    if file.is_empty() {
+        return Some("");
+    }
+    let head = alloc::format!("@{file}\n");
+    let at = if TAILORINGS.starts_with(&head[..]) {
+        0
+    } else {
+        TAILORINGS.find(&alloc::format!("\n{head}"))? + 1
+    };
+    let body = &TAILORINGS[at + head.len()..];
+    Some(body.find("\n@").map_or(body, |e| &body[..=e]))
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Ce {
     var: bool,
     w: [u16; 3],
 }
 
+#[derive(Clone)]
 pub struct Table {
     map: BTreeMap<Vec<u32>, Vec<Ce>>,
     /// Longest contraction starting with a code point.
@@ -93,6 +288,60 @@ impl Table {
             map,
             maxlen,
             contraction,
+        }
+    }
+
+    /// Unicode::Collate's `entry` (`parseEntry`): each line `CODES ;
+    /// [.P.S.T]...` maps the code points to its collation elements (`*`
+    /// for `.` marking a variable one), in the place of the DUCET's.
+    pub fn tailor(&mut self, entry: &str) {
+        for line in entry.lines() {
+            let line = line.split('#').next().unwrap_or("");
+            let Some((cps, ces)) = line.split_once(';') else {
+                continue;
+            };
+            let cps: Vec<u32> = cps
+                .split_whitespace()
+                .filter_map(|h| u32::from_str_radix(h, 16).ok())
+                .collect();
+            if cps.is_empty() {
+                continue;
+            }
+            let mut out = Vec::new();
+            let mut l3_ignorable = true;
+            for ce in ces.split('[').skip(1) {
+                let ce = ce.split(']').next().unwrap_or("");
+                let var = ce.starts_with('*');
+                let ws: Vec<u16> = ce
+                    .trim_start_matches(['.', '*'])
+                    .split('.')
+                    .map(|h| u16::from_str_radix(h, 16).unwrap_or(0))
+                    .collect();
+                let w = [
+                    ws.first().copied().unwrap_or(0),
+                    ws.get(1).copied().unwrap_or(0),
+                    ws.get(2).copied().unwrap_or(0),
+                ];
+                if w != [0, 0, 0] {
+                    l3_ignorable = false;
+                }
+                out.push(Ce { var, w });
+            }
+            if l3_ignorable {
+                out.clear();
+            }
+            if cps.len() > 1 {
+                let e = self.maxlen.entry(cps[0]).or_insert(0);
+                if *e < cps.len() {
+                    *e = cps.len();
+                }
+                let mut u = cps.clone();
+                while u.len() > 2 {
+                    u.pop();
+                    self.contraction.insert(u.clone());
+                }
+            }
+            self.map.insert(cps, out);
         }
     }
 }

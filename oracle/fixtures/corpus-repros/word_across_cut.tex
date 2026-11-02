@@ -1,0 +1,62 @@
+\documentclass[12pt]{article}
+\usepackage[a4paper,top=1in,bottom=1in]{geometry}
+\usepackage{listings,xcolor,lmodern,xurl,multicol,amsthm}
+\usepackage[T1]{fontenc}
+\PassOptionsToPackage{
+  defaults=hu-min,
+  labelitems=unchanged,
+  }{magyar.ldf}
+\usepackage[english,magyar]{babel}
+
+\usepackage{upquote}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+\def\codefont{\usefont{T1}{pcrs}{m}{n}}
+
+\newcommand{\code}{\lstinline}
+\makeatletter
+\def\@oddfoot{\hfill\textsf{\color{gray}\thepage}\hfill}
+\def\@evenfoot{\@oddfoot}
+\def\ps@plain{\def\@oddfoot{\hfill\textsf{\color{gray}\thepage}\hfill}}
+\makeatother
+
+\definecolor{hured}{RGB}{207,36,54}
+\definecolor{hugreen}{RGB}{69,113,79}
+\usepackage{contour}
+\def\huazlogo{%
+  {\contourlength{.8pt}%
+  \sbox0{\contour{black!30}{\Huge\bfseries\sffamily\color{white}HUAZ}}%
+  \mbox{}%
+  \lower-\dimeval{2\ht0/3}%
+  \rlap{{\color{hured}\rule{\wd0}{\dimeval{\ht0/3}}}}%
+  {\color{hugreen}\rule{\wd0}{\dimeval{\ht0/3}}}%
+  \llap{\usebox0}}}
+
+\def\huaz{\textbf{\sffamily hu\itshape\color{gray}az}}
+
+\def\labelenumi{\textbf{\theenumi.}}
+
+\def\huqq#1{,,{\color{gray}#1}''}
+
+\theoremstyle{definition}
+\newtheorem{eset}{eset}
+
+\flushbottom
+
+\begin{document}
+
+
+
+
+
+\section{Bevezetés}
+
+A magyar nyelvben a határozott névelő egy szó előtt aszerint \huqq{a} vagy \huqq{az}, hogy a szó kiejtve mássalhangzóval vagy magánhangzóval kezdődik.
+Például \huqq{a szék} vagy \huqq{az asztal}.
+Ez egyszerű szabály, de írásban összetett vizsgálatot igényel.
+Itt felsorolunk néhány nehézséget:
+
+
+\end{document}

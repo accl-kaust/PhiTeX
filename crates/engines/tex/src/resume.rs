@@ -54,6 +54,10 @@ pub(crate) struct Checkpoints {
     /// The conditionals the run began inside (`carried_conds`): a
     /// checkpoint has no conditional of its own open.
     conds0: Vec<u8>,
+    /// Of those taken by this run, by index in `taken`: the reads
+    /// `unread` had taken out then ([`phitex_defuse::Ctx::unread_count`]),
+    /// to make their count of reads the record's at the park.
+    fresh: Vec<(usize, usize)>,
 }
 
 /// The paragraph's mode (tex.web's `hmode`, unrestricted).
@@ -79,6 +83,7 @@ impl Run<'_, '_> {
             next: self.cmds + every(),
             taken,
             conds0: self.conds.clone(),
+            fresh: Vec::new(),
         }));
     }
 
@@ -140,6 +145,15 @@ impl Run<'_, '_> {
             || self.interp.is_some()
             || self.scanner.is_some()
             || !self.pending_pre.is_empty()
+            || !self.incs.is_empty()
+            || self.read_point_pending.is_some()
+            || !self.vain_after_point.is_empty()
+            || !self.seeded.is_empty()
+            || self.defer_hit.is_some()
+            || self.mode_zero
+            || self.fin_box.is_some()
+            || self.tool_cut.is_some()
+            || self.lt.sink.is_some()
             || self.nest.len() != 1
             || self.nest[0].mode != HMODE
             || self.nest[0].group != 0
@@ -210,7 +224,7 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let base = base.to_value(v, &mut |l| self.loc_field(l));
-        let (cont, locals) = self.cont_encode()?;
+        let (cont, locals) = self.cont_encode_with(false, false)?;
         if !locals.is_empty() {
             if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
                 eprintln!(
@@ -259,7 +273,7 @@ impl Run<'_, '_> {
             int(i64::from_ne_bytes(self.lines_read.to_ne_bytes())),
             int(i64::from_ne_bytes(self.exps.to_ne_bytes())),
         ]);
-        let ck = v.list(vec![
+        let mut ys = vec![
             int(i64::try_from(li).unwrap_or(-1)),
             int(i64::from(loc)),
             int(i64::from(state)),
@@ -274,11 +288,184 @@ impl Run<'_, '_> {
             base,
             v.list(self.cand_marks.iter().map(|m| cand_value(v, m)).collect()),
             v.list(ahead),
-        ]);
+        ];
+        ys.extend(self.ck_more());
+        let ck = v.list(ys);
+        let unread = self.cx.unread_count();
         if let Some(c) = self.ck.as_mut() {
+            c.fresh.push((c.taken.len(), unread));
             c.taken.push(ck);
         }
         Ok(())
+    }
+
+    /// A checkpoint's parts from its 15th on: the count of the reads
+    /// made before it, the nest's lines and places, the page-layer
+    /// registers held, the candidate a second pass ends at, the rest of
+    /// the run's state ([`Run::ck_run_state`]).
+    fn ck_more(&mut self) -> Vec<ValueId> {
+        let v = self.v;
+        let int = |x: i64| v.int(x);
+        vec![
+            int(i64::try_from(self.cx.reads_made()).unwrap_or(i64::MAX)),
+            // (the nest's lines and places: a paragraph's box reports name
+            // the line it began on, §816)
+            v.list(
+                self.nest
+                    .iter()
+                    .map(|l| {
+                        v.list(vec![
+                            line_mark_value(v, l.mode_line),
+                            place_value(v, l.mode_place.as_ref()),
+                        ])
+                    })
+                    .collect(),
+            ),
+            // (the page-layer registers whose next read is ordered after a
+            // page firing at a candidate passed, `Run::page_regs_held`:
+            // those read since are not)
+            v.list(
+                self.page_regs_held
+                    .clone()
+                    .into_iter()
+                    .map(|l| self.loc_field(l).0)
+                    .collect(),
+            ),
+            // (the candidate a second pass ends at: a cutoff is only to a
+            // checkpoint of a run that ends where this one does)
+            int(self.stop_at.map_or(-1, i64::from)),
+            self.ck_run_state(),
+        ]
+    }
+
+    /// What else of the run a checkpoint carries: the insertion classes
+    /// put on the list since the last candidate, the registers' first
+    /// definitions and first values read, XeTeX's input modes, scripts
+    /// and character classes, the files written as text, where the lines
+    /// read went, the scope kind read ([`Run::ck_run_restore`]).
+    fn ck_run_state(&mut self) -> ValueId {
+        let v = self.v;
+        let int = |x: i64| v.int(x);
+        let mut first: Vec<(crate::state::Loc, u32)> =
+            self.reg_first_def.iter().map(|(&l, &k)| (l, k)).collect();
+        first.sort_unstable();
+        let mut based: Vec<(crate::state::Loc, i32)> =
+            self.reg_loaded_base.iter().map(|(&l, &k)| (l, k)).collect();
+        based.sort_unstable();
+        let first: Vec<ValueId> = first
+            .into_iter()
+            .map(|(l, k)| v.list(vec![self.loc_field(l).0, int(i64::from(k))]))
+            .collect();
+        let based: Vec<ValueId> = based
+            .into_iter()
+            .map(|(l, k)| v.list(vec![self.loc_field(l).0, int(i64::from(k))]))
+            .collect();
+        let lt = self.lt;
+        v.list(vec![
+            v.list(
+                self.ins_pending
+                    .iter()
+                    .map(|&n| int(i64::from(n)))
+                    .collect(),
+            ),
+            v.list(first),
+            v.list(based),
+            v.list(
+                self.xenc
+                    .iter()
+                    .map(|&(n, m)| v.list(vec![n, int(m)]))
+                    .collect(),
+            ),
+            v.list(
+                self.xdirs
+                    .iter()
+                    .map(|&(f, d)| {
+                        v.list(vec![int(f), d.map_or(ValueId::UNIT, |d| int(i64::from(d)))])
+                    })
+                    .collect(),
+            ),
+            int(i64::from(self.ic_prev)),
+            int(i64::from(self.ic_space)),
+            v.list(self.text_written.iter().map(|t| v.str(t)).collect()),
+            int(i64::from(lt.hit) | i64::from(lt.weak) << 1 | i64::from(lt.strong) << 2),
+            // (the scope kind read, if it was: whether the run stands at
+            // the top level decides which of its definitions it publishes,
+            // `Run::publication`; read before the checkpoint, it is not
+            // read again)
+            match self.scope_kind_memo {
+                None => v.list(Vec::new()),
+                Some(k) => v.list(vec![v.list(k.into_iter().collect())]),
+            },
+        ])
+    }
+
+    /// [`Run::ck_run_state`]'s parts put back.
+    fn ck_run_restore(&mut self, x: ValueId) {
+        let v = self.v;
+        let xs = list_of(v, x);
+        let [
+            pend,
+            first,
+            based,
+            xenc,
+            xdirs,
+            icp,
+            ics,
+            written,
+            lt,
+            skind,
+        ] = xs[..]
+        else {
+            return;
+        };
+        let pair = |e: ValueId| match list_of(v, e)[..] {
+            [a, b] => Some((a, b)),
+            _ => None,
+        };
+        self.ins_pending = list_of(v, pend)
+            .iter()
+            .filter_map(|&n| u16::try_from(int_of(v, n)).ok())
+            .collect();
+        self.reg_first_def.clear();
+        for (f, k) in list_of(v, first).into_iter().filter_map(pair) {
+            let l = self.loc_of(Field(f));
+            self.reg_first_def
+                .insert(l, u32::try_from(int_of(v, k)).unwrap_or(0));
+        }
+        self.reg_loaded_base.clear();
+        for (f, k) in list_of(v, based).into_iter().filter_map(pair) {
+            let l = self.loc_of(Field(f));
+            self.reg_loaded_base
+                .insert(l, i32::try_from(int_of(v, k)).unwrap_or(0));
+        }
+        self.xenc = list_of(v, xenc)
+            .into_iter()
+            .filter_map(pair)
+            .map(|(n, m)| (n, int_of(v, m)))
+            .collect();
+        self.xdirs = list_of(v, xdirs)
+            .into_iter()
+            .filter_map(pair)
+            .map(|(f, d)| {
+                (
+                    int_of(v, f),
+                    (d != ValueId::UNIT).then(|| u32::try_from(int_of(v, d)).unwrap_or(0)),
+                )
+            })
+            .collect();
+        self.ic_prev = i32::try_from(int_of(v, icp)).unwrap_or(0);
+        self.ic_space = i32::try_from(int_of(v, ics)).unwrap_or(0);
+        self.text_written = list_of(v, written)
+            .iter()
+            .map(|&t| crate::val::str_of(v, t))
+            .collect();
+        let b = int_of(v, lt);
+        self.scope_kind_memo = list_of(v, skind)
+            .first()
+            .map(|&k| list_of(v, k).first().copied());
+        self.lt.hit = b & 1 != 0;
+        self.lt.weak = b & 2 != 0;
+        self.lt.strong = b & 4 != 0;
     }
 
     /// The checkpoints taken, with the run's record: the node's
@@ -298,8 +485,23 @@ impl Run<'_, '_> {
             return;
         }
         let v = self.v;
+        let mut taken = c.taken;
+        // (each count of reads before a checkpoint as the record has
+        // them: `unread` may have taken some out since)
+        for &(i, at) in &c.fresh {
+            let mut ys = list_of(v, taken[i]);
+            if let Some(m) = ys.get_mut(14)
+                && let Ok(made) = usize::try_from(int_of(v, *m))
+            {
+                let k = self.cx.reads_kept_of(made, at);
+                if k != made {
+                    *m = v.int(i64::try_from(k).unwrap_or(i64::MAX));
+                    taken[i] = v.list(ys);
+                }
+            }
+        }
         let mut xs = vec![v.list(self.cx.args().to_vec())];
-        xs.extend(c.taken);
+        xs.extend(taken);
         self.cx.park(v.list(xs));
     }
 
@@ -329,6 +531,17 @@ impl Run<'_, '_> {
         let old_args = list_of(v, old);
         let args = self.cx.args().to_vec();
         if old_args.len() != args.len() || old_args.get(1..) != args.get(1..) {
+            if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
+                eprintln!(
+                    "ck: node {} woken by {:?}: its arguments moved ({} {:?})",
+                    self.cx.node().raw(),
+                    self.cx.woken_by(),
+                    old_args.len(),
+                    (0..old_args.len().min(args.len()))
+                        .filter(|&i| old_args[i] != args[i])
+                        .collect::<Vec<_>>()
+                );
+            }
             return Ok(false);
         }
         let old_segs = crate::input::joined(crate::run::decode_segs(v, &old_args));
@@ -343,6 +556,13 @@ impl Run<'_, '_> {
             let c = list_of(v, ck);
             if c.len() < 14 {
                 continue;
+            }
+            // (a second pass ends at its candidate: never from past it)
+            if let Some(k) = self.stop_at {
+                let cand = list_of(v, c[10]).get(5).map_or(i64::MAX, |&x| int_of(v, x));
+                if cand > i64::from(k) {
+                    continue;
+                }
             }
             let Ok(li) = usize::try_from(int_of(v, c[0])) else {
                 continue;
@@ -392,6 +612,14 @@ impl Run<'_, '_> {
         };
         self.cont_load(c[6], ValueId::UNIT)?;
         self.st.with_base(v, base);
+        if let Some(&ls) = c.get(15) {
+            for (l, &x) in self.nest.iter_mut().zip(&list_of(v, ls)) {
+                if let [m, p] = list_of(v, x)[..] {
+                    l.mode_line = line_mark_of(v, m);
+                    l.mode_place = place_of(v, p);
+                }
+            }
+        }
         // (the input: the new text, its segment `li` the line on top at
         // the checkpoint's place)
         let Some(Seg::Line(mut line)) = new_segs.get(li).cloned() else {
@@ -419,24 +647,45 @@ impl Run<'_, '_> {
         }
         self.cont_lines.clear();
         self.ck_restore(&c);
+        if let Some(&x) = c.get(18) {
+            self.ck_run_restore(x);
+        }
         self.cand_marks = list_of(v, c[12])
             .iter()
             .filter_map(|&m| cand_of(v, m))
             .collect();
         self.page_regs_held.clear();
-        self.note_page_regs_held();
+        match c.get(16) {
+            Some(&hs) => {
+                for f in list_of(v, hs) {
+                    let l = self.loc_of(Field(f));
+                    self.page_regs_held.push(l);
+                }
+            }
+            None => self.note_page_regs_held(),
+        }
         self.muts += 1;
         self.resumed_at = Some(self.cmds);
+        if check() {
+            self.resumed_ck = Some(cks[k]);
+        }
         self.ops
             .resumed_edits
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.cx.goes_on_from_edit();
+        // (the last run's reads made before the checkpoint stand with
+        // this run's, the rest dropped; a checkpoint with no count of
+        // them, every read kept)
+        match c.get(14).map(|&x| usize::try_from(int_of(v, x))) {
+            Some(Ok(made)) => self.cx.goes_on_after_reads(made),
+            _ => self.cx.goes_on_from_edit(),
+        }
         // (the checkpoints up to this one stand for the next run)
         let conds0 = self.conds.clone();
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
             taken: cks[..=k].to_vec(),
             conds0,
+            fresh: Vec::new(),
         }));
         Ok(true)
     }
@@ -530,6 +779,194 @@ impl Run<'_, '_> {
     }
 }
 
+impl Run<'_, '_> {
+    /// `PHITEX_RESUME_CHECK`: the checkpoint `ck` a resumed run went on
+    /// from against this whole run's at the same command: the parts that
+    /// differ, by path (a base slot by its field), as one line.
+    pub(crate) fn ck_compare(&self, ck: ValueId) -> String {
+        let v = self.v;
+        let a = list_of(v, ck);
+        let at = a.get(5).map(|&x| int_of(v, x));
+        let taken = self
+            .ck
+            .as_ref()
+            .map(|c| c.taken.clone())
+            .unwrap_or_default();
+        let Some(b) = taken
+            .iter()
+            .map(|&x| list_of(v, x))
+            .find(|b| b.get(5).map(|&x| int_of(v, x)) == at)
+        else {
+            let cmds: Vec<i64> = taken
+                .iter()
+                .filter_map(|&x| list_of(v, x).get(5).map(|&y| int_of(v, y)))
+                .collect();
+            return format!("no checkpoint of the whole run at command {at:?} (its: {cmds:?})");
+        };
+        if a.len() != b.len() {
+            return format!("lengths {} {}", a.len(), b.len());
+        }
+        let mut out = Vec::new();
+        for i in 0..a.len() {
+            if a[i] == b[i] {
+                continue;
+            }
+            if i == 11 {
+                // (the base table: its slots by field)
+                let (sa, sb) = (list_of(v, a[i]), list_of(v, b[i]));
+                for j in 0..sa.len().min(sb.len()) {
+                    if sa[j] == sb[j] {
+                        continue;
+                    }
+                    if j == 0 {
+                        let by = |x: ValueId| -> std::collections::BTreeMap<String, ValueId> {
+                            list_of(v, x)
+                                .iter()
+                                .filter_map(|&s| {
+                                    let f = *list_of(v, s).first()?;
+                                    Some((crate::val::field_name(v, Field(f)), s))
+                                })
+                                .collect()
+                        };
+                        let (ma, mb) = (by(sa[0]), by(sb[0]));
+                        for (f, x) in &ma {
+                            match mb.get(f) {
+                                Some(y) if y == x => {}
+                                Some(y) => out.push(format!(
+                                    "base {f}: resumed {} whole {}",
+                                    short(v, *x),
+                                    short(v, *y)
+                                )),
+                                None => out
+                                    .push(format!("base {f}: resumed {} whole none", short(v, *x))),
+                            }
+                        }
+                        for (f, y) in &mb {
+                            if !ma.contains_key(f) {
+                                out.push(format!("base {f}: resumed none whole {}", short(v, *y)));
+                            }
+                        }
+                    } else {
+                        out.push(format!(
+                            "base[{j}]: resumed {} whole {}",
+                            short(v, sa[j]),
+                            short(v, sb[j])
+                        ));
+                    }
+                }
+                continue;
+            }
+            out.push(diff_path(v, &format!("[{i}]"), a[i], b[i]));
+        }
+        if out.is_empty() {
+            "same".to_owned()
+        } else {
+            out.truncate(24);
+            out.join(" | ")
+        }
+    }
+}
+
+/// A nest level's `mode_line` as a value ([`line_mark_of`]).
+fn line_mark_value(v: &phitex_defuse::Values, m: Option<crate::run::LineMark>) -> ValueId {
+    let Some((n, mine, name, own)) = m else {
+        return ValueId::UNIT;
+    };
+    let opt = |x: Option<ValueId>| v.list(x.into_iter().collect());
+    v.list(vec![
+        opt(n.map(|n| v.int(n))),
+        v.int(mine),
+        opt(name),
+        opt(own.map(|(a, b)| {
+            v.list(vec![
+                v.int(i64::from_ne_bytes(a.to_ne_bytes())),
+                v.int(i64::from(b)),
+            ])
+        })),
+    ])
+}
+
+/// [`line_mark_value`]'s mark.
+fn line_mark_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::LineMark> {
+    let [n, mine, name, own] = list_of(v, x)[..] else {
+        return None;
+    };
+    let first = |x: ValueId| list_of(v, x).first().copied();
+    Some((
+        first(n).map(|n| int_of(v, n)),
+        int_of(v, mine),
+        first(name),
+        first(own).and_then(|o| match list_of(v, o)[..] {
+            [a, b] => Some((
+                u64::from_ne_bytes(int_of(v, a).to_ne_bytes()),
+                u32::try_from(int_of(v, b)).ok()?,
+            )),
+            _ => None,
+        }),
+    ))
+}
+
+/// A nest level's `mode_place` as a value ([`place_of`]).
+fn place_value(v: &phitex_defuse::Values, p: Option<&crate::run::DiagPlace>) -> ValueId {
+    let Some((a, n, b, s, k)) = p else {
+        return ValueId::UNIT;
+    };
+    v.list(vec![
+        *a,
+        v.int(*n),
+        *b,
+        v.str(s),
+        v.int(i64::try_from(*k).unwrap_or(0)),
+    ])
+}
+
+/// [`place_value`]'s place.
+fn place_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::DiagPlace> {
+    let [a, n, b, s, k] = list_of(v, x)[..] else {
+        return None;
+    };
+    Some((
+        a,
+        int_of(v, n),
+        b,
+        crate::val::str_of(v, s),
+        usize::try_from(int_of(v, k)).unwrap_or(0),
+    ))
+}
+
+/// A value shortened for a trace line.
+fn short(v: &phitex_defuse::Values, x: ValueId) -> String {
+    let s = v.render(x);
+    if s.len() > 160 {
+        let mut k = 160;
+        while !s.is_char_boundary(k) {
+            k -= 1;
+        }
+        format!("{}…", &s[..k])
+    } else {
+        s
+    }
+}
+
+/// The first place two values differ, by list index ([`Run::ck_compare`]).
+fn diff_path(v: &phitex_defuse::Values, at: &str, a: ValueId, b: ValueId) -> String {
+    let (xa, xb) = (list_of(v, a), list_of(v, b));
+    if !xa.is_empty() && !xb.is_empty() && xa.len() == xb.len() {
+        let d: Vec<usize> = (0..xa.len()).filter(|&i| xa[i] != xb[i]).collect();
+        if d.len() == 1 {
+            return diff_path(v, &format!("{at}[{}]", d[0]), xa[d[0]], xb[d[0]]);
+        }
+        if d.len() > 1 && d.len() <= 4 {
+            return d
+                .iter()
+                .map(|&i| diff_path(v, &format!("{at}[{i}]"), xa[i], xb[i]))
+                .collect::<Vec<_>>()
+                .join(" ; ");
+        }
+    }
+    format!("{at}: resumed {} whole {}", short(v, a), short(v, b))
+}
+
 /// Whether `PHITEX_RESUME_CHECK` is set (`observe`).
 pub(crate) fn check() -> bool {
     crate::exec::obs_flag!("PHITEX_RESUME_CHECK")
@@ -613,5 +1050,6 @@ fn cand_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::pages::CandMa
         fresh: b & 2 != 0,
         restartable: b & 4 != 0,
         open_cut: b & 8 != 0,
+        par_cut: false,
     })
 }

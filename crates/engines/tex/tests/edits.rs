@@ -993,3 +993,92 @@ fn an_edited_paragraph_goes_on_from_a_checkpoint() {
         );
     }
 }
+
+/// A long paragraph over many lines edited near its end, an overfull
+/// line after the edit: the edit's run goes on from its last run's last
+/// checkpoint before the edit, and its log (the overfull box's report of
+/// the lines the paragraph began and ended on) and output are a cold
+/// build's. The report named the checkpoint's line as the paragraph's
+/// first: the nest's lines were not in a checkpoint.
+#[test]
+fn an_edit_resumed_paragraph_reports_the_lines_it_began_on() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("plain");
+    let prelude = common::plain();
+    let opts = || common::options("./lines.tex", "lines", "", &fx);
+    let doc = |w: &str| {
+        let mut s = String::from("\\hsize=300pt\nSet.\n\n");
+        for k in 0..700 {
+            let _ = write!(s, "w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            s.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        let _ = write!(
+            s,
+            "then {w} and \\hbox{{\\vrule width 400pt}} done.\n\n\\bye\n"
+        );
+        s
+    };
+    let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+    for (k, w) in ["two", "three", "there"].into_iter().enumerate() {
+        let text = doc(w);
+        b.edit(&text);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        let (out, log) = b.output();
+        let (cold_out, cold_log) = cold.output();
+        assert!(
+            common::first_difference(&out, &cold_out).is_none(),
+            "edit {k}: the output is not the cold build's"
+        );
+        assert_eq!(log, cold_log, "edit {k}: the log is the cold build's");
+        assert!(
+            log.contains("in paragraph at lines 4--"),
+            "edit {k}: the overfull box names the paragraph's lines: {}",
+            common::log_excerpt(&log)
+        );
+        // (the first edit's run takes the checkpoints, the next go on)
+        assert_eq!(
+            b.stats.resumed_at_mark > 0,
+            k > 0,
+            "edit {k}: went on from a checkpoint"
+        );
+    }
+}
+
+/// A paragraph resumed after an edit rests on the reads its last run
+/// made before the checkpoint: a register set before the paragraph and
+/// used at its start, set again, asks it again, and the output is a cold
+/// build's; edits after that go on from checkpoints again.
+#[test]
+fn an_edit_resumed_paragraph_is_asked_again_for_a_read_before_its_checkpoint() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("plain");
+    let prelude = common::plain();
+    let opts = || common::options("./early.tex", "early", "", &fx);
+    let doc = |d: &str, w: &str| {
+        let mut s = format!("\\hsize=300pt\n\\dimen5={d}\\relax Set.\n\n\\kern\\dimen5 ");
+        for k in 0..700 {
+            let _ = write!(s, "w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            s.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        let _ = write!(s, "then {w} done.\n\n\\bye\n");
+        s
+    };
+    let mut b = common::build(opts(), Some(&prelude), &doc("1pt", "one"));
+    for (k, (d, w)) in [
+        ("1pt", "two"),
+        ("1pt", "three"),
+        ("5pt", "three"),
+        ("5pt", "four"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let text = doc(d, w);
+        b.edit(&text);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        assert!(
+            common::first_difference(&b.output().0, &cold.output().0).is_none(),
+            "edit {k} (\\dimen5={d}, {w}): the output is not the cold build's"
+        );
+    }
+}

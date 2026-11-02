@@ -165,6 +165,11 @@ pub(crate) struct Ops {
         std::sync::Arc<std::sync::Mutex<crate::FxHashMap<crate::pages::FinPageKey, FinClass>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// How long a run of an edit's evaluation may read no new line of its
+    /// input before it is stuck, in ms (0: no such bound): set by
+    /// [`crate::Build::set_stuck_after`] from the cold build's time, never
+    /// for the cold build (`Run::watchdog`).
+    pub edit_stall_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// [`crate::Options::origins`]: the pages' writers keep their glyphs
     /// (`crate::origins`).
     pub origins: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -973,6 +978,10 @@ pub(crate) struct Run<'c, 'a> {
     pub(crate) no_resume: bool,
     /// The command count the run went on from a checkpoint at.
     pub(crate) resumed_at: Option<u64>,
+    /// `PHITEX_RESUME_CHECK`: the checkpoint the run went on from, to
+    /// compare with the whole run's at the same command
+    /// ([`Run::ck_compare`]).
+    pub(crate) resumed_ck: Option<ValueId>,
     /// A halt raised on the token path ([`Run::raise`]), returned by the
     /// next `get_next` of the command in progress.
     pub(crate) halt: Option<Halt>,
@@ -994,7 +1003,7 @@ pub(crate) struct Run<'c, 'a> {
     /// The scope kind the node runs in, once read ([`Run::scope_kind`]):
     /// it does not change during the run.
     #[allow(clippy::option_option)]
-    scope_kind_memo: Option<Option<ValueId>>,
+    pub(crate) scope_kind_memo: Option<Option<ValueId>>,
     /// What the run publishes, made before it finishes
     /// ([`Run::prepare_publication`]), with the table's state then and
     /// the locations it restored.
@@ -1220,6 +1229,7 @@ impl<'c, 'a> Run<'c, 'a> {
             ck: None,
             no_resume: false,
             resumed_at: None,
+            resumed_ck: None,
             halt: None,
             cand: 0,
             cand_marks: Vec::new(),

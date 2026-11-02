@@ -6,7 +6,6 @@ latex_base_ltnews	differs: page 55: obj 1331 (Action) line 20: oracle "117.941",
 latex_beamertheme-focus_focus-demo	differs: page 1: obj 1 (Catalog) line 8: oracle "/PageLabels <<", phitex "/PageMode /UseOutlines"
 latex_beautybook_beautybook-en	differs: page 19: obj 746 (page 19, untyped) line 624: oracle "0.0 10.11215 m ", phitex "-100.5473 164.4841 m " (its page-6 /pgfsmask numbers agree since 9dd4e3020; accl 22970)
 latex_biblatex-cheatsheet_biblatex-cheatsheet	differs: page 1: obj 150 (Catalog) line 2: oracle "/OpenAction 3 0 R", phitex "/Names 3 0 R" (pages 2 vs 3)
-latex_biblatex-iso690_biblatex-iso690	differs: page 1: obj 524 (untyped) line 5: oracle "<end>", phitex "<end>" (pages 18 vs 15)
 latex_biblatex_biblatex	-j1 differs: page 6: obj 172 (page 6, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 10.9091 Tf 41.32", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 10.9091 Tf 41.32"; -j4 error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 timeout, -j4 timeout)
 latex_cidarticle_cidarticle-author-template	differs: page 1: obj 28 (page 1, untyped) line 10: oracle "/F159 14 Tf 70.866 512.746 Td [(Ein)-250(sehr)-250(langer)-250(T)18(it", phitex "/F55 14 Tf 70.866 512.746 Td [(Ein)-250(sehr)-250(langer)-250(T)18(ite"
 latex_circuitikz_circuitikzmanual	-j1 differs: page 2: obj 1 (Catalog) line 7: oracle "/Outlines 5 0 R", phitex "/PageMode /UseOutlines" (pages 306 vs 299); -j4 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes) (not the same in each run: the first sweep had -j1 timeout, -j4 timeout)
@@ -15,12 +14,8 @@ latex_dynkin-diagrams_dynkin-diagrams	differs: page 10: obj 339 (page 10, untype
 latex_easyformat_easyformat	differs: page 2: obj 82 (page 2, untyped) line 26: oracle "5.578 -22.515 Td [(nasa)]TJ [-383(and)]TJ [-384(esa)]TJ [-383(are)-383", phitex "5.578 -22.515 Td [(nasa)-383(and)-384(esa)-383(are)-383(probably)-384("
 latex_els-cas-templates_doc_elsdoc-cas	differs: page 9: obj 203 (page 9, untyped) line 13: oracle "0.75 0.5 0.25 rg 0.75 0.5 0.25 RG", phitex "0 g 0 G"
 latex_elsarticle_elsdoc	differs: page 12: obj 344 (page 12, untyped) line 14: oracle "0.75 0.5 0.25 rg 0.75 0.5 0.25 RG", phitex "0 g 0 G"
-latex_elteiktdk_elteiktdk_en	-j1 error: error: the files the document reads back still changed after 5 rounds, latexmk's limit: pdf:alloc, elteiktdk_en.lol (\bbl@hk@biblatex@langsetup), wsize:elteiktd; -j4 error: error: the files the document reads back still changed after 5 rounds, latexmk's limit: cs:blx@bbl@mdfivesum@old, cs:c@conpageno, font, lines, skind, elteiktdk_
-latex_elteikthesis_elteikthesis_en	-j1 error: error: the files the document reads back still changed after 5 rounds, latexmk's limit: pdf:alloc, elteikthesis_en.lol (\bbl@hk@biblatex@langsetup), elteikthesi; -j4 error: error: the files the document reads back still changed after 5 rounds, latexmk's limit: cs:blx@bbl@mdfivesum@old, dimen:123, font, lines, pdf:alloc, elteikthesi
 latex_fariscovernew_guide_fariscovernew_full	differs: page 3: obj 57 (page 3, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 17.2154 Tf 212.5", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 17.2154 Tf 212.5"
-latex_glosmathtools_sample_glosmathtools_en	differs: page 2: obj 266 (Catalog) line 22: oracle "<end>", phitex "<end>"
 latex_highlightx_highlightx-doc	differs: page 1: obj 25 (page 1, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g"
-latex_huaz_huaz	differs: page 1: obj 54 (page 1, untyped) line 64: oracle "[<11>]TJ 0 -14.446 Td [(v)54(agy)-337<12>]TJ", phitex "[<11>]TJ 0 -14.446 Td [(v)54(agy)-325<12>]TJ"
 latex_ibycus-babel_ibycus-babel-test	differs: page 1: obj 3 (page 1, untyped) line 6: oracle "/F42 11.9552 Tf 224.346 685.004 Td [<c3>167(Hrodìtou)-309(Qour)-28<d0>", phitex "/F42 11.9552 Tf 224.346 685.004 Td [<c3>167(Hrodìtou)-223(Qour)-27<d0>"
 latex_icite_samples_icite-biblatex	differs: page 2: obj 16 (Link) line 19: oracle "155.551", phitex "213.113"
 latex_knowledge_knowledge	-j1 error: error: You can't use `&' in restricted horizontal mode; -j4 error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 error, -j4 timeout)
@@ -41,11 +36,9 @@ latex_proofread_example	differs: page 1: obj 6 (page 1, untyped) line 1364: orac
 latex_przechlewski-book_wkmgr1	differs: page 1: obj 97 (page 1, untyped) line 6: oracle "/F81 11.9552 Tf 190.624 723.203 Td [(Uniwersytet)-250(Kaszubski)-250<9", phitex "/F81 11.9552 Tf 190.624 723.203 Td [(Uniwersytet)-250(Kaszubski)-250<9"
 latex_repeatindex_testrepeatindex	differs: page 2: obj 30 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 4 vs 3)
 latex_rvwrite_rvwrite-doc	differs: page 2: obj 63 (page 2, untyped) line 13: oracle "0 0.83 1 0.7 k 0 0.83 1 0.7 K", phitex "0 g 0 G"
-latex_ryethesis_ryesample	differs: page 11: obj 422 (Catalog) line 22: oracle "<end>", phitex "<end>" (pages 35 vs 33)
 latex_semioneside_example	differs: page 2: obj 28 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 5 vs 3)
 latex_showexpl_showexpl-test	differs: page 1: obj 24 (page 1, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g BT /F1 14.3462 ", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g BT /F1 14.3462 "
 latex_snaptodo_snaptodo	differs: page 3: obj 79 (page 3, untyped) line 194: oracle "1 0 0 1 71.499 17.412 cm", phitex "1 0 0 1 76.204 17.412 cm"
-latex_spath3_spath3	differs: obj 2 (untyped) line 2: oracle "/pgfpat11 280 0 R", phitex "/pgfpat11 152 0 R"
 latex_teubner_teubner-doc	differs: page 1: obj 12 (Pages) line 15: oracle "<end>", phitex "<end>"
 latex_tex-vpat_texlive-vpat	differs: page 1: obj 4369 (Catalog) line 4: oracle "/MarkInfo 4 0 R", phitex "/MarkInfo 5 0 R" (past \pdfdest struct, accl 22465)
 latex_texproposal_texproposal	differs: page 1: obj 1 (Catalog) line 14: oracle "1", phitex "2" (pages 27 vs 29)
