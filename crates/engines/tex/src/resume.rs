@@ -65,8 +65,12 @@ impl Run<'_, '_> {
     pub(crate) fn ck_begin(&mut self) {
         // (an edited node's run, or a run of a node whose last run took
         // them: they stay for its next edit)
+        // (`PHITEX_CK_ALL`, observe: every exec run takes them, the cost a
+        // resumption of refuted runs would pay, measured for the report)
         if self.cx.op() != self.ops.exec
-            || !(matches!(self.cx.woken_by(), Some(Cause::Edited)) || self.cx.last_parked())
+            || !(matches!(self.cx.woken_by(), Some(Cause::Edited))
+                || self.cx.last_parked()
+                || crate::exec::obs_flag!("PHITEX_CK_ALL"))
         {
             return;
         }
