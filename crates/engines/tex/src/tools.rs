@@ -557,7 +557,22 @@ impl Operation for ToolRun {
                         continue 'entries;
                     }
                 }
+                if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+                    eprintln!("tool {} for {output}: the kept run's outcome", tool.name());
+                }
                 return Ok(outcome_value(v, tool, &output, &e.out));
+            }
+            if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+                eprintln!(
+                    "tool {} for {output}: runs ({} kept runs of its key; its input read {})",
+                    tool.name(),
+                    outcomes().locked().get(&k).map_or(0, Vec::len),
+                    if tool == Tool::Bibtex && bibtex_lines(&text).is_none() {
+                        "whole"
+                    } else {
+                        "by its lines"
+                    }
+                );
             }
         }
         // (run, then the files it asked for and had not looked up, and
@@ -731,7 +746,8 @@ fn content_key(tool: Tool, n: &Need, x: Option<&(String, Vec<u8>)>) -> u64 {
         return 0;
     };
     let h = phitex_defuse::hash_bytes(0x6669_6c65_7061_7468, path.as_bytes());
-    let aux = matches!(n, Need::File(f) if f.ends_with(".aux"));
+    // (as BibTeX tells an `.aux` file's name: by its last four bytes)
+    let aux = matches!(n, Need::File(f) if f.as_bytes().ends_with(b".aux"));
     match (tool == Tool::Bibtex && aux)
         .then(|| bibtex_lines(b))
         .flatten()

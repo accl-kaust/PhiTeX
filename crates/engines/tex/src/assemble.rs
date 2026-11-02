@@ -90,17 +90,11 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
 /// Example: a page of lines A, B, C, a word edited in B keeping B's
 /// dimensions: the finisher stands, this node reads B's unit again and
 /// writes the page with the new B.
-#[allow(
-    clippy::assertions_on_constants,
-    reason = "a debug or observe build stops on the defect"
-)]
 fn fill_sealed_pages(
     cx: &mut Ctx<'_>,
     pages: Vec<ValueId>,
 ) -> Result<(Vec<ValueId>, Vec<u64>), Stop> {
-    use phitex_defuse::Step;
     let v = cx.values();
-    let node = crate::pages::node_of;
     let mut out = Vec::with_capacity(pages.len());
     let mut ids = Vec::with_capacity(pages.len());
     // (`PHITEX_TEX_TIME`: the windows' reads, the pieces named, the pages
@@ -117,31 +111,7 @@ fn fill_sealed_pages(
     for page in pages {
         let t0 = std::time::Instant::now();
         let xs = list_of(v, page);
-        let mut units: Vec<(i64, ValueId)> = Vec::new();
-        if let Some(&places) = xs.get(5) {
-            let w = list_of(v, places);
-            let at = |k: usize| w.get(k).map_or(-1, |&x| int_of(v, x));
-            let after = Some(at(0)).filter(|&a| a >= 0);
-            // (no window: a finisher whose page's sealed lines all came
-            // from other finishers' pieces, read by piece below)
-            if at(1) >= 0 {
-                let view =
-                    cx.view_through(v.field(crate::pages::PITEMS), after.map(node), node(at(1)))?;
-                for &[p, i] in w[2.min(w.len())..].as_chunks::<2>().0 {
-                    let (p, i) = (int_of(v, p), int_of(v, i));
-                    let Some(u) = cx.at(view, Step::Index(u32::try_from(i).unwrap_or(u32::MAX)))
-                    else {
-                        continue;
-                    };
-                    if cx.get(u, Step::Index(0)).and_then(|x| v.as_int(x)) != Some(p) {
-                        continue;
-                    }
-                    if let Some(x) = cx.at(u, Step::Index(2)).map(|x| cx.whole(x)) {
-                        units.push((p, x));
-                    }
-                }
-            }
-        }
+        let mut units = window_units(cx, &xs)?;
         t_win += t0.elapsed();
         let t0 = std::time::Instant::now();
         // (the lines a routine gave back from pieces outside the window:
@@ -178,29 +148,7 @@ fn fill_sealed_pages(
             t_fill += t0.elapsed();
             continue;
         }
-        let y = if xs.len() > 5 {
-            let mut line = |s: &nodes::Sealed| -> Option<ValueId> {
-                let items = units.iter().find(|e| e.0 == s.piece)?.1;
-                let item = v
-                    .with_list(items, |xs| xs.get(s.k as usize).copied())
-                    .flatten()?;
-                v.with_list(item, |ys| ys.get(1).copied()).flatten()
-            };
-            let mut memo = phitex_defuse::FxHashMap::default();
-            if let Some(b) = nodes::unseal_value(v, xs[0], &mut line, &mut memo) {
-                let mut ys = xs[..5].to_vec();
-                ys[0] = b;
-                v.list(ys)
-            } else {
-                // (a line whose unit is not where the page names it: the
-                // finishers have all run, their windows' units are there)
-                let msg = "a sealed line's unit is not in its page's window";
-                assert!(!cfg!(any(debug_assertions, feature = "observe")), "{msg}");
-                page
-            }
-        } else {
-            page
-        };
+        let y = filled_page(v, page, &xs, &units);
         // (its identity: what it holds, not its value's id in this store)
         let id = v.digest(y);
         {
@@ -221,6 +169,71 @@ fn fill_sealed_pages(
         );
     }
     Ok((out, ids))
+}
+
+/// The units of a page's sealed lines read in its finisher's window
+/// ([`fill_sealed_pages`]): `[piece, items]` each, by its place there.
+fn window_units(cx: &mut Ctx<'_>, xs: &[ValueId]) -> Result<Vec<(i64, ValueId)>, Stop> {
+    use phitex_defuse::Step;
+    let v = cx.values();
+    let node = crate::pages::node_of;
+    let mut units: Vec<(i64, ValueId)> = Vec::new();
+    if let Some(&places) = xs.get(5) {
+        let w = list_of(v, places);
+        let at = |k: usize| w.get(k).map_or(-1, |&x| int_of(v, x));
+        let after = Some(at(0)).filter(|&a| a >= 0);
+        // (no window: a finisher whose page's sealed lines all came
+        // from other finishers' pieces, read by piece below)
+        if at(1) >= 0 {
+            let view =
+                cx.view_through(v.field(crate::pages::PITEMS), after.map(node), node(at(1)))?;
+            for &[p, i] in w[2.min(w.len())..].as_chunks::<2>().0 {
+                let (p, i) = (int_of(v, p), int_of(v, i));
+                let Some(u) = cx.at(view, Step::Index(u32::try_from(i).unwrap_or(u32::MAX))) else {
+                    continue;
+                };
+                if cx.get(u, Step::Index(0)).and_then(|x| v.as_int(x)) != Some(p) {
+                    continue;
+                }
+                if let Some(x) = cx.at(u, Step::Index(2)).map(|x| cx.whole(x)) {
+                    units.push((p, x));
+                }
+            }
+        }
+    }
+    Ok(units)
+}
+
+/// Page `page` (its elements `xs`) with its sealed lines filled from
+/// `units` ([`fill_sealed_pages`]).
+#[allow(
+    clippy::assertions_on_constants,
+    reason = "a debug or observe build stops on the defect"
+)]
+fn filled_page(v: &Values, page: ValueId, xs: &[ValueId], units: &[(i64, ValueId)]) -> ValueId {
+    if xs.len() > 5 {
+        let mut line = |s: &nodes::Sealed| -> Option<ValueId> {
+            let items = units.iter().find(|e| e.0 == s.piece)?.1;
+            let item = v
+                .with_list(items, |xs| xs.get(s.k as usize).copied())
+                .flatten()?;
+            v.with_list(item, |ys| ys.get(1).copied()).flatten()
+        };
+        let mut memo = phitex_defuse::FxHashMap::default();
+        if let Some(b) = nodes::unseal_value(v, xs[0], &mut line, &mut memo) {
+            let mut ys = xs[..5].to_vec();
+            ys[0] = b;
+            v.list(ys)
+        } else {
+            // (a line whose unit is not where the page names it: the
+            // finishers have all run, their windows' units are there)
+            let msg = "a sealed line's unit is not in its page's window";
+            assert!(!cfg!(any(debug_assertions, feature = "observe")), "{msg}");
+            page
+        }
+    } else {
+        page
+    }
 }
 
 /// The pieces of a page's sealed lines ([`crate::nodes::sealed_pieces`],

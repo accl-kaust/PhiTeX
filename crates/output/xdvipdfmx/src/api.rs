@@ -866,6 +866,50 @@ impl Session {
         self.page_no
     }
 
+    /// Whether the glyphs each page marks used are recorded
+    /// ([`Session::take_usage`]).
+    pub fn record_usage(&mut self, on: bool) {
+        let p = &mut self.dpx.dev.pdev.page_used;
+        if on != p.is_some() {
+            *p = on.then(Vec::new);
+        }
+    }
+
+    /// The glyphs marked used since the last call (a page's), each once,
+    /// in order ([`crate::pdfdev::usage_key`]).
+    pub fn take_usage(&mut self) -> Vec<u64> {
+        let mut x = self
+            .dpx
+            .dev
+            .pdev
+            .page_used
+            .as_mut()
+            .map(core::mem::take)
+            .unwrap_or_default();
+        x.sort_unstable();
+        x.dedup();
+        x
+    }
+
+    /// The glyphs of `rec` ([`Session::take_usage`]) marked used again.
+    pub fn apply_usage(&mut self, rec: &[u64]) {
+        let fonts = &self.dpx.dev.pdev.fonts;
+        for &k in rec {
+            let (fi, composite, code) = (
+                (k >> 33) as usize,
+                k & (1 << 32) != 0,
+                (k & 0xffff_ffff) as u32,
+            );
+            if let Some(Some(uc)) = fonts.get(fi).map(|f| f.used_chars.as_ref()) {
+                if composite {
+                    uc.add2(code);
+                } else {
+                    uc.set(code as usize, 1);
+                }
+            }
+        }
+    }
+
     /// The fonts' used-glyph tables, in the order [`Session::snapshot`]
     /// takes them (a shared one as often as it is shared; none where a
     /// font has none).
@@ -886,15 +930,16 @@ impl Session {
     /// after the same point, `base` a session of the same document there
     /// whose pages before it went otherwise (an edit's): the same state,
     /// the bytes written so far aside ([`crate::obj::PdfOut`]'s
-    /// equality), its fonts' glyphs those of `base` and perhaps more, and
-    /// the values of objects that differ only those of objects `base`'s
+    /// equality; the glyphs used compared apart, given the end from this
+    /// way's and the pages' after, [`Graft`]), and the values of objects
+    /// that differ only those of objects `base`'s
     /// pages after the point left as they were (`post`, `base`'s state
     /// after its last page, and the grafts of each: the end writes such
     /// an object, with this way's value; a destination's place, an
     /// outline entry's title).
     /// Then the pages after are `base`'s, each object `delta` bytes
     /// further, and the end is the end of `base`'s session after them
-    /// with the glyphs added ([`Session::graft`] of the [`Graft`]); else
+    /// with this way's glyphs ([`Session::graft`] of the [`Graft`]); else
     /// `None`. `base`'s state is compared whole, every field of every
     /// part of xdvipdfmx's (its fonts, objects, resources, colours,
     /// annotations, outline, ...), so no part a page reads is missed.
@@ -917,47 +962,28 @@ impl Session {
         if mine.len() != theirs.len() || mine.iter().zip(&theirs).any(|(a, b)| a.0 != b.0) {
             return None;
         }
-        let mine: Vec<(UsedKey, Option<crate::pdffont::UsedChars>)> = mine;
+        // (the glyphs used, compared apart: they are written at the end
+        // only, and the graft gives the end this way's, [`Graft::used`])
         let mut used = Vec::new();
         let mut kept: Vec<Vec<u8>> = Vec::with_capacity(mine.len());
-        let mut as_base: Vec<Vec<u8>> = Vec::with_capacity(mine.len());
         for ((k, a), (_, b)) in mine.iter().zip(&theirs) {
-            let k = *k;
             match (a, b) {
-                (None, None) => {
-                    kept.push(Vec::new());
-                    as_base.push(Vec::new());
-                }
+                (None, None) => kept.push(Vec::new()),
                 (Some(a), Some(b)) => {
                     let x = a.to_vec();
-                    // (`base`'s glyphs as its grafts made them)
-                    let mut y = b.to_vec();
-                    for g in grafts {
-                        if let Some((_, e)) = g.used.iter().find(|u| u.0 == k) {
-                            for (q, e) in y.iter_mut().zip(e) {
-                                *q |= e;
-                            }
-                        }
-                    }
-                    // (a glyph of `base`'s this session has not: the end's
-                    // fonts could hold fewer, not graftable)
-                    if x.len() != y.len() || x.iter().zip(&y).any(|(p, q)| q & !p != 0) {
+                    if x.len() != b.to_vec().len() {
                         return None;
                     }
-                    let extra: Vec<u8> = x.iter().zip(&y).map(|(p, q)| p & !q).collect();
-                    if extra.iter().any(|&e| e != 0) {
-                        used.push((k, extra));
-                    }
+                    used.push((*k, x.clone()));
                     kept.push(x);
-                    as_base.push(y);
                 }
                 _ => return None,
             }
         }
         // (the rest compared with the glyphs set as `base`'s, then set back)
-        for ((_, a), y) in mine.iter().zip(&as_base) {
-            if let Some(a) = a {
-                a.store(y);
+        for ((_, a), (_, b)) in mine.iter().zip(&theirs) {
+            if let (Some(a), Some(b)) = (a, b) {
+                a.store(&b.to_vec());
             }
         }
         let same = self.dpx.same_but_objects(&base.dpx);
@@ -1004,6 +1030,8 @@ impl Session {
             direct: base.dpx.o.direct_labels(),
             moved: self.dpx.o.moved_from(&xref),
             used,
+            from: self.page_no,
+            after: alloc::sync::Arc::from(Vec::new()),
             objects,
         })
     }
@@ -1018,15 +1046,17 @@ impl Session {
         for (k, x) in &g.objects {
             self.dpx.o.set_kept(*k, x);
         }
+        // (the glyphs: those of the fonts there as this way used them, and
+        // those the pages after it used, up to here)
         let tables = self.used_tables();
-        for (k, extra) in &g.used {
+        for (k, x) in &g.used {
             if let Some((_, Some(t))) = tables.iter().find(|t| t.0 == *k) {
-                let mut b = t.to_vec();
-                for (x, e) in b.iter_mut().zip(extra) {
-                    *x |= e;
-                }
-                t.store(&b);
+                t.store(x);
             }
+        }
+        let n = usize::try_from(self.page_no - g.from).unwrap_or(0);
+        for rec in g.after.iter().take(n) {
+            self.apply_usage(rec);
         }
     }
 
@@ -1149,10 +1179,15 @@ pub struct Graft {
     direct: Vec<u64>,
     /// Those of them this way placed elsewhere, with this way's entries.
     moved: Vec<(u32, crate::obj::XrefEntry)>,
-    /// The glyphs this way used and the other had not, by used-glyph
-    /// table ([`Session::used_tables`], by font: a session with more
-    /// fonts after the point numbers the same tables alike).
+    /// The glyphs of the fonts there as this way had used them, by
+    /// used-glyph table ([`Session::used_tables`], by font: a session with
+    /// more fonts after the point numbers the same tables alike).
     used: Vec<(UsedKey, Vec<u8>)>,
+    /// The page the point is before, and the glyphs each page from there
+    /// on used the other way ([`Session::take_usage`]): a session that
+    /// many pages further has them too.
+    from: i32,
+    after: alloc::sync::Arc<[alloc::sync::Arc<[u64]>]>,
     /// The objects whose values this way gave otherwise, which no page
     /// after changed the other way: this way's values.
     objects: Vec<(u32, crate::obj::Kept)>,
@@ -1163,6 +1198,14 @@ impl Graft {
     #[must_use]
     pub fn delta(&self) -> i64 {
         self.delta
+    }
+
+    /// With the glyphs each page from the point on used the other way, in
+    /// order ([`Session::take_usage`]).
+    #[must_use]
+    pub fn with_after(mut self, after: Vec<alloc::sync::Arc<[u64]>>) -> Graft {
+        self.after = after.into();
+        self
     }
 }
 
@@ -1381,6 +1424,104 @@ mod tests {
                 "batch {batch}: a page more, the replayed end differs"
             );
         }
+    }
+
+    /// A fold that went another way through page 2 of 3 (other
+    /// characters, one glyph no longer used and one new, a destination
+    /// elsewhere on it) and came back to the base's state before page 3:
+    /// the base's page 3 and its end grafted give the file the fold
+    /// written to the end gives, byte for byte; a fold whose state differs
+    /// there (a page more of objects) does not converge.
+    #[test]
+    fn a_converged_fold_writes_the_file_a_whole_fold_writes() {
+        use crate::direct::Op;
+        let font = || Op::FontDef {
+            id: 0,
+            checksum: u32::from_be_bytes(CMR10_TFM[24..28].try_into().unwrap()),
+            size: 655_360,
+            design_size: 655_360,
+            name: b"cmr10".to_vec(),
+        };
+        let shows = |first: bool, chars: &[u8], dest: Option<u32>| {
+            let mut ops = Vec::new();
+            if first {
+                ops.push(Op::Special(b"pdf:mapline cmr10 CMR10 <cmr10.pfb".to_vec()));
+                ops.push(font());
+            }
+            ops.extend([Op::Push, Op::Font(0)]);
+            ops.extend(chars.iter().map(|&c| Op::Set(i32::from(c))));
+            if let Some(y) = dest {
+                let sp = alloc::format!("pdf:dest (d) [@thispage /XYZ 0 {y} null]");
+                ops.push(Op::Special(sp.into_bytes()));
+            }
+            // (a footer, as a page of TeX's ends: what the device's text
+            // state is left at is the same)
+            ops.extend([
+                Op::Pop,
+                Op::Push,
+                Op::Down(30_000_000),
+                Op::Font(0),
+                Op::Set(57),
+                Op::Pop,
+            ]);
+            ops
+        };
+        let (s0, _) = cmr10_session(false, false);
+        let mut s = Session::direct(
+            Options {
+                source_date_epoch: Some(0),
+                ..Options::default()
+            },
+            s0.dpx.files.0.clone(),
+            Box::new(|l, d: &[u8]| phitex_codecs::deflate::compress(d, l)),
+            1000,
+            b"",
+        )
+        .expect("starts");
+        s.record_usage(true);
+        let base_pages = [
+            shows(true, b"AB", None),
+            shows(false, b"CDQ", Some(100)),
+            shows(false, b"EF", None),
+        ];
+        let mut snaps = Vec::new();
+        let mut usage = Vec::new();
+        let mut chunks = Vec::new();
+        for p in &base_pages {
+            snaps.push(s.snapshot());
+            chunks.push(s.page_ops(p).expect("page").pdf);
+            usage.push(alloc::sync::Arc::<[u64]>::from(s.take_usage()));
+        }
+        let post = s.snapshot();
+        for new in [
+            shows(false, b"CDZ", Some(200)),
+            shows(false, b"CD", Some(100)),
+            shows(false, b"QQ", Some(300)),
+        ] {
+            // (the fold from page 2: its page, then the base's from page 3)
+            let mut f = snaps[1].snapshot();
+            let p2 = f.page_ops(&new).expect("page").pdf;
+            let _ = f.take_usage();
+            let g = f
+                .converged(&snaps[2], &[], &post, &[])
+                .unwrap_or_else(|| panic!("{new:?}: no graft: {}", f.differs(&snaps[2])));
+            let g = g.with_after(usage[2..].to_vec());
+            let mut end = post.snapshot();
+            end.graft(&g);
+            let mut kept = p2.clone();
+            kept.extend_from_slice(&chunks[2]);
+            kept.extend(end.finish().expect("finish"));
+            // (the fold to the end)
+            let mut whole = p2;
+            whole.extend(f.page_ops(&base_pages[2]).expect("page").pdf);
+            whole.extend(f.finish().expect("finish"));
+            assert!(kept == whole, "{new:?}: the converged file differs");
+        }
+        // (a page more: another state, no graft)
+        let mut f = snaps[1].snapshot();
+        f.page_ops(&base_pages[1]).expect("page");
+        f.page_ops(&shows(false, b"Q", None)).expect("page");
+        assert!(f.converged(&snaps[2], &[], &post, &[]).is_none());
     }
 
     #[test]
