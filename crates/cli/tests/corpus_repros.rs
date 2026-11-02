@@ -908,3 +908,27 @@ fn rest_start_moved() {
 fn savepos_pageheight() {
     check_threads("savepos_pageheight", "pdf");
 }
+
+/// The document's text read to its end with no `\end` (an example
+/// environment left open swallows `\end{document}`, as the biblatex manual
+/// cut inside an `ltxexample`), under XeLaTeX: "! Emergency stop. ***
+/// (job aborted, no legal \end found)", and the page shipped before is
+/// xelatex's PDF. Was no output file ("the pages' writers ran before every
+/// page had finished"): the last piece ended as one whose text goes on,
+/// and the main list never ended. At -j1 and -j4 (oracle: xelatex in the
+/// CI image, accl 23340).
+#[test]
+fn text_ends_without_end_xe() {
+    let name = "text_ends_without_end_xe";
+    let want = std::fs::read(fixtures().join(format!("{name}.pdf"))).expect("the oracle");
+    for j in [1, 4] {
+        let (got, term) = build_j(name, j);
+        assert!(
+            got == want,
+            "{name} -j{j}: the PDF differs from xelatex's ({} vs {} bytes): {}",
+            got.len(),
+            want.len(),
+            term.lines().last().unwrap_or("")
+        );
+    }
+}
