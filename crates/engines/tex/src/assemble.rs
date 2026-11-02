@@ -94,6 +94,10 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
     clippy::assertions_on_constants,
     reason = "a debug or observe build stops on the defect"
 )]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one walk of the pages; its profile timers are lines of their own"
+)]
 fn fill_sealed_pages(
     cx: &mut Ctx<'_>,
     pages: Vec<ValueId>,

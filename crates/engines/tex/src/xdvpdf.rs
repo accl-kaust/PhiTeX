@@ -714,8 +714,8 @@ fn fold(
         i += 1;
     }
     let t0 = std::time::Instant::now();
-    let (post, mut s, rec) = match (&grafted, f.base) {
-        (Some((i, g)), Some(b)) => {
+    let (post, mut s, rec) = if let (Some((i, g)), Some(b)) = (&grafted, f.base) {
+        {
             let i = *i;
             t.to = Some(i);
             chunks.extend(b.chunks[i..].iter().cloned());
@@ -735,7 +735,8 @@ fn fold(
             s.set_files(f.files.clone());
             (post, s, Some(b.end.clone()))
         }
-        _ => {
+    } else {
+        {
             states.push(s.page_state().map_err(|e| fatal(&e))?);
             labels.push(s.next_label());
             let post = Arc::new(Snap {
@@ -749,16 +750,13 @@ fn fold(
     };
     t.snaps += t0.elapsed();
     let t0 = std::time::Instant::now();
-    let (tail, end) = match &rec {
-        Some(r) => {
-            let (tail, new) = s.finish_again(r).map_err(|e| fatal(&e))?;
-            t.replayed = new.is_none();
-            (tail, new.map_or_else(|| r.clone(), Arc::new))
-        }
-        None => {
-            let (tail, end) = s.finish_recorded().map_err(|e| fatal(&e))?;
-            (tail, Arc::new(end))
-        }
+    let (tail, end) = if let Some(r) = &rec {
+        let (tail, new) = s.finish_again(r).map_err(|e| fatal(&e))?;
+        t.replayed = new.is_none();
+        (tail, new.map_or_else(|| r.clone(), Arc::new))
+    } else {
+        let (tail, end) = s.finish_recorded().map_err(|e| fatal(&e))?;
+        (tail, Arc::new(end))
     };
     t.end = t0.elapsed();
     let t0 = std::time::Instant::now();
