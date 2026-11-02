@@ -344,6 +344,63 @@ impl FileRest {
             }
     }
 
+    /// The file's rest exactly, as a value ([`FileRest::of_value`]): a
+    /// checkpoint's input levels and text (`crate::resume`). Its text
+    /// is the value `id` (read before the checkpoint, a read kept).
+    pub(crate) fn to_value(&self, v: &Values) -> ValueId {
+        let usz = |x: usize| v.int(i64::try_from(x).unwrap_or(i64::MAX));
+        let units = self.units.as_ref().map_or_else(
+            || v.list(Vec::new()),
+            |u| {
+                v.list(vec![v.list(
+                    u.iter()
+                        .map(|&(k, st)| v.list(vec![k, v.int(i64::from(st))]))
+                        .collect(),
+                )])
+            },
+        );
+        v.list(vec![
+            self.id,
+            usz(self.off),
+            self.name,
+            usz(self.pos),
+            v.int(i64::from(self.line)),
+            units,
+            v.int(i64::from(self.sliceable) | i64::from(self.loaded) << 1),
+            v.list(self.cut.into_iter().collect()),
+        ])
+    }
+
+    /// [`FileRest::to_value`]'s file.
+    pub(crate) fn of_value(v: &Values, x: ValueId) -> Option<FileRest> {
+        let [id, off, name, pos, line, units, flags, cut] = list_of(v, x)[..] else {
+            return None;
+        };
+        let units = list_of(v, units).first().map(|&l| {
+            list_of(v, l)
+                .iter()
+                .filter_map(|&e| match list_of(v, e)[..] {
+                    [k, st] => Some((k, int_of(v, st) != 0)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .into()
+        });
+        let f = int_of(v, flags);
+        Some(FileRest {
+            id,
+            text: v.get(id),
+            off: usize::try_from(int_of(v, off)).ok()?,
+            name,
+            pos: usize::try_from(int_of(v, pos)).ok()?,
+            line: u32::try_from(int_of(v, line)).ok()?,
+            units,
+            sliceable: f & 1 != 0,
+            cut: list_of(v, cut).first().copied(),
+            loaded: f & 2 != 0,
+        })
+    }
+
     pub(crate) fn new(v: &Values, id: ValueId, off: usize, name: ValueId) -> FileRest {
         // (a line ends at a carriage return alone too, as web2c's
         // `input_line` reads: a file with old Mac line ends, coursepaper.cls)
