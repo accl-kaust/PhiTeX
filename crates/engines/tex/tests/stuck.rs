@@ -191,13 +191,14 @@ fn a_run_past_the_memory_or_time_limit_ends_the_build_stuck() {
 /// beside a small build limited to 256 MB: the build ends, not stuck.
 /// Measured on the process, a build in a 32 GB job was stopped "stuck"
 /// at -j1 by its neighbours' 24 GB and wrote an empty PDF
-/// (latexmk_corpus_protrude_koma, latexmk_ams_index, latexmk_minted;
+/// (`latexmk_corpus_protrude_koma`, `latexmk_ams_index`, `latexmk_minted`;
 /// accl 22597).
 #[test]
 fn the_memory_limit_is_the_builds_own_not_the_processs() {
-    let held: Vec<u8> = (0..512usize << 20).map(|i| (i % 251) as u8).collect();
-    // (a run of a few million commands, so the guard looks: every 64
-    // heartbeats of 4096 commands)
+    // (written, so resident)
+    let held: Vec<u8> = vec![7; 512 << 20];
+    // (a run of a few hundred thousand commands, so the guard looks: at
+    // every heartbeat of 4096 commands)
     let src = "A paragraph.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\ifnum\\count1<300000 \\repeat\n\nAnother.\n\n\\bye\n";
     for threads in [1, 8] {
         let (b, t) = build_limited(
@@ -215,5 +216,5 @@ fn the_memory_limit_is_the_builds_own_not_the_processs() {
         );
         assert_eq!(b.pages().len(), 1, "-j{threads}: the page");
     }
-    assert_eq!(held[1000], (1000 % 251) as u8);
+    assert_eq!(held[1000], 7);
 }
