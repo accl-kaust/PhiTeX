@@ -872,8 +872,8 @@ fn glossaries_made() {
 }
 
 /// TeX Live manual ibycus-babel-test (pdflatex): ibyhyph.tex loads its
-/// patterns with e-TeX's `\savinghyphcodes=1` after making `( ) ' ` = +
-/// |` letters by `\lccode`; e-TeX hyphenates an ibycus word with those
+/// patterns with e-TeX's `\savinghyphcodes=1` after making the accent
+/// characters (parentheses, quotes, `=`, `+`, `|`) letters by `\lccode`; e-TeX hyphenates an ibycus word with those
 /// saved codes in the `\lccode`s' place (`store_hyph_codes`,
 /// `set_lc_code`), the document's `\lccode`s of the accents being 0.
 /// The codes were not saved: no ibycus word was hyphenated. At -j1 and
