@@ -1,0 +1,15 @@
+% \pdfximagebbox of an included PDF page: its page box (pinlabel reads its
+% figure's size so); and \openin of the names pinlabel tries.
+\documentclass{article}
+\begin{document}
+\newread\st
+\openin\st=fig6.ps \ifeof\st ps:eof\else ps:open\fi\closein\st\par
+\openin\st=fig6.eps \ifeof\st eps:eof\else eps:open\fi\closein\st\par
+\openin\st=fig6.pdf \ifeof\st pdf:eof\else pdf:open\fi\closein\st\par
+\pdfximage cropbox {fig6.pdf}
+A: \pdfximagebbox\pdflastximage 1, \pdfximagebbox\pdflastximage 2,
+\pdfximagebbox\pdflastximage 3, \pdfximagebbox\pdflastximage 4\par
+\pdfximage {fig6.pdf}
+B: \pdfximagebbox\pdflastximage 1, \pdfximagebbox\pdflastximage 2,
+\pdfximagebbox\pdflastximage 3, \pdfximagebbox\pdflastximage 4\par
+\end{document}
