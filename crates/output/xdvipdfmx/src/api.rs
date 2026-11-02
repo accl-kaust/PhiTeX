@@ -1448,12 +1448,22 @@ mod tests {
                 ops.push(Op::Special(b"pdf:mapline cmr10 CMR10 <cmr10.pfb".to_vec()));
                 ops.push(font());
             }
-            ops.push(Op::Font(0));
+            ops.extend([Op::Push, Op::Font(0)]);
             ops.extend(chars.iter().map(|&c| Op::Set(i32::from(c))));
             if let Some(y) = dest {
                 let sp = alloc::format!("pdf:dest (d) [@thispage /XYZ 0 {y} null]");
                 ops.push(Op::Special(sp.into_bytes()));
             }
+            // (a footer, as a page of TeX's ends: what the device's text
+            // state is left at is the same)
+            ops.extend([
+                Op::Pop,
+                Op::Push,
+                Op::Down(30_000_000),
+                Op::Font(0),
+                Op::Set(57),
+                Op::Pop,
+            ]);
             ops
         };
         let (s0, _) = cmr10_session(false, false);
