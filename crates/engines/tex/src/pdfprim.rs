@@ -4116,8 +4116,12 @@ impl Walk<'_> {
     /// `pdf_hlist_out`: `cur_h` from the left edge, on the baseline.
     fn hlist(&mut self, b: &BoxNode, left: i32, base: i32) {
         let mut g = GlueRun::new(b);
-        let mut h = left;
-        for n in &b.list {
+        self.hnodes(&b.list, &mut g, left, base);
+    }
+
+    /// An hlist's nodes from `h` on; where they end.
+    fn hnodes(&mut self, list: &[Node], g: &mut GlueRun, mut h: i32, base: i32) -> i32 {
+        for n in list {
             match n {
                 Node::Char { font, ch } => h += (self.width)(*font, *ch),
                 Node::Lig(l) => h += (self.width)(l.font, l.ch),
@@ -4141,9 +4145,13 @@ impl Walk<'_> {
                 }
                 Node::Glue(x) => h += g.glue(x),
                 Node::Kern(w, _) | Node::Math(_, w) => h += *w,
+                // (an unbroken discretionary's text: tex.web's
+                // `replace_count` nodes after it, shipped in its place)
+                Node::Disc(d) => h = self.hnodes(&d.replace, g, h, base),
                 _ => {}
             }
         }
+        h
     }
 
     /// `pdf_vlist_out`: `cur_v` from the top edge.
