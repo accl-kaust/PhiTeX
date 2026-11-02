@@ -216,3 +216,64 @@ The bars are release bars. Edits on amsldoc and Grail at -j8: a letter or word �
 **P9: interpreter CPI** (§4, codehigh/pegmatch). Callgrind with the watchdog off, then the hot path's instruction-cache footprint. Size: 2 agent-days to measure, more to fix.
 
 Order: WP0 → P1 (with P1b) → P2 → P3 → P4 → P5, P6 → P7. P2, P3 and P4 carry the edit bars; P1 and P7 carry cold -j8.
+
+## 8. The deciding experiments (2026-11-02)
+
+### WP0 and P1, measured and backed out
+
+A/B in one job, base and fix runs interleaved, 16 CPUs (8 cores), median of 5, md5s identical (accl 22719):
+
+| | base | WP0 |
+|---|---|---|
+| amsldoc cold -j1 / -j8 | 2.36 / 3.95 s | 2.74 / 3.99 s |
+| Grail cold -j1 / -j8 | 41.1 / 45.9 s | 41.5 / 46.8 s |
+| amsldoc -j8 edits: letter / sentence / cite | 21 / 283 / 326 ms | 35 / 586 / 538 ms |
+
+P1, the second version (accl 22752): Grail -j8 makes 9571 runs instead of 15220 and wastes 36.7 s of CPU instead of 63 s, but its wall is unchanged (48 s), and amsldoc -j1 got slower. Both are backed out (ca3e4d01d) and kept on branch `scaling-p1`.
+
+Cutting the waste does not move the wall. Waiting serialises by construction, so this does not by itself prove the chain is inherent; the predictor test below asks whether guessing could keep the parallel runs.
+
+### Would a guess of a paragraph start's state have held? (accl 22793, `bench/predict-tmp.py`)
+
+Each committed text run's reads were logged (`PHITEX_KREAD_KEYS=*`). Every refuted read is then compared with the value the reader's kept run read. The logging inside the commit slowed this run's -j8 schedule a lot (amsldoc 50 s), so the sample holds more speculative reads than a normal build, but the values compared are the final ones.
+
+| | amsldoc -j8 | Grail -j8 |
+|---|---|---|
+| refuted reads | 30 098 | 132 722 |
+| hit: the value the text node before it read (prev) | 42% | 48% |
+| hit: the commonest kept value of the key (mode) | 47% | 47% |
+| hit: the node's own kept value (warm, a previous build of the same text) | 84% | 79% (the rest: readers outside the text, or fields their kept run did not read) |
+| wasted CPU of the nodes all of whose refuted reads prev gets right | 0% | 4% |
+| the same for mode | 4% | 1% |
+| the same for warm | 49% | 54% |
+
+Per key, prev holds best on `skind` (931/1262 amsldoc, 9571/12674 Grail), `parshape` and the paragraph parameters. It fails on `vlist:last` (228/2341), the page layer's `pages:start:*`, `count:0`, `\@currentHref` and `\@currentlabel`: the per-paragraph state that really changes.
+
+**Verdict:** a cold value predictor recovers 0-4% of the waste, far below the 90% that would make value prediction the pivot. Even a perfect warm prediction from a previous build recovers about half, because the other half of the refuted runs also read the page layer's state (`pages:start:*`, `count:0`, `deadcycles`) or reads made by non-text runs.
+
+### Where a text run's instructions go (accl 22772, callgrind, amsldoc -j1, 13.8 G)
+
+- `Run::command` in text runs (expansion): 57%. Exec 31%, resume pieces 22%.
+- Line breaking (`line_break_`): 1.9%. `char_run`: about 2%.
+- Finishers: 11% (`ship_out` 3.4%, `box_out` 5.5%). Deflate 1.8%. The link 3.9%.
+- The hint pass: about 10%, at startup outside the evaluation. Inside `Closure::call`, the source pass's closures over the format's macros: 1.36 G.
+
+**Typesetting off the chain buys at most about 5% on amsldoc.** The chain is macro expansion. Finishers, shipping and the link are already nodes of their own.
+
+### Useful CPU at -j8 against -j1 (accl 22448, 5 cores)
+
+Busy minus wasted CPU:
+- amsldoc: 1.20 s at -j1 against 1.88 s at -j8 (1.57x).
+- Grail: 23.1 s against 27.2 s (1.18x).
+
+The kept runs cost more at -j8 (SMT siblings, §7 P7) even when nothing is wasted.
+
+### What this leaves for cold -j8 on LaTeX
+
+The text's state chain is real at paragraph granularity: its start state cannot be guessed cold. What can be parallel:
+1. The passes. Grail's three passes of 10-14 s each re-run finishers and text whose aux values moved; a pass that resumes only the readers of changed keys (P2/P3) shortens the second and third.
+2. Expansion inside one long run: a TikZ picture or `\dochighinput`, as finer nodes (P8).
+3. The hint pass (10% of amsldoc, startup, serial).
+4. The interpreter's cycles per instruction (P9: 2.5x pdfTeX's on codehigh).
+
+Of these, only (1) and (4) move both Grail and amsldoc. The ranked order of §7 stands with WP0 and P1 dropped: **P2 (resume and cutoff, also the edit lever) first**, then P3, P4 and P9.
