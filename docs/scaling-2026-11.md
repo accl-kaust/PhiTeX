@@ -203,7 +203,9 @@ The bars are release bars. Edits on amsldoc and Grail at -j8: a letter or word â
 
 **P6: granularity of resume pieces.** A `\ref`/nameref reader is a 103 ms resume piece in Grail, and every heading edit re-runs it in full. P2's resumption cuts that to the part after the read. Otherwise cut resume pieces at paragraph ends as exec pieces are. Bar: no single text run over 20 ms in Grail's edits. Size: 1-2 agent-days.
 
-**P7: kept-run slowdown at -j8.**
+**P7: kept-run slowdown at -j8 (measured, accl 22684).** A job given 10 CPUs on accl gets 5 physical cores and both of their SMT threads (affinity 2-6,66-70; EPYC 7763, 2 threads a core). amsldoc -j1 takes 2.44 s alone, 3.63 s beside 7 spinning `yes` processes (1.49x) and 3.74 s beside 7 memory walkers (1.53x). That is the 1.5-1.8x of the kept runs at -j8. So: (i) every -j8 measurement above ran 8 workers on 5-6 cores. The A/B jobs from 22715 on take 16 CPUs (8 cores). (ii) A worker on a core's second thread halves the chain's speed. The default worker count should be the physical cores, and a speculative run should never share a core with the chain's node.
+
+**P7 (old text): kept-run slowdown at -j8.**
 - Evidence: kept runs are 1.5-1.8x slower at -j8. amsldoc -j1 slows from 2.2 to 2.7-3.5 s beside 7 spinning processes and to 3.6 s beside 7 memory walkers (accl 22636; a clean rerun with the CPU layout is 22684).
 - Likely cause: SMT siblings and the all-core clock.
 - Change: after P1 removes most of the waste, measure again. If SMT siblings are the cause, size the default worker count to physical cores, and keep speculative runs off the chain's core.
