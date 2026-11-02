@@ -634,19 +634,12 @@ impl Run<'_, '_> {
         // after the one this node stops at, where it stops ([`REST_OF`]),
         // else nothing)
         self.cx.child(self.ops.pages, rest_args(v, me));
-        // 1. the parked state (a rest's, folded from the start it has now:
-        // one parked from another start, which its loop node before
-        // defined anew while this run was asked for something else, a
-        // hole filled, is folded again from the new one; at -j4 the wake
-        // that reaches a run first is the scheduler's, and subfigure's
-        // test went on from the tail of a start a page before, and fired
-        // the page its loop node before now fires too: shipped twice)
+        // 1. the parked state
         let began = rest.as_ref().map(|r| r.encode(v));
         let old = self
             .cx
             .resumed()
             .and_then(|x| LoopState::decode(v, x))
-            .filter(|o| o.began == began)
             .unwrap_or_default();
         self.loop_keys = LoopKeys::of(&old, me);
         // 2. where to start
@@ -659,7 +652,15 @@ impl Run<'_, '_> {
             after: if rest.is_some() { old.after } else { None },
             ..LoopState::default()
         };
-        let (start, bound) = self.where_to_start(&old, &mut ls);
+        // (a rest's fold from the start it has now: one parked from
+        // another, which its loop node before defined anew while this run
+        // was asked for something else, a hole filled, folds from the new
+        // one, as where its start's change woke it. At -j4 the wake that
+        // reaches a run first is the scheduler's: subfigure's test went
+        // on from the tail of a start a page before, and fired the page
+        // its loop node before now fired too, shipped twice)
+        let moved = rest.is_some() && old.began != began;
+        let (start, bound) = self.where_to_start(&old, &mut ls, moved);
         if matches!(start, Start::Tail(_)) || self.parked_first(rest.as_ref(), &old) {
             self.cx.goes_on();
         }
@@ -956,10 +957,16 @@ impl Run<'_, '_> {
     /// [`Run::page_loop`]'s step 2: where the fold starts and how far it
     /// may stop early, the kept checkpoints emitted again on `ls` (their
     /// give-backs read again: one that moved is where it goes on from).
-    fn where_to_start(&mut self, old: &LoopState, ls: &mut LoopState) -> (Start, Bound) {
+    fn where_to_start(
+        &mut self,
+        old: &LoopState,
+        ls: &mut LoopState,
+        moved: bool,
+    ) -> (Start, Bound) {
         let v = self.v;
         let me = self.cx.node();
         let site = match self.cx.woken_by() {
+            _ if moved => None,
             // (a rest's start moved: from it)
             Some(Cause::Changed { field, .. })
                 if crate::val::field_name(self.v, field).starts_with(REST_OF)
