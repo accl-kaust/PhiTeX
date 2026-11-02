@@ -66,6 +66,26 @@ pub(crate) struct Checkpoints {
 /// The paragraph's mode (tex.web's `hmode`, unrestricted).
 const HMODE: i32 = 102;
 
+/// A checkpoint's input decoded ([`Run::ck_input_of`]).
+struct CkInput {
+    input: crate::input::Input,
+    pulled: usize,
+    pull_at: Vec<Option<usize>>,
+    pull_box: Vec<bool>,
+    pull_lev: Option<usize>,
+    cut_state: Option<u8>,
+}
+
+/// Where a checkpoint is taken ([`Run::ck_where`]).
+enum At {
+    /// In a paragraph of the node's own text, its line at the bottom of
+    /// the input ([`Run::ck_where_line`]): an edit after it leaves it.
+    Line((usize, u32, u8, i64, Vec<u32>)),
+    /// Anywhere else: its input whole ([`Run::ck_input`]), for a run asked
+    /// again with its text the same.
+    Anywhere,
+}
+
 impl Run<'_, '_> {
     /// Whether the run takes checkpoints: an exec run of an edited
     /// node's text.
@@ -237,16 +257,10 @@ impl Run<'_, '_> {
         }
     }
 
-    /// Where the run stands, if a checkpoint can be taken there: the
-    /// text's segment the line read is, the line's place and state, its
-    /// `\endlinechar` and the characters the run appended to it.
-    fn ck_where(&self) -> Option<(usize, u32, u8, i64, Vec<u32>)> {
-        // (the node's line at the bottom; above it only token lists: the
-        // tokens a command read ahead and put back, kept with the place)
-        let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
+    /// Where the run stands, if a checkpoint can be taken there
+    /// ([`At`]).
+    fn ck_where(&self) -> Option<At> {
         if self.input.levels.is_empty()
-            || !self.input.levels[1..].iter().all(toks)
-            || self.pulled != 0
             || !self.kids.is_empty()
             || self.claim_rest
             || self.fatal_hit
@@ -268,6 +282,37 @@ impl Run<'_, '_> {
             || self.fin_box.is_some()
             || self.tool_cut.is_some()
             || self.lt.sink.is_some()
+        {
+            return None;
+        }
+        if let Some(at) = self.ck_where_line() {
+            return Some(At::Line(at));
+        }
+        // (anywhere else: in a group or a box, in a file, in a sibling's
+        // text; not in an alignment, nor where a give-back would read a
+        // line a park left)
+        if self.aopen != 0
+            || self.astate.is_some()
+            || self.read_back_at.is_some()
+            || self.pull_orig.iter().any(Option::is_some)
+            || self.pull_at.len() != self.pulled
+            || self.pull_box.len() != self.pulled
+            || crate::exec::obs_flag!("PHITEX_CK_LINE_ONLY")
+        {
+            return None;
+        }
+        Some(At::Anywhere)
+    }
+
+    /// [`Run::ck_where`] in a paragraph of the node's own text, its line
+    /// at the bottom and above it only token lists (the tokens a command
+    /// read ahead and put back, kept with the place): the text's segment
+    /// the line read is, the line's place and state, its `\endlinechar`
+    /// and the characters the run appended to it.
+    fn ck_where_line(&self) -> Option<(usize, u32, u8, i64, Vec<u32>)> {
+        let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
+        if !self.input.levels[1..].iter().all(toks)
+            || self.pulled != 0
             || self.nest.len() != 1
             || self.nest[0].mode != HMODE
             || self.nest[0].group != 0
@@ -306,23 +351,46 @@ impl Run<'_, '_> {
     }
 
     /// A checkpoint here ([`Run::ck_where`]'s place).
-    fn ck_take(&mut self, at: (usize, u32, u8, i64, Vec<u32>)) -> R<()> {
-        let (li, loc, state, endch, extra) = at;
+    fn ck_take(&mut self, at: At) -> R<()> {
         let v = self.v;
-        // (the token lists above the line, bottom first: their types and
-        // the tokens left)
-        let ahead: Vec<ValueId> = self.input.levels[1..]
-            .iter()
-            .filter(|l| l.a < l.b)
-            .map(|l| {
-                v.list(vec![
-                    v.int(i64::from(l.ty)),
-                    crate::val::toks_value(v, self.input.arena.get(l.rest())),
-                ])
-            })
-            .collect();
+        // (the input anywhere: every level and the text from the segment
+        // last reached, with what the run pulled, `Run::ck_input`; at its
+        // line, only the token lists above it, bottom first: their types
+        // and the tokens left)
+        let (li, loc, state, endch, extra, ahead, input, cost) = match at {
+            At::Line((li, loc, state, endch, extra)) => {
+                let ahead: Vec<ValueId> = self.input.levels[1..]
+                    .iter()
+                    .filter(|l| l.a < l.b)
+                    .map(|l| {
+                        v.list(vec![
+                            v.int(i64::from(l.ty)),
+                            crate::val::toks_value(v, self.input.arena.get(l.rest())),
+                        ])
+                    })
+                    .collect();
+                (
+                    i64::try_from(li).unwrap_or(-1),
+                    loc,
+                    state,
+                    endch,
+                    extra,
+                    ahead,
+                    ValueId::UNIT,
+                    0,
+                )
+            }
+            At::Anywhere => {
+                let (input, cost) = self.ck_input();
+                (-1, 0, 0, 0, Vec::new(), Vec::new(), input, cost)
+            }
+        };
+        // (the next one after as many commands as this one's parts are
+        // long, at least `every`: what checkpoints cost stays a share of
+        // what the run does, however deep its lists and input)
+        let cost = cost + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
         if let Some(c) = self.ck.as_mut() {
-            c.next = self.cmds + every();
+            c.next = self.cmds + every().max(cost);
         }
         // (the table at the run's base level: what it defined and stepped;
         // none where a group of its own saved a value)
@@ -388,7 +456,7 @@ impl Run<'_, '_> {
             int(i64::from_ne_bytes(self.exps.to_ne_bytes())),
         ]);
         let mut ys = vec![
-            int(i64::try_from(li).unwrap_or(-1)),
+            int(li),
             int(i64::from(loc)),
             int(i64::from(state)),
             int(endch),
@@ -404,6 +472,7 @@ impl Run<'_, '_> {
             v.list(ahead),
         ];
         ys.extend(self.ck_more());
+        ys.push(input);
         let ck = v.list(ys);
         let unread = self.cx.unread_count();
         if let Some(c) = self.ck.as_mut() {
@@ -483,6 +552,179 @@ impl Run<'_, '_> {
             );
         }
         Err(crate::run::Halt::Same)
+    }
+
+    /// The input as a checkpoint taken anywhere holds it
+    /// ([`Run::ck_input_restore`]), and how long it is: every level,
+    /// bottom first (a token list with all its tokens and how many were
+    /// read, a line, a file's rest, each exactly); the text from the
+    /// segment last reached (or the last sibling pulled's first, which a
+    /// give-back reads) on, with its length and where the run stands in
+    /// it; the siblings pulled and where their texts begin.
+    fn ck_input(&self) -> (ValueId, u64) {
+        use crate::input::kind;
+        let v = self.v;
+        let int = |x: i64| v.int(x);
+        let usz = |x: usize| v.int(i64::try_from(x).unwrap_or(i64::MAX));
+        let mut cost = 0u64;
+        let levels: Vec<ValueId> = self
+            .input
+            .levels
+            .iter()
+            .map(|l| match l.kind {
+                kind::TOKS => {
+                    let r = crate::input::Range { start: l.c, end: l.b };
+                    let toks = self.input.arena.get(r);
+                    cost += toks.len() as u64;
+                    v.list(vec![
+                        int(0),
+                        int(i64::from(l.ty)),
+                        crate::val::toks_value(v, toks),
+                        int(i64::from(l.a - l.c)),
+                    ])
+                }
+                kind::LINE => {
+                    cost += 1;
+                    v.list(vec![int(1), self.input.line(*l).to_value(v)])
+                }
+                _ => {
+                    cost += 1;
+                    v.list(vec![int(2), self.input.file(*l).to_value(v)])
+                }
+            })
+            .collect();
+        let text = &self.input.text;
+        let mut from = self.input.text_at.saturating_sub(1).min(text.len());
+        if let Some(&Some(p)) = self.pull_at.last() {
+            from = from.min(p);
+        }
+        let segs: Vec<ValueId> = text[from..]
+            .iter()
+            .map(|s| match s {
+                Seg::Toks(t) => {
+                    cost += t.len() as u64;
+                    v.list(vec![int(0), crate::val::toks_value(v, t)])
+                }
+                Seg::Line(l) => {
+                    cost += 1;
+                    v.list(vec![int(1), l.to_value(v)])
+                }
+                Seg::File(f) => {
+                    cost += 1;
+                    v.list(vec![int(2), f.to_value(v)])
+                }
+            })
+            .collect();
+        let opt = |x: Option<usize>| x.map_or(int(-1), usz);
+        let pull = v.list(vec![
+            usz(self.pulled),
+            v.list(self.pull_at.iter().map(|&p| opt(p)).collect()),
+            v.list(self.pull_box.iter().map(|&b| int(i64::from(b))).collect()),
+            opt(self.pull_lev),
+            self.cut_state.map_or(int(-1), |s| int(i64::from(s))),
+        ]);
+        let x = v.list(vec![
+            v.list(levels),
+            v.list(vec![
+                usz(text.len()),
+                usz(self.input.text_at),
+                usz(from),
+                v.list(segs),
+            ]),
+            pull,
+        ]);
+        (x, cost)
+    }
+
+    /// [`Run::ck_input`]'s input decoded ([`Run::ck_input_put`] puts it
+    /// back): the text's segments before those it holds are empty token
+    /// lists (read already, never read again).
+    #[allow(clippy::type_complexity)]
+    fn ck_input_of(&self, x: ValueId) -> Option<CkInput> {
+        use crate::input::kind;
+        let v = self.v;
+        let n = |x: ValueId| usize::try_from(int_of(v, x)).ok();
+        let [levels, text, pull] = list_of(v, x)[..] else {
+            return None;
+        };
+        let [len, at, from, segs] = list_of(v, text)[..] else {
+            return None;
+        };
+        let (Some(len), Some(at), Some(from)) = (n(len), n(at), n(from)) else {
+            return None;
+        };
+        let mut input = crate::input::Input::new();
+        input.text = vec![Seg::Toks(Vec::new()); from];
+        for e in list_of(v, segs) {
+            let seg = match list_of(v, e)[..] {
+                [k, t] if int_of(v, k) == 0 => Seg::Toks(crate::val::toks_of(v, Some(t))),
+                [k, l] if int_of(v, k) == 1 => match crate::input::Line::of_value(v, l) {
+                    Some(l) => Seg::Line(l),
+                    None => return None,
+                },
+                [_, f] => match crate::run::FileRest::of_value(v, f) {
+                    Some(f) => Seg::File(f),
+                    None => return None,
+                },
+                _ => return None,
+            };
+            input.text.push(seg);
+        }
+        if input.text.len() != len {
+            return None;
+        }
+        input.text_at = at;
+        for e in list_of(v, levels) {
+            match list_of(v, e)[..] {
+                [k, ty, t, read] if int_of(v, k) == i64::from(kind::TOKS) => {
+                    let toks = crate::val::toks_of(v, Some(t));
+                    input.push_toks_at(
+                        &toks,
+                        n(read).unwrap_or(0),
+                        u8::try_from(int_of(v, ty)).unwrap_or(0),
+                    );
+                }
+                [k, l] if int_of(v, k) == i64::from(kind::LINE) => {
+                    let Some(l) = crate::input::Line::of_value(v, l) else {
+                        return None;
+                    };
+                    input.push_line(l);
+                }
+                [_, f] => {
+                    let Some(f) = crate::run::FileRest::of_value(v, f) else {
+                        return None;
+                    };
+                    input.push_file(f);
+                }
+                _ => return None,
+            }
+        }
+        let [pulled, pull_at, pull_box, pull_lev, cut_state] = list_of(v, pull)[..] else {
+            return None;
+        };
+        let opt = |x: ValueId| usize::try_from(int_of(v, x)).ok();
+        Some(CkInput {
+            input,
+            pulled: n(pulled)?,
+            pull_at: list_of(v, pull_at).into_iter().map(opt).collect(),
+            pull_box: list_of(v, pull_box)
+                .into_iter()
+                .map(|b| int_of(v, b) != 0)
+                .collect(),
+            pull_lev: opt(pull_lev),
+            cut_state: u8::try_from(int_of(v, cut_state)).ok(),
+        })
+    }
+
+    /// [`Run::ck_input_of`]'s input as the run's.
+    fn ck_input_put(&mut self, c: CkInput) {
+        self.input = c.input;
+        self.pulled = c.pulled;
+        self.pull_at = c.pull_at;
+        self.pull_box = c.pull_box;
+        self.pull_orig = vec![None; c.pulled];
+        self.pull_lev = c.pull_lev;
+        self.cut_state = c.cut_state;
     }
 
     /// A checkpoint's parts from its 15th on: the count of the reads
@@ -781,9 +1023,10 @@ impl Run<'_, '_> {
                 if made != usize::MAX && self.cx.last_reads_hold(made) {
                     if check() {
                         eprintln!(
-                            "ck-change: node {} woken by {:?} goes on from checkpoint {k} after {made} reads",
+                            "ck-change: node {} woken by {:?} goes on from checkpoint {k} after {made} reads{}",
                             self.cx.node().raw(),
-                            self.cx.woken_by()
+                            self.cx.woken_by(),
+                            if int_of(v, c[0]) < 0 { " (anywhere)" } else { "" }
                         );
                     }
                     found = Some((k, c));
@@ -849,6 +1092,20 @@ impl Run<'_, '_> {
         };
         let li = usize::try_from(int_of(v, c[0])).unwrap_or(0);
         let loc = usize::try_from(int_of(v, c[1])).unwrap_or(0);
+        // (one taken anywhere: its input whole; at a line of the text,
+        // that line in the new text)
+        let anywhere = match c.get(19) {
+            Some(&x) if int_of(v, c[0]) < 0 => match self.ck_input_of(x) {
+                Some(i) => Some(i),
+                None => return Ok(false),
+            },
+            _ => None,
+        };
+        let line = match new_segs.get(li) {
+            Some(Seg::Line(l)) if anywhere.is_none() => Some(l.clone()),
+            _ if anywhere.is_some() => None,
+            _ => return Ok(false),
+        };
         let Some(base) = crate::state::Base::of_value(v, c[11], &mut |f| self.loc_of(f)) else {
             return Ok(false);
         };
@@ -865,29 +1122,30 @@ impl Run<'_, '_> {
                 }
             }
         }
-        // (the input: the new text, its segment `li` the line on top at
-        // the checkpoint's place)
-        let Some(Seg::Line(mut line)) = new_segs.get(li).cloned() else {
-            return Ok(false);
-        };
-        line.loc = loc;
-        line.state = u8::try_from(int_of(v, c[2])).unwrap_or(line.state);
-        line.endch = int_of(v, c[3]);
-        line.buf.extend(
-            list_of(v, c[4])
-                .iter()
-                .map(|&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
-        );
-        self.input = crate::input::Input::new();
-        self.input.text = new_segs;
-        self.input.text_at = li + 1;
-        self.input.push_line(line);
-        for e in list_of(v, c[13]) {
-            if let [ty, t] = list_of(v, e)[..] {
-                let toks = crate::val::toks_of(v, Some(t));
-                let r = self.input.arena.alloc(&toks);
-                self.input
-                    .push_toks(r, u8::try_from(int_of(v, ty)).unwrap_or(0));
+        if let Some(i) = anywhere {
+            self.ck_input_put(i);
+        } else if let Some(mut line) = line {
+            // (the input: the new text, its segment `li` the line on top
+            // at the checkpoint's place)
+            line.loc = loc;
+            line.state = u8::try_from(int_of(v, c[2])).unwrap_or(line.state);
+            line.endch = int_of(v, c[3]);
+            line.buf.extend(
+                list_of(v, c[4])
+                    .iter()
+                    .map(|&x| u32::try_from(int_of(v, x)).unwrap_or(0)),
+            );
+            self.input = crate::input::Input::new();
+            self.input.text = new_segs;
+            self.input.text_at = li + 1;
+            self.input.push_line(line);
+            for e in list_of(v, c[13]) {
+                if let [ty, t] = list_of(v, e)[..] {
+                    let toks = crate::val::toks_of(v, Some(t));
+                    let r = self.input.arena.alloc(&toks);
+                    self.input
+                        .push_toks(r, u8::try_from(int_of(v, ty)).unwrap_or(0));
+                }
             }
         }
         self.cont_lines = lines;

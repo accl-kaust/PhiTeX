@@ -1403,7 +1403,11 @@ impl Run<'_, '_> {
             );
         }
         let mut c = self.st.cont(v, &open);
-        if closed {
+        // (a checkpoint's table is its base table, the save stack with
+        // it, `State::base_of`: none here, and its stamps and groups as
+        // they are, as the base table holds them)
+        let raw = !with_frames;
+        if closed || raw {
             c.slots.clear();
             c.save.clear();
             c.defined.clear();
@@ -1437,7 +1441,9 @@ impl Run<'_, '_> {
         gids.dedup();
         // (0 stays 0: no stamp, no group)
         let st_of = |x: u64| -> u64 {
-            if x == 0 {
+            if raw {
+                x
+            } else if x == 0 {
                 0
             } else {
                 u64::try_from(stamps.partition_point(|&y| y < x)).unwrap_or(0)
@@ -1445,7 +1451,9 @@ impl Run<'_, '_> {
             }
         };
         let gid_of = |x: u32| -> u32 {
-            if x == 0 {
+            if raw {
+                x
+            } else if x == 0 {
                 0
             } else {
                 u32::try_from(gids.partition_point(|&y| y < x)).unwrap_or(0)

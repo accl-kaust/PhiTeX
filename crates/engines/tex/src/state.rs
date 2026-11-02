@@ -2736,6 +2736,23 @@ pub(crate) struct Base {
     stamp: u64,
     next_gid: u32,
     pp_dirty: bool,
+    /// The save stack of the run's open groups, bottom first
+    /// ([`Saved`]: the entry saved by its value and flags).
+    save: Vec<BaseSave>,
+    /// The locations a resume piece's table carried
+    /// ([`State::from_cont`]).
+    carried: Vec<Loc>,
+}
+
+/// A save of [`Base`]'s.
+struct BaseSave {
+    loc: Loc,
+    prev: Option<ValueId>,
+    flags: u8,
+    gid: u32,
+    stamp: u64,
+    at: u64,
+    ldef: Ldef,
 }
 
 /// An entry noted at a candidate ([`Base`]): `None` not loaded.
@@ -2769,9 +2786,10 @@ struct BaseMeta {
 impl State {
     /// The table at its base level ([`Base`]): each location the run
     /// defined, stepped, holds a symbol or a value given in place of the
-    /// engine's at. None where a group of the run's own saved a value.
+    /// engine's at, or a save marks; with the save stack of the groups
+    /// open. None while a command's changes may be undone.
     pub(crate) fn base_of(&self, v: &Values) -> Option<Base> {
-        if !self.save.is_empty() || !self.cont_locs.is_empty() || self.undo.is_some() {
+        if self.undo.is_some() {
             return None;
         }
         let mut slots = Vec::new();
@@ -2784,6 +2802,7 @@ impl State {
                 && !s.sym
                 && s.lazy.is_none()
                 && s.e.flags & (PRELOADED | LOADED) == 0
+                && (s.save_gid, s.save_stamp, s.ginert) == (0, 0, 0)
             {
                 continue;
             }
@@ -2836,6 +2855,20 @@ impl State {
             stamp: self.stamp,
             next_gid: self.next_gid,
             pp_dirty: self.pp_dirty,
+            save: self
+                .save
+                .iter()
+                .map(|s| BaseSave {
+                    loc: s.loc,
+                    prev: self.encode(&s.prev, v),
+                    flags: s.prev.flags,
+                    gid: s.gid,
+                    stamp: s.stamp,
+                    at: s.at,
+                    ldef: s.ldef,
+                })
+                .collect(),
+            carried: self.cont_locs.clone(),
         })
     }
 
@@ -2908,6 +2941,23 @@ impl State {
         self.stamp = b.stamp;
         self.next_gid = b.next_gid;
         self.pp_dirty = b.pp_dirty;
+        self.save = b
+            .save
+            .into_iter()
+            .map(|s| Saved {
+                loc: s.loc,
+                prev: if s.prev.is_none() && s.flags & LOADED == 0 {
+                    UNLOADED
+                } else {
+                    ent(s.prev, s.flags)
+                },
+                gid: s.gid,
+                stamp: s.stamp,
+                at: s.at,
+                ldef: s.ldef,
+            })
+            .collect();
+        self.cont_locs = b.carried;
         self.muts += 1;
     }
 }
@@ -3052,6 +3102,24 @@ impl Base {
             .collect();
         let defined = self.defined.iter().map(|&l| field(l).0).collect();
         let font_slow = self.font_slow.iter().map(|&l| field(l).0).collect();
+        let save = self
+            .save
+            .iter()
+            .map(|s| {
+                v.list(vec![
+                    field(s.loc).0,
+                    opt(s.prev),
+                    v.int(i64::from(s.flags)),
+                    v.int(i64::from(s.gid)),
+                    u(s.stamp),
+                    u(s.at),
+                    u(s.ldef.0),
+                    v.int(i64::from(s.ldef.1)),
+                    v.int(s.ldef.2.map_or(-1, i64::from)),
+                ])
+            })
+            .collect();
+        let carried = self.carried.iter().map(|&l| field(l).0).collect();
         v.list(vec![
             v.list(slots),
             v.list(cands),
@@ -3061,6 +3129,8 @@ impl Base {
             u(self.stamp),
             v.int(i64::from(self.next_gid)),
             v.int(i64::from(self.pp_dirty)),
+            v.list(save),
+            v.list(carried),
         ])
     }
 
@@ -3081,6 +3151,8 @@ impl Base {
             stamp,
             next_gid,
             pp_dirty,
+            save,
+            carried,
         ] = xs[..]
         else {
             return None;
@@ -3102,7 +3174,27 @@ impl Base {
             stamp: u(stamp),
             next_gid: u32::try_from(int_of(v, next_gid)).unwrap_or(0),
             pp_dirty: int_of(v, pp_dirty) != 0,
+            save: Vec::new(),
+            carried: Vec::new(),
         };
+        for e in list_of(v, save) {
+            let [f, prev, flags, gid, stamp, at_, ls, ll, lg] = list_of(v, e)[..] else {
+                return None;
+            };
+            out.save.push(BaseSave {
+                loc: loc(Field(f)),
+                prev: opt(prev),
+                flags: u8::try_from(int_of(v, flags)).unwrap_or(0),
+                gid: u32::try_from(int_of(v, gid)).unwrap_or(0),
+                stamp: u(stamp),
+                at: u(at_),
+                ldef: (u(ls), int_of(v, ll) != 0, u32::try_from(int_of(v, lg)).ok()),
+            });
+        }
+        out.carried = list_of(v, carried)
+            .into_iter()
+            .map(|f| loc(Field(f)))
+            .collect();
         for s in list_of(v, slots) {
             out.slots.push(BaseSlot::of_value(v, s, loc)?);
         }
