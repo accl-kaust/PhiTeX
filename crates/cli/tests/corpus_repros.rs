@@ -857,3 +857,16 @@ fn pages_objects_in_conditional() {
 fn word_across_cut() {
     check_threads("word_across_cut", "pdf");
 }
+
+/// TeX Live manual ryesample (pdflatex): the glossaries package's lists,
+/// `STEM.glo` and `STEM.acn`, made into `STEM.gls` and `STEM.acr` by
+/// makeindex in the style `STEM.ist` the package writes, as the corpus
+/// loop runs them (`makeglossaries`'s calls; latexmk with that custom
+/// dependency). No tool claimed them: the glossaries were empty and the
+/// pages two short. At -j1 and -j4 (oracle: pdflatex and makeindex in
+/// the CI image, latexmk with the loop's rule, accl 23161; the base
+/// differs).
+#[test]
+fn glossaries_made() {
+    check_threads("glossaries_tool", "pdf");
+}

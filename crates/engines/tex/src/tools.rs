@@ -76,10 +76,15 @@ pub(crate) fn made_from(
 /// writes ([`made_from`] without the job's arguments).
 pub(crate) fn made_names(input: &str) -> Vec<String> {
     let base = input.rsplit_once('.').map_or(input, |(b, _)| b);
-    [format!("{base}.bbl"), format!("{base}.ind")]
-        .into_iter()
-        .filter(|o| claims(o).iter().any(|(_, i)| i == input))
-        .collect()
+    [
+        format!("{base}.bbl"),
+        format!("{base}.ind"),
+        format!("{base}.gls"),
+        format!("{base}.acr"),
+    ]
+    .into_iter()
+    .filter(|o| claims(o).iter().any(|(_, i)| i == input))
+    .collect()
 }
 
 /// The loop-back of a file the job writes, its whole text as the job
@@ -297,10 +302,33 @@ fn mktex_run(output: &str, opts: &ToolOptions, served: &mut Served) -> Option<Ve
 
 /// The tools that may make `output` by default, each with its input.
 pub(crate) fn claims(output: &str) -> Vec<(Tool, String)> {
-    Tool::ALL
+    let mut out: Vec<(Tool, String)> = Tool::ALL
         .into_iter()
         .filter_map(|t| t.default_input(output).map(|i| (t, i)))
-        .collect()
+        .collect();
+    if let Some((input, _, _)) = glossary(output) {
+        out.push((Tool::Makeindex, input));
+    }
+    out
+}
+
+/// The glossaries package's lists (`makeglossaries`, as the loop runs
+/// makeindex on them): output `STEM.gls` from `STEM.glo` with its
+/// transcript `STEM.glg`, `STEM.acr` from `STEM.acn` with `STEM.alg`,
+/// each in the style `STEM.ist` the package writes: `(input, transcript,
+/// style)`.
+fn glossary(output: &str) -> Option<(String, String, String)> {
+    let (stem, ext) = output.rsplit_once('.')?;
+    let (input, log) = match ext {
+        "gls" => ("glo", "glg"),
+        "acr" => ("acn", "alg"),
+        _ => return None,
+    };
+    Some((
+        format!("{stem}.{input}"),
+        format!("{stem}.{log}"),
+        format!("{stem}.ist"),
+    ))
 }
 
 /// The tools' settings the client gives ([`crate::Options::bibtex`]).
@@ -418,8 +446,10 @@ impl phitex_makeindex::Files for Served {
         self.file(name).is_some()
     }
     fn style(&mut self, name: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+        // (kpathsea's `ist` path starts with the current directory: a
+        // style the job wrote, glossaries' `STEM.ist`, is found there)
         let n = chars(name);
-        self.get(Need::Support(ToolSearch::IndexStyle, n))
+        self.get(Need::Data(ToolSearch::IndexStyle, n))
             .map(|(p, b)| (bytes(&p), Some(b)))
     }
     fn out_name_ok(&mut self, _name: &[u8]) -> Result<(), Vec<u8>> {
@@ -875,6 +905,15 @@ pub(crate) fn run_args(cx: &mut Ctx<'_>, output: &str) -> Result<Option<Vec<Valu
         // node; read either way, so this runs again once it does)
         if crate::ops::lb_read(cx, size_field(v, &input))?.is_none() {
             continue;
+        }
+        // (a glossary: run only where its style is there, the job's
+        // `\makeglossaries` wrote it or the document's directory has it)
+        if let Some((glo, log, ist)) = glossary(output).filter(|g| g.0 == input) {
+            if look_up(cx, &Need::File(ist.clone()))?.is_none() {
+                return Ok(None);
+            }
+            let args = ["-s", &ist, "-t", &log, "-o", output, &glo].map(str::to_owned);
+            return Ok(Some(command_args(v, t, output, &input, &args)));
         }
         return Ok(Some(command_args(
             v,

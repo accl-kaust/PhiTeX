@@ -1,0 +1,10 @@
+\documentclass{article}
+\usepackage[acronym]{glossaries}
+\makeglossaries
+\newglossaryentry{ex}{name={example},description={a thing shown}}
+\newglossaryentry{zeta}{name={zeta},description={the last letter}}
+\newacronym{pdf}{PDF}{Portable Document Format}
+\begin{document}
+An \gls{ex}, a \gls{zeta} and a \gls{pdf}; again \gls{pdf}.
+\printglossaries
+\end{document}
