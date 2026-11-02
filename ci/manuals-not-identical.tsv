@@ -45,7 +45,6 @@ latex_ryethesis_ryesample	differs: page 11: obj 422 (Catalog) line 22: oracle "<
 latex_semioneside_example	differs: page 2: obj 28 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 5 vs 3)
 latex_showexpl_showexpl-test	differs: page 1: obj 24 (page 1, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g BT /F1 14.3462 ", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g BT /F1 14.3462 "
 latex_snaptodo_snaptodo	differs: page 3: obj 79 (page 3, untyped) line 194: oracle "1 0 0 1 71.499 17.412 cm", phitex "1 0 0 1 76.204 17.412 cm"
-latex_spath3_spath3	differs: obj 2 (untyped) line 2: oracle "/pgfpat11 280 0 R", phitex "/pgfpat11 152 0 R"
 latex_teubner_teubner-doc	differs: page 1: obj 12 (Pages) line 15: oracle "<end>", phitex "<end>"
 latex_tex-vpat_texlive-vpat	differs: page 1: obj 4369 (Catalog) line 4: oracle "/MarkInfo 4 0 R", phitex "/MarkInfo 5 0 R" (past \pdfdest struct, accl 22465)
 latex_texproposal_texproposal	differs: page 1: obj 1 (Catalog) line 14: oracle "1", phitex "2" (pages 27 vs 29)

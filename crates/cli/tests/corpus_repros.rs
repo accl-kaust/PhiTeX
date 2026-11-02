@@ -826,3 +826,19 @@ fn tcx_first_line() {
 fn png_alpha_objects_counted() {
     check_threads("png_alpha_count", "pdf");
 }
+
+/// manuals (spath3: pgf's `\immediate\pdfobj` numbered 404 for pdfTeX's
+/// 429, the 25 objects of the page firing before it missing; tex-vpat):
+/// an object number read inside a conditional the text's run opens,
+/// after a candidate inside it where a page fires. No pass of the run
+/// could end at a paragraph's start or a paragraph's end inside its own
+/// conditionals, so the number missed that page's objects
+/// (`PAGES_OBJECTS_DEFECT`). Now, where a page fires at one of its
+/// candidates, the run ends at the first such candidate a second pass
+/// can end at, the continuation carrying the conditionals
+/// (`Run::order_after_pages`; oracle: pdftex in the CI image, accl 23046,
+/// 23055).
+#[test]
+fn pages_objects_in_conditional() {
+    check_threads("pages_objects_in_conditional", "pdf");
+}

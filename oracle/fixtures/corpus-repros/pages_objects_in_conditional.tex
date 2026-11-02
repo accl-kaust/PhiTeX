@@ -1,0 +1,18 @@
+% An object number read inside a conditional the text's run opens, after
+% a candidate inside it where a page fires: pdfTeX ships that page before
+% the \pdfobj, so \pdflastobj counts its objects (spath3: pgf's
+% \immediate\pdfobj got 404 for pdfTeX's 429; tex-vpat). No pass of the
+% run could end at such a candidate; one inside conditionals that own no
+% list can, its continuation carrying them.
+% (PDF: pdftex, the oracle made in the CI image)
+\def\t{Some words to fill the lines of a paragraph, and more of them. }
+\def\p{\t\t\t\t\t\t\t\t\par}
+\iftrue
+\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p
+\immediate\pdfobj{(after a page)}\edef\n{\the\pdflastobj}
+Object \n.\par
+\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p\p
+\immediate\pdfobj{(after another)}\edef\n{\the\pdflastobj}
+Object \n.\par
+\fi
+\bye

@@ -66,6 +66,12 @@ pub(crate) struct CandMark {
     /// page fires at that the run read the page after
     /// ([`Run::order_after_own_page`]).
     pub open_cut: bool,
+    /// Whether a second pass can end the run here at a paragraph's start
+    /// inside conditionals of its own: the continuation carries them, as
+    /// at a forced one (amsmath's display in `\ifmmode`'s `\else`); a
+    /// read of the pages' objects after it ends here where a page fires
+    /// ([`Run::order_after_pages`]).
+    pub par_cut: bool,
 }
 
 /// The start of [`Run::order_after_pages`]' engine diagnostic.
@@ -145,6 +151,7 @@ impl Run<'_, '_> {
                     && below.iter().all(|l| !l.owns && l.group != 0)
             });
         let restartable = can || (par_start && self.conds.is_empty());
+        let par_cut = par_start && !self.conds.is_empty();
         // (a rest of blank input makes no node: the piece runs it, spaces
         // and an empty line's `\par` in vertical mode, §1070)
         let open_cut = self.open_span() && self.cuttable_open();
@@ -162,7 +169,7 @@ impl Run<'_, '_> {
                 || (self.cand_marks.is_empty() && self.forced_pending_before()?));
         let cuttable = fresh
             && (((can || forced_par) && !self.rest_blank()?)
-                || ((restartable || open_cut || forced_par) && self.stop_at == Some(k)));
+                || ((restartable || open_cut || par_cut || forced_par) && self.stop_at == Some(k)));
         self.cand_marks.push(CandMark {
             k,
             stamp: self.st.stamp(),
@@ -176,6 +183,7 @@ impl Run<'_, '_> {
             fresh,
             restartable,
             open_cut,
+            par_cut,
         });
         self.st.mark_candidate();
         if fresh {
@@ -357,7 +365,7 @@ impl Run<'_, '_> {
     /// such candidate ([`Halt::Recut`], [`Run::finish_candidate`])
     /// whether or not a page fires there (the piece's boundaries are its
     /// text's alone), its rest a resume placed after the pages firing
-    /// there, which reads their objects. Where no pass can end at it (inside a conditional of the
+    /// there, which reads their objects. Where no pass can end at it (inside a list of the
     /// run's own), the read stands where no page fires at the run's
     /// candidates ([`Run::page_fires_in_own`]). (`why`: the reader, for
     /// the trace.)
@@ -379,16 +387,23 @@ impl Run<'_, '_> {
         let Some(m) = self.cand_marks.iter().find(|m| m.fresh) else {
             return Ok(());
         };
-        let (k, restartable) = (m.k, m.restartable);
-        // (no pass can end there: complete where no page fires at any of
-        // the run's candidates, the page builder's fold over the profiles
-        // to its own says: a read of the page state, [`Feedback::PageSoFar`];
-        // where one can, it ends there whatever the pages do)
+        let (k, restartable, open_cut) = (m.k, m.restartable, m.open_cut || m.par_cut);
+        // (inside a span of the run's own: complete where no page fires
+        // at any of the run's candidates, the page builder's fold over the
+        // profiles to its own says: a read of the page state,
+        // [`Feedback::PageSoFar`]; where a pass can end outside one, it
+        // ends there whatever the pages do)
         if !restartable && !self.page_fires_in_own()? {
             return Ok(());
         }
-        if !restartable {
-            // (a candidate inside a span of the run's own no pass can end
+        // (a page fires at one: a second pass can end inside groups or
+        // conditionals of the run's own that own no list, the continuation
+        // carrying them ([`CandMark::open_cut`]; a paragraph's start,
+        // [`CandMark::par_cut`]): tex-vpat's resume cut inside four
+        // conditionals, an `\item`'s object numbers read after its first
+        // candidate; spath3's pgf `\immediate\pdfobj`)
+        if !restartable && !open_cut {
+            // (a candidate inside a list of the run's own no pass can end
             // at: a page firing there would be missing from the number)
             let msg = format!(
                 "{PAGES_OBJECTS_DEFECT} ({why}, candidate {k}): a number here may miss that page's objects (node {})",
