@@ -383,7 +383,12 @@ impl Line {
         let int = |x: i64| v.int(x);
         // (a buffer of characters as a string; one holding a code no
         // character has, as its codes)
-        let buf = match self.buf.iter().map(|&c| char::from_u32(c)).collect::<Option<String>>() {
+        let buf = match self
+            .buf
+            .iter()
+            .map(|&c| char::from_u32(c))
+            .collect::<Option<String>>()
+        {
             Some(s) => v.str(&s),
             None => v.list(self.buf.iter().map(|&c| int(i64::from(c))).collect()),
         };

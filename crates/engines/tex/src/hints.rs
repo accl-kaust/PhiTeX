@@ -5469,7 +5469,11 @@ pub fn set_hints_mode(m: HintsMode) {
 /// Turns the hints off (every node may define anything, as without
 /// them) or on again, for comparisons ([`set_hints_mode`]).
 pub fn set_hints_enabled(on: bool) {
-    set_hints_mode(if on { HintsMode::Normal } else { HintsMode::Any });
+    set_hints_mode(if on {
+        HintsMode::Normal
+    } else {
+        HintsMode::Any
+    });
 }
 
 /// The adversarial mode's hint ([`HintsMode::Adversarial`]): defines
@@ -5496,7 +5500,8 @@ fn adversarial_hint() -> Arc<Hint> {
 /// `PHITEX_HINTS` set to print (observe): any value but a mode's.
 fn print_hints() -> bool {
     cfg!(feature = "observe")
-        && crate::exec::env_str!("PHITEX_HINTS").is_some_and(|v| !matches!(v, "0" | "any" | "adversarial"))
+        && crate::exec::env_str!("PHITEX_HINTS")
+            .is_some_and(|v| !matches!(v, "0" | "any" | "adversarial"))
 }
 
 /// Whether the node's text says its command opens and closes no scope.

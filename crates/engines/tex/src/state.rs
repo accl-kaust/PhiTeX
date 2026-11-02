@@ -3049,6 +3049,7 @@ impl BaseSlot {
 
 impl Base {
     /// As a value, each location as its field (`field`).
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn to_value(&self, v: &Values, field: &mut dyn FnMut(Loc) -> Field) -> ValueId {
         let opt = |x: Option<ValueId>| v.list(x.into_iter().collect());
         let at = |l: Locality| {
