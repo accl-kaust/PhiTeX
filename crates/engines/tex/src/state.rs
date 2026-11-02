@@ -2776,6 +2776,10 @@ struct BaseSlot {
 
 #[allow(clippy::option_option)]
 struct BaseMeta {
+    /// Its index among the table's metas: their order is the order of
+    /// the run's first definitions, which a cut's check data keeps
+    /// ([`State::defined_local_since`]).
+    ix: u32,
     eng: Option<Option<ValueId>>,
     publ: Option<(Option<ValueId>, Locality)>,
     ldef_stamp: u64,
@@ -2809,8 +2813,9 @@ impl State {
             let meta = usize::try_from(s.meta)
                 .ok()
                 .filter(|&m| m > 0)
-                .and_then(|m| self.metas.get(m - 1))
-                .map(|m| BaseMeta {
+                .and_then(|m| Some((m - 1, self.metas.get(m - 1)?)))
+                .map(|(ix, m)| BaseMeta {
+                    ix: u32::try_from(ix).unwrap_or(u32::MAX),
                     eng: m.eng,
                     publ: m.publ.as_ref().map(|(e, l)| (self.encode(e, v), *l)),
                     ldef_stamp: m.ldef_stamp,
@@ -2897,19 +2902,31 @@ impl State {
                 | if x.is_some() { HAS_ID } else { 0 };
             e
         };
-        for s in b.slots {
-            self.changing(s.loc);
-            let meta = s.meta.map(|m| {
-                self.metas.push(Meta {
-                    loc: s.loc,
-                    eng: m.eng,
-                    publ: m.publ.map(|(x, l)| (ent(x, LOADED), l)),
-                    ldef_stamp: m.ldef_stamp,
-                    ldef_local: m.ldef_local,
-                    ldef_gid: m.ldef_gid,
-                });
-                u32::try_from(self.metas.len()).unwrap_or(0)
+        // (the metas in their order in the run, [`BaseMeta::ix`])
+        let mut order: Vec<(u32, usize)> = b
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| Some((s.meta.as_ref()?.ix, i)))
+            .collect();
+        order.sort_unstable();
+        let mut meta_of = vec![0u32; b.slots.len()];
+        for (_, i) in order {
+            let s = &b.slots[i];
+            let Some(m) = s.meta.as_ref() else { continue };
+            self.metas.push(Meta {
+                loc: s.loc,
+                eng: m.eng,
+                publ: m.publ.map(|(x, l)| (ent(x, LOADED), l)),
+                ldef_stamp: m.ldef_stamp,
+                ldef_local: m.ldef_local,
+                ldef_gid: m.ldef_gid,
             });
+            meta_of[i] = u32::try_from(self.metas.len()).unwrap_or(0);
+        }
+        for (i, s) in b.slots.into_iter().enumerate() {
+            self.changing(s.loc);
+            let meta = s.meta.map(|_| meta_of[i]);
             let e = if s.cur.is_none() && s.flags & LOADED == 0 {
                 UNLOADED
             } else {
@@ -2995,7 +3012,8 @@ impl BaseSlot {
         };
         let ms = list_of(v, meta);
         let meta = match ms[..] {
-            [eng, publ, stamp, local, gid] => Some(BaseMeta {
+            [eng, publ, stamp, local, gid, ix] => Some(BaseMeta {
+                ix: u32::try_from(int_of(v, ix)).unwrap_or(u32::MAX),
                 eng: list_of(v, eng).first().map(|&x| opt(x)),
                 publ: match list_of(v, publ)[..] {
                     [x, l] => Some((opt(x), at(l))),
@@ -3061,6 +3079,7 @@ impl Base {
                             u(m.ldef_stamp),
                             v.int(i64::from(m.ldef_local)),
                             v.int(m.ldef_gid.map_or(-1, i64::from)),
+                            v.int(i64::from(m.ix)),
                         ])
                     },
                 );
