@@ -757,7 +757,14 @@ impl Biber<'_> {
                 shifted: true,
                 normalize: true,
             };
-            let h = md5_hex(c.view_sort_key(&self.table, si).as_bytes());
+            // (the sortinit collator: the sorting template's locale,
+            // `Unicode::Collate::Locale->new(locale => ..., level => 1)`)
+            let acc = crate::collate::accepted_locale(if truthy(&dl.sortingtemplate.locale) {
+                &dl.sortingtemplate.locale
+            } else {
+                ""
+            });
+            let h = md5_hex(c.view_sort_key(self.table_of(&acc), si).as_bytes());
             sub(
                 &mut s,
                 "SORTINITHASH",

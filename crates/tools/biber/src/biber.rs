@@ -32,6 +32,9 @@ pub struct Biber<'f> {
     pub unsupported: Vec<String>,
     pub recode: crate::recode::Recode,
     pub table: crate::collate::Table,
+    /// The DUCET tailored for each locale sorted in so far (by the
+    /// locale Unicode::Collate::Locale accepts).
+    pub tailored: BTreeMap<String, crate::collate::Table>,
     pub macros: Macros,
     pub bibcache: BibCache,
     pub bt_warnings: Vec<String>,
@@ -53,6 +56,26 @@ pub fn numeric_order(keys: &[String]) -> Vec<String> {
 }
 
 impl<'f> Biber<'f> {
+    /// The table for `locale` (a BCP 47 or POSIX name): the DUCET with
+    /// Unicode::Collate::Locale's tailoring for it, made once; `None`
+    /// where this crate does not have that tailoring.
+    pub fn prepare_table(&mut self, locale: &str) -> Option<String> {
+        let acc = crate::collate::accepted_locale(locale);
+        let entry = crate::collate::tailoring(&acc)?;
+        if !entry.is_empty() && !self.tailored.contains_key(&acc) {
+            let mut t = self.table.clone();
+            t.tailor(entry);
+            self.tailored.insert(acc.clone(), t);
+        }
+        Some(acc)
+    }
+
+    /// The table [`Self::prepare_table`] made for accepted locale `acc`.
+    #[must_use]
+    pub fn table_of(&self, acc: &str) -> &crate::collate::Table {
+        self.tailored.get(acc).unwrap_or(&self.table)
+    }
+
     pub fn new(files: &'f mut dyn Files) -> Biber<'f> {
         let cfg = Config::new();
         let set = cfg.opt("decodecharsset");
@@ -69,6 +92,7 @@ impl<'f> Biber<'f> {
             unsupported: Vec::new(),
             recode: crate::recode::Recode::new(&set),
             table: crate::collate::Table::load(),
+            tailored: BTreeMap::new(),
             macros: Macros::default(),
             bibcache: BibCache::default(),
             bt_warnings: Vec::new(),

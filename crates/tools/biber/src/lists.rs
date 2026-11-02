@@ -1112,15 +1112,28 @@ impl Biber<'_> {
                 crate::bcf::locale2bcp47(&loc)
             }
         };
-        self.check_locale(&thislocale)?;
+        let acc = self.check_locale(&thislocale)?;
+        // (the sortinit collator's: the template's own locale, level 1,
+        // `set_sortinit_collator`)
+        if truthy(&st.locale) {
+            self.check_locale(&st.locale)?;
+        }
         let sortcase = self.cfg.opt("sortcase") == "1";
         let sortupper = self.cfg.opt("sortupper") == "1";
         let base_level: u8 = if sortcase { 4 } else { 2 };
         let mut colls = Vec::new();
+        // (a field's own locale where it is not the list's: a collator of
+        // its own, `Biber::UCollate->new($sl, ...)`)
+        let mut accs = Vec::new();
         for set in &st.spec {
+            let mut a = acc.clone();
             if let Some(l) = set.locale.as_deref().filter(|s| truthy(s)) {
-                self.check_locale(&crate::bcf::locale2bcp47(l))?;
+                let sl = crate::bcf::locale2bcp47(l);
+                if sl != thislocale {
+                    a = self.check_locale(&sl)?;
+                }
             }
+            accs.push(a);
             let mut level = base_level;
             let mut ubl = sortupper;
             let mut changed = false;
@@ -1172,7 +1185,9 @@ impl Biber<'_> {
                     });
                     let key = cache
                         .entry((i, f.clone()))
-                        .or_insert_with(|| c.sort_key(&self.table, f))
+                        .or_insert_with(|| {
+                            c.sort_key(self.table_of(accs.get(i).unwrap_or(&acc)), f)
+                        })
                         .clone();
                     ks.push(K::S(key));
                 }
@@ -1202,18 +1217,15 @@ impl Biber<'_> {
         Ok(())
     }
 
-    fn check_locale(&mut self, l: &str) -> Result<(), Fatal> {
-        let lang = lc(l.split(['-', '_']).next().unwrap_or(""));
-        if [
-            "", "en", "de", "fr", "it", "nl", "pt", "id", "ms", "ga", "la",
-        ]
-        .contains(&lang.as_str())
-        {
-            Ok(())
-        } else {
-            Err(self.unsupported(&alloc::format!(
-                "sorting locale '{l}' (only untailored collation)"
-            )))
+    /// The locale Unicode::Collate::Locale accepts for `l`, its table
+    /// made ([`Biber::prepare_table`]); unsupported where this crate has
+    /// not its tailoring.
+    fn check_locale(&mut self, l: &str) -> Result<String, Fatal> {
+        match self.prepare_table(l) {
+            Some(a) => Ok(a),
+            None => Err(self.unsupported(&alloc::format!(
+                "sorting locale '{l}' (a tailoring this crate does not have)"
+            ))),
         }
     }
 
