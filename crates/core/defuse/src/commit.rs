@@ -591,6 +591,14 @@ fn file_stop(eng: &Engine, f: Field, k: RangeKey, r: &RangeReader) -> bool {
         return true;
     };
     let n = eng.node(stop);
+    // (a running node may be past its commit's take of its stops and still
+    // open, a hole while it commits (`Node::is_open`): marked before it is
+    // looked at, so either the end of its run (`reask_late_stops`) sees the
+    // mark or this sees the node no longer open)
+    if matches!(n.state(), State::Running | State::RunningDirty | State::RunningInert) {
+        n.late_stops.store(true, Ordering::SeqCst);
+        std::sync::atomic::fence(Ordering::SeqCst);
+    }
     let Some((_, mut inner)) = own_write(eng, n) else {
         return false;
     };
@@ -3110,6 +3118,28 @@ fn take_stops(inner: &mut Inner, node: NodeId) -> Vec<(Field, RangeKey, RangeRea
         .partition(|s| s.2.to == Some(node));
     inner.stops = rest;
     mine
+}
+
+/// The `next` readers filed at `node` while it ran (`Node::late_stops`),
+/// taken and re-asked once its run has ended and it is no longer open.
+/// A hole stays open while it commits (`Node::is_open`), so a reader
+/// whose search stopped at it then was filed after the commit had taken
+/// the node's stops, and no commit of the node took that filing: the
+/// reader kept its answer of none before the field's contribution
+/// (review's next_readers_follow_their_stops_across_splits).
+pub(crate) fn reask_late_stops(eng: &Engine, w: Option<&Worker>, node: &Node) {
+    std::sync::atomic::fence(Ordering::SeqCst);
+    if !node.late_stops.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let stops = match own_write(eng, node) {
+        Some((_, mut inner)) => take_stops(&mut inner, node.id),
+        None => return,
+    };
+    if !stops.is_empty() {
+        let mut st = CommitStats::default();
+        reask_stops(eng, w, stops, node.id, &mut st);
+    }
 }
 
 /// Re-asks the `next` readers whose search stopped at `by`: it has

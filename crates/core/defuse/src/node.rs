@@ -52,6 +52,11 @@ pub(crate) struct Node {
     /// it is still `Running`: a walk that finds one of them changed marks it
     /// as `sched::mark_dirty` does.
     pub(crate) committing: AtomicBool,
+    /// A `next` reader was filed as stopped here while the node ran
+    /// (`commit::file_stop`): its commit may have taken its stops before
+    /// that filing, so the end of the run takes them again
+    /// (`commit::reask_late_stops`).
+    pub(crate) late_stops: AtomicBool,
     /// Runs in this evaluation (`Limits::runs_per_node`), the evaluation
     /// they count in.
     pub(crate) runs: AtomicU32,
@@ -232,6 +237,7 @@ impl Node {
             pos: AtomicU64::new(pos.0),
             state: AtomicU8::new(State::Dirty as u8),
             committing: AtomicBool::new(false),
+            late_stops: AtomicBool::new(false),
             runs: AtomicU32::new(0),
             run_epoch: AtomicU64::new(0),
             reruns: AtomicU32::new(0),
