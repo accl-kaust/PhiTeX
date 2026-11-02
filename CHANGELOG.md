@@ -142,8 +142,8 @@ and XeLaTeX, built by graph reduction, with exact output.
   tests that ran in no CI until the alpha's gate ran every test binary,
   red before the alpha's work as well (mc 77044): four count runs, the
   speed that is recorded, not gated (`chain::chains`,
-  `chain::census_plain`, `cuts`'s moved fire, `fatal`'s read-on); two need a font the CI image lacks
-  (`xetex::ini_features`, `ini_bidi`). `scripts/accl/gate-known-reds.txt`
+  `chain::census_plain`, `cuts`'s moved fire, `fatal`'s read-on).
+  `scripts/accl/gate-known-reds.txt`
   names each with its cause.
 - **XeLaTeX's first build in the browser** makes the format there (a
   minute or more) until the web build ships it prebuilt, as it does
