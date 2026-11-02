@@ -1050,6 +1050,9 @@ fn run_worker(
                 continue;
             }
             let (k, pass) = crate::commit::publish_finals(eng, w);
+            if run_log() {
+                eprintln!("quiet: {} re-asked {k} pass {pass}", log_clock(Instant::now()));
+            }
             if pass {
                 let k = pool.shared.passes.fetch_add(1, Ordering::SeqCst) + 1;
                 Worker::max(&w.final_max, k);
@@ -1236,11 +1239,25 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
 
 /// Whether a definition by `by` reaches `reader` across the settling
 /// line: `by`'s operation settles at quiet points and its last run said
-/// nothing of `Ctx::settle_now`, `reader`'s does not settle.
+/// nothing of `Ctx::settle_now`, `reader`'s does not settle, and the
+/// reader stands before the layer's frontier. One past it read the
+/// field while no frontier held it (before the layer first defined the
+/// field, `Engine::mark_settled`, or with the layer's fold ended; a read
+/// of a field the layer defines waits at the frontier,
+/// `Ctx::hold_at_frontier`): asked again now, it waits for the
+/// frontier to pass it and runs once on what the pages before it left,
+/// as at one thread. Held, it ran again only at the next quiet point,
+/// and the next page's routine read what that run left there: a chain
+/// through every page, text to routine to text, one page a pass
+/// (beautybook-en at -j4: pgf's `\pgf@picture@serial@count`, which each
+/// page's TikZ header and the TikZ in its text step, re-asked one page
+/// a pass, "the page layout did not settle after 12 passes" and no
+/// output file in 11 of 30 builds, accl 22502, 22609).
 pub(crate) fn settles_edge(eng: &Engine, by: NodeId, reader: &Node) -> bool {
     eng.placed_node(by)
         .is_some_and(|b| eng.op(b.op()).settles_at_quiet() && !b.settle_now.load(Ordering::Acquire))
         && !eng.op(reader.op()).settles_at_quiet()
+        && !past_frontier(eng, reader, eng.frontier.load(Ordering::Acquire))
 }
 
 /// Lists a wake for the next quiet point (`Report::held_deferred`).
@@ -1384,6 +1401,13 @@ pub(crate) fn run_log() -> bool {
     })
 }
 
+/// (`PHITEX_RUN_LOG`) `t` on the run log's clock: ns since the first
+/// time asked, one clock for the process (every evaluation's runs on it).
+fn log_clock(t: Instant) -> u128 {
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    t.saturating_duration_since(*T0.get_or_init(Instant::now)).as_nanos()
+}
+
 pub(crate) fn wake_log() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| std::env::var_os("PHITEX_WAKE_LOG").is_some_and(|v| !v.is_empty() && v != "0"))
@@ -1516,6 +1540,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     }
     let t = Instant::now();
     let version = eng.version.load(Ordering::Acquire);
+    node.held_panic.store(false, Ordering::Release);
     let mut cx = Ctx::new(eng, Some(w), node);
     let r = catch_unwind(AssertUnwindSafe(|| op.run(&mut cx)));
     if run_log() {
@@ -1535,14 +1560,29 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             .lock()
             .and_then(|f| eng.values().as_str(f.0))
             .unwrap_or_default();
+        // (and when: its start and end on the process's clock, ns, and
+        // its worker, for a timeline of the runs)
         eprintln!(
-            "run: node {} ({}) at {}: {how}; goes on {}, woken by {:?}, parked on {parked:?}",
+            "run: node {} ({}) at {}: {how}; goes on {}, woken by {:?}, parked on {parked:?}\tt {} {} w {} e {}",
             n.raw(),
             op.name(),
             node.pos_hint().0,
             cx.goes_on,
-            cx.woke
+            cx.woke,
+            log_clock(t),
+            log_clock(Instant::now()),
+            w.ix,
+            pool.epoch
         );
+        let wf = match &cx.woke {
+            Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => {
+                eng.values().as_str(field.0)
+            }
+            _ => None,
+        };
+        if let Some(wf) = wf {
+            eprintln!("runf: node {} field {wf}", n.raw());
+        }
     }
     // (a resumption: the run woken by the answer its node's last run
     // parked on, going on from there; else the last run's work, if any,
@@ -1608,6 +1648,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
                 .unwrap_or_else(|| "panic".to_owned());
             let reads = std::mem::take(&mut cx.product.reads);
             drop(cx);
+            node.held_panic.store(true, Ordering::Release);
             give_back(eng, node);
             pool.shared
                 .panicked_roots
@@ -1697,6 +1738,9 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             }
             let done = ns(pool.t0);
             node.done_ns.store(done, Ordering::Relaxed);
+            if run_log() {
+                eprintln!("commit: node {} done {}", n.raw(), log_clock(Instant::now()));
+            }
             w.last_commit.store(n.raw(), Ordering::Relaxed);
             w.last_done.store(done, Ordering::Relaxed);
             if end_run(eng, pool, w, node, State::Clean) {
@@ -1770,7 +1814,13 @@ pub(crate) fn settled_node(eng: &Engine, n: NodeId) -> bool {
     eng.placed_node(n).is_none_or(|x| match x.state() {
         State::Gone | State::Inert => true,
         State::Clean => x.run_record().is_some_and(|r| !r.provisional),
-        _ => false,
+        // (a run that panicked on inputs that hold, held for the
+        // evaluation's decision: no commit of it comes in this pool. Waited
+        // for, its readers waited again each time the quiet point let them
+        // go, and the line never ended: latex_minutes_Protokol's finisher
+        // 872 panicked once, its readers 197 and 227 ran 80 000 times each
+        // in 150 s at -j1, accl 22791)
+        _ => x.held_panic.load(Ordering::Acquire),
     })
 }
 

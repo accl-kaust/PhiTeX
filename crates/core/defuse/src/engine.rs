@@ -1227,7 +1227,10 @@ impl Engine {
     }
 
     pub fn set_limits(&self, l: Limits) {
-        self.values.count_payload(l.collect_at_bytes.is_some());
+        // (counted where it collects, and where a memory limit is
+        // measured against it: `Limits::memory_bytes`)
+        self.values
+            .count_payload(l.collect_at_bytes.is_some() || l.memory_bytes.is_some());
         *self.limits.write() = l;
     }
 
