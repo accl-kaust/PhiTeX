@@ -1645,6 +1645,8 @@ impl Run<'_, '_> {
         // (the patterns' words read here, outside the cell: an error
         // reading them stays this run's)
         let mut words: Vec<(u16, bool, Vec<String>)> = Vec::new();
+        // (e-TeX's saved hyphenation codes, the last per language)
+        let mut codes: Vec<(u16, Vec<u16>)> = Vec::new();
         if let Some(x) = x {
             for e in list_of(v, x) {
                 let xs = list_of(v, e);
@@ -1652,7 +1654,21 @@ impl Run<'_, '_> {
                 if langs.binary_search(&lang).is_err() {
                     continue;
                 }
-                let pattern = xs.get(1).is_some_and(|&k| crate::val::str_of(v, k) == "p");
+                let kind = xs
+                    .get(1)
+                    .map(|&k| crate::val::str_of(v, k))
+                    .unwrap_or_default();
+                if kind == "c" {
+                    let cs = xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default();
+                    let cs = cs
+                        .iter()
+                        .map(|&c| u16::try_from(int_of(v, c)).unwrap_or(0))
+                        .collect();
+                    codes.retain(|e| e.0 != lang);
+                    codes.push((lang, cs));
+                    continue;
+                }
+                let pattern = kind == "p";
                 let ws = xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default();
                 words.push((
                     lang,
@@ -1664,6 +1680,9 @@ impl Run<'_, '_> {
         Ok(once
             .get_or_init(|| {
                 let mut p = phitex_typeset::hyph::Patterns::default();
+                for (lang, cs) in &codes {
+                    p.set_hyph_codes(*lang, cs.clone());
+                }
                 for (lang, pattern, ws) in &words {
                     for w in ws {
                         if *pattern {
