@@ -1424,9 +1424,12 @@ impl Run<'_, '_> {
             && s.endch == -2
         {
             let (starts, ends) = (s.starts, s.ends);
-            // (XeTeX's `input_line`: the line's bytes made characters)
+            // (XeTeX's `input_line`: the line's bytes made characters;
+            // pdfTeX's, through a TCX's `xord`)
             if self.xe {
                 self.xe_decode_top()?;
+            } else {
+                self.tcx_decode_top()?;
             }
             // §360: `\endlinechar` as it is when the line is read goes
             // after its last character (an assignment on the line itself
@@ -1592,6 +1595,14 @@ impl Run<'_, '_> {
             let mut buf = std::mem::take(&mut next.buf);
             self.xe_decode_joined(&mut buf, origin)?;
             next.buf = buf;
+        } else if !self.xe
+            && self.input.line(top).endch != -2
+            && !next.chars
+            && !next.rescanned
+            && next.buf.iter().any(|&c| c >= 0x80)
+            && let Some(t) = self.tcx()?
+        {
+            t.decode(&mut next.buf);
         }
         // (a sibling whose text began here now continues the line on top)
         for p in &mut self.pull_at {

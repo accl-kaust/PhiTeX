@@ -1685,7 +1685,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             for r in &rec.reads {
                 if let ReadKind::Field { f, at: Anchor::Me } = r.kind
                     && let Some(name) = eng.values().as_str(f.0)
-                    && (keys.is_empty() || keys.iter().any(|k| *k == name))
+                    && (keys.is_empty() || keys.contains(&name))
                 {
                     eprintln!(
                         "kread:\t{}\t{}\t{name}\t{}",

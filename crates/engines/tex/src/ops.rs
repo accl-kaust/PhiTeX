@@ -51,6 +51,39 @@ pub(crate) static COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 pub(crate) static COMMANDS_BY: [std::sync::atomic::AtomicU64; 4] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
+/// `PHITEX_HINT_LOG` (observe): each run's hint, bounded or why not,
+/// with its text; the scaling report's count of the unbounded nodes by
+/// cause.
+fn hint_log(
+    r: &Run<'_, '_>,
+    hint: &crate::hints::Hint,
+    claimed: &[std::sync::Arc<crate::hints::Hint>],
+) {
+    if !crate::exec::obs_flag!("PHITEX_HINT_LOG") {
+        return;
+    }
+    let why = if hint.bound.is_none() {
+        hint.cause.clone()
+    } else if r.hint_void {
+        "regime violated".to_owned()
+    } else if let Some(h) = claimed.iter().find(|h| h.bound.is_none()) {
+        format!("claimed: {}", h.cause)
+    } else {
+        String::new()
+    };
+    eprintln!(
+        "hint:\t{}\t{}\t{}\t{}",
+        r.cx.node().raw(),
+        if why.is_empty() { "B" } else { "A" },
+        why.replace(['\t', '\n'], " "),
+        hint.excerpt
+            .chars()
+            .take(100)
+            .collect::<String>()
+            .replace(['\t', '\n'], " ")
+    );
+}
+
 /// Runs `body` as one node: its definitions, contributions and
 /// children go out only if it finishes; a starved or file-waiting run
 /// records its need for the client instead. A run that stops starts
@@ -555,31 +588,7 @@ impl Operation for Exec {
             // (what it defined outside its bound is the engine's: a
             // static definition list is a guess it widens, counted as
             // `defs_refuted`)
-            // (`PHITEX_HINT_LOG`, observe: each run's hint, bounded or
-            // why not, with its text; the scaling report's count of the
-            // unbounded nodes by cause)
-            if crate::exec::obs_flag!("PHITEX_HINT_LOG") {
-                let why = if hint.bound.is_none() {
-                    hint.cause.clone()
-                } else if r.hint_void {
-                    "regime violated".to_owned()
-                } else if let Some(h) = claimed.iter().find(|h| h.bound.is_none()) {
-                    format!("claimed: {}", h.cause)
-                } else {
-                    String::new()
-                };
-                eprintln!(
-                    "hint:\t{}\t{}\t{}\t{}",
-                    r.cx.node().raw(),
-                    if why.is_empty() { "B" } else { "A" },
-                    why.replace(['\t', '\n'], " "),
-                    hint.excerpt
-                        .chars()
-                        .take(100)
-                        .collect::<String>()
-                        .replace(['\t', '\n'], " ")
-                );
-            }
+            hint_log(r, &hint, &claimed);
             if hint.bound.is_some() && !r.hint_void && claimed.iter().all(|h| h.bound.is_some()) {
                 crate::hints::count(r, 0);
             } else {
