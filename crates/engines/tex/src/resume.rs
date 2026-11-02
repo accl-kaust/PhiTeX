@@ -1129,6 +1129,15 @@ impl Run<'_, '_> {
                 }
             }
         }
+        if let Some(name) = crate::exec::obs_str!("PHITEX_CONT_SHOW") {
+            let l = self.loc_of(v.field(name));
+            eprintln!(
+                "cont {} resumed at command {}: {name}: {}",
+                self.cx.node().raw(),
+                int_of(v, c[5]),
+                self.st.debug_marks(l)
+            );
+        }
         if let Some(i) = anywhere {
             self.ck_input_put(i);
         } else if let Some(mut line) = line {
