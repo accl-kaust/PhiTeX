@@ -533,6 +533,18 @@ fn pdfnoligatures() {
     check_threads("pdfnoligatures", "pdf");
 }
 
+/// `\tagcode` below 0 (pdfTeX's `set_tag_code`): the character's tags
+/// taken off for good, -1 its lig/kern program. The code was kept and
+/// read back, but the font kept its tags, so microtype's tracked small
+/// caps (`no ligatures={f}`, a `\tagcode` of the f) kept the ff
+/// ligature: lie-hasse's section title "Three dimensional effect" sat
+/// 0.275bp off pdfTeX's (accl 22825, its own preamble). At -j1 and -j4
+/// (oracle: pdflatex in the CI image).
+#[test]
+fn tagcode_ligatures() {
+    check_threads("tagcode_ligatures", "pdf");
+}
+
 /// `\pdffontattr` and `\pdfnobuiltintounicode` of a virtual font (cmap's,
 /// for every font it loads; libertine's T1 fonts are virtual) set its
 /// fields without reading it in (no `do_vf`): pdfTeX numbers its local

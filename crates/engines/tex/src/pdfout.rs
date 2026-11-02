@@ -1688,6 +1688,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
                         ls: None,
                         ex: None,
                         nolig: false,
+                        untagged: Vec::new(),
                     },
                 ));
                 g
@@ -1783,6 +1784,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
                 ls: None,
                 ex: None,
                 nolig: false,
+                untagged: Vec::new(),
             },
         ));
         out.space = Some(id);

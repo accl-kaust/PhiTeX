@@ -1,0 +1,17 @@
+% \tagcode below 0 takes a character's tags off for good (pdfTeX's
+% set_tag_code): -1 its lig/kern program. microtype's tracking sets it
+% for the f of a tracked font (no ligatures={f}); lie-hasse's amsart
+% section title in tracked small caps (cfr-lm): "effect" without the ff
+% ligature. And on a font of its own, a later positive code restoring
+% nothing.
+\documentclass{amsart}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\RequirePackage[tt=lining]{cfr-lm}
+\usepackage[kerning=true,tracking=true]{microtype}
+\begin{document}
+\section{Three dimensional effect}
+Office affairs, efficient and fluffy.
+\font\tg=ecrm1000 \tagcode\tg`f=-1 \tagcode\tg`f=0
+{\tg Office affairs, efficient AVAVA fluffy.} [\the\tagcode\tg`f]
+\end{document}

@@ -1953,6 +1953,32 @@ pub(crate) fn code_table(r: &mut Run<'_, '_>, m: i32, f: i64) -> R<Vec<(u16, i32
         .collect())
 }
 
+/// Field `k` of font `f`'s info ([`crate::fonts::info`]) made `make` of
+/// its value there (none: past the list's end); the fields before it
+/// filled with `UNIT`.
+fn font_info_set(
+    r: &mut Run<'_, '_>,
+    f: i64,
+    k: usize,
+    make: impl FnOnce(Option<ValueId>) -> ValueId,
+) -> R<()> {
+    let v = r.v;
+    let Some(x) = r.font_get(f, crate::fields::FontCell::Info)? else {
+        return Ok(());
+    };
+    let mut xs = list_of(v, x);
+    if xs.len() < 4 {
+        return Ok(());
+    }
+    let old = xs.get(k).copied().filter(|&y| y != ValueId::UNIT);
+    if xs.len() <= k {
+        xs.resize(k + 1, ValueId::UNIT);
+    }
+    xs[k] = make(old);
+    r.font_set(f, crate::fields::FontCell::Info, v.list(xs), true);
+    Ok(())
+}
+
 /// `\lpcode` and the other font codes, read (pdfTeX §426).
 /// The character a font code of font `f` is for: XeTeX's
 /// `scan_glyph_number` for a native font (a glyph id: `/name`, `u`
@@ -2038,16 +2064,8 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
             // set and nothing read it: microtype's tracked small caps kept
             // their ligatures, lie-hasse's "ff" in a section title)
             r.set(&format!("fcode:nolig:{f}"), v.int(1), true);
-            let x = r.font_get(f, crate::fields::FontCell::Info)?;
-            if let Some(x) = x {
-                let mut xs = list_of(v, x);
-                if xs.len() >= 4 {
-                    xs.resize(7, ValueId::UNIT);
-                    xs.push(v.int(1));
-                    xs.truncate(8);
-                    r.font_set(f, crate::fields::FontCell::Info, v.list(xs), true);
-                }
-            }
+            let one = v.int(1);
+            font_info_set(r, f, 7, |_| one)?;
             return Ok(true);
         }
         let ch = scan_code_index(r, f)?;
@@ -2060,6 +2078,33 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
         } else {
             n.clamp(-1000, 1000)
         };
+        // (`\tagcode` below 0, pdfTeX's `set_tag_code`: the character's
+        // tags `-n` names taken off for good, 1 its lig/kern program, 2
+        // its next larger, 4 its extensible; the font's info keeps each
+        // character's taken tags, [`crate::fonts::Info::untagged`].
+        // Kept as the code only, microtype's `no ligatures={f}` of a
+        // tracked font kept the ff ligature: lie-hasse's section title)
+        if chr == TAG && n < 0 {
+            let bits = n.clamp(-7, 0).abs();
+            let c = i64::from(ch);
+            font_info_set(r, f, 8, |old| {
+                let mut xs = old.map(|x| list_of(v, x)).unwrap_or_default();
+                let mut done = false;
+                for p in xs.chunks_mut(2) {
+                    if let [k, m] = p
+                        && int_of(v, *k) == c
+                    {
+                        *m = v.int(int_of(v, *m) | i64::from(bits));
+                        done = true;
+                    }
+                }
+                if !done {
+                    xs.push(v.int(c));
+                    xs.push(v.int(i64::from(bits)));
+                }
+                v.list(xs)
+            })?;
+        }
         if tabled(chr) {
             let mut t = code_table(r, chr, f)?;
             let c = u16::try_from(ch).unwrap_or(0);
