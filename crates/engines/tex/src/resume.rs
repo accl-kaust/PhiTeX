@@ -351,13 +351,14 @@ impl Run<'_, '_> {
     }
 
     /// A checkpoint here ([`Run::ck_where`]'s place).
+    #[allow(clippy::too_many_lines)]
     fn ck_take(&mut self, at: At) -> R<()> {
         let v = self.v;
         // (the input anywhere: every level and the text from the segment
         // last reached, with what the run pulled, `Run::ck_input`; at its
         // line, only the token lists above it, bottom first: their types
         // and the tokens left)
-        let (li, loc, state, endch, extra, ahead, input, cost) = match at {
+        let (li, loc, state, endch, extra, ahead, whole_input, enc_cost) = match at {
             At::Line((li, loc, state, endch, extra)) => {
                 let ahead: Vec<ValueId> = self.input.levels[1..]
                     .iter()
@@ -388,9 +389,9 @@ impl Run<'_, '_> {
         // (the next one after as many commands as this one's parts are
         // long, at least `every`: what checkpoints cost stays a share of
         // what the run does, however deep its lists and input)
-        let cost = cost + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
+        let spacing = enc_cost + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
         if let Some(c) = self.ck.as_mut() {
-            c.next = self.cmds + every().max(cost);
+            c.next = self.cmds + every().max(spacing);
         }
         // (the table at the run's base level: what it defined and stepped;
         // none where a group of its own saved a value)
@@ -472,7 +473,7 @@ impl Run<'_, '_> {
             v.list(ahead),
         ];
         ys.extend(self.ck_more());
-        ys.push(input);
+        ys.push(whole_input);
         let ck = v.list(ys);
         let unread = self.cx.unread_count();
         if let Some(c) = self.ck.as_mut() {
@@ -573,7 +574,10 @@ impl Run<'_, '_> {
             .iter()
             .map(|l| match l.kind {
                 kind::TOKS => {
-                    let r = crate::input::Range { start: l.c, end: l.b };
+                    let r = crate::input::Range {
+                        start: l.c,
+                        end: l.b,
+                    };
                     let toks = self.input.arena.get(r);
                     cost += toks.len() as u64;
                     v.list(vec![
@@ -658,14 +662,8 @@ impl Run<'_, '_> {
         for e in list_of(v, segs) {
             let seg = match list_of(v, e)[..] {
                 [k, t] if int_of(v, k) == 0 => Seg::Toks(crate::val::toks_of(v, Some(t))),
-                [k, l] if int_of(v, k) == 1 => match crate::input::Line::of_value(v, l) {
-                    Some(l) => Seg::Line(l),
-                    None => return None,
-                },
-                [_, f] => match crate::run::FileRest::of_value(v, f) {
-                    Some(f) => Seg::File(f),
-                    None => return None,
-                },
+                [k, l] if int_of(v, k) == 1 => Seg::Line(crate::input::Line::of_value(v, l)?),
+                [_, f] => Seg::File(crate::run::FileRest::of_value(v, f)?),
                 _ => return None,
             };
             input.text.push(seg);
@@ -685,16 +683,10 @@ impl Run<'_, '_> {
                     );
                 }
                 [k, l] if int_of(v, k) == i64::from(kind::LINE) => {
-                    let Some(l) = crate::input::Line::of_value(v, l) else {
-                        return None;
-                    };
-                    input.push_line(l);
+                    input.push_line(crate::input::Line::of_value(v, l)?);
                 }
                 [_, f] => {
-                    let Some(f) = crate::run::FileRest::of_value(v, f) else {
-                        return None;
-                    };
-                    input.push_file(f);
+                    input.push_file(crate::run::FileRest::of_value(v, f)?);
                 }
                 _ => return None,
             }
@@ -1033,7 +1025,11 @@ impl Run<'_, '_> {
                             "ck-change: node {} woken by {:?} goes on from checkpoint {k} after {made} reads{}",
                             self.cx.node().raw(),
                             self.cx.woken_by(),
-                            if int_of(v, c[0]) < 0 { " (anywhere)" } else { "" }
+                            if int_of(v, c[0]) < 0 {
+                                " (anywhere)"
+                            } else {
+                                ""
+                            }
                         );
                     }
                     found = Some((k, c));

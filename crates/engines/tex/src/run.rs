@@ -352,11 +352,13 @@ impl FileRest {
         let units = self.units.as_ref().map_or_else(
             || v.list(Vec::new()),
             |u| {
-                v.list(vec![v.list(
-                    u.iter()
-                        .map(|&(k, st)| v.list(vec![k, v.int(i64::from(st))]))
-                        .collect(),
-                )])
+                v.list(vec![
+                    v.list(
+                        u.iter()
+                            .map(|&(k, st)| v.list(vec![k, v.int(i64::from(st))]))
+                            .collect(),
+                    ),
+                ])
             },
         );
         v.list(vec![
