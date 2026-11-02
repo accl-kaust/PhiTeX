@@ -102,7 +102,16 @@ fn fill_sealed_pages(
     let node = crate::pages::node_of;
     let mut out = Vec::with_capacity(pages.len());
     let mut ids = Vec::with_capacity(pages.len());
+    // (`PHITEX_TEX_TIME`: the windows' reads, the pieces named, the pages
+    // filled; units read)
+    let (mut t_win, mut t_named, mut t_fill, mut n_units) = (
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+        0usize,
+    );
     for page in pages {
+        let t0 = std::time::Instant::now();
         let xs = list_of(v, page);
         let mut units: Vec<(i64, ValueId)> = Vec::new();
         if let Some(&places) = xs.get(5) {
@@ -129,6 +138,8 @@ fn fill_sealed_pages(
                 }
             }
         }
+        t_win += t0.elapsed();
+        let t0 = std::time::Instant::now();
         // (the lines a routine gave back from pieces outside the window:
         // their pieces' units, each read by itself)
         let mut named = Vec::new();
@@ -143,6 +154,9 @@ fn fill_sealed_pages(
             }
         }
         units.sort_unstable_by_key(|e| e.0);
+        n_units += units.len();
+        t_named += t0.elapsed();
+        let t0 = std::time::Instant::now();
         // (filled once per page and units, its identity with it: a page
         // an edit left as it was is not walked again)
         let key: Vec<u64> = [v.instance(), page.raw()]
@@ -156,6 +170,7 @@ fn fill_sealed_pages(
         if let Some(&(y, id)) = filled().locked().get(&key) {
             out.push(y);
             ids.push(id);
+            t_fill += t0.elapsed();
             continue;
         }
         let y = if xs.len() > 5 {
@@ -193,6 +208,12 @@ fn fill_sealed_pages(
         }
         out.push(y);
         ids.push(id);
+        t_fill += t0.elapsed();
+    }
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+        eprintln!(
+            "output file: sealed lines: windows read {t_win:?}, pieces named and read {t_named:?} ({n_units} units), pages filled {t_fill:?}"
+        );
     }
     Ok((out, ids))
 }
