@@ -1019,7 +1019,7 @@ fn an_edit_resumed_paragraph_reports_the_lines_it_began_on() {
         s
     };
     let mut b = common::build(opts(), Some(&prelude), &doc("one"));
-    for (k, w) in ["two", "three", "four four"].into_iter().enumerate() {
+    for (k, w) in ["two", "three", "seven"].into_iter().enumerate() {
         let text = doc(w);
         b.edit(&text);
         let cold = common::build(opts(), Some(&prelude), &text);
