@@ -892,6 +892,24 @@ impl<'a> Ctx<'a> {
         n.map(|n| (n.op(), n.args().to_vec()))
     }
 
+    /// Whether no `i`-th claimed sibling of operation `op` follows me (none,
+    /// or one of another operation): the end of the text `op`'s nodes are
+    /// pieces of. Found so, it is a read of that sibling's operation
+    /// ([`Ctx::following`] through its op: asked again when a sibling of
+    /// `op` comes there, not when another's text is edited); a sibling of
+    /// `op` found is no read, as a run that ends before its next sibling
+    /// reads nothing of it.
+    pub fn ends_before(&mut self, i: usize, op: OpId) -> bool {
+        let n = read::following_on(self.eng, self.me, i, &mut self.follow_at);
+        if n.as_ref().is_some_and(|n| n.op() == op) {
+            return false;
+        }
+        let path = self.path(&[Step::Index(0)]);
+        let seen = read::apply_path(self.eng, n.as_ref().map(|n| read::text_value(self.eng, n)), path);
+        self.record(ReadKind::Following { i }, path, seen);
+        true
+    }
+
     /// The node of the `i`-th claimed sibling, as the `following(i)`
     /// just made found it (its read recorded there); None otherwise.
     #[must_use]
