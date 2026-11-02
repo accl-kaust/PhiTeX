@@ -1014,6 +1014,13 @@ impl Run<'_, '_> {
                     continue;
                 }
             }
+            // (one a second pass took, ending at its candidate, is not
+            // a whole run's, nor the other way round: a run resumed from
+            // a second pass's checkpoint went on in that pass's state,
+            // amsldoc -j1 node 1385)
+            if c.get(17).map(|&x| int_of(v, x)) != Some(self.stop_at.map_or(-1, i64::from)) {
+                continue;
+            }
             if !edit {
                 // (the same text: the checkpoint stands if the reads made
                 // before it hold)
