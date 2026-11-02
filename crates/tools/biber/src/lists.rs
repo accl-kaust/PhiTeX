@@ -1223,9 +1223,12 @@ impl Biber<'_> {
     fn check_locale(&mut self, l: &str) -> Result<String, Fatal> {
         match self.prepare_table(l) {
             Some(a) => Ok(a),
-            None => Err(self.unsupported(&alloc::format!(
-                "sorting locale '{l}' (a tailoring this crate does not have)"
-            ))),
+            None => {
+                let acc = crate::collate::accepted_locale(l);
+                Err(self.unsupported(&alloc::format!(
+                    "sorting locale '{l}': Unicode::Collate::Locale's '{acc}' tailoring is not built in (only the locales whose tailoring is a plain entry list are)"
+                )))
+            }
         }
     }
 

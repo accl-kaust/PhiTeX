@@ -130,6 +130,13 @@ and XeLaTeX, built by graph reduction, with exact output.
 ### Known not to work
 
 - **LuaLaTeX** (`luatex`, `lualatex`): rejected with an error.
+- **biber sorting in some locales:** the built-in biber sorts in every
+  locale whose Unicode::Collate::Locale tailoring is a plain entry list
+  (Czech, Hungarian, Polish, Swedish and 69 more) or that has none
+  (English, German, French, ...). Danish, Canadian French, Maltese,
+  Church Slavic, Macedonian, Serbian, Thai, Japanese, Korean and the
+  Chinese orders stop biber with an error naming the locale, and no
+  `.bbl` is made.
 - **XeLaTeX's edit speed** (the user's decision of 2026-10-30: recorded,
   not gated, for 1.61): on a two-column paper with line numbers (the
   user's, 18 pages, 16 threads, release build, medians of 20) a space

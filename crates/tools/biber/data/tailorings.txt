@@ -1,7 +1,11 @@
 # Unicode::Collate::Locale 1.31 tailorings (DUCET 13.0.0): the locales whose
 # file is only an `entry` (the others, and the CJK ones, are not here).
-# Generated from perl 5.42 core Unicode/Collate/Locale/*.pl: "@name" then the
-# entry lines, comments dropped.
+# Source: Unicode/Collate/Locale/*.pl of Unicode::Collate 1.31 as perl 5.42
+# ships it (by SADAHIRO Tomoyuki, derived from the CLDR collation data);
+# "@name" then the file's entry lines, comments dropped. License: the
+# module's, "same terms as Perl itself" (the Artistic License or the GNU
+# General Public License, version 1 or later), and the Unicode License
+# for the CLDR data it derives from.
 @af
 0149      ; [.2118.0020.0009]
 @ar
