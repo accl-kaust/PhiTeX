@@ -196,7 +196,9 @@ def run_one(c, j, args):
     # (a document with a time limit of its own, `time_limit_s` beside
     # its entry with the reason in `time_limit_why`: the sweep's wall
     # limit and the engine's, PHITEX_TIME_LIMIT_SECS, both raised to it
-    # for that document alone)
+    # for that document alone. A limit is pdflatex's own wall on the
+    # machine that enforces it, the gate's runner, measured there with
+    # manuals.py's oracle loop; its why names the runner, date and run)
     limit = max(args.timeout, c.get("time_limit_s") or 0)
     extra = {"PHITEX_TEX_TIME": "1", "PHITEX_CACHE_DIR": str(cdir)}
     if c.get("time_limit_s"):
