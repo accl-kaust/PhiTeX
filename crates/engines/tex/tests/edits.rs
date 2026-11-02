@@ -1082,3 +1082,54 @@ fn an_edit_resumed_paragraph_is_asked_again_for_a_read_before_its_checkpoint() {
         );
     }
 }
+
+/// A long box whose run reads on into the paragraphs after its node
+/// (siblings pulled) and into a file `\input` inside it, a group of its
+/// own open throughout, reading a macro only at its end: an edit of that
+/// macro's definition before the box asks the box's run again, which
+/// goes on from its last checkpoint before the read (taken in the group,
+/// the box, the file and the pulled siblings), and the output is a cold
+/// build's. Checkpoints were taken only in a paragraph of a node's own
+/// text: Grail's figures ran again whole (accl 23178).
+#[test]
+fn a_box_over_paragraphs_and_a_file_goes_on_from_a_checkpoint_inside() {
+    use std::fmt::Write as _;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-anywhere");
+    let _ = std::fs::create_dir_all(&dir);
+    let words = |n: usize, tag: &str| {
+        let mut s = String::new();
+        for k in 0..n {
+            let _ = write!(s, "{tag}{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            s.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        s
+    };
+    std::fs::write(dir.join("inner.tex"), words(900, "f")).unwrap();
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{\\begingroup\\count1=7 {}\n\n{}\n\n\\input inner\n\n{}\n\nend \\late.\\endgroup}}\n\\box1\n\n\\bye\n",
+            words(700, "w"),
+            words(700, "v"),
+            words(900, "u")
+        )
+    };
+    let opts = || common::options("./ck.tex", "ck", "", &dir);
+    let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+    for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+        let text = doc(m);
+        b.edit(&text);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        let (out, log) = b.output();
+        let (cold_out, cold_log) = cold.output();
+        assert!(
+            common::first_difference(&out, &cold_out).is_none(),
+            "edit {k} (\\late={m}): the output is not the cold build's"
+        );
+        assert_eq!(log, cold_log, "edit {k}: the log is the cold build's");
+        assert!(
+            b.stats.resumed_at_mark > 0,
+            "edit {k}: the box's run went on from a checkpoint"
+        );
+    }
+}
