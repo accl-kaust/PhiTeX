@@ -971,6 +971,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             v.building(true);
         }
         let spin = ui.spin(format!("{what}: build {builds} ({why})"), status.clone());
+        // (`--json`: the build has its text and evaluates from here; an
+        // edit of the main file from now on is offered to it. Its count is
+        // `builds`: a reader waiting for a build's result by `build` is not
+        // answered by its start)
+        ui.event(&json!({"event": "started", "builds": builds, "why": why}));
         // (a build that fails inside the engine — a panic: the pieces did
         // not settle — is reported, and the watch goes on waiting)
         // (the build on this thread, the same one every build: what the

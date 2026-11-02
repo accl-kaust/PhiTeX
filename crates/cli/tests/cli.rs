@@ -2481,30 +2481,19 @@ fn watch_absorbs_an_edit_during_the_cold_build() {
         .stderr(Stdio::inherit())
         .spawn()
         .expect("phitex watch runs");
-    // (the edited text written again and again until the build ends: the
-    // writes that come while the engine evaluates are taken by it; the
-    // build cannot be told apart from outside, so no single moment is
-    // guessed)
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let writer = {
-        let (stop, path, edited) = (stop.clone(), dir.join("slow.tex"), edited.clone());
-        std::thread::spawn(move || {
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(300));
-                // (written whole, then renamed: a watcher never reads it
-                // half written)
-                let tmp = path.with_extension("tmp");
-                std::fs::write(&tmp, &edited).expect("the edit");
-                std::fs::rename(&tmp, &path).expect("the edit in place");
-            }
-        })
-    };
+    // (the edited text written once the cold build says it started, its
+    // text read and its evaluation begun: a write timed from the watch's
+    // start missed a cold build that ended sooner, 0.27 s at 16 threads)
     let stdout = child.stdout.take().expect("its output");
     let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
     let mut seen = Vec::new();
+    until(&mut lines, "event", &"started".into(), &mut seen);
+    // (written whole, then renamed: a watcher never reads it half written)
+    let path = dir.join("slow.tex");
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &edited).expect("the edit");
+    std::fs::rename(&tmp, &path).expect("the edit in place");
     let first = until(&mut lines, "build", &1.into(), &mut seen);
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    writer.join().expect("the writer");
     eprintln!("{first}");
     assert!(
         first["absorbed"].as_u64().unwrap_or(0) >= 1,
