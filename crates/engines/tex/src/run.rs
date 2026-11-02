@@ -116,6 +116,9 @@ pub(crate) struct Ops {
     /// The engine is XeTeX (set once, before the first evaluation):
     /// `crate::xetex`.
     pub xe: std::sync::Arc<std::sync::OnceLock<crate::xetex::XeTeX>>,
+    /// The job's TCX tables, parsed from the `tcx` field's value once
+    /// (`crate::tcx`).
+    pub tcx: std::sync::Arc<crate::tcx::TcxCell>,
     /// The format's definitions the build analyses document texts with
     /// (set by `api::Build::with`; none while a format is built): a
     /// document file `\input` is sliced with them ([`Run::leftover`]).
@@ -4570,6 +4573,8 @@ impl<'c, 'a> Run<'c, 'a> {
                 .map_or(ValueId::UNIT, |o| o.0);
             let m = self.input_mode(name)?;
             crate::xetex::decode_line(&mut chars, m, false);
+        } else if let Some(t) = self.tcx()? {
+            t.decode(&mut chars);
         }
         let Some(s) = self.input.top_line_mut() else {
             return Ok(false);

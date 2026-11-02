@@ -756,3 +756,16 @@ repro!(
     box_registers_past_255,
     "manuals (milsymb: forest's directory tree drawn without its node texts): \\setbox<n> past 255 was read with TeX82's box contexts (global_box_flag box_flag+256, ship_out_flag box_flag+512), so \\setbox300 set register 44 globally and \\setbox600 shipped its box; e-TeX's are box_flag+32768 and box_flag+65536 (etex.ch §1071). forest's node boxes are \\locbox registers counted down from 32767 (oracle: pdflatex in the CI image, accl 22653)"
 );
+
+/// TeX Live manual sample-polski (pdflatex): its first line is
+/// `%& --translate-file=il2-pl`, a TCX web2c's `parse_first_line` reads
+/// and pdfTeX applies: each byte of a file's line through its `xord` (the
+/// ISO-8859-2 text in T1's codes), each written character through its
+/// `xchr` where `xprn` says it prints, else in `^^` form, read back
+/// through `xord` (the .toc, a `\read`). The TCX was not read, the bytes
+/// were their own characters ("tre\xb6ci" for "treści"). At -j1 and -j4
+/// (oracle: pdftex in the CI image, accl 22852; the base differs).
+#[test]
+fn tcx_first_line() {
+    check_threads("tcx_il2pl", "pdf");
+}

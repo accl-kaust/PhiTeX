@@ -50,7 +50,6 @@ latex_pagecolor_pagecolor-example	differs: page 8: obj 41 (page 8, untyped) line
 latex_pas-tableur_pas-tableur	error: error: You can't use `\cr' in restricted horizontal mode
 latex_pfdicons_pfdicons-doc	differs: page 33: obj 744 (page 33, untyped) line 622: oracle "0.5 g 0.5 G", phitex "0.93 g 0.93 G"
 latex_pinlabel_src_pinlabdoc	differs: page 3: obj 352 (Catalog) line 10: oracle "<end>", phitex "<end>" (pages 21 vs 20)
-latex_polski_sample-polski	differs: page 1: obj 3 (page 1, untyped) line 6: oracle "/F43 14.3462 Tf 133.768 657.235 Td [(Spis)-375(tre±ci)]TJ/F44 9.9626 T", phitex "/F43 14.3462 Tf 133.768 657.235 Td [(Spis)-375(tre±ci)]TJ/F44 9.9626 T"
 latex_proofread_example	differs: page 1: obj 6 (page 1, untyped) line 1364: oracle "-371.1494 7.97021 m", phitex "-371.47456 7.97021 m"
 latex_przechlewski-book_wkmgr1	differs: page 1: obj 97 (page 1, untyped) line 6: oracle "/F81 11.9552 Tf 190.624 723.203 Td [(Uniwersytet)-250(Kaszubski)-250<9", phitex "/F81 11.9552 Tf 190.624 723.203 Td [(Uniwersytet)-250(Kaszubski)-250<9"
 latex_repeatindex_testrepeatindex	differs: page 2: obj 30 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 4 vs 3)

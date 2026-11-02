@@ -309,6 +309,12 @@ pub struct Options {
     /// format is XeTeX's too: a format is built by the engine that loads
     /// it.
     pub xetex: Option<crate::XeTeX>,
+    /// The TCX file's bytes (web2c's `--translate-file`, or the one a
+    /// `%&` first line names, [`crate::translate_file`]): pdfTeX reads
+    /// each file byte through its `xord` and writes each character
+    /// through its `xchr` and `xprn` (`crate::tcx`); `None` keeps the
+    /// format's tables.
+    pub tcx: Option<Vec<u8>>,
     /// Whether the pages' writers keep each page's glyphs, for
     /// [`Build::page_origins`] (docs/note-origins.md): off by default.
     /// The output is the same either way.
@@ -936,6 +942,7 @@ impl Default for Options {
             analyses: None,
             out_name_ok: None,
             xetex: None,
+            tcx: None,
             origins: false,
         }
     }
@@ -3177,6 +3184,7 @@ impl Graph {
             node_rec: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pdf_cmds: Arc::default(),
             xe: Arc::default(),
+            tcx: Arc::default(),
             rel_keys: Arc::default(),
             class_proj,
             box_shape_proj,
@@ -8554,6 +8562,11 @@ fn job_env(
             v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
         ),
     ];
+    if let Some(t) = &opts.tcx
+        && opts.xetex.is_none()
+    {
+        sets.push((v.field("tcx"), v.str(&latin1(t))));
+    }
     if let Some(t) = opts.epoch {
         // §241 fix_date_and_time, at the job's start
         for (k, x) in date_params(t) {

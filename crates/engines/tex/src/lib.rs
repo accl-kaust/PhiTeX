@@ -63,6 +63,7 @@ mod scan;
 mod shell;
 mod showbox;
 mod state;
+mod tcx;
 pub mod timeline;
 mod tools;
 mod val;
@@ -83,6 +84,7 @@ pub use origins::{OriginsSnapshot, PageOrigins};
 pub use phitex_otf::index::FontIndex;
 pub use phitex_otf::{FontSource, KpseFormat};
 pub use shell::{ShellHook, ShellRan, TEXLIVE_COMMANDS, texlive_commands};
+pub use tcx::translate_file;
 pub use xdvpdf::XdvPdf;
 pub use xetex::{FontFiles, XeTeX};
 
