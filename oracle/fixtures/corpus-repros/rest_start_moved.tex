@@ -1,0 +1,23 @@
+% The lists of figures and tables grow by a page once the .lof and .lot
+% are read back: the page loop node that fired the List of Tables'
+% first page no longer waits there and fires the next page itself, and
+% its old rest, parked at a hole after that page with the old start, is
+% woken by the hole's filling. Folded on from its parked tail, it fired
+% the same page again (subfigure's test at -j4: a page shipped twice, the
+% pages after it numbered one higher).
+\documentclass{article}
+\newcount\n
+\begin{document}
+\listoffigures
+\clearpage
+\listoftables
+\clearpage
+\section{Floats}
+\loop
+\begin{figure}[ht]\centering\fbox{Figure \the\n}\caption{A figure, number \the\n.}\end{figure}
+\begin{table}[ht]\centering\fbox{Table \the\n}\caption{A table, number \the\n.}\end{table}
+Some text between the floats, number \the\n.\par
+\advance\n 1
+\ifnum\n=\numexpr(\n/8)*8\relax \clearpage\fi
+\ifnum\n<64 \repeat
+\end{document}
