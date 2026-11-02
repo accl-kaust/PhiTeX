@@ -1329,7 +1329,11 @@ impl Run<'_, '_> {
 /// (`PHITEX_HINT_LOG`, observe) A document run's hint, bounded or why not,
 /// with its text: the scaling report's count of the unbounded nodes by
 /// cause.
-fn log_hint(r: &Run<'_, '_>, hint: &crate::hints::Hint, claimed: &[std::sync::Arc<crate::hints::Hint>]) {
+fn log_hint(
+    r: &Run<'_, '_>,
+    hint: &crate::hints::Hint,
+    claimed: &[std::sync::Arc<crate::hints::Hint>],
+) {
     if !crate::exec::obs_flag!("PHITEX_HINT_LOG") {
         return;
     }
@@ -1347,6 +1351,10 @@ fn log_hint(r: &Run<'_, '_>, hint: &crate::hints::Hint, claimed: &[std::sync::Ar
         r.cx.node().raw(),
         if why.is_empty() { "B" } else { "A" },
         why.replace(['\t', '\n'], " "),
-        hint.excerpt.chars().take(100).collect::<String>().replace(['\t', '\n'], " ")
+        hint.excerpt
+            .chars()
+            .take(100)
+            .collect::<String>()
+            .replace(['\t', '\n'], " ")
     );
 }
