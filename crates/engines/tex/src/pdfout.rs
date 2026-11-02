@@ -3729,6 +3729,15 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         } else {
             0
         };
+        if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
+            eprintln!(
+                "alloc-fold: page {pno}: os {os} (page {}, marks {}, dests {dests_written}, forms {forms_written}, images {images_os}, raw {raw_written}), written before {written}, read-time os {}, objects {}",
+                i(4),
+                made.compressible,
+                i(8),
+                out.objects
+            );
+        }
         for _ in 0..os {
             if (written + i(8)) % 100 == 0 {
                 out.objects += 1;

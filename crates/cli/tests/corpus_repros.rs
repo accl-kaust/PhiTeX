@@ -496,6 +496,19 @@ fn raw_objects_in_object_streams() {
     check_threads("raw_objects_in_object_streams", "pdf");
 }
 
+/// An included PDF page with a `/Group`: the page that first shows it
+/// numbers the group's object (`out_image`), and the image's write puts
+/// it into an object stream. The image's own writer (`ximage_own_info`),
+/// showing no page, wrote the group in the image's dictionary and
+/// counted no object for it, so every object number TeX read after that
+/// page was one short: iacrj's logo, `/Metadata 183 0 R` for pdfTeX's 184
+/// (`PHITEX_ALLOC_TRACE`, page 1's objects in object streams 21 for 22,
+/// accl 22754). At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdf_image_page_group() {
+    check_threads("pdf_image_page_group", "pdf");
+}
+
 /// `\pdfnoligatures` (pdfTeX's `set_no_ligatures`): the font's
 /// characters lose their lig/kern programs, no ligature and no kern. The
 /// primitive set a mark nothing read, so microtype's tracked small caps

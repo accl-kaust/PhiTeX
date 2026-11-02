@@ -36,7 +36,6 @@ latex_gammas_gammas_template	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 
 latex_glosmathtools_sample_glosmathtools_en	differs: page 2: obj 266 (Catalog) line 22: oracle "<end>", phitex "<end>"
 latex_highlightx_highlightx-doc	differs: page 1: obj 25 (page 1, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g"
 latex_huaz_huaz	differs: page 1: obj 54 (page 1, untyped) line 64: oracle "[<11>]TJ 0 -14.446 Td [(v)54(agy)-337<12>]TJ", phitex "[<11>]TJ 0 -14.446 Td [(v)54(agy)-325<12>]TJ"
-latex_iacrj_iacrj-doc	differs: obj 344 (Catalog): /Metadata 183 0 R and /OutputIntents 189 0 R for pdfTeX's 184 and 190: the read-time object count misses the second object stream's number (opened by page 8); 7ad720778 counted \pdfrefobj raw objects but these are not the missing one (accl 22691)
 latex_ibycus-babel_ibycus-babel-test	differs: page 1: obj 3 (page 1, untyped) line 6: oracle "/F42 11.9552 Tf 224.346 685.004 Td [<c3>167(Hrodìtou)-309(Qour)-28<d0>", phitex "/F42 11.9552 Tf 224.346 685.004 Td [<c3>167(Hrodìtou)-223(Qour)-27<d0>"
 latex_icite_samples_icite-biblatex	differs: page 2: obj 16 (Link) line 19: oracle "155.551", phitex "213.113"
 latex_ijmart_ijmsample	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes) (not the same in each run: the first sweep had -j1 error, -j4 differs)

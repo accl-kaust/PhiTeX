@@ -3583,8 +3583,24 @@ fn ximage_own_info(
     // (from the objects reading made on: a PNG's transparency group is
     // the read's, counted where it is read)
     let before = st.objects_numbered();
+    // (an included PDF page's `/Group`: the page that first shows the
+    // image numbers its object (`out_image`, `pdf_new_objnum`), and the
+    // image's write puts it into an object stream at
+    // `\pdfobjcompresslevel` 2 and more (`pdf_begin_obj(group, 2)`). This
+    // writer shows no page, so it writes the group in the image's
+    // dictionary: counted here. Not counted, iacrj's logo's group (object
+    // 63, in stream 24) left every read-time number after page 1 one
+    // short and the second stream's number late: the XMP stream's
+    // number TeX read, 184, was 183)
+    let group = st.ximage_page_group(n);
     let (objs, os) = match st.write_ximage(n, fonts) {
-        Ok(()) => st.objects_after(before),
+        Ok(()) => {
+            let (objs, os) = st.objects_after(before);
+            (
+                objs + usize::from(group),
+                os + usize::from(group && ocl.0 >= 2),
+            )
+        }
         Err(_) => (0, 0),
     };
     Ok((

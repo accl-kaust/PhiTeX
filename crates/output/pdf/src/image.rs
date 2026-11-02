@@ -839,6 +839,14 @@ impl PdfState {
         self.aux.ximages.get(&n).map(XImage::info)
     }
 
+    /// Whether image `n` is an included PDF page with a `/Group` whose
+    /// object the page that first shows it numbers (`out_image`), written
+    /// apart with the image (`pdf_begin_obj(group, 2)`).
+    #[must_use]
+    pub fn ximage_page_group(&self, n: usize) -> bool {
+        self.aux.ximages.get(&n).is_some_and(|x| x.group_ref == -1)
+    }
+
     /// Whether `n` is a `\pdfximage` (`pdf_check_obj(obj_type_ximage, n)`).
     #[must_use]
     pub fn is_ximage(&self, n: usize) -> bool {
