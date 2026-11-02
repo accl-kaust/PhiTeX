@@ -508,6 +508,8 @@ struct Times {
     done: usize,
     replayed: bool,
     checks: usize,
+    /// The base's pages kept between pages folded.
+    kept: usize,
     converge: std::time::Duration,
     start: std::time::Duration,
     layout: std::time::Duration,
@@ -538,16 +540,6 @@ fn fold(
     let n = walks.len();
     let same = f.base.map_or(0, |b| {
         b.ids.iter().zip(ids).take_while(|(a, c)| a == c).count()
-    });
-    // (the pages from which on the base's are the same, the count alike)
-    let tail = f.base.filter(|b| b.ids.len() == n).map_or(n, |b| {
-        n - b
-            .ids
-            .iter()
-            .rev()
-            .zip(ids.iter().rev())
-            .take_while(|(a, c)| a == c)
-            .count()
     });
     // (the state before the first page that differs: the latest kept at
     // or before it)
@@ -593,13 +585,24 @@ fn fold(
     t.start = t_fold.elapsed();
     let every = n.div_ceil(SNAPS).max(1);
     let mut grafted: Option<(usize, Arc<Graft>)> = None;
-    for (i, p) in walks.iter().enumerate().skip(k) {
+    // (the page the fold went on from last: the resumed one, or one after
+    // a stretch of the base's pages kept)
+    let mut seg = k;
+    let mut i = k;
+    // (a state kept from the base, grafted, the fold goes on from: pushed
+    // as the snapshot before its page)
+    let mut kept_snap: Option<Arc<Snap>> = resume.cloned();
+    while i < n {
+        let p = &walks[i];
         // (the base's pages from here, and its state here but for where it
-        // stands: they and its end, the graft applied)
+        // stands: they and its end, the graft applied; or, where pages
+        // after differ again, its pages up to a state kept before the next
+        // that differs, the fold going on from that state grafted)
         if converge
-            && i > k
-            && i >= tail
+            && i > seg
             && let Some(b) = f.base
+            && b.ids.len() == n
+            && b.ids[i] == ids[i]
             && b.labels.get(i) == Some(&s.next_label())
             && let Some(x) = b.snaps.iter().find(|x| x.at == i)
             && w.same_ahead(&x.w)
@@ -624,8 +627,41 @@ fn fold(
             }
             t.checks += 1;
             if let Some(g) = g {
-                grafted = Some((i, Arc::new(g.with_after(b.usage[i..].to_vec()))));
-                break;
+                let g = Arc::new(g.with_after(b.usage[i..].to_vec()));
+                // (the next page that differs, and the last state the base
+                // kept at or before it, past this one)
+                let next = (i..n).find(|&j| b.ids[j] != ids[j]);
+                let back = next.and_then(|j| b.snaps.iter().rev().find(|x| x.at <= j && x.at > i));
+                if next.is_none() {
+                    grafted = Some((i, g));
+                    break;
+                }
+                // (none kept between: the fold goes on through them)
+                if let Some(back) = back {
+                    let m = back.at;
+                    chunks.extend(b.chunks[i..m].iter().cloned());
+                    ops.extend(b.ops[i..m].iter().cloned());
+                    docs.extend(b.docs[i..m].iter().cloned());
+                    states.extend(b.states[i..m].iter().cloned());
+                    labels.extend(b.labels[i..m].iter().copied());
+                    usage.extend(b.usage[i..m].iter().cloned());
+                    snaps.extend(
+                        b.snaps
+                            .iter()
+                            .filter(|x| x.at >= i && x.at < m)
+                            .map(|x| Arc::new(x.grafted(&g))),
+                    );
+                    let there = Arc::new(back.grafted(&g));
+                    s = there.session();
+                    s.set_files(f.files.clone());
+                    s.record_usage(true);
+                    w = there.w.clone();
+                    kept_snap = Some(there);
+                    t.kept += m - i;
+                    seg = m;
+                    i = m;
+                    continue;
+                }
             }
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 eprintln!(
@@ -635,11 +671,11 @@ fn fold(
                 );
             }
         }
-        if i == k
-            && let Some(r) = resume
+        if i == seg
+            && let Some(r) = kept_snap.take()
         {
-            // (the state resumed from: the base's, kept as it is)
-            snaps.push(r.clone());
+            // (the state gone on from: the base's, kept as it is)
+            snaps.push(r);
         } else if i.is_multiple_of(every) {
             let t0 = std::time::Instant::now();
             snaps.push(Arc::new(Snap {
@@ -675,6 +711,7 @@ fn fold(
         }
         docs.push(Arc::new(Docs::of(o.as_deref(), i, &mut s)));
         ops.push(o);
+        i += 1;
     }
     let t0 = std::time::Instant::now();
     let (post, mut s, rec) = match (&grafted, f.base) {
@@ -1255,7 +1292,12 @@ pub(crate) fn file(
             t.from + 1,
             pages.len(),
             t.done,
-            t.to.map_or_else(String::new, |i| format!(", the base's from page {}", i + 1)),
+            t.to.map_or_else(String::new, |i| format!(", the base's from page {}", i + 1))
+                + &if t.kept > 0 {
+                    format!(" and {} between", t.kept)
+                } else {
+                    String::new()
+                },
             t.start,
             t.converge,
             t.walk,
