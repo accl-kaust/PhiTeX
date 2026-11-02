@@ -653,3 +653,16 @@ repro!(
     marginpar_after_display,
     "manuals (hep-paper, verifiche: 'Float(s) lost'): a \\marginpar before a display in a paragraph and another after it; the first one's -10004 fires at the display's start (§1145's build_page) and its routine takes it off \\@currlist before the text after the display conses the second on. The piece ran on through the display's start (a list of its own open), its \\@currlist still holding the first, and that definition stood over the routine's: the second was never output. A display's start is now a cut where a page is made to fire, as a paragraph's start is (oracle: pdflatex in the CI image, accl 22589)"
 );
+
+/// TeX Live manual proofread: soul's highlighting puts a TikZ mark
+/// (`\pdfsavepos` and a `\write` of `\pgfsyspdfmark`) into the pre-break
+/// text of a discretionary at each hyphenation point; where the line does
+/// not break there, `hlist_out` never meets it (§622) and nothing is
+/// written. The shipout ran every whatsit the page's decoding held, a
+/// discretionary's pre-break and post-break text's too: the .aux had a
+/// mark at x 0 for each (oracle: pdflatex in the CI image, accl 22640).
+#[test]
+fn write_in_unbroken_discretionary() {
+    check_aux("write_in_unbroken_discretionary");
+    check_threads("write_in_unbroken_discretionary", "pdf");
+}
