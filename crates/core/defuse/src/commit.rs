@@ -773,13 +773,27 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // (a run that went on from its last run's state rests on that run's
     // reads: kept, but those it read again)
     let own_reads = p.reads.len();
+    // (the kept reads' indices in the record: after the run's own, or,
+    // for a run that went on after its last run's first reads, first)
+    let mut kept_first: Option<usize> = None;
     let mut gone_kept: Vec<(Field, NodeId)> = Vec::new();
     // (the kept reads this run read again with another answer: the state
     // it resumed from rested on the old one, `replaced_moved` below)
     let mut replaced_moved: Vec<ReadKind> = Vec::new();
-    if p.resumed.get()
+    // (a run that went on after its last run's first k reads: those
+    // first, as they were, then its own, so the record's reads stay in
+    // the order they were made, `Ctx::goes_on_after_reads`)
+    if let Some(k) = p.kept_reads.get()
         && let Some(r) = node.run_record()
     {
+        let mut merged: Vec<crate::node::ReadRec> = r.reads[..k.min(r.reads.len())].to_vec();
+        kept_first = Some(merged.len());
+        merged.append(&mut p.reads);
+        p.reads = merged;
+    } else if p.resumed.get()
+        && let Some(r) = node.run_record()
+    {
+        let rreads: &[crate::node::ReadRec] = &r.reads;
         let again: FxHashMap<(ReadKind, PathId), Option<ValueId>> =
             p.reads.iter().map(|x| ((x.kind.clone(), x.path), x.seen)).collect();
         // (a kept read of the line this run read again and found moved: a
@@ -790,7 +804,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // met a hole: nothing of the state rests on an answer there. A
         // plain read of a field at the node, a placement's output, are
         // the run's own to act on as it reads them each run)
-        for x in &r.reads {
+        for x in rreads {
             if let Some(&seen) = again.get(&(x.kind.clone(), x.path))
                 && seen != x.seen
                 && matches!(
@@ -821,7 +835,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             } => is_gone(n),
             _ => false,
         };
-        for x in &r.reads {
+        for x in rreads {
             if let ReadKind::Field {
                 f,
                 at: Anchor::Before(n) | Anchor::AfterOwn(n),
@@ -839,7 +853,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // not rest on, and kept it would refute the state when that
         // placement runs)
         p.reads.extend(
-            r.reads
+            rreads
                 .iter()
                 .filter(|x| {
                     !again.contains_key(&(x.kind.clone(), x.path))
@@ -2055,14 +2069,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             _ => false,
         };
         let c = cause_of_read(&rec.reads[i]);
-        if i >= own_reads {
+        let kept = |j: usize| kept_first.map_or(j >= own_reads, |n| j < n);
+        if kept(i) {
             stale = !range(&rec.reads[i].kind, &c);
         }
         causes.push(c);
-        if i >= own_reads {
+        if kept(i) {
             let mut memo = read::FoldMemo::new();
-            for (j, r) in rec.reads.iter().enumerate().skip(own_reads) {
-                if j == i || stale {
+            for (j, r) in rec.reads.iter().enumerate() {
+                if !kept(j) || j == i || stale {
                     continue;
                 }
                 // (as the check above: a field no change has counted

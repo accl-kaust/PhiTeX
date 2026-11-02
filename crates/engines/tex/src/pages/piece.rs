@@ -1284,6 +1284,19 @@ impl Run<'_, '_> {
     /// with no saves or definitions below them.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn cont_encode_as(&mut self, closed: bool) -> R<(ValueId, Vec<ValueId>)> {
+        self.cont_encode_with(closed, true)
+    }
+
+    /// [`Run::cont_encode_as`]; `frames` false: no input (a checkpoint's,
+    /// whose input is the node's text from its place, `crate::resume`:
+    /// the rest encoded at every checkpoint would cost the text's length
+    /// at each).
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn cont_encode_with(
+        &mut self,
+        closed: bool,
+        with_frames: bool,
+    ) -> R<(ValueId, Vec<ValueId>)> {
         let v = self.v;
         // (each token level's file line: of the innermost file read
         // below it, §304, a file it is inside staying open until the
@@ -1323,7 +1336,8 @@ impl Run<'_, '_> {
         };
         let base_here = here_of(base);
         let mut frames = Vec::new();
-        for (i, l) in self.input.levels.iter().enumerate().rev() {
+        let levels: &[crate::input::Level] = if with_frames { &self.input.levels } else { &[] };
+        for (i, l) in levels.iter().enumerate().rev() {
             match l.kind {
                 crate::input::kind::TOKS => {
                     let r = self.input.arena.get(l.rest());
@@ -1339,7 +1353,11 @@ impl Run<'_, '_> {
                 _ => frames.extend(file_frames(v, self.input.file(*l))),
             }
         }
-        for s in self.input.text_rest() {
+        for s in if with_frames {
+            self.input.text_rest()
+        } else {
+            &[]
+        } {
             match s {
                 Seg::Line(l) => {
                     if let Some(f) = line_frame(v, l) {
@@ -1589,17 +1607,12 @@ impl Run<'_, '_> {
         Ok((cont, locals))
     }
 
-    /// A resume piece's start: the continuation `x` ([`Run::cont_encode`])
-    /// loaded; the base-level values the open groups' bindings hide
-    /// checked against the engine's reaching here (a global definition
-    /// between the cut and here, the finisher's, replaces the binding and
-    /// makes the groups' saves inert, §283).
-    #[allow(clippy::too_many_lines)]
-    pub(crate) fn cont_load(&mut self, x: ValueId, pid: ValueId) -> R<()> {
+    /// The continuation `x`'s text as the run's input, from its start,
+    /// with each segment's file line ([`Run::cont_load`]).
+    pub(crate) fn cont_text(&mut self, x: ValueId) -> R<()> {
         let v = self.v;
         let xs = list_of(v, x);
-        let a = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
-        let frames = self.resolve_units(&[a(0)])?;
+        let frames = self.resolve_units(&[xs.first().copied().unwrap_or(ValueId::UNIT)])?;
         self.input.text = crate::run::decode_segs(v, &frames);
         // (where each segment was read: a token frame's file line)
         self.cont_lines = frames
@@ -1611,6 +1624,26 @@ impl Run<'_, '_> {
             .map(|&f| crate::run::frame_line(v, f))
             .collect();
         self.input.text_at = 0;
+        Ok(())
+    }
+
+    /// A resume piece's start: the continuation `x` ([`Run::cont_encode`])
+    /// loaded; the base-level values the open groups' bindings hide
+    /// checked against the engine's reaching here (a global definition
+    /// between the cut and here, the finisher's, replaces the binding and
+    /// makes the groups' saves inert, §283).
+    pub(crate) fn cont_load(&mut self, x: ValueId, pid: ValueId) -> R<()> {
+        self.cont_text(x)?;
+        self.cont_state(x, pid)
+    }
+
+    /// [`Run::cont_load`] past the text: the state, the nest, the
+    /// conditionals and the rest the continuation carries.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn cont_state(&mut self, x: ValueId, pid: ValueId) -> R<()> {
+        let v = self.v;
+        let xs = list_of(v, x);
+        let a = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
         // the state table first: the levels index its saves
         let st = list_of(v, a(4));
         let sa = |i: usize| st.get(i).copied().unwrap_or(ValueId::UNIT);
