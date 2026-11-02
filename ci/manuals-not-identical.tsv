@@ -27,7 +27,6 @@ latex_elteikthesis_elteikthesis_en	-j1 error: error: the files the document read
 latex_fariscovernew_guide_fariscovernew_full	differs: page 3: obj 57 (page 3, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 17.2154 Tf 212.5", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 17.2154 Tf 212.5"
 latex_forest-quickstart_forest-quickstart	differs: page 2: obj 385 (untyped) line 5: oracle "<end>", phitex "<end>"
 latex_fragoli_fragoli_doc	-j1 differs: page 5: obj 426 (page 5, untyped) line 318: oracle "q", phitex "Q"; -j4 differs: page 1: obj 1826 (Catalog) line 10: oracle "<end>", phitex "<end>" (not the same in each run: the first sweep had -j1 differs, -j4 timeout)
-latex_gammas_gammas_template	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes); -j4 differs: page 1: obj 17 (page 1, untyped) line 97: oracle "/F119 5.9776 Tf 1 0 0 1 111.245 384.391 Tm [(13)]TJ", phitex "/F119 5.9776 Tf 1 0 0 1 111.245 384.391 Tm [(12)]TJ"
 latex_glosmathtools_sample_glosmathtools_en	differs: page 2: obj 266 (Catalog) line 22: oracle "<end>", phitex "<end>"
 latex_highlightx_highlightx-doc	differs: page 1: obj 25 (page 1, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g"
 latex_huaz_huaz	differs: page 1: obj 54 (page 1, untyped) line 64: oracle "[<11>]TJ 0 -14.446 Td [(v)54(agy)-337<12>]TJ", phitex "[<11>]TJ 0 -14.446 Td [(v)54(agy)-325<12>]TJ"
