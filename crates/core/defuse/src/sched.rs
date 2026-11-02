@@ -1866,6 +1866,10 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
         // took its stops, re-asked)
         if to != State::Dirty {
             crate::commit::reask_late_stops(eng, Some(w), node);
+            // (and the runs that parked on it after its commit released
+            // them (`park_waiting`): it was running then, not settled, and
+            // they were listed after that release; settled now, they go on)
+            release_waiting(eng, Some(w), node.id);
         }
         if to == State::Dirty && !defer(eng, &pool.shared, node.id) {
             w.ready().push(eng, node);

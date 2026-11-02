@@ -44,9 +44,11 @@ pub struct ShellRan {
 }
 
 /// Runs the commands `\write18` allows ([`crate::Options::shell_hook`]).
-/// Called from any engine worker, possibly several at once and for a run
-/// later thrown away: a call leaves nothing behind but its [`ShellRan`],
-/// and gives the same result for the same command and files.
+/// Called from any engine worker, possibly several at once, and only for
+/// a node at the committed frontier (every node before it settled in its
+/// pass, `phitex_defuse::Ctx::wait_settled`): a call leaves nothing behind
+/// but its [`ShellRan`], and gives the same result for the same command
+/// and files.
 pub trait ShellHook: Send + Sync {
     /// Runs `command` (quoted by the engine) in a working directory
     /// holding exactly `files` (name relative to it, bytes).
@@ -333,6 +335,32 @@ fn closed_text(v: &Values, entries: &[ValueId], name: &str) -> Option<String> {
     state.filter(|s| s.1).map(|s| s.0)
 }
 
+/// What the host's call is: the memo's answer for `cmd` over `files`
+/// where a call before read the same, else the call to make; `None` with
+/// no hook.
+enum Lookup {
+    Known(Arc<Made>),
+    Call,
+}
+
+/// The memo's answer for `cmd` over `files` (TeX's characters), else
+/// [`Lookup::Call`]; `None` with no hook.
+fn lookup(ops: &crate::run::Ops, cmd: &str, files: &[(String, String)]) -> Option<Lookup> {
+    let memo = {
+        let o = ops
+            .tool_opts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        o.shell_hook.as_ref()?;
+        o.shell_memo.clone()
+    };
+    let m = memo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .find(cmd, files);
+    Some(m.map_or(Lookup::Call, Lookup::Known))
+}
+
 /// The host's call: its result for `cmd` over `files` (TeX's characters),
 /// from the memo where a call before read the same; `None` with no hook.
 /// No lock is held while the host runs.
@@ -474,8 +502,26 @@ impl Run<'_, '_> {
     fn shell_call(&mut self, cmd: &str) -> R<Option<Arc<Made>>> {
         let v = self.v;
         let files = self.shell_view()?;
-        let Some(made) = call(self.ops, cmd, &files) else {
-            return Ok(None);
+        let made = match lookup(self.ops, cmd, &files) {
+            None => return Ok(None),
+            Some(Lookup::Known(m)) => m,
+            Some(Lookup::Call) => {
+                // (the host runs a command only at the committed frontier,
+                // every node before this one settled in this pass and no
+                // page left to fire before it (`Ctx::wait_settled`): a
+                // command acts outside the engine, so it never runs on a
+                // view of the job's files that TeX's own order never had,
+                // though the run on it would be thrown away (shell's
+                // a_command_reads_what_the_job_wrote at -j8: `fakecmd up
+                // inb.txt` called on an inb.txt opened and closed with its
+                // line not yet written). A view the memo answers calls
+                // nothing: answered at once)
+                self.cx.wait_settled()?;
+                let Some(m) = call(self.ops, cmd, &files) else {
+                    return Ok(None);
+                };
+                m
+            }
         };
         if made.status != 0 && crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!("shell: {cmd:?} returned {}", made.status);

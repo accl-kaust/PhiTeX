@@ -917,6 +917,33 @@ impl<'a> Ctx<'a> {
         Ok(h)
     }
 
+    /// Stops the run until I stand at the committed frontier: every node
+    /// before me in my unit has committed in this pass with no re-ask
+    /// pending (none to run, again or for the first time, none running or
+    /// committing), and the settling layer's frontier is not before me
+    /// (`Ctx::set_frontier`: the pages before me fired, their finishers
+    /// placed before me). For an effect outside the engine that a run on
+    /// a guessed state must never make, though the run is thrown away (a
+    /// shell command): made past this point, it is made on the state TeX's
+    /// own order has here. Stopped, the run is queued again when the node
+    /// waited for commits, or when the frontier passes me; the check is
+    /// made again then. A node before me that changes after this (a
+    /// loop-back's next pass, an edit) re-asks me through what I read.
+    pub fn wait_settled(&mut self) -> Result<(), Stop> {
+        use std::sync::atomic::Ordering::Acquire;
+        self.check()?;
+        let eng = self.eng;
+        if let Some(x) = read::on_one_layout(eng, || read::unsettled_before(eng, self.me)) {
+            self.wait_on = Some(x);
+            return Err(stop());
+        }
+        if crate::sched::past_frontier(eng, self.me, eng.frontier.load(Acquire)) {
+            self.wait_frontier = true;
+            return Err(stop());
+        }
+        Ok(())
+    }
+
     /// Narrows what I may define, for prediction. Accepted, not used by
     /// this core.
     pub fn narrow(&mut self, _m: MayDefine) {}

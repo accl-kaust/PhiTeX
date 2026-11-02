@@ -933,6 +933,37 @@ pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     None
 }
 
+/// The first node before `me` in its unit that has something left to
+/// commit in this pass: to run, again or for the first time, or running,
+/// its commit's walks still going (`Ctx::wait_settled`). A node taken by
+/// a claim, its run ending (`RunningInert`), is not: its claimer holds its
+/// text, and it commits nothing.
+pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let from = unit_start(eng, me);
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            return None;
+        }
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
+                let n = eng.node(*id);
+                if *id != me.id
+                    && n.unit == me.unit
+                    && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
+                {
+                    return Some(*id);
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    None
+}
+
 /// [`hole_before`]'s answer as a read's value: the node's id.
 pub(crate) fn hole_value(eng: &Engine, h: Option<NodeId>) -> Option<ValueId> {
     h.map(|h| eng.values().int(i64::from_ne_bytes(h.raw().to_ne_bytes())))
