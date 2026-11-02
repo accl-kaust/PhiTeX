@@ -328,6 +328,14 @@ struct Slot {
     lazy: Option<ValueId>,
     /// The run handed out its symbol ([`State::symbol`]).
     sym: bool,
+    /// The group ([`State::open`]'s number) whose part of
+    /// [`State::defined`] holds this location already: a local
+    /// definition there again is not listed again.
+    def_gid: u32,
+    /// The candidate ([`State::cands`]'s index, plus one) whose entries
+    /// hold this location already: only the first entry at a candidate
+    /// is its value there ([`State::at_candidates`]).
+    cand_noted: u32,
 }
 
 impl Default for Slot {
@@ -346,6 +354,8 @@ impl Default for Slot {
             base_unread: false,
             lazy: None,
             sym: false,
+            def_gid: 0,
+            cand_noted: 0,
         }
     }
 }
@@ -913,9 +923,16 @@ impl State {
     /// since the last candidate (its latest definition `ldef` before it).
     #[inline]
     fn note_cand(&mut self, loc: Loc, ldef: u64, prev: Entry) {
-        if let Some((st, xs)) = self.cands.last_mut()
-            && ldef <= *st
-        {
+        // (once per candidate: a location a loop's group restores and
+        // the loop defines again was noted at every pass, a million
+        // entries in xkcdcolors' `\foreach`, each written by every
+        // checkpoint after)
+        let k = u32::try_from(self.cands.len()).unwrap_or(u32::MAX);
+        if self.cands.last().is_none_or(|c| ldef > c.0) || self.slot(loc).cand_noted == k {
+            return;
+        }
+        self.slot(loc).cand_noted = k;
+        if let Some((_, xs)) = self.cands.last_mut() {
             xs.push((loc, prev));
         }
     }
@@ -1695,8 +1712,15 @@ impl State {
         if let Some(x) = saved {
             self.save.push(x);
         }
-        if !global && grp.is_some() {
-            self.defined.push(loc);
+        // (once per group: a loop redefining a macro in a group open
+        // throughout listed it at every pass, 1.6 M entries in
+        // xkcdcolors' `\foreach`, and every checkpoint wrote the list)
+        if !global && let Some(g) = grp {
+            let s = self.slot(loc);
+            if s.def_gid != g {
+                s.def_gid = g;
+                self.defined.push(loc);
+            }
         }
         let m = self.meta_mut(mi);
         m.ldef_stamp = st;
@@ -2784,6 +2808,9 @@ struct BaseMeta {
     /// the run's first definitions, which a cut's check data keeps
     /// ([`State::defined_local_since`]).
     ix: u32,
+    /// The slot's [`Slot::def_gid`] and [`Slot::cand_noted`].
+    def_gid: u32,
+    cand_noted: u32,
     eng: Option<Option<ValueId>>,
     publ: Option<(Option<ValueId>, Locality)>,
     ldef_stamp: u64,
@@ -2820,6 +2847,8 @@ impl State {
                 .and_then(|m| Some((m - 1, self.metas.get(m - 1)?)))
                 .map(|(ix, m)| BaseMeta {
                     ix: u32::try_from(ix).unwrap_or(u32::MAX),
+                    def_gid: s.def_gid,
+                    cand_noted: s.cand_noted,
                     eng: m.eng,
                     publ: m.publ.as_ref().map(|(e, l)| (self.encode(e, v), *l)),
                     ldef_stamp: m.ldef_stamp,
@@ -2941,7 +2970,11 @@ impl State {
         }
         for (i, s) in b.slots.into_iter().enumerate() {
             self.changing(s.loc);
-            let meta = s.meta.map(|_| meta_of[i]);
+            let meta = s.meta.as_ref().map(|_| meta_of[i]);
+            let (def_gid, cand_noted) = s
+                .meta
+                .as_ref()
+                .map_or((0, 0), |m| (m.def_gid, m.cand_noted));
             let e = if s.cur.is_none() && s.flags & LOADED == 0 {
                 UNLOADED
             } else {
@@ -2955,6 +2988,8 @@ impl State {
             slot.base = s.base;
             slot.lazy = s.lazy;
             slot.sym = s.sym;
+            slot.def_gid = def_gid;
+            slot.cand_noted = cand_noted;
             slot.meta = meta.unwrap_or(0);
         }
         for (l, x, at) in b.extra {
@@ -3027,8 +3062,10 @@ impl BaseSlot {
         };
         let ms = list_of(v, meta);
         let meta = match ms[..] {
-            [eng, publ, stamp, local, gid, ix] => Some(BaseMeta {
+            [eng, publ, stamp, local, gid, ix, dg, cn] => Some(BaseMeta {
                 ix: u32::try_from(int_of(v, ix)).unwrap_or(u32::MAX),
+                def_gid: u32::try_from(int_of(v, dg)).unwrap_or(0),
+                cand_noted: u32::try_from(int_of(v, cn)).unwrap_or(0),
                 eng: list_of(v, eng).first().map(|&x| opt(x)),
                 publ: match list_of(v, publ)[..] {
                     [x, l] => Some((opt(x), at(l))),
@@ -3063,6 +3100,32 @@ impl BaseSlot {
 }
 
 impl Base {
+    /// (observe, `PHITEX_CK_SIZE`) The slots whose values are largest,
+    /// by the bytes their encoding makes now.
+    pub(crate) fn debug_sizes(&self, v: &Values, field: &mut dyn FnMut(Loc) -> Field) {
+        let mut big: Vec<(u64, String)> = Vec::new();
+        for s in &self.slots {
+            let b0 = v.payload_bytes();
+            let _ = v.list(vec![s.cur.unwrap_or(ValueId::UNIT)]);
+            let w = v.render(s.cur.unwrap_or(ValueId::UNIT)).len() as u64;
+            let _ = b0;
+            big.push((w, crate::val::field_name(v, field(s.loc))));
+        }
+        big.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        big.truncate(5);
+        eprintln!(
+            "ck-part slots {} cands {:?} extra {} defined {} font_slow {} save {} carried {} touched {} biggest {big:?}",
+            self.slots.len(),
+            self.cands.iter().map(|c| c.1.len()).collect::<Vec<_>>(),
+            self.extra.len(),
+            self.defined.len(),
+            self.font_slow.len(),
+            self.save.len(),
+            self.carried.len(),
+            self.touched.len()
+        );
+    }
+
     /// As a value, each location as its field (`field`).
     #[allow(clippy::too_many_lines)]
     pub(crate) fn to_value(&self, v: &Values, field: &mut dyn FnMut(Loc) -> Field) -> ValueId {
@@ -3096,6 +3159,8 @@ impl Base {
                             v.int(i64::from(m.ldef_local)),
                             v.int(m.ldef_gid.map_or(-1, i64::from)),
                             v.int(i64::from(m.ix)),
+                            v.int(i64::from(m.def_gid)),
+                            v.int(i64::from(m.cand_noted)),
                         ])
                     },
                 );

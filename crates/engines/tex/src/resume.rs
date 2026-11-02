@@ -382,6 +382,11 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     fn ck_take(&mut self, at: At) -> R<()> {
         let v = self.v;
+        let bytes0 = if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
+            v.payload_bytes()
+        } else {
+            0
+        };
         // (the input anywhere: every level and the text from the segment
         // last reached, with what the run pulled, `Run::ck_input`; at its
         // line, only the token lists above it, bottom first: their types
@@ -411,6 +416,9 @@ impl Run<'_, '_> {
             }
             At::Anywhere => {
                 let (input, cost) = self.ck_input();
+                if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
+                    eprintln!("ck-part input {}", v.payload_bytes().saturating_sub(bytes0));
+                }
                 (-1, 0, 0, 0, Vec::new(), Vec::new(), input, cost)
             }
         };
@@ -422,6 +430,17 @@ impl Run<'_, '_> {
             + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
         if let Some(c) = self.ck.as_mut() {
             c.next = self.cmds + every().max(spacing);
+        }
+        if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
+            eprintln!(
+                "ck-size: node {} at command {}: input {enc_cost} touched {} items {} levels {} next {}",
+                self.cx.node().raw(),
+                self.cmds,
+                self.st.touched_len(),
+                self.nest.iter().map(|l| l.list.len()).sum::<usize>(),
+                self.input.levels.len(),
+                self.ck.as_ref().map_or(0, |c| c.next)
+            );
         }
         if li < 0 && crate::exec::obs_flag!("PHITEX_CK_TRACE") {
             eprintln!(
@@ -457,7 +476,28 @@ impl Run<'_, '_> {
             return Ok(());
         };
         let base = base.to_value(v, &mut |l| self.loc_field(l));
+        if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
+            eprintln!("ck-part base {}", v.payload_bytes().saturating_sub(bytes0));
+        }
+        if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
+            let b1 = v.payload_bytes();
+            let again = self
+                .st
+                .base_of(v)
+                .map(|b| b.to_value(v, &mut |l| self.loc_field(l)));
+            eprintln!(
+                "ck-part base again {} same {}",
+                v.payload_bytes().saturating_sub(b1),
+                again == Some(base)
+            );
+            if let Some(b) = self.st.base_of(v) {
+                b.debug_sizes(v, &mut |l| self.loc_field(l));
+            }
+        }
         let (cont, locals) = self.cont_encode_with(false, false)?;
+        if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
+            eprintln!("ck-part cont {}", v.payload_bytes().saturating_sub(bytes0));
+        }
         if !locals.is_empty() {
             if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
                 eprintln!(
@@ -525,6 +565,14 @@ impl Run<'_, '_> {
         ys.extend(self.ck_more());
         ys.push(whole_input);
         let ck = v.list(ys);
+        if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
+            eprintln!(
+                "ck-bytes: node {} at command {}: {} bytes made",
+                self.cx.node().raw(),
+                self.cmds,
+                v.payload_bytes().saturating_sub(bytes0)
+            );
+        }
         let unread = self.cx.unread_count();
         if let Some(c) = self.ck.as_mut() {
             c.fresh.push((c.taken.len(), unread));
