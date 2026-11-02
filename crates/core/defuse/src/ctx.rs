@@ -892,24 +892,6 @@ impl<'a> Ctx<'a> {
         n.map(|n| (n.op(), n.args().to_vec()))
     }
 
-    /// Whether no `i`-th claimed sibling of operation `op` follows me (none,
-    /// or one of another operation): the end of the text `op`'s nodes are
-    /// pieces of. Found so, it is a read of that sibling's operation
-    /// ([`Ctx::following`] through its op: asked again when a sibling of
-    /// `op` comes there, not when another's text is edited); a sibling of
-    /// `op` found is no read, as a run that ends before its next sibling
-    /// reads nothing of it.
-    pub fn ends_before(&mut self, i: usize, op: OpId) -> bool {
-        let n = read::following_on(self.eng, self.me, i, &mut self.follow_at);
-        if n.as_ref().is_some_and(|n| n.op() == op) {
-            return false;
-        }
-        let path = self.path(&[Step::Index(0)]);
-        let seen = read::apply_path(self.eng, n.as_ref().map(|n| read::text_value(self.eng, n)), path);
-        self.record(ReadKind::Following { i }, path, seen);
-        true
-    }
-
     /// The node of the `i`-th claimed sibling, as the `following(i)`
     /// just made found it (its read recorded there); None otherwise.
     #[must_use]
@@ -933,33 +915,6 @@ impl<'a> Ctx<'a> {
             self.record(ReadKind::Hole, PathId::WHOLE, read::hole_value(self.eng, h));
         }
         Ok(h)
-    }
-
-    /// Stops the run until I stand at the committed frontier: every node
-    /// before me in my unit has committed in this pass with no re-ask
-    /// pending (none to run, again or for the first time, none running or
-    /// committing), and the settling layer's frontier is not before me
-    /// (`Ctx::set_frontier`: the pages before me fired, their finishers
-    /// placed before me). For an effect outside the engine that a run on
-    /// a guessed state must never make, though the run is thrown away (a
-    /// shell command): made past this point, it is made on the state TeX's
-    /// own order has here. Stopped, the run is queued again when the node
-    /// waited for commits, or when the frontier passes me; the check is
-    /// made again then. A node before me that changes after this (a
-    /// loop-back's next pass, an edit) re-asks me through what I read.
-    pub fn wait_settled(&mut self) -> Result<(), Stop> {
-        use std::sync::atomic::Ordering::Acquire;
-        self.check()?;
-        let eng = self.eng;
-        if let Some(x) = read::on_one_layout(eng, || read::unsettled_before(eng, self.me)) {
-            self.wait_on = Some(x);
-            return Err(stop());
-        }
-        if crate::sched::past_frontier(eng, self.me, eng.frontier.load(Acquire)) {
-            self.wait_frontier = true;
-            return Err(stop());
-        }
-        Ok(())
     }
 
     /// Narrows what I may define, for prediction. Accepted, not used by

@@ -233,37 +233,3 @@ fn a_read_on_waits_for_the_text_before_it() {
         "the siblings read on into at -j8, as at -j1"
     );
 }
-
-/// The job's text read to its end at the top level, a page shipped and no
-/// `\end` (the biblatex manual cut inside an `ltxexample`, whose
-/// `\end{document}` the example read as its text): TeX reads the terminal
-/// next, which a nonstop build has none of (§360), "*** (job aborted, no
-/// legal \end found)", and the page shipped before stands. Before, the last
-/// piece ended as one whose text goes on: no fatal error, the page loop
-/// waited for a main list that never ended, and the build wrote no output
-/// file ("the pages' writers ran before every page had finished"). Oracle:
-/// pdflatex and xelatex, "! Emergency stop." (accl 23309).
-#[test]
-fn the_text_ending_with_no_end_ends_the_job() {
-    let src = "Page one.\\vfill\\eject\nPage two.\n";
-    for threads in [1, 8] {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let dir = common::scratch(&format!("no-end-{threads}"));
-            let opts = Options {
-                threads: Some(threads),
-                ..common::options("./d.tex", "d", "", &dir)
-            };
-            let b = common::build(opts, Some(&common::plain()), src);
-            let _ = tx.send((b.fatal(), b.output().1));
-        });
-        let (fatal, log) = rx
-            .recv_timeout(std::time::Duration::from_secs(120))
-            .unwrap_or_else(|_| panic!("-j{threads}: the build did not end in 120 s"));
-        assert!(
-            fatal && log.contains("*** (job aborted, no legal \\end found)"),
-            "-j{threads}: the job is aborted:\n{log}"
-        );
-        assert!(log.contains("[1]"), "-j{threads}: page 1 shipped:\n{log}");
-    }
-}

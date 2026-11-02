@@ -4986,30 +4986,6 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                 }
             }
-            // the document's text read to its end at the top level with
-            // no `\end` (no piece of it follows: as `pull` finds the
-            // input's end): TeX reads the terminal next, and a build has
-            // none (nonstop), so the job ends with §360's fatal "***
-            // (job aborted, no legal \end found)"; the page loop is given
-            // the main list's end and the pages shipped before are the
-            // output (xelatex's; pdflatex writes none). Ended as a piece
-            // whose text goes on, the main list never ended: the page loop
-            // waited for a contribution that never came, PAGES_END was
-            // never defined and no output file was written (the biblatex
-            // manual cut inside an `ltxexample`, its `\end{document}` read
-            // as the example's text; the oracle's "! Emergency stop.")
-            if self.top
-                && self.doc
-                && (op == self.ops.exec || op == self.ops.resume)
-                && self.fin.is_none()
-                && self.cut.is_none()
-                && self.close_cont.is_none()
-                && self.leftover().is_empty()
-                && self.cx.ends_before(self.pulled, self.ops.exec)
-            {
-                self.eof = true;
-                return Err(Halt::Fatal);
-            }
             return Ok(());
         }
     }

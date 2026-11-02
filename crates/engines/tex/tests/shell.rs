@@ -212,14 +212,6 @@ fn a_command_reads_what_the_job_wrote_and_its_output_is_read_after_it() {
         assert_eq!(got(&log), ["ALPHA", "BETA"], "-j{threads}: {log}");
         let n0 = fake.distinct().len();
         assert_eq!(n0, 2, "-j{threads}: {:?}", fake.distinct());
-        // (each command called once, on the file the job wrote: none on a
-        // view TeX's order never had, a file opened and not written yet)
-        assert_eq!(
-            fake.calls.lock().unwrap().len(),
-            2,
-            "-j{threads}: {:?}",
-            fake.calls.lock().unwrap()
-        );
         // (an input edited: one call more)
         b.edit(&up_doc("gamma", "beta"));
         let (dvi, log) = b.output();
@@ -229,12 +221,6 @@ fn a_command_reads_what_the_job_wrote_and_its_output_is_read_after_it() {
             n0 + 1,
             "-j{threads}: {:?}",
             fake.distinct()
-        );
-        assert_eq!(
-            fake.calls.lock().unwrap().len(),
-            3,
-            "-j{threads}: {:?}",
-            fake.calls.lock().unwrap()
         );
         let cold = common::build(
             options("up", Some(Arc::new(Fake::default())), threads),

@@ -7375,14 +7375,9 @@ impl Build {
             &self.opts.name,
             self.g.eng.acc_value(self.unit, v.field("log")),
         );
-        // (TeX's fatal error removes pdfTeX's PDF file only: XeTeX's XDV
-        // is closed with the pages shipped and xelatex's xdvipdfmx makes
-        // the PDF of them, "! Emergency stop." then "Output written on
-        // NAME.pdf (n pages)."; pdfTeX's `pdftex_fail` stops the job
-        // before its PDF file is written)
-        let fatal = fatal.filter(|&f| {
-            f != crate::log::Fatal::Tex || (dvi.starts_with(b"%PDF") && self.opts.xetex.is_none())
-        });
+        // (TeX's fatal error removes a PDF file only; pdfTeX's
+        // `pdftex_fail` stops the job before its PDF file is written)
+        let fatal = fatal.filter(|&f| f != crate::log::Fatal::Tex || dvi.starts_with(b"%PDF"));
         crate::timeline::note(
             "output: the log laid out (fatal errors found)",
             t0.elapsed(),
