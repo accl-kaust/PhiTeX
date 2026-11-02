@@ -771,6 +771,34 @@ impl Tfm {
         self.with_pairs()
     }
 
+    /// The font with tags taken off characters (`set_tag_code`, pdfTeX:
+    /// for each `(c, bits)`, 1 its `lig_tag`, 2 its `list_tag`, 4 its
+    /// `ext_tag`, where the character has that tag).
+    #[must_use]
+    pub fn without_tags(mut self, tags: &[(u8, u8)]) -> Tfm {
+        for &(c, bits) in tags {
+            let Some(k) = u16::from(c).checked_sub(self.bc) else {
+                continue;
+            };
+            let Some(ci) = self.chars.get_mut(usize::from(k)) else {
+                continue;
+            };
+            if !ci.exists() {
+                continue;
+            }
+            let off = match ci.tag {
+                Tag::Ext => bits & 4 != 0,
+                Tag::List => bits & 2 != 0,
+                Tag::Lig => bits & 1 != 0,
+                Tag::None => false,
+            };
+            if off {
+                ci.tag = Tag::None;
+            }
+        }
+        self.with_pairs()
+    }
+
     /// The font with its pair table ([`Tfm::lookup`]): each left
     /// character's program walked once, the first step for each right
     /// character kept.
