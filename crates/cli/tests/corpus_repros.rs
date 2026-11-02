@@ -657,7 +657,3 @@ repro!(
     box_registers_past_255,
     "manuals (milsymb: forest's directory tree drawn without its node texts): \\setbox<n> past 255 was read with TeX82's box contexts (global_box_flag box_flag+256, ship_out_flag box_flag+512), so \\setbox300 set register 44 globally and \\setbox600 shipped its box; e-TeX's are box_flag+32768 and box_flag+65536 (etex.ch §1071). forest's node boxes are \\locbox registers counted down from 32767 (oracle: pdflatex in the CI image, accl 22653)"
 );
-repro!(
-    routine_global_after_own_page,
-    "research corpus (classicthesis-xe: \\thepage and LaTeX's \\glb@currsize after a page read as before it): a page fires at a candidate inside a group the text's run opens and goes on past, and the paragraphs after it read a macro the output routine defines globally (a shipout hook counting the pages); the run read it at its own position, the value before the page. Now a run ends at a candidate of its own it can end at where a page fires, its rest a resume after the page's finisher (oracle: pdflatex in the CI image, accl 22727)"
-);

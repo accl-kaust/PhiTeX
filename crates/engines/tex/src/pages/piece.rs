@@ -194,17 +194,6 @@ impl Run<'_, '_> {
         // the page is made to fire, above: elsewhere the piece runs on
         // through the candidate, and a page firing there has its
         // finisher run on the piece's state there, [`Run::preload_candidate`])
-        // (a candidate the run goes on past, inside a group or a
-        // conditional of its own, that a page fires at: TeX runs the
-        // page's routine there, and the text after it reads every global
-        // the routine set (classicthesis-xe: `\thepage` and LaTeX's
-        // `\glb@currsize` after a page; a shipout hook's count). The run
-        // ends there instead, its rest a resume after the page's
-        // finisher, [`Run::order_after_own_page`]; where it cannot (a
-        // list of its own open) it runs on)
-        if !cuttable && fresh && (restartable || open_cut) {
-            self.order_after_own_fire()?;
-        }
         if cuttable {
             if self.open_span() && crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
                 eprintln!(
@@ -329,20 +318,6 @@ impl Run<'_, '_> {
             && (self.top || self.doc)
             && self.nest.iter().all(|l| !l.owns && l.group != 0)
             && self.has_input()
-    }
-
-    /// A page fires at a candidate of the run's own it could end at
-    /// ([`Run::own_page_fire`]): it ends there ([`Run::order_after_own_page`]).
-    fn order_after_own_fire(&mut self) -> R<()> {
-        let op = self.cx.op();
-        let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
-        if !piece || self.cut.is_some() || self.stop_at.is_some() || self.interp.is_some() {
-            return Ok(());
-        }
-        if let Some(k) = self.own_page_fire()? {
-            self.order_after_own_page(k)?;
-        }
-        Ok(())
     }
 
     /// A read of the page (`\pagegoal`, `\pagetotal`, ...) after a

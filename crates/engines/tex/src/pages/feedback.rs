@@ -347,13 +347,6 @@ impl Run<'_, '_> {
         Ok(fired == Some(true))
     }
 
-    /// The candidate of this run's own the first page firing in its items
-    /// fires at, if one does ([`Run::page_so_far`]).
-    pub(crate) fn own_page_fire(&mut self) -> R<Option<u32>> {
-        let (_, fired, own_k) = self.page_so_far()?;
-        Ok(own_k.filter(|_| fired == Some(true)))
-    }
-
     /// At a candidate a page can fire at ([`Run::finish_candidate`]), or
     /// a checkpoint taken after one restored: the page-layer registers the
     /// run holds (loaded, or its own definitions or maps), whose next read
