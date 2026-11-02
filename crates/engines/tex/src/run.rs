@@ -4552,11 +4552,24 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(text) = self.cx.read(field)?.map(|t| str_of(v, t)) else {
             return Ok(false);
         };
+        // (XeTeX: the comment's bytes made characters in the line's file's
+        // mode, as `input_line` made the line's own: the line was read,
+        // and decoded, with its mark in the comment's place)
+        let mut chars: Vec<u32> = text.chars().map(u32::from).collect();
+        if self.xe {
+            let name = self
+                .input
+                .top_line()
+                .and_then(|s| s.origin)
+                .map_or(ValueId::UNIT, |o| o.0);
+            let m = self.input_mode(name)?;
+            crate::xetex::decode_line(&mut chars, m, false);
+        }
         let Some(s) = self.input.top_line_mut() else {
             return Ok(false);
         };
         let i = s.loc - 1;
-        s.buf.splice(i..i + 17, text.chars().map(u32::from));
+        s.buf.splice(i..i + 17, chars);
         s.loc = i;
         Ok(true)
     }

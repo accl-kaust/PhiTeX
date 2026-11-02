@@ -975,7 +975,7 @@ impl Run<'_, '_> {
     /// The input mode of the file named `name` (its `xenc:` field, set by
     /// `\XeTeXinputencoding` or at its opening from
     /// `\XeTeXdefaultencoding`; `auto` where none was).
-    fn input_mode(&mut self, name: ValueId) -> R<i64> {
+    pub(crate) fn input_mode(&mut self, name: ValueId) -> R<i64> {
         if let Some(&(_, m)) = self.xenc.iter().find(|e| e.0 == name) {
             return Ok(m);
         }

@@ -1,0 +1,16 @@
+% !TEX program = xelatex
+% A line whose `%' is no comment when it is read (verbatim's catcodes)
+% under XeLaTeX: its text after the `%' is UTF-8, decoded as the rest of
+% the line is (TeX Live manuals hfutthesis, zhlineskip, highlightx,
+% caspervector: their verbatim comments were their bytes).
+\documentclass{article}
+\usepackage{fontspec}
+\begin{document}
+Text é.
+\begin{verbatim}
+% main levée “utf8”
+x % comment ‘q’ — é
+\end{verbatim}
+{\catcode`\%=12 F4 % é “x”
+}
+\end{document}
