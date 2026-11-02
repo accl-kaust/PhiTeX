@@ -767,7 +767,32 @@ pub(crate) type FoldMemo = Vec<((Field, Pos, Pos), ValueId, Box<[Met]>)>;
 /// moved since; what that met is met again by the read asking.
 pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut FoldMemo) -> ValueId {
     if WATCHING.get() == 0 {
-        return fold(eng, f, Some(from), Some(to));
+        // (readers of one field from one start, asked in order of their
+        // ends (`reask_ranges_in`): each goes on from the last one's fold,
+        // `fold(from, to)` = `fold(from, b)` + `fold(b - 1, to)` for
+        // `from < b <= to`, so asking them all folds the field once, not
+        // once a reader: openmoji's `lines` readers, one a piece, asked at
+        // each sibling a run claimed, each folding every segment from the
+        // document's start, accl 23214, 23227)
+        let prev = memo.iter().position(|e| e.0.0 == f && e.0.1 == from && e.2.is_empty());
+        if let Some(i) = prev {
+            let ((_, _, b), x, _) = memo[i];
+            if b == to {
+                return x;
+            }
+            if b > from && b < to {
+                let mono = eng.monoid(f);
+                let y = mono.combine(eng.values(), x, fold(eng, f, Some(Pos(b.0 - 1)), Some(to)));
+                memo[i] = ((f, from, to), y, Box::default());
+                return y;
+            }
+        }
+        let x = fold(eng, f, Some(from), Some(to));
+        match prev {
+            Some(i) => memo[i] = ((f, from, to), x, Box::default()),
+            None => memo.push(((f, from, to), x, Box::default())),
+        }
+        return x;
     }
     let key = (f, from, to);
     if let Some(e) = memo.iter().find(|e| e.0 == key && e.2.iter().all(|m| stands(eng, m))) {

@@ -2969,7 +2969,10 @@ fn reask_ranges_in(
     stops: &[(Field, RangeKey, RangeReader)],
     st: &mut CommitStats,
 ) {
-    let readers = eng.ranges.holding(f, at);
+    let mut readers = eng.ranges.holding(f, at);
+    // (in order of their ends: the folds of readers from one start go on
+    // from one another's, `read::fold_in`)
+    readers.sort_by_cached_key(|(_, r)| read::pos_of(eng, r.to.unwrap_or(r.node)).map_or(u64::MAX, |p| p.0));
     let mut memo = read::FoldMemo::new();
     for (k, r) in readers {
         if stops.iter().any(|s| s.0 == f && s.1 == k) {
