@@ -613,5 +613,6 @@ fn cand_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::pages::CandMa
         fresh: b & 2 != 0,
         restartable: b & 4 != 0,
         open_cut: b & 8 != 0,
+        par_cut: false,
     })
 }

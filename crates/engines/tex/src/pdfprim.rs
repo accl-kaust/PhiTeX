@@ -434,13 +434,8 @@ fn hex_upper(b: &[u8]) -> String {
 /// File `name` as `\\pdffilesize` and its kin find it (`name.tex` first
 /// where it has no extension): `[path, text]`.
 fn file_found(r: &mut Run<'_, '_>, name: &str) -> R<Option<ValueId>> {
-    let key = crate::run::tex_names(name).0;
-    let name = crate::run::same_dir(name);
-    let mut found = r.read_file(&key)?;
-    if found.is_none() && key != name {
-        found = r.read_file(name)?;
-    }
-    Ok(found)
+    let key = r.tex_key(name)?;
+    r.read_file(&key)
 }
 
 fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
@@ -466,7 +461,7 @@ fn file_bytes_shared(r: &mut Run<'_, '_>, name: &str) -> R<Option<std::sync::Arc
 /// beside it (`fsize:<name>`), so the run reads not its text: an edit
 /// inside the file that keeps its length reaches only its pieces.
 fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
-    let key = r.tex_lookup(name)?;
+    let key = r.tex_key(name)?;
     if r.read_cut(&key)?.is_some() {
         let v = r.v;
         if let Some(n) = r.cx.env(v.field(&format!("fsize:{key}")))? {
@@ -676,7 +671,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             let job = r
                 .get_loc(crate::fields::cell::JOBNAME)?
                 .map_or_else(|| "texput".to_owned(), |x| str_of(r.v, x));
-            let key = r.tex_lookup(&name)?;
+            let key = r.tex_key(&name)?;
             // (a file found: the build's clock too, as pdfTeX's under
             // FORCE_SOURCE_DATE gives SOURCE_DATE_EPOCH for every file
             // (utils.c `getfilemoddate`); epstopdf-base compares an EPS's
@@ -3632,23 +3627,18 @@ fn ximage_own_info(
     // the read's, counted where it is read)
     let before = st.objects_numbered();
     // (an included PDF page's `/Group`: the page that first shows the
-    // image numbers its object (`out_image`, `pdf_new_objnum`), and the
-    // image's write puts it into an object stream at
-    // `\pdfobjcompresslevel` 2 and more (`pdf_begin_obj(group, 2)`). This
-    // writer shows no page, so it writes the group in the image's
-    // dictionary: counted here. Not counted, iacrj's logo's group (object
-    // 63, in stream 24) left every read-time number after page 1 one
-    // short and the second stream's number late: the XMP stream's
-    // number TeX read, 184, was 183)
-    let group = st.ximage_page_group(n);
+    // image numbers its object (`out_image`), and the image's write
+    // writes the group as that object, into an object stream at
+    // `\pdfobjcompresslevel` 2 and more (`pdf_begin_obj(group, 2)`).
+    // Shown here as there, so this writer writes it so too: one showing
+    // no page copied the group into the image's dictionary, no object
+    // for a direct one (iacrj's logo: every read-time number after page
+    // 1 one short, /Metadata 183 for 184), its object copied for one the
+    // page names indirectly (counted again on top of that: every number
+    // after the page one past pdfTeX's))
+    st.show_ximage_group(n);
     let (objs, os) = match st.write_ximage(n, fonts) {
-        Ok(()) => {
-            let (objs, os) = st.objects_after(before);
-            (
-                objs + usize::from(group),
-                os + usize::from(group && ocl.0 >= 2),
-            )
-        }
+        Ok(()) => st.objects_after(before),
         Err(_) => (0, 0),
     };
     Ok((

@@ -375,7 +375,9 @@ case $shard in
       # (every crate's integration tests and phitex-live's unit tests, as
       # `cargo test` builds them: no feature)
       W="cargo test --profile fastdev --no-run --message-format=json-render-diagnostics"
-      ( { CARGO_TARGET_DIR=$PWD/target-wtests $W --workspace --test '*' && CARGO_TARGET_DIR=$PWD/target-wtests $W -p phitex-live --lib; } > "$r/build-wtests.json" 2> "$r/build-wtests.txt"; echo "EXIT $?" >> "$r/build-wtests.txt" ) &
+      # (and phitex-otf's otf-index, the XeTeX tests' font index made
+      # from it in the tests shard)
+      ( { CARGO_TARGET_DIR=$PWD/target-wtests $W --workspace --test '*' && CARGO_TARGET_DIR=$PWD/target-wtests $W -p phitex-live --lib && CARGO_TARGET_DIR=$PWD/target-wtests cargo build -q --profile fastdev -p phitex-otf --example otf-index; } > "$r/build-wtests.json" 2> "$r/build-wtests.txt"; echo "EXIT $?" >> "$r/build-wtests.txt" ) &
     fi
     wait
     built
@@ -448,6 +450,7 @@ for l in open(sys.argv[1]):
 open(os.path.join(sys.argv[2], "list.txt"), "w").write("".join(x + "\n" for x in sorted(set(lst))))
 open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in sorted(set(bins))))' "$r/build-wtests.json" "$r/store.tmp/wtests" "latex $SUITES"
         [ -s "$r/store.tmp/wtests/list.txt" ] || red "build (the tests shard's): no test binary"
+        cp target-wtests/fastdev/examples/otf-index "$r/store.tmp/wtests/otf-index" || red "build (the tests shard's): no otf-index"
       fi
       ls -laR "$r/store.tmp" > "$r/store.txt"
       [ $status = green ] && mv "$r/store.tmp" "$r/store"
@@ -489,6 +492,16 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
         mkdir -p "$(dirname "$p")" "$(dirname "$(dirname "$p")")/tmp"
         cp "$d/bin/$b" "$p"
       done < "$d/bins.txt"
+      # (the XeTeX tests' font index, PHITEX_FONT_INDEX: fontconfig's list
+      # of TeX Live's fonts, as the oracle sees them (scripts/xetex/
+      # fonts.conf), made as oracle/fixtures/xetex/job.sh makes it;
+      # without it no font is found by name, "Font not loadable")
+      sed "s#/usr/share/texmf-dist#$(kpsewhich -var-value TEXMFDIST)#; s#/tmp/phitex-xetex-fc-cache#$w/fc-cache#" scripts/xetex/fonts.conf > "$w/fonts.conf"
+      if FONTCONFIG_FILE=$w/fonts.conf "$d/otf-index" "$w/fonts.idx" > "$r/otf-index.txt" 2>&1; then
+        export PHITEX_FONT_INDEX=$w/fonts.idx
+      else
+        red "tests: the font index: $(tail -1 "$r/otf-index.txt")"
+      fi
       lane() {
         local f pkg dir
         while IFS=$'\t' read -r f pkg dir; do

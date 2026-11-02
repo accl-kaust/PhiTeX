@@ -77,7 +77,7 @@ pub struct LoadOptions {
 }
 
 /// `struct attr_` (pdfximage.c).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct XimageAttr {
     pub width: i32,
     pub height: i32,
@@ -96,7 +96,7 @@ pub struct XimageAttr {
 
 /// `struct pdf_ximage_`. `Default` is not C's initial state: use
 /// [`PdfXimage::pdf_init_ximage_struct`].
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfXimage {
     pub ident: Option<Vec<u8>>,
     /// `char res_name[16]`: the resource name (`Im1`, `Fm2`…), no NUL.
@@ -111,7 +111,7 @@ pub struct PdfXimage {
 }
 
 /// pdfximage.c's statics: `_opts` and `_ic`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `_opts.cmdtmpl`: the distiller command template.
     pub cmdtmpl: Option<Vec<u8>>,

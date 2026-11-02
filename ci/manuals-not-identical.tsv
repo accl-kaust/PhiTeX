@@ -4,7 +4,7 @@ latex_amsldoc-vn_amsldoc-vi	differs: page 10: obj 346 (untyped) line 6: oracle "
 latex_asmejour_asmejour-template	-j1 error: error: the build stopped: it made no progress (the build passed its time limit of 600 s; at asmejour-template.tex:379, on \else: , input 4 levels deep, 14 lists; -j4 error: killed (-9)
 latex_base_ltnews	differs: page 55: obj 1331 (Action) line 20: oracle "117.941", phitex "107.121" (not the same in each run: the first sweep had -j1 differs, -j4 timeout)
 latex_beamertheme-focus_focus-demo	differs: page 1: obj 1 (Catalog) line 8: oracle "/PageLabels <<", phitex "/PageMode /UseOutlines"
-latex_beautybook_beautybook-en	differs: page 6: obj 1 (untyped) line 98: oracle "/pgfsmask298 <<", phitex "/pgfsmask297 <<"
+latex_beautybook_beautybook-en	differs: page 19: obj 746 (page 19, untyped) line 624: oracle "0.0 10.11215 m ", phitex "-100.5473 164.4841 m " (its page-6 /pgfsmask numbers agree since 9dd4e3020; accl 22970)
 latex_biblatex-cheatsheet_biblatex-cheatsheet	differs: page 1: obj 150 (Catalog) line 2: oracle "/OpenAction 3 0 R", phitex "/Names 3 0 R" (pages 2 vs 3)
 latex_biblatex-iso690_biblatex-iso690	differs: page 1: obj 524 (untyped) line 5: oracle "<end>", phitex "<end>" (pages 18 vs 15)
 latex_biblatex_biblatex	-j1 differs: page 6: obj 172 (page 6, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 10.9091 Tf 41.32", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 10.9091 Tf 41.32"; -j4 error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 timeout, -j4 timeout)
@@ -24,7 +24,6 @@ latex_ibycus-babel_ibycus-babel-test	differs: page 1: obj 3 (page 1, untyped) li
 latex_icite_samples_icite-biblatex	differs: page 2: obj 16 (Link) line 19: oracle "155.551", phitex "213.113"
 latex_knowledge_knowledge	-j1 error: error: You can't use `&' in restricted horizontal mode; -j4 error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 error, -j4 timeout)
 latex_kotex-utf_kotex-utf-doc	differs: page 16: obj 583 (page 16, untyped) line 7: oracle "[-316<c8>]TJ", phitex "[<c8>]TJ" (past CJK.enc, accl 22513)
-latex_milsymb_milsymb	differs: page 48: obj 926 (page 48, untyped) line 27: oracle "q", phitex "Q"
 latex_minitoc_examples_mtc-2c	differs: page 1: obj 47 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 9 vs 10)
 latex_minutes_Protokol	differs: page 3: obj 393 (Catalog) line 4: oracle "/PageLabels <<", phitex "/Pages 5 0 R" (pages 33 vs 31)
 latex_moderncv_manual_moderncv_userguide	differs: page 1: obj 650 (Catalog) line 5: oracle "/PageMode /UseNone", phitex "/PageLabels <<"
@@ -45,7 +44,6 @@ latex_ryethesis_ryesample	differs: page 11: obj 422 (Catalog) line 22: oracle "<
 latex_semioneside_example	differs: page 2: obj 28 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 5 vs 3)
 latex_showexpl_showexpl-test	differs: page 1: obj 24 (page 1, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g BT /F1 14.3462 ", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g 0 G 0 g BT /F1 14.3462 "
 latex_snaptodo_snaptodo	differs: page 3: obj 79 (page 3, untyped) line 194: oracle "1 0 0 1 71.499 17.412 cm", phitex "1 0 0 1 76.204 17.412 cm"
-latex_spath3_spath3	differs: obj 2 (untyped) line 2: oracle "/pgfpat11 280 0 R", phitex "/pgfpat11 152 0 R"
 latex_teubner_teubner-doc	differs: page 1: obj 12 (Pages) line 15: oracle "<end>", phitex "<end>"
 latex_tex-vpat_texlive-vpat	differs: page 1: obj 4369 (Catalog) line 4: oracle "/MarkInfo 4 0 R", phitex "/MarkInfo 5 0 R" (past \pdfdest struct, accl 22465)
 latex_texproposal_texproposal	differs: page 1: obj 1 (Catalog) line 14: oracle "1", phitex "2" (pages 27 vs 29)

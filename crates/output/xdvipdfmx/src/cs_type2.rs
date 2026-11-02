@@ -72,7 +72,7 @@ const CS_HFLEX1: u8 = 36;
 const CS_FLEX1: u8 = 37;
 
 /// cs_type2.c's statics.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct State {
     pub status: i32,
     pub num_stems: i32,

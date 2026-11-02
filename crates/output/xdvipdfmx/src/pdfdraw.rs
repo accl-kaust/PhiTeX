@@ -93,7 +93,7 @@ pub const PETYPES: [PeType; 7] = [
 pub const DEFAULT_XGS: &[u8] = b"<< /Type /ExtGState   /LW 1 /LC 0 /LJ 0 /ML 10 /D [[] 0]   /RI /RelativeColorimetric /SA false /BM /Normal /SMask /None   /AIS false /TK false /CA 1 /ca 1   /OP false /op false /OPM 0 /FL 1>>";
 
 /// `pa_elem`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct PaElem {
     /// `PE_TYPE__*`.
     pub r#type: i32,
@@ -101,13 +101,13 @@ pub struct PaElem {
 }
 
 /// `struct pdf_path_` (`num_paths`/`max_paths`: the Vec's length).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfPath {
     pub path: Vec<PaElem>,
 }
 
 /// `pdf_gstate.linedash`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct LineDash {
     pub num_dash: i32,
     pub pattern: [f64; PDF_DASH_SIZE_MAX],
@@ -115,7 +115,7 @@ pub struct LineDash {
 }
 
 /// `pdf_gstate`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfGstate {
     pub cp: PdfCoord,
     /// cm.
@@ -140,14 +140,14 @@ pub struct PdfGstate {
 }
 
 /// `struct xgs_res`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct XgsRes {
     pub object: Option<Obj>,
     pub accumlated: Option<Obj>,
 }
 
 /// pdfdraw.c's statics.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `fmt_buf` (scratch).
     pub fmt_buf: Buf,

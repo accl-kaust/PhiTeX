@@ -6,11 +6,7 @@
 # (768878f5a, mc 77044) and recorded for 1.61 (2026-10-31); each by its
 # exact name as the shard names it (PACKAGE--TARGET::TEST), a tab, and
 # its cause. CHANGELOG.md's "Known not to work" lists them too.
-phitex-cli--cli::watch_absorbs_an_edit_during_the_cold_build	issue #3 item 6: the cold build ends (about 205 ms) before the test's writer first writes (300 ms), so it absorbs nothing; the test's timing assumption, not the watch
 phitex-tex--chain::chains	1.61, speed (recorded, not gated: the user's 2026-10-29 decision): runs per node above the 1.1 bar (display: 21 runs for 15 nodes), red before the alpha (77044)
 phitex-tex--chain::census_plain	1.61, speed: runs per node and critical-path bars, red before the alpha (77044)
-phitex-tex--cuts::a_moved_page_fire_relocates_the_rest_and_keeps_the_finisher	1.61, speed: 14 wasted runs where the test allows none, red before the alpha (77044)
 phitex-tex--fatal::a_read_on_waits_for_the_text_before_it	1.61, speed: at -j8, 64 siblings read on where -j1 reads 3 (speculation), red before the alpha (77044)
-phitex-tex--xetex::ini_features	the CI image has not the test's font (Amiri: "Font not loadable"), red before the alpha (77044); the image gets the font after the alpha
-phitex-tex--xetex::ini_bidi	the CI image has not the test's font (Amiri), as ini_features
 phitex-defuse--block_heads::a_blocks_definers_run_before_the_readers_they_re_ask	speed (recorded, not gated: the user's 2026-10-31 decision): wasted reader runs at -j8 on a 4-core runner, 421 for 200 readers against the bound 400 (GitHub gate run 41201269355); every result exact

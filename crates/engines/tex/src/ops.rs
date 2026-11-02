@@ -821,13 +821,21 @@ impl Operation for Files {
             Some(&n) => {
                 let name = str_of(v, n);
                 let shared = ops(&self.0);
+                let t0 = std::time::Instant::now();
                 file_node(cx, &name, &shared.defs)?;
+                let t_file = t0.elapsed();
                 // (what a tool makes of it by default: run here, on the
                 // text as the job writes it, so a reader of the output
                 // depends on what the tool makes, not on its input)
                 for (o, args) in crate::tools::made_from(cx, &name)? {
                     let x = cx.apply(shared.tool, args)?;
                     define_traced(cx, crate::tools::made_field(v, &o), x);
+                }
+                if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+                    eprintln!(
+                        "files-node: {name}: in all {:?}, the file {t_file:?}",
+                        t0.elapsed()
+                    );
                 }
                 Ok(ValueId::UNIT)
             }
@@ -1111,6 +1119,49 @@ fn written_units(cx: &mut Ctx<'_>, name: &str, text: &str, defs: &crate::hints::
     order
 }
 
+/// `PHITEX_TEX_TIME` (profile): how a written file's units were cut
+/// ([`unit_ends`]): their count, how many end a line, the first ends, and
+/// whether they were cut again from the last cut, in what time.
+fn cut_said(
+    name: &str,
+    text: &str,
+    ends: &[usize],
+    again: bool,
+    cut_before: bool,
+    t: std::time::Duration,
+) {
+    let at_line = ends
+        .iter()
+        .filter(|&&e| e == 0 || text.as_bytes().get(e - 1) == Some(&b'\n'))
+        .count();
+    let show = |e: usize| {
+        let a = text.floor_char_boundary(e.saturating_sub(12));
+        let b = text.ceil_char_boundary((e + 12).min(text.len()));
+        let m = e.min(text.len()).max(a);
+        format!("{:?}|{:?}", &text[a..m], &text[m..b])
+    };
+    eprintln!(
+        "files-node: {name}: {} units, {at_line} ending a line; ends {}",
+        ends.len(),
+        ends.iter()
+            .take(6)
+            .map(|&e| show(e))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    eprintln!(
+        "files-node: {name}: cut {} ({} bytes) in {t:?}",
+        if again {
+            "again from the last cut"
+        } else if cut_before {
+            "whole: the last cut under other definitions"
+        } else {
+            "whole"
+        },
+        text.len()
+    );
+}
+
 /// A written file's text as units: the order value (`wfile:<name>`) and
 /// each unit's field (`wunit:<name>:<hash>:<n>`) with its text.
 pub(crate) fn units_of<'t>(
@@ -1196,10 +1247,21 @@ fn unit_ends(name: &str, text: &str, defs: &crate::hints::Defs) -> (Arc<[usize]>
         let h = crate::hints::text_hints(t, phitex_source::pass::FileKind::Document, defs);
         h.slices.iter().map(|&(_, e)| e).collect()
     };
+    let t_cut = std::time::Instant::now();
     let mut ends: Vec<usize> = match &before {
         Some((old, (_, old_ends, _))) => units_again(old, old_ends, text, cut),
         None => cut(text),
     };
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+        cut_said(
+            name,
+            text,
+            &ends,
+            before.is_some(),
+            last.locked().contains_key(name),
+            t_cut.elapsed(),
+        );
+    }
     // (the units cover the text: each from the end of the one before to
     // its slice's end, the last to the text's end)
     ends.retain(|&e| e > 0 && e <= text.len());
@@ -1301,6 +1363,9 @@ fn units_again(
         return cut(text);
     }
     let mid = cut(&text[l_at..r_at]);
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+        eprintln!("files-node: cut again: bytes {l_at}..{r_at} of {}", n.len());
+    }
     let mut ends = kept;
     ends.extend(mid.into_iter().map(|e| e + l_at));
     ends.push(r_at);

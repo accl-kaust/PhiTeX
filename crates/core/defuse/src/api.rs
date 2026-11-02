@@ -274,7 +274,10 @@ pub trait Operation: Send + Sync {
     /// node is queued or running, and then runs before the loop-back values
     /// are published (a pass's writers: a page's PDF side, the link, the
     /// files): so they run once a pass, not once for every rerun of what
-    /// they read. Nothing an evaluation needs may wait on one.
+    /// they read. One whose definitions are not read back (`read_back`
+    /// false: the output's writers) waits further, for a quiet point whose
+    /// published values start no pass: it runs once an evaluation, after
+    /// its last pass. Nothing an evaluation needs may wait on one.
     fn final_only(&self) -> bool {
         false
     }

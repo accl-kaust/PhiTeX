@@ -440,6 +440,20 @@ fn input_dotted_name() {
     check_threads("input_dotted_name", "pdf");
 }
 
+/// `\input` of a name with an extension the `tex` format does not know,
+/// a file the job writes: kpathsea finds `name` (no `name.tex`), and
+/// what TeX keeps of the file is that one's. The lookup found `name` but
+/// kept its read-back, read-back point and seed under `name.tex`, so a
+/// `.dat` read back from the run before defined nothing (phitex-tex's
+/// `auxloop::a_file_of_definitions_is_read_back_per_field_whatever_its_name`),
+/// conv-xkv's `.cut` written and read in one run left `\fname`
+/// undefined, and hyperref's `.out` and probsoln's `excluded.tex` never
+/// settled. At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn input_dotted_read_back() {
+    check_threads("input_dotted_read_back", "pdf");
+}
+
 /// pdfTeX 1.40.26's structure destinations: `\pdfdest struct n` (a
 /// destination naming structure element `n`'s object, not its page's)
 /// and a `goto` action's `struct` (its `/SD`, with `file` the text as
@@ -507,6 +521,35 @@ fn raw_objects_in_object_streams() {
 #[test]
 fn pdf_image_page_group() {
     check_threads("pdf_image_page_group", "pdf");
+}
+
+/// An included PDF page whose `/Group` is an indirect object: the image's
+/// own writer, showing no page, copied the group's object into the
+/// image (an object), and the count of the page's group was added on
+/// top, so every object number TeX read after the page was one past
+/// pdfTeX's (df0d049ac counted the group for every included page with
+/// one). The own writer now shows the image as the page does
+/// (`out_image` numbers the group), and the write makes what pdfTeX's
+/// makes. At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdf_image_page_group_ref() {
+    check_threads("pdf_image_page_group_ref", "pdf");
+}
+
+/// A PNG with an alpha channel: reading it numbers the document's
+/// transparency group, and its write writes the group into an object
+/// stream, which that write opens. The image's own writer counted the
+/// stream with the image's objects (`PdfState::objects_after` took only
+/// the streams its later objects went into for streams), so every
+/// object number TeX read after the page showing it was one past
+/// pdfTeX's (beautynote's `/pgfsmask76` for 75, elegantnote-en; hidden
+/// there until df0d049ac counted the included PDF's page group, one
+/// short, beside it; `objects_after`'s fix is 9dd4e3020's, as
+/// `png_alpha_objects_counted`'s). At -j1 and -j4 (oracle: pdflatex in the
+/// CI image).
+#[test]
+fn pdf_image_png_group() {
+    check_threads("pdf_image_png_group", "pdf");
 }
 
 /// A line a node boundary cuts right after a control word: its
@@ -797,4 +840,20 @@ fn png_alpha_objects_counted() {
 #[test]
 fn word_across_cut() {
     check_threads("word_across_cut", "pdf");
+}
+
+/// manuals (spath3: pgf's `\immediate\pdfobj` numbered 404 for pdfTeX's
+/// 429, the 25 objects of the page firing before it missing; tex-vpat):
+/// an object number read inside a conditional the text's run opens,
+/// after a candidate inside it where a page fires. No pass of the run
+/// could end at a paragraph's start or a paragraph's end inside its own
+/// conditionals, so the number missed that page's objects
+/// (`PAGES_OBJECTS_DEFECT`). Now, where a page fires at one of its
+/// candidates, the run ends at the first such candidate a second pass
+/// can end at, the continuation carrying the conditionals
+/// (`Run::order_after_pages`; oracle: pdftex in the CI image, accl 23046,
+/// 23055).
+#[test]
+fn pages_objects_in_conditional() {
+    check_threads("pages_objects_in_conditional", "pdf");
 }
