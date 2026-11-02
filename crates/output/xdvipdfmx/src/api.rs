@@ -1426,6 +1426,76 @@ mod tests {
         }
     }
 
+    /// A fold that went another way through page 2 of 3 (other
+    /// characters, one glyph no longer used and one new, a destination
+    /// elsewhere on it) and came back to the base's state before page 3:
+    /// the base's page 3 and its end grafted give the file the fold
+    /// written to the end gives, byte for byte; a fold whose state differs
+    /// there (a page more of objects) does not converge.
+    #[test]
+    fn a_converged_fold_writes_the_file_a_whole_fold_writes() {
+        let dest = |y: u32, chars: &[u8]| {
+            let mut p = cmr10_shows(chars);
+            p.pop();
+            let sp = alloc::format!("pdf:dest (d) [@thispage /XYZ 0 {y} null]");
+            p.push(crate::dvi::XXX4);
+            p.extend(u32::try_from(sp.len()).unwrap().to_be_bytes());
+            p.extend_from_slice(sp.as_bytes());
+            p.push(crate::dvi::EOP);
+            p
+        };
+        let base_pages = [cmr10_shows(b"AB"), dest(100, b"CDQ"), cmr10_shows(b"EF")];
+        let (mut s, _) = cmr10_session(false, false);
+        s.record_usage(true);
+        let mut snaps = Vec::new();
+        let mut usage = Vec::new();
+        let mut chunks = Vec::new();
+        for p in &base_pages {
+            snaps.push(s.snapshot());
+            chunks.push(s.page(p).expect("page").pdf);
+            usage.push(alloc::sync::Arc::<[u64]>::from(s.take_usage()));
+        }
+        let post = s.snapshot();
+        for (new, converges) in [
+            (dest(200, b"CDZ"), true),
+            (dest(100, b"CD"), true),
+            (dest(300, b"QQ"), true),
+        ] {
+            // (the fold from page 2: its page, then the base's from page 3)
+            let mut f = snaps[1].snapshot();
+            let p2 = f.page(&new).expect("page").pdf;
+            let _ = f.take_usage();
+            let g = f.converged(&snaps[2], &[], &post, &[]);
+            assert_eq!(
+                g.is_some(),
+                converges,
+                "{:?}",
+                String::from_utf8_lossy(&new)
+            );
+            let Some(g) = g else { continue };
+            let g = g.with_after(usage[2..].to_vec());
+            let mut end = post.snapshot();
+            end.graft(&g);
+            let mut kept = p2.clone();
+            kept.extend_from_slice(&chunks[2]);
+            kept.extend(end.finish().expect("finish"));
+            // (the fold to the end)
+            let mut whole = p2;
+            whole.extend(f.page(&base_pages[2]).expect("page").pdf);
+            whole.extend(f.finish().expect("finish"));
+            assert!(
+                kept == whole,
+                "the converged file differs: {:?}",
+                String::from_utf8_lossy(&new)
+            );
+        }
+        // (a page of more objects: another state, no graft)
+        let mut f = snaps[1].snapshot();
+        f.page(&dest(100, b"CDQ")).expect("page");
+        f.page(&cmr10_shows(b"Q")).expect("page");
+        assert!(f.converged(&snaps[2], &[], &post, &[]).is_none());
+    }
+
     #[test]
     fn glyph_runs_only_when_asked() {
         let (pdf_on, runs_on, _) = cmr10_page(true, false);
