@@ -60,7 +60,7 @@ pub(crate) struct Checkpoints {
     fresh: Vec<(usize, usize)>,
     /// `PHITEX_CK_WHY` (observe): why no checkpoint was taken where one
     /// was due, by reason, the commands it was refused at.
-    why: Vec<(&'static str, u64)>,
+    why: Vec<(String, u64)>,
 }
 
 /// The paragraph's mode (tex.web's `hmode`, unrestricted).
@@ -126,17 +126,18 @@ impl Run<'_, '_> {
         let Some(c) = self.ck.as_ref() else {
             return Ok(());
         };
-        if self.cmds < c.next || self.conds != c.conds0 {
+        if self.cmds < c.next {
+            return Ok(());
+        }
+        if self.conds != c.conds0 {
+            if crate::exec::obs_flag!("PHITEX_CK_WHY") {
+                self.ck_census("a conditional open".to_owned());
+            }
             return Ok(());
         }
         if crate::exec::obs_flag!("PHITEX_CK_WHY") && self.ck_where().is_none() {
             let why = self.ck_refusal();
-            if let Some(c) = self.ck.as_mut() {
-                match c.why.iter_mut().find(|w| w.0 == why) {
-                    Some(w) => w.1 += 1,
-                    None => c.why.push((why, 1)),
-                }
-            }
+            self.ck_census(why);
         }
         let Some(at) = self.ck_where() else {
             if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
@@ -165,8 +166,19 @@ impl Run<'_, '_> {
         self.ck_take(at)
     }
 
-    /// `PHITEX_CK_WHY`: the first reason [`Run::ck_where`] refuses here.
-    fn ck_refusal(&self) -> &'static str {
+    /// `PHITEX_CK_WHY`: one refusal counted under `why`.
+    fn ck_census(&mut self, why: String) {
+        if let Some(c) = self.ck.as_mut() {
+            match c.why.iter_mut().find(|w| w.0 == why) {
+                Some(w) => w.1 += 1,
+                None => c.why.push((why, 1)),
+            }
+        }
+    }
+
+    /// `PHITEX_CK_WHY`: every reason [`Run::ck_where`] refuses here,
+    /// joined by `+`.
+    fn ck_refusal(&self) -> String {
         let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
         let checks: [(bool, &'static str); 26] = [
             (self.input.levels.is_empty(), "no input"),
@@ -217,10 +229,12 @@ impl Run<'_, '_> {
             ),
             (self.nest.iter().any(|l| l.group != 0), "inside a group"),
         ];
-        checks
-            .iter()
-            .find(|c| c.0)
-            .map_or("the line, the base table or locals", |c| c.1)
+        let all: Vec<&str> = checks.iter().filter(|c| c.0).map(|c| c.1).collect();
+        if all.is_empty() {
+            "the line, the base table or locals".to_owned()
+        } else {
+            all.join("+")
+        }
     }
 
     /// Where the run stands, if a checkpoint can be taken there: the
