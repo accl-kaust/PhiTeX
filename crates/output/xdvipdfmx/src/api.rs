@@ -1434,45 +1434,67 @@ mod tests {
     /// there (a page more of objects) does not converge.
     #[test]
     fn a_converged_fold_writes_the_file_a_whole_fold_writes() {
-        let dest = |y: u32, chars: &[u8]| {
-            let mut p = cmr10_shows(chars);
-            p.pop();
-            let sp = alloc::format!("pdf:dest (d) [@thispage /XYZ 0 {y} null]");
-            p.push(crate::dvi::XXX4);
-            p.extend(u32::try_from(sp.len()).unwrap().to_be_bytes());
-            p.extend_from_slice(sp.as_bytes());
-            p.push(crate::dvi::EOP);
-            p
+        use crate::direct::Op;
+        let font = || Op::FontDef {
+            id: 0,
+            checksum: u32::from_be_bytes(CMR10_TFM[24..28].try_into().unwrap()),
+            size: 655_360,
+            design_size: 655_360,
+            name: b"cmr10".to_vec(),
         };
-        let base_pages = [cmr10_shows(b"AB"), dest(100, b"CDQ"), cmr10_shows(b"EF")];
-        let (mut s, _) = cmr10_session(false, false);
+        let shows = |first: bool, chars: &[u8], dest: Option<u32>| {
+            let mut ops = Vec::new();
+            if first {
+                ops.push(Op::Special(b"pdf:mapline cmr10 CMR10 <cmr10.pfb".to_vec()));
+                ops.push(font());
+            }
+            ops.push(Op::Font(0));
+            ops.extend(chars.iter().map(|&c| Op::Set(i32::from(c))));
+            if let Some(y) = dest {
+                let sp = alloc::format!("pdf:dest (d) [@thispage /XYZ 0 {y} null]");
+                ops.push(Op::Special(sp.into_bytes()));
+            }
+            ops
+        };
+        let (s0, _) = cmr10_session(false, false);
+        let mut s = Session::direct(
+            Options {
+                source_date_epoch: Some(0),
+                ..Options::default()
+            },
+            s0.dpx.files.0.clone(),
+            Box::new(|l, d: &[u8]| phitex_codecs::deflate::compress(d, l)),
+            1000,
+            b"",
+        )
+        .expect("starts");
         s.record_usage(true);
+        let base_pages = [
+            shows(true, b"AB", None),
+            shows(false, b"CDQ", Some(100)),
+            shows(false, b"EF", None),
+        ];
         let mut snaps = Vec::new();
         let mut usage = Vec::new();
         let mut chunks = Vec::new();
         for p in &base_pages {
             snaps.push(s.snapshot());
-            chunks.push(s.page(p).expect("page").pdf);
+            chunks.push(s.page_ops(p).expect("page").pdf);
             usage.push(alloc::sync::Arc::<[u64]>::from(s.take_usage()));
         }
         let post = s.snapshot();
-        for (new, converges) in [
-            (dest(200, b"CDZ"), true),
-            (dest(100, b"CD"), true),
-            (dest(300, b"QQ"), true),
+        for new in [
+            shows(false, b"CDZ", Some(200)),
+            shows(false, b"CD", Some(100)),
+            shows(false, b"QQ", Some(300)),
         ] {
             // (the fold from page 2: its page, then the base's from page 3)
             let mut f = snaps[1].snapshot();
-            let p2 = f.page(&new).expect("page").pdf;
+            let p2 = f.page_ops(&new).expect("page").pdf;
             let _ = f.take_usage();
-            let g = f.converged(&snaps[2], &[], &post, &[]);
-            assert_eq!(
-                g.is_some(),
-                converges,
-                "{:?}",
-                String::from_utf8_lossy(&new)
-            );
-            let Some(g) = g else { continue };
+            let g = f
+                .converged(&snaps[2], &[], &post, &[])
+                .unwrap_or_else(|| panic!("{new:?}: no graft: {}", f.differs(&snaps[2])));
             let g = g.with_after(usage[2..].to_vec());
             let mut end = post.snapshot();
             end.graft(&g);
@@ -1481,18 +1503,14 @@ mod tests {
             kept.extend(end.finish().expect("finish"));
             // (the fold to the end)
             let mut whole = p2;
-            whole.extend(f.page(&base_pages[2]).expect("page").pdf);
+            whole.extend(f.page_ops(&base_pages[2]).expect("page").pdf);
             whole.extend(f.finish().expect("finish"));
-            assert!(
-                kept == whole,
-                "the converged file differs: {:?}",
-                String::from_utf8_lossy(&new)
-            );
+            assert!(kept == whole, "{new:?}: the converged file differs");
         }
-        // (a page of more objects: another state, no graft)
+        // (a page more: another state, no graft)
         let mut f = snaps[1].snapshot();
-        f.page(&dest(100, b"CDQ")).expect("page");
-        f.page(&cmr10_shows(b"Q")).expect("page");
+        f.page_ops(&base_pages[1]).expect("page");
+        f.page_ops(&shows(false, b"Q", None)).expect("page");
         assert!(f.converged(&snaps[2], &[], &post, &[]).is_none());
     }
 
