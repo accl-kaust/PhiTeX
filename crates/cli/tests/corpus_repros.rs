@@ -666,3 +666,15 @@ fn write_in_unbroken_discretionary() {
     check_aux("write_in_unbroken_discretionary");
     check_threads("write_in_unbroken_discretionary", "pdf");
 }
+
+/// TeX Live manuals hfutthesis, zhlineskip, highlightx, caspervector
+/// (xelatex): a document line's comment read as text (verbatim's `%` is
+/// no comment) is spliced back from the canonical text's mark as the
+/// file's bytes; under XeTeX they are decoded in the file's input mode as
+/// the line around them was. They were the bytes' characters ("Missing
+/// character: There is no ^^80"). At -j1 and -j4 (oracle: xelatex in the
+/// CI image, accl 22729; the base differs).
+#[test]
+fn xe_verbatim_comment() {
+    check_threads("xe_verbatim_comment", "pdf");
+}

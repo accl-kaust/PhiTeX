@@ -7,14 +7,14 @@
 \usepackage{etoc}
 \usepackage{fontspec}
 \begin{document}
-\tableofcontents
-\section{Définition}
-\section{Création d’une ligne}
 \newread\tocin
 \openin\tocin=\jobname.toc
 \ifeof\tocin\else
-  \readline\tocin to\x \readline\tocin to\x
+  \readline\tocin to\x
   \texttt{\meaning\x}
 \fi
 \closein\tocin
+\tableofcontents
+\section{Définition}
+\section{Création d’une ligne}
 \end{document}
