@@ -1858,7 +1858,12 @@ impl Run<'_, '_> {
     /// `auto`, [`crate::xetex::decode_line`]). pdfTeX's lines are bytes.
     pub(crate) fn next_read_line_decoded(&mut self, field: &str, st: ValueId) -> R<Option<String>> {
         if !self.xe {
-            return self.next_read_line(field, st);
+            // (pdfTeX's: through a TCX's `xord`)
+            let t = self.tcx()?;
+            return Ok(self.next_read_line(field, st)?.map(|text| match t {
+                Some(t) => t.reread(&text),
+                None => text,
+            }));
         }
         let v = self.v;
         let first = match &*v.get(st) {
@@ -2272,8 +2277,22 @@ impl Run<'_, '_> {
             line.push('\n');
             // (XeTeX writes UTF-8, controls in `^^` form; the line read
             // back here is those bytes read as XeTeX reads them)
+            // (pdfTeX under a TCX: each character its `xchr` byte where
+            // printable, else in `^^` form; the line read back through
+            // `xord`)
             let line = if self.xe {
                 crate::xetex::file_text(&line)
+            } else if let Some(t) = self.tcx()? {
+                let mut out = String::with_capacity(line.len());
+                for c in s.chars() {
+                    if i64::from(u32::from(c)) == nl {
+                        out.push('\n');
+                    } else {
+                        t.print_file_char(&mut out, u32::from(c));
+                    }
+                }
+                out.push('\n');
+                out
             } else {
                 line
             };
@@ -2301,6 +2320,8 @@ impl Run<'_, '_> {
                 self.interp_point = self.read_point_of(&name)?;
                 let r = if self.xe {
                     self.interpret_line(&crate::xetex::reread(&text))
+                } else if let Some(t) = self.tcx()? {
+                    self.interpret_line(&t.reread(&text))
                 } else {
                     self.interpret_line(&text)
                 };

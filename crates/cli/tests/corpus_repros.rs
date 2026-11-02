@@ -689,3 +689,16 @@ fn xe_verbatim_comment() {
 fn xe_read_utf8() {
     check_threads("xe_read_utf8", "pdf");
 }
+
+/// TeX Live manual sample-polski (pdflatex): its first line is
+/// `%& --translate-file=il2-pl`, a TCX web2c's `parse_first_line` reads
+/// and pdfTeX applies: each byte of a file's line through its `xord` (the
+/// ISO-8859-2 text in T1's codes), each written character through its
+/// `xchr` where `xprn` says it prints, else in `^^` form, read back
+/// through `xord` (the .toc, a `\read`). The TCX was not read, the bytes
+/// were their own characters ("tre\xb6ci" for "treści"). At -j1 and -j4
+/// (oracle: pdftex in the CI image, accl 22852; the base differs).
+#[test]
+fn tcx_first_line() {
+    check_threads("tcx_il2pl", "pdf");
+}
