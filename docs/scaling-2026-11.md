@@ -306,3 +306,10 @@ So a checkpoint's state is not a function of the reads recorded before it. Some 
 3. gate on `PHITEX_RESUME_CHECK` reporting 0 differences over the corpus's edit sweep and cold amsldoc/Grail at -j1 and -j8.
 
 Only then is resuming worth measuring. Size: 3-5 agent-days.
+
+### P2, the blocker located (accl 22826, 22834; branch `scaling-p2` cd6f840b1)
+
+- **The edit resumption is sound.** Edit resumptions (`Cause::Edited`) checked against whole runs: letter, word and sentence edits on amsldoc and Grail at -j1, every one "same", 3 of 3 for each kind (accl 22826).
+- **The new path fails only past a page candidate.** Change resumptions refused from any checkpoint that has a page candidate marked before it: 0 resumptions are left in amsldoc and Grail cold at -j1 and -j8, and the PDFs are identical again (98c96e00, 004bb415; accl 22834).
+- **Every checkpoint in practice is past a candidate.** The state there holds what the page's routine left at that candidate. It is loaded (`Held::Loaded`, "a finisher's state at its candidate … no read recorded"), not read. So a moved page state passes `last_reads_hold`, and the resumed run goes on from a stale state. That is the cause of all the differences in 22814.
+- **What P2 needs first:** record a loaded candidate state as a read of the fields it was loaded from (or file the candidate's state digest with the checkpoint, and refuse a resumption when it moved). Only then is a resumption past a candidate valid. Edits never meet this, because an edit's resumption keeps every read of the last run, and a moved page state wakes the node for that reason.
