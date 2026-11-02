@@ -299,6 +299,14 @@ impl<'a> Ctx<'a> {
             return Ok(());
         }
         eng.frontier_held.fetch_add(1, Relaxed);
+        if crate::sched::run_log() {
+            eprintln!(
+                "frontier: read held node {} field {} at {}",
+                self.me.id.raw(),
+                self.values().render(f.0),
+                fr.saturating_sub(1)
+            );
+        }
         self.wait_frontier = true;
         Err(stop())
     }
