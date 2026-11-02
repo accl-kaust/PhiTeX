@@ -194,10 +194,15 @@ pub(crate) struct LoopState {
     /// them (a column's routine that never saw the column before it
     /// output, and gave back the same `\clearpage` again, with no end).
     pub after: Option<(NodeId, NodeId)>,
+    /// A loop rest's: the start its fold began from ([`REST_OF`] of the
+    /// loop node before it, a [`RestStart`]'s value). A run whose start
+    /// is another folds from it anew: the checkpoints and the tail kept
+    /// were folded from the old one, whatever woke the run.
+    pub began: Option<ValueId>,
 }
 
 /// The tag of a parked [`LoopState`] of this version.
-const STATE_TAG: &str = "\u{1}pages-loop-11";
+const STATE_TAG: &str = "\u{1}pages-loop-12";
 
 /// The placement of checkpoint `i`'s finisher: after the rest, placement
 /// 0 ([`Run::page_loop`]).
@@ -336,6 +341,7 @@ impl LoopState {
                 v.list(vec![raw_value(v, Some(c)), raw_value(v, Some(f))])
             }),
             self.rest_def.unwrap_or(ValueId::UNIT),
+            self.began.unwrap_or(ValueId::UNIT),
         ])
     }
 
@@ -343,7 +349,7 @@ impl LoopState {
     /// the run starts from nothing).
     pub(crate) fn decode(v: &Values, x: ValueId) -> Option<LoopState> {
         let xs = list_of(v, x);
-        if xs.len() != 9 || !v.with_str(xs[0], |s| s == STATE_TAG).unwrap_or(false) {
+        if xs.len() != 10 || !v.with_str(xs[0], |s| s == STATE_TAG).unwrap_or(false) {
             return None;
         }
         let cps = |x: ValueId, at: usize| -> Option<Vec<Checkpoint>> {
@@ -394,6 +400,7 @@ impl LoopState {
                 _ => None,
             },
             rest_def: some(xs[8]),
+            began: some(xs[9]),
         })
     }
 
@@ -627,11 +634,19 @@ impl Run<'_, '_> {
         // after the one this node stops at, where it stops ([`REST_OF`]),
         // else nothing)
         self.cx.child(self.ops.pages, rest_args(v, me));
-        // 1. the parked state
+        // 1. the parked state (a rest's, folded from the start it has now:
+        // one parked from another start, which its loop node before
+        // defined anew while this run was asked for something else, a
+        // hole filled, is folded again from the new one; at -j4 the wake
+        // that reaches a run first is the scheduler's, and subfigure's
+        // test went on from the tail of a start a page before, and fired
+        // the page its loop node before now fires too: shipped twice)
+        let began = rest.as_ref().map(|r| r.encode(v));
         let old = self
             .cx
             .resumed()
             .and_then(|x| LoopState::decode(v, x))
+            .filter(|o| o.began == began)
             .unwrap_or_default();
         self.loop_keys = LoopKeys::of(&old, me);
         // 2. where to start
@@ -640,6 +655,7 @@ impl Run<'_, '_> {
             base: rest.as_ref().map_or(0, |r| r.base),
             rest_at: old.rest_at,
             rest_def: old.rest_def,
+            began,
             after: if rest.is_some() { old.after } else { None },
             ..LoopState::default()
         };
