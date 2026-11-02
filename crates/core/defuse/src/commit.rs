@@ -1916,7 +1916,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // are queued by where they stand against it, `sched::sched_key`)
     if let Some(at) = frontier {
         eng.frontier_by.store(node.id.raw() + 1, Ordering::Release);
-        eng.frontier.store(at.map_or(0, |n| n.raw() + 1), Ordering::Release);
+        let new = at.map_or(0, |n| n.raw() + 1);
+        let old = eng.frontier.swap(new, Ordering::AcqRel);
+        crate::sched::log_frontier(eng, old, new, Some(node.id), "set");
     }
     for n in &made {
         enqueue(
@@ -3051,6 +3053,13 @@ fn reask_range(
                             )
                             .is_ok()
                     {
+                        crate::sched::log_frontier(
+                            eng,
+                            to.raw() + 1,
+                            n.stop.map_or(0, |s| s.raw() + 1),
+                            Some(r.node),
+                            "stop",
+                        );
                         crate::sched::release_frontier(eng, w);
                     }
                 }
