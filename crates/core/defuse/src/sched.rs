@@ -255,6 +255,20 @@ impl Worker {
         Worker::add(&self.shaped, st.shaped);
     }
 
+    /// Queues `nodes` on its ready heap ([`Ready`]): each taken by place,
+    /// the earliest first, by it or by any idle worker.
+    pub(crate) fn ready_all(&self, eng: &Engine, nodes: &[NodeId]) {
+        // (counted before pushed, as `seed`)
+        self.shared.outstanding.fetch_add(nodes.len(), Ordering::SeqCst);
+        for &n in nodes {
+            self.ready().push(eng, eng.node(n));
+        }
+        let sh = &self.shared;
+        if sh.spawned.load(Ordering::Relaxed) < sh.n && nodes.len() >= 2 {
+            sh.want_spawn.store(true, Ordering::SeqCst);
+        }
+    }
+
     /// Seeds the block with nodes to run in this order.
     pub(crate) fn seed(&self, nodes: &[NodeId]) {
         let run = self.block_runs.fetch_add(1, Ordering::Relaxed);
@@ -1052,7 +1066,13 @@ fn run_worker(
                     .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty)),
             );
             if !rel.is_empty() {
-                w.seed(&rel);
+                // (on the ready heap, by place, where every idle worker
+                // takes the earliest: as a block they were one worker's,
+                // stolen from only past `BLOCK_MIN`, and the others idled
+                // while it ran them one after another; Grail -j8 at a
+                // quiet point inside a pass: worker 0 busy 7.5 s of 10.3,
+                // the other seven 0.9-2 s each, accl 23051)
+                w.ready_all(eng, &rel);
                 pool.shared.wake_all();
                 continue;
             }
