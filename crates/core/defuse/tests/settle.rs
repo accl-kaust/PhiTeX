@@ -252,3 +252,58 @@ fn held_wakes_are_never_lost_on_many_workers() {
         );
     }
 }
+
+/// `[at, x]`: a page-layer node whose fold stands at node `at` (its raw
+/// id): it sets the layer's frontier there (`Ctx::set_frontier`), as the
+/// page loop does at a hole. Settles at quiet points.
+struct Front;
+
+impl Operation for Front {
+    fn name(&self) -> &'static str {
+        "front"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let a = cx.args().to_vec();
+        let at = cx.values().as_int(a[0]).and_then(|x| u64::try_from(x).ok());
+        cx.set_frontier(at.map(phitex_defuse::NodeId::from_raw));
+        Ok(a[1])
+    }
+
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+}
+
+/// A text reader past the layer's frontier, re-asked by a page value,
+/// is not held to the quiet point: it waits at the frontier
+/// (`Ctx::hold_at_frontier`) and runs once the layer is quiet, in the
+/// same pass, on what the pages before it left. Line: F (sets the
+/// frontier at A), A (text), P (page: pn := 1), T (text: reads pn). F
+/// and P edited (pn := 2): F stands the frontier at A again, P's change
+/// reaches T past it. Held, T ran again only at the next quiet point,
+/// and a routine after it read what that run left one pass later: a
+/// chain through every page, one page a pass (beautybook-en at -j4,
+/// "the page layout did not settle after 12 passes", accl 22609).
+#[test]
+fn a_text_reader_past_the_frontier_waits_there_and_is_not_held() {
+    let o = setup();
+    let (e, v) = (&o.e, o.e.values());
+    let front = e.register(Arc::new(Front));
+    let u = e.new_unit();
+    let (pn, a) = (v.field("pn"), v.field("a"));
+    let f = e.push(u, front, vec![v.int(-1), v.int(0)]);
+    let an = e.push(u, o.def_op, vec![a.0, v.int(1)]);
+    let p = e.push(u, o.page_op, vec![pn.0, v.int(1), ValueId::UNIT]);
+    let t = e.push(u, o.reader_op, vec![pn.0]);
+    e.evaluate(1).unwrap();
+    assert_eq!(int(e, t), Some(1));
+    let at = i64::try_from(an.raw()).expect("an id");
+    e.replace(f, front, vec![v.int(at), v.int(1)]);
+    e.replace(p, o.page_op, vec![pn.0, v.int(2), ValueId::UNIT]);
+    let rep = e.evaluate(1).unwrap();
+    assert_eq!(int(e, t), Some(2), "{rep:?}");
+    assert_eq!(rep.held_deferred, 0, "T past the frontier is not held: {rep:?}");
+    assert_eq!(rep.held_passes, 0, "no pass: {rep:?}");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

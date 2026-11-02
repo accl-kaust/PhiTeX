@@ -1239,11 +1239,25 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
 
 /// Whether a definition by `by` reaches `reader` across the settling
 /// line: `by`'s operation settles at quiet points and its last run said
-/// nothing of `Ctx::settle_now`, `reader`'s does not settle.
+/// nothing of `Ctx::settle_now`, `reader`'s does not settle, and the
+/// reader stands before the layer's frontier. One past it read the
+/// field while no frontier held it (before the layer first defined the
+/// field, `Engine::mark_settled`, or with the layer's fold ended; a read
+/// of a field the layer defines waits at the frontier,
+/// `Ctx::hold_at_frontier`): asked again now, it waits for the
+/// frontier to pass it and runs once on what the pages before it left,
+/// as at one thread. Held, it ran again only at the next quiet point,
+/// and the next page's routine read what that run left there: a chain
+/// through every page, text to routine to text, one page a pass
+/// (beautybook-en at -j4: pgf's `\pgf@picture@serial@count`, which each
+/// page's TikZ header and the TikZ in its text step, re-asked one page
+/// a pass, "the page layout did not settle after 12 passes" and no
+/// output file in 11 of 30 builds, accl 22502, 22609).
 pub(crate) fn settles_edge(eng: &Engine, by: NodeId, reader: &Node) -> bool {
     eng.placed_node(by)
         .is_some_and(|b| eng.op(b.op()).settles_at_quiet() && !b.settle_now.load(Ordering::Acquire))
         && !eng.op(reader.op()).settles_at_quiet()
+        && !past_frontier(eng, reader, eng.frontier.load(Ordering::Acquire))
 }
 
 /// Lists a wake for the next quiet point (`Report::held_deferred`).
