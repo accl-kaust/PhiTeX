@@ -882,3 +882,15 @@ fn glossaries_made() {
 fn saved_hyph_codes() {
     check_threads("saved_hyph_codes", "pdf");
 }
+
+/// TeX Live manual focus-demo (xelatex, beamer): `\pdflastypos` is
+/// measured from the page's top, the page's height being `\pdfpageheight`
+/// when it is not zero, in XeTeX and in pdfTeX's DVI mode alike ("Calculate
+/// DVI page dimensions and margins"); beamer sets it. The height was the
+/// shipped box's with twice the offsets and the DVI origin, so tikz's
+/// `remember picture` overlays were drawn 1in off. At -j1 and -j4
+/// (oracle: xelatex in the CI image, accl 23258; the base differs).
+#[test]
+fn savepos_pageheight() {
+    check_threads("savepos_pageheight", "pdf");
+}
