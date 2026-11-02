@@ -870,3 +870,17 @@ fn word_across_cut() {
 fn glossaries_made() {
     check_threads("glossaries_tool", "pdf");
 }
+
+/// manual subfigure's test at -j4 (a page shipped twice, the pages after
+/// it numbered one higher, 6 of 8 runs): the lists of figures and tables
+/// grow by a page in the second evaluation, the loop node that fired the
+/// List of Tables' first page fires the next one itself, and its old rest,
+/// woken by a hole filling before its start's change, folded on from its
+/// parked tail and fired that page again. A rest whose start moved folds
+/// from the new one, whatever woke it (`LoopState::began`; oracle:
+/// pdflatex in the CI image, accl 23217: the base differs in 5 of 10 runs
+/// at -j4).
+#[test]
+fn rest_start_moved() {
+    check_threads("rest_start_moved", "pdf");
+}
