@@ -3517,7 +3517,10 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     } else {
         None
     };
+    // (`\pdfximagebbox`'s four: the writer's, 0 outside PDF mode)
+    let mut bbox = [0; 4];
     if let Some((_, i, _, _)) = &got {
+        bbox = i.bbox;
         w = i.width;
         h = i.height;
         d = i.depth;
@@ -3556,10 +3559,10 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
             v.str(&name),
             v.int(i64::from(page)),
             at,
-            v.int(0),
-            v.int(0),
-            v.int(i64::from(x)),
-            v.int(i64::from(y)),
+            v.int(i64::from(bbox[0])),
+            v.int(i64::from(bbox[1])),
+            v.int(i64::from(bbox[2])),
+            v.int(i64::from(bbox[3])),
             v.int(wobjs),
             v.int(wos),
             v.int(i64::from(immediate)),

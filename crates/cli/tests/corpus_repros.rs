@@ -920,3 +920,14 @@ fn savepos_pageheight() {
 fn savepos_disc() {
     check_threads("savepos_disc", "pdf");
 }
+
+/// TeX Live manual pinlabdoc (pdflatex): pinlabel reads its figure's size
+/// with `\pdfximagebbox`, an included PDF page's box (pdfTeX's
+/// `pdf_ximage_bbox_code`: its origin, and that plus the page's size);
+/// the image's record held the bitmap size `image_info` reads, 0 for a
+/// PDF, so every `\pinlabel` was placed on a figure of no size. At -j1
+/// and -j4 (oracle: pdftex in the CI image, accl 23321; the base differs).
+#[test]
+fn ximage_bbox() {
+    check_threads("ximage_bbox", "pdf");
+}

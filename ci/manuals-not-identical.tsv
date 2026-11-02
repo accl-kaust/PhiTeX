@@ -27,7 +27,6 @@ latex_optikz_optikz_doc	differs: page 1: obj 44 (page 1, untyped) line 24: oracl
 latex_pagecolor_pagecolor-example	differs: page 8: obj 41 (page 8, untyped) line 17: oracle "/F45 9.9626 Tf 14.944 -14.944 Td [(Lorem)-287(ipsum)-286(dol)-1(or)-28", phitex "/F45 9.9626 Tf 14.944 -14.944 Td [(Lorem)-287(ipsum)-286(dol)-1(or)-28"
 latex_pas-tableur_pas-tableur	error: error: You can't use `\cr' in restricted horizontal mode
 latex_pfdicons_pfdicons-doc	differs: page 33: obj 744 (page 33, untyped) line 622: oracle "0.5 g 0.5 G", phitex "0.93 g 0.93 G"
-latex_pinlabel_src_pinlabdoc	differs: page 3: obj 352 (Catalog) line 10: oracle "<end>", phitex "<end>" (pages 21 vs 20)
 latex_przechlewski-book_wkmgr1	differs: page 1: obj 97 (page 1, untyped) line 6: oracle "/F81 11.9552 Tf 190.624 723.203 Td [(Uniwersytet)-250(Kaszubski)-250<9", phitex "/F81 11.9552 Tf 190.624 723.203 Td [(Uniwersytet)-250(Kaszubski)-250<9"
 latex_repeatindex_testrepeatindex	differs: page 2: obj 30 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 4 vs 3)
 latex_rvwrite_rvwrite-doc	differs: page 2: obj 63 (page 2, untyped) line 13: oracle "0 0.83 1 0.7 k 0 0.83 1 0.7 K", phitex "0 g 0 G"

@@ -88,6 +88,9 @@ pub struct XImageInfo {
     pub pages: i32,
     /// `img_colordepth`.
     pub colordepth: i32,
+    /// `\pdfximagebbox` 1 to 4: an included PDF page's box (its
+    /// origin, and that plus the page's size); 0 for other images.
+    pub bbox: [Scaled; 4],
 }
 
 /// A PDF page's part of an image (`pdf_image_struct`).
@@ -185,6 +188,23 @@ impl XImage {
             depth: self.depth,
             pages: self.pages,
             colordepth: self.bits,
+            bbox: [1, 2, 3, 4].map(|j| self.bbox(j)),
+        }
+    }
+
+    /// `\pdfximagebbox` j (1 to 4; pdfTeX's `pdf_ximage_bbox_code`).
+    fn bbox(&self, j: i32) -> Scaled {
+        let Some(i) = self.image.as_ref() else {
+            return 0;
+        };
+        match &i.kind {
+            Kind::Pdf(p) => match j {
+                1 => p.orig_x,
+                2 => p.orig_y,
+                3 => p.orig_x + i.width,
+                _ => p.orig_y + i.height,
+            },
+            _ => 0,
         }
     }
 }
@@ -872,18 +892,7 @@ impl PdfState {
     /// page, 0 for other images.
     #[must_use]
     pub fn ximage_bbox(&self, n: usize, j: i32) -> Scaled {
-        let Some(i) = self.aux.ximages.get(&n).and_then(|x| x.image.as_ref()) else {
-            return 0;
-        };
-        match &i.kind {
-            Kind::Pdf(p) => match j {
-                1 => p.orig_x,
-                2 => p.orig_y,
-                3 => p.orig_x + i.width,
-                _ => p.orig_y + i.height,
-            },
-            _ => 0,
-        }
+        self.aux.ximages.get(&n).map_or(0, |x| x.bbox(j))
     }
 
     /// `\immediate\pdfximage`: `pdf_write_image(pdf_last_ximage)`.
