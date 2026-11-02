@@ -187,12 +187,17 @@ jobs:
           persist-credentials: false
       - run: scripts/ci/free-disk.sh
       - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-      - run: docker pull -q "$IMAGE"
+      # (the -doc image, as accl's runs of these tests have it: its TeX
+      # Live has the language collections the corpus repros load, CJK.sty
+      # and ngerman.sty among them; the plain image has not, and LaTeX asked
+      # the terminal for the missing file: input_enc_named_file and
+      # page_counter_after_own_page red here, green on accl)
+      - run: docker pull -q "$IMAGE-doc"
       - uses: actions/download-artifact@v4
         with:
           name: store-tests
       - run: mkdir -p out/store && tar -C out/store -xf store.tar
-      - run: scripts/ci/gate-gh.sh tests
+      - run: IMAGE="$IMAGE-doc" scripts/ci/gate-gh.sh tests
       - uses: actions/upload-artifact@v4
         if: always()
         with:
