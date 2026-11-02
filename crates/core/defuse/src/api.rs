@@ -634,8 +634,12 @@ pub struct Limits {
     /// sixth of it with nodes still outstanding (a wake lost), ends the
     /// evaluation with `EvalError::Stuck`, the nodes queued pending.
     pub stall: Option<Duration>,
-    /// The process's resident memory past which a run reports itself
-    /// stuck (default none; the client measures it, `Ctx::stuck`).
+    /// The evaluation's own value store (`Values::payload_bytes`) past
+    /// which a run reports itself stuck (default none; the client
+    /// measures it, `Ctx::stuck`). The store's payload, not the
+    /// process's resident memory: several builds in one process (a test
+    /// suite's, a host's) each hold their own, and one past its limit is
+    /// that build's, never its neighbours'.
     pub memory_bytes: Option<u64>,
     /// The value store's payload at which the evaluation stops every
     /// worker at the end of its run and collects (`Engine::collect`;

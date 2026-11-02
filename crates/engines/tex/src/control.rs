@@ -41,7 +41,6 @@ pub(crate) struct Watchdog {
     stamp: u64,
     at: Option<std::time::Instant>,
     cmds_at: u64,
-    ticks: u64,
 }
 
 impl Run<'_, '_> {
@@ -161,7 +160,7 @@ impl Run<'_, '_> {
     /// that reads no new line of its input (a document line, or a file's
     /// read here) for `Limits::stall`, that runs 20 million commands
     /// without an assignment or a new line, or past `Limits::memory_bytes`
-    /// resident (looked at every 64 checks), or past the build's time
+    /// of its own values, or past the build's time
     /// limit (`Limits::time`), is stuck, and the evaluation
     /// ends with `EvalError::Stuck` naming it and where it is. A
     /// one-letter edit of amsldoc left a page's run going for minutes at
@@ -187,7 +186,6 @@ impl Run<'_, '_> {
                 stamp,
                 at: Some(now),
                 cmds_at: cmds,
-                ticks: 0,
             };
             return Ok(());
         };
@@ -202,8 +200,7 @@ impl Run<'_, '_> {
             w.stamp = stamp;
             w.cmds_at = cmds;
         }
-        w.ticks += 1;
-        let (still, ticks) = (cmds - w.cmds_at, w.ticks);
+        let still = cmds - w.cmds_at;
         let since = now.duration_since(at);
         let why = if let Some(t) = lim.time
             && self.cx.elapsed().is_some_and(|e| e > t)
@@ -225,15 +222,19 @@ impl Run<'_, '_> {
                 "it ran {} million commands without an assignment or a new line of input, an endless loop",
                 still / 1_000_000
             ))
-        } else if ticks % 64 == 0
-            && let Some(m) = lim.memory_bytes
-            && crate::api::rss_kb() << 10 > m
+        } else if let Some(m) = lim.memory_bytes
+            && self.cx.values().payload_bytes() > m
         {
+            // (the build's own values, not the process's resident memory:
+            // a test binary's builds share one process, and a build in a
+            // 32 GB job was stopped "stuck" at -j1 by its neighbours'
+            // 24 GB, its PDF empty: latexmk_corpus_protrude_koma,
+            // latexmk_ams_index, latexmk_minted, accl 22597)
             #[allow(clippy::cast_precision_loss, reason = "a display of bytes")]
             let gb = |b: u64| b as f64 / f64::from(1u32 << 30);
             Some(format!(
-                "the process holds {:.1} GB, past the limit of {:.1} GB",
-                gb(crate::api::rss_kb() << 10),
+                "its values hold {:.1} GB, past the limit of {:.1} GB",
+                gb(self.cx.values().payload_bytes()),
                 gb(m)
             ))
         } else {

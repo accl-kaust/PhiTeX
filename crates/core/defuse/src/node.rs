@@ -139,6 +139,11 @@ pub(crate) struct Node {
     /// re-asked at once, not held to the quiet point
     /// (`sched::settles_edge`).
     pub(crate) settle_now: AtomicBool,
+    /// Its last run panicked on inputs that hold, held for
+    /// `Engine::evaluate`'s decision once the line is quiet: no run of it
+    /// comes in this pool, so no run waits for its commit
+    /// (`sched::settled_node`).
+    pub(crate) held_panic: AtomicBool,
     /// Where it stands among the nodes placed at its anchor: 0 a child
     /// of it, 1 after it and its children (another's `Ctx::follow_after`,
     /// or the placement after it in its placer's run), 2 its own
@@ -210,6 +215,7 @@ impl Node {
             anchor: AtomicU64::new(0),
             state_stale: AtomicBool::new(false),
             settle_now: AtomicBool::new(false),
+            held_panic: AtomicBool::new(false),
             slot: AtomicU8::new(0),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),

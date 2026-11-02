@@ -307,3 +307,53 @@ fn a_text_reader_past_the_frontier_waits_there_and_is_not_held() {
     assert_eq!(rep.held_passes, 0, "no pass: {rep:?}");
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[f, x]`: a page-layer node that predicts `f` := x and whose run
+/// panics. Settles at quiet points.
+struct PanicPage;
+
+impl Operation for PanicPage {
+    fn name(&self) -> &'static str {
+        "panic-page"
+    }
+
+    fn run(&self, _: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        panic!("a routine that fails on inputs that hold");
+    }
+
+    fn predicted_defs(&self, args: &[ValueId], _: &Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(vec![(Field(args[0]), args[1])])
+    }
+
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+}
+
+/// A text reader of a page node's prediction waits for its commit
+/// (`Ctx::wait_for_settling`), but not for one whose run panicked on
+/// inputs that hold, held for the evaluation's decision: no commit of it
+/// comes, and the reader, let go at each quiet point, waited again each
+/// time, and the evaluation never ended (latex_minutes_Protokol: its
+/// readers ran 80 000 times each in 150 s, accl 22791). Here the
+/// evaluation ends, with the panic.
+#[test]
+fn a_reader_does_not_wait_for_a_page_node_whose_run_panicked() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let o = setup();
+        let (e, v) = (&o.e, o.e.values());
+        let pp = e.register(Arc::new(PanicPage));
+        let u = e.new_unit();
+        let pn = v.field("pn");
+        e.push(u, pp, vec![pn.0, v.int(1)]);
+        e.push(u, o.reader_op, vec![pn.0]);
+        let r = e.evaluate(1).map(|_| ()).map_err(|x| x.to_string());
+        let _ = tx.send(r);
+    });
+    let r = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the evaluation ends");
+    let err = r.expect_err("the panic is the evaluation's failure");
+    assert!(err.contains("panicked"), "{err}");
+}
