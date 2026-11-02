@@ -894,3 +894,15 @@ fn saved_hyph_codes() {
 fn savepos_pageheight() {
     check_threads("savepos_pageheight", "pdf");
 }
+
+/// TeX Live manual snaptodo (pdflatex): `\pdflastxpos` past an unbroken
+/// discretionary with text of its own (a hyphenated word's ligature or
+/// kern, an explicit `\discretionary`): pdfTeX ships that text in the
+/// line, tex.web's `replace_count` nodes after the discretionary, and the
+/// positions' fold passed over it, so a later `\pdfsavepos` in the line was
+/// short by its width (snaptodo's second note 4.72pt off). At -j1 and -j4
+/// (oracle: pdftex in the CI image, accl 23274; the base differs).
+#[test]
+fn savepos_disc() {
+    check_threads("savepos_disc", "pdf");
+}

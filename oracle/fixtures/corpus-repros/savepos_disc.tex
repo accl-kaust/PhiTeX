@@ -1,0 +1,17 @@
+\documentclass{article}
+% \pdflastxpos past words whose hyphenation points sit in a ligature or
+% a kern (an unbroken discretionary with text of its own: "difficult",
+% "toward"), in a justified line.
+\makeatletter
+\newcommand\here[1]{\pdfsavepos\write\@auxout{\gdef\string\pos#1{\the\pdflastxpos,\the\pdflastypos}}}
+\makeatother
+\begin{document}
+\pretolerance=-1
+\noindent the text will be flushed toward the difficult and affluent offices\here{a}
+of the main body, the text will be flushed toward the main text body\here{b} of it all.
+
+\noindent x\discretionary{-}{}{abcdefgh}y\here{c}: \csname posc\endcsname
+
+a: \csname posa\endcsname\par
+b: \csname posb\endcsname
+\end{document}
