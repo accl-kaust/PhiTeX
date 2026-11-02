@@ -557,7 +557,22 @@ impl Operation for ToolRun {
                         continue 'entries;
                     }
                 }
+                if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+                    eprintln!("tool {} for {output}: the kept run's outcome", tool.name());
+                }
                 return Ok(outcome_value(v, tool, &output, &e.out));
+            }
+            if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+                eprintln!(
+                    "tool {} for {output}: runs ({} kept runs of its key; its input read {})",
+                    tool.name(),
+                    outcomes().locked().get(&k).map_or(0, Vec::len),
+                    if tool == Tool::Bibtex && bibtex_lines(&text).is_none() {
+                        "whole"
+                    } else {
+                        "by its lines"
+                    }
+                );
             }
         }
         // (run, then the files it asked for and had not looked up, and
