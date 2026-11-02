@@ -66,9 +66,13 @@ pub trait ShellHook: Send + Sync {
 
 Rules for an implementation:
 
-1. **Any thread, any time, any number of times.** The engine calls it from
-   its workers, possibly several at once, and possibly for a run that is
-   later thrown away (a run on inputs that turned out stale). So a call
+1. **Any thread, possibly several at once.** The engine calls it from its
+   workers, and only from a node at the committed frontier: every node
+   before it has committed in this pass with no re-ask pending, and no
+   page before it is left to fire (`Ctx::wait_settled`), so a command
+   never runs on a view of the job's files that TeX's order never had. A
+   later pass or an edit that changes the files it read calls it again
+   (as pdflatex's next run would). So a call
    must not leave anything behind that the job or a later call could see:
    each call gets a fresh working directory, and what the command did
    reaches the job only through the returned `ShellRan`.

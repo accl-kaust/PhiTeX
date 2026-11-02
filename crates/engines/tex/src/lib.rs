@@ -99,6 +99,6 @@ pub const OBSERVE: bool = cfg!(feature = "observe");
 pub fn tex_time() -> bool {
     exec::prof_flag!("PHITEX_TEX_TIME")
 }
-pub use hints::{paragraph_units, set_hints_enabled};
+pub use hints::{HintsMode, paragraph_units, set_hints_enabled, set_hints_mode};
 pub(crate) use phitex_defuse::FxHashMap;
 pub use pkgrec::summary as pkgrec_summary;
