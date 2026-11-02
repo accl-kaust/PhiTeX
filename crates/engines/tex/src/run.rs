@@ -165,6 +165,11 @@ pub(crate) struct Ops {
         std::sync::Arc<std::sync::Mutex<crate::FxHashMap<crate::pages::FinPageKey, FinClass>>>,
     /// [`crate::Options::finisher_predictions`].
     pub fin_predict: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// How long a run of an edit's evaluation may read no new line of its
+    /// input before it is stuck, in ms (0: no such bound): set by
+    /// [`crate::Build::set_stuck_after`] from the cold build's time, never
+    /// for the cold build (`Run::watchdog`).
+    pub edit_stall_ms: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// [`crate::Options::origins`]: the pages' writers keep their glyphs
     /// (`crate::origins`).
     pub origins: std::sync::Arc<std::sync::atomic::AtomicBool>,

@@ -183,11 +183,14 @@ pub struct Options {
     /// take; past it the build ends with the engine's deadline error,
     /// naming what waits, in the log. `None`: no limit.
     pub time_limit: Option<std::time::Duration>,
-    /// How long a build may make no progress before it ends stuck
-    /// (`phitex_defuse::Limits::stall`, [`crate::run::Run::watchdog`]):
-    /// `None` takes `PHITEX_STUCK_SECS` (0: never), else 300 s, a cold
-    /// build's bound (a front end sets an edit's from the cold build's
-    /// time, [`Build::set_stuck_after`]).
+    /// How long a build's workers may all stay idle with work left (a
+    /// wake lost) before it ends stuck, six times that
+    /// (`phitex_defuse::Limits::stall`): `None` takes `PHITEX_STUCK_SECS`
+    /// (0: never), else 300 s. A run that reads no new line of its input
+    /// is held to a bound in an edit's evaluation only, which a front end
+    /// sets from the cold build's time ([`Build::set_stuck_after`],
+    /// [`crate::run::Run::watchdog`]); a cold build's runs stop at the
+    /// time limit.
     pub stuck_after: Option<std::time::Duration>,
     /// The bytes of the build's own values past which a run is stuck
     /// (`phitex_defuse::Limits::memory_bytes`, [`crate::run::Run::watchdog`];
@@ -3172,6 +3175,7 @@ impl Graph {
             fin_class: Arc::default(),
             audit: Arc::default(),
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            edit_stall_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             origins: origins_on,
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             resumed_edits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -7282,6 +7286,14 @@ impl Build {
     /// held to what the document has shown it needs. `None`: no bound by
     /// time (the command and memory bounds stay).
     pub fn set_stuck_after(&self, d: Option<std::time::Duration>) {
+        // (the runs' bound, `Run::watchdog`'s no-new-line rule: an edit's
+        // only)
+        self.g.ops.edit_stall_ms.store(
+            d.map_or(0, |d| {
+                u64::try_from(d.as_millis()).unwrap_or(u64::MAX).max(1)
+            }),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let l = self.g.eng.limits();
         self.g
             .eng
