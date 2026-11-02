@@ -20,7 +20,7 @@ use phitex_typeset::glue::Glue;
 use phitex_typeset::node::{BoxKind, BoxNode, Disc, GlueKind, KernKind, Ligature, List, Node};
 use phitex_typeset::pack::{PackParams, Spec};
 
-use crate::control::{LEADER_FLAG, SHIP_OUT_FLAG};
+use crate::control::{GLOBAL_BOX_FLAG, LEADER_FLAG, SHIP_OUT_FLAG};
 use crate::fields::Par;
 use crate::nodes::{self, Side, T_BUILD_PAGE, T_DELETE, T_PD, T_SF, T_SPACE, T_VBOX};
 use crate::run::{R, Run};
@@ -1921,10 +1921,10 @@ impl Run<'_, '_> {
             }
         } else if ctx < SHIP_OUT_FLAG {
             // §1077
-            let (n, global) = if ctx < BOX_FLAG + 256 {
+            let (n, global) = if ctx < GLOBAL_BOX_FLAG {
                 (ctx - BOX_FLAG, false)
             } else {
-                (ctx - BOX_FLAG - 256, true)
+                (ctx - GLOBAL_BOX_FLAG, true)
             };
             self.set_box_reg(md, n, b, global);
         } else if let Some(b) = b {
@@ -2345,7 +2345,7 @@ impl Run<'_, '_> {
                 };
                 let outer = self.close_group(md)?;
                 if (BOX_FLAG..SHIP_OUT_FLAG).contains(&ctx)
-                    && ctx < BOX_FLAG + 256
+                    && ctx < GLOBAL_BOX_FLAG
                     && self.effect == crate::run::CLOSE
                 {
                     // a local \setbox of an engine scope lands outside it

@@ -740,3 +740,7 @@ fn xe_verbatim_comment() {
 fn xe_read_utf8() {
     check_threads("xe_read_utf8", "pdf");
 }
+repro!(
+    box_registers_past_255,
+    "manuals (milsymb: forest's directory tree drawn without its node texts): \\setbox<n> past 255 was read with TeX82's box contexts (global_box_flag box_flag+256, ship_out_flag box_flag+512), so \\setbox300 set register 44 globally and \\setbox600 shipped its box; e-TeX's are box_flag+32768 and box_flag+65536 (etex.ch §1071). forest's node boxes are \\locbox registers counted down from 32767 (oracle: pdflatex in the CI image, accl 22653)"
+);

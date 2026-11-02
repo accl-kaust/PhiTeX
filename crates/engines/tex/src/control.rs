@@ -26,8 +26,12 @@ const LAZY_OPEN: i64 = 3;
 /// alone, through a path into its lines ([`crate::tools::lines_field`]),
 /// so that the run depends on the lines it read, not the whole text.
 const LAZY_LINES: i64 = 4;
-pub(crate) const SHIP_OUT_FLAG: i64 = BOX_FLAG + 512;
-pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 513;
+/// e-TeX's box contexts (etex.ch, §1071): `\setbox` of its 32768
+/// registers, local below `global_box_flag`, global from it, then
+/// `\shipout` and the leaders.
+pub(crate) const GLOBAL_BOX_FLAG: i64 = BOX_FLAG + 32768;
+pub(crate) const SHIP_OUT_FLAG: i64 = BOX_FLAG + 65536;
+pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 65537;
 
 /// `PHITEX_HEARTBEAT_FROM`: the command count the per-command trace starts at.
 static HEARTBEAT_FROM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -1082,7 +1086,7 @@ impl Run<'_, '_> {
                 let n = self.scan_eight_bit_int()?;
                 self.scan_optional_equals()?;
                 let md = self.mode()?;
-                let ctx = BOX_FLAG + i64::from(n) + if global { 256 } else { 0 };
+                let ctx = if global { GLOBAL_BOX_FLAG } else { BOX_FLAG } + i64::from(n);
                 self.scan_box(&md, ctx)?;
             }
             cmd::SET_AUX => {
