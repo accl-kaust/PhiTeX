@@ -1634,6 +1634,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 && let Some((_, d)) = Segment::reaching(&inner, f, pos, false)
             {
                 if refuted.is_none() && through(eng, Reaching::of(&d.plain(&eng.values)), r.path) != r.seen {
+                    note_refute(eng, f, node.id, Some(d.by), r.seen, through(eng, Reaching::of(&d.plain(&eng.values)), r.path));
                     refuted = Some(i);
                 }
             } else {
@@ -1649,6 +1650,37 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         );
         let old = node.last.lock().replace(rec.clone());
         node.serial.store(serial, Ordering::Release);
+        // (`PHITEX_REFUTE_LOG`: a run again whose products are its last
+        // run's, defined, contributed and output alike: a cutoff's)
+        if refute_log()
+            && let Some(o) = old.as_ref().filter(|o| !o.provisional)
+        {
+            let same = o.output == rec.output
+                && o.contribs == rec.contribs
+                && o.defs.len() == rec.defs.len()
+                && o.defs.iter().zip(&rec.defs).all(|(a, b)| a.f == b.f && a.value == b.value && a.rel == b.rel);
+            eprintln!("redo:\t{}\t{}\t{}", node.id.raw(), eng.op(node.op()).name(), u8::from(same));
+        }
+        // (`PHITEX_KREAD_KEYS=a|b|…` or `*`, with `PHITEX_REFUTE_LOG`: each
+        // committed text run's reads of those fields, the value's id, for
+        // the scaling report's predictor test: what a paragraph start would
+        // have had to guess)
+        if refute_log() && eng.op(node.op()).text() {
+            let keys = kread_keys();
+            for r in &rec.reads {
+                if let ReadKind::Field { f, at: Anchor::Me } = r.kind
+                    && let Some(name) = eng.values().as_str(f.0)
+                    && (keys.is_empty() || keys.iter().any(|k| *k == name))
+                {
+                    eprintln!(
+                        "kread:\t{}\t{}\t{name}\t{}",
+                        node.id.raw(),
+                        pos.0,
+                        r.seen.map_or(0, ValueId::raw)
+                    );
+                }
+            }
+        }
         if let Some(o) = &old {
             eng.stale_reads.fetch_add(o.reads.len() as u64, Ordering::Relaxed);
         }
@@ -2213,7 +2245,9 @@ fn walk_here(
                 // after the lock, `read::client_path`)
                 match here {
                     Some((_, d)) if !read::client_path(eng, r.path) => {
-                        if through(eng, Reaching::of(&d.plain(&eng.values)), r.path) != r.seen {
+                        let now = through(eng, Reaching::of(&d.plain(&eng.values)), r.path);
+                        if now != r.seen {
+                            note_refute(eng, f, r.node, Some(by), r.seen, now);
                             wake.push((r.node, by, f));
                         }
                     }
@@ -2747,6 +2781,65 @@ fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<
     }
 }
 
+/// (`PHITEX_REFUTE_LOG`, observe) A read refuted: the field, the reader,
+/// the definer whose value moved it, the value the reader saw and the one
+/// it would see now; one tab-separated line, for the scaling report's
+/// table of what speculation guessed and what came.
+fn refute_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| crate::obs::enabled() && std::env::var_os("PHITEX_REFUTE_LOG").is_some())
+}
+
+/// (`PHITEX_KREAD_KEYS`) The fields whose committed reads are printed;
+/// empty for `*`.
+fn kread_keys() -> &'static [String] {
+    static K: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    K.get_or_init(|| {
+        std::env::var("PHITEX_KREAD_KEYS").map_or_else(
+            |_| vec!["\u{0}".to_owned()],
+            |v| if v == "*" { Vec::new() } else { v.split('|').map(str::to_owned).collect() },
+        )
+    })
+}
+
+fn note_refute(eng: &Engine, f: Field, reader: NodeId, by: Option<NodeId>, seen: Option<ValueId>, now: Option<ValueId>) {
+    if !refute_log() {
+        return;
+    }
+    // (where in the reader's last run the field was first read: the share
+    // of its reads before it, what a resumption from there would keep)
+    let at = eng.node(reader).record().map_or(String::from("-"), |r| {
+        let k = r
+            .reads
+            .iter()
+            .position(|x| matches!(&x.kind, ReadKind::Field { f: g, .. } if *g == f))
+            .unwrap_or(r.reads.len());
+        format!("{k}/{}", r.reads.len())
+    });
+    let v = eng.values();
+    let show = |x: Option<ValueId>| {
+        x.map_or_else(
+            || "-".to_owned(),
+            |x| v.render(x).chars().take(160).collect::<String>().replace(['\t', '\n'], " "),
+        )
+    };
+    let op = |n: NodeId| eng.op(eng.node(n).op()).name();
+    eprintln!(
+        "refute:\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{at}\t{}\t{}",
+        v.as_str(f.0).unwrap_or_default(),
+        reader.raw(),
+        op(reader),
+        by.map_or(0, NodeId::raw),
+        by.map_or("-", op),
+        by.map_or(0, |b| eng.node(b).runs.load(std::sync::atomic::Ordering::Relaxed)),
+        u8::from(seen == now),
+        show(seen),
+        show(now),
+        seen.map_or(0, ValueId::raw),
+        now.map_or(0, ValueId::raw)
+    );
+}
+
 fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Option<NodeId>, st: &mut CommitStats) {
     if !live(eng, r.node, r.serial) {
         return;
@@ -2758,7 +2851,11 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
         },
         None => Cause::Environment { field: f },
     };
-    if reader_answer(eng, f, r) != r.seen
+    let now = reader_answer(eng, f, r);
+    if now != r.seen {
+        note_refute(eng, f, r.node, by, r.seen, now);
+    }
+    if now != r.seen
         && mark_stale(
             eng,
             w,
