@@ -17,7 +17,7 @@ use crate::prelude::*;
 pub const THEBUFFLENGTH: usize = 1024;
 
 /// specials.c's `static` state.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `coords`: the `pdf:bt`/`pdf:et` coordinate stack (top = last).
     pub coords: crate::dpxutil::DpxStack<PdfCoord>,

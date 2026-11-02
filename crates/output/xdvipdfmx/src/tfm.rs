@@ -105,7 +105,7 @@ pub struct TfmFont {
 }
 
 /// `struct coverage`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct Coverage {
     pub first_char: i32,
     pub num_chars: i32,
@@ -113,7 +113,7 @@ pub struct Coverage {
 }
 
 /// `struct range_map`: all characters of a range have the same metrics.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct RangeMap {
     pub num_coverages: u16,
     pub coverages: Vec<Coverage>,
@@ -121,14 +121,14 @@ pub struct RangeMap {
 }
 
 /// `struct char_map` (one coverage).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct CharMap {
     pub coverage: Coverage,
     pub indices: Vec<u32>,
 }
 
 /// `font_metric`'s `charmap` (`type` + `data`).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub enum FmCharmap {
     /// `MAPTYPE_NONE`.
     #[default]
@@ -140,7 +140,7 @@ pub enum FmCharmap {
 }
 
 /// `struct font_metric`. `Default` is `fm_init`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct FontMetric {
     pub tex_name: Vec<u8>,
     pub designsize: Fixword,
@@ -158,7 +158,7 @@ pub struct FontMetric {
 }
 
 /// tfm.c's statics.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `fms` (`numfms` = `len()`).
     pub fms: Vec<FontMetric>,

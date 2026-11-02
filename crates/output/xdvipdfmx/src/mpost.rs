@@ -30,7 +30,7 @@ const PS_STACK_SIZE: usize = 1024;
 const DEVICE_RESOLUTION: f64 = 1000.0;
 
 /// mpost.c's `static` state.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `stack` (`top_stack` is its length).
     pub stack: Vec<Obj>,

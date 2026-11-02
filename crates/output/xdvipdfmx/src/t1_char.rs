@@ -103,7 +103,7 @@ const CS_FLEX1: i32 = 37;
 
 /// t1_char.c's statics (`[vh]stem` support needs one more slot on
 /// `cs_arg_stack`).
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct State {
     pub status: i32,
     pub phase: i32,
