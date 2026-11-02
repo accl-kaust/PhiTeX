@@ -1762,7 +1762,13 @@ fn waits_for_text(eng: &Engine, n: &Node) -> bool {
 /// ran keeps the wake it was queued by, its creation: the move is in
 /// `stale_wake`, so the cause is not asked here.)
 fn refuted_wake(n: &Node) -> bool {
-    n.parked_on.lock().is_none() && !matches!(n.woke.lock().as_ref().map(|w| &w.cause), Some(Cause::Edited))
+    // (`Output`: released by the node it waited for, `release_waiting`,
+    // a run that waited on purpose, `Ctx::wait_for_pending`)
+    n.parked_on.lock().is_none()
+        && !matches!(
+            n.woke.lock().as_ref().map(|w| &w.cause),
+            Some(Cause::Edited | Cause::Output { .. })
+        )
 }
 
 /// A node whose run a failure stopped (a limit, a panic), `Dirty` again on

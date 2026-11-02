@@ -61,6 +61,10 @@ pub(crate) struct Node {
     pub(crate) reruns: AtomicU32,
     /// The field its last commit's run parked on (`Ctx::parked_on`).
     pub(crate) parked_on: Mx<Option<Field>>,
+    /// What its operation says it may define (`Operation::may_define`),
+    /// asked once, when a reader past it while it has not run asks
+    /// (`Ctx::wait_for_pending`).
+    pub(crate) may: std::sync::OnceLock<crate::api::MayDefine>,
     /// Bumped at each commit; a reader record carrying an older serial is
     /// stale and dropped when met, so a commit never visits other segments
     /// to retract its node's old reads. Zero: never committed.
@@ -200,6 +204,7 @@ impl Node {
         pos: Pos,
     ) -> Node {
         Node {
+            may: std::sync::OnceLock::new(),
             final_reruns: AtomicU32::new(0),
             final_epoch: AtomicU64::new(0),
             awaited: AtomicBool::new(false),

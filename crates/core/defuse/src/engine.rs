@@ -26,6 +26,11 @@ pub(crate) struct Unit {
     pub(crate) end: Pos,
     /// The label of the last node pushed, for the next push.
     pub(crate) last: AtomicU64,
+    /// (`read::pending_definer`) A label below which no segment of the
+    /// unit held a hole when last looked, in evaluation `clear_epoch`; a
+    /// new evaluation looks again from the start.
+    pub(crate) clear_to: AtomicU64,
+    pub(crate) clear_epoch: AtomicU64,
 }
 
 /// A reader of the environment's value of a field (`Ctx::env`).
@@ -573,6 +578,8 @@ impl Engine {
                 start,
                 end,
                 last: AtomicU64::new(start.0),
+                clear_to: AtomicU64::new(0),
+                clear_epoch: AtomicU64::new(0),
             },
         );
         let sid = SegId(u32::try_from(self.segs.reserve()).expect("segment ids"));
@@ -626,6 +633,8 @@ impl Engine {
                     start: a,
                     end: b,
                     last: AtomicU64::new(a.0),
+                    clear_to: AtomicU64::new(0),
+                    clear_epoch: AtomicU64::new(0),
                 },
             );
             let sid = SegId(u32::try_from(self.segs.reserve()).expect("segment ids"));
