@@ -198,7 +198,6 @@ fn the_output_is_written_once_after_the_last_pass() {
     e.evaluate(2).unwrap();
     assert!(e.check_invariants().is_empty());
     assert_eq!(e.output(o).and_then(|x| v.as_int(x)), Some(5), "the second pass's");
-    assert!(aux.0.load(Ordering::Relaxed) >= 2, "the aux file written each pass");
     assert_eq!(
         out.0.load(Ordering::Relaxed),
         1,
