@@ -277,3 +277,32 @@ The text's state chain is real at paragraph granularity: its start state cannot 
 4. The interpreter's cycles per instruction (P9: 2.5x pdfTeX's on codehigh).
 
 Of these, only (1) and (4) move both Grail and amsldoc. The ranked order of §7 stands with WP0 and P1 dropped: **P2 (resume and cutoff, also the edit lever) first**, then P3, P4 and P9.
+
+### P2 tried: resuming a refuted run from its last checkpoint (backed out; branch `scaling-p2`)
+
+What was built (166d28314):
+- Every exec run takes checkpoints. Their cost (accl 22812, observe build, -j1, base against checkpoints, 3 runs each): amsldoc 2.11 → 2.23 s (+6%), Grail 24.8-25.8 → 25.2-25.7 s (+2%), RSS +2%.
+- Each checkpoint records how many reads the run had made.
+- A run woken by anything but an edit goes on from the latest checkpoint whose earlier reads all still hold (`Ctx::parked_state`, `Ctx::last_reads_hold`, `Ctx::goes_on_after_reads`). The kept reads are filed first, so later checkpoints' indices hold.
+
+The resume check (`PHITEX_RESUME_CHECK=1`, accl 22814) runs each resumed run again whole and compares the products:
+
+| build | resumed runs | differ from the whole run |
+|---|---|---|
+| amsldoc -j1 | 20 | 0 |
+| amsldoc -j8 | 150 | 4 |
+| Grail -j1 | 35 | 12 |
+| Grail -j8 | 136 | 38 |
+
+Grail's PDF changed (3a2866fc against 004bb415). The differences take two forms:
+- **Log contributions:** "Overfull \hbox … in paragraph at lines N--N" with another N.
+- **Publications:** the same fields published at another level, for example `cs:if@nobreak` global against local, and microtype/acro definitions.
+
+So a checkpoint's state is not a function of the reads recorded before it. Some inputs a run uses before a checkpoint are not recorded reads: the family snapshots a table is loaded from are unrecorded by design (`Ctx::snapshot`), the paragraph's start line is carried outside the checkpoint, and the group level of a binding is not in `base_of`. The same restore code serves the existing edit resumption (`resume_edit` for `Cause::Edited`), so edit resumption may carry the same differences. That is worth a check of its own: the edit sweep with `PHITEX_RESUME_CHECK`.
+
+**P2's real first step** is to make a checkpoint's state a pure function of the reads before it:
+1. record the snapshot-loaded items a checkpoint carries as reads;
+2. put the paragraph's start line and the binding levels into the checkpoint;
+3. gate on `PHITEX_RESUME_CHECK` reporting 0 differences over the corpus's edit sweep and cold amsldoc/Grail at -j1 and -j8.
+
+Only then is resuming worth measuring. Size: 3-5 agent-days.
