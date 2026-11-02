@@ -271,8 +271,7 @@ struct Base {
     chunks: Vec<Arc<[u8]>>,
     /// The session and the writer after the last page, before the end:
     /// where a page is written again ([`Session::reship`]).
-    post: Session,
-    post_writer: DviWriter,
+    post: Arc<Snap>,
     /// The file's `/Size`.
     size: u32,
     layout: phitex_pdf::Layout,
@@ -632,7 +631,12 @@ fn fold(
                 );
             }
         }
-        if i.is_multiple_of(every) {
+        if i == k
+            && let Some(r) = resume
+        {
+            // (the state resumed from: the base's, kept as it is)
+            snaps.push(r.clone());
+        } else if i.is_multiple_of(every) {
             let t0 = std::time::Instant::now();
             snaps.push(Arc::new(Snap {
                 at: i,
@@ -668,7 +672,7 @@ fn fold(
         ops.push(o);
     }
     let t0 = std::time::Instant::now();
-    let (post, post_writer, rec) = match (&grafted, f.base) {
+    let (post, mut s, rec) = match (&grafted, f.base) {
         (Some((i, g)), Some(b)) => {
             let i = *i;
             t.to = Some(i);
@@ -683,18 +687,23 @@ fn fold(
                     .filter(|x| x.at >= i)
                     .map(|x| Arc::new(x.grafted(g))),
             );
-            let mut post = b.post.snapshot();
-            post.graft(g);
-            post.set_files(f.files.clone());
-            (post, b.post_writer.clone(), Some(b.end.clone()))
+            let post = Arc::new(b.post.grafted(g));
+            let mut s = post.session();
+            s.set_files(f.files.clone());
+            (post, s, Some(b.end.clone()))
         }
         _ => {
             states.push(s.page_state().map_err(|e| fatal(&e))?);
             labels.push(s.next_label());
-            (s.snapshot(), w.clone(), f.base.map(|b| b.end.clone()))
+            let post = Arc::new(Snap {
+                at: n,
+                s: Arc::new(s.snapshot()),
+                w: w.clone(),
+                grafts: Vec::new(),
+            });
+            (post, s, f.base.map(|b| b.end.clone()))
         }
     };
-    let mut s = post.snapshot();
     t.snaps += t0.elapsed();
     let t0 = std::time::Instant::now();
     let (tail, end) = match &rec {
@@ -724,7 +733,6 @@ fn fold(
             labels,
             chunks,
             post,
-            post_writer,
             size: s.next_label(),
             layout,
             end,
@@ -802,10 +810,10 @@ fn live(
 ) -> Result<(usize, phitex_pdf::Layout, String), String> {
     let (n, bn) = (walks.len(), b.ids.len());
     let t0 = std::time::Instant::now();
-    let mut s = b.post.snapshot();
+    let mut s = b.post.session();
     s.set_files(files);
     let t_snap = t0.elapsed();
-    let mut w = b.post_writer.clone();
+    let mut w = b.post.w.clone();
     // (each page's operations and specials on the document; the pages to
     // write again)
     let mut again: Vec<(usize, Vec<Op>)> = Vec::new();

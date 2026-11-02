@@ -95,13 +95,27 @@ pub struct FontmapRec {
 }
 
 /// fontmap.c's statics.
-#[derive(PartialEq, Clone, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct State {
     /// `fontmap` (NULL before `pdf_init_fontmaps`): the records put since
     /// the session's start, a removed one as `None`.
     pub fontmap: Option<HtTable<Option<FontmapRec>>>,
     /// The records of the session's start, under `fontmap`.
     pub start: Option<Arc<HtTable<FontmapRec>>>,
+}
+
+/// The start's records, shared by a session's snapshots, compared as
+/// the same where they are the same records (a document's map of tens of
+/// thousands, 1.3 ms to compare whole, accl 22862).
+impl PartialEq for State {
+    fn eq(&self, o: &Self) -> bool {
+        let start = match (&self.start, &o.start) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+            (None, None) => true,
+            _ => false,
+        };
+        start && self.fontmap == o.fontmap
+    }
 }
 
 /// `pdf_init_fontmap_record`.
