@@ -771,6 +771,8 @@ pub(crate) struct Run<'c, 'a> {
     /// symbol there instead of forcing it (docs/note-relative-counters.md
     /// §2.4, `Run::if_operand`). Deeper expansions force as anywhere.
     pub(crate) size_stop: Option<u32>,
+    /// The path `[Step::Present]`, interned once a run ([`Run::lb_present`]).
+    pub(crate) present_path: Option<phitex_defuse::PathId>,
     /// Where the conditional text being skipped began (§494's
     /// `skip_line`, [`Run::line_mark`]).
     pub skip_from: LineMark,
@@ -1224,6 +1226,7 @@ impl<'c, 'a> Run<'c, 'a> {
             in_skip: false,
             expand_depth: 0,
             size_stop: None,
+            present_path: None,
             skip_from: (None, 0, None, None),
             skip_first: Vec::new(),
             defer_ok: false,
@@ -2382,7 +2385,9 @@ impl<'c, 'a> Run<'c, 'a> {
     /// written does not depend on what was written.
     pub(crate) fn lb_present(&mut self, f: Field) -> R<bool> {
         let v = self.v;
-        let p = self.cx.path(&[phitex_defuse::Step::Present]);
+        let p = *self
+            .present_path
+            .get_or_insert_with(|| self.cx.path(&[phitex_defuse::Step::Present]));
         Ok(self.cx.read_final_path(f, p)?.and_then(|x| v.as_bool(x)) == Some(true))
     }
 

@@ -409,7 +409,7 @@ pub(crate) fn is_size(t: Tok) -> bool {
     is_sym(t) && size_of(t).is_some()
 }
 
-/// `\pdffilesize{name}` in a piece, of a file the job writes and reads
+/// `\pdffilesize` in a piece of TeX's file `key` ([`Run::tex_key`]), a file the job writes and reads
 /// back, written the round before (its size known, `wsize:<key>`): the
 /// size symbol of its digits instead of them. The run reads only that
 /// the file is there (the presence of its loop-backs, the size not
@@ -419,7 +419,7 @@ pub(crate) fn is_size(t: Tok) -> bool {
 /// ([`size_digits`]). None where the size is read as before: outside a
 /// document's piece, a file this run opened for writing (its text so
 /// far), a cut document file, one a tool makes, one not written.
-pub(crate) fn size_symbol(r: &mut Run<'_, '_>, name: &str) -> crate::run::R<Option<Tok>> {
+pub(crate) fn size_symbol(r: &mut Run<'_, '_>, key: &str) -> crate::run::R<Option<Tok>> {
     let op = r.cx.op();
     if !(op == r.ops.exec || op == r.ops.resume)
         || !r.doc
@@ -428,18 +428,19 @@ pub(crate) fn size_symbol(r: &mut Run<'_, '_>, name: &str) -> crate::run::R<Opti
     {
         return Ok(None);
     }
-    let key = r.tex_key(name)?;
-    if r.get(&format!("wopen:{key}"))?.is_some() || r.read_cut(&key)?.is_some() {
-        return Ok(None);
-    }
+    // (a file the job writes first: any other, a package's, fails here
+    // and is looked up as before)
     let v = r.v;
-    let ws = crate::tools::size_field(v, &key);
-    if !r.lb_known(&key, ws)? {
+    let ws = crate::tools::size_field(v, key);
+    if !r.lb_known(key, ws)? {
         return Ok(None);
     }
-    let k = r.keyed(crate::fields::Fam::Wkeys, &key);
-    let w = r.keyed(crate::fields::Fam::Wfile, &key);
-    if !(r.lb_known(&key, k)? || r.lb_known(&key, w)?) || r.tool_makes(&key)? {
+    if r.get(&format!("wopen:{key}"))?.is_some() || r.read_cut(key)?.is_some() {
+        return Ok(None);
+    }
+    let k = r.keyed(crate::fields::Fam::Wkeys, key);
+    let w = r.keyed(crate::fields::Fam::Wfile, key);
+    if !(r.lb_known(key, k)? || r.lb_known(key, w)?) || r.tool_makes(key)? {
         return Ok(None);
     }
     // (written the round before: its size not `UNIT`, read as that alone)
@@ -448,7 +449,7 @@ pub(crate) fn size_symbol(r: &mut Run<'_, '_>, name: &str) -> crate::run::R<Opti
     if unit.and_then(|x| v.as_bool(x)) != Some(false) {
         return Ok(None);
     }
-    Ok(Some(size_tok(Part::All, &key)))
+    Ok(Some(size_tok(Part::All, key)))
 }
 
 /// The digits a size symbol stands for, where TeX needs them: the
