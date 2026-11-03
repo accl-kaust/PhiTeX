@@ -1954,9 +1954,6 @@ pub struct Stats {
     /// The siblings the runs read on into (`Run::pull`), over all runs:
     /// a run on a wrong guess that reads on counts what it took.
     pub siblings_pulled: u64,
-    /// The units of each accumulator the last evaluation ended with
-    /// (`vprof`: the profiles the pieces contributed).
-    pub units_now: Vec<(&'static str, u64)>,
     /// What the last build or edit's evaluations ran ([`RunReport`]).
     pub last: RunReport,
     /// The engine's speculative runs: kept with outstanding
@@ -2541,15 +2538,6 @@ impl Stats {
     #[must_use]
     pub fn units_folded(&self, op: &str) -> u64 {
         if op == "pages" { self.units_folded } else { 0 }
-    }
-
-    /// The units accumulator `field` holds at the build's end.
-    #[must_use]
-    pub fn units_contributed(&self, field: &str) -> u64 {
-        self.units_now
-            .iter()
-            .find(|x| x.0 == field)
-            .map_or(0, |x| x.1)
     }
 
     /// The relations (`Ctx::define_rel`) on `field` the live nodes of
@@ -4122,14 +4110,6 @@ impl Graph {
                 .ops
                 .siblings_pulled
                 .load(std::sync::atomic::Ordering::Relaxed);
-            {
-                let v = self.eng.values();
-                let n = self
-                    .eng
-                    .acc_value(unit, v.field(crate::vprof::VPROF))
-                    .map_or(0, |x| v.seq_to_vec(x).len());
-                stats.units_now = vec![(crate::vprof::VPROF, u64::try_from(n).unwrap_or(0))];
-            }
             stats.env_calls = self.env_calls;
             stats.add_reruns(&self.eng, &r);
             stats.add_refuted(&self.eng, &r);
@@ -7131,6 +7111,19 @@ impl Build {
     }
 
     /// What the last evaluation's link did with the exact PDF's pages:
+    /// The units accumulator `field` holds now (a fold over the
+    /// document: asked for, not counted after every evaluation).
+    #[must_use]
+    pub fn units_contributed(&self, field: &str) -> u64 {
+        let v = self.g.eng.values();
+        let n = self
+            .g
+            .eng
+            .acc_value(self.unit, v.field(field))
+            .map_or(0, |x| v.seq_to_vec(x).len());
+        u64::try_from(n).unwrap_or(0)
+    }
+
     /// `(placed, shipped again)`, the pages placed as their own steps
     /// wrote them and those it wrote again itself (none linked: zeros).
     #[must_use]
