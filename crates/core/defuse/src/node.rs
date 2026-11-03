@@ -126,6 +126,12 @@ pub(crate) struct Node {
     /// give-back reached again. True once it leaves the line
     /// (`commit::release_leaving`): from then on it claims nothing.
     pub(crate) claim_mx: Mx<bool>,
+    /// A run of it stopped at the settling layer's frontier
+    /// (`Ctx::hold_at_frontier`, `Ctx::wait_settled`): one begun past the
+    /// frontier would most likely stop there again, its work thrown away,
+    /// so it waits for the frontier first (`sched::work`). Only when it
+    /// runs: what it makes is what it would make anyway.
+    pub(crate) held_frontier: AtomicBool,
     /// Placed as its placer's continuation (`Ctx::follow`,
     /// `Ctx::follow_after`), not as its child: a node placed after the
     /// placer and its children goes before it.
@@ -155,6 +161,17 @@ pub(crate) struct Node {
     /// continuation (`Ctx::follow`). Those of a lower slot stand before
     /// those of a higher one.
     pub(crate) slot: AtomicU8,
+    /// Whether its last commit was refuted by the commit itself (a read it
+    /// resumed on moved): its record's reads may hold while the state it
+    /// parked rests on the old answers (`Ctx::last_run_stands`).
+    pub(crate) refuted: AtomicBool,
+    /// How long its longest run that committed took, ns (`sched::work`).
+    pub(crate) full_ns: AtomicU64,
+    /// Its order among the nodes placed after the same anchor in slot 1
+    /// by different placers (`Ctx::rank_placement`): one of a lower rank
+    /// stands before one of a higher; 0 none (placed right after the
+    /// anchor's children, before those already there).
+    pub(crate) rank: AtomicU64,
     /// Its operation's static effect (`Operation::effect`), packed
     /// (`pack_effect`): asked once when the node is made or its text
     /// replaced.
@@ -216,12 +233,16 @@ impl Node {
             claimer: AtomicU64::new(0),
             claim_end: AtomicU64::new(0),
             claim_mx: Mx::new(false),
+            held_frontier: AtomicBool::new(false),
             follows: AtomicBool::new(false),
             anchor: AtomicU64::new(0),
             state_stale: AtomicBool::new(false),
             settle_now: AtomicBool::new(false),
             held_panic: AtomicBool::new(false),
             slot: AtomicU8::new(0),
+            rank: AtomicU64::new(0),
+            full_ns: AtomicU64::new(0),
+            refuted: AtomicBool::new(false),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             bracket_gen: AtomicU64::new(0),
@@ -362,6 +383,10 @@ impl Node {
 
     pub(crate) fn slot(&self) -> u8 {
         self.slot.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn rank(&self) -> u64 {
+        self.rank.load(Ordering::Acquire)
     }
 
     pub(crate) fn pos_hint(&self) -> Pos {
@@ -565,6 +590,9 @@ pub(crate) struct Product {
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) reads: Vec<ReadRec>,
     pub(crate) placements: Vec<Placement>,
+    /// The placements' ranks (`Ctx::rank_placement`), by index; one past
+    /// the end is 0.
+    pub(crate) ranks: Vec<u64>,
     pub(crate) claim: usize,
     /// What the run set (`Ctx::set_effect`); None: its operation's.
     pub(crate) effect: Option<Effect>,

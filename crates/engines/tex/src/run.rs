@@ -1412,10 +1412,8 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         };
         let gl = self.loc_of(g);
-        let s = crate::defer::Sym {
-            reg: self.count_reg(gl).unwrap_or(0),
-            node,
-            j: 0,
+        let Some(s) = crate::defer::Sym::at(self, gl, node) else {
+            return Ok(());
         };
         let x = match self.op_name() {
             "exec" | "resume" => crate::defer::force(self, s)?,

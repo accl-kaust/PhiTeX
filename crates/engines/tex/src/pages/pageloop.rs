@@ -1216,7 +1216,14 @@ impl Run<'_, '_> {
                 continue;
             }
             let i = n + ls.beyond.len();
-            self.emit_page(i, c.key, c.cursor, c.page, c.args, (prev, ls.after));
+            self.emit_page(
+                i,
+                c.key,
+                c.cursor,
+                c.page,
+                c.args,
+                (prev, ls.after, ls.base),
+            );
             prev = Some(c.cursor);
             ls.beyond.push(Checkpoint {
                 placement: i,
@@ -1246,7 +1253,14 @@ impl Run<'_, '_> {
     fn emit_kept(&mut self, ls: &mut LoopState, c: &Checkpoint) -> ValueId {
         let i = ls.checkpoints.len();
         let prev = ls.checkpoints.last().map(|p| p.cursor);
-        self.emit_page(i, c.key, c.cursor, c.page, c.args, (prev, ls.after));
+        self.emit_page(
+            i,
+            c.key,
+            c.cursor,
+            c.page,
+            c.args,
+            (prev, ls.after, ls.base),
+        );
         // (the page this node stops at for its rest: its give-back is the
         // rest's to read)
         let gave = if ls.rest_at == Some(c.key) {
@@ -1276,7 +1290,7 @@ impl Run<'_, '_> {
         cursor: NodeId,
         x: ValueId,
         args: ValueId,
-        (prev, after): (Option<NodeId>, Option<(NodeId, NodeId)>),
+        (prev, after, base): (Option<NodeId>, Option<(NodeId, NodeId)>, usize),
     ) {
         let v = self.v;
         self.loop_keys.taken.insert(key);
@@ -1301,6 +1315,12 @@ impl Run<'_, '_> {
             fin_placement(i),
             "checkpoint i's finisher is placement i + 1"
         );
+        // (among the finishers after the same node, by the page's place
+        // among the document's fires: one a loop node placed from a start
+        // since moved never stands before an earlier page's, whose
+        // definitions (`\c@page`, the marks) it would hand that one)
+        self.cx
+            .rank_placement(at, u64::try_from(base + i).unwrap_or(u64::MAX - 1) + 1);
     }
 
     /// §1026's give-back of page `i`'s routine as the loop folds it: the
@@ -1574,7 +1594,7 @@ impl Run<'_, '_> {
                 i64::try_from(j).unwrap_or(i64::MAX),
             ),
         );
-        self.emit_page(i, page.key, page.at, x, args, (prev, ls.after));
+        self.emit_page(i, page.key, page.at, x, args, (prev, ls.after, ls.base));
         ls.checkpoints.push(Checkpoint {
             key: page.key,
             page: x,

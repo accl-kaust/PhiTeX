@@ -270,6 +270,10 @@ def side_env(engine, extra=None, phitex=False, formats=None):
         if phitex:
             e["PHITEX_XETEX"] = "1"
     if phitex:
+        # (as the oracle's -no-shell-escape, oracle_cmd: ualberta's
+        # \\write18{makeindex} is refused there; PhiTeX's default is TeX
+        # Live's restricted one)
+        e["shell_escape"] = "f"
         e["PHITEX_CACHE_DIR"] = str(WORK / "cache")
         e["PHITEX_STORE_DIR"] = str(WORK / "store")
         e["NO_COLOR"] = "1"

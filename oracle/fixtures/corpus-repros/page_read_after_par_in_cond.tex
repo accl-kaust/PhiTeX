@@ -1,0 +1,20 @@
+% knowledge and minutes (TeX Live manuals): a page fires where a paragraph starts
+% (a skip before it took the page over), inside a conditional and a group of the
+% piece's own: the run reads \value{page} after it, the value the routine stepped.
+% Their tables of contents ran over a page and a \setcounter{page}{\value{page}}
+% after them lost the step: a page number printed twice, every page after it one low.
+\documentclass{article}
+\def\e{\vskip 40pt\leavevmode\hbox{Text of an entry.}\par}
+\def\f{\e\e\e\e\e\e\e\e\e\e}
+\begin{document}
+Before.\par
+\ifnum1=1
+\begingroup
+\f\f\e\e\e\e
+\endgroup
+\edef\p{\the\value{page}}\setcounter{page}{\p}
+Page \p.\par
+\fi
+\newpage
+Now \thepage.
+\end{document}

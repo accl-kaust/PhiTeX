@@ -281,7 +281,11 @@ impl PdfOut {
                     c
                 }
             } else {
-                let c = i32::from(s[*pp]);
+                // (`pn_getc`: `ch = p[0]` of a signed `char`, x86's: a byte
+                // past 127 written as it is, not as `#xx`, is negative, an
+                // invalid character, dropped; a figure's font `/等线,Bold`
+                // comes out `/,Bold`)
+                let c = i32::from(s[*pp].cast_signed());
                 *pp += 1;
                 c
             };
@@ -728,5 +732,27 @@ impl PdfOut {
         mut unknown: Option<Unknown<'_>>,
     ) -> Result<Option<Obj>> {
         self.parse_dict_ext(s, pp, None, &mut unknown, true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::boxed::Box;
+    use alloc::vec::Vec;
+
+    use crate::obj::PdfOut;
+
+    /// A byte past 127 in a name, not as `#xx`: `pn_getc` of a signed
+    /// `char` drops it (texproposal's figure's font `/等线,Bold` is
+    /// `/,Bold` in xelatex's PDF, its oracle); as `#xx` it stays.
+    #[test]
+    fn a_name_drops_raw_bytes_past_127() {
+        let mut o = PdfOut::new(Box::new(|_, _| Vec::new()));
+        let (s, mut p) = ("/\u{7b49}\u{7ebf},Bold ".as_bytes(), 0);
+        let n = o.parse_pdf_name(s, &mut p).expect("a name");
+        assert_eq!(o.name_value(n).expect("a name"), b",Bold");
+        let (s, mut p) = (b"/#e7#ad,Bold ".as_slice(), 0);
+        let n = o.parse_pdf_name(s, &mut p).expect("a name");
+        assert_eq!(o.name_value(n).expect("a name"), b"\xe7\xad,Bold");
     }
 }
