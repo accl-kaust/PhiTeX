@@ -1215,10 +1215,24 @@ impl<'a> Ctx<'a> {
                 let v = &self.eng.values;
                 let mut memo = crate::read::FoldMemo::new();
                 let total = r.reads.len();
-                for rd in r.reads.iter().filter(|rd| !crate::read::holds(self.eng, self.me, rd, &mut memo)).take(6) {
-                    let now = crate::read::answer_in(self.eng, self.me, &rd.kind, rd.path, &mut memo);
-                    let cut = |x: Option<ValueId>| x.map_or_else(|| "none".to_owned(), |x| v.render(x).chars().take(80).collect());
-                    eprintln!("moved: node {} of {total} reads: {:?} seen {} now {}", self.me.id.raw(), rd.kind.field().map(|f| v.render(f.0)), cut(rd.seen), cut(now));
+                for rd in r
+                    .reads
+                    .iter()
+                    .filter(|rd| !crate::read::holds(self.eng, self.me, rd, &mut memo))
+                    .take(6)
+                {
+                    let now =
+                        crate::read::answer_in(self.eng, self.me, &rd.kind, rd.path, &mut crate::read::FoldMemo::new());
+                    let cut = |x: Option<ValueId>| {
+                        x.map_or_else(|| "none".to_owned(), |x| v.render(x).chars().take(80).collect())
+                    };
+                    eprintln!(
+                        "moved: node {} of {total} reads: {:?} seen {} now {}",
+                        self.me.id.raw(),
+                        rd.kind.field().map(|f| v.render(f.0)),
+                        cut(rd.seen),
+                        cut(now)
+                    );
                 }
             }
             return None;
