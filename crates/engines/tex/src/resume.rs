@@ -645,6 +645,9 @@ impl Run<'_, '_> {
             c.fresh.push((c.taken.len(), unread));
             c.taken.push(ck);
         }
+        // (the reads after it are those a cutoff here or at the next run
+        // checks: what the run reads again from now on among them)
+        self.cx.reads_begin_again();
         self.cut_off(ck)
     }
 

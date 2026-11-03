@@ -1545,3 +1545,35 @@ fn a_routine_runs_again_for_the_line_number_only_where_it_shows() {
     assert!(common::first_difference(&b.output().0, &cold.output().0).is_none());
     assert!(ran > 0, "the routines that show it run again");
 }
+
+/// A paragraph that reads `\pagetotal` before its first checkpoint and
+/// again after it, the first read leaving no trace in its state. An edit
+/// on an earlier page moves the page start reaching it (not the items
+/// between the old start and the paragraph), so it runs again and reaches
+/// the checkpoint in the same state; the page start read before the
+/// checkpoint was answered again from the run's memo after it, so it was
+/// among neither the state compared nor the reads the cutoff checks: the
+/// cutoff kept the old run's `\the\pagetotal` (ribbonproofs' framed.sty).
+#[test]
+fn cutoff_sees_the_page_start_read_before_its_checkpoint() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from(
+        "\\hsize=4in \\vsize=100pt \\parindent=0pt \\baselineskip=12pt \\parskip=0pt\n",
+    );
+    for p in 0..12 {
+        let _ = writeln!(src, "Filler {p}.\n");
+    }
+    src.push_str(
+        "Reader \\ifdim\\pagetotal<-1pt x\\fi \\count1=0 \\loop\\advance\\count1 by 1 \
+         \\ifnum\\count1<3000 \\repeat [\\the\\pagetotal]\n\n\\bye\n",
+    );
+    let prelude = common::plain();
+    let opts = || common::options("./cs.tex", "cs", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replacen("Filler 3.", "Filler 3.\\vrule height 40pt", 1);
+    b.edit(&text);
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+}
