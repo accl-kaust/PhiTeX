@@ -155,6 +155,11 @@ pub(crate) struct Node {
     /// continuation (`Ctx::follow`). Those of a lower slot stand before
     /// those of a higher one.
     pub(crate) slot: AtomicU8,
+    /// Its order among the nodes placed after the same anchor in slot 1
+    /// by different placers (`Ctx::rank_placement`): one of a lower rank
+    /// stands before one of a higher; 0 none (placed right after the
+    /// anchor's children, before those already there).
+    pub(crate) rank: AtomicU64,
     /// Its operation's static effect (`Operation::effect`), packed
     /// (`pack_effect`): asked once when the node is made or its text
     /// replaced.
@@ -222,6 +227,7 @@ impl Node {
             settle_now: AtomicBool::new(false),
             held_panic: AtomicBool::new(false),
             slot: AtomicU8::new(0),
+            rank: AtomicU64::new(0),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             bracket_gen: AtomicU64::new(0),
@@ -362,6 +368,10 @@ impl Node {
 
     pub(crate) fn slot(&self) -> u8 {
         self.slot.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn rank(&self) -> u64 {
+        self.rank.load(Ordering::Acquire)
     }
 
     pub(crate) fn pos_hint(&self) -> Pos {
@@ -565,6 +575,9 @@ pub(crate) struct Product {
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) reads: Vec<ReadRec>,
     pub(crate) placements: Vec<Placement>,
+    /// The placements' ranks (`Ctx::rank_placement`), by index; one past
+    /// the end is 0.
+    pub(crate) ranks: Vec<u64>,
     pub(crate) claim: usize,
     /// What the run set (`Ctx::set_effect`); None: its operation's.
     pub(crate) effect: Option<Effect>,

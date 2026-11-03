@@ -102,6 +102,7 @@ impl<'a> Ctx<'a> {
                 contribs: Vec::new(),
                 reads: Vec::new(),
                 placements: Vec::new(),
+                ranks: Vec::new(),
                 claim: 0,
                 effect: None,
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
@@ -773,6 +774,29 @@ impl<'a> Ctx<'a> {
         );
         self.product.placements.push(Placement::FollowAfterPlaced(j, op, args));
         self.product.placements.len() - 1
+    }
+
+    /// Gives my `i`-th placement of this run, one placed after another
+    /// node (`follow_after`, `follow_after_placed`), its order among the
+    /// nodes others place after that node: it stands after those of a
+    /// lower rank and before those of a higher one, wherever each placer
+    /// stands and whenever each commits. Unranked (0), it goes right
+    /// after that node's children, before every node placed after it
+    /// already. A page's finisher ranks by the page's place among the
+    /// document's fires, so a finisher placed by a loop node from a start
+    /// another one has since moved never stands before the finisher of an
+    /// earlier page after the same piece.
+    ///
+    /// # Panics
+    ///
+    /// Where `i` is not a placement this run made.
+    pub fn rank_placement(&mut self, i: usize, rank: u64) {
+        assert!(i < self.product.placements.len(), "rank_placement({i}): no such placement");
+        let r = &mut self.product.ranks;
+        if r.len() <= i {
+            r.resize(i + 1, 0);
+        }
+        r[i] = rank;
     }
 
     /// The output my `i`-th placement had at my last commit, if it has run.
