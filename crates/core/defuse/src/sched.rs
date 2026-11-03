@@ -1606,9 +1606,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     // (one that stopped at the frontier before: not begun past it, where
     // it would stop again and its run be thrown away; the end of a Grail
     // edit's document, 65-100 ms of commands an edit)
-    if node.held_frontier.load(Ordering::Relaxed)
-        && past_frontier(eng, node, eng.frontier.load(Ordering::Acquire))
-    {
+    if node.held_frontier.load(Ordering::Relaxed) && past_frontier(eng, node, eng.frontier.load(Ordering::Acquire)) {
         park_frontier(eng, pool, w, node);
         return Ok(());
     }
