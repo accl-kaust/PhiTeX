@@ -1627,6 +1627,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         park_waiting(eng, pool, w, node, Some(x));
         return Ok(());
     }
+    // (one that stopped at the frontier before: not begun past it, where
+    // it would stop again and its run be thrown away; the end of a Grail
+    // edit's document, 65-100 ms of commands an edit)
+    if node.held_frontier.load(Ordering::Relaxed) && past_frontier(eng, node, eng.frontier.load(Ordering::Acquire)) {
+        park_frontier(eng, pool, w, node);
+        return Ok(());
+    }
     let first = node.run_epoch.swap(pool.epoch, Ordering::AcqRel) != pool.epoch;
     if first {
         node.runs.store(0, Ordering::Relaxed);
@@ -1812,6 +1819,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         }
         Ok(Err(_stop)) if cx.wait_frontier => {
             drop(cx);
+            node.held_frontier.store(true, Ordering::Relaxed);
             park_frontier(eng, pool, w, node);
             Ok(())
         }

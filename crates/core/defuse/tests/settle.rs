@@ -308,6 +308,55 @@ fn a_text_reader_past_the_frontier_waits_there_and_is_not_held() {
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
 
+/// `[f]`: reads f and counts its runs begun.
+struct CountedReader(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Operation for CountedReader {
+    fn name(&self) -> &'static str {
+        "counted-reader"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let f = Field(cx.args()[0]);
+        Ok(cx.read(f)?.unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// A reader that stopped at the frontier once is not begun past it again:
+/// its run would stop at the same read, its work thrown away (Grail's
+/// `\end{document}` piece, 65-100 ms of commands an edit, mc 79308). Line
+/// as in the test above: the first edit's T begins, stops at the frontier
+/// and begins again; the second's begins once, with the same answer.
+#[test]
+fn a_reader_held_at_the_frontier_waits_there_before_its_next_run() {
+    let o = setup();
+    let (e, v) = (&o.e, o.e.values());
+    let front = e.register(Arc::new(Front));
+    let begun = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reader = e.register(Arc::new(CountedReader(begun.clone())));
+    let u = e.new_unit();
+    let (pn, a) = (v.field("pn"), v.field("a"));
+    let f = e.push(u, front, vec![v.int(-1), v.int(0)]);
+    let an = e.push(u, o.def_op, vec![a.0, v.int(1)]);
+    let p = e.push(u, o.page_op, vec![pn.0, v.int(1), ValueId::UNIT]);
+    let t = e.push(u, reader, vec![pn.0]);
+    e.evaluate(1).unwrap();
+    assert_eq!(int(e, t), Some(1));
+    let at = i64::try_from(an.raw()).expect("an id");
+    let count = |x: i64, keep: i64| {
+        begun.store(0, std::sync::atomic::Ordering::Relaxed);
+        e.replace(f, front, vec![v.int(at), v.int(keep)]);
+        e.replace(p, o.page_op, vec![pn.0, v.int(x), ValueId::UNIT]);
+        let rep = e.evaluate(1).unwrap();
+        assert_eq!(int(e, t), Some(x), "{rep:?}");
+        begun.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    assert_eq!(count(2, 1), 2, "stops at the frontier, then runs");
+    assert_eq!(count(3, 2), 1, "waits for the frontier first");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+
 /// `[f, x]`: a page-layer node that predicts `f` := x and whose run
 /// panics. Settles at quiet points.
 struct PanicPage;
