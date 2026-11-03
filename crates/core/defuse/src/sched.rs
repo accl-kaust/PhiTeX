@@ -66,7 +66,7 @@ pub(crate) struct Shared {
     /// no thread.
     spawned: AtomicUsize,
     want_spawn: AtomicBool,
-    n: usize,
+    pub(crate) n: usize,
     /// `Limits::final_reruns`.
     final_limit: u32,
     /// When the evaluation began (`Ctx::elapsed`, a run's own check of
