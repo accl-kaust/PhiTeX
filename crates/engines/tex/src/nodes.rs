@@ -1719,8 +1719,7 @@ fn node_walk(
                     // its level, an object a piece (`append_link`), or a
                     // thread: [`crate::pdfout`]'s `mark_events` counts them;
                     // one with an empty list it does not enter)
-                    let entered =
-                        !dvi && v.with_list(at(9), |l| !l.is_empty()).unwrap_or(false);
+                    let entered = !dvi && v.with_list(at(9), |l| !l.is_empty()).unwrap_or(false);
                     if !inner.is_empty() || entered {
                         // (the box on the way: its kind, no measures)
                         let zero = v.int(0);

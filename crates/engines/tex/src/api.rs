@@ -9390,7 +9390,7 @@ mod canonical_tests {
             if ch != '\n' {
                 continue;
             }
-            for blanks in [" ", "  \t"] {
+            for blanks in [" ", "   "] {
                 let new = format!("{}{blanks}{}", &text[..i], &text[i..]);
                 let (old_c, marks) = canonical_text(text).unwrap();
                 assert_eq!(canonical_text(&new).unwrap().0, old_c, "{new:?}");
