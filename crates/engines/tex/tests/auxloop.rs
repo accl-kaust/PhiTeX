@@ -442,3 +442,70 @@ Status \st.
         "the node that read the file's first line did not run again: {r:?}"
     );
 }
+
+/// A run that reads the `.aux` inline and goes on past a page candidate
+/// (LaTeX's `\begin{document}`: the `.aux` read, then the hooks): its
+/// rest is a resume reading the run's continuation at the cut (the
+/// file read in a group: inline, its units not pieces of their own). The
+/// `.aux` one line longer (a `\citation` more) runs the reader again,
+/// and the continuation it leaves is the same: the number of lines the
+/// run began is no part of it, so the rest does not run again (on
+/// Grail every `\cite` added and every heading edited ran the rest of
+/// `\begin{document}` again, 150 ms).
+#[test]
+fn a_longer_aux_does_not_run_the_rest_after_its_reader_again() {
+    let doc = |n: usize| {
+        let writes = "\\immediate\\write1{a}\n".repeat(n);
+        format!(
+            r"\def\start{{\begingroup\openin15=\jobname.aux \ifeof15 \else\closein15 \input\jobname.aux \fi\endgroup
+  Before the cut.\par After the cut, the rest of the run.\par}}
+\start
+
+Text between.
+
+\immediate\openout1=\jobname.aux
+
+{writes}
+\bye
+"
+        )
+    };
+    let dir = common::fixtures().join("plain");
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..common::options("./c.tex", "c", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&common::plain()), &doc(2));
+        // (one line more each time, then fewer)
+        for n in [3, 4, 5, 2] {
+            b.edit(&doc(n));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {n} lines: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&common::plain()), &doc(n));
+            let d = common::first_difference(&b.output().0, &cold.output().0);
+            assert!(
+                d.is_none(),
+                "-j{threads} {n}: edit differs from cold: {d:?}"
+            );
+            assert!(
+                r.iter()
+                    .any(|x| x.starts_with("exec") && x.contains("\\start")),
+                "-j{threads} {n}: the reader of the .aux did not run again: {r:?}"
+            );
+            // (the rest is a resume reading `cont:<reader>:<k>`)
+            assert!(
+                !r.iter().any(|x| x.contains("Changed cont:")),
+                "-j{threads} {n}: the rest after the reader ran again: {r:?}"
+            );
+        }
+    }
+}

@@ -657,8 +657,6 @@ pub(crate) struct Run<'c, 'a> {
     /// Control sequence names scanned, by a hash of their characters
     /// ([`Run::cs_of_buf`]).
     pub cs_cache: Box<[(u64, Tok)]>,
-    /// Lines begun by this run.
-    pub lines_read: u64,
     /// Lines begun by this run of document pieces (lines without a
     /// number of their own, `Line::lineno`), by file name: the `lines`
     /// accumulator, contributed once at the end.
@@ -1183,7 +1181,6 @@ impl<'c, 'a> Run<'c, 'a> {
             ops,
             input: crate::input::Input::new(),
             cs_cache: vec![(0, Tok::c(0)); CS_CACHE].into_boxed_slice(),
-            lines_read: 0,
             doc_lines: Vec::new(),
             dline_reads: Vec::new(),
             mode_zero: false,

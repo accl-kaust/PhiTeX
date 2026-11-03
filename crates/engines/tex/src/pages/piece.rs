@@ -1123,6 +1123,26 @@ impl Run<'_, '_> {
         let (reads, defs) = self.check_data(Some(k));
         self.pin_reaching_page_params(&mut raw)?;
         let (cont, locals) = self.cont_encode()?;
+        if crate::exec::obs_flag!("PHITEX_CONT_DUMP") {
+            let xs = list_of(v, cont);
+            for (i, &x) in xs.iter().enumerate() {
+                let parts = list_of(v, x);
+                eprintln!(
+                    "contdump: node {} k {k} part {i} digest {:016x} len {}: {}",
+                    self.cx.node().raw(),
+                    crate::val::digest(v, x),
+                    parts.len(),
+                    v.render(x).chars().take(300).collect::<String>()
+                );
+                for (j, &y) in parts.iter().enumerate() {
+                    eprintln!(
+                        "contdump:   {i}.{j} {:016x} {}",
+                        crate::val::digest(v, y),
+                        v.render(y).chars().take(200).collect::<String>()
+                    );
+                }
+            }
+        }
         self.contribute_units(&raw, Some(k), reads, defs, locals)?;
         let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
         let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
@@ -1581,8 +1601,14 @@ impl Run<'_, '_> {
             v.int(self.next_lid),
             v.int(self.last_par.0),
             v.int(self.last_par.1),
-            v.int(self.lines_entered),
-            v.int(i64::from_ne_bytes(self.lines_read.to_ne_bytes())),
+            // (the lines the run began, in all files: counts a run
+            // compares only with themselves (its watchdog's progress, a
+            // candidate's mark, `Run::same_first_token`), not carried: a
+            // file read before the cut one line longer, the `.aux` with a
+            // `\citation` more, would change the continuation for
+            // nothing, and the rest of `\begin{document}` ran again)
+            v.int(0),
+            v.int(0),
             v.int(i64::from(self.eof)),
             v.int(i64::from(self.radix)),
             v.int(self.cur_order as i64),
@@ -1831,7 +1857,6 @@ impl Run<'_, '_> {
         self.next_lid = n(0);
         self.last_par = (n(1), n(2));
         self.lines_entered = n(3);
-        self.lines_read = u64::from_ne_bytes(n(4).to_ne_bytes());
         self.eof = n(5) != 0;
         self.radix = i32::try_from(n(6)).unwrap_or(0);
         self.cur_order = crate::val::order(n(7));
