@@ -217,6 +217,13 @@ const REST_TAG: &str = "\u{1}pages-rest";
 /// `pages:rest:<that node>`.
 pub(crate) const REST_OF: &str = "pages:rest";
 
+/// [`REST_OF`]'s value where the loop node before the rest makes no rest
+/// start: its fold ended (the text's end, `\end`) without stopping at a
+/// page for its rest. Undefined, the start is not decided yet (the loop
+/// node is parked at a hole short of the page it stopped at): the rest
+/// keeps what it made and waits; this, it has no pages.
+const NO_REST: &str = "\u{1}pages-no-rest";
+
 /// The arguments of a loop rest ([`Fold::Wait`]): `[tag, node]`, the loop
 /// node before it: one rest a loop node, wherever that node stops, so a
 /// node that stops elsewhere keeps its rest, which its start
@@ -566,8 +573,11 @@ enum RestBegin {
     Loop,
     /// A rest, at its start.
     At(RestStart),
-    /// A rest whose start is not defined yet.
+    /// A rest whose start is not defined yet: the loop node before it
+    /// has not reached the page its rest starts after.
     NotYet,
+    /// A rest after a loop node that makes no rest start ([`NO_REST`]).
+    Nothing,
 }
 
 /// Where the run may stop early on a page it fires again as it was: past
@@ -625,7 +635,25 @@ impl Run<'_, '_> {
         let rest = match self.rest_start()? {
             RestBegin::Loop => None,
             RestBegin::At(r) => Some(r),
-            RestBegin::NotYet => return Ok(ValueId::UNIT),
+            RestBegin::Nothing => return Ok(ValueId::UNIT),
+            RestBegin::NotYet => {
+                // (its start not decided yet: the loop node before it
+                // folds again (its own start moved: a pass's aux values,
+                // an edit before it) and is parked at a hole short of the
+                // page its rest starts after. What this rest made stands,
+                // its pages, their finishers, its own rest and their
+                // keys, untouched until the start comes; nothing is
+                // folded or fired from the start it had. Its state is
+                // kept with the start forgotten, so the run the start
+                // wakes folds from it anew, reading everything again
+                // (this run reads the start alone). Taken back, every
+                // rest and finisher after it went and was made anew with
+                // new nodes once the start came: Grail's pages' routines,
+                // its first one's 4.4 s, each pass and each \cite edit,
+                // accl 23278, 23376, 23381)
+                self.wait_keeping(None);
+                return Ok(ValueId::UNIT);
+            }
         };
         // (its rest, placement 0, first: a child, right after this node
         // whatever its pages; placed after them, it stood after the last
@@ -636,17 +664,28 @@ impl Run<'_, '_> {
         self.cx.child(self.ops.pages, rest_args(v, me));
         // 1. the parked state
         let began = rest.as_ref().map(|r| r.encode(v));
-        let old = self
-            .cx
-            .resumed()
+        let took = self.cx.resumed();
+        let old = took
             .and_then(|x| LoopState::decode(v, x))
             .unwrap_or_default();
+        // (its last state where it is stale (its start moved: the loop
+        // node before it, or the text before its first page, ran again)
+        // and offered none: nothing is folded from it, but the pages it
+        // fired past where this run parks stand as they were until the
+        // fold reaches them, and the fold stops for its rest at the same
+        // page; dropped, each finisher after the hole and the rest's
+        // whole chain were made anew)
+        let prior = if took.is_none() {
+            self.cx.last_state().and_then(|x| LoopState::decode(v, x))
+        } else {
+            None
+        };
         self.loop_keys = LoopKeys::of(&old, me);
         // 2. where to start
         let n_old = old.checkpoints.len();
         let mut ls = LoopState {
             base: rest.as_ref().map_or(0, |r| r.base),
-            rest_at: old.rest_at,
+            rest_at: old.rest_at.or(prior.as_ref().and_then(|p| p.rest_at)),
             rest_def: old.rest_def,
             began,
             after: if rest.is_some() { old.after } else { None },
@@ -685,10 +724,20 @@ impl Run<'_, '_> {
                     // pages' keys are its own, [`PageKey::owner`], so no
                     // page of the loop nodes before it is hidden by one
                     // kept here)
-                    if old.checkpoints.is_empty() && old.tail.is_none() {
+                    // (as where its start is not decided yet: its state
+                    // kept with the start forgotten, and the reads of the
+                    // run it was folded in not kept with this one's, which
+                    // waits: kept, one of them that moved since woke it at
+                    // each commit of the same wait, a pages rest run
+                    // 1 048 577 times, accl 23339)
+                    // (its state stale, none offered: its last one, as
+                    // where its start is not decided)
+                    if took.is_none() {
+                        self.wait_keeping(None);
+                    } else if old.checkpoints.is_empty() && old.tail.is_none() {
                         self.cx.park(ls.encode(v));
                     } else {
-                        self.cx.unchanged();
+                        self.wait_keeping(Some(&old));
                     }
                     return Ok(ValueId::UNIT);
                 };
@@ -736,7 +785,10 @@ impl Run<'_, '_> {
         if hole {
             self.cx.parked_on(v.field(crate::vprof::VPROF));
             ls.tail = Some(encode_tail(v, &st, &lc));
-            self.emit_beyond(&mut ls, &old);
+            match &prior {
+                Some(p) => self.emit_beyond_stale(&mut ls, p),
+                None => self.emit_beyond(&mut ls, &old),
+            }
         }
         self.publish_frontier(fold, &ls, &lc);
         // (waiting: the pages after the page waited at are a loop rest's,
@@ -759,9 +811,19 @@ impl Run<'_, '_> {
             ls.rest_at = Some(k);
             ls.rest_def = Some(r);
             self.cx.define_with(rest_field(v, me), r, Locality::Global);
+        } else if hole {
+            // (parked at a hole short of the page its rest starts after:
+            // the start is not decided, so not defined, and the rest
+            // waits with what it made standing (`RestBegin::NotYet`); the
+            // fold stops for it at the same page once it gets there)
+            ls.rest_def = None;
         } else {
+            // (the fold ended with no page to stop at for its rest: it
+            // has none, and drops what it made)
             ls.rest_at = None;
             ls.rest_def = None;
+            self.cx
+                .define_with(rest_field(v, me), v.str(NO_REST), Locality::Global);
         }
         ls.ended = lc.ended;
         if crate::exec::obs_flag!("PHITEX_KEY_TRACE") {
@@ -832,6 +894,9 @@ impl Run<'_, '_> {
         match self.cx.read_at(f, At::End(self.cx.unit()))? {
             phitex_defuse::FieldAt::Def(x, _) if let Some(r) = RestStart::decode(v, x) => {
                 Ok(RestBegin::At(r))
+            }
+            phitex_defuse::FieldAt::Def(x, _) if v.with_str(x, |s| s == NO_REST).unwrap_or(false) => {
+                Ok(RestBegin::Nothing)
             }
             _ => {
                 self.cx.parked_on(f);
@@ -933,6 +998,31 @@ impl Run<'_, '_> {
         Ok(Some((st, lc, p, gave)))
     }
 
+    /// A rest that must wait (its start not decided, or its first page's
+    /// give-back not in) keeps what its last run made standing
+    /// ([`phitex_defuse::Ctx::unchanged`]): its pages, their finishers and
+    /// its own rest, under their keys. Its state (`old`, else its last
+    /// one) is parked again with its start forgotten, so the run that the
+    /// answer wakes folds from that start anew and reads everything again;
+    /// this run files only its own reads, none of the last run's
+    /// ([`phitex_defuse::Ctx::not_resumed`]). A rest that made nothing
+    /// keeps nothing.
+    fn wait_keeping(&mut self, old: Option<&LoopState>) {
+        let v = self.v;
+        let st = match old {
+            Some(o) => Some(o.clone()),
+            None => self.cx.last_state().and_then(|x| LoopState::decode(v, x)),
+        };
+        self.cx.not_resumed();
+        let Some(mut st) = st else {
+            return;
+        };
+        st.began = None;
+        st.wait = None;
+        self.cx.park(st.encode(v));
+        self.cx.unchanged();
+    }
+
     /// The fold waits at checkpoint `i` for its give-back
     /// ([`Fold::Wait`]): the pages after it are a loop rest's, its own
     /// node, so that this one's runs re-emit its pages alone, never every
@@ -1028,11 +1118,24 @@ impl Run<'_, '_> {
     /// has not reached them).
     fn emit_beyond(&mut self, ls: &mut LoopState, old: &LoopState) {
         let n = ls.checkpoints.len();
-        let olds = old.checkpoints.iter().skip(n).chain(
-            old.beyond
-                .iter()
-                .skip(n.saturating_sub(old.checkpoints.len())),
-        );
+        let olds: Vec<Checkpoint> = old
+            .checkpoints
+            .iter()
+            .skip(n)
+            .chain(
+                old.beyond
+                    .iter()
+                    .skip(n.saturating_sub(old.checkpoints.len())),
+            )
+            .cloned()
+            .collect();
+        self.emit_beyond_from(ls, &olds);
+    }
+
+    /// [`Run::emit_beyond`]'s pages `olds`, each placed again where its
+    /// contributor still stands and its key is not one of this run's.
+    fn emit_beyond_from(&mut self, ls: &mut LoopState, olds: &[Checkpoint]) {
+        let n = ls.checkpoints.len();
         let mut keys: phitex_defuse::FxHashSet<PageKey> =
             ls.checkpoints.iter().map(|c| c.key).collect();
         let mut prev = ls.checkpoints.last().map(|c| c.cursor);
@@ -1048,6 +1151,21 @@ impl Run<'_, '_> {
                 ..c.clone()
             });
         }
+    }
+
+    /// [`Run::emit_beyond`] from a stale state ([`Run::page_loop`]'s
+    /// `prior`): its pages past the last this run fired, by their place
+    /// among the document's fires (their keys), placed again as they were.
+    fn emit_beyond_stale(&mut self, ls: &mut LoopState, prior: &LoopState) {
+        let next = u32::try_from(ls.base + ls.checkpoints.len()).unwrap_or(u32::MAX);
+        let olds: Vec<Checkpoint> = prior
+            .checkpoints
+            .iter()
+            .chain(&prior.beyond)
+            .filter(|c| c.key.nth >= next)
+            .cloned()
+            .collect();
+        self.emit_beyond_from(ls, &olds);
     }
 
     /// A checkpoint kept: its page defined and its finisher placed again,
