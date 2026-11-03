@@ -1255,11 +1255,11 @@ fn a_run_goes_on_from_a_checkpoint_inside_an_alignment() {
 /// A macro that reads two job-written files back with much work between
 /// (on a few locations: a table that grows spaces checkpoints further)
 /// (LaTeX's `\document`: the `.aux`, the packages' hooks, then the
-/// `.out`): an edit that changes only what the second file says wakes
-/// the macro's run for its read of that file, and the run goes on from
-/// a checkpoint taken after the first read-back, with the read-back's
-/// state carried (its macro's level marked on the input, the values
-/// noted at the point), not from its start; the output and log are a
+/// `.out`), and at its end a macro an earlier node defines: an edit of
+/// that definition wakes the macro's run for its last read, and the run
+/// goes on from a checkpoint taken while the read-back's macro runs,
+/// with the read-back's state carried (its macro's level marked on the
+/// input, the values noted at the point), not from its start; the output and log are a
 /// cold build's, at 1 and 8 threads. Checkpoints were refused while a
 /// read-back's macro ran: Grail's heading edit ran `\begin{document}`'s
 /// node whole again for its `.out` (140 ms).
@@ -1270,7 +1270,7 @@ fn a_run_goes_on_from_a_checkpoint_between_two_read_backs() {
     let prelude = common::plain();
     let doc = |m: &str| {
         format!(
-            "\\def\\xa{{?}}\\def\\xb{{?}}\n\\def\\begindoc{{\\openin3=\\jobname.xa \\ifeof3 \\closein3 \\else\\closein3 \\input\\jobname.xa \\fi\n\\count255=0 \\loop\\advance\\count255 1 \\edef\\w{{\\the\\count255}}\\setbox0\\hbox{{\\w}}\\ifnum\\count255<3000 \\repeat\n\\openin3=\\jobname.xb \\ifeof3 \\closein3 \\else\\closein3 \\input\\jobname.xb \\fi\n\\immediate\\openout1=\\jobname.xa \\immediate\\openout2=\\jobname.xb }}\n\\begindoc\nText \\xa\\ and \\xb\\ and \\w.\n\n\\immediate\\write1{{\\noexpand\\def\\noexpand\\xa{{A}}}}\n\\immediate\\write2{{\\noexpand\\def\\noexpand\\xb{{{m}}}}}\n\\bye\n"
+            "\\def\\late{{{m}}}\\def\\xa{{?}}\\def\\xb{{?}}\n\n\\def\\begindoc{{\\openin3=\\jobname.xa \\ifeof3 \\closein3 \\else\\closein3 \\input\\jobname.xa \\fi\n\\count255=0 \\loop\\advance\\count255 1 \\edef\\w{{\\the\\count255}}\\setbox0\\hbox{{\\w}}\\ifnum\\count255<3000 \\repeat\n\\openin3=\\jobname.xb \\ifeof3 \\closein3 \\else\\closein3 \\input\\jobname.xb \\fi\n\\immediate\\openout1=\\jobname.xa \\immediate\\openout2=\\jobname.xb \\edef\\w{{\\w\\late}}}}\n\\begindoc\nText \\xa\\ and \\xb\\ and \\w.\n\n\\immediate\\write1{{\\noexpand\\def\\noexpand\\xa{{A}}}}\n\\immediate\\write2{{\\noexpand\\def\\noexpand\\xb{{B}}}}\n\\bye\n"
         )
     };
     for t in [1, 8] {
@@ -1287,7 +1287,7 @@ fn a_run_goes_on_from_a_checkpoint_between_two_read_backs() {
             let (cold_out, cold_log) = cold.output();
             assert!(
                 common::first_difference(&out, &cold_out).is_none(),
-                "{t} threads, edit {k} (\\xb={m}): the output is not the cold build's"
+                "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
             );
             assert_eq!(
                 log, cold_log,
