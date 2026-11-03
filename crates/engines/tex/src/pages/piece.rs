@@ -413,7 +413,7 @@ impl Run<'_, '_> {
         let Some(m) = self.cand_marks.iter().find(|m| m.k == k) else {
             return Ok(());
         };
-        if !m.fresh || !(m.restartable || m.open_cut) {
+        if !m.fresh || !(m.restartable || m.open_cut || m.par_cut) {
             return Ok(());
         }
         if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {

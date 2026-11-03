@@ -2731,7 +2731,11 @@ impl Run<'_, '_> {
     /// A piece's read of the lines before it (`\inputlineno`), noted by
     /// where the number goes ([`LinesTaint`]).
     fn note_lines_read(&mut self) {
-        let piece = self.cx.op() == self.ops.exec || self.cx.op() == self.ops.resume;
+        // (and a page's routine: hooks' bodies record \inputlineno too, and
+        // Grail's first page's routine, 3.8 s of hyperxmp, ran again for
+        // each line deleted above it, accl 23788)
+        let op = self.cx.op();
+        let piece = op == self.ops.exec || op == self.ops.resume || op == self.ops.finish;
         // (a number read into the log stands: the log is the run's
         // output, and a number taken back there is the one a run read
         // before the lines ahead of it were in, `D=1` for line 6 at -j8)

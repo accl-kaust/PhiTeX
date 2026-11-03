@@ -1031,13 +1031,20 @@ impl Run<'_, '_> {
         let out = self
             .cx
             .read_at(r.key.field(v, PAGE_OUT), At::End(self.cx.unit()))?;
+        // (the page's routine not run on the page as it is now, but what it
+        // gave back on the page before it moved being the guess: the fold
+        // goes on, so the pages after it and their routines run beside
+        // this one, not each after the last, the chain of an edit that
+        // moves pages. The read stands: the routine's commit runs this
+        // again, on what it gave back. A guess it has not given back
+        // before, as in a first build, is waited for)
         let gave = match out {
-            phitex_defuse::FieldAt::Def(x, fin) => {
-                page_out_parts(v, x).filter(|o| o.1 == r.page).map(|o| {
+            phitex_defuse::FieldAt::Def(x, fin) => page_out_parts(v, x)
+                .filter(|o| o.1 == r.page || o.0 == r.guess)
+                .map(|o| {
                     ls.after = fin.map(|f| (p.node, f));
                     o.0
-                })
-            }
+                }),
             _ => None,
         };
         let Some(gave) = gave else {
@@ -1245,7 +1252,14 @@ impl Run<'_, '_> {
                 continue;
             }
             let i = n + ls.beyond.len();
-            self.emit_page(i, c.key, c.cursor, c.page, c.args, (prev, ls.after, ls.base));
+            self.emit_page(
+                i,
+                c.key,
+                c.cursor,
+                c.page,
+                c.args,
+                (prev, ls.after, ls.base),
+            );
             prev = Some(c.cursor);
             ls.beyond.push(Checkpoint {
                 placement: i,
@@ -1275,7 +1289,14 @@ impl Run<'_, '_> {
     fn emit_kept(&mut self, ls: &mut LoopState, c: &Checkpoint) -> ValueId {
         let i = ls.checkpoints.len();
         let prev = ls.checkpoints.last().map(|p| p.cursor);
-        self.emit_page(i, c.key, c.cursor, c.page, c.args, (prev, ls.after, ls.base));
+        self.emit_page(
+            i,
+            c.key,
+            c.cursor,
+            c.page,
+            c.args,
+            (prev, ls.after, ls.base),
+        );
         // (the page this node stops at for its rest: its give-back is the
         // rest's to read)
         let gave = if ls.rest_at == Some(c.key) {

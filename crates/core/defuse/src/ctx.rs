@@ -1215,7 +1215,13 @@ impl<'a> Ctx<'a> {
     pub(crate) fn last_run_stands(&mut self) -> Option<ValueId> {
         if !matches!(
             self.woke,
-            Some(Cause::Changed { .. } | Cause::Range { .. } | Cause::Rebind { .. } | Cause::Output { .. })
+            Some(
+                Cause::Changed { .. }
+                    | Cause::Range { .. }
+                    | Cause::Rebind { .. }
+                    | Cause::Output { .. }
+                    | Cause::Environment { .. }
+            )
         ) || self.me.moved.load(std::sync::atomic::Ordering::Acquire)
             || self.me.refuted.load(std::sync::atomic::Ordering::Acquire)
         {

@@ -223,6 +223,11 @@ impl Operation for Finish {
         )]
         let out = run_node(cx, o, |r| {
             let out = r.finish_page();
+            // (the lines read into bodies nothing looked at: taken back,
+            // as a piece's are)
+            if out.is_ok() {
+                r.settle_lines();
+            }
             r.report_macros(t_fin.elapsed());
             out
         });
