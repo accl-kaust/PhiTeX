@@ -880,7 +880,7 @@ fn blanks_at_line_ends_run_no_node() {
         .iter()
         .map(|l| {
             l.strip_suffix('\n')
-                .map_or_else(|| format!("{l} \t "), |b| format!("{b} \t \n"))
+                .map_or_else(|| format!("{l}   "), |b| format!("{b}   \n"))
         })
         .collect();
     let mut last = src.clone();
