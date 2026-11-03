@@ -1701,9 +1701,11 @@ impl Run<'_, '_> {
     }
 
     /// Class `n`'s registers as the builder has them (`base`, from the
-    /// routines' give-backs in fold order), each with the text's own
+    /// routines' give-backs in fold order), its box with the text's own
     /// definition reaching `at` where the text set it after the piece
-    /// `since` (raw id, -1 none) the page before fired in: a finisher's
+    /// `since` (raw id, -1 none) the page before fired in, its other
+    /// registers as the text or the environment has them at `at` unless a
+    /// routine's definition reaches there: a finisher's
     /// definition never reaches the builder by its place, which the
     /// builder's own placements move (a routine's `\box\footins` read by
     /// place: the loop relocated the finisher, the pieces between its
@@ -1743,6 +1745,17 @@ impl Run<'_, '_> {
         });
         for (i, f) in fields.into_iter().enumerate() {
             let x = match self.field_at(f, at, false)? {
+                // (`\count`, `\dimen`, `\skip`: eqtb as it stands where
+                // the piece is, what no routine defined. A routine run in a
+                // group gives back the group's values, which the group's end
+                // takes away with no definition after the routine: multicol's
+                // `\count\footins` and `\skip\footins` times its columns)
+                phitex_defuse::FieldAt::Def(x, Some(d))
+                    if i > 0 && self.cx.op_of(d).is_some_and(|o| o != fin) =>
+                {
+                    x
+                }
+                phitex_defuse::FieldAt::Def(x, None) if i > 0 || env => x,
                 phitex_defuse::FieldAt::Def(x, Some(d))
                     if self.cx.op_of(d).is_some_and(|o| o != fin)
                         && after
@@ -1750,7 +1763,6 @@ impl Run<'_, '_> {
                 {
                     x
                 }
-                phitex_defuse::FieldAt::Def(x, None) if env => x,
                 _ => continue,
             };
             match i {

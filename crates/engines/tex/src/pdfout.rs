@@ -3237,26 +3237,29 @@ fn mark_events(
                 _ => {}
             }
         }
-        fn nodes(&mut self, list: &[phitex_typeset::node::Node], vertical: bool) {
+        /// `skel`: `list` is a sealed line's skeleton, its boxes all entered
+        /// (their lists there only what they hold of whatsits).
+        fn nodes(&mut self, list: &[phitex_typeset::node::Node], vertical: bool, skel: bool) {
             use phitex_typeset::node::Node;
             for p in list {
                 match p {
-                    Node::Box(b) => self.boxed(b),
+                    // (§733, §742: a box with an empty list is not entered)
+                    Node::Box(b) if skel || !b.list.is_empty() => self.boxed(b, skel),
                     Node::Whatsit(h, _) => self.what(*h, vertical),
-                    Node::Disc(d) if !vertical => self.nodes(&d.replace, false),
+                    Node::Disc(d) if !vertical => self.nodes(&d.replace, false, skel),
                     _ => {}
                 }
             }
         }
-        fn boxed(&mut self, b: &BoxNode) {
+        fn boxed(&mut self, b: &BoxNode, skel: bool) {
             use phitex_typeset::node::BoxKind;
             self.cur_s += 1;
             let vertical = b.kind == BoxKind::V;
             self.count(if vertical { 4 } else { 0 }, self.cur_s);
-            self.nodes(
-                crate::nodes::sealed_skeleton(b, self.side).unwrap_or(&b.list),
-                vertical,
-            );
+            match crate::nodes::sealed_skeleton(b, self.side) {
+                Some(list) => self.nodes(list, vertical, true),
+                None => self.nodes(&b.list, vertical, skel),
+            }
             self.cur_s -= 1;
         }
     }
@@ -3268,7 +3271,7 @@ fn mark_events(
         seg: BTreeMap::new(),
         ev: Vec::new(),
     };
-    w.boxed(bx);
+    w.boxed(bx, false);
     w.flush();
     v.list(w.ev.into_iter().map(|e| v.list(e)).collect())
 }

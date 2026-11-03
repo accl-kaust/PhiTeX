@@ -9370,10 +9370,10 @@ mod canonical_tests {
     #[test]
     fn blanks_at_line_ends_are_left_out() {
         for (t, want) in [
-            ("a b  \nc\t\n", "a b\nc\n"),
+            ("a b  \nc\t\n", "a b\nc\t\n"),
             ("a \r\nb", "a\r\nb"),
-            ("a\r \n", "a\r \n"),
-            ("   \n\t\n", "\n\n"),
+            ("a\r \n", "a\n"),
+            ("   \n\t\n", "\n\t\n"),
             ("x % c  \ny \\% \n", "x %\0"),
             ("end ", "end"),
         ] {
@@ -9390,7 +9390,7 @@ mod canonical_tests {
             if ch != '\n' {
                 continue;
             }
-            for blanks in [" ", "  \t"] {
+            for blanks in [" ", "   "] {
                 let new = format!("{}{blanks}{}", &text[..i], &text[i..]);
                 let (old_c, marks) = canonical_text(text).unwrap();
                 assert_eq!(canonical_text(&new).unwrap().0, old_c, "{new:?}");

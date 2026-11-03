@@ -1,0 +1,25 @@
+% moderncv_userguide (TeX Live manual): a footnote inside multicols, its text
+% put back after the environment. multicol multiplies \count\footins and
+% \skip\footins by the columns, locally in its group; the routine run at the
+% environment's end sees those values, the builder took them from it and kept
+% them after the group's end: the page's goal three times too small.
+\documentclass{article}
+\usepackage{multicol,lipsum}
+\makeatletter
+\def\pr{\typeout{\the\pagegoal\space\the\pagetotal\space\the\count\footins\space\the\skip\footins}}
+\makeatother
+\begin{document}
+\lipsum[1]
+\begin{multicols}{3}
+a\footnote{The footnote.} \lipsum[2]
+\end{multicols}
+\pr
+\lipsum[3]\pr
+\lipsum[4-6]\pr
+\lipsum[7-12]
+\begin{multicols}{2}
+\lipsum[13]\footnote{Another.}
+\end{multicols}
+{\skip\footins=20pt \lipsum[14-16]\footnote{A local class in a group over a page.}\lipsum[17-20]\par}
+\lipsum[21-24]\footnote{After the group.}\lipsum[25]
+\end{document}
