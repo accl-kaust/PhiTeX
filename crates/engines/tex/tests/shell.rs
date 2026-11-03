@@ -489,7 +489,7 @@ fn the_evaluation_goes_on_while_a_command_runs() {
 /// build ends. Before, the command waited for that node, which never ran
 /// before the quiet point, and the quiet point let the command go only to
 /// wait again, for ever (minted's `\write18` at the end of a document:
-/// latexmk_minted past 300 s at -j1 and -j8, lectures and handin-doc). At
+/// `latexmk_minted` past 300 s at -j1 and -j8, lectures and handin-doc). At
 /// -j1 and -j8.
 #[test]
 fn a_command_after_a_pdf_page_runs_once() {

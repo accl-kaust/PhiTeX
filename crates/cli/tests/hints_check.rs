@@ -45,10 +45,30 @@ fn docs() -> Vec<Doc> {
     for (name, dir, main, engine) in [
         ("url", "latex/url", "url.tex", "pdflatex"),
         ("xurl", "latex/xurl", "xurl.tex", "xelatex"),
-        ("geometry-samples", "latex/geometry", "geometry-samples.tex", "pdflatex"),
-        ("checklistings", "latex/checklistings", "example.tex", "pdflatex"),
-        ("verbatimbox", "latex/verbatimbox", "verbatimbox.tex", "pdflatex"),
-        ("verbatimcopy", "latex/verbatimcopy", "verbatimcopy.tex", "pdflatex"),
+        (
+            "geometry-samples",
+            "latex/geometry",
+            "geometry-samples.tex",
+            "pdflatex",
+        ),
+        (
+            "checklistings",
+            "latex/checklistings",
+            "example.tex",
+            "pdflatex",
+        ),
+        (
+            "verbatimbox",
+            "latex/verbatimbox",
+            "verbatimbox.tex",
+            "pdflatex",
+        ),
+        (
+            "verbatimcopy",
+            "latex/verbatimcopy",
+            "verbatimcopy.tex",
+            "pdflatex",
+        ),
         ("mcaption", "latex/mcaption", "example.tex", "pdflatex"),
         ("enumitem", "latex/enumitem", "enumitem.tex", "pdflatex"),
         ("iftex", "generic/iftex", "iftex.tex", "xelatex"),
@@ -71,7 +91,10 @@ fn docs() -> Vec<Doc> {
 
 fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).expect("a scratch directory");
-    for e in std::fs::read_dir(from).expect("the document's directory").flatten() {
+    for e in std::fs::read_dir(from)
+        .expect("the document's directory")
+        .flatten()
+    {
         let p = e.path();
         if p.is_dir() {
             copy_dir(&p, &to.join(e.file_name()));
@@ -113,7 +136,8 @@ fn build(doc: &Doc, mode: &str) -> (Vec<u8>, String) {
     }
     let out = cmd.output().expect("phitex runs");
     let pdf = std::fs::read(dir.join(doc.main.replace(".tex", ".pdf"))).unwrap_or_default();
-    let term = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    let term =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     (pdf, term.lines().last().unwrap_or("").to_owned())
 }
 
@@ -122,7 +146,11 @@ fn a_wrong_hint_never_changes_the_output() {
     let mut bad = Vec::new();
     for doc in docs() {
         let (want, term) = build(&doc, "");
-        assert!(!want.is_empty(), "{}: the normal build made no PDF: {term}", doc.name);
+        assert!(
+            !want.is_empty(),
+            "{}: the normal build made no PDF: {term}",
+            doc.name
+        );
         for mode in ["any", "adversarial"] {
             let (got, term) = build(&doc, mode);
             if got != want {
