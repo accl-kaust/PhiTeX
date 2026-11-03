@@ -1,0 +1,18 @@
+% biblatex-cheatsheet (TeX Live manual): \maketitle as the first thing
+% inside three-column multicols on a landscape page. PhiTeX shipped one
+% page more than pdfTeX.
+\documentclass[a4paper,landscape]{article}
+\usepackage{geometry,multicol,lipsum}
+\geometry{hmargin=10mm,vmargin=10mm}
+\title{Title}\author{Author}\date{}
+\pagestyle{empty}
+\begin{document}
+\footnotesize
+\begin{multicols}{3}
+\maketitle\thispagestyle{empty}
+\section{One}
+\lipsum[1-12]
+\section{Two}
+\lipsum[13-24]
+\end{multicols}
+\end{document}

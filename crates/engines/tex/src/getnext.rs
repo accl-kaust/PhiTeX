@@ -659,7 +659,7 @@ impl Run<'_, '_> {
                     }
                     let f = self.input.file_mut(top);
                     if f.has_lines() {
-                        let line = f.take_line(self.xe);
+                        let line = f.take_line();
                         self.input.push_line(line);
                     } else {
                         self.pop_input_level();
@@ -1995,7 +1995,7 @@ impl Run<'_, '_> {
                     && let Some(n) = t.as_cs()
                 {
                     let f = Tok::cs(&format!("{n}F"));
-                    self.input.arena.set(i, f);
+                    self.input.set_tok(i, f);
                     return;
                 }
             }

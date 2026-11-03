@@ -5080,11 +5080,10 @@ fn canonical_lines(
     out.push_str(&text[copied..]);
 }
 
-/// Where the blanks web2c's `input_line` drops from line `body` (its end
-/// not in it) begin and end, if it has any: the spaces and tabs before
-/// its carriage returns ([`crate::input::Line::of_str`] drops those, then
-/// the blanks). None where what is left would end in a carriage return
-/// (`Line::of_str` would drop that too, unlike the line's).
+/// Where the spaces web2c's `input_line` drops from line `body` (its end
+/// not in it) begin and end, if it has any, among the carriage returns it
+/// drops with them ([`crate::input::Line::of_str`]): the first dropped
+/// byte and the end of the last space. Tabs stay.
 fn blanks_at_end(body: &str) -> Option<(usize, usize)> {
     let b = body.as_bytes();
     let mut e = b.len();
@@ -5092,10 +5091,10 @@ fn blanks_at_end(body: &str) -> Option<(usize, usize)> {
         e -= 1;
     }
     let mut f = e;
-    while f > 0 && matches!(b[f - 1], b' ' | b'\t') {
+    while f > 0 && matches!(b[f - 1], b' ' | b'\r') {
         f -= 1;
     }
-    (f < e && (f == 0 || b[f - 1] != b'\r')).then_some((f, e))
+    (f < e).then_some((f, e))
 }
 
 /// [`canonical_lines`] of one line `body` (its end not in it), line `n`
@@ -5131,9 +5130,7 @@ fn canonical_line(
             out.push_str("0000000000000000");
             // (the comment as web2c's `input_line` keeps it: the
             // line's end, then its trailing blanks removed, §31)
-            let c = body[k + 1..]
-                .trim_end_matches(['\r', '\n'])
-                .trim_end_matches([' ', '\t']);
+            let c = body[k + 1..].trim_end_matches([' ', '\r', '\n']);
             marks.push((
                 u32::try_from(n + 1).unwrap_or(u32::MAX),
                 prefix_hash(&body[..k]),

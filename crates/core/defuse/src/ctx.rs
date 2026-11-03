@@ -1199,17 +1199,6 @@ impl<'a> Ctx<'a> {
     /// the others: filled since, it does not hold. The output of that run,
     /// if it stands.
     pub(crate) fn last_run_stands(&mut self) -> Option<ValueId> {
-        if crate::sched::run_log() && self.me.full_ns.load(std::sync::atomic::Ordering::Relaxed) >= 100_000_000 {
-            eprintln!(
-                "standing: node {} woke {:?} moved {} refuted {} last {:?} state {}",
-                self.me.id.raw(),
-                self.woke.as_ref().map(std::mem::discriminant),
-                self.me.moved.load(std::sync::atomic::Ordering::Acquire),
-                self.me.refuted.load(std::sync::atomic::Ordering::Acquire),
-                self.last.as_ref().map(|r| (r.provisional, r.reads.len())),
-                self.last.as_ref().is_some_and(|r| r.state.is_some()),
-            );
-        }
         if !matches!(
             self.woke,
             Some(Cause::Changed { .. } | Cause::Range { .. } | Cause::Rebind { .. } | Cause::Output { .. })
@@ -1225,30 +1214,6 @@ impl<'a> Ctx<'a> {
             .iter()
             .all(|rd| crate::read::holds(self.eng, self.me, rd, &mut memo))
         {
-            if crate::sched::run_log() && self.me.full_ns.load(std::sync::atomic::Ordering::Relaxed) >= 100_000_000 {
-                let v = &self.eng.values;
-                let mut memo = crate::read::FoldMemo::new();
-                let total = r.reads.len();
-                for rd in r
-                    .reads
-                    .iter()
-                    .filter(|rd| !crate::read::holds(self.eng, self.me, rd, &mut memo))
-                    .take(6)
-                {
-                    let now =
-                        crate::read::answer_in(self.eng, self.me, &rd.kind, rd.path, &mut crate::read::FoldMemo::new());
-                    let cut = |x: Option<ValueId>| {
-                        x.map_or_else(|| "none".to_owned(), |x| v.render(x).chars().take(80).collect())
-                    };
-                    eprintln!(
-                        "moved: node {} of {total} reads: {:?} seen {} now {}",
-                        self.me.id.raw(),
-                        rd.kind.field().map(|f| v.render(f.0)),
-                        cut(rd.seen),
-                        cut(now)
-                    );
-                }
-            }
             return None;
         }
         let output = r.output;
