@@ -986,6 +986,13 @@ impl<'a> Ctx<'a> {
         Ok(d)
     }
 
+    /// Whether a claim took my node while this run was on its way (a
+    /// sibling's run claimed it after a worker took it to run). Not a
+    /// read.
+    pub fn claimed_away(&self) -> bool {
+        matches!(self.me.state(), State::Inert | State::RunningInert)
+    }
+
     /// Always true: a run never knows it is final. Side effects belong
     /// after the evaluation, from outputs.
     pub fn is_speculative(&self) -> bool {
