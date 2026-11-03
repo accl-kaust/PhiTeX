@@ -952,6 +952,40 @@ impl Run<'_, '_> {
         if changes.is_empty() && rtn_after.is_none() && boxes.is_empty() {
             return Ok(());
         }
+        let Some(used) = self.cx.read(fire_used_field(v, at))? else {
+            return Ok(());
+        };
+        let (used, ranges) = {
+            let u = list_of(v, used);
+            (list_of(v, u[0]), list_of(v, u[1]))
+        };
+        // (the run read `f` across this candidate)
+        let used_here = |f: ValueId| {
+            used.binary_search(&f).is_ok_and(|i| {
+                list_of(v, ranges[i])
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .any(|&[a, b]| int_of(v, a) <= i64::from(k) && i64::from(k) <= int_of(v, b))
+            })
+        };
+        let changes: Vec<_> = changes
+            .into_iter()
+            .filter(|d| {
+                v.with_str(d.0.0, |s| {
+                    s.starts_with("pages:") || PAGE_FIELDS.contains(&s) || s == MAIN_PREVGRAF
+                }) == Some(false)
+            })
+            .collect();
+        // (whether the routine changed them matters only for what the run
+        // read across the candidate: the rest is not looked at, nor the
+        // finisher's run made to depend on what reaches it)
+        if rtn_after.is_none()
+            && !boxes.iter().any(|b| used_here(b.0.0))
+            && !changes.iter().any(|d| used_here(d.0.0))
+        {
+            return Ok(());
+        }
         let locals: Vec<ValueId> = args
             .get(3)
             .map(|&x| list_of(v, x))
@@ -961,12 +995,6 @@ impl Run<'_, '_> {
             .collect();
         let mut changed = Vec::new();
         for (f, what, _) in changes {
-            let own = v.with_str(f.0, |s| {
-                s.starts_with("pages:") || PAGE_FIELDS.contains(&s) || s == MAIN_PREVGRAF
-            }) != Some(false);
-            if own {
-                continue;
-            }
             let same = !locals.contains(&f.0)
                 && match what {
                     crate::state::Pub::Value(x) => {
@@ -986,7 +1014,10 @@ impl Run<'_, '_> {
                                 r(Some(x))
                             );
                         }
+                        // (no `\\afterassignment` token pending, read as
+                        // nothing or left as nothing, §1269: the same)
                         y == Some(Some(x))
+                            || (y == Some(None) && x == ValueId::UNIT && transient(v, f))
                     }
                     crate::state::Pub::Rel(c) => c == 0,
                 };
@@ -994,13 +1025,6 @@ impl Run<'_, '_> {
                 changed.push(f.0);
             }
         }
-        if changed.is_empty() && rtn_after.is_none() && boxes.is_empty() {
-            return Ok(());
-        }
-        let Some(used) = self.cx.read(fire_used_field(v, at))? else {
-            return Ok(());
-        };
-        let used = list_of(v, list_of(v, used)[0]);
         if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
             eprintln!(
                 "fire-conflict: finisher {} piece {} candidate {k}: boxes {} changed [{}] of them used [{}]",
@@ -1018,15 +1042,15 @@ impl Run<'_, '_> {
                     .join(" "),
                 changed
                     .iter()
-                    .filter(|f| used.binary_search(f).is_ok())
+                    .filter(|&&f| used_here(f))
                     .map(|&f| crate::val::field_name(v, Field(f)))
                     .collect::<Vec<_>>()
                     .join(" "),
             );
         }
         if rtn_after.is_some()
-            || changed.iter().any(|f| used.binary_search(f).is_ok())
-            || boxes.iter().any(|b| used.binary_search(&b.0.0).is_ok())
+            || changed.iter().any(|&f| used_here(f))
+            || boxes.iter().any(|b| used_here(b.0.0))
         {
             // (every field the routine changed, with the value it left:
             // the piece puts them in force at the candidate, as TeX's
@@ -1050,6 +1074,12 @@ impl Run<'_, '_> {
                 v.list(pairs),
                 Locality::Global,
             );
+            // (TeX's own serial chain from the text to the routine and
+            // back: the piece goes again at once, on what the pages before
+            // it left; held to a quiet point, a chain through the pages
+            // takes one pass a page, and past the settling limit the
+            // output is a pass's that never settled: texpower's links)
+            self.cx.settle_now();
         }
         Ok(())
     }
@@ -1070,13 +1100,13 @@ impl Run<'_, '_> {
         };
         let used = self.cx.read(fire_used_field(v, at))?;
         let passed =
-            used.is_some_and(|u| list_of(v, list_of(v, u)[1]).contains(&v.int(i64::from(k))));
+            used.is_some_and(|u| list_of(v, list_of(v, u)[2]).contains(&v.int(i64::from(k))));
         if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
             eprintln!(
                 "fire-after: finisher {} piece {} candidate {k}: used {} passed {passed}",
                 self.cx.node().raw(),
                 at.raw(),
-                used.map_or_else(|| "-".to_owned(), |u| v.render(list_of(v, u)[1])),
+                used.map_or_else(|| "-".to_owned(), |u| v.render(list_of(v, u)[2])),
             );
         }
         Ok(passed)

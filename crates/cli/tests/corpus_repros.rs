@@ -1147,3 +1147,13 @@ fn page_read_after_par_in_cond() {
 fn pdf_savepos_texxet() {
     check_threads("pdf_savepos_texxet", "pdf");
 }
+
+/// A routine's global definitions and what the text's run read across the
+/// page's candidate: a value the run bound itself after the candidate is
+/// its own, an older binding read again after a group (or a group's binding
+/// from before the candidate) is the routine's. At -j1 and -j4 (oracle:
+/// pdftex in the CI image).
+#[test]
+fn routine_global_read_by_position() {
+    check_threads("routine_global_read_by_position", "pdf");
+}

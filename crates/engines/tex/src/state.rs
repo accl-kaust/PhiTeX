@@ -180,6 +180,32 @@ impl Family {
     }
 }
 
+/// Whether every read of `loc`'s value a run makes is one
+/// [`State::note_read`] sees, at the place it is made. Not: what a run reads
+/// through a memo kept while the table is unchanged (category codes, font
+/// cells, `\\endlinechar`), the codes that go with them, what the page
+/// builder takes from a candidate's markers (the page parameters) and box
+/// registers, which a `\\box` or `\\wd` reads by other ways.
+pub(crate) fn read_by_position(loc: Loc) -> bool {
+    use crate::fields::Par;
+    !is_page_param(loc)
+        && loc != Par::endlinechar as Loc
+        && !matches!(
+            Family::of(loc),
+            Some(
+                Family::Cat
+                    | Family::Lc
+                    | Family::Uc
+                    | Family::Sf
+                    | Family::Mc
+                    | Family::Dc
+                    | Family::Box
+                    | Family::Fam
+                    | Family::Font
+            )
+        )
+}
+
 /// The kinds of a slot's value ([`Entry`]'s `kind`): an engine value
 /// not decoded yet, a typed one, or a meaning (`K_MEAN0` and above:
 /// `cmd` and `chr` hold its command code and modifier, `payload` its
@@ -335,6 +361,14 @@ struct Slot {
     /// hold this location already: only the first entry at a candidate
     /// is its value there ([`State::at_candidates`]).
     cand_noted: u32,
+    /// The candidates passed when the binding in force was last read
+    /// ([`State::note_read`]): reads between two candidates count once.
+    read_at: std::cell::Cell<u32>,
+    /// Where in [`State::read_across`] this location's latest entry is.
+    across_ix: std::cell::Cell<u32>,
+    /// The candidate number from which the value here is what a global
+    /// definition left: no older binding shows through it (§283).
+    floor: u32,
 }
 
 impl Default for Slot {
@@ -355,6 +389,9 @@ impl Default for Slot {
             sym: false,
             def_gid: 0,
             cand_noted: 0,
+            read_at: std::cell::Cell::new(0),
+            across_ix: std::cell::Cell::new(0),
+            floor: 0,
         }
     }
 }
@@ -483,6 +520,15 @@ pub(crate) struct State {
     /// location defined after it and before the next one for the first
     /// time since it, the entry the location held at the candidate.
     cands: Vec<(u64, Vec<(Loc, Entry)>)>,
+    /// `cands.len()`, one load for a read's check ([`State::note_read`]).
+    cands_passed: u32,
+    /// The meanings the run read holding a binding from before a candidate
+    /// it passed: `(loc, from, to)`, a value bound before candidate `from`
+    /// (by index in [`State::cands`]) was read after candidate `to - 1`.
+    /// A routine's global definition at one of those candidates is what
+    /// TeX's read there saw ([`State::note_read`]). Only ever grows: a
+    /// [`State::rollback`] leaves a read it took back, as a read made.
+    read_across: std::cell::RefCell<Vec<(Loc, u32, u32)>>,
     /// The table as it stood at [`State::checkpoint`], kept as it
     /// changes: [`State::rollback`] puts it back.
     undo: Option<Box<Undo>>,
@@ -593,6 +639,8 @@ impl Clone for State {
             font_slow: self.font_slow.clone(),
             muts: self.muts,
             cands: self.cands.clone(),
+            cands_passed: self.cands_passed,
+            read_across: self.read_across.clone(),
             undo: None,
             tainted: self.tainted.clone(),
             taint_read: self.taint_read.clone(),
@@ -714,6 +762,8 @@ impl State {
             font_slow: phitex_defuse::FxHashSet::default(),
             muts: 0,
             cands: Vec::new(),
+            cands_passed: 0,
+            read_across: std::cell::RefCell::new(Vec::new()),
             undo: None,
             tainted: Vec::new(),
             taint_read: std::cell::Cell::new(false),
@@ -858,6 +908,7 @@ impl State {
         self.scope_extra = u.scope_extra;
         self.cont_locs = u.cont_locs;
         self.cands = u.cands;
+        self.cands_passed = u32::try_from(self.cands.len()).unwrap_or(u32::MAX);
         self.stamp = u.stamp;
         self.pp_dirty = u.pp_dirty;
         self.next_gid = u.next_gid;
@@ -921,6 +972,82 @@ impl State {
     /// defined after it hold here are kept ([`State::at_candidates`]).
     pub(crate) fn mark_candidate(&mut self) {
         self.cands.push((self.stamp, Vec::new()));
+        self.cands_passed = u32::try_from(self.cands.len()).unwrap_or(u32::MAX);
+    }
+
+    /// A read of the value `loc` holds. Between two candidates, one load
+    /// and one comparison; once in each stretch the binding's age is looked
+    /// at ([`State::note_read_across`]).
+    #[inline]
+    pub(crate) fn note_read(&self, loc: Loc) {
+        if let Some(s) = self.slot_ref(loc)
+            && s.read_at.get() != self.cands_passed
+        {
+            self.note_read_across(s, loc);
+        }
+    }
+
+    /// [`State::note_read`], the first in its stretch: where the binding
+    /// in force was made before a candidate passed, its value was read
+    /// across those candidates.
+    #[cold]
+    #[inline(never)]
+    fn note_read_across(&self, s: &Slot, loc: Loc) {
+        let now = self.cands_passed;
+        s.read_at.set(now);
+        let ldef = usize::try_from(s.meta)
+            .ok()
+            .and_then(|m| m.checked_sub(1))
+            .and_then(|m| self.metas.get(m))
+            .map_or(0, |m| m.ldef_stamp);
+        let from = u32::try_from(self.cands.partition_point(|c| c.0 < ldef))
+            .unwrap_or(u32::MAX)
+            .max(s.floor);
+        if from < now {
+            let mut xs = self.read_across.borrow_mut();
+            if let Some(x) = xs.get_mut(s.across_ix.get() as usize)
+                && x.0 == loc
+                && x.1 == from
+            {
+                x.2 = now;
+            } else {
+                s.across_ix.set(u32::try_from(xs.len()).unwrap_or(u32::MAX));
+                xs.push((loc, from, now));
+            }
+        }
+    }
+
+    /// A read of `loc` the run made from elsewhere than its table, in the
+    /// stretch before candidate `at` (by index): as read across all the
+    /// candidates before it.
+    pub(crate) fn note_read_before(&self, loc: Loc, at: u32) {
+        if at > 0 {
+            self.read_across.borrow_mut().push((loc, 0, at));
+        }
+    }
+
+    /// The location of spill field `f`, if the run has made one.
+    pub(crate) fn spill_of(&self, f: Field) -> Option<Loc> {
+        self.spill_ix.get(&f).map(|&i| SPILL | i)
+    }
+
+    /// [`State::read_across`]: `(loc, from, to)` by index in the candidates.
+    pub(crate) fn reads_across(&self) -> Vec<(Loc, u32, u32)> {
+        self.read_across.borrow().clone()
+    }
+
+    /// A routine's value put in force at the candidate just passed
+    /// ([`State::apply_global`]) counts as read across it.
+    pub(crate) fn note_applied(&self, loc: Loc) {
+        let now = self.cands_passed;
+        if now > 0 {
+            self.read_across.borrow_mut().push((loc, now - 1, now));
+        }
+    }
+
+    /// How many candidates the run passed.
+    pub(crate) fn cands_passed(&self) -> u32 {
+        self.cands_passed
     }
 
     /// Notes `loc`'s entry before a definition, where it is the first
@@ -1136,7 +1263,13 @@ impl State {
     pub(crate) fn cmd_chr_fast(&self, loc: Loc) -> Option<(u8, i32)> {
         // (a meaning's location is never a spill one: one bounds test)
         let s = self.eq.get(loc as usize)?;
-        (s.e.flags & (LOADED | CC) == (LOADED | CC)).then_some((s.e.cmd, s.e.chr))
+        if s.e.flags & (LOADED | CC) != (LOADED | CC) {
+            return None;
+        }
+        if s.read_at.get() != self.cands_passed {
+            self.note_read_across(s, loc);
+        }
+        Some((s.e.cmd, s.e.chr))
     }
 
     #[inline]
@@ -1531,6 +1664,7 @@ impl State {
     #[inline]
     pub(crate) fn macro_at(&self, loc: Loc) -> Option<Rc<crate::val::Macro>> {
         self.look(loc);
+        self.note_read(loc);
         let s = self.slot_ref(loc)?;
         if s.e.flags & LOADED == 0 || s.e.kind != K_MACRO {
             return None;
@@ -1565,6 +1699,7 @@ impl State {
     #[inline]
     pub(crate) fn mean_of(&mut self, loc: Loc, v: &Values) -> Mean {
         self.look(loc);
+        self.note_read(loc);
         let e = *self.entry_mut(loc);
         match e.kind {
             K_ABSENT => Mean::Undefined,
@@ -1595,6 +1730,7 @@ impl State {
             return None;
         }
         self.look(loc);
+        self.note_read(loc);
         Some(s.e)
     }
 
@@ -1604,6 +1740,7 @@ impl State {
     pub(crate) fn same_macro(&self, a: Loc, b: Loc) -> Option<bool> {
         let m = |l: Loc| {
             let s = self.eq.get(l as usize)?;
+            self.note_read(l);
             (s.e.flags & LOADED != 0 && s.e.kind == K_MACRO).then_some(s.e.payload as usize)
         };
         let (pa, pb) = (m(a)?, m(b)?);
@@ -1618,6 +1755,7 @@ impl State {
     /// once; nothing cloned).
     #[inline]
     pub(crate) fn cmd_chr_of(&mut self, loc: Loc, v: &Values) -> (u8, i32) {
+        self.note_read(loc);
         let e = *self.entry_mut(loc);
         if e.flags & CC != 0 {
             return (e.cmd, e.chr);
@@ -1809,6 +1947,8 @@ impl State {
             e.flags = LOADED;
             s.e = e;
         }
+        // (a step uses the value it steps)
+        self.note_read(loc);
         true
     }
 
@@ -1985,6 +2125,8 @@ impl State {
             }
             let slot = self.slot(s.loc);
             slot.e = s.prev;
+            // (an older binding again: its next read is looked at)
+            slot.read_at.set(u32::MAX);
             slot.lazy = s.lazy;
             slot.save_gid = s.gid;
             slot.save_stamp = s.stamp;
@@ -2822,10 +2964,13 @@ impl State {
         let st = self.stamp;
         let mut e = Entry::raw_seen(v, x);
         e.flags |= LOADED | PRELOADED;
+        let now = self.cands_passed;
         let s = self.slot(loc);
         s.e = e;
         s.lazy = None;
         s.ginert = st;
+        s.floor = now.saturating_sub(1);
+        s.read_at.set(u32::MAX);
         if is_page_param(loc) {
             self.pp_dirty = true;
         }
@@ -2865,6 +3010,8 @@ pub(crate) struct Base {
     /// The candidates passed ([`State::mark_candidate`]): each one's clock
     /// and the entries noted at it (`None`: not loaded).
     cands: Vec<(u64, Vec<BaseCand>)>,
+    /// [`State::read_across`].
+    read_across: Vec<(Loc, u32, u32)>,
     extra: Vec<(Loc, Option<ValueId>, Locality)>,
     defined: Vec<Loc>,
     font_slow: Vec<Loc>,
@@ -3025,6 +3172,7 @@ impl State {
         Some(Base {
             slots,
             cands,
+            read_across: self.read_across.borrow().clone(),
             extra: self
                 .scope_extra
                 .iter()
@@ -3155,6 +3303,8 @@ impl State {
                 .collect();
             self.cands.push((st, xs));
         }
+        self.cands_passed = u32::try_from(self.cands.len()).unwrap_or(u32::MAX);
+        self.read_across = std::cell::RefCell::new(b.read_across);
         self.defined = b.defined;
         self.font_slow.extend(b.font_slow);
         self.stamp = b.stamp;
@@ -3388,9 +3538,17 @@ impl Base {
                 x
             })
             .collect();
+        // (flat: each entry its field and the two candidates)
+        let mut across = Vec::with_capacity(3 * self.read_across.len());
+        for &(l, a, b) in &self.read_across {
+            across.push(field(l).0);
+            across.push(v.int(i64::from(a)));
+            across.push(v.int(i64::from(b)));
+        }
         v.list(vec![
             v.list(slots),
             v.list(cands),
+            v.list(across),
             v.list(extra),
             v.list(defined),
             v.list(font_slow),
@@ -3414,6 +3572,7 @@ impl Base {
         let [
             slots,
             cands,
+            across,
             extra,
             defined,
             font_slow,
@@ -3438,6 +3597,15 @@ impl Base {
         let mut out = Base {
             slots: Vec::new(),
             cands: Vec::new(),
+            read_across: list_of(v, across)
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|&[f, a, b]| {
+                    let n = |x| u32::try_from(int_of(v, x)).unwrap_or(0);
+                    (loc(Field(f)), n(a), n(b))
+                })
+                .collect(),
             extra: Vec::new(),
             defined: Vec::new(),
             font_slow: Vec::new(),

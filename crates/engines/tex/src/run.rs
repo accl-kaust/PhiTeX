@@ -1082,14 +1082,9 @@ pub(crate) struct Run<'c, 'a> {
     /// fire at, loaded or its own: its next read of one asks first whether
     /// a page fired there ([`Run::order_page_reg_read`]).
     pub page_regs_held: Vec<Loc>,
-    /// Whether the run read `\badness` (§424's `last_item`): a value a
-    /// routine sets with every box it packs, which the run's own packing
-    /// otherwise only defines ([`Run::fire_conflicts`]).
-    pub badness_read: bool,
-    /// The fields of the routines' values this run put in force at its
-    /// candidates ([`Run::apply_fire_conflict`]): they stay in what it
-    /// says it used, so the finisher keeps them in force.
-    pub fire_applied: Vec<ValueId>,
+    /// The run's engine reads so far noted against its candidates
+    /// ([`Run::note_engine_reads`]).
+    pub reads_noted: usize,
     /// A finisher's routine's `\\aftergroup` tokens where its piece went on
     /// past the candidate: for its [`crate::pages::FIRE_CONFLICT`].
     pub fin_rtn_after: Option<ValueId>,
@@ -1337,8 +1332,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cand: 0,
             cand_marks: Vec::new(),
             page_regs_held: Vec::new(),
-            badness_read: false,
-            fire_applied: Vec::new(),
+            reads_noted: 0,
             fin_rtn_after: None,
             fin_boxes: Vec::new(),
             pdf_cmd: 0,
@@ -1402,6 +1396,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.page_regs_held.retain(|&l| l != loc);
             self.order_page_reg_read(loc)?;
         }
+        self.st.note_read(loc);
         match self.st.load_state(loc) {
             1 => Ok(()),
             2 => self.unalias(loc),

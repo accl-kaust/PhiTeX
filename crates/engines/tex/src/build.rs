@@ -1781,6 +1781,14 @@ impl Run<'_, '_> {
             let f = self.loc_field(l);
             self.fin_boxes.retain(|e| e.0 != f);
             self.fin_boxes.push((f, val));
+            if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+                eprintln!(
+                    "fire-box: finisher {} {} at level {lvl}: {}",
+                    self.cx.node().raw(),
+                    crate::val::field_name(v, f),
+                    if b.is_some() { "set" } else { "void" }
+                );
+            }
             lvl
         } else {
             base
@@ -4028,7 +4036,6 @@ impl Run<'_, '_> {
             return Ok(IVal::Int(if m == 3 {
                 self.input_line_no()?
             } else {
-                self.badness_read = true;
                 self.int_loc(crate::fields::cell::BADNESS)?
             }));
         }

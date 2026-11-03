@@ -185,6 +185,7 @@ impl Run<'_, '_> {
             open_cut,
             par_cut,
         });
+        self.note_engine_reads();
         self.st.mark_candidate();
         if fresh {
             self.note_page_regs_held();
@@ -262,7 +263,6 @@ impl Run<'_, '_> {
                 self.back_toks(toks_of(v, x));
                 continue;
             }
-            self.fire_applied.push(f.0);
             if let Some(n) = super::box_reg_of(v, f) {
                 // (§1079: at the level of the binding, which the groups
                 // keep or restore as TeX's)
@@ -277,6 +277,7 @@ impl Run<'_, '_> {
             }
             let loc = self.loc_of(f);
             self.st.apply_global(v, loc, x);
+            self.st.note_applied(loc);
         }
         Ok(())
     }
@@ -425,22 +426,57 @@ impl Run<'_, '_> {
         Err(Halt::Recut(k))
     }
 
+    /// The location of field `f` where the run's reads of it can be
+    /// dated ([`crate::state::read_by_position`]), without making one.
+    fn dated_loc(&self, f: Field) -> Option<Loc> {
+        let l = match self.ops.fields.loc_of(self.v, self.cx.values_epoch(), f) {
+            Some(l) => Loc::try_from(l).ok()?,
+            None => self.st.spill_of(f)?,
+        };
+        crate::state::read_by_position(l).then_some(l)
+    }
+
+    /// The fields the run read from the engine since it last looked, as
+    /// read across every candidate before: what reads them by a way past
+    /// the table (a skipped branch's class of a token, `\\ifdefined`)
+    /// holds no binding the table could date.
+    fn note_engine_reads(&mut self) {
+        let n = self.cx.reads_len();
+        let at = self.st.cands_passed();
+        if at > 0 {
+            for (_, f) in self.cx.fields_read_since(self.reads_noted) {
+                if let Some(l) = self.dated_loc(f) {
+                    self.st.note_read_before(l, at);
+                }
+            }
+        }
+        self.reads_noted = n;
+    }
+
     /// At a pass's end (`ops::run_node`): the candidates of the run's own
     /// it went on past where a page can fire and a second pass can end
     /// (a paragraph's start, a candidate inside groups or conditionals of
-    /// its own), and what it used. TeX runs the routine of a page firing
-    /// there at that `build_page`, and the text after it reads every
-    /// global the routine set (classicthesis-xe's `\\thepage` and LaTeX's
-    /// `\\glb@currsize`, a shipout hook's macro); the run read every field
-    /// at its own position, before the page's finisher. The finisher reads
-    /// this ([`super::FIRE_USED`]) and, where its routine changed a field
-    /// the run used, defines [`super::FIRE_CONFLICT`], which asks the run
-    /// again, and [`Run::apply_fire_conflict`] puts it in force at the
-    /// candidate. A page firing where the routine changed nothing the run
-    /// used changes nothing it did. What the run put in force counts as
-    /// used: applying a routine's value is always what TeX does, and
-    /// without it a field read only on the way the old value took would
-    /// come and go with each run.
+    /// its own), and what it read across them. TeX runs the routine of a
+    /// page firing there at that `build_page`, and the text after it reads
+    /// every global the routine set (classicthesis-xe's `\\thepage` and
+    /// LaTeX's `\\glb@currsize`, a shipout hook's macro); the run read
+    /// every field at its own position, before the page's finisher. The
+    /// finisher reads this ([`super::FIRE_USED`]) and, where its routine
+    /// changed a field the run read across that candidate, defines
+    /// [`super::FIRE_CONFLICT`], which asks the run again, and
+    /// [`Run::apply_fire_conflict`] puts it in force at the candidate. A
+    /// page whose routine changed only what the run did not read across its
+    /// candidate changes nothing the run did: what the run read of those it
+    /// bound itself after the candidate (`\\font@name`, every
+    /// `\\selectfont`), and its later definitions stand over the routine's
+    /// ([`Run::give_way`]). What the run put in force counts as read there:
+    /// applying a routine's value is always what TeX does, and without it
+    /// a field read only on the way the old value took would come and go
+    /// with each run.
+    ///
+    /// What the run read in ways it cannot date
+    /// ([`crate::state::read_by_position`]) counts as read across all its
+    /// candidates.
     pub(crate) fn order_after_fires(&mut self) -> R<()> {
         let op = self.cx.op();
         let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
@@ -449,46 +485,98 @@ impl Run<'_, '_> {
         }
         let v = self.v;
         let end = self.cut.or(self.stop_at);
+        let past = |m: &CandMark| {
+            m.fresh && (m.restartable || m.open_cut || m.par_cut) && Some(m.k) != end
+        };
         let ks: Vec<u32> = self
             .cand_marks
             .iter()
-            .filter(|m| m.fresh && (m.restartable || m.open_cut || m.par_cut) && Some(m.k) != end)
+            .filter(|m| past(m))
             .map(|m| m.k)
             .collect();
         if ks.is_empty() {
             return Ok(());
         }
-        let mut fs: Vec<ValueId> = self.fire_conflicts().into_iter().map(|f| f.0).collect();
-        fs.extend(self.fire_applied.iter().copied());
-        fs.sort_unstable();
-        fs.dedup();
+        self.note_engine_reads();
+        let ranges = self.fire_read_across(&ks, &past);
         let node = self.cx.node();
         if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
-            eprintln!("fire-pass: node {} past {ks:?}", node.raw());
+            eprintln!(
+                "fire-pass: node {} past {ks:?}: {} fields",
+                node.raw(),
+                ranges.len()
+            );
         }
-        let passed = v.list(ks.iter().map(|&k| v.int(i64::from(k))).collect());
+        let int = |k: u32| v.int(i64::from(k));
+        let (mut fs, mut rs) = (
+            Vec::with_capacity(ranges.len()),
+            Vec::with_capacity(ranges.len()),
+        );
+        for (f, r) in ranges {
+            fs.push(f);
+            rs.push(v.list(r.iter().flat_map(|&(a, b)| [int(a), int(b)]).collect()));
+        }
+        let passed = v.list(ks.iter().map(|&k| int(k)).collect());
         self.cx.define_with(
             super::fire_used_field(v, node),
-            v.list(vec![v.list(fs), passed]),
+            v.list(vec![v.list(fs), v.list(rs), passed]),
             Locality::Global,
         );
         Ok(())
     }
 
-    fn fire_conflicts(&mut self) -> phitex_defuse::FxHashSet<Field> {
-        let mut out: phitex_defuse::FxHashSet<Field> =
-            self.cx.fields_read_since(0).map(|(_, f)| f).collect();
+    /// Each field the run read across candidates it went on past, sorted
+    /// by field: the runs of them it read across (`[first k, last k]`,
+    /// merged), by candidate number.
+    fn fire_read_across(
+        &mut self,
+        ks: &[u32],
+        past: &impl Fn(&CandMark) -> bool,
+    ) -> Vec<(ValueId, Vec<(u32, u32)>)> {
+        let (first, last) = (ks[0], ks[ks.len() - 1]);
+        let mut by: Vec<(ValueId, u32, u32)> = Vec::new();
+        // (by index in the candidates: those of `past` among them)
+        let marks: Vec<Option<u32>> = self
+            .cand_marks
+            .iter()
+            .map(|m| past(m).then_some(m.k))
+            .collect();
+        for (l, a, b) in self.st.reads_across() {
+            let (a, b) = (a as usize, (b as usize).min(marks.len()));
+            let Some(xs) = marks.get(a..b) else { continue };
+            let mut it = xs.iter().flatten();
+            let Some(&from) = it.next() else { continue };
+            let to = it.next_back().copied().unwrap_or(from);
+            let f = self.loc_field(l);
+            by.push((f.0, from, to));
+        }
+        // (what the run holds that it cannot date: all its candidates)
+        let reads: Vec<Field> = self.cx.fields_read_since(0).map(|(_, f)| f).collect();
+        for f in reads {
+            if self.dated_loc(f).is_none() {
+                by.push((f.0, first, last));
+            }
+        }
         let locs: Vec<Loc> = self
             .st
             .held_locs()
             .chain(self.st.defined_stamped().into_iter().map(|d| d.0))
             .collect();
-        // (`\badness`, which every box the run packs defines, is the
-        // routine's only where the run reads it, [`Run::badness_read`])
-        let badness: Loc = crate::fields::cell::BADNESS;
         for l in locs {
-            if l != badness || self.badness_read {
-                out.insert(self.loc_field(l));
+            if !crate::state::read_by_position(l) {
+                let f = self.loc_field(l);
+                by.push((f.0, first, last));
+            }
+        }
+        by.sort_unstable();
+        let mut out: Vec<(ValueId, Vec<(u32, u32)>)> = Vec::new();
+        for (f, a, b) in by {
+            match out.last_mut() {
+                Some((g, r)) if *g == f => match r.last_mut() {
+                    Some(x) if a <= x.1 => x.1 = x.1.max(b),
+                    _ => r.push((a, b)),
+                },
+                _ => out.push((f, vec![(a, b)])),
             }
         }
         out
@@ -1964,6 +2052,13 @@ impl Run<'_, '_> {
                 if super::box_reg_of(v, f).is_some()
                     && let Some(x) = x1
                 {
+                    if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+                        eprintln!(
+                            "fire-box: rest {} takes {}",
+                            self.cx.node().raw(),
+                            crate::val::field_name(v, f)
+                        );
+                    }
                     // (a routine's `\box`, §1079: the binding replaced at
                     // its level, which the groups keep or restore as TeX's)
                     self.st
