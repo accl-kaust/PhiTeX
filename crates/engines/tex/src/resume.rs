@@ -75,6 +75,11 @@ pub(crate) struct Checkpoints {
     /// The command count at the last one taken (the run's start before
     /// the first).
     last: u64,
+    /// An edited node's run: its checkpoints every [`every`] commands
+    /// whatever they cost, as the next edit is most likely in the same
+    /// text again (a letter typed after a letter); another run's are
+    /// spaced by their cost ([`space`]).
+    dense: bool,
     /// The encodings its checkpoints made, for the next ones.
     memo: crate::state::CkMemo,
 }
@@ -138,6 +143,7 @@ impl Run<'_, '_> {
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
             last: self.cmds,
+            dense: matches!(self.cx.woken_by(), Some(phitex_defuse::Cause::Edited)),
             taken,
             fresh: Vec::new(),
             why: Vec::new(),
@@ -178,7 +184,7 @@ impl Run<'_, '_> {
             static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             *F.get_or_init(|| std::env::var("PHITEX_CK_FIRST").map_or(true, |x| x != "0"))
         };
-        let need = if !first_rule && c.taken.is_empty() {
+        let need = if c.dense || (!first_rule && c.taken.is_empty()) {
             0
         } else {
             c.last
@@ -475,7 +481,12 @@ impl Run<'_, '_> {
             + self.st.base_len() as u64
             + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
         if let Some(c) = self.ck.as_mut() {
-            c.next = self.cmds + every().max(space() * spacing);
+            c.next = self.cmds
+                + if c.dense {
+                    every()
+                } else {
+                    every().max(space() * spacing)
+                };
             c.last = self.cmds;
         }
         if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
@@ -1440,6 +1451,7 @@ impl Run<'_, '_> {
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
             last: self.cmds,
+            dense: matches!(self.cx.woken_by(), Some(phitex_defuse::Cause::Edited)),
             taken: cks[..=k].to_vec(),
             fresh: Vec::new(),
             why: Vec::new(),
