@@ -1825,7 +1825,15 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             let done = ns(pool.t0);
             node.done_ns.store(done, Ordering::Relaxed);
             if run_log() {
-                eprintln!("commit: node {} done {}", n.raw(), log_clock(Instant::now()));
+                eprintln!(
+                    "commit: node {} done {} commit {} reask {} walked {} woken {}",
+                    n.raw(),
+                    log_clock(Instant::now()),
+                    st.commit_ns,
+                    st.reask_ns,
+                    st.walked,
+                    st.woken
+                );
             }
             w.last_commit.store(n.raw(), Ordering::Relaxed);
             w.last_done.store(done, Ordering::Relaxed);
