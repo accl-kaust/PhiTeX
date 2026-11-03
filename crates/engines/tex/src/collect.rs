@@ -16,7 +16,7 @@
 //!
 //! Dropped (caches of ids, made again from what stands):
 //! - the link's memos (`pdfout::clear_link_memos`,
-//!   `assemble::clear_line_memos`);
+//!   `assemble::clear_line_memos`, the filled pages too);
 //! - the decoded profiles (`vprof::clear_decoded`), the folded blocks
 //!   (`build::clear_blocks`), the made lines (`nodes::clear_made`), the
 //!   routine guesses seen (`pages::clear_guess_seen`, observe).

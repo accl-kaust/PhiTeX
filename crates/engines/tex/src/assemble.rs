@@ -973,8 +973,11 @@ struct LinkInputs {
 static LINK_INPUTS: std::sync::OnceLock<std::sync::Mutex<LinkInputs>> = std::sync::OnceLock::new();
 
 /// At a collection ([`crate::collect`]): the link's walks of the line and
-/// the items, and its inputs, dropped; the next link reads them anew.
+/// the items, its inputs, and the filled pages ([`filled`], a value no
+/// root holds), dropped; the next link reads them anew, and a page's
+/// identity is what it holds, so its walk stands.
 pub(crate) fn clear_line_memos() {
+    filled().locked().clear();
     if let Some(m) = LINE_MEMO.get() {
         *m.locked() = LineMemos::default();
     }

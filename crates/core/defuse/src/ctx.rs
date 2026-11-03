@@ -962,6 +962,13 @@ impl<'a> Ctx<'a> {
         Ok(h)
     }
 
+    /// Whether this evaluation has more than one thread: work done ahead
+    /// on a guess can stand beside what it guesses at, not only before it.
+    /// Never for what a run makes, only for how far it goes on a guess.
+    pub fn has_other_threads(&self) -> bool {
+        self.worker.is_some_and(|w| w.shared.n > 1)
+    }
+
     /// Stops the run until I stand at the committed frontier: every node
     /// before me in my unit has committed in this pass with no re-ask
     /// pending (none to run, again or for the first time, none running or
@@ -984,6 +991,14 @@ impl<'a> Ctx<'a> {
         }
         if crate::sched::past_frontier(eng, self.me, eng.frontier.load(Acquire)) {
             self.wait_frontier = true;
+            return Err(stop());
+        }
+        // (and what I read before that still stands: a node before me that
+        // committed after my read and before this check has settled, and
+        // its re-ask finds no read of mine filed yet: the effect was made
+        // on the old answer, a run's commit too late to take it back.
+        // Stopped, the run begins again, every node before it settled)
+        if !self.own_reads_hold() {
             return Err(stop());
         }
         Ok(())
@@ -1201,7 +1216,13 @@ impl<'a> Ctx<'a> {
     pub(crate) fn last_run_stands(&mut self) -> Option<ValueId> {
         if !matches!(
             self.woke,
-            Some(Cause::Changed { .. } | Cause::Range { .. } | Cause::Rebind { .. } | Cause::Output { .. })
+            Some(
+                Cause::Changed { .. }
+                    | Cause::Range { .. }
+                    | Cause::Rebind { .. }
+                    | Cause::Output { .. }
+                    | Cause::Environment { .. }
+            )
         ) || self.me.moved.load(std::sync::atomic::Ordering::Acquire)
             || self.me.refuted.load(std::sync::atomic::Ordering::Acquire)
         {
