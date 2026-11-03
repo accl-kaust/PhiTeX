@@ -217,7 +217,8 @@ pub struct LoadedFont {
     /// Transparency ExtGState.
     pub xgs_id: i32,
     /// XeTeX's glyph metrics (`gm`, `num_glyphs` entries).
-    pub gm: Vec<Gm>,
+    /// (read only once the font is loaded: shared by the session's snapshots)
+    pub gm: alloc::sync::Arc<[Gm]>,
     pub shift_gid: i32,
     pub num_glyphs: u16,
     pub layout_dir: i32,
@@ -1219,7 +1220,7 @@ impl Dpx {
             let lf = &mut self.dvi.loaded_fonts[cur_id];
             lf.shift_gid = shift;
             lf.num_glyphs = num_glyphs;
-            lf.gm = gm;
+            lf.gm = gm.into();
         } else {
             let Some(data) = self.files.read(&path) else {
                 crate::fatal!("Cannot proceed without the font");
@@ -1273,7 +1274,7 @@ impl Dpx {
             }
             let lf = &mut self.dvi.loaded_fonts[cur_id];
             lf.num_glyphs = num_glyphs;
-            lf.gm = gm;
+            lf.gm = gm.into();
         }
         let lf = &mut self.dvi.loaded_fonts[cur_id];
         lf.layout_dir = layout_dir;
