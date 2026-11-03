@@ -1988,6 +1988,75 @@ fn an_index_tool_node_runs_once_a_pass_after_an_edit() {
         assert!(
             runs <= 3,
             "{extra:?}: the index's tool node ran {runs} times"
+        );
+    }
+}
+
+/// `\begin{document}` reads the `.aux` inside the `document`
+/// environment's group, hyperref's `\newlabel`s binding each label in
+/// that group before defining it globally, and goes on past a page
+/// candidate (a box the hooks put on the page). The continuation carried
+/// the label's global value in that slot, which the resume does not keep
+/// (it reads the engine's). The rest of `\begin{document}` is a resume. A heading's
+/// text edited changes one label's value: the reader of the `.aux` runs
+/// again and the label's readers do, not the rest, which reads the label
+/// from the engine and not from the continuation (on Grail it ran again
+/// for every heading edit, 144 ms). The edited PDF equals a cold build's.
+#[test]
+fn a_heading_edit_does_not_run_the_rest_of_begin_document_again() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/heading-rest");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |title: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\usepackage{{hyperref}}\n\\AtBeginDocument{{\\null\\par\\def\\hook{{x}}\\null\\par}}\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{sec:a}}\nSee section~\\ref{{sec:b}}.\n\n\
+             \\section{{{title}}}\\label{{sec:b}}\nText of the second section.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("headrest", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc("Second"));
+        for title in ["Xsecond", "Second part", "Second"] {
+            b.edit(&doc(title));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {title}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(title));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {title}"
+            );
+            // (the `.aux`'s reader, `\begin{document}`'s node, and its
+            // rest, a resume reading `cont:<reader>:<k>`)
+            let readers: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .filter(|(n, op, _)| {
+                    *op == "exec" && b.describe_node(*n).contains("\\begin{document}")
+                })
+                .map(|(n, _, _)| format!("Changed cont:{n}:"))
+                .collect();
+            assert!(
+                !r.iter()
+                    .any(|x| readers.iter().any(|c| x.contains(c.as_str()))),
+                "-j{threads} {title}: the rest after the .aux's reader ran again: {r:?}"
+            );
+        }
+    }
+}
 
 /// A LaTeX document of several pages with a table of contents and
 /// citations (BibTeX), built to its fixpoint; a heading edited: the
@@ -2074,71 +2143,5 @@ fn a_toc_edit_keeps_every_rest_and_finisher() {
             r.placements_made("finish") <= new_pages,
             "-j{threads}: no finisher made anew but for a new page: {r:?}"
         );
-    }
-}
-
-/// `\begin{document}` reads the `.aux` inside the `document`
-/// environment's group, hyperref's `\newlabel`s binding each label in
-/// that group before defining it globally, and goes on past a page
-/// candidate (a box the hooks put on the page). The continuation carried
-/// the label's global value in that slot, which the resume does not keep
-/// (it reads the engine's). The rest of `\begin{document}` is a resume. A heading's
-/// text edited changes one label's value: the reader of the `.aux` runs
-/// again and the label's readers do, not the rest, which reads the label
-/// from the engine and not from the continuation (on Grail it ran again
-/// for every heading edit, 144 ms). The edited PDF equals a cold build's.
-#[test]
-fn a_heading_edit_does_not_run_the_rest_of_begin_document_again() {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/heading-rest");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("a scratch directory");
-    let doc = |title: &str| {
-        format!(
-            "\\documentclass{{article}}\n\\usepackage{{hyperref}}\n\\AtBeginDocument{{\\null\\par\\def\\hook{{x}}\\null\\par}}\n\\begin{{document}}\n\
-             \\section{{Intro}}\\label{{sec:a}}\nSee section~\\ref{{sec:b}}.\n\n\
-             \\section{{{title}}}\\label{{sec:b}}\nText of the second section.\n\\end{{document}}\n"
-        )
-    };
-    for threads in [1, 4] {
-        let opts = || Options {
-            fixpoint: true,
-            threads: Some(threads),
-            ..pdf_opts("headrest", &dir)
-        };
-        let mut b = common::build(opts(), Some(&prelude(true)), &doc("Second"));
-        for title in ["Xsecond", "Second part", "Second"] {
-            b.edit(&doc(title));
-            let r: Vec<String> = b
-                .stats
-                .reruns
-                .iter()
-                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
-                .collect();
-            for x in &r {
-                eprintln!("  -j{threads} {title}: rerun {x}");
-            }
-            let cold = common::build(opts(), Some(&prelude(true)), &doc(title));
-            assert_eq!(
-                common::first_difference(&b.output().0, &cold.output().0),
-                None,
-                "-j{threads} {title}"
-            );
-            // (the `.aux`'s reader, `\begin{document}`'s node, and its
-            // rest, a resume reading `cont:<reader>:<k>`)
-            let readers: Vec<String> = b
-                .stats
-                .reruns
-                .iter()
-                .filter(|(n, op, _)| {
-                    *op == "exec" && b.describe_node(*n).contains("\\begin{document}")
-                })
-                .map(|(n, _, _)| format!("Changed cont:{n}:"))
-                .collect();
-            assert!(
-                !r.iter()
-                    .any(|x| readers.iter().any(|c| x.contains(c.as_str()))),
-                "-j{threads} {title}: the rest after the .aux's reader ran again: {r:?}"
-            );
-        }
     }
 }
