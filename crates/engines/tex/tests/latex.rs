@@ -1933,3 +1933,61 @@ fn lineno_numbered_lines_run_their_finishers_a_few_times() {
         );
     }
 }
+
+/// imakeidx's `\write18{makeindex ...}` at `\printindex` is a tool node
+/// reading the `.idx` stream before it, which the pages' finishers write
+/// (`\index` entries go out at `\shipout`). It runs at the committed
+/// frontier only, once a pass: run on each guess of the stream, it ran
+/// again at every page's finisher that committed before it (amsldoc's
+/// paragraph added at -j8: 20 runs, 162 ms). A paragraph added at the
+/// start runs it at most once in each of its passes, and the edited PDF equals a
+/// cold build's. At -j8.
+#[test]
+fn an_index_tool_node_runs_once_a_pass_after_an_edit() {
+    use std::fmt::Write as _;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/index-node");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |extra: &str| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\usepackage{imakeidx}\n\\makeindex\n\\begin{document}\n",
+        );
+        s.push_str(extra);
+        for k in 0..24 {
+            let _ = write!(
+                s,
+                "\\section{{Part {k}}}\nText of part {k}\\index{{word{k}}} and more\\index{{common}}.\n\n\\newpage\n"
+            );
+        }
+        s.push_str("\\printindex\n\\end{document}\n");
+        s
+    };
+    let opts = || Options {
+        fixpoint: true,
+        threads: Some(8),
+        tool_finder: Some(common::tool_finder(&dir)),
+        ..pdf_opts("idxnode", &dir)
+    };
+    let mut b = common::build(opts(), Some(&prelude(true)), &doc(""));
+    for extra in ["An added paragraph.\n\n", "Another paragraph, longer.\n\n"] {
+        b.edit(&doc(extra));
+        let runs = b
+            .stats
+            .reruns
+            .iter()
+            .filter(|(_, op, _)| *op == "toolnode")
+            .count();
+        let cold = common::build(opts(), Some(&prelude(true)), &doc(extra));
+        assert_eq!(
+            common::first_difference(&b.output().0, &cold.output().0),
+            None,
+            "{extra:?}"
+        );
+        // (an edit's passes: the text's, the `.idx`'s round, one to
+        // settle)
+        assert!(
+            runs <= 3,
+            "{extra:?}: the index's tool node ran {runs} times"
+        );
+    }
+}

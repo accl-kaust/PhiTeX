@@ -995,6 +995,12 @@ impl Operation for ToolNode {
             return Ok(ValueId::UNIT);
         };
         let (out, input) = (str_of(v, out), str_of(v, input));
+        // (at the committed frontier only, as a shell command: the input's
+        // stream before here is then the pass's, not a guess. Run on each
+        // guess, amsldoc's makeindex node ran again at every page's
+        // finisher that wrote `\index` entries before it, 20 runs and
+        // 162 ms for a paragraph added at -j8)
+        cx.wait_settled()?;
         let acc = cx.fold(crate::run::stream_bucket(v, &input), None, None)?;
         let text = crate::api::written_texts(v, Some(acc))
             .into_iter()
