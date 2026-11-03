@@ -189,34 +189,6 @@ impl Run<'_, '_> {
         if fresh {
             self.note_page_regs_held();
         }
-        // (the routine of a page firing here, run before the text after
-        // it: its global values in force, [`Run::order_after_fires`])
-        if let Some(i) = self.fire_apply.iter().position(|a| a.0 == k) {
-            let pairs = self.fire_apply[i].1.clone();
-            let after = self.v.field(super::RTN_AFTER);
-            for (f, x) in pairs {
-                if f == after {
-                    // (the routine's `\aftergroup` tokens: read next,
-                    // §1100, after this `build_page`)
-                    self.back_toks(toks_of(self.v, x));
-                    continue;
-                }
-                if let Some(n) = super::box_reg_of(self.v, f) {
-                    // (§1079: at the level of the binding, which the
-                    // groups keep or restore as TeX's)
-                    let b = x.and_then(|x| {
-                        list_of(self.v, x)
-                            .get(1)
-                            .copied()
-                            .filter(|&b| b != ValueId::UNIT)
-                    });
-                    self.modify_box_reg(n, b)?;
-                    continue;
-                }
-                let loc = self.loc_of(f);
-                self.st.apply_global(self.v, loc, x);
-            }
-        }
         if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
             self.trace_candidate(k, newgraf, fresh, cuttable);
         }
@@ -244,6 +216,67 @@ impl Run<'_, '_> {
             }
             self.cut = Some(k);
             return Err(Halt::Cut);
+        }
+        // (the run goes on past it: the routine of a page firing here
+        // runs before the text after it)
+        if fresh && (restartable || open_cut || par_cut) {
+            self.apply_fire_conflict(k)?;
+        }
+        Ok(())
+    }
+
+    /// A candidate the run goes on past: what the routine of a page
+    /// firing there did that the run used ([`super::FIRE_CONFLICT`], that
+    /// page's finisher's), in force here, as TeX's text after the routine
+    /// has it: its global values, the box registers it used up, and its
+    /// `\\aftergroup` tokens, read next (§1100, after this `build_page`).
+    /// None of it is the run's own definition: the finisher, after the
+    /// run, defines it, and readers after the run are asked again only
+    /// where a value changed.
+    fn apply_fire_conflict(&mut self, k: u32) -> R<()> {
+        let op = self.cx.op();
+        if !((op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc))
+            || self.interp.is_some()
+        {
+            return Ok(());
+        }
+        let v = self.v;
+        let f = super::fire_conflict_field(v, self.cx.node(), k);
+        let at = phitex_defuse::At::End(self.cx.unit());
+        let phitex_defuse::FieldAt::Def(x, _) = self.cx.read_at(f, at)? else {
+            return Ok(());
+        };
+        let after = v.field(super::RTN_AFTER);
+        for e in list_of(v, x) {
+            let ys = list_of(v, e);
+            let Some(&f) = ys.first() else { continue };
+            let (f, x) = (Field(f), ys.get(1).copied());
+            if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+                eprintln!(
+                    "fire-apply: node {} candidate {k}: {}",
+                    self.cx.node().raw(),
+                    crate::val::field_name(v, f)
+                );
+            }
+            if f == after {
+                self.back_toks(toks_of(v, x));
+                continue;
+            }
+            self.fire_applied.push(f.0);
+            if let Some(n) = super::box_reg_of(v, f) {
+                // (§1079: at the level of the binding, which the groups
+                // keep or restore as TeX's)
+                let b = x.and_then(|x| {
+                    list_of(v, x)
+                        .get(1)
+                        .copied()
+                        .filter(|&b| b != ValueId::UNIT)
+                });
+                self.modify_box_reg(n, b)?;
+                continue;
+            }
+            let loc = self.loc_of(f);
+            self.st.apply_global(v, loc, x);
         }
         Ok(())
     }
@@ -395,24 +428,19 @@ impl Run<'_, '_> {
     /// At a pass's end (`ops::run_node`): the candidates of the run's own
     /// it went on past where a page can fire and a second pass can end
     /// (a paragraph's start, a candidate inside groups or conditionals of
-    /// its own). TeX runs the routine of a page firing there at that
-    /// `build_page`, and the text after it reads every global the routine
-    /// set (classicthesis-xe's `\thepage` and LaTeX's `\glb@currsize`, a
-    /// shipout hook's macro); the run read every field at its own
-    /// position, before the page's finisher.
-    ///
-    /// The run defines what it used ([`super::FIRE_USED`],
-    /// [`Run::fire_conflicts`]; the first pass's, kept by the passes
-    /// after it, `Run::fire_used`), and reads for each such candidate,
-    /// in order, whether the finisher of a page firing there changed one
-    /// of those fields ([`super::FIRE_CONFLICT`], that finisher's: every
-    /// field it changed, with its value). Where it did, the run goes
-    /// again from its start, the same node, with those values put in
-    /// force at the candidate ([`Halt::Refire`], `Run::fire_apply`), as
-    /// TeX's text after the routine has them; its definitions stay its
-    /// own, so a reader after it is asked again only where a value
-    /// changed. A page firing where the routine changed nothing the run
-    /// used changes nothing it did.
+    /// its own), and what it used. TeX runs the routine of a page firing
+    /// there at that `build_page`, and the text after it reads every
+    /// global the routine set (classicthesis-xe's `\\thepage` and LaTeX's
+    /// `\\glb@currsize`, a shipout hook's macro); the run read every field
+    /// at its own position, before the page's finisher. The finisher reads
+    /// this ([`super::FIRE_USED`]) and, where its routine changed a field
+    /// the run used, defines [`super::FIRE_CONFLICT`], which asks the run
+    /// again, and [`Run::apply_fire_conflict`] puts it in force at the
+    /// candidate. A page firing where the routine changed nothing the run
+    /// used changes nothing it did. What the run put in force counts as
+    /// used: applying a routine's value is always what TeX does, and
+    /// without it a field read only on the way the old value took would
+    /// come and go with each run.
     pub(crate) fn order_after_fires(&mut self) -> R<()> {
         let op = self.cx.op();
         let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
@@ -427,71 +455,23 @@ impl Run<'_, '_> {
             .filter(|m| m.fresh && (m.restartable || m.open_cut || m.par_cut) && Some(m.k) != end)
             .map(|m| m.k)
             .collect();
-        if ks.is_empty() && self.fire_used.is_none() {
+        if ks.is_empty() {
             return Ok(());
         }
-        let used = match self.fire_used {
-            Some(u) => u,
-            None => {
-                let mut fs: Vec<ValueId> = self.fire_conflicts().into_iter().map(|f| f.0).collect();
-                fs.sort_unstable();
-                let u = v.list(fs);
-                self.fire_used = Some(u);
-                u
-            }
-        };
+        let mut fs: Vec<ValueId> = self.fire_conflicts().into_iter().map(|f| f.0).collect();
+        fs.extend(self.fire_applied.iter().copied());
+        fs.sort_unstable();
+        fs.dedup();
         let node = self.cx.node();
-        // (the fields, the first pass's; the candidates, this pass's: a
-        // routine's tokens read at one can move those after it)
+        if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+            eprintln!("fire-pass: node {} past {ks:?}", node.raw());
+        }
         let passed = v.list(ks.iter().map(|&k| v.int(i64::from(k))).collect());
         self.cx.define_with(
             super::fire_used_field(v, node),
-            v.list(vec![used, passed]),
+            v.list(vec![v.list(fs), passed]),
             Locality::Global,
         );
-        if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
-            eprintln!(
-                "fire-pass: node {} past {ks:?}, marks {:?}",
-                node.raw(),
-                self.cand_marks
-                    .iter()
-                    .map(|m| (m.k, m.fresh, m.restartable, m.open_cut, m.par_cut))
-                    .collect::<Vec<_>>()
-            );
-        }
-        let at = phitex_defuse::At::End(self.cx.unit());
-        for k in ks {
-            let f = super::fire_conflict_field(v, node, k);
-            let phitex_defuse::FieldAt::Def(x, _) = self.cx.read_at(f, at)? else {
-                continue;
-            };
-            if self.fire_apply.iter().any(|a| a.0 == k) {
-                continue;
-            }
-            let pairs: Vec<(Field, Option<ValueId>)> = list_of(v, x)
-                .into_iter()
-                .filter_map(|e| match list_of(v, e)[..] {
-                    [f] => Some((Field(f), None)),
-                    [f, y] => Some((Field(f), Some(y))),
-                    _ => None,
-                })
-                .collect();
-            if crate::exec::obs_flag!("PHITEX_PAGE_TRACE")
-                || crate::exec::obs_flag!("PHITEX_FIRE_TRACE")
-            {
-                eprintln!(
-                    "page-trace: node {} goes again with the routine of the page at candidate {k} in force there: {}",
-                    node.raw(),
-                    pairs
-                        .iter()
-                        .map(|p| crate::val::field_name(v, p.0))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                );
-            }
-            self.fire_apply.push((k, pairs));
-            return Err(Halt::Refire);
-        }
         Ok(())
     }
 

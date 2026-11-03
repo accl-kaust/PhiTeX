@@ -84,9 +84,9 @@ fn hint_log(
     );
 }
 
-/// One pass of a run's `body`; one that ends (at its end or a cut)
-/// ends at a candidate before instead where a page firing there is the
-/// routine's ([`Run::order_after_fires`]).
+/// One pass of a run's `body`; one that ends (at its end or a cut) says
+/// what it used for the finishers of pages firing at candidates it went
+/// on past ([`Run::order_after_fires`]).
 fn pass(r: &mut Run<'_, '_>, body: &mut impl FnMut(&mut Run<'_, '_>) -> R<()>) -> R<()> {
     let res = body(r);
     if matches!(res, Ok(()) | Err(Halt::Cut)) {
@@ -142,24 +142,11 @@ pub(crate) fn run_node(
     let t_first = t_body.elapsed();
     let recut = matches!(res, Err(Halt::Recut(_)));
     // (a second pass from the start, ending at the candidate the first
-    // asked for: deterministic, `Halt::Recut`; or going on with the
-    // values of a routine run at a candidate it passes in force there,
-    // `Halt::Refire`, [`Run::order_after_fires`])
-    while let Err(h @ (Halt::Recut(_) | Halt::Refire)) = res {
-        let stop = match h {
-            Halt::Recut(k) => {
-                if r.stop_at.is_some_and(|s| k >= s) {
-                    unreachable!("a second pass passed its candidate {k}");
-                }
-                Some(k)
-            }
-            _ => r.stop_at,
-        };
-        let (cx, used, apply) = (r.cx, r.fire_used, std::mem::take(&mut r.fire_apply));
+    // asked for: deterministic, one at most, `Halt::Recut`)
+    if let Err(Halt::Recut(k)) = res {
+        let cx = r.cx;
         r = Run::new(cx, o);
-        r.stop_at = stop;
-        r.fire_used = used;
-        r.fire_apply = apply;
+        r.stop_at = Some(k);
         // (a second pass to a candidate takes no marks)
         res = pass(&mut r, &mut body);
     }
@@ -244,7 +231,6 @@ pub(crate) fn run_node(
                 Err(Halt::Fatal) => "fatal",
                 Err(Halt::Cut) => "cut",
                 Err(Halt::Recut(_)) => "recut",
-                Err(Halt::Refire) => "refire",
                 Err(Halt::Same) => "same",
             },
             r.cx.is_speculative(),
@@ -262,7 +248,6 @@ pub(crate) fn run_node(
                 Err(Halt::Fatal) => "fatal".to_owned(),
                 Err(Halt::Cut) => "cut".to_owned(),
                 Err(Halt::Recut(k)) => format!("recut at {k}"),
-                Err(Halt::Refire) => "refire".to_owned(),
                 Err(Halt::Same) => "same as the last run (cut off)".to_owned(),
             }
         );
@@ -308,23 +293,12 @@ pub(crate) fn run_node(
                             .unwrap_or_else(|| "the same".to_owned())
                     );
                 }
-                while let Err(h @ (Halt::Recut(_) | Halt::Refire)) = res {
-                    let stop = match h {
-                        Halt::Recut(k) => {
-                            if r.stop_at.is_some_and(|s| k >= s) {
-                                unreachable!("a second pass passed its candidate {k}");
-                            }
-                            Some(k)
-                        }
-                        _ => r.stop_at,
-                    };
-                    let (cx, used, apply) = (r.cx, r.fire_used, std::mem::take(&mut r.fire_apply));
+                if let Err(Halt::Recut(k)) = res {
+                    let cx = r.cx;
                     cx.begin_again();
                     r = Run::new(cx, o);
                     r.no_resume = true;
-                    r.stop_at = stop;
-                    r.fire_used = used;
-                    r.fire_apply = apply;
+                    r.stop_at = Some(k);
                     res = pass(&mut r, &mut body);
                 }
                 if matches!(res, Ok(()) | Err(Halt::Cut)) {
@@ -433,7 +407,6 @@ pub(crate) fn run_node(
         // (a second pass ends at its candidate, before the read that
         // asked for it)
         Err(Halt::Recut(k)) => unreachable!("a second pass passed its candidate {k}"),
-        Err(Halt::Refire) => unreachable!("a pass with a routine's values goes again"),
         Err(Halt::Starve) => {
             let u = ValueId::UNIT;
             Ok(r.stall("starve", u))

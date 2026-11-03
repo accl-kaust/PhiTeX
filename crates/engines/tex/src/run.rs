@@ -40,12 +40,6 @@ pub(crate) enum Halt {
     /// again from its start and ends at `k`, its rest a resume after the
     /// pages firing there.
     Recut(u32),
-    /// A page fired at a candidate of the run's own it went on past, and
-    /// its routine changed globally a field the run used
-    /// ([`Run::order_after_fires`]): the run goes again from its start
-    /// with that routine's values put in force at the candidate
-    /// (`Run::fire_apply`), the same node.
-    Refire,
     /// The run would read on into the text after it (`Run::pull`) while
     /// a node before it has not run yet: it waits for that node
     /// (`Ctx::hole_before`), ending as a starved run does.
@@ -1092,14 +1086,10 @@ pub(crate) struct Run<'c, 'a> {
     /// routine sets with every box it packs, which the run's own packing
     /// otherwise only defines ([`Run::fire_conflicts`]).
     pub badness_read: bool,
-    /// What the run's first pass used, as [`crate::pages::FIRE_USED`]
-    /// defines it: the passes after it keep it (`ops::run_node`).
-    pub fire_used: Option<ValueId>,
-    /// The global values of the routines of pages firing at candidates
-    /// the run goes on past, put in force there (after the candidate's
-    /// mark, as TeX runs the routine at that `build_page`): by candidate,
-    /// each field with its value ([`Run::order_after_fires`]).
-    pub fire_apply: Vec<(u32, Vec<(Field, Option<ValueId>)>)>,
+    /// The fields of the routines' values this run put in force at its
+    /// candidates ([`Run::apply_fire_conflict`]): they stay in what it
+    /// says it used, so the finisher keeps them in force.
+    pub fire_applied: Vec<ValueId>,
     /// A finisher's routine's `\\aftergroup` tokens where its piece went on
     /// past the candidate: for its [`crate::pages::FIRE_CONFLICT`].
     pub fin_rtn_after: Option<ValueId>,
@@ -1348,8 +1338,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cand_marks: Vec::new(),
             page_regs_held: Vec::new(),
             badness_read: false,
-            fire_used: None,
-            fire_apply: Vec::new(),
+            fire_applied: Vec::new(),
             fin_rtn_after: None,
             fin_boxes: Vec::new(),
             pdf_cmd: 0,
