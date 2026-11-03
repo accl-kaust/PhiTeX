@@ -588,6 +588,15 @@ fn record_of(
     m
 }
 
+/// Whether the record of page `key` with lines `h` is made
+/// ([`record_of`]'s memo).
+fn record_made(key: u64, h: &Lines) -> bool {
+    records()
+        .locked()
+        .get(&(key, h.clone()))
+        .is_some_and(|m| m.get().is_some())
+}
+
 /// The pages by key: a pure function's memo.
 fn pieces() -> &'static PieceMemo {
     static P: OnceLock<PieceMemo> = OnceLock::new();
@@ -4645,11 +4654,20 @@ fn link(
     // pages' own steps are making are waited for, not made twice)
     {
         let tr = std::time::Instant::now();
-        let todo: Vec<usize> = (start..xpages.len())
+        // (not those the line ends with as the last link did: theirs,
+        // made already, or copied once the writer is the same there)
+        let todo: Vec<usize> = (start..xpages.len() - suffix.min(xpages.len() - start))
             .filter(|&i| {
                 v.as_int(xpages[i]).is_some()
                     && pcs[i].is_some()
-                    && hashes.get(i).is_some_and(Option::is_some)
+                    && hashes.get(i).is_some_and(|h| {
+                        h.as_ref().is_some_and(|h| {
+                            let key = u64::from_ne_bytes(
+                                v.as_int(xpages[i]).unwrap_or(0).to_ne_bytes(),
+                            );
+                            !record_made(key, h)
+                        })
+                    })
             })
             .collect();
         let n = if todo.len() > 2 {
