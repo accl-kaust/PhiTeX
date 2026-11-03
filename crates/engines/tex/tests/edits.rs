@@ -1355,6 +1355,47 @@ fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
     }
 }
 
+/// A run gone on from a checkpoint before its edit takes its later
+/// checkpoints doubling apart (`resume::ck_gap`): a later edit further on
+/// in the same paragraph, past those it took sparsely, still goes on from
+/// one, and the output is a cold build's.
+#[test]
+fn a_run_with_doubled_checkpoints_serves_a_later_edit_further_on() {
+    let fx = common::fixtures().join("plain");
+    let prelude = common::plain();
+    let opts = || common::options("./long.tex", "long", "", &fx);
+    let words: Vec<String> = (0..6000)
+        .map(|k| format!("w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17))
+        .collect();
+    let par = |ws: &[String]| format!("\\hsize=300pt\n{}\n\n\\bye\n", ws.join(" "));
+    let mut ws = words.clone();
+    let mut b = common::build(opts(), Some(&prelude), &par(&ws));
+    // (the first, dense, leaves checkpoints all along; the second goes on
+    // from one and takes those after it doubling; the rest are past them)
+    for (k, at, resumes) in [
+        (0, 5990, false),
+        (1, 2000, true),
+        (2, 4000, true),
+        (3, 5900, true),
+        (4, 5950, true),
+    ] {
+        ws[at] = format!("edit{k}\\kern0pt");
+        let text = par(&ws);
+        b.edit(&text);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        assert!(
+            common::first_difference(&b.output().0, &cold.output().0).is_none(),
+            "edit {k} at word {at}: the output is not the cold build's"
+        );
+        assert_eq!(
+            b.stats.resumed_at_mark > 0,
+            resumes,
+            "edit {k} at word {at}: {} runs went on from a checkpoint",
+            b.stats.resumed_at_mark
+        );
+    }
+}
+
 /// Exact PDF, compressed, a paragraph deleted near the start of 300:
 /// every later page's lines move, so the link places a new record for
 /// each. A page's content is compressed once, where the link places it

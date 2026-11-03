@@ -274,6 +274,12 @@ impl Engine {
 
     /// A bracket changed: a new scope count.
     /// A new scope epoch: the epoch it begins.
+    /// How many times a node's brackets changed so far.
+    #[must_use]
+    pub fn scope_changes(&self) -> u64 {
+        self.scope_gen.load(Ordering::Acquire)
+    }
+
     pub(crate) fn scope_changed(&self) -> u64 {
         self.scope_gen.fetch_add(1, Ordering::AcqRel) + 1
     }
@@ -984,7 +990,14 @@ impl Engine {
             inner.by_op.entry(op).or_default().push(node);
             n.op.store(op.0, Ordering::Release);
         }
-        let effect = self.op(op).effect(&args, &self.values);
+        let mut effect = self.op(op).effect(&args, &self.values);
+        if matches!(effect, crate::api::Effect::Scope(_))
+            && old_op == op
+            && n.record().is_some()
+            && self.op(op).same_effect(&n.args(), &args, &self.values)
+        {
+            effect = crate::api::Effect::Pending;
+        }
         *n.text.write() = args.into();
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
         n.effect.store(crate::node::pack_effect(effect), Ordering::Release);
