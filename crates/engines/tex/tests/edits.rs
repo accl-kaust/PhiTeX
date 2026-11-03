@@ -1355,6 +1355,71 @@ fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
     }
 }
 
+/// A run gone on from a checkpoint before its edit takes its later
+/// checkpoints doubling apart (`resume::ck_gap`): a later edit further on
+/// in the same run, past those it took sparsely, still goes on from one,
+/// and the output and log are a cold build's, at 1 and 8 threads.
+#[test]
+fn a_run_with_doubled_checkpoints_serves_a_later_edit_further_on() {
+    use std::fmt::Write as _;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-doubled");
+    let _ = std::fs::create_dir_all(&dir);
+    let words = |n: usize, tag: &str| {
+        let mut s = String::new();
+        for k in 0..n {
+            let _ = write!(s, "{tag}{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            s.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        s
+    };
+    let prelude = common::plain();
+    // (one run: a box, no paragraph end at the top level to cut it)
+    let doc = |first: &str, late: &str| {
+        format!(
+            "\\pdfoutput=1 \\hsize=300pt\n\\setbox1\\vbox{{{}{first} {}{late} {}}}\n\\shipout\\box1\n\\end\n",
+            words(400, "w"),
+            words(4000, "v"),
+            words(400, "u"),
+        )
+    };
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./ckd.tex", "ckd", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude), &doc("alpha", "omega"));
+        // (near the start, the run goes on and takes its checkpoints
+        // doubling; then far on, past them, back and forth)
+        for (k, (first, late)) in [
+            ("beta", "omega"),
+            ("beta", "theta"),
+            ("beta", "omega"),
+            ("gamma", "omega"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let text = doc(first, late);
+            b.edit(&text);
+            let cold = common::build(opts(), Some(&prelude), &text);
+            let (out, log) = b.output();
+            let (cold_out, cold_log) = cold.output();
+            assert!(
+                common::first_difference(&out, &cold_out).is_none(),
+                "{t} threads, edit {k}: the output is not the cold build's"
+            );
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
+            assert!(
+                b.stats.resumed_at_mark > 0,
+                "{t} threads, edit {k}: the run went on from a checkpoint"
+            );
+        }
+    }
+}
+
 /// Exact PDF, compressed, a paragraph deleted near the start of 300:
 /// every later page's lines move, so the link places a new record for
 /// each. A page's content is compressed once, where the link places it
