@@ -1198,6 +1198,17 @@ impl<'a> Ctx<'a> {
     /// creation, the structure around it); not on a last run that met a
     /// hole, which it may find filled. The output of that run, if it stands.
     pub(crate) fn last_run_stands(&mut self) -> Option<ValueId> {
+        if crate::sched::run_log() && self.me.full_ns.load(std::sync::atomic::Ordering::Relaxed) >= 100_000_000 {
+            eprintln!(
+                "standing: node {} woke {:?} moved {} refuted {} last {:?} state {}",
+                self.me.id.raw(),
+                self.woke.as_ref().map(std::mem::discriminant),
+                self.me.moved.load(std::sync::atomic::Ordering::Acquire),
+                self.me.refuted.load(std::sync::atomic::Ordering::Acquire),
+                self.last.as_ref().map(|r| (r.provisional, r.reads.len())),
+                self.last.as_ref().is_some_and(|r| r.state.is_some()),
+            );
+        }
         if !matches!(
             self.woke,
             Some(Cause::Changed { .. } | Cause::Range { .. } | Cause::Rebind { .. } | Cause::Output { .. })
