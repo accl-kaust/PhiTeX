@@ -117,7 +117,9 @@ pub(crate) fn run_node(
             .fatal_starts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if f.0.is_some_and(|n| cx.before(n, cx.node())) {
+        // (a node a worker took before the claim reached it is claimed
+        // away by now: its run had begun)
+        if f.0.is_some_and(|n| cx.before(n, cx.node())) && !cx.claimed_away() {
             f.1 += 1;
         }
     }
