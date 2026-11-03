@@ -2130,6 +2130,7 @@ fn a_heading_edit_reads_no_file_size() {
 /// and with one, and empty; each build's lines are what the digits give
 /// (`N=` the number read with `\count`), and equal a cold build's.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_file_size_symbol_answers_as_its_digits() {
     let doc = |body: Option<&str>| {
         let write = body.map_or_else(String::new, |b| {

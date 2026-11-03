@@ -432,15 +432,17 @@ pub(crate) fn size_symbol(r: &mut Run<'_, '_>, key: &str) -> crate::run::R<Optio
     // and is looked up as before)
     let v = r.v;
     let ws = crate::tools::size_field(v, key);
-    if !r.lb_known(key, ws)? {
+    if !r.lb_known_present(key, ws)? {
         return Ok(None);
     }
-    if r.get(&format!("wopen:{key}"))?.is_some() || r.read_cut(key)?.is_some() {
+    // (open for writing in this run: its text so far; read back, it is
+    // no document file the client cut, `Run::read_cut`)
+    if r.get(&format!("wopen:{key}"))?.is_some() {
         return Ok(None);
     }
     let k = r.keyed(crate::fields::Fam::Wkeys, key);
     let w = r.keyed(crate::fields::Fam::Wfile, key);
-    if !(r.lb_known(key, k)? || r.lb_known(key, w)?) || r.tool_makes(key)? {
+    if !(r.lb_known_present(key, k)? || r.lb_known_present(key, w)?) || r.tool_makes(key)? {
         return Ok(None);
     }
     // (written the round before: its size not `UNIT`, read as that alone)
@@ -459,9 +461,11 @@ pub(crate) fn size_symbol(r: &mut Run<'_, '_>, key: &str) -> crate::run::R<Optio
 /// run does not change what the expansion was). Forced in a piece,
 /// resolved in a finisher; anywhere else a symbol is [`leaked`].
 pub(crate) fn size_digits(r: &mut Run<'_, '_>, part: Part, key: &str) -> crate::run::R<String> {
-    if !matches!(r.op_name(), "exec" | "resume" | "finish") {
-        panic!("defer: size symbol of {key} reached op {}", r.op_name());
-    }
+    assert!(
+        matches!(r.op_name(), "exec" | "resume" | "finish"),
+        "defer: size symbol of {key} reached op {}",
+        r.op_name()
+    );
     let v = r.v;
     let n = r
         .lb(crate::tools::size_field(v, key))?

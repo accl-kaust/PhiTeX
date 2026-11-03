@@ -2369,15 +2369,30 @@ impl<'c, 'a> Run<'c, 'a> {
     /// ([`crate::ops::WSAME`]): that text is read back where it is read
     /// ([`Run::seed_written`]), as a run reads it before any value.
     pub(crate) fn lb_known(&mut self, key: &str, f: Field) -> R<bool> {
-        let v = self.v;
-        if self
-            .lb(v.field(&format!("{}:{key}", crate::ops::WSAME)))?
-            .and_then(|x| v.as_bool(x))
-            == Some(true)
-        {
+        if self.lb_same(key)? {
+            return Ok(false);
+        }
+        Ok(self.lb(f)?.is_some())
+    }
+
+    /// [`Run::lb_known`], `f` read for its presence alone
+    /// ([`Run::lb_present`]): a size symbol's reads
+    /// ([`crate::defer::size_symbol`]).
+    pub(crate) fn lb_known_present(&mut self, key: &str, f: Field) -> R<bool> {
+        if self.lb_same(key)? {
             return Ok(false);
         }
         self.lb_present(f)
+    }
+
+    /// Whether file `key`, whose text the client gave, is written as
+    /// given ([`crate::ops::WSAME`]).
+    fn lb_same(&mut self, key: &str) -> R<bool> {
+        let v = self.v;
+        Ok(self
+            .lb(v.field(&format!("{}:{key}", crate::ops::WSAME)))?
+            .and_then(|x| v.as_bool(x))
+            == Some(true))
     }
 
     /// Whether loop-back field `f` has a value ([`Run::lb`]), read as that
@@ -2918,7 +2933,7 @@ impl<'c, 'a> Run<'c, 'a> {
             // (a failed tool's `[message]`: no file)
             return Ok(x != ValueId::UNIT && list_of(self.v, x).len() != 1);
         }
-        self.lb_present(crate::tools::made_field(self.v, key))
+        Ok(self.lb(crate::tools::made_field(self.v, key))?.is_some())
     }
 
     /// A `\write18` naming a tool (`[tool, output, input, [args...]]`,

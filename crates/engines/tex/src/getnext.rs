@@ -468,6 +468,14 @@ impl Run<'_, '_> {
         self.step_reads = was;
     }
 
+    /// Whether `get_x_token` stops at the current token, a symbol, for
+    /// `\\if`'s operand ([`Run::size_stop`]).
+    #[cold]
+    #[inline(never)]
+    fn size_stop_here(&self) -> bool {
+        self.size_stop == Some(self.expand_depth) && crate::defer::is_size(self.cur.tok)
+    }
+
     /// `get_x_token` (§380): a halt is raised, never returned.
     pub(crate) fn get_x_token(&mut self) {
         loop {
@@ -495,10 +503,7 @@ impl Run<'_, '_> {
             }
             // (a file size's symbol as `\if`'s operand, kept:
             // [`Run::size_stop`])
-            if self.cur.cmd == cmd::SYM
-                && self.size_stop == Some(self.expand_depth)
-                && crate::defer::is_size(self.cur.tok)
-            {
+            if self.cur.cmd == cmd::SYM && self.size_stop.is_some() && self.size_stop_here() {
                 return;
             }
             let nr = std::mem::replace(&mut self.num_reads, false);

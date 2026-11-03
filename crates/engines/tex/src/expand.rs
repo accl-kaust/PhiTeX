@@ -529,20 +529,10 @@ impl Run<'_, '_> {
                 let mut tok = tok;
                 if crate::defer::is_sym(tok) {
                     let undelimited = s == Some(r) && (r >= len || is_match(&p[r]));
-                    let size = crate::defer::size_of(tok).map(|(part, _)| part);
-                    match size {
-                        Some(crate::defer::Part::Head) if undelimited => {}
-                        Some(crate::defer::Part::All) if undelimited => {
-                            let key = crate::defer::size_of(tok)
-                                .map(|(_, k)| k)
-                                .unwrap_or_default();
-                            self.back_input(crate::defer::size_tok(crate::defer::Part::Tail, &key));
-                            tok = crate::defer::size_tok(crate::defer::Part::Head, &key);
-                        }
-                        _ => match self.lift(|r| crate::defer::expand_any(r, tok)) {
-                            Some(()) => continue 'cont,
-                            None => return false,
-                        },
+                    match self.sym_arg(tok, undelimited) {
+                        Some(Some(t)) => tok = t,
+                        Some(None) => continue 'cont,
+                        None => return false,
                     }
                 }
                 if r < len && !is_match(&p[r]) && tok == p[r] {
@@ -700,6 +690,28 @@ impl Run<'_, '_> {
             }
         }
         true
+    }
+
+    /// A symbol met outside braces while a macro's arguments are matched
+    /// ([`Run::macro_args`]): the token to take (an undelimited
+    /// argument's file size digit, docs/note-relative-counters.md §2.4:
+    /// the first digit's symbol, the rest's put back), or its digits put
+    /// on the input to be matched one by one (`Some(None)`); None: a halt.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::option_option)]
+    fn sym_arg(&mut self, tok: Tok, undelimited: bool) -> Option<Option<Tok>> {
+        use crate::defer::{Part, size_of, size_tok};
+        match size_of(tok) {
+            Some((Part::Head, _)) if undelimited => Some(Some(tok)),
+            Some((Part::All, key)) if undelimited => {
+                self.back_input(size_tok(Part::Tail, &key));
+                Some(Some(size_tok(Part::Head, &key)))
+            }
+            _ => self
+                .lift(|r| crate::defer::expand_any(r, tok))
+                .map(|()| None),
+        }
     }
 
     /// A step that may stop, on the token path: its halt raised
@@ -869,15 +881,41 @@ impl Run<'_, '_> {
     /// \scan_stop: #1 \scan_stop:` on `\pdffilesize`). Elsewhere it is
     /// forced, an ordinary read of the size.
     fn if_char_cat(&mut self, cat: bool) -> R<bool> {
+        let a = self.if_operand()?;
+        if let IfOp::Known(m, n) = a {
+            let b = self.if_operand()?;
+            if let IfOp::Known(c, h) = b {
+                return Ok(if cat { m == c } else { n == h });
+            }
+            return self.if_char_cat_sym(cat, a, Some(b));
+        }
+        self.if_char_cat_sym(cat, a, None)
+    }
+
+    /// [`Run::if_char_cat`] where an operand is a file size's digits:
+    /// `a` the first operand, `b` the second where it was taken.
+    #[cold]
+    #[inline(never)]
+    fn if_char_cat_sym(&mut self, cat: bool, a: IfOp, b: Option<IfOp>) -> R<bool> {
         let digit = |n: i32| (48..=57).contains(&n);
+        let mut a = Some(a);
+        let mut b = b;
         let a = loop {
-            match self.if_operand()? {
+            let x = match a.take() {
+                Some(x) => x,
+                None => self.if_operand()?,
+            };
+            match x {
                 IfOp::Tail(key) => self.force_size(crate::defer::Part::Tail, &key)?,
                 x => break x,
             }
         };
         let b = loop {
-            match self.if_operand()? {
+            let x = match b.take() {
+                Some(x) => x,
+                None => self.if_operand()?,
+            };
+            match x {
                 IfOp::Tail(key) => {
                     if let IfOp::Known(m, n) = a
                         && self.tail_is_false(cat, m, n)?
@@ -1801,6 +1839,17 @@ fn order(a: i32, b: i32) -> i64 {
     }
 }
 
+/// One operand of `\if` or `\ifcat` ([`Run::if_operand`]).
+enum IfOp {
+    /// A token's (command, character) pair, §506.
+    Known(u8, i32),
+    /// The first digit of file `key`'s size, not read.
+    Digit(String),
+    /// The rest of file `key`'s size after its first digit, possibly
+    /// none, not read.
+    Tail(String),
+}
+
 #[cfg(test)]
 mod tests {
     /// A line ends at LF, CR or CR LF, as web2c's `input_line` reads.
@@ -1811,15 +1860,4 @@ mod tests {
         assert_eq!(super::cr_lines("x\r\r\ny").as_deref(), Some("x\n\r\ny"));
         assert_eq!(super::split_lines("%a\r\\x"), ["%a\n", "\\x"]);
     }
-}
-
-/// One operand of `\if` or `\ifcat` ([`Run::if_operand`]).
-enum IfOp {
-    /// A token's (command, character) pair, §506.
-    Known(u8, i32),
-    /// The first digit of file `key`'s size, not read.
-    Digit(String),
-    /// The rest of file `key`'s size after its first digit, possibly
-    /// none, not read.
-    Tail(String),
 }
