@@ -338,6 +338,16 @@ pub trait Operation: Send + Sync {
         Effect::None
     }
 
+    /// Whether a node's text going from `old` to `new` leaves its scope
+    /// effect as its last run found it, for all the text shows: then an
+    /// edit keeps the brackets the node has until it runs, where
+    /// [`Operation::effect`] says others. (A prediction refuted by this
+    /// node's run, filed again at each edit and taken back at each commit,
+    /// each a walk of every reader after it.)
+    fn same_effect(&self, _old: &[ValueId], _new: &[ValueId], _values: &Values) -> bool {
+        false
+    }
+
     /// The values the client holds for this operation outside the engine
     /// (a cache it decodes again, a run state kept for a resume), each
     /// given to `keep`, at a collection ([`crate::Engine::collect`]):

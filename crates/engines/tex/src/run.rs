@@ -5660,7 +5660,9 @@ impl<'c, 'a> Run<'c, 'a> {
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 for (k, ok) in learn {
-                    crate::hints::learn_scope(&mut m, k, ok);
+                    if m.get(&k) != Some(&ok) {
+                        m.insert(k, ok);
+                    }
                 }
             }
         }
