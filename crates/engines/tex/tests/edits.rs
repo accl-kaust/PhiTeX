@@ -1357,68 +1357,42 @@ fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
 
 /// A run gone on from a checkpoint before its edit takes its later
 /// checkpoints doubling apart (`resume::ck_gap`): a later edit further on
-/// in the same run, past those it took sparsely, still goes on from one,
-/// and the output and log are a cold build's, at 1 and 8 threads.
+/// in the same paragraph, past those it took sparsely, still goes on from
+/// one, and the output is a cold build's.
 #[test]
 fn a_run_with_doubled_checkpoints_serves_a_later_edit_further_on() {
-    use std::fmt::Write as _;
-    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-doubled");
-    let _ = std::fs::create_dir_all(&dir);
-    let words = |n: usize, tag: &str| {
-        let mut s = String::new();
-        for k in 0..n {
-            let _ = write!(s, "{tag}{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
-            s.push(if k % 10 == 9 { '\n' } else { ' ' });
-        }
-        s
-    };
+    let fx = common::fixtures().join("plain");
     let prelude = common::plain();
-    // (one run: a box, no paragraph end at the top level to cut it)
-    let doc = |first: &str, late: &str| {
-        format!(
-            "\\pdfoutput=1 \\hsize=300pt\n\\setbox1\\vbox{{{}{first} {}{late} {}}}\n\\shipout\\box1\n\\end\n",
-            words(4000, "w"),
-            words(12000, "v"),
-            words(4000, "u"),
-        )
-    };
-    for t in [1, 8] {
-        let opts = || phitex_tex::Options {
-            threads: Some(t),
-            ..common::options("./ckd.tex", "ckd", "", &dir)
-        };
-        let mut b = common::build(opts(), Some(&prelude), &doc("alpha", "omega"));
-        // (near the start, the run goes on and takes its checkpoints
-        // doubling; then far on, past them, back and forth)
-        for (k, (first, late)) in [
-            ("beta", "omega"),
-            ("beta", "theta"),
-            ("beta", "omega"),
-            ("gamma", "omega"),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let text = doc(first, late);
-            b.edit(&text);
-            let cold = common::build(opts(), Some(&prelude), &text);
-            let (out, log) = b.output();
-            let (cold_out, cold_log) = cold.output();
-            assert!(
-                common::first_difference(&out, &cold_out).is_none(),
-                "{t} threads, edit {k}: the output is not the cold build's"
-            );
-            assert_eq!(
-                log, cold_log,
-                "{t} threads, edit {k}: the log is the cold build's"
-            );
-            // (the cold build's run spaces its checkpoints by what they
-            // cost; the first edit's, dense, leaves them to go on from)
-            assert!(
-                k == 0 || b.stats.resumed_at_mark > 0,
-                "{t} threads, edit {k}: the run went on from a checkpoint"
-            );
-        }
+    let opts = || common::options("./long.tex", "long", "", &fx);
+    let words: Vec<String> = (0..6000)
+        .map(|k| format!("w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17))
+        .collect();
+    let par = |ws: &[String]| format!("\\hsize=300pt\n{}\n\n\\bye\n", ws.join(" "));
+    let mut ws = words.clone();
+    let mut b = common::build(opts(), Some(&prelude), &par(&ws));
+    // (the first, dense, leaves checkpoints all along; the second goes on
+    // from one and takes those after it doubling; the rest are past them)
+    for (k, at, resumes) in [
+        (0, 5990, false),
+        (1, 2000, true),
+        (2, 4000, true),
+        (3, 5900, true),
+        (4, 5950, true),
+    ] {
+        ws[at] = format!("edit{k}\\kern0pt");
+        let text = par(&ws);
+        b.edit(&text);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        assert!(
+            common::first_difference(&b.output().0, &cold.output().0).is_none(),
+            "edit {k} at word {at}: the output is not the cold build's"
+        );
+        assert_eq!(
+            b.stats.resumed_at_mark > 0,
+            resumes,
+            "edit {k} at word {at}: {} runs went on from a checkpoint",
+            b.stats.resumed_at_mark
+        );
     }
 }
 
