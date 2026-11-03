@@ -1104,7 +1104,7 @@ fn pdf_savepos_texxet() {
 /// copy of a font expands to fonts of its own, even at a ratio another copy
 /// already has; they took one font by name and size, so every font loaded
 /// after them had a number six too small (`/F559` for `/F565`). A `\font`
-/// loaded anew after `\pdffontexpand` (LaTeX_RefSheet) does find those of
+/// loaded anew after `\pdffontexpand` (`LaTeX_RefSheet`) does find those of
 /// its name and size. Oracle: pdftex in the CI image.
 #[test]
 fn expand_copies_numbered() {
