@@ -102,18 +102,6 @@ pub(crate) fn symbol_for(r: &mut Run<'_, '_>, loc: Loc) -> Tok {
     sym_tok(r.st.symbol(loc, node).unwrap_or(Sym { loc, node }))
 }
 
-/// The expansion of a symbol token met by `expand` (its command code
-/// `cmd::SYM`): in a list built with expansion (`scan_toks` with
-/// `xpand`, as `etex::protect` sees it) it is kept; elsewhere in a piece
-/// it is forced (`force`), in a finisher resolved (`resolve`); any other
-/// operation: [`leaked`]. The digits go back onto the input as
-/// `conv_toks` puts `\number`'s.
-pub(crate) fn expand_sym(r: &mut Run<'_, '_>, s: Sym) -> crate::run::R<()> {
-    let x = value(r, s)?;
-    r.push_number(x);
-    Ok(())
-}
-
 /// A symbol's digits where they are needed: forced in a piece, resolved
 /// in a finisher, [`leaked`] anywhere else.
 pub(crate) fn value(r: &mut Run<'_, '_>, s: Sym) -> crate::run::R<i32> {
@@ -131,14 +119,9 @@ pub(crate) fn digits_of(r: &mut Run<'_, '_>, toks: &[Tok]) -> crate::run::R<Opti
         return Ok(None);
     }
     let mut out = Vec::with_capacity(toks.len() + 4);
-    let mut d = String::new();
     for &t in toks {
-        match sym_of(t).filter(|_| is_sym(t)) {
-            Some(s) => {
-                d.clear();
-                print_sym(r, s, &mut d)?;
-                out.extend(d.chars().map(|c| Tok::ch(12, u32::from(c))));
-            }
+        match digits_str(r, t)? {
+            Some(d) => out.extend(d.chars().map(|c| Tok::ch(12, u32::from(c)))),
             None => out.push(t),
         }
     }
@@ -363,4 +346,162 @@ pub(crate) fn print_sym(r: &mut Run<'_, '_>, s: Sym, out: &mut String) -> crate:
 /// value), for tests and traces.
 pub(crate) fn int_of(v: &phitex_defuse::Values, x: ValueId) -> Option<i32> {
     v.as_int(x).and_then(|n| i32::try_from(n).ok())
+}
+
+// ------------------------------------------------------ file size symbols
+
+/// The tag of a size symbol's name, past [`SYM_PREFIX`]:
+/// `<SYM_PREFIX>fsz\u{2}<part>\u{2}<key>`.
+const SIZE_TAG: &str = "fsz\u{2}";
+
+/// Which digits of a file's size a size symbol stands for
+/// (docs/note-relative-counters.md §2.4): all of them (`\pdffilesize`'s
+/// expansion, a non-empty digit string), the first (an undelimited
+/// argument TeX took of them, one digit), or the rest after the first
+/// (what TeX left on the input, possibly none).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Part {
+    All,
+    Head,
+    Tail,
+}
+
+impl Part {
+    fn tag(self) -> char {
+        match self {
+            Part::All => 'a',
+            Part::Head => 'h',
+            Part::Tail => 't',
+        }
+    }
+
+    fn of_tag(c: char) -> Option<Part> {
+        Some(match c {
+            'a' => Part::All,
+            'h' => Part::Head,
+            't' => Part::Tail,
+            _ => return None,
+        })
+    }
+}
+
+/// The token of the size symbol of `part` of file `key`'s size: one
+/// internal control sequence, the same in every run and build (a
+/// definition holding it does not change with the size).
+pub(crate) fn size_tok(part: Part, key: &str) -> Tok {
+    Tok::cs(&format!("{SYM_PREFIX}{SIZE_TAG}{}\u{2}{key}", part.tag()))
+}
+
+/// The part and file of a size symbol, if `t` is one.
+pub(crate) fn size_of(t: Tok) -> Option<(Part, String)> {
+    let c = t.as_cs()?;
+    let name = c.name();
+    let rest = name.strip_prefix(SYM_PREFIX)?.strip_prefix(SIZE_TAG)?;
+    let mut cs = rest.chars();
+    let part = Part::of_tag(cs.next()?)?;
+    let key = cs.as_str().strip_prefix('\u{2}')?;
+    Some((part, key.to_owned()))
+}
+
+/// Whether `t` is a size symbol.
+#[inline]
+pub(crate) fn is_size(t: Tok) -> bool {
+    is_sym(t) && size_of(t).is_some()
+}
+
+/// `\pdffilesize` in a piece of TeX's file `key` ([`Run::tex_key`]), a file the job writes and reads
+/// back, written the round before (its size known, `wsize:<key>`): the
+/// size symbol of its digits instead of them. The run reads only that
+/// the file is there (the presence of its loop-backs, the size not
+/// `UNIT`), not the size: a reader that only tests the digits for
+/// blankness (expl3's `\file_if_exist`, LaTeX's `\IfFileExists`) does
+/// not depend on the size. Where TeX needs the digits they are forced
+/// ([`size_digits`]). None where the size is read as before: outside a
+/// document's piece, a file this run opened for writing (its text so
+/// far), a cut document file, one a tool makes, one not written.
+pub(crate) fn size_symbol(r: &mut Run<'_, '_>, key: &str) -> crate::run::R<Option<Tok>> {
+    let op = r.cx.op();
+    if !(op == r.ops.exec || op == r.ops.resume)
+        || !r.doc
+        || r.interp.is_some()
+        || crate::exec::obs_flag!("PHITEX_NO_DEFER")
+    {
+        return Ok(None);
+    }
+    // (a file the job writes first: any other, a package's, fails here
+    // and is looked up as before)
+    let v = r.v;
+    let ws = crate::tools::size_field(v, key);
+    if !r.lb_known_present(key, ws)? {
+        return Ok(None);
+    }
+    // (open for writing in this run: its text so far; read back, it is
+    // no document file the client cut, `Run::read_cut`)
+    if r.get(&format!("wopen:{key}"))?.is_some() {
+        return Ok(None);
+    }
+    let k = r.keyed(crate::fields::Fam::Wkeys, key);
+    let w = r.keyed(crate::fields::Fam::Wfile, key);
+    if !(r.lb_known_present(key, k)? || r.lb_known_present(key, w)?) || r.tool_makes(key)? {
+        return Ok(None);
+    }
+    // (written the round before: its size not `UNIT`, read as that alone)
+    let p = r.cx.path(&[phitex_defuse::Step::Eq(ValueId::UNIT)]);
+    let unit = r.cx.read_final_path(ws, p)?;
+    if unit.and_then(|x| v.as_bool(x)) != Some(false) {
+        return Ok(None);
+    }
+    Ok(Some(size_tok(Part::All, key)))
+}
+
+/// The digits a size symbol stands for, where TeX needs them: the
+/// file's size as the round before wrote it (`wsize:<key>`, read
+/// whole), as `\pdffilesize` read it where the symbol was made ([`size_symbol`]
+/// found it written and not open for writing; a later `\openout` in the
+/// run does not change what the expansion was). Forced in a piece,
+/// resolved in a finisher; anywhere else a symbol is [`leaked`].
+pub(crate) fn size_digits(r: &mut Run<'_, '_>, part: Part, key: &str) -> crate::run::R<String> {
+    assert!(
+        matches!(r.op_name(), "exec" | "resume" | "finish"),
+        "defer: size symbol of {key} reached op {}",
+        r.op_name()
+    );
+    let v = r.v;
+    let n = r
+        .lb(crate::tools::size_field(v, key))?
+        .and_then(|x| v.as_int(x))
+        .unwrap_or(0);
+    let d = n.to_string();
+    Ok(match part {
+        Part::All => d,
+        Part::Head => d[..1].to_owned(),
+        Part::Tail => d[1..].to_owned(),
+    })
+}
+
+/// The digits symbol `t` stands for (a register's or a size's), as
+/// [`value`] and [`size_digits`] give them; None for another token.
+pub(crate) fn digits_str(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<Option<String>> {
+    if !is_sym(t) {
+        return Ok(None);
+    }
+    if let Some((part, key)) = size_of(t) {
+        return size_digits(r, part, &key).map(Some);
+    }
+    let Some(s) = sym_of(t) else {
+        return Ok(None);
+    };
+    let mut d = String::new();
+    print_sym(r, s, &mut d)?;
+    Ok(Some(d))
+}
+
+/// A symbol where its digits are needed (`expand` on `cmd::SYM`, a
+/// delimited argument, `\string`): they go onto the input, as
+/// `conv_toks` puts `\number`'s.
+pub(crate) fn expand_any(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<()> {
+    if let Some(d) = digits_str(r, t)? {
+        r.push_toks(crate::expand::str_toks(&d));
+    }
+    Ok(())
 }

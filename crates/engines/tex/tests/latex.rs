@@ -2061,6 +2061,202 @@ fn a_heading_edit_does_not_run_the_rest_of_begin_document_again() {
     }
 }
 
+/// `\tableofcontents` reads its `.toc` through `\IfFileExists`, which
+/// is expl3's `\file_if_exist`: it expands `\pdffilesize` of the file and
+/// tests the digits only for blankness (`\if:w \scan_stop: #1
+/// \scan_stop:`, `\tl_if_blank`). The size is a symbol standing for a
+/// non-empty digit string, read for presence alone: a heading edit,
+/// which changes the `.toc`'s size, wakes no reader on the size
+/// (`wsize:`; amsldoc's TOC resume ran again on `wsize:amsldoc.toc` at
+/// every heading edit). The `.toc` going from absent to present (a
+/// `\tableofcontents` added) runs its reader, and every edited PDF
+/// equals a cold build's.
+#[test]
+fn a_heading_edit_reads_no_file_size() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/toc-size");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |toc: bool, title: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\begin{{document}}\n{}\
+             \\section{{Intro}}\nFirst section.\n\n\
+             \\section{{{title}}}\nText of the second section.\n\n\
+             \\section{{Last}}\nThe end.\n\\end{{document}}\n",
+            if toc { "\\tableofcontents\n" } else { "" }
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("tocsize", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(true, "Second"));
+        for (toc, title) in [
+            (true, "Xsecond"),
+            (true, "Second part of it"),
+            (false, "Second"),
+            (true, "Second"),
+        ] {
+            b.edit(&doc(toc, title));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {toc} {title}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(toc, title));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {toc} {title}"
+            );
+            assert!(
+                !r.iter()
+                    .any(|x| !x.starts_with("files") && x.contains("wsize:")),
+                "-j{threads} {toc} {title}: a reader ran again on a file's size: {r:?}"
+            );
+        }
+    }
+}
+
+/// `\pdffilesize` of a file the job writes and reads back is a symbol
+/// read for presence alone (docs/note-relative-counters.md §2.4), and
+/// every use of it answers what TeX's digits answer: printed, as a
+/// number, `\if` and `\ifcat` against a digit and against a non-digit,
+/// an undelimited argument (its first digit, the rest left), kept by
+/// `\detokenize`, expl3's `\tl_if_blank` (`\use_none:n` then an empty
+/// test), `\ifx`. The file is absent, then of sizes with two digits
+/// and with one, and empty; each build's lines are what the digits give
+/// (`N=` the number read with `\count`), and equal a cold build's.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_file_size_symbol_answers_as_its_digits() {
+    let doc = |body: Option<&str>| {
+        let write = body.map_or_else(String::new, |b| {
+            format!("\\newwrite\\sizf\\immediate\\openout\\sizf=\\jobname.siz\n{}\\immediate\\closeout\\sizf\n", if b.is_empty() { String::new() } else { format!("\\immediate\\write\\sizf{{{b}}}\n") })
+        });
+        format!(
+            r"\def\size{{\pdffilesize{{\jobname.siz}}}}
+\count255=0\size\relax
+\immediate\write16{{N=\the\count255.}}
+\immediate\write16{{A=\size.}}
+\immediate\write16{{B=\if\relax\size\relax Y\else N\fi.}}
+\immediate\write16{{C=\ifcat 1\size Y\else N\fi.}}
+\immediate\write16{{D=\if 1\size Y\else N\fi.}}
+\def\first#1{{(#1)}}
+\edef\sz{{\size}}
+\immediate\write16{{E=\expandafter\first\sz!.}}
+\immediate\write16{{F=\detokenize\expandafter{{\sz}}.}}
+\def\usenone#1{{}}
+\def\ifemptyo#1{{\if\relax\detokenize\expandafter{{#1}}\relax}}
+\def\gtest#1{{\immediate\write16{{G=\ifemptyo{{\usenone#1?}}Y\else N\fi.}}}}
+\expandafter\gtest\expandafter{{\sz}}
+\edef\kept{{\size}}
+\immediate\write16{{H=\ifnum0\kept>9 Y\else N\fi.}}
+\immediate\write16{{I=\expandafter\ifx\sz\relax Y\else N\fi.}}
+\immediate\write16{{J=\if\relax\kept\relax Y\else N\fi.}}
+Text.
+{write}\end{{document}}
+"
+        )
+    };
+    // (what TeX writes for a size of `n`, none where absent)
+    let want = |n: Option<u64>| -> Vec<String> {
+        let d = n.map_or_else(String::new, |n| n.to_string());
+        let (h, t) = if d.is_empty() {
+            ("", "")
+        } else {
+            d.split_at(1)
+        };
+        let yn = |b: bool| if b { "Y" } else { "N" }.to_owned();
+        // (`\ifx` of the first two digits, or of the digit and `\relax`;
+        // absent: `\relax` and `Y`)
+        let i = if d.len() >= 2 && d.as_bytes()[0] == d.as_bytes()[1] {
+            format!("{}\\relax Y", &d[2..])
+        } else {
+            "N".to_owned()
+        };
+        vec![
+            format!("N={}.", n.unwrap_or(0)),
+            format!("A={d}."),
+            format!("B={}.", yn(d.is_empty())),
+            // (`\ifcat 1` against the first digit: true, the rest then
+            // `Y`; absent: against `Y`, a letter)
+            format!(
+                "C={}.",
+                if d.is_empty() {
+                    "N".to_owned()
+                } else {
+                    format!("{t}Y")
+                }
+            ),
+            format!(
+                "D={}.",
+                if h == "1" {
+                    format!("{t}Y")
+                } else {
+                    "N".to_owned()
+                }
+            ),
+            if d.is_empty() {
+                "E=(!).".to_owned()
+            } else {
+                format!("E=({h}){t}!.")
+            },
+            format!("F={d}."),
+            format!("G={}.", yn(d.is_empty())),
+            format!("H={}.", yn(n.unwrap_or(0) > 9)),
+            format!("I={i}."),
+            format!("J={}.", yn(d.is_empty())),
+        ]
+    };
+    let lines = |log: &str| -> Vec<String> {
+        log.lines()
+            .filter(|l| l.len() > 1 && l.as_bytes()[1] == b'=' && l.ends_with('.'))
+            .map(str::to_owned)
+            .collect()
+    };
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/size-symbol");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("sizesym", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(None));
+        // (absent: a cold build that writes no such file; a build after
+        // one that wrote it finds what that wrote, as TeX does)
+        assert_eq!(lines(&b.output().1), want(None), "-j{threads}: absent");
+        for body in ["abcdefghijklm", "ab", "", "abcdefghij"] {
+            let body = Some(body);
+            b.edit(&doc(body));
+            let got = lines(&b.output().1);
+            let n = got
+                .first()
+                .and_then(|l| l.strip_prefix("N=")?.strip_suffix('.')?.parse::<u64>().ok());
+            let w = want(n);
+            assert_eq!(got, w, "-j{threads} {body:?}: the size's uses");
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(body));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {body:?}: edit differs from cold"
+            );
+            assert_eq!(
+                lines(&cold.output().1),
+                got,
+                "-j{threads} {body:?}: cold's lines"
+            );
+        }
+    }
+}
+
 /// A LaTeX document of several pages with a table of contents and
 /// citations (BibTeX), built to its fixpoint; a heading edited: the
 /// `.toc` read back moves the first page, so the page loop's first node
