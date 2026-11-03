@@ -403,11 +403,15 @@ impl Run<'_, '_> {
         self.muts += 1;
         self.close_group(md)?;
         if !after.is_empty() {
-            self.cx.define_with(
-                v.field(RTN_AFTER),
-                crate::val::toks_value(v, &after),
-                Locality::Global,
-            );
+            let toks = crate::val::toks_value(v, &after);
+            if self.fire_passed()? {
+                // (the piece went on past the candidate: they go to it,
+                // read there, [`Run::define_fire_conflict`])
+                self.fin_rtn_after = Some(toks);
+            } else {
+                self.cx
+                    .define_with(v.field(RTN_AFTER), toks, Locality::Global);
+            }
         }
         if self.st.take_page_params() {
             self.put_page_params()?;
@@ -882,6 +886,9 @@ impl Run<'_, '_> {
             .into_iter()
             .filter(|d| d.2 == Locality::Global)
             .map(|d| d.0.0)
+            // (a text's box binding the routine used up replaces that
+            // binding as a global replaces a local, [`Run::cont_load`])
+            .chain(self.fin_boxes.iter().map(|b| b.0.0))
             .collect();
         // (none given as nothing, as the declared guess says it,
         // [`Finish::static_contribs`])
@@ -935,13 +942,14 @@ impl Run<'_, '_> {
         else {
             return Ok(());
         };
-        let globals: Vec<ValueId> = self
-            .publication()
+        let publication = self.publication();
+        let changes: Vec<_> = publication
             .into_iter()
             .filter(|d| d.2 == Locality::Global)
-            .map(|d| d.0.0)
             .collect();
-        if globals.is_empty() {
+        let rtn_after = self.fin_rtn_after.take();
+        let boxes = self.fin_boxes.clone();
+        if changes.is_empty() && rtn_after.is_none() && boxes.is_empty() {
             return Ok(());
         }
         let locals: Vec<ValueId> = args
@@ -952,10 +960,7 @@ impl Run<'_, '_> {
             .filter_map(|e| list_of(v, e).first().copied())
             .collect();
         let mut changed = Vec::new();
-        for (f, what, l) in self.publication() {
-            if l != Locality::Global || !globals.contains(&f.0) {
-                continue;
-            }
+        for (f, what, _) in changes {
             let own = v.with_str(f.0, |s| {
                 s.starts_with("pages:") || PAGE_FIELDS.contains(&s) || s == MAIN_PREVGRAF
             }) != Some(false);
@@ -989,14 +994,40 @@ impl Run<'_, '_> {
                 changed.push(f.0);
             }
         }
-        if changed.is_empty() {
+        if changed.is_empty() && rtn_after.is_none() && boxes.is_empty() {
             return Ok(());
         }
         let Some(used) = self.cx.read(fire_used_field(v, at))? else {
             return Ok(());
         };
-        let used = list_of(v, used);
-        if changed.iter().any(|f| used.binary_search(f).is_ok()) {
+        let used = list_of(v, list_of(v, used)[0]);
+        if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+            eprintln!(
+                "fire-conflict: finisher {} piece {} candidate {k}: boxes {} changed [{}] of them used [{}]",
+                self.cx.node().raw(),
+                at.raw(),
+                boxes
+                    .iter()
+                    .map(|b| crate::val::field_name(v, b.0))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                changed
+                    .iter()
+                    .map(|&f| crate::val::field_name(v, Field(f)))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                changed
+                    .iter()
+                    .filter(|f| used.binary_search(f).is_ok())
+                    .map(|&f| crate::val::field_name(v, Field(f)))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        if rtn_after.is_some()
+            || changed.iter().any(|f| used.binary_search(f).is_ok())
+            || boxes.iter().any(|b| used.binary_search(&b.0.0).is_ok())
+        {
             // (every field the routine changed, with the value it left:
             // the piece puts them in force at the candidate, as TeX's
             // text after the routine has them)
@@ -1007,6 +1038,12 @@ impl Run<'_, '_> {
                     Some(x) => v.list(vec![f, x]),
                     None => v.list(vec![f]),
                 });
+            }
+            for (f, x) in boxes {
+                pairs.push(v.list(vec![f.0, x]));
+            }
+            if let Some(toks) = rtn_after {
+                pairs.push(v.list(vec![v.field(RTN_AFTER).0, toks]));
             }
             self.cx.define_with(
                 fire_conflict_field(v, at, k),
@@ -1019,6 +1056,32 @@ impl Run<'_, '_> {
 }
 
 impl Run<'_, '_> {
+    /// Whether the finisher's page fired at a candidate its piece went
+    /// on past ([`FIRE_USED`]'s second list), where the piece's next
+    /// pass can read the routine's `\\aftergroup` tokens.
+    fn fire_passed(&mut self) -> R<bool> {
+        let v = self.v;
+        let Some((at, k)) = self
+            .fin_page()
+            .filter(|p| !p.in_material)
+            .map(|p| (p.at, p.k))
+        else {
+            return Ok(false);
+        };
+        let used = self.cx.read(fire_used_field(v, at))?;
+        let passed =
+            used.is_some_and(|u| list_of(v, list_of(v, u)[1]).contains(&v.int(i64::from(k))));
+        if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+            eprintln!(
+                "fire-after: finisher {} piece {} candidate {k}: used {} passed {passed}",
+                self.cx.node().raw(),
+                at.raw(),
+                used.map_or_else(|| "-".to_owned(), |u| v.render(list_of(v, u)[1])),
+            );
+        }
+        Ok(passed)
+    }
+
     /// The value field `f` had where the finisher's page fired, as the
     /// piece held it there and the routine began with it: what the piece
     /// defined after the candidate as it was there (`args`' ninth,
@@ -1053,6 +1116,12 @@ impl Run<'_, '_> {
         }
         Ok(Some(self.cx.read(f)?))
     }
+}
+
+/// The register of a box register's field (`box:<n>`).
+pub(crate) fn box_reg_of(v: &Values, f: Field) -> Option<i32> {
+    v.with_str(f.0, |s| s.strip_prefix("box:")?.parse().ok())
+        .flatten()
 }
 
 /// The main vertical list's `\prevgraf` (`crate::build`'s `pg:<list>`,

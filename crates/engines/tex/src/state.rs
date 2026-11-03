@@ -1271,6 +1271,15 @@ impl State {
         true
     }
 
+    /// Whether the binding of `loc` in force is one this run made.
+    pub(crate) fn defined_here(&self, loc: Loc) -> bool {
+        self.slot_ref(loc)
+            .and_then(|s| usize::try_from(s.meta).ok())
+            .filter(|&m| m > 0)
+            .and_then(|m| self.metas.get(m - 1))
+            .is_some_and(|m| m.ldef_stamp > 0)
+    }
+
     /// A value read in place of the engine's (a finisher's state at its
     /// candidate, a job-written line's at its read-back point): loaded,
     /// no read recorded, never compared with the engine's at the end.
@@ -2797,6 +2806,20 @@ impl State {
     pub(crate) fn apply_global(&mut self, v: &Values, loc: Loc, x: Option<ValueId>) {
         self.changing(loc);
         self.muts += 1;
+        // (the value at this candidate, which the routine begins with, is
+        // the one before: [`State::at_candidates`])
+        if !self.cands.is_empty() {
+            let (prev, meta) = {
+                let s = self.slot(loc);
+                (s.e, s.meta)
+            };
+            let ldef = usize::try_from(meta)
+                .ok()
+                .filter(|&m| m > 0)
+                .and_then(|m| self.metas.get(m - 1))
+                .map_or(0, |m| m.ldef_stamp);
+            self.note_cand(loc, ldef, prev);
+        }
         self.stamp += 1;
         let st = self.stamp;
         let mut e = Entry::raw_seen(v, x);

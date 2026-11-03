@@ -1056,3 +1056,29 @@ fn pdf_texxet() {
 fn line_end_tab() {
     check_threads("line_end_tab", "pdf");
 }
+
+/// A page fires in paragraphs inside a group the text's run opens, and
+/// its routine leaves tokens with `\\aftergroup`: TeX reads them right
+/// after that `build_page` (§1100), so what follows sees what they do. The
+/// piece that went on past the page goes again with them read there.
+/// Oracle: pdftex in the CI image.
+#[test]
+fn routine_aftergroup_in_group() {
+    check_threads("routine_aftergroup_in_group", "pdf");
+}
+
+/// [`routine_aftergroup_in_group`] as afterpage.sty has it: the next
+/// page's colour restored (pagecolor-example). Oracle: pdflatex.
+#[test]
+fn afterpage_in_group() {
+    check_threads("afterpage_in_group", "pdf");
+}
+
+/// A routine's `\\box` of a register the text's open group bound: void at
+/// the binding's level (§1079), whatever group the routine runs in
+/// (longtable's `\\LT@foot` at `\\endlongtable`: typstfun's `\\vsize` kept
+/// the foot's height, a row more on a later table's page). Oracle: pdflatex.
+#[test]
+fn routine_box_used_in_group() {
+    check_threads("routine_box_used_in_group", "pdf");
+}

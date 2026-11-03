@@ -47,7 +47,8 @@ use crate::vprof::{PItem, ScanState};
 
 /// What a piece used (read, held or defined) in a pass that went on past
 /// a candidate of its own where a page can fire and a second pass can
-/// end: `pages:used:<piece>`, the fields by id, sorted. The finisher of a
+/// end: `pages:used:<piece>`, the fields by id, sorted, and the candidates
+/// it went on past, as a list of the two. The finisher of a
 /// page firing at such a candidate reads it and, where the routine changed
 /// one of them globally, defines [`FIRE_CONFLICT`] (`Run::define_fire_conflict`).
 pub(crate) const FIRE_USED: &str = "pages:used";
@@ -60,8 +61,8 @@ pub(crate) fn fire_used_field(v: &Values, piece: NodeId) -> Field {
 /// A page fired at candidate `k` of a piece's own items, and its routine
 /// changed globally a field the piece used ([`FIRE_USED`]):
 /// `pages:conflict:<piece>:<k>`, every field the routine changed with the
-/// value it left (`[field, value]`, `[field]` for none), defined by that
-/// page's finisher. The piece, which went on past the candidate, goes
+/// value it left (`[field, value]`, `[field]` for none), and the tokens it
+/// left after its group ([`RTN_AFTER`]), defined by that page's finisher. The piece, which went on past the candidate, goes
 /// again with those values in force there (`Run::order_after_fires`):
 /// TeX runs the routine at that `build_page`, and the text after it sees
 /// every global it set (classicthesis-xe's `\thepage` and

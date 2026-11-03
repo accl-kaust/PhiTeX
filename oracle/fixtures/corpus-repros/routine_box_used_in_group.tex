@@ -1,0 +1,35 @@
+% A longtable: the routine at \endlongtable's \penalty-30000 takes \LT@foot with
+% \box, at the level of its binding (§1079), inside the environment's group,
+% so \ifvoid\LT@foot after the penalty sees it void and \vsize keeps the
+% foot's height off. (PDF: pdflatex in the CI image)
+\documentclass{article}
+\usepackage{longtable}
+\usepackage{booktabs}
+\begin{document}
+\newcommand\rows[1]{\count255=0 \loop a & b \\ \advance\count255 by 1 \ifnum\count255<#1 \repeat}
+Before.
+\begin{longtable}{ll}
+\toprule
+H & I \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+one & two \\
+three & four \\
+\end{longtable}
+\makeatletter\par \the\vsize\ \the\pagegoal\ \the\@colroom\ \ifvoid\LT@foot void\else box\fi\par\makeatother
+Between.
+\begin{longtable}{ll}
+\toprule
+H & I \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+one & two \\
+three & four \\
+\end{longtable}
+\makeatletter\par \the\vsize\ \the\pagegoal\ \the\@colroom\ \ifvoid\LT@foot void\else box\fi\par\makeatother
+End.
+\end{document}

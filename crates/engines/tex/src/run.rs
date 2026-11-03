@@ -1100,6 +1100,12 @@ pub(crate) struct Run<'c, 'a> {
     /// mark, as TeX runs the routine at that `build_page`): by candidate,
     /// each field with its value ([`Run::order_after_fires`]).
     pub fire_apply: Vec<(u32, Vec<(Field, Option<ValueId>)>)>,
+    /// A finisher's routine's `\\aftergroup` tokens where its piece went on
+    /// past the candidate: for its [`crate::pages::FIRE_CONFLICT`].
+    pub fin_rtn_after: Option<ValueId>,
+    /// The box registers a finisher's routine used up that the text's
+    /// open groups bound (`\\box`, §1079): each field with what it left.
+    pub fin_boxes: Vec<(Field, ValueId)>,
     /// The serial of the writer command the command in progress recorded
     /// ([`crate::pdfout::command`]), until a read-time allocation takes
     /// it as its own ([`crate::pdfout::note_read_time`]); 0: none.
@@ -1344,6 +1350,8 @@ impl<'c, 'a> Run<'c, 'a> {
             badness_read: false,
             fire_used: None,
             fire_apply: Vec::new(),
+            fin_rtn_after: None,
+            fin_boxes: Vec::new(),
             pdf_cmd: 0,
             scope_kind_memo: None,
             pubs: None,

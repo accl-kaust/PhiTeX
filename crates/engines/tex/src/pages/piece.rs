@@ -193,7 +193,26 @@ impl Run<'_, '_> {
         // it: its global values in force, [`Run::order_after_fires`])
         if let Some(i) = self.fire_apply.iter().position(|a| a.0 == k) {
             let pairs = self.fire_apply[i].1.clone();
+            let after = self.v.field(super::RTN_AFTER);
             for (f, x) in pairs {
+                if f == after {
+                    // (the routine's `\aftergroup` tokens: read next,
+                    // §1100, after this `build_page`)
+                    self.back_toks(toks_of(self.v, x));
+                    continue;
+                }
+                if let Some(n) = super::box_reg_of(self.v, f) {
+                    // (§1079: at the level of the binding, which the
+                    // groups keep or restore as TeX's)
+                    let b = x.and_then(|x| {
+                        list_of(self.v, x)
+                            .get(1)
+                            .copied()
+                            .filter(|&b| b != ValueId::UNIT)
+                    });
+                    self.modify_box_reg(n, b)?;
+                    continue;
+                }
                 let loc = self.loc_of(f);
                 self.st.apply_global(self.v, loc, x);
             }
@@ -422,8 +441,24 @@ impl Run<'_, '_> {
             }
         };
         let node = self.cx.node();
-        self.cx
-            .define_with(super::fire_used_field(v, node), used, Locality::Global);
+        // (the fields, the first pass's; the candidates, this pass's: a
+        // routine's tokens read at one can move those after it)
+        let passed = v.list(ks.iter().map(|&k| v.int(i64::from(k))).collect());
+        self.cx.define_with(
+            super::fire_used_field(v, node),
+            v.list(vec![used, passed]),
+            Locality::Global,
+        );
+        if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+            eprintln!(
+                "fire-pass: node {} past {ks:?}, marks {:?}",
+                node.raw(),
+                self.cand_marks
+                    .iter()
+                    .map(|m| (m.k, m.fresh, m.restartable, m.open_cut, m.par_cut))
+                    .collect::<Vec<_>>()
+            );
+        }
         let at = phitex_defuse::At::End(self.cx.unit());
         for k in ks {
             let f = super::fire_conflict_field(v, node, k);
@@ -1946,6 +1981,15 @@ impl Run<'_, '_> {
             // the binding was made after left it standing)
             if replaced(&gdefs, f, piece, after) {
                 let loc = self.loc_of(f);
+                if super::box_reg_of(v, f).is_some()
+                    && let Some(x) = x1
+                {
+                    // (a routine's `\box`, §1079: the binding replaced at
+                    // its level, which the groups keep or restore as TeX's)
+                    self.st
+                        .modify(loc, crate::state::Entry::raw(Some(x)), false, false);
+                    continue;
+                }
                 self.st.override_global(loc, x1);
                 continue;
             }
