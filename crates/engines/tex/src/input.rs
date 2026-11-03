@@ -461,14 +461,12 @@ impl Line {
     }
 
     /// A line from `text` (one line of a file, as web2c's `input_line`
-    /// reads it: trailing blanks removed), its `\endlinechar` applied.
+    /// reads it: its trailing spaces and line ends removed, tabs kept),
+    /// its `\endlinechar` applied.
     pub(crate) fn of_str(line: &str, endlinechar: i64, rescanned: bool) -> Line {
         let bytes = line.as_bytes();
         let mut end = bytes.len();
-        while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
-            end -= 1;
-        }
-        while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
+        while end > 0 && matches!(bytes[end - 1], b' ' | b'\n' | b'\r') {
             end -= 1;
         }
         let mut buf: Vec<u32> = line[..end].chars().map(u32::from).collect();

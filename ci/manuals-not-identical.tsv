@@ -23,8 +23,6 @@ latex_teubner_teubner-doc	differs: page 1: obj 12 (Pages) line 15: oracle "<end>
 latex_tex-vpat_texlive-vpat	differs: page 1: obj 4369 (Catalog) line 4: oracle "/MarkInfo 4 0 R", phitex "/MarkInfo 5 0 R" (past \pdfdest struct, accl 22465)
 latex_texproposal_texproposal	differs: page 1: obj 1 (Catalog) line 14: oracle "1", phitex "2" (pages 27 vs 29)
 latex_tikz-mirror-lens_tikz-mirror-lens	differs: obj 1572 (untyped) line 1: oracle "[", phitex "<<" (not the same in each run: the first sweep had -j1 timeout, -j4 differs)
-latex_tikzcodeblocks_tikzcodeblocks-documentation	differs: page 2: obj 461 (page 21, Page) line 14: oracle "<end>", phitex "<end>"
-latex_translation-enumitem-de_enumitem-de	differs: page 11: obj 237 (page 16, Page) line 17: oracle "<end>", phitex "<end>"
 latex_typog_typog-example	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes)
 latex_typogrid_testtypogrid	differs: page 2: obj 12 (page 2, untyped) line 143: oracle "0 0 69.449 1.993 re f", phitex "0 0 104.173 1.993 re f"
 latex_typstfun_typstfun	differs: page 2: obj 46 (page 2, untyped) line 61: oracle "/F62 10.9091 Tf 56.693 308.139 Td [(\\arccos)-7368(arccos)-7894(\\arcs", phitex "/F62 10.9091 Tf 56.693 308.139 Td [(\\arccos)-7368(arccos)-7894(\\arcs"

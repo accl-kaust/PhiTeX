@@ -659,7 +659,7 @@ impl Run<'_, '_> {
                     }
                     let f = self.input.file_mut(top);
                     if f.has_lines() {
-                        let line = f.take_line(self.xe);
+                        let line = f.take_line();
                         self.input.push_line(line);
                     } else {
                         self.pop_input_level();

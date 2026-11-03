@@ -1024,3 +1024,13 @@ fn multicol_title_inside() {
 fn pdf_texxet() {
     check_threads("pdf_texxet", "pdf");
 }
+
+/// TeX Live manual enumitem-de (pdflatex): `\begin{verbatim}` and a tab at
+/// the line's end. web2c's `input_line` trims spaces and line ends, not
+/// tabs, in pdfTeX as in XeTeX; `PhiTeX` trimmed tabs for pdfTeX, so the
+/// verbatim's empty first line was missing and the page broke elsewhere.
+/// At -j1 and -j4 (oracle: pdftex in the CI image, accl 23645).
+#[test]
+fn line_end_tab() {
+    check_threads("line_end_tab", "pdf");
+}
