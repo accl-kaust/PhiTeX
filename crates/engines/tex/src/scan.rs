@@ -1008,6 +1008,12 @@ impl Run<'_, '_> {
                 self.get_token_stored();
                 self.ck()?;
                 let tok = self.cur.tok;
+                // (a deferred read's symbol among the delimiters: TeX has
+                // its digits there, matched one by one, `Run::sym_arg`)
+                if self.cur.cmd == cmd::SYM {
+                    crate::defer::expand_any(self, tok)?;
+                    continue;
+                }
                 if !tok.is_cs_or_active() && matches!(tok.cat(), Some(1 | 2)) {
                     if tok.cat() == Some(2) {
                         // §475 "Missing { inserted": `\def\a}` is `\def\a{}`

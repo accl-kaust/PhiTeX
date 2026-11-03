@@ -433,3 +433,15 @@ fn steps_after_candidates_reach_the_routine_as_values_do() {
         );
     }
 }
+
+/// A symbol among a macro's delimiters, as etoolbox's `\\ifinlist` makes them
+/// (biblatex's `\\xifinlist{\\the\\c@refsection}{...}`): TeX has the digits
+/// there, and text with those digits, from any read, matches.
+#[test]
+fn a_counter_among_a_macros_delimiters_matches_its_digits() {
+    let src = "\\openout1=\\jobname.out\n\\count200=7\n\\edef\\n{\\the\\count200}\n\
+               \\edef\\next{\\def\\noexpand\\find####1,\\n,####2&{\\immediate\\write1{[####1]}}}\\next\n\
+               \\find a,7,b&\n\\edef\\m{x,\\the\\count200,y&}\\expandafter\\find\\m\n\\closeout1\n\\bye\n";
+    let (_, out) = cold("delim", src, 1);
+    assert_eq!(out.trim_end(), "[a]\n[x]", "{out:?}");
+}

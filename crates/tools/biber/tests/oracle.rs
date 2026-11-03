@@ -2,6 +2,7 @@
 //! `refs.bib` fed to the native biber, must give biber 2.22's `.bbl`
 //! byte for byte.
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 struct Dir(PathBuf);
@@ -59,6 +60,7 @@ fn fixtures_byte_identical() {
 /// renumbered and citations of a key cited before added, gives the same
 /// `.bbl` as its canonical form.
 #[test]
+#[allow(clippy::many_single_char_names)]
 fn canonical_bcf_gives_the_same_bbl() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../oracle/fixtures/biber");
     let mut names: Vec<String> = std::fs::read_dir(&dir)
@@ -89,12 +91,13 @@ fn canonical_bcf_gives_the_same_bbl() {
                 let a = t.find(" order=\"").expect("order") + 8;
                 let b = a + t[a..].find('"').expect("order");
                 order += 2;
-                more.push_str(&format!(
-                    "    <bcf:citekey order=\"{}\" intorder=\"1\">{k}</bcf:citekey>\n",
+                let _ = writeln!(
+                    more,
+                    "    <bcf:citekey order=\"{}\" intorder=\"1\">{k}</bcf:citekey>",
                     order + 1_000_000
-                ));
+                );
                 more.push_str(&t[..a]);
-                more.push_str(&format!("{order}"));
+                let _ = write!(more, "{order}");
                 more.push_str(&t[b..]);
             } else {
                 more.push_str(l);
