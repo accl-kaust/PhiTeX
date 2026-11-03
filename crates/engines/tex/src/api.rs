@@ -4494,13 +4494,14 @@ pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<Strin
         for d in list_of(v, made) {
             if let [f, x, _] = list_of(v, d).as_slice() {
                 let name = str_of(v, *f);
-                use crate::val::{Mean, cmd};
-                let looked_at = match Mean::decode(v, Some(*x)) {
-                    Mean::Prim(_, c, _) | Mean::Char(c, _) => {
-                        c == cmd::MAC_PARAM || c == cmd::IF_TEST || c == cmd::FI_OR_ELSE
+                let looked_at = match crate::val::Mean::decode(v, Some(*x)) {
+                    crate::val::Mean::Prim(_, c, _) | crate::val::Mean::Char(c, _) => {
+                        c == crate::val::cmd::MAC_PARAM
+                            || c == crate::val::cmd::IF_TEST
+                            || c == crate::val::cmd::FI_OR_ELSE
                     }
                     // (§336: an `\\outer` macro in skipped text)
-                    Mean::Macro(m) => m.flags & 2 != 0,
+                    crate::val::Mean::Macro(m) => m.flags & 2 != 0,
                     _ => false,
                 };
                 if looked_at {
