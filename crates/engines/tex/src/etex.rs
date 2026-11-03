@@ -933,6 +933,27 @@ pub(crate) fn the_toks(r: &mut Run<'_, '_>) -> R<Vec<Tok>> {
     if c == 1 {
         return Ok(body);
     }
+    // (a file size's symbol stands for digits, which `\detokenize`
+    // makes into the same digits: it is kept, its stretches between
+    // shown as they are, docs/note-relative-counters.md §2.4; a control
+    // word's space after its name does not depend on what follows)
+    if body.iter().any(|&t| crate::defer::is_size(t)) {
+        let mut out = Vec::with_capacity(body.len());
+        for part in body.split_inclusive(|&t| crate::defer::is_size(t)) {
+            let (last, rest) = part
+                .split_last()
+                .map_or((None, part), |(l, r)| (Some(*l), r));
+            let (text, sym) = match last {
+                Some(l) if crate::defer::is_size(l) => (rest, Some(l)),
+                _ => (part, None),
+            };
+            let mut s = String::new();
+            r.show_toks_into(&mut s, text)?;
+            out.extend(str_toks(&s));
+            out.extend(sym);
+        }
+        return Ok(out);
+    }
     let mut s = String::new();
     r.show_toks_into(&mut s, &body)?;
     Ok(str_toks(&s))

@@ -1126,9 +1126,36 @@ impl Session {
             };
         }
         time!(
-            o, conf, dvi_filename, pdf_filename, dvi, dev, doc, draw, color, resource, font,
-            fontmap, tfm, vf, agl, encoding, cmap, cid, ximage, spc, pdfm, xtx, misc, html,
-            dvips, mpost, t1_char, cs_type2, session, runs
+            o,
+            conf,
+            dvi_filename,
+            pdf_filename,
+            dvi,
+            dev,
+            doc,
+            draw,
+            color,
+            resource,
+            font,
+            fontmap,
+            tfm,
+            vf,
+            agl,
+            encoding,
+            cmap,
+            cid,
+            ximage,
+            spc,
+            pdfm,
+            xtx,
+            misc,
+            html,
+            dvips,
+            mpost,
+            t1_char,
+            cs_type2,
+            session,
+            runs
         );
         out
     }

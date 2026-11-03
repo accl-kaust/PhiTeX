@@ -128,7 +128,7 @@ submit() {
 }
 
 # J...: "JobID|State" of all those jobs, one sacct call
-states() { $SSH $H "$slurm sacct -j $(IFS=,; echo "$*") -n -X -P -o JobID,State"; }
+states() { $SSH $SH "$slurm sacct -j $(IFS=,; echo "$*") -n -X -P -o JobID,State"; }
 
 # (the jobs not yet reported in one query a minute, each reported in
 # order once it and those before it ended; a query that fails, acclhead1
