@@ -1192,7 +1192,9 @@ impl<'a> Ctx<'a> {
     ///
     /// Not for a settling node, whose runs fold on from where they parked;
     /// not for one relocated (its definitions are filed where it stood:
-    /// `commit::relocate`), or asked for anything but a read (an edit, a
+    /// `commit::relocate`), or refuted by its own commit (the state it
+    /// parked rests on what moved, though the reads hold now:
+    /// `resumed_reread.rs`), or asked for anything but a read (an edit, a
     /// creation, the structure around it); not on a last run that met a
     /// hole, which it may find filled. The output of that run, if it stands.
     pub(crate) fn last_run_stands(&mut self) -> Option<ValueId> {
@@ -1200,6 +1202,7 @@ impl<'a> Ctx<'a> {
             self.woke,
             Some(Cause::Changed { .. } | Cause::Range { .. } | Cause::Rebind { .. } | Cause::Output { .. })
         ) || self.me.moved.load(std::sync::atomic::Ordering::Acquire)
+            || self.me.refuted.load(std::sync::atomic::Ordering::Acquire)
             || self.eng.op(self.me.op()).settles_at_quiet()
         {
             return None;

@@ -2160,6 +2160,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let now = read::answer_in(eng, node, &r.kind, r.path, &mut read::FoldMemo::new());
         note_refute(eng, f, node.id, None, r.seen, now);
     }
+    node.refuted
+        .store(refuted.is_some() || !replaced_moved.is_empty(), Ordering::Release);
     if let Some(i) = refuted {
         // (a range from a node, or a read at a node: the change lies
         // there; one from the unit's start names no node a run could go

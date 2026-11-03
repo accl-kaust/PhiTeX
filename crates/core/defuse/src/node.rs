@@ -155,6 +155,10 @@ pub(crate) struct Node {
     /// continuation (`Ctx::follow`). Those of a lower slot stand before
     /// those of a higher one.
     pub(crate) slot: AtomicU8,
+    /// Whether its last commit was refuted by the commit itself (a read it
+    /// resumed on moved): its record's reads may hold while the state it
+    /// parked rests on the old answers (`Ctx::last_run_stands`).
+    pub(crate) refuted: AtomicBool,
     /// How long its longest run that committed took, ns (`sched::work`).
     pub(crate) full_ns: AtomicU64,
     /// Its order among the nodes placed after the same anchor in slot 1
@@ -231,6 +235,7 @@ impl Node {
             slot: AtomicU8::new(0),
             rank: AtomicU64::new(0),
             full_ns: AtomicU64::new(0),
+            refuted: AtomicBool::new(false),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             bracket_gen: AtomicU64::new(0),
