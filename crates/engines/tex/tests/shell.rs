@@ -580,3 +580,66 @@ fn a_command_does_not_run_again_on_a_file_it_did_not_read() {
         fake.calls.lock().unwrap()
     );
 }
+
+/// A `\write` more to a file a run writes already leaves the names of
+/// the files the job writes as they were (a name once a run): a command
+/// answered from the memo, which reads those names, does not run again
+/// (on Grail a `\cite` of a cited key, a `\citation` more in the `.aux`,
+/// ran a minted listing's run again). The edited builds equal cold
+/// builds of their texts.
+#[test]
+fn a_write_more_to_a_written_file_does_not_run_a_command_again() {
+    let doc = |n: usize| {
+        format!(
+            r"\def\made{{none}}
+\immediate\openout5=other.txt {}\immediate\closeout5
+
+\immediate\openout4=inb.txt \immediate\write4{{beta}}\immediate\closeout4
+
+Between them.
+\immediate\write18{{fakecmd up inb.txt outb.tex}}
+\openin1=outb.tex \ifeof1 \else\closein1 \input outb.tex \fi
+{SHOW}
+\bye
+",
+            "\\immediate\\write5{x}".repeat(n)
+        )
+    };
+    let fake = Arc::new(Fake::default());
+    let mut b = common::build(
+        options("upw", Some(fake.clone()), 1),
+        Some(&common::plain()),
+        &doc(1),
+    );
+    assert_eq!(got(&b.output().1), ["BETA"]);
+    for n in [2, 3, 4] {
+        b.edit(&doc(n));
+        let reran: Vec<String> = b
+            .stats
+            .reruns
+            .iter()
+            .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+            .collect();
+        for r in &reran {
+            eprintln!("  {n}: rerun {r}");
+        }
+        let (dvi, log) = b.output();
+        assert_eq!(got(&log), ["BETA"], "{log}");
+        let cold = common::build(
+            options("upw", Some(Arc::new(Fake::default())), 1),
+            Some(&common::plain()),
+            &doc(n),
+        );
+        assert_eq!(
+            common::first_difference(&dvi, &cold.output().0),
+            None,
+            "{n}"
+        );
+        // (the first edit runs it again: its run handed the host every
+        // file, `a_command_does_not_run_again_on_a_file_it_did_not_read`)
+        assert!(
+            n == 2 || !reran.iter().any(|r| r.contains("Between them.")),
+            "{n}: the run of the command ran again: {reran:?}"
+        );
+    }
+}

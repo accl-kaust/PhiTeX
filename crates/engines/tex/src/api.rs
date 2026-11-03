@@ -8726,12 +8726,16 @@ fn declare_fields(eng: &Engine) {
     let mut per: Vec<Field> = (0..crate::run::STREAM_BUCKETS)
         .map(|k| eng.values().field(&format!("wstreams:{k}")))
         .collect();
-    per.push(eng.values().field(crate::run::WNAMES));
     per.push(eng.values().field(crate::shell::OUTS));
     per.push(eng.values().field(crate::shell::NAMES));
     for fld in per {
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));
     }
+    // (the names of the files the streams write, each once, in the
+    // order they first come: `\write`s more to a file written already
+    // leave the names as they were, `NamesMonoid`)
+    let wnames = eng.values().field(crate::run::WNAMES);
+    eng.declare_accumulator(wnames, Arc::new(NamesMonoid));
     let lines = eng.values().field("lines");
     eng.declare_accumulator(lines, Arc::new(LinesMonoid));
     let allocs = eng.values().field(crate::pdfout::ALLOCS);
@@ -8760,6 +8764,34 @@ fn declare_fields(eng: &Engine) {
 /// The `lines` accumulator: the lines of documents' pieces begun, by
 /// file name, as `[[name, count], ...]` sorted by name
 /// ([`crate::run::Run::doc_lines`]).
+/// The names of the files the job's streams write ([`crate::run::WNAMES`]):
+/// a sequence of names, each once, in the order they first come. Its
+/// readers take it as a set (the files' root, a command's view of the
+/// files, `crate::shell`), so a node's `\write` more to a file written
+/// before it, one entry more in the stream, leaves it as it was: a
+/// `\cite` added to Grail's text, a `\citation` more in the `.aux`,
+/// ran a minted listing's run again (`exec <- wnames`, 65 ms).
+struct NamesMonoid;
+
+impl phitex_defuse::Monoid for NamesMonoid {
+    fn empty(&self, _: &Values) -> ValueId {
+        ValueId::NIL
+    }
+
+    fn combine(&self, v: &Values, a: ValueId, b: ValueId) -> ValueId {
+        let xs = v.seq_to_vec(a);
+        let new: Vec<ValueId> = {
+            let mut seen: crate::FxHashMap<ValueId, ()> = xs.iter().map(|&x| (x, ())).collect();
+            v.seq_to_vec(b)
+                .into_iter()
+                .filter(|&n| seen.insert(n, ()).is_none())
+                .collect()
+        };
+        new.into_iter()
+            .fold(a, |acc, n| v.seq_concat(acc, v.seq_unit(n)))
+    }
+}
+
 struct LinesMonoid;
 
 impl phitex_defuse::Monoid for LinesMonoid {
