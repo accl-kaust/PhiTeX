@@ -269,6 +269,23 @@ impl Worker {
         }
     }
 
+    /// A node just put on its ready heap: another worker woken only for
+    /// work this one will not run next, its own next node among what it
+    /// queues. A wake per node handed every step of a chain, a page's
+    /// finisher to the page's fold to the next finisher, to a worker
+    /// with none of the run's tables and none of its cache: the steps ran
+    /// one after another all the same, each 1.5 times as long as on one
+    /// worker and through a futex (Grail, a sentence: its 18 finishers
+    /// 89 ms at -j1, 180 ms at -j8, with no two running at once).
+    /// What is passed over here is found by an idle worker's next look
+    /// (`idle_wait`'s timeout) at the latest.
+    pub(crate) fn wake_for_more(&self) {
+        let sh = &self.shared;
+        if self.ready().len() + self.block.len() >= 2 {
+            sh.wake_one();
+        }
+    }
+
     /// Seeds the block with nodes to run in this order.
     pub(crate) fn seed(&self, nodes: &[NodeId]) {
         let run = self.block_runs.fetch_add(1, Ordering::Relaxed);
@@ -427,6 +444,10 @@ const SPINS: u32 = 64;
 /// reaches it (`commit::first_hole`), not once per definer before it.
 const BLOCK_MIN: usize = 96;
 const BLOCK_STEAL: usize = 32;
+/// An idle worker with no wake looks for work again after this (the
+/// caller's, which also asks for edits and starts the spare workers, after
+/// [`ABSORB_EVERY`]).
+const IDLE_LOOK: Duration = Duration::from_millis(20);
 /// Edits are asked for this often from the caller's thread.
 const ABSORB_EVERY: Duration = Duration::from_millis(2);
 
@@ -874,11 +895,12 @@ impl Pool {
             if self.shared.wakes.load(Ordering::SeqCst) != seen {
                 continue;
             }
-            // (the timeout only guards a lost wakeup; a short one would
-            // have idle workers preempting the busy ones every few
-            // microseconds)
+            // (the timeout only guards a lost wakeup; a short one has idle
+            // workers preempting the busy ones, and with 31 of them on 2 ms
+            // one looked every 65 microseconds and took the node a worker
+            // had just queued for itself)
             drop(
-                cv.wait_timeout(g, Duration::from_millis(2))
+                cv.wait_timeout(g, if w.ix == 0 { ABSORB_EVERY } else { IDLE_LOOK })
                     .unwrap_or_else(PoisonError::into_inner),
             );
         };
@@ -1187,7 +1209,7 @@ pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wak
             if sh.spawned.load(Ordering::Relaxed) < sh.n && w.ready().len() >= 2 {
                 sh.want_spawn.store(true, Ordering::SeqCst);
             }
-            sh.wake_one();
+            w.wake_for_more();
         }
         None => eng.pend(n.id),
     }
@@ -1206,7 +1228,7 @@ pub(crate) fn requeue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>) {
     }
     w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
     w.ready().push(eng, n);
-    w.shared.wake_one();
+    w.wake_for_more();
 }
 
 /// A walk's re-ask: marks a clean node dirty and queues it. A running node
@@ -1960,7 +1982,7 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
         }
         if to == State::Dirty && !defer(eng, &pool.shared, node.id) {
             w.ready().push(eng, node);
-            w.shared.wake_one();
+            w.wake_for_more();
         } else {
             pool.shared.done_one();
         }
@@ -2011,7 +2033,7 @@ fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<N
     if committed(on) {
         drop(m);
         w.ready().push(eng, node);
-        w.shared.wake_one();
+        w.wake_for_more();
         return;
     }
     m.entry(on).or_default().push(node.id);
@@ -2083,7 +2105,7 @@ fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
     if !held() {
         drop(m);
         w.ready().push(eng, node);
-        w.shared.wake_one();
+        w.wake_for_more();
         return;
     }
     m.push(node.id);
