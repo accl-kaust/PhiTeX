@@ -1245,3 +1245,48 @@ fn a_run_goes_on_from_a_checkpoint_inside_an_alignment() {
         }
     }
 }
+
+/// A macro that reads two job-written files back with much work between
+/// (LaTeX's `\document`: the `.aux`, the packages' hooks, then the
+/// `.out`): an edit that changes only what the second file says wakes
+/// the macro's run for its read of that file, and the run goes on from
+/// a checkpoint taken after the first read-back, with the read-back's
+/// state carried (its macro's level marked on the input, the values
+/// noted at the point), not from its start; the output and log are a
+/// cold build's, at 1 and 8 threads. Checkpoints were refused while a
+/// read-back's macro ran: Grail's heading edit ran `\begin{document}`'s
+/// node whole again for its `.out` (140 ms).
+#[test]
+fn a_run_goes_on_from_a_checkpoint_between_two_read_backs() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-read-back");
+    let _ = std::fs::create_dir_all(&dir);
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\def\\xa{{?}}\\def\\xb{{?}}\n\\def\\begindoc{{\\openin3=\\jobname.xa \\ifeof3 \\closein3 \\else\\closein3 \\input\\jobname.xa \\fi\n\\count255=0 \\loop\\advance\\count255 1 \\expandafter\\edef\\csname w\\the\\count255\\endcsname{{\\the\\count255}}\\ifnum\\count255<3000 \\repeat\n\\openin3=\\jobname.xb \\ifeof3 \\closein3 \\else\\closein3 \\input\\jobname.xb \\fi\n\\immediate\\openout1=\\jobname.xa \\immediate\\openout2=\\jobname.xb }}\n\\begindoc\nText \\xa\\ and \\xb\\ and \\csname w2999\\endcsname.\n\n\\immediate\\write1{{\\noexpand\\def\\noexpand\\xa{{A}}}}\n\\immediate\\write2{{\\noexpand\\def\\noexpand\\xb{{{m}}}}}\n\\bye\n"
+        )
+    };
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./rb.tex", "rb", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+            let text = doc(m);
+            b.edit(&text);
+            let cold = common::build(opts(), Some(&prelude), &text);
+            let (out, log) = b.output();
+            let (cold_out, cold_log) = cold.output();
+            assert!(
+                common::first_difference(&out, &cold_out).is_none(),
+                "{t} threads, edit {k} (\\xb={m}): the output is not the cold build's"
+            );
+            assert_eq!(log, cold_log, "{t} threads, edit {k}: the log is the cold build's");
+            assert!(
+                b.stats.resumed_at_mark > 0,
+                "{t} threads, edit {k}: the macro's run went on from a checkpoint after the first read-back"
+            );
+        }
+    }
+}

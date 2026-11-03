@@ -268,6 +268,10 @@ pub(crate) struct Level {
     pub a: u32,
     pub b: u32,
     pub c: u32,
+    /// The macro that read a job-written file back ([`crate::run::Run::read_back_at`]):
+    /// while this level is on the stack, the run's definitions keep their
+    /// value at the read-back (a checkpoint's input carries it).
+    pub rb: bool,
 }
 
 impl Level {
@@ -279,6 +283,7 @@ impl Level {
             a: r.start,
             b: r.end,
             c: r.start,
+            rb: false,
         }
     }
 
@@ -290,6 +295,7 @@ impl Level {
             a: u32::try_from(i).unwrap_or(u32::MAX),
             b: 0,
             c: 0,
+            rb: false,
         }
     }
 
@@ -301,6 +307,7 @@ impl Level {
             a: u32::try_from(i).unwrap_or(u32::MAX),
             b: 0,
             c: 0,
+            rb: false,
         }
     }
 

@@ -233,7 +233,7 @@ impl Run<'_, '_> {
     /// joined by `+`.
     fn ck_refusal(&self) -> String {
         let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
-        let checks: [(bool, &'static str); 26] = [
+        let checks: [(bool, &'static str); 24] = [
             (self.input.levels.is_empty(), "no input"),
             (
                 !self.input.levels.iter().skip(1).all(toks)
@@ -258,12 +258,7 @@ impl Run<'_, '_> {
             (self.chars_live.is_some(), "chars live"),
             (self.interp.is_some(), "interpreting a line"),
             (self.scanner.is_some(), "scanner"),
-            (!self.pending_pre.is_empty(), "pending pre"),
             (!self.incs.is_empty(), "incompleat noad"),
-            (
-                self.read_point_pending.is_some() || !self.vain_after_point.is_empty(),
-                "read point",
-            ),
             (!self.seeded.is_empty(), "seeded"),
             (self.defer_hit.is_some(), "defer"),
             (self.mode_zero, "mode zero"),
@@ -285,8 +280,7 @@ impl Run<'_, '_> {
         let mut all: Vec<&str> = checks.iter().filter(|c| c.0).map(|c| c.1).collect();
         // (and those of a checkpoint anywhere, when none at the line)
         if !self.input.levels.is_empty() && self.ck_where_line().is_none() {
-            let anywhere: [(bool, &'static str); 3] = [
-                (self.read_back_at.is_some(), "a read-back level"),
+            let anywhere: [(bool, &'static str); 2] = [
                 (self.pull_orig.iter().any(Option::is_some), "a pulled line kept"),
                 (
                     self.pull_at.len() != self.pulled || self.pull_box.len() != self.pulled,
@@ -323,10 +317,7 @@ impl Run<'_, '_> {
             || self.chars_live.is_some()
             || self.interp.is_some()
             || self.scanner.is_some()
-            || !self.pending_pre.is_empty()
             || !self.incs.is_empty()
-            || self.read_point_pending.is_some()
-            || !self.vain_after_point.is_empty()
             || !self.seeded.is_empty()
             || self.defer_hit.is_some()
             || self.mode_zero
@@ -342,8 +333,7 @@ impl Run<'_, '_> {
         // (anywhere else: in a group or a box, in a file, in a sibling's
         // text, in an alignment (its state in `Run::ck_run_state`); not
         // where a give-back would read a line a park left)
-        if self.read_back_at.is_some()
-            || self.pull_orig.iter().any(Option::is_some)
+        if self.pull_orig.iter().any(Option::is_some)
             || self.pull_at.len() != self.pulled
             || self.pull_box.len() != self.pulled
             || crate::exec::obs_flag!("PHITEX_CK_LINE_ONLY")
@@ -382,7 +372,10 @@ impl Run<'_, '_> {
     /// and the characters the run appended to it.
     fn ck_where_line(&self) -> Option<(usize, u32, u8, i64, Vec<u32>)> {
         let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
+        // (a read-back's macro on the stack: only anywhere, whose input
+        // carries its mark)
         if !self.input.levels[1..].iter().all(toks)
+            || self.input.levels.iter().any(|l| l.rb)
             || self.pulled != 0
             || self.nest.len() != 1
             || self.nest[0].mode != HMODE
@@ -732,6 +725,7 @@ impl Run<'_, '_> {
                         int(i64::from(l.ty)),
                         crate::val::toks_value(v, toks),
                         int(i64::from(l.a - l.c)),
+                        int(i64::from(l.rb)),
                     ])
                 }
                 kind::LINE => {
@@ -821,13 +815,16 @@ impl Run<'_, '_> {
         input.text_at = at;
         for e in list_of(v, levels) {
             match list_of(v, e)[..] {
-                [k, ty, t, read] if int_of(v, k) == i64::from(kind::TOKS) => {
+                [k, ty, t, read, rb] if int_of(v, k) == i64::from(kind::TOKS) => {
                     let toks = crate::val::toks_of(v, Some(t));
                     input.push_toks_at(
                         &toks,
                         n(read).unwrap_or(0),
                         u8::try_from(int_of(v, ty)).unwrap_or(0),
                     );
+                    if let Some(l) = input.levels.last_mut() {
+                        l.rb = int_of(v, rb) != 0;
+                    }
                 }
                 [k, l] if int_of(v, k) == i64::from(kind::LINE) => {
                     input.push_line(crate::input::Line::of_value(v, l)?);
@@ -972,7 +969,71 @@ impl Run<'_, '_> {
             // far), the table (its preamble) and the input (its templates))
             v.list(self.astate.into_iter().map(int).collect()),
             int(self.aopen),
+            self.ck_read_back(),
         ])
+    }
+
+    /// A read-back's state as the run has it (its macro's level is marked
+    /// on the input, `Level::rb`): whether the run read a file back and
+    /// is a read-back point, the locations whose value there it noted, a
+    /// pending point with the values kept for it, and the files looked
+    /// for in vain after the point ([`Run::note_pre`],
+    /// [`Run::ck_read_back_restore`]).
+    fn ck_read_back(&mut self) -> ValueId {
+        let v = self.v;
+        let int = |x: i64| v.int(x);
+        let mut noted: Vec<crate::state::Loc> = self.pre_noted.iter().copied().collect();
+        noted.sort_unstable();
+        let noted: Vec<ValueId> = noted.into_iter().map(|l| self.loc_field(l).0).collect();
+        let pre: Vec<ValueId> = self
+            .pending_pre
+            .clone()
+            .into_iter()
+            .map(|(l, x)| v.list(vec![self.loc_field(l).0, x]))
+            .collect();
+        v.list(vec![
+            int(i64::from(self.read_back_at.is_some())),
+            int(i64::from(self.read_back_done)),
+            int(i64::from(self.read_point_here)),
+            v.list(noted),
+            v.list(self.read_point_pending.iter().map(|p| v.str(p)).collect()),
+            v.list(pre),
+            v.list(self.vain_after_point.iter().map(|p| v.str(p)).collect()),
+        ])
+    }
+
+    /// [`Run::ck_read_back`]'s state put back.
+    fn ck_read_back_restore(&mut self, x: ValueId) {
+        let v = self.v;
+        let [at, done, here, noted, pending, pre, vain] = list_of(v, x)[..] else {
+            return;
+        };
+        // (its level, if still on the stack, came back marked with the
+        // input; the level itself is not needed, only that there was one)
+        self.read_back_at = (int_of(v, at) != 0).then(crate::input::Level::default);
+        self.read_back_ix.set(None);
+        self.read_back_done = int_of(v, done) != 0;
+        self.read_point_here = int_of(v, here) != 0;
+        self.pre_noted = list_of(v, noted)
+            .into_iter()
+            .map(|f| self.loc_of(Field(f)))
+            .collect();
+        self.read_point_pending = list_of(v, pending)
+            .first()
+            .map(|&p| crate::val::str_of(v, p));
+        self.pending_pre.clear();
+        self.pending_locs.clear();
+        for e in list_of(v, pre) {
+            if let [f, y] = list_of(v, e)[..] {
+                let l = self.loc_of(Field(f));
+                self.pending_pre.push((l, y));
+                self.pending_locs.insert(l);
+            }
+        }
+        self.vain_after_point = list_of(v, vain)
+            .iter()
+            .map(|&p| crate::val::str_of(v, p))
+            .collect();
     }
 
     /// [`Run::ck_run_state`]'s parts put back.
@@ -993,10 +1054,12 @@ impl Run<'_, '_> {
             closed,
             astate,
             aopen,
+            read_back,
         ] = xs[..]
         else {
             return;
         };
+        self.ck_read_back_restore(read_back);
         self.astate = list_of(v, astate).first().map(|&x| int_of(v, x));
         self.aopen = int_of(v, aopen);
         self.closed = list_of(v, closed)
