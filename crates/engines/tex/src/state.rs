@@ -853,6 +853,9 @@ impl State {
         }
         let n = u32::try_from(spill).unwrap_or(u32::MAX);
         self.numbered.retain(|_, i| *i < n);
+        // (a font cell whose slot went with them: a checkpoint names each
+        // of these by its field, and a location with no slot has none)
+        self.font_slow.retain(|&l| l & SPILL == 0 || l & !SPILL < n);
         self.save = u.save;
         self.defined = u.defined;
         self.scope_extra = u.scope_extra;
@@ -3472,6 +3475,26 @@ mod tests {
     /// A cut inside a group: a global definition made there with no save
     /// of its location open is not carried; a location the open group
     /// saved keeps its slot and its mark.
+    /// A font's cell noted past a checkpoint and rolled back: its slot is
+    /// gone, so it is no font cell here. Kept, a checkpoint asked this
+    /// location's field, had none to find, and the answer poisoned a
+    /// thread's names (`cs:` at another run's location: arabtex-doc's
+    /// expanded fonts lost their `\fontdimen`s in the run gone on from it).
+    #[test]
+    fn a_rollback_drops_the_font_cells_of_the_slots_it_drops() {
+        let v = Values::new();
+        let mut st = State::new();
+        let kept = st.spill_loc(v.field("fd:1:1"));
+        st.note_font_loc(kept);
+        assert!(st.checkpoint());
+        let gone = st.spill_loc(v.field("fd:1:2"));
+        st.note_font_loc(gone);
+        st.rollback();
+        assert!(st.field(gone).is_none());
+        assert!(st.font_slow.contains(&kept));
+        assert!(!st.font_slow.contains(&gone));
+    }
+
     #[test]
     fn a_continuation_carries_only_what_the_engine_does_not_hold() {
         let v = Values::new();

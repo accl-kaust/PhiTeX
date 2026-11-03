@@ -572,6 +572,8 @@ impl Fields {
         if loc < NSLOT {
             return self.slot_field[loc];
         }
+        // (a spill location is its table's own: its field is in its slot)
+        debug_assert!(loc < 1 << 31, "field of a spill location {loc}");
         let key = u32::try_from(loc).unwrap_or(u32::MAX);
         if let Some(f) = with_names(v, epoch, |c| c.fields.get(&key).copied()) {
             return f;
@@ -602,9 +604,11 @@ impl Fields {
         } else {
             Tok::ch(13, u32::try_from(loc - MEAN_ACTIVE).unwrap_or(0))
         };
-        let f = self
-            .meaning_at(v, epoch, t)
-            .unwrap_or_else(|| v.field("cs:"));
+        // (no meaning here: no name to keep; `cs:` kept at this location
+        // would send the empty name's readers to it)
+        let Some(f) = self.meaning_at(v, epoch, t) else {
+            return v.field("cs:");
+        };
         with_names(v, epoch, |c| {
             bounded(&mut c.locs);
             c.locs.insert(f, u32::try_from(loc).ok());
