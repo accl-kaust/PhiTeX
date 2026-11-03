@@ -1110,6 +1110,29 @@ impl Session {
         out
     }
 
+    /// The time `clock` gives each part of the state's copy
+    /// ([`Session::snapshot`]'s), by part (a diagnostic).
+    #[must_use]
+    pub fn clone_timed(&self, clock: &dyn Fn() -> u64) -> Vec<(&'static str, u64)> {
+        let a = &*self.dpx;
+        let mut out = Vec::new();
+        macro_rules! time {
+            ($($f:ident),*) => {
+                $({
+                    let t = clock();
+                    let _ = core::hint::black_box(a.$f.clone());
+                    out.push((stringify!($f), clock().saturating_sub(t)));
+                })*
+            };
+        }
+        time!(
+            o, conf, dvi_filename, pdf_filename, dvi, dev, doc, draw, color, resource, font,
+            fontmap, tfm, vf, agl, encoding, cmap, cid, ximage, spc, pdfm, xtx, misc, html,
+            dvips, mpost, t1_char, cs_type2, session, runs
+        );
+        out
+    }
+
     /// The parts of the state in which this session and `o` differ,
     /// named (a diagnostic of [`Session::converged`]).
     #[must_use]

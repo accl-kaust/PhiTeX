@@ -855,16 +855,33 @@ fn live(
     let mut s = b.post.session();
     s.set_files(files);
     let t_snap = t0.elapsed();
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+        let c = std::time::Instant::now();
+        let clock = || u64::try_from(c.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let parts: Vec<String> = s
+            .clone_timed(&clock)
+            .into_iter()
+            .filter(|p| p.1 >= 100)
+            .map(|(w, us)| format!("{w} {us} µs"))
+            .collect();
+        eprintln!(
+            "xdv pdf: live: the session's copy by part ({} grafts): {}",
+            b.post.grafts.len(),
+            parts.join(", ")
+        );
+    }
     let mut w = b.post.w.clone();
     // (each page's operations and specials on the document; the pages to
     // write again)
     let mut again: Vec<(usize, Vec<Op>)> = Vec::new();
     let mut docs: Vec<Arc<Docs>> = Vec::with_capacity(n);
+    let mut n_walked = 0usize;
     for (i, p) in walks.iter().enumerate() {
         if i < bn && Arc::ptr_eq(p, &b.walks[i]) {
             docs.push(b.docs[i].clone());
             continue;
         }
+        n_walked += 1;
         let Some(ops) = walk(&mut w, p, defs, origins) else {
             return Err(format!("page {} is not shipped", i + 1));
         };
@@ -1003,7 +1020,7 @@ fn live(
         (p.found, p.made)
     };
     let times = format!(
-        "the session taken {t_snap:?}, walk {t_walk:?}, the pages written {t_pages:?}, end {t_end:?} ({}; streams found compressed {} of {} bytes, compressed {} of {} bytes){}{}",
+        "the session taken {t_snap:?}, {n_walked} pages walked {t_walk:?}, the pages written {t_pages:?}, end {t_end:?} ({}; streams found compressed {} of {} bytes, compressed {} of {} bytes){}{}",
         steps.join(", "),
         found.0,
         found.1,
@@ -1144,6 +1161,7 @@ pub(crate) fn file(
     packed_next();
     // (each page decoded once while it is the same)
     let t = std::time::Instant::now();
+    let mut n_decoded = 0usize;
     let walks: Vec<Arc<Walk>> = {
         let b = base.as_ref().map(|b| b.locked());
         let mut old: phitex_defuse::FxHashMap<u64, &Arc<Walk>> =
@@ -1154,8 +1172,13 @@ pub(crate) fn file(
         pages
             .iter()
             .map(|pg| {
-                old.get(&pg.raw())
-                    .map_or_else(|| Arc::new(Walk::of(v, *pg)), |w| Arc::clone(w))
+                old.get(&pg.raw()).map_or_else(
+                    || {
+                        n_decoded += 1;
+                        Arc::new(Walk::of(v, *pg))
+                    },
+                    |w| Arc::clone(w),
+                )
             })
             .collect()
     };
@@ -1188,7 +1211,7 @@ pub(crate) fn file(
             shown(cx, pages, &walks, &defs, &nums, inst);
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 eprintln!(
-                    "xdv pdf: live: {k} of {} pages written again: files checked {t_files:?}, pages decoded {t_decode:?}, link {:?} ({times}), in all {:?}",
+                    "xdv pdf: live: {k} of {} pages written again: files checked {t_files:?}, {n_decoded} pages decoded {t_decode:?}, link {:?} ({times}), in all {:?}",
                     pages.len(),
                     t.elapsed(),
                     t0.elapsed()
