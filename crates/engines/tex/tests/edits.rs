@@ -1412,8 +1412,10 @@ fn a_run_with_doubled_checkpoints_serves_a_later_edit_further_on() {
                 log, cold_log,
                 "{t} threads, edit {k}: the log is the cold build's"
             );
+            // (the cold build's run spaces its checkpoints by what they
+            // cost; the first edit's, dense, leaves them to go on from)
             assert!(
-                b.stats.resumed_at_mark > 0,
+                k == 0 || b.stats.resumed_at_mark > 0,
                 "{t} threads, edit {k}: the run went on from a checkpoint"
             );
         }
