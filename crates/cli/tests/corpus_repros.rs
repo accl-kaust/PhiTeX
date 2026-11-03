@@ -967,3 +967,16 @@ fn text_ends_without_end_xe() {
 fn pdf_omit_params() {
     check_threads("pdf_omit_params", "pdf");
 }
+
+/// TeX Live manual showexpl-test (xelatex): an included PDF's form whose
+/// `/Length` is an indirect object. xdvipdfmx imports that object with
+/// the form (`pdf_import_object` of the stream's dictionary) and writes
+/// it when the file it was read from is let go, `pdf_files_close` after
+/// the fonts; PhiTeX's writer never let the files go, so the object was
+/// never written and its number was left empty (showexpl's included
+/// picture: two Type1C font files' lengths). At -j1 and -j4 (oracle:
+/// xelatex in the CI image, mc 79161).
+#[test]
+fn xe_import_length() {
+    check_threads("xe_import_length", "pdf");
+}
