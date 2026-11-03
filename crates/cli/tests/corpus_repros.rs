@@ -1045,6 +1045,52 @@ fn line_end_tab() {
     check_threads("line_end_tab", "pdf");
 }
 
+/// TeX Live manual `moderncv_userguide` (pdflatex): a footnote inside
+/// `multicols`, put back after it. multicol multiplies `\count\footins`
+/// and `\skip\footins` by its columns, locally in its group; the routine
+/// run at the environment's end sees those values and the builder took
+/// them from its give-back, where the group's end after it defines
+/// nothing: the page's goal lost three times the footnote's height. At
+/// -j1 and -j4 (oracle: pdftex in the CI image, accl 23665).
+#[test]
+fn multicol_footnote_after() {
+    check_threads("multicol_footnote_after", "pdf");
+}
+
+/// TeX Live manual texlive-vpat (pdflatex): a link over three lines of a
+/// paragraph in a box on a line. A sealed line's skeleton kept only the
+/// boxes with whatsits in them, so the read-time fold of a page's objects
+/// (`mark_events`) missed the link's piece on the middle line, and every
+/// read-time object number after it was one low: pointers to struct
+/// elements and pages one before their objects. At -j1 and -j4 (oracle:
+/// pdftex in the CI image, accl 23719).
+#[test]
+fn link_over_plain_line() {
+    check_threads("link_over_plain_line", "pdf");
+}
+
+/// TeX Live manual texlive-vpat (pdflatex): `\pdffilemoddate` is the
+/// file's own time, in UTC under `FORCE_SOURCE_DATE`, which pins no file's
+/// date (utils.c `getfilemoddate`); `PhiTeX` gave `SOURCE_DATE_EPOCH`. A
+/// tagged document embeds its `.css` with it, `/ModDate` in the file's
+/// `/Params`. At -j1 and -j4 (oracle: pdftex in the CI image, mc 79410).
+#[test]
+fn file_mod_date() {
+    check_threads("file_mod_date", "pdf");
+}
+
+/// TeX Live manuals knowledge and minutes (pdflatex): a page fires where a
+/// paragraph starts inside a conditional of the piece's own, and the run
+/// reads `\value{page}` after it (`\setcounter{page}{\value{page}}`). A cut
+/// at such a candidate is what a second pass can make (`par_cut`), and
+/// `Run::order_after_own_page` did not take it: the read stood with the value
+/// from before the routine, and put back, undid its step. At -j1 and -j4
+/// (oracle: pdftex in the CI image, mc 79427; the base differs, mc 79428).
+#[test]
+fn page_read_after_par_in_cond() {
+    check_threads("page_read_after_par_in_cond", "pdf");
+}
+
 /// `\pdfsavepos` in right-to-left text: the number TeX reads back is
 /// where the output puts the whatsit, in the reversed segment (it was the
 /// list's order: fariscovernew's pgf pictures in an RTL paragraph, placed

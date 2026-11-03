@@ -1597,10 +1597,34 @@ fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), E
     })
 }
 
+/// A run this long, as its node's longest one that committed took (its
+/// last may be a short one on a value on the way, where the routine's
+/// long part did not run: then it committed that, and the text after it
+/// ran the same 4 s at once, Grail's lastpage hook, accl 23633), starts
+/// only once every node before it in its unit has settled: run sooner, on
+/// what those nodes have not said yet, it is seconds thrown away (Grail's
+/// \cite at -j8: the last pages' finishers, 4.1 s of hyperxmp each, on
+/// values among finishers that were still running, where -j1 ran neither,
+/// accl 23609). One asked for a change that holds then runs once; one
+/// whose reads have come back runs nothing (`Ctx::last_run_stands`). The
+/// order of the runs only: what they make is what they read.
+const LONG_RUN_NS: u64 = 100_000_000;
+
 fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
     let node = eng.node(n);
     if !node.cas_state(State::Dirty, State::Running) {
         pool.shared.done_one();
+        return Ok(());
+    }
+    // (a long run waits for the nodes before it: `LONG_RUN_NS`)
+    if node.full_ns.load(Ordering::Relaxed) >= LONG_RUN_NS
+        && node.run_record().is_some_and(|r| r.state.is_none())
+        && let Some(x) = crate::read::on_one_layout(eng, || crate::read::unsettled_before(eng, node))
+    {
+        if run_log() {
+            eprintln!("long: node {} waits for {}", n.raw(), x.raw());
+        }
+        park_waiting(eng, pool, w, node, Some(x));
         return Ok(());
     }
     // (one that stopped at the frontier before: not begun past it, where
@@ -1643,9 +1667,14 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     node.held_panic.store(false, Ordering::Release);
     let mut cx = Ctx::new(eng, Some(w), node);
     let retries0 = crate::read::retries();
-    let r = catch_unwind(AssertUnwindSafe(|| op.run(&mut cx)));
+    let stands = cx.last_run_stands();
+    let r = match stands {
+        Some(out) => Ok(Ok(out)),
+        None => catch_unwind(AssertUnwindSafe(|| op.run(&mut cx))),
+    };
     if run_log() {
         let how = match &r {
+            Ok(Ok(_)) if stands.is_some() => "stands".to_owned(),
             Ok(Ok(_)) => "ok".to_owned(),
             Ok(Err(_)) if cx.wait_frontier => "held at the frontier".to_owned(),
             Ok(Err(_)) => match cx.wait_on {
@@ -1806,6 +1835,9 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             Ok(())
         }
         Ok(Ok(out)) => {
+            if stands.is_none() {
+                node.full_ns.fetch_max(run_ns, Ordering::Relaxed);
+            }
             debug_assert!(
                 !cx.wait_frontier,
                 "node {} ended its run past a stop at the frontier that it did not return",
