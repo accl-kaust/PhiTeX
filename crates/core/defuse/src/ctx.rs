@@ -1195,8 +1195,9 @@ impl<'a> Ctx<'a> {
     /// `commit::relocate`), or refuted by its own commit (the state it
     /// parked rests on what moved, though the reads hold now:
     /// `resumed_reread.rs`), or asked for anything but a read (an edit, a
-    /// creation, the structure around it); not on a last run that met a
-    /// hole, which it may find filled. The output of that run, if it stands.
+    /// creation, the structure around it). A hole it met is a read like
+    /// the others: filled since, it does not hold. The output of that run,
+    /// if it stands.
     pub(crate) fn last_run_stands(&mut self) -> Option<ValueId> {
         if crate::sched::run_log() && self.me.full_ns.load(std::sync::atomic::Ordering::Relaxed) >= 100_000_000 {
             eprintln!(
@@ -1223,7 +1224,7 @@ impl<'a> Ctx<'a> {
         if !r
             .reads
             .iter()
-            .all(|rd| !matches!(rd.kind, ReadKind::Hole) && crate::read::holds(self.eng, self.me, rd, &mut memo))
+            .all(|rd| crate::read::holds(self.eng, self.me, rd, &mut memo))
         {
             if crate::sched::run_log() && self.me.full_ns.load(std::sync::atomic::Ordering::Relaxed) >= 100_000_000 {
                 let v = &self.eng.values;
