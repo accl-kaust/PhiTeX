@@ -101,6 +101,7 @@ impl<'a> Ctx<'a> {
                 defs: Vec::new(),
                 contribs: Vec::new(),
                 reads: Vec::new(),
+                sources: Vec::new(),
                 placements: Vec::new(),
                 ranks: Vec::new(),
                 claim: 0,
@@ -183,6 +184,15 @@ impl<'a> Ctx<'a> {
         });
     }
 
+    /// The node whose definition a read got (`RunRecord::sources`).
+    fn note_source(&mut self, by: Option<NodeId>) {
+        if let Some(by) = by
+            && self.product.sources.last() != Some(&by)
+        {
+            self.product.sources.push(by);
+        }
+    }
+
     /// Loads `f`'s change count before a read of it ([`ReadRec::epoch`]).
     fn before_read(&mut self, f: Field) {
         self.ep = self.eng.field_epoch(f);
@@ -218,6 +228,7 @@ impl<'a> Ctx<'a> {
         let mut pairs = Vec::with_capacity(fields.len());
         for f in fields {
             let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+            self.note_source(r.by);
             if let Some(x) = r.value {
                 pairs.push(v.list(vec![f.0, x]));
             }
@@ -254,6 +265,7 @@ impl<'a> Ctx<'a> {
         }
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        self.note_source(r.by);
         self.wait_for_settling(&r)?;
         self.hold_at_frontier(f)?;
         self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
@@ -395,6 +407,7 @@ impl<'a> Ctx<'a> {
             ),
         };
         if let (Some(x), Anchor::Before(_) | Anchor::AfterOwn(_)) = (&r, &anchor) {
+            self.note_source(x.by);
             self.wait_for_settling(x)?;
             self.hold_at_frontier(f)?;
         }
@@ -438,6 +451,7 @@ impl<'a> Ctx<'a> {
         self.check()?;
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        self.note_source(r.by);
         if let Some(x) = r.value
             && read::alias_of(self.values(), x).is_some()
         {
@@ -455,6 +469,7 @@ impl<'a> Ctx<'a> {
         self.check()?;
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        self.note_source(r.by);
         let seen = through(self.eng, r, SITE);
         self.record(ReadKind::Field { f, at: Anchor::Me }, SITE, seen);
         Ok(r.by)
@@ -674,6 +689,7 @@ impl<'a> Ctx<'a> {
         self.check()?;
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        self.note_source(r.by);
         self.views.push(ViewRec {
             kind: ReadKind::Field { f, at: Anchor::Me },
             path: PathId::WHOLE,

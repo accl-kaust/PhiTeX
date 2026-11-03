@@ -445,6 +445,10 @@ pub(crate) struct RunRecord {
     pub(crate) defs: Vec<DefRec>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) reads: Vec<ReadRec>,
+    /// The nodes whose definitions its reads got, each once (those it
+    /// kept from its last run's with them): what its next run waits for
+    /// (`read::open_definer_before`). A hint.
+    pub(crate) sources: Box<[NodeId]>,
     /// Its placements in order (`Ctx::child`, `Ctx::follow`), matched by
     /// (op, args) at the next commit so unchanged ones are kept.
     pub(crate) placed: Vec<NodeId>,
@@ -470,6 +474,7 @@ impl RunRecord {
             defs,
             contribs: Vec::new(),
             reads: Vec::new(),
+            sources: Box::default(),
             placed: Vec::new(),
             claim: 0,
             state: None,
@@ -600,6 +605,8 @@ pub(crate) struct Product {
     pub(crate) defs: Vec<DefRec>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) reads: Vec<ReadRec>,
+    /// The nodes whose definitions the reads got (`RunRecord::sources`).
+    pub(crate) sources: Vec<NodeId>,
     pub(crate) placements: Vec<Placement>,
     /// The placements' ranks (`Ctx::rank_placement`), by index; one past
     /// the end is 0.

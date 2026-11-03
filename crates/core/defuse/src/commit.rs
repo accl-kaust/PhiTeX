@@ -1049,6 +1049,18 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             r.shrink_to_fit();
             r
         },
+        sources: {
+            let mut s = std::mem::take(&mut p.sources);
+            if (p.unchanged || p.resumed.get())
+                && let Some(r) = node.record()
+            {
+                s.extend_from_slice(&r.sources);
+            }
+            s.sort_unstable();
+            s.dedup();
+            s.retain(|&x| x != node.id);
+            s.into_boxed_slice()
+        },
         // (`placed`, swapped in under the lock)
         placed: Vec::new(),
         claim: p.claim,
@@ -4145,6 +4157,7 @@ pub(crate) fn edit_placed(eng: &Engine, placer: NodeId, f: impl FnOnce(&mut Vec<
         defs: r.defs.clone(),
         contribs: r.contribs.clone(),
         reads: r.reads.clone(),
+        sources: r.sources.clone(),
         placed,
         claim: r.claim,
         effect: r.effect,

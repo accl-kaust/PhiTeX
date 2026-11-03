@@ -1030,30 +1030,22 @@ pub(crate) fn mover_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     })
 }
 
-/// The first of `r`'s reads, `me`'s last run's, whose definition reaching
-/// `me` is an unsettled node's: that node, which may be about to move it. In
-/// a chain one that did not move a later node's read last does not count
-/// (`Operation::chains`); nor do the page loop's rests.
+/// An unsettled node among those whose definitions `r`, `me`'s last run,
+/// read: it may be about to move them. In a chain one that did not move a
+/// later node's read last does not count (`Operation::chains`); nor do the
+/// page loop's rests.
 pub(crate) fn open_definer_before(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
     let chain = eng.op(me.op()).chains();
-    r.reads.iter().find_map(|rd| {
-        let ReadKind::Field {
-            f,
-            at: Anchor::Me | Anchor::Before(_) | Anchor::AfterOwn(_),
-        } = rd.kind
-        else {
-            return None;
-        };
-        let by = reaching_at(eng, f, me.id, false)?.by.filter(|&b| b != me.id)?;
-        let x = eng.placed_node(by)?;
-        let op = eng.op(x.op());
-        (x.unit == me.unit
-            && matches!(x.state(), State::Dirty | State::Running | State::RunningDirty)
-            && !x.held_panic.load(Ordering::Acquire)
-            && !op.works_at_frontier()
-            && !op.final_only()
-            && !(chain && op.chains() && !x.moves.load(Ordering::Acquire)))
-        .then_some(by)
+    r.sources.iter().copied().find(|&by| {
+        eng.placed_node(by).is_some_and(|x| {
+            matches!(x.state(), State::Dirty | State::Running | State::RunningDirty) && x.unit == me.unit && {
+                let op = eng.op(x.op());
+                !x.held_panic.load(Ordering::Acquire)
+                    && !op.works_at_frontier()
+                    && !op.final_only()
+                    && !(chain && op.chains() && !x.moves.load(Ordering::Acquire))
+            }
+        })
     })
 }
 
