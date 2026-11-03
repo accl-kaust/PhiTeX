@@ -1178,12 +1178,15 @@ impl Run<'_, '_> {
         let quad = self.font_int(fi, crate::fields::FontCell::Fd(6))?;
         let mut expansion = None;
         let mut auto = false;
+        let mut copy = false;
         let mut slots: Box<[std::sync::OnceLock<_>]> = Box::new([]);
         if let Some((st, sh, step, a)) = crate::pdfprim::expand_params(self, fi)?
             && step > 0
             && let Some((name, size)) = view.names.get(&f).cloned()
         {
-            let key = |e: i32| crate::fonts::expanded_key(f, &name, size, e);
+            copy = crate::pdfprim::is_font_copy(self, fi)?;
+            let base = copy.then_some(f);
+            let key = |e: i32| crate::fonts::expanded_key(base, &name, size, e);
             expansion = Some(phitex_typeset::fonts::Expansion {
                 stretch: (st > 0).then(|| (key(st), st)),
                 shrink: (sh > 0).then(|| (key(-sh), -sh)),
@@ -1198,6 +1201,7 @@ impl Run<'_, '_> {
             Box::new(crate::fonts::Px {
                 expansion,
                 auto,
+                copy,
                 lp,
                 rp,
                 ef,
