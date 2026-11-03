@@ -63,7 +63,7 @@ use crate::val::{
 mod feedback;
 mod finisher;
 mod pageloop;
-mod piece;
+pub(crate) mod piece;
 pub(crate) use piece::PAGES_OBJECTS_DEFECT;
 mod replay;
 mod routine;
