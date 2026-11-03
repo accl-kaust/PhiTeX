@@ -704,6 +704,13 @@ impl Pool {
                 match second {
                     Some(s) if (taken.len() - s).is_multiple_of(2) => break,
                     None if taken.len() >= want => break,
+                    // (`want` from a length read before the owner went on:
+                    // a thief off its CPU meanwhile came to the owner's end
+                    // and took the reader whose definer the owner was
+                    // running, which then ran on what was not there yet,
+                    // defuse's commits_do_not_wait_on_each_other 64001 runs
+                    // for 64000, 4 in 600 on a loaded node, accl 23793)
+                    None if taken.len().is_multiple_of(2) && st.len() < BLOCK_STEAL => break,
                     _ => {}
                 }
                 match st.steal() {
