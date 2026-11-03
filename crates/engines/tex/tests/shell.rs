@@ -521,3 +521,62 @@ Page one.\vfill\eject
         assert_eq!(calls, 1, "-j{threads}");
     }
 }
+
+/// A command answered from the memo reads only the files the call kept
+/// read: an edit of another file the job writes runs neither the command
+/// nor the run that makes it again (minted's commands on Grail read
+/// every file the job wrote, so each `.aux` change ran the run of every
+/// listing again). The run that called the host read every file it
+/// handed it, so the first edit runs it again, answered from the memo
+/// reading `inb.txt` alone; the edits after it do not. The edited builds
+/// equal cold builds of their texts.
+#[test]
+fn a_command_does_not_run_again_on_a_file_it_did_not_read() {
+    let fake = Arc::new(Fake::default());
+    let mut b = common::build(
+        options("upr", Some(fake.clone()), 1),
+        Some(&common::plain()),
+        &up_doc("alpha", "beta"),
+    );
+    assert_eq!(got(&b.output().1), ["ALPHA", "BETA"]);
+    for (k, a) in ["gamma", "delta", "epsilon"].into_iter().enumerate() {
+        b.edit(&up_doc(a, "beta"));
+        let reran: Vec<String> = b
+            .stats
+            .reruns
+            .iter()
+            .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+            .collect();
+        for r in &reran {
+            eprintln!("  {a}: rerun {r}");
+        }
+        let (dvi, log) = b.output();
+        assert_eq!(got(&log), [a.to_uppercase().as_str(), "BETA"], "{log}");
+        let cold = common::build(
+            options("upr", Some(Arc::new(Fake::default())), 1),
+            Some(&common::plain()),
+            &up_doc(a, "beta"),
+        );
+        assert_eq!(
+            common::first_difference(&dvi, &cold.output().0),
+            None,
+            "{a}"
+        );
+        assert!(
+            k == 0 || !reran.iter().any(|r| r.contains("Between them.")),
+            "{a}: the run of the command on inb.txt ran again: {reran:?}"
+        );
+    }
+    // (the command on inb.txt called once, in the first build)
+    assert_eq!(
+        fake.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.contains("inb.txt"))
+            .count(),
+        1,
+        "{:?}",
+        fake.calls.lock().unwrap()
+    );
+}
