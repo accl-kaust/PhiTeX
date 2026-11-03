@@ -1481,8 +1481,16 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // off to after the lock as one made anew is, standing nowhere yet
         // for the checks of those after them)
         for (i, what) in p.placements.iter().enumerate() {
+            // (a placement after another node goes after that one's
+            // children, not after this subtree's end: not walked for it,
+            // a loop rest's whole chain of rests after it at each rest's
+            // commit)
             if let Some(k) = kept_end.take() {
-                after = subtree_end(eng, k);
+                after = if matches!(what, Placement::FollowAfter(..) | Placement::FollowAfterPlaced(..)) {
+                    k
+                } else {
+                    subtree_end(eng, k)
+                };
                 labelled = after;
             }
             let after_pos = if moving.contains(&labelled) {
