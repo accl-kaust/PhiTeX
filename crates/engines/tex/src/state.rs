@@ -2903,7 +2903,10 @@ impl State {
                     def_gid: s.def_gid,
                     cand_noted: s.cand_noted,
                     eng: m.eng,
-                    publ: m.publ.as_ref().map(|(e, l)| (self.encode_memo(e, v, memo), *l)),
+                    publ: m
+                        .publ
+                        .as_ref()
+                        .map(|(e, l)| (self.encode_memo(e, v, memo), *l)),
                     ldef_stamp: m.ldef_stamp,
                     ldef_local: m.ldef_local,
                     ldef_gid: m.ldef_gid,
@@ -2928,7 +2931,12 @@ impl State {
                 (
                     *st,
                     xs.iter()
-                        .map(|(l, e)| (*l, (e.flags & LOADED != 0).then(|| self.encode_memo(e, v, memo))))
+                        .map(|(l, e)| {
+                            (
+                                *l,
+                                (e.flags & LOADED != 0).then(|| self.encode_memo(e, v, memo)),
+                            )
+                        })
                         .collect(),
                 )
             })
@@ -3388,12 +3396,12 @@ impl Base {
                 return None;
             }
             let mut ys = Vec::with_capacity(es.len() / 3);
-            for e in es.chunks_exact(3) {
-                let l = loc(Field(e[0]));
-                ys.push(match int_of(v, e[1]) {
+            for &[f, tag, x] in es.as_chunks::<3>().0 {
+                let l = loc(Field(f));
+                ys.push(match int_of(v, tag) {
                     0 => (l, None),
                     1 => (l, Some(None)),
-                    _ => (l, Some(Some(e[2]))),
+                    _ => (l, Some(Some(x))),
                 });
             }
             out.cands.push((u(st), ys));

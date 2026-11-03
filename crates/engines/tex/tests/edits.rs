@@ -1141,7 +1141,7 @@ fn a_box_over_paragraphs_and_a_file_goes_on_from_a_checkpoint_inside() {
 /// with the checkpoint, so the `\else` after the read skips to its `\fi`
 /// as in a whole run, and the output and log are a cold build's, at 1
 /// and 8 threads. Checkpoints were refused while a conditional of the
-/// run's own was open: Grail's figures (TikZ, inside pgf's
+/// run's own was open: Grail's figures (`TikZ`, inside its
 /// conditionals) went on from their first checkpoint only, 2 s of a
 /// \cite edit's figure rerun.
 #[test]
@@ -1183,7 +1183,10 @@ fn a_run_goes_on_from_a_checkpoint_inside_its_own_conditional() {
                 common::first_difference(&out, &cold_out).is_none(),
                 "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
             );
-            assert_eq!(log, cold_log, "{t} threads, edit {k}: the log is the cold build's");
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
             assert!(
                 b.stats.resumed_at_mark > 0,
                 "{t} threads, edit {k}: the box's run went on from a checkpoint inside its conditionals"
@@ -1237,7 +1240,10 @@ fn a_run_goes_on_from_a_checkpoint_inside_an_alignment() {
                 common::first_difference(&out, &cold_out).is_none(),
                 "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
             );
-            assert_eq!(log, cold_log, "{t} threads, edit {k}: the log is the cold build's");
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
             assert!(
                 b.stats.resumed_at_mark > 0,
                 "{t} threads, edit {k}: the box's run went on from a checkpoint inside the alignment"
@@ -1283,7 +1289,10 @@ fn a_run_goes_on_from_a_checkpoint_between_two_read_backs() {
                 common::first_difference(&out, &cold_out).is_none(),
                 "{t} threads, edit {k} (\\xb={m}): the output is not the cold build's"
             );
-            assert_eq!(log, cold_log, "{t} threads, edit {k}: the log is the cold build's");
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
             assert!(
                 b.stats.resumed_at_mark > 0,
                 "{t} threads, edit {k}: the macro's run went on from a checkpoint after the first read-back"
@@ -1334,7 +1343,10 @@ fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
                 common::first_difference(&out, &cold_out).is_none(),
                 "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
             );
-            assert_eq!(log, cold_log, "{t} threads, edit {k}: the log is the cold build's");
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
             assert!(
                 b.stats.resumed_at_mark > 0,
                 "{t} threads, edit {k}: the box's run went on from a checkpoint after the page it shipped"

@@ -3134,11 +3134,10 @@ impl<'c, 'a> Run<'c, 'a> {
         for l in &mut self.input.levels {
             l.rb = false;
         }
-        let i = self
-            .input
-            .levels
-            .iter()
-            .position(|l| l.kind == crate::input::kind::TOKS && l.ty == crate::input::ty::MACRO);
+        let i =
+            self.input.levels.iter().position(|l| {
+                l.kind == crate::input::kind::TOKS && l.ty == crate::input::ty::MACRO
+            });
         if let Some(i) = i {
             self.input.levels[i].rb = true;
         }

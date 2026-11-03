@@ -37,18 +37,8 @@ use crate::val::{int_of, list_of};
 /// The commands between two checkpoints of a run (`observe`:
 /// `PHITEX_CK_EVERY`, for the tests, another number).
 /// How many commands a checkpoint's parts' length in entries buys: the
-/// next is due that many times its length after the last (the run's
-/// start for the first), at least [`every`] (`PHITEX_CK_SPACE`, the
-/// experiment's).
-fn space() -> u64 {
-    static K: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *K.get_or_init(|| {
-        std::env::var("PHITEX_CK_SPACE")
-            .ok()
-            .and_then(|x| x.parse().ok())
-            .unwrap_or(4)
-    })
-}
+/// next is due that many times its length after it, at least [`every`].
+const SPACE: u64 = 4;
 
 fn every() -> u64 {
     crate::exec::obs_str!("PHITEX_CK_EVERY")
@@ -72,9 +62,6 @@ pub(crate) struct Checkpoints {
     /// `PHITEX_CK_WHY` (observe): why no checkpoint was taken where one
     /// was due, by reason, the commands it was refused at.
     why: Vec<(String, u64)>,
-    /// The command count at the last one taken (the run's start before
-    /// the first).
-    last: u64,
     /// An edited node's run: its checkpoints every [`every`] commands
     /// whatever they cost, as the next edit is most likely in the same
     /// text again (a letter typed after a letter); another run's are
@@ -144,7 +131,6 @@ impl Run<'_, '_> {
         }
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
-            last: self.cmds,
             dense: matches!(self.cx.woken_by(), Some(phitex_defuse::Cause::Edited)),
             taken,
             fresh: Vec::new(),
@@ -179,26 +165,6 @@ impl Run<'_, '_> {
             return Ok(());
         };
         if self.cmds < c.next {
-            return Ok(());
-        }
-        // (the first too after as many commands as its table's length
-        // buys, `space`: a short run takes none, its next run is short)
-        let first_rule = {
-            static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            *F.get_or_init(|| std::env::var("PHITEX_CK_FIRST").map_or(true, |x| x != "0"))
-        };
-        let need = if c.dense || (!first_rule && c.taken.is_empty()) {
-            0
-        } else {
-            c.last
-                + space()
-                * (self.st.base_len() as u64
-                    + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>())
-        };
-        if self.cmds < need {
-            if let Some(c) = self.ck.as_mut() {
-                c.next = need;
-            }
             return Ok(());
         }
         // (inside a conditional too: the continuation carries the
@@ -301,7 +267,10 @@ impl Run<'_, '_> {
         // (and those of a checkpoint anywhere, when none at the line)
         if !self.input.levels.is_empty() && self.ck_where_line().is_none() {
             let anywhere: [(bool, &'static str); 2] = [
-                (self.pull_orig.iter().any(Option::is_some), "a pulled line kept"),
+                (
+                    self.pull_orig.iter().any(Option::is_some),
+                    "a pulled line kept",
+                ),
                 (
                     self.pull_at.len() != self.pulled || self.pull_box.len() != self.pulled,
                     "pulled places unknown",
@@ -499,9 +468,8 @@ impl Run<'_, '_> {
                 + if c.dense {
                     every()
                 } else {
-                    every().max(space() * spacing)
+                    every().max(SPACE * spacing)
                 };
-            c.last = self.cmds;
         }
         if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
             eprintln!(
@@ -538,7 +506,11 @@ impl Run<'_, '_> {
         // none where a group of its own saved a value)
         // (the encodings made for this run's checkpoints before: most of
         // the table is as it was at the last one)
-        let mut memo = self.ck.as_mut().map(|c| std::mem::take(&mut c.memo)).unwrap_or_default();
+        let mut memo = self
+            .ck
+            .as_mut()
+            .map(|c| std::mem::take(&mut c.memo))
+            .unwrap_or_default();
         let base = self.st.base_of(v, &mut memo);
         let base = base.map(|b| b.to_value(v, &mut |l| self.loc_field(l), &mut memo));
         if let Some(c) = self.ck.as_mut() {
@@ -735,7 +707,10 @@ impl Run<'_, '_> {
     /// segment last reached (or the last sibling pulled's first, which a
     /// give-back reads) on, with its length and where the run stands in
     /// it; the siblings pulled and where their texts begin.
-    fn ck_input(&self, memo: &mut phitex_defuse::FxHashMap<(u64, u32, u32), ValueId>) -> (ValueId, u64) {
+    fn ck_input(
+        &self,
+        memo: &mut phitex_defuse::FxHashMap<(u64, u32, u32), ValueId>,
+    ) -> (ValueId, u64) {
         use crate::input::kind;
         let v = self.v;
         let int = |x: i64| v.int(x);
@@ -1509,7 +1484,6 @@ impl Run<'_, '_> {
         // (the checkpoints up to this one stand for the next run)
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
-            last: self.cmds,
             dense: matches!(self.cx.woken_by(), Some(phitex_defuse::Cause::Edited)),
             taken: cks[..=k].to_vec(),
             fresh: Vec::new(),
