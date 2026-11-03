@@ -1453,3 +1453,54 @@ fn a_rest_gone_on_on_a_guess_is_run_again_on_what_the_routine_gave_back() {
         );
     }
 }
+
+/// A page's routine that reads `\\inputlineno` into a body nothing looks
+/// at does not run again for a line inserted above it; one whose page
+/// shows the number does, and its page is a cold build's.
+#[test]
+fn a_routine_runs_again_for_the_line_number_only_where_it_shows() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let doc = |routine: &str| {
+        let mut s = format!(
+            "\\vsize=100pt \\hsize=150pt \\parindent=0pt\n\\output={{{routine}\\shipout\\vbox{{\\unvbox255}}}}\n"
+        );
+        for k in 0..12 {
+            let _ = writeln!(s, "Paragraph {k} has a few words, a line or two of them.\n");
+        }
+        s.push_str("\\bye\n");
+        s
+    };
+    let prelude = common::plain();
+    let opts = || common::options("./lnr.tex", "lnr", "", &fx);
+    // (read into a body nothing looks at: no routine runs)
+    let src = doc("{\\edef\\where{\\the\\inputlineno}}");
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = format!("\\relax\n{src}");
+    b.edit(&text);
+    let ran = b
+        .stats
+        .reruns
+        .iter()
+        .filter(|(_, op, _)| *op == "finish")
+        .count();
+    let cold = common::build(opts(), Some(&prelude), &text);
+    assert!(common::first_difference(&b.output().0, &cold.output().0).is_none());
+    assert_eq!(ran, 0, "no routine runs again: {:?}", b.stats.reruns);
+    // (shown on the page: every routine after the line runs, as cold)
+    let src = doc(
+        "\\edef\\where{\\the\\inputlineno}\\global\\setbox254\\hbox{\\where}\\shipout\\box254 ",
+    );
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = format!("\\relax\n{src}");
+    b.edit(&text);
+    let ran = b
+        .stats
+        .reruns
+        .iter()
+        .filter(|(_, op, _)| *op == "finish")
+        .count();
+    let cold = common::build(opts(), Some(&prelude), &text);
+    assert!(common::first_difference(&b.output().0, &cold.output().0).is_none());
+    assert!(ran > 0, "the routines that show it run again");
+}
