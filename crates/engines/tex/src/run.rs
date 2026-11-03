@@ -929,6 +929,12 @@ pub(crate) struct Run<'c, 'a> {
     /// The locations the line being interpreted read before it defined
     /// them, if it did ([`Run::interp_reads`]).
     pub interp_first: Vec<Loc>,
+    /// Meanings a line interpreted looked at only for §479's `#`
+    /// ([`Run::param_look`]), not read before it defined them otherwise.
+    pub interp_param: phitex_defuse::FxHashSet<Loc>,
+    /// A `\\def`'s body scanned: the meaning asked for is only looked at for
+    /// whether it is the parameter character.
+    pub param_look: bool,
     /// [`Run::set_mean`] finds the location it defines.
     pub defining: bool,
     /// The fields a read-back nested in a line's interpretation set (a
@@ -1279,6 +1285,8 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_short: false,
             interp_reads: ValueId::NIL,
             interp_first: Vec::new(),
+            interp_param: phitex_defuse::FxHashSet::default(),
+            param_look: false,
             defining: false,
             interp_nested: phitex_defuse::FxHashMap::default(),
             interp_eof: false,
@@ -1436,6 +1444,15 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         };
         if !done.insert(loc) {
+            // (looked at only for `#`, used now)
+            if !self.param_look
+                && !self.in_skip
+                && !self.defining
+                && self.interp_param.remove(&loc)
+                && !self.st.defined_after(loc, self.interp_base)
+            {
+                self.interp_first.push(loc);
+            }
             return Ok(());
         }
         if self.st.defined_after(loc, self.interp_base) {
@@ -1443,8 +1460,15 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (read before the line defined it: what the lines before it
         // left there, [`Run::interp_reads`]; a meaning about to be
-        // defined is not read)
-        if !self.defining {
+        // defined is not read; one in a `\\def`'s body is looked at only
+        // for whether it is the parameter character, §479, one in skipped
+        // text only for whether it is a conditional, §494, which a line
+        // before it would change only by making it that:
+        // `\\providecommand`'s `\\l@ngrel@x` and `\\reserved@c` in every
+        // `.aux` of hyperref)
+        if self.param_look || self.in_skip {
+            self.interp_param.insert(loc);
+        } else if !self.defining {
             self.interp_first.push(loc);
         }
         if self.pre_memo_at != self.interp_point {
@@ -3665,6 +3689,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // [`Run::note_pre`], is not the line's)
         self.interp = Some(phitex_defuse::FxHashSet::default());
         self.interp_first.clear();
+        self.interp_param.clear();
         self.set("cat:64", v.int(11), false);
         // (on a list of its own, dropped after: what a line typesets,
         // an error's text, goes nowhere)
@@ -3749,6 +3774,16 @@ impl<'c, 'a> Run<'c, 'a> {
             .map(|l| str_of(v, self.loc_field(l).0))
             .filter(|n| is_read_back_definition(n))
             .collect();
+        // (looked at for `#` alone: asked of the lines before it by that,
+        // `crate::api::written_as_text`)
+        let looks: Vec<Loc> = std::mem::take(&mut self.interp_param).into_iter().collect();
+        reads.extend(
+            looks
+                .into_iter()
+                .map(|l| str_of(v, self.loc_field(l).0))
+                .filter(|n| is_read_back_definition(n))
+                .map(|n| format!("{}{n}", crate::api::PARAM_LOOK)),
+        );
         reads.sort_unstable();
         reads.dedup();
         self.interp_reads = v.list(reads.iter().map(|n| v.str(n)).collect());

@@ -1118,7 +1118,9 @@ impl Run<'_, '_> {
                 if macro_def && tok.is_cs_or_active() {
                     // (§479: whether it is the macro parameter character)
                     let was = std::mem::replace(&mut self.step_reads, true);
+                    self.param_look = true;
                     let r = self.set_cur(tok);
+                    self.param_look = false;
                     self.step_reads = was;
                     r?;
                 }

@@ -1342,12 +1342,21 @@ impl Run<'_, '_> {
 
     /// `get_r_token` (§1215).
     fn get_r_token(&mut self) -> R<Tok> {
+        // (the name to define: its meaning is not read, [`Run::interp_first`]:
+        // `\\let\\l@ngrel@x` in every `\\providecommand` written to the `.aux`
+        // made the file one read back as its text)
+        let was = std::mem::replace(&mut self.defining, true);
         loop {
-            self.get_name_token()?;
+            let r = self.get_name_token();
+            if r.is_err() {
+                self.defining = was;
+            }
+            r?;
             if self.cur.tok != crate::val::space_tok() {
                 break;
             }
         }
+        self.defining = was;
         if !self.cur.is_cs() {
             // "Missing control sequence inserted": \inaccessible
             self.back_cur();

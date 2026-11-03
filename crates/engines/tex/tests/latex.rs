@@ -2352,3 +2352,56 @@ fn a_toc_edit_keeps_every_rest_and_finisher() {
         );
     }
 }
+
+/// The `.aux` hyperref's kind of package writes: `\providecommand` lines,
+/// each of which goes through `\def`'s body and skipped text naming
+/// `\l@ngrel@x` and `\reserved@c`, which the lines before it define. Those
+/// looks ask only whether the name is `#` or a conditional, so the file stays
+/// read back per field, and a heading's new `.aux` line runs no reader of the
+/// file's text. A line before it that does make such a name a conditional
+/// makes it the text (tested against cold).
+#[test]
+fn providecommand_lines_keep_the_aux_read_back_per_field() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/aux-provide");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |title: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\\AtBeginDocument{{\\if@filesw\
+             \\immediate\\write\\@auxout{{\\string\\providecommand\\string\\aone[1]{{}}}}\
+             \\immediate\\write\\@auxout{{\\string\\providecommand\\string\\atwo[1]{{}}}}\
+             \\immediate\\write\\@auxout{{\\string\\providecommand\\string\\athree[2]{{}}}}\\fi}}\n\
+             \\makeatother\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{a}}\nFirst, see section~\\ref{{b}}.\n\n\
+             \\section{{{title}}}\\label{{b}}\nText of the second section.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("auxprovide", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc("Second"));
+        for title in ["Xsecond", "Second part"] {
+            b.edit(&doc(title));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(title));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {title}"
+            );
+            assert!(
+                !r.iter()
+                    .any(|x| x.contains("wunit:") || x.contains("wfile:")),
+                "-j{threads} {title}: a reader of the .aux's text ran again: {r:?}"
+            );
+        }
+    }
+}
