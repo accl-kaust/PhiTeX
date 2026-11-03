@@ -360,6 +360,9 @@ pub struct Fired {
     /// The insertion classes' records as the fire found them (§1018:
     /// `best_ins_ptr`, the split's `broken_ptr`/`broken_ins`).
     pub ins_records: Vec<PageIns>,
+    /// e-TeX's `\pagediscards` while `\output` runs: what the builder
+    /// discarded from the top of this page (§999), when saving.
+    pub discards: List,
 }
 
 /// The page builder's state (§980–§991).
@@ -910,6 +913,7 @@ impl PageBuilder {
             best,
             mark_at,
             ins_records,
+            discards: std::mem::take(&mut self.discards),
         }
     }
 }

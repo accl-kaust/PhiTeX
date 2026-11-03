@@ -287,6 +287,7 @@ impl Run<'_, '_> {
             int(xs[1]),
             glue_value(v, &glue_of(v, xs[2])),
             int(xs[3]),
+            int(xs[4]),
         ]))
     }
 }
