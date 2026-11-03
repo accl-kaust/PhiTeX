@@ -320,16 +320,17 @@ fn the_defer_fixture_is_byte_identical_to_pdftex() {
 /// run had for it, which in the second run is another register's. Named
 /// by location, after an edit the second run's `\count300` became
 /// `\count301` as of the first (beamer: "Figure 72819:", the second
-/// run's location being a dimension there).
+/// run's location being a dimension there). The second run's registers
+/// are met in one macro, so a cut does not put them in a run of their own.
 #[test]
 fn a_symbol_read_by_another_run_is_of_the_same_register() {
     let mark = |n: usize| format!("Paragraph {n} of");
     let text = |n: usize, k: usize| {
-        let b = "\\count301=7 \\count302=8 \\global\\count300=\\saved\\relax Restored: \\the\\count300.\n\n";
+        let b = "\\restore Restored: \\the\\count300.\n\n";
         let d = doc(n, k, "\\xdef\\saved{\\the\\count300}Saved paragraph.");
         let d = d.replacen(&mark(80), &format!("{b}{}", mark(80)), 1);
         format!(
-            "\\output={{\\count255=\\count300 \\advance\\count255 by 1 \\global\\count300=\\count255 \\shipout\\box255 \\global\\advance\\count0 by 1 }}\n{d}"
+            "\\def\\restore{{\\count301=7 \\count302=8 \\global\\count300=\\saved\\relax}}\n\\output={{\\count255=\\count300 \\advance\\count255 by 1 \\global\\count300=\\count255 \\shipout\\box255 \\global\\advance\\count0 by 1 }}\n{d}"
         )
     };
     for threads in [1, 8] {
