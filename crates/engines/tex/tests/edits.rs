@@ -1377,9 +1377,9 @@ fn a_run_with_doubled_checkpoints_serves_a_later_edit_further_on() {
     let doc = |first: &str, late: &str| {
         format!(
             "\\pdfoutput=1 \\hsize=300pt\n\\setbox1\\vbox{{{}{first} {}{late} {}}}\n\\shipout\\box1\n\\end\n",
-            words(400, "w"),
-            words(4000, "v"),
-            words(400, "u"),
+            words(4000, "w"),
+            words(12000, "v"),
+            words(4000, "u"),
         )
     };
     for t in [1, 8] {
