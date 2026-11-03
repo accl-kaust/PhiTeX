@@ -82,6 +82,8 @@ pub(crate) struct Checkpoints {
     dense: bool,
     /// The encodings its checkpoints made, for the next ones.
     memo: crate::state::CkMemo,
+    /// Its token list levels' encodings by arena and range.
+    levels: phitex_defuse::FxHashMap<(u64, u32, u32), ValueId>,
 }
 
 /// The paragraph's mode (tex.web's `hmode`, unrestricted).
@@ -148,6 +150,7 @@ impl Run<'_, '_> {
             fresh: Vec::new(),
             why: Vec::new(),
             memo: crate::state::CkMemo::default(),
+            levels: phitex_defuse::FxHashMap::default(),
         }));
     }
 
@@ -468,7 +471,15 @@ impl Run<'_, '_> {
                 )
             }
             At::Anywhere => {
-                let (input, cost) = self.ck_input();
+                let mut memo = self
+                    .ck
+                    .as_mut()
+                    .map(|c| std::mem::take(&mut c.levels))
+                    .unwrap_or_default();
+                let (input, cost) = self.ck_input(&mut memo);
+                if let Some(c) = self.ck.as_mut() {
+                    c.levels = memo;
+                }
                 if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
                     eprintln!("ck-part input {}", v.payload_bytes().saturating_sub(bytes0));
                 }
@@ -724,7 +735,7 @@ impl Run<'_, '_> {
     /// segment last reached (or the last sibling pulled's first, which a
     /// give-back reads) on, with its length and where the run stands in
     /// it; the siblings pulled and where their texts begin.
-    fn ck_input(&self) -> (ValueId, u64) {
+    fn ck_input(&self, memo: &mut phitex_defuse::FxHashMap<(u64, u32, u32), ValueId>) -> (ValueId, u64) {
         use crate::input::kind;
         let v = self.v;
         let int = |x: i64| v.int(x);
@@ -740,12 +751,23 @@ impl Run<'_, '_> {
                         start: l.c,
                         end: l.b,
                     };
-                    let toks = self.input.arena.get(r);
-                    cost += toks.len() as u64;
+                    // (a list encoded at an earlier checkpoint of the run,
+                    // its range in the same arena, is the same list)
+                    let key = (self.input.arena_id, l.c, l.b);
+                    let t = if let Some(&t) = memo.get(&key) {
+                        cost += 1;
+                        t
+                    } else {
+                        let toks = self.input.arena.get(r);
+                        cost += toks.len() as u64;
+                        let t = crate::val::toks_value(v, toks);
+                        memo.insert(key, t);
+                        t
+                    };
                     v.list(vec![
                         int(0),
                         int(i64::from(l.ty)),
-                        crate::val::toks_value(v, toks),
+                        t,
                         int(i64::from(l.a - l.c)),
                         int(i64::from(l.rb)),
                     ])
@@ -1493,6 +1515,7 @@ impl Run<'_, '_> {
             fresh: Vec::new(),
             why: Vec::new(),
             memo: crate::state::CkMemo::default(),
+            levels: phitex_defuse::FxHashMap::default(),
         }));
         Ok(true)
     }

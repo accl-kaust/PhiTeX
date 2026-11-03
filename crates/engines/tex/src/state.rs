@@ -2814,7 +2814,14 @@ pub(crate) struct CkMemo {
     macros: FxHashMap<usize, (Rc<crate::val::Macro>, ValueId)>,
     toks: FxHashMap<usize, (Rc<[Tok]>, ValueId)>,
     slots: FxHashMap<Loc, (BaseSlot, ValueId)>,
+    /// The touched locations' list by chunks of [`TOUCHED_CHUNK`]: each
+    /// chunk's locations and its value.
+    touched: Vec<(Vec<Loc>, ValueId)>,
 }
+
+/// The touched locations a chunk of [`Base::to_value`]'s list holds: the
+/// list grows at its end, its chunks before the last stay as they were.
+const TOUCHED_CHUNK: usize = 256;
 
 /// A save of [`Base`]'s.
 struct BaseSave {
@@ -3273,7 +3280,22 @@ impl Base {
             })
             .collect();
         let carried = self.carried.iter().map(|&l| field(l).0).collect();
-        let touched = self.touched.iter().map(|&l| field(l).0).collect();
+        let touched: Vec<ValueId> = self
+            .touched
+            .chunks(TOUCHED_CHUNK)
+            .enumerate()
+            .map(|(k, ls)| {
+                if let Some((was, x)) = memo.touched.get(k)
+                    && was[..] == *ls
+                {
+                    return *x;
+                }
+                let x = v.list(ls.iter().map(|&l| field(l).0).collect());
+                memo.touched.truncate(k);
+                memo.touched.push((ls.to_vec(), x));
+                x
+            })
+            .collect();
         v.list(vec![
             v.list(slots),
             v.list(cands),
@@ -3334,6 +3356,7 @@ impl Base {
             carried: Vec::new(),
             touched: list_of(v, touched)
                 .into_iter()
+                .flat_map(|c| list_of(v, c))
                 .map(|f| loc(Field(f)))
                 .collect(),
         };
