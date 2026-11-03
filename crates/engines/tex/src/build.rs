@@ -1183,7 +1183,7 @@ impl Run<'_, '_> {
             && step > 0
             && let Some((name, size)) = view.names.get(&f).cloned()
         {
-            let key = |e: i32| crate::fonts::expanded_key(&name, size, e);
+            let key = |e: i32| crate::fonts::expanded_key(f, &name, size, e);
             expansion = Some(phitex_typeset::fonts::Expansion {
                 stretch: (st > 0).then(|| (key(st), st)),
                 shrink: (sh > 0).then(|| (key(-sh), -sh)),

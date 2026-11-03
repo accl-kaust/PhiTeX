@@ -2367,10 +2367,10 @@ fn set_expand_params(
 }
 
 /// `get_expand_font(f, e)` (pdfTeX): font `f` expanded by `e`
-/// thousandths, the font of its expanded name and size where there is
-/// one (`tfm_lookup`), else made: automatically, `f`'s metrics scaled
-/// (`auto_expand_font`, [`crate::fonts::expanded`]); else the TFM of the
-/// expanded name, a font of its own.
+/// thousandths, the one `f` has where it has one (`pdf_font_elink`), else
+/// made: automatically, `f`'s metrics scaled (`auto_expand_font`,
+/// [`crate::fonts::expanded`]); else the TFM of the expanded name, a font
+/// of its own.
 pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -> R<i64> {
     use crate::fields::FontCell;
     let v = r.v;
@@ -2382,7 +2382,8 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
     if !auto {
         return r.read_font_info(None, &name, i.size);
     }
-    let k = i64::from(crate::fonts::expanded_key(&i.name, i.size, e));
+    let base = u32::try_from(f).unwrap_or(0);
+    let k = i64::from(crate::fonts::expanded_key(base, &i.name, i.size, e));
     let held = crate::fonts::info(v, r.font_get(k, FontCell::Info)?)
         .is_some_and(|j| j.name == name && j.size == i.size);
     if held {

@@ -1099,3 +1099,13 @@ fn page_read_after_par_in_cond() {
 fn pdf_savepos_texxet() {
     check_threads("pdf_savepos_texxet", "pdf");
 }
+
+/// TeX Live manual typog-example (pdflatex, microtype's contexts): each
+/// copy of a font expands to fonts of its own, even at a ratio another copy
+/// already has (`pdf_font_elink`); they took one font by name and size, so
+/// every font loaded after them had a number six too small (`/F559` for
+/// `/F565`). Oracle: pdftex in the CI image.
+#[test]
+fn expand_copies_numbered() {
+    check_threads("expand_copies_numbered", "pdf");
+}
