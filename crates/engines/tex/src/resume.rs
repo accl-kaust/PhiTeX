@@ -1275,78 +1275,11 @@ impl Run<'_, '_> {
         };
         let old_args = list_of(v, old);
         let args = self.ck_key();
-        // (a resume whose continuation moved only in bindings it carries:
-        // a checkpoint taken before the run touched any of them stands,
-        // those bindings put in as the new continuation has them)
-        let n = args.len();
-        let moved_cont = if !edit
-            && self.cx.op() == self.ops.resume
-            && n > 0
-            && old_args.len() == n
-            && old_args[..n - 1] == args[..n - 1]
-            && old_args[n - 1] != args[n - 1]
-        {
-            self.cont_slots_moved(old_args[n - 1], args[n - 1])
-                .map(|fs| (old_args[n - 1], args[n - 1], fs))
-        } else {
-            None
-        };
-        if moved_cont.is_none()
-            && (old_args.len() != args.len()
-                || old_args.get(1..) != args.get(1..)
-                || (!edit && old_args != args))
+        if old_args.len() != args.len()
+            || old_args.get(1..) != args.get(1..)
+            || (!edit && old_args != args)
         {
             if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
-                // (a resume's continuation: which of its parts moved, and
-                // of its state's slots, which fields)
-                if let (Some(&a), Some(&b)) = (old_args.last(), args.last())
-                    && self.cx.op() == self.ops.resume
-                    && a != b
-                {
-                    let (xa, xb) = (list_of(v, a), list_of(v, b));
-                    let parts: Vec<usize> = (0..xa.len().max(xb.len()))
-                        .filter(|&i| xa.get(i) != xb.get(i))
-                        .collect();
-                    let slots = |x: &[ValueId]| -> std::collections::BTreeMap<String, ValueId> {
-                        x.get(4)
-                            .and_then(|&st| list_of(v, st).first().copied())
-                            .map(|s| list_of(v, s))
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter_map(|e| {
-                                let ys = list_of(v, e);
-                                Some((crate::val::field_name(v, Field(*ys.first()?)), e))
-                            })
-                            .collect()
-                    };
-                    let (sa, sb) = (slots(&xa), slots(&xb));
-                    let moved: Vec<&String> = sa
-                        .keys()
-                        .chain(sb.keys())
-                        .filter(|k| sa.get(*k) != sb.get(*k))
-                        .take(12)
-                        .collect();
-                    let sub = |i: usize| -> Vec<usize> {
-                        let (pa, pb) = (
-                            xa.get(i).map(|&x| list_of(v, x)).unwrap_or_default(),
-                            xb.get(i).map(|&x| list_of(v, x)).unwrap_or_default(),
-                        );
-                        (0..pa.len().max(pb.len())).filter(|&j| pa.get(j) != pb.get(j)).take(12).collect()
-                    };
-                    eprintln!(
-                        "ck: node {} continuation moved: parts {parts:?}; state parts {:?}; slots {moved:?}; misc {:?}; frames {:?}",
-                        self.cx.node().raw(),
-                        {
-                            let (pa, pb) = (
-                                xa.get(4).map(|&x| list_of(v, x)).unwrap_or_default(),
-                                xb.get(4).map(|&x| list_of(v, x)).unwrap_or_default(),
-                            );
-                            (0..pa.len().max(pb.len())).filter(|&j| pa.get(j) != pb.get(j)).collect::<Vec<_>>()
-                        },
-                        sub(5),
-                        sub(0)
-                    );
-                }
                 eprintln!(
                     "ck: node {} woken by {:?}: its arguments moved ({} {:?})",
                     self.cx.node().raw(),
@@ -1392,21 +1325,7 @@ impl Run<'_, '_> {
                 let made = c.get(14).map_or(usize::MAX, |&x| {
                     usize::try_from(int_of(v, x)).unwrap_or(usize::MAX)
                 });
-                let holds = match &moved_cont {
-                    None => self.cx.last_reads_hold(made),
-                    Some((oc, _, fs)) => {
-                        let cf = crate::pages::piece::cont_field(
-                            v,
-                            args.get(1).copied().unwrap_or(ValueId::UNIT),
-                            u32::try_from(int_of(v, args.get(2).copied().unwrap_or(ValueId::UNIT)))
-                                .unwrap_or(0),
-                        );
-                        made != usize::MAX
-                            && self.ck_untouched(&c, *oc, fs)
-                            && self.cx.last_reads_hold_but(made, cf)
-                    }
-                };
-                if made != usize::MAX && holds {
+                if made != usize::MAX && self.cx.last_reads_hold(made) {
                     if check() || crate::exec::obs_flag!("PHITEX_CK_RESUMED") {
                         eprintln!(
                             "ck-change: node {} woken by {:?} goes on from checkpoint {k} after {made} reads at command {}{}: {:?}",
@@ -1508,11 +1427,7 @@ impl Run<'_, '_> {
         // (a resume's segments' file lines, as its continuation gave
         // them: the checkpoint's continuation holds those of its rest)
         let lines = std::mem::take(&mut self.cont_lines);
-        let ck_cont = match &moved_cont {
-            Some((_, nc, fs)) => self.cont_with_slots(c[6], *nc, fs),
-            None => c[6],
-        };
-        self.cont_load(ck_cont, ValueId::UNIT)?;
+        self.cont_load(c[6], ValueId::UNIT)?;
         self.st.with_base(v, base);
         if let Some(&ls) = c.get(15) {
             for (l, &x) in self.nest.iter_mut().zip(&list_of(v, ls)) {
@@ -1596,117 +1511,13 @@ impl Run<'_, '_> {
             next: self.cmds + every(),
             last: self.cmds,
             dense: matches!(self.cx.woken_by(), Some(phitex_defuse::Cause::Edited)),
-            // (with a continuation's bindings put in: only the one gone
-            // on from, as put in; those before it hold the old bindings)
-            taken: if moved_cont.is_some() {
-                let mut ys = c.clone();
-                ys[6] = ck_cont;
-                vec![v.list(ys)]
-            } else {
-                cks[..=k].to_vec()
-            },
+            taken: cks[..=k].to_vec(),
             fresh: Vec::new(),
             why: Vec::new(),
             memo: crate::state::CkMemo::default(),
             levels: phitex_defuse::FxHashMap::default(),
         }));
         Ok(true)
-    }
-
-    /// A continuation's carried bindings by field: its state's slot
-    /// entries ([`Run::cont_encode_with`]).
-    fn cont_slot_map(&self, cont: ValueId) -> Vec<(ValueId, ValueId)> {
-        let v = self.v;
-        list_of(v, cont)
-            .get(4)
-            .and_then(|&st| list_of(v, st).first().copied())
-            .map(|s| list_of(v, s))
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|e| Some((*list_of(v, e).first()?, e)))
-            .collect()
-    }
-
-    /// The fields whose carried binding differs between continuations
-    /// `a` and `b`, if nothing else of them does.
-    fn cont_slots_moved(&self, a: ValueId, b: ValueId) -> Option<Vec<ValueId>> {
-        let v = self.v;
-        let (xa, xb) = (list_of(v, a), list_of(v, b));
-        if xa.len() != xb.len() || xa.len() < 5 || (0..xa.len()).any(|i| i != 4 && xa[i] != xb[i]) {
-            return None;
-        }
-        let (sa, sb) = (list_of(v, xa[4]), list_of(v, xb[4]));
-        if sa.len() != sb.len() || sa.is_empty() || (1..sa.len()).any(|j| sa[j] != sb[j]) {
-            return None;
-        }
-        let (ma, mb) = (self.cont_slot_map(a), self.cont_slot_map(b));
-        let get = |m: &[(ValueId, ValueId)], f: ValueId| m.iter().find(|e| e.0 == f).map(|e| e.1);
-        let mut fs: Vec<ValueId> = ma
-            .iter()
-            .chain(&mb)
-            .map(|e| e.0)
-            .filter(|&f| get(&ma, f) != get(&mb, f))
-            .collect();
-        fs.sort_unstable();
-        fs.dedup();
-        Some(fs)
-    }
-
-    /// Whether checkpoint `c` was taken before its run touched any of
-    /// the fields `fs` (read or defined them: its table's touched and
-    /// defined locations), and holds their bindings as continuation
-    /// `old` carried them (to be replaced by the new ones).
-    fn ck_untouched(&self, c: &[ValueId], old: ValueId, fs: &[ValueId]) -> bool {
-        let v = self.v;
-        let Some(&base) = c.get(11) else { return false };
-        let b = list_of(v, base);
-        let (Some(&touched), Some(&defined)) = (b.get(10), b.get(3)) else {
-            return false;
-        };
-        let seen: phitex_defuse::FxHashSet<ValueId> = list_of(v, touched)
-            .into_iter()
-            .flat_map(|ch| list_of(v, ch))
-            .chain(list_of(v, defined))
-            .collect();
-        if fs.iter().any(|f| seen.contains(f)) {
-            return false;
-        }
-        let (mo, mc) = (self.cont_slot_map(old), self.cont_slot_map(c[6]));
-        let get = |m: &[(ValueId, ValueId)], f: ValueId| m.iter().find(|e| e.0 == f).map(|e| e.1);
-        fs.iter().all(|&f| get(&mo, f) == get(&mc, f))
-    }
-
-    /// Checkpoint continuation `ck` with the bindings of fields `fs` as
-    /// continuation `new` carries them.
-    fn cont_with_slots(&self, ck: ValueId, new: ValueId, fs: &[ValueId]) -> ValueId {
-        let v = self.v;
-        let mut xs = list_of(v, ck);
-        let Some(st) = xs.get(4).map(|&x| list_of(v, x)) else {
-            return ck;
-        };
-        let Some(&slots) = st.first() else { return ck };
-        let mn = self.cont_slot_map(new);
-        let mut out: Vec<ValueId> = Vec::new();
-        for e in list_of(v, slots) {
-            match list_of(v, e).first() {
-                Some(f) if fs.contains(f) => {
-                    if let Some(x) = mn.iter().find(|m| m.0 == *f) {
-                        out.push(x.1);
-                    }
-                }
-                _ => out.push(e),
-            }
-        }
-        for &f in fs {
-            let had = list_of(v, slots).iter().any(|&e| list_of(v, e).first() == Some(&f));
-            if !had && let Some(x) = mn.iter().find(|m| m.0 == f) {
-                out.push(x.1);
-            }
-        }
-        let mut st2 = st.clone();
-        st2[0] = v.list(out);
-        xs[4] = v.list(st2);
-        v.list(xs)
     }
 
     /// What a checkpoint holds besides the continuation: the command

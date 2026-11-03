@@ -1137,24 +1137,6 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    /// [`Ctx::last_reads_hold`] but for the reads of field `skip`: a run
-    /// that read it again already (its value moved in a way the client
-    /// has shown the point does not depend on). Not a read.
-    pub fn last_reads_hold_but(&self, k: usize, skip: Field) -> bool {
-        let Some(r) = self.last.as_ref().filter(|r| !r.provisional) else {
-            return false;
-        };
-        if k > r.reads.len() {
-            return false;
-        }
-        let mut memo = crate::read::FoldMemo::new();
-        r.reads[..k].iter().all(|rd| {
-            rd.kind.field() == Some(skip)
-                || (!matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
-                    && crate::read::holds(self.eng, self.me, rd, &mut memo))
-        })
-    }
-
     /// Whether my last run's reads from its `m`-th on all still give
     /// what they gave, none of them a placement's output or a hole: what
     /// that run made after a point of it reached after `m` reads stands
