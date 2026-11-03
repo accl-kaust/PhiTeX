@@ -2775,11 +2775,32 @@ fn xelatex_watch_compacts_a_series() {
 #[test]
 #[ignore = "heavy: the xelatex format; run on accl"]
 fn xelatex_watch_exact_edits() {
+    xelatex_exact_edits("xelatex-exact", None);
+}
+
+/// The same edits with the value store collected at every chance
+/// (`PHITEX_COLLECT_MB`, a real session passes 1 GB on a large document):
+/// what the output keeps between edits by a value's id must not outlive
+/// the value. The filled pages' memo did: on the 306-page circuitikz
+/// manual every edit after a collection stopped the page writer (in an
+/// observe build, "used after its collection") or gave a PDF that was not
+/// the cold build's.
+#[test]
+#[ignore = "heavy: the xelatex format; run on accl"]
+fn xelatex_watch_edits_across_collections() {
+    xelatex_exact_edits("xelatex-collect", Some("1"));
+}
+
+fn xelatex_exact_edits(name: &str, collect_mb: Option<&str>) {
     let _one = one();
     let text = std::fs::read_to_string(xetex_docs().join("fontspec.tex")).expect("the document");
-    let dir = scratch("xelatex-exact");
+    let dir = scratch(name);
     std::fs::write(dir.join("fontspec.tex"), &text).expect("the document");
-    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+    let mut watch = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir);
+    if let Some(mb) = collect_mb {
+        watch.env("PHITEX_COLLECT_MB", mb);
+    }
+    let mut child = watch
         .args([
             "watch",
             "--json",
@@ -2833,7 +2854,7 @@ fn xelatex_watch_exact_edits() {
     }
     let _ = child.wait();
     for (k, (t, watched)) in texts.iter().enumerate() {
-        let cold_dir = scratch(&format!("xelatex-exact-cold-{k}"));
+        let cold_dir = scratch(&format!("{name}-cold-{k}"));
         std::fs::write(cold_dir.join("fontspec.tex"), t).expect("the edited document");
         let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
             .args(["build", "--engine", "xelatex", "-j", "4", "fontspec.tex"])
