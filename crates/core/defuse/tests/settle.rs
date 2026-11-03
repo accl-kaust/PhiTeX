@@ -357,3 +357,96 @@ fn a_reader_does_not_wait_for_a_page_node_whose_run_panicked() {
     let err = r.expect_err("the panic is the evaluation's failure");
     assert!(err.contains("panicked"), "{err}");
 }
+
+/// `[f]`: a text node reading `f`, its output `f`'s value; keeps the
+/// cause each of its runs is told (`Ctx::woken_by`).
+struct WokeReader {
+    woke: std::sync::Mutex<Vec<Option<phitex_defuse::Cause>>>,
+}
+
+impl Operation for WokeReader {
+    fn name(&self) -> &'static str {
+        "woke-reader"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.woke.lock().unwrap().push(cx.woken_by());
+        let x = cx.read(Field(cx.args()[0]))?;
+        Ok(x.unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// `[at, f]`: a page-layer node whose frontier stands at node `at`
+/// while `f` read at its unit's end is 1, and is past everything once it
+/// is not (the loop at a hole, then past it). Settles at quiet points.
+struct FrontWhile;
+
+impl Operation for FrontWhile {
+    fn name(&self) -> &'static str {
+        "front-while"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args().to_vec();
+        let at = v.as_int(a[0]).and_then(|x| u64::try_from(x).ok());
+        let x = match cx.read_at(Field(a[1]), phitex_defuse::At::End(cx.unit()))? {
+            phitex_defuse::FieldAt::Def(x, _) => v.as_int(x),
+            _ => None,
+        };
+        cx.set_frontier(if x == Some(1) {
+            at.map(phitex_defuse::NodeId::from_raw)
+        } else {
+            None
+        });
+        Ok(ValueId::UNIT)
+    }
+
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+}
+
+/// A run held at the frontier (`Ctx::hold_at_frontier`) and released when
+/// the frontier passes it (`sched::release_frontier`) runs for the cause
+/// that woke it, not a structural one. Released as `Cause::Structure`
+/// with no site, its run was told no cause (`Ctx::woken_by`): attributed
+/// to no field (amsldoc, a paragraph added: 69 runs of 890 ms
+/// "Structure", each first woken by a changed page-layer field), and a
+/// run going on from a checkpoint before the change's site went back to
+/// its start instead. Line: F (frontier at A while `go` is 1 at the
+/// end), A, T (reads `pn`, edited), P (page: `go` := 2). F, T and P
+/// edited: F stands the frontier at A, T past it is held, P's change
+/// moves F's frontier past T, and T is released told its edit.
+#[test]
+fn a_run_released_at_the_frontier_keeps_the_cause_that_woke_it() {
+    let o = setup();
+    let (e, v) = (&o.e, o.e.values());
+    let front = e.register(Arc::new(FrontWhile));
+    let wr = Arc::new(WokeReader {
+        woke: std::sync::Mutex::new(Vec::new()),
+    });
+    let wop = e.register(wr.clone());
+    let u = e.new_unit();
+    let (pn, go, a) = (v.field("pn"), v.field("go"), v.field("a"));
+    let f = e.push(u, front, vec![v.int(-1), go.0]);
+    let an = e.push(u, o.def_op, vec![a.0, v.int(1)]);
+    let t = e.push(u, wop, vec![pn.0]);
+    let p = e.push(u, o.page_op, vec![go.0, v.int(1), ValueId::UNIT]);
+    e.push(u, o.page_op, vec![pn.0, v.int(5), ValueId::UNIT]);
+    e.evaluate(1).unwrap();
+    wr.woke.lock().unwrap().clear();
+    let held = e.frontier_held();
+    let at = i64::try_from(an.raw()).expect("an id");
+    e.replace(f, front, vec![v.int(at), go.0]);
+    e.replace(t, wop, vec![pn.0, v.int(0)]);
+    e.replace(p, o.page_op, vec![go.0, v.int(2), ValueId::UNIT]);
+    let rep = e.evaluate(1).unwrap();
+    let woke = wr.woke.lock().unwrap().clone();
+    assert!(e.frontier_held() > held, "T was held at the frontier: {woke:?} {rep:?}");
+    assert!(woke.len() >= 2, "T ran, was held, ran again: {woke:?}");
+    assert!(
+        woke.iter().all(|c| matches!(c, Some(phitex_defuse::Cause::Edited))),
+        "each run of T is told its edit: {woke:?}"
+    );
+}

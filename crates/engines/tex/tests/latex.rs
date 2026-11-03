@@ -2253,3 +2253,99 @@ Text.
         }
     }
 }
+
+/// A LaTeX document of several pages with a table of contents and
+/// citations (BibTeX), built to its fixpoint; a heading edited: the
+/// `.toc` read back moves the first page, so the page loop's first node
+/// folds again from a moved start, and its rests fold again while the
+/// pieces after them are holes. A rest whose start is not decided yet,
+/// or found stale, waits with what it made standing
+/// (`pages::pageloop`, `Run::wait_keeping`): no loop node and no finisher
+/// is made anew (on Grail every rest and finisher after the first pages
+/// was, each \cite edit, accl 23278, mc 78930: 51 finishers made anew and
+/// their routines run, 4.1 s of a 6.5 s edit), and the edited build equals
+/// a cold build of the edited text, at one and at eight threads.
+#[test]
+fn a_toc_edit_keeps_every_rest_and_finisher() {
+    let fx = common::fixtures().join("latexmk").join("bibtex");
+    let mut src = String::from(
+        "\\documentclass{article}\n\\begin{document}\n\\tableofcontents\n\\clearpage\n",
+    );
+    for s in 0..12 {
+        let _ = std::fmt::Write::write_fmt(
+            &mut src,
+            format_args!("\\section{{Section number {s}}}\\label{{s{s}}}\n"),
+        );
+        for p in 0..6 {
+            let _ = std::fmt::Write::write_fmt(
+                &mut src,
+                format_args!(
+                    "Paragraph {p} of section {s}, long enough to make a few lines of text in the article class, with a citation~\\cite{{{}}} and a reference to section~\\ref{{s{}}} on page~\\pageref{{s{}}}, so that the pages fill.\n\n",
+                    ["knuth84", "lamport94", "mittelbach04"][(s + p) % 3],
+                    (s + 5) % 12,
+                    (s + 7) % 12
+                ),
+            );
+        }
+    }
+    src.push_str("\\bibliographystyle{plain}\n\\bibliography{refs}\n\\end{document}\n");
+    let edited = src.replacen("\\section{Section number 3}", "\\section{Section number three, a longer title that takes two lines in the table of contents and in the text}", 1);
+    assert_ne!(edited, src);
+    for threads in [1, 8] {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("toc-edit-j{threads}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        std::fs::copy(fx.join("refs.bib"), dir.join("refs.bib")).expect("the database");
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            tool_finder: Some(common::tool_finder(&dir)),
+            ..pdf_opts("tocedit", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &src);
+        let pages = b.pages().len();
+        assert!(pages >= 6, "-j{threads}: several pages: {pages}");
+        let r = common::rebuild(&mut b, &edited);
+        eprintln!(
+            "-j{threads} toc edit: {} pages, loop nodes made {} run {}, finishers made {} run {}, {} runs: {r:?}",
+            b.pages().len(),
+            r.placements_made("pages"),
+            r.runs_by_op
+                .iter()
+                .find(|x| x.0 == "pages")
+                .map_or(0, |x| x.1),
+            r.placements_made("finish"),
+            r.runs_by_op
+                .iter()
+                .find(|x| x.0 == "finish")
+                .map_or(0, |x| x.1),
+            r.runs
+        );
+        let cdir = dir.join("cold");
+        std::fs::create_dir_all(&cdir).expect("a scratch directory");
+        std::fs::copy(fx.join("refs.bib"), cdir.join("refs.bib")).expect("the database");
+        let cold = common::build(
+            Options {
+                fixpoint: true,
+                threads: Some(threads),
+                tool_finder: Some(common::tool_finder(&cdir)),
+                ..pdf_opts("tocedit", &cdir)
+            },
+            Some(&prelude(true)),
+            &edited,
+        );
+        if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+            panic!("-j{threads}: the edit differs from a cold build: {d}");
+        }
+        let new_pages = b.pages().len().saturating_sub(pages);
+        assert_eq!(
+            r.placements_made("pages"),
+            new_pages,
+            "-j{threads}: no loop node made anew but for a new page: {r:?}"
+        );
+        assert!(
+            r.placements_made("finish") <= new_pages,
+            "-j{threads}: no finisher made anew but for a new page: {r:?}"
+        );
+    }
+}

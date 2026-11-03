@@ -125,7 +125,7 @@ fn the_loop_parks_at_holes_and_resumes() {
     );
     assert_eq!(
         b.stats.units_folded("pages"),
-        b.stats.units_contributed("vprof"),
+        b.units_contributed("vprof"),
         "every profile unit folded exactly once over all runs of the loop"
     );
 }

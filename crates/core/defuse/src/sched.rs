@@ -1841,7 +1841,15 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             let done = ns(pool.t0);
             node.done_ns.store(done, Ordering::Relaxed);
             if run_log() {
-                eprintln!("commit: node {} done {}", n.raw(), log_clock(Instant::now()));
+                eprintln!(
+                    "commit: node {} done {} commit {} reask {} walked {} woken {}",
+                    n.raw(),
+                    log_clock(Instant::now()),
+                    st.commit_ns,
+                    st.reask_ns,
+                    st.walked,
+                    st.woken
+                );
             }
             w.last_commit.store(n.raw(), Ordering::Relaxed);
             w.last_done.store(done, Ordering::Relaxed);
@@ -2072,16 +2080,22 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
     }
     for n in go {
         if let Some(x) = eng.placed_node(n).filter(|x| x.state() == State::Dirty) {
-            enqueue(
-                eng,
-                Some(w),
-                x,
+            // (the run goes on for the cause that woke it, which the hold
+            // only paused: its resumption point and the wake's attribution
+            // are that cause's, not a structural one's)
+            let wake = x.woke.lock().as_ref().map_or(
                 Wake {
                     by: None,
                     cause: Cause::Structure,
                     at_ns: eng.now_ns(),
                 },
+                |o| Wake {
+                    by: o.by,
+                    cause: o.cause.clone(),
+                    at_ns: eng.now_ns(),
+                },
             );
+            enqueue(eng, Some(w), x, wake);
         }
     }
 }

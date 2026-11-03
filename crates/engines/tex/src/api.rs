@@ -564,8 +564,20 @@ impl phitex_defuse::EditSource for Absorb<'_> {
         // (the lines before each node's text, where the text moved them:
         // a run that reads a line of one reads them, `dline:<node>`)
         if self.incr.is_some() {
-            let changes =
-                dline_changes(eng.values(), self.dlines, dlines_of(self.text, self.nodes));
+            // (from the text's line starts, kept and moved by the edit:
+            // not a count of the whole text's lines each edit)
+            let now = {
+                let mut ls = self.lines.locked();
+                let starts = ls.get_or_insert_with(|| line_starts(self.text));
+                dlines_from_starts(starts, self.text.len(), self.nodes)
+            };
+            if crate::exec::obs_flag!("PHITEX_CANON_CHECK") {
+                assert!(
+                    now == dlines_of(self.text, self.nodes),
+                    "the nodes' lines from the line starts differ"
+                );
+            }
+            let changes = dline_changes(eng.values(), self.dlines, now);
             if !changes.is_empty() {
                 eng.update_environment(&changes);
             }
@@ -708,6 +720,30 @@ fn dlines_of(text: &str, nodes: &[(u64, NodeId, Src)]) -> Vec<(u64, i64)> {
         out.push((n.raw(), nl + i64::from(s > 0)));
     }
     out
+}
+
+/// [`dlines_of`] from the text's line starts (`starts`, [`line_starts`]:
+/// 0 and each byte after a line end) and its length `len`: a binary
+/// search per node, not a pass over the text.
+fn dlines_from_starts(
+    starts: &[usize],
+    len: usize,
+    nodes: &[(u64, NodeId, Src)],
+) -> Vec<(u64, i64)> {
+    nodes
+        .iter()
+        .map(|(_, n, src)| {
+            let Src::Doc(s, _) = *src;
+            // (the line ends before byte s - 1: the starts after them up
+            // to it, the text's own start not one)
+            let end = s.saturating_sub(1).min(len);
+            let nl = starts.partition_point(|&k| k <= end).saturating_sub(1);
+            (
+                n.raw(),
+                i64::try_from(nl).unwrap_or(i64::MAX) + i64::from(s > 0),
+            )
+        })
+        .collect()
 }
 
 /// The environment's changes for the nodes' lines now (`dlines_of`)
@@ -1918,9 +1954,6 @@ pub struct Stats {
     /// The siblings the runs read on into (`Run::pull`), over all runs:
     /// a run on a wrong guess that reads on counts what it took.
     pub siblings_pulled: u64,
-    /// The units of each accumulator the last evaluation ended with
-    /// (`vprof`: the profiles the pieces contributed).
-    pub units_now: Vec<(&'static str, u64)>,
     /// What the last build or edit's evaluations ran ([`RunReport`]).
     pub last: RunReport,
     /// The engine's speculative runs: kept with outstanding
@@ -2505,15 +2538,6 @@ impl Stats {
     #[must_use]
     pub fn units_folded(&self, op: &str) -> u64 {
         if op == "pages" { self.units_folded } else { 0 }
-    }
-
-    /// The units accumulator `field` holds at the build's end.
-    #[must_use]
-    pub fn units_contributed(&self, field: &str) -> u64 {
-        self.units_now
-            .iter()
-            .find(|x| x.0 == field)
-            .map_or(0, |x| x.1)
     }
 
     /// The relations (`Ctx::define_rel`) on `field` the live nodes of
@@ -4086,14 +4110,6 @@ impl Graph {
                 .ops
                 .siblings_pulled
                 .load(std::sync::atomic::Ordering::Relaxed);
-            {
-                let v = self.eng.values();
-                let n = self
-                    .eng
-                    .acc_value(unit, v.field(crate::vprof::VPROF))
-                    .map_or(0, |x| v.seq_to_vec(x).len());
-                stats.units_now = vec![(crate::vprof::VPROF, u64::try_from(n).unwrap_or(0))];
-            }
             stats.env_calls = self.env_calls;
             stats.add_reruns(&self.eng, &r);
             stats.add_refuted(&self.eng, &r);
@@ -7095,6 +7111,19 @@ impl Build {
     }
 
     /// What the last evaluation's link did with the exact PDF's pages:
+    /// The units accumulator `field` holds now (a fold over the
+    /// document: asked for, not counted after every evaluation).
+    #[must_use]
+    pub fn units_contributed(&self, field: &str) -> u64 {
+        let v = self.g.eng.values();
+        let n = self
+            .g
+            .eng
+            .acc_value(self.unit, v.field(field))
+            .map_or(0, |x| v.seq_to_vec(x).len());
+        u64::try_from(n).unwrap_or(0)
+    }
+
     /// `(placed, shipped again)`, the pages placed as their own steps
     /// wrote them and those it wrote again itself (none linked: zeros).
     #[must_use]
@@ -9220,6 +9249,24 @@ mod prelude_tests {
 #[cfg(test)]
 mod canonical_tests {
     use super::*;
+
+    /// The nodes' lines from the kept line starts are those a pass over
+    /// the text counts: nodes at the start, mid-line, at a line's start,
+    /// after a blank line, at the end; a text with no final line end.
+    #[test]
+    fn nodes_lines_from_line_starts_are_the_texts() {
+        for t in ["a\nbc\n\nd\ne", "\n\nx\ny\n", "abc", "", "a\n"] {
+            let n = |k: u64| NodeId::from_raw(k);
+            let nodes: Vec<(u64, NodeId, Src)> = (0..=t.len())
+                .map(|s| (s as u64, n(s as u64 + 1), Src::Doc(s, t.len())))
+                .collect();
+            assert_eq!(
+                dlines_from_starts(&line_starts(t), t.len(), &nodes),
+                dlines_of(t, &nodes),
+                "{t:?}"
+            );
+        }
+    }
 
     /// A slice whose key is a node's but whose text is not (forced: both
     /// keyed 5) is no node's: the edit replaces it. (Matched by the key
