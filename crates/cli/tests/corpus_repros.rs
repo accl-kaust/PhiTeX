@@ -1047,6 +1047,16 @@ fn pdf_texxet() {
     check_threads("pdf_texxet", "pdf");
 }
 
+/// Two PNGs with an alpha channel: writing the first writes the
+/// document's transparency group into an object stream, the second has
+/// none to write. The pages' fold counted it with each image, so an
+/// object number TeX read where a stream opened was one past pdfTeX's:
+/// cursolatex's form numbers, pgf's masks and shadows. At -j1 and -j4.
+#[test]
+fn pdf_image_png_group_once() {
+    check_threads("pdf_image_png_group_once", "pdf");
+}
+
 /// TeX Live manual enumitem-de (pdflatex): `\begin{verbatim}` and a tab at
 /// the line's end. web2c's `input_line` trims spaces and line ends, not
 /// tabs, in pdfTeX as in XeTeX; `PhiTeX` trimmed tabs for pdfTeX, so the
@@ -1058,7 +1068,7 @@ fn line_end_tab() {
 }
 
 /// A page fires in paragraphs inside a group the text's run opens, and
-/// its routine leaves tokens with `\\aftergroup`: TeX reads them right
+/// its routine leaves tokens with `\aftergroup`: TeX reads them right
 /// after that `build_page` (§1100), so what follows sees what they do. The
 /// piece that went on past the page goes again with them read there.
 /// Oracle: pdftex in the CI image.
@@ -1074,11 +1084,19 @@ fn afterpage_in_group() {
     check_threads("afterpage_in_group", "pdf");
 }
 
-/// A routine's `\\box` of a register the text's open group bound: void at
+/// A routine's `\box` of a register the text's open group bound: void at
 /// the binding's level (§1079), whatever group the routine runs in
-/// (longtable's `\\LT@foot` at `\\endlongtable`: typstfun's `\\vsize` kept
+/// (longtable's `\LT@foot` at `\endlongtable`: typstfun's `\vsize` kept
 /// the foot's height, a row more on a later table's page). Oracle: pdflatex.
 #[test]
 fn routine_box_used_in_group() {
     check_threads("routine_box_used_in_group", "pdf");
+}
+/// `\pdfsavepos` in right-to-left text: the number TeX reads back is
+/// where the output puts the whatsit, in the reversed segment (it was the
+/// list's order: fariscovernew's pgf pictures in an RTL paragraph, placed
+/// by their marks, 3.5 pt off). Oracle: pdftex in the CI image.
+#[test]
+fn pdf_savepos_texxet() {
+    check_threads("pdf_savepos_texxet", "pdf");
 }

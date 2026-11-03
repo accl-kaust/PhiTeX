@@ -1432,9 +1432,9 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some((g, node)) = self.st.alias_at(loc, self.v) else {
             return Ok(());
         };
-        let s = crate::defer::Sym {
-            loc: self.loc_of(g),
-            node,
+        let gl = self.loc_of(g);
+        let Some(s) = crate::defer::Sym::at(self, gl, node) else {
+            return Ok(());
         };
         let x = match self.op_name() {
             "exec" | "resume" => crate::defer::force(self, s)?,

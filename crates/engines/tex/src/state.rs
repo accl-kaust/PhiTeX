@@ -24,7 +24,6 @@ use std::rc::Rc;
 use phitex_defuse::{Ctx, Field, FxHashMap, Locality, ValueId, Values};
 use phitex_typeset::glue::Glue;
 
-use crate::defer::Sym;
 use crate::val::{Mean, Tok};
 
 /// A location in the table.
@@ -1309,21 +1308,20 @@ impl State {
         self.slot_ref(loc).and_then(|s| s.lazy)
     }
 
-    /// The symbol of a page-layer item at this run (spec §2.2): where
-    /// the item is neither loaded, written nor stepped by the run, the
-    /// symbol stands for the value reaching the run (`crate::defer`);
-    /// `None` otherwise (the caller reads it). Callers: `\the` and
-    /// `\number` on the register alone in a piece, after
-    /// `defer::deferrable` said the register is a page-layer one.
-    pub(crate) fn symbol(&mut self, loc: Loc, node: phitex_defuse::NodeId) -> Option<Sym> {
+    /// A symbol of page-layer item `loc` made in this run (spec §2.2):
+    /// where the item is neither loaded, written nor stepped by the run,
+    /// the symbol stands for the value reaching the run (`crate::defer`),
+    /// and the slot says so. Callers: `\the` and `\number` on the register
+    /// alone in a piece, after `defer::deferrable` said it is a page-layer
+    /// one.
+    pub(crate) fn note_symbol(&mut self, loc: Loc) {
         let s = self.slot_ref(loc);
         if s.is_some_and(|s| {
             s.e.flags & LOADED != 0 || s.meta != 0 || s.mapped != MAP_NONE || s.lazy.is_some()
         }) {
-            return None;
+            return;
         }
         self.slot(loc).sym = true;
-        Some(Sym { loc, node })
     }
 
     // ---------------------------------------------------------- values
