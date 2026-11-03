@@ -444,5 +444,5 @@ fn a_counter_among_a_macros_delimiters_matches_its_digits() {
                \\find a,7,b&\n\\edef\\m{x,\\the\\count200,y&}\\expandafter\\find\\m\n\
                Text.\\par\n\\closeout1\n\\bye\n";
     let (_, out) = cold("delim", src, 1);
-    assert_eq!(out.trim_end(), "[a]\n[x]", "{out:?}");
+    assert_eq!(out.trim_end(), "[a][x]", "{out:?}");
 }
