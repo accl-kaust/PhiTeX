@@ -1698,9 +1698,12 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             pool.epoch
         );
         let wf = match &cx.woke {
-            Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => {
-                eng.values().as_str(field.0)
-            }
+            Some(
+                Cause::Range { field, .. }
+                | Cause::Changed { field, .. }
+                | Cause::Rebind { field, .. }
+                | Cause::Environment { field },
+            ) => eng.values().as_str(field.0),
             _ => None,
         };
         if let Some(wf) = wf {
