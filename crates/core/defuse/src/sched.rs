@@ -1798,6 +1798,11 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             Ok(())
         }
         Ok(Ok(out)) => {
+            debug_assert!(
+                !cx.wait_frontier,
+                "node {} ended its run past a stop at the frontier that it did not return",
+                node.id.raw()
+            );
             let product = cx.into_product(out);
             if product.parked_on.is_some() {
                 Worker::add(&w.parks, 1);

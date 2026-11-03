@@ -2067,8 +2067,12 @@ impl<'c, 'a> Run<'c, 'a> {
             self.pre_noted.insert(loc);
             return;
         }
-        // (a stop here stops the run: it runs again from its start)
-        if self.load(loc).is_err() {
+        // (a stop here stops the run: it runs again from its start,
+        // the definition that brought it here made in vain; gone on from,
+        // the run would commit without this value kept, its publication
+        // what it is where the location goes unread)
+        if let Err(h) = self.load(loc) {
+            self.raise(h);
             return;
         }
         let old = self.st.id_of(loc, v).unwrap_or(ValueId::UNIT);
