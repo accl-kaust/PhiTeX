@@ -5321,6 +5321,24 @@ impl ShapeScan {
     }
 }
 
+/// A run's word on what the text's `name` did to the scope (`ok`: what the
+/// text shows, an opener opened, a closer closed). One run it did not is
+/// the last word: the name's text says nothing about its brackets, for
+/// whatever reason (a `\\begin{aligned}` in a short verbatim), and no
+/// later run's "yes" makes the prediction good again. With the last run's
+/// word kept, the threads' order chose it: amsldoc at -j32 ended a cold
+/// build with `aligned` predicted open, so typing one letter in the
+/// paragraph that shows `|\\!\\begin{aligned}|` filed an open at the edit
+/// and took it back at the run's commit, each a walk of all 332 075 readers
+/// after it, 50-90 ms each, and 6 ms became 190 ms (accl 23856).
+pub(crate) fn learn_scope(learned: &mut FxHashMap<String, bool>, name: String, ok: bool) {
+    if ok {
+        learned.entry(name).or_insert(true);
+    } else {
+        learned.insert(name, false);
+    }
+}
+
 /// The brackets a node's text predicts from [`scope_shape`] and what runs
 /// of texts of the same shape left (`learned`, by the shape's names, the
 /// last run's outcome): a closer closes the scope the node runs in unless
@@ -5874,6 +5892,27 @@ impl Hint {
 
 #[cfg(test)]
 mod tests {
+    /// One run of a name's text that did not open what it shows ends the
+    /// name's prediction, in whichever order the threads learned the two:
+    /// no open is filed for it at an edit, to be taken back at the run.
+    #[test]
+    fn a_name_refuted_once_predicts_no_brackets_whatever_the_order() {
+        let shape = super::ScopeShape::Open(vec!["aligned".to_owned()]);
+        for order in [[true, false], [false, true]] {
+            let mut m = phitex_defuse::FxHashMap::default();
+            for ok in order {
+                super::learn_scope(&mut m, "aligned".to_owned(), ok);
+            }
+            assert_eq!(super::predicted_brackets(&shape, &m), None, "{order:?}");
+        }
+        let mut m = phitex_defuse::FxHashMap::default();
+        super::learn_scope(&mut m, "aligned".to_owned(), true);
+        assert!(
+            super::predicted_brackets(&shape, &m).is_some(),
+            "only yes: predicted"
+        );
+    }
+
     use super::*;
 
     fn hint_of(text: &str, at: usize) -> Hint {
