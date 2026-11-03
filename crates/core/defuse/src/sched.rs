@@ -432,7 +432,13 @@ const ABSORB_EVERY: Duration = Duration::from_millis(2);
 
 impl Pool {
     /// A pool of `n` workers and their deques.
-    pub(crate) fn new(n: usize, epoch: u64, limits: Limits) -> (Pool, Vec<Worker>) {
+    /// `collect_mark`: the store's mark as the last collection left it.
+    pub(crate) fn new(
+        n: usize,
+        epoch: u64,
+        limits: Limits,
+        collect_mark: u64,
+    ) -> (Pool, Vec<Worker>) {
         let n = n.max(1);
         let blocks: Vec<Deque<(NodeId, u32)>> = (0..n).map(|_| Deque::new_lifo()).collect();
         let block_stealers = blocks.iter().map(Deque::stealer).collect();
@@ -463,7 +469,9 @@ impl Pool {
             active: AtomicUsize::new(1),
             arrived: AtomicUsize::new(0),
             collect_gen: AtomicU64::new(0),
-            collect_next: AtomicU64::new(limits.collect_at_bytes.unwrap_or(u64::MAX)),
+            collect_next: AtomicU64::new(
+                limits.collect_at_bytes.map_or(u64::MAX, |floor| floor.max(collect_mark)),
+            ),
         });
         let workers = blocks
             .into_iter()
@@ -782,16 +790,15 @@ impl Pool {
                 let mut extra = std::mem::take(&mut *sh.extra_roots.lock());
                 extra.extend(sh.panicked_roots.lock().iter().copied());
                 let floor = self.limits.collect_at_bytes.unwrap_or(u64::MAX);
-                if let Some(c) = eng.collect_at_barrier(extra) {
-                    let held = ns(t);
-                    sh.collect_next
-                        .store(floor.max(c.bytes_after.saturating_mul(2)), Ordering::SeqCst);
-                    w.log.lock().collections.push((c, held));
-                } else {
-                    sh.collect_next.store(
-                        floor.max(eng.values().payload_bytes().saturating_mul(2)),
-                        Ordering::SeqCst,
-                    );
+                let collected = eng.collect_at_barrier(extra);
+                let stood = collected
+                    .as_ref()
+                    .map_or_else(|| eng.values().payload_bytes(), |c| c.bytes_after);
+                let next = floor.max(stood.saturating_mul(2));
+                sh.collect_next.store(next, Ordering::SeqCst);
+                eng.collect_mark.store(next, Ordering::SeqCst);
+                if let Some(c) = collected {
+                    w.log.lock().collections.push((c, ns(t)));
                 }
                 sh.arrived.store(0, Ordering::SeqCst);
                 sh.collect_wanted.store(false, Ordering::SeqCst);
