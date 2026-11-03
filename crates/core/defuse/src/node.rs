@@ -126,6 +126,12 @@ pub(crate) struct Node {
     /// give-back reached again. True once it leaves the line
     /// (`commit::release_leaving`): from then on it claims nothing.
     pub(crate) claim_mx: Mx<bool>,
+    /// A run of it stopped at the settling layer's frontier
+    /// (`Ctx::hold_at_frontier`, `Ctx::wait_settled`): one begun past the
+    /// frontier would most likely stop there again, its work thrown away,
+    /// so it waits for the frontier first (`sched::work`). Only when it
+    /// runs: what it makes is what it would make anyway.
+    pub(crate) held_frontier: AtomicBool,
     /// Placed as its placer's continuation (`Ctx::follow`,
     /// `Ctx::follow_after`), not as its child: a node placed after the
     /// placer and its children goes before it.
@@ -227,6 +233,7 @@ impl Node {
             claimer: AtomicU64::new(0),
             claim_end: AtomicU64::new(0),
             claim_mx: Mx::new(false),
+            held_frontier: AtomicBool::new(false),
             follows: AtomicBool::new(false),
             anchor: AtomicU64::new(0),
             state_stale: AtomicBool::new(false),

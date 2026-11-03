@@ -465,7 +465,12 @@ impl Run<'_, '_> {
             + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
         if let Some(c) = self.ck.as_mut() {
             c.next = self.cmds
-                + if c.dense {
+                + if c.dense && self.resumed_at.is_some() {
+                    // (a run gone on from a checkpoint before the edit:
+                    // those it takes now stand past the edit, of use only
+                    // to a later edit further on; doubling)
+                    every() << (c.fresh.len() + 1).min(16)
+                } else if c.dense {
                     every()
                 } else {
                     every().max(SPACE * spacing)

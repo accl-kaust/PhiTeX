@@ -1,0 +1,23 @@
+% !TEX program = pdftex
+% \pdfsavepos in right-to-left text (TeX--XeT): where the output puts the
+% whatsit, not where the list has it: in a reversed segment, a box inside
+% one, a vbox inside one, stretched and overfull lines, math in a segment.
+% (PDF: pdftex, the oracle made in the CI image)
+\TeXXeTstate=1 \parindent=0pt
+\newtoks\got
+\long\def\pos#1{\shipout\vbox{\hsize=200pt #1}%
+  \edef\x{\the\got\the\pdflastxpos,\the\pdflastypos\ }\got\expandafter{\x}}
+\def\m{\pdfsavepos}
+\pos{\hbox to 200pt{\beginR abc\m\ def\hfil\endR}}
+\pos{\hbox to 200pt{abc \beginR def\m\ ghi\endR\ jkl\hfil}}
+\pos{\hbox to 200pt{\beginR a\hbox{b\m c}d\hskip 3pt plus 1fil e\endR}}
+\pos{\hbox to 200pt{\beginR a\vbox{\hsize=50pt\moveright 5pt\hbox{b\m c}}d\endR\hfil}}
+\pos{\hbox to 50pt{\beginR abcdefghij klmnopqrstuvwxyz\m\ abc\endR}}
+\pos{\hbox to 50pt{\beginR a\hbox{\vrule width 100pt}\m b\endR}}
+\pos{\hbox to 200pt{\beginR a$b\m c$d\endR\hfil}}
+\pos{\hbox to 200pt{\beginR a\beginL b\m c\endL d\endR\hfil}}
+\pos{\hbox to 200pt{\beginR a\hbox{\beginL b\m c\endL}d\endR\hfil}}
+\pos{\beginR\noindent a\m b\par}
+\pos{\TeXXeTstate=1 \everypar{\beginR}\rightskip 0pt plus 1fil a\m\ b\par}
+\the\got
+\bye

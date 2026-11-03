@@ -3532,7 +3532,7 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     };
     // (`\pdfximagebbox`'s four: the writer's, 0 outside PDF mode)
     let mut bbox = [0; 4];
-    if let Some((_, i, _, _)) = &got {
+    if let Some((_, i, _, _, _)) = &got {
         bbox = i.bbox;
         w = i.width;
         h = i.height;
@@ -3540,7 +3540,7 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
         pages = i.pages;
         depth = i.colordepth;
     }
-    let (wobjs, wos) = got.as_ref().map_or((0, 0), |g| (g.2, g.3));
+    let (wobjs, wos, wgroup) = got.as_ref().map_or((0, 0, false), |g| (g.2, g.3, g.4));
     let n = or_alloc(r, got.and_then(|g| g.0))?;
     // (pdfTeX's writepng, reading a PNG with an alpha channel for PDF 1.4
     // and later after the image's object: the document's transparency
@@ -3562,6 +3562,11 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
                 crate::pdfout::os_write(r)?;
             }
         }
+        // (the document's transparency group, written with the first
+        // image that needs it, into an object stream)
+        if wgroup {
+            crate::pdfout::png_group_write(r)?;
+        }
     }
     r.set(
         &format!("pdf:ximage:{n}"),
@@ -3579,6 +3584,7 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
             v.int(wobjs),
             v.int(wos),
             v.int(i64::from(immediate)),
+            v.int(i64::from(wgroup)),
         ]),
         true,
     );
@@ -3626,7 +3632,7 @@ fn ximage_own_info(
     set: impl Fn(&mut phitex_pdf::PdfState),
     ocl: (i32, i32, i32),
     fonts: &crate::pdfout::Fonts,
-) -> Result<(phitex_pdf::XImageInfo, i64, i64), phitex_pdf::PdfError> {
+) -> Result<(phitex_pdf::XImageInfo, i64, i64, bool), phitex_pdf::PdfError> {
     let mut st = phitex_pdf::PdfState::new(phitex_pdf::PdfParams::default());
     set(&mut st);
     {
@@ -3657,10 +3663,20 @@ fn ximage_own_info(
         Ok(()) => st.objects_after(before),
         Err(_) => (0, 0),
     };
+    // (a PNG's transparency group is the document's, written once with
+    // the first image that needs it: this writer has no other image, so
+    // it wrote it; the record says so apart, for the fold to count it
+    // once. Counted with each image, every read-time number after a
+    // second such image was one past pdfTeX's where it opened an object
+    // stream (cursolatex's masks named forms one off, so the shadows
+    // lost their shadings))
+    let group = st.png_group_in_stream();
+    let os = os - usize::from(group);
     Ok((
         info,
         i64::try_from(objs).unwrap_or(0),
         i64::try_from(os).unwrap_or(0),
+        group,
     ))
 }
 
@@ -3679,7 +3695,7 @@ struct XImageScan {
 
 /// What [`ximage_step`] gives: the image's object number, what TeX reads
 /// of it, and the objects its write makes (all, those in object streams).
-type XImageStep = Option<(Option<usize>, phitex_pdf::XImageInfo, i64, i64)>;
+type XImageStep = Option<(Option<usize>, phitex_pdf::XImageInfo, i64, i64, bool)>;
 
 /// `\\pdfximage` as a step (pdfTeX §1358, writeimg.c `read_image`):
 /// the image's object number and what TeX reads of it.
@@ -3756,7 +3772,7 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
     // link's writer has them: `pdfout::command`'s)
     let mut fs = crate::pdfout::fonts_for(r, &[], false)?;
     crate::pdfout::image_fonts(r, &mut fs)?;
-    let (i, wobjs, wos) = match ximage_own_info(&spec, &set, ocl, &fs) {
+    let (i, wobjs, wos, wgroup) = match ximage_own_info(&spec, &set, ocl, &fs) {
         Ok(i) => i,
         Err(e) => {
             r.log("error", &e.to_string())?;
@@ -3783,7 +3799,7 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
     if let Some(e) = got.as_ref().and_then(|g| g.err.clone()) {
         r.log("error", &e)?;
     }
-    Ok(Some((num_of(got), i, wobjs, wos)))
+    Ok(Some((num_of(got), i, wobjs, wos, wgroup)))
 }
 
 /// `\\pdfxform` as a step (pdfTeX §1357): the box goes to the writer,
@@ -4061,6 +4077,7 @@ pub(crate) fn positions(r: &mut Run<'_, '_>, b: &BoxNode) -> R<Positions> {
     let mut w = Walk {
         at: &mut at,
         width: &width,
+        dir: 0,
     };
     let cur_v = b.height + v0;
     if b.kind == BoxKind::V {
@@ -4078,6 +4095,8 @@ pub(crate) fn positions(r: &mut Run<'_, '_>, b: &BoxNode) -> R<Positions> {
 struct Walk<'a> {
     at: &'a mut phitex_defuse::FxHashMap<u32, (i32, i32)>,
     width: &'a dyn Fn(u32, u16) -> i32,
+    /// e-TeX's `cur_dir`: 1 inside a right-to-left segment.
+    dir: u8,
 }
 
 /// The glue setting state of a box (§625).
@@ -4128,11 +4147,127 @@ impl GlueRun {
     }
 }
 
+/// The widths [`phitex_pdf::lr::reverse`] asks for, on the walk.
+struct WalkWidths<'a, 'b> {
+    width: &'a dyn Fn(u32, u16) -> i32,
+    g: &'b mut GlueRun,
+}
+
+impl phitex_pdf::lr::LrWidths for WalkWidths<'_, '_> {
+    fn char_wd(&mut self, f: u32, c: u16) -> i32 {
+        (self.width)(f, c)
+    }
+
+    fn glue(&mut self, g: &GlueNode) -> i32 {
+        self.g.glue(g)
+    }
+
+    fn glue_sets(&self, g: &GlueNode) -> bool {
+        match self.g.sign {
+            GlueSign::Stretching => g.spec.stretch_order == self.g.order,
+            GlueSign::Shrinking => g.spec.shrink_order == self.g.order,
+            GlueSign::Normal => false,
+        }
+    }
+}
+
 impl Walk<'_> {
     /// `pdf_hlist_out`: `cur_h` from the left edge, on the baseline.
     fn hlist(&mut self, b: &BoxNode, left: i32, base: i32) {
         let mut g = GlueRun::new(b);
-        self.hnodes(&b.list, &mut g, left, base);
+        if self.dir == 0
+            && !b
+                .list
+                .iter()
+                .any(|n| matches!(n, Node::Math(k, _) if k.is_lr()))
+        {
+            self.hnodes(&b.list, &mut g, left, base);
+        } else {
+            self.hlist_lr(&b.list, &mut g, left, base);
+        }
+    }
+
+    /// `pdf_hlist_out` for mixed direction text, as the writer goes
+    /// through it (`phitex_pdf`'s `hlist_lr`): a position in a
+    /// right-to-left segment is where the reversed segment puts it.
+    fn hlist_lr(&mut self, list: &[Node], g: &mut GlueRun, left: i32, base: i32) {
+        use phitex_pdf::lr::{Lr, flatten_into, reverse};
+        let mut q = std::collections::VecDeque::new();
+        flatten_into(list, &mut q);
+        let mut lr: Vec<u8> = vec![0];
+        let mut h = left;
+        if self.dir == 1 {
+            // "Reverse the complete hlist"
+            let mut back = 0;
+            let mut rev = reverse(
+                &mut WalkWidths {
+                    width: self.width,
+                    g,
+                },
+                &mut back,
+                self.dir,
+                &mut q,
+                None,
+                &mut lr,
+            );
+            rev.push_front(Lr::N(Node::Kern(
+                -back,
+                phitex_typeset::node::KernKind::Explicit,
+            )));
+            q = rev;
+        }
+        let mut edge = h;
+        while let Some(it) = q.pop_front() {
+            match it {
+                Lr::Edge { dir, width, dist } => {
+                    h += width;
+                    edge = h + dist;
+                    self.dir = dir;
+                }
+                Lr::Fixed(x) => h += x.spec.width,
+                Lr::N(Node::Math(k, w)) => {
+                    // "Adjust the LR stack for the `hlist_out` routine"
+                    if k.is_end() {
+                        if lr.last() == Some(&k.end_type()) {
+                            lr.pop();
+                        }
+                    } else {
+                        lr.push(k.end_type());
+                        if k.dir() != self.dir {
+                            // "Reverse an hlist segment"
+                            let dir = 1 - self.dir;
+                            let mut seg = h - edge + w;
+                            let tail = Lr::Edge {
+                                dir: self.dir,
+                                width: 0,
+                                dist: 0,
+                            };
+                            let mut rev = reverse(
+                                &mut WalkWidths {
+                                    width: self.width,
+                                    g,
+                                },
+                                &mut seg,
+                                dir,
+                                &mut q,
+                                Some(tail),
+                                &mut lr,
+                            );
+                            rev.append(&mut q);
+                            rev.push_front(Lr::Edge {
+                                dir,
+                                width: w,
+                                dist: seg,
+                            });
+                            q = rev;
+                            continue;
+                        }
+                    }
+                    h += w;
+                }
+                Lr::N(n) => h = self.hnodes(std::slice::from_ref(&n), g, h, base),
+            }
+        }
     }
 
     /// An hlist's nodes from `h` on; where they end.
@@ -4142,14 +4277,18 @@ impl Walk<'_> {
                 Node::Char { font, ch } => h += (self.width)(*font, *ch),
                 Node::Lig(l) => h += (self.width)(l.font, l.ch),
                 Node::Box(x) => {
+                    let end = h + x.width;
                     if !x.list.is_empty() {
+                        // (e-TeX: in a reversed segment a box's own list
+                        // starts at its far edge, reversed again)
+                        let at = if self.dir == 1 { end } else { h };
                         if x.kind == BoxKind::V {
-                            self.vlist(x, h, base + x.shift - x.height);
+                            self.vlist(x, at, base + x.shift - x.height);
                         } else {
-                            self.hlist(x, h, base + x.shift);
+                            self.hlist(x, at, base + x.shift);
                         }
                     }
-                    h += x.width;
+                    h = end;
                 }
                 Node::Rule(x) => h += x.width,
                 // (XeTeX's native word or glyph: `cur_h` past its width,
@@ -4181,10 +4320,15 @@ impl Walk<'_> {
                         v += x.height + x.depth;
                     } else {
                         v += x.height;
-                        if x.kind == BoxKind::V {
-                            self.vlist(x, left + x.shift, v - x.height);
+                        let at = if self.dir == 1 {
+                            left - x.shift
                         } else {
-                            self.hlist(x, left + x.shift, v);
+                            left + x.shift
+                        };
+                        if x.kind == BoxKind::V {
+                            self.vlist(x, at, v - x.height);
+                        } else {
+                            self.hlist(x, at, v);
                         }
                         v += x.depth;
                     }
@@ -4355,12 +4499,12 @@ mod tests {
         };
         let fonts = crate::pdfout::Fonts::default();
         for (ocl, want) in [
-            ((2, 1, 5), (1, 1)),
-            ((0, 1, 5), (1, 0)),
-            ((2, 1, 7), (1, 1)),
+            ((2, 1, 5), (1, 0, true)),
+            ((0, 1, 5), (1, 0, false)),
+            ((2, 1, 7), (1, 0, true)),
         ] {
             let got = super::ximage_own_info(&spec, |_| {}, ocl, &fonts)
-                .map(|(_, o, s)| (o, s))
+                .map(|(_, o, s, g)| (o, s, g))
                 .expect("the image");
             assert_eq!(got, want, "at {ocl:?}");
         }
