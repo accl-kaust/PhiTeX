@@ -198,6 +198,28 @@ impl PdfOut {
         Ok(())
     }
 
+    /// `pdf_files_close`: the files read, freed as `ht_clear_table`
+    /// passes over `pdf_files` (by hash bucket, then in the order each
+    /// bucket's were opened). An object imported from one is held by its
+    /// cross-reference entry until then, and written when it is let go:
+    /// a stream's indirect `/Length`, replaced by the stream's own, is
+    /// written here, after the fonts. A file opened without a name is in
+    /// no table and is never freed (pdf_open).
+    ///
+    /// # Errors
+    /// As writing an object.
+    pub fn pdf_files_close(&mut self) -> Result<()> {
+        let mut order: Vec<(usize, u32)> = (0..self.files.len() as u32)
+            .filter(|&pf| !self.files[pf as usize].ident.is_empty())
+            .map(|pf| (crate::dpxutil::get_hash(&self.files[pf as usize].ident), pf))
+            .collect();
+        order.sort_by_key(|&(h, _)| h);
+        for (_, pf) in order {
+            self.pdf_file_free(pf)?;
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn pdf_file_version(&self, pf: u32) -> i32 {
         self.files[pf as usize].version

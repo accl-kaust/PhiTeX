@@ -955,3 +955,28 @@ fn text_ends_without_end_xe() {
         );
     }
 }
+
+/// TeX Live manual nddiss (pdflatex, pdfx): `\pdfomitcharset`,
+/// `\pdfomitinfodict` and `\pdfomitprocset` were primitives the writer
+/// never read: every subset Type 1 font had its `/CharSet`, the file its
+/// Info dictionary and each page its `/ProcSet`. The first two are read
+/// where pdfTeX writes the fonts and the Info dictionary (the end), the
+/// third with each page's parameters. At -j1 and -j4 (oracle: pdftex in
+/// the CI image, mc 79143; the base differs).
+#[test]
+fn pdf_omit_params() {
+    check_threads("pdf_omit_params", "pdf");
+}
+
+/// TeX Live manual showexpl-test (xelatex): an included PDF's form whose
+/// `/Length` is an indirect object. xdvipdfmx imports that object with
+/// the form (`pdf_import_object` of the stream's dictionary) and writes
+/// it when the file it was read from is let go, `pdf_files_close` after
+/// the fonts; PhiTeX's writer never let the files go, so the object was
+/// never written and its number was left empty (showexpl's included
+/// picture: two Type1C font files' lengths). At -j1 and -j4 (oracle:
+/// xelatex in the CI image, mc 79161).
+#[test]
+fn xe_import_length() {
+    check_threads("xe_import_length", "pdf");
+}
