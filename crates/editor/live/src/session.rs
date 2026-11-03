@@ -898,7 +898,11 @@ impl Session {
                     progress: Some(progress),
                     // (pdfTeX's `\pdfshellescape`: 1 with -shell-escape,
                     // else TeX Live's restricted default)
-                    shell_escape: if self.job.shell_escape { 1 } else { 2 },
+                    shell_escape: if self.job.shell_escape {
+                        1
+                    } else {
+                        shell_escape_default()
+                    },
                     // (the commands neither in process nor refused: run as
                     // processes, each in a scratch directory of its own)
                     shell_hook,
@@ -2146,6 +2150,17 @@ mod tests {
     fn comment() {
         assert_eq!(dvi_comment(0), " TeX output 1970.01.01:0000");
         assert_eq!(dvi_comment(1_791_810_000), " TeX output 2026.10.12:1300");
+    }
+}
+
+/// `\pdfshellescape` where the job does not ask for it: TeX Live's
+/// `shell_escape` as kpathsea reads it, the environment over texmf.cnf's `p`
+/// (`f` or `0` off, `t` or `1` on, else restricted).
+fn shell_escape_default() -> i32 {
+    match std::env::var("shell_escape").as_deref() {
+        Ok("f" | "F" | "0") => 0,
+        Ok("t" | "T" | "y" | "Y" | "1") => 1,
+        _ => 2,
     }
 }
 

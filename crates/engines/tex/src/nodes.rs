@@ -1607,7 +1607,7 @@ impl FontIds {
 }
 
 /// The fonts of native list `l` into `out` (their ids, sorted); `false`
-/// where it holds a node other than characters, boxes of them,
+/// where it holds a node other than characters, empty boxes,
 /// discretionaries, glue without leaders, rules, kerns and the like
 /// ([`line_shape`] decides those from the list's value).
 fn native_walk(l: &[Node], out: &mut FontIds) -> bool {
@@ -1628,7 +1628,8 @@ fn native_walk(l: &[Node], out: &mut FontIds) -> bool {
             out.insert(n.font);
             true
         }
-        Node::Box(b) => native_walk(&b.list, out),
+        // (a box the writer enters is for the skeleton, [`line_shape`])
+        Node::Box(b) => b.list.is_empty(),
         Node::Disc(d) => {
             native_walk(&d.pre, out) && native_walk(&d.post, out) && native_walk(&d.replace, out)
         }
@@ -1653,7 +1654,8 @@ fn native_walk(l: &[Node], out: &mut FontIds) -> bool {
 /// then; a link, an annotation, a destination, a thread, a literal, a
 /// `\special` give the writer their data, the writer placing them where
 /// it walks the line), kept with the boxes on the way to it as the
-/// skeleton; one that reads its position at shipping
+/// skeleton (every box the writer enters, for a PDF's page: a link running
+/// at its level writes an object there); one that reads its position at shipping
 /// ([`crate::pdfprim::reads_position_at_shipout`]) is not sealed, nor is
 /// one in a discretionary. An insertion, an adjustment, an unset box,
 /// a node not known: not sealed. With `dvi` (a DVI's or XeTeX's page,
@@ -1713,7 +1715,12 @@ fn node_walk(
                     if !line_walk(v, at(9), fonts, Some(&mut inner), dvi) {
                         return false;
                     }
-                    if !inner.is_empty() {
+                    // (a box the writer enters counts where a link runs at
+                    // its level, an object a piece (`append_link`), or a
+                    // thread: [`crate::pdfout`]'s `mark_events` counts them;
+                    // one with an empty list it does not enter)
+                    let entered = !dvi && v.with_list(at(9), |l| !l.is_empty()).unwrap_or(false);
+                    if !inner.is_empty() || entered {
                         // (the box on the way: its kind, no measures)
                         let zero = v.int(0);
                         let mut b = vec![zero; 10];

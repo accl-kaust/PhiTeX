@@ -1,0 +1,7 @@
+% texlive-vpat (TeX Live manual): \pdffilemoddate is the file's own time, in UTC
+% under FORCE_SOURCE_DATE, which pins no file's date: a file of TeX Live's.
+\documentclass{article}
+\begin{document}
+\pdffilemoddate{article.cls}, [\pdffilemoddate{none.tex}].
+\immediate\openout15=\jobname.w \immediate\closeout15
+\end{document}
