@@ -886,8 +886,9 @@ impl Operation for Files {
                             // (biber's input without what it passes over: a
                             // citation of a key cited before makes no new one,
                             // and the memoised run answers)
-                            let t = name
-                                .ends_with(".bcf")
+                            let t = std::path::Path::new(&name)
+                                .extension()
+                                .is_some_and(|e| e == "bcf")
                                 .then(|| phitex_biber::canonical_bcf(&str_of(v, t)))
                                 .flatten()
                                 .map_or(t, |c| v.str(&c));
