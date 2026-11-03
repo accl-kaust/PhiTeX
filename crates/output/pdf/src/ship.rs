@@ -8,10 +8,9 @@ use std::collections::VecDeque;
 use phitex_typeset::arith::Scaled;
 use phitex_typeset::fonts::FontId;
 use phitex_typeset::glue::{GlueSign, Order};
-use phitex_typeset::node::{
-    BoxKind, BoxNode, GlueKind, GlueNode, KernKind, MathKind, Node, RUNNING,
-};
+use phitex_typeset::node::{BoxKind, BoxNode, GlueKind, GlueNode, KernKind, Node, RUNNING};
 
+use crate::lr::{Lr, LrWidths, flatten_into};
 use crate::num::{ONE_BP, ONE_HUNDRED_BP, TEN_POW, divide_scaled, round_xn_over_d};
 use crate::{
     BILLION, ColorStackCmd, FontSource, FontState, FontType, LiteralMode, MAX_DIMEN, OBJ_TYPE_FONT,
@@ -68,6 +67,31 @@ impl Frame {
         }
         size += self.cur_g;
         size
+    }
+}
+
+/// The widths [`crate::lr::reverse`] asks for, as the output has them.
+struct OutWidths<'a> {
+    st: &'a mut PdfState,
+    fr: &'a mut Frame,
+    src: &'a dyn FontSource,
+}
+
+impl LrWidths for OutWidths<'_> {
+    fn char_wd(&mut self, f: FontId, c: u16) -> Scaled {
+        self.st.char_wd(f, c, self.src)
+    }
+
+    fn glue(&mut self, g: &GlueNode) -> Scaled {
+        self.fr.glue(g)
+    }
+
+    fn glue_sets(&self, g: &GlueNode) -> bool {
+        match self.fr.g_sign {
+            GlueSign::Stretching => g.spec.stretch_order == self.fr.g_order,
+            GlueSign::Shrinking => g.spec.shrink_order == self.fr.g_order,
+            GlueSign::Normal => false,
+        }
     }
 }
 
@@ -1122,141 +1146,19 @@ impl PdfState {
         self.font(f).width(c)
     }
 
-    /// e-TeX's `reverse`: the nodes of `q` up to the end of the segment
-    /// (all of them when `t` is `None`) in reverse order, `t` last, with
-    /// glue set as it is output, `cur_h` advanced by their widths.
-    #[allow(clippy::too_many_lines)]
+    /// [`crate::lr::reverse`] at `cur_h`, the widths the output's.
     fn reverse(
         &mut self,
         fr: &mut Frame,
         q: &mut VecDeque<Lr>,
-        mut t: Option<Lr>,
+        t: Option<Lr>,
         lr: &mut Vec<u8>,
         src: &dyn FontSource,
     ) -> VecDeque<Lr> {
-        let mut l: VecDeque<Lr> = VecDeque::new();
-        let mut m = 0u32;
-        let mut n = 0u32;
-        loop {
-            while let Some(it) = q.pop_front() {
-                let mut node = match it {
-                    Lr::N(node) => node,
-                    Lr::Fixed(g) => {
-                        self.cur_h += g.spec.width;
-                        l.push_front(Lr::Fixed(g));
-                        continue;
-                    }
-                    other @ Lr::Edge { .. } => {
-                        l.push_front(other);
-                        continue;
-                    }
-                };
-                let rule_wd = match &mut node {
-                    Node::Char { font, ch } => self.char_wd(*font, *ch, src),
-                    Node::Lig(lg) => {
-                        let w = self.char_wd(lg.font, lg.ch, src);
-                        node = Node::Char {
-                            font: lg.font,
-                            ch: lg.ch,
-                        };
-                        w
-                    }
-                    Node::Box(bx) => bx.width,
-                    Node::Rule(r) => r.width,
-                    Node::Kern(w, _) => *w,
-                    Node::Native(nw) => nw.width,
-                    Node::Whatsit(_, Some(sz)) => sz.width,
-                    Node::Glue(g) => {
-                        let w = fr.glue(g);
-                        // "Handle a glue node for mixed direction"
-                        let set = match fr.g_sign {
-                            GlueSign::Stretching => g.spec.stretch_order == fr.g_order,
-                            GlueSign::Shrinking => g.spec.shrink_order == fr.g_order,
-                            GlueSign::Normal => false,
-                        };
-                        if set {
-                            if matches!(
-                                g.kind,
-                                GlueKind::ALeaders | GlueKind::CLeaders | GlueKind::XLeaders
-                            ) {
-                                let mut g = g.clone();
-                                g.spec.width = w;
-                                self.cur_h += w;
-                                l.push_front(Lr::Fixed(g));
-                                continue;
-                            }
-                            node = Node::Kern(w, KernKind::Normal);
-                        }
-                        w
-                    }
-                    Node::Math(k, w) => {
-                        let (k, w) = (*k, *w);
-                        if k.is_end() {
-                            if lr.last() == Some(&k.end_type()) {
-                                lr.pop();
-                                if n > 0 {
-                                    n -= 1;
-                                    node = Node::Math(k.flipped(), w);
-                                } else {
-                                    node = Node::Kern(w, KernKind::Normal);
-                                    if m > 0 {
-                                        m -= 1;
-                                    } else {
-                                        // "Finish the reversed hlist segment"
-                                        let cur_h = self.cur_h;
-                                        if let Some(Lr::Edge { dir, .. }) = t {
-                                            l.push_back(Lr::Edge {
-                                                dir,
-                                                width: w,
-                                                dist: -cur_h - w,
-                                            });
-                                        }
-                                        return l;
-                                    }
-                                }
-                            } else {
-                                node = Node::Kern(w, KernKind::Normal);
-                            }
-                        } else {
-                            lr.push(k.end_type());
-                            if n > 0 || k.dir() != self.cur_dir {
-                                n += 1;
-                                node = Node::Math(k.flipped(), w);
-                            } else {
-                                node = Node::Kern(w, KernKind::Normal);
-                                m += 1;
-                            }
-                        }
-                        w
-                    }
-                    _ => {
-                        l.push_front(Lr::N(node));
-                        continue;
-                    }
-                };
-                self.cur_h += rule_wd;
-                if matches!(node, Node::Kern(..)) && (rule_wd == 0 || (l.is_empty() && t.is_none()))
-                {
-                    continue;
-                }
-                l.push_front(Lr::N(node));
-            }
-            if t.is_none() && m == 0 && n == 0 {
-                break;
-            }
-            // "manufacture one missing math node"
-            let top = lr.last().copied().unwrap_or(0);
-            q.push_back(Lr::N(Node::Math(MathKind::of_subtype(i64::from(top)), 0)));
-            if top == 0 {
-                // (an empty stack: nothing left to close)
-                q.clear();
-                break;
-            }
-        }
-        if let Some(t) = t.take() {
-            l.push_back(t);
-        }
-        l
+        let (mut h, dir) = (self.cur_h, self.cur_dir);
+        let rev = crate::lr::reverse(&mut OutWidths { st: self, fr, src }, &mut h, dir, q, t, lr);
+        self.cur_h = h;
+        rev
     }
 
     /// The nodes of an hlist (pdfTeX §731–§737); a discretionary's
@@ -2219,31 +2121,6 @@ impl StringBits {
             space: st.metrics.space(),
             shrink: st.metrics.space_shrink(),
             has_space: st.has_space,
-        }
-    }
-}
-
-/// An item of an hlist being output with TeX--XeT: a node, e-TeX's edge
-/// node (a change of direction: `cur_h` moves by `width`, the new left
-/// edge is `dist` beyond), or leaders glue whose width `reverse` has
-/// fixed.
-enum Lr {
-    N(Node),
-    Edge {
-        dir: u8,
-        width: Scaled,
-        dist: Scaled,
-    },
-    Fixed(GlueNode),
-}
-
-/// `list`'s nodes, a discretionary's replacement text in its place (the
-/// nodes TeX's list has after the discretionary node).
-fn flatten_into(list: &[Node], q: &mut VecDeque<Lr>) {
-    for n in list {
-        match n {
-            Node::Disc(d) => flatten_into(&d.replace, q),
-            n => q.push_back(Lr::N(n.clone())),
         }
     }
 }

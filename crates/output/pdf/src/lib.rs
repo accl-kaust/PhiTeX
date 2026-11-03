@@ -94,6 +94,7 @@ mod encodings;
 mod epdffont;
 mod font;
 mod image;
+pub mod lr;
 mod macnames;
 pub mod map;
 mod marks;
