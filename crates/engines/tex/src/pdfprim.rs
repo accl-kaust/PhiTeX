@@ -456,6 +456,24 @@ fn file_bytes_shared(r: &mut Run<'_, '_>, name: &str) -> R<Option<std::sync::Arc
     Ok(xs.get(1).map(|&t| crate::pdfout::text_bytes(r.v, t)))
 }
 
+/// The modification time (seconds since the epoch) of the file on disk
+/// that TeX's file `key` ([`Run::tex_key`]) was found at, where it was found
+/// on one.
+fn file_mtime(r: &mut Run<'_, '_>, key: &str) -> R<Option<i64>> {
+    let Some(x) = r.read_file_lazy(key)? else {
+        return Ok(None);
+    };
+    let v = r.v;
+    let Some(&p) = list_of(v, x).first() else {
+        return Ok(None);
+    };
+    Ok(std::fs::metadata(str_of(v, p))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_secs()).ok()))
+}
+
 /// A file's size in bytes, as [`file_bytes`] finds it. A document file
 /// the client cut (`Run::read_cut`): the size the environment holds
 /// beside it (`fsize:<name>`), so the run reads not its text: an edit
@@ -678,15 +696,18 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                 .get_loc(crate::fields::cell::JOBNAME)?
                 .map_or_else(|| "texput".to_owned(), |x| str_of(r.v, x));
             let key = r.tex_key(&name)?;
-            // (a file found: the build's clock too, as pdfTeX's under
-            // FORCE_SOURCE_DATE gives SOURCE_DATE_EPOCH for every file
-            // (utils.c `getfilemoddate`); epstopdf-base compares an EPS's
-            // date with its PDF's and converts only a source it can date)
-            if name == format!("{job}.log")
-                || r.get(&format!("wopen:{key}"))?.is_some()
-                || file_size(r, &name)?.is_some()
-            {
+            // (a file found: its own time, in UTC under FORCE_SOURCE_DATE,
+            // which pins no file's date (utils.c `getfilemoddate`:
+            // `makepdftime(st_mtime, buf, use_utc)`; a tagged document
+            // embeds its `.css` with it: texlive-vpat's `/ModDate`); the
+            // build's clock for one with no time on a disk here)
+            if name == format!("{job}.log") || r.get(&format!("wopen:{key}"))?.is_some() {
                 creation_date(r)?
+            } else if file_size(r, &name)?.is_some() {
+                match file_mtime(r, &key)? {
+                    Some(t) => pdf_date(t),
+                    None => creation_date(r)?,
+                }
             } else {
                 String::new()
             }

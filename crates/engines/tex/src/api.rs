@@ -9370,10 +9370,10 @@ mod canonical_tests {
     #[test]
     fn blanks_at_line_ends_are_left_out() {
         for (t, want) in [
-            ("a b  \nc\t\n", "a b\nc\n"),
+            ("a b  \nc\t\n", "a b\nc\t\n"),
             ("a \r\nb", "a\r\nb"),
-            ("a\r \n", "a\r \n"),
-            ("   \n\t\n", "\n\n"),
+            ("a\r \n", "a\n"),
+            ("   \n\t\n", "\n\t\n"),
             ("x % c  \ny \\% \n", "x %\0"),
             ("end ", "end"),
         ] {

@@ -1058,3 +1058,13 @@ fn multicol_footnote_after() {
 fn link_over_plain_line() {
     check_threads("link_over_plain_line", "pdf");
 }
+
+/// TeX Live manual texlive-vpat (pdflatex): `\pdffilemoddate` is the
+/// file's own time, in UTC under `FORCE_SOURCE_DATE`, which pins no file's
+/// date (utils.c `getfilemoddate`); `PhiTeX` gave `SOURCE_DATE_EPOCH`. A
+/// tagged document embeds its `.css` with it, `/ModDate` in the file's
+/// `/Params`. At -j1 and -j4 (oracle: pdftex in the CI image, mc 79410).
+#[test]
+fn file_mod_date() {
+    check_threads("file_mod_date", "pdf");
+}
