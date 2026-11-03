@@ -166,16 +166,61 @@ fn subtree_end_skip(eng: &Engine, n: NodeId, skip: Option<&FxHashSet<NodeId>>) -
 /// after, and so on); none where the chain ends before `a` (a pushed
 /// node, or one anchored elsewhere).
 fn slot_under(eng: &Engine, y: NodeId, a: NodeId) -> Option<u8> {
+    sib_under(eng, y, a).map(|z| eng.node(z).slot())
+}
+
+/// The node of `y`'s anchor chain whose anchor is `a` (`slot_under`'s).
+fn sib_under(eng: &Engine, y: NodeId, a: NodeId) -> Option<NodeId> {
     let mut z = y;
     for _ in 0..100_000 {
         let zn = eng.placed_node(z)?;
         let an = zn.anchor()?;
         if an == a {
-            return Some(zn.slot());
+            return Some(z);
         }
         z = an;
     }
     None
+}
+
+/// Where a node of rank `rank` placed after `a` and its children goes,
+/// from `from` (the children's end) in this segment: past the nodes
+/// placed after `a` (slot 1) by a lower rank, and what stands under
+/// them (`Ctx::rank_placement`); `from` for an unranked one. The walk
+/// stops at a node of `skip` (the node relocated and its subtree, which
+/// it must stand before).
+fn ranked_end(
+    eng: &Engine,
+    inner: &Inner,
+    a: NodeId,
+    from: NodeId,
+    rank: u64,
+    skip: Option<&FxHashSet<NodeId>>,
+) -> NodeId {
+    let mut last = from;
+    if rank == 0 {
+        return last;
+    }
+    for (_, &x) in inner.nodes.range((Excluded(eng.node(from).pos_hint()), Unbounded)) {
+        if skip.is_some_and(|k| k.contains(&x)) {
+            break;
+        }
+        let Some(xn) = eng.placed_node(x) else {
+            continue;
+        };
+        if xn.state() == State::Gone {
+            continue;
+        }
+        let Some(d) = sib_under(eng, x, a) else {
+            break;
+        };
+        let dn = eng.node(d);
+        if dn.slot() != 1 || dn.rank() == 0 || dn.rank() >= rank {
+            break;
+        }
+        last = x;
+    }
+    last
 }
 
 /// Whether `x` is a placement of `by`'s, or of one of its placements.
@@ -193,7 +238,7 @@ fn own_of(eng: &Engine, x: NodeId, by: NodeId) -> bool {
 /// Whether `x` standing between a placement's floor and it strands it:
 /// a node of a later slot under `a` than `s`, or of none (pushed, or
 /// anchored elsewhere), not `by`'s own.
-fn strands(eng: &Engine, x: NodeId, by: NodeId, a: NodeId, s: u8) -> bool {
+fn strands(eng: &Engine, x: NodeId, by: NodeId, a: NodeId, s: u8, rank: u64) -> bool {
     // (one not in the table yet: made by this commit, its own)
     let Some(xn) = eng.placed_node(x) else {
         return false;
@@ -207,7 +252,10 @@ fn strands(eng: &Engine, x: NodeId, by: NodeId, a: NodeId, s: u8) -> bool {
         return false;
     }
     let t = slot_under(eng, x, a);
-    let bad = !matches!(t, Some(t) if t <= s);
+    // (and, of a ranked one after `a`, one placed after `a` by a higher
+    // rank: `Ctx::rank_placement`)
+    let bad = !matches!(t, Some(t) if t <= s)
+        || (s == 1 && rank > 0 && t == Some(1) && sib_under(eng, x, a).is_some_and(|d| eng.node(d).rank() > rank));
     if bad && crate::obs::enabled() && crate::sched::wake_log() {
         eprintln!(
             "stranded: anchor {} slot {s}: node {} (op {:?}, anchor {:?} slot {}, under {t:?}) between",
@@ -268,6 +316,7 @@ fn stranded(
     s: u8,
     floor: Pos,
     kpos: Pos,
+    rank: u64,
 ) -> bool {
     if kpos <= floor {
         return false;
@@ -275,10 +324,10 @@ fn stranded(
     inner
         .nodes
         .range((Excluded(floor), Excluded(kpos)))
-        .any(|(_, &x)| strands(eng, x, by, a, s))
+        .any(|(_, &x)| strands(eng, x, by, a, s, rank))
         || others.iter().any(|&x| {
             let p = eng.node(x).pos_hint();
-            p > floor && p < kpos && strands(eng, x, by, a, s)
+            p > floor && p < kpos && strands(eng, x, by, a, s, rank)
         })
 }
 
@@ -763,7 +812,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         p.claim = r.claim;
         p.placements.clear();
         if moved {
-            p.placements = replay_placements(eng, node.id, &r.placed);
+            p.ranks.clear();
+            p.placements = replay_placements(eng, node.id, &r.placed, &mut p.ranks);
         }
         if p.state.is_none() {
             p.state = r.state;
@@ -1435,8 +1485,16 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // off to after the lock as one made anew is, standing nowhere yet
         // for the checks of those after them)
         for (i, what) in p.placements.iter().enumerate() {
+            // (a placement after another node goes after that one's
+            // children, not after this subtree's end: not walked for it,
+            // a loop rest's whole chain of rests after it at each rest's
+            // commit)
             if let Some(k) = kept_end.take() {
-                after = subtree_end(eng, k);
+                after = if matches!(what, Placement::FollowAfter(..) | Placement::FollowAfterPlaced(..)) {
+                    k
+                } else {
+                    subtree_end(eng, k)
+                };
                 labelled = after;
             }
             let after_pos = if moving.contains(&labelled) {
@@ -1465,6 +1523,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 w => w,
             };
             made_now.push(true);
+            let rank_i = match what {
+                Placement::FollowAfter(..) => p.ranks.get(i).copied().unwrap_or(0),
+                _ => 0,
+            };
             if let Some(k) = kept_i {
                 let kn = eng.node(k);
                 // (one placed after another node stands while it is still
@@ -1500,10 +1562,14 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     Placement::FollowAfterPlaced(..) => unreachable!("resolved above"),
                 };
                 let kpos = kn.pos_hint();
+                // (a ranked one after another node: of its rank still, no
+                // node of a higher rank before it, `Ctx::rank_placement`)
+                let rank = if slot == 1 { rank_i } else { 0 };
                 if kn.state() != State::Gone
                     && kpos > floor
                     && ceiling.is_none_or(|c| kpos < c)
-                    && !stranded(eng, &inner, &others, node.id, anchor, slot, sfloor, kpos)
+                    && kn.rank() == rank
+                    && !stranded(eng, &inner, &others, node.id, anchor, slot, sfloor, kpos, rank)
                 {
                     placed.push(k);
                     kept_end = Some(k);
@@ -1572,6 +1638,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             };
             n.anchor.store(anchor.raw() + 1, Ordering::Release);
             n.slot.store(slot, Ordering::Release);
+            n.rank.store(if slot == 1 { rank_i } else { 0 }, Ordering::Release);
             prev = Some(id);
             let before = if matches!(what, Placement::Follow(..)) && !elsewhere {
                 while old_follows
@@ -1593,7 +1660,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 let bp = bn.pos_hint();
                 bn.seg_hint() == seg.id
                     && inner.nodes.get(&bp) == Some(&b)
-                    && !stranded(eng, &inner, &others, node.id, node.id, 2, after_pos, bp)
+                    && !stranded(eng, &inner, &others, node.id, node.id, 2, after_pos, bp, 0)
             });
             let in_here = at.is_none()
                 && pred.is_some()
@@ -2093,6 +2160,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let now = read::answer_in(eng, node, &r.kind, r.path, &mut read::FoldMemo::new());
         note_refute(eng, f, node.id, None, r.seen, now);
     }
+    node.refuted
+        .store(refuted.is_some() || !replaced_moved.is_empty(), Ordering::Release);
     if let Some(i) = refuted {
         // (a range from a node, or a read at a node: the change lies
         // there; one from the unit's start names no node a run could go
@@ -4164,6 +4233,7 @@ fn place_at_end(eng: &Engine, at: NodeId, end: NodeId, node: Arc<Node>, pred: Pr
             }
             let end = match node.parent {
                 Some(p) if node.slot() == 2 => attached_end(eng, &inner, p, end),
+                _ if node.slot() == 1 => ranked_end(eng, &inner, at, end, node.rank(), None),
                 _ => end,
             };
             return place(eng, seg, &mut inner, end, node, pred);
@@ -4180,7 +4250,7 @@ fn place_at_end(eng: &Engine, at: NodeId, end: NodeId, node: Arc<Node>, pred: Pr
 /// what a run of a relocated node that published nothing new
 /// (`Ctx::unchanged`) places, so its commit checks them where it stands
 /// now. Those gone or never placed are left out, as they were.
-fn replay_placements(eng: &Engine, me: NodeId, placed: &[NodeId]) -> Vec<Placement> {
+fn replay_placements(eng: &Engine, me: NodeId, placed: &[NodeId], ranks: &mut Vec<u64>) -> Vec<Placement> {
     let mut out: Vec<Placement> = Vec::with_capacity(placed.len());
     let mut at: Vec<(NodeId, usize)> = Vec::with_capacity(placed.len());
     for &c in placed {
@@ -4201,6 +4271,7 @@ fn replay_placements(eng: &Engine, me: NodeId, placed: &[NodeId]) -> Vec<Placeme
             (_, None) => Placement::FollowAfter(me, op, args),
         };
         at.push((c, out.len()));
+        ranks.push(cn.rank());
         out.push(x);
     }
     out
@@ -4210,6 +4281,7 @@ fn replay_placements(eng: &Engine, me: NodeId, placed: &[NodeId]) -> Vec<Placeme
 /// would: after a node and its children (`Ctx::follow_after`), after a
 /// node and its placements, or before a node (a continuation's place it
 /// takes; after the second where that one is gone).
+#[derive(Clone, Copy)]
 pub(crate) enum Target {
     AfterChildren(NodeId),
     After(NodeId),
@@ -4320,12 +4392,17 @@ pub(crate) fn relocate(
         } else {
             None
         };
+        // (a ranked one after a node: past the lower ranks there)
+        let ranked = match to {
+            Target::AfterChildren(at) if first && m.slot() == 1 && m.rank() > 0 => Some((at, m.rank())),
+            _ => None,
+        };
         let place = land(
             eng,
             &m,
             prev,
             if first { before } else { None },
-            parent,
+            (parent, ranked),
             &skip,
             left.hole,
         );
@@ -4571,7 +4648,7 @@ fn land(
     m: &Arc<Node>,
     after: NodeId,
     before: Option<NodeId>,
-    attach: Option<NodeId>,
+    (attach, ranked): (Option<NodeId>, Option<(NodeId, u64)>),
     skip: &FxHashSet<NodeId>,
     hole: bool,
 ) -> Option<(Pos, SegId, Vec<DefRec>, Brackets)> {
@@ -4611,6 +4688,7 @@ fn land(
             },
             None => {
                 let end = attach.map_or(after, |a| attached_end_skip(eng, &inner, a, after, Some(skip)));
+                let end = ranked.map_or(end, |(a, r)| ranked_end(eng, &inner, a, end, r, Some(skip)));
                 match Segment::gap_after(&inner, eng.node(end).pos_hint()) {
                     Some(p) => p,
                     None => {
