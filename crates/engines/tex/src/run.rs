@@ -528,8 +528,9 @@ impl FileRest {
     /// The next line as a segment not yet reached (what a top-level
     /// node's arguments for it decode to, without a value or a string per
     /// line: its bytes are its characters, trailing blanks removed, as
-    /// web2c's `input_line`); the offset moves past it.
-    pub(crate) fn take_line(&mut self, xetex: bool) -> Line {
+    /// web2c's `input_line`: spaces and line ends, not tabs); the offset
+    /// moves past it.
+    pub(crate) fn take_line(&mut self) -> Line {
         let at = self.pos;
         let s = self.str();
         let rest = &s[self.off..];
@@ -537,11 +538,7 @@ impl FileRest {
         let line = &rest[..n];
         let bytes = line.as_bytes();
         let mut end = bytes.len();
-        while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
-            end -= 1;
-        }
-        // (XeTeX's `input_line` trims spaces and line ends, not tabs)
-        while end > 0 && (bytes[end - 1] == b' ' || (!xetex && bytes[end - 1] == b'\t')) {
+        while end > 0 && matches!(bytes[end - 1], b' ' | b'\n' | b'\r') {
             end -= 1;
         }
         // (the text holds one character per byte of the file, §31: a byte
@@ -6101,7 +6098,7 @@ pub(crate) fn slice_args_in_file(
         };
         let used = rest.len() - next.len();
         let seg: String = if ends {
-            seg.trim_end_matches([' ', '\t', '\r']).to_owned()
+            seg.trim_end_matches([' ', '\r']).to_owned()
         } else {
             seg.to_owned()
         };
@@ -6140,7 +6137,7 @@ pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<Value
             None => (rest, false, ""),
         };
         let seg: String = if ends {
-            seg.trim_end_matches([' ', '\t', '\r']).to_owned()
+            seg.trim_end_matches([' ', '\r']).to_owned()
         } else {
             seg.to_owned()
         };

@@ -1873,6 +1873,20 @@ impl State {
             .is_some_and(|s| s.mapped != MAP_NONE && s.map != Map::ID)
     }
 
+    /// Whether the table a continuation brought ([`State::from_cont`])
+    /// holds a page parameter's binding local to a group open at the cut
+    /// (multicol's `\\vsize` in its environment): a binding no field has.
+    pub(crate) fn carries_page_param(&self) -> bool {
+        self.cont_locs.iter().any(|&l| {
+            is_page_param(l)
+                && self
+                    .slot_ref(l)
+                    .and_then(|s| usize::try_from(s.meta).ok().filter(|&m| m > 0))
+                    .and_then(|m| self.metas.get(m - 1))
+                    .is_some_and(|m| m.ldef_local && m.ldef_gid.is_some())
+        })
+    }
+
     /// Whether a page parameter changed since the last call
     /// ([`State::set`], [`State::close`]).
     pub(crate) fn take_page_params(&mut self) -> bool {
