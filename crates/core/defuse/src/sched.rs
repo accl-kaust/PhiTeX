@@ -1193,6 +1193,22 @@ pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wak
     }
 }
 
+/// Queues a dirty node again, keyed by its label now: one whose label
+/// moved while it was queued (`commit::relocate`) stood in the ready heap
+/// at its old label's key. The old entry, popped later, finds the node
+/// run (`work` takes only a dirty node) and counts itself done. Outside
+/// an evaluation, or for a node run only at the end, its place in the
+/// queue does not matter.
+pub(crate) fn requeue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>) {
+    let Some(w) = w else { return };
+    if eng.op(n.op()).final_only() {
+        return;
+    }
+    w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
+    w.ready().push(eng, n);
+    w.shared.wake_one();
+}
+
 /// A walk's re-ask: marks a clean node dirty and queues it. A running node
 /// is left alone until its commit: what it reads is checked again there,
 /// after the definition the walk is for was filed, so it needs no mark; one
