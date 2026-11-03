@@ -998,3 +998,17 @@ fn xe_import_length() {
 fn routine_local_after_group() {
     check_threads("routine_local_after_group", "pdf");
 }
+
+/// TeX Live manuals biblatex-cheatsheet and mtc-2c (pdflatex), cut:
+/// `\maketitle` as the first thing inside `multicols`. multicol sets
+/// `\vsize` to three columns' height with a local definition in its
+/// environment's group, and the pieces after it inside `\maketitle`'s
+/// group go on from continuations whose tables hold that binding, which
+/// no field has. Their page parameter marker read the field, the
+/// `\textheight` from outside the environment, and the page's first box
+/// froze `\pagegoal` on it: a first page one column high, one page too
+/// many. At -j1 and -j4 (oracle: pdftex in the CI image).
+#[test]
+fn multicol_title_inside() {
+    check_threads("multicol_title_inside", "pdf");
+}

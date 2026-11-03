@@ -3,7 +3,6 @@ generic_pgf_pgfmanual	error: error: PhiTeX's engine stopped: it ran past its tim
 latex_amsldoc-vn_amsldoc-vi	differs: page 10: obj 346 (untyped) line 6: oracle "643.413", phitex "643.831"
 latex_asmejour_asmejour-template	-j1 error: error: the build stopped: it made no progress (the build passed its time limit of 600 s; at asmejour-template.tex:379, on \else: , input 4 levels deep, 14 lists; -j4 error: killed (-9)
 latex_beautybook_beautybook-en	differs: page 19: obj 746 (page 19, untyped) line 624: oracle "0.0 10.11215 m ", phitex "-100.5473 164.4841 m " (its page-6 /pgfsmask numbers agree since 9dd4e3020; accl 22970)
-latex_biblatex-cheatsheet_biblatex-cheatsheet	differs: page 1: obj 150 (Catalog) line 2: oracle "/OpenAction 3 0 R", phitex "/Names 3 0 R" (pages 2 vs 3)
 latex_biblatex_biblatex	-j1 differs: page 6: obj 172 (page 6, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 10.9091 Tf 41.32", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 10.9091 Tf 41.32"; -j4 error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 timeout, -j4 timeout)
 latex_cursolatex_cursolatex	differs: page 9: obj 8042 (untyped) line 765: oracle "<end>", phitex "<end>"
 latex_dynkin-diagrams_dynkin-diagrams	differs: page 10: obj 339 (page 10, untyped) line 1176: oracle "/F131 9.9626 Tf 354.869 580.108 Td [(\\dynkin)-700(GI)]TJ/F126 9.9626 ", phitex "/F131 9.9626 Tf 354.869 580.108 Td [(\\dynkin)-700(GI)]TJ/F126 9.9626 " (not the same in each run: the first sweep had -j1 timeout, -j4 timeout)
@@ -14,7 +13,6 @@ latex_fariscovernew_guide_fariscovernew_full	differs: page 3: obj 57 (page 3, un
 latex_icite_samples_icite-biblatex	differs: page 2: obj 16 (Link) line 19: oracle "155.551", phitex "213.113"
 latex_knowledge_knowledge	-j1 error: error: You can't use `&' in restricted horizontal mode; -j4 error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 error, -j4 timeout)
 latex_kotex-utf_kotex-utf-doc	differs: page 16: obj 583 (page 16, untyped) line 7: oracle "[-316<c8>]TJ", phitex "[<c8>]TJ" (past CJK.enc, accl 22513)
-latex_minitoc_examples_mtc-2c	differs: page 1: obj 47 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 9 vs 10)
 latex_minutes_Protokol	differs: page 3: obj 393 (Catalog) line 4: oracle "/PageLabels <<", phitex "/Pages 5 0 R" (pages 33 vs 31)
 latex_moderncv_manual_moderncv_userguide	differs: page 1: obj 650 (Catalog) line 5: oracle "/PageMode /UseNone", phitex "/PageLabels <<"
 latex_montex_montex	error: error: Font T1/cmss/sbc/n/10.95=ecssdc10 at 10.95pt not loadable: Metric (TFM) file not found
