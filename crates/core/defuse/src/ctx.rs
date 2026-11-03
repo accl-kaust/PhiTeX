@@ -102,6 +102,7 @@ impl<'a> Ctx<'a> {
                 contribs: Vec::new(),
                 reads: Vec::new(),
                 placements: Vec::new(),
+                ranks: Vec::new(),
                 claim: 0,
                 effect: None,
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
@@ -789,6 +790,32 @@ impl<'a> Ctx<'a> {
         self.product.placements.len() - 1
     }
 
+    /// Gives my `i`-th placement of this run, one placed after another
+    /// node (`follow_after`, `follow_after_placed`), its order among the
+    /// nodes others place after that node: it stands after those of a
+    /// lower rank and before those of a higher one, wherever each placer
+    /// stands and whenever each commits. Unranked (0), it goes right
+    /// after that node's children, before every node placed after it
+    /// already. A page's finisher ranks by the page's place among the
+    /// document's fires, so a finisher placed by a loop node from a start
+    /// another one has since moved never stands before the finisher of an
+    /// earlier page after the same piece.
+    ///
+    /// # Panics
+    ///
+    /// Where `i` is not a placement this run made.
+    pub fn rank_placement(&mut self, i: usize, rank: u64) {
+        assert!(
+            i < self.product.placements.len(),
+            "rank_placement({i}): no such placement"
+        );
+        let r = &mut self.product.ranks;
+        if r.len() <= i {
+            r.resize(i + 1, 0);
+        }
+        r[i] = rank;
+    }
+
     /// The output my `i`-th placement had at my last commit, if it has run.
     pub fn placed_output(&mut self, i: usize) -> Option<ValueId> {
         let c = self.last.as_ref().and_then(|r| r.placed.get(i).copied());
@@ -1166,6 +1193,47 @@ impl<'a> Ctx<'a> {
             !matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
                 && crate::read::holds(self.eng, self.me, rd, &mut memo)
         })
+    }
+
+    /// A run woken for a read that moved finds every read of my last run
+    /// giving what it gave: a run is a function of its reads, so it would
+    /// make what that run made, and that run's definitions, contributions,
+    /// placements and output stand ([`Ctx::unchanged`]) with its reads
+    /// filed again. What moved moved back, a value on the way among the
+    /// nodes before this one that re-ran out of order, and nothing is run:
+    /// Grail's last pages' routines ran 3.8 s of hyperxmp on such wakes at
+    /// -j8 to make what they had made.
+    ///
+    /// Not for a node with a parked state, whose runs fold on from it (a
+    /// page loop); not for one relocated (its definitions are filed where it stood:
+    /// `commit::relocate`), or refuted by its own commit (the state it
+    /// parked rests on what moved, though the reads hold now:
+    /// `resumed_reread.rs`), or asked for anything but a read (an edit, a
+    /// creation, the structure around it). A hole it met is a read like
+    /// the others: filled since, it does not hold. The output of that run,
+    /// if it stands.
+    pub(crate) fn last_run_stands(&mut self) -> Option<ValueId> {
+        if !matches!(
+            self.woke,
+            Some(Cause::Changed { .. } | Cause::Range { .. } | Cause::Rebind { .. } | Cause::Output { .. })
+        ) || self.me.moved.load(std::sync::atomic::Ordering::Acquire)
+            || self.me.refuted.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        let r = self.last.as_ref().filter(|r| !r.provisional && r.state.is_none())?;
+        let mut memo = crate::read::FoldMemo::new();
+        if !r
+            .reads
+            .iter()
+            .all(|rd| crate::read::holds(self.eng, self.me, rd, &mut memo))
+        {
+            return None;
+        }
+        let output = r.output;
+        self.product.reads.extend(r.reads.iter().cloned());
+        self.product.unchanged = true;
+        Some(output)
     }
 
     /// Whether my last run's reads from its `m`-th on all still give
