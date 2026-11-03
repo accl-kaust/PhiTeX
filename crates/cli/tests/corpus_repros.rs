@@ -1085,7 +1085,7 @@ fn file_mod_date() {
 /// at such a candidate is what a second pass can make (`par_cut`), and
 /// `Run::order_after_own_page` did not take it: the read stood with the value
 /// from before the routine, and put back, undid its step. At -j1 and -j4
-/// (oracle: pdftex in the CI image, mc 79421; the base differs, mc 79422).
+/// (oracle: pdftex in the CI image, mc 79427; the base differs, mc 79428).
 #[test]
 fn page_read_after_par_in_cond() {
     check_threads("page_read_after_par_in_cond", "pdf");

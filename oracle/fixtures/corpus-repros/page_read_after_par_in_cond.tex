@@ -1,23 +1,20 @@
-% knowledge and minutes (TeX Live manuals): a page fires where a paragraph starts,
-% inside a conditional of the piece's own: the rest of the run reads \value{page}
-% after it, the value the routine stepped. Their tables of contents ran over a page
-% and a \setcounter{page}{\value{page}} after them lost the step: a page number
-% printed twice, every page after it one low.
+% knowledge and minutes (TeX Live manuals): a page fires where a paragraph starts
+% (a skip before it took the page over), inside a conditional and a group of the
+% piece's own: the run reads \value{page} after it, the value the routine stepped.
+% Their tables of contents ran over a page and a \setcounter{page}{\value{page}}
+% after them lost the step: a page number printed twice, every page after it one low.
 \documentclass{article}
-\usepackage{lipsum}
-\newcount\n
+\def\e{\vskip 40pt\leavevmode\hbox{Text of an entry.}\par}
+\def\f{\e\e\e\e\e\e\e\e\e\e}
 \begin{document}
+Before.\par
 \ifnum1=1
-  \lipsum[1-3]\par
-  \lipsum[4-12]\par
-  \edef\p{\the\value{page}}\setcounter{page}{\p}
-  Page \p.\par
-\fi
-\newpage
-Now \thepage.
-\ifnum1=1
-\loop\ifnum\n<40 \advance\n by 1 \lipsum[2]\par\repeat
+\begingroup
+\f\f\e\e\e\e
+\endgroup
 \edef\p{\the\value{page}}\setcounter{page}{\p}
 Page \p.\par
 \fi
+\newpage
+Now \thepage.
 \end{document}
