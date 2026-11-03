@@ -1636,9 +1636,14 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     node.held_panic.store(false, Ordering::Release);
     let mut cx = Ctx::new(eng, Some(w), node);
     let retries0 = crate::read::retries();
-    let r = catch_unwind(AssertUnwindSafe(|| op.run(&mut cx)));
+    let stands = cx.last_run_stands();
+    let r = match stands {
+        Some(out) => Ok(Ok(out)),
+        None => catch_unwind(AssertUnwindSafe(|| op.run(&mut cx))),
+    };
     if run_log() {
         let how = match &r {
+            Ok(Ok(_)) if stands.is_some() => "stands".to_owned(),
             Ok(Ok(_)) => "ok".to_owned(),
             Ok(Err(_)) if cx.wait_frontier => "held at the frontier".to_owned(),
             Ok(Err(_)) => match cx.wait_on {

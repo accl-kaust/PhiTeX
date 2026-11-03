@@ -189,7 +189,14 @@ fn sib_under(eng: &Engine, y: NodeId, a: NodeId) -> Option<NodeId> {
 /// them (`Ctx::rank_placement`); `from` for an unranked one. The walk
 /// stops at a node of `skip` (the node relocated and its subtree, which
 /// it must stand before).
-fn ranked_end(eng: &Engine, inner: &Inner, a: NodeId, from: NodeId, rank: u64, skip: Option<&FxHashSet<NodeId>>) -> NodeId {
+fn ranked_end(
+    eng: &Engine,
+    inner: &Inner,
+    a: NodeId,
+    from: NodeId,
+    rank: u64,
+    skip: Option<&FxHashSet<NodeId>>,
+) -> NodeId {
     let mut last = from;
     if rank == 0 {
         return last;
@@ -248,10 +255,7 @@ fn strands(eng: &Engine, x: NodeId, by: NodeId, a: NodeId, s: u8, rank: u64) -> 
     // (and, of a ranked one after `a`, one placed after `a` by a higher
     // rank: `Ctx::rank_placement`)
     let bad = !matches!(t, Some(t) if t <= s)
-        || (s == 1
-            && rank > 0
-            && t == Some(1)
-            && sib_under(eng, x, a).is_some_and(|d| eng.node(d).rank() > rank));
+        || (s == 1 && rank > 0 && t == Some(1) && sib_under(eng, x, a).is_some_and(|d| eng.node(d).rank() > rank));
     if bad && crate::obs::enabled() && crate::sched::wake_log() {
         eprintln!(
             "stranded: anchor {} slot {s}: node {} (op {:?}, anchor {:?} slot {}, under {t:?}) between",

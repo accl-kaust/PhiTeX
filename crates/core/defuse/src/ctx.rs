@@ -791,7 +791,10 @@ impl<'a> Ctx<'a> {
     ///
     /// Where `i` is not a placement this run made.
     pub fn rank_placement(&mut self, i: usize, rank: u64) {
-        assert!(i < self.product.placements.len(), "rank_placement({i}): no such placement");
+        assert!(
+            i < self.product.placements.len(),
+            "rank_placement({i}): no such placement"
+        );
         let r = &mut self.product.ranks;
         if r.len() <= i {
             r.resize(i + 1, 0);
@@ -1176,6 +1179,44 @@ impl<'a> Ctx<'a> {
             !matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
                 && crate::read::holds(self.eng, self.me, rd, &mut memo)
         })
+    }
+
+    /// A run woken for a read that moved finds every read of my last run
+    /// giving what it gave: a run is a function of its reads, so it would
+    /// make what that run made, and that run's definitions, contributions,
+    /// placements and output stand ([`Ctx::unchanged`]) with its reads
+    /// filed again. What moved moved back, a value on the way among the
+    /// nodes before this one that re-ran out of order, and nothing is run:
+    /// Grail's last pages' routines ran 3.8 s of hyperxmp on such wakes at
+    /// -j8 to make what they had made.
+    ///
+    /// Not for a settling node, whose runs fold on from where they parked;
+    /// not for one relocated (its definitions are filed where it stood:
+    /// `commit::relocate`), or asked for anything but a read (an edit, a
+    /// creation, the structure around it); not on a last run that met a
+    /// hole, which it may find filled. The output of that run, if it stands.
+    pub(crate) fn last_run_stands(&mut self) -> Option<ValueId> {
+        if !matches!(
+            self.woke,
+            Some(Cause::Changed { .. } | Cause::Range { .. } | Cause::Rebind { .. } | Cause::Output { .. })
+        ) || self.me.moved.load(std::sync::atomic::Ordering::Acquire)
+            || self.eng.op(self.me.op()).settles_at_quiet()
+        {
+            return None;
+        }
+        let r = self.last.as_ref().filter(|r| !r.provisional)?;
+        let mut memo = crate::read::FoldMemo::new();
+        if !r
+            .reads
+            .iter()
+            .all(|rd| !matches!(rd.kind, ReadKind::Hole) && crate::read::holds(self.eng, self.me, rd, &mut memo))
+        {
+            return None;
+        }
+        let output = r.output;
+        self.product.reads.extend(r.reads.iter().cloned());
+        self.product.unchanged = true;
+        Some(output)
     }
 
     /// Whether my last run's reads from its `m`-th on all still give
