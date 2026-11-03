@@ -687,6 +687,12 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
         }
         cv::FILE_SIZE => {
             let name = ext_string(r)?;
+            // (a written file's size as a symbol, read for presence
+            // alone: docs/note-relative-counters.md §2.4)
+            if let Some(t) = crate::defer::size_symbol(r, &name)? {
+                r.push_toks([t]);
+                return Ok(());
+            }
             file_size(r, &name)?.map_or_else(String::new, |n| n.to_string())
         }
         cv::MDFIVE_SUM => {

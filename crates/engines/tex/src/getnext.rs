@@ -493,6 +493,14 @@ impl Run<'_, '_> {
             {
                 return;
             }
+            // (a file size's symbol as `\if`'s operand, kept:
+            // [`Run::size_stop`])
+            if self.cur.cmd == cmd::SYM
+                && self.size_stop == Some(self.expand_depth)
+                && crate::defer::is_size(self.cur.tok)
+            {
+                return;
+            }
             let nr = std::mem::replace(&mut self.num_reads, false);
             self.expand();
             self.num_reads = nr;

@@ -142,10 +142,10 @@ impl Run<'_, '_> {
                 cmd::CONVERT => self.conv_toks()?,
                 cmd::SYM => {
                     // (a deferred read's symbol where its digits are
-                    // needed: docs/spec-deferred-reads.md §2)
-                    if let Some(s) = crate::defer::sym_of(self.cur.tok) {
-                        crate::defer::expand_sym(self, s)?;
-                    }
+                    // needed: docs/spec-deferred-reads.md §2; a file
+                    // size's, docs/note-relative-counters.md §2.4)
+                    let t = self.cur.tok;
+                    crate::defer::expand_any(self, t)?;
                 }
                 cmd::THE => {
                     let toks = self.the_toks();
@@ -521,15 +521,28 @@ impl Run<'_, '_> {
                 }
                 // (a deferred read's symbol outside braces: TeX matched
                 // its digits one by one, docs/spec-deferred-reads.md §2)
-                if crate::defer::is_sym(tok)
-                    && let Some(sy) = crate::defer::sym_of(tok)
-                {
-                    match self.lift(|r| crate::defer::value(r, sy)) {
-                        Some(x) => {
-                            self.push_number(x);
-                            continue 'cont;
+                // (a file size's symbol taken whole as an undelimited
+                // argument: TeX took its first digit and left the rest,
+                // docs/note-relative-counters.md §2.4, so the argument
+                // is the first digit's symbol and the rest's goes back;
+                // the first digit's symbol alone is one digit)
+                let mut tok = tok;
+                if crate::defer::is_sym(tok) {
+                    let undelimited = s == Some(r) && (r >= len || is_match(&p[r]));
+                    let size = crate::defer::size_of(tok).map(|(part, _)| part);
+                    match size {
+                        Some(crate::defer::Part::Head) if undelimited => {}
+                        Some(crate::defer::Part::All) if undelimited => {
+                            let key = crate::defer::size_of(tok)
+                                .map(|(_, k)| k)
+                                .unwrap_or_default();
+                            self.back_input(crate::defer::size_tok(crate::defer::Part::Tail, &key));
+                            tok = crate::defer::size_tok(crate::defer::Part::Head, &key);
                         }
-                        None => return false,
+                        _ => match self.lift(|r| crate::defer::expand_any(r, tok)) {
+                            Some(()) => continue 'cont,
+                            None => return false,
+                        },
                     }
                 }
                 if r < len && !is_match(&p[r]) && tok == p[r] {
@@ -786,6 +799,11 @@ impl Run<'_, '_> {
     fn x_char_or_active(&mut self) -> R<(u8, i32)> {
         self.get_x_token();
         self.ck()?;
+        Ok(self.char_or_active())
+    }
+
+    /// The current token as `\if` and `\ifcat` compare it (§506).
+    fn char_or_active(&self) -> (u8, i32) {
         // (XeTeX: every Unicode character, `too_big_usv` past them)
         let big = if self.xe { 0x10_FFFF } else { 255 };
         let (mut c, mut h) = (self.cur.cmd, self.cur.chr);
@@ -805,9 +823,138 @@ impl Run<'_, '_> {
             && matches!(c, cmd::RELAX | cmd::TAB_MARK | cmd::CAR_RET | cmd::PAR_END)
             && (256..=258).contains(&h);
         if c > cmd::ACTIVE_CHAR || h > big || special {
-            return Ok((cmd::RELAX, big + 1));
+            return (cmd::RELAX, big + 1);
         }
-        Ok((c, h))
+        (c, h)
+    }
+
+    /// One operand of `\if` or `\ifcat` (§506), where a file size's
+    /// symbol is kept (docs/note-relative-counters.md §2.4): all its
+    /// digits taken there are the first digit's symbol taken and the
+    /// rest's left on the input, as TeX takes one digit.
+    fn if_operand(&mut self) -> R<IfOp> {
+        use crate::defer::{Part, size_of, size_tok};
+        let was = self.size_stop.replace(self.expand_depth);
+        let got = self.x_char_or_active();
+        self.size_stop = was;
+        let (c, h) = got?;
+        let t = self.cur.tok;
+        if self.cur.cmd == cmd::SYM
+            && let Some((part, key)) = size_of(t)
+        {
+            return Ok(match part {
+                Part::All => {
+                    self.back_input(size_tok(Part::Tail, &key));
+                    IfOp::Digit(key)
+                }
+                Part::Head => IfOp::Digit(key),
+                Part::Tail => IfOp::Tail(key),
+            });
+        }
+        Ok(IfOp::Known(c, h))
+    }
+
+    /// A file size's first digit, read now (forced).
+    fn size_head(&mut self, key: &str) -> R<(u8, i32)> {
+        let d = crate::defer::size_digits(self, crate::defer::Part::Head, key)?;
+        let c = d.chars().next().map_or(48, u32::from);
+        Ok((cmd::OTHER_CHAR, i32::try_from(c).unwrap_or(48)))
+    }
+
+    /// `\if` (`cat` false) or `\ifcat` (§506). An operand that is a file
+    /// size's digit (docs/note-relative-counters.md §2.4: a non-empty
+    /// digit string's first) is not read where the answer is the same
+    /// for every digit: `\ifcat` against any token, `\if` against one
+    /// whose character code is not a digit's (expl3's `\if:w
+    /// \scan_stop: #1 \scan_stop:` on `\pdffilesize`). Elsewhere it is
+    /// forced, an ordinary read of the size.
+    fn if_char_cat(&mut self, cat: bool) -> R<bool> {
+        let digit = |n: i32| (48..=57).contains(&n);
+        let a = loop {
+            match self.if_operand()? {
+                IfOp::Tail(key) => self.force_size(crate::defer::Part::Tail, &key)?,
+                x => break x,
+            }
+        };
+        let b = loop {
+            match self.if_operand()? {
+                IfOp::Tail(key) => {
+                    if let IfOp::Known(m, n) = a
+                        && self.tail_is_false(cat, m, n)?
+                    {
+                        return Ok(false);
+                    }
+                    self.force_size(crate::defer::Part::Tail, &key)?;
+                }
+                x => break x,
+            }
+        };
+        let ((m, n), (c, h)) = match (a, b) {
+            (IfOp::Known(m, n), IfOp::Known(c, h)) => ((m, n), (c, h)),
+            (IfOp::Known(m, n), IfOp::Digit(key)) => {
+                if cat {
+                    return Ok(m == cmd::OTHER_CHAR);
+                }
+                if !digit(n) {
+                    return Ok(false);
+                }
+                ((m, n), self.size_head(&key)?)
+            }
+            (IfOp::Digit(key), IfOp::Known(c, h)) => {
+                if cat {
+                    return Ok(c == cmd::OTHER_CHAR);
+                }
+                if !digit(h) {
+                    return Ok(false);
+                }
+                (self.size_head(&key)?, (c, h))
+            }
+            (IfOp::Digit(k1), IfOp::Digit(k2)) => (self.size_head(&k1)?, self.size_head(&k2)?),
+            (IfOp::Tail(_), _) | (_, IfOp::Tail(_)) => unreachable!("tails forced above"),
+        };
+        Ok(if cat { m == c } else { n == h })
+    }
+
+    /// A size symbol's digits forced onto the input, where TeX had them.
+    fn force_size(&mut self, part: crate::defer::Part, key: &str) -> R<()> {
+        let d = crate::defer::size_digits(self, part, key)?;
+        self.push_toks(str_toks(&d));
+        Ok(())
+    }
+
+    /// `\if`/`\ifcat`'s second operand the rest of a file size's digits
+    /// (`Part::Tail`, possibly none) against a first operand (`m`, `n`):
+    /// false, and that rest and the token after it taken, where it is
+    /// false both ways: against the rest's first digit, and against the
+    /// token after it (unexpandable, taken as it is), which TeX's
+    /// operand is where the rest is empty. A false `\if` skips to its
+    /// `\else` or `\fi`, and neither the digits nor an unexpandable
+    /// token is one, so both ways skip the same. Else nothing taken.
+    fn tail_is_false(&mut self, cat: bool, m: u8, n: i32) -> R<bool> {
+        let on_digit = if cat {
+            m == cmd::OTHER_CHAR
+        } else if (48..=57).contains(&n) {
+            return Ok(false);
+        } else {
+            false
+        };
+        if on_digit {
+            return Ok(false);
+        }
+        self.get_token();
+        self.ck()?;
+        let t = self.cur.tok;
+        if self.cur.cmd > cmd::MAX_COMMAND {
+            self.back_input(t);
+            return Ok(false);
+        }
+        let (c, h) = self.char_or_active();
+        let same = if cat { m == c } else { n == h };
+        if same {
+            self.back_input(t);
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// §507: `\ifx`'s two tokens compared.
@@ -945,11 +1092,7 @@ impl Run<'_, '_> {
         let negate = self.cur.chr >= crate::etex::UNLESS_CODE;
         let this_if = self.cur.chr % crate::etex::UNLESS_CODE;
         let b = match this_if {
-            0 | 1 => {
-                let (m, n) = self.x_char_or_active()?;
-                let (c, h) = self.x_char_or_active()?;
-                if this_if == 0 { n == h } else { m == c }
-            }
+            0 | 1 => self.if_char_cat(this_if == 1)?,
             2 => {
                 // (`\ifnum`: an operand that is a macro's number is read as
                 // the comparison's outcome alone, `crate::scan::Num`)
@@ -1263,11 +1406,11 @@ impl Run<'_, '_> {
     /// taken instead.
     pub(crate) fn unsym_cur(&mut self) -> R<()> {
         while self.cur.cmd == cmd::SYM {
-            let Some(s) = crate::defer::sym_of(self.cur.tok) else {
+            let t = self.cur.tok;
+            let Some(d) = crate::defer::digits_str(self, t)? else {
                 break;
             };
-            let x = crate::defer::value(self, s)?;
-            self.push_number(x);
+            self.push_toks(str_toks(&d));
             self.get_token();
             self.ck()?;
         }
@@ -1668,4 +1811,15 @@ mod tests {
         assert_eq!(super::cr_lines("x\r\r\ny").as_deref(), Some("x\n\r\ny"));
         assert_eq!(super::split_lines("%a\r\\x"), ["%a\n", "\\x"]);
     }
+}
+
+/// One operand of `\if` or `\ifcat` ([`Run::if_operand`]).
+enum IfOp {
+    /// A token's (command, character) pair, §506.
+    Known(u8, i32),
+    /// The first digit of file `key`'s size, not read.
+    Digit(String),
+    /// The rest of file `key`'s size after its first digit, possibly
+    /// none, not read.
+    Tail(String),
 }
