@@ -766,6 +766,13 @@ pub(crate) struct Run<'c, 'a> {
     pub in_skip: bool,
     /// The expansions nested now ([`crate::expand::EXPAND_DEPTH`]).
     pub(crate) expand_depth: u32,
+    /// `\if`/`\ifcat` fetching an operand at this expansion depth
+    /// ([`Run::expand_depth`]): `get_x_token` stops at a file size's
+    /// symbol there instead of forcing it (docs/note-relative-counters.md
+    /// §2.4, `Run::if_operand`). Deeper expansions force as anywhere.
+    pub(crate) size_stop: Option<u32>,
+    /// The path `[Step::Present]`, interned once a run ([`Run::lb_present`]).
+    pub(crate) present_path: Option<phitex_defuse::PathId>,
     /// Where the conditional text being skipped began (§494's
     /// `skip_line`, [`Run::line_mark`]).
     pub skip_from: LineMark,
@@ -1218,6 +1225,8 @@ impl<'c, 'a> Run<'c, 'a> {
             uread: Vec::new(),
             in_skip: false,
             expand_depth: 0,
+            size_stop: None,
+            present_path: None,
             skip_from: (None, 0, None, None),
             skip_first: Vec::new(),
             defer_ok: false,
@@ -2361,15 +2370,41 @@ impl<'c, 'a> Run<'c, 'a> {
     /// ([`crate::ops::WSAME`]): that text is read back where it is read
     /// ([`Run::seed_written`]), as a run reads it before any value.
     pub(crate) fn lb_known(&mut self, key: &str, f: Field) -> R<bool> {
-        let v = self.v;
-        if self
-            .lb(v.field(&format!("{}:{key}", crate::ops::WSAME)))?
-            .and_then(|x| v.as_bool(x))
-            == Some(true)
-        {
+        if self.lb_same(key)? {
             return Ok(false);
         }
         Ok(self.lb(f)?.is_some())
+    }
+
+    /// [`Run::lb_known`], `f` read for its presence alone
+    /// ([`Run::lb_present`]): a size symbol's reads
+    /// ([`crate::defer::size_symbol`]).
+    pub(crate) fn lb_known_present(&mut self, key: &str, f: Field) -> R<bool> {
+        if self.lb_same(key)? {
+            return Ok(false);
+        }
+        self.lb_present(f)
+    }
+
+    /// Whether file `key`, whose text the client gave, is written as
+    /// given ([`crate::ops::WSAME`]).
+    fn lb_same(&mut self, key: &str) -> R<bool> {
+        let v = self.v;
+        Ok(self
+            .lb(v.field(&format!("{}:{key}", crate::ops::WSAME)))?
+            .and_then(|x| v.as_bool(x))
+            == Some(true))
+    }
+
+    /// Whether loop-back field `f` has a value ([`Run::lb`]), read as that
+    /// alone (`Step::Present`): a reader asking whether a file is
+    /// written does not depend on what was written.
+    pub(crate) fn lb_present(&mut self, f: Field) -> R<bool> {
+        let v = self.v;
+        let p = *self
+            .present_path
+            .get_or_insert_with(|| self.cx.path(&[phitex_defuse::Step::Present]));
+        Ok(self.cx.read_final_path(f, p)?.and_then(|x| v.as_bool(x)) == Some(true))
     }
 
     /// The file `key` from the client (`file:<key>`): `None` if it is
@@ -2894,7 +2929,7 @@ impl<'c, 'a> Run<'c, 'a> {
 
     /// Whether a tool makes file `key` ([`Run::tool_output`]): its text is
     /// then not the file system's units.
-    fn tool_makes(&mut self, key: &str) -> R<bool> {
+    pub(crate) fn tool_makes(&mut self, key: &str) -> R<bool> {
         if let Some(x) = self.get(&crate::tools::out_name(key))? {
             // (a failed tool's `[message]`: no file)
             return Ok(x != ValueId::UNIT && list_of(self.v, x).len() != 1);

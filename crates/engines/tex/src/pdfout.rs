@@ -4662,9 +4662,8 @@ fn link(
                     && pcs[i].is_some()
                     && hashes.get(i).is_some_and(|h| {
                         h.as_ref().is_some_and(|h| {
-                            let key = u64::from_ne_bytes(
-                                v.as_int(xpages[i]).unwrap_or(0).to_ne_bytes(),
-                            );
+                            let key =
+                                u64::from_ne_bytes(v.as_int(xpages[i]).unwrap_or(0).to_ne_bytes());
                             !record_made(key, h)
                         })
                     })

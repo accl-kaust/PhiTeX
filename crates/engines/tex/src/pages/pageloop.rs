@@ -743,7 +743,10 @@ impl Run<'_, '_> {
                     // where its start is not decided)
                     if took.is_none() {
                         self.wait_keeping(None);
-                    } else if old.checkpoints.is_empty() && old.beyond.is_empty() && old.tail.is_none() {
+                    } else if old.checkpoints.is_empty()
+                        && old.beyond.is_empty()
+                        && old.tail.is_none()
+                    {
                         self.cx.park(ls.encode(v));
                     } else {
                         self.wait_keeping(Some(&old));
@@ -919,7 +922,9 @@ impl Run<'_, '_> {
             phitex_defuse::FieldAt::Def(x, _) if let Some(r) = RestStart::decode(v, x) => {
                 Ok(RestBegin::At(r))
             }
-            phitex_defuse::FieldAt::Def(x, _) if v.with_str(x, |s| s == NO_REST).unwrap_or(false) => {
+            phitex_defuse::FieldAt::Def(x, _)
+                if v.with_str(x, |s| s == NO_REST).unwrap_or(false) =>
+            {
                 Ok(RestBegin::Nothing)
             }
             _ => {
