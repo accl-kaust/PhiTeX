@@ -993,6 +993,14 @@ impl<'a> Ctx<'a> {
             self.wait_frontier = true;
             return Err(stop());
         }
+        // (and what I read before that still stands: a node before me that
+        // committed after my read and before this check has settled, and
+        // its re-ask finds no read of mine filed yet: the effect was made
+        // on the old answer, a run's commit too late to take it back.
+        // Stopped, the run begins again, every node before it settled)
+        if !self.own_reads_hold() {
+            return Err(stop());
+        }
         Ok(())
     }
 
