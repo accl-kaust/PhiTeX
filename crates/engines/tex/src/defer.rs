@@ -15,27 +15,39 @@ use crate::val::Tok;
 /// The prefix of a symbol's internal name: `\u{10FFFE}sym\u{2}<loc>\u{2}<node raw>`.
 pub(crate) const SYM_PREFIX: &str = "\u{10FFFE}sym\u{2}";
 
-/// A symbol: register `loc`'s value as of piece `node`.
+/// A symbol: integer register `reg`'s value as of piece `node`, plus `j`,
+/// the steps the piece made of it before the read
+/// (docs/note-relative-counters.md §2.1). By the register's number: a
+/// location past the fixed ones is the run's own, and a symbol outlives
+/// its run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Sym {
-    pub loc: Loc,
+    pub reg: i32,
     pub node: NodeId,
+    pub j: i32,
 }
 
 /// The token of symbol `s` (an internal control sequence, interned once
 /// per (register, piece): `Tok::cs` of its name).
 pub(crate) fn sym_tok(s: Sym) -> Tok {
-    Tok::cs(&format!("{SYM_PREFIX}{}\u{2}{}", s.loc, s.node.raw()))
+    Tok::cs(&format!(
+        "{SYM_PREFIX}{}\u{2}{}\u{2}{}",
+        s.reg,
+        s.node.raw(),
+        s.j
+    ))
 }
 
 /// The symbol a token is, if it is one (its name starts with
 /// [`SYM_PREFIX`]; parsed back, `CsId::name`).
 pub(crate) fn sym_of(t: Tok) -> Option<Sym> {
     let rest = t.as_cs()?.name().strip_prefix(SYM_PREFIX)?;
-    let (loc, node) = rest.split_once('\u{2}')?;
+    let (reg, rest) = rest.split_once('\u{2}')?;
+    let (node, j) = rest.split_once('\u{2}')?;
     Some(Sym {
-        loc: loc.parse().ok()?,
+        reg: reg.parse().ok()?,
         node: NodeId::from_raw(node.parse().ok()?),
+        j: j.parse().ok()?,
     })
 }
 
@@ -99,7 +111,10 @@ fn routine_regs(r: &mut Run<'_, '_>) {
 /// as it consumes anything but that one internal quantity).
 pub(crate) fn symbol_for(r: &mut Run<'_, '_>, loc: Loc) -> Tok {
     let node = r.cx.node();
-    sym_tok(r.st.symbol(loc, node).unwrap_or(Sym { loc, node }))
+    let j = r.st.steps_of(loc);
+    r.st.note_symbol(loc);
+    let reg = r.count_reg(loc).unwrap_or(0);
+    sym_tok(Sym { reg, node, j })
 }
 
 /// A symbol's digits where they are needed: forced in a piece, resolved
@@ -141,23 +156,41 @@ pub(crate) fn force(r: &mut Run<'_, '_>, s: Sym) -> crate::run::R<i32> {
     // (another piece's symbol, met in this one through a macro or a
     // list it left: the register as of that piece, as it would have
     // read it)
+    if crate::exec::obs_flag!("PHITEX_SYM_TRACE") {
+        trace_force(r, s);
+    }
     if s.node != r.cx.node() {
         return resolve(r, s);
     }
     r.defer_ok = false;
     // (the run has not written it since: the piece's own read, memoised;
     // else the value reaching the run, as first loaded or read now)
-    let pristine = !r.st.has_map(s.loc) && !r.st.defined_after(s.loc, 0);
+    let loc = r.reg_loc(0, s.reg);
+    let pristine = !r.st.has_map(loc) && !r.st.defined_after(loc, 0);
     if pristine {
-        return r.int_loc(s.loc);
+        return Ok(r.int_loc(loc)?.wrapping_add(s.j));
     }
-    if let Some(&b) = r.reg_loaded_base.get(&s.loc) {
-        return Ok(b);
+    if let Some(&b) = r.reg_loaded_base.get(&loc) {
+        return Ok(b.wrapping_add(s.j));
     }
-    let f = r.loc_field(s.loc);
+    let f = r.loc_field(loc);
     let x = crate::val::i32_of(r.v, r.cx.read(f)?);
-    r.reg_loaded_base.insert(s.loc, x);
-    Ok(x)
+    r.reg_loaded_base.insert(loc, x);
+    Ok(x.wrapping_add(s.j))
+}
+
+/// `PHITEX_SYM_TRACE` (observe): a symbol forced, for finding what keeps a
+/// relative register's readers concrete.
+#[cold]
+fn trace_force(r: &Run<'_, '_>, s: Sym) {
+    eprintln!(
+        "sym-force: node {} (by {}) count {} j {} cur {:?}",
+        r.cx.node().raw(),
+        s.node.raw(),
+        s.reg,
+        s.j,
+        r.cur.tok.as_cs().map(|c| c.name().to_owned())
+    );
 }
 
 /// A finisher resolves a symbol: the definition of the register reaching
@@ -165,13 +198,15 @@ pub(crate) fn force(r: &mut Run<'_, '_>, s: Sym) -> crate::run::R<i32> {
 /// (`FieldAt`'s value; none: the environment's value, as the piece
 /// would have read). Never a read at the finisher's own position.
 pub(crate) fn resolve(r: &mut Run<'_, '_>, s: Sym) -> crate::run::R<i32> {
-    let f = r.loc_field(s.loc);
-    Ok(match r.cx.read_at(f, At::Before(s.node))? {
+    let loc = r.reg_loc(0, s.reg);
+    let f = r.loc_field(loc);
+    let x = match r.cx.read_at(f, At::Before(s.node))? {
         FieldAt::Def(x, _) => int_of(r.v, x).unwrap_or(0),
         // (none reaches it: an absent integer is 0, as a read gives it;
         // the piece gone, the finisher is asked again when it comes back)
         FieldAt::Unset | FieldAt::Gone => 0,
-    })
+    };
+    Ok(x.wrapping_add(s.j))
 }
 
 /// A symbol met where none may be: the link, the files, a tool, or a
@@ -179,8 +214,8 @@ pub(crate) fn resolve(r: &mut Run<'_, '_>, s: Sym) -> crate::run::R<i32> {
 /// A bug of the implementation, never of a document.
 pub(crate) fn leaked(r: &Run<'_, '_>, s: Sym) -> ! {
     panic!(
-        "defer: symbol of register {:?} by node {} reached op {}",
-        s.loc,
+        "defer: symbol of register {} by node {} reached op {}",
+        s.reg,
         s.node.raw(),
         r.op_name()
     )
@@ -220,9 +255,11 @@ pub(crate) fn try_symbolic(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate
         if c == cmd::ASSIGN_INT {
             let l = r.quantity_loc(cmd::ASSIGN_INT, r.cur.chr);
             if let Some((g, node)) = r.st.alias_at(l, r.v) {
+                let gl = r.loc_of(g);
                 let s = Sym {
-                    loc: r.loc_of(g),
+                    reg: r.count_reg(gl).unwrap_or(0),
                     node,
+                    j: 0,
                 };
                 if symbolic(r, loc, s, global) {
                     return Ok(true);
@@ -269,12 +306,14 @@ pub(crate) fn try_symbolic(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate
 /// piece's own symbol of `loc`, else an alias.
 fn symbolic(r: &mut Run<'_, '_>, loc: Loc, s: Sym, global: bool) -> bool {
     if s == (Sym {
-        loc,
+        reg: r.count_reg(loc).unwrap_or(-1),
         node: r.cx.node(),
+        j: 0,
     }) {
         return restore_reaching(r, loc, global);
     }
-    alias(r, loc, s, global)
+    // (a value plus steps is neither: the digits are read)
+    s.j == 0 && alias(r, loc, s, global)
 }
 
 /// Integer register `loc` set to symbol `s` of another register (or of
@@ -289,7 +328,8 @@ fn alias(r: &mut Run<'_, '_>, loc: Loc, s: Sym, global: bool) -> bool {
     if !r.map_ok(loc, global) {
         return false;
     }
-    let g = r.loc_field(s.loc);
+    let gl = r.reg_loc(0, s.reg);
+    let g = r.loc_field(gl);
     r.note_reg_def(loc);
     let e = crate::state::Entry::alias(r.v, g, s.node);
     r.set_loc(loc, e, global);

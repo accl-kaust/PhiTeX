@@ -1406,9 +1406,11 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some((g, node)) = self.st.alias_at(loc, self.v) else {
             return Ok(());
         };
+        let gl = self.loc_of(g);
         let s = crate::defer::Sym {
-            loc: self.loc_of(g),
+            reg: self.count_reg(gl).unwrap_or(0),
             node,
+            j: 0,
         };
         let x = match self.op_name() {
             "exec" | "resume" => crate::defer::force(self, s)?,
@@ -1718,6 +1720,27 @@ impl<'c, 'a> Run<'c, 'a> {
             && (global || self.innermost_group().is_none())
     }
 
+    /// Whether a step of integer register `loc` can be a step of the run's
+    /// map, published as a relation so a reader later on is asked as soon
+    /// as the value moves, not after every stepping run before it has run
+    /// again: as [`Run::map_ok`], and after a candidate too, the value at
+    /// the candidate kept (`State::add`), for a register no routine defines.
+    pub(crate) fn step_ok(&mut self, loc: Loc, global: bool) -> bool {
+        if self.cand_marks.is_empty() {
+            return self.map_ok(loc, global);
+        }
+        let op = self.cx.op();
+        self.count_reg(loc).is_some()
+            && (op == self.ops.exec || op == self.ops.resume)
+            && self.doc
+            && !self.rec_load
+            && self.interp.is_none()
+            && !self.read_back_done
+            && !self.read_point_here
+            && (global || self.innermost_group().is_none())
+            && !crate::defer::deferrable(self, loc)
+    }
+
     /// An integer register's engine value as first loaded
     /// ([`Run::reg_loaded_base`]).
     /// Kept for the registers a restore can name: `\count0`–`\count255`
@@ -1781,13 +1804,18 @@ impl<'c, 'a> Run<'c, 'a> {
     /// set, where it is a page-layer register the run has not loaded and
     /// holds no map of (its own write makes it concrete): no read.
     pub(crate) fn defer_at(&mut self, loc: Loc) -> R<bool> {
-        if self.st.is_loaded(loc) || self.st.has_map(loc) || self.st.lazy(loc).is_some() {
+        if self.st.is_loaded(loc) || self.st.lazy(loc).is_some() {
             return Ok(false);
         }
         if loc as usize >= crate::fields::NSLOT {
             self.loc_field(loc);
         }
-        if self.count_reg(loc).is_none() || !crate::defer::deferrable(self, loc) {
+        // (a page-layer register a piece stepped is concrete, as the
+        // restores of §2 of the spec expect; any other is relative,
+        // docs/note-relative-counters.md §2.1, its steps in the symbol)
+        if self.count_reg(loc).is_none()
+            || (self.st.has_map(loc) && crate::defer::deferrable(self, loc))
+        {
             return Ok(false);
         }
         // (a symbol is resolved as of the piece's position: made after a

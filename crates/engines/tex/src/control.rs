@@ -1408,8 +1408,14 @@ impl Run<'_, '_> {
         // step of the run's map, nothing read, published as a relation,
         // `State::add`)
         let mut pre = None;
-        if p == 0 && q == cmd::ADVANCE && self.map_ok(l, global) {
+        if p == 0 && q == cmd::ADVANCE && self.step_ok(l, global) {
             let x = self.scan_int()?;
+            // (steps on both sides of a candidate: the routine of a page
+            // firing there needs the value they make there, so the run
+            // reads the register, `State::add` keeps the value at it)
+            if !self.cand_marks.is_empty() && self.st.has_map(l) {
+                self.load(l)?;
+            }
             if self.st.add(self.v, l, x, global) {
                 self.muts += 1;
                 return Ok(());

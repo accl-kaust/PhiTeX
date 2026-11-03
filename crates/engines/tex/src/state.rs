@@ -24,7 +24,6 @@ use std::rc::Rc;
 use phitex_defuse::{Ctx, Field, FxHashMap, Locality, ValueId, Values};
 use phitex_typeset::glue::Glue;
 
-use crate::defer::Sym;
 use crate::val::{Mean, Tok};
 
 /// A location in the table.
@@ -1306,15 +1305,22 @@ impl State {
     /// `None` otherwise (the caller reads it). Callers: `\the` and
     /// `\number` on the register alone in a piece, after
     /// `defer::deferrable` said the register is a page-layer one.
-    pub(crate) fn symbol(&mut self, loc: Loc, node: phitex_defuse::NodeId) -> Option<Sym> {
+    pub(crate) fn note_symbol(&mut self, loc: Loc) {
         let s = self.slot_ref(loc);
         if s.is_some_and(|s| {
             s.e.flags & LOADED != 0 || s.meta != 0 || s.mapped != MAP_NONE || s.lazy.is_some()
         }) {
-            return None;
+            return;
         }
         self.slot(loc).sym = true;
-        Some(Sym { loc, node })
+    }
+
+    /// The steps the run holds of register `loc`, unread: what a symbol
+    /// made now adds to the value reaching the run.
+    pub(crate) fn steps_of(&self, loc: Loc) -> i32 {
+        self.slot_ref(loc)
+            .filter(|s| s.mapped != MAP_NONE)
+            .map_or(0, |s| s.map.add)
     }
 
     // ---------------------------------------------------------- values
@@ -1754,6 +1760,15 @@ impl State {
         }
         self.changing(loc);
         self.muts += 1;
+        // (after a candidate: what it holds there is kept, unread the value
+        // that reached the run, for the routine of a page firing there,
+        // `State::at_candidates`; the stamp says it came after the candidate,
+        // `State::defined_stamped`)
+        if !self.cands.is_empty() {
+            self.stamp += 1;
+            let prev = self.slot(loc).e;
+            self.note_cand(loc, 0, prev);
+        }
         let loaded = self.is_loaded(loc);
         let cur = if loaded {
             Some(self.int_of(loc, v))
@@ -1996,7 +2011,10 @@ impl State {
         self.slot_ref(loc)
             .and_then(|s| usize::try_from(s.meta).ok().filter(|&m| m > 0))
             .and_then(|m| self.metas.get(m - 1))
-            .is_some_and(|m| !m.ldef_local || m.ldef_gid.is_none())
+            .map_or_else(
+                || self.has_map(loc),
+                |m| !m.ldef_local || m.ldef_gid.is_none(),
+            )
     }
 
     /// The groups opened so far: a group [`State::open`] opens after
@@ -2032,11 +2050,26 @@ impl State {
     /// Every location the run defined: its latest definition's stamp,
     /// whether local, and the group it was made in.
     pub(crate) fn defined_stamped(&self) -> Vec<(Loc, u64, bool, Option<u32>)> {
-        self.metas
+        let mut out: Vec<_> = self
+            .metas
             .iter()
             .filter(|m| m.ldef_stamp > 0)
             .map(|m| (m.loc, m.ldef_stamp, m.ldef_local, m.ldef_gid))
-            .collect()
+            .collect();
+        // (a register stepped after a candidate, no definition: as one made
+        // right after the last candidate holding it, [`State::add`])
+        for (st, xs) in &self.cands {
+            for &(l, _) in xs {
+                if self
+                    .slot_ref(l)
+                    .is_some_and(|s| s.meta == 0 && s.mapped != MAP_NONE)
+                {
+                    out.retain(|x: &(Loc, u64, bool, Option<u32>)| x.0 != l);
+                    out.push((l, st + 1, false, None));
+                }
+            }
+        }
+        out
     }
 
     /// The locations whose latest definition after stamp `since` is
