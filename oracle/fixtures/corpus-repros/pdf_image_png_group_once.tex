@@ -1,0 +1,18 @@
+% two PNGs with an alpha channel: the document's transparency group is
+% written once, with the first, into an object stream; an object number
+% TeX reads where a stream opens counts it once (cursolatex: every number
+% after a stream's opening one past pdfTeX's, the masks' forms one off,
+% pgf's shadows without their shadings)
+\documentclass{article}
+\usepackage{graphicx}
+\newcount\n
+\begin{document}
+\includegraphics{png-rgba.png}
+\newpage
+\pdfximage{png-rgba.png}\pdfrefximage\pdflastximage
+\newpage
+\loop
+\immediate\pdfobj{<< /After \the\n\space >>}\the\pdflastobj\space
+\advance\n 1
+\ifnum\n<150 \repeat
+\end{document}

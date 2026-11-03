@@ -1134,6 +1134,227 @@ fn a_box_over_paragraphs_and_a_file_goes_on_from_a_checkpoint_inside() {
     }
 }
 
+/// A run asked again for a read near its end goes on from a checkpoint
+/// taken inside a conditional of its own, open from near its start to
+/// past the read (`\ifnum ... \else ... \fi` around the box's material,
+/// in a group and a file too): the conditionals open there come back
+/// with the checkpoint, so the `\else` after the read skips to its `\fi`
+/// as in a whole run, and the output and log are a cold build's, at 1
+/// and 8 threads. Checkpoints were refused while a conditional of the
+/// run's own was open: Grail's figures (`TikZ`, inside its
+/// conditionals) went on from their first checkpoint only, 2 s of a
+/// \cite edit's figure rerun.
+#[test]
+fn a_run_goes_on_from_a_checkpoint_inside_its_own_conditional() {
+    use std::fmt::Write as _;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-in-if");
+    let _ = std::fs::create_dir_all(&dir);
+    let words = |n: usize, tag: &str| {
+        let mut s = String::new();
+        for k in 0..n {
+            let _ = write!(s, "{tag}{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            s.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        s
+    };
+    std::fs::write(dir.join("inner.tex"), words(900, "f")).unwrap();
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{\\begingroup\\count1=7 \\ifnum\\count1=7 {}\n\n{}\n\n\\ifodd\\count1 \\input inner\n\n{}\n\nend \\late.\\else odd never\\fi\\else never\\fi\\endgroup}}\n\\box1\n\n\\bye\n",
+            words(700, "w"),
+            words(700, "v"),
+            words(900, "u")
+        )
+    };
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./ck.tex", "ck", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+            let text = doc(m);
+            b.edit(&text);
+            let cold = common::build(opts(), Some(&prelude), &text);
+            let (out, log) = b.output();
+            let (cold_out, cold_log) = cold.output();
+            assert!(
+                common::first_difference(&out, &cold_out).is_none(),
+                "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
+            );
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
+            assert!(
+                b.stats.resumed_at_mark > 0,
+                "{t} threads, edit {k}: the box's run went on from a checkpoint inside its conditionals"
+            );
+        }
+    }
+}
+
+/// A run asked again for a read in the last row of a long `\halign`
+/// goes on from a checkpoint taken inside the alignment (in its cells,
+/// with `align_state` and the alignments open carried, the templates on
+/// the input, the rows so far in the nest), and the output and log are a
+/// cold build's, at 1 and 8 threads. Checkpoints were refused while an
+/// alignment was open: Grail's floats (tables) went on from their start,
+/// 4 s of a \cite edit.
+#[test]
+fn a_run_goes_on_from_a_checkpoint_inside_an_alignment() {
+    use std::fmt::Write as _;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-in-align");
+    let _ = std::fs::create_dir_all(&dir);
+    let rows = |n: usize| {
+        let mut s = String::new();
+        for k in 0..n {
+            let _ = writeln!(
+                s,
+                "w{k}a\\kern0pt w{k}b\\kern0pt w{k}c&\\ifodd{k} odd{k}\\else even{k}\\fi\\kern0pt v{k}\\cr"
+            );
+        }
+        s
+    };
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{\\tabskip=1pt\\halign{{#\\hfil\\tabskip=2pt&\\quad#\\hfil\\cr\n{}end \\late&{{\\late}}\\cr\n\\noalign{{\\kern1pt}}last&row\\cr}}}}\n\\box1\n\n\\bye\n",
+            rows(400)
+        )
+    };
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./ck.tex", "ck", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+            let text = doc(m);
+            b.edit(&text);
+            let cold = common::build(opts(), Some(&prelude), &text);
+            let (out, log) = b.output();
+            let (cold_out, cold_log) = cold.output();
+            assert!(
+                common::first_difference(&out, &cold_out).is_none(),
+                "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
+            );
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
+            assert!(
+                b.stats.resumed_at_mark > 0,
+                "{t} threads, edit {k}: the box's run went on from a checkpoint inside the alignment"
+            );
+        }
+    }
+}
+
+/// A macro that reads two job-written files back with much work between
+/// (on a few locations: a table that grows spaces checkpoints further)
+/// (LaTeX's `\document`: the `.aux`, the packages' hooks, then the
+/// `.out`), and at its end a macro an earlier node defines: an edit of
+/// that definition wakes the macro's run for its last read, and the run
+/// goes on from a checkpoint taken while the read-back's macro runs,
+/// with the read-back's state carried (its macro's level marked on the
+/// input, the values noted at the point), not from its start; the output and log are a
+/// cold build's, at 1 and 8 threads. Checkpoints were refused while a
+/// read-back's macro ran: Grail's heading edit ran `\begin{document}`'s
+/// node whole again for its `.out` (140 ms).
+#[test]
+fn a_run_goes_on_from_a_checkpoint_between_two_read_backs() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-read-back");
+    let _ = std::fs::create_dir_all(&dir);
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\def\\late{{{m}}}\\def\\xa{{?}}\\def\\xb{{?}}\n\n\\def\\begindoc{{\\openin3=\\jobname.xa \\ifeof3 \\closein3 \\else\\closein3 \\input\\jobname.xa \\fi\n\\count255=0 \\loop\\advance\\count255 1 \\edef\\w{{\\the\\count255}}\\setbox0\\hbox{{\\w}}\\ifnum\\count255<3000 \\repeat\n\\openin3=\\jobname.xb \\ifeof3 \\closein3 \\else\\closein3 \\input\\jobname.xb \\fi\n\\immediate\\openout1=\\jobname.xa \\immediate\\openout2=\\jobname.xb \\edef\\w{{\\w\\late}}}}\n\\begindoc\nText \\xa\\ and \\xb\\ and \\w.\n\n\\immediate\\write1{{\\noexpand\\def\\noexpand\\xa{{A}}}}\n\\immediate\\write2{{\\noexpand\\def\\noexpand\\xb{{B}}}}\n\\bye\n"
+        )
+    };
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./rb.tex", "rb", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+            let text = doc(m);
+            b.edit(&text);
+            let cold = common::build(opts(), Some(&prelude), &text);
+            let (out, log) = b.output();
+            let (cold_out, cold_log) = cold.output();
+            assert!(
+                common::first_difference(&out, &cold_out).is_none(),
+                "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
+            );
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
+            assert!(
+                b.stats.resumed_at_mark > 0,
+                "{t} threads, edit {k}: the macro's run went on from a checkpoint after the first read-back"
+            );
+        }
+    }
+}
+
+/// A run that made a child before the read it is asked again for (a page
+/// it shipped out: its PDF side) goes on from a checkpoint after the
+/// child, which it still places, and the output and log are a cold
+/// build's, at 1 and 8 threads. Checkpoints were refused once a run
+/// had a child pending: the rest of the run ran again whole.
+#[test]
+fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
+    use std::fmt::Write as _;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-after-kid");
+    let _ = std::fs::create_dir_all(&dir);
+    let words = |n: usize, tag: &str| {
+        let mut s = String::new();
+        for k in 0..n {
+            let _ = write!(s, "{tag}{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            s.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        s
+    };
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\pdfoutput=1 \\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{{}\n\n\\shipout\\hbox{{early page}}\n\n{}\n\nend \\late.}}\n\\box1\n\n\\bye\n",
+            words(300, "w"),
+            words(1500, "v")
+        )
+    };
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./ck.tex", "ck", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+            let text = doc(m);
+            b.edit(&text);
+            let cold = common::build(opts(), Some(&prelude), &text);
+            let (out, log) = b.output();
+            let (cold_out, cold_log) = cold.output();
+            assert!(
+                common::first_difference(&out, &cold_out).is_none(),
+                "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
+            );
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
+            assert!(
+                b.stats.resumed_at_mark > 0,
+                "{t} threads, edit {k}: the box's run went on from a checkpoint after the page it shipped"
+            );
+        }
+    }
+}
+
 /// Exact PDF, compressed, a paragraph deleted near the start of 300:
 /// every later page's lines move, so the link places a new record for
 /// each. A page's content is compressed once, where the link places it

@@ -50,6 +50,12 @@ thread_local! {
     static ARENAS: std::cell::RefCell<Vec<Vec<Tok>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// A new arena identity ([`Input::arena_id`]): unique in the process.
+fn next_arena_id() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The largest token vector [`ARENAS`] keeps (64 MB).
 const ARENA_KEEP: usize = 1 << 24;
 
@@ -268,6 +274,10 @@ pub(crate) struct Level {
     pub a: u32,
     pub b: u32,
     pub c: u32,
+    /// The macro that read a job-written file back ([`crate::run::Run::read_back_at`]):
+    /// while this level is on the stack, the run's definitions keep their
+    /// value at the read-back (a checkpoint's input carries it).
+    pub rb: bool,
 }
 
 impl Level {
@@ -279,6 +289,7 @@ impl Level {
             a: r.start,
             b: r.end,
             c: r.start,
+            rb: false,
         }
     }
 
@@ -290,6 +301,7 @@ impl Level {
             a: u32::try_from(i).unwrap_or(u32::MAX),
             b: 0,
             c: 0,
+            rb: false,
         }
     }
 
@@ -301,6 +313,7 @@ impl Level {
             a: u32::try_from(i).unwrap_or(u32::MAX),
             b: 0,
             c: 0,
+            rb: false,
         }
     }
 
@@ -570,6 +583,11 @@ pub(crate) struct Input {
     /// between commands ([`Input::compact`]): four times what survived
     /// the last compaction, at least [`ARENA_COMPACT`].
     pub compact_at: usize,
+    /// The arena's identity: a token list level's range names the same
+    /// tokens while it stays (the arena only grows until it is replaced,
+    /// by a compaction or another input); a checkpoint's encoding of it
+    /// is kept by this and the range (`crate::resume`).
+    pub arena_id: u64,
     /// The levels as the command in progress found them, saved as they
     /// come on top ([`Input::snapshot`]).
     snap: Option<Snap>,
@@ -610,6 +628,13 @@ pub(crate) const ARENA_MAX: usize = 1 << 27;
 pub(crate) const ARENA_COMPACT: usize = 1 << 22;
 
 impl Input {
+    /// Token `i` of the arena replaced in place: the arena's ranges no
+    /// longer name what they named ([`Input::arena_id`]).
+    pub(crate) fn set_tok(&mut self, i: u32, t: Tok) {
+        self.arena.set(i, t);
+        self.arena_id = next_arena_id();
+    }
+
     pub(crate) fn new() -> Input {
         Input {
             arena: Arena::with_capacity(1 << 14),
@@ -624,6 +649,7 @@ impl Input {
             text: Vec::new(),
             text_at: 0,
             compact_at: ARENA_COMPACT,
+            arena_id: next_arena_id(),
             snap: None,
         }
     }
@@ -970,7 +996,9 @@ impl Input {
                 continue;
             }
             if l.a >= l.b {
+                let rb = l.rb;
                 *l = Level::toks(Range { start: 0, end: 0 }, l.ty);
+                l.rb = rb;
                 continue;
             }
             let r = fresh.alloc(&self.arena.toks[l.c as usize..l.b as usize]);
@@ -981,6 +1009,7 @@ impl Input {
         }
         self.compact_at = (fresh.len() * 4).max(ARENA_COMPACT);
         self.arena = fresh;
+        self.arena_id = next_arena_id();
     }
 }
 

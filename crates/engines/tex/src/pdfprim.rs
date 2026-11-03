@@ -3553,7 +3553,7 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     };
     // (`\pdfximagebbox`'s four: the writer's, 0 outside PDF mode)
     let mut bbox = [0; 4];
-    if let Some((_, i, _, _)) = &got {
+    if let Some((_, i, _, _, _)) = &got {
         bbox = i.bbox;
         w = i.width;
         h = i.height;
@@ -3561,7 +3561,7 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
         pages = i.pages;
         depth = i.colordepth;
     }
-    let (wobjs, wos) = got.as_ref().map_or((0, 0), |g| (g.2, g.3));
+    let (wobjs, wos, wgroup) = got.as_ref().map_or((0, 0, false), |g| (g.2, g.3, g.4));
     let n = or_alloc(r, got.and_then(|g| g.0))?;
     // (pdfTeX's writepng, reading a PNG with an alpha channel for PDF 1.4
     // and later after the image's object: the document's transparency
@@ -3583,6 +3583,11 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
                 crate::pdfout::os_write(r)?;
             }
         }
+        // (the document's transparency group, written with the first
+        // image that needs it, into an object stream)
+        if wgroup {
+            crate::pdfout::png_group_write(r)?;
+        }
     }
     r.set(
         &format!("pdf:ximage:{n}"),
@@ -3600,6 +3605,7 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
             v.int(wobjs),
             v.int(wos),
             v.int(i64::from(immediate)),
+            v.int(i64::from(wgroup)),
         ]),
         true,
     );
@@ -3647,7 +3653,7 @@ fn ximage_own_info(
     set: impl Fn(&mut phitex_pdf::PdfState),
     ocl: (i32, i32, i32),
     fonts: &crate::pdfout::Fonts,
-) -> Result<(phitex_pdf::XImageInfo, i64, i64), phitex_pdf::PdfError> {
+) -> Result<(phitex_pdf::XImageInfo, i64, i64, bool), phitex_pdf::PdfError> {
     let mut st = phitex_pdf::PdfState::new(phitex_pdf::PdfParams::default());
     set(&mut st);
     {
@@ -3678,10 +3684,20 @@ fn ximage_own_info(
         Ok(()) => st.objects_after(before),
         Err(_) => (0, 0),
     };
+    // (a PNG's transparency group is the document's, written once with
+    // the first image that needs it: this writer has no other image, so
+    // it wrote it; the record says so apart, for the fold to count it
+    // once. Counted with each image, every read-time number after a
+    // second such image was one past pdfTeX's where it opened an object
+    // stream (cursolatex's masks named forms one off, so the shadows
+    // lost their shadings))
+    let group = st.png_group_in_stream();
+    let os = os - usize::from(group);
     Ok((
         info,
         i64::try_from(objs).unwrap_or(0),
         i64::try_from(os).unwrap_or(0),
+        group,
     ))
 }
 
@@ -3700,7 +3716,7 @@ struct XImageScan {
 
 /// What [`ximage_step`] gives: the image's object number, what TeX reads
 /// of it, and the objects its write makes (all, those in object streams).
-type XImageStep = Option<(Option<usize>, phitex_pdf::XImageInfo, i64, i64)>;
+type XImageStep = Option<(Option<usize>, phitex_pdf::XImageInfo, i64, i64, bool)>;
 
 /// `\\pdfximage` as a step (pdfTeX §1358, writeimg.c `read_image`):
 /// the image's object number and what TeX reads of it.
@@ -3777,7 +3793,7 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
     // link's writer has them: `pdfout::command`'s)
     let mut fs = crate::pdfout::fonts_for(r, &[], false)?;
     crate::pdfout::image_fonts(r, &mut fs)?;
-    let (i, wobjs, wos) = match ximage_own_info(&spec, &set, ocl, &fs) {
+    let (i, wobjs, wos, wgroup) = match ximage_own_info(&spec, &set, ocl, &fs) {
         Ok(i) => i,
         Err(e) => {
             r.log("error", &e.to_string())?;
@@ -3804,7 +3820,7 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
     if let Some(e) = got.as_ref().and_then(|g| g.err.clone()) {
         r.log("error", &e)?;
     }
-    Ok(Some((num_of(got), i, wobjs, wos)))
+    Ok(Some((num_of(got), i, wobjs, wos, wgroup)))
 }
 
 /// `\\pdfxform` as a step (pdfTeX §1357): the box goes to the writer,
@@ -4376,12 +4392,12 @@ mod tests {
         };
         let fonts = crate::pdfout::Fonts::default();
         for (ocl, want) in [
-            ((2, 1, 5), (1, 1)),
-            ((0, 1, 5), (1, 0)),
-            ((2, 1, 7), (1, 1)),
+            ((2, 1, 5), (1, 0, true)),
+            ((0, 1, 5), (1, 0, false)),
+            ((2, 1, 7), (1, 0, true)),
         ] {
             let got = super::ximage_own_info(&spec, |_| {}, ocl, &fonts)
-                .map(|(_, o, s)| (o, s))
+                .map(|(_, o, s, g)| (o, s, g))
                 .expect("the image");
             assert_eq!(got, want, "at {ocl:?}");
         }

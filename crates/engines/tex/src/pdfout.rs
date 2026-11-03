@@ -3006,6 +3006,7 @@ pub(crate) fn page_allocs(
     // first page that shows it, unless `\immediate` wrote it, with what
     // writing it makes, [`crate::pdfprim`]'s `ximage_own_info`)
     let mut images: Vec<ValueId> = Vec::new();
+    let mut group_wanted = false;
     // (the raw objects the page names, `\pdfrefobj`, that are neither
     // streams nor written by `\immediate`: pdfTeX writes each after the
     // page's dictionary where a page first names it ("Write out pending
@@ -3035,7 +3036,13 @@ pub(crate) fn page_allocs(
                 if let Some(x) = r.get(&format!("pdf:ximage:{n}"))? {
                     let at = |k: usize| crate::val::int_at(v, x, k);
                     if at(12) == 0 {
-                        images.push(v.list(vec![v.int(n), v.int(at(10)), v.int(at(11))]));
+                        group_wanted |= at(13) != 0;
+                        images.push(v.list(vec![
+                            v.int(n),
+                            v.int(at(10)),
+                            v.int(at(11)),
+                            v.int(at(13)),
+                        ]));
                     }
                 }
             }
@@ -3086,6 +3093,9 @@ pub(crate) fn page_allocs(
         .map(|n| v.int(n))
         .collect();
     let rt_forms = r.get(RT_FORMS)?.unwrap_or_else(|| v.list(Vec::new()));
+    // (an image here that needs the document's transparency group: has a
+    // read-time write written it?)
+    let rt_group = group_wanted && r.get(RT_PNG_GROUP)?.is_some();
     // (where the page broke, for a page firing inside a piece: the
     // piece and its candidate, [`page_offset_at`])
     let brk = r
@@ -3114,6 +3124,7 @@ pub(crate) fn page_allocs(
         rt_forms,
         v.list(images),
         v.list(raw),
+        v.int(i64::from(rt_group)),
     ]);
     if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
         eprintln!("alloc: page (node {}): {}", r.cx.node().raw(), v.render(e));
@@ -3339,6 +3350,10 @@ const RT_PAGES: &str = "pdf:rtpages";
 /// The forms read-time writes wrote ([`forms_first_written`]).
 const RT_FORMS: &str = "pdf:rtforms";
 
+/// Whether a read-time write wrote the document's transparency group
+/// ([`png_group_write`]).
+const RT_PNG_GROUP: &str = "pdf:rtpnggroup";
+
 /// The forms whatsits `whats` name (`\\pdfrefxform`), with the forms
 /// their boxes name in turn: pdfTeX writes each that is not written yet
 /// when it ships the page or form they are in (§752's "Write out pending
@@ -3442,6 +3457,19 @@ pub(crate) fn os_write(r: &mut Run<'_, '_>) -> R<()> {
     Ok(())
 }
 
+/// An `\\immediate\\pdfximage` that needs the document's transparency
+/// group: written with it, into an object stream, unless a page or a
+/// read-time write before wrote it.
+pub(crate) fn png_group_write(r: &mut Run<'_, '_>) -> R<()> {
+    let v = r.v;
+    let range = allocs_range(r, "png_group_write")?;
+    if fold_allocs(v, range).png_group || r.get(RT_PNG_GROUP)?.is_some() {
+        return Ok(());
+    }
+    r.set(RT_PNG_GROUP, v.int(1), true);
+    os_write(r)
+}
+
 /// A read-time object counted in the `pdf:objnum` cell, made by this
 /// run ([`crate::pdfprim::rt_before`]).
 pub(crate) fn bump_cell(r: &mut Run<'_, '_>) -> R<()> {
@@ -3499,6 +3527,8 @@ struct AllocFold {
     forms: Arc<BTreeSet<ValueId>>,
     /// The objects the pages wrote into object streams.
     os_written: i64,
+    /// Whether the document's transparency group is written.
+    png_group: bool,
 }
 
 /// The writer's link stack and thread over the pages, as the fold of
@@ -3619,12 +3649,15 @@ impl MarkState {
 type AllocMemo = Mutex<FxHashMap<(u64, u64), AllocFold>>;
 
 /// The objects writing the images a page shows first makes (each
-/// image's record: its number, its objects, those in object streams),
-/// added to `objects`; those in object streams returned.
+/// image's record: its number, its objects, those in object streams,
+/// whether writing it writes the document's transparency group where
+/// nothing has: `group`, one object in a stream, numbered where it was
+/// read), added to `objects`; those in object streams returned.
 fn images_written(
     v: &Values,
     images: &[ValueId],
     seen: &mut BTreeSet<i64>,
+    group: &mut bool,
     objects: &mut i64,
 ) -> i64 {
     let mut os = 0i64;
@@ -3634,6 +3667,10 @@ fn images_written(
         if seen.insert(y(0)) {
             *objects += y(1);
             os += y(2);
+            if y(3) != 0 && !*group {
+                *group = true;
+                os += 1;
+            }
         }
     }
     os
@@ -3662,6 +3699,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     let mut seen_forms: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_images: BTreeSet<i64> = BTreeSet::new();
     let mut seen_raw: BTreeSet<i64> = BTreeSet::new();
+    let mut png_group = false;
     let mut ms = MarkState::default();
     for (pages, e) in v.seq_to_vec(range).into_iter().enumerate() {
         let xs = list_of(v, e);
@@ -3732,7 +3770,15 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         out.objects += made.objects;
         // (the images first shown here, written after the page: what
         // writing each makes, `pdf_write_image`)
-        let images_os = images_written(v, &l(15), &mut seen_images, &mut out.objects);
+        // (a read-time write before the page wrote the group, [`RT_PNG_GROUP`])
+        png_group |= i(17) != 0;
+        let images_os = images_written(
+            v,
+            &l(15),
+            &mut seen_images,
+            &mut png_group,
+            &mut out.objects,
+        );
         // (the read-time writes into object streams before the page
         // count toward a stream's 100; a link piece's, a bead
         // rectangle's and a destination's object go into one too)
@@ -3769,6 +3815,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     out.dests = Arc::new(seen_dest);
     out.forms = Arc::new(seen_forms);
     out.os_written = written;
+    out.png_group = png_group;
     let mut g = m.locked();
     if g.len() > 1 << 12 {
         g.clear();

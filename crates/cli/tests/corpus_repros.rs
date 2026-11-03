@@ -1025,6 +1025,16 @@ fn pdf_texxet() {
     check_threads("pdf_texxet", "pdf");
 }
 
+/// Two PNGs with an alpha channel: writing the first writes the
+/// document's transparency group into an object stream, the second has
+/// none to write. The pages' fold counted it with each image, so an
+/// object number TeX read where a stream opened was one past pdfTeX's:
+/// cursolatex's form numbers, pgf's masks and shadows. At -j1 and -j4.
+#[test]
+fn pdf_image_png_group_once() {
+    check_threads("pdf_image_png_group_once", "pdf");
+}
+
 /// TeX Live manual enumitem-de (pdflatex): `\begin{verbatim}` and a tab at
 /// the line's end. web2c's `input_line` trims spaces and line ends, not
 /// tabs, in pdfTeX as in XeTeX; `PhiTeX` trimmed tabs for pdfTeX, so the

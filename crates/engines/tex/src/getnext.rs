@@ -1995,7 +1995,7 @@ impl Run<'_, '_> {
                     && let Some(n) = t.as_cs()
                 {
                     let f = Tok::cs(&format!("{n}F"));
-                    self.input.arena.set(i, f);
+                    self.input.set_tok(i, f);
                     return;
                 }
             }
