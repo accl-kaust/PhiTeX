@@ -635,7 +635,12 @@ impl Run<'_, '_> {
         let rest = match self.rest_start()? {
             RestBegin::Loop => None,
             RestBegin::At(r) => Some(r),
-            RestBegin::Nothing => return Ok(ValueId::UNIT),
+            RestBegin::Nothing => {
+                // (the answer it parked on, its start, came: none. It goes
+                // on from there, with nothing of its own done again)
+                self.cx.goes_on();
+                return Ok(ValueId::UNIT);
+            }
             RestBegin::NotYet => {
                 // (its start not decided yet: the loop node before it
                 // folds again (its own start moved: a pass's aux values,
@@ -811,14 +816,19 @@ impl Run<'_, '_> {
             ls.rest_at = Some(k);
             ls.rest_def = Some(r);
             self.cx.define_with(rest_field(v, me), r, Locality::Global);
-        } else if hole {
-            // (parked at a hole short of the page its rest starts after:
-            // the start is not decided, so not defined, and the rest
-            // waits with what it made standing (`RestBegin::NotYet`); the
-            // fold stops for it at the same page once it gets there)
+        } else if !lc.ended {
+            // (parked at a hole short of the page its rest starts after,
+            // or stopped where the next contribution is not where it was
+            // (the change that moved it runs this node again): the start
+            // is not decided, so not defined, and the rest waits with
+            // what it made standing (`RestBegin::NotYet`); the fold stops
+            // for it at the same page once it gets there. Saying "none"
+            // at such a stop made the rest drop its pages and finishers,
+            // whose material the next run of this node folded again, and
+            // the two ran each other a million times on Grail, mc 78931)
             ls.rest_def = None;
         } else {
-            // (the fold ended with no page to stop at for its rest: it
+            // (the job ended with no page to stop at for its rest: it
             // has none, and drops what it made)
             ls.rest_at = None;
             ls.rest_def = None;
