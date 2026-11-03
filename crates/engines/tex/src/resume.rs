@@ -174,10 +174,18 @@ impl Run<'_, '_> {
         }
         // (the first too after as many commands as its table's length
         // buys, `space`: a short run takes none, its next run is short)
-        let need = c.last
-            + space()
+        let first_rule = {
+            static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *F.get_or_init(|| std::env::var("PHITEX_CK_FIRST").map_or(true, |x| x != "0"))
+        };
+        let need = if !first_rule && c.taken.is_empty() {
+            0
+        } else {
+            c.last
+                + space()
                 * (self.st.base_len() as u64
-                    + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>());
+                    + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>())
+        };
         if self.cmds < need {
             if let Some(c) = self.ck.as_mut() {
                 c.next = need;

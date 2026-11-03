@@ -3088,7 +3088,6 @@ impl BaseSlot {
     /// One slot of [`Base::of_value`].
     fn of_value(v: &Values, s: ValueId, loc: &mut dyn FnMut(Field) -> Loc) -> Option<BaseSlot> {
         use crate::val::{int_of, list_of};
-        let opt = |x: ValueId| list_of(v, x).first().copied();
         let at = |x: ValueId| match int_of(v, x) {
             0 => Locality::Local,
             1 => Locality::Global,
@@ -3099,6 +3098,7 @@ impl BaseSlot {
         let ys = list_of(v, s);
         let [
             f,
+            has,
             cur,
             flags,
             save_gid,
@@ -3110,31 +3110,34 @@ impl BaseSlot {
             base,
             lazy,
             sym,
-            meta,
+            eng,
+            publ,
+            publ_at,
+            stamp,
+            local,
+            gid,
+            ix,
+            dg,
+            cn,
         ] = ys[..]
         else {
             return None;
         };
-        let ms = list_of(v, meta);
-        let meta = match ms[..] {
-            [eng, publ, stamp, local, gid, ix, dg, cn] => Some(BaseMeta {
-                ix: u32::try_from(int_of(v, ix)).unwrap_or(u32::MAX),
-                def_gid: u32::try_from(int_of(v, dg)).unwrap_or(0),
-                cand_noted: u32::try_from(int_of(v, cn)).unwrap_or(0),
-                eng: list_of(v, eng).first().map(|&x| opt(x)),
-                publ: match list_of(v, publ)[..] {
-                    [x, l] => Some((opt(x), at(l))),
-                    _ => None,
-                },
-                ldef_stamp: u(stamp),
-                ldef_local: int_of(v, local) != 0,
-                ldef_gid: u32::try_from(int_of(v, gid)).ok(),
-            }),
-            _ => None,
-        };
+        let has = int_of(v, has);
+        let bit = |k: u32, x: ValueId| (has >> k & 1 != 0).then_some(x);
+        let meta = (has >> 3 & 1 != 0).then(|| BaseMeta {
+            ix: u32::try_from(int_of(v, ix)).unwrap_or(u32::MAX),
+            def_gid: u32::try_from(int_of(v, dg)).unwrap_or(0),
+            cand_noted: u32::try_from(int_of(v, cn)).unwrap_or(0),
+            eng: (has >> 4 & 1 != 0).then(|| bit(5, eng)),
+            publ: (has >> 6 & 1 != 0).then(|| (bit(7, publ), at(publ_at))),
+            ldef_stamp: u(stamp),
+            ldef_local: int_of(v, local) != 0,
+            ldef_gid: u32::try_from(int_of(v, gid)).ok(),
+        });
         Some(BaseSlot {
             loc: loc(Field(f)),
-            cur: opt(cur),
+            cur: bit(0, cur),
             flags: u8::try_from(int_of(v, flags)).unwrap_or(0),
             save: (
                 u32::try_from(int_of(v, save_gid)).unwrap_or(0),
@@ -3146,8 +3149,8 @@ impl BaseSlot {
                 add: i32::try_from(int_of(v, add)).unwrap_or(0),
             },
             mapped: u8::try_from(int_of(v, mapped)).unwrap_or(0),
-            base: opt(base),
-            lazy: opt(lazy),
+            base: bit(1, base),
+            lazy: bit(2, lazy),
             sym: int_of(v, sym) != 0,
             meta,
         })
@@ -3182,30 +3185,25 @@ impl Base {
                 {
                     return *x;
                 }
-                let meta = s.meta.as_ref().map_or_else(
-                    || v.list(Vec::new()),
-                    |m| {
-                        v.list(vec![
-                            match m.eng {
-                                None => v.list(Vec::new()),
-                                Some(x) => v.list(vec![opt(x)]),
-                            },
-                            match m.publ {
-                                None => v.list(Vec::new()),
-                                Some((x, l)) => v.list(vec![opt(x), at(l)]),
-                            },
-                            u(m.ldef_stamp),
-                            v.int(i64::from(m.ldef_local)),
-                            v.int(m.ldef_gid.map_or(-1, i64::from)),
-                            v.int(i64::from(m.ix)),
-                            v.int(i64::from(m.def_gid)),
-                            v.int(i64::from(m.cand_noted)),
-                        ])
-                    },
-                );
+                // (one flat list: a value absent is UNIT with its bit off
+                // in `has`, `BaseSlot::of_value`; a list for each part
+                // made most of a checkpoint's cost)
+                let val = |x: Option<ValueId>| x.unwrap_or(ValueId::UNIT);
+                let m = s.meta.as_ref();
+                let eng = m.and_then(|m| m.eng);
+                let publ = m.and_then(|m| m.publ);
+                let has = i64::from(s.cur.is_some())
+                    | i64::from(s.base.is_some()) << 1
+                    | i64::from(s.lazy.is_some()) << 2
+                    | i64::from(m.is_some()) << 3
+                    | i64::from(eng.is_some()) << 4
+                    | i64::from(eng.flatten().is_some()) << 5
+                    | i64::from(publ.is_some()) << 6
+                    | i64::from(publ.and_then(|p| p.0).is_some()) << 7;
                 let x = v.list(vec![
                     field(s.loc).0,
-                    opt(s.cur),
+                    v.int(has),
+                    val(s.cur),
                     v.int(i64::from(s.flags)),
                     v.int(i64::from(s.save.0)),
                     u(s.save.1),
@@ -3213,10 +3211,18 @@ impl Base {
                     v.int(i64::from(s.map.keep)),
                     v.int(i64::from(s.map.add)),
                     v.int(i64::from(s.mapped)),
-                    opt(s.base),
-                    opt(s.lazy),
+                    val(s.base),
+                    val(s.lazy),
                     v.int(i64::from(s.sym)),
-                    meta,
+                    val(eng.flatten()),
+                    val(publ.and_then(|p| p.0)),
+                    at(publ.map_or(Locality::Local, |p| p.1)),
+                    u(m.map_or(0, |m| m.ldef_stamp)),
+                    v.int(m.map_or(0, |m| i64::from(m.ldef_local))),
+                    v.int(m.and_then(|m| m.ldef_gid).map_or(-1, i64::from)),
+                    v.int(m.map_or(0, |m| i64::from(m.ix))),
+                    v.int(m.map_or(0, |m| i64::from(m.def_gid))),
+                    v.int(m.map_or(0, |m| i64::from(m.cand_noted))),
                 ]);
                 memo.slots.insert(s.loc, (s.clone(), x));
                 x
@@ -3231,14 +3237,20 @@ impl Base {
             .cands
             .iter()
             .map(|(st, xs)| {
-                let xs = xs
-                    .iter()
-                    .map(|&(l, x)| match x {
-                        None => v.list(vec![field(l).0]),
-                        Some(x) => v.list(vec![field(l).0, opt(x)]),
-                    })
-                    .collect();
-                v.list(vec![u(*st), v.list(xs)])
+                // (flat: each entry its field, 0 not loaded, 1 absent or
+                // 2 a value, and the value or UNIT)
+                let mut ys = Vec::with_capacity(1 + 3 * xs.len());
+                ys.push(u(*st));
+                for &(l, x) in xs {
+                    ys.push(field(l).0);
+                    ys.push(v.int(match x {
+                        None => 0,
+                        Some(None) => 1,
+                        Some(Some(_)) => 2,
+                    }));
+                    ys.push(x.flatten().unwrap_or(ValueId::UNIT));
+                }
+                v.list(ys)
             })
             .collect();
         let defined = self.defined.iter().map(|&l| field(l).0).collect();
@@ -3347,16 +3359,19 @@ impl Base {
             out.slots.push(BaseSlot::of_value(v, s, loc)?);
         }
         for c in list_of(v, cands) {
-            let [st, xs] = list_of(v, c)[..] else {
+            let xs = list_of(v, c);
+            let (&st, es) = xs.split_first()?;
+            if es.len() % 3 != 0 {
                 return None;
-            };
-            let mut ys = Vec::new();
-            for e in list_of(v, xs) {
-                match list_of(v, e)[..] {
-                    [f] => ys.push((loc(Field(f)), None)),
-                    [f, x] => ys.push((loc(Field(f)), Some(opt(x)))),
-                    _ => return None,
-                }
+            }
+            let mut ys = Vec::with_capacity(es.len() / 3);
+            for e in es.chunks_exact(3) {
+                let l = loc(Field(e[0]));
+                ys.push(match int_of(v, e[1]) {
+                    0 => (l, None),
+                    1 => (l, Some(None)),
+                    _ => (l, Some(Some(e[2]))),
+                });
             }
             out.cands.push((u(st), ys));
         }
