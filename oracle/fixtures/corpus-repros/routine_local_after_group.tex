@@ -1,0 +1,103 @@
+% TeX Live manual przechlewski-book wkmgr1 (pdflatex), cut: prelim2e prints
+% its draft line in \footnotesize at every shipout; on the title page
+% \footnotesize is \small, defined in the titlepage group, and hyperref
+% redefines it in groups of the routine (\pdfstringdef) before it is read.
+%% Przykład #1 pracy magisterskiej z pakietem wkmgr
+\documentclass[brudnopis,xodstep]{wkmgr}
+%%
+%% Skład alternatywnymi krojami pisma
+%% +--------------------------------+
+%% skład fontami podobnymi do kroju Palatino:
+% \usepackage{tgpagella,pxfonts,qpxmath} %% pxfonts
+%% skład fontami podobnymi do kroju Times:
+\usepackage{tgtermes,txfonts,qtxmath} %% txfonts
+%%
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{polski}
+\usepackage{array}
+
+%% podpisy pod rysunkami/tytuły tabel nad tabelami; oba od lewej a nie centrowane ; złożone mniejszym stopniem
+\usepackage[font=small,justification=raggedright,singlelinecheck=off,tableposition=top]{caption}
+
+%% klikalne linki w pliku PDF 
+%% +------------------------+
+%% opcja pagebackref generuje linki w spisie literatury (do strony na której zacytowano pozycję):
+\usepackage[breaklinks,pagebackref]{hyperref}
+%% \usepackage[breaklinks]{hyperref} %% 
+
+%% Cytowanie autor-rok (pakiet natbib):
+%% +---------------------------------+
+\usepackage[authoryear]{natbib}
+%%
+%%
+%% Paginy (opcjonalne, odkomentuj poniższe jeżeli mają być dodane):
+% \usepackage{fancyhdr}
+% \pagestyle{fancyplain}
+% \renewcommand{\chaptermark}[1]{\markboth{#1}{}}
+% \renewcommand{\sectionmark}[1]{\markright{\thesection{.} #1}}
+% \lhead[\fancyplain{}{\renewcommand\familydefault{\rmdefault}%
+%       \normalfont \small\itshape\thepage}]
+%      {\fancyplain{}{\renewcommand\familydefault{\rmdefault}%
+%       \normalfont \small\itshape\rightmark}}
+% \rhead[\fancyplain{}{\renewcommand\familydefault{\rmdefault}%
+%      \normalfont \small\itshape\leftmark}]
+%     {\fancyplain{}{\renewcommand\familydefault{\rmdefault}%
+%      \normalfont \small\itshape\thepage}}
+% \cfoot[]{}
+%%
+
+
+%%
+%% Opcjonalnie identyfikator dokumentu (drukowany tylko z włączoną opcją `brudnopis'):
+\nrwersji {0.1}
+
+% Dane autora(ów):
+\author{Józef Miśkiewicz}
+\nralbumu{0123456789}
+\email{walenty@szczesny.com.pl}
+
+%% Jeżeli jest drugi autor:
+%% \author{Monika A.~Szczęsna-Woś}
+%% \nralbumu{rr000000002}
+
+% Tytuł pracy:
+\title{Tytuł pracy}
+
+% Kierunek, tj. katedra/instytut promotora:
+\kierunek {Pendologia eksperymentalna}
+
+% Rok obrony:
+\date{2011}
+
+% Nazwa szkoły:
+\UniversityName{Uniwersytet Kaszubski -- Wydział Pendologii}
+% Jeżeli nie podano miejsca zostanie wpisany `Sopot'
+\miejsce{Wejherowo}
+
+% Tytuł naukowy, imię i nazwisko promotora:
+\opiekun{dr~hab. Jan Kowalski}
+
+%
+% Miejsce na deklaracje własnych poleceń:
+\newcommand{\filename}[1]{\texttt{#1}}
+
+\def\SITI{SI/TI} %%%
+\def\ISTI{SI/TI} %%%
+\def\UTAUT{UTAUT} %%%
+%%
+
+\makeatletter 
+% polecenie zawierające @ muszą być wew \makeatletter ... \makeatother
+%% Poprawienie błędu w pakiecie pxfonts.sty
+\makeatletter %%
+\def\T@n@@nc@d@ngM@cr@M@d{}
+\makeatother
+
+\begin{document}
+\maketitle
+\introduction
+Wstęp o~objętości 3--5 stron winien zawierać.
+\chapter{Tytuł}
+Treść.
+\end{document}

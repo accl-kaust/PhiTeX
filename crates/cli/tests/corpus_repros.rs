@@ -980,3 +980,21 @@ fn pdf_omit_params() {
 fn xe_import_length() {
     check_threads("xe_import_length", "pdf");
 }
+
+/// TeX Live manual przechlewski-book wkmgr1 (pdflatex), cut: a binding
+/// local to a group open where a page fires is the routine's, given to
+/// the finisher to be read where it is used (`State::set_lazy`). A local
+/// definition in a group of the routine (hyperref's `\pdfstringdef`
+/// lets `\footnotesize` be `\@empty`) dropped it, and the group's close
+/// gave back the location unread with nothing to read it from: the
+/// routine read the value reaching the finisher, the one outside the
+/// group. prelim2e's draft line on the title page, `\footnotesize` there
+/// `\small` (the class's titlepage), came out at 9pt for 10pt; moreenum's
+/// first page fired inside a `\small` group and loaded the font of the
+/// wrong size, every font number after it one off. The save now keeps
+/// the binding and the close restores it. At -j1 and -j4 (oracle: pdftex
+/// in the CI image, mc 79240; the base differs, mc 79241).
+#[test]
+fn routine_local_after_group() {
+    check_threads("routine_local_after_group", "pdf");
+}

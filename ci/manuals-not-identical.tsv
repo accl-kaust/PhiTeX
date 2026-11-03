@@ -18,12 +18,10 @@ latex_minitoc_examples_mtc-2c	differs: page 1: obj 47 (Catalog) line 6: oracle "
 latex_minutes_Protokol	differs: page 3: obj 393 (Catalog) line 4: oracle "/PageLabels <<", phitex "/Pages 5 0 R" (pages 33 vs 31)
 latex_moderncv_manual_moderncv_userguide	differs: page 1: obj 650 (Catalog) line 5: oracle "/PageMode /UseNone", phitex "/PageLabels <<"
 latex_montex_montex	error: error: Font T1/cmss/sbc/n/10.95=ecssdc10 at 10.95pt not loadable: Metric (TFM) file not found
-latex_moreenum_moreenum-doc	differs: page 2: obj 13 (page 2, untyped) line 307: oracle "/F50 11.9552 Tf 86.365 414.492 Td [(The)]TJ/F59 10.9091 Tf [-224(\\pro", phitex "/F50 11.9552 Tf 86.365 414.492 Td [(The)]TJ/F59 10.9091 Tf [-224(\\pro"
 latex_optikz_optikz_doc	differs: page 1: obj 44 (page 1, untyped) line 24: oracle "1 0 0 1 264.254 368.807 cm", phitex "1 0 0 1 265.491 368.807 cm"
 latex_pagecolor_pagecolor-example	differs: page 8: obj 41 (page 8, untyped) line 17: oracle "/F45 9.9626 Tf 14.944 -14.944 Td [(Lorem)-287(ipsum)-286(dol)-1(or)-28", phitex "/F45 9.9626 Tf 14.944 -14.944 Td [(Lorem)-287(ipsum)-286(dol)-1(or)-28"
 latex_pas-tableur_pas-tableur	error: error: You can't use `\cr' in restricted horizontal mode
 latex_pfdicons_pfdicons-doc	differs: page 33: obj 744 (page 33, untyped) line 622: oracle "0.5 g 0.5 G", phitex "0.93 g 0.93 G"
-latex_przechlewski-book_wkmgr1	differs: page 1: obj 97 (page 1, untyped) line 6: oracle "/F81 11.9552 Tf 190.624 723.203 Td [(Uniwersytet)-250(Kaszubski)-250<9", phitex "/F81 11.9552 Tf 190.624 723.203 Td [(Uniwersytet)-250(Kaszubski)-250<9"
 latex_repeatindex_testrepeatindex	differs: page 2: obj 30 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 4 vs 3)
 latex_rvwrite_rvwrite-doc	differs: page 2: obj 63 (page 2, untyped) line 13: oracle "0 0.83 1 0.7 k 0 0.83 1 0.7 K", phitex "0 g 0 G"
 latex_semioneside_example	differs: page 2: obj 28 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 5 vs 3)
