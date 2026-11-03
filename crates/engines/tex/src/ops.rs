@@ -84,6 +84,17 @@ fn hint_log(
     );
 }
 
+/// One pass of a run's `body`; one that ends (at its end or a cut)
+/// ends at a candidate before instead where a page firing there is the
+/// routine's ([`Run::order_after_fires`]).
+fn pass(r: &mut Run<'_, '_>, body: &mut impl FnMut(&mut Run<'_, '_>) -> R<()>) -> R<()> {
+    let res = body(r);
+    if matches!(res, Ok(()) | Err(Halt::Cut)) {
+        r.order_after_fires()?;
+    }
+    res
+}
+
 /// Runs `body` as one node: its definitions, contributions and
 /// children go out only if it finishes; a starved or file-waiting run
 /// records its need for the client instead. A run that stops starts
@@ -127,17 +138,30 @@ pub(crate) fn run_node(
     let mut r = Run::new(cx, o);
     let t_new = t_new.elapsed();
     let t_body = std::time::Instant::now();
-    let mut res = body(&mut r);
+    let mut res = pass(&mut r, &mut body);
     let t_first = t_body.elapsed();
     let recut = matches!(res, Err(Halt::Recut(_)));
     // (a second pass from the start, ending at the candidate the first
-    // asked for: deterministic, one at most, `Halt::Recut`)
-    if let Err(Halt::Recut(k)) = res {
-        let cx = r.cx;
+    // asked for: deterministic, `Halt::Recut`; or going on with the
+    // values of a routine run at a candidate it passes in force there,
+    // `Halt::Refire`, [`Run::order_after_fires`])
+    while let Err(h @ (Halt::Recut(_) | Halt::Refire)) = res {
+        let stop = match h {
+            Halt::Recut(k) => {
+                if r.stop_at.is_some_and(|s| k >= s) {
+                    unreachable!("a second pass passed its candidate {k}");
+                }
+                Some(k)
+            }
+            _ => r.stop_at,
+        };
+        let (cx, used, apply) = (r.cx, r.fire_used, std::mem::take(&mut r.fire_apply));
         r = Run::new(cx, o);
-        r.stop_at = Some(k);
+        r.stop_at = stop;
+        r.fire_used = used;
+        r.fire_apply = apply;
         // (a second pass to a candidate takes no marks)
-        res = body(&mut r);
+        res = pass(&mut r, &mut body);
     }
     // the run's end on the page (`crate::pages`): its items folded into
     // the page state, a finisher placed where a page finishes; a page
@@ -220,6 +244,7 @@ pub(crate) fn run_node(
                 Err(Halt::Fatal) => "fatal",
                 Err(Halt::Cut) => "cut",
                 Err(Halt::Recut(_)) => "recut",
+                Err(Halt::Refire) => "refire",
                 Err(Halt::Same) => "same",
             },
             r.cx.is_speculative(),
@@ -237,6 +262,7 @@ pub(crate) fn run_node(
                 Err(Halt::Fatal) => "fatal".to_owned(),
                 Err(Halt::Cut) => "cut".to_owned(),
                 Err(Halt::Recut(k)) => format!("recut at {k}"),
+                Err(Halt::Refire) => "refire".to_owned(),
                 Err(Halt::Same) => "same as the last run (cut off)".to_owned(),
             }
         );
@@ -269,7 +295,7 @@ pub(crate) fn run_node(
                 cx.begin_again();
                 r = Run::new(cx, o);
                 r.no_resume = true;
-                let mut res = body(&mut r);
+                let mut res = pass(&mut r, &mut body);
                 if let Some(ck) = rck {
                     let made = crate::val::list_of(r.v, ck)
                         .get(14)
@@ -282,13 +308,24 @@ pub(crate) fn run_node(
                             .unwrap_or_else(|| "the same".to_owned())
                     );
                 }
-                if let Err(Halt::Recut(k)) = res {
-                    let cx = r.cx;
+                while let Err(h @ (Halt::Recut(_) | Halt::Refire)) = res {
+                    let stop = match h {
+                        Halt::Recut(k) => {
+                            if r.stop_at.is_some_and(|s| k >= s) {
+                                unreachable!("a second pass passed its candidate {k}");
+                            }
+                            Some(k)
+                        }
+                        _ => r.stop_at,
+                    };
+                    let (cx, used, apply) = (r.cx, r.fire_used, std::mem::take(&mut r.fire_apply));
                     cx.begin_again();
                     r = Run::new(cx, o);
                     r.no_resume = true;
-                    r.stop_at = Some(k);
-                    res = body(&mut r);
+                    r.stop_at = stop;
+                    r.fire_used = used;
+                    r.fire_apply = apply;
+                    res = pass(&mut r, &mut body);
                 }
                 if matches!(res, Ok(()) | Err(Halt::Cut)) {
                     res = r.page_fold();
@@ -396,6 +433,7 @@ pub(crate) fn run_node(
         // (a second pass ends at its candidate, before the read that
         // asked for it)
         Err(Halt::Recut(k)) => unreachable!("a second pass passed its candidate {k}"),
+        Err(Halt::Refire) => unreachable!("a pass with a routine's values goes again"),
         Err(Halt::Starve) => {
             let u = ValueId::UNIT;
             Ok(r.stall("starve", u))

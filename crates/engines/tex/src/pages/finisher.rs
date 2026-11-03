@@ -156,6 +156,7 @@ impl Operation for Finish {
         ps.extend(FINISHER_FIELDS.iter().map(|&s| s.to_owned()));
         ps.push(PAGE_OUT.to_owned());
         ps.push(RTN.to_owned());
+        ps.push(FIRE_CONFLICT.to_owned());
         MayDefine::Prefixes(ps)
     }
 
@@ -376,6 +377,10 @@ impl Run<'_, '_> {
             .as_ref()
             .map(|c| c.args.clone())
             .unwrap_or_default();
+        // (what the routine itself changed, before the piece's later
+        // definitions stand over it: the piece puts these in force at
+        // the candidate, [`Run::order_after_fires`])
+        self.define_fire_conflict(&args)?;
         self.give_way(&args)?;
         let g = self.contribute_global_defs();
         self.record_finisher_defs(&args, g);

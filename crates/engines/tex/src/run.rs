@@ -40,6 +40,12 @@ pub(crate) enum Halt {
     /// again from its start and ends at `k`, its rest a resume after the
     /// pages firing there.
     Recut(u32),
+    /// A page fired at a candidate of the run's own it went on past, and
+    /// its routine changed globally a field the run used
+    /// ([`Run::order_after_fires`]): the run goes again from its start
+    /// with that routine's values put in force at the candidate
+    /// (`Run::fire_apply`), the same node.
+    Refire,
     /// The run would read on into the text after it (`Run::pull`) while
     /// a node before it has not run yet: it waits for that node
     /// (`Ctx::hole_before`), ending as a starved run does.
@@ -1082,6 +1088,18 @@ pub(crate) struct Run<'c, 'a> {
     /// fire at, loaded or its own: its next read of one asks first whether
     /// a page fired there ([`Run::order_page_reg_read`]).
     pub page_regs_held: Vec<Loc>,
+    /// Whether the run read `\badness` (§424's `last_item`): a value a
+    /// routine sets with every box it packs, which the run's own packing
+    /// otherwise only defines ([`Run::fire_conflicts`]).
+    pub badness_read: bool,
+    /// What the run's first pass used, as [`crate::pages::FIRE_USED`]
+    /// defines it: the passes after it keep it (`ops::run_node`).
+    pub fire_used: Option<ValueId>,
+    /// The global values of the routines of pages firing at candidates
+    /// the run goes on past, put in force there (after the candidate's
+    /// mark, as TeX runs the routine at that `build_page`): by candidate,
+    /// each field with its value ([`Run::order_after_fires`]).
+    pub fire_apply: Vec<(u32, Vec<(Field, Option<ValueId>)>)>,
     /// The serial of the writer command the command in progress recorded
     /// ([`crate::pdfout::command`]), until a read-time allocation takes
     /// it as its own ([`crate::pdfout::note_read_time`]); 0: none.
@@ -1323,6 +1341,9 @@ impl<'c, 'a> Run<'c, 'a> {
             cand: 0,
             cand_marks: Vec::new(),
             page_regs_held: Vec::new(),
+            badness_read: false,
+            fire_used: None,
+            fire_apply: Vec::new(),
             pdf_cmd: 0,
             scope_kind_memo: None,
             pubs: None,

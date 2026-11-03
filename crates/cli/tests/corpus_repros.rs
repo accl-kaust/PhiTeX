@@ -858,6 +858,28 @@ fn word_across_cut() {
     check_threads("word_across_cut", "pdf");
 }
 
+/// research corpus (classicthesis-xe: `\thepage` and LaTeX's
+/// `\glb@currsize` after a page read as before it): a page fires at a
+/// paragraph's start inside a group the text's run opens, and the
+/// paragraphs after it read a macro the output routine defines globally
+/// (a shipout hook counting the pages). The run went on past the
+/// candidate and read it at its own position, the value before the page.
+/// Now every such candidate is a cut, its rest a resume after the
+/// finisher of a page firing there (oracle: pdflatex in the CI image,
+/// accl 22727).
+#[test]
+fn routine_global_after_own_page() {
+    check_threads("routine_global_after_own_page", "pdf");
+}
+
+/// [`routine_global_after_own_page`] under plain's routine with one
+/// `\xdef`, the paragraphs made by a recursive macro in `\begingroup`
+/// (oracle: pdftex in the CI image).
+#[test]
+fn routine_global_bounded() {
+    check_threads("routine_global_bounded", "pdf");
+}
+
 /// TeX Live manual ryesample (pdflatex): the glossaries package's lists,
 /// `STEM.glo` and `STEM.acn`, made into `STEM.gls` and `STEM.acr` by
 /// makeindex in the style `STEM.ist` the package writes, as the corpus

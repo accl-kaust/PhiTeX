@@ -182,6 +182,20 @@ impl<'a> Ctx<'a> {
         });
     }
 
+    /// How many reads my run has made so far (a mark for
+    /// [`Ctx::fields_read_since`]).
+    pub fn reads_len(&self) -> usize {
+        self.product.reads.len()
+    }
+
+    /// The fields my run read from its read `from` on (a mark of
+    /// [`Ctx::reads_len`]), with each read's index, in order (a field read
+    /// twice is listed twice): a client checking what it read after a
+    /// point against what another node may define.
+    pub fn fields_read_since(&self, from: usize) -> impl Iterator<Item = (usize, Field)> + '_ {
+        self.product.reads.iter().enumerate().skip(from).filter_map(|(i, r)| r.kind.field().map(|f| (i, f)))
+    }
+
     /// Loads `f`'s change count before a read of it ([`ReadRec::epoch`]).
     fn before_read(&mut self, f: Field) {
         self.ep = self.eng.field_epoch(f);

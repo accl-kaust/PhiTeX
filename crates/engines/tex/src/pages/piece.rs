@@ -189,6 +189,15 @@ impl Run<'_, '_> {
         if fresh {
             self.note_page_regs_held();
         }
+        // (the routine of a page firing here, run before the text after
+        // it: its global values in force, [`Run::order_after_fires`])
+        if let Some(i) = self.fire_apply.iter().position(|a| a.0 == k) {
+            let pairs = self.fire_apply[i].1.clone();
+            for (f, x) in pairs {
+                let loc = self.loc_of(f);
+                self.st.apply_global(self.v, loc, x);
+            }
+        }
         if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
             self.trace_candidate(k, newgraf, fresh, cuttable);
         }
@@ -362,6 +371,112 @@ impl Run<'_, '_> {
             );
         }
         Err(Halt::Recut(k))
+    }
+
+    /// At a pass's end (`ops::run_node`): the candidates of the run's own
+    /// it went on past where a page can fire and a second pass can end
+    /// (a paragraph's start, a candidate inside groups or conditionals of
+    /// its own). TeX runs the routine of a page firing there at that
+    /// `build_page`, and the text after it reads every global the routine
+    /// set (classicthesis-xe's `\thepage` and LaTeX's `\glb@currsize`, a
+    /// shipout hook's macro); the run read every field at its own
+    /// position, before the page's finisher.
+    ///
+    /// The run defines what it used ([`super::FIRE_USED`],
+    /// [`Run::fire_conflicts`]; the first pass's, kept by the passes
+    /// after it, `Run::fire_used`), and reads for each such candidate,
+    /// in order, whether the finisher of a page firing there changed one
+    /// of those fields ([`super::FIRE_CONFLICT`], that finisher's: every
+    /// field it changed, with its value). Where it did, the run goes
+    /// again from its start, the same node, with those values put in
+    /// force at the candidate ([`Halt::Refire`], `Run::fire_apply`), as
+    /// TeX's text after the routine has them; its definitions stay its
+    /// own, so a reader after it is asked again only where a value
+    /// changed. A page firing where the routine changed nothing the run
+    /// used changes nothing it did.
+    pub(crate) fn order_after_fires(&mut self) -> R<()> {
+        let op = self.cx.op();
+        let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
+        if !piece || self.interp.is_some() {
+            return Ok(());
+        }
+        let v = self.v;
+        let end = self.cut.or(self.stop_at);
+        let ks: Vec<u32> = self
+            .cand_marks
+            .iter()
+            .filter(|m| m.fresh && (m.restartable || m.open_cut || m.par_cut) && Some(m.k) != end)
+            .map(|m| m.k)
+            .collect();
+        if ks.is_empty() && self.fire_used.is_none() {
+            return Ok(());
+        }
+        let used = match self.fire_used {
+            Some(u) => u,
+            None => {
+                let mut fs: Vec<ValueId> = self.fire_conflicts().into_iter().map(|f| f.0).collect();
+                fs.sort_unstable();
+                let u = v.list(fs);
+                self.fire_used = Some(u);
+                u
+            }
+        };
+        let node = self.cx.node();
+        self.cx
+            .define_with(super::fire_used_field(v, node), used, Locality::Global);
+        let at = phitex_defuse::At::End(self.cx.unit());
+        for k in ks {
+            let f = super::fire_conflict_field(v, node, k);
+            let phitex_defuse::FieldAt::Def(x, _) = self.cx.read_at(f, at)? else {
+                continue;
+            };
+            if self.fire_apply.iter().any(|a| a.0 == k) {
+                continue;
+            }
+            let pairs: Vec<(Field, Option<ValueId>)> = list_of(v, x)
+                .into_iter()
+                .filter_map(|e| match list_of(v, e)[..] {
+                    [f] => Some((Field(f), None)),
+                    [f, y] => Some((Field(f), Some(y))),
+                    _ => None,
+                })
+                .collect();
+            if crate::exec::obs_flag!("PHITEX_PAGE_TRACE")
+                || crate::exec::obs_flag!("PHITEX_FIRE_TRACE")
+            {
+                eprintln!(
+                    "page-trace: node {} goes again with the routine of the page at candidate {k} in force there: {}",
+                    node.raw(),
+                    pairs
+                        .iter()
+                        .map(|p| crate::val::field_name(v, p.0))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+            }
+            self.fire_apply.push((k, pairs));
+            return Err(Halt::Refire);
+        }
+        Ok(())
+    }
+
+    fn fire_conflicts(&mut self) -> phitex_defuse::FxHashSet<Field> {
+        let mut out: phitex_defuse::FxHashSet<Field> =
+            self.cx.fields_read_since(0).map(|(_, f)| f).collect();
+        let locs: Vec<Loc> = self
+            .st
+            .held_locs()
+            .chain(self.st.defined_stamped().into_iter().map(|d| d.0))
+            .collect();
+        // (`\badness`, which every box the run packs defines, is the
+        // routine's only where the run reads it, [`Run::badness_read`])
+        let badness: Loc = crate::fields::cell::BADNESS;
+        for l in locs {
+            if l != badness || self.badness_read {
+                out.insert(self.loc_field(l));
+            }
+        }
+        out
     }
 
     /// A read of the objects the pages shipped before this run

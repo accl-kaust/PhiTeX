@@ -45,6 +45,34 @@ use phitex_defuse::{At, Cause, Ctx, Effect, MayDefine, NodeId, Operation, Stop, 
 use super::*;
 use crate::vprof::{PItem, ScanState};
 
+/// What a piece used (read, held or defined) in a pass that went on past
+/// a candidate of its own where a page can fire and a second pass can
+/// end: `pages:used:<piece>`, the fields by id, sorted. The finisher of a
+/// page firing at such a candidate reads it and, where the routine changed
+/// one of them globally, defines [`FIRE_CONFLICT`] (`Run::define_fire_conflict`).
+pub(crate) const FIRE_USED: &str = "pages:used";
+
+/// [`FIRE_USED`]' field of `piece`.
+pub(crate) fn fire_used_field(v: &Values, piece: NodeId) -> Field {
+    v.field(&format!("{FIRE_USED}:{}", piece.raw()))
+}
+
+/// A page fired at candidate `k` of a piece's own items, and its routine
+/// changed globally a field the piece used ([`FIRE_USED`]):
+/// `pages:conflict:<piece>:<k>`, every field the routine changed with the
+/// value it left (`[field, value]`, `[field]` for none), defined by that
+/// page's finisher. The piece, which went on past the candidate, goes
+/// again with those values in force there (`Run::order_after_fires`):
+/// TeX runs the routine at that `build_page`, and the text after it sees
+/// every global it set (classicthesis-xe's `\thepage` and
+/// `\glb@currsize` after a page).
+pub(crate) const FIRE_CONFLICT: &str = "pages:conflict";
+
+/// [`FIRE_CONFLICT`]' field of candidate `k` of `piece`.
+pub(crate) fn fire_conflict_field(v: &Values, piece: NodeId, k: u32) -> Field {
+    v.field(&format!("{FIRE_CONFLICT}:{}:{k}", piece.raw()))
+}
+
 /// The page of a fired page, as its finisher reads it:
 /// `pages:page:<owner>:<piece>:<nth>` (raw ids, [`PageKey`]), defined by
 /// the [`Pages`] node that fired it,

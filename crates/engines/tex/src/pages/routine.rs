@@ -13,8 +13,9 @@
 //! finisher's (`finisher.rs`).
 
 use super::{
-    BEFORE_PIECE, Field, GDEFS, List, Locality, Mode, Node, PITEMS, PackParams, Page, Par, R, Run,
-    Side, Spec, ValueId, Values, group, int_of, list_of, nodes, some, str_of, toks_of,
+    BEFORE_PIECE, Field, GDEFS, List, Locality, Mode, Node, PAGE_FIELDS, PITEMS, PackParams, Page,
+    Par, R, Run, Side, Spec, ValueId, Values, fire_conflict_field, fire_used_field, group, int_of,
+    list_of, nodes, some, str_of, toks_of,
 };
 
 /// A routine's give-back as [`RTN`] holds it: `[markers, list]`, and
@@ -911,6 +912,152 @@ impl Run<'_, '_> {
         x
     }
 }
+
+impl Run<'_, '_> {
+    /// [`FIRE_CONFLICT`] of the finisher's page, where it fired at a
+    /// candidate of a piece's own items: the first field the routine
+    /// changed globally that the piece used ([`FIRE_USED`], defined where
+    /// the piece went on past a candidate of its own). Changed: defined
+    /// globally (`names`, [`Run::contribute_global_defs`]) to a value
+    /// other than the one the routine began with, or bound locally in the
+    /// piece's groups open at the candidate (`args`' fourth: TeX's global
+    /// definition replaces the value at every level, §279, which the
+    /// piece restores at their ends); the page layer's own aside (the
+    /// page state a piece folds, `pages:*`, the main list's `\prevgraf`:
+    /// the routine runs in a list of its own, §1025, and a `\par` in it
+    /// sets that list's, §1244).
+    pub(crate) fn define_fire_conflict(&mut self, args: &[ValueId]) -> R<()> {
+        let v = self.v;
+        let Some((at, k)) = self
+            .fin_page()
+            .filter(|p| !p.in_material)
+            .map(|p| (p.at, p.k))
+        else {
+            return Ok(());
+        };
+        let globals: Vec<ValueId> = self
+            .publication()
+            .into_iter()
+            .filter(|d| d.2 == Locality::Global)
+            .map(|d| d.0.0)
+            .collect();
+        if globals.is_empty() {
+            return Ok(());
+        }
+        let locals: Vec<ValueId> = args
+            .get(3)
+            .map(|&x| list_of(v, x))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| list_of(v, e).first().copied())
+            .collect();
+        let mut changed = Vec::new();
+        for (f, what, l) in self.publication() {
+            if l != Locality::Global || !globals.contains(&f.0) {
+                continue;
+            }
+            let own = v.with_str(f.0, |s| {
+                s.starts_with("pages:") || PAGE_FIELDS.contains(&s) || s == MAIN_PREVGRAF
+            }) != Some(false);
+            if own {
+                continue;
+            }
+            let same = !locals.contains(&f.0)
+                && match what {
+                    crate::state::Pub::Value(x) => {
+                        let y = self.fire_start_value(args, f)?;
+                        if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") && y != Some(Some(x)) {
+                            let r = |z: Option<ValueId>| {
+                                z.map_or_else(
+                                    || "-".to_owned(),
+                                    |z| v.render(z).chars().take(80).collect(),
+                                )
+                            };
+                            eprintln!(
+                                "fire-change: finisher {} {}: began {} left {}",
+                                self.cx.node().raw(),
+                                crate::val::field_name(v, f),
+                                y.map_or_else(|| "?".to_owned(), r),
+                                r(Some(x))
+                            );
+                        }
+                        y == Some(Some(x))
+                    }
+                    crate::state::Pub::Rel(c) => c == 0,
+                };
+            if !same {
+                changed.push(f.0);
+            }
+        }
+        if changed.is_empty() {
+            return Ok(());
+        }
+        let Some(used) = self.cx.read(fire_used_field(v, at))? else {
+            return Ok(());
+        };
+        let used = list_of(v, used);
+        if changed.iter().any(|f| used.binary_search(f).is_ok()) {
+            // (every field the routine changed, with the value it left:
+            // the piece puts them in force at the candidate, as TeX's
+            // text after the routine has them)
+            let mut pairs = Vec::with_capacity(changed.len());
+            for f in changed {
+                let loc = self.loc_of(Field(f));
+                pairs.push(match self.st.id_of(loc, v) {
+                    Some(x) => v.list(vec![f, x]),
+                    None => v.list(vec![f]),
+                });
+            }
+            self.cx.define_with(
+                fire_conflict_field(v, at, k),
+                v.list(pairs),
+                Locality::Global,
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Run<'_, '_> {
+    /// The value field `f` had where the finisher's page fired, as the
+    /// piece held it there and the routine began with it: what the piece
+    /// defined after the candidate as it was there (`args`' ninth,
+    /// [`Run::preload_candidate`]), else the value reaching the finisher
+    /// (read: the routine's own definitions are not before it). `None`:
+    /// not known here (the piece's page gone).
+    #[allow(clippy::option_option)]
+    fn fire_start_value(&mut self, args: &[ValueId], f: Field) -> R<Option<Option<ValueId>>> {
+        let v = self.v;
+        if let Some(&after) = args.get(8) {
+            for e in list_of(v, after) {
+                let ys = list_of(v, e);
+                let [g, _, kv] = ys[..] else { continue };
+                if g != f.0 || kv == ValueId::UNIT {
+                    continue;
+                }
+                if kv == v.str(BEFORE_PIECE) {
+                    let piece = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(
+                        int_of(v, args.get(5).copied().unwrap_or(ValueId::UNIT)).to_ne_bytes(),
+                    ));
+                    return Ok(match self.field_at(f, piece, true)? {
+                        phitex_defuse::FieldAt::Def(x, _) => Some(Some(x)),
+                        phitex_defuse::FieldAt::Unset => Some(None),
+                        phitex_defuse::FieldAt::Gone => None,
+                    });
+                }
+                if self.is_lazy(kv) {
+                    return Ok(Some(self.fin_lazy_preload(kv)?));
+                }
+                return Ok(Some(list_of(v, kv).first().copied()));
+            }
+        }
+        Ok(Some(self.cx.read(f)?))
+    }
+}
+
+/// The main vertical list's `\prevgraf` (`crate::build`'s `pg:<list>`,
+/// the main list's id 0).
+const MAIN_PREVGRAF: &str = "pg:0";
 
 /// Whether field `f` is a command's transient state (§1266's
 /// `after_token`): what a routine leaves there depends on what reached it

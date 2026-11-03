@@ -4015,6 +4015,7 @@ impl Run<'_, '_> {
             return Ok(IVal::Int(if m == 3 {
                 self.input_line_no()?
             } else {
+                self.badness_read = true;
                 self.int_loc(crate::fields::cell::BADNESS)?
             }));
         }

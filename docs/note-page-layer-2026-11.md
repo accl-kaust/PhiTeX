@@ -178,3 +178,69 @@ resumed exactly. This needs measurements from the resume side.
   the routine run on the piece's state at the candidate.
 - milsymb: section.4's `/XYZ` destination on its `\begin{landscape}` page
   (misc2's dest-under-`\pdfsetmatrix` family).
+
+## 6. The rule in dev: a piece ends where a page's routine changed what it used (pages3)
+
+**Rule.** A text piece that goes on past a candidate where a page may
+fire and a second pass can end (a paragraph's start, a candidate inside
+groups or conditionals of its own) defines what it used,
+`pages:used:<piece>`: every field it read from the engine, held,
+carried or defined, from its first pass. The finisher of a page firing
+at candidate `k` of that piece's own items compares each field its
+routine defined globally with the value it began with (the piece's
+value at the candidate: what the piece defined after it as it was
+there, else the value reaching the finisher). Where one it changed, or
+bound locally in the piece's open groups, is in the used set, it
+defines `pages:conflict:<piece>:<k>`. The piece reads only that field
+and ends at the first such candidate (`Halt::Recut`). Its rest is then
+a resume after the finisher, and reads the routine's values as the
+text after any cut does. Code: `Run::order_after_fires` and
+`Run::fire_conflicts` (pages/piece.rs), `Run::define_fire_conflict`
+and `Run::fire_start_value` (pages/routine.rs).
+
+**Exact.** `routine_global_after_own_page` and `routine_global_bounded`
+(corpus_repros, pdflatex and pdftex oracles); semioneside and
+testrepeatindex become identical. Suites green, corpus_repros 88/88
+(accl 23282).
+
+**Cost: 2-4x runs.** Against dev-next dfd76859a, which already gives a
+recut piece's dropped definitions to its rest as predictions (accl
+23294):
+
+| document | runs -j1 | runs -j4 |
+|---|---|---|
+| amsldoc | 5023 vs 2353 | 12090 vs 5456 |
+| hagenberg | 2512 vs 787 | 9839 vs 2540 |
+| texpower | 14036 vs 3776 | 37756 vs 15277 |
+| kotex-utf | 9386 vs 3291 | 16331 vs 10999 |
+
+**Cause: each recut, not the rule.** hagenberg with no conflict recut
+(a variant, ac2e216ee) runs 787 times, as dev does (accl 23331). Each
+recut costs 150-200 runs. The recut piece's definitions move to its new
+resume: skind, parskip, cs:par, pages:rest, and every reader in the
+scope is asked again (accl 23174: one recut woke 722 nodes). The
+recuts that remain are 7-22 a document (accl 23239, 23312):
+- `if@newlist`: a routine leaves `\iffalse` where the text had
+  `\iftrue`;
+- `count:0`;
+- `skip:58` and `skip:67`: registers the routine sets globally that the
+  piece also defines;
+- `font@name`: the routine leaves its footer's font name, and the piece
+  defines it again before reading it.
+
+**Tried and dropped.**
+- Cutting up front at every such candidate: needs every paragraph's
+  start (an engine scope's paragraphs are outer ones). amsldoc then has
+  4x nodes and 6x runs, and amsldoc and multicol come out wrong (accl
+  23130, 23134, 23154).
+- Counting only the piece's own values it used across the candidate
+  (noted in `Run::load` and the control sequence lookups): gudoc's
+  `\c@page` and `\maxdepth` reach the page builder without a load (a
+  candidate's page parameter marker, `\count0` used as symbols and
+  steps). `page_counter_after_own_page` goes red (accl 23223 to 23324).
+
+**Open lever: a cheaper recut.** A recut that keeps the scope's
+definers where they were, or readers not asked again when only the
+definer moved. That is the re-ask cascade coldscale owns. kotex-utf's
+page 16 is another cause: the finisher's state at the candidate
+(`preload_candidate`) for its letterspacing, unproven.

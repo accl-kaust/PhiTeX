@@ -2074,6 +2074,21 @@ impl State {
         out
     }
 
+    /// Every location whose value the run holds: read (loaded), defined,
+    /// or carried by its continuation; a location may be listed twice.
+    pub(crate) fn held_locs(&self) -> impl Iterator<Item = Loc> + '_ {
+        self.metas
+            .iter()
+            .map(|m| m.loc)
+            .chain(
+                self.touched
+                    .iter()
+                    .copied()
+                    .filter(|&l| self.slot_ref(l).is_some_and(|s| s.e.flags & LOADED != 0)),
+            )
+            .chain(self.cont_locs.iter().copied())
+    }
+
     /// Every location the run defined: its latest definition's stamp,
     /// whether local, and the group it was made in.
     pub(crate) fn defined_stamped(&self) -> Vec<(Loc, u64, bool, Option<u32>)> {
@@ -2772,6 +2787,27 @@ impl State {
         st.stamp = c.stamp;
         st.next_gid = c.next_gid;
         st
+    }
+
+    /// A routine's global definition in force where it ran, at a candidate
+    /// the run passes (`Run::order_after_fires`): the value as if read,
+    /// never the run's own definition (it publishes nothing of it; the
+    /// routine's finisher, after it, defines it), and the open groups'
+    /// saves of it inert (§279, §283).
+    pub(crate) fn apply_global(&mut self, v: &Values, loc: Loc, x: Option<ValueId>) {
+        self.changing(loc);
+        self.muts += 1;
+        self.stamp += 1;
+        let st = self.stamp;
+        let mut e = Entry::raw_seen(v, x);
+        e.flags |= LOADED | PRELOADED;
+        let s = self.slot(loc);
+        s.e = e;
+        s.lazy = None;
+        s.ginert = st;
+        if is_page_param(loc) {
+            self.pp_dirty = true;
+        }
     }
 
     /// A global definition made between a cut and its resume (the
