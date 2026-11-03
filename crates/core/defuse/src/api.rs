@@ -307,12 +307,15 @@ pub trait Operation: Send + Sync {
         false
     }
 
-    /// Whether its nodes stand in a chain (default no): each reads what
-    /// the ones before it defined, one after another along the document
-    /// (a page's routine reads the counters and marks the page before's
-    /// left). One whose last commit moved what a later one read goes
-    /// first: the later one, whatever woke it, waits for it to settle
-    /// (`sched::work`). The order of the runs only.
+    /// Whether its nodes stand in a chain whose links seldom carry a
+    /// change (default no): each reads what the ones before it defined,
+    /// one after another along the document, and on most edits that stays
+    /// as it was (a page's routine reads the counters and marks the page
+    /// before's left). A node after an unsettled node whose definition it
+    /// read last time waits for that one (`sched::work`); in a chain only
+    /// for one whose last commit moved what a later one read
+    /// (`Node::moves`), any of those before it, whatever woke it; the
+    /// others run side by side. The order of the runs only.
     fn chains(&self) -> bool {
         false
     }

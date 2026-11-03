@@ -1184,6 +1184,18 @@ fn defer(eng: &Engine, sh: &Shared, n: NodeId) -> bool {
 /// Queues a node made dirty (a new node, a released sibling): on `w`'s
 /// deque, or the engine's pending list when no evaluation runs.
 pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) {
+    // (a node of an edit that has never run: what it defines is not known,
+    // so those after it wait for it (`hold_for`))
+    if matches!(wake.cause, Cause::Created { .. })
+        && (eng.holds_on.load(Ordering::Acquire) || (w.is_none() && eng.epoch.load(Ordering::Acquire) > 0))
+        && n.record().is_none()
+    {
+        let op = eng.op(n.op());
+        if !op.chains() && !op.works_at_frontier() && !op.final_only() && !n.moves.swap(true, Ordering::AcqRel) {
+            eng.movers.lock().insert(n.id);
+            eng.movers_n.fetch_add(1, Ordering::Release);
+        }
+    }
     *n.woke.lock() = Some(wake);
     match w {
         Some(w) if defer(eng, &w.shared, n.id) => {}
@@ -1627,7 +1639,9 @@ const LONG_RUN_NS: u64 = 100_000_000;
 /// ran on the value before the last (Grail's deleted paragraph, -j8: 230
 /// finisher runs for -j1's 29, accl 23886).
 pub(crate) fn note_move(eng: &Engine, by: Option<NodeId>, reader: &Node) {
-    let Some(by) = by.filter(|&b| b != reader.id) else { return };
+    let Some(by) = by.filter(|&b| b != reader.id) else {
+        return;
+    };
     let Some(b) = eng.placed_node(by) else { return };
     if b.op() != reader.op() || !eng.op(b.op()).chains() || b.moves.load(Ordering::Relaxed) {
         return;
@@ -1645,6 +1659,32 @@ pub(crate) fn clear_move(eng: &Engine, node: &Node) {
         eng.movers.lock().remove(&node.id);
         eng.movers_n.fetch_sub(1, Ordering::Release);
     }
+}
+
+/// The unsettled node `node` should wait for, by the last evaluation's
+/// graph: one before it that moved a read of its chain or has never run
+/// (`read::mover_before`), or whose definition its last run read
+/// (`read::open_definer_before`). Without this, on an edit that re-asks
+/// many nodes at once every worker ran its node on a value about to move:
+/// a generated 82-page book's added paragraph took 1.2 s at -j8 and 2 s at
+/// -j32 where -j1 takes 125 ms (accl 23926). The rule and that measure
+/// come from the old graph used as an edit's whole schedule (`PHITEX_ORACLE`
+/// on branch moonshot, 127 ms at -j8), which the links of the chain would
+/// make one run after another (para4000's deleted paragraph, -j8, 108 ms
+/// to 228 ms): hence `Operation::chains`. The page loop's rests are not
+/// held: they go on on a guess by themselves, the routines' give-backs.
+fn hold_for(eng: &Engine, node: &Node) -> Option<NodeId> {
+    let op = eng.op(node.op());
+    if op.works_at_frontier() || op.final_only() {
+        return None;
+    }
+    if eng.movers_n.load(Ordering::Acquire) != 0
+        && let Some(x) = crate::read::mover_before(eng, node)
+    {
+        return Some(x);
+    }
+    let r = node.run_record()?;
+    crate::read::open_definer_before(eng, node, &r)
 }
 
 fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
@@ -1672,9 +1712,8 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     // and again. One thread takes them in order anyway)
     if !quiet
         && pool.shared.n > 1
-        && eng.movers_n.load(Ordering::Acquire) != 0
-        && eng.op(node.op()).chains()
-        && let Some(x) = crate::read::mover_before(eng, node)
+        && eng.holds_on.load(Ordering::Acquire)
+        && let Some(x) = hold_for(eng, node)
     {
         if run_log() {
             eprintln!("chain: node {} waits for {}", n.raw(), x.raw());

@@ -124,6 +124,60 @@ fn a_value_moving_down_a_chain_costs_about_one_run_a_node() {
     assert!(e.check_invariants().is_empty());
 }
 
+/// `Link` not of a chain: `[root, before, out]`.
+struct Text(AtomicU64);
+
+impl Operation for Text {
+    fn name(&self) -> &'static str {
+        "text"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let r = cx.read(Field(cx.args()[0]))?;
+        let b = cx.read(Field(cx.args()[1]))?;
+        spin(Duration::from_millis(2));
+        let v = cx.values();
+        let int = |x: Option<ValueId>| x.and_then(|x| v.as_int(x)).unwrap_or(0);
+        let out = v.int(int(r) + int(b));
+        cx.define(Field(cx.args()[2]), out);
+        Ok(out)
+    }
+}
+
+/// A node waits for the unsettled one whose definition it read last time,
+/// from the first edit on, and a node of an edit that never ran holds those
+/// after it. Each runs once on a change all of them read, the one the edit
+/// put in and what follows it about once.
+#[test]
+fn an_edit_runs_in_the_order_of_the_last_graph() {
+    let e = Engine::new();
+    let v = e.values();
+    let root = e.register(Arc::new(Root));
+    let text = Arc::new(Text(AtomicU64::new(0)));
+    let top = e.register(text.clone());
+    let u = e.new_unit();
+    let r = v.field("root");
+    let rn = e.push(u, root, vec![r.0, v.int(1)]);
+    let mut before = r;
+    let mut last = rn;
+    for i in 0..LINKS {
+        let out = v.field(&format!("x{i}"));
+        last = e.push(u, top, vec![r.0, before.0, out.0]);
+        before = out;
+    }
+    e.evaluate(8).unwrap();
+    for x in [2, 3, 4, 5] {
+        e.replace(rn, root, vec![r.0, v.int(x)]);
+        let n0 = text.0.load(Ordering::Relaxed);
+        e.evaluate(8).unwrap();
+        let runs = text.0.load(Ordering::Relaxed) - n0;
+        assert_eq!(e.output(last), Some(v.int(x * (LINKS + 1))));
+        assert!(runs < 2 * LINKS as u64, "x {x}: {runs} runs of {LINKS} nodes");
+    }
+    assert!(e.check_invariants().is_empty());
+}
+
 /// Nodes of a chain none of which moved another's read run side by side.
 #[test]
 fn nodes_of_a_chain_nothing_moves_run_side_by_side() {

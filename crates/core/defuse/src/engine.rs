@@ -181,6 +181,9 @@ pub struct Engine {
     /// chain (`Node::moves`), and how many. A hint for the order of runs.
     pub(crate) movers: crate::lock::Mx<crate::values::FxHashSet<NodeId>>,
     pub(crate) movers_n: AtomicU64,
+    /// An evaluation has ended: there is a last run's graph to order the
+    /// next one's runs by (`sched::work`).
+    pub(crate) holds_on: std::sync::atomic::AtomicBool,
     /// The node that set the frontier, its raw id plus one: a stop of its
     /// that moves on moves the frontier with it (`commit::reask_range`).
     pub(crate) frontier_by: AtomicU64,
@@ -315,6 +318,7 @@ impl Engine {
             frontier: AtomicU64::new(0),
             movers: crate::lock::Mx::new(crate::values::FxHashSet::default()),
             movers_n: AtomicU64::new(0),
+            holds_on: std::sync::atomic::AtomicBool::new(false),
             frontier_by: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
             layout_gen: AtomicU64::new(0),
@@ -1386,6 +1390,7 @@ impl Engine {
         }
         loop {
             let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            self.holds_on.store(epoch > 1, Ordering::Release);
             self.final_gen.fetch_add(1, Ordering::AcqRel);
             let (pool, workers) = Pool::new(n, epoch, self.limits());
             let mut seed = self.take_pending(&workers[0]);
