@@ -1399,3 +1399,57 @@ fn a_paragraph_deleted_places_every_later_page_compressed_once() {
     assert!(d.is_none(), "edit differs from cold: {d:?}");
     assert_eq!(b.link_pages().1, 0, "every page placed, none shipped again");
 }
+
+/// A page's routine that gives back a line only on a page whose last mark
+/// says so: a paragraph deleted moves the mark to another page, so a rest
+/// that went on past a moved page on what its routine gave back before
+/// (`Run::rest_begins`) has the wrong guess, on the page that now gives
+/// back and on the page that no longer does. The routine's commit runs
+/// it again: the PDF is a cold build's at every thread count.
+#[test]
+fn a_rest_gone_on_on_a_guess_is_run_again_on_what_the_routine_gave_back() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from(
+        "\\pdfoutput=1 \\hsize=3in \\vsize=2in \\parindent=0pt\n\
+         \\def\\X{X}\n\
+         \\output={\\shipout\\box255 \\advancepageno\n\
+         \\edef\\b{\\botmark}\\ifx\\b\\X \\global\\setbox1\\hbox{given back}\\unhbox1 \\par\\fi}\n",
+    );
+    for k in 0..60 {
+        let m = if k == 31 { "\\mark{X}" } else { "\\mark{n}" };
+        let _ = writeln!(
+            src,
+            "Paragraph {k}{m} has some words in it, enough to make a few lines of text \
+             on a page this narrow, and a few more for good measure.\n"
+        );
+    }
+    src.push_str("\\bye\n");
+    let prelude = common::plain();
+    let gone = "Paragraph 3\\mark{n} has some words in it, enough to make a few lines of text \
+                on a page this narrow, and a few more for good measure.\n\n";
+    assert!(src.contains(gone));
+    let text = src.replacen(gone, "", 1);
+    for t in [1, 4, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./pg.tex", "pg", "", &fx)
+        };
+        let mut b = common::build(opts(), Some(&prelude), &src);
+        assert!(b.is_pdf());
+        b.edit(&text);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        let d = common::first_difference(&b.output().0, &cold.output().0);
+        assert!(
+            d.is_none(),
+            "-j{t}: the edit differs from a cold build: {d:?}"
+        );
+        b.edit(&src);
+        let cold = common::build(opts(), Some(&prelude), &src);
+        let d = common::first_difference(&b.output().0, &cold.output().0);
+        assert!(
+            d.is_none(),
+            "-j{t}: the revert differs from a cold build: {d:?}"
+        );
+    }
+}
