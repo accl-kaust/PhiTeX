@@ -202,6 +202,12 @@ impl Operation for Finish {
         true
     }
 
+    /// A page's routine reads the counters and marks the routines of the
+    /// pages before it left.
+    fn chains(&self) -> bool {
+        true
+    }
+
     /// 1. `args` = [`FinishArgs::decode`]; the page =
     ///    `read_at(PAGE_OF:<piece>:<nth>, At::End(unit))` decoded as
     ///    [`Page`]. Unset: the loop has not fired this page (the

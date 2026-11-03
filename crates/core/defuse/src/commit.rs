@@ -803,6 +803,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // at once: before any walk of this commit asks, `sched::settles_edge`)
     if !p.unchanged {
         node.settle_now.store(p.settle_now, Ordering::Release);
+        crate::sched::clear_move(eng, node);
     }
     if let Some(r) = node.record().filter(|_| p.unchanged) {
         p.defs.clone_from(&r.defs);
@@ -2279,6 +2280,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             Cause::Changed { field, .. } => read::reaching_at(eng, *field, node.id, false).and_then(|r| r.by),
             _ => None,
         };
+        // (its definer's walk came before this run filed the read: it
+        // moved the read all the same)
+        crate::sched::note_move(eng, by, node);
         if let Some(by) = by
             && crate::sched::settles_edge(eng, by, node)
         {

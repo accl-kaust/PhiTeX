@@ -177,6 +177,10 @@ pub struct Engine {
     /// of the node past which it may yet place nodes, plus one; 0, none
     /// (no reader waits).
     pub(crate) frontier: AtomicU64,
+    /// The nodes whose last commit moved a later node's read of their
+    /// chain (`Node::moves`), and how many. A hint for the order of runs.
+    pub(crate) movers: crate::lock::Mx<crate::values::FxHashSet<NodeId>>,
+    pub(crate) movers_n: AtomicU64,
     /// The node that set the frontier, its raw id plus one: a stop of its
     /// that moves on moves the frontier with it (`commit::reask_range`).
     pub(crate) frontier_by: AtomicU64,
@@ -309,6 +313,8 @@ impl Engine {
             settle_marks: (0..SETTLE_MARK_WORDS).map(|_| AtomicU64::new(0)).collect(),
             settle_exact: Lock::new(crate::FxHashSet::default()),
             frontier: AtomicU64::new(0),
+            movers: crate::lock::Mx::new(crate::values::FxHashSet::default()),
+            movers_n: AtomicU64::new(0),
             frontier_by: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
             layout_gen: AtomicU64::new(0),

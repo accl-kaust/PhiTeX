@@ -165,6 +165,15 @@ pub(crate) struct Node {
     /// resumed on moved): its record's reads may hold while the state it
     /// parked rests on the old answers (`Ctx::last_run_stands`).
     pub(crate) refuted: AtomicBool,
+    /// Its last commit that published anything moved what a later node of
+    /// its chain read (`Operation::chains`, `sched::note_move`): those
+    /// wait for it to settle. Listed in `Engine::movers`.
+    pub(crate) moves: AtomicBool,
+    /// It was stopped before a run to wait for a node (`sched::work`): the
+    /// wake that asked for the run still stands; its waiting ended by
+    /// that node's settling clears this (`sched::release_waiting`), a
+    /// quiet point's does not.
+    pub(crate) held: AtomicBool,
     /// How long its longest run that committed took, ns (`sched::work`).
     pub(crate) full_ns: AtomicU64,
     /// Its order among the nodes placed after the same anchor in slot 1
@@ -243,6 +252,8 @@ impl Node {
             rank: AtomicU64::new(0),
             full_ns: AtomicU64::new(0),
             refuted: AtomicBool::new(false),
+            moves: AtomicBool::new(false),
+            held: AtomicBool::new(false),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             bracket_gen: AtomicU64::new(0),
