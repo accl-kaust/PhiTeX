@@ -155,7 +155,7 @@ pub(crate) struct Node {
     /// continuation (`Ctx::follow`). Those of a lower slot stand before
     /// those of a higher one.
     pub(crate) slot: AtomicU8,
-    /// How long its last run that committed took, ns (`sched::work`).
+    /// How long its longest run that committed took, ns (`sched::work`).
     pub(crate) full_ns: AtomicU64,
     /// Its order among the nodes placed after the same anchor in slot 1
     /// by different placers (`Ctx::rank_placement`): one of a lower rank

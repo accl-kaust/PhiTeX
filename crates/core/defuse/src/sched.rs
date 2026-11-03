@@ -1597,7 +1597,10 @@ fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), E
     })
 }
 
-/// A run this long, as its node's last one that committed took, starts
+/// A run this long, as its node's longest one that committed took (its
+/// last may be a short one on a value on the way, where the routine's
+/// long part did not run: then it committed that, and the text after it
+/// ran the same 4 s at once, Grail's lastpage hook, accl 23633), starts
 /// only once every node before it in its unit has settled: run sooner, on
 /// what those nodes have not said yet, it is seconds thrown away (Grail's
 /// \cite at -j8: the last pages' finishers, 4.1 s of hyperxmp each, on
@@ -1825,7 +1828,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         }
         Ok(Ok(out)) => {
             if stands.is_none() {
-                node.full_ns.store(run_ns, Ordering::Relaxed);
+                node.full_ns.fetch_max(run_ns, Ordering::Relaxed);
             }
             let product = cx.into_product(out);
             if product.parked_on.is_some() {
