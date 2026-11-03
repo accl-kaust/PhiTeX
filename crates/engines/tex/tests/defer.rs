@@ -340,7 +340,11 @@ fn a_symbol_read_by_another_run_is_of_the_same_register() {
             ..common::options("./d.tex", "d", "", &dir)
         };
         let mut b = common::build(opts, Some(&common::plain()), &src);
-        let edited = src.replacen(&mark(0), &format!("A new page.\\vfill\\eject\n\n{}", mark(0)), 1);
+        let edited = src.replacen(
+            &mark(0),
+            &format!("A new page.\\vfill\\eject\n\n{}", mark(0)),
+            1,
+        );
         common::rebuild(&mut b, &edited);
         assert_eq!(
             b.output().0,
