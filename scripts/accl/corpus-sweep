@@ -64,7 +64,7 @@ wait_run() {
   local j
   j=$(grep "^$1 " "$reg" | sed -n 's/.*job=\([0-9]*\).*/\1/p' | tail -1)
   while [ "$(ssh $H "$slurm squeue -h -j $j -o %i" 2>/dev/null | wc -l)" != 0 ]; do sleep 120; done
-  ssh $H "$slurm sacct -j $j -X -n -P -o JobID,State,Elapsed,TotalCPU,MaxRSS,NodeList" 2>/dev/null || true
+  ssh $SH "$slurm sacct -j $j -X -n -P -o JobID,State,Elapsed,TotalCPU,MaxRSS,NodeList" 2>/dev/null || true
   table "$1"
 }
 
