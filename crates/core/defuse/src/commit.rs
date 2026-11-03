@@ -2084,6 +2084,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // unseen. One that took none clears that.)
     let mut causes: Vec<Cause> = Vec::new();
     let mut stale = false;
+    if let Some(i) = refuted
+        && refute_log()
+        && let Some(f) = rec.reads[i].kind.field()
+    {
+        // (the commit's own check: the read's old answer and its new one)
+        let r = &rec.reads[i];
+        let now = read::answer_in(eng, node, &r.kind, r.path, &mut read::FoldMemo::new());
+        note_refute(eng, f, node.id, None, r.seen, now);
+    }
     if let Some(i) = refuted {
         // (a range from a node, or a read at a node: the change lies
         // there; one from the unit's start names no node a run could go

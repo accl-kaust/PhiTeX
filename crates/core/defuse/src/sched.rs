@@ -2056,16 +2056,22 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
     }
     for n in go {
         if let Some(x) = eng.placed_node(n).filter(|x| x.state() == State::Dirty) {
-            enqueue(
-                eng,
-                Some(w),
-                x,
+            // (the run goes on for the cause that woke it, which the hold
+            // only paused: its resumption point and the wake's attribution
+            // are that cause's, not a structural one's)
+            let wake = x.woke.lock().as_ref().map_or(
                 Wake {
                     by: None,
                     cause: Cause::Structure,
                     at_ns: eng.now_ns(),
                 },
+                |o| Wake {
+                    by: o.by,
+                    cause: o.cause.clone(),
+                    at_ns: eng.now_ns(),
+                },
             );
+            enqueue(eng, Some(w), x, wake);
         }
     }
 }
