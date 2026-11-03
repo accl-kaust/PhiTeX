@@ -177,6 +177,10 @@ pub struct Engine {
     /// of the node past which it may yet place nodes, plus one; 0, none
     /// (no reader waits).
     pub(crate) frontier: AtomicU64,
+    /// The payload past which the store is next collected, as the last
+    /// collection left it (twice what stood after it): an evaluation goes
+    /// on from it, or each would collect again what the last one kept.
+    pub(crate) collect_mark: AtomicU64,
     /// The node that set the frontier, its raw id plus one: a stop of its
     /// that moves on moves the frontier with it (`commit::reask_range`).
     pub(crate) frontier_by: AtomicU64,
@@ -315,6 +319,7 @@ impl Engine {
             settle_marks: (0..SETTLE_MARK_WORDS).map(|_| AtomicU64::new(0)).collect(),
             settle_exact: Lock::new(crate::FxHashSet::default()),
             frontier: AtomicU64::new(0),
+            collect_mark: AtomicU64::new(0),
             frontier_by: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
             layout_gen: AtomicU64::new(0),
@@ -1394,7 +1399,7 @@ impl Engine {
         loop {
             let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
             self.final_gen.fetch_add(1, Ordering::AcqRel);
-            let (pool, workers) = Pool::new(n, epoch, self.limits());
+            let (pool, workers) = Pool::new(n, epoch, self.limits(), self.collect_mark.load(Ordering::SeqCst));
             let mut seed = self.take_pending(&workers[0]);
             // (a node that runs only when the line is quiet waits for it)
             seed.retain(|&n| !pool.defer(self, n));

@@ -3,7 +3,7 @@
 //! settled, never on a state the line's own order never had, at any
 //! number of threads.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -149,4 +149,81 @@ fn an_effect_does_not_wait_for_a_node_that_runs_once_the_line_is_quiet() {
             "-j{threads}: ended {ok}, made once on 5 {once}, invariants {inv}"
         );
     }
+}
+
+/// `[f, g]`: as `Copy`, its definition held until `read` is raised.
+struct LateCopy(Arc<Gates>);
+
+impl Operation for LateCopy {
+    fn name(&self) -> &'static str {
+        "late_copy"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let x = cx.read(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT);
+        self.0.wait(&self.0.read);
+        cx.define(Field(cx.args()[1]), x);
+        self.0.copied.store(true, Ordering::SeqCst);
+        Ok(x)
+    }
+}
+
+#[derive(Default)]
+struct Gates {
+    read: AtomicBool,
+    copied: AtomicBool,
+}
+
+impl Gates {
+    /// (bounded: a run on one thread at a time finds no one to raise it)
+    fn wait(&self, flag: &AtomicBool) {
+        let t = Instant::now();
+        while !flag.load(Ordering::SeqCst) && t.elapsed() < Duration::from_millis(500) {
+            std::hint::spin_loop();
+        }
+    }
+}
+
+/// `[g]`: reads g, lets the copy define it, waits for that commit, and only
+/// then for the frontier; its effect: what it read, noted.
+struct LateEffect(Arc<Gates>, Mutex<Vec<ValueId>>);
+
+impl Operation for LateEffect {
+    fn name(&self) -> &'static str {
+        "late_effect"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let x = cx.read(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT);
+        if !self.0.read.swap(true, Ordering::SeqCst) {
+            self.0.wait(&self.0.copied);
+            spin(Duration::from_millis(20));
+        }
+        cx.wait_settled()?;
+        self.1.lock().unwrap().push(x);
+        Ok(x)
+    }
+}
+
+/// A node before the effect commits after the effect's read and before its
+/// wait: every node before it has settled, and the copy's re-ask found no
+/// read of the effect's filed yet. The effect is not made on the old answer
+/// (the gate's -j2 on [UNIT, 7], one in many).
+#[test]
+fn an_effect_is_not_made_on_a_read_moved_before_its_wait() {
+    let e = Engine::new();
+    let v = e.values();
+    let g = Arc::new(Gates::default());
+    let def = e.register(Arc::new(SlowDef));
+    let copy = e.register(Arc::new(LateCopy(g.clone())));
+    let eff = Arc::new(LateEffect(g, Mutex::new(Vec::new())));
+    let eop = e.register(eff.clone());
+    let (f, h) = (v.field("f"), v.field("g"));
+    let u = e.new_unit();
+    e.push(u, def, vec![f.0, v.int(7), v.int(0)]);
+    e.push(u, copy, vec![f.0, h.0]);
+    e.push(u, eop, vec![h.0]);
+    e.evaluate(4).unwrap();
+    assert_eq!(*eff.1.lock().unwrap(), vec![v.int(7)]);
+    assert!(e.check_invariants().is_empty());
 }
