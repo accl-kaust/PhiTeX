@@ -433,12 +433,7 @@ const ABSORB_EVERY: Duration = Duration::from_millis(2);
 impl Pool {
     /// A pool of `n` workers and their deques.
     /// `collect_mark`: the store's mark as the last collection left it.
-    pub(crate) fn new(
-        n: usize,
-        epoch: u64,
-        limits: Limits,
-        collect_mark: u64,
-    ) -> (Pool, Vec<Worker>) {
+    pub(crate) fn new(n: usize, epoch: u64, limits: Limits, collect_mark: u64) -> (Pool, Vec<Worker>) {
         let n = n.max(1);
         let blocks: Vec<Deque<(NodeId, u32)>> = (0..n).map(|_| Deque::new_lifo()).collect();
         let block_stealers = blocks.iter().map(Deque::stealer).collect();
@@ -470,7 +465,9 @@ impl Pool {
             arrived: AtomicUsize::new(0),
             collect_gen: AtomicU64::new(0),
             collect_next: AtomicU64::new(
-                limits.collect_at_bytes.map_or(u64::MAX, |floor| floor.max(collect_mark)),
+                limits
+                    .collect_at_bytes
+                    .map_or(u64::MAX, |floor| floor.max(collect_mark)),
             ),
         });
         let workers = blocks

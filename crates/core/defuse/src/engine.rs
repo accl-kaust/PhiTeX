@@ -1386,8 +1386,7 @@ impl Engine {
         loop {
             let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
             self.final_gen.fetch_add(1, Ordering::AcqRel);
-            let (pool, workers) =
-                Pool::new(n, epoch, self.limits(), self.collect_mark.load(Ordering::SeqCst));
+            let (pool, workers) = Pool::new(n, epoch, self.limits(), self.collect_mark.load(Ordering::SeqCst));
             let mut seed = self.take_pending(&workers[0]);
             // (a node that runs only when the line is quiet waits for it)
             seed.retain(|&n| !pool.defer(self, n));
