@@ -1046,3 +1046,15 @@ fn line_end_tab() {
 fn multicol_footnote_after() {
     check_threads("multicol_footnote_after", "pdf");
 }
+
+/// TeX Live manual texlive-vpat (pdflatex): a link over three lines of a
+/// paragraph in a box on a line. A sealed line's skeleton kept only the
+/// boxes with whatsits in them, so the read-time fold of a page's objects
+/// (`mark_events`) missed the link's piece on the middle line, and every
+/// read-time object number after it was one low: pointers to struct
+/// elements and pages one before their objects. At -j1 and -j4 (oracle:
+/// pdftex in the CI image, accl 23719).
+#[test]
+fn link_over_plain_line() {
+    check_threads("link_over_plain_line", "pdf");
+}
