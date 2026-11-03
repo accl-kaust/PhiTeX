@@ -1037,10 +1037,14 @@ impl Run<'_, '_> {
         // this one, not each after the last, the chain of an edit that
         // moves pages. The read stands: the routine's commit runs this
         // again, on what it gave back. A guess it has not given back
-        // before, as in a first build, is waited for)
+        // before, as in a first build, is waited for, and so is any on one
+        // thread, where the routine runs next anyway and the fold on the
+        // guess is done twice: para4000's deleted paragraph 184 -> 206 ms
+        // at -j1, accl 23790)
+        let beside = self.cx.has_other_threads();
         let gave = match out {
             phitex_defuse::FieldAt::Def(x, fin) => page_out_parts(v, x)
-                .filter(|o| o.1 == r.page || o.0 == r.guess)
+                .filter(|o| o.1 == r.page || (beside && o.0 == r.guess))
                 .map(|o| {
                     ls.after = fin.map(|f| (p.node, f));
                     o.0

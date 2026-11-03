@@ -569,6 +569,16 @@ impl Operation for Exec {
             predicted_effect(ops(&self.0), v, args, false)
         }
     }
+    /// The same openers and closers shown: what the last run did with
+    /// them stands over what other texts' runs did with those names. (A
+    /// `\\begin{aligned}` in a short verbatim, amsldoc: where another
+    /// piece taught that `aligned` opens, as the threads' order had it at
+    /// -j32, one letter typed in its paragraph filed an open at the edit
+    /// and took it back at the run, each a walk of all 332 075 readers
+    /// after it: 6 ms at -j1, -j8 and -j16, 190 ms at -j32, accl 23856.)
+    fn same_effect(&self, old: &[ValueId], new: &[ValueId], v: &Values) -> bool {
+        scope_shape_of(v, old, false) == scope_shape_of(v, new, false)
+    }
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let args = cx.args().to_vec();
         // (a package load: its run recorded, publishing its net effect,
