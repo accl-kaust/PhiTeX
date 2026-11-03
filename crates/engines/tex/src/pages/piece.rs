@@ -1140,6 +1140,16 @@ impl Run<'_, '_> {
                         crate::val::digest(v, y),
                         v.render(y).chars().take(200).collect::<String>()
                     );
+                    // (the state's slots, saves and definitions one by one)
+                    if i == 4 && j < 3 {
+                        for (m, &z) in list_of(v, y).iter().enumerate() {
+                            eprintln!(
+                                "contdump:     {i}.{j}.{m} {:016x} {}",
+                                crate::val::digest(v, z),
+                                v.render(z).chars().take(300).collect::<String>()
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1559,9 +1569,20 @@ impl Run<'_, '_> {
                     g.map(gid_of),
                 )
             });
+            // (a binding the resume does not keep, `loaded` false, is
+            // read from the engine there: its value is no part of the
+            // continuation. Carried, a global definition the run made in
+            // a group it opened, a `\newlabel` read from the `.aux` in
+            // `\begin{document}`'s, changed the continuation, and the
+            // rest of `\begin{document}` ran again for one label: Grail's
+            // heading edit, 144 ms)
             slots.push(v.list(vec![
                 f.0,
-                opt_val(s.cur),
+                if s.loaded {
+                    opt_val(s.cur)
+                } else {
+                    ValueId::UNIT
+                },
                 v.int(i64::from(s.loaded)),
                 v.int(i64::from(gid_of(s.save_gid))),
                 v.int(i64::from_ne_bytes(st_of(s.save_stamp).to_ne_bytes())),
@@ -1576,7 +1597,11 @@ impl Run<'_, '_> {
             let f = self.loc_field(s.loc);
             saves.push(v.list(vec![
                 f.0,
-                opt_val(s.prev),
+                if s.prev_loaded {
+                    opt_val(s.prev)
+                } else {
+                    ValueId::UNIT
+                },
                 v.int(i64::from(s.prev_loaded)),
                 v.int(i64::from(gid_of(s.gid))),
                 v.int(i64::from_ne_bytes(st_of(s.stamp).to_ne_bytes())),
