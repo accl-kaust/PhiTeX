@@ -2072,7 +2072,9 @@ fn a_heading_edit_does_not_run_the_rest_of_begin_document_again() {
 #[test]
 fn a_toc_edit_keeps_every_rest_and_finisher() {
     let fx = common::fixtures().join("latexmk").join("bibtex");
-    let mut src = String::from("\\documentclass{article}\n\\begin{document}\n\\tableofcontents\n\\clearpage\n");
+    let mut src = String::from(
+        "\\documentclass{article}\n\\begin{document}\n\\tableofcontents\n\\clearpage\n",
+    );
     for s in 0..12 {
         let _ = std::fmt::Write::write_fmt(
             &mut src,
@@ -2112,9 +2114,15 @@ fn a_toc_edit_keeps_every_rest_and_finisher() {
             "-j{threads} toc edit: {} pages, loop nodes made {} run {}, finishers made {} run {}, {} runs: {r:?}",
             b.pages().len(),
             r.placements_made("pages"),
-            r.runs_by_op.iter().find(|x| x.0 == "pages").map_or(0, |x| x.1),
+            r.runs_by_op
+                .iter()
+                .find(|x| x.0 == "pages")
+                .map_or(0, |x| x.1),
             r.placements_made("finish"),
-            r.runs_by_op.iter().find(|x| x.0 == "finish").map_or(0, |x| x.1),
+            r.runs_by_op
+                .iter()
+                .find(|x| x.0 == "finish")
+                .map_or(0, |x| x.1),
             r.runs
         );
         let cdir = dir.join("cold");
