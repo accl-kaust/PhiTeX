@@ -1577,3 +1577,31 @@ fn cutoff_sees_the_page_start_read_before_its_checkpoint() {
     let d = common::first_difference(&b.output().0, &cold.output().0);
     assert!(d.is_none(), "edit differs from cold: {d:?}");
 }
+
+/// A long line with an overfull box before the run's checkpoint on it and
+/// a paragraph overfull after it, edited past the checkpoint: the run goes
+/// on from there, and its diagnostics hold what a cold build's do. A place
+/// held the whole line: the box's report made before the checkpoint and
+/// the paragraph's start held the line without the new word (Grail, under
+/// `PHITEX_RESUME_CHECK`). What a diagnostic shows comes from the text.
+#[test]
+fn a_run_gone_on_holds_the_places_of_a_cold_build() {
+    let fx = common::fixtures().join("dvi");
+    let src = "\\hsize=1in \\parindent=0pt\n\
+         Reader \\setbox0\\hbox to 1pt{wide words} \\count1=0 \\loop\\advance\\count1 by 1 \
+         \\ifnum\\count1<3000 \\repeat \\hbox to 2in{}. Tail\n\n\\bye\n"
+        .to_owned();
+    let prelude = common::plain();
+    let opts = || common::options("./dl.tex", "dl", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replacen(". Tail", ". Tail typed", 1);
+    b.edit(&text);
+    assert!(
+        b.stats.resumed_at_mark > 0,
+        "the edit went on from no checkpoint"
+    );
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let (x, y) = (b.diagnostic_places(), cold.diagnostic_places());
+    assert!(y.len() >= 2, "{y:?}");
+    assert_eq!(x, y);
+}

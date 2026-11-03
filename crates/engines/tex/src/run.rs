@@ -4102,16 +4102,27 @@ impl<'c, 'a> Run<'c, 'a> {
             });
         match &src {
             Some(s) => {
-                let mut buf = s.buf.clone();
-                if s.endch >= 0 && buf.len() > s.loc && s.ends {
+                let mut n = s.buf.len();
+                if s.endch >= 0 && n > s.loc && s.ends {
                     // the end of line character TeX appended
-                    buf.pop();
+                    n -= 1;
                 }
-                let seg: String = buf
+                let loc = s.loc.min(n);
+                // (a line of a file: its place there says where it is,
+                // its text only up to the column, for the column's bytes.
+                // What the line goes on with is not the diagnostic's, and
+                // an edit past the column leaves the place as it was: a
+                // run going on from a checkpoint before the edit holds
+                // the same one as a run from the start)
+                if let Some((f, _, _)) = s.origin
+                    && f != ValueId::UNIT
+                {
+                    n = loc;
+                }
+                let seg: String = s.buf[..n]
                     .iter()
                     .map(|&c| char::from_u32(c).unwrap_or('?'))
                     .collect();
-                let loc = s.loc.min(buf.len());
                 match s.origin {
                     Some((n, a, u)) => (n, i64::try_from(a).unwrap_or(0), u, seg, loc),
                     None => (ValueId::UNIT, -1, ValueId::UNIT, seg, loc),
