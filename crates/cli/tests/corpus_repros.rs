@@ -1110,11 +1110,11 @@ fn expand_copies_numbered() {
     check_threads("expand_copies_numbered", "pdf");
 }
 
-/// TeX Live manual asmejour-template (pdflatex, flushend): `\\pagediscards`
-/// gave nothing and `\\savingvdiscards` was not followed, so flushend's
+/// TeX Live manual asmejour-template (pdflatex, flushend): `\pagediscards`
+/// gave nothing and `\savingvdiscards` was not followed, so flushend's
 /// measure of the glue between its balanced columns was 0 pt, not 1.72 pt:
 /// the last page's second column came out 1.73 pt short and all its glue set
-/// differently. Also `\\splitdiscards`. Oracle: pdftex in the CI image.
+/// differently. Also `\splitdiscards`. Oracle: pdftex in the CI image.
 #[test]
 fn page_discards() {
     check_threads("page_discards", "pdf");
