@@ -1090,3 +1090,12 @@ fn file_mod_date() {
 fn page_read_after_par_in_cond() {
     check_threads("page_read_after_par_in_cond", "pdf");
 }
+
+/// `\pdfsavepos` in right-to-left text: the number TeX reads back is
+/// where the output puts the whatsit, in the reversed segment (it was the
+/// list's order: fariscovernew's pgf pictures in an RTL paragraph, placed
+/// by their marks, 3.5 pt off). Oracle: pdftex in the CI image.
+#[test]
+fn pdf_savepos_texxet() {
+    check_threads("pdf_savepos_texxet", "pdf");
+}

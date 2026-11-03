@@ -4098,6 +4098,7 @@ pub(crate) fn positions(r: &mut Run<'_, '_>, b: &BoxNode) -> R<Positions> {
     let mut w = Walk {
         at: &mut at,
         width: &width,
+        dir: 0,
     };
     let cur_v = b.height + v0;
     if b.kind == BoxKind::V {
@@ -4115,6 +4116,8 @@ pub(crate) fn positions(r: &mut Run<'_, '_>, b: &BoxNode) -> R<Positions> {
 struct Walk<'a> {
     at: &'a mut phitex_defuse::FxHashMap<u32, (i32, i32)>,
     width: &'a dyn Fn(u32, u16) -> i32,
+    /// e-TeX's `cur_dir`: 1 inside a right-to-left segment.
+    dir: u8,
 }
 
 /// The glue setting state of a box (§625).
@@ -4165,11 +4168,127 @@ impl GlueRun {
     }
 }
 
+/// The widths [`phitex_pdf::lr::reverse`] asks for, on the walk.
+struct WalkWidths<'a, 'b> {
+    width: &'a dyn Fn(u32, u16) -> i32,
+    g: &'b mut GlueRun,
+}
+
+impl phitex_pdf::lr::LrWidths for WalkWidths<'_, '_> {
+    fn char_wd(&mut self, f: u32, c: u16) -> i32 {
+        (self.width)(f, c)
+    }
+
+    fn glue(&mut self, g: &GlueNode) -> i32 {
+        self.g.glue(g)
+    }
+
+    fn glue_sets(&self, g: &GlueNode) -> bool {
+        match self.g.sign {
+            GlueSign::Stretching => g.spec.stretch_order == self.g.order,
+            GlueSign::Shrinking => g.spec.shrink_order == self.g.order,
+            GlueSign::Normal => false,
+        }
+    }
+}
+
 impl Walk<'_> {
     /// `pdf_hlist_out`: `cur_h` from the left edge, on the baseline.
     fn hlist(&mut self, b: &BoxNode, left: i32, base: i32) {
         let mut g = GlueRun::new(b);
-        self.hnodes(&b.list, &mut g, left, base);
+        if self.dir == 0
+            && !b
+                .list
+                .iter()
+                .any(|n| matches!(n, Node::Math(k, _) if k.is_lr()))
+        {
+            self.hnodes(&b.list, &mut g, left, base);
+        } else {
+            self.hlist_lr(&b.list, &mut g, left, base);
+        }
+    }
+
+    /// `pdf_hlist_out` for mixed direction text, as the writer goes
+    /// through it (`phitex_pdf`'s `hlist_lr`): a position in a
+    /// right-to-left segment is where the reversed segment puts it.
+    fn hlist_lr(&mut self, list: &[Node], g: &mut GlueRun, left: i32, base: i32) {
+        use phitex_pdf::lr::{Lr, flatten_into, reverse};
+        let mut q = std::collections::VecDeque::new();
+        flatten_into(list, &mut q);
+        let mut lr: Vec<u8> = vec![0];
+        let mut h = left;
+        if self.dir == 1 {
+            // "Reverse the complete hlist"
+            let mut back = 0;
+            let mut rev = reverse(
+                &mut WalkWidths {
+                    width: self.width,
+                    g,
+                },
+                &mut back,
+                self.dir,
+                &mut q,
+                None,
+                &mut lr,
+            );
+            rev.push_front(Lr::N(Node::Kern(
+                -back,
+                phitex_typeset::node::KernKind::Explicit,
+            )));
+            q = rev;
+        }
+        let mut edge = h;
+        while let Some(it) = q.pop_front() {
+            match it {
+                Lr::Edge { dir, width, dist } => {
+                    h += width;
+                    edge = h + dist;
+                    self.dir = dir;
+                }
+                Lr::Fixed(x) => h += x.spec.width,
+                Lr::N(Node::Math(k, w)) => {
+                    // "Adjust the LR stack for the `hlist_out` routine"
+                    if k.is_end() {
+                        if lr.last() == Some(&k.end_type()) {
+                            lr.pop();
+                        }
+                    } else {
+                        lr.push(k.end_type());
+                        if k.dir() != self.dir {
+                            // "Reverse an hlist segment"
+                            let dir = 1 - self.dir;
+                            let mut seg = h - edge + w;
+                            let tail = Lr::Edge {
+                                dir: self.dir,
+                                width: 0,
+                                dist: 0,
+                            };
+                            let mut rev = reverse(
+                                &mut WalkWidths {
+                                    width: self.width,
+                                    g,
+                                },
+                                &mut seg,
+                                dir,
+                                &mut q,
+                                Some(tail),
+                                &mut lr,
+                            );
+                            rev.append(&mut q);
+                            rev.push_front(Lr::Edge {
+                                dir,
+                                width: w,
+                                dist: seg,
+                            });
+                            q = rev;
+                            continue;
+                        }
+                    }
+                    h += w;
+                }
+                Lr::N(n) => h = self.hnodes(std::slice::from_ref(&n), g, h, base),
+            }
+        }
     }
 
     /// An hlist's nodes from `h` on; where they end.
@@ -4179,14 +4298,18 @@ impl Walk<'_> {
                 Node::Char { font, ch } => h += (self.width)(*font, *ch),
                 Node::Lig(l) => h += (self.width)(l.font, l.ch),
                 Node::Box(x) => {
+                    let end = h + x.width;
                     if !x.list.is_empty() {
+                        // (e-TeX: in a reversed segment a box's own list
+                        // starts at its far edge, reversed again)
+                        let at = if self.dir == 1 { end } else { h };
                         if x.kind == BoxKind::V {
-                            self.vlist(x, h, base + x.shift - x.height);
+                            self.vlist(x, at, base + x.shift - x.height);
                         } else {
-                            self.hlist(x, h, base + x.shift);
+                            self.hlist(x, at, base + x.shift);
                         }
                     }
-                    h += x.width;
+                    h = end;
                 }
                 Node::Rule(x) => h += x.width,
                 // (XeTeX's native word or glyph: `cur_h` past its width,
@@ -4218,10 +4341,15 @@ impl Walk<'_> {
                         v += x.height + x.depth;
                     } else {
                         v += x.height;
-                        if x.kind == BoxKind::V {
-                            self.vlist(x, left + x.shift, v - x.height);
+                        let at = if self.dir == 1 {
+                            left - x.shift
                         } else {
-                            self.hlist(x, left + x.shift, v);
+                            left + x.shift
+                        };
+                        if x.kind == BoxKind::V {
+                            self.vlist(x, at, v - x.height);
+                        } else {
+                            self.hlist(x, at, v);
                         }
                         v += x.depth;
                     }
