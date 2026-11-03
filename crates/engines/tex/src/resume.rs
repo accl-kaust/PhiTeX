@@ -284,7 +284,7 @@ impl Run<'_, '_> {
         ];
         let mut all: Vec<&str> = checks.iter().filter(|c| c.0).map(|c| c.1).collect();
         // (and those of a checkpoint anywhere, when none at the line)
-        if self.ck_where_line().is_none() {
+        if !self.input.levels.is_empty() && self.ck_where_line().is_none() {
             let anywhere: [(bool, &'static str); 4] = [
                 (self.aopen != 0 || self.astate.is_some(), "an alignment open"),
                 (self.read_back_at.is_some(), "a read-back level"),
