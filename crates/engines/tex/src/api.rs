@@ -1778,6 +1778,9 @@ pub struct Stats {
     /// Runs that ended at a checkpoint of their last run reached in its
     /// state (the cutoff, `crate::resume`): that run's products stand.
     pub cut_offs: u64,
+    /// Runs of the text's pieces begun after a run claimed the rest of
+    /// the input at a fatal error (none: the job ends there, §93).
+    pub starts_after_fatal: u64,
     pub cut_in_run: u64,
     pub restarted: u64,
     /// Stopped runs restarted instead of resumed, by the first read that
@@ -3184,6 +3187,7 @@ impl Graph {
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             resumed_edits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cut_offs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            fatal_starts: Arc::default(),
             siblings_pulled: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
             scope_learned: Arc::default(),
@@ -4068,6 +4072,16 @@ impl Graph {
                 .ops
                 .cut_offs
                 .swap(0, std::sync::atomic::Ordering::Relaxed);
+            // (the evaluation's: the next one's fatal run, if any, sets it
+            // again)
+            let (_, after) = std::mem::take(
+                &mut *self
+                    .ops
+                    .fatal_starts
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            stats.starts_after_fatal += after;
             stats.siblings_pulled = self
                 .ops
                 .siblings_pulled
