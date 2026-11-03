@@ -1034,3 +1034,15 @@ fn pdf_texxet() {
 fn line_end_tab() {
     check_threads("line_end_tab", "pdf");
 }
+
+/// TeX Live manual `moderncv_userguide` (pdflatex): a footnote inside
+/// `multicols`, put back after it. multicol multiplies `\count\footins`
+/// and `\skip\footins` by its columns, locally in its group; the routine
+/// run at the environment's end sees those values and the builder took
+/// them from its give-back, where the group's end after it defines
+/// nothing: the page's goal lost three times the footnote's height. At
+/// -j1 and -j4 (oracle: pdftex in the CI image, accl 23665).
+#[test]
+fn multicol_footnote_after() {
+    check_threads("multicol_footnote_after", "pdf");
+}
