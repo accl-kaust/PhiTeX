@@ -527,6 +527,7 @@ Text between.
 /// return; Grail's `\inputminted`s under `PHITEX_RESUME_CHECK`).
 #[test]
 fn a_definition_kept_for_a_read_back_stops_at_the_frontier() {
+    use std::fmt::Write as _;
     let mut doc = String::from(
         r"\newcount\n
 \output={\global\def\mine{routine}\shipout\box255 }
@@ -535,9 +536,11 @@ fn a_definition_kept_for_a_read_back_stops_at_the_frontier() {
 ",
     );
     for i in 0..400 {
-        doc.push_str(&format!(
-            "Paragraph {i} of the text, long enough for the pages to fire.\n\n"
-        ));
+        writeln!(
+            doc,
+            "Paragraph {i} of the text, long enough for the pages to fire.\n"
+        )
+        .unwrap();
         if i % 40 == 39 {
             doc.push_str("\\window\n\n");
         }
