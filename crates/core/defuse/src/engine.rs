@@ -184,6 +184,10 @@ pub struct Engine {
     /// An evaluation has ended: there is a last run's graph to order the
     /// next one's runs by (`sched::work`).
     pub(crate) holds_on: std::sync::atomic::AtomicBool,
+    /// The payload past which the store is next collected, as the last
+    /// collection left it (twice what stood after it): an evaluation goes
+    /// on from it, or each would collect again what the last one kept.
+    pub(crate) collect_mark: AtomicU64,
     /// The node that set the frontier, its raw id plus one: a stop of its
     /// that moves on moves the frontier with it (`commit::reask_range`).
     pub(crate) frontier_by: AtomicU64,
@@ -277,6 +281,12 @@ impl Engine {
 
     /// A bracket changed: a new scope count.
     /// A new scope epoch: the epoch it begins.
+    /// How many times a node's brackets changed so far.
+    #[must_use]
+    pub fn scope_changes(&self) -> u64 {
+        self.scope_gen.load(Ordering::Acquire)
+    }
+
     pub(crate) fn scope_changed(&self) -> u64 {
         self.scope_gen.fetch_add(1, Ordering::AcqRel) + 1
     }
@@ -319,6 +329,7 @@ impl Engine {
             movers: crate::lock::Mx::new(crate::values::FxHashSet::default()),
             movers_n: AtomicU64::new(0),
             holds_on: std::sync::atomic::AtomicBool::new(false),
+            collect_mark: AtomicU64::new(0),
             frontier_by: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
             layout_gen: AtomicU64::new(0),
@@ -989,7 +1000,14 @@ impl Engine {
             inner.by_op.entry(op).or_default().push(node);
             n.op.store(op.0, Ordering::Release);
         }
-        let effect = self.op(op).effect(&args, &self.values);
+        let mut effect = self.op(op).effect(&args, &self.values);
+        if matches!(effect, crate::api::Effect::Scope(_))
+            && old_op == op
+            && n.record().is_some()
+            && self.op(op).same_effect(&n.args(), &args, &self.values)
+        {
+            effect = crate::api::Effect::Pending;
+        }
         *n.text.write() = args.into();
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
         n.effect.store(crate::node::pack_effect(effect), Ordering::Release);
@@ -1392,7 +1410,7 @@ impl Engine {
             let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
             self.holds_on.store(epoch > 1, Ordering::Release);
             self.final_gen.fetch_add(1, Ordering::AcqRel);
-            let (pool, workers) = Pool::new(n, epoch, self.limits());
+            let (pool, workers) = Pool::new(n, epoch, self.limits(), self.collect_mark.load(Ordering::SeqCst));
             let mut seed = self.take_pending(&workers[0]);
             // (a node that runs only when the line is quiet waits for it)
             seed.retain(|&n| !pool.defer(self, n));
