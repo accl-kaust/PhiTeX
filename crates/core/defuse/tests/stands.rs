@@ -151,3 +151,64 @@ fn a_value_moved_back_before_its_reader_ran_runs_nothing() {
     }
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[t]`: sleeps `t` ms, defines `x` := t.
+struct SlowDef;
+
+impl Operation for SlowDef {
+    fn name(&self) -> &'static str {
+        "slowdef"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let t = v.as_int(cx.args()[0]).unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(t.unsigned_abs()));
+        cx.define(v.field("x"), cx.args()[0]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[y]`: reads `x`, takes 120 ms; outputs x + y; counts its runs.
+struct Long {
+    runs: AtomicU64,
+}
+
+impl Operation for Long {
+    fn name(&self) -> &'static str {
+        "long"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        let v = cx.values();
+        let x = cx.read(v.field("x"))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        Ok(v.int(x + v.as_int(cx.args()[0]).unwrap_or(0)))
+    }
+}
+
+/// A long run asked for together with a node before it: on free threads it
+/// waits for that node, and runs once, on what that node makes.
+#[test]
+fn a_long_run_waits_for_the_nodes_before_it() {
+    let e = Engine::new();
+    let v = e.values();
+    let slow = e.register(Arc::new(SlowDef));
+    let long_op = Arc::new(Long {
+        runs: AtomicU64::new(0),
+    });
+    let long = e.register(long_op.clone());
+    let u = e.new_unit();
+    let a = e.push(u, slow, vec![v.int(1)]);
+    let b = e.push(u, long, vec![v.int(10)]);
+    e.evaluate(4).unwrap();
+    assert_eq!(e.output(b).and_then(|x| v.as_int(x)), Some(11));
+    let before = long_op.runs.load(Ordering::SeqCst);
+    e.replace(a, slow, vec![v.int(50)]);
+    e.replace(b, long, vec![v.int(20)]);
+    let rep = e.evaluate(4).unwrap();
+    assert_eq!(e.output(b).and_then(|x| v.as_int(x)), Some(70), "{rep:?}");
+    assert_eq!(long_op.runs.load(Ordering::SeqCst), before + 1, "{rep:?}");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

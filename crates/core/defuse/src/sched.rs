@@ -1597,10 +1597,31 @@ fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), E
     })
 }
 
+/// A run this long, as its node's last one that committed took, starts
+/// only once every node before it in its unit has settled: run sooner, on
+/// what those nodes have not said yet, it is seconds thrown away (Grail's
+/// \cite at -j8: the last pages' finishers, 4.1 s of hyperxmp each, on
+/// values among finishers that were still running, where -j1 ran neither,
+/// accl 23609). One asked for a change that holds then runs once; one
+/// whose reads have come back runs nothing (`Ctx::last_run_stands`). The
+/// order of the runs only: what they make is what they read.
+const LONG_RUN_NS: u64 = 100_000_000;
+
 fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
     let node = eng.node(n);
     if !node.cas_state(State::Dirty, State::Running) {
         pool.shared.done_one();
+        return Ok(());
+    }
+    // (a long run waits for the nodes before it: `LONG_RUN_NS`)
+    if node.full_ns.load(Ordering::Relaxed) >= LONG_RUN_NS
+        && !eng.op(node.op()).settles_at_quiet()
+        && let Some(x) = crate::read::on_one_layout(eng, || crate::read::unsettled_before(eng, node))
+    {
+        if run_log() {
+            eprintln!("long: node {} waits for {}", n.raw(), x.raw());
+        }
+        park_waiting(eng, pool, w, node, Some(x));
         return Ok(());
     }
     let first = node.run_epoch.swap(pool.epoch, Ordering::AcqRel) != pool.epoch;
@@ -1803,6 +1824,9 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             Ok(())
         }
         Ok(Ok(out)) => {
+            if stands.is_none() {
+                node.full_ns.store(run_ns, Ordering::Relaxed);
+            }
             let product = cx.into_product(out);
             if product.parked_on.is_some() {
                 Worker::add(&w.parks, 1);

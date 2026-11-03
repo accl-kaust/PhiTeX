@@ -155,6 +155,8 @@ pub(crate) struct Node {
     /// continuation (`Ctx::follow`). Those of a lower slot stand before
     /// those of a higher one.
     pub(crate) slot: AtomicU8,
+    /// How long its last run that committed took, ns (`sched::work`).
+    pub(crate) full_ns: AtomicU64,
     /// Its order among the nodes placed after the same anchor in slot 1
     /// by different placers (`Ctx::rank_placement`): one of a lower rank
     /// stands before one of a higher; 0 none (placed right after the
@@ -228,6 +230,7 @@ impl Node {
             held_panic: AtomicBool::new(false),
             slot: AtomicU8::new(0),
             rank: AtomicU64::new(0),
+            full_ns: AtomicU64::new(0),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             bracket_gen: AtomicU64::new(0),
