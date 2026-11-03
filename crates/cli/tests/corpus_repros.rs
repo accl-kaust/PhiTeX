@@ -998,3 +998,39 @@ fn xe_import_length() {
 fn routine_local_after_group() {
     check_threads("routine_local_after_group", "pdf");
 }
+
+/// TeX Live manuals biblatex-cheatsheet and mtc-2c (pdflatex), cut:
+/// `\maketitle` as the first thing inside `multicols`. multicol sets
+/// `\vsize` to three columns' height with a local definition in its
+/// environment's group, and the pieces after it inside `\maketitle`'s
+/// group go on from continuations whose tables hold that binding, which
+/// no field has. Their page parameter marker read the field, the
+/// `\textheight` from outside the environment, and the page's first box
+/// froze `\pagegoal` on it: a first page one column high, one page too
+/// many. At -j1 and -j4 (oracle: pdftex in the CI image).
+#[test]
+fn multicol_title_inside() {
+    check_threads("multicol_title_inside", "pdf");
+}
+
+/// TeX Live manual montex (pdflatex): rlbicig.sty's right-to-left text,
+/// e-TeX's TeX--XeT (`\beginR` ... `\endR`). pdfTeX's `pdf_hlist_out`
+/// reverses each right-to-left segment as it reaches it (e-TeX's
+/// `reverse`: glue set as kerns, leaders fixed, edges, a box inside
+/// reversed whole), as the DVI writer already did; the PDF writer wrote
+/// the segment in its logical order. At -j1 and -j4 (oracle: pdftex in
+/// the CI image, mc 79261; the base differs, mc 79263).
+#[test]
+fn pdf_texxet() {
+    check_threads("pdf_texxet", "pdf");
+}
+
+/// TeX Live manual enumitem-de (pdflatex): `\begin{verbatim}` and a tab at
+/// the line's end. web2c's `input_line` trims spaces and line ends, not
+/// tabs, in pdfTeX as in XeTeX; `PhiTeX` trimmed tabs for pdfTeX, so the
+/// verbatim's empty first line was missing and the page broke elsewhere.
+/// At -j1 and -j4 (oracle: pdftex in the CI image, accl 23645).
+#[test]
+fn line_end_tab() {
+    check_threads("line_end_tab", "pdf");
+}

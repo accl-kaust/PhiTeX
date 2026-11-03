@@ -863,6 +863,9 @@ pub struct PdfState {
     cur_page_height: Scaled,
     cur_s: i32,
     doing_leaders: bool,
+    /// e-TeX's `cur_dir`: 1 inside right-to-left text (TeX--XeT); 0
+    /// between boxes shipped.
+    cur_dir: u8,
     /// `is_shipping_page`.
     shipping_page: bool,
     /// `pdf_cur_form` and the form's size.
@@ -1015,6 +1018,7 @@ impl PdfState {
             cur_page_height: 0,
             cur_s: -1,
             doing_leaders: false,
+            cur_dir: 0,
             shipping_page: false,
             cur_form: 0,
             xform_height: 0,

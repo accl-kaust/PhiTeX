@@ -1,0 +1,29 @@
+%read back	
+% enumitem-de (TeX Live manual): web2c's input_line trims spaces and line ends,
+% not tabs: a verbatim line after \begin{verbatim}<tab> stands, an empty line.
+\documentclass{article}
+\newread\rd
+\newbox\wb
+\begin{document}
+\openin\rd=\jobname.tex
+\readline\rd to\x
+\setbox\wb\hbox{\ttfamily\meaning\x}
+\the\wd\wb\ \the\catcode9
+\closein\rd
+
+Before
+\begin{verbatim}	
+one
+\end{verbatim}	
+after 	 
+\begin{verbatim}	 	
+two	
+\end{verbatim}
+and
+\begin{verbatim} 
+three
+\end{verbatim}
+\obeylines
+tab end	
+next
+\end{document}
