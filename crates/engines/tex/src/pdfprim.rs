@@ -462,6 +462,12 @@ fn file_bytes_shared(r: &mut Run<'_, '_>, name: &str) -> R<Option<std::sync::Arc
 /// inside the file that keeps its length reaches only its pieces.
 fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
     let key = r.tex_key(name)?;
+    file_size_of(r, &key)
+}
+
+/// [`file_size`] of TeX's file `key` ([`Run::tex_key`], looked up once).
+fn file_size_of(r: &mut Run<'_, '_>, key: &str) -> R<Option<usize>> {
+    let key = key.to_owned();
     if r.read_cut(&key)?.is_some() {
         let v = r.v;
         if let Some(n) = r.cx.env(v.field(&format!("fsize:{key}")))? {
@@ -471,7 +477,7 @@ fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
     // (a file the job writes and reads back: its size, not its text,
     // `Run::read_written_text`)
     let was = std::mem::replace(&mut r.size_read, true);
-    let found = file_found(r, name);
+    let found = r.read_file(&key);
     r.size_read = was;
     let Some(x) = found? else {
         return Ok(None);
@@ -687,7 +693,14 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
         }
         cv::FILE_SIZE => {
             let name = ext_string(r)?;
-            file_size(r, &name)?.map_or_else(String::new, |n| n.to_string())
+            // (a written file's size as a symbol, read for presence
+            // alone: docs/note-relative-counters.md §2.4)
+            let key = r.tex_key(&name)?;
+            if let Some(t) = crate::defer::size_symbol(r, &key)? {
+                r.push_toks([t]);
+                return Ok(());
+            }
+            file_size_of(r, &key)?.map_or_else(String::new, |n| n.to_string())
         }
         cv::MDFIVE_SUM => {
             let file = r.scan_keyword("file")?;

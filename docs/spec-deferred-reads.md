@@ -84,7 +84,7 @@ value is known.
   as any control sequence is, so records, whatsits and marks carry it
   unchanged. Its meaning is a new command code `cmd::SYM`
   (`defer::is_sym`), expandable: `expand` forces or resolves it
-  (`defer::expand_sym`); in a list built with expansion it is kept as
+  (`defer::expand_any`); in a list built with expansion it is kept as
   `protect` keeps a protected macro.
 - Byte-identity: a resolved symbol prints exactly the digits `\number`
   would have printed at typesetting time (the sign and no leading
