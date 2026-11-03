@@ -585,7 +585,9 @@ impl Run<'_, '_> {
             int(i64::from(self.error_count)),
             int(i64::from(self.cand)),
             int(i64::from_ne_bytes(self.pdf_cmd.to_ne_bytes())),
-            int(i64::from_ne_bytes(self.lines_read.to_ne_bytes())),
+            // (formerly the lines the run began: none kept, as in a
+            // continuation, `Run::cont_encode`)
+            int(0),
             int(i64::from_ne_bytes(self.exps.to_ne_bytes())),
         ]);
         let mut ys = vec![
@@ -1529,7 +1531,7 @@ impl Run<'_, '_> {
             errors,
             cand,
             pdf_cmd,
-            lines_read,
+            _lines,
             exps,
         ] = m[..]
         {
@@ -1540,7 +1542,6 @@ impl Run<'_, '_> {
             self.error_count = u32::try_from(errors).unwrap_or(0);
             self.cand = u32::try_from(cand).unwrap_or(0);
             self.pdf_cmd = u64::from_ne_bytes(pdf_cmd.to_ne_bytes());
-            self.lines_read = u64::from_ne_bytes(lines_read.to_ne_bytes());
             self.exps = u64::from_ne_bytes(exps.to_ne_bytes());
         }
     }

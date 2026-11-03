@@ -1095,6 +1095,8 @@ fn pdf_exact(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, Stop> {
         fonts,
         seed,
         info_omit_date: i32::try_from(int_field(cx, "param:pdfinfoomitdate")?).unwrap_or(0),
+        omit_charset: i32::try_from(int_field(cx, "param:pdfomitcharset")?).unwrap_or(0),
+        omit_info_dict: i32::try_from(int_field(cx, "param:pdfomitinfodict")?).unwrap_or(0),
         suppress_ptex_info: i32::try_from(int_field(cx, "param:pdfsuppressptexinfo")?).unwrap_or(0),
         ptex_use_underscore: i32::try_from(int_field(cx, "param:pdfptexuseunderscore")?)
             .unwrap_or(0),

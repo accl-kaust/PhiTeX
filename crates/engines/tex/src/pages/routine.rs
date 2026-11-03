@@ -664,6 +664,8 @@ impl Run<'_, '_> {
             xs.push(v.str(&s));
         }
         xs.push(v.int(i64::from(self.param("pdfpkresolution")?)));
+        // (`\pdfomitprocset`: read as the page's resources are written)
+        xs.push(v.int(i64::from(self.param("pdfomitprocset")?)));
         Ok(v.list(xs))
     }
 }

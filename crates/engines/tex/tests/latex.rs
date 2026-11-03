@@ -1933,3 +1933,215 @@ fn lineno_numbered_lines_run_their_finishers_a_few_times() {
         );
     }
 }
+
+/// imakeidx's `\write18{makeindex ...}` at `\printindex` is a tool node
+/// reading the `.idx` stream before it, which the pages' finishers write
+/// (`\index` entries go out at `\shipout`). It runs at the committed
+/// frontier only, once a pass: run on each guess of the stream, it ran
+/// again at every page's finisher that committed before it (amsldoc's
+/// paragraph added at -j8: 20 runs, 162 ms). A paragraph added at the
+/// start runs it at most once in each of its passes, and the edited PDF equals a
+/// cold build's. At -j8.
+#[test]
+fn an_index_tool_node_runs_once_a_pass_after_an_edit() {
+    use std::fmt::Write as _;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/index-node");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |extra: &str| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\usepackage{imakeidx}\n\\makeindex\n\\begin{document}\n",
+        );
+        s.push_str(extra);
+        for k in 0..24 {
+            let _ = write!(
+                s,
+                "\\section{{Part {k}}}\nText of part {k}\\index{{word{k}}} and more\\index{{common}}.\n\n\\newpage\n"
+            );
+        }
+        s.push_str("\\printindex\n\\end{document}\n");
+        s
+    };
+    let opts = || Options {
+        fixpoint: true,
+        threads: Some(8),
+        tool_finder: Some(common::tool_finder(&dir)),
+        ..pdf_opts("idxnode", &dir)
+    };
+    let mut b = common::build(opts(), Some(&prelude(true)), &doc(""));
+    for extra in ["An added paragraph.\n\n", "Another paragraph, longer.\n\n"] {
+        b.edit(&doc(extra));
+        let runs = b
+            .stats
+            .reruns
+            .iter()
+            .filter(|(_, op, _)| *op == "toolnode")
+            .count();
+        let cold = common::build(opts(), Some(&prelude(true)), &doc(extra));
+        assert_eq!(
+            common::first_difference(&b.output().0, &cold.output().0),
+            None,
+            "{extra:?}"
+        );
+        // (an edit's passes: the text's, the `.idx`'s round, one to
+        // settle)
+        assert!(
+            runs <= 3,
+            "{extra:?}: the index's tool node ran {runs} times"
+        );
+    }
+}
+
+/// `\begin{document}` reads the `.aux` inside the `document`
+/// environment's group, hyperref's `\newlabel`s binding each label in
+/// that group before defining it globally, and goes on past a page
+/// candidate (a box the hooks put on the page). The continuation carried
+/// the label's global value in that slot, which the resume does not keep
+/// (it reads the engine's). The rest of `\begin{document}` is a resume. A heading's
+/// text edited changes one label's value: the reader of the `.aux` runs
+/// again and the label's readers do, not the rest, which reads the label
+/// from the engine and not from the continuation (on Grail it ran again
+/// for every heading edit, 144 ms). The edited PDF equals a cold build's.
+#[test]
+fn a_heading_edit_does_not_run_the_rest_of_begin_document_again() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/heading-rest");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |title: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\usepackage{{hyperref}}\n\\AtBeginDocument{{\\null\\par\\def\\hook{{x}}\\null\\par}}\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{sec:a}}\nSee section~\\ref{{sec:b}}.\n\n\
+             \\section{{{title}}}\\label{{sec:b}}\nText of the second section.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("headrest", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc("Second"));
+        for title in ["Xsecond", "Second part", "Second"] {
+            b.edit(&doc(title));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {title}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(title));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {title}"
+            );
+            // (the `.aux`'s reader, `\begin{document}`'s node, and its
+            // rest, a resume reading `cont:<reader>:<k>`)
+            let readers: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .filter(|(n, op, _)| {
+                    *op == "exec" && b.describe_node(*n).contains("\\begin{document}")
+                })
+                .map(|(n, _, _)| format!("Changed cont:{n}:"))
+                .collect();
+            assert!(
+                !r.iter()
+                    .any(|x| readers.iter().any(|c| x.contains(c.as_str()))),
+                "-j{threads} {title}: the rest after the .aux's reader ran again: {r:?}"
+            );
+        }
+    }
+}
+
+/// A LaTeX document of several pages with a table of contents and
+/// citations (BibTeX), built to its fixpoint; a heading edited: the
+/// `.toc` read back moves the first page, so the page loop's first node
+/// folds again from a moved start, and its rests fold again while the
+/// pieces after them are holes. A rest whose start is not decided yet,
+/// or found stale, waits with what it made standing
+/// (`pages::pageloop`, `Run::wait_keeping`): no loop node and no finisher
+/// is made anew (on Grail every rest and finisher after the first pages
+/// was, each \cite edit, accl 23278, mc 78930: 51 finishers made anew and
+/// their routines run, 4.1 s of a 6.5 s edit), and the edited build equals
+/// a cold build of the edited text, at one and at eight threads.
+#[test]
+fn a_toc_edit_keeps_every_rest_and_finisher() {
+    let fx = common::fixtures().join("latexmk").join("bibtex");
+    let mut src = String::from("\\documentclass{article}\n\\begin{document}\n\\tableofcontents\n\\clearpage\n");
+    for s in 0..12 {
+        let _ = std::fmt::Write::write_fmt(
+            &mut src,
+            format_args!("\\section{{Section number {s}}}\\label{{s{s}}}\n"),
+        );
+        for p in 0..6 {
+            let _ = std::fmt::Write::write_fmt(
+                &mut src,
+                format_args!(
+                    "Paragraph {p} of section {s}, long enough to make a few lines of text in the article class, with a citation~\\cite{{{}}} and a reference to section~\\ref{{s{}}} on page~\\pageref{{s{}}}, so that the pages fill.\n\n",
+                    ["knuth84", "lamport94", "mittelbach04"][(s + p) % 3],
+                    (s + 5) % 12,
+                    (s + 7) % 12
+                ),
+            );
+        }
+    }
+    src.push_str("\\bibliographystyle{plain}\n\\bibliography{refs}\n\\end{document}\n");
+    let edited = src.replacen("\\section{Section number 3}", "\\section{Section number three, a longer title that takes two lines in the table of contents and in the text}", 1);
+    assert_ne!(edited, src);
+    for threads in [1, 8] {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("toc-edit-j{threads}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        std::fs::copy(fx.join("refs.bib"), dir.join("refs.bib")).expect("the database");
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            tool_finder: Some(common::tool_finder(&dir)),
+            ..pdf_opts("tocedit", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &src);
+        let pages = b.pages().len();
+        assert!(pages >= 6, "-j{threads}: several pages: {pages}");
+        let r = common::rebuild(&mut b, &edited);
+        eprintln!(
+            "-j{threads} toc edit: {} pages, loop nodes made {} run {}, finishers made {} run {}, {} runs: {r:?}",
+            b.pages().len(),
+            r.placements_made("pages"),
+            r.runs_by_op.iter().find(|x| x.0 == "pages").map_or(0, |x| x.1),
+            r.placements_made("finish"),
+            r.runs_by_op.iter().find(|x| x.0 == "finish").map_or(0, |x| x.1),
+            r.runs
+        );
+        let cdir = dir.join("cold");
+        std::fs::create_dir_all(&cdir).expect("a scratch directory");
+        std::fs::copy(fx.join("refs.bib"), cdir.join("refs.bib")).expect("the database");
+        let cold = common::build(
+            Options {
+                fixpoint: true,
+                threads: Some(threads),
+                tool_finder: Some(common::tool_finder(&cdir)),
+                ..pdf_opts("tocedit", &cdir)
+            },
+            Some(&prelude(true)),
+            &edited,
+        );
+        if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+            panic!("-j{threads}: the edit differs from a cold build: {d}");
+        }
+        let new_pages = b.pages().len().saturating_sub(pages);
+        assert_eq!(
+            r.placements_made("pages"),
+            new_pages,
+            "-j{threads}: no loop node made anew but for a new page: {r:?}"
+        );
+        assert!(
+            r.placements_made("finish") <= new_pages,
+            "-j{threads}: no finisher made anew but for a new page: {r:?}"
+        );
+    }
+}

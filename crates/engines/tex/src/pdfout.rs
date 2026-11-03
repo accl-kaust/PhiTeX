@@ -588,6 +588,15 @@ fn record_of(
     m
 }
 
+/// Whether the record of page `key` with lines `h` is made
+/// ([`record_of`]'s memo).
+fn record_made(key: u64, h: &Lines) -> bool {
+    records()
+        .locked()
+        .get(&(key, h.clone()))
+        .is_some_and(|m| m.get().is_some())
+}
+
 /// The pages by key: a pure function's memo.
 fn pieces() -> &'static PieceMemo {
     static P: OnceLock<PieceMemo> = OnceLock::new();
@@ -2197,6 +2206,7 @@ pub(crate) fn page_params(v: &Values, p: &mut PdfParams, xs: &[ValueId]) {
     p.obj_compress_level = param(v, xs, 13);
     p.gen_tounicode = param(v, xs, 14);
     p.pk_resolution = param(v, xs, 18);
+    p.omit_procset = param(v, xs, 19);
     let text = |k: usize| {
         xs.get(k)
             .map(|&t| bytes_of(&str_of(v, t)))
@@ -3914,6 +3924,10 @@ pub(crate) struct EndFields {
     /// ([`FontNums::seed`]).
     pub seed: Vec<(FontId, String, i32)>,
     pub info_omit_date: i32,
+    /// `\pdfomitcharset` and `\pdfomitinfodict`, read where pdfTeX
+    /// writes the fonts and the Info dictionary: at the end.
+    pub omit_charset: i32,
+    pub omit_info_dict: i32,
     pub suppress_ptex_info: i32,
     /// `\pdfptexuseunderscore`: the Info dictionary's `/PTEX_Fullbanner`
     /// for `/PTEX.Fullbanner`.
@@ -4630,6 +4644,50 @@ fn link(
     // being filled: compared again once that stream is written)
     let mut os_wait: Option<usize> = None;
     let (mut t_try, mut t_snap) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    // (the records' steps: the page's record, its fonts and names, the
+    // replay, the parts taken)
+    let mut t_step = [std::time::Duration::ZERO; 4];
+    // (the records of the pages from `start` on not made yet (an edit's
+    // pages whose lines changed), made on the executor side by side
+    // before the loop places them in order: a page's record is a pure
+    // function of its piece and its lines, [`record_of`]; those the
+    // pages' own steps are making are waited for, not made twice)
+    {
+        let tr = std::time::Instant::now();
+        // (not those the line ends with as the last link did: theirs,
+        // made already, or copied once the writer is the same there)
+        let todo: Vec<usize> = (start..xpages.len() - suffix.min(xpages.len() - start))
+            .filter(|&i| {
+                v.as_int(xpages[i]).is_some()
+                    && pcs[i].is_some()
+                    && hashes.get(i).is_some_and(|h| {
+                        h.as_ref().is_some_and(|h| {
+                            let key = u64::from_ne_bytes(
+                                v.as_int(xpages[i]).unwrap_or(0).to_ne_bytes(),
+                            );
+                            !record_made(key, h)
+                        })
+                    })
+            })
+            .collect();
+        let n = if todo.len() > 2 {
+            crate::exec::threads(None)
+        } else {
+            1
+        };
+        if n > 1 {
+            let mut ex = crate::exec::Inner(n);
+            crate::exec::map_on(&mut ex, todo.len(), &|j| {
+                let i = todo[j];
+                if let (Some(pc), Some(Some(h))) = (&pcs[i], hashes.get(i)) {
+                    let mut line = |s: &crate::nodes::Sealed| line_of(v, units, s);
+                    let key = u64::from_ne_bytes(v.as_int(xpages[i]).unwrap_or(0).to_ne_bytes());
+                    record_of(v, key, pc, h, &mut line, None);
+                }
+            });
+        }
+        crate::timeline::note("link: the pages' records made side by side", tr.elapsed());
+    }
     // (the object streams the records fill compressed after the loop,
     // side by side with the pages' contents, not one after another in it)
     st.defer_streams(true);
@@ -4712,6 +4770,7 @@ fn link(
             let Some(h) = hashes.get(i).cloned().flatten() else {
                 return none;
             };
+            let ts = std::time::Instant::now();
             let made = record_of(
                 v,
                 u64::from_ne_bytes(v.as_int(x).unwrap_or(0).to_ne_bytes()),
@@ -4723,6 +4782,8 @@ fn link(
             let empty = (phitex_pdf::PageRecord::default(), BTreeSet::new(), 0);
             let made = made.get().unwrap_or(&empty);
             let rec = &made.0;
+            t_step[0] += ts.elapsed();
+            let ts = std::time::Instant::now();
             let fwd = nums.resolve(&pc.fonts, Some(rec.font_loads()));
             let src = Mapped::new(&pc.fonts, &nums, &fwd);
             let fmap = |g: FontId| fwd.get(&g).copied().unwrap_or(g);
@@ -4744,6 +4805,8 @@ fn link(
                 .iter()
                 .filter_map(|&(p, t)| reloc.get(&t).map(|&m| (p, m)))
                 .collect();
+            t_step[1] += ts.elapsed();
+            let ts = std::time::Instant::now();
             let res = if moved {
                 Err("an object numbered otherwise at read time".to_owned())
             } else if tex.len() != aliases.len() {
@@ -4752,6 +4815,7 @@ fn link(
                 let at = |n: usize| tex.get(&n).copied().unwrap_or(n);
                 st.replay_page(rec, &src, &fmap, &at, None, &mut ps)
             };
+            t_step[2] += ts.elapsed();
             if res.is_err() {
                 // (the node that wrote the page logged the writer's
                 // error when it wrote it)
@@ -4840,8 +4904,10 @@ fn link(
                 }
             }
         }
+        let ts = std::time::Instant::now();
         st.take_parts(&mut ps);
         parts.push(ps);
+        t_step[3] += ts.elapsed();
     }
     st.defer_streams(false);
     let t_loop = t0.elapsed();
@@ -4854,6 +4920,10 @@ fn link(
     );
     crate::timeline::note("link: the resync tries", t_try);
     crate::timeline::note("link: the writer's snapshots", t_snap);
+    crate::timeline::note("link: the pages' records", t_step[0]);
+    crate::timeline::note("link: the pages' fonts and names", t_step[1]);
+    crate::timeline::note("link: the pages replayed", t_step[2]);
+    crate::timeline::note("link: the parts taken", t_step[3]);
     // (spec-final §6.1: the pages' contents whose font numbers moved,
     // rewritten and compressed apart, on the executor)
     let t_parts = std::time::Instant::now();
@@ -4989,6 +5059,8 @@ fn link(
         bytes.push(c);
     }
     st.params_mut().info_omit_date = f.info_omit_date;
+    st.params_mut().omit_charset = f.omit_charset;
+    st.params_mut().omit_info_dict = f.omit_info_dict;
     st.params_mut().suppress_ptex_info = f.suppress_ptex_info;
     st.params_mut().ptex_use_underscore = f.ptex_use_underscore;
     st.params_mut().pk_resolution = f.pk_resolution;

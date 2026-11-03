@@ -869,13 +869,25 @@ impl Operation for Files {
                 let name = str_of(v, n);
                 let shared = ops(&self.0);
                 let t0 = std::time::Instant::now();
-                file_node(cx, &name, &shared.defs)?;
+                let text = file_node(cx, &name, &shared.defs)?;
                 let t_file = t0.elapsed();
                 // (what a tool makes of it by default: run here, on the
                 // text as the job writes it, so a reader of the output
-                // depends on what the tool makes, not on its input)
-                for (o, args) in crate::tools::made_from(cx, &name)? {
-                    let x = cx.apply(shared.tool, args)?;
+                // depends on what the tool makes, not on its input; the
+                // text handed to the run, as this node made it: the run
+                // reading it back from `wtext:` read the definition before
+                // this node's, and each change of the file ran the node
+                // twice, Grail's `.aux` 19 ms more)
+                for (o, mut args) in crate::tools::made_from(cx, &name, text.is_some())? {
+                    let x = match text {
+                        Some(t) if t == ValueId::UNIT => ValueId::UNIT,
+                        Some(t) => {
+                            args.truncate(4);
+                            args.extend([t, v.int(1)]);
+                            cx.apply(shared.tool, args)?
+                        }
+                        None => cx.apply(shared.tool, args)?,
+                    };
                     define_traced(cx, crate::tools::made_field(v, &o), x);
                 }
                 if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -990,11 +1002,13 @@ type WrittenDefs = Vec<(String, ValueId)>;
 /// `wsize:`), its read-back's keys and definitions (`wkeys:`, `wdef:`)
 /// or its units and order (`wfile:`, `wunit:`), and for a file whose
 /// text the client gave, whether it is written as given (`wsame:`).
+/// Its value: the text as defined (`UNIT`: not written); `None` for a
+/// file not opened now, kept as it was.
 fn file_node(
     cx: &mut Ctx<'_>,
     name: &str,
     defs_lock: &std::sync::Mutex<crate::hints::Defs>,
-) -> Result<ValueId, Stop> {
+) -> Result<Option<ValueId>, Stop> {
     let v = cx.values();
     let k = v.field(&format!("wkeys:{name}"));
     let wt = crate::tools::text_field(v, name);
@@ -1011,7 +1025,7 @@ fn file_node(
     // run finds the file an earlier run wrote, which a job that writes a
     // file only where it is missing reads instead of writing it again)
     if text.is_none() && ds.is_none() {
-        return keep_file(cx, name);
+        return keep_file(cx, name).map(|_| None);
     }
     if let Some(seed) = seed_text(cx, name)? {
         let same = text
@@ -1075,13 +1089,13 @@ fn file_node(
             );
         }
         define_traced(cx, k, keys);
-        return Ok(ValueId::UNIT);
+        return Ok(Some(tv));
     }
     let f = v.field(&format!("wfile:{name}"));
     // a file the job did not write is absent
     let Some(t) = text else {
         define_traced(cx, f, v.list(Vec::new()));
-        return Ok(ValueId::UNIT);
+        return Ok(Some(tv));
     };
     if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
         eprintln!("aux-trace: define wfile {name}: {} bytes:\n{t}", t.len());
@@ -1093,7 +1107,7 @@ fn file_node(
         eprintln!("files-node: {name}: its units in {:?}", t0.elapsed());
     }
     define_traced(cx, f, order);
-    Ok(ValueId::UNIT)
+    Ok(Some(tv))
 }
 
 /// The text the client gave for file `name`, one the job writes, as the

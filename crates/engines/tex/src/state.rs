@@ -392,6 +392,11 @@ struct Saved {
     /// binding in force is the saved one, an outer group's local or the
     /// run's base, and the mark says whose.
     ldef: Ldef,
+    /// The value the slot was given to be read where the run first uses
+    /// it ([`State::set_lazy`]), not read yet when the write hid it: the
+    /// group's close gives it back (a finisher's local at its candidate,
+    /// redefined in a group of the routine and read after it).
+    lazy: Option<ValueId>,
 }
 
 /// A latest-definition mark: its stamp, whether local, its group.
@@ -1721,7 +1726,7 @@ impl State {
             self.note_cand(loc, ldef.0, prev);
         }
         let s = self.slot(loc);
-        s.lazy = None;
+        let lazy = s.lazy.take();
         let mut saved = None;
         if global {
             s.ginert = st;
@@ -1735,6 +1740,7 @@ impl State {
                 stamp: s.save_stamp,
                 at: st,
                 ldef,
+                lazy,
             });
             s.save_gid = g;
             s.save_stamp = st;
@@ -1958,6 +1964,7 @@ impl State {
             }
             let slot = self.slot(s.loc);
             slot.e = s.prev;
+            slot.lazy = s.lazy;
             slot.save_gid = s.gid;
             slot.save_stamp = s.stamp;
             let meta = slot.meta;
@@ -2706,13 +2713,14 @@ impl State {
         let mut st = State::new();
         // (a binding that is an alias definition's value stays one,
         // resolved where the resume uses it)
+        // (one not loaded is read from the engine: its value is not
+        // carried, `Run::cont_encode`)
         let ent = |x: Option<ValueId>, loaded: bool| {
+            if !loaded {
+                return UNLOADED;
+            }
             let mut e = Entry::raw_seen(v, x);
-            e.flags = if loaded {
-                LOADED | HAS_ID | (e.flags & ALIAS)
-            } else {
-                0
-            };
+            e.flags = LOADED | HAS_ID | (e.flags & ALIAS);
             e
         };
         for s in c.slots {
@@ -2743,6 +2751,7 @@ impl State {
                 stamp: s.stamp,
                 at: s.at,
                 ldef: s.ldef,
+                lazy: None,
             });
         }
         st.defined = c.defined;
@@ -2832,6 +2841,7 @@ struct BaseSave {
     stamp: u64,
     at: u64,
     ldef: Ldef,
+    lazy: Option<ValueId>,
 }
 
 /// An entry noted at a candidate ([`Base`]): `None` not loaded.
@@ -2965,6 +2975,7 @@ impl State {
                     stamp: s.stamp,
                     at: s.at,
                     ldef: s.ldef,
+                    lazy: s.lazy,
                 })
                 .collect(),
             carried: self.cont_locs.clone(),
@@ -3092,6 +3103,7 @@ impl State {
                 stamp: s.stamp,
                 at: s.at,
                 ldef: s.ldef,
+                lazy: s.lazy,
             })
             .collect();
         self.cont_locs = b.carried;
@@ -3284,6 +3296,7 @@ impl Base {
                     u(s.ldef.0),
                     v.int(i64::from(s.ldef.1)),
                     v.int(s.ldef.2.map_or(-1, i64::from)),
+                    opt(s.lazy),
                 ])
             })
             .collect();
@@ -3369,7 +3382,7 @@ impl Base {
                 .collect(),
         };
         for e in list_of(v, save) {
-            let [f, prev, flags, gid, stamp, at_, ls, ll, lg] = list_of(v, e)[..] else {
+            let [f, prev, flags, gid, stamp, at_, ls, ll, lg, lazy] = list_of(v, e)[..] else {
                 return None;
             };
             out.save.push(BaseSave {
@@ -3380,6 +3393,7 @@ impl Base {
                 stamp: u(stamp),
                 at: u(at_),
                 ldef: (u(ls), int_of(v, ll) != 0, u32::try_from(int_of(v, lg)).ok()),
+                lazy: opt(lazy),
             });
         }
         out.carried = list_of(v, carried)

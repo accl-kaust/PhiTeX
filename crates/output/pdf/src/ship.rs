@@ -1672,11 +1672,22 @@ impl PdfState {
                 self.cur_page_height,
             );
         }
-        self.end_stream();
+        // (a recorded page's content is not compressed here: the link
+        // compresses it where it places it, its font numbers as there,
+        // [`PdfState::replay_page`]; the bytes here are no one's)
+        let defer = shipping_page
+            && self.zip.is_some()
+            && self.rec.as_ref().is_some_and(|r| r.blob.is_some());
+        if defer {
+            self.end_stream_with(|_, _| Vec::new());
+        } else {
+            self.end_stream();
+        }
         if shipping_page && let Some(r) = &mut self.rec {
             if let Some(b) = &mut r.blob {
                 b.1 = self.out.len();
             }
+            r.deferred = defer;
             r.walk = false;
             r.font_list.clone_from(&self.font_list);
             r.other = !self.xform_list.is_empty()

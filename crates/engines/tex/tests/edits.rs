@@ -1354,3 +1354,48 @@ fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
         }
     }
 }
+
+/// Exact PDF, compressed, a paragraph deleted near the start of 300:
+/// every later page's lines move, so the link places a new record for
+/// each. A page's content is compressed once, where the link places it
+/// with the document's font numbers (the page's own writer leaves it
+/// uncompressed: its font numbers are the page's keys, rewritten there
+/// anyway), and the records are made side by side before the link
+/// places them in order. Every page is placed (none shipped again), and
+/// the PDF equals a cold build's.
+#[test]
+fn a_paragraph_deleted_places_every_later_page_compressed_once() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from(
+        "\\pdfoutput=1 \\pdfcompresslevel=9 \\hsize=5in \\vsize=7in \\parindent=20pt\n",
+    );
+    for k in 0..300 {
+        let _ = writeln!(
+            src,
+            "Paragraph {k} has some words in it, {{\\bf a few bold}} and {{\\it italic}}, \
+             enough to fill a few lines of text set with plain's macros.\n"
+        );
+    }
+    src.push_str("\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./pz.tex", "pz", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    assert!(b.is_pdf());
+    let n = b.pages().len();
+    let before = b.pages();
+    let gone = "Paragraph 3 has some words in it, {\\bf a few bold} and {\\it italic}, \
+                enough to fill a few lines of text set with plain's macros.\n\n";
+    assert!(src.contains(gone));
+    let text = src.replacen(gone, "", 1);
+    b.edit(&text);
+    let touched = common::pages_touched(&before, &b.pages());
+    assert!(
+        touched.len() + 3 >= n,
+        "the pages after the deleted paragraph changed: {touched:?} of {n}"
+    );
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+    assert_eq!(b.link_pages().1, 0, "every page placed, none shipped again");
+}

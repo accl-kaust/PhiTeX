@@ -6,7 +6,7 @@
 //!
 //! A command runs where it is in TeX's order, in the run that makes it
 //! ([`Run::shell_run`]): it is handed the files the job wrote and closed
-//! before it and the files earlier commands left ([`Run::shell_view`]),
+//! before it and the files earlier commands left ([`Run::shell_file`]),
 //! and what it made of each name is the run's definition of
 //! `toolout:<name>` (`crate::tools::out_field`), which a later read of
 //! that name reads, in this run or after it; a name it removed is absent
@@ -200,7 +200,7 @@ fn shell_cmd_is_allowed(cmd: &str, allowed: &[String]) -> Result<Option<String>,
 pub(crate) const OUTS: &str = "shellouts";
 
 /// The names the commands made or removed, in TeX's order: what a later
-/// command's view looks up ([`Run::shell_view`]).
+/// command's view looks up ([`Run::shell_file`]).
 pub(crate) const NAMES: &str = "shellnames";
 
 /// The environment's list of the names in the build's store of command
@@ -258,13 +258,16 @@ pub(crate) struct Made {
     stdout: String,
 }
 
+/// The files a call read, each with its text's key (`None`: absent).
+type Reads = Vec<(String, Option<u64>)>;
+
 /// One call remembered: the files it read with their texts' keys (`None`:
 /// absent), or all the files it was handed (`all`: the same names, the
 /// same texts), and what it made.
 #[derive(Debug)]
 struct Call {
     all: bool,
-    reads: Vec<(String, Option<u64>)>,
+    reads: Reads,
     made: Arc<Made>,
 }
 
@@ -290,6 +293,16 @@ impl Memo {
                 c.reads.iter().all(|(n, k)| key(n) == *k)
             };
             same.then(|| c.made.clone())
+        })
+    }
+
+    /// The calls kept for `cmd`, latest last: each the files it read
+    /// with their texts' keys, `None` where it read all it was handed.
+    fn reads_of(&self, cmd: &str) -> Vec<(Option<Reads>, Arc<Made>)> {
+        self.0.get(cmd).map_or_else(Vec::new, |cs| {
+            cs.iter()
+                .map(|c| ((!c.all).then(|| c.reads.clone()), c.made.clone()))
+                .collect()
         })
     }
 
@@ -456,11 +469,10 @@ impl Run<'_, '_> {
         Ok(out)
     }
 
-    /// The files a command here is handed (docs/note-shell-hook.md): each
-    /// file the job wrote and closed before here, as it wrote it, else
-    /// what the commands before here (or the store: the evaluation
-    /// before) left of it, by name.
-    pub(crate) fn shell_view(&mut self) -> R<Vec<(String, String)>> {
+    /// The names of the files a command here is handed
+    /// ([`Run::shell_file`] each): the files the job wrote before here, the
+    /// names the commands before here made or removed, the store's.
+    fn shell_names(&mut self) -> R<std::collections::BTreeSet<String>> {
         let v = self.v;
         let mut names = std::collections::BTreeSet::new();
         for f in [crate::run::WNAMES, NAMES] {
@@ -470,24 +482,84 @@ impl Run<'_, '_> {
         if let Some(s) = self.cx.env(v.field(STORE))? {
             names.extend(list_of(v, s).into_iter().map(|n| str_of(v, n)));
         }
-        let mut out = Vec::new();
-        for n in names {
-            let entries = self.fold_with_own(crate::run::stream_bucket(v, &n))?;
-            if let Some(t) = closed_text(v, &entries, &n) {
-                out.push((n, t));
-                continue;
+        Ok(names)
+    }
+
+    /// File `name` of a command's view (docs/note-shell-hook.md): as the job
+    /// wrote it, closed before here, else what the commands before here
+    /// (or the store) left of it; `None`: not handed. Reads that file's
+    /// stream alone ([`crate::run::stream_bucket`]).
+    fn shell_file(&mut self, name: &str) -> R<Option<String>> {
+        let v = self.v;
+        let entries = self.fold_with_own(crate::run::stream_bucket(v, name))?;
+        if let Some(t) = closed_text(v, &entries, name) {
+            return Ok(Some(t));
+        }
+        let made = self.get(&crate::tools::out_name(name))?;
+        Ok(made
+            .and_then(|x| list_of(v, x).get(1).copied())
+            .map(|t| str_of(v, t)))
+    }
+
+    /// The memo's answer for `cmd` read file by file: a call kept that
+    /// read some of the files, each as it is here, made what that call
+    /// made; only the files the kept calls read are read here, so a
+    /// change of a file no call read (the `.aux` a minted command never
+    /// opens) runs nothing again, not even this run. `None`: no call
+    /// kept matches (or one read all it was handed: the whole view then).
+    fn shell_memo_lazy(
+        &mut self,
+        cmd: &str,
+        names: &std::collections::BTreeSet<String>,
+    ) -> R<Option<Arc<Made>>> {
+        let memo = {
+            let o = self
+                .ops
+                .tool_opts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if o.shell_hook.is_none() {
+                return Ok(None);
             }
-            let made = self.get(&crate::tools::out_name(&n))?;
-            if let Some(t) = made.and_then(|x| list_of(v, x).get(1).copied()) {
-                out.push((n, str_of(v, t)));
+            o.shell_memo.clone()
+        };
+        let calls = memo
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reads_of(cmd);
+        let mut keys: crate::FxHashMap<String, Option<u64>> = crate::FxHashMap::default();
+        for (reads, made) in calls.into_iter().rev() {
+            let Some(reads) = reads else {
+                return Ok(None);
+            };
+            let mut same = true;
+            for (n, k) in &reads {
+                let got = if let Some(&g) = keys.get(n) {
+                    g
+                } else {
+                    let g = if names.contains(n) {
+                        self.shell_file(n)?.map(|t| text_key(&t))
+                    } else {
+                        None
+                    };
+                    keys.insert(n.clone(), g);
+                    g
+                };
+                if got != *k {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return Ok(Some(made));
             }
         }
-        Ok(out)
+        Ok(None)
     }
 
     /// A `\write18` the host runs (`cmd` quoted, [`runsystem`]), here in
     /// this run, in TeX's order: handed the files as they are here
-    /// ([`Run::shell_view`]), what it made is this run's definition of
+    /// ([`Run::shell_file`]), what it made is this run's definition of
     /// each name it wrote or removed (`toolout:<name>`, global, as a file
     /// on disk is), which the reads after it read (`Run::tool_output`),
     /// with the names ([`NAMES`]) and the results ([`OUTS`]) contributed.
@@ -501,26 +573,38 @@ impl Run<'_, '_> {
     /// no hook.
     fn shell_call(&mut self, cmd: &str) -> R<Option<Arc<Made>>> {
         let v = self.v;
-        let files = self.shell_view()?;
-        let made = match lookup(self.ops, cmd, &files) {
-            None => return Ok(None),
-            Some(Lookup::Known(m)) => m,
-            Some(Lookup::Call) => {
-                // (the host runs a command only at the committed frontier,
-                // every node before this one settled in this pass and no
-                // page left to fire before it (`Ctx::wait_settled`): a
-                // command acts outside the engine, so it never runs on a
-                // view of the job's files that TeX's own order never had,
-                // though the run on it would be thrown away (shell's
-                // a_command_reads_what_the_job_wrote at -j8: `fakecmd up
-                // inb.txt` called on an inb.txt opened and closed with its
-                // line not yet written). A view the memo answers calls
-                // nothing: answered at once)
-                self.cx.wait_settled()?;
-                let Some(m) = call(self.ops, cmd, &files) else {
-                    return Ok(None);
-                };
-                m
+        let names = self.shell_names()?;
+        let lazy = self.shell_memo_lazy(cmd, &names)?;
+        let made = if let Some(m) = lazy {
+            m
+        } else {
+            let mut files = Vec::new();
+            for n in names {
+                if let Some(t) = self.shell_file(&n)? {
+                    files.push((n, t));
+                }
+            }
+            match lookup(self.ops, cmd, &files) {
+                None => return Ok(None),
+                Some(Lookup::Known(m)) => m,
+                Some(Lookup::Call) => {
+                    // (the host runs a command only at the committed
+                    // frontier, every node before this one settled in this
+                    // pass and no page left to fire before it
+                    // (`Ctx::wait_settled`): a command acts outside the
+                    // engine, so it never runs on a view of the job's files
+                    // that TeX's own order never had, though the run on it
+                    // would be thrown away (shell's
+                    // a_command_reads_what_the_job_wrote at -j8: `fakecmd up
+                    // inb.txt` called on an inb.txt opened and closed with
+                    // its line not yet written). A view the memo answers
+                    // calls nothing: answered at once)
+                    self.cx.wait_settled()?;
+                    let Some(m) = call(self.ops, cmd, &files) else {
+                        return Ok(None);
+                    };
+                    m
+                }
             }
         };
         if made.status != 0 && crate::exec::obs_flag!("PHITEX_AUX_TRACE") {

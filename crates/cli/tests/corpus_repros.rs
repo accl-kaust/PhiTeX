@@ -955,3 +955,46 @@ fn text_ends_without_end_xe() {
         );
     }
 }
+
+/// TeX Live manual nddiss (pdflatex, pdfx): `\pdfomitcharset`,
+/// `\pdfomitinfodict` and `\pdfomitprocset` were primitives the writer
+/// never read: every subset Type 1 font had its `/CharSet`, the file its
+/// Info dictionary and each page its `/ProcSet`. The first two are read
+/// where pdfTeX writes the fonts and the Info dictionary (the end), the
+/// third with each page's parameters. At -j1 and -j4 (oracle: pdftex in
+/// the CI image, mc 79143; the base differs).
+#[test]
+fn pdf_omit_params() {
+    check_threads("pdf_omit_params", "pdf");
+}
+
+/// TeX Live manual showexpl-test (xelatex): an included PDF's form whose
+/// `/Length` is an indirect object. xdvipdfmx imports that object with
+/// the form (`pdf_import_object` of the stream's dictionary) and writes
+/// it when the file it was read from is let go, `pdf_files_close` after
+/// the fonts; `PhiTeX`'s writer never let the files go, so the object was
+/// never written and its number was left empty (showexpl's included
+/// picture: two `Type1C` font files' lengths). At -j1 and -j4 (oracle:
+/// xelatex in the CI image, mc 79161).
+#[test]
+fn xe_import_length() {
+    check_threads("xe_import_length", "pdf");
+}
+
+/// TeX Live manual przechlewski-book wkmgr1 (pdflatex), cut: a binding
+/// local to a group open where a page fires is the routine's, given to
+/// the finisher to be read where it is used (`State::set_lazy`). A local
+/// definition in a group of the routine (hyperref's `\pdfstringdef`
+/// lets `\footnotesize` be `\@empty`) dropped it, and the group's close
+/// gave back the location unread with nothing to read it from: the
+/// routine read the value reaching the finisher, the one outside the
+/// group. prelim2e's draft line on the title page, `\footnotesize` there
+/// `\small` (the class's titlepage), came out at 9pt for 10pt; moreenum's
+/// first page fired inside a `\small` group and loaded the font of the
+/// wrong size, every font number after it one off. The save now keeps
+/// the binding and the close restores it. At -j1 and -j4 (oracle: pdftex
+/// in the CI image, mc 79240; the base differs, mc 79241).
+#[test]
+fn routine_local_after_group() {
+    check_threads("routine_local_after_group", "pdf");
+}

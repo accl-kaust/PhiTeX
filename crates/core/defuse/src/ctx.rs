@@ -1087,6 +1087,23 @@ impl<'a> Ctx<'a> {
         self.last.as_ref().and_then(|r| r.state)
     }
 
+    /// The state my last run stored with `park`, stale or not, as a value
+    /// only: taking it neither goes on from it nor keeps any of that
+    /// run's reads (for that, [`Ctx::resumed`]).
+    pub fn last_state(&self) -> Option<ValueId> {
+        self.last.as_ref().and_then(|r| r.state)
+    }
+
+    /// This run does not go on from the state [`Ctx::resumed`] offered
+    /// after all: its last run's reads are not kept with its own. A run
+    /// that took the state, then met what it must wait for and keeps its
+    /// last products standing ([`Ctx::unchanged`]), files only what it
+    /// read: keeping the last run's reads, one that moved since woke it
+    /// again at each commit of the same wait, with no end.
+    pub fn not_resumed(&self) {
+        self.product.resumed.set(false);
+    }
+
     /// Whether my last run stored a state with `park` (whatever woke me).
     pub fn last_parked(&self) -> bool {
         self.last.as_ref().is_some_and(|r| r.state.is_some())

@@ -1671,6 +1671,9 @@ impl Dpx {
                 lap("resources", &mut out);
             }
         }
+        // (the files read for their objects, freed: what they held
+        // written, as `pdf_files_close` does before the file's end)
+        self.o.pdf_files_close()?;
         self.o.flush()?;
         lap("flush", &mut out);
         Ok(out)

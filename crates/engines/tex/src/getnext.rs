@@ -1099,7 +1099,6 @@ impl Run<'_, '_> {
         if let Some(l) = begun {
             self.muts += 1;
             self.lines_entered -= 1;
-            self.lines_read -= 1;
             // (and in the lines the run contributes by file,
             // `Run::doc_line_begun`, as §362 counted it there)
             if l.lineno == 0 && !l.rescanned {
@@ -1133,7 +1132,7 @@ impl Run<'_, '_> {
         state: u8,
         endch: i64,
     ) -> R<bool> {
-        let counted = (self.lines_entered, self.lines_read);
+        let counted = self.lines_entered;
         let doc_lines = self.doc_lines.clone();
         let saved = std::mem::replace(&mut self.input, crate::input::Input::new());
         let (eof, no_pull) = (self.eof, self.no_pull);
@@ -1148,7 +1147,7 @@ impl Run<'_, '_> {
                 .input
                 .top_line()
                 .is_some_and(|x| x.loc == loc && x.state == state && x.endch == endch);
-        (self.lines_entered, self.lines_read) = counted;
+        self.lines_entered = counted;
         self.doc_lines = doc_lines;
         self.input = saved;
         self.eof = eof;
@@ -1444,7 +1443,6 @@ impl Run<'_, '_> {
             if starts {
                 self.muts += 1;
                 self.lines_entered += 1;
-                self.lines_read += 1;
                 // (a `\read` line is no file's, §483: `line` stays)
                 if let Some(s) = self.input.top_line()
                     && s.lineno == 0

@@ -56,14 +56,19 @@ pub(crate) fn made_field(v: &Values, name: &str) -> Field {
 /// writes, each with its run's arguments: an output whose first claiming
 /// tool with a written input reads `input` (BibTeX's `.bbl` from the
 /// `.aux`, biber's from the `.bcf`, makeindex's `.ind` from the `.idx`).
+/// `written`: the caller, `input`'s own node, defined its size (the job
+/// writes it): not read back, which would read the definition before
+/// the caller's.
 pub(crate) fn made_from(
     cx: &mut Ctx<'_>,
     input: &str,
+    written: bool,
 ) -> Result<Vec<(String, Vec<ValueId>)>, Stop> {
     let v = cx.values();
     let mut out = Vec::new();
+    let own = written.then_some(input);
     for o in made_names(input) {
-        if let Some(args) = run_args(cx, &o)?
+        if let Some(args) = run_args(cx, &o, own)?
             && args.get(2).is_some_and(|&i| str_of(v, i) == input)
         {
             out.push((o, args));
@@ -469,8 +474,23 @@ pub(crate) fn support_field(v: &Values, s: ToolSearch, name: &str) -> Field {
 
 /// Looks up what a run asked for: a file the job writes, by its text
 /// the round before; else through the job's or the tool's lookup.
-fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop> {
+/// `streams`: a run of a files' node (`crate::ops::Files`), after the
+/// pass's text: a file the job writes in this pass is read from its
+/// stream as the pass wrote it ([`crate::run::stream_bucket`]), as
+/// latexmk's tool reads the files the TeX run before it left, not from
+/// its node's definition, which may not be this pass's yet (a database
+/// the job writes, revtex4-2's Notes.bib).
+fn look_up(cx: &mut Ctx<'_>, n: &Need, streams: bool) -> Result<Option<(String, Vec<u8>)>, Stop> {
     let v = cx.values();
+    if streams && let Need::File(name) | Need::Data(_, name) = n {
+        let acc = cx.fold(crate::run::stream_bucket(v, name), None, None)?;
+        if let Some((_, t)) = crate::api::written_texts(v, Some(acc))
+            .into_iter()
+            .find(|(m, _)| m == name)
+        {
+            return Ok(Some((format!("./{name}"), bytes(&t))));
+        }
+    }
     let file = |x: Option<ValueId>| {
         x.and_then(|x| {
             let xs = list_of(v, x);
@@ -507,7 +527,9 @@ fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop
 
 /// A tool's run on the files the job wrote the round before
 /// (`Ctx::apply`): `[tool, output, input, [args...]]` (and the input's
-/// text where a `\write18`'s node read it, [`ToolNode`]), its output
+/// text where a `\write18`'s node read it, [`ToolNode`], or where the
+/// input's own files' node made it, followed by 1 there: the other files
+/// it reads read from their streams, [`look_up`]), its output
 /// `[path, text]` (TeX's characters), or `UNIT` where the tool makes
 /// none (its input not written, a bibliography asked for by none, a
 /// failed run). The output is `[path, text, 0]`: read inline where it is
@@ -533,6 +555,9 @@ impl Operation for ToolRun {
             .map(|&l| list_of(v, l).iter().map(|&a| str_of(v, a)).collect())
             .unwrap_or_default();
         let opts = ops(&self.0).tool_opts.locked().clone();
+        // (a files' node's run: the files the job writes as this pass
+        // wrote them, [`look_up`])
+        let streams = args.get(5).is_some_and(|&x| crate::val::int_of(v, x) != 0);
         let mut served = Served::default();
         // (the input first: as a `\write18`'s node read it, else as the
         // round before wrote it; none written, no run)
@@ -543,13 +568,13 @@ impl Operation for ToolRun {
         // without one, mktexmf writing one where it can)
         if tool == Tool::Mktex {
             let need = mf_need(&input);
-            let found = look_up(cx, &need)?;
+            let found = look_up(cx, &need, streams)?;
             served.got.insert(need, found);
         }
         let Some((_, text)) = (match given {
             Some(x) => Some(x),
             None if tool == Tool::Mktex => Some((String::new(), Vec::new())),
-            None => look_up(cx, &Need::File(input.clone()))?,
+            None => look_up(cx, &Need::File(input.clone()), streams)?,
         }) else {
             return Ok(ValueId::UNIT);
         };
@@ -582,7 +607,7 @@ impl Operation for ToolRun {
                     continue;
                 }
                 for (n, h) in &e.read {
-                    let x = look_up(cx, n)?;
+                    let x = look_up(cx, n, streams)?;
                     if content_key(tool, n, x.as_ref()) != *h {
                         continue 'entries;
                     }
@@ -652,7 +677,7 @@ impl Operation for ToolRun {
             }
             fail = None;
             for n in missing {
-                let x = look_up(cx, &n)?;
+                let x = look_up(cx, &n, streams)?;
                 served.got.insert(n, x);
             }
         };
@@ -898,18 +923,25 @@ fn makeindex_said(ilg: &[u8]) -> Vec<(bool, String)> {
 /// The arguments of the tool run that makes `output` by default, if one
 /// does: the first tool claiming it by name whose input the job writes
 /// (its size defined, `crate::ops::Files`). `None`: no tool makes it.
-pub(crate) fn run_args(cx: &mut Ctx<'_>, output: &str) -> Result<Option<Vec<ValueId>>, Stop> {
+/// `written`: a file the caller knows the job writes (its own node's).
+pub(crate) fn run_args(
+    cx: &mut Ctx<'_>,
+    output: &str,
+    written: Option<&str>,
+) -> Result<Option<Vec<ValueId>>, Stop> {
     let v = cx.values();
     for (t, input) in claims(output) {
         // (a job that writes the input defines its size, the files'
         // node; read either way, so this runs again once it does)
-        if crate::ops::lb_read(cx, size_field(v, &input))?.is_none() {
+        if written != Some(input.as_str())
+            && crate::ops::lb_read(cx, size_field(v, &input))?.is_none()
+        {
             continue;
         }
         // (a glossary: run only where its style is there, the job's
         // `\makeglossaries` wrote it or the document's directory has it)
         if let Some((glo, log, ist)) = glossary(output).filter(|g| g.0 == input) {
-            if look_up(cx, &Need::File(ist.clone()))?.is_none() {
+            if look_up(cx, &Need::File(ist.clone()), false)?.is_none() {
                 return Ok(None);
             }
             let args = ["-s", &ist, "-t", &log, "-o", output, &glo].map(str::to_owned);
@@ -963,6 +995,12 @@ impl Operation for ToolNode {
             return Ok(ValueId::UNIT);
         };
         let (out, input) = (str_of(v, out), str_of(v, input));
+        // (at the committed frontier only, as a shell command: the input's
+        // stream before here is then the pass's, not a guess. Run on each
+        // guess, amsldoc's makeindex node ran again at every page's
+        // finisher that wrote `\index` entries before it, 20 runs and
+        // 162 ms for a paragraph added at -j8)
+        cx.wait_settled()?;
         let acc = cx.fold(crate::run::stream_bucket(v, &input), None, None)?;
         let text = crate::api::written_texts(v, Some(acc))
             .into_iter()
