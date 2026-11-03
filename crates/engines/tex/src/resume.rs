@@ -36,6 +36,20 @@ use crate::val::{int_of, list_of};
 
 /// The commands between two checkpoints of a run (`observe`:
 /// `PHITEX_CK_EVERY`, for the tests, another number).
+/// How many commands a checkpoint's parts' length in entries buys: the
+/// next is due that many times its length after the last (the run's
+/// start for the first), at least [`every`] (`PHITEX_CK_SPACE`, the
+/// experiment's).
+fn space() -> u64 {
+    static K: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *K.get_or_init(|| {
+        std::env::var("PHITEX_CK_SPACE")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(4)
+    })
+}
+
 fn every() -> u64 {
     crate::exec::obs_str!("PHITEX_CK_EVERY")
         .and_then(|x| x.parse().ok())
@@ -58,6 +72,11 @@ pub(crate) struct Checkpoints {
     /// `PHITEX_CK_WHY` (observe): why no checkpoint was taken where one
     /// was due, by reason, the commands it was refused at.
     why: Vec<(String, u64)>,
+    /// The command count at the last one taken (the run's start before
+    /// the first).
+    last: u64,
+    /// The encodings its checkpoints made, for the next ones.
+    memo: crate::state::CkMemo,
 }
 
 /// The paragraph's mode (tex.web's `hmode`, unrestricted).
@@ -118,9 +137,11 @@ impl Run<'_, '_> {
         }
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
+            last: self.cmds,
             taken,
             fresh: Vec::new(),
             why: Vec::new(),
+            memo: crate::state::CkMemo::default(),
         }));
     }
 
@@ -149,6 +170,18 @@ impl Run<'_, '_> {
             return Ok(());
         };
         if self.cmds < c.next {
+            return Ok(());
+        }
+        // (the first too after as many commands as its table's length
+        // buys, `space`: a short run takes none, its next run is short)
+        let need = c.last
+            + space()
+                * (self.st.base_len() as u64
+                    + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>());
+        if self.cmds < need {
+            if let Some(c) = self.ck.as_mut() {
+                c.next = need;
+            }
             return Ok(());
         }
         // (inside a conditional too: the continuation carries the
@@ -444,7 +477,8 @@ impl Run<'_, '_> {
             + self.st.base_len() as u64
             + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
         if let Some(c) = self.ck.as_mut() {
-            c.next = self.cmds + every().max(4 * spacing);
+            c.next = self.cmds + every().max(space() * spacing);
+            c.last = self.cmds;
         }
         if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
             eprintln!(
@@ -479,7 +513,15 @@ impl Run<'_, '_> {
         }
         // (the table at the run's base level: what it defined and stepped;
         // none where a group of its own saved a value)
-        let Some(base) = self.st.base_of(v) else {
+        // (the encodings made for this run's checkpoints before: most of
+        // the table is as it was at the last one)
+        let mut memo = self.ck.as_mut().map(|c| std::mem::take(&mut c.memo)).unwrap_or_default();
+        let base = self.st.base_of(v, &mut memo);
+        let base = base.map(|b| b.to_value(v, &mut |l| self.loc_field(l), &mut memo));
+        if let Some(c) = self.ck.as_mut() {
+            c.memo = memo;
+        }
+        let Some(base) = base else {
             if crate::exec::obs_flag!("PHITEX_CK_WHY") {
                 self.ck_census("no base table".to_owned());
             }
@@ -493,7 +535,6 @@ impl Run<'_, '_> {
             }
             return Ok(());
         };
-        let base = base.to_value(v, &mut |l| self.loc_field(l));
         if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
             eprintln!("ck-part base {}", v.payload_bytes().saturating_sub(bytes0));
         }
@@ -1320,9 +1361,11 @@ impl Run<'_, '_> {
         // (the checkpoints up to this one stand for the next run)
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
+            last: self.cmds,
             taken: cks[..=k].to_vec(),
             fresh: Vec::new(),
             why: Vec::new(),
+            memo: crate::state::CkMemo::default(),
         }));
         Ok(true)
     }

@@ -1329,6 +1329,37 @@ impl State {
         }
     }
 
+    /// [`State::encode`], a macro's or a token list's value taken from
+    /// `memo` where the same body was encoded before.
+    fn encode_memo(&self, e: &Entry, v: &Values, memo: &mut CkMemo) -> Option<ValueId> {
+        if e.flags & HAS_ID != 0 || e.kind == K_RAW {
+            return e.id;
+        }
+        match e.kind {
+            K_MACRO => {
+                let m = &self.macros[e.payload as usize];
+                let k = Rc::as_ptr(m) as usize;
+                if let Some(&(_, x)) = memo.macros.get(&k) {
+                    return Some(x);
+                }
+                let x = Mean::Macro(m.clone()).encode(v);
+                memo.macros.insert(k, (m.clone(), x));
+                Some(x)
+            }
+            K_TOKS => {
+                let t = &self.toks[e.payload as usize];
+                let k = Rc::as_ptr(t).cast::<Tok>() as usize;
+                if let Some(&(_, x)) = memo.toks.get(&k) {
+                    return Some(x);
+                }
+                let x = crate::val::toks_value(v, t);
+                memo.toks.insert(k, (t.clone(), x));
+                Some(x)
+            }
+            _ => self.encode(e, v),
+        }
+    }
+
     /// The meaning a meaning entry holds (a macro's body shared).
     fn mean_of_entry(&self, e: &Entry) -> Mean {
         match e.kind {
@@ -2772,6 +2803,19 @@ pub(crate) struct Base {
     touched: Vec<Loc>,
 }
 
+/// What a run's checkpoints made before, kept for its next ones
+/// ([`State::base_of`], [`Base::to_value`]): a macro's and a token list's
+/// value by the body it encodes (held, so its address names no other),
+/// and each location's slot value by the slot it encodes. A run's tables
+/// change by a few locations between two checkpoints: each made anew
+/// cost Grail and amsldoc 5-9% of a cold build (callgrind, `ck_take`).
+#[derive(Default)]
+pub(crate) struct CkMemo {
+    macros: FxHashMap<usize, (Rc<crate::val::Macro>, ValueId)>,
+    toks: FxHashMap<usize, (Rc<[Tok]>, ValueId)>,
+    slots: FxHashMap<Loc, (BaseSlot, ValueId)>,
+}
+
 /// A save of [`Base`]'s.
 struct BaseSave {
     loc: Loc,
@@ -2787,6 +2831,7 @@ struct BaseSave {
 #[allow(clippy::option_option)]
 type BaseCand = (Loc, Option<Option<ValueId>>);
 
+#[derive(Clone, PartialEq)]
 struct BaseSlot {
     loc: Loc,
     cur: Option<ValueId>,
@@ -2803,6 +2848,7 @@ struct BaseSlot {
 }
 
 #[allow(clippy::option_option)]
+#[derive(Clone, PartialEq)]
 struct BaseMeta {
     /// Its index among the table's metas: their order is the order of
     /// the run's first definitions, which a cut's check data keeps
@@ -2823,7 +2869,7 @@ impl State {
     /// defined, stepped, holds a symbol or a value given in place of the
     /// engine's at, or a save marks; with the save stack of the groups
     /// open. None while a command's changes may be undone.
-    pub(crate) fn base_of(&self, v: &Values) -> Option<Base> {
+    pub(crate) fn base_of(&self, v: &Values, memo: &mut CkMemo) -> Option<Base> {
         if self.undo.is_some() {
             return None;
         }
@@ -2850,14 +2896,14 @@ impl State {
                     def_gid: s.def_gid,
                     cand_noted: s.cand_noted,
                     eng: m.eng,
-                    publ: m.publ.as_ref().map(|(e, l)| (self.encode(e, v), *l)),
+                    publ: m.publ.as_ref().map(|(e, l)| (self.encode_memo(e, v, memo), *l)),
                     ldef_stamp: m.ldef_stamp,
                     ldef_local: m.ldef_local,
                     ldef_gid: m.ldef_gid,
                 });
             slots.push(BaseSlot {
                 loc: l,
-                cur: self.encode(&s.e, v),
+                cur: self.encode_memo(&s.e, v, memo),
                 flags: s.e.flags,
                 save: (s.save_gid, s.save_stamp, s.ginert),
                 map: s.map,
@@ -2875,7 +2921,7 @@ impl State {
                 (
                     *st,
                     xs.iter()
-                        .map(|(l, e)| (*l, (e.flags & LOADED != 0).then(|| self.encode(e, v))))
+                        .map(|(l, e)| (*l, (e.flags & LOADED != 0).then(|| self.encode_memo(e, v, memo))))
                         .collect(),
                 )
             })
@@ -2886,7 +2932,7 @@ impl State {
             extra: self
                 .scope_extra
                 .iter()
-                .map(|(l, e, at)| (*l, self.encode(e, v), *at))
+                .map(|(l, e, at)| (*l, self.encode_memo(e, v, memo), *at))
                 .collect(),
             defined: self.defined.clone(),
             font_slow: self.font_slow.iter().copied().collect(),
@@ -2898,7 +2944,7 @@ impl State {
                 .iter()
                 .map(|s| BaseSave {
                     loc: s.loc,
-                    prev: self.encode(&s.prev, v),
+                    prev: self.encode_memo(&s.prev, v, memo),
                     flags: s.prev.flags,
                     gid: s.gid,
                     stamp: s.stamp,
@@ -3111,7 +3157,12 @@ impl BaseSlot {
 impl Base {
     /// As a value, each location as its field (`field`).
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn to_value(&self, v: &Values, field: &mut dyn FnMut(Loc) -> Field) -> ValueId {
+    pub(crate) fn to_value(
+        &self,
+        v: &Values,
+        field: &mut dyn FnMut(Loc) -> Field,
+        memo: &mut CkMemo,
+    ) -> ValueId {
         let opt = |x: Option<ValueId>| v.list(x.into_iter().collect());
         let at = |l: Locality| {
             v.int(match l {
@@ -3126,6 +3177,11 @@ impl Base {
             .slots
             .iter()
             .map(|s| {
+                if let Some((was, x)) = memo.slots.get(&s.loc)
+                    && was == s
+                {
+                    return *x;
+                }
                 let meta = s.meta.as_ref().map_or_else(
                     || v.list(Vec::new()),
                     |m| {
@@ -3147,7 +3203,7 @@ impl Base {
                         ])
                     },
                 );
-                v.list(vec![
+                let x = v.list(vec![
                     field(s.loc).0,
                     opt(s.cur),
                     v.int(i64::from(s.flags)),
@@ -3161,7 +3217,9 @@ impl Base {
                     opt(s.lazy),
                     v.int(i64::from(s.sym)),
                     meta,
-                ])
+                ]);
+                memo.slots.insert(s.loc, (s.clone(), x));
+                x
             })
             .collect();
         let extra = self
