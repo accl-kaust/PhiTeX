@@ -955,3 +955,15 @@ fn text_ends_without_end_xe() {
         );
     }
 }
+
+/// TeX Live manual nddiss (pdflatex, pdfx): `\pdfomitcharset`,
+/// `\pdfomitinfodict` and `\pdfomitprocset` were primitives the writer
+/// never read: every subset Type 1 font had its `/CharSet`, the file its
+/// Info dictionary and each page its `/ProcSet`. The first two are read
+/// where pdfTeX writes the fonts and the Info dictionary (the end), the
+/// third with each page's parameters. At -j1 and -j4 (oracle: pdftex in
+/// the CI image, mc 79143; the base differs).
+#[test]
+fn pdf_omit_params() {
+    check_threads("pdf_omit_params", "pdf");
+}

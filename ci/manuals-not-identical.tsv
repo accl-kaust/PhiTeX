@@ -21,7 +21,6 @@ latex_minutes_Protokol	differs: page 3: obj 393 (Catalog) line 4: oracle "/PageL
 latex_moderncv_manual_moderncv_userguide	differs: page 1: obj 650 (Catalog) line 5: oracle "/PageMode /UseNone", phitex "/PageLabels <<"
 latex_montex_montex	error: error: Font T1/cmss/sbc/n/10.95=ecssdc10 at 10.95pt not loadable: Metric (TFM) file not found
 latex_moreenum_moreenum-doc	differs: page 2: obj 13 (page 2, untyped) line 307: oracle "/F50 11.9552 Tf 86.365 414.492 Td [(The)]TJ/F59 10.9091 Tf [-224(\\pro", phitex "/F50 11.9552 Tf 86.365 414.492 Td [(The)]TJ/F59 10.9091 Tf [-224(\\pro"
-latex_nddiss_template	differs: obj 26 (FontDescriptor) line 4: oracle "/Descent -194", phitex "/CharSet (/A/B/C/D/E/F/G/H/I/J/K/L/N/O/P/R/S/T/U/W/Y/a/b/c/comma/d/e/f"
 latex_openmoji_openmoji-doc	error: killed (-9)
 latex_optikz_optikz_doc	differs: page 1: obj 44 (page 1, untyped) line 24: oracle "1 0 0 1 264.254 368.807 cm", phitex "1 0 0 1 265.491 368.807 cm"
 latex_pagecolor_pagecolor-example	differs: page 8: obj 41 (page 8, untyped) line 17: oracle "/F45 9.9626 Tf 14.944 -14.944 Td [(Lorem)-287(ipsum)-286(dol)-1(or)-28", phitex "/F45 9.9626 Tf 14.944 -14.944 Td [(Lorem)-287(ipsum)-286(dol)-1(or)-28"

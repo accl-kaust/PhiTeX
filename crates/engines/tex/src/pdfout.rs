@@ -2197,6 +2197,7 @@ pub(crate) fn page_params(v: &Values, p: &mut PdfParams, xs: &[ValueId]) {
     p.obj_compress_level = param(v, xs, 13);
     p.gen_tounicode = param(v, xs, 14);
     p.pk_resolution = param(v, xs, 18);
+    p.omit_procset = param(v, xs, 19);
     let text = |k: usize| {
         xs.get(k)
             .map(|&t| bytes_of(&str_of(v, t)))
@@ -3914,6 +3915,10 @@ pub(crate) struct EndFields {
     /// ([`FontNums::seed`]).
     pub seed: Vec<(FontId, String, i32)>,
     pub info_omit_date: i32,
+    /// `\pdfomitcharset` and `\pdfomitinfodict`, read where pdfTeX
+    /// writes the fonts and the Info dictionary: at the end.
+    pub omit_charset: i32,
+    pub omit_info_dict: i32,
     pub suppress_ptex_info: i32,
     /// `\pdfptexuseunderscore`: the Info dictionary's `/PTEX_Fullbanner`
     /// for `/PTEX.Fullbanner`.
@@ -4989,6 +4994,8 @@ fn link(
         bytes.push(c);
     }
     st.params_mut().info_omit_date = f.info_omit_date;
+    st.params_mut().omit_charset = f.omit_charset;
+    st.params_mut().omit_info_dict = f.omit_info_dict;
     st.params_mut().suppress_ptex_info = f.suppress_ptex_info;
     st.params_mut().ptex_use_underscore = f.ptex_use_underscore;
     st.params_mut().pk_resolution = f.pk_resolution;
