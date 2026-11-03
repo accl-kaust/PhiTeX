@@ -19,7 +19,6 @@ latex_pfdicons_pfdicons-doc	differs: page 33: obj 744 (page 33, untyped) line 62
 latex_repeatindex_testrepeatindex	differs: page 2: obj 30 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 4 vs 3)
 latex_semioneside_example	differs: page 2: obj 28 (Catalog) line 6: oracle "<end>", phitex "<end>" (pages 5 vs 3)
 latex_teubner_teubner-doc	differs: page 1: obj 12 (Pages) line 15: oracle "<end>", phitex "<end>"
-latex_texproposal_texproposal	differs: page 1: obj 1 (Catalog) line 14: oracle "1", phitex "2" (pages 27 vs 29)
 latex_tikz-mirror-lens_tikz-mirror-lens	differs: obj 1572 (untyped) line 1: oracle "[", phitex "<<" (not the same in each run: the first sweep had -j1 timeout, -j4 differs)
 latex_typog_typog-example	error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes)
 latex_typogrid_testtypogrid	differs: page 2: obj 12 (page 2, untyped) line 143: oracle "0 0 69.449 1.993 re f", phitex "0 0 104.173 1.993 re f"
