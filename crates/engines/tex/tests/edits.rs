@@ -1133,3 +1133,61 @@ fn a_box_over_paragraphs_and_a_file_goes_on_from_a_checkpoint_inside() {
         );
     }
 }
+
+/// A run asked again for a read near its end goes on from a checkpoint
+/// taken inside a conditional of its own, open from near its start to
+/// past the read (`\ifnum ... \else ... \fi` around the box's material,
+/// in a group and a file too): the conditionals open there come back
+/// with the checkpoint, so the `\else` after the read skips to its `\fi`
+/// as in a whole run, and the output and log are a cold build's, at 1
+/// and 8 threads. Checkpoints were refused while a conditional of the
+/// run's own was open: Grail's figures (TikZ, inside pgf's
+/// conditionals) went on from their first checkpoint only, 2 s of a
+/// \cite edit's figure rerun.
+#[test]
+fn a_run_goes_on_from_a_checkpoint_inside_its_own_conditional() {
+    use std::fmt::Write as _;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-in-if");
+    let _ = std::fs::create_dir_all(&dir);
+    let words = |n: usize, tag: &str| {
+        let mut s = String::new();
+        for k in 0..n {
+            let _ = write!(s, "{tag}{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            s.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        s
+    };
+    std::fs::write(dir.join("inner.tex"), words(900, "f")).unwrap();
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{\\begingroup\\count1=7 \\ifnum\\count1=7 {}\n\n{}\n\n\\ifodd\\count1 \\input inner\n\n{}\n\nend \\late.\\else odd never\\fi\\else never\\fi\\endgroup}}\n\\box1\n\n\\bye\n",
+            words(700, "w"),
+            words(700, "v"),
+            words(900, "u")
+        )
+    };
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./ck.tex", "ck", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+            let text = doc(m);
+            b.edit(&text);
+            let cold = common::build(opts(), Some(&prelude), &text);
+            let (out, log) = b.output();
+            let (cold_out, cold_log) = cold.output();
+            assert!(
+                common::first_difference(&out, &cold_out).is_none(),
+                "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
+            );
+            assert_eq!(log, cold_log, "{t} threads, edit {k}: the log is the cold build's");
+            assert!(
+                b.stats.resumed_at_mark > 0,
+                "{t} threads, edit {k}: the box's run went on from a checkpoint inside its conditionals"
+            );
+        }
+    }
+}

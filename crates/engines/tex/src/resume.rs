@@ -51,9 +51,6 @@ pub(crate) struct Checkpoints {
     /// Those taken (each [`Run::ck_take`]'s value), in order: a resumed
     /// run's begin with those before the one it went on from.
     taken: Vec<ValueId>,
-    /// The conditionals the run began inside (`carried_conds`): a
-    /// checkpoint has no conditional of its own open.
-    conds0: Vec<u8>,
     /// Of those taken by this run, by index in `taken`: the reads
     /// `unread` had taken out then ([`phitex_defuse::Ctx::unread_count`]),
     /// to make their count of reads the record's at the park.
@@ -122,7 +119,6 @@ impl Run<'_, '_> {
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
             taken,
-            conds0: self.conds.clone(),
             fresh: Vec::new(),
             why: Vec::new(),
         }));
@@ -155,12 +151,10 @@ impl Run<'_, '_> {
         if self.cmds < c.next {
             return Ok(());
         }
-        if self.conds != c.conds0 {
-            if crate::exec::obs_flag!("PHITEX_CK_WHY") {
-                self.ck_census("a conditional open".to_owned());
-            }
-            return Ok(());
-        }
+        // (inside a conditional too: the continuation carries the
+        // conditionals open, `conds` and `if_codes`, and whether the run
+        // read those a node before it left, as a cut's does; a test's
+        // expansion is inside one command, never at a checkpoint)
         if crate::exec::obs_flag!("PHITEX_CK_WHY") && self.ck_where().is_none() {
             let why = self.ck_refusal();
             self.ck_census(why);
@@ -255,7 +249,20 @@ impl Run<'_, '_> {
             ),
             (self.nest.iter().any(|l| l.group != 0), "inside a group"),
         ];
-        let all: Vec<&str> = checks.iter().filter(|c| c.0).map(|c| c.1).collect();
+        let mut all: Vec<&str> = checks.iter().filter(|c| c.0).map(|c| c.1).collect();
+        // (and those of a checkpoint anywhere, when none at the line)
+        if self.ck_where_line().is_none() {
+            let anywhere: [(bool, &'static str); 4] = [
+                (self.aopen != 0 || self.astate.is_some(), "an alignment open"),
+                (self.read_back_at.is_some(), "a read-back level"),
+                (self.pull_orig.iter().any(Option::is_some), "a pulled line kept"),
+                (
+                    self.pull_at.len() != self.pulled || self.pull_box.len() != self.pulled,
+                    "pulled places unknown",
+                ),
+            ];
+            all.extend(anywhere.iter().filter(|c| c.0).map(|c| c.1));
+        }
         if all.is_empty() {
             "the line, the base table or locals".to_owned()
         } else {
@@ -473,6 +480,9 @@ impl Run<'_, '_> {
         // (the table at the run's base level: what it defined and stepped;
         // none where a group of its own saved a value)
         let Some(base) = self.st.base_of(v) else {
+            if crate::exec::obs_flag!("PHITEX_CK_WHY") {
+                self.ck_census("no base table".to_owned());
+            }
             if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
                 eprintln!(
                     "ck: node {} at command {}: no base table ({})",
@@ -492,6 +502,9 @@ impl Run<'_, '_> {
             eprintln!("ck-part cont {}", v.payload_bytes().saturating_sub(bytes0));
         }
         if !locals.is_empty() {
+            if crate::exec::obs_flag!("PHITEX_CK_WHY") {
+                self.ck_census("group-local bindings".to_owned());
+            }
             if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
                 eprintln!(
                     "ck: node {} at command {}: {} group-local bindings",
@@ -1305,11 +1318,9 @@ impl Run<'_, '_> {
             _ => self.cx.goes_on_from_edit(),
         }
         // (the checkpoints up to this one stand for the next run)
-        let conds0 = self.conds.clone();
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
             taken: cks[..=k].to_vec(),
-            conds0,
             fresh: Vec::new(),
             why: Vec::new(),
         }));
