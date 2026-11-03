@@ -69,8 +69,7 @@ fn a_fatal_error_ends_the_job_on_eight_threads() {
     let b = build(8);
     assert!(b.fatal(), "{:?}", b.stats.runs_by_op);
     assert_eq!(
-        b.stats.starts_after_fatal,
-        0,
+        b.stats.starts_after_fatal, 0,
         "no piece after the error begins once its run claimed the rest: {:?}",
         b.stats.runs_by_op
     );
