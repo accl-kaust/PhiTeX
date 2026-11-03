@@ -3046,13 +3046,14 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// The page parameters in force (§980), as a `T_PAGE_PARAMS` marker:
-    /// `[tag, vsize, maxdepth, topskip, holdinginserts]`.
+    /// `[tag, vsize, maxdepth, topskip, holdinginserts, savingvdiscards]`.
     pub(crate) fn page_params_marker(&mut self) -> R<ValueId> {
         let v = self.v;
         let vsize = self.ipar(Par::vsize)?;
         let maxdepth = self.ipar(Par::maxdepth)?;
         let topskip = self.gpar(Par::topskip)?;
         let holding = self.ipar(Par::holdinginserts)?;
+        let saving = self.ipar(Par::savingvdiscards)?;
         if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
             eprintln!(
                 "page-trace: node {} op {:?} params marker vsize {vsize} topskip {}",
@@ -3067,6 +3068,7 @@ impl<'c, 'a> Run<'c, 'a> {
             v.int(i64::from(maxdepth)),
             crate::val::glue_value(v, &topskip),
             v.int(i64::from(holding)),
+            v.int(i64::from(saving)),
         ]))
     }
 

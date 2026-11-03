@@ -2375,6 +2375,7 @@ impl Enc<'_> {
                 self.i(i64::from(q.max_depth));
                 self.glue(&q.top_skip);
                 self.i(i64::from(q.holding_inserts));
+                self.i(i64::from(q.saving_vdiscards));
             }
             None => self.i(0),
         }
@@ -2682,7 +2683,7 @@ impl Dec<'_> {
             max_depth: self.i32(),
             top_skip: self.glue(),
             holding_inserts: self.i32(),
-            saving_vdiscards: false,
+            saving_vdiscards: self.i32() != 0,
         })
     }
     fn class(&mut self) -> (u16, InsertClass) {

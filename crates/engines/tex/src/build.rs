@@ -4107,7 +4107,18 @@ impl Run<'_, '_> {
         let stk = self.gpar(Par::splittopskip)?;
         let smd = self.ipar(Par::splitmaxdepth)?;
         let pp = self.pack_params(false)?;
-        let r = phitex_typeset::page::vsplit(bx.list, h, smd, stk, false, &pp);
+        let saving = self.ipar(Par::savingvdiscards)? > 0;
+        let r = phitex_typeset::page::vsplit(bx.list, h, smd, stk, saving, &pp);
+        // (e-TeX §977: `split_disc` holds this split's, the last one's gone)
+        if saving
+            || self
+                .get(crate::etex::SPLIT_DISCARDS)?
+                .is_some_and(|x| !list_of(v, x).is_empty())
+        {
+            let d = r.discards.iter().map(|n| nodes::encode(v, n, &side));
+            let d = v.list(d.collect());
+            self.set(crate::etex::SPLIT_DISCARDS, d, true);
+        }
         // (§977's `vpackage(p,h,exactly,split_max_depth)`, after the
         // rest's `vpack`: its badness is `\badness`, its report the log's,
         // §674-§678)

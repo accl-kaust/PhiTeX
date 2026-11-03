@@ -847,6 +847,7 @@ pub(crate) fn params_marker(v: &Values, p: &PageParams) -> ValueId {
         v.int(i64::from(p.max_depth)),
         glue_value(v, &p.top_skip),
         v.int(i64::from(p.holding_inserts)),
+        v.int(i64::from(p.saving_vdiscards)),
     ])
 }
 
@@ -1566,7 +1567,8 @@ pub(crate) fn with_text(v: &Values, mut p: PageParams, ch: &[(usize, ValueId)]) 
             0 => p.vsize = crate::val::i32_of(v, Some(x)),
             1 => p.max_depth = crate::val::i32_of(v, Some(x)),
             2 => p.top_skip = glue_of(v, Some(x)),
-            _ => p.holding_inserts = crate::val::i32_of(v, Some(x)),
+            3 => p.holding_inserts = crate::val::i32_of(v, Some(x)),
+            _ => p.saving_vdiscards = crate::val::i32_of(v, Some(x)) > 0,
         }
     }
     p
@@ -1581,7 +1583,7 @@ pub(crate) fn params_of(v: &Values, m: ValueId) -> PageParams {
         max_depth: i32::try_from(g(2)).unwrap_or(0),
         top_skip: glue_of(v, xs.get(3).copied()),
         holding_inserts: i32::try_from(g(4)).unwrap_or(0),
-        saving_vdiscards: false,
+        saving_vdiscards: g(5) > 0,
     }
 }
 
@@ -1627,12 +1629,18 @@ pub(crate) fn page_data(v: &Values, f: &Fired, side: &Side) -> ValueId {
         .iter()
         .map(|n| nodes::encode(v, n, side))
         .collect();
+    let discards: Vec<ValueId> = f
+        .discards
+        .iter()
+        .map(|n| nodes::encode(v, n, side))
+        .collect();
     v.list(vec![
         b255,
         v.list(inserts),
         v.list(marks),
         v.list(held),
         v.int(i64::from(f.output_penalty)),
+        v.list(discards),
     ])
 }
 
@@ -1814,7 +1822,7 @@ impl Run<'_, '_> {
             max_depth: int(xs[1]),
             top_skip: glue_of(v, xs[2]),
             holding_inserts: int(xs[3]),
-            saving_vdiscards: false,
+            saving_vdiscards: int(xs[4]) > 0,
         })
     }
 

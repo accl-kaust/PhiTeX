@@ -217,6 +217,7 @@ params!(
     vsize,
     widowpenalty,
     xspaceskip,
+    savingvdiscards,
 );
 
 /// The fixed locations of a run's state table ([`crate::state`]):

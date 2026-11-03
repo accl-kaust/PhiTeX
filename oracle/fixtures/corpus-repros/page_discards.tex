@@ -1,0 +1,29 @@
+% e-TeX's \pagediscards and \splitdiscards: an output routine reads what the
+% page builder discarded from the top of the page (flushend measures it to
+% put back the glue between its columns), a \vsplit's discards likewise.
+\documentclass{article}
+\savingvdiscards=1
+\newbox\disc
+\output={%
+  \setbox\disc=\vbox{\pagediscards}%
+  \setbox255=\vbox{\hbox{Page discards: \the\ht\disc}\unvbox255}%
+  \shipout\box255
+}
+\vsize=100pt
+\begin{document}
+\newbox\col
+\setbox\col=\vbox{\hbox{one}\vskip 3pt plus 1pt\penalty5\kern 2pt\hbox{two}}
+\setbox0=\vsplit\col to 8pt
+\setbox\disc=\vbox{\splitdiscards}
+Split discards: \the\ht\disc.\par
+\setbox\disc=\vbox{\splitdiscards}
+Taken: \the\ht\disc.\par
+\newcount\n
+\loop\ifnum\n<30 \advance\n 1
+  Paragraph \the\n\ of a few words.\par
+  \ifnum\n=6 \vskip 7pt\penalty-10000 \vskip 11pt plus 2pt\kern 5pt\fi
+\repeat
+\savingvdiscards=0
+\penalty-10000 \vskip 13pt
+After saving stopped.
+\end{document}
