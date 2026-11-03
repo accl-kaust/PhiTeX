@@ -501,6 +501,13 @@ Text between.
                     .any(|x| x.starts_with("exec") && x.contains("\\start")),
                 "-j{threads} {n}: the reader of the .aux did not run again: {r:?}"
             );
+            // (the file's node runs once: it reads no definition of its
+            // own file's text or size, which it makes itself)
+            assert!(
+                !r.iter().any(|x| x.starts_with("files Changed wsize:")
+                    || x.starts_with("files Changed wtext:")),
+                "-j{threads} {n}: the .aux's node ran again on its own text: {r:?}"
+            );
             // (the rest is a resume reading `cont:<reader>:<k>`)
             assert!(
                 !r.iter().any(|x| x.contains("Changed cont:")),
