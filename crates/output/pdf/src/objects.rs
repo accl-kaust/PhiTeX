@@ -136,6 +136,13 @@ impl PdfState {
         (after - streams.len(), in_streams)
     }
 
+    /// Whether this writer wrote the document's transparency group (a
+    /// PNG's alpha channel) into an object stream.
+    #[must_use]
+    pub fn png_group_in_stream(&self) -> bool {
+        self.png_group_written && self.objs[self.png_group].os_idx >= 0
+    }
+
     pub(crate) fn sys_obj_ptr(&self) -> usize {
         self.objs.len() - 1
     }
