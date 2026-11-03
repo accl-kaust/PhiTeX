@@ -58,16 +58,20 @@ fn a_fatal_error_ends_the_job_on_one_thread() {
     );
 }
 
-/// Eight threads: pieces that had started before the fatal run committed
-/// finish, nothing else runs; far fewer than the paragraphs, and no page.
+/// Eight threads: pieces that had begun before the fatal run claimed the
+/// rest of the input finish, none after it begins once it has, and no
+/// page is finished. (How many had begun is the scheduler's: the other
+/// workers run ahead while the first runs the pieces before the error,
+/// 34 to 222 runs at two CPUs, mc 79080, 79123; a bound on that count
+/// failed on a loaded runner.)
 #[test]
 fn a_fatal_error_ends_the_job_on_eight_threads() {
     let b = build(8);
     assert!(b.fatal(), "{:?}", b.stats.runs_by_op);
-    let (exec, live) = (common::runs_of(&b, "exec"), b.nodes_by_op("exec") as u64);
-    assert!(
-        exec < live / 2,
-        "at most the pieces that had started: {exec} runs of {live} pieces, {:?}",
+    assert_eq!(
+        b.stats.starts_after_fatal,
+        0,
+        "no piece after the error begins once its run claimed the rest: {:?}",
         b.stats.runs_by_op
     );
     assert_eq!(

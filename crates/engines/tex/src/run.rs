@@ -188,6 +188,11 @@ pub(crate) struct Ops {
     /// state, that run's products standing (`crate::resume`'s cutoff;
     /// `Stats::cut_offs`).
     pub cut_offs: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The node whose run claimed the rest of the input at a fatal error
+    /// ([`Run::fatal_hit`]), and the runs of text pieces after it begun
+    /// since: none begins once it has, whatever had begun before (§93;
+    /// `Stats::starts_after_fatal`).
+    pub fatal_starts: std::sync::Arc<std::sync::Mutex<(Option<phitex_defuse::NodeId>, u64)>>,
     /// The siblings runs read on into over all runs (`Run::pull`;
     /// `Stats::siblings_pulled`).
     pub siblings_pulled: std::sync::Arc<std::sync::atomic::AtomicU64>,
@@ -5506,6 +5511,11 @@ impl<'c, 'a> Run<'c, 'a> {
         // included files' pieces among it, is dead input)
         if self.fatal_hit {
             self.cx.claim_rest();
+            self.ops
+                .fatal_starts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0 = Some(self.cx.node());
         } else {
             self.cx.claim(n);
         }

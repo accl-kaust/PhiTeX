@@ -112,6 +112,15 @@ pub(crate) fn run_node(
     } else {
         None
     };
+    if cx.op() == o.exec {
+        let mut f = o
+            .fatal_starts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if f.0.is_some_and(|n| cx.before(n, cx.node())) {
+            f.1 += 1;
+        }
+    }
     let t_new = std::time::Instant::now();
     let mut r = Run::new(cx, o);
     let t_new = t_new.elapsed();
