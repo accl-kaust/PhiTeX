@@ -2084,6 +2084,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // unseen. One that took none clears that.)
     let mut causes: Vec<Cause> = Vec::new();
     let mut stale = false;
+    if let Some(i) = refuted
+        && refute_log()
+        && let Some(f) = rec.reads[i].kind.field()
+    {
+        // (the commit's own check: the read's old answer and its new one)
+        let r = &rec.reads[i];
+        let now = read::answer_in(eng, node, &r.kind, r.path, &mut read::FoldMemo::new());
+        note_refute(eng, f, node.id, None, r.seen, now);
+    }
     if let Some(i) = refuted {
         // (a range from a node, or a read at a node: the change lies
         // there; one from the unit's start names no node a run could go
@@ -4392,7 +4401,19 @@ pub(crate) fn relocate(
         if m.state() == State::Clean && m.cas_state(State::Clean, State::Dirty) {
             enqueue(eng, w, m, wake);
         } else {
+            // (one queued already is queued again at its new label: its
+            // entry keyed by the old label ran it after the nodes between
+            // the two, each reading its definitions before it ran there;
+            // the stale entry finds it run, `sched::work`. Grail's cold
+            // build at -j1: a page's routine moved to the piece it now
+            // fires in ran ~170 ms after the pieces past that one, which
+            // held at the frontier on its definitions, 331 holds in a
+            // pass, mc 79156)
+            let queued = m.state() == State::Dirty;
             mark_dirty(eng, w, m, wake);
+            if queued {
+                crate::sched::requeue(eng, w, m);
+            }
         }
     }
     if crate::obs::enabled() && crate::sched::wake_log() {
@@ -4609,18 +4630,25 @@ fn land(
         if b.closes > 0 || b.opens > 0 {
             file_brackets(eng, &mut inner, m, p, b);
         }
-        for d in &defs {
+        // (at the depths its commit filed them at, `filed_defs`: filed at
+        // depth 0, a global definition by a node inside a scope was seen
+        // inside that scope alone, and a reader past the scope's close met
+        // the definition before it, ran, and ran again once the moved node
+        // had: Grail's float box `\bx@M`, voided by the routine that
+        // placed the float, read again by every later routine as the
+        // float's box when that routine moved, mc 79156)
+        for d in filed_defs(&eng.values, &defs, &b) {
             let mp = inner.defs.entry(d.f).or_default();
             let first = mp.is_empty();
             mp.insert(
                 p,
                 Def {
-                    depth: 0,
+                    depth: d.depth,
                     value: d.value,
                     by: m.id,
                     rel: d.rel,
                     provisional: true,
-                    multi: false,
+                    multi: d.multi,
                 },
             );
             if first {

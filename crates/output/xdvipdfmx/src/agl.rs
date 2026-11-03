@@ -36,8 +36,9 @@ pub struct AglName {
 /// agl.c's statics.
 #[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
-    /// `aglmap`.
-    pub aglmap: HtTable<AglName>,
+    /// `aglmap`: read only once loaded, so shared by a session's
+    /// snapshots (`Session::snapshot`), not copied for each.
+    pub aglmap: alloc::sync::Arc<HtTable<AglName>>,
 }
 
 /// `modifiers` (static; without the C terminator).
@@ -413,7 +414,7 @@ fn put_unicode_glyph(name: &[u8], dst: &mut [u8], dstp: &mut usize) -> i32 {
 impl Dpx {
     /// `agl_init_map`.
     pub fn agl_init_map(&mut self) -> Result<()> {
-        self.agl.aglmap = HtTable::ht_init_table();
+        self.agl.aglmap = alloc::sync::Arc::new(HtTable::ht_init_table());
         self.agl_load_listfile(AGL_EXTRA_LISTFILE, 0)?;
         if self.agl_load_listfile(AGL_PREDEF_LISTFILE, 1)? < 0 {
             warn!("Failed to load AGL file \"pdfglyphlist.txt\"...");
@@ -426,7 +427,7 @@ impl Dpx {
 
     /// `agl_close_map`.
     pub fn agl_close_map(&mut self) {
-        self.agl.aglmap.ht_clear_table();
+        alloc::sync::Arc::make_mut(&mut self.agl.aglmap).ht_clear_table();
     }
 
     /// `agl_load_listfile` (static): the number of entries read, or -1.
@@ -488,8 +489,9 @@ impl Dpx {
             agln.n_components = n_unicodes as i32;
             agln.unicodes[..n_unicodes].copy_from_slice(&unicodes[..n_unicodes]);
 
-            match self.agl.aglmap.ht_lookup_table_mut(&name) {
-                None => self.agl.aglmap.ht_append_table(&name, agln),
+            let map = alloc::sync::Arc::make_mut(&mut self.agl.aglmap);
+            match map.ht_lookup_table_mut(&name) {
+                None => map.ht_append_table(&name, agln),
                 Some(mut duplicate) => {
                     while duplicate.alternate.is_some() {
                         duplicate = duplicate.alternate.as_mut().unwrap();

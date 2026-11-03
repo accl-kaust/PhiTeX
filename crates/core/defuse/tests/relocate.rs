@@ -188,3 +188,191 @@ fn a_relocation_re_asks_the_readers_at_the_old_place() {
     assert_eq!(rep.placements_moved, 1, "{rep:?}");
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[key]`: defines `m` := key globally. Counts its runs.
+struct GMark {
+    runs: AtomicU64,
+}
+
+impl Operation for GMark {
+    fn name(&self) -> &'static str {
+        "gmark"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        let v = cx.values();
+        cx.define_with(v.field("m"), cx.args()[0], phitex_defuse::Locality::Global);
+        Ok(cx.args()[0])
+    }
+}
+
+/// `[open?]`: opens one scope after itself (args `[1]`), or closes one
+/// before itself (`[0]`).
+struct Bracket;
+
+impl Operation for Bracket {
+    fn name(&self) -> &'static str {
+        "bracket"
+    }
+
+    fn effect(&self, args: &[ValueId], v: &Values) -> phitex_defuse::Effect {
+        if v.as_int(args[0]) == Some(1) {
+            phitex_defuse::Effect::Open
+        } else {
+            phitex_defuse::Effect::Close
+        }
+    }
+
+    fn run(&self, _cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A node that defines `m` globally inside a scope, moved within it: a
+/// reader past the scope's close sees its definition at the new place as
+/// at the old, and is not run again. Its definitions were filed at the
+/// new place at depth 0, seen only inside the scope, so the reader was
+/// re-asked into the definition before the scope (none here), ran, and
+/// ran again once the moved node had (Grail: the routine that voids a
+/// float's box moved, every later routine reading the class's box ran
+/// again, mc 79156).
+#[test]
+fn a_global_definition_moved_inside_a_scope_still_reaches_past_its_close() {
+    let e = Engine::new();
+    let v = e.values();
+    let def = e.register(Arc::new(Def));
+    let gm = Arc::new(GMark {
+        runs: AtomicU64::new(0),
+    });
+    let gmark = e.register(gm.clone());
+    let pl = Arc::new(Placer {
+        runs: AtomicU64::new(0),
+        mark: std::sync::Mutex::new(Some(gmark)),
+    });
+    let placer = e.register(pl.clone());
+    let rd = Arc::new(Reader {
+        runs: AtomicU64::new(0),
+    });
+    let reader = e.register(rd.clone());
+    let bracket = e.register(Arc::new(Bracket));
+    let u = e.new_unit();
+    let _open = e.push(u, bracket, vec![v.int(1)]);
+    let a = e.push(u, def, vec![v.field("a").0, v.int(1)]);
+    let b = e.push(u, def, vec![v.field("b").0, v.int(2)]);
+    let p = e.push(u, placer, vec![v.int(i64::try_from(a.raw()).unwrap()), v.int(7)]);
+    let _close = e.push(u, bracket, vec![v.int(0)]);
+    let r = e.push(u, reader, vec![]);
+    let rep = e.evaluate(2).unwrap();
+    assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(7), "{rep:?}");
+    let x1 = e.placed_by(p);
+    let (gm_runs, rd_runs) = (gm.runs.load(Ordering::SeqCst), rd.runs.load(Ordering::SeqCst));
+    // the placer now places X after B, still inside the scope
+    e.replace(p, placer, vec![v.int(i64::try_from(b.raw()).unwrap()), v.int(7)]);
+    let rep = e.evaluate(2).unwrap();
+    assert_eq!(e.placed_by(p), x1, "the same node, relocated: {rep:?}");
+    assert!(e.before(b, x1[0]), "X stands after B now");
+    assert_eq!(rep.placements_moved, 1, "{rep:?}");
+    assert_eq!(gm.runs.load(Ordering::SeqCst), gm_runs + 1, "X ran once more: {rep:?}");
+    assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(7), "{rep:?}");
+    assert_eq!(
+        rd.runs.load(Ordering::SeqCst),
+        rd_runs,
+        "the reader past the scope's close is not run again: {rep:?}"
+    );
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+
+/// `[key]`: reads `a` and defines `m` := it. Counts its runs.
+struct CopyA {
+    runs: AtomicU64,
+}
+
+impl Operation for CopyA {
+    fn name(&self) -> &'static str {
+        "copy"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        let v = cx.values();
+        let a = cx.read(v.field("a"))?.unwrap_or(ValueId::UNIT);
+        cx.define(v.field("m"), a);
+        Ok(a)
+    }
+}
+
+/// `[]`: reads `a`, then `m`, and outputs `m`. Counts its runs.
+struct Reader2 {
+    runs: AtomicU64,
+}
+
+impl Operation for Reader2 {
+    fn name(&self) -> &'static str {
+        "reader2"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        let v = cx.values();
+        cx.read(v.field("a"))?;
+        Ok(cx.read(v.field("m"))?.unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// A node queued to run (its read moved) and then moved before readers
+/// of its definition runs before them, at its new place: queued at its
+/// old place's key, it ran after them, and each ran twice (Grail's cold
+/// build, a page's routine moved to the piece it now fires in after the
+/// text before it changed: the pieces after that piece held at the
+/// frontier on the routine's definitions until it ran, 331 holds in a
+/// pass, mc 79156).
+#[test]
+fn a_queued_node_moved_before_its_readers_runs_before_them() {
+    let e = Engine::new();
+    let v = e.values();
+    let def = e.register(Arc::new(Def));
+    let cp = Arc::new(CopyA {
+        runs: AtomicU64::new(0),
+    });
+    let copy = e.register(cp.clone());
+    let pl = Arc::new(Placer {
+        runs: AtomicU64::new(0),
+        mark: std::sync::Mutex::new(Some(copy)),
+    });
+    let placer = e.register(pl.clone());
+    let rd = Arc::new(Reader2 {
+        runs: AtomicU64::new(0),
+    });
+    let reader = e.register(rd.clone());
+    let u = e.new_unit();
+    let a = e.push(u, def, vec![v.field("a").0, v.int(1)]);
+    let p0 = e.push(u, def, vec![v.field("b").0, v.int(0)]);
+    // the placer stands before the readers, placing X after `z`, after
+    // them: they see none
+    let p = e.push(u, placer, vec![v.int(0), v.int(7)]);
+    let rs: Vec<NodeId> = (0..4).map(|_| e.push(u, reader, vec![])).collect();
+    let z = e.push(u, def, vec![v.field("z").0, v.int(0)]);
+    e.replace(p, placer, vec![v.int(i64::try_from(z.raw()).unwrap()), v.int(7)]);
+    let rep = e.evaluate(1).unwrap();
+    assert_eq!(e.output(rs[0]), Some(ValueId::UNIT), "{rep:?}");
+    let x1 = e.placed_by(p);
+    assert_eq!(x1.len(), 1);
+    let rd_runs = rd.runs.load(Ordering::SeqCst);
+    // `a` changes (X and the readers are queued to run again) and X moves
+    // after `p0`, before the readers
+    e.replace(a, def, vec![v.field("a").0, v.int(2)]);
+    e.replace(p, placer, vec![v.int(i64::try_from(p0.raw()).unwrap()), v.int(7)]);
+    let rep = e.evaluate(1).unwrap();
+    assert_eq!(e.placed_by(p), x1, "the same node, relocated: {rep:?}");
+    assert!(e.before(x1[0], rs[0]), "X stands before the readers now");
+    for &r in &rs {
+        assert_eq!(e.output(r).and_then(|x| v.as_int(x)), Some(2), "{rep:?}");
+    }
+    assert_eq!(
+        rd.runs.load(Ordering::SeqCst),
+        rd_runs + rs.len() as u64,
+        "each reader ran once, after X: {rep:?}"
+    );
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

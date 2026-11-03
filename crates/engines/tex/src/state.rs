@@ -2682,13 +2682,14 @@ impl State {
         let mut st = State::new();
         // (a binding that is an alias definition's value stays one,
         // resolved where the resume uses it)
+        // (one not loaded is read from the engine: its value is not
+        // carried, `Run::cont_encode`)
         let ent = |x: Option<ValueId>, loaded: bool| {
+            if !loaded {
+                return UNLOADED;
+            }
             let mut e = Entry::raw_seen(v, x);
-            e.flags = if loaded {
-                LOADED | HAS_ID | (e.flags & ALIAS)
-            } else {
-                0
-            };
+            e.flags = LOADED | HAS_ID | (e.flags & ALIAS);
             e
         };
         for s in c.slots {
