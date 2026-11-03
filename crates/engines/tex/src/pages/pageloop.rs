@@ -303,6 +303,12 @@ enum Fold {
     Hole,
     /// The text ended, or the fold took the old one's end.
     End,
+    /// (a rest's) At its start's first step: the contributor the page it
+    /// starts after fired in is gone or no longer where the start says.
+    /// The start is stale (the loop node before it has not run again on
+    /// what moved): nothing is folded from it, the rest waits for it with
+    /// what it made standing ([`Run::wait_keeping`]).
+    Stale,
     /// At a page whose routine's give-back is not known and the depth
     /// spent ([`LoopState::depth`]): its finisher's output read to wake
     /// the run ([`phitex_defuse::Ctx::placed_output_wait`]).
@@ -647,14 +653,14 @@ impl Run<'_, '_> {
                 // an edit before it) and is parked at a hole short of the
                 // page its rest starts after. What this rest made stands,
                 // its pages, their finishers, its own rest and their
-                // keys, placed again until the start comes; nothing is
-                // folded or fired from the start it had, and its own
-                // rest's start is not defined ([`Run::wait_keeping`]). Taken back, every
+                // keys, until the start comes; nothing is folded or fired
+                // from the start it had ([`Run::wait_keeping`]). Taken
+                // back, every
                 // rest and finisher after it went and was made anew with
                 // new nodes once the start came: Grail's pages' routines,
                 // its first one's 4.4 s, each pass and each \cite edit,
                 // accl 23278, 23376, 23381)
-                self.wait_keeping(None, true);
+                self.wait_keeping(None);
                 return Ok(ValueId::UNIT);
             }
         };
@@ -736,11 +742,11 @@ impl Run<'_, '_> {
                     // (its state stale, none offered: its last one, as
                     // where its start is not decided)
                     if took.is_none() {
-                        self.wait_keeping(None, false);
+                        self.wait_keeping(None);
                     } else if old.checkpoints.is_empty() && old.tail.is_none() {
                         self.cx.park(ls.encode(v));
                     } else {
-                        self.wait_keeping(Some(&old), false);
+                        self.wait_keeping(Some(&old));
                     }
                     return Ok(ValueId::UNIT);
                 };
@@ -774,6 +780,16 @@ impl Run<'_, '_> {
                 bound,
             )?
         };
+        if fold == Fold::Stale {
+            if let Some(p) = rest_of(v, self.cx.args()) {
+                self.cx.parked_on(rest_field(v, p));
+            }
+            if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
+                eprintln!("pages {}: its start is stale: it waits", me.raw());
+            }
+            self.wait_keeping(took.map(|_| &old));
+            return Ok(ValueId::UNIT);
+        }
         let hole = fold == Fold::Hole;
         if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
             self.trace_end(fold, &ls, &lc);
@@ -958,6 +974,7 @@ impl Run<'_, '_> {
                 Fold::Wait => "waiting for a give-back",
                 Fold::End if lc.ended => "with the job",
                 Fold::End => "neither ended nor at a hole",
+                Fold::Stale => "at a stale start",
             },
             ls.checkpoints.len(),
             lc.cur.map(NodeId::raw),
@@ -1006,45 +1023,32 @@ impl Run<'_, '_> {
         Ok(Some((st, lc, p, gave)))
     }
 
-    /// A rest that must wait (its start not decided, or its first page's
-    /// give-back not in) keeps what its last run made standing: its rest
-    /// (when `child`: not placed yet), its pages, their finishers, under
-    /// their keys, from `old` (else its last state), placed again as they
-    /// were with no give-back read. Its own rest's start it does not
-    /// define: that was folded from the start it waits on, and the rest
-    /// after it, folding from it, fired pages from a stale start (its
-    /// next contribution elsewhere, a scratch fold and a tail fold of
-    /// Grail's last rest ran each other a million times, local run on
-    /// bd88fdebb); that rest waits too, keeping its own. The state is
-    /// parked with the start forgotten, so the run the answer wakes folds
-    /// from that start anew and reads everything again; this run files
-    /// only its own reads, none of the last run's
-    /// ([`phitex_defuse::Ctx::not_resumed`]). A rest that made nothing
+    /// A rest that must wait (its start not decided or stale, or its
+    /// first page's give-back not in) keeps what its last run made
+    /// standing ([`phitex_defuse::Ctx::unchanged`]): its pages, their
+    /// finishers, its own rest and its rest's start, under their keys;
+    /// nothing is folded or fired from the start it waits on. Its state
+    /// (`old`, else its last one) is parked again with the start
+    /// forgotten, so the run the answer wakes folds from that start anew
+    /// and reads everything again; this run files only its own reads, none
+    /// of the last run's ([`phitex_defuse::Ctx::not_resumed`]: kept, one
+    /// that moved since woke it at each commit of the same wait, a pages
+    /// rest run 1 048 577 times, accl 23339). A rest that made nothing
     /// keeps nothing.
-    fn wait_keeping(&mut self, old: Option<&LoopState>, child: bool) {
+    fn wait_keeping(&mut self, old: Option<&LoopState>) {
         let v = self.v;
-        let me = self.cx.node();
         let st = match old {
             Some(o) => Some(o.clone()),
             None => self.cx.last_state().and_then(|x| LoopState::decode(v, x)),
         };
         self.cx.not_resumed();
-        let Some(st) = st else {
+        let Some(mut st) = st else {
             return;
         };
-        if child {
-            self.cx.child(self.ops.pages, rest_args(v, me));
-        }
-        self.loop_keys = LoopKeys::of(&st, me);
-        let mut ls = LoopState {
-            base: st.base,
-            after: st.after,
-            rest_at: st.rest_at,
-            ..LoopState::default()
-        };
-        let olds: Vec<Checkpoint> = st.checkpoints.iter().chain(&st.beyond).cloned().collect();
-        self.emit_beyond_from(&mut ls, &olds);
-        self.cx.park(ls.encode(v));
+        st.began = None;
+        st.wait = None;
+        self.cx.park(st.encode(v));
+        self.cx.unchanged();
     }
 
     /// The fold waits at checkpoint `i` for its give-back
@@ -1354,6 +1358,7 @@ impl Run<'_, '_> {
                 ls.wait = Some(*i);
                 return Ok(Fold::Wait);
             }
+            let from_start = first.is_some();
             let next_fire = match first.take() {
                 Some((p, gave)) => Some((p, gave)),
                 None => pending.take().map(|(i, p)| (p, ls.checkpoints[i].gave)),
@@ -1381,7 +1386,7 @@ impl Run<'_, '_> {
                     (c.1, c.2)
                 } else if p.units != ValueId::UNIT {
                     if !self.cx.alive(p.node) {
-                        return Ok(Fold::Hole);
+                        return Ok(if from_start { Fold::Stale } else { Fold::Hole });
                     }
                     (p.units, v.seq_to_vec(p.units))
                 } else {
@@ -1391,7 +1396,7 @@ impl Run<'_, '_> {
                     // (not where it was: the change that moved it runs
                     // this node again, from before it)
                     let Some((_, u)) = next.filter(|n| n.0 == p.node) else {
-                        return Ok(Fold::Hole);
+                        return Ok(if from_start { Fold::Stale } else { Fold::Hole });
                     };
                     (u, v.seq_to_vec(u))
                 };
