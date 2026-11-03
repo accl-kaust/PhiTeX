@@ -261,7 +261,10 @@ impl Run<'_, '_> {
                 "a line above the text's",
             ),
             (self.pulled != 0, "siblings pulled"),
-            (!self.kids.is_empty(), "children"),
+            (
+                self.kids.iter().any(|k| self.kid_code(k.0).is_none()),
+                "children",
+            ),
             (self.claim_rest, "claim rest"),
             (self.fatal_hit, "fatal"),
             (self.cut.is_some(), "cut"),
@@ -320,7 +323,7 @@ impl Run<'_, '_> {
         // enumitem -j4)
         if self.input.levels.is_empty()
             || self.effect != phitex_defuse::Effect::None
-            || !self.kids.is_empty()
+            || self.kids.iter().any(|k| self.kid_code(k.0).is_none())
             || self.claim_rest
             || self.fatal_hit
             || self.cut.is_some()
@@ -989,7 +992,29 @@ impl Run<'_, '_> {
             v.list(self.astate.into_iter().map(int).collect()),
             int(self.aopen),
             self.ck_read_back(),
+            // (the children made so far, placed as the run ends: a run
+            // that goes on from here places them too)
+            v.list(
+                self.kids
+                    .iter()
+                    .map(|(op, args)| {
+                        v.list(vec![
+                            int(self.kid_code(*op).unwrap_or(-1)),
+                            v.list(args.clone()),
+                        ])
+                    })
+                    .collect(),
+            ),
         ])
+    }
+
+    /// A child's operation as a checkpoint has it: those a run makes
+    /// (a group's definitions put back, a tool, a page's PDF side).
+    fn kid_code(&self, op: phitex_defuse::OpId) -> Option<i64> {
+        [self.ops.put, self.ops.toolnode, self.ops.pdfpage]
+            .iter()
+            .position(|&o| o == op)
+            .and_then(|k| i64::try_from(k).ok())
     }
 
     /// A read-back's state as the run has it (its macro's level is marked
@@ -1074,10 +1099,22 @@ impl Run<'_, '_> {
             astate,
             aopen,
             read_back,
+            kids,
         ] = xs[..]
         else {
             return;
         };
+        let ops = [self.ops.put, self.ops.toolnode, self.ops.pdfpage];
+        self.kids = list_of(v, kids)
+            .into_iter()
+            .filter_map(|k| match list_of(v, k)[..] {
+                [c, args] => usize::try_from(int_of(v, c))
+                    .ok()
+                    .and_then(|c| ops.get(c).copied())
+                    .map(|op| (op, list_of(v, args))),
+                _ => None,
+            })
+            .collect();
         self.ck_read_back_restore(read_back);
         self.astate = list_of(v, astate).first().map(|&x| int_of(v, x));
         self.aopen = int_of(v, aopen);
