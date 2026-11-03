@@ -1190,8 +1190,8 @@ impl<'a> Ctx<'a> {
     /// Grail's last pages' routines ran 3.8 s of hyperxmp on such wakes at
     /// -j8 to make what they had made.
     ///
-    /// Not for a settling node, whose runs fold on from where they parked;
-    /// not for one relocated (its definitions are filed where it stood:
+    /// Not for a node with a parked state, whose runs fold on from it (a
+    /// page loop); not for one relocated (its definitions are filed where it stood:
     /// `commit::relocate`), or refuted by its own commit (the state it
     /// parked rests on what moved, though the reads hold now:
     /// `resumed_reread.rs`), or asked for anything but a read (an edit, a
@@ -1215,11 +1215,10 @@ impl<'a> Ctx<'a> {
             Some(Cause::Changed { .. } | Cause::Range { .. } | Cause::Rebind { .. } | Cause::Output { .. })
         ) || self.me.moved.load(std::sync::atomic::Ordering::Acquire)
             || self.me.refuted.load(std::sync::atomic::Ordering::Acquire)
-            || self.eng.op(self.me.op()).settles_at_quiet()
         {
             return None;
         }
-        let r = self.last.as_ref().filter(|r| !r.provisional)?;
+        let r = self.last.as_ref().filter(|r| !r.provisional && r.state.is_none())?;
         let mut memo = crate::read::FoldMemo::new();
         if !r
             .reads

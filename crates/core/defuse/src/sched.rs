@@ -1618,7 +1618,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     }
     // (a long run waits for the nodes before it: `LONG_RUN_NS`)
     if node.full_ns.load(Ordering::Relaxed) >= LONG_RUN_NS
-        && !eng.op(node.op()).settles_at_quiet()
+        && node.run_record().is_some_and(|r| r.state.is_none())
         && let Some(x) = crate::read::on_one_layout(eng, || crate::read::unsettled_before(eng, node))
     {
         if run_log() {
