@@ -1,0 +1,15 @@
+% TeX Live manual montex (pdflatex): rlbicig.sty's right-to-left text,
+% e-TeX's TeX--XeT (\beginR ... \endR): pdfTeX's pdf_hlist_out reverses
+% each right-to-left segment as it reaches it (e-TeX's reverse, pdfTeX
+% §1409ff); the PDF writer wrote the segment in its logical order.
+\documentclass{article}
+\begin{document}
+\TeXXeTstate=1
+Left \beginR right to left text\endR\ end.\par
+\noindent\hbox to 200pt{\beginR a \hfil b \vrule width 2pt\ c\endR}\par
+\noindent\hbox to 200pt{x \beginR a\hbox{inner \beginL left\endL} \leaders\hbox to 5pt{.\hss}\hfil b\endR\ y}\par
+\beginR A whole paragraph reversed, long enough to break into lines,
+with \textbf{bold} words and a rule \vrule width 2pt and more words to
+fill several lines of text, and a word in \beginL left to right\endL\
+inside it.\endR\par
+\end{document}

@@ -1012,3 +1012,15 @@ fn routine_local_after_group() {
 fn multicol_title_inside() {
     check_threads("multicol_title_inside", "pdf");
 }
+
+/// TeX Live manual montex (pdflatex): rlbicig.sty's right-to-left text,
+/// e-TeX's TeX--XeT (`\beginR` ... `\endR`). pdfTeX's `pdf_hlist_out`
+/// reverses each right-to-left segment as it reaches it (e-TeX's
+/// `reverse`: glue set as kerns, leaders fixed, edges, a box inside
+/// reversed whole), as the DVI writer already did; the PDF writer wrote
+/// the segment in its logical order. At -j1 and -j4 (oracle: pdftex in
+/// the CI image, mc 79261; the base differs, mc 79263).
+#[test]
+fn pdf_texxet() {
+    check_threads("pdf_texxet", "pdf");
+}
