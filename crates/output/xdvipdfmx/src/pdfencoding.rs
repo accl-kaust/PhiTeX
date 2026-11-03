@@ -1343,7 +1343,7 @@ mod tounicode_tests {
                 ..Default::default()
             };
             a.unicodes[0] = u;
-            d.agl.aglmap.ht_append_table(n, a);
+            alloc::sync::Arc::make_mut(&mut d.agl.aglmap).ht_append_table(n, a);
         }
         let mut enc: Vec<Option<Vec<u8>>> = vec![None; 256];
         enc[0x41] = Some(b"A".to_vec());

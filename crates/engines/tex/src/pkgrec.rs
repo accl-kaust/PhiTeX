@@ -95,7 +95,7 @@ pub(crate) fn node_key(text: &str) -> String {
         let mut t = String::with_capacity(text.len());
         let mut rest = text;
         while let Some(k) = rest.find('\n') {
-            t.push_str(rest[..k].trim_end_matches([' ', '\t', '\r']));
+            t.push_str(rest[..k].trim_end_matches([' ', '\r']));
             t.push('\n');
             rest = &rest[k + 1..];
         }

@@ -528,8 +528,9 @@ impl FileRest {
     /// The next line as a segment not yet reached (what a top-level
     /// node's arguments for it decode to, without a value or a string per
     /// line: its bytes are its characters, trailing blanks removed, as
-    /// web2c's `input_line`); the offset moves past it.
-    pub(crate) fn take_line(&mut self, xetex: bool) -> Line {
+    /// web2c's `input_line`: spaces and line ends, not tabs); the offset
+    /// moves past it.
+    pub(crate) fn take_line(&mut self) -> Line {
         let at = self.pos;
         let s = self.str();
         let rest = &s[self.off..];
@@ -537,11 +538,7 @@ impl FileRest {
         let line = &rest[..n];
         let bytes = line.as_bytes();
         let mut end = bytes.len();
-        while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
-            end -= 1;
-        }
-        // (XeTeX's `input_line` trims spaces and line ends, not tabs)
-        while end > 0 && (bytes[end - 1] == b' ' || (!xetex && bytes[end - 1] == b'\t')) {
+        while end > 0 && matches!(bytes[end - 1], b' ' | b'\n' | b'\r') {
             end -= 1;
         }
         // (the text holds one character per byte of the file, §31: a byte
@@ -2044,23 +2041,24 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Whether the macro that read a job-written file back still runs:
     /// its level on the input stack ([`Run::read_back_at`]).
     fn read_back_running(&self) -> bool {
-        self.read_back_at.is_some_and(|m| {
-            let same = |l: &crate::input::Level| {
-                l.kind == m.kind && l.ty == m.ty && l.c == m.c && l.b == m.b
-            };
-            // (where it was found last: a level stays at its place on the
-            // stack while it is there; else looked for again)
-            if self
-                .read_back_ix
-                .get()
-                .is_some_and(|i| self.input.levels.get(i).is_some_and(same))
-            {
-                return true;
-            }
-            let i = self.input.levels.iter().position(same);
-            self.read_back_ix.set(i);
-            i.is_some()
-        })
+        if self.read_back_at.is_none() {
+            return false;
+        }
+        // (the level itself, marked where it was found: never another
+        // level that came to stand where it stood once it ended)
+        let same = |l: &crate::input::Level| l.rb;
+        // (where it was found last: a level stays at its place on the
+        // stack while it is there; else looked for again)
+        if self
+            .read_back_ix
+            .get()
+            .is_some_and(|i| self.input.levels.get(i).is_some_and(same))
+        {
+            return true;
+        }
+        let i = self.input.levels.iter().position(same);
+        self.read_back_ix.set(i);
+        i.is_some()
     }
 
     pub(crate) fn note_pre(&mut self, loc: Loc) {
@@ -2098,8 +2096,12 @@ impl<'c, 'a> Run<'c, 'a> {
             self.pre_noted.insert(loc);
             return;
         }
-        // (a stop here stops the run: it runs again from its start)
-        if self.load(loc).is_err() {
+        // (a stop here stops the run: it runs again from its start,
+        // the definition that brought it here made in vain; gone on from,
+        // the run would commit without this value kept, its publication
+        // what it is where the location goes unread)
+        if let Err(h) = self.load(loc) {
+            self.raise(h);
             return;
         }
         let old = self.st.id_of(loc, v).unwrap_or(ValueId::UNIT);
@@ -3189,12 +3191,19 @@ impl<'c, 'a> Run<'c, 'a> {
         self.read_point_pending = None;
         self.pending_pre.clear();
         self.pending_locs.clear();
-        self.read_back_at = self
-            .input
-            .levels
-            .iter()
-            .find(|l| l.kind == crate::input::kind::TOKS && l.ty == crate::input::ty::MACRO)
-            .copied();
+        // (the macro's level marked: the mark leaves with it)
+        for l in &mut self.input.levels {
+            l.rb = false;
+        }
+        let i =
+            self.input.levels.iter().position(|l| {
+                l.kind == crate::input::kind::TOKS && l.ty == crate::input::ty::MACRO
+            });
+        if let Some(i) = i {
+            self.input.levels[i].rb = true;
+        }
+        self.read_back_ix.set(i);
+        self.read_back_at = i.map(|i| self.input.levels[i]);
         self.read_back_done = self.read_back_at.is_some();
     }
 
@@ -6117,7 +6126,7 @@ pub(crate) fn slice_args_in_file(
         };
         let used = rest.len() - next.len();
         let seg: String = if ends {
-            seg.trim_end_matches([' ', '\t', '\r']).to_owned()
+            seg.trim_end_matches([' ', '\r']).to_owned()
         } else {
             seg.to_owned()
         };
@@ -6156,7 +6165,7 @@ pub(crate) fn slice_args(v: &Values, text: &str, starts_line: bool) -> Vec<Value
             None => (rest, false, ""),
         };
         let seg: String = if ends {
-            seg.trim_end_matches([' ', '\t', '\r']).to_owned()
+            seg.trim_end_matches([' ', '\r']).to_owned()
         } else {
             seg.to_owned()
         };

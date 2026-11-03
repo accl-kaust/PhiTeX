@@ -36,6 +36,10 @@ use crate::val::{int_of, list_of};
 
 /// The commands between two checkpoints of a run (`observe`:
 /// `PHITEX_CK_EVERY`, for the tests, another number).
+/// How many commands a checkpoint's parts' length in entries buys: the
+/// next is due that many times its length after it, at least [`every`].
+const SPACE: u64 = 4;
+
 fn every() -> u64 {
     crate::exec::obs_str!("PHITEX_CK_EVERY")
         .and_then(|x| x.parse().ok())
@@ -51,9 +55,6 @@ pub(crate) struct Checkpoints {
     /// Those taken (each [`Run::ck_take`]'s value), in order: a resumed
     /// run's begin with those before the one it went on from.
     taken: Vec<ValueId>,
-    /// The conditionals the run began inside (`carried_conds`): a
-    /// checkpoint has no conditional of its own open.
-    conds0: Vec<u8>,
     /// Of those taken by this run, by index in `taken`: the reads
     /// `unread` had taken out then ([`phitex_defuse::Ctx::unread_count`]),
     /// to make their count of reads the record's at the park.
@@ -61,6 +62,15 @@ pub(crate) struct Checkpoints {
     /// `PHITEX_CK_WHY` (observe): why no checkpoint was taken where one
     /// was due, by reason, the commands it was refused at.
     why: Vec<(String, u64)>,
+    /// An edited node's run: its checkpoints every [`every`] commands
+    /// whatever they cost, as the next edit is most likely in the same
+    /// text again (a letter typed after a letter); another run's are
+    /// spaced by their cost ([`space`]).
+    dense: bool,
+    /// The encodings its checkpoints made, for the next ones.
+    memo: crate::state::CkMemo,
+    /// Its token list levels' encodings by arena and range.
+    levels: phitex_defuse::FxHashMap<(u64, u32, u32), ValueId>,
 }
 
 /// The paragraph's mode (tex.web's `hmode`, unrestricted).
@@ -121,10 +131,12 @@ impl Run<'_, '_> {
         }
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
+            dense: matches!(self.cx.woken_by(), Some(phitex_defuse::Cause::Edited)),
             taken,
-            conds0: self.conds.clone(),
             fresh: Vec::new(),
             why: Vec::new(),
+            memo: crate::state::CkMemo::default(),
+            levels: phitex_defuse::FxHashMap::default(),
         }));
     }
 
@@ -155,12 +167,10 @@ impl Run<'_, '_> {
         if self.cmds < c.next {
             return Ok(());
         }
-        if self.conds != c.conds0 {
-            if crate::exec::obs_flag!("PHITEX_CK_WHY") {
-                self.ck_census("a conditional open".to_owned());
-            }
-            return Ok(());
-        }
+        // (inside a conditional too: the continuation carries the
+        // conditionals open, `conds` and `if_codes`, and whether the run
+        // read those a node before it left, as a cut's does; a test's
+        // expansion is inside one command, never at a checkpoint)
         if crate::exec::obs_flag!("PHITEX_CK_WHY") && self.ck_where().is_none() {
             let why = self.ck_refusal();
             self.ck_census(why);
@@ -206,7 +216,7 @@ impl Run<'_, '_> {
     /// joined by `+`.
     fn ck_refusal(&self) -> String {
         let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
-        let checks: [(bool, &'static str); 26] = [
+        let checks: [(bool, &'static str); 24] = [
             (self.input.levels.is_empty(), "no input"),
             (
                 !self.input.levels.iter().skip(1).all(toks)
@@ -220,7 +230,10 @@ impl Run<'_, '_> {
                 "a line above the text's",
             ),
             (self.pulled != 0, "siblings pulled"),
-            (!self.kids.is_empty(), "children"),
+            (
+                self.kids.iter().any(|k| self.kid_code(k.0).is_none()),
+                "children",
+            ),
             (self.claim_rest, "claim rest"),
             (self.fatal_hit, "fatal"),
             (self.cut.is_some(), "cut"),
@@ -231,12 +244,7 @@ impl Run<'_, '_> {
             (self.chars_live.is_some(), "chars live"),
             (self.interp.is_some(), "interpreting a line"),
             (self.scanner.is_some(), "scanner"),
-            (!self.pending_pre.is_empty(), "pending pre"),
             (!self.incs.is_empty(), "incompleat noad"),
-            (
-                self.read_point_pending.is_some() || !self.vain_after_point.is_empty(),
-                "read point",
-            ),
             (!self.seeded.is_empty(), "seeded"),
             (self.defer_hit.is_some(), "defer"),
             (self.mode_zero, "mode zero"),
@@ -255,7 +263,21 @@ impl Run<'_, '_> {
             ),
             (self.nest.iter().any(|l| l.group != 0), "inside a group"),
         ];
-        let all: Vec<&str> = checks.iter().filter(|c| c.0).map(|c| c.1).collect();
+        let mut all: Vec<&str> = checks.iter().filter(|c| c.0).map(|c| c.1).collect();
+        // (and those of a checkpoint anywhere, when none at the line)
+        if !self.input.levels.is_empty() && self.ck_where_line().is_none() {
+            let anywhere: [(bool, &'static str); 2] = [
+                (
+                    self.pull_orig.iter().any(Option::is_some),
+                    "a pulled line kept",
+                ),
+                (
+                    self.pull_at.len() != self.pulled || self.pull_box.len() != self.pulled,
+                    "pulled places unknown",
+                ),
+            ];
+            all.extend(anywhere.iter().filter(|c| c.0).map(|c| c.1));
+        }
         if all.is_empty() {
             "the line, the base table or locals".to_owned()
         } else {
@@ -273,7 +295,7 @@ impl Run<'_, '_> {
         // enumitem -j4)
         if self.input.levels.is_empty()
             || self.effect != phitex_defuse::Effect::None
-            || !self.kids.is_empty()
+            || self.kids.iter().any(|k| self.kid_code(k.0).is_none())
             || self.claim_rest
             || self.fatal_hit
             || self.cut.is_some()
@@ -284,10 +306,7 @@ impl Run<'_, '_> {
             || self.chars_live.is_some()
             || self.interp.is_some()
             || self.scanner.is_some()
-            || !self.pending_pre.is_empty()
             || !self.incs.is_empty()
-            || self.read_point_pending.is_some()
-            || !self.vain_after_point.is_empty()
             || !self.seeded.is_empty()
             || self.defer_hit.is_some()
             || self.mode_zero
@@ -301,12 +320,9 @@ impl Run<'_, '_> {
             return Some(At::Line(at));
         }
         // (anywhere else: in a group or a box, in a file, in a sibling's
-        // text; not in an alignment, nor where a give-back would read a
-        // line a park left)
-        if self.aopen != 0
-            || self.astate.is_some()
-            || self.read_back_at.is_some()
-            || self.pull_orig.iter().any(Option::is_some)
+        // text, in an alignment (its state in `Run::ck_run_state`); not
+        // where a give-back would read a line a park left)
+        if self.pull_orig.iter().any(Option::is_some)
             || self.pull_at.len() != self.pulled
             || self.pull_box.len() != self.pulled
             || crate::exec::obs_flag!("PHITEX_CK_LINE_ONLY")
@@ -345,7 +361,10 @@ impl Run<'_, '_> {
     /// and the characters the run appended to it.
     fn ck_where_line(&self) -> Option<(usize, u32, u8, i64, Vec<u32>)> {
         let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
+        // (a read-back's macro on the stack: only anywhere, whose input
+        // carries its mark)
         if !self.input.levels[1..].iter().all(toks)
+            || self.input.levels.iter().any(|l| l.rb)
             || self.pulled != 0
             || self.nest.len() != 1
             || self.nest[0].mode != HMODE
@@ -421,7 +440,15 @@ impl Run<'_, '_> {
                 )
             }
             At::Anywhere => {
-                let (input, cost) = self.ck_input();
+                let mut memo = self
+                    .ck
+                    .as_mut()
+                    .map(|c| std::mem::take(&mut c.levels))
+                    .unwrap_or_default();
+                let (input, cost) = self.ck_input(&mut memo);
+                if let Some(c) = self.ck.as_mut() {
+                    c.levels = memo;
+                }
                 if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
                     eprintln!("ck-part input {}", v.payload_bytes().saturating_sub(bytes0));
                 }
@@ -437,7 +464,12 @@ impl Run<'_, '_> {
             + self.st.base_len() as u64
             + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
         if let Some(c) = self.ck.as_mut() {
-            c.next = self.cmds + every().max(4 * spacing);
+            c.next = self.cmds
+                + if c.dense {
+                    every()
+                } else {
+                    every().max(SPACE * spacing)
+                };
         }
         if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
             eprintln!(
@@ -472,7 +504,22 @@ impl Run<'_, '_> {
         }
         // (the table at the run's base level: what it defined and stepped;
         // none where a group of its own saved a value)
-        let Some(base) = self.st.base_of(v) else {
+        // (the encodings made for this run's checkpoints before: most of
+        // the table is as it was at the last one)
+        let mut memo = self
+            .ck
+            .as_mut()
+            .map(|c| std::mem::take(&mut c.memo))
+            .unwrap_or_default();
+        let base = self.st.base_of(v, &mut memo);
+        let base = base.map(|b| b.to_value(v, &mut |l| self.loc_field(l), &mut memo));
+        if let Some(c) = self.ck.as_mut() {
+            c.memo = memo;
+        }
+        let Some(base) = base else {
+            if crate::exec::obs_flag!("PHITEX_CK_WHY") {
+                self.ck_census("no base table".to_owned());
+            }
             if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
                 eprintln!(
                     "ck: node {} at command {}: no base table ({})",
@@ -483,7 +530,6 @@ impl Run<'_, '_> {
             }
             return Ok(());
         };
-        let base = base.to_value(v, &mut |l| self.loc_field(l));
         if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
             eprintln!("ck-part base {}", v.payload_bytes().saturating_sub(bytes0));
         }
@@ -492,6 +538,9 @@ impl Run<'_, '_> {
             eprintln!("ck-part cont {}", v.payload_bytes().saturating_sub(bytes0));
         }
         if !locals.is_empty() {
+            if crate::exec::obs_flag!("PHITEX_CK_WHY") {
+                self.ck_census("group-local bindings".to_owned());
+            }
             if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
                 eprintln!(
                     "ck: node {} at command {}: {} group-local bindings",
@@ -660,7 +709,10 @@ impl Run<'_, '_> {
     /// segment last reached (or the last sibling pulled's first, which a
     /// give-back reads) on, with its length and where the run stands in
     /// it; the siblings pulled and where their texts begin.
-    fn ck_input(&self) -> (ValueId, u64) {
+    fn ck_input(
+        &self,
+        memo: &mut phitex_defuse::FxHashMap<(u64, u32, u32), ValueId>,
+    ) -> (ValueId, u64) {
         use crate::input::kind;
         let v = self.v;
         let int = |x: i64| v.int(x);
@@ -676,13 +728,25 @@ impl Run<'_, '_> {
                         start: l.c,
                         end: l.b,
                     };
-                    let toks = self.input.arena.get(r);
-                    cost += toks.len() as u64;
+                    // (a list encoded at an earlier checkpoint of the run,
+                    // its range in the same arena, is the same list)
+                    let key = (self.input.arena_id, l.c, l.b);
+                    let t = if let Some(&t) = memo.get(&key) {
+                        cost += 1;
+                        t
+                    } else {
+                        let toks = self.input.arena.get(r);
+                        cost += toks.len() as u64;
+                        let t = crate::val::toks_value(v, toks);
+                        memo.insert(key, t);
+                        t
+                    };
                     v.list(vec![
                         int(0),
                         int(i64::from(l.ty)),
-                        crate::val::toks_value(v, toks),
+                        t,
                         int(i64::from(l.a - l.c)),
+                        int(i64::from(l.rb)),
                     ])
                 }
                 kind::LINE => {
@@ -772,13 +836,16 @@ impl Run<'_, '_> {
         input.text_at = at;
         for e in list_of(v, levels) {
             match list_of(v, e)[..] {
-                [k, ty, t, read] if int_of(v, k) == i64::from(kind::TOKS) => {
+                [k, ty, t, read, rb] if int_of(v, k) == i64::from(kind::TOKS) => {
                     let toks = crate::val::toks_of(v, Some(t));
                     input.push_toks_at(
                         &toks,
                         n(read).unwrap_or(0),
                         u8::try_from(int_of(v, ty)).unwrap_or(0),
                     );
+                    if let Some(l) = input.levels.last_mut() {
+                        l.rb = int_of(v, rb) != 0;
+                    }
                 }
                 [k, l] if int_of(v, k) == i64::from(kind::LINE) => {
                     input.push_line(crate::input::Line::of_value(v, l)?);
@@ -917,7 +984,99 @@ impl Run<'_, '_> {
             // (the streams an `\immediate\closeout` closed: closed for
             // the run's later writes, `Run::closed`)
             v.list(self.closed.iter().map(|&k| int(i64::from(k))).collect()),
+            // (the alignments open: `align_state` as the run has it, if
+            // read, and how many are open, both run-local; the rest of an
+            // alignment is in the nest (its levels' extras, the rows so
+            // far), the table (its preamble) and the input (its templates))
+            v.list(self.astate.into_iter().map(int).collect()),
+            int(self.aopen),
+            self.ck_read_back(),
+            // (the children made so far, placed as the run ends: a run
+            // that goes on from here places them too)
+            v.list(
+                self.kids
+                    .iter()
+                    .map(|(op, args)| {
+                        v.list(vec![
+                            int(self.kid_code(*op).unwrap_or(-1)),
+                            v.list(args.clone()),
+                        ])
+                    })
+                    .collect(),
+            ),
         ])
+    }
+
+    /// A child's operation as a checkpoint has it: those a run makes
+    /// (a group's definitions put back, a tool, a page's PDF side).
+    fn kid_code(&self, op: phitex_defuse::OpId) -> Option<i64> {
+        [self.ops.put, self.ops.toolnode, self.ops.pdfpage]
+            .iter()
+            .position(|&o| o == op)
+            .and_then(|k| i64::try_from(k).ok())
+    }
+
+    /// A read-back's state as the run has it (its macro's level is marked
+    /// on the input, `Level::rb`): whether the run read a file back and
+    /// is a read-back point, the locations whose value there it noted, a
+    /// pending point with the values kept for it, and the files looked
+    /// for in vain after the point ([`Run::note_pre`],
+    /// [`Run::ck_read_back_restore`]).
+    fn ck_read_back(&mut self) -> ValueId {
+        let v = self.v;
+        let int = |x: i64| v.int(x);
+        let mut noted: Vec<crate::state::Loc> = self.pre_noted.iter().copied().collect();
+        noted.sort_unstable();
+        let noted: Vec<ValueId> = noted.into_iter().map(|l| self.loc_field(l).0).collect();
+        let pre: Vec<ValueId> = self
+            .pending_pre
+            .clone()
+            .into_iter()
+            .map(|(l, x)| v.list(vec![self.loc_field(l).0, x]))
+            .collect();
+        v.list(vec![
+            int(i64::from(self.read_back_at.is_some())),
+            int(i64::from(self.read_back_done)),
+            int(i64::from(self.read_point_here)),
+            v.list(noted),
+            v.list(self.read_point_pending.iter().map(|p| v.str(p)).collect()),
+            v.list(pre),
+            v.list(self.vain_after_point.iter().map(|p| v.str(p)).collect()),
+        ])
+    }
+
+    /// [`Run::ck_read_back`]'s state put back.
+    fn ck_read_back_restore(&mut self, x: ValueId) {
+        let v = self.v;
+        let [at, done, here, noted, pending, pre, vain] = list_of(v, x)[..] else {
+            return;
+        };
+        // (its level, if still on the stack, came back marked with the
+        // input; the level itself is not needed, only that there was one)
+        self.read_back_at = (int_of(v, at) != 0).then(crate::input::Level::default);
+        self.read_back_ix.set(None);
+        self.read_back_done = int_of(v, done) != 0;
+        self.read_point_here = int_of(v, here) != 0;
+        self.pre_noted = list_of(v, noted)
+            .into_iter()
+            .map(|f| self.loc_of(Field(f)))
+            .collect();
+        self.read_point_pending = list_of(v, pending)
+            .first()
+            .map(|&p| crate::val::str_of(v, p));
+        self.pending_pre.clear();
+        self.pending_locs.clear();
+        for e in list_of(v, pre) {
+            if let [f, y] = list_of(v, e)[..] {
+                let l = self.loc_of(Field(f));
+                self.pending_pre.push((l, y));
+                self.pending_locs.insert(l);
+            }
+        }
+        self.vain_after_point = list_of(v, vain)
+            .iter()
+            .map(|&p| crate::val::str_of(v, p))
+            .collect();
     }
 
     /// [`Run::ck_run_state`]'s parts put back.
@@ -936,10 +1095,28 @@ impl Run<'_, '_> {
             lt,
             skind,
             closed,
+            astate,
+            aopen,
+            read_back,
+            kids,
         ] = xs[..]
         else {
             return;
         };
+        let ops = [self.ops.put, self.ops.toolnode, self.ops.pdfpage];
+        self.kids = list_of(v, kids)
+            .into_iter()
+            .filter_map(|k| match list_of(v, k)[..] {
+                [c, args] => usize::try_from(int_of(v, c))
+                    .ok()
+                    .and_then(|c| ops.get(c).copied())
+                    .map(|op| (op, list_of(v, args))),
+                _ => None,
+            })
+            .collect();
+        self.ck_read_back_restore(read_back);
+        self.astate = list_of(v, astate).first().map(|&x| int_of(v, x));
+        self.aopen = int_of(v, aopen);
         self.closed = list_of(v, closed)
             .iter()
             .filter_map(|&k| i32::try_from(int_of(v, k)).ok())
@@ -1307,13 +1484,14 @@ impl Run<'_, '_> {
             _ => self.cx.goes_on_from_edit(),
         }
         // (the checkpoints up to this one stand for the next run)
-        let conds0 = self.conds.clone();
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
+            dense: matches!(self.cx.woken_by(), Some(phitex_defuse::Cause::Edited)),
             taken: cks[..=k].to_vec(),
-            conds0,
             fresh: Vec::new(),
             why: Vec::new(),
+            memo: crate::state::CkMemo::default(),
+            levels: phitex_defuse::FxHashMap::default(),
         }));
         Ok(true)
     }

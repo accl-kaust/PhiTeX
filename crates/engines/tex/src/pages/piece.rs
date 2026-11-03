@@ -260,8 +260,16 @@ impl Run<'_, '_> {
         } else if k == 0 && !self.own_page_params_put() {
             // (the parameters reaching the piece, unless an item of it
             // already noted the ones it set, `Run::append`: that marker
-            // is later in force and this one, after it, would undo it)
-            self.put_page_params_reaching();
+            // is later in force and this one, after it, would undo it.
+            // A resume holding a parameter's binding local to a group open
+            // at its cut has it in its table only, not where the fold and
+            // `Run::pin_reaching_page_params` read: its value given here,
+            // the table's as nothing was set since the run began)
+            if self.st.carries_page_param() {
+                self.put_page_params()?;
+            } else {
+                self.put_page_params_reaching();
+            }
         }
         for n in std::mem::take(&mut self.ins_pending) {
             // (the class's registers as this run left them when it

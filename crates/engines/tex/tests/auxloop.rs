@@ -516,3 +516,41 @@ Text between.
         }
     }
 }
+
+/// Text after a page defining, in the macro that looked for a file in
+/// vain, a field the page's output routine defines: keeping the value
+/// there for the lines written later reads the field, a read held while
+/// the pages have not reached the text. The run stops there and runs
+/// again; it used to go on without the value and commit, with what it
+/// published depending on when the pages got there (a debug build's
+/// assertion in the scheduler, a run ended past a stop it did not
+/// return; Grail's `\inputminted`s under `PHITEX_RESUME_CHECK`).
+#[test]
+fn a_definition_kept_for_a_read_back_stops_at_the_frontier() {
+    use std::fmt::Write as _;
+    let mut doc = String::from(
+        r"\newcount\n
+\output={\global\def\mine{routine}\shipout\box255 }
+\def\window{\openin1=nosuchfile.xyz \global\def\mine{text}}
+\immediate\openout1=f.aux
+",
+    );
+    for i in 0..400 {
+        writeln!(
+            doc,
+            "Paragraph {i} of the text, long enough for the pages to fire.\n"
+        )
+        .unwrap();
+        if i % 40 == 39 {
+            doc.push_str("\\window\n\n");
+        }
+    }
+    doc.push_str("\\immediate\\write1{\\noexpand\\gdef\\noexpand\\seen{\\mine}}\n\\bye\n");
+    let dir = common::fixtures().join("plain");
+    let opts = Options {
+        fixpoint: true,
+        ..common::options("./w.tex", "w", "", &dir)
+    };
+    let b = common::build(opts, Some(&common::plain()), &doc);
+    assert!(!b.output().0.is_empty(), "no output");
+}
