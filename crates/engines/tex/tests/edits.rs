@@ -1191,3 +1191,57 @@ fn a_run_goes_on_from_a_checkpoint_inside_its_own_conditional() {
         }
     }
 }
+
+/// A run asked again for a read in the last row of a long `\halign`
+/// goes on from a checkpoint taken inside the alignment (in its cells,
+/// with `align_state` and the alignments open carried, the templates on
+/// the input, the rows so far in the nest), and the output and log are a
+/// cold build's, at 1 and 8 threads. Checkpoints were refused while an
+/// alignment was open: Grail's floats (tables) went on from their start,
+/// 4 s of a \cite edit.
+#[test]
+fn a_run_goes_on_from_a_checkpoint_inside_an_alignment() {
+    use std::fmt::Write as _;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-in-align");
+    let _ = std::fs::create_dir_all(&dir);
+    let rows = |n: usize| {
+        let mut s = String::new();
+        for k in 0..n {
+            let _ = writeln!(
+                s,
+                "w{k}a\\kern0pt w{k}b\\kern0pt w{k}c&\\ifodd{k} odd{k}\\else even{k}\\fi\\kern0pt v{k}\\cr"
+            );
+        }
+        s
+    };
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{\\tabskip=1pt\\halign{{#\\hfil\\tabskip=2pt&\\quad#\\hfil\\cr\n{}end \\late&{{\\late}}\\cr\n\\noalign{{\\kern1pt}}last&row\\cr}}}}\n\\box1\n\n\\bye\n",
+            rows(400)
+        )
+    };
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./ck.tex", "ck", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+            let text = doc(m);
+            b.edit(&text);
+            let cold = common::build(opts(), Some(&prelude), &text);
+            let (out, log) = b.output();
+            let (cold_out, cold_log) = cold.output();
+            assert!(
+                common::first_difference(&out, &cold_out).is_none(),
+                "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
+            );
+            assert_eq!(log, cold_log, "{t} threads, edit {k}: the log is the cold build's");
+            assert!(
+                b.stats.resumed_at_mark > 0,
+                "{t} threads, edit {k}: the box's run went on from a checkpoint inside the alignment"
+            );
+        }
+    }
+}

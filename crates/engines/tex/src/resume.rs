@@ -285,8 +285,7 @@ impl Run<'_, '_> {
         let mut all: Vec<&str> = checks.iter().filter(|c| c.0).map(|c| c.1).collect();
         // (and those of a checkpoint anywhere, when none at the line)
         if !self.input.levels.is_empty() && self.ck_where_line().is_none() {
-            let anywhere: [(bool, &'static str); 4] = [
-                (self.aopen != 0 || self.astate.is_some(), "an alignment open"),
+            let anywhere: [(bool, &'static str); 3] = [
                 (self.read_back_at.is_some(), "a read-back level"),
                 (self.pull_orig.iter().any(Option::is_some), "a pulled line kept"),
                 (
@@ -341,11 +340,9 @@ impl Run<'_, '_> {
             return Some(At::Line(at));
         }
         // (anywhere else: in a group or a box, in a file, in a sibling's
-        // text; not in an alignment, nor where a give-back would read a
-        // line a park left)
-        if self.aopen != 0
-            || self.astate.is_some()
-            || self.read_back_at.is_some()
+        // text, in an alignment (its state in `Run::ck_run_state`); not
+        // where a give-back would read a line a park left)
+        if self.read_back_at.is_some()
             || self.pull_orig.iter().any(Option::is_some)
             || self.pull_at.len() != self.pulled
             || self.pull_box.len() != self.pulled
@@ -969,6 +966,12 @@ impl Run<'_, '_> {
             // (the streams an `\immediate\closeout` closed: closed for
             // the run's later writes, `Run::closed`)
             v.list(self.closed.iter().map(|&k| int(i64::from(k))).collect()),
+            // (the alignments open: `align_state` as the run has it, if
+            // read, and how many are open, both run-local; the rest of an
+            // alignment is in the nest (its levels' extras, the rows so
+            // far), the table (its preamble) and the input (its templates))
+            v.list(self.astate.into_iter().map(int).collect()),
+            int(self.aopen),
         ])
     }
 
@@ -988,10 +991,14 @@ impl Run<'_, '_> {
             lt,
             skind,
             closed,
+            astate,
+            aopen,
         ] = xs[..]
         else {
             return;
         };
+        self.astate = list_of(v, astate).first().map(|&x| int_of(v, x));
+        self.aopen = int_of(v, aopen);
         self.closed = list_of(v, closed)
             .iter()
             .filter_map(|&k| i32::try_from(int_of(v, k)).ok())
