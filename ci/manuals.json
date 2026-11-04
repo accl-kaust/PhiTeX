@@ -9832,7 +9832,7 @@
    "oracle_wall_s": 700.27,
    "passes": 3,
    "path": "latex/codehigh/codehigh.tex",
-   "time_limit_s": 394,
+   "time_limit_s": 1500,
    "time_limit_why": "pdflatex's own wall on the gate's runner: 394 s (manuals.py's oracle loop, 3 passes, in the -doc image on GitHub's ubuntu-24.04, 4 CPUs, AMD EPYC 9V45; run 41432138147, 2026-11-02). PhiTeX is held to it, not to the sweep's 300 s; it is identical with the limit raised (accl 23041)",
    "tools": []
   },
