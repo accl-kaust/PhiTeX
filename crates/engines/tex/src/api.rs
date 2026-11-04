@@ -2862,6 +2862,10 @@ struct Graph {
     reads: Vec<(String, u64)>,
     /// The finder's answers since the last evaluation began.
     queries: Vec<(String, bool)>,
+    /// The names a tool's search was asked for (`tfile:` fields: a
+    /// `.bib`, a `.bst`, an `.ist`), and whether found: a watch rebuilds
+    /// when one of them changes ([`Build::tool_reads`]).
+    tool_reads: Vec<(String, bool)>,
     /// The files the finder does not have.
     absent: Vec<Field>,
     /// The files the job writes and reads back: loop-back fields
@@ -3303,6 +3307,7 @@ impl Graph {
             files: Vec::new(),
             reads: Vec::new(),
             queries: Vec::new(),
+            tool_reads: Vec::new(),
             absent: Vec::new(),
             written: Vec::new(),
             seeds: Vec::new(),
@@ -3552,7 +3557,11 @@ impl Graph {
             // (a tool's support file: in the environment, not among the
             // names the finder is asked for again; a file read both cut
             // and whole, [`DocFile`], listed once)
-            if !name.starts_with("tfile:") && !self.reads.iter().any(|(n, _)| *n == name) {
+            if let Some(t) = name.strip_prefix("tfile:").and_then(|r| r.split_once(':')) {
+                if !self.tool_reads.iter().any(|(n, _)| n == t.1) {
+                    self.tool_reads.push((t.1.to_owned(), val.is_some()));
+                }
+            } else if !self.reads.iter().any(|(n, _)| *n == name) {
                 self.queries.push((name.clone(), val.is_some()));
                 self.reads.push((name, hash));
             }
@@ -6989,6 +6998,14 @@ impl Build {
         self.prelude.errors.is_empty() && self.prelude.diags.is_empty()
     }
 
+    /// The names tools' searches were asked for in this build's life,
+    /// each with whether it was found ([`ToolSearch`]: a bibliography's
+    /// database and style, an index style).
+    #[must_use]
+    pub fn tool_reads(&self) -> Vec<(String, bool)> {
+        self.g.tool_reads.clone()
+    }
+
     /// The document's files read back still changing after
     /// [`LATEXMK_MAX_REPEAT`] runs, as messages (among
     /// [`Build::diagnostics`]' errors at no place): the build failed as
@@ -8104,8 +8121,8 @@ impl Build {
 
     /// A job stopped at `\read` in a run that cannot ask (`*** (cannot
     /// \read from terminal in nonstop modes)`): LaTeX asks so after saying
-    /// why with a message, not an error (`\@missingfileerror`'s `!
-    /// LaTeX Error: File `x.sty' not found.`, typed out). That line, the
+    /// why with a message, not an error (`\@missingfileerror`'s "!
+    /// LaTeX Error: File x.sty not found.", typed out). That line, the
     /// last such before the stop, is the diagnostic's message, the stop its
     /// help; without it the reason was not shown at all. The log is not
     /// changed.
