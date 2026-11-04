@@ -54,6 +54,7 @@ mod pages;
 mod parbreak;
 mod pdfout;
 mod pdfprim;
+mod pic;
 mod pkgrec;
 mod prims;
 mod print;

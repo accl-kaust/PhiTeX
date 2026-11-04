@@ -1694,7 +1694,10 @@ impl Run<'_, '_> {
 }
 
 /// A nest level's `mode_line` as a value ([`line_mark_of`]).
-fn line_mark_value(v: &phitex_defuse::Values, m: Option<crate::run::LineMark>) -> ValueId {
+pub(crate) fn line_mark_value(
+    v: &phitex_defuse::Values,
+    m: Option<crate::run::LineMark>,
+) -> ValueId {
     let Some((n, mine, name, own)) = m else {
         return ValueId::UNIT;
     };
@@ -1713,7 +1716,7 @@ fn line_mark_value(v: &phitex_defuse::Values, m: Option<crate::run::LineMark>) -
 }
 
 /// [`line_mark_value`]'s mark.
-fn line_mark_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::LineMark> {
+pub(crate) fn line_mark_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::LineMark> {
     let [n, mine, name, own] = list_of(v, x)[..] else {
         return None;
     };
@@ -1733,7 +1736,7 @@ fn line_mark_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::Lin
 }
 
 /// A nest level's `mode_place` as a value ([`place_of`]).
-fn place_value(v: &phitex_defuse::Values, p: Option<&crate::run::DiagPlace>) -> ValueId {
+pub(crate) fn place_value(v: &phitex_defuse::Values, p: Option<&crate::run::DiagPlace>) -> ValueId {
     let Some((a, n, b, s, k)) = p else {
         return ValueId::UNIT;
     };
@@ -1747,7 +1750,7 @@ fn place_value(v: &phitex_defuse::Values, p: Option<&crate::run::DiagPlace>) -> 
 }
 
 /// [`place_value`]'s place.
-fn place_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::DiagPlace> {
+pub(crate) fn place_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::DiagPlace> {
     let [a, n, b, s, k] = list_of(v, x)[..] else {
         return None;
     };

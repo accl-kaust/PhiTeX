@@ -87,6 +87,15 @@ impl Run<'_, '_> {
             if crate::exec::obs_flag!("PHITEX_CMD_TRACE") {
                 self.cmd_trace();
             }
+            // (`\begin{tikzpicture}`: the picture as a child node of this
+            // run, its output taken here, `crate::pic`)
+            if self.pic_on
+                && (cmd::CALL..=cmd::LONG_OUTER_CALL).contains(&self.cur.cmd)
+                && self.cur.tok == crate::pic::begin_tok()
+                && self.pic_begin()?
+            {
+                return self.ck();
+            }
             if self.cur.cmd > cmd::MAX_COMMAND {
                 if self.cur.cmd >= cmd::END_TEMPLATE
                     && self.cur.cmd != cmd::DONT_EXPAND

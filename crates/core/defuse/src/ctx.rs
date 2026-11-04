@@ -826,6 +826,23 @@ impl<'a> Ctx<'a> {
         self.product.placements.len() - 1
     }
 
+    /// [`Ctx::child`], unless this run placed that very node already (a
+    /// second pass of a run over the same text): that placement's index.
+    pub fn child_once(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
+        let same = self
+            .product
+            .placements
+            .iter()
+            .position(|p| matches!(p, Placement::Child(o, a) if *o == op && a[..] == args[..]));
+        same.unwrap_or_else(|| self.child(op, args))
+    }
+
+    /// Whether this node ran before (its last record stands): a run of
+    /// an edit's evaluation on a node the build has, not a node's first.
+    pub fn ran_before(&self) -> bool {
+        self.last.is_some()
+    }
+
     /// Places a node after me and my children.
     pub fn follow(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
         self.product.placements.push(Placement::Follow(op, args));

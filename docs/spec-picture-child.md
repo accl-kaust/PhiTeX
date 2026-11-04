@@ -235,3 +235,54 @@ after the child alone: about 11 s busy at -j1 from 17.6, not 100 ms. The
 font moves need a definer-independent font identity (the font's number
 by its name and size, not by load order) or a first-definer relation; not
 in this spec.
+
+## 6. What building it found (matrix5, 2026-11-04, branch matrix5: code written, type-checked, NOT run)
+
+The branch holds a first build of §2–§4 (`crates/engines/tex/src/pic.rs`,
+hooks in run.rs, control.rs, ops.rs, state.rs, build.rs, pages/piece.rs,
+api.rs, defuse ctx.rs). It passed `cargo check` on phitex-tex and
+phitex-defuse only: no test, no document was run on it. What the engine
+said against the spec as written:
+
+- §2.2's trigger ("read from a line of the run's text") reaches none of
+  Grail's figures. The six hand-written ones (`figures/*.tex`) put
+  `\begin{tikzpicture}` inside `\resizebox{..}{!}{%`, so the body reaches
+  the command loop as a macro argument's token list; evaluation.tex's
+  generated ones come as lines of a file `\input` inside the float (a
+  `FILE` level under the current line). The build matches `{name}` at
+  the top level's rest in three forms: the token list (`\end{name}`
+  sought in the same list), the current line with the end on it, and
+  the current line followed by the file below it or by the run's own
+  text segments (no pulling of siblings: no trigger when the end is not
+  in what the run already holds).
+- §2.6 needs a third check: the run defining, after the picture, a name
+  the child defines globally too (TeX's final value is the run's, the
+  split's would be the child's). And `State::defined_since_in_order`
+  cannot serve any of the checks: a meta keeps only the latest
+  definition, so a later group-local one (the caption's `\normalsize`
+  in its group) hides a global one made after the picture, and the
+  group-locals themselves (which never reach the engine, open or
+  closed) would refuse every captioned figure. The build stamps the
+  base-level binding (`Meta::publ_stamp`, `State::published_since`).
+- The child's local definitions at its base level (`\end`'s
+  `\@doendpe` sets `\par` and `\everypar` locally outside the
+  environment's group) must come back to the figure's run as locals of
+  its innermost group, never be published: placed after the run, they
+  would outlive the float's group. The build filters them out of the
+  child's publication (`Run::finish`) and carries them in the output.
+- `Ctx::last.is_some()` is not "a re-run after an edit": a cold build
+  re-runs nodes (Grail: 3624 runs of 1457 nodes), so §2.5 as written
+  would run every re-run figure's picture twice on the cold build. The
+  build arms the trigger only when `Ops::edit_stall_ms` is set (the
+  watch sets it after the cold build, `Build::set_stuck_after`).
+- The child must never act as a page piece: `at_outer` (candidates,
+  cuts) is off for it; a fatal error inside it must not claim the rest
+  of the unit (`run_node`'s Fatal arm is bypassed by the child's own
+  refusal); it ends `run_all` before the "group left open" path.
+- `\begin` is LaTeX's robust command: the trigger takes any macro call
+  (`cmd::CALL..=LONG_OUTER_CALL`) whose token is `\begin`.
+- Known difference left: the picture's log lines (overfull boxes) come
+  after the figure's whole log, where pdflatex writes them in the
+  middle; the PDF bar is untouched, the log is not identical.
+- Not built: `PHITEX_PIC_CHECK` (§2.6's inline comparison), the tests
+  of §4, any measurement.

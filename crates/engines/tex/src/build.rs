@@ -98,7 +98,7 @@ impl Run<'_, '_> {
             vlid,
             group,
             sid: t.lid,
-            depth: base.depth + groups,
+            depth: base.depth + groups + self.depth_add,
             extra: t.extra.clone(),
             vm,
         })

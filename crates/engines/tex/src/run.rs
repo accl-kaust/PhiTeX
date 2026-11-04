@@ -114,6 +114,9 @@ pub(crate) struct Ops {
     /// A page's PDF side, run once the loop-backs settle
     /// (`crate::pdfout::PdfPage`).
     pub pdfpage: OpId,
+    /// A picture of a figure's run as a child node of its own
+    /// (`crate::pic`).
+    pub pic: OpId,
     /// The tools' settings ([`crate::Options::bibtex`]).
     pub tool_opts: std::sync::Arc<std::sync::Mutex<crate::tools::ToolOptions>>,
     /// The build's field handles (`crate::fields`).
@@ -520,6 +523,13 @@ impl FileRest {
         self.off < self.str().len() || self.lazy()
     }
 
+    /// Where a scan ahead of the lines begins ([`FileRest::line_at`]):
+    /// the offset, the characters before it and the lines before it;
+    /// and the text's length, where it ends.
+    pub(crate) fn scan_from(&self) -> (usize, usize, u32, usize) {
+        (self.off, self.pos, self.line, self.str().len())
+    }
+
     pub(crate) fn pos_chars(&self) -> usize {
         self.pos
     }
@@ -536,9 +546,26 @@ impl FileRest {
     /// web2c's `input_line`: spaces and line ends, not tabs); the offset
     /// moves past it.
     pub(crate) fn take_line(&mut self) -> Line {
-        let at = self.pos;
+        let (l, off, pos, line) = self.line_at(self.off, self.pos, self.line);
+        self.pos = pos;
+        self.off = off;
+        self.line = line;
+        l
+    }
+
+    /// [`FileRest::take_line`] from offset `off` (characters before it
+    /// `pos`, lines before it `line`), the file left as it is: the line
+    /// and the offset, position and line count after it (a scan ahead,
+    /// `crate::pic`).
+    pub(crate) fn line_at(
+        &self,
+        off: usize,
+        pos: usize,
+        line_count: u32,
+    ) -> (Line, usize, usize, u32) {
+        let at = pos;
         let s = self.str();
-        let rest = &s[self.off..];
+        let rest = &s[off.min(s.len())..];
         let n = rest.find('\n').map_or(rest.len(), |k| k + 1);
         let line = &rest[..n];
         let bytes = line.as_bytes();
@@ -551,10 +578,8 @@ impl FileRest {
         let mut buf = Vec::with_capacity(end + 1);
         buf.extend(line[..end].chars().map(u32::from));
         let chars = line.chars().count();
-        self.pos += chars;
-        self.off += n;
-        self.line = self.line.saturating_add(1);
-        Line {
+        let line = line_count.saturating_add(1);
+        let l = Line {
             buf,
             loc: 0,
             state: NEW_LINE,
@@ -562,11 +587,12 @@ impl FileRest {
             starts: true,
             ends: true,
             origin: Some((self.name, at, ValueId::UNIT)),
-            lineno: self.line,
+            lineno: line,
             owner: None,
             rescanned: false,
             chars: false,
-        }
+        };
+        (l, off + n, pos + chars, line)
     }
 }
 
@@ -736,6 +762,25 @@ pub(crate) struct Run<'c, 'a> {
     /// Per pulled sibling: whether a box of the run's own was open when
     /// it was pulled (a figure's float: one node, like a picture).
     pub pull_box: Vec<bool>,
+    /// A picture of this run placed as a child (`crate::pic`): the
+    /// trigger is armed (a document piece's run of an edit's
+    /// evaluation), the placement made and what it needs checked at the
+    /// run's end, the reads since it; `no_child`: a run made again
+    /// inline after a check failed. `pic_child`: this run is the child.
+    pub pic_on: bool,
+    pub pic_mark: Option<crate::pic::PicMark>,
+    pub pic_reads: phitex_defuse::FxHashSet<crate::state::Loc>,
+    /// The hashes of the pictures this run met, in order.
+    pub pic_seen: Vec<u64>,
+    pub no_child: bool,
+    pub pic_child: Option<crate::pic::PicChild>,
+    /// The child's output, in place of the run's ([`Run::finish`]).
+    pub pic_out: Option<ValueId>,
+    /// A refused child: nothing of it published or contributed.
+    pub pic_void: bool,
+    /// Groups open around the run's base level that are not its own (a
+    /// picture child's parent's), for `\currentgrouplevel`.
+    pub depth_add: i64,
     /// Whether the node is the document's text (no parent): the end of
     /// its following siblings is the end of the file.
     pub top: bool,
@@ -1266,6 +1311,15 @@ impl<'c, 'a> Run<'c, 'a> {
             pull_lev: None,
             pull_orig: Vec::new(),
             pull_box: Vec::new(),
+            pic_on: false,
+            pic_mark: None,
+            pic_reads: phitex_defuse::FxHashSet::default(),
+            pic_seen: Vec::new(),
+            no_child: false,
+            pic_child: None,
+            pic_out: None,
+            pic_void: false,
+            depth_add: 0,
             top: false,
             claim_rest: false,
             fatal_hit: false,
@@ -1466,6 +1520,11 @@ impl<'c, 'a> Run<'c, 'a> {
             self.order_page_reg_read(loc)?;
         }
         self.st.note_read(loc);
+        // (a picture child placed: what the run reads from here on is
+        // checked against what the child defines, `crate::pic`)
+        if self.pic_mark.is_some() {
+            self.pic_reads.insert(loc);
+        }
         match self.st.load_state(loc) {
             1 => Ok(()),
             2 => self.unalias(loc),
@@ -1509,7 +1568,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// run publishes stays the alias.
     #[cold]
     #[inline(never)]
-    fn unalias(&mut self, loc: Loc) -> R<()> {
+    pub(crate) fn unalias(&mut self, loc: Loc) -> R<()> {
         let Some((g, node)) = self.st.alias_at(loc, self.v) else {
             return Ok(());
         };
@@ -1518,7 +1577,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         };
         let x = match self.op_name() {
-            "exec" | "resume" => crate::defer::force(self, s)?,
+            "exec" | "resume" | "pic" => crate::defer::force(self, s)?,
             _ => crate::defer::resolve(self, s)?,
         };
         self.st.resolve_alias(loc, x);
@@ -1681,6 +1740,8 @@ impl<'c, 'a> Run<'c, 'a> {
             "finish"
         } else if op == o.brk {
             "break"
+        } else if op == o.pic {
+            "pic"
         } else {
             "other"
         }
@@ -1773,6 +1834,10 @@ impl<'c, 'a> Run<'c, 'a> {
             self.load_trace(f);
         }
         if self.fin_scope_closer.is_some() && self.fin_read_in_scope(loc, f)? {
+            return Ok(());
+        }
+        // (a picture child: its parent's locals first, by name, `crate::pic`)
+        if self.pic_child.is_some() && self.pic_local_read(loc, f)? {
             return Ok(());
         }
         let r = self.st.get(self.cx, self.v, loc, f);
@@ -1872,7 +1937,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// ([`Run::reg_loaded_base`]).
     /// Kept for the registers a restore can name: `\count0`–`\count255`
     /// and the deferred ones ([`Run::defer_regs`]).
-    fn note_loaded_base(&mut self, loc: Loc, x: Option<ValueId>) {
+    pub(crate) fn note_loaded_base(&mut self, loc: Loc, x: Option<ValueId>) {
         if (loc as usize).wrapping_sub(crate::fields::REG0) < 256
             || self.defer_regs.as_ref().is_some_and(|r| r.contains(&loc))
         {
@@ -5320,6 +5385,16 @@ impl<'c, 'a> Run<'c, 'a> {
         if (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc) {
             self.take_rtn_after()?;
         }
+        // (a document piece's run of an edit's evaluation places its
+        // pictures as children, `crate::pic`; never a cold build's run)
+        self.pic_on = self.doc
+            && !self.no_child
+            && (op == self.ops.exec || op == self.ops.resume)
+            && self
+                .ops
+                .edit_stall_ms
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != 0;
         loop {
             while self.has_input() {
                 if self.give_back_peeked()? {
@@ -5353,6 +5428,11 @@ impl<'c, 'a> Run<'c, 'a> {
                     }
                     return Ok(());
                 }
+            }
+            // (a picture child: its text ran to its end; its levels are
+            // its output's, `crate::pic`)
+            if self.pic_child.is_some() {
+                return Ok(());
             }
             // a document file reached with conditionals of the run's own
             // open and no other level: the run stops there, its
@@ -5561,7 +5641,14 @@ impl<'c, 'a> Run<'c, 'a> {
         let t_pub = std::time::Instant::now();
         // (a finisher's sealed lines in a definition stay sealed: a run
         // that opens the box reads their lists then, `crate::pages::seal`)
-        let publication = self.publication();
+        // (a picture child's local definitions at its base level are its
+        // parent's, carried in its output, never the engine's: `crate::pic`)
+        let pic = self.pic_child.is_some();
+        let publication: Vec<(Field, crate::state::Pub, Locality)> = self
+            .publication()
+            .into_iter()
+            .filter(|&(_, _, l)| !(pic && l == Locality::Local))
+            .collect();
         let published: Vec<(Field, ValueId, Locality)> = publication
             .iter()
             .filter_map(|&(f, w, l)| match w {
@@ -6060,7 +6147,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 }
             );
         }
-        out
+        self.pic_out.unwrap_or(out)
     }
 
     /// Notes what the run publishes and read ([`Ops::audit`]).

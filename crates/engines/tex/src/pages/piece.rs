@@ -83,6 +83,10 @@ impl Run<'_, '_> {
     /// just begun above it (`nest_ptr <= 1` of §1091, §1200; `mode =
     /// vmode` of §1076, §1094, §1100, §1103, §812).
     pub(crate) fn at_outer(&mut self) -> R<bool> {
+        // (a picture child builds a list of its own, never the main one)
+        if self.pic_child.is_some() {
+            return Ok(false);
+        }
         let base = self.base_mode()?;
         if base.lid != 0 || base.km != 1 {
             return Ok(false);
