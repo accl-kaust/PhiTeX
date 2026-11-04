@@ -1082,6 +1082,18 @@ pub(crate) struct Run<'c, 'a> {
     /// fire at, loaded or its own: its next read of one asks first whether
     /// a page fired there ([`Run::order_page_reg_read`]).
     pub page_regs_held: Vec<Loc>,
+    /// A finisher's piece, where the piece closes the engine scope it ran
+    /// in after the page's candidate: [`Run::fin_read_in_scope`].
+    pub fin_scope_closer: Option<phitex_defuse::NodeId>,
+    /// The run's engine reads so far noted against its candidates
+    /// ([`Run::note_engine_reads`]).
+    pub reads_noted: usize,
+    /// A finisher's routine's `\\aftergroup` tokens where its piece went on
+    /// past the candidate: for its [`crate::pages::FIRE_CONFLICT`].
+    pub fin_rtn_after: Option<ValueId>,
+    /// The box registers a finisher's routine used up that the text's
+    /// open groups bound (`\\box`, §1079): each field with what it left.
+    pub fin_boxes: Vec<(Field, ValueId)>,
     /// The serial of the writer command the command in progress recorded
     /// ([`crate::pdfout::command`]), until a read-time allocation takes
     /// it as its own ([`crate::pdfout::note_read_time`]); 0: none.
@@ -1323,6 +1335,10 @@ impl<'c, 'a> Run<'c, 'a> {
             cand: 0,
             cand_marks: Vec::new(),
             page_regs_held: Vec::new(),
+            fin_scope_closer: None,
+            reads_noted: 0,
+            fin_rtn_after: None,
+            fin_boxes: Vec::new(),
             pdf_cmd: 0,
             scope_kind_memo: None,
             pubs: None,
@@ -1359,6 +1375,17 @@ impl<'c, 'a> Run<'c, 'a> {
         f
     }
 
+    /// [`Run::loc_field`] for a location the run may not have touched: its
+    /// slot is left as it is (the touched locations are the run's order,
+    /// [`crate::state::State::used_locs`]).
+    pub(crate) fn loc_field_peek(&self, loc: Loc) -> Field {
+        self.st.field(loc).unwrap_or_else(|| {
+            self.ops
+                .fields
+                .field_of(self.v, self.cx.values_epoch(), loc as usize)
+        })
+    }
+
     /// The location of field `f` (a fixed one, a meaning's, or the
     /// spill's).
     pub(crate) fn loc_of(&mut self, f: Field) -> Loc {
@@ -1384,6 +1411,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.page_regs_held.retain(|&l| l != loc);
             self.order_page_reg_read(loc)?;
         }
+        self.st.note_read(loc);
         match self.st.load_state(loc) {
             1 => Ok(()),
             2 => self.unalias(loc),
@@ -1643,6 +1671,9 @@ impl<'c, 'a> Run<'c, 'a> {
         // a page fires at: the run ends there, [`Run::order_page_reg_read`])
         self.order_page_reg_read(loc)?;
         let f = self.loc_field(loc);
+        if self.fin_scope_closer.is_some() && self.fin_read_in_scope(loc, f)? {
+            return Ok(());
+        }
         let r = self.st.get(self.cx, self.v, loc, f);
         if r.is_err() {
             note_stop(self.op_name(), f);
@@ -3996,6 +4027,21 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// A log event (laid out by the client, [`crate::log`]).
+    /// A report for the log whose text holds a [`crate::log::LINE_MARK`]
+    /// for each line named in `marks` (a node and its line there, in
+    /// turn; [`Run::line_for_log`]).
+    pub(crate) fn log_lines(&mut self, kind: &str, text: &str, marks: Vec<i64>) -> R<()> {
+        if marks.is_empty() {
+            return self.log(kind, text);
+        }
+        let v = self.v;
+        let nl = i64::from(self.ipar(Par::newlinechar)?);
+        let marks = v.list(marks.into_iter().map(|x| v.int(x)).collect());
+        let e = v.list(vec![v.str(kind), v.str(text), v.int(nl), marks]);
+        self.contribute("log", v.seq_unit(e));
+        Ok(())
+    }
+
     pub(crate) fn log(&mut self, kind: &str, text: &str) -> R<()> {
         if kind == "error" {
             self.diag(true, text);
@@ -4544,7 +4590,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Whether `l` is a finisher's field given where the routine reads
     /// it ([`crate::state::State::lazy`]): the run's own, read in full.
     fn lazy_pre(&self, l: Loc) -> bool {
-        self.st.lazy(l).is_some()
+        self.st.lazy(l).is_some() || self.fin_scope_closer.is_some()
     }
 
     /// Whether `tok`'s meaning is a macro whose body is a number

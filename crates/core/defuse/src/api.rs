@@ -296,6 +296,14 @@ pub trait Operation: Send + Sync {
         false
     }
 
+    /// Whether a change of its definition of field `f` re-asks a reader at
+    /// once though the operation settles at quiet points: a step of a
+    /// serial chain the reader waits on, as [`Ctx::settle_now`] says of a
+    /// whole run (default no).
+    fn settles_now(&self, _f: Field, _values: &Values) -> bool {
+        false
+    }
+
     /// Whether its nodes' work is at the settling layer's frontier
     /// (`Ctx::set_frontier`) wherever they stand (default no): one past
     /// the frontier runs in the order of a node at it. The page loop

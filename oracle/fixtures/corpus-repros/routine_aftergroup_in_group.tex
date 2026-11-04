@@ -1,0 +1,15 @@
+% !TEX program = pdftex
+% A page fires in a run of paragraphs inside a group the text's run opens,
+% and the output routine leaves tokens with \aftergroup (what afterpage.sty
+% does): TeX reads them in the main vertical list right after that
+% build_page (§1100), so the paragraphs after the break see what they do.
+% (PDF: pdftex, the oracle made in the CI image)
+\newcount\n \newcount\shown
+\def\x{0}
+\def\after{\global\advance\shown1 \xdef\x{\the\shown}}
+\output={\plainoutput\aftergroup\after}
+\def\t{Some words to fill the lines of a paragraph, and more of them. }
+\long\def\iter{\advance\n1 Paragraph \the\n\ after \x\ pages. \t\t\t\t\t\par
+  \ifnum\n<120 \expandafter\iter\fi}
+\begingroup \iter \endgroup
+\bye

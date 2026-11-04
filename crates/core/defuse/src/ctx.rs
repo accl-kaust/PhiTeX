@@ -193,6 +193,25 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// How many reads my run has made so far (a mark for
+    /// [`Ctx::fields_read_since`]).
+    pub fn reads_len(&self) -> usize {
+        self.product.reads.len()
+    }
+
+    /// The fields my run read from its read `from` on (a mark of
+    /// [`Ctx::reads_len`]), with each read's index, in order (a field read
+    /// twice is listed twice): a client checking what it read after a
+    /// point against what another node may define.
+    pub fn fields_read_since(&self, from: usize) -> impl Iterator<Item = (usize, Field)> + '_ {
+        self.product
+            .reads
+            .iter()
+            .enumerate()
+            .skip(from)
+            .filter_map(|(i, r)| r.kind.field().map(|f| (i, f)))
+    }
+
     /// Loads `f`'s change count before a read of it ([`ReadRec::epoch`]).
     fn before_read(&mut self, f: Field) {
         self.ep = self.eng.field_epoch(f);
@@ -1435,6 +1454,20 @@ impl<'a> Ctx<'a> {
     /// or ahead (then it goes on). Not a read.
     pub fn before(&self, a: NodeId, b: NodeId) -> bool {
         self.eng.node(a).pos_hint() < self.eng.node(b).pos_hint()
+    }
+
+    /// Whether node `n`, where it stands, closes a scope after its reads
+    /// and definitions: what it ran in is out of sight from a node after
+    /// it. Not a read: a change of a node's brackets re-asks the readers it
+    /// reaches past.
+    pub fn closes_scope_after(&self, n: NodeId) -> bool {
+        self.eng.placed_node(n).is_some_and(|x| {
+            let b = x.record().map_or_else(
+                || crate::node::unpack_effect(x.effect.load(std::sync::atomic::Ordering::Acquire)).0,
+                |r| r.effect.brackets(),
+            );
+            b.closes > 0 && !b.before
+        })
     }
 
     /// Node `n`'s operation, where it stands (placed, not removed). Not a

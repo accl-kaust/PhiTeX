@@ -84,6 +84,17 @@ fn hint_log(
     );
 }
 
+/// One pass of a run's `body`; one that ends (at its end or a cut) says
+/// what it used for the finishers of pages firing at candidates it went
+/// on past ([`Run::order_after_fires`]).
+fn pass(r: &mut Run<'_, '_>, body: &mut impl FnMut(&mut Run<'_, '_>) -> R<()>) -> R<()> {
+    let res = body(r);
+    if matches!(res, Ok(()) | Err(Halt::Cut)) {
+        r.order_after_fires();
+    }
+    res
+}
+
 /// Runs `body` as one node: its definitions, contributions and
 /// children go out only if it finishes; a starved or file-waiting run
 /// records its need for the client instead. A run that stops starts
@@ -127,7 +138,7 @@ pub(crate) fn run_node(
     let mut r = Run::new(cx, o);
     let t_new = t_new.elapsed();
     let t_body = std::time::Instant::now();
-    let mut res = body(&mut r);
+    let mut res = pass(&mut r, &mut body);
     let t_first = t_body.elapsed();
     let recut = matches!(res, Err(Halt::Recut(_)));
     // (a second pass from the start, ending at the candidate the first
@@ -137,7 +148,7 @@ pub(crate) fn run_node(
         r = Run::new(cx, o);
         r.stop_at = Some(k);
         // (a second pass to a candidate takes no marks)
-        res = body(&mut r);
+        res = pass(&mut r, &mut body);
     }
     // the run's end on the page (`crate::pages`): its items folded into
     // the page state, a finisher placed where a page finishes; a page
@@ -269,7 +280,7 @@ pub(crate) fn run_node(
                 cx.begin_again();
                 r = Run::new(cx, o);
                 r.no_resume = true;
-                let mut res = body(&mut r);
+                let mut res = pass(&mut r, &mut body);
                 if let Some(ck) = rck {
                     let made = crate::val::list_of(r.v, ck)
                         .get(14)
@@ -288,7 +299,7 @@ pub(crate) fn run_node(
                     r = Run::new(cx, o);
                     r.no_resume = true;
                     r.stop_at = Some(k);
-                    res = body(&mut r);
+                    res = pass(&mut r, &mut body);
                 }
                 if matches!(res, Ok(()) | Err(Halt::Cut)) {
                     res = r.page_fold();

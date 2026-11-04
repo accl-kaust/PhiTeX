@@ -4754,7 +4754,7 @@ pub(crate) struct Marks(Arc<Mutex<MarksState>>);
 struct OutMemo {
     #[allow(clippy::type_complexity)]
     output: Option<(
-        (Option<ValueId>, Option<ValueId>, Option<ValueId>, usize),
+        (Option<ValueId>, Option<ValueId>, Option<ValueId>, usize, u64),
         (Arc<Vec<u8>>, String),
     )>,
     pages: Option<(Option<ValueId>, Vec<u64>)>,
@@ -7404,6 +7404,11 @@ impl Build {
             self.g.eng.acc_value(self.unit, v.field("log")),
             self.g.eng.acc_value(self.unit, v.field("pagehash")),
             self.g.eval_errors.len(),
+            // (the lines before the text's nodes: the log's reports name
+            // lines by them, `crate::log::LINE_MARK`)
+            self.dlines.iter().fold(0u64, |h, (&n, &k)| {
+                h.wrapping_add(phitex_defuse::hash_words(n, &[k.cast_unsigned()]))
+            }),
         );
         crate::timeline::note("output: the key (log, pagehash folds)", t0.elapsed());
         if let Some((k, x)) = &self.memo.locked().output
@@ -7431,6 +7436,7 @@ impl Build {
             v,
             &self.opts.name,
             self.g.eng.acc_value(self.unit, v.field("log")),
+            &|n| self.dlines.get(&n).copied(),
         );
         // (TeX's fatal error removes pdfTeX's PDF file only: XeTeX's XDV
         // is closed with the pages shipped and xelatex's xdvipdfmx makes

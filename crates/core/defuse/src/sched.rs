@@ -1350,6 +1350,13 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
     if !matches!(wake.cause, Cause::Changed { .. } | Cause::Rebind { .. }) {
         return false;
     }
+    if let Cause::Changed { field, .. } = wake.cause
+        && eng
+            .placed_node(by)
+            .is_some_and(|b| eng.op(b.op()).settles_now(field, eng.values()))
+    {
+        return false;
+    }
     settles_edge(eng, by, n)
 }
 
