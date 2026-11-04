@@ -1019,6 +1019,9 @@ pub(crate) struct Run<'c, 'a> {
     pub interp_eof: bool,
     /// The errors §338 gave as the interpreted file ended.
     pub interp_errs: Vec<String>,
+    /// §338's error met while a list was scanned, logged once the scan
+    /// has the list for its runaway lines ([`Run::take_runaway`]).
+    pub runaway_due: Option<RunawayDue>,
     /// Whether the last line interpreted ([`Run::interpret_line`]) only
     /// defined: it contributed nothing, typeset nothing, called no
     /// node, left no group or conditional open. A file every line of
@@ -1393,6 +1396,7 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_nested: phitex_defuse::FxHashMap::default(),
             interp_eof: false,
             interp_errs: Vec::new(),
+            runaway_due: None,
             interp_plain: false,
             text_written: Vec::new(),
             seeded: Vec::new(),
@@ -4284,6 +4288,81 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn log(&mut self, kind: &str, text: &str) -> R<()> {
+        self.log_help(kind, text, &[])
+    }
+
+    /// An error of TeX's `error` (§82, §90; `kind` "error" or "errmsg"),
+    /// its context and help lines after it in the log
+    /// ([`crate::context`]); another kind of event as it is.
+    pub(crate) fn log_help(&mut self, kind: &str, text: &str, help: &[&str]) -> R<()> {
+        self.log_event(kind, text)?;
+        if kind != "error" && kind != "errmsg" {
+            return Ok(());
+        }
+        let stop = kind == "error" && self.error_count >= 100;
+        let mut marks = Vec::new();
+        let tail = self.error_tail(if stop { &[] } else { help }, &mut marks)?;
+        let k = if stop {
+            crate::log::CONTEXT_ONLY
+        } else {
+            crate::log::CONTEXT
+        };
+        self.log_lines_any(k, &tail, marks)?;
+        if stop {
+            self.log_hundred()?;
+        }
+        Ok(())
+    }
+
+    /// An error's event alone, no context after it (a message that is
+    /// not `error`'s: §530's "I can't find file").
+    pub(crate) fn log_bare(&mut self, text: &str) -> R<()> {
+        self.log_event("error", text)?;
+        if self.error_count >= 100 {
+            self.log_hundred()?;
+        }
+        Ok(())
+    }
+
+    /// §306's runaway list ([`Run::runaway_text`]), before its error.
+    pub(crate) fn log_runaway(&mut self, what: &str, toks: &[Tok]) -> R<()> {
+        let t = self.runaway_text(what, toks)?;
+        self.log_lines_any(crate::log::RUNAWAY, &t, Vec::new())
+    }
+
+    /// [`Run::log_lines`] for any kind (marks or none).
+    pub(crate) fn log_lines_any(&mut self, kind: &str, text: &str, marks: Vec<i64>) -> R<()> {
+        let v = self.v;
+        let nl = i64::from(self.ipar(Par::newlinechar)?);
+        let mut e = vec![v.str(kind), v.str(text), v.int(nl)];
+        if !marks.is_empty() {
+            e.push(v.list(marks.into_iter().map(|x| v.int(x)).collect()));
+        }
+        let e = v.list(e);
+        self.contribute("log", v.seq_unit(e));
+        Ok(())
+    }
+
+    /// §82: the hundredth error ends the job.
+    pub(crate) fn log_hundred(&mut self) -> R<()> {
+        let nl = i64::from(self.ipar(Par::newlinechar)?);
+        let e = self.v.list(vec![
+            self.v.str("wlog"),
+            self.v.str("(That makes 100 errors; please try again.)"),
+            self.v.int(nl),
+        ]);
+        let s = self.v.seq_unit(e);
+        self.contribute("log", s);
+        self.fatal_logged = true;
+        Err(Halt::Fatal)
+    }
+
+    pub(crate) fn log_event(&mut self, kind: &str, text: &str) -> R<()> {
+        // (an error left due by a scan that did not take it: logged before
+        // this one, without its list)
+        if self.runaway_due.is_some() {
+            self.take_runaway(None)?;
+        }
         if kind == "error" {
             self.diag(true, text);
         }
@@ -4299,10 +4378,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 .unwrap_or(text);
             self.diag(true, first);
         }
-        let stop = kind == "error" && {
+        if kind == "error" {
             self.error_count += 1;
-            self.error_count >= 100
-        };
+        }
         let nl = i64::from(self.ipar(Par::newlinechar)?);
         let e = self
             .v
@@ -4312,18 +4390,6 @@ impl<'c, 'a> Run<'c, 'a> {
         if kind == "error" || kind == "errmsg" {
             let one = self.v.int(1);
             self.contribute(LOG_ERRORS, one);
-        }
-        if stop {
-            // §82: history is fatal_error_stop and the job ends
-            let e = self.v.list(vec![
-                self.v.str("wlog"),
-                self.v.str("(That makes 100 errors; please try again.)"),
-                self.v.int(nl),
-            ]);
-            let s = self.v.seq_unit(e);
-            self.contribute("log", s);
-            self.fatal_logged = true;
-            return Err(Halt::Fatal);
         }
         Ok(())
     }
@@ -4351,7 +4417,10 @@ impl<'c, 'a> Run<'c, 'a> {
         self.contribute("log", s);
         let one = self.v.int(1);
         self.contribute(LOG_ERRORS, one);
-        Ok(())
+        // (§1298's `error`: the context, `help0`)
+        let mut marks = Vec::new();
+        let tail = self.error_tail(&[], &mut marks)?;
+        self.log_lines_any(crate::log::CONTEXT, &tail, marks)
     }
 
     /// `fatal_error` (§93): `s` logged, and the job ends there (§1335).
@@ -4359,7 +4428,13 @@ impl<'c, 'a> Run<'c, 'a> {
     /// read from the terminal and every file error ends the job (§71,
     /// §484, §530).
     pub(crate) fn fatal<T>(&mut self, s: &str) -> R<T> {
-        self.log("error", s)?;
+        // (§93's "Emergency stop", `s` its help line; the log shows it
+        // so, [`crate::log`])
+        if s.starts_with("*** (") {
+            self.log_help("error", s, &[s])?;
+        } else {
+            self.log("error", s)?;
+        }
         self.fatal_logged = true;
         Err(Halt::Fatal)
     }
@@ -6606,6 +6681,15 @@ pub(crate) struct Seeded {
 }
 
 /// `scanner_status` (§305) values kept in [`Run::scanner`].
+/// An error [`Run::runaway_error`] left due: its message, what was
+/// scanned, its context (made when it was met) and the lines' marks.
+pub(crate) struct RunawayDue {
+    pub msg: String,
+    pub what: &'static str,
+    pub tail: String,
+    pub marks: Vec<i64>,
+}
+
 pub(crate) const SCAN_DEFINING: u8 = 2;
 pub(crate) const SCAN_MATCHING: u8 = 3;
 pub(crate) const SCAN_ABSORBING: u8 = 5;

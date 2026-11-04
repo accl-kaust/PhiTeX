@@ -188,7 +188,8 @@ impl Run<'_, '_> {
                             self.page_nth()
                         );
                     }
-                    self.log("error", "Undefined control sequence")?;
+                    // §370
+                    self.log_help("error", "Undefined control sequence", &UNDEFINED_HELP)?;
                 }
             }
         }
@@ -234,13 +235,33 @@ impl Run<'_, '_> {
 
     /// `macro_call` (§389–§400).
     /// §396: "Paragraph ended before \\x was complete".
-    fn runaway(&mut self, name: Tok) -> R<()> {
+    /// The list so far (`toks`, the argument) shown first (§306), and the
+    /// `\par` backed up before the error (`back_error`), as its context
+    /// shows it.
+    fn runaway(&mut self, name: Tok, toks: &[Tok], par: Tok) -> R<()> {
         let mut s = String::from("Paragraph ended before ");
         // (`sprint_cs(warning_index)`, as §338's)
         let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
         crate::print::sprint_cs(&mut s, name, esc);
         s.push_str(" was complete");
-        self.log("error", &s)
+        self.log_runaway("argument", toks)?;
+        self.back_input(par);
+        self.log_help(
+            "error",
+            &s,
+            &[
+                "I suspect you've forgotten a `}', causing me to apply this",
+                "control sequence to too much text. How can we recover?",
+                "My plan is to forget the whole thing and hope for the best.",
+            ],
+        )
+    }
+
+    /// The argument matched so far since `start` (the call's scratch).
+    fn arg_so_far(&self, base: crate::input::Scratch, start: usize) -> Vec<Tok> {
+        (start..self.input.arena.scratch_len(base))
+            .map(|i| self.input.arena.scratch_at(base, i))
+            .collect()
     }
 
     /// `overflow` (§94): TeX's capacity `what` (`n`) exceeded; the job
@@ -662,12 +683,16 @@ impl Run<'_, '_> {
                 }
                 if tok == par && (!long_state || self.outer_call) {
                     // §392: the `\par` §338 inserted ends the call quietly
+                    // (§338's error logged now, its runaway list this
+                    // argument so far)
                     if std::mem::take(&mut self.outer_call) {
+                        let so_far = self.arg_so_far(base, start);
+                        self.lift(|r| r.take_runaway(Some(&so_far)));
                         return false;
                     }
                     // §396: a runaway argument; the \par is read again
-                    self.lift(|r| r.runaway(name));
-                    self.back_input(tok);
+                    let so_far = self.arg_so_far(base, start);
+                    self.lift(|r| r.runaway(name, &so_far, tok));
                     return false;
                 }
                 match tok {
@@ -681,11 +706,12 @@ impl Run<'_, '_> {
                                 return false;
                             }
                             if t2 == par && (!long_state || self.outer_call) {
+                                let so_far = self.arg_so_far(base, start);
                                 if std::mem::take(&mut self.outer_call) {
+                                    self.lift(|r| r.take_runaway(Some(&so_far)));
                                     return false;
                                 }
-                                self.lift(|r| r.runaway(name));
-                                self.back_input(t2);
+                                self.lift(|r| r.runaway(name, &so_far, t2));
                                 return false;
                             }
                             if let Some(y) = t2.as_char() {
@@ -853,7 +879,7 @@ impl Run<'_, '_> {
             return self.raise(crate::run::Halt::Fatal);
         }
         *ended = true;
-        if let Err(h) = self.incomplete_if() {
+        if let Err(h) = self.incomplete_if(true) {
             self.raise(h);
         }
     }
@@ -1698,7 +1724,7 @@ impl Run<'_, '_> {
             && self.int32("shellescape")? != 0
         {
             let Some(text) = self.pipe_text(cmd)? else {
-                self.log("error", "I can't find file")?;
+                self.log_bare("I can't find file")?;
                 return self.fatal("*** (job aborted, file error in nonstop mode)");
             };
             self.log("open", &name)?;
@@ -1729,12 +1755,12 @@ impl Run<'_, '_> {
         let Some(x) = self.read_file_lazy(&key)? else {
             // §530: in the nonstop modes (a build's, [`Run::fatal`]) the
             // job ends
-            self.log("error", "I can't find file")?;
+            self.log_bare("I can't find file")?;
             return self.fatal("*** (job aborted, file error in nonstop mode)");
         };
         let xs = crate::val::list_of(self.v, x);
         if xs.len() < 2 {
-            self.log("error", "I can't find file")?;
+            self.log_bare("I can't find file")?;
             return self.fatal("*** (job aborted, file error in nonstop mode)");
         }
         // (a job-written file whose read-back only defines: its
@@ -1934,3 +1960,12 @@ mod tests {
         assert_eq!(super::split_lines("%a\r\\x"), ["%a\n", "\\x"]);
     }
 }
+
+/// §370's help.
+const UNDEFINED_HELP: [&str; 5] = [
+    "The control sequence at the end of the top line",
+    "of your error message was never \\def'ed. If you have",
+    "misspelled it (e.g., `\\hobx'), type `I' and the correct",
+    "spelling (e.g., `I\\hbox'). Otherwise just continue,",
+    "and I'll forget about whatever was undefined.",
+];
