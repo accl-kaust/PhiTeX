@@ -2708,3 +2708,30 @@ fn latex_warnings_are_diagnostics() {
         "{ds:#?}"
     );
 }
+
+/// A file `\input` names and the run cannot find: LaTeX's error, given
+/// after the stop it ends in (`why_read_stopped`), has the `\input` with
+/// its argument as its culprit.
+#[test]
+fn a_missing_files_input_is_the_culprit() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latex-missing-file");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let src = "\\documentclass{article}\n\\begin{document}\n\
+               Include \\input{nosuchfile} here.\n\\end{document}\n";
+    std::fs::write(dir.join("mf.tex"), src).expect("the document");
+    let b = common::build(pdf_opts("mf", &dir), Some(&prelude(true)), src);
+    let ds = b.diagnostics();
+    for d in &ds {
+        eprintln!("{d:?}");
+    }
+    let d = ds
+        .iter()
+        .find(|d| d.message.contains("nosuchfile.tex' not found"))
+        .unwrap_or_else(|| panic!("no diagnostic naming the file: {ds:#?}"));
+    assert_eq!(d.severity, phitex_tex::Severity::Error);
+    assert_eq!(
+        (d.line, &src[d.range.0..d.range.1]),
+        (3, "\\input{nosuchfile}")
+    );
+}

@@ -8502,6 +8502,45 @@ impl Build {
             d.help = Some(format!(
                 "LaTeX then asks for what to do, and a run that cannot ask stops there ({stop}), as pdflatex does"
             ));
+            // (the message now names the file: its command is the culprit)
+            self.place_culprit(d);
+        }
+    }
+
+    /// `d`'s range as [`culprit`] finds it for its message on the line
+    /// it is at: for a diagnostic whose message is given after its place
+    /// was made ([`Build::why_read_stopped`]: `File `x.tex' not found`
+    /// at the stop after it, so `\input{x}`).
+    fn place_culprit(&self, d: &mut Diagnostic) {
+        // (the document's range is in its raw text's bytes; a file's in
+        // its characters, which are its bytes)
+        let (text, bytes): (String, bool) = if d.file == self.opts.name {
+            (
+                self.raw
+                    .as_deref()
+                    .map_or_else(|| self.text.clone(), str::to_owned),
+                true,
+            )
+        } else {
+            let b = (self.opts.finder)(d.file.trim_start_matches("./"))
+                .map(|(_, b)| b)
+                .unwrap_or_default();
+            (b.iter().map(|&c| char::from(c)).collect(), false)
+        };
+        let b = if bytes {
+            d.range.0.min(text.len())
+        } else {
+            text.char_indices()
+                .nth(d.range.0)
+                .map_or(text.len(), |(k, _)| k)
+        };
+        if !text.is_char_boundary(b) {
+            return;
+        }
+        let ls = text[..b].rfind('\n').map_or(0, |k| k + 1);
+        if let Some((s, e)) = culprit(&d.message, &text, ls, b, ls, false) {
+            let unit = |p: usize| if bytes { p } else { text[..p].chars().count() };
+            d.range = (unit(s), unit(e));
         }
     }
 
