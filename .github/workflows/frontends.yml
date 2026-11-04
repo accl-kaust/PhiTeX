@@ -1,0 +1,154 @@
+# The editors and browsers against one build of a commit (docs/ci.md,
+# "The frontends' checks"): the release gate's (release.yml: a tag is not
+# released unless both jobs pass) and the nightly's (nightly.yml: reported,
+# the nightly published either way). The frontends' scripts are those of
+# the PhiTeX-frontends commit ci/frontends.commit pins.
+#
+# editors: the Linux x86_64 binary the calling run built (input `binary`,
+# its artifact; built here when none is given), its viewer in it:
+#   Emacs (editors/emacs/phitex.el) and Neovim 0.11 (editors/nvim/phitex.lua),
+#   headless: the cursor in an \input child builds the main file, the
+#   child's error is its diagnostic, inverse and forward search through
+#   the viewer, one watch per project, stopped with its last buffer;
+#   VS Code's native engine (test/lsp-smoke.mjs: phitex watch --lsp as the
+#   extension drives it): the viewer announced, an unsaved edit changes
+#   the PDF, a clean stop.
+# browsers: the wasm core and the browser build made from this commit (the
+# frontends' phitex/ is this checkout), in Chrome:
+#   Overleaf: the extension on the mock Overleaf (mock/server.mjs; never
+#   overleaf.com): the first page, typed words on it, no exception or
+#   console error (test/scenarios/ci.json);
+#   the demo (demo.phitex.org's build, build/web, served here): a sample's
+#   first page from its PDF, typed words on it, no error (web/test/check.mjs);
+#   VS Code's built-in wasm engine (vscode/test/smoke.ts).
+# Not covered (a manual step before a tag, docs/ci.md): overleaf.com itself
+# (its live DOM and login, the main file it names), the VS Code UI.
+#
+# A push to the branch frontends-check runs it alone on that commit.
+name: frontends
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: the PhiTeX commit (default the run's)
+        type: string
+        default: ""
+      binary:
+        description: the calling run's artifact with phitex-x86_64-linux.tar.gz (default built here)
+        type: string
+        default: ""
+  push:
+    branches: [frontends-check]
+permissions:
+  contents: read
+jobs:
+  editors:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          path: phitex
+          persist-credentials: false
+      - id: pin
+        run: echo "sha=$(tr -d ' \n' < phitex/ci/frontends.commit)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: accl-kaust/PhiTeX-frontends
+          ref: ${{ steps.pin.outputs.sha }}
+          path: fe
+          persist-credentials: false
+      - if: inputs.binary != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.binary }}
+          path: dist
+      - if: inputs.binary != ''
+        run: mkdir bin && tar -xzf dist/phitex-x86_64-linux.tar.gz -C bin
+      - if: inputs.binary == ''
+        working-directory: phitex
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq clang mold
+          rustup show active-toolchain || rustup toolchain install
+          cargo build --release --locked -p phitex-cli
+          mkdir ../bin && cp target/release/phitex ../bin/
+      - run: bin/phitex --version
+      - name: Emacs, Neovim 0.11, Node
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq emacs-nox
+          curl -fsSL https://github.com/neovim/neovim/releases/download/v0.11.4/nvim-linux-x86_64.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix fe/vscode
+      - name: Emacs, Neovim and VS Code's native engine against the binary
+        run: fe/test/editors/run.sh bin/phitex emacs nvim vscode
+  browsers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          path: pin
+          sparse-checkout: ci/frontends.commit
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - id: pin
+        run: echo "sha=$(tr -d ' \n' < pin/ci/frontends.commit)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: accl-kaust/PhiTeX-frontends
+          ref: ${{ steps.pin.outputs.sha }}
+          path: fe
+          persist-credentials: false
+      # (this commit as the frontends' phitex/: the core and the viewer built from it)
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          path: fe/phitex
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - working-directory: fe
+        run: |
+          npm ci
+          npm ci --prefix vscode
+          npm i --no-save --no-package-lock --prefix web/test playwright-core@1.56.1
+      - working-directory: fe
+        run: rustup toolchain install
+      # (minted's wheels, as the demo's deploy takes them)
+      - working-directory: fe
+        run: |
+          pip download --no-deps --only-binary=:all: -d target/minted latexminted==0.7.1 latexrestricted==0.6.2 latex2pydata==0.5.0 pygments==2.19.1
+      - name: the wasm core, the extension, the web and VS Code builds
+        working-directory: fe
+        run: |
+          MINTED_WHEELS=target/minted scripts/build/build.sh
+          scripts/build/build-web.sh
+          scripts/build/mock-editor.sh
+          scripts/build/build-vscode.sh
+      - name: Overleaf (the extension on the mock)
+        working-directory: fe
+        env:
+          PHITEX_CHROME: google-chrome
+        run: node scripts/dev/mock-run.mjs test/scenarios/ci.json
+      - name: the demo (build/web, served here)
+        working-directory: fe
+        env:
+          PHITEX_CHROME: /usr/bin/google-chrome
+        run: node web/test/check.mjs
+      - name: VS Code's built-in wasm engine
+        working-directory: fe
+        run: node vscode/dist/smoke.mjs test/scenarios/ci main.tex
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontends-shots
+          path: |
+            fe/target/mock-run/
+            fe/web/shots/
+          retention-days: 7
