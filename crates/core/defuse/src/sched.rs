@@ -1007,12 +1007,16 @@ impl Pool {
     /// passed, for it to ask.
     /// Nothing to take, nodes held behind the frontier, and every run going
     /// stands past the frontier too: nothing before it is at work, so it
-    /// moves only when those runs end, and the frontier is let go as at a
-    /// quiet point. One of them may be reading what a held node would
-    /// change: a run on old values in an endless loop of its own (numerica
-    /// at -j8, a thread at 100% and 14 GB, no read of it moving, for no node
-    /// before it ran) never ended, and the line never went quiet. The order
-    /// of the runs only: what they make is what they read.
+    /// moves only when those runs end. One of them may be reading what a
+    /// held node would change: a run on old values in an endless loop of its
+    /// own (numerica at -j8, a thread at 100% and 14 GB, no read of it
+    /// moving, for no node before it ran) never ended, and the line never
+    /// went quiet. The frontier moves to the earliest held node, which goes
+    /// on; the others stay held, each let go in its turn as the one before
+    /// it ends. (Let go all at once, as at a quiet point, every held run
+    /// went on on old values whenever the runs at work were past it for a
+    /// moment: at -j32 a letter typed into a beamer frame ran 285 runs, 2.5
+    /// s.) The order of the runs only: what they make is what they read.
     fn release_past_only(&self, eng: &Engine, w: &Worker) -> bool {
         let fr = eng.frontier.load(Ordering::Acquire);
         if fr == 0 || self.shared.frontier_waiting.lock().is_empty() {
@@ -1032,15 +1036,29 @@ impl Pool {
                 return false;
             }
         }
-        if !any
-            || eng
-                .frontier
-                .compare_exchange(fr, 0, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
+        if !any {
+            return false;
+        }
+        let Some(first) = self
+            .shared
+            .frontier_waiting
+            .lock()
+            .iter()
+            .filter_map(|&n| eng.placed_node(n))
+            .filter(|n| n.state() == State::Dirty)
+            .min_by_key(|n| n.pos_hint())
+            .map(|n| n.id.raw() + 1)
+        else {
+            return false;
+        };
+        if eng
+            .frontier
+            .compare_exchange(fr, first, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
         {
             return false;
         }
-        log_frontier(eng, fr, 0, None, "past only");
+        log_frontier(eng, fr, first, None, "past only");
         release_frontier(eng, Some(w));
         true
     }

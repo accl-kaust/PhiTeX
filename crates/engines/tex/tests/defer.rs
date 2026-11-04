@@ -554,3 +554,40 @@ fn a_routines_value_gives_way_to_steps_that_cancel_after_its_candidate() {
         assert_eq!(got, want_out, "-j{threads}: each page's value");
     }
 }
+
+/// The first `\outer` macro, made by an edit before a run that scanned a list
+/// holding its token (no format, so none was made before): that run stops at
+/// the token with TeX's error (§357), and goes on past it once the edit is
+/// reverted. A scan reads no token's meaning while none is made
+/// (`val::OUTER_MADE`), so the run's read of that alone must bring it back.
+#[test]
+fn an_outer_macro_an_edit_makes_stops_a_later_scan() {
+    let doc = |first: &str| {
+        format!(
+            "\\catcode`\\{{=1 \\catcode`\\}}=2 \\catcode`\\#=6\n\
+             \\def\\foo{{}}\\def\\list{{a\\foo b}}\\def\\m#1.{{}}\n\
+             {first}First.\\par\n\n\
+             Second.\\par\n\n\
+             \\expandafter\\m\\list.\\par\n\n\
+             \\end\n"
+        )
+    };
+    let forbidden = |b: &phitex_tex::Build| {
+        b.diagnostics()
+            .iter()
+            .any(|d| d.message.contains("Forbidden control sequence"))
+    };
+    for threads in [1, 4] {
+        let dir = common::scratch(&format!("defer-outer-edit-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let mut b = common::build(opts, None, &doc(""));
+        assert!(!forbidden(&b), "-j{threads}: cold");
+        common::rebuild(&mut b, &doc("\\outer\\def\\foo{}"));
+        assert!(forbidden(&b), "-j{threads}: the edit");
+        common::rebuild(&mut b, &doc(""));
+        assert!(!forbidden(&b), "-j{threads}: the revert");
+    }
+}

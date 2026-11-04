@@ -1,0 +1,37 @@
+% An \outer macro met in a token list while a macro's arguments or a list's
+% body are being scanned: "Forbidden control sequence found" (TeX sec. 357 reads
+% a list's tokens through check_outer_validity as sec. 341 does a file's, sec. 336).
+% The scan ends at it, by \par for an argument (sec. 339) or } for a body.
+\documentclass{article}
+\def\foo{FOO}
+\def\bar{BAR}
+\def\list{a,\foo,b,}
+\def\brace{{x\foo y}z}
+\def\delim#1,#2,#3.{[#1|#2|#3]}
+\def\undelim#1#2{(#1)(#2)}
+\long\def\ldelim#1.{<#1>}
+\def\show#1{\expandafter\undelim#1 end. }
+\begin{document}
+Before any is outer: \expandafter\delim\list. and \expandafter\undelim\brace.
+
+\begingroup\outer\def\bar{bar}\endgroup
+A local one, gone: \expandafter\delim\list. and \expandafter\undelim\brace.
+
+\outer\def\foo{FOO}
+Delimited: \expandafter\delim\list. done.
+
+Second delimited: \expandafter\expandafter\expandafter\delim\expandafter\list\list. done.
+
+Undelimited, braces: \expandafter\undelim\brace. done.
+
+Long: \expandafter\ldelim\list. done.
+
+A body: \toks0=\expandafter{\list}\the\toks0 . done.
+
+A definition: \expandafter\def\expandafter\z\expandafter{\list}\z. done.
+
+\expandafter\let\expandafter\copyfoo\csname foo\endcsname
+\def\other{a,\relax,b,}\expandafter\delim\other. Not outer still works.
+
+Paragraph after, using a list again: \expandafter\delim\list. done.
+\end{document}

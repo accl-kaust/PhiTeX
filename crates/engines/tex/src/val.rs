@@ -1111,6 +1111,13 @@ pub(crate) fn class_projection(x: ValueId, v: &Values) -> ValueId {
     v.int(c)
 }
 
+/// Defined, once and globally, by the first definition of an `\outer` macro
+/// ([`Run::set_mean`]): while it does not reach a run, no token anywhere is
+/// `\outer`, so a scan needs no token's meaning for §357's check
+/// (`Run::get_token_tok`). A format or a document that makes one reads it and
+/// scans token by token, each token's class read.
+pub(crate) const OUTER_MADE: &str = "outer:made";
+
 /// Whether a meaning is an `\outer` macro (§336), as a lookup that only
 /// steps over its token needs it (`\expandafter`'s first, §368): `get_next`
 /// checks an outer one's validity, nothing else of it is used. A pure
