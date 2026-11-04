@@ -1129,7 +1129,7 @@ fn plain_list(x: ValueId, v: &Values) -> ValueId {
         .body
         .iter()
         .copied()
-        .filter(|t| t.is_cs_or_active())
+        .filter(Tok::is_cs_or_active)
         .collect();
     cs.sort_unstable_by_key(|t| t.encode(v).raw());
     cs.dedup();
