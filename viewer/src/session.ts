@@ -482,6 +482,15 @@ export class PreviewSession {
         const lost = res.json?.error === "no such handle" || /^(core trapped|PDF driver failed)/.test(res.error ?? "");
         // (a build that came back whole: a trap after it is a new one)
         if (res.ok && (r.op === "edit" || r.op === "status")) this.traps = 0;
+        // (a core that ran out of the memory it got: the same document
+        // outgrows it again, so it is said, not reopened, the host's words
+        // naming the size and what to close)
+        if (lost && this.opened && /needs more than the [\d.]+ GiB of memory/.test(res.error ?? "")) {
+          this.opened = false;
+          this.sink.error(res.error!);
+          this.sink.connection?.(false, res.error!);
+          return res;
+        }
         if (lost && this.opened && r.op !== "open") {
           this.opened = false;
           // (a trap again with no good build between is the same trap, the

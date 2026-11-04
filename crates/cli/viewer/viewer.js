@@ -4605,6 +4605,12 @@ var PreviewSession = class {
         if (res.error) this.errorsSeen = [...this.errorsSeen.slice(-19), `${r.op}: ${res.error}`];
         const lost = res.json?.error === "no such handle" || /^(core trapped|PDF driver failed)/.test(res.error ?? "");
         if (res.ok && (r.op === "edit" || r.op === "status")) this.traps = 0;
+        if (lost && this.opened && /needs more than the [\d.]+ GiB of memory/.test(res.error ?? "")) {
+          this.opened = false;
+          this.sink.error(res.error);
+          this.sink.connection?.(false, res.error);
+          return res;
+        }
         if (lost && this.opened && r.op !== "open") {
           this.opened = false;
           this.traps++;

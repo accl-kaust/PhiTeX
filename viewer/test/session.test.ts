@@ -212,3 +212,24 @@ test("a page's glyphs asked before its origins came are asked again after the or
   // (and the stale answer kept nothing: the page's glyphs are the new ones)
   assert.equal((await s.boxesOf("main.tex", 6, 9)).length, 1);
 });
+
+// A core that ran out of the memory it got (the Overleaf extension's
+// host names the size and what to close): said, not reopened; the same
+// document would outgrow it again, and the reopen's second trap said
+// "again: the preview stops here" over the host's words.
+test("a core that outgrew its memory is said, not reopened", async () => {
+  const host: EditorHost = { loadProject: async () => ({ "main.tex": "x" }), onOpen: () => undefined, onChanges: () => undefined };
+  const ops: string[] = [];
+  const why = "core trapped (thread 2): This document needs more than the 2 GiB of memory PhiTeX's engine got in this tab: close them.";
+  const core = { request: async (r: { op: string }) => (ops.push(r.op), r.op === "status" ? { ok: false, error: why } : { ok: false }) };
+  const said: string[] = [];
+  const sink = new Proxy({ error: (e: string) => said.push(e) }, { get: (t, p) => (t as Record<string | symbol, unknown>)[p] ?? (() => undefined) });
+  const s = new PreviewSession(host, core as never, sink as never, { schedule: () => undefined });
+  const w = s as unknown as { opened: boolean; core: { request(r: unknown): Promise<unknown> }; chain: Promise<unknown> };
+  w.opened = true;
+  await w.core.request({ op: "status" });
+  await w.chain;
+  assert.deepEqual(ops, ["status"], "no reopen");
+  assert.deepEqual(said, [why]);
+  assert.equal(w.opened, false);
+});
