@@ -1001,7 +1001,11 @@ impl<'a> Ctx<'a> {
     /// ([`Ctx::set_frontier`]). Not a read.
     pub fn past_frontier(&self, n: NodeId) -> bool {
         self.eng.placed_node(n).is_some_and(|x| {
-            crate::sched::past_frontier(self.eng, x, self.eng.frontier.load(std::sync::atomic::Ordering::Acquire))
+            crate::sched::past_frontier(
+                self.eng,
+                x,
+                self.eng.frontier.load(std::sync::atomic::Ordering::Acquire),
+            )
         })
     }
 
