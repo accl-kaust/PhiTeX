@@ -3583,6 +3583,7 @@ fn watch_open_starts_only_the_users_viewer() {
     }
 }
 
+<<<<<<< HEAD
 /// The figures' pictures as child nodes of their figures' runs (an edit's
 /// evaluation only, `crate::pic` in phitex-tex): a picture inside
 /// `\resizebox`'s argument, one read from an `\input` file, two in one
@@ -3617,18 +3618,45 @@ Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon wor
     let dir = scratch(&name);
     std::fs::write(dir.join("pics.tex"), &text).expect("the document");
     std::fs::write(dir.join("pic2.tex"), pic2).expect("the input");
+=======
+/// `phitex watch` writing a file a `\write18` command made in a folder of
+/// its own (minted's `_minted/`) makes that folder: the folder's own event
+/// is the watch's write, not a source changed, so the cold build is not
+/// followed by a second one and the exact file said written is the cold
+/// build's (Grail: every cold build was followed by a build "why
+/// _minted", and the bench waiting for build 1's written event never
+/// saw it).
+#[test]
+fn watch_a_folder_it_makes_is_no_change() {
+    let _one = one();
+    let dir = scratch("watch-own-folder");
+    std::fs::write(
+        dir.join("doc.tex"),
+        plain() + "\\immediate\\write18{mkdir -p made && echo hello > made/note.txt}Alpha.\\bye\n",
+    )
+    .expect("the document");
+>>>>>>> matrix6
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
             "--write",
             "--json",
             "--no-view",
+<<<<<<< HEAD
             "--exact-pdf",
             "--engine",
             "pdflatex",
             "-j",
             threads,
             "pics.tex",
+=======
+            "--shell-escape",
+            "--idle",
+            "1000",
+            "--ini",
+            "--etex",
+            "doc.tex",
+>>>>>>> matrix6
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -3640,6 +3668,7 @@ Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon wor
     let mut seen = Vec::new();
     let cold = until(&mut lines, "build", &1.into(), &mut seen);
     assert_eq!(cold["ok"], true, "{cold}");
+<<<<<<< HEAD
     let fig1 = fig1.to_owned();
     let edits: Vec<Box<dyn Fn(&str) -> String>> = vec![
         Box::new(move |t| t.replacen(&fig1, "", 1)),
@@ -3678,11 +3707,21 @@ Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon wor
         let pdf = std::fs::read(dir.join("pics.pdf")).expect("the watch's PDF");
         texts.push((t.clone(), pdf));
     }
+=======
+    let written = until(&mut lines, "event", &"written".into(), &mut seen);
+    assert!(
+        dir.join("made").join("note.txt").is_file(),
+        "the command's file was not written in its folder:\n{}",
+        seen.join("\n")
+    );
+    assert_eq!(written["build"], 1, "{}", seen.join("\n"));
+>>>>>>> matrix6
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
     }
     let _ = child.wait();
     assert!(
+<<<<<<< HEAD
         texts.last().map(|x| &x.1) == texts.first().map(|x| &x.1),
         "j{threads}: the last revert's PDF is not the cold build's"
     );
@@ -3714,4 +3753,10 @@ fn texts_back(text: &str, steps: &[String]) -> Vec<String> {
     let mut out: Vec<String> = steps.iter().rev().skip(1).cloned().collect();
     out.push(text.to_owned());
     out
+=======
+        !seen.iter().any(|l| l.contains("\"builds\":2")),
+        "a second build after the cold one:\n{}",
+        seen.join("\n")
+    );
+>>>>>>> matrix6
 }
