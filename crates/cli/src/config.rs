@@ -402,7 +402,7 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     (
         "shell-escape",
         "off",
-        "let the document run shell commands (\\write18)",
+        "let documents run any shell command (\\write18); yours only: a project's is ignored",
     ),
     (
         "viewer",
@@ -534,6 +534,22 @@ fn canonical(k: &str) -> &str {
         "output-directory" | "out-dir" => "output-dir",
         k => k,
     }
+}
+
+/// A project's settings without what only the user can allow: its
+/// `shell-escape = true` is ignored and said, since a project folder may
+/// be anyone's and building it must not run what it asks.
+#[must_use]
+pub fn without_permissions(mut project: Config) -> Config {
+    if project.shell_escape == Some(true) {
+        project.warnings.push(
+            "`shell-escape` in a project's phitex.toml is ignored: the document could run any command. \
+             If you trust it: --shell-escape, or `phitex config shell-escape on` for all your documents"
+                .to_owned(),
+        );
+    }
+    project.shell_escape = None;
+    project
 }
 
 /// The project's `phitex.toml` at `dir` or above.
@@ -836,6 +852,22 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn a_project_cannot_allow_itself_shell_escape() {
+        let project = parse("shell-escape = true").unwrap();
+        let c = without_permissions(project).over(Config::default());
+        assert_eq!(c.shell_escape, None);
+        assert_eq!(c.warnings.len(), 1);
+        let user = parse("shell-escape = true").unwrap();
+        let c = without_permissions(parse("synctex = true").unwrap()).over(user);
+        assert_eq!(c.shell_escape, Some(true));
+        assert!(c.warnings.is_empty());
+        // (a project's `false` says nothing of the user's choice: the user's own switch stands)
+        let user = parse("shell-escape = true").unwrap();
+        let c = without_permissions(parse("shell-escape = false").unwrap()).over(user);
+        assert_eq!(c.shell_escape, Some(true));
+    }
 
     #[test]
     fn toml() {

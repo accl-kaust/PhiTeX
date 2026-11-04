@@ -3415,3 +3415,51 @@ fn watch_reads_a_changed_bst_and_bib() {
     }
     let _ = child.wait();
 }
+
+/// `\write18` runs any command only when the user allows it: `--shell-escape`
+/// or their own `phitex.toml`; a project's `shell-escape = true` is ignored
+/// and said (item 20).
+#[test]
+fn only_the_user_allows_shell_escape() {
+    let _one = one();
+    let doc = "\\immediate\\write18{echo made > made.tex}\n\\openin1=made.tex\n\
+               \\ifeof1 \\message{NOTMADE}\\else \\message{MADE}\\fi\n\\bye\n";
+    let build = |name: &str, toml: Option<&str>, user: Option<&str>, args: &[&str]| {
+        let dir = scratch(name);
+        std::fs::write(dir.join("d.tex"), doc).expect("the document");
+        if let Some(t) = toml {
+            std::fs::write(dir.join("phitex.toml"), t).expect("the project's settings");
+        }
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join("phitex")).expect("a home");
+        if let Some(u) = user {
+            std::fs::write(home.join("phitex/phitex.toml"), u).expect("the user's settings");
+        }
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .env("XDG_CONFIG_HOME", &home)
+            .args(["build", "--engine", "pdftex"])
+            .args(args)
+            .arg("d.tex")
+            .output()
+            .expect("phitex build runs");
+        let log = std::fs::read_to_string(dir.join("d.log")).unwrap_or_default();
+        (
+            log,
+            String::from_utf8_lossy(&out.stderr).into_owned()
+                + &String::from_utf8_lossy(&out.stdout),
+        )
+    };
+    let (log, said) = build("shell-project", Some("shell-escape = true\n"), None, &[]);
+    assert!(log.contains("NOTMADE"), "a project allowed itself:\n{log}");
+    assert!(said.contains("is ignored"), "not said:\n{said}");
+    let (log, _) = build("shell-flag", None, None, &["--shell-escape"]);
+    assert!(
+        log.contains("MADE") && !log.contains("NOTMADE"),
+        "--shell-escape:\n{log}"
+    );
+    let (log, _) = build("shell-user", None, Some("shell-escape = true\n"), &[]);
+    assert!(
+        log.contains("MADE") && !log.contains("NOTMADE"),
+        "the user's:\n{log}"
+    );
+}
