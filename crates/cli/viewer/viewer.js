@@ -1031,8 +1031,10 @@ header:active { cursor: grabbing; }
 @container (max-width: 360px) { .find input { width: 72px; } .bar { padding: 0 4px; } }
 @container (min-width: 561px) { .narrow { display: none !important; } }
 
-/* menus and popovers: plain lists in the host's menu colour */
-.menu { position: absolute; z-index: 20; min-width: 230px; max-width: calc(100% - 12px); padding: 4px 0; text-align: left;
+/* menus and popovers: plain lists in the host's menu colour; above a
+   feature tip (30): a menu is what the user just opened, and the welcome
+   tip's card covered the record menu's Clean rebuild */
+.menu { position: absolute; z-index: 31; min-width: 230px; max-width: calc(100% - 12px); padding: 4px 0; text-align: left;
   background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 4px 16px rgb(0 0 0 / 22%); }
 .menu > button, .menu .mi { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 14px; cursor: pointer; }
 .menu > button:hover, .menu > button:focus-visible { background: var(--ph-hover); }
