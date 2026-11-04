@@ -85,7 +85,7 @@ pub(crate) fn load_info(v: &Values, i: &Info) -> Option<Arc<Loaded>> {
 /// allocation: each entry holds the font it was made from, so that
 /// allocation is never freed and given to another font, whose memo hit
 /// would answer the first font's widths (a font loaded twice at once
-/// by two threads left one copy to drop; ArsClassica -j8, 1 build in 72,
+/// by two threads left one copy to drop; `ArsClassica` -j8, 1 build in 72,
 /// a letter-spaced heading set by another font's widths), and a hit is
 /// checked to be the font held.
 type Made<K> = Mutex<FxHashMap<(usize, K), (Arc<Loaded>, Arc<Loaded>)>>;
@@ -143,8 +143,10 @@ fn untagged(l: &Arc<Loaded>, tags: &[(u8, u8)]) -> Arc<Loaded> {
         at_hash: OnceLock::new(),
         whd: OnceLock::new(),
     });
-    m.locked()
-        .insert((Arc::as_ptr(l) as usize, tags.to_vec()), (l.clone(), x.clone()));
+    m.locked().insert(
+        (Arc::as_ptr(l) as usize, tags.to_vec()),
+        (l.clone(), x.clone()),
+    );
     x
 }
 
@@ -921,12 +923,20 @@ mod tests {
         // answers only for the font it holds)
         let a = loaded(0x8_0000);
         let xa = expanded(&a, 100);
-        assert_eq!(Arc::strong_count(&a), 2, "the memo holds the font it expanded");
+        assert_eq!(
+            Arc::strong_count(&a),
+            2,
+            "the memo holds the font it expanded"
+        );
         assert!(Arc::ptr_eq(&expanded(&a, 100), &xa), "a hit");
         let r = |x: i32| phitex_typeset::arith::round_xn_over_d(x, 1100, 1000);
         assert_eq!(xa.at.width(b'A'), a.at.width(b'A').map(r));
         let ua = untagged(&a, &[(b'A', 1)]);
-        assert_eq!(Arc::strong_count(&a), 3, "the memo holds the font it untagged");
+        assert_eq!(
+            Arc::strong_count(&a),
+            3,
+            "the memo holds the font it untagged"
+        );
         assert!(Arc::ptr_eq(&untagged(&a, &[(b'A', 1)]), &ua));
         // (a hit on the allocation is checked to be the font held: a
         // key of the same address as another font is answered afresh)
@@ -950,7 +960,13 @@ mod tests {
         assert!(Arc::ptr_eq(&first, &again));
         let ls = load_spaced(&v, file, 10 << 16, 0x1_0000, false).unwrap();
         assert!(!Arc::ptr_eq(&first, &ls));
-        assert_eq!(ls.at.width(b'A'), first.at.width(b'A').map(|w| w + 0x1_0000));
-        assert!(Arc::ptr_eq(&ls, &load_spaced(&v, file, 10 << 16, 0x1_0000, false).unwrap()));
+        assert_eq!(
+            ls.at.width(b'A'),
+            first.at.width(b'A').map(|w| w + 0x1_0000)
+        );
+        assert!(Arc::ptr_eq(
+            &ls,
+            &load_spaced(&v, file, 10 << 16, 0x1_0000, false).unwrap()
+        ));
     }
 }
