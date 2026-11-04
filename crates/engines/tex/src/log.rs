@@ -214,6 +214,11 @@ pub(crate) const FAIL: &str = "fail";
 /// Log events' kinds: an `\hbox`'s or a `\vbox`'s report (§663,
 /// §675), its parts apart by [`BOX_LINE`]: the report and where, an
 /// `\hbox`'s `short_display`, the `show_box` lines.
+/// In a report's text: a line's number, made when the log is laid out
+/// from the event's marks (`[node, line in its text, ...]`) and the lines
+/// before each node's text the client gives ([`LayoutMemo::update`]).
+pub(crate) const LINE_MARK: char = '\u{10FFFC}';
+
 pub(crate) const HREPORT: &str = "hreport";
 pub(crate) const VREPORT: &str = "vreport";
 
@@ -253,6 +258,19 @@ pub(crate) struct LayoutMemo {
     fatal: Vec<(usize, Fatal)>,
     text: String,
     offset: usize,
+    /// The events with [`LINE_MARK`]s: the event, its marks, the numbers
+    /// they made.
+    marked: Vec<(usize, Vec<i64>, Vec<i64>)>,
+}
+
+/// The numbers `marks` name (`[node, line in its text, ...]`).
+fn mark_lines(marks: &[i64], dline: &dyn Fn(u64) -> Option<i64>) -> Vec<i64> {
+    marks
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[n, k]| dline(n.cast_unsigned()).unwrap_or(0) + k)
+        .collect()
 }
 
 impl LayoutMemo {
@@ -264,9 +282,10 @@ impl LayoutMemo {
         v: &Values,
         name: &str,
         events: Option<ValueId>,
+        dline: &dyn Fn(u64) -> Option<i64>,
     ) -> Option<Fatal> {
         let evs = events.map(|e| v.seq_to_vec(e)).unwrap_or_default();
-        let same = if self.name == name {
+        let mut same = if self.name == name {
             self.events
                 .iter()
                 .zip(&evs)
@@ -275,6 +294,16 @@ impl LayoutMemo {
         } else {
             0
         };
+        // (and to the first report whose lines moved)
+        if let Some(m) = self
+            .marked
+            .iter()
+            .take_while(|m| m.0 < same)
+            .find(|m| mark_lines(&m.1, dline) != m.2)
+        {
+            same = m.0;
+        }
+        self.marked.retain(|m| m.0 < same);
         let mut log = Log::default();
         if same == 0 {
             log.raw('(');
@@ -306,8 +335,16 @@ impl LayoutMemo {
                 self.fatal.push((k, Fatal::Driver));
             }
             let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
-            let text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
+            let mut text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
             let nl = xs.get(2).map_or(-1, |&n| int_of(v, n));
+            if let Some(&ms) = xs.get(3) {
+                let marks: Vec<i64> = list_of(v, ms).iter().map(|&m| int_of(v, m)).collect();
+                let lines = mark_lines(&marks, dline);
+                for l in &lines {
+                    text = text.replacen(LINE_MARK, &l.to_string(), 1);
+                }
+                self.marked.push((k, marks, lines));
+            }
             log.event(&kind, &text, nl);
             self.after.push((log.text.len(), log.offset));
         }

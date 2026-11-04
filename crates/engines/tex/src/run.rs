@@ -3996,6 +3996,21 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// A log event (laid out by the client, [`crate::log`]).
+    /// A report for the log whose text holds a [`crate::log::LINE_MARK`]
+    /// for each line named in `marks` (a node and its line there, in
+    /// turn; [`Run::line_for_log`]).
+    pub(crate) fn log_lines(&mut self, kind: &str, text: &str, marks: Vec<i64>) -> R<()> {
+        if marks.is_empty() {
+            return self.log(kind, text);
+        }
+        let v = self.v;
+        let nl = i64::from(self.ipar(Par::newlinechar)?);
+        let marks = v.list(marks.into_iter().map(|x| v.int(x)).collect());
+        let e = v.list(vec![v.str(kind), v.str(text), v.int(nl), marks]);
+        self.contribute("log", v.seq_unit(e));
+        Ok(())
+    }
+
     pub(crate) fn log(&mut self, kind: &str, text: &str) -> R<()> {
         if kind == "error" {
             self.diag(true, text);
