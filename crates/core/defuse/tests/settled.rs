@@ -228,8 +228,9 @@ fn an_effect_is_not_made_on_a_read_moved_before_its_wait() {
     assert!(e.check_invariants().is_empty());
 }
 
-/// `[]`: says at once that its run makes no progress (`Ctx::stuck`).
-struct NoProgress;
+/// `[]`: counts its runs, and says at once that it makes no progress
+/// (`Ctx::stuck`).
+struct NoProgress(Arc<AtomicU64>);
 
 impl Operation for NoProgress {
     fn name(&self) -> &'static str {
@@ -237,6 +238,7 @@ impl Operation for NoProgress {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, Ordering::SeqCst);
         Err(cx.stuck("no progress".to_owned()))
     }
 }
@@ -256,32 +258,33 @@ impl Operation for Panics {
 
 /// A stuck run behind a node no run of this pass can bring a commit of
 /// (one that runs only once the line is quiet, one that panicked on inputs
-/// that hold): the evaluation ends and says so. Before, `open_before`
-/// called such a node open, the run waited for it, `park_waiting` found it
-/// settled and queued the run again, and the build never ended and never
-/// reported.
+/// that hold): the evaluation ends at its first report, the run not run
+/// again. Before, `open_before` called such a node open, the run waited
+/// for it, `park_waiting` found it settled and queued the run again: a run
+/// takes `Limits::stall` to find it is stuck, 300 s, so that was a build
+/// that never ended and never said why.
 #[test]
 fn a_stuck_run_behind_a_node_with_no_commit_to_come_is_reported() {
     for threads in [1, 2, 8] {
         for panics in [false, true] {
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let e = Engine::new();
-                let before = if panics {
-                    e.register(Arc::new(Panics))
-                } else {
-                    e.register(Arc::new(Writer))
-                };
-                let stuck = e.register(Arc::new(NoProgress));
-                let u = e.new_unit();
-                e.push(u, before, Vec::new());
-                e.push(u, stuck, Vec::new());
-                let _ = tx.send(e.evaluate(threads).is_err());
-            });
-            let failed = rx
-                .recv_timeout(Duration::from_secs(60))
-                .unwrap_or_else(|_| panic!("-j{threads} panics {panics}: the evaluation did not end in 60 s"));
-            assert!(failed, "-j{threads} panics {panics}: the stuck run was not reported");
+            let runs = Arc::new(AtomicU64::new(0));
+            let e = Engine::new();
+            let before = if panics {
+                e.register(Arc::new(Panics))
+            } else {
+                e.register(Arc::new(Writer))
+            };
+            let stuck = e.register(Arc::new(NoProgress(runs.clone())));
+            let u = e.new_unit();
+            e.push(u, before, Vec::new());
+            e.push(u, stuck, Vec::new());
+            let r = e.evaluate(threads);
+            let n = runs.load(Ordering::SeqCst);
+            assert!(
+                r.is_err() && n <= 2,
+                "-j{threads} panics {panics}: {n} runs, ended {:?}",
+                r.err().map(|e| e.to_string())
+            );
         }
     }
 }
