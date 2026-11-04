@@ -502,8 +502,8 @@ fn a_run_released_at_the_frontier_keeps_the_cause_that_woke_it() {
 
 /// `[ms, def, reads...]`: reads each field, sleeps `ms` milliseconds,
 /// defines `def` (a field, or UNIT for none) := 1 + the sum of what it
-/// read. Counts its runs begun.
-struct Slow(Arc<std::sync::atomic::AtomicUsize>);
+/// read. Keeps each run's sum once its reads are made.
+struct Slow(Arc<std::sync::Mutex<Vec<i64>>>);
 
 impl Operation for Slow {
     fn name(&self) -> &'static str {
@@ -511,13 +511,13 @@ impl Operation for Slow {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let v = cx.values();
         let a = cx.args().to_vec();
         let mut sum = 1;
         for &f in &a[2..] {
             sum += cx.read(Field(f))?.and_then(|x| v.as_int(x)).unwrap_or(0);
         }
+        self.0.lock().unwrap().push(sum);
         let ms = v.as_int(a[0]).and_then(|x| u64::try_from(x).ok()).unwrap_or(0);
         std::thread::sleep(std::time::Duration::from_millis(ms));
         let out = v.int(sum);
@@ -528,23 +528,54 @@ impl Operation for Slow {
     }
 }
 
-/// Runs held at the frontier while the only run at work stands past it
-/// too are let go one at a time, the earliest first, not all at once: let
-/// go together, a later one ran on what an earlier one had yet to define,
-/// and ran again once it had (beamer at -j32, a letter typed: 285 runs and
-/// 2.5 s on 2 tries of 3; cold at -j8 twice the busy time). Line: F
-/// (frontier at A), A, P (page: pn), S (text, slow, reads nothing the
-/// page layer defines), T1 (reads pn, slow, defines x), T2 (reads pn and
-/// x). P, F and S edited, at 4 threads: S runs past the frontier while T1
-/// and T2 are held; T2 begins once at the hold and once after T1's
-/// commit.
+/// `[at, ms, f, x]`: sleeps `ms` milliseconds, then in one commit stands
+/// the frontier at node `at` (-1: none) and defines f := x, a page value.
+struct FrontPage;
+
+impl Operation for FrontPage {
+    fn name(&self) -> &'static str {
+        "front-page"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args().to_vec();
+        let ms = v.as_int(a[1]).and_then(|x| u64::try_from(x).ok()).unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        let at = v.as_int(a[0]).and_then(|x| u64::try_from(x).ok());
+        cx.set_frontier(at.map(phitex_defuse::NodeId::from_raw));
+        cx.define(Field(a[2]), a[3]);
+        Ok(a[3])
+    }
+
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+}
+
+/// A run held at the frontier that reads what an earlier held one
+/// defines runs after it: past the frontier with every run at work past
+/// it too, the earliest held goes first and the others in turn; at the
+/// quiet point all go together, and one that waited for an earlier one's
+/// commit (`sched::work`'s chain hold) waits on for it, not let go on its
+/// prediction with it. Let go together with it, a later one ran on what
+/// the earlier one had yet to define, and ran again once it had (beamer
+/// at -j32, a letter typed: 285 runs and 2.5 s on 2 tries of 3; this test
+/// red on every try with the quiet point letting the waiter go). Line: F
+/// (a settling node, after a sleep, in one commit: the frontier at A and
+/// the page value pn), A, S (text, slow, reads nothing the page layer
+/// defines), T1 (reads pn, slow, defines x), T2 (reads pn and x). F and
+/// S edited, at 4 threads: T1 waits for S (a long run), T2 for T1, T1 is
+/// held at the frontier F stands and let go at the quiet point after S.
+/// What T2 read is checked, not how often it began: never the new pn with
+/// T1's old x.
 #[test]
 fn runs_held_at_the_frontier_are_let_go_the_earliest_first() {
     for _ in 0..6 {
         let o = setup();
         let (e, v) = (&o.e, o.e.values());
-        let front = e.register(Arc::new(Front));
-        let n = || Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let front = e.register(Arc::new(FrontPage));
+        let n = || Arc::new(std::sync::Mutex::new(Vec::new()));
         let (cs, c1, c2) = (n(), n(), n());
         let (s_op, t1_op, t2_op) = (
             e.register(Arc::new(Slow(cs.clone()))),
@@ -553,26 +584,23 @@ fn runs_held_at_the_frontier_are_let_go_the_earliest_first() {
         );
         let u = e.new_unit();
         let (pn, a, x, y) = (v.field("pn"), v.field("a"), v.field("x"), v.field("y"));
-        let f = e.push(u, front, vec![v.int(-1), v.int(0)]);
+        let f = e.push(u, front, vec![v.int(-1), v.int(0), pn.0, v.int(1)]);
         let an = e.push(u, o.def_op, vec![a.0, v.int(1)]);
-        let p = e.push(u, o.page_op, vec![pn.0, v.int(1), ValueId::UNIT]);
         let s = e.push(u, s_op, vec![v.int(0), y.0]);
-        let _t1 = e.push(u, t1_op, vec![v.int(0), x.0, pn.0]);
+        let _t1 = e.push(u, t1_op, vec![v.int(150), x.0, pn.0]);
         let t2 = e.push(u, t2_op, vec![v.int(0), ValueId::UNIT, pn.0, x.0]);
         e.evaluate(4).unwrap();
         assert_eq!(int(e, t2), Some(1 + 1 + 2));
         let at = i64::try_from(an.raw()).expect("an id");
-        c2.store(0, std::sync::atomic::Ordering::SeqCst);
-        e.replace(f, front, vec![v.int(at), v.int(1)]);
-        e.replace(p, o.page_op, vec![pn.0, v.int(2), ValueId::UNIT]);
+        c2.lock().unwrap().clear();
+        e.replace(f, front, vec![v.int(at), v.int(30), pn.0, v.int(2)]);
         e.replace(s, s_op, vec![v.int(400), y.0]);
-        e.replace(_t1, t1_op, vec![v.int(150), x.0, pn.0]);
         let rep = e.evaluate(4).unwrap();
         assert_eq!(int(e, t2), Some(1 + 2 + 3), "{rep:?}");
+        let seen = c2.lock().unwrap().clone();
         assert!(
-            c2.load(std::sync::atomic::Ordering::SeqCst) <= 2,
-            "T2 began {} times: let go with T1, it ran on T1's old x: {rep:?}",
-            c2.load(std::sync::atomic::Ordering::SeqCst)
+            !seen.contains(&(1 + 2 + 2)),
+            "T2 went on with the new pn and T1's old x: it read {seen:?}: {rep:?}"
         );
         assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
     }
