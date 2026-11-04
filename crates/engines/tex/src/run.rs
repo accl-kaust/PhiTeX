@@ -2593,6 +2593,15 @@ impl<'c, 'a> Run<'c, 'a> {
                     .read_written_text(key, wt)?
                     .filter(|&t| t != ValueId::UNIT)
             {
+                // (`PHITEX_TEX_TIME`: where in its commands a run reads a
+                // written file's text: what runs again on the file's change)
+                if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+                    eprintln!(
+                        "read-text: {key} in node {} at command {}",
+                        self.cx.node().raw(),
+                        self.cmds
+                    );
+                }
                 return Ok(Some(v.list(vec![v.str(&format!("./{key}")), t])));
             }
         }
@@ -3546,6 +3555,16 @@ impl<'c, 'a> Run<'c, 'a> {
         self.note_read_point();
         self.mark_read_point(key)?;
         self.note_read_back(key)?;
+        // (`PHITEX_TEX_TIME`: where in its commands a run reads a file
+        // back per field, and how many keys: what runs again on a key's
+        // change)
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "read-back: {key} in node {} at command {}",
+                self.cx.node().raw(),
+                self.cmds
+            );
+        }
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "aux-trace: read back {key} in node {} ({:?}): levels {:?}",
