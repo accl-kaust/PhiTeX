@@ -2050,6 +2050,19 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     if p.claim > 0 || last.as_ref().is_some_and(|r| r.claim > 0) {
         apply_claim(eng, ww, node, p.claim);
     }
+    // (the frontier this run moved, before any reader is asked again: one
+    // woken by this commit past it reads what the layer defines and waits
+    // there (`Ctx::hold_at_frontier`). Set after the re-asks, the woken
+    // reader began on the old frontier and read on past the new one, and
+    // ran again on what a run held before it then defined; and before the
+    // placements are queued: they are queued by where they stand against
+    // it, `sched::sched_key`)
+    if let Some(at) = frontier {
+        eng.frontier_by.store(node.id.raw() + 1, Ordering::Release);
+        let new = at.map_or(0, |n| n.raw() + 1);
+        let old = eng.frontier.swap(new, Ordering::AcqRel);
+        crate::sched::log_frontier(eng, old, new, Some(node.id), "set");
+    }
     // a changed bracket: the readers after it whose answer moved
     if let Some(old) = bracket_change {
         reask_after_effect(eng, ww, node, seg_pos, old, brackets, &mut st);
@@ -2104,15 +2117,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // (queued in their order: the ready heap takes the first queued first
     // among equal keys (`sched::Ready`), so its placements run in their
     // order, a child before the node after it, where `sched::sched_key`
-    // ties them (the settling layer's, keyed at the frontier))
-    // (the frontier this run moved, before its placements are queued: they
-    // are queued by where they stand against it, `sched::sched_key`)
-    if let Some(at) = frontier {
-        eng.frontier_by.store(node.id.raw() + 1, Ordering::Release);
-        let new = at.map_or(0, |n| n.raw() + 1);
-        let old = eng.frontier.swap(new, Ordering::AcqRel);
-        crate::sched::log_frontier(eng, old, new, Some(node.id), "set");
-    }
+    // ties them (the settling layer's, keyed at the frontier, which this
+    // run moved above))
     for n in &made {
         enqueue(
             eng,

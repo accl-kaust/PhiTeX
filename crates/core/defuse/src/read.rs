@@ -1011,6 +1011,42 @@ pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     None
 }
 
+/// A node of `me`'s unit between position `from` (excluded) and `me` that
+/// is to run again: dirty (queued, or parked), or running and asked again
+/// meanwhile. For the frontier's release (`sched::Pool::release_past_only`): a
+/// run let go past such a node read what that node had yet to define. One
+/// running for the first time does not count: what it defines is guessed
+/// at, as everywhere (counted, every held run waited for the runs between
+/// the frontier and it, and the page loop, which waits for the held run's
+/// text, with them: beamer cold -j8 5.4 s to 6.2 s, a label typed at -j8
+/// 379 ms to 543 ms, accl 24653).
+pub(crate) fn dirty_between(eng: &Engine, from: Pos, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            return None;
+        }
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
+                let n = eng.node(*id);
+                if *id != me.id
+                    && n.unit == me.unit
+                    && matches!(n.state(), State::Dirty | State::RunningDirty)
+                    && !eng.op(n.op()).final_only()
+                    && !n.held_panic.load(Ordering::Acquire)
+                {
+                    return Some(*id);
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    None
+}
+
 /// The last node before `me` in its unit whose last commit moved a read of
 /// their chain (`sched::note_move`) and that is yet to commit again; none
 /// where every such node has settled.
