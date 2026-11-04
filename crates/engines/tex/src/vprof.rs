@@ -47,7 +47,7 @@ const P_PD: i64 = 11; // d
 const P_DEL: i64 = 12;
 const P_BP: i64 = 13; // k
 const P_PP: i64 = 14; // (the parameters reaching the scan)
-const P_PPV: i64 = 15; // vsize, maxdepth, topskip glue4, holdinginserts
+const P_PPV: i64 = 15; // vsize, maxdepth, topskip glue4, holdinginserts, savingvdiscards
 const P_SET: i64 = 16; // i, x
 const P_INSP: i64 = 17; // n (the registers reaching the scan)
 const P_INSPV: i64 = 18; // n, box h+d or -1, is hbox, count, dimen, skip glue4
@@ -236,6 +236,7 @@ fn push_item(
                 out.extend([P_PPV, i64::from(p.vsize), i64::from(p.max_depth)]);
                 put_glue(out, &p.top_skip);
                 out.push(i64::from(p.holding_inserts));
+                out.push(i64::from(p.saving_vdiscards));
             }
         }
         nodes::T_SET_PAGE => out.extend([P_SET, int_at(v, x, 1), int_at(v, x, 2)]),
@@ -466,7 +467,7 @@ impl Reader<'_> {
                     max_depth,
                     top_skip,
                     holding_inserts: self.n32(),
-                    saving_vdiscards: false,
+                    saving_vdiscards: self.n32() != 0,
                 }))
             }
             P_SET => PItem::SetPage(self.next(), self.n32()),

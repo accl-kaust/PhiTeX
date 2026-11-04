@@ -138,10 +138,17 @@ pub(crate) fn expanded_name(name: &str, e: i32) -> String {
     format!("{name}{e:+}")
 }
 
-/// The key of font `name` at `size` expanded by `e` (the key of a font of
-/// its name and size, as `tfm_lookup` finds it).
-pub(crate) fn expanded_key(name: &str, size: i32, e: i32) -> u32 {
-    key_of(&expanded_name(name, e), size, 0)
+/// The key of font `name` at `size` expanded automatically by `e`: of its
+/// name and size, as `tfm_lookup` finds it (a `\font` reloaded after
+/// `\pdffontexpand` shares them); `copy`, a `\pdfcopyfont` (one for each of
+/// microtype's contexts), has its own: pdfTeX numbers one for each copy
+/// at the same `e`.
+pub(crate) fn expanded_key(copy: Option<FontId>, name: &str, size: i32, e: i32) -> u32 {
+    let n = expanded_name(name, e);
+    match copy {
+        Some(f) => key_of(&format!("{n}\u{1}{f}"), size, 0),
+        None => key_of(&n, size, 0),
+    }
 }
 
 /// [`load`] with every width `dw` wider and, if `nolig`, no lig/kern
@@ -313,6 +320,8 @@ pub(crate) struct View {
 pub(crate) struct Px {
     pub expansion: Option<phitex_typeset::fonts::Expansion>,
     pub auto: bool,
+    /// Made by `\pdfcopyfont` (its expanded fonts its own).
+    pub copy: bool,
     pub lp: Box<[i32]>,
     pub rp: Box<[i32]>,
     pub ef: Box<[i32]>,
@@ -741,7 +750,7 @@ impl View {
         let Some((name, size)) = self.names.get(&font) else {
             return font;
         };
-        let k = expanded_key(name, *size, e);
+        let k = expanded_key(p.copy.then_some(font), name, *size, e);
         let Some((l, params)) = self.fonts.get(font) else {
             return font;
         };

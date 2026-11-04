@@ -1178,12 +1178,15 @@ impl Run<'_, '_> {
         let quad = self.font_int(fi, crate::fields::FontCell::Fd(6))?;
         let mut expansion = None;
         let mut auto = false;
+        let mut copy = false;
         let mut slots: Box<[std::sync::OnceLock<_>]> = Box::new([]);
         if let Some((st, sh, step, a)) = crate::pdfprim::expand_params(self, fi)?
             && step > 0
             && let Some((name, size)) = view.names.get(&f).cloned()
         {
-            let key = |e: i32| crate::fonts::expanded_key(&name, size, e);
+            copy = crate::pdfprim::is_font_copy(self, fi)?;
+            let base = copy.then_some(f);
+            let key = |e: i32| crate::fonts::expanded_key(base, &name, size, e);
             expansion = Some(phitex_typeset::fonts::Expansion {
                 stretch: (st > 0).then(|| (key(st), st)),
                 shrink: (sh > 0).then(|| (key(-sh), -sh)),
@@ -1198,6 +1201,7 @@ impl Run<'_, '_> {
             Box::new(crate::fonts::Px {
                 expansion,
                 auto,
+                copy,
                 lp,
                 rp,
                 ef,
@@ -4128,7 +4132,18 @@ impl Run<'_, '_> {
         let stk = self.gpar(Par::splittopskip)?;
         let smd = self.ipar(Par::splitmaxdepth)?;
         let pp = self.pack_params(false)?;
-        let r = phitex_typeset::page::vsplit(bx.list, h, smd, stk, false, &pp);
+        let saving = self.ipar(Par::savingvdiscards)? > 0;
+        let r = phitex_typeset::page::vsplit(bx.list, h, smd, stk, saving, &pp);
+        // (e-TeX §977: `split_disc` holds this split's, the last one's gone)
+        if saving
+            || self
+                .get(crate::etex::SPLIT_DISCARDS)?
+                .is_some_and(|x| !list_of(v, x).is_empty())
+        {
+            let d = r.discards.iter().map(|n| nodes::encode(v, n, &side));
+            let d = v.list(d.collect());
+            self.set(crate::etex::SPLIT_DISCARDS, d, true);
+        }
         // (§977's `vpackage(p,h,exactly,split_max_depth)`, after the
         // rest's `vpack`: its badness is `\badness`, its report the log's,
         // §674-§678)

@@ -337,6 +337,10 @@ impl Run<'_, '_> {
             self.set_cell(l, v.list(vec![v.int(0), b]), true);
         }
         self.set("param:outputpenalty", v.int(output_penalty), true);
+        // (e-TeX: `\pagediscards` gives them while the routine runs)
+        if !list_of(v, a(5)).is_empty() {
+            self.set(crate::etex::PAGE_DISCARDS, a(5), true);
+        }
         let output = self.par(Par::output)?;
         let mut toks = toks_of(v, output);
         // (`\deadcycles` where the page fired, as the page builder had it:
@@ -402,6 +406,13 @@ impl Run<'_, '_> {
         };
         self.muts += 1;
         self.close_group(md)?;
+        // (§1026, e-TeX: the discards the routine did not take are flushed)
+        if self
+            .get(crate::etex::PAGE_DISCARDS)?
+            .is_some_and(|x| !list_of(v, x).is_empty())
+        {
+            self.set(crate::etex::PAGE_DISCARDS, v.list(Vec::new()), true);
+        }
         if !after.is_empty() {
             let toks = crate::val::toks_value(v, &after);
             if self.fire_passed()? {
