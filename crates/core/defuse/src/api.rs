@@ -566,6 +566,11 @@ pub struct Report {
     /// evaluation's and the edits' before it: a search that goes on from
     /// where it stopped steps over each node about once.
     pub scanned: u64,
+    /// The interval entries the range index stepped over to find the
+    /// range readers a change re-asks (`index::RangeIndex::holding`): a
+    /// change costs the readers whose interval ends near it, never every
+    /// reader that starts before it.
+    pub range_stepped: u64,
     /// The most commits under way at once: more than one where commits
     /// do not wait on each other (no lock of all the line's).
     pub commits_at_once: u64,

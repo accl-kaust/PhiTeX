@@ -1477,6 +1477,7 @@ impl Engine {
         let mut rep = Report {
             readers_swept: swept,
             scanned: self.scanned.swap(0, Ordering::Relaxed),
+            range_stepped: self.ranges.stepped.swap(0, Ordering::Relaxed),
             commits_at_once: self.commit_peak.swap(0, Ordering::Relaxed),
             collections: workers
                 .iter()
