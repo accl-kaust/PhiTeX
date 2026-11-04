@@ -862,7 +862,7 @@ fn an_opened_pdf_without_pages_is_empty() {
 
 /// A sum of dimensions past 2^31 sp: the oracle's `integer` has 64 bits
 /// (Arch's `--disable-dump-share`), its box holds 48000.0pt and a `\count`
-/// takes 3145728000 (pdftex -ini in the CI image). PhiTeX's `Scaled` is 32
+/// takes 3145728000 (pdftex -ini in the CI image). Our `Scaled` is 32
 /// bits and shows -17536.0pt. docs/note-width-arithmetic.md.
 #[test]
 #[ignore = "open for v1.0: Scaled is i32, see docs/note-width-arithmetic.md"]

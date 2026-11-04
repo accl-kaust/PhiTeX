@@ -529,6 +529,8 @@ pub(crate) struct State {
     /// location defined after it and before the next one for the first
     /// time since it, the entry the location held at the candidate.
     cands: Vec<(u64, Vec<(Loc, Entry)>)>,
+    /// A run of a code table's entries set but not yet written ([`BulkCodes`]).
+    bulk: Option<Box<BulkCodes>>,
     /// The candidates the run went on past where a page's routine can
     /// reach what it reads after ([`State::mark_past`]): each one's clock
     /// and number.
@@ -659,6 +661,7 @@ impl Clone for State {
             font_slow: self.font_slow.clone(),
             muts: self.muts,
             cands: self.cands.clone(),
+            bulk: self.bulk.clone(),
             past: self.past.clone(),
             past_n: self.past_n,
             read_across: self.read_across.clone(),
@@ -793,6 +796,7 @@ impl State {
             font_slow: phitex_defuse::FxHashSet::default(),
             muts: 0,
             cands: Vec::new(),
+            bulk: None,
             past: Vec::new(),
             past_n: 0,
             read_across: std::cell::RefCell::new(Vec::new()),
@@ -1515,6 +1519,14 @@ impl State {
         self.slot(loc).sym = true;
     }
 
+    /// The steps the run holds of register `loc`, unread: what a symbol
+    /// made now adds to the value reaching the run.
+    pub(crate) fn steps_of(&self, loc: Loc) -> i32 {
+        self.slot_ref(loc)
+            .filter(|s| s.mapped != MAP_NONE)
+            .map_or(0, |s| s.map.add)
+    }
+
     // ---------------------------------------------------------- values
 
     /// The engine value of entry `e` (`None`: absent), encoded from its
@@ -1886,6 +1898,55 @@ impl State {
         i
     }
 
+    /// Whether a run of code entries can wait ([`BulkCodes`]): none waits
+    /// already, and no undo log or candidate's entries keep each write.
+    pub(crate) fn bulk_ok(&self) -> bool {
+        self.bulk.is_none() && self.undo.is_none() && self.cands.is_empty()
+    }
+
+    /// Whether entries wait ([`BulkCodes`]).
+    #[inline]
+    pub(crate) fn bulk_waits(&self) -> bool {
+        self.bulk.is_some()
+    }
+
+    /// Entries `lo..hi` of code table `table` each set locally in group
+    /// `gid` to the character itself, to be written when asked for.
+    pub(crate) fn bulk_codes(&mut self, table: usize, lo: i32, hi: i32, gid: u32) {
+        self.any_gen = new_cat_gen();
+        self.muts += 1;
+        self.stamp += 1;
+        self.bulk = Some(Box::new(BulkCodes {
+            table,
+            lo,
+            hi,
+            gid,
+            save_at: self.save.len(),
+            done: phitex_defuse::FxHashSet::default(),
+        }));
+    }
+
+    /// Entry `c` of code table `table` is asked for, at `loc`: written now if
+    /// it waits.
+    #[inline]
+    pub(crate) fn bulk_take(&mut self, table: usize, c: i32, loc: Loc) {
+        let Some(b) = self.bulk.as_mut() else {
+            return;
+        };
+        if b.table == table && (b.lo..b.hi).contains(&c) && b.done.insert(c) {
+            let gid = b.gid;
+            self.set(loc, Entry::int(c), false, Some(gid));
+        }
+    }
+
+    /// All that waits taken off, to be written: table, the entries not
+    /// written yet, their group.
+    pub(crate) fn bulk_rest(&mut self) -> Option<(usize, Vec<i32>, u32)> {
+        let b = self.bulk.take()?;
+        let rest = (b.lo..b.hi).filter(|c| !b.done.contains(c)).collect();
+        Some((b.table, rest, b.gid))
+    }
+
     /// A write (spec §2.3; §277–§279: `eq_define` / `geq_define`): `grp`
     /// is the innermost group of the run open now, if any. A local write
     /// inside it saves the value it hides, once per group while that
@@ -1988,6 +2049,15 @@ impl State {
         }
         self.changing(loc);
         self.muts += 1;
+        // (after a candidate: what it holds there is kept, unread the value
+        // that reached the run, for the routine of a page firing there,
+        // `State::at_candidates`; the stamp says it came after the candidate,
+        // `State::defined_stamped`)
+        if !self.cands.is_empty() {
+            self.stamp += 1;
+            let prev = self.slot(loc).e;
+            self.note_cand(loc, 0, prev);
+        }
         let loaded = self.is_loaded(loc);
         let cur = if loaded {
             Some(self.int_of(loc, v))
@@ -2159,6 +2229,10 @@ impl State {
     /// group dies with it: nothing of it is published.
     pub(crate) fn close(&mut self, save_base: usize, def_base: usize) {
         self.muts += 1;
+        if self.bulk.as_ref().is_some_and(|b| b.save_at >= save_base) {
+            self.bulk = None;
+            self.any_gen = new_cat_gen();
+        }
         while self.save.len() > save_base {
             let Some(s) = self.save.pop() else { break };
             let slot = self.slot(s.loc);
@@ -2248,7 +2322,17 @@ impl State {
         self.slot_ref(loc)
             .and_then(|s| usize::try_from(s.meta).ok().filter(|&m| m > 0))
             .and_then(|m| self.metas.get(m - 1))
-            .is_some_and(|m| !m.ldef_local || m.ldef_gid.is_none())
+            .map_or_else(
+                // (only stepped, even where the steps cancel, `State::add`:
+                // nothing to publish, and what they leave is still later in
+                // TeX's order than a routine run at a candidate before them.
+                // `\\g__kernel_prg_map_int` stepped -1 then +1 around a
+                // candidate in latex_starray: the routine's value of it stood
+                // over the piece's, the next step made -1, and a name built
+                // from it went wrong)
+                || self.slot_ref(loc).is_some_and(|s| s.mapped != MAP_NONE),
+                |m| !m.ldef_local || m.ldef_gid.is_none(),
+            )
     }
 
     /// The groups opened so far: a group [`State::open`] opens after
@@ -2299,11 +2383,26 @@ impl State {
     /// Every location the run defined: its latest definition's stamp,
     /// whether local, and the group it was made in.
     pub(crate) fn defined_stamped(&self) -> Vec<(Loc, u64, bool, Option<u32>)> {
-        self.metas
+        let mut out: Vec<_> = self
+            .metas
             .iter()
             .filter(|m| m.ldef_stamp > 0)
             .map(|m| (m.loc, m.ldef_stamp, m.ldef_local, m.ldef_gid))
-            .collect()
+            .collect();
+        // (a register stepped after a candidate, no definition: as one made
+        // right after the last candidate holding it, [`State::add`])
+        for (st, xs) in &self.cands {
+            for &(l, _) in xs {
+                if self
+                    .slot_ref(l)
+                    .is_some_and(|s| s.meta == 0 && s.mapped != MAP_NONE)
+                {
+                    out.retain(|x: &(Loc, u64, bool, Option<u32>)| x.0 != l);
+                    out.push((l, st + 1, false, None));
+                }
+            }
+        }
+        out
     }
 
     /// The locations whose latest definition after stamp `since` is
@@ -2805,6 +2904,28 @@ fn stored(val: Entry) -> Entry {
     let mut e = val;
     e.flags = LOADED | (val.flags & (HAS_ID | CC | ALIAS));
     e
+}
+
+/// Local definitions in the group open now of a code table's entries
+/// `lo..hi` past its fixed slots, each character's entry the character,
+/// not yet written ([`State::bulk_codes`]): a table of 65536 entries set
+/// whole in a group that then reads three of them and ends. No slot, no
+/// save entry and no definition mark exist until an entry is asked for
+/// ([`State::bulk_take`]), or the run does anything other than the few
+/// commands that cannot see the table ([`crate::run::Run::flush_bulk_codes`]);
+/// the group's close forgets what was never asked for, which leaves each
+/// entry as restoring it would.
+#[derive(Clone)]
+pub(crate) struct BulkCodes {
+    table: usize,
+    lo: i32,
+    hi: i32,
+    gid: u32,
+    /// The save stack's height when made: the group that holds it closes
+    /// to no more than this.
+    save_at: usize,
+    /// Entries written since.
+    done: phitex_defuse::FxHashSet<i32>,
 }
 
 /// Whether `loc` is one of the page builder's parameters (§980).

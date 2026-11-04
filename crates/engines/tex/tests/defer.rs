@@ -354,3 +354,203 @@ fn a_symbol_read_by_another_run_is_of_the_same_register() {
         );
     }
 }
+
+/// A counter that only counts (docs/note-relative-counters.md §2.1): each
+/// paragraph steps it and carries its value, plus the steps it made, into
+/// a macro and a deferred `\write` without reading it; a step added before
+/// them moves the values in the file and in the last paragraph, which
+/// typesets one, and asks no paragraph that only carries it again.
+#[test]
+fn a_counter_only_stepped_and_carried_is_no_read() {
+    let src = |extra: &str| {
+        let mut s = String::from("\\openout1=\\jobname.out\n\\count200=5\n");
+        s.push_str(extra);
+        for i in 0..80 {
+            let _ = write!(
+                s,
+                "\\global\\advance\\count200 1 \\advance\\count200 2 \
+                 \\edef\\w{{\\write1{{n{i}=\\the\\count200.}}}}\\w\\edef\\last{{\\number\\count200}}\
+                 Paragraph {i} of the document, long enough to make a line or two when set in the \
+                 plain format's ten point roman.\n\n"
+            );
+        }
+        s.push_str("The last value is \\last.\n\n\\closeout1\n\\bye\n");
+        s
+    };
+    for threads in [1, 8] {
+        let dir = common::scratch(&format!("defer-rel-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let first = src("");
+        let mut b = common::build(opts, Some(&common::plain()), &first);
+        let (want, out) = cold("rel", &first, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: cold");
+        assert!(out.contains("n0=8.") && out.contains("n79=245."), "{out:?}");
+        let edited = src("\\advance\\count200 1000\n");
+        common::rebuild(&mut b, &edited);
+        let (want, out) = cold("rel-edited", &edited, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: edited equals cold");
+        assert!(out.contains("n0=1008."), "{out:?}");
+        let got: String = b
+            .writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(got, out, "-j{threads}: the file follows");
+        assert!(
+            b.stats.refuted_by_op("exec", "count:200")
+                + b.stats.refuted_by_op("resume", "count:200")
+                <= 1,
+            "-j{threads}: only the paragraph typesetting it reads it: {:?}",
+            b.stats.refuted_by_field
+        );
+    }
+}
+
+/// Steps of a counter after candidates of a run that cannot be cut (a
+/// group open over paragraphs): published as a relation, each page's routine,
+/// which reads the counter at its candidate, reads what the steps before it
+/// make. Against the same text setting the counter by value at each step.
+#[test]
+fn steps_after_candidates_reach_the_routine_as_values_do() {
+    let src = |step: &str, front: &str| {
+        let mut s = String::from(
+            "\\openout1=\\jobname.out\n\\count200=5\n\
+             \\output={\\immediate\\write1{p\\the\\count0=\\the\\count200.}\\shipout\\box255\\global\\advance\\count0 1 }\n",
+        );
+        s.push_str(front);
+        for b in 0..6 {
+            s.push_str("\\begingroup\n");
+            for i in 0..12 {
+                let _ = write!(
+                    s,
+                    "Paragraph {b} {i}, long enough to make a line or two when set in the plain \
+                     format's ten point roman, and one more clause to be sure. {step} Then more text \
+                     after the step, which runs on to another line of the paragraph.\n\n"
+                );
+            }
+            s.push_str("\\endgroup\n\n");
+        }
+        s.push_str("\\closeout1\n\\bye\n");
+        s
+    };
+    let map = "\\global\\advance\\count200 1 ";
+    let val = "\\global\\count200=\\numexpr\\count200+1\\relax ";
+    let (want_dvi, want_out) = cold("steps-val", &src(val, ""), 1);
+    assert!(want_out.contains("p2="), "several pages: {want_out:?}");
+    let (want_dvi2, want_out2) = cold(
+        "steps-val2",
+        &src(val, "\\global\\advance\\count200 100\n"),
+        1,
+    );
+    for threads in [1, 4, 8] {
+        let dir = common::scratch(&format!("defer-steps-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let mut b = common::build(opts, Some(&common::plain()), &src(map, ""));
+        assert_eq!(b.output().0, want_dvi, "-j{threads}: cold");
+        let got: String = b
+            .writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(got, want_out, "-j{threads}: each page's value");
+        common::rebuild(&mut b, &src(map, "\\global\\advance\\count200 100\n"));
+        assert_eq!(b.output().0, want_dvi2, "-j{threads}: edited");
+        let got: String = b
+            .writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(
+            got, want_out2,
+            "-j{threads}: each page's value after the edit"
+        );
+    }
+}
+
+/// A symbol among a macro's delimiters, as etoolbox's `\\ifinlist` makes them
+/// (biblatex's `\\xifinlist{\\the\\c@refsection}{...}`): TeX has the digits
+/// there, and text with those digits, from any read, matches.
+#[test]
+fn a_counter_among_a_macros_delimiters_matches_its_digits() {
+    let src = "\\openout1=\\jobname.out\n\\count200=7\n\\edef\\n{\\the\\count200}\n\
+               \\edef\\next{\\def\\noexpand\\find##1,\\n,##2&{\\noexpand\\write1{[##1]}}}\\next\n\
+               \\find a,7,b&\n\\edef\\m{x,\\the\\count200,y&}\\expandafter\\find\\m\n\
+               Text.\\par\n\\closeout1\n\\bye\n";
+    let (_, out) = cold("delim", src, 1);
+    assert_eq!(out.trim_end(), "[a][x]", "{out:?}");
+}
+
+/// Steps that cancel around a candidate of a run that cannot be cut (a group
+/// open over paragraphs), under a routine that steps the same counter and so
+/// defines its value: the run publishes nothing for them, and what they leave
+/// is still later in TeX's order than the routine, which gives way. As
+/// `\\g__kernel_prg_map_int` in `latex_starray`, where the routine's value stood
+/// and the next step made it -1. Against the same text setting by value.
+#[test]
+fn a_routines_value_gives_way_to_steps_that_cancel_after_its_candidate() {
+    let src = |down: &str, up: &str| {
+        let mut s = String::from(
+            "\\openout1=\\jobname.out\n\\count200=5\n\
+             \\output={\\global\\advance\\count200 1 \\count1=\\count200 \\global\\advance\\count200 -1 \
+             \\immediate\\write1{p\\the\\count0=\\the\\count200.}\\shipout\\box255\\global\\advance\\count0 1 }\n",
+        );
+        for b in 0..6 {
+            s.push_str("\\begingroup\n");
+            for i in 0..12 {
+                let _ = write!(
+                    s,
+                    "{down}Paragraph {b} {i}, long enough to make a line or two when set in the \
+                     plain format's ten point roman, and one more clause to be sure, then more \
+                     text which runs on to another line of the paragraph.\n\n{up}"
+                );
+            }
+            s.push_str("\\endgroup\n\n");
+        }
+        s.push_str("The counter ends at \\the\\count200.\n\n\\closeout1\n\\bye\n");
+        s
+    };
+    let (want_dvi, want_out) = cold(
+        "cancel-val",
+        &src(
+            "\\global\\count200=\\numexpr\\count200-1\\relax ",
+            "\\global\\count200=\\numexpr\\count200+1\\relax ",
+        ),
+        1,
+    );
+    assert!(
+        want_out.contains("p2=4."),
+        "several pages, each at 4: {want_out:?}"
+    );
+    for threads in [1, 4, 8] {
+        let dir = common::scratch(&format!("defer-cancel-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let b = common::build(
+            opts,
+            Some(&common::plain()),
+            &src(
+                "\\global\\advance\\count200 -1 ",
+                "\\global\\advance\\count200 1 ",
+            ),
+        );
+        assert_eq!(b.output().0, want_dvi, "-j{threads}: cold");
+        let got: String = b
+            .writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(got, want_out, "-j{threads}: each page's value");
+    }
+}

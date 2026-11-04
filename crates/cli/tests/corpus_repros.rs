@@ -1191,6 +1191,22 @@ fn page_discards() {
     check_threads("page_discards", "pdf");
 }
 
+/// Loops of register arithmetic and code assignments (`Run::counted_loop`):
+/// each shape it runs whole, and each it must leave to the interpreter (a
+/// value or character out of range, an overflow, a pending
+/// `\afterassignment`, `\globaldefs`, a body with anything else in it).
+/// Oracles: pdftex and xetex in the CI image.
+#[test]
+fn count_loop() {
+    check_threads("count_loop", "pdf");
+}
+
+/// [`count_loop`] under XeTeX: the code tables past 255.
+#[test]
+fn count_loop_xe() {
+    check_threads("count_loop_xe", "pdf");
+}
+
 /// TeX Live manual ualberta: an `\\input` file whose last line has no newline.
 /// That line still ends (§31) and gives its space; a slice of the file took
 /// it as cut mid-line, one space short, so a paragraph running on into the
