@@ -1015,7 +1015,6 @@ pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
 /// their chain (`sched::note_move`) and that is yet to commit again; none
 /// where every such node has settled.
 pub(crate) fn mover_before(eng: &Engine, me: &Node) -> Option<NodeId> {
-    let chain = eng.op(me.op()).chains();
     let open: Vec<NodeId> = eng
         .movers
         .lock()
@@ -1027,10 +1026,6 @@ pub(crate) fn mover_before(eng: &Engine, me: &Node) -> Option<NodeId> {
                     n.unit == me.unit
                         && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
                         && !n.held_panic.load(Ordering::Acquire)
-                        // (a chain's mover holds its chain: what comes down it
-                        // reaches a node of another operation only by what that
-                        // node read, `open_definer_before`)
-                        && (chain || !eng.op(n.op()).chains())
                 })
         })
         .collect();
