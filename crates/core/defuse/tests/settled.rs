@@ -227,3 +227,61 @@ fn an_effect_is_not_made_on_a_read_moved_before_its_wait() {
     assert_eq!(*eff.1.lock().unwrap(), vec![v.int(7)]);
     assert!(e.check_invariants().is_empty());
 }
+
+/// `[]`: says at once that its run makes no progress (`Ctx::stuck`).
+struct NoProgress;
+
+impl Operation for NoProgress {
+    fn name(&self) -> &'static str {
+        "no_progress"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        Err(cx.stuck("no progress".to_owned()))
+    }
+}
+
+/// `[]`: panics, on no input at all (so on inputs that hold).
+struct Panics;
+
+impl Operation for Panics {
+    fn name(&self) -> &'static str {
+        "panics"
+    }
+
+    fn run(&self, _cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        panic!("this run panics");
+    }
+}
+
+/// A stuck run behind a node no run of this pass can bring a commit of
+/// (one that runs only once the line is quiet, one that panicked on inputs
+/// that hold): the evaluation ends and says so. Before, `open_before`
+/// called such a node open, the run waited for it, `park_waiting` found it
+/// settled and queued the run again, and the build never ended and never
+/// reported.
+#[test]
+fn a_stuck_run_behind_a_node_with_no_commit_to_come_is_reported() {
+    for threads in [1, 2, 8] {
+        for panics in [false, true] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let e = Engine::new();
+                let before = if panics {
+                    e.register(Arc::new(Panics))
+                } else {
+                    e.register(Arc::new(Writer))
+                };
+                let stuck = e.register(Arc::new(NoProgress));
+                let u = e.new_unit();
+                e.push(u, before, Vec::new());
+                e.push(u, stuck, Vec::new());
+                let _ = tx.send(e.evaluate(threads).is_err());
+            });
+            let failed = rx
+                .recv_timeout(Duration::from_secs(60))
+                .unwrap_or_else(|_| panic!("-j{threads} panics {panics}: the evaluation did not end in 60 s"));
+            assert!(failed, "-j{threads} panics {panics}: the stuck run was not reported");
+        }
+    }
+}
