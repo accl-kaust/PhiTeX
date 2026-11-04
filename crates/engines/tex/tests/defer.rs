@@ -476,6 +476,75 @@ fn steps_after_candidates_reach_the_routine_as_values_do() {
     }
 }
 
+/// Steps on both sides of candidates of a run that cannot be cut, a page's
+/// routine reading the counter at each: the run does not read the counter
+/// for them. Its value at a candidate is what reached the run plus the
+/// steps before the candidate, which the page's finisher resolves, so a step
+/// added before them wakes the finishers, not the text (LaTeX's
+/// `\\g__mark_int` in amsldoc, every piece after an edit re-run in turn).
+/// Against the same text setting the counter by value.
+#[test]
+fn steps_on_both_sides_of_candidates_are_no_read() {
+    let src = |step: &str, front: &str| {
+        let mut s = String::from(
+            "\\openout1=\\jobname.out\n\\count200=5\n\\
+             \\output={\\immediate\\write1{p\\the\\count0=\\the\\count200.}\\shipout\\box255\\global\\advance\\count0 1 }\n",
+        );
+        s.push_str(front);
+        for b in 0..4 {
+            s.push_str("\\begingroup\n");
+            for i in 0..16 {
+                let _ = write!(
+                    s,
+                    "{step}Paragraph {b} {i}, long enough to make a line or two when set in the \
+                     plain format's ten point roman, and one more clause to be sure. {step} Then \
+                     more text after the step, which runs on to another line of the paragraph.\n\n"
+                );
+            }
+            s.push_str("\\endgroup\n\n");
+        }
+        s.push_str("\\closeout1\n\\bye\n");
+        s
+    };
+    let map = "\\global\\advance\\count200 1 ";
+    let val = "\\global\\count200=\\numexpr\\count200+1\\relax ";
+    let front = "\\global\\advance\\count200 100\n";
+    let (want_dvi, want_out) = cold("both-val", &src(val, ""), 1);
+    assert!(want_out.contains("p3="), "several pages: {want_out:?}");
+    let (want_dvi2, want_out2) = cold("both-val2", &src(val, front), 1);
+    let file = |b: &mut phitex_tex::Build| -> String {
+        b.writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect()
+    };
+    for threads in [1, 4, 8] {
+        let dir = common::scratch(&format!("defer-both-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let mut b = common::build(opts, Some(&common::plain()), &src(map, ""));
+        assert_eq!(b.output().0, want_dvi, "-j{threads}: cold");
+        assert_eq!(file(&mut b), want_out, "-j{threads}: each page's value");
+        common::rebuild(&mut b, &src(map, front));
+        assert_eq!(b.output().0, want_dvi2, "-j{threads}: edited");
+        assert_eq!(
+            file(&mut b),
+            want_out2,
+            "-j{threads}: each page's value after the edit"
+        );
+        assert_eq!(
+            b.stats.refuted_by_op("exec", "count:200")
+                + b.stats.refuted_by_op("resume", "count:200"),
+            0,
+            "-j{threads}: no text reads the counter: {:?}",
+            b.stats.refuted_by_field
+        );
+    }
+}
+
 /// A symbol among a macro's delimiters, as etoolbox's `\\ifinlist` makes them
 /// (biblatex's `\\xifinlist{\\the\\c@refsection}{...}`): TeX has the digits
 /// there, and text with those digits, from any read, matches.
