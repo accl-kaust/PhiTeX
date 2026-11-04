@@ -3614,6 +3614,10 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
             v.int(wos),
             v.int(i64::from(immediate)),
             v.int(i64::from(wgroup)),
+            // (14: the file's bytes, hashed: a page that shows the image
+            // is another page when they change, its size or not,
+            // `crate::pdfout`'s `images_shown`)
+            v.int(phitex_defuse::hash_bytes(0x696d_6167_6500, &data).cast_signed()),
         ]),
         true,
     );

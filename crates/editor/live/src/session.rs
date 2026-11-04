@@ -421,6 +421,17 @@ impl Report {
     }
 }
 
+/// What the builds read ([`Session::watched`]).
+#[derive(Clone, Debug, Default)]
+pub struct Watched {
+    /// The names asked for, as TeX gave them (`./` dropped).
+    pub names: Vec<String>,
+    /// Where those found were found.
+    pub paths: Vec<PathBuf>,
+    /// Whether a build is there (before one: nothing is known yet).
+    pub built: bool,
+}
+
 /// What was written.
 #[derive(Default)]
 pub struct Written {
@@ -937,15 +948,13 @@ impl Session {
                 let opts = Options {
                     edits: Some(self.absorb.tx.clone()),
                     // (`PHITEX_TIME_LIMIT_SECS`: a longer limit for a
-                    // measurement of a document the kernel is still slow on)
-                    time_limit: match std::env::var("PHITEX_TIME_LIMIT_SECS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                    {
-                        Some(secs) => Some(Duration::from_secs(secs)),
-                        None if first => Some(Duration::from_mins(30)),
-                        None => opts.time_limit,
-                    },
+                    // measurement of a document the kernel is still slow on,
+                    // 0 for none, as `phitex_tex::Options::default` reads it)
+                    time_limit: time_limit_of(
+                        std::env::var("PHITEX_TIME_LIMIT_SECS").ok().as_deref(),
+                        first,
+                        opts.time_limit,
+                    ),
                     ..opts
                 };
                 phitex_tex::timeline::lap("session: the options (records read)");
@@ -1681,6 +1690,29 @@ impl Session {
         }
     }
 
+    /// What the builds read, for a watch's file events ([`Watched`]):
+    /// every name TeX asked the finder for (found or not: a file that
+    /// appears is a change too) with the paths of those found, and the
+    /// names the tools' searches asked for. Empty before a build.
+    pub fn watched(&self) -> Watched {
+        let mut w = Watched::default();
+        // (the main file: never asked of the finder, it is what the build begins with)
+        w.names.push(plain_name(&self.job.path.to_string_lossy()));
+        w.paths.push(self.job.path.clone());
+        for (n, _, p) in &self.inputs {
+            w.names.push(plain_name(n));
+            if let Some(p) = p {
+                w.paths.push(p.clone());
+            }
+        }
+        if let Some(b) = &self.build {
+            w.names
+                .extend(b.tool_reads().into_iter().map(|(n, _)| plain_name(&n)));
+        }
+        w.built = self.build.is_some();
+        w
+    }
+
     /// The names the builds asked the finder for (`inputs`)
     /// that stand for one of `changed` (as found, or as named): by the
     /// names and the files kept, no lookup; a changed name equal to
@@ -1695,6 +1727,10 @@ impl Session {
             .map(|(_, _, p)| p.as_ref().map(|p| plain_name(&p.to_string_lossy())))
             .collect();
         let mut hit = vec![false; self.inputs.len()];
+        // (a changed file TeX did not read: staged too, for a tool that
+        // read it, BibTeX's `.bib`, a `.bst`, makeindex's `.ist`; the
+        // engine stages only what one of its runs read, else nothing)
+        let mut tools: Vec<String> = Vec::new();
         for c in changed {
             let mut any = false;
             for (i, (n, ..)) in self.inputs.iter().enumerate() {
@@ -1714,15 +1750,22 @@ impl Session {
                     && self.host.same_file(f, c)
                 {
                     hit[i] = true;
+                    any = true;
                 }
             }
+            if !any && !tools.contains(c) {
+                tools.push(c.clone());
+            }
         }
-        self.inputs
+        let mut out: Vec<String> = self
+            .inputs
             .iter()
             .zip(hit)
             .filter(|(_, h)| *h)
             .map(|((n, ..), _)| n.clone())
-            .collect()
+            .collect();
+        out.extend(tools);
+        out
     }
 
     /// The main file's name as TeX prints it (`./story.tex`).
@@ -1942,6 +1985,19 @@ pub fn waiting_notes(_job: &Job) -> Vec<String> {
 /// needs one run, not two.
 const LATEXMK_AUX: &str = "\\relax \n\\gdef \\@abspage@last{1}\n";
 
+/// The build's time limit from `PHITEX_TIME_LIMIT_SECS` (`var`): that
+/// many seconds, none for 0 (a measurement's cold build is never cut
+/// short); unset or unreadable, 30 minutes for the session's first build
+/// (`first`), else the options' own (`fallback`).
+fn time_limit_of(var: Option<&str>, first: bool, fallback: Option<Duration>) -> Option<Duration> {
+    match var.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(0) => None,
+        Some(secs) => Some(Duration::from_secs(secs)),
+        None if first => Some(Duration::from_mins(30)),
+        None => fallback,
+    }
+}
+
 /// Whether a file the document writes may be written under `name`
 /// (kpathsea's `kpse_out_name_ok` in its paranoid mode, TeX Live's
 /// default `openout_any = p`): a relative name, no `..` component, no
@@ -2102,6 +2158,30 @@ fn main_byte_as_line(s: &str, text: &str, file: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    /// `PHITEX_TIME_LIMIT_SECS=0` is no limit, as the engine's options
+    /// read it: the scoreboard's cold builds set it so, and the watch
+    /// read it as a limit of zero seconds, so every build ended at once
+    /// with the engine's deadline (mc 80017: circuitikz "ran past its time
+    /// limit" after 88 ms at every thread count).
+    #[test]
+    fn a_time_limit_of_zero_is_none() {
+        let fb = Some(Duration::from_secs(600));
+        assert_eq!(super::time_limit_of(Some("0"), true, fb), None);
+        assert_eq!(super::time_limit_of(Some(" 0\n"), false, fb), None);
+        assert_eq!(
+            super::time_limit_of(Some("90"), true, fb),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(
+            super::time_limit_of(None, true, fb),
+            Some(Duration::from_mins(30))
+        );
+        assert_eq!(super::time_limit_of(None, false, fb), fb);
+        assert_eq!(super::time_limit_of(Some("x"), false, fb), fb);
+    }
+
     #[test]
     fn a_main_file_byte_inside_a_character_is_its_line() {
         let text = "a\n\u{a9} b\nc";

@@ -1128,6 +1128,63 @@ pub(crate) fn outer_projection(x: ValueId, v: &Values) -> ValueId {
     v.int(i64::from(outer))
 }
 
+/// The head of a gobbled call ([`skeleton_projection`]).
+const SKELETON: &str = "\u{10FFFE}skeleton";
+
+/// A macro with no parameters, plain (not `\long`, `\outer` or
+/// `\protected`), whose body is a control sequence followed by braced
+/// groups and nothing else, the groups holding characters only (no
+/// control sequence or active character at any depth): its head and the
+/// groups' count, 1 to 9 (a `.nav` file's `\sectionentry{1}{Title}{3}…`).
+pub(crate) fn skeleton_of(m: &Macro) -> Option<(Tok, u8)> {
+    if m.flags != 0 || !m.params.is_empty() {
+        return None;
+    }
+    let (&head, rest) = m.body.split_first()?;
+    if !head.is_cs() || head.is_internal_cs() {
+        return None;
+    }
+    let (mut depth, mut k) = (0u32, 0u8);
+    for t in rest {
+        match t.cat()? {
+            1 => {
+                if depth == 0 {
+                    k = k.checked_add(1)?;
+                }
+                depth += 1;
+            }
+            2 if depth > 0 => depth -= 1,
+            13 => return None,
+            _ if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    (depth == 0 && (1..=9).contains(&k)).then_some((head, k))
+}
+
+/// What a call of a macro the command loop expands needs of its meaning
+/// where its body's head gobbles every group after it ([`skeleton_of`],
+/// `Run::skeleton_call`): the head and the groups' count; any other
+/// meaning whole. The head's arguments are thrown away unread (its body
+/// uses none of them, §400): the characters they hold are scanned only
+/// for their braces, never a `\par` or an `\outer` token (§392). A pure
+/// projection for the engine: a redefinition that changes only those
+/// characters (a section's title in its navigation entry) leaves such a
+/// reader standing.
+pub(crate) fn skeleton_projection(x: ValueId, v: &Values) -> ValueId {
+    match Mean::decode(v, Some(x)) {
+        Mean::Macro(m) => match skeleton_of(&m) {
+            Some((head, k)) => v.list(vec![
+                str_id(v, SKELETON),
+                tok_value(v, head),
+                v.int(i64::from(k)),
+            ]),
+            None => x,
+        },
+        _ => x,
+    }
+}
+
 /// What a token stepped over or stored without expansion reads of its
 /// meaning: a skipped conditional branch counts the conditionals it opens
 /// and closes and stops at an `\else`, `\or` or `\fi` of its own level,

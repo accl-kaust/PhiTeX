@@ -22,6 +22,30 @@ export interface Diagnostic {
   problem?: Problem;
 }
 
+/** A problem's kind, for the problems' filters (panel.ts): errors, then the warnings by what they are about. */
+export type Kind = "error" | "overfull" | "underfull" | "reference" | "font" | "other";
+
+/** The kinds, in the filters' order, with their names. */
+export const KINDS: [Kind, string][] = [
+  ["error", "Errors"],
+  ["overfull", "Overfull"],
+  ["underfull", "Underfull"],
+  ["reference", "References"],
+  ["font", "Fonts"],
+  ["other", "Other"],
+];
+
+/** What `d` is about: an error; an overfull or underfull box (TeX's "Overfull \hbox", "Underfull \vbox", "Tight", "Loose"); an undefined reference or citation (LaTeX's, BibTeX's); a font (a missing character, a substitution); else other. */
+export function kindOf(d: { severity: string; message: string }): Kind {
+  if (d.severity === "error" || d.severity === "fatal") return "error";
+  const m = d.message;
+  if (/^Overfull \\[hv]box|^Tight \\[hv]box/.test(m)) return "overfull";
+  if (/^Underfull \\[hv]box|^Loose \\[hv]box/.test(m)) return "underfull";
+  if (/[Rr]eference|[Cc]itation|database entry|undefined references|\bLabel\b/.test(m)) return "reference";
+  if (/[Ff]ont|Missing character/.test(m)) return "font";
+  return "other";
+}
+
 /** The build's first TeX error, as the core reads it off the terminal. */
 export interface TexError {
   message: string;

@@ -262,6 +262,11 @@ pub(crate) struct Ops {
     /// a membership test of a list macro reads whether the item is in it
     /// ([`Run::clist_has`]).
     pub clist_proj: phitex_defuse::ProjId,
+    /// The gobbled-call projection of meanings
+    /// ([`crate::val::skeleton_projection`]): a macro the command loop
+    /// expands whose body's head gobbles every group after it reads only
+    /// the head and the groups' count ([`Run::skeleton_lookup`]).
+    pub skel_proj: phitex_defuse::ProjId,
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
@@ -680,6 +685,13 @@ pub(crate) struct Run<'c, 'a> {
     pub exps: u64,
     /// The macro call next is the command loop's own ([`Run::counted_loop`]).
     pub command_call: bool,
+    /// Set while the command loop fetches its next token
+    /// ([`Run::skeleton_lookup`]).
+    pub cmd_fetch: bool,
+    /// The token the command loop fetched, read through the gobbled-call
+    /// projection: its location, its body's head and the groups' count
+    /// ([`Run::skeleton_call`]).
+    pub skel: Option<(Tok, Loc, Tok, u8)>,
     /// The lines named by a line being expanded for the log ([`Run::write_out`]);
     /// none where its text can go elsewhere.
     pub log_marks: Option<Vec<i64>>,
@@ -1237,6 +1249,8 @@ impl<'c, 'a> Run<'c, 'a> {
             cmds: 0,
             exps: 0,
             command_call: false,
+            cmd_fetch: false,
+            skel: None,
             log_marks: None,
             xpand_depth: 0,
             marks_depth: 0,
@@ -1610,9 +1624,24 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a read-back field, or one the reading run defined after the
         // read-back, [`Run::note_pre`]: as this run holds it, the line
-        // written in the reading run itself, or no point known)
+        // written in the reading run itself, or no point known; only
+        // this run's own `wpre:`, left by its read-back here or by its
+        // definitions after it: one another node's read-back left is
+        // that point's, not this one's. thuthesis: the main `.aux` read
+        // at `\begin{document}` ran natbib's `\bibstyle`, whose style
+        // hook `\let`s `\bibstyle` to `\@gobble`, and left
+        // `wpre:cs:bibstyle` natbib's; the appendix's bibunit `.aux`,
+        // read where its unit starts after `\AtBeginDocument` made
+        // `\bibstyle` `\@gobble` globally, took that `wpre:` for its own
+        // `\bibstyle` line and ran the hook again, 32 definitions pdflatex
+        // does not make, in every other round: the rounds never settled)
         let Some(at) = self.interp_point.filter(|&n| n != self.cx.node()) else {
-            return self.get(&format!("wpre:{name}"));
+            let pre = format!("wpre:{name}");
+            let pl = self.loc_of(self.v.field(&pre));
+            if !self.st.defined_after(pl, 0) {
+                return Ok(None);
+            }
+            return self.get(&pre);
         };
         if !is_read_back_definition(&name) {
             return Ok(None);
@@ -1737,7 +1766,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     #[inline(never)]
-    fn load_slow(&mut self, loc: Loc) -> R<()> {
+    pub(crate) fn load_slow(&mut self, loc: Loc) -> R<()> {
         if self.in_skip && self.rec_load {
             self.skip_first.push(loc);
         }
@@ -2579,6 +2608,15 @@ impl<'c, 'a> Run<'c, 'a> {
                     .read_written_text(key, wt)?
                     .filter(|&t| t != ValueId::UNIT)
             {
+                // (`PHITEX_TEX_TIME`: where in its commands a run reads a
+                // written file's text: what runs again on the file's change)
+                if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+                    eprintln!(
+                        "read-text: {key} in node {} at command {}",
+                        self.cx.node().raw(),
+                        self.cmds
+                    );
+                }
                 return Ok(Some(v.list(vec![v.str(&format!("./{key}")), t])));
             }
         }
@@ -3532,6 +3570,16 @@ impl<'c, 'a> Run<'c, 'a> {
         self.note_read_point();
         self.mark_read_point(key)?;
         self.note_read_back(key)?;
+        // (`PHITEX_TEX_TIME`: where in its commands a run reads a file
+        // back per field, and how many keys: what runs again on a key's
+        // change)
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "read-back: {key} in node {} at command {}",
+                self.cx.node().raw(),
+                self.cmds
+            );
+        }
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!(
                 "aux-trace: read back {key} in node {} ({:?}): levels {:?}",
@@ -3562,7 +3610,11 @@ impl<'c, 'a> Run<'c, 'a> {
     fn read_back_pre(&mut self, key: &str, name: &str, val: ValueId) -> R<()> {
         let v = self.v;
         let pre = format!("wpre:{name}");
-        if self.get(&pre)?.is_none() {
+        // (kept once per run: this run's own, not one another node's
+        // read-back of the field left, which is that point's value, and
+        // would keep this point's unrecorded, [`Run::pre_value`])
+        let pl = self.loc_of(v.field(&pre));
+        if !self.st.defined_after(pl, 0) {
             let was = self.get(name)?;
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                 eprintln!(
@@ -3843,14 +3895,19 @@ impl<'c, 'a> Run<'c, 'a> {
             // (a line that does more than define is read back as text:
             // its interpretation stops at the first command that does,
             // its definitions not wanted)
-            // (a group opened in the line shares its list: only a level
-            // with a list of its own, or an item on any, is more; a group
-            // still open at the line's end is, below)
+            // (a group opened in the line shares its list: an item on the
+            // line's own list is more. A box the line builds has a list of
+            // its own, and what is on it is the box's: `\\settowidth` in
+            // hypdoc's `\\HD@SetMacroIndent` only sets a dimension. A box
+            // still open at the line's end is more, below)
             if self.contributed_since(nc)
                 || self.kids.len() != nk
                 || self.nest.len() <= nest_len
-                || self.nest[nest_len + 1..].iter().any(|l| l.owns)
-                || self.nest[nest_len..].iter().any(|l| !l.list.is_empty())
+                || !self.nest[nest_len].list.is_empty()
+                || self.nest[nest_len + 1..]
+                    .iter()
+                    .take_while(|l| !l.owns)
+                    .any(|l| !l.list.is_empty())
             {
                 break;
             }
@@ -4187,6 +4244,18 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn log(&mut self, kind: &str, text: &str) -> R<()> {
         if kind == "error" {
             self.diag(true, text);
+        }
+        // (an `\errmessage`, LaTeX's errors among them: a diagnostic at
+        // the place it was met, its first line the message; without it
+        // `! LaTeX Error: ...` had no line and no place on the pages)
+        if kind == "errmsg" {
+            let nl = self.ipar(Par::newlinechar)?;
+            let first = u32::try_from(nl)
+                .ok()
+                .and_then(char::from_u32)
+                .and_then(|c| text.split(c).next())
+                .unwrap_or(text);
+            self.diag(true, first);
         }
         let stop = kind == "error" && {
             self.error_count += 1;
@@ -4618,6 +4687,16 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
+        if self.cmd_fetch
+            && let Some(c) = self.skeleton_lookup(tok)?
+        {
+            self.cur = Cur {
+                tok,
+                cmd: c,
+                chr: 0,
+            };
+            return Ok(());
+        }
         if self.class_reads
             && let Some(c) = self.class_lookup(tok)?
         {
@@ -4629,6 +4708,53 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         }
         self.set_cur_cs_slow(tok)
+    }
+
+    /// The command loop's next token, a macro not yet read whose body is
+    /// a head followed by groups of characters only
+    /// ([`crate::val::skeleton_of`]): read through the gobbled-call
+    /// projection, kept with its head and the groups' count for
+    /// [`Run::skeleton_call`], which goes on only if the head gobbles
+    /// them all; its command code ([`cmd::CALL`]). `None` (read in full,
+    /// as before) for any other meaning, one this run holds, or where the
+    /// meaning comes from elsewhere than the engine.
+    #[inline(never)]
+    fn skeleton_lookup(&mut self, tok: Tok) -> R<Option<u8>> {
+        self.skel = None;
+        if self.interp.is_some()
+            || self.in_skip
+            || self.rec_load
+            || self.fin_scope_closer.is_some()
+            || tok.is_internal_cs()
+            || !tok.is_cs()
+        {
+            return Ok(None);
+        }
+        let Some(l) = self.mean_loc(tok) else {
+            return Ok(None);
+        };
+        if self.st.is_loaded(l) || self.st.lazy(l).is_some() || self.lazy_pre(l) {
+            return Ok(None);
+        }
+        let f = self.loc_field(l);
+        let p = phitex_defuse::PathId::of_proj(self.ops.skel_proj);
+        let mut shape = None;
+        let (_, through) = self.cx.read_or_path(f, p, |v, x| {
+            shape = match crate::val::Mean::decode(v, Some(x)) {
+                crate::val::Mean::Macro(m) => crate::val::skeleton_of(&m),
+                _ => None,
+            };
+            shape.is_some()
+        })?;
+        match shape {
+            Some((head, k)) if through => {
+                self.skel = Some((tok, l, head, k));
+                Ok(Some(cmd::CALL))
+            }
+            // (read whole: `load_slow` loads it, its read answered from
+            // the one made)
+            _ => Ok(None),
+        }
     }
 
     /// A class read (spec-redesign §8): the command code of `tok`'s
