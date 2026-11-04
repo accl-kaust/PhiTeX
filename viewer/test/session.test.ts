@@ -164,3 +164,51 @@ test("a queued keystroke is timed by its own build", () => {
   assert.match(said[0], /rebuilt +3 of 100 steps, 1 pass/);
   assert.equal(w.queued, null);
 });
+
+// The watch answers a request and sends its events on one socket, but a
+// reply made before the pages' origins came can go out after the
+// `origins` event that says they came (view.rs answers, then waits for
+// the socket the broadcast holds). A lookup begun after that event must
+// ask again, not share the request already in flight, whose answer is
+// "not made yet": the problems' underlines, looked up again on the event,
+// drew nothing until the next build (the browser suite's "kinds filter"
+// red, 1 run in N, the overfull box's bar never on the page).
+test("a page's glyphs asked before its origins came are asked again after the origins event", async () => {
+  const host: EditorHost = { loadProject: async () => ({}), onOpen: () => undefined, onChanges: () => undefined };
+  let emit!: (e: unknown) => void;
+  const held: ((r: unknown) => void)[] = [];
+  const core = {
+    request: (r: { op: string }) => (r.op === "origins" ? new Promise((go) => held.push(go)) : Promise.resolve({ ok: false })),
+    onEvent: (cb: (e: unknown) => void) => (emit = cb),
+  };
+  const sink = new Proxy({}, { get: () => () => undefined });
+  const s = new PreviewSession(host, core as never, sink as never, { schedule: () => undefined, remote: { source: () => undefined } });
+  const w = s as unknown as { opened: boolean; hashes: string[] };
+  w.opened = true;
+  w.hashes = ["a"];
+  const b64 = (xs: number[], f = false) => {
+    const d = new DataView(new ArrayBuffer(4 * xs.length));
+    xs.forEach((x, i) => (f ? d.setFloat32(4 * i, x, true) : d.setUint32(4 * i, x, true)));
+    return btoa(String.fromCharCode(...new Uint8Array(d.buffer)));
+  };
+  const page = { files: ["main.tex"], files_from: 0, n: 3, file: b64([0, 0, 0]), start: b64([6, 7, 8]), end: b64([7, 8, 9]), synth: b64([0]), x: b64([72, 78, 84], true), y: b64([100, 100, 100], true) };
+  // (the status's lookup: its request sent, the origins not made yet)
+  const first = s.boxesOf("main.tex", 6, 9);
+  await new Promise((go) => setTimeout(go, 0));
+  assert.equal(held.length, 1);
+  // (the origins event overtakes that request's answer; the panel looks up again)
+  emit({ event: "origins", pages: [1], edits: [] });
+  const again = s.boxesOf("main.tex", 6, 9);
+  await new Promise((go) => setTimeout(go, 0));
+  held[0]({ ok: false, error: "page 0's origins are not made yet" });
+  assert.equal(held.length, 2, "asked again after the event");
+  held[1]({ ok: true, json: page });
+  // (the first lookup's answer was of before: it too asks again, the same request)
+  assert.equal((await first).length, 1);
+  assert.equal(held.length, 2);
+  const got = await again;
+  assert.equal(got.length, 1, "the boxes found on the page");
+  assert.equal(got[0].k, 0);
+  // (and the stale answer kept nothing: the page's glyphs are the new ones)
+  assert.equal((await s.boxesOf("main.tex", 6, 9)).length, 1);
+});

@@ -428,7 +428,10 @@ export class PreviewSession {
       // (and the problems' underlines, looked up before the origins were
       // there, are looked up again: a build's problems reach the view
       // before its origins do)
-      if (this.o.remote && (e as { event?: string }).event === "origins") return void (this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
+      // (a request for them still in flight may have been answered before
+      // they came, its reply sent after this event: not shared or kept, the
+      // page asked again, glyphsFetch)
+      if (this.o.remote && (e as { event?: string }).event === "origins") return void (this.originsSeen++, this.glyphsAsked.clear(), this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
       if (this.o.remote && "event" in e && WATCH.has(e.event)) return this.onWatch(e as WatchEvent);
       // (a build of the core's began or ended; `preparing`, older cores' name for it)
       if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);
@@ -1059,15 +1062,21 @@ export class PreviewSession {
     // collaborators all ask for a page an edit changed, at once)
     let p = this.glyphsAsked.get(key);
     if (!p) {
-      p = this.glyphsFetch(k, key).finally(() => this.glyphsAsked.delete(key));
-      this.glyphsAsked.set(key, p);
+      const mine: Promise<Glyph[]> = this.glyphsFetch(k, key).finally(() => this.glyphsAsked.get(key) === mine && this.glyphsAsked.delete(key));
+      this.glyphsAsked.set(key, (p = mine));
     }
     return p;
   }
   private glyphsAsked = new Map<string, Promise<Glyph[]>>();
+  /** The watch's `origins` events seen: a page's answer asked before the latest is of the origins before it. */
+  private originsSeen = 0;
 
   private async glyphsFetch(k: number, key: string): Promise<Glyph[]> {
+    const seen = this.originsSeen;
     const r = await this.core.request({ op: "origins", page: k });
+    // (the origins came while this was asked, the answer made before
+    // them: the page asked again, as the event's lookups do)
+    if (seen !== this.originsSeen) return this.glyphsOf(k);
     if (!r.ok || !r.json) return [];
     // (the job's names: "main" for main.tex, "ch/intro.tex", "article.cls")
     const path = (n: string) => {

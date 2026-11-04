@@ -4562,7 +4562,7 @@ var PreviewSession = class {
     core.onEvent?.((e) => {
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
-      if (this.o.remote && e.event === "origins") return void (this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
+      if (this.o.remote && e.event === "origins") return void (this.originsSeen++, this.glyphsAsked.clear(), this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
       if (this.o.remote && "event" in e && WATCH2.has(e.event)) return this.onWatch(e);
       if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);
       if (e.event === "switched") {
@@ -5106,14 +5106,18 @@ var PreviewSession = class {
     if (have) return Promise.resolve(have);
     let p = this.glyphsAsked.get(key);
     if (!p) {
-      p = this.glyphsFetch(k, key).finally(() => this.glyphsAsked.delete(key));
-      this.glyphsAsked.set(key, p);
+      const mine = this.glyphsFetch(k, key).finally(() => this.glyphsAsked.get(key) === mine && this.glyphsAsked.delete(key));
+      this.glyphsAsked.set(key, p = mine);
     }
     return p;
   }
   glyphsAsked = /* @__PURE__ */ new Map();
+  /** The watch's `origins` events seen: a page's answer asked before the latest is of the origins before it. */
+  originsSeen = 0;
   async glyphsFetch(k, key) {
+    const seen = this.originsSeen;
     const r = await this.core.request({ op: "origins", page: k });
+    if (seen !== this.originsSeen) return this.glyphsOf(k);
     if (!r.ok || !r.json) return [];
     const path = (n) => {
       n = n.replace(/^\.\//, "");
