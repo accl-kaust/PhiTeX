@@ -17,7 +17,8 @@
 # frontends' phitex/ is this checkout), in Chrome:
 #   Overleaf: the extension on the mock Overleaf (mock/server.mjs; never
 #   overleaf.com): the first page, typed words on it, no exception or
-#   console error (test/scenarios/ci.json);
+#   console error (test/scenarios/ci.json); a figure replaced as Overleaf's
+#   socket announces it changes the PDF (test/scenarios/ci-figure.json);
 #   the demo (demo.phitex.org's build, build/web, served here): a sample's
 #   first page from its PDF, typed words on it, no error (web/test/check.mjs);
 #   VS Code's built-in wasm engine (vscode/test/smoke.ts).
@@ -137,7 +138,9 @@ jobs:
         working-directory: fe
         env:
           PHITEX_CHROME: google-chrome
-        run: node scripts/dev/mock-run.mjs test/scenarios/ci.json
+        run: |
+          node scripts/dev/mock-run.mjs test/scenarios/ci.json
+          node scripts/dev/mock-run.mjs test/scenarios/ci-figure.json
       - name: the demo (build/web, served here)
         working-directory: fe
         env:
