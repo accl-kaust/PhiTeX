@@ -45,6 +45,7 @@ mod report;
 mod session;
 mod shelf;
 mod shell;
+mod star;
 mod tex;
 mod tools;
 mod ui;

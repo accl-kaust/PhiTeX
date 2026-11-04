@@ -223,6 +223,7 @@ fn run(nn: &str) -> Vec<String> {
     let mut child = phitex(&wdir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--exact-pdf",
             "--no-view",

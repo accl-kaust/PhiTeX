@@ -82,6 +82,17 @@ pub enum ToolSearch {
 }
 
 impl ToolSearch {
+    /// Every search, each once ([`Build::stage_file`] stages a file under
+    /// each one's field).
+    pub(crate) const ALL: [ToolSearch; 6] = [
+        ToolSearch::BibStyle,
+        ToolSearch::BibData,
+        ToolSearch::IndexStyle,
+        ToolSearch::GsFont,
+        ToolSearch::Mf,
+        ToolSearch::Web2c,
+    ];
+
     /// The search's code in its environment field (`tools::support_field`).
     pub(crate) fn code(self) -> u8 {
         match self {
@@ -734,16 +745,19 @@ fn dlines_from_starts(
         .iter()
         .map(|(_, n, src)| {
             let Src::Doc(s, _) = *src;
-            // (the line ends before byte s - 1: the starts after them up
-            // to it, the text's own start not one)
-            let end = s.saturating_sub(1).min(len);
-            let nl = starts.partition_point(|&k| k <= end).saturating_sub(1);
-            (
-                n.raw(),
-                i64::try_from(nl).unwrap_or(i64::MAX) + i64::from(s > 0),
-            )
+            (n.raw(), lines_before(starts, len, s))
         })
         .collect()
+}
+
+/// The lines of a text before its byte `s`, as [`dlines_of`] counts them,
+/// from its line starts.
+fn lines_before(starts: &[usize], len: usize, s: usize) -> i64 {
+    // (the line ends before byte s - 1: the starts after them up to it,
+    // the text's own start not one)
+    let end = s.saturating_sub(1).min(len);
+    let nl = starts.partition_point(|&k| k <= end).saturating_sub(1);
+    i64::try_from(nl).unwrap_or(i64::MAX) + i64::from(s > 0)
 }
 
 /// The environment's changes for the nodes' lines now (`dlines_of`)
@@ -964,7 +978,17 @@ impl Default for Options {
             prelude_jobname: "texput".to_owned(),
             program: "pdftex".to_owned(),
             prelude_bytes: None,
-            time_limit: Some(std::time::Duration::from_secs(600)),
+            // (`PHITEX_TIME_LIMIT_SECS`: another bound, 0 for none; a
+            // measurement's cold build or reference must never be cut
+            // short, a truncated reference compares as a wrong edit)
+            time_limit: match std::env::var("PHITEX_TIME_LIMIT_SECS")
+                .ok()
+                .and_then(|x| x.trim().parse::<u64>().ok())
+            {
+                Some(0) => None,
+                Some(n) => Some(std::time::Duration::from_secs(n)),
+                None => Some(std::time::Duration::from_secs(600)),
+            },
             stuck_after: None,
             memory_limit: None,
             threads: None,
@@ -2848,6 +2872,10 @@ struct Graph {
     reads: Vec<(String, u64)>,
     /// The finder's answers since the last evaluation began.
     queries: Vec<(String, bool)>,
+    /// The names a tool's search was asked for (`tfile:` fields: a
+    /// `.bib`, a `.bst`, an `.ist`), and whether found: a watch rebuilds
+    /// when one of them changes ([`Build::tool_reads`]).
+    tool_reads: Vec<(String, bool)>,
     /// The files the finder does not have.
     absent: Vec<Field>,
     /// The files the job writes and reads back: loop-back fields
@@ -2925,6 +2953,12 @@ pub(crate) struct DocFile {
     /// ([`DocFile::shifts`]), so a reader running again places the piece
     /// it placed, not one moved; none: made from the text.
     args: Vec<Option<Vec<ValueId>>>,
+    /// The lines before each slice's text, by the value of its frames
+    /// ([`crate::run::lines_owner`]), as given to its runs
+    /// (`dline:<frames>`, [`doc_file_line`]). Empty until a reader reaches
+    /// the file; two slices with the same frames (a kept one's stale place
+    /// a new one's now) have none: their runs fold the lines.
+    dlines: FxHashMap<u64, i64>,
 }
 
 impl DocFile {
@@ -2933,6 +2967,40 @@ impl DocFile {
         self.shifts.values().for_each(|&(x, _)| keep(x));
         self.args.iter().flatten().flatten().for_each(|&x| keep(x));
     }
+
+    /// Each slice's arguments made, and the lines before each text now
+    /// ([`DocFile::dlines`]).
+    fn lines_now(
+        &mut self,
+        v: &Values,
+        loads: Option<&crate::pkgrec::LoadHints>,
+    ) -> Vec<(u64, i64)> {
+        let name = v.str(&self.path);
+        let starts = line_starts(&self.text);
+        let len = self.text.len();
+        self.args.resize(self.slices.len(), None);
+        let mut now: FxHashMap<u64, Option<i64>> = FxHashMap::default();
+        for ((_, n), a) in self.slices.iter().zip(self.args.iter_mut()) {
+            let a = a.get_or_insert_with(|| {
+                node_args(v, &self.text, Some(&self.incr), n, loads, Some(name))
+            });
+            let DocNode::Doc(s, _) = *n;
+            now.entry(a[0].raw())
+                .and_modify(|k| *k = None)
+                .or_insert(Some(lines_before(&starts, len, s)));
+        }
+        now.into_iter()
+            .filter_map(|(n, k)| k.map(|k| (n, k)))
+            .collect()
+    }
+}
+
+/// The lines given for the text of a piece of a cut file
+/// ([`DocFile::dlines`]).
+fn doc_file_line(docs: &DocFiles, n: u64) -> Option<i64> {
+    docs.locked()
+        .values()
+        .find_map(|d| d.locked().dlines.get(&n).copied())
 }
 
 /// The build's cut document files, by name ([`DocFile`]).
@@ -2972,6 +3040,7 @@ fn cut_doc_file(
         shifts: FxHashMap::default(),
         placed: FxHashMap::default(),
         args: Vec::new(),
+        dlines: FxHashMap::default(),
     };
     docs.locked()
         .insert(name.to_owned(), Arc::new(std::sync::Mutex::new(df)));
@@ -2997,17 +3066,14 @@ pub(crate) fn doc_file_pieces(
     if !df.readers.contains(&node) {
         df.readers.push(node);
     }
-    let name = v.str(&df.path);
     let df = &mut *df;
-    df.args.resize(df.slices.len(), None);
-    df.slices
-        .iter()
-        .zip(df.args.iter_mut())
-        .map(|((_, n), a)| {
-            a.get_or_insert_with(|| node_args(v, &df.text, Some(&df.incr), n, loads, Some(name)))
-                .clone()
-        })
-        .collect()
+    // (the lines given as the file is first reached; an edit moves them,
+    // [`Build::stage_doc_file`])
+    let now = df.lines_now(v, loads);
+    if df.dlines.is_empty() {
+        df.dlines = now.into_iter().collect();
+    }
+    df.args.iter().flatten().cloned().collect()
 }
 
 /// The arguments of slices `new` an edit made of `old` (`args` theirs,
@@ -3181,6 +3247,7 @@ impl Graph {
         let forced_proj = eng.register_projection(Arc::new(crate::val::forced_projection));
         let num_proj = eng.register_projection(Arc::new(crate::val::num_projection));
         let clist_proj = eng.register_projection(Arc::new(crate::val::clist_projection));
+        let skel_proj = eng.register_projection(Arc::new(crate::val::skeleton_projection));
         let ops = Ops {
             exec,
             put,
@@ -3233,6 +3300,7 @@ impl Graph {
             forced_proj,
             num_proj,
             clist_proj,
+            skel_proj,
         };
         let _ = shared.set(ops.clone());
         declare_fields(&eng);
@@ -3251,6 +3319,7 @@ impl Graph {
             files: Vec::new(),
             reads: Vec::new(),
             queries: Vec::new(),
+            tool_reads: Vec::new(),
             absent: Vec::new(),
             written: Vec::new(),
             seeds: Vec::new(),
@@ -3421,6 +3490,11 @@ impl Graph {
                     val
                 }));
             }
+            // (the lines before a piece of a cut file, [`DocFile::dlines`])
+            if let Some(n) = field.strip_prefix("dline:") {
+                let k = doc_file_line(&docs, n.parse().ok()?);
+                return Some(k.map(|k| v.int(k)));
+            }
             // (a tool's support file, `tfile:<search>:<name>`: the
             // client's lookup for tools, else its finder by name)
             if let Some(rest) = field.strip_prefix("tfile:") {
@@ -3495,7 +3569,11 @@ impl Graph {
             // (a tool's support file: in the environment, not among the
             // names the finder is asked for again; a file read both cut
             // and whole, [`DocFile`], listed once)
-            if !name.starts_with("tfile:") && !self.reads.iter().any(|(n, _)| *n == name) {
+            if let Some(t) = name.strip_prefix("tfile:").and_then(|r| r.split_once(':')) {
+                if !self.tool_reads.iter().any(|(n, _)| n == t.1) {
+                    self.tool_reads.push((t.1.to_owned(), val.is_some()));
+                }
+            } else if !self.reads.iter().any(|(n, _)| *n == name) {
                 self.queries.push((name.clone(), val.is_some()));
                 self.reads.push((name, hash));
             }
@@ -5821,6 +5899,11 @@ pub struct Build {
     /// `text`'s line starts, made when a diagnostic asks and kept
     /// through edits (`Absorb` moves them).
     lines: Mutex<Option<Vec<usize>>>,
+    /// The diagnostics placed by the last [`Build::diagnostics`], by
+    /// their entry, place and line ([`diag_key`]): an edit places only
+    /// the entries it made or moved (a viewer asks after each edit; a
+    /// document of thousands of LaTeX errors placed them all again).
+    diag_memo: Mutex<FxHashMap<u64, Diagnostic>>,
     /// The document's units and their analyses ([`Incr`]).
     incr: Incr,
     /// Whether a package load ran in the last evaluation: only then do
@@ -6075,6 +6158,7 @@ impl Build {
             raw: g_canon.then(|| Arc::from(document)),
             memo: Mutex::default(),
             lines: Mutex::default(),
+            diag_memo: Mutex::default(),
             loads_ran: false,
             staged: false,
             evaluated: false,
@@ -6413,6 +6497,7 @@ impl Build {
     /// sent, as one.
     #[allow(clippy::too_many_lines)]
     pub fn stage_file(&mut self, name: &str, text: Option<&[u8]>) {
+        let tools = self.stage_tool_file(name, text);
         let v = self.g.eng.values();
         let f = v.field(&format!("file:{name}"));
         let d = v.field(&format!("dfile:{name}"));
@@ -6435,6 +6520,9 @@ impl Build {
             None
         };
         if k.is_none() && !cut {
+            if tools {
+                self.push_staged();
+            }
             return;
         }
         let old = k.map(|k| list_of(v, self.g.files[k].1)).unwrap_or_default();
@@ -6461,6 +6549,9 @@ impl Build {
             // the build read; each one's package-load record was dropped,
             // so the preamble's loads ran again in full: 4 nodes, 2.5 s)
             if found.is_some() && !cut && self.g.files[k].1 == val {
+                if tools {
+                    self.push_staged();
+                }
                 return;
             }
             if found.is_none() {
@@ -6499,7 +6590,14 @@ impl Build {
                 (_, found_text) => {
                     self.g.files.retain(|&(g, _)| g != d);
                     self.g.absent.retain(|&g| g != d);
-                    self.g.ops.docs.locked().remove(name);
+                    // (the lines it gave go with it: a run of a later cut's
+                    // text with the same frames asks them anew)
+                    let gone = self.g.ops.docs.locked().remove(name);
+                    if let Some(df) = gone {
+                        let changes =
+                            dline_changes(self.g.eng.values(), &mut df.locked().dlines, Vec::new());
+                        self.g.eng.update_environment(&changes);
+                    }
                     if let (Some((path, bytes)), Some(_)) = (&found, found_text) {
                         let defs = self.g.ops.defs.locked().clone();
                         let x = cut_doc_file(
@@ -6552,6 +6650,11 @@ impl Build {
             }
         }
         crate::timeline::lap("stage: the loads' records");
+        self.push_staged();
+    }
+
+    /// The environment pushed after a file was staged ([`Build::stage_file`]).
+    fn push_staged(&mut self) {
         self.g.absorb_provided();
         let env = self.g.environment(self.opts.fixpoint);
         let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
@@ -6560,6 +6663,58 @@ impl Build {
         self.g.push_env(env);
         crate::timeline::lap("stage: the environment set");
         self.staged = true;
+    }
+
+    /// File `name` staged where a tool's search found it in the project
+    /// (`tfile:<search>:<name>`, a `.bib` BibTeX or biber read, a `.bst`,
+    /// an `.ist`): its new text there (`text`, else the finder's), or gone,
+    /// or come where the search had found none (its first element is the
+    /// current directory, `./`). A tool's files are not `file:` fields, so
+    /// a database edited during a watch was read as it was at the first
+    /// build. Whether one changed.
+    fn stage_tool_file(&mut self, name: &str, text: Option<&[u8]>) -> bool {
+        let v = self.g.eng.values();
+        let mut changed = false;
+        let mut now: Option<Option<Vec<u8>>> = None;
+        let mut read = |b: &Self| -> Option<Vec<u8>> {
+            now.get_or_insert_with(|| match text {
+                Some(t) => Some(t.to_vec()),
+                None => (b.opts.finder)(name).map(|(_, b)| b),
+            })
+            .clone()
+        };
+        for search in ToolSearch::ALL {
+            let f = crate::tools::support_field(v, search, name);
+            if let Some(k) = self.g.files.iter().position(|(g, _)| *g == f) {
+                let Some(path) = list_of(v, self.g.files[k].1).first().map(|&p| str_of(v, p))
+                else {
+                    continue;
+                };
+                // (found elsewhere by the search, TEXMF's: not this file)
+                if path.trim_start_matches("./") != name {
+                    continue;
+                }
+                if let Some(b) = read(self) {
+                    let x = v.list(vec![v.str(&path), v.str(&latin1(&b))]);
+                    if self.g.files[k].1 != x {
+                        self.g.files[k].1 = x;
+                        changed = true;
+                    }
+                } else {
+                    self.g.files.remove(k);
+                    self.g.absent.push(f);
+                    changed = true;
+                }
+            } else if self.g.absent.contains(&f)
+                && let Some(b) = read(self)
+            {
+                self.g.absent.retain(|g| *g != f);
+                let x = v.list(vec![v.str(&format!("./{name}")), v.str(&latin1(&b))]);
+                self.g.files.push((f, x));
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Cut document file `df` ([`DocFile`]) whose text is now `text`:
@@ -6689,6 +6844,16 @@ impl Build {
         df.shifts = shifts;
         df.placed = placed;
         df.slices = new;
+        // (the lines given its pieces, moved with the text; none yet where
+        // no reader has reached it)
+        if !df.dlines.is_empty() {
+            let now = df.lines_now(self.g.eng.values(), loads.as_deref());
+            let changes = dline_changes(self.g.eng.values(), &mut df.dlines, now);
+            drop(df);
+            if !changes.is_empty() {
+                self.g.eng.update_environment(&changes);
+            }
+        }
         crate::timeline::lap("stage: the file's pieces edited");
     }
 
@@ -6846,6 +7011,14 @@ impl Build {
     #[must_use]
     pub fn prelude_complete(&self) -> bool {
         self.prelude.errors.is_empty() && self.prelude.diags.is_empty()
+    }
+
+    /// The names tools' searches were asked for in this build's life,
+    /// each with whether it was found ([`ToolSearch`]: a bibliography's
+    /// database and style, an index style).
+    #[must_use]
+    pub fn tool_reads(&self) -> Vec<(String, bool)> {
+        self.g.tool_reads.clone()
     }
 
     /// The document's files read back still changing after
@@ -7451,9 +7624,16 @@ impl Build {
             self.g.eval_errors.len(),
             // (the lines before the text's nodes: the log's reports name
             // lines by them, `crate::log::LINE_MARK`)
-            self.dlines.iter().fold(0u64, |h, (&n, &k)| {
-                h.wrapping_add(phitex_defuse::hash_words(n, &[k.cast_unsigned()]))
-            }),
+            self.g.ops.docs.locked().values().fold(
+                self.dlines.iter().fold(0u64, |h, (&n, &k)| {
+                    h.wrapping_add(phitex_defuse::hash_words(n, &[k.cast_unsigned()]))
+                }),
+                |h, d| {
+                    d.locked().dlines.iter().fold(h, |h, (&n, &k)| {
+                        h.wrapping_add(phitex_defuse::hash_words(n, &[k.cast_unsigned()]))
+                    })
+                },
+            ),
         );
         crate::timeline::note("output: the key (log, pagehash folds)", t0.elapsed());
         if let Some((k, x)) = &self.memo.locked().output
@@ -7481,7 +7661,12 @@ impl Build {
             v,
             &self.opts.name,
             self.g.eng.acc_value(self.unit, v.field("log")),
-            &|n| self.dlines.get(&n).copied(),
+            &|n| {
+                self.dlines
+                    .get(&n)
+                    .copied()
+                    .or_else(|| doc_file_line(&self.g.ops.docs, n))
+            },
         );
         // (TeX's fatal error removes pdfTeX's PDF file only: XeTeX's XDV
         // is closed with the pages shipped and xelatex's xdvipdfmx makes
@@ -7723,6 +7908,8 @@ impl Build {
                     .collect::<Vec<_>>()
             })
             .collect();
+        let memo_old = std::mem::take(&mut *self.diag_memo.locked());
+        let mut memo_new: FxHashMap<u64, Diagnostic> = FxHashMap::default();
         for e in entries {
             let xs = list_of(v, e);
             let int = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
@@ -7812,6 +7999,29 @@ impl Build {
                 text.char_indices().nth(at).map_or(text.len(), |(k, _)| k)
             };
             let head = &text[..b];
+            // (placed by the last call: the same entry at the same place
+            // in the same line)
+            let key = {
+                let ls = head.rfind('\n').map_or(0, |k| k + 1);
+                let le = text[b..].find('\n').map_or(text.len(), |k| b + k);
+                phitex_defuse::hash_words(
+                    phitex_defuse::hash_bytes(e.raw(), &text.as_bytes()[ls..le]),
+                    &[
+                        u64::try_from(at).unwrap_or(0),
+                        phitex_defuse::hash_bytes(0, file.as_bytes()),
+                    ],
+                )
+            };
+            // (an undefined name's help names the names defined near it,
+            // which the edit may have changed: placed again)
+            if let Some(d) = memo_old
+                .get(&key)
+                .filter(|_| message != "Undefined control sequence")
+            {
+                memo_new.insert(key, d.clone());
+                out.push(d.clone());
+                continue;
+            }
             // (the document's line by its line starts; a file's counted)
             let line = if file == docname {
                 doc_lines.partition_point(|&k| k <= b)
@@ -7856,7 +8066,7 @@ impl Build {
             } else {
                 (start, at)
             };
-            out.push(Diagnostic {
+            let d = Diagnostic {
                 file,
                 range: (start, at),
                 line,
@@ -7868,8 +8078,11 @@ impl Build {
                 message,
                 context,
                 help,
-            });
+            };
+            memo_new.insert(key, d.clone());
+            out.push(d);
         }
+        *self.diag_memo.locked() = memo_new;
         // pdfTeX's fatal `pdftex_fail` (the output's: a font without a
         // map entry), or XeTeX's driver's: at no place of the text, so at
         // its end, where the job stopped; its message as pdfTeX's line has
@@ -7915,6 +8128,7 @@ impl Build {
             &format!("diagnostics: {n_entries} entries"),
             t_entries.elapsed(),
         );
+        self.why_read_stopped(&mut out);
         out.extend(self.prelude.diags.iter().cloned());
         for m in &self.g.eval_warnings {
             out.push(Diagnostic {
@@ -7946,6 +8160,56 @@ impl Build {
         }
         out.sort_by(|a, b| (&a.file, a.range.0).cmp(&(&b.file, b.range.0)));
         out
+    }
+
+    /// A job stopped at `\read` in a run that cannot ask (`*** (cannot
+    /// \read from terminal in nonstop modes)`): LaTeX asks so after saying
+    /// why with a message, not an error (`\@missingfileerror`'s "!
+    /// LaTeX Error: File x.sty not found.", typed out). That line, the
+    /// last such before the stop, is the diagnostic's message, the stop its
+    /// help; without it the reason was not shown at all. The log is not
+    /// changed.
+    fn why_read_stopped(&self, out: &mut [Diagnostic]) {
+        let Some(d) = out.iter_mut().find(|d| {
+            d.severity == Severity::Error
+                && d.message.starts_with("*** (cannot \\read from terminal")
+        }) else {
+            return;
+        };
+        let v = self.g.eng.values();
+        let mut why = None;
+        for x in self
+            .g
+            .eng
+            .acc_value(self.unit, v.field("log"))
+            .map(|e| v.seq_to_vec(e))
+            .unwrap_or_default()
+        {
+            let xs = list_of(v, x);
+            let Some(&t) = xs.get(1) else { continue };
+            let text = str_of(v, t);
+            let nl = xs.get(2).map_or(-1, |&n| int_of(v, n));
+            let nl = u32::try_from(nl)
+                .ok()
+                .and_then(char::from_u32)
+                .unwrap_or('\n');
+            for line in text.split([nl, '\n']) {
+                if let Some(m) = line.trim_start().strip_prefix("! ")
+                    && m.contains("Error")
+                {
+                    why = Some(m.trim_end().trim_end_matches('.').to_owned());
+                }
+            }
+            if str_of(v, xs[0]) == "error" && text.starts_with("*** (cannot") {
+                break;
+            }
+        }
+        if let Some(m) = why {
+            let stop = std::mem::replace(&mut d.message, m);
+            d.help = Some(format!(
+                "LaTeX then asks for what to do, and a run that cannot ask stops there ({stop}), as pdflatex does"
+            ));
+        }
     }
 
     /// The diagnostics at no place alone (the engine's own warnings and
@@ -9567,4 +9831,22 @@ pub fn rss_kb() -> u64 {
                 .and_then(|v| v.split_whitespace().next().and_then(|n| n.parse().ok()))
         })
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tool_search_tests {
+    use super::ToolSearch;
+
+    /// Every search a `tfile:` field may name is in [`ToolSearch::ALL`],
+    /// which `stage_file` stages a changed file under.
+    #[test]
+    fn every_search_is_staged() {
+        let named: Vec<ToolSearch> = (0..=u8::MAX)
+            .filter_map(|c| ToolSearch::of_code(&c.to_string()))
+            .collect();
+        assert_eq!(named, ToolSearch::ALL);
+        for (k, s) in ToolSearch::ALL.iter().enumerate() {
+            assert_eq!(usize::from(s.code()), k);
+        }
+    }
 }

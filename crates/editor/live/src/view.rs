@@ -54,6 +54,18 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// The cache's account, emptied first when asked ([`Viewer::on_cache`]).
 pub type CacheFn = Box<dyn Fn(bool) -> Result<Value, String> + Send>;
 
+/// The user's viewer preferences kept by the host across ports and
+/// browsers (the user's `phitex.toml`: the tips seen, ...): given `Some`
+/// keys and values, those set first; the preferences answered as an
+/// object ([`Viewer::on_prefs`]).
+pub type PrefsFn =
+    Box<dyn Fn(Option<&serde_json::Map<String, Value>>) -> Result<Value, String> + Send>;
+
+/// What the host tells the viewer when asked (`{"op":"info","what":...}`):
+/// this version's news, a file's lines around a problem (the request's
+/// other fields), ...; `None`: not here ([`Viewer::on_info`]).
+pub type InfoFn = Box<dyn Fn(&str, &Value) -> Option<Value> + Send>;
+
 /// What a build left, for the viewer.
 pub struct Built {
     /// The PDF to show (none: no pages, or a DVI that dvipdfmx refused).
@@ -224,6 +236,9 @@ pub type SelectFn = Box<dyn Fn(&str, (usize, usize), (usize, usize)) + Send>;
 pub struct Viewer {
     pages: Mutex<Pages>,
     diagnostics: Mutex<Value>,
+    /// The first build's time and the builds so far: what a tab that joins
+    /// later was not told.
+    built_times: Mutex<(Option<f64>, u64)>,
     asks: Mutex<Vec<Ask>>,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
     building: AtomicBool,
@@ -240,6 +255,8 @@ pub struct Viewer {
     /// The cache's size and limit, emptied when asked (the `cache` op:
     /// the viewer's Clear cache; the host's).
     cache: Mutex<Option<CacheFn>>,
+    prefs: Mutex<Option<PrefsFn>>,
+    info: Mutex<Option<InfoFn>>,
     /// The commits of the project's history (the diff's picker).
     log: Mutex<Option<Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>>>,
     /// Shows a source place (file, line, column from 1, and the place as
@@ -267,6 +284,7 @@ impl Default for Viewer {
         Viewer {
             pages: Mutex::new(Pages::default()),
             diagnostics: Mutex::new(json!([])),
+            built_times: Mutex::new((None, 0)),
             asks: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
             building: AtomicBool::new(false),
@@ -275,6 +293,8 @@ impl Default for Viewer {
             transcript: Mutex::new((Arc::from(""), u64::MAX)),
             builds: std::sync::atomic::AtomicU64::new(0),
             cache: Mutex::new(None),
+            prefs: Mutex::new(None),
+            info: Mutex::new(None),
             log: Mutex::new(None),
             goto: Mutex::new(None),
             select: Mutex::new(None),
@@ -554,6 +574,16 @@ impl Viewer {
         *lock(&self.cache) = Some(cache);
     }
 
+    /// The user's preferences for the `prefs` op ([`PrefsFn`]).
+    pub fn on_prefs(&self, prefs: PrefsFn) {
+        *lock(&self.prefs) = Some(prefs);
+    }
+
+    /// What the host tells for the `info` op ([`InfoFn`]).
+    pub fn on_info(&self, info: InfoFn) {
+        *lock(&self.info) = Some(info);
+    }
+
     pub fn on_log(&self, log: Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>) {
         *lock(&self.log) = Some(log);
     }
@@ -700,6 +730,13 @@ impl Viewer {
         *lock(&self.diagnostics) = items;
         if let Some(c) = &b.changed {
             self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
+        }
+        {
+            let mut t = lock(&self.built_times);
+            t.1 += 1;
+            if b.parts.get("cold") == Some(&json!(true)) {
+                t.0 = Some(b.ms);
+            }
         }
         // (the build's time and parts: a timing popover's, the first build's
         // too, which has no change to time from)
@@ -916,6 +953,11 @@ impl Viewer {
                 s.ask(Ask::Rebuild);
                 ok(json!({}))
             }
+            // (Clean rebuild: the build dropped, made again from nothing)
+            "cold" => {
+                s.ask(Ask::Cold);
+                ok(json!({}))
+            }
             "console" => {
                 let c = lock(&s.console);
                 ok(json!({"items": c.0.iter().collect::<Vec<_>>(), "status": c.1}))
@@ -926,6 +968,27 @@ impl Viewer {
                     Some(Ok(v)) => ok(v),
                     Some(Err(e)) => fail(&e),
                     None => fail("no cache here"),
+                }
+            }
+            // (`{"op":"prefs"}`: the user's viewer preferences; with
+            // `"set":{...}` those set first)
+            "prefs" => {
+                let set = req.get("set").and_then(Value::as_object);
+                match lock(&s.prefs).as_ref().map(|f| f(set)) {
+                    Some(Ok(v)) => ok(v),
+                    Some(Err(e)) => fail(&e),
+                    None => fail("no preferences here"),
+                }
+            }
+            "info" if text("what").as_deref() == Some("built") => {
+                let t = lock(&s.built_times);
+                ok(json!({"first_ms": t.0, "builds": t.1}))
+            }
+            "info" => {
+                let what = text("what").unwrap_or_default();
+                match lock(&s.info).as_ref().and_then(|f| f(&what, req)) {
+                    Some(v) => ok(v),
+                    None => fail(&format!("no {what:?} here")),
                 }
             }
             "diff" => ok(lock(&s.diff).state.clone()),

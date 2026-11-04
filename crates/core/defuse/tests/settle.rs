@@ -499,3 +499,81 @@ fn a_run_released_at_the_frontier_keeps_the_cause_that_woke_it() {
         "each run of T is told its edit: {woke:?}"
     );
 }
+
+/// `[ms, def, reads...]`: reads each field, sleeps `ms` milliseconds,
+/// defines `def` (a field, or UNIT for none) := 1 + the sum of what it
+/// read. Counts its runs begun.
+struct Slow(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Operation for Slow {
+    fn name(&self) -> &'static str {
+        "slow"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let v = cx.values();
+        let a = cx.args().to_vec();
+        let mut sum = 1;
+        for &f in &a[2..] {
+            sum += cx.read(Field(f))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+        }
+        let ms = v.as_int(a[0]).and_then(|x| u64::try_from(x).ok()).unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        let out = v.int(sum);
+        if a[1] != ValueId::UNIT {
+            cx.define(Field(a[1]), out);
+        }
+        Ok(out)
+    }
+}
+
+/// Runs held at the frontier while the only run at work stands past it
+/// too are let go one at a time, the earliest first, not all at once: let
+/// go together, a later one ran on what an earlier one had yet to define,
+/// and ran again once it had (beamer at -j32, a letter typed: 285 runs and
+/// 2.5 s on 2 tries of 3; cold at -j8 twice the busy time). Line: F
+/// (frontier at A), A, P (page: pn), S (text, slow, reads nothing the
+/// page layer defines), T1 (reads pn, slow, defines x), T2 (reads pn and
+/// x). P, F and S edited, at 4 threads: S runs past the frontier while T1
+/// and T2 are held; T2 begins once at the hold and once after T1's
+/// commit.
+#[test]
+fn runs_held_at_the_frontier_are_let_go_the_earliest_first() {
+    for _ in 0..6 {
+        let o = setup();
+        let (e, v) = (&o.e, o.e.values());
+        let front = e.register(Arc::new(Front));
+        let n = || Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (cs, c1, c2) = (n(), n(), n());
+        let (s_op, t1_op, t2_op) = (
+            e.register(Arc::new(Slow(cs.clone()))),
+            e.register(Arc::new(Slow(c1.clone()))),
+            e.register(Arc::new(Slow(c2.clone()))),
+        );
+        let u = e.new_unit();
+        let (pn, a, x, y) = (v.field("pn"), v.field("a"), v.field("x"), v.field("y"));
+        let f = e.push(u, front, vec![v.int(-1), v.int(0)]);
+        let an = e.push(u, o.def_op, vec![a.0, v.int(1)]);
+        let p = e.push(u, o.page_op, vec![pn.0, v.int(1), ValueId::UNIT]);
+        let s = e.push(u, s_op, vec![v.int(0), y.0]);
+        let _t1 = e.push(u, t1_op, vec![v.int(0), x.0, pn.0]);
+        let t2 = e.push(u, t2_op, vec![v.int(0), ValueId::UNIT, pn.0, x.0]);
+        e.evaluate(4).unwrap();
+        assert_eq!(int(e, t2), Some(1 + 1 + 2));
+        let at = i64::try_from(an.raw()).expect("an id");
+        c2.store(0, std::sync::atomic::Ordering::SeqCst);
+        e.replace(f, front, vec![v.int(at), v.int(1)]);
+        e.replace(p, o.page_op, vec![pn.0, v.int(2), ValueId::UNIT]);
+        e.replace(s, s_op, vec![v.int(400), y.0]);
+        e.replace(_t1, t1_op, vec![v.int(150), x.0, pn.0]);
+        let rep = e.evaluate(4).unwrap();
+        assert_eq!(int(e, t2), Some(1 + 2 + 3), "{rep:?}");
+        assert!(
+            c2.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "T2 began {} times: let go with T1, it ran on T1's old x: {rep:?}",
+            c2.load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+    }
+}

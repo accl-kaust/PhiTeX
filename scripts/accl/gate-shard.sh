@@ -38,7 +38,8 @@
 #                                       oracle's; red: one not identical,
 #                                       unless ci/manuals-not-identical.tsv
 #                                       names it (reported apart with its
-#                                       cause). In the -doc image
+#                                       cause), or ci/manuals-slow.tsv does
+#                                       and it only timed out. In the -doc image
 #   gate-shard.sh wasm                  scripts/wasm.sh check: phitex-wasm built
 #                                       (its own build, no store), its documents
 #                                       in Node at -j 4 and 1 against pdfTeX's
@@ -681,8 +682,10 @@ PY
     # mc from the same image: manuals.py); a PDF that differs gets its
     # oracle built here, for pdfdiff. The manuals not identical when the
     # gate took them (ci/manuals-not-identical.tsv, with the cause) are
-    # built too and reported apart (known-red.txt), never red; every other
-    # one is red unless identical
+    # built too and reported apart (known-red.txt), never red; one exact
+    # given time but slower than its limit (ci/manuals-slow.tsv) is not
+    # red for a timeout alone, which goes apart as "slow (listed)"; every
+    # other one is red unless identical
     k=$1 n=$2
     fetched
     bin=$w/bin/cli/rel/phitex
@@ -699,7 +702,7 @@ PY
       echo "sweep_s $(( $(date +%s) - s0 ))" >> "$r/times.txt"
       python3 -I scripts/ci/sweep.py table "$r/manuals" --json "$r/manuals/table.json" > "$r/table.txt" 2>&1
       python3 -I scripts/ci/verdict.py ci/manuals.json "$k/$n" "${GATE_MANUALS_JOBS:-1,4}" "$r/manuals" --prefix "manuals: " \
-        --known ci/manuals-not-identical.tsv --known-out "$r/known-red.txt" >> "$r/red.txt"
+        --known ci/manuals-not-identical.tsv --slow ci/manuals-slow.tsv --known-out "$r/known-red.txt" >> "$r/red.txt"
       grep -q . "$r/red.txt" && status=red
     fi
     ;;

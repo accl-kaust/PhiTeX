@@ -75,7 +75,9 @@ impl Run<'_, '_> {
                 self.watchdog()?;
             }
             self.no_pull = true;
+            self.cmd_fetch = true;
             let got = self.get_next();
+            self.cmd_fetch = false;
             self.no_pull = false;
             // (the command loop's one check of the token path's halt)
             self.ck()?;

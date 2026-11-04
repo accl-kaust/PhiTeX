@@ -2588,3 +2588,77 @@ fn a_message_on_a_line_does_not_tie_its_paragraph_to_the_lines_above() {
         }
     }
 }
+
+/// The pieces of a file `\input` read their lines from where the file's
+/// text puts them, as the document's own nodes do: a box's report in one
+/// does not tie it to the lines above it in the file, and a number read
+/// from it is the line in the file at each of its reads.
+#[test]
+fn a_piece_of_an_input_file_has_its_lines_given() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/input-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let part = |above: &str| {
+        format!(
+            "First paragraph.\n{above}\n\
+             \\newpage\n\
+             Another paragraph.\n\n\
+             \\hbox to 10pt{{Far too wide for the box it is set in.}}\n\n\
+             \\parbox{{5pt}}{{Words\nunderfullwordstoolongforitswidth}}\n\n\
+             Numbered \\here\\typeout{{numbered \\here}}.\n\n\
+             The end.\n"
+        )
+    };
+    // (a file that names `\\inputlineno` itself is read whole, not cut:
+    // the number read through a macro)
+    let doc = "\\documentclass{article}\n\\newcommand\\here{\\the\\inputlineno}\n\\begin{document}\n\\input{part}\n\n\
+               Between the two.\n\n\\input{part}\n\\end{document}\n";
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("inputlines", &dir)
+        };
+        std::fs::write(dir.join("part.tex"), part("")).expect("the part");
+        let mut b = common::build(opts(), Some(&prelude(true)), doc);
+        for above in [
+            "One line more.\n",
+            "Two lines\nmore here.\n\nAnd a paragraph.\n",
+            "",
+        ] {
+            let text = part(above);
+            b.edit_file("part.tex", Some(text.as_bytes()));
+            std::fs::write(dir.join("part.tex"), &text).expect("the part");
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            let cold = common::build(opts(), Some(&prelude(true)), doc);
+            let (mine, want) = (b.output(), cold.output());
+            assert_eq!(
+                common::first_difference(&mine.0, &want.0),
+                None,
+                "-j{threads} {above:?}"
+            );
+            assert_eq!(mine.1, want.1, "-j{threads} {above:?}: the log");
+            let line = 1 + text
+                .lines()
+                .position(|l| l.contains("Numbered"))
+                .expect("the line");
+            let said = format!("numbered {line}\n");
+            assert_eq!(
+                mine.1.matches(&said).count(),
+                2,
+                "-j{threads} {above:?}: {said:?} in {}",
+                mine.1
+            );
+            assert!(
+                !r.iter()
+                    .any(|x| x.contains("wide") || x.contains("underfullwords")),
+                "-j{threads} {above:?}: a piece with a report ran again: {r:?}"
+            );
+        }
+    }
+}

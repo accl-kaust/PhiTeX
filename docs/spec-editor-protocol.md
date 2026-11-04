@@ -150,8 +150,14 @@ and used at once (the client's answer is not waited for).
 
 ```json
 {"state": "starting" | "fetching" | "typesetting" | "ready" | "failed" | "stopped",
- "ms": 67.2, "pages": 3, "errors": 0, "warnings": 2, "engine": "native" | "wasm"}
+ "ms": 67.2, "pages": 3, "errors": 0, "warnings": 2, "engine": "native" | "wasm",
+ "root": "/home/me/paper", "main": "paper.tex"}
 ```
+
+- `root`, `main`: the folder the watch runs in and its main file, named
+  from there. The watch may run above the editor's root (a chapter opened
+  first, its main file found one folder up, `\input`ing it): a client
+  sends the files under `root` to this watch rather than start another.
 
 - Sent at every change of `state` and after every build.
 - `starting`: after `initialized`, before the first build is in.

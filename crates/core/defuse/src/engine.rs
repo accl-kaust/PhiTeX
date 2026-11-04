@@ -1417,7 +1417,13 @@ impl Engine {
             // (in position order, as the blocks run: a node inserted before
             // others runs with them, not after every node pushed)
             commit::sort_by_label(self, &mut seed);
-            if !seed.is_empty() {
+            // (a few nodes: on the first worker's queue, the others woken only
+            // if they wait there, as for any node a commit queues. Dealt out,
+            // an edit's two nodes began on two threads wherever they read one
+            // another)
+            if n > 1 && seed.len() < crate::sched::BLOCK_MIN {
+                workers[0].ready_all(self, &seed);
+            } else if !seed.is_empty() {
                 let per = seed.len().div_ceil(n);
                 for (i, chunk) in seed.chunks(per).enumerate() {
                     workers[i].seed(chunk);
@@ -1477,6 +1483,7 @@ impl Engine {
         let mut rep = Report {
             readers_swept: swept,
             scanned: self.scanned.swap(0, Ordering::Relaxed),
+            range_stepped: self.ranges.stepped.swap(0, Ordering::Relaxed),
             commits_at_once: self.commit_peak.swap(0, Ordering::Relaxed),
             collections: workers
                 .iter()

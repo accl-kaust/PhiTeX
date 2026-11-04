@@ -68,6 +68,16 @@ one is said (the image is not the one pinned from). Every manual is red
 unless identical, but those in `ci/manuals-not-identical.tsv` (its id, a
 tab, the cause, as the user decides): they run and are reported apart
 (`known-red.txt`), and one identical again is said. A manual in
+`ci/manuals-slow.tsv` is identical at -j1 and -j4 given time but slower
+than its limit (the sweep's 300 s, or its own `time_limit_s`, pdflatex's
+wall on the gate's runner): a speed item, not a correctness one (the
+user, 2026-11-04: an exact PDF is correct however long it takes). Its
+row holds its measured times (PhiTeX at each -j, pdflatex, the node, the
+job, the date). The gate keeps its limit for it, so the gate does not
+grow by hours: a build of it that only runs past the limit is expected,
+reported apart as `slow (listed)` in `known-red.txt`, never red, and
+one within the limit at every -j is said there; a PDF of it that differs,
+or an error, stays red. A manual in
 `ci/manuals-pdftex-bugs.tsv` differs only where pdfTeX has a bug PhiTeX
 does not copy (`docs/differences.md`). Its row lists that entry, a mask
 and the oracle's objects the mask may change, and the manual passes as
@@ -153,6 +163,26 @@ there is no override.
    **A dry run** is a push to the branch `release-dry` (`git push github
    dev:release-dry`): every step but the release, signed with a key made for
    the run.
+   **The frontends' checks** (`.github/workflows/frontends.yml`) must pass
+   before the release job (and a dry run's signing) runs: the x86_64 Linux
+   binary just built, its viewer in it, with Emacs, Neovim 0.11 and VS
+   Code's native engine (the frontends' `test/editors/run.sh`), and the
+   browser build of the same commit (the wasm core, the extension, the
+   demo) in Chrome: the Overleaf extension on the mock Overleaf, the demo
+   served locally, VS Code's built-in wasm engine. Each opens a project,
+   waits for its first page, types words and finds them on the page, and
+   fails on an exception or console error. The frontends' scripts are
+   those of the PhiTeX-frontends commit `ci/frontends.commit` pins (moved
+   on with them; a push to the branch `frontends-check` runs the checks
+   alone). No job reaches overleaf.com or deploys anything.
+   **By hand before the tag** (what CI does not cover): in a fresh Chrome
+   profile with the extension built from the release's commit, a
+   throwaway project on overleaf.com: the Instant view shows the first
+   page; typed words reach the page; the main file is the one Overleaf
+   names when another file is open; a figure replaced in Overleaf's file
+   tree changes the page; an error's place opens the editor there. Also
+   the VS Code UI (the panel, its buttons), which CI drives only through
+   the extension's engine.
 3. **`CHANGELOG.md`** gets the version's entry in the same pull request. The
    site (PhiTeX.org) regenerates `news.json` from it at its next deploy
    (docs/spec-distribution.md §4).
@@ -183,3 +213,8 @@ channel never sees it. `SHA256SUMS` is signed in the environment
 only with `update-channel = "nightly"` in the user's `phitex.toml`, or for
 an install made by `PHITEX_CHANNEL=nightly` install.sh; it then takes the
 nightly, or a stable release when one is later.
+
+The nightly also runs the frontends' checks on its binary
+(`frontends.yml`, as the release gate does) and the live demo
+(`demo-live`: https://demo.phitex.org/ opened as a visitor, read only).
+Both are reported: a red one does not hold the nightly back.

@@ -443,3 +443,49 @@ fn placements_moved_back_together_stand_with_their_placer() {
     assert!(e.before(c[1], b), "its children before B: {:?}", e.order(u));
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// Line: A, B, the placer P placing X = Mark after B (X places its child
+/// C), then a second placer Q placing Y = Mark after X. P is edited to
+/// place X after A, before B: X moves back, and C and Y, which stand
+/// under X, go with it, in their order, before B. Left after B, C stood
+/// past B, and Y, placed after X and its children, after C there
+/// (numerica at -j4: a page's finisher after its piece's next pages).
+#[test]
+fn a_placement_moved_back_takes_what_stands_under_it() {
+    let (e, _pl, _mk, _rd, def, _mark, placer, _reader) = setup();
+    let v = e.values();
+    let u = e.new_unit();
+    let raw = |n: NodeId| v.int(i64::try_from(n.raw()).unwrap());
+    let a = e.push(u, def, vec![v.field("a").0, v.int(1)]);
+    let b = e.push(u, def, vec![v.field("b").0, v.int(2)]);
+    let p = e.push(u, placer, vec![raw(b), v.int(7)]);
+    let rep = e.evaluate(2).unwrap();
+    let x = e.placed_by(p);
+    assert_eq!(x.len(), 1, "{rep:?}");
+    let x = x[0];
+    let c = e.placed_by(x);
+    assert_eq!(c.len(), 1, "{rep:?}");
+    let c = c[0];
+    let q = e.push(u, placer, vec![raw(x), v.int(8)]);
+    let rep = e.evaluate(2).unwrap();
+    let y = e.placed_by(q);
+    assert_eq!(y.len(), 1, "{rep:?}");
+    let y = y[0];
+    assert!(
+        e.before(b, x) && e.before(x, c) && e.before(c, y),
+        "X, C, Y after B: {rep:?}"
+    );
+    e.replace(p, placer, vec![raw(a), v.int(7)]);
+    let rep = e.evaluate(2).unwrap();
+    assert_eq!(e.placed_by(p), vec![x], "the same node, relocated: {rep:?}");
+    assert!(e.before(a, x) && e.before(x, b), "X between A and B: {rep:?}");
+    assert!(
+        e.before(x, c) && e.before(c, b),
+        "its child C with it, before B: {rep:?}"
+    );
+    assert!(
+        e.before(c, y) && e.before(y, b),
+        "Y, placed after X, with it, before B: {rep:?}"
+    );
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

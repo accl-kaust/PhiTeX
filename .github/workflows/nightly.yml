@@ -11,6 +11,9 @@
 # install by `PHITEX_CHANNEL=nightly` install.sh), checked against the
 # nightly key (ci/nightly.pub), never the release key. Signing runs in
 # the environment `nightly` (its secret NIGHTLY_MINISIGN_KEY).
+# The frontends' checks (frontends.yml) run on the nightly's binary too,
+# reported: a red one does not hold the nightly back (the release gate is
+# where they block). demo-live: the deployed demo.phitex.org, read only.
 name: nightly
 on:
   schedule:
@@ -96,6 +99,39 @@ jobs:
           name: phitex-${{ matrix.asset }}
           path: phitex-${{ matrix.asset }}.tar.gz
           retention-days: 3
+  frontends:
+    needs: [which, build]
+    uses: ./.github/workflows/frontends.yml
+    with:
+      ref: ${{ needs.which.outputs.sha }}
+      binary: phitex-x86_64-linux
+  # (the live demo, as a visitor opens it: nothing deployed, nothing written)
+  demo-live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: ci/frontends.commit
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - id: pin
+        run: echo "sha=$(tr -d ' \n' < ci/frontends.commit)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: accl-kaust/PhiTeX-frontends
+          ref: ${{ steps.pin.outputs.sha }}
+          path: fe
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - working-directory: fe
+        env:
+          PHITEX_CHROME: /usr/bin/google-chrome
+        run: |
+          npm i --no-save --no-package-lock --prefix web/test playwright-core@1.56.1
+          node web/test/check.mjs https://demo.phitex.org/
   publish:
     needs: [which, build]
     runs-on: ubuntu-24.04
@@ -112,6 +148,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: phitex-*
           merge-multiple: true
       - name: SHA256SUMS, signed with the nightly key
         env:
