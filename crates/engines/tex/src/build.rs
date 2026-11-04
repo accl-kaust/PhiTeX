@@ -1776,6 +1776,27 @@ impl Run<'_, '_> {
         let lvl = x.map_or(0, |x| crate::val::int_at(v, x, 0));
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
         let base = self.base_mode()?.depth;
+        // (a finisher's use of a box the text's open groups bound, whose
+        // level is the text's: for the piece that goes on past the page,
+        // [`Run::define_fire_conflict`])
+        // (and the rest after it, reading the finisher's definition,
+        // `Run::cont_load`: the binding's level is outside the routine)
+        let base = if self.fin.is_some() && lvl > 0 && !self.st.defined_here(l) {
+            let f = self.loc_field(l);
+            self.fin_boxes.retain(|e| e.0 != f);
+            self.fin_boxes.push((f, val));
+            if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+                eprintln!(
+                    "fire-box: finisher {} {} at level {lvl}: {}",
+                    self.cx.node().raw(),
+                    crate::val::field_name(v, f),
+                    if b.is_some() { "set" } else { "void" }
+                );
+            }
+            lvl
+        } else {
+            base
+        };
         self.modify_at(l, val, lvl, base);
         // (the text's own, [`Run::tbox_loc`])
         if let Some(n) = crate::fields::box_of(l)
