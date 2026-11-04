@@ -162,6 +162,16 @@ header:active { cursor: grabbing; }
 .timing { width: 340px; padding: 12px 14px; font-variant-numeric: tabular-nums; }
 .timing .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 8px; }
 .timing .head span { color: var(--ph-fg2); }
+/* (Did you know: under the opening's step, quiet) */
+.opening .steps .hint { margin-top: 10px; color: var(--ph-fg2); font-size: 12px; line-height: 1.4; max-width: 420px; }
+/* (the first build beside the edits: bars as long as their times) */
+.timing .tbars { padding: 4px 12px 8px; display: grid; gap: 4px; }
+.timing .tb { display: grid; grid-template-columns: 88px 1fr auto; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+.timing .tb .k { color: var(--ph-fg2); }
+.timing .tb .track { height: 8px; border-radius: 4px; background: var(--ph-hover, rgb(0 0 0 / 6%)); overflow: hidden; }
+.timing .tb .track i { display: block; height: 100%; border-radius: 4px; background: var(--ph-fg2); }
+.timing .tb .track i.edit, .timing .tb .track i.median { background: var(--ph-progress, #f58f2d); }
+.timing .tb.x { display: block; color: var(--ph-fg2); font-size: 11px; }
 .timing .head b { font-size: 20px; font-weight: 600; }
 .timing .row { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; padding: 7px 0; border-top: 1px solid var(--ph-border); }
 .timing .row .k { color: var(--ph-fg2); }
@@ -177,6 +187,12 @@ header:active { cursor: grabbing; }
 .timing .foot.err { color: var(--ph-danger); }
 
 /* problems: Overleaf's log entries, in a popover under the bar */
+/* (the problems' filters: a kind a pill, on or off) */
+.logs .kinds { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 12px 8px; border-bottom: 1px solid var(--ph-border); }
+.logs .kinds button { all: unset; cursor: pointer; padding: 2px 9px; border: 1px solid var(--ph-border); border-radius: var(--ph-pill); font-size: 12px; font-variant-numeric: tabular-nums; }
+.logs .kinds button[aria-pressed=true] { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.logs .kinds button:hover { background: var(--ph-hover); }
+.logs .kinds button[aria-pressed=true]:hover { background: var(--ph-accent); }
 .logs { right: 6px; top: 4px; width: min(460px, calc(100% - 12px)); max-height: calc(100% - 8px); overflow: auto; padding: 0; }
 .logs > header { all: unset; display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 14px; position: sticky; top: 0; z-index: 1;
   background: var(--ph-menu); border-bottom: 1px solid var(--ph-border); font-weight: 600; }
@@ -206,9 +222,18 @@ header:active { cursor: grabbing; }
 .diffbar button { all: unset; cursor: pointer; padding: 2px 8px; border-radius: var(--ph-radius); color: var(--ph-fg2); white-space: nowrap; }
 .diffbar button:hover:not(:disabled) { background: var(--ph-hover); color: var(--ph-fg); }
 .diffbar button:disabled { opacity: .4; cursor: default; }
+/* (Diff | Current: which pages are shown, the one shown filled; the diff's style on its half) */
+.diffbar .seg { display: inline-flex; border: 1px solid var(--ph-accent); border-radius: var(--ph-pill); overflow: hidden; }
+.diffbar .seg button { border-radius: 0; padding: 2px 10px; color: var(--ph-accent); font-weight: 600; }
+.diffbar .seg button[aria-pressed=true] { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.diffbar .seg button[aria-pressed=true]:hover:not(:disabled) { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.diffbar .seg .chev { font-weight: 400; margin-left: 2px; }
+.diffset .row.bars button { padding: 1px 10px; }
+.diffset .row.bars button[aria-checked=true] { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg); }
+.diffset .row.bars button:disabled { opacity: .45; cursor: default; }
 .diffbar button.cur { background: var(--ph-hover); color: var(--ph-fg); }
 .diffbar .sep { width: 1px; align-self: stretch; margin: 2px; background: var(--ph-border); }
-.diffset { display: none; left: 50%; transform: translateX(-50%); top: 4px; width: 320px; padding: 12px; font-size: 12px; }
+.diffset { display: none; left: 50%; transform: translateX(-50%); top: 4px; width: 320px; max-height: calc(100% - 12px); overflow: auto; padding: 12px; font-size: 12px; }
 .diffset.on { display: block; }
 .diffset h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--ph-fg2); }
 .diffset h4:not(:first-child) { margin-top: 12px; }
@@ -246,16 +271,29 @@ header:active { cursor: grabbing; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
-.phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: rgb(0 100 255 / 25%); }
+.phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
 .slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: rgb(255 214 0 / 45%); mix-blend-mode: multiply;
   box-shadow: 0 0 0 1px rgb(232 172 0 / 80%); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
+/* (the text selected on the pages, one block a line: viewer.ts drawSelection) */
+.slot .mark.seltext { background: rgb(0 100 255 / 25%); mix-blend-mode: normal; border-radius: 0; }
 .slot .mark.fade { opacity: 0; transition: opacity 1.2s; }
 .slot .mark.sel { transition: none; }
 .slot .mark.fnd { background: rgb(255 214 0 / 40%); box-shadow: none; transition: none; }
 .slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); box-shadow: 0 0 0 1px rgb(150 100 0 / 90%); }
 .slot .culprit { position: absolute; pointer-events: none; }
+/* (the marks along the pages' scrollbar: the problems' places and the diff's changes) */
+.smarks { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
+.smarks[hidden] { display: none; }
+.smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); }
+.smarks i.error { background: var(--ph-danger, #d93025); }
+.smarks i.change { background: var(--ph-accent, #1d3e72); }
+.phx-card[data-key] { cursor: pointer; }
+/* (an overfull box's bar at its line's end, pdflatex's draft rule, drawn by the viewer only; an underfull's hollow) */
+.slot .culprit.rule::after { display: none; }
+.slot .culprit.rule.overfull { background: #1b222c; }
+.slot .culprit.rule.underfull { box-shadow: inset 0 0 0 1.5px #c77700; }
 /* (a culprit hovered: its problem's message, a small tooltip under the line) */
 .ctip { position: absolute; z-index: 8; max-width: min(420px, calc(100% - 16px)); display: flex; gap: 6px; align-items: flex-start; padding: 5px 9px;
   background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius);
