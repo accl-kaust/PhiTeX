@@ -1624,9 +1624,24 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a read-back field, or one the reading run defined after the
         // read-back, [`Run::note_pre`]: as this run holds it, the line
-        // written in the reading run itself, or no point known)
+        // written in the reading run itself, or no point known; only
+        // this run's own `wpre:`, left by its read-back here or by its
+        // definitions after it: one another node's read-back left is
+        // that point's, not this one's. thuthesis: the main `.aux` read
+        // at `\begin{document}` ran natbib's `\bibstyle`, whose style
+        // hook `\let`s `\bibstyle` to `\@gobble`, and left
+        // `wpre:cs:bibstyle` natbib's; the appendix's bibunit `.aux`,
+        // read where its unit starts after `\AtBeginDocument` made
+        // `\bibstyle` `\@gobble` globally, took that `wpre:` for its own
+        // `\bibstyle` line and ran the hook again, 32 definitions pdflatex
+        // does not make, in every other round: the rounds never settled)
         let Some(at) = self.interp_point.filter(|&n| n != self.cx.node()) else {
-            return self.get(&format!("wpre:{name}"));
+            let pre = format!("wpre:{name}");
+            let pl = self.loc_of(self.v.field(&pre));
+            if !self.st.defined_after(pl, 0) {
+                return Ok(None);
+            }
+            return self.get(&pre);
         };
         if !is_read_back_definition(&name) {
             return Ok(None);
@@ -3576,7 +3591,11 @@ impl<'c, 'a> Run<'c, 'a> {
     fn read_back_pre(&mut self, key: &str, name: &str, val: ValueId) -> R<()> {
         let v = self.v;
         let pre = format!("wpre:{name}");
-        if self.get(&pre)?.is_none() {
+        // (kept once per run: this run's own, not one another node's
+        // read-back of the field left, which is that point's value, and
+        // would keep this point's unrecorded, [`Run::pre_value`])
+        let pl = self.loc_of(v.field(&pre));
+        if !self.st.defined_after(pl, 0) {
             let was = self.get(name)?;
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                 eprintln!(

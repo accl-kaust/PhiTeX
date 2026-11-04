@@ -1246,3 +1246,26 @@ fn routine_page_at_any_candidate() {
 fn outer_in_scan() {
     check_threads("outer_in_scan", "pdf");
 }
+
+/// thuthesis (natbib + bibunits): a second job-written file (a bibunit's
+/// `.aux`) read back where its unit starts, after `\AtBeginDocument` made
+/// `\bibstyle` `\@gobble`. The main `.aux`'s read at `\begin{document}` had
+/// run natbib's `\bibstyle`, whose style hook `\let`s `\bibstyle` to
+/// `\@gobble`, and left `wpre:cs:bibstyle` natbib's; the unit file's
+/// `\bibstyle` line took that `wpre:` as the value its own read-back
+/// replaced and ran the hook again, in every other round, so the rounds
+/// never settled (exit 1, "still changed after 5 rounds"). A line reads a
+/// `wpre:` only from its own run. Oracle: pdflatex in the CI image.
+#[test]
+fn aux_pre_other_point() {
+    let name = "aux_pre_other_point";
+    let want = std::fs::read(fixtures().join(format!("{name}.pdf"))).expect("the oracle");
+    for j in [1, 4] {
+        let (got, term) = build_out(name, j, "pdf");
+        assert!(
+            !term.contains("still changed") && !term.contains("no fixpoint"),
+            "{name} -j{j}: the rounds did not settle: {term}"
+        );
+        assert!(got == want, "{name} -j{j}: the PDF differs from pdflatex's");
+    }
+}
