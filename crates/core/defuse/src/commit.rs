@@ -2294,7 +2294,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         };
         // (its definer's walk came before this run filed the read: it
         // moved the read all the same)
-        crate::sched::note_move(eng, by, node);
+        crate::sched::note_move(eng, by, node, &cause);
         if let Some(by) = by
             && crate::sched::settles_edge(eng, by, node)
         {

@@ -1312,7 +1312,7 @@ fn note_stale(n: &Node, wake: Wake) {
 
 /// `mark_stale` with no wake held.
 pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
-    note_move(eng, wake.by, n);
+    note_move(eng, wake.by, n, &wake.cause);
     frontier_back(eng, n, &wake);
     if n.committing.load(Ordering::Acquire) {
         return mark_dirty_now(eng, w, n, wake);
@@ -1386,7 +1386,7 @@ pub(crate) fn hold_wake(eng: &Engine, w: Option<&Worker>, n: NodeId, wake: Wake)
 
 /// `mark_dirty` with no wake held.
 pub(crate) fn mark_dirty_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
-    note_move(eng, wake.by, n);
+    note_move(eng, wake.by, n, &wake.cause);
     frontier_back(eng, n, &wake);
     loop {
         match n.state() {
@@ -1681,7 +1681,7 @@ const LONG_RUN_NS: u64 = 100_000_000;
 /// what has moved tells: most links of the graph carry no change, and nodes
 /// joined by those run side by side (para4000's deleted paragraph, its pages'
 /// routines; amsldoc's heading edit, 13 runs, 55 ms at -j8 against 64 at -j1).
-pub(crate) fn note_move(eng: &Engine, by: Option<NodeId>, reader: &Node) {
+pub(crate) fn note_move(eng: &Engine, by: Option<NodeId>, reader: &Node, cause: &Cause) {
     let Some(by) = by.filter(|&b| b != reader.id) else {
         return;
     };
@@ -1689,6 +1689,15 @@ pub(crate) fn note_move(eng: &Engine, by: Option<NodeId>, reader: &Node) {
     // (a routine moving the page loop, by its give-back: the loop goes on on
     // a guess past it anyway, and no node after it read what moved)
     if b.moves.load(Ordering::Relaxed) || eng.op(reader.op()).works_at_frontier() || eng.op(reader.op()).final_only() {
+        return;
+    }
+    // (a relation's value, a counter's step: recomputed in place as what it
+    // steps from moves, not by a run of its node: 500 routines shifted by an
+    // inserted one have their answers at once, side by side)
+    if let Cause::Changed { field, .. } = cause
+        && b.record()
+            .is_some_and(|r| r.defs.iter().any(|d| d.f == *field && d.rel.is_some()))
+    {
         return;
     }
     if !b.moves.swap(true, Ordering::AcqRel) && eng.op(b.op()).chains() {
