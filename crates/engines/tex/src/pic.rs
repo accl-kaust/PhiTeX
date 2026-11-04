@@ -501,20 +501,16 @@ impl Run<'_, '_> {
     fn pic_locals(&mut self) -> R<ValueId> {
         let v = self.v;
         self.flush_bulk_codes();
-        let open: Vec<u32> = self
-            .nest
-            .iter()
-            .filter(|l| l.group != 0)
-            .map(|l| l.gid)
-            .collect();
-        let c = self.st.cont(v, &open);
-        let mut xs = Vec::with_capacity(c.slots.len());
-        for s in &c.slots {
-            if !s.group_local {
-                continue;
-            }
-            let f = self.loc_field(s.loc);
-            xs.push(v.list(vec![f.0, opt(s.cur)]));
+        // (every binding the run made so far, as it stands: the child,
+        // placed after the run, must see the run's state at the picture,
+        // not what the run leaves at its end; what the run only read the
+        // child reads from the engine, and a definition the run makes of
+        // it after the picture refuses the split, `Run::pic_conflict`)
+        let now = self.st.defined_now(v);
+        let mut xs = Vec::with_capacity(now.len());
+        for (loc, cur) in now {
+            let f = self.loc_field(loc);
+            xs.push(v.list(vec![f.0, opt(cur)]));
         }
         Ok(v.list(xs))
     }
@@ -695,7 +691,6 @@ impl Run<'_, '_> {
         let Some(p) = self.pic_child.as_mut() else {
             return Ok(false);
         };
-        p.read.push(f.0);
         let view = match p.view {
             Some(w) => w,
             None => {
@@ -705,6 +700,10 @@ impl Run<'_, '_> {
             }
         };
         let Some(x) = self.cx.get(view, Step::Key(f.0)) else {
+            // (read from the engine, after the parent: the parent's check)
+            if let Some(p) = self.pic_child.as_mut() {
+                p.read.push(f.0);
+            }
             return Ok(false);
         };
         let x = some(x);

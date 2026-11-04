@@ -3059,6 +3059,32 @@ impl State {
     /// `open`: the groups of the run open now (their ids, the nest's
     /// group levels): a slot is a group's local only while its local
     /// definition's group is one of them.
+    /// Every location the run defined so far (locally or globally, in a
+    /// group or not) with its binding now (`None`: absent): the run's
+    /// state at this point where it is not the engine's (a picture
+    /// child's view of its parent, `crate::pic`).
+    pub(crate) fn defined_now(&self, v: &Values) -> Vec<(Loc, Option<ValueId>)> {
+        let mut out = Vec::new();
+        for &l in &self.touched {
+            let Some(s) = self.slot_ref(l) else { continue };
+            let defined = usize::try_from(s.meta)
+                .ok()
+                .filter(|&m| m > 0)
+                .and_then(|m| self.metas.get(m - 1))
+                .is_some_and(|m| m.ldef_stamp > 0);
+            if !defined {
+                continue;
+            }
+            let cur = if s.e.flags & HAS_ID != 0 {
+                s.e.id
+            } else {
+                self.encode(&s.e, v)
+            };
+            out.push((l, cur));
+        }
+        out
+    }
+
     pub(crate) fn cont(&self, v: &Values, open: &[u32]) -> ContState {
         let ent = |e: &Entry| -> (Option<ValueId>, bool) {
             let id = if e.flags & HAS_ID != 0 {
