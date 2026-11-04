@@ -15,5 +15,5 @@ latex_teubner_teubner-doc	differs: page 1: obj 12 (Pages) line 15: oracle "<end>
 latex_tikz-mirror-lens_tikz-mirror-lens	differs: obj 1572 (untyped) line 1: oracle "[", phitex "<<" (not the same in each run: the first sweep had -j1 timeout, -j4 differs)
 latex_typogrid_testtypogrid	differs: page 2: obj 12 (page 2, untyped) line 143: oracle "0 0 69.449 1.993 re f", phitex "0 0 104.173 1.993 re f"
 latex_typstfun_typstfun	differs: page 2: obj 46 (page 2, untyped) line 61: oracle "/F62 10.9091 Tf 56.693 308.139 Td [(\\arccos)-7368(arccos)-7894(\\arcs", phitex "/F62 10.9091 Tf 56.693 308.139 Td [(\\arccos)-7368(arccos)-7894(\\arcs"
-latex_ualberta_ualberta	-j1 error: no PDF, exit 0 (PhiTeX wrote DVI/XDV, 0 bytes); -j4 differs: page 7: obj 2221 (Catalog) line 18: oracle "<end>", phitex "<end>" (pages 110 vs 109)
+latex_ualberta_ualberta	differs: obj 662 (destination table.caption.11, in a landscape table, page 24): oracle /XYZ 142.104 4188.697, phitex /XYZ 142.36 108 (the only object that differs; accl 23982)
 latex_zx-calculus_zx-calculus	error: error: You can't use `&' in restricted horizontal mode
