@@ -2287,6 +2287,7 @@ pub(crate) fn release_waiting(eng: &Engine, w: Option<&Worker>, n: NodeId) {
         node.awaited.store(false, Ordering::SeqCst);
         m.remove(&n)
     };
+    let alone = ws.as_ref().is_some_and(|l| l.len() == 1);
     for m in ws.into_iter().flatten() {
         if let Some(x) = eng.placed_node(m).filter(|x| x.state() == State::Dirty) {
             // (stopped before its run: what asked for that run still asks,
@@ -2297,6 +2298,16 @@ pub(crate) fn release_waiting(eng: &Engine, w: Option<&Worker>, n: NodeId) {
             } else {
                 None
             };
+            // (the one a chain goes on with, this worker's next: another
+            // woken for it takes it from here with nothing in its caches.
+            // book5's deleted paragraph at -j8, a chain of text nodes held
+            // and let go: 204 ms to 273 ms, the same runs, accl 23994)
+            if kept.is_some() && alone && !defer(eng, &w.shared, x.id) {
+                *x.woke.lock() = kept;
+                w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
+                w.ready().push(eng, x);
+                continue;
+            }
             enqueue(
                 eng,
                 Some(w),
