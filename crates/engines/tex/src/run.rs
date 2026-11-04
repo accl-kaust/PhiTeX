@@ -668,14 +668,16 @@ pub(crate) fn warning_shape(line: &str) -> bool {
 
 /// A continuation line of a written warning without its lead: the
 /// kernel's `\MessageBreak` begins each with the warning's source in
-/// parentheses and blanks (`(Font)              using ...`, `(hyperref)
-/// ...`), or blanks alone (a `LaTeX Warning`'s).
+/// parentheses, one word, and blanks (`(Font)              using ...`,
+/// `(hyperref)                ...`; one blank where the text was a
+/// macro's body, whose blanks TeX read as one), or blanks alone (a `LaTeX
+/// Warning`'s).
 pub(crate) fn continuation(line: &str) -> &str {
     let t = line.trim_start();
     if let Some(r) = t.strip_prefix('(')
         && let Some(k) = r.find(')')
         && !r[..k].contains(' ')
-        && r[k + 1..].starts_with("  ")
+        && r[k + 1..].starts_with(' ')
     {
         return r[k + 1..].trim();
     }
