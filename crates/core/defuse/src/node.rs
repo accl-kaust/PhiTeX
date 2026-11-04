@@ -165,6 +165,16 @@ pub(crate) struct Node {
     /// resumed on moved): its record's reads may hold while the state it
     /// parked rests on the old answers (`Ctx::last_run_stands`).
     pub(crate) refuted: AtomicBool,
+    /// Its last commit that published anything moved what a later node
+    /// read, or it never ran (`sched::note_move`): those wait for it to
+    /// settle (`sched::hold_for`). A node of a chain, or one that never ran,
+    /// is listed in `Engine::movers`.
+    pub(crate) moves: AtomicBool,
+    /// It was stopped before a run to wait for a node (`sched::work`): the
+    /// wake that asked for the run still stands; its waiting ended by
+    /// that node's settling clears this (`sched::release_waiting`), a
+    /// quiet point's does not.
+    pub(crate) held: AtomicBool,
     /// How long its longest run that committed took, ns (`sched::work`).
     pub(crate) full_ns: AtomicU64,
     /// Its order among the nodes placed after the same anchor in slot 1
@@ -243,6 +253,8 @@ impl Node {
             rank: AtomicU64::new(0),
             full_ns: AtomicU64::new(0),
             refuted: AtomicBool::new(false),
+            moves: AtomicBool::new(false),
+            held: AtomicBool::new(false),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             bracket_gen: AtomicU64::new(0),
@@ -434,6 +446,10 @@ pub(crate) struct RunRecord {
     pub(crate) defs: Vec<DefRec>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) reads: Vec<ReadRec>,
+    /// The nodes whose definitions its reads got, each once (those it
+    /// kept from its last run's with them): what its next run waits for
+    /// (`read::open_definer_before`). A hint.
+    pub(crate) sources: Box<[NodeId]>,
     /// Its placements in order (`Ctx::child`, `Ctx::follow`), matched by
     /// (op, args) at the next commit so unchanged ones are kept.
     pub(crate) placed: Vec<NodeId>,
@@ -459,6 +475,7 @@ impl RunRecord {
             defs,
             contribs: Vec::new(),
             reads: Vec::new(),
+            sources: Box::default(),
             placed: Vec::new(),
             claim: 0,
             state: None,
@@ -589,6 +606,8 @@ pub(crate) struct Product {
     pub(crate) defs: Vec<DefRec>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) reads: Vec<ReadRec>,
+    /// The nodes whose definitions the reads got (`RunRecord::sources`).
+    pub(crate) sources: Vec<NodeId>,
     pub(crate) placements: Vec<Placement>,
     /// The placements' ranks (`Ctx::rank_placement`), by index; one past
     /// the end is 0.
