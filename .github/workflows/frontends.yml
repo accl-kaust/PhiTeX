@@ -148,6 +148,10 @@ jobs:
         run: |
           node scripts/dev/mock-run.mjs test/scenarios/ci.json
           node scripts/dev/mock-run.mjs test/scenarios/ci-figure.json
+          # (the runner is a 16 GB machine, Chrome sandboxed: each renderer 8 GiB of
+          # data, a core 4 GiB; a reload's core, and a second tab's, which says why)
+          node scripts/dev/mock-run.mjs test/scenarios/ci-reload.json
+          node scripts/dev/mock-run.mjs test/scenarios/ci-tabs.json
       - name: the demo (build/web, served here)
         if: ${{ !cancelled() }}
         working-directory: fe
