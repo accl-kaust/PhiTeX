@@ -961,13 +961,15 @@ impl Run<'_, '_> {
         };
         // (the run read `f` across this candidate)
         let used_here = |f: ValueId| {
-            used.binary_search(&f).is_ok_and(|i| {
-                list_of(v, ranges[i])
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .any(|&[a, b]| int_of(v, a) <= i64::from(k) && i64::from(k) <= int_of(v, b))
-            })
+            let from = used.partition_point(|&g| g < f);
+            used[from..]
+                .iter()
+                .take_while(|&&g| g == f)
+                .enumerate()
+                .any(|(i, _)| {
+                    int_of(v, ranges[2 * (from + i)]) <= i64::from(k)
+                        && i64::from(k) <= int_of(v, ranges[2 * (from + i) + 1])
+                })
         };
         let changes: Vec<_> = changes
             .into_iter()

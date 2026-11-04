@@ -361,8 +361,8 @@ struct Slot {
     /// hold this location already: only the first entry at a candidate
     /// is its value there ([`State::at_candidates`]).
     cand_noted: u32,
-    /// The candidates passed when the binding in force was last read
-    /// ([`State::note_read`]): reads between two candidates count once.
+    /// The candidates gone past when the binding in force was last read
+    /// ([`State::note_read`]): reads between two of them count once.
     read_at: std::cell::Cell<u32>,
     /// Where in [`State::read_across`] this location's latest entry is.
     across_ix: std::cell::Cell<u32>,
@@ -520,14 +520,18 @@ pub(crate) struct State {
     /// location defined after it and before the next one for the first
     /// time since it, the entry the location held at the candidate.
     cands: Vec<(u64, Vec<(Loc, Entry)>)>,
-    /// `cands.len()`, one load for a read's check ([`State::note_read`]).
-    cands_passed: u32,
-    /// The meanings the run read holding a binding from before a candidate
-    /// it passed: `(loc, from, to)`, a value bound before candidate `from`
-    /// (by index in [`State::cands`]) was read after candidate `to - 1`.
-    /// A routine's global definition at one of those candidates is what
-    /// TeX's read there saw ([`State::note_read`]). Only ever grows: a
-    /// [`State::rollback`] leaves a read it took back, as a read made.
+    /// The candidates the run went on past where a page's routine can
+    /// reach what it reads after ([`State::mark_past`]): each one's clock
+    /// and number.
+    past: Vec<(u64, u32)>,
+    /// `past.len()`, one load for a read's check ([`State::note_read`]).
+    past_n: u32,
+    /// What the run read holding a binding from before a candidate it went
+    /// on past: `(loc, from, to)`, a value bound before [`State::past`]'s
+    /// `from` was read after its `to - 1`. A routine's global definition at
+    /// one of those candidates is what TeX's read there saw
+    /// ([`State::note_read`]). A [`State::rollback`] leaves a read it took
+    /// back as a read made, but for the spill locations it drops.
     read_across: std::cell::RefCell<Vec<(Loc, u32, u32)>>,
     /// The table as it stood at [`State::checkpoint`], kept as it
     /// changes: [`State::rollback`] puts it back.
@@ -555,6 +559,7 @@ pub(crate) struct Undo {
     scope_extra: Vec<(Loc, Entry, Locality)>,
     cont_locs: Vec<Loc>,
     cands: Vec<(u64, Vec<(Loc, Entry)>)>,
+    past: usize,
     stamp: u64,
     pp_dirty: bool,
     next_gid: u32,
@@ -639,7 +644,8 @@ impl Clone for State {
             font_slow: self.font_slow.clone(),
             muts: self.muts,
             cands: self.cands.clone(),
-            cands_passed: self.cands_passed,
+            past: self.past.clone(),
+            past_n: self.past_n,
             read_across: self.read_across.clone(),
             undo: None,
             tainted: self.tainted.clone(),
@@ -762,7 +768,8 @@ impl State {
             font_slow: phitex_defuse::FxHashSet::default(),
             muts: 0,
             cands: Vec::new(),
-            cands_passed: 0,
+            past: Vec::new(),
+            past_n: 0,
             read_across: std::cell::RefCell::new(Vec::new()),
             undo: None,
             tainted: Vec::new(),
@@ -861,6 +868,7 @@ impl State {
             scope_extra: self.scope_extra.clone(),
             cont_locs: self.cont_locs.clone(),
             cands: self.cands.clone(),
+            past: self.past.len(),
             stamp: self.stamp,
             pp_dirty: self.pp_dirty,
             next_gid: self.next_gid,
@@ -903,6 +911,10 @@ impl State {
         }
         let n = u32::try_from(spill).unwrap_or(u32::MAX);
         self.numbered.retain(|_, i| *i < n);
+        // (a spill location dropped is another's when it is numbered again)
+        self.read_across
+            .get_mut()
+            .retain(|e| e.0 & SPILL == 0 || e.0 & !SPILL < n);
         // (a font cell whose slot went with them: a checkpoint names each
         // of these by its field, and a location with no slot has none)
         self.font_slow.retain(|&l| l & SPILL == 0 || l & !SPILL < n);
@@ -911,7 +923,8 @@ impl State {
         self.scope_extra = u.scope_extra;
         self.cont_locs = u.cont_locs;
         self.cands = u.cands;
-        self.cands_passed = u32::try_from(self.cands.len()).unwrap_or(u32::MAX);
+        self.past.truncate(u.past);
+        self.past_n = u32::try_from(self.past.len()).unwrap_or(u32::MAX);
         self.stamp = u.stamp;
         self.pp_dirty = u.pp_dirty;
         self.next_gid = u.next_gid;
@@ -975,7 +988,14 @@ impl State {
     /// defined after it hold here are kept ([`State::at_candidates`]).
     pub(crate) fn mark_candidate(&mut self) {
         self.cands.push((self.stamp, Vec::new()));
-        self.cands_passed = u32::try_from(self.cands.len()).unwrap_or(u32::MAX);
+    }
+
+    /// The run goes on past its candidate `k`, where a page's routine can
+    /// fire and the text after it read what the routine set: reads from
+    /// here on are looked at ([`State::note_read`]).
+    pub(crate) fn mark_past(&mut self, k: u32) {
+        self.past.push((self.stamp, k));
+        self.past_n = u32::try_from(self.past.len()).unwrap_or(u32::MAX);
     }
 
     /// A read of the value `loc` holds. Between two candidates, one load
@@ -984,7 +1004,7 @@ impl State {
     #[inline]
     pub(crate) fn note_read(&self, loc: Loc) {
         if let Some(s) = self.slot_ref(loc)
-            && s.read_at.get() != self.cands_passed
+            && s.read_at.get() != self.past_n
         {
             self.note_read_across(s, loc);
         }
@@ -996,14 +1016,19 @@ impl State {
     #[cold]
     #[inline(never)]
     fn note_read_across(&self, s: &Slot, loc: Loc) {
-        let now = self.cands_passed;
+        // (a location the run has not touched goes to the engine, whose
+        // reads are the run's own record, `Run::note_engine_reads`)
+        if !s.touched {
+            return;
+        }
+        let now = self.past_n;
         s.read_at.set(now);
         let ldef = usize::try_from(s.meta)
             .ok()
             .and_then(|m| m.checked_sub(1))
             .and_then(|m| self.metas.get(m))
             .map_or(0, |m| m.ldef_stamp);
-        let from = u32::try_from(self.cands.partition_point(|c| c.0 < ldef))
+        let from = u32::try_from(self.past.partition_point(|c| c.0 < ldef))
             .unwrap_or(u32::MAX)
             .max(s.floor);
         if from < now {
@@ -1020,12 +1045,11 @@ impl State {
         }
     }
 
-    /// A read of `loc` the run made from elsewhere than its table, in the
-    /// stretch before candidate `at` (by index): as read across all the
-    /// candidates before it.
-    pub(crate) fn note_read_before(&self, loc: Loc, at: u32) {
-        if at > 0 {
-            self.read_across.borrow_mut().push((loc, 0, at));
+    /// A read of `loc` the run made from elsewhere than its table: as read
+    /// across all the candidates it has gone past.
+    pub(crate) fn note_read_elsewhere(&self, loc: Loc) {
+        if self.past_n > 0 {
+            self.read_across.borrow_mut().push((loc, 0, self.past_n));
         }
     }
 
@@ -1034,23 +1058,28 @@ impl State {
         self.spill_ix.get(&f).map(|&i| SPILL | i)
     }
 
-    /// [`State::read_across`]: `(loc, from, to)` by index in the candidates.
+    /// [`State::read_across`]: `(loc, from, to)` by index in [`State::past`].
     pub(crate) fn reads_across(&self) -> Vec<(Loc, u32, u32)> {
         self.read_across.borrow().clone()
     }
 
-    /// A routine's value put in force at the candidate just passed
+    /// A routine's value put in force at the candidate just gone past
     /// ([`State::apply_global`]) counts as read across it.
     pub(crate) fn note_applied(&self, loc: Loc) {
-        let now = self.cands_passed;
+        let now = self.past_n;
         if now > 0 {
             self.read_across.borrow_mut().push((loc, now - 1, now));
         }
     }
 
-    /// How many candidates the run passed.
-    pub(crate) fn cands_passed(&self) -> u32 {
-        self.cands_passed
+    /// How many candidates the run has gone past.
+    pub(crate) fn past_n(&self) -> u32 {
+        self.past_n
+    }
+
+    /// The numbers of the candidates the run has gone past, in order.
+    pub(crate) fn past_ks(&self) -> Vec<u32> {
+        self.past.iter().map(|p| p.1).collect()
     }
 
     /// Notes `loc`'s entry before a definition, where it is the first
@@ -1269,7 +1298,7 @@ impl State {
         if s.e.flags & (LOADED | CC) != (LOADED | CC) {
             return None;
         }
-        if s.read_at.get() != self.cands_passed {
+        if s.read_at.get() != self.past_n {
             self.note_read_across(s, loc);
         }
         Some((s.e.cmd, s.e.chr))
@@ -2967,7 +2996,7 @@ impl State {
         let st = self.stamp;
         let mut e = Entry::raw_seen(v, x);
         e.flags |= LOADED | PRELOADED;
-        let now = self.cands_passed;
+        let now = self.past_n;
         let s = self.slot(loc);
         s.e = e;
         s.lazy = None;
@@ -3013,7 +3042,8 @@ pub(crate) struct Base {
     /// The candidates passed ([`State::mark_candidate`]): each one's clock
     /// and the entries noted at it (`None`: not loaded).
     cands: Vec<(u64, Vec<BaseCand>)>,
-    /// [`State::read_across`].
+    /// [`State::past`], [`State::read_across`].
+    past: Vec<(u64, u32)>,
     read_across: Vec<(Loc, u32, u32)>,
     extra: Vec<(Loc, Option<ValueId>, Locality)>,
     defined: Vec<Loc>,
@@ -3047,6 +3077,9 @@ pub(crate) struct CkMemo {
     /// The touched locations' list by chunks of [`TOUCHED_CHUNK`]: each
     /// chunk's locations and its value.
     touched: Vec<(Vec<Loc>, ValueId)>,
+    /// [`State::read_across`]' list by chunks of [`TOUCHED_CHUNK`]: a
+    /// chunk's entries change where the run reads them again.
+    across: Vec<(Vec<(Loc, u32, u32)>, ValueId)>,
 }
 
 /// The touched locations a chunk of [`Base::to_value`]'s list holds: the
@@ -3175,6 +3208,7 @@ impl State {
         Some(Base {
             slots,
             cands,
+            past: self.past.clone(),
             read_across: self.read_across.borrow().clone(),
             extra: self
                 .scope_extra
@@ -3306,7 +3340,8 @@ impl State {
                 .collect();
             self.cands.push((st, xs));
         }
-        self.cands_passed = u32::try_from(self.cands.len()).unwrap_or(u32::MAX);
+        self.past = b.past;
+        self.past_n = u32::try_from(self.past.len()).unwrap_or(u32::MAX);
         self.read_across = std::cell::RefCell::new(b.read_across);
         self.defined = b.defined;
         self.font_slow.extend(b.font_slow);
@@ -3541,16 +3576,41 @@ impl Base {
                 x
             })
             .collect();
-        // (flat: each entry its field and the two candidates)
-        let mut across = Vec::with_capacity(3 * self.read_across.len());
-        for &(l, a, b) in &self.read_across {
-            across.push(field(l).0);
-            across.push(v.int(i64::from(a)));
-            across.push(v.int(i64::from(b)));
-        }
+        // (flat in its chunks: each entry its field and the two candidates)
+        let across: Vec<ValueId> = self
+            .read_across
+            .chunks(TOUCHED_CHUNK)
+            .enumerate()
+            .map(|(k, es)| {
+                if let Some((was, x)) = memo.across.get(k)
+                    && was[..] == *es
+                {
+                    return *x;
+                }
+                let mut ys = Vec::with_capacity(3 * es.len());
+                for &(l, a, b) in es {
+                    ys.push(field(l).0);
+                    ys.push(v.int(i64::from(a)));
+                    ys.push(v.int(i64::from(b)));
+                }
+                let x = v.list(ys);
+                if memo.across.len() > k {
+                    memo.across[k] = (es.to_vec(), x);
+                } else {
+                    memo.across.push((es.to_vec(), x));
+                }
+                x
+            })
+            .collect();
+        let past: Vec<ValueId> = self
+            .past
+            .iter()
+            .flat_map(|&(st, k)| [u(st), v.int(i64::from(k))])
+            .collect();
         v.list(vec![
             v.list(slots),
             v.list(cands),
+            v.list(past),
             v.list(across),
             v.list(extra),
             v.list(defined),
@@ -3575,6 +3635,7 @@ impl Base {
         let [
             slots,
             cands,
+            past,
             across,
             extra,
             defined,
@@ -3600,15 +3661,13 @@ impl Base {
         let mut out = Base {
             slots: Vec::new(),
             cands: Vec::new(),
-            read_across: list_of(v, across)
-                .as_chunks::<3>()
+            past: list_of(v, past)
+                .as_chunks::<2>()
                 .0
                 .iter()
-                .map(|&[f, a, b]| {
-                    let n = |x| u32::try_from(int_of(v, x)).unwrap_or(0);
-                    (loc(Field(f)), n(a), n(b))
-                })
+                .map(|&[st, k]| (u(st), u32::try_from(int_of(v, k)).unwrap_or(0)))
                 .collect(),
+            read_across: Vec::new(),
             extra: Vec::new(),
             defined: Vec::new(),
             font_slow: Vec::new(),
@@ -3674,6 +3733,20 @@ impl Base {
         out.font_slow = list_of(v, font_slow)
             .into_iter()
             .map(|f| loc(Field(f)))
+            .collect();
+        // (last: a spill location is numbered at its first asking, the
+        // table's own locations in their order first, as the run had them)
+        out.read_across = list_of(v, across)
+            .into_iter()
+            .flat_map(|c| list_of(v, c))
+            .collect::<Vec<_>>()
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .map(|&[f, a, b]| {
+                let n = |x| u32::try_from(int_of(v, x)).unwrap_or(0);
+                (loc(Field(f)), n(a), n(b))
+            })
             .collect();
         Some(out)
     }

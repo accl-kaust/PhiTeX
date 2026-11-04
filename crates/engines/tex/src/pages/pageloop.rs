@@ -45,12 +45,13 @@ use phitex_defuse::{At, Cause, Ctx, Effect, MayDefine, NodeId, Operation, Stop, 
 use super::*;
 use crate::vprof::{PItem, ScanState};
 
-/// What a piece used (read, held or defined) in a pass that went on past
-/// a candidate of its own where a page can fire and a second pass can
-/// end: `pages:used:<piece>`, the fields by id, sorted, and the candidates
-/// it went on past, as a list of the two. The finisher of a
-/// page firing at such a candidate reads it and, where the routine changed
-/// one of them globally, defines [`FIRE_CONFLICT`] (`Run::define_fire_conflict`).
+/// What a piece read across the candidates of its own it went on past,
+/// where a page can fire: `pages:used:<piece>`, a list of the fields by id,
+/// sorted, one for each stretch of candidates it read one across; those
+/// stretches, flat (first k, last k); and the candidates it went on past.
+/// The finisher of a page firing at such a candidate reads it and, where
+/// the routine changed one of them globally and the piece read it across
+/// that candidate, defines [`FIRE_CONFLICT`] (`Run::define_fire_conflict`).
 pub(crate) const FIRE_USED: &str = "pages:used";
 
 /// [`FIRE_USED`]' field of `piece`.

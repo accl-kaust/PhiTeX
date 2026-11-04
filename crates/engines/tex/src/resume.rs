@@ -530,7 +530,7 @@ impl Run<'_, '_> {
             .map(|c| std::mem::take(&mut c.memo))
             .unwrap_or_default();
         let base = self.st.base_of(v, &mut memo);
-        let base = base.map(|b| b.to_value(v, &mut |l| self.loc_field(l), &mut memo));
+        let base = base.map(|b| b.to_value(v, &mut |l| self.loc_field_peek(l), &mut memo));
         if let Some(c) = self.ck.as_mut() {
             c.memo = memo;
         }

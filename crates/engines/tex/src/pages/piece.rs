@@ -185,7 +185,6 @@ impl Run<'_, '_> {
             open_cut,
             par_cut,
         });
-        self.note_engine_reads();
         self.st.mark_candidate();
         if fresh {
             self.note_page_regs_held();
@@ -221,6 +220,8 @@ impl Run<'_, '_> {
         // (the run goes on past it: the routine of a page firing here
         // runs before the text after it)
         if fresh && (restartable || open_cut || par_cut) {
+            self.note_engine_reads();
+            self.st.mark_past(k);
             self.apply_fire_conflict(k)?;
         }
         Ok(())
@@ -442,11 +443,10 @@ impl Run<'_, '_> {
     /// holds no binding the table could date.
     fn note_engine_reads(&mut self) {
         let n = self.cx.reads_len();
-        let at = self.st.cands_passed();
-        if at > 0 {
+        if self.st.past_n() > 0 {
             for (_, f) in self.cx.fields_read_since(self.reads_noted) {
                 if let Some(l) = self.dated_loc(f) {
-                    self.st.note_read_before(l, at);
+                    self.st.note_read_elsewhere(l);
                 }
             }
         }
@@ -484,37 +484,27 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let v = self.v;
-        let end = self.cut.or(self.stop_at);
-        let past = |m: &CandMark| {
-            m.fresh && (m.restartable || m.open_cut || m.par_cut) && Some(m.k) != end
-        };
-        let ks: Vec<u32> = self
-            .cand_marks
-            .iter()
-            .filter(|m| past(m))
-            .map(|m| m.k)
-            .collect();
+        let ks = self.st.past_ks();
         if ks.is_empty() {
             return Ok(());
         }
         self.note_engine_reads();
-        let ranges = self.fire_read_across(&ks, &past);
+        let ranges = self.fire_read_across(&ks);
         let node = self.cx.node();
         if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
             eprintln!(
-                "fire-pass: node {} past {ks:?}: {} fields",
+                "fire-pass: node {} past {ks:?}: {} ranges",
                 node.raw(),
                 ranges.len()
             );
         }
         let int = |k: u32| v.int(i64::from(k));
-        let (mut fs, mut rs) = (
-            Vec::with_capacity(ranges.len()),
-            Vec::with_capacity(ranges.len()),
-        );
-        for (f, r) in ranges {
+        let mut fs = Vec::with_capacity(ranges.len());
+        let mut rs = Vec::with_capacity(2 * ranges.len());
+        for (f, a, b) in ranges {
             fs.push(f);
-            rs.push(v.list(r.iter().flat_map(|&(a, b)| [int(a), int(b)]).collect()));
+            rs.push(int(a));
+            rs.push(int(b));
         }
         let passed = v.list(ks.iter().map(|&k| int(k)).collect());
         self.cx.define_with(
@@ -525,30 +515,19 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// Each field the run read across candidates it went on past, sorted
-    /// by field: the runs of them it read across (`[first k, last k]`,
-    /// merged), by candidate number.
-    fn fire_read_across(
-        &mut self,
-        ks: &[u32],
-        past: &impl Fn(&CandMark) -> bool,
-    ) -> Vec<(ValueId, Vec<(u32, u32)>)> {
+    /// Each stretch of candidates the run read a field across, sorted by
+    /// field then candidate, merged: `(field, first k, last k)`.
+    fn fire_read_across(&mut self, ks: &[u32]) -> Vec<(ValueId, u32, u32)> {
         let (first, last) = (ks[0], ks[ks.len() - 1]);
         let mut by: Vec<(ValueId, u32, u32)> = Vec::new();
-        // (by index in the candidates: those of `past` among them)
-        let marks: Vec<Option<u32>> = self
-            .cand_marks
-            .iter()
-            .map(|m| past(m).then_some(m.k))
-            .collect();
         for (l, a, b) in self.st.reads_across() {
-            let (a, b) = (a as usize, (b as usize).min(marks.len()));
-            let Some(xs) = marks.get(a..b) else { continue };
-            let mut it = xs.iter().flatten();
-            let Some(&from) = it.next() else { continue };
-            let to = it.next_back().copied().unwrap_or(from);
-            let f = self.loc_field(l);
-            by.push((f.0, from, to));
+            let Some(xs) = ks.get(a as usize..(b as usize).min(ks.len())) else {
+                continue;
+            };
+            let (Some(&from), Some(&to)) = (xs.first(), xs.last()) else {
+                continue;
+            };
+            by.push((self.loc_field_peek(l).0, from, to));
         }
         // (what the run holds that it cannot date: all its candidates)
         let reads: Vec<Field> = self.cx.fields_read_since(0).map(|(_, f)| f).collect();
@@ -564,19 +543,15 @@ impl Run<'_, '_> {
             .collect();
         for l in locs {
             if !crate::state::read_by_position(l) {
-                let f = self.loc_field(l);
-                by.push((f.0, first, last));
+                by.push((self.loc_field_peek(l).0, first, last));
             }
         }
         by.sort_unstable();
-        let mut out: Vec<(ValueId, Vec<(u32, u32)>)> = Vec::new();
+        let mut out: Vec<(ValueId, u32, u32)> = Vec::with_capacity(by.len());
         for (f, a, b) in by {
             match out.last_mut() {
-                Some((g, r)) if *g == f => match r.last_mut() {
-                    Some(x) if a <= x.1 => x.1 = x.1.max(b),
-                    _ => r.push((a, b)),
-                },
-                _ => out.push((f, vec![(a, b)])),
+                Some(x) if x.0 == f && a <= x.2 => x.2 = x.2.max(b),
+                _ => out.push((f, a, b)),
             }
         }
         out

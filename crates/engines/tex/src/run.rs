@@ -1371,6 +1371,17 @@ impl<'c, 'a> Run<'c, 'a> {
         f
     }
 
+    /// [`Run::loc_field`] for a location the run may not have touched: its
+    /// slot is left as it is (the touched locations are the run's order,
+    /// [`crate::state::State::used_locs`]).
+    pub(crate) fn loc_field_peek(&self, loc: Loc) -> Field {
+        self.st.field(loc).unwrap_or_else(|| {
+            self.ops
+                .fields
+                .field_of(self.v, self.cx.values_epoch(), loc as usize)
+        })
+    }
+
     /// The location of field `f` (a fixed one, a meaning's, or the
     /// spill's).
     pub(crate) fn loc_of(&mut self, f: Field) -> Loc {
