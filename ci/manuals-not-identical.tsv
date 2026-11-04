@@ -6,7 +6,6 @@ latex_beautybook_beautybook-en	differs: page 19: obj 746 (page 19, untyped) line
 latex_biblatex_biblatex	-j1 differs: page 6: obj 172 (page 6, untyped) line 5: oracle "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 10.9091 Tf 41.32", phitex "q 1 0 0 1 72 769.89 cm 0 G 0 g 0 G 0 g 0 G 0 g BT /F5 10.9091 Tf 41.32"; -j4 error: error: PhiTeX's engine stopped: it ran past its time limit. This is a bug in PhiTeX, not in the document (-v shows the engine's details) (not the same in each run: the first sweep had -j1 timeout, -j4 timeout)
 latex_easyformat_easyformat	differs: page 2: obj 82 (page 2, untyped) line 26: oracle "5.578 -22.515 Td [(nasa)]TJ [-383(and)]TJ [-384(esa)]TJ [-383(are)-383", phitex "5.578 -22.515 Td [(nasa)-383(and)-384(esa)-383(are)-383(probably)-384("
 latex_icite_samples_icite-biblatex	differs: page 2: obj 16 (Link) line 19: oracle "155.551", phitex "213.113"
-latex_kotex-utf_kotex-utf-doc	differs: page 16: obj 583 (page 16, untyped) line 7: oracle "[-316<c8>]TJ", phitex "[<c8>]TJ" (past CJK.enc, accl 22513)
 latex_montex_montex	error: error: Font T1/cmss/sbc/n/10.95=ecssdc10 at 10.95pt not loadable: Metric (TFM) file not found
 latex_optikz_optikz_doc	differs: page 1: obj 44 (page 1, untyped) line 24: oracle "1 0 0 1 264.254 368.807 cm", phitex "1 0 0 1 265.491 368.807 cm"
 latex_pas-tableur_pas-tableur	error: error: You can't use `\cr' in restricted horizontal mode

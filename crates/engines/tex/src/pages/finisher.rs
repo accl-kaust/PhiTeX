@@ -339,6 +339,12 @@ impl Run<'_, '_> {
             page_x,
             brk,
         });
+        self.fin_scope_closer = self
+            .fin
+            .as_ref()
+            .and_then(|c| c.brk)
+            .map(|b| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(b.0.to_ne_bytes())))
+            .filter(|&p| self.cx.closes_scope_after(p));
         self.preload_candidate(&fargs)?;
         if let Some(names) = crate::exec::obs_str!("PHITEX_FIN_SHOW") {
             let mut shown = Vec::new();

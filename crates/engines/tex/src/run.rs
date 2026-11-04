@@ -1082,6 +1082,9 @@ pub(crate) struct Run<'c, 'a> {
     /// fire at, loaded or its own: its next read of one asks first whether
     /// a page fired there ([`Run::order_page_reg_read`]).
     pub page_regs_held: Vec<Loc>,
+    /// A finisher's piece, where the piece closes the engine scope it ran
+    /// in after the page's candidate: [`Run::fin_read_in_scope`].
+    pub fin_scope_closer: Option<phitex_defuse::NodeId>,
     /// The run's engine reads so far noted against its candidates
     /// ([`Run::note_engine_reads`]).
     pub reads_noted: usize,
@@ -1332,6 +1335,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cand: 0,
             cand_marks: Vec::new(),
             page_regs_held: Vec::new(),
+            fin_scope_closer: None,
             reads_noted: 0,
             fin_rtn_after: None,
             fin_boxes: Vec::new(),
@@ -1667,6 +1671,9 @@ impl<'c, 'a> Run<'c, 'a> {
         // a page fires at: the run ends there, [`Run::order_page_reg_read`])
         self.order_page_reg_read(loc)?;
         let f = self.loc_field(loc);
+        if self.fin_scope_closer.is_some() && self.fin_read_in_scope(loc, f)? {
+            return Ok(());
+        }
         let r = self.st.get(self.cx, self.v, loc, f);
         if r.is_err() {
             note_stop(self.op_name(), f);
@@ -4555,7 +4562,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Whether `l` is a finisher's field given where the routine reads
     /// it ([`crate::state::State::lazy`]): the run's own, read in full.
     fn lazy_pre(&self, l: Loc) -> bool {
-        self.st.lazy(l).is_some()
+        self.st.lazy(l).is_some() || self.fin_scope_closer.is_some()
     }
 
     /// Whether `tok`'s meaning is a macro whose body is a number

@@ -1088,6 +1088,35 @@ impl Run<'_, '_> {
 }
 
 impl Run<'_, '_> {
+    /// A finisher reading field `f` where its piece closes the engine scope
+    /// it ran in, after every candidate of its own. The routine ran inside
+    /// that scope (§1012), and the finisher stands after the piece, out of
+    /// its sight: a binding of the scope's, made by a piece before this one,
+    /// is the value at the candidate, which no list of the piece holds (it
+    /// lists its own definitions, [`Run::check_data`]). A definition after
+    /// that binding, global (the piece's before the candidate, the routine
+    /// of a page before this one), stands over it. kotex-utf's
+    /// `\\interhchar` in a quote whose last paragraph a page ends. True:
+    /// loaded here.
+    pub(crate) fn fin_read_in_scope(&mut self, loc: crate::state::Loc, f: Field) -> R<bool> {
+        let Some(piece) = self.fin_scope_closer else {
+            return Ok(false);
+        };
+        let phitex_defuse::FieldAt::Def(x, Some(by)) = self.field_at(f, piece, true)? else {
+            return Ok(false);
+        };
+        let me = self.cx.node();
+        let there = match self.field_at(f, me, true)? {
+            phitex_defuse::FieldAt::Def(_, later) => later,
+            _ => None,
+        };
+        if there == Some(by) || there.is_some_and(|n| self.cx.before(by, n)) {
+            return Ok(false);
+        }
+        self.st.preload(self.v, loc, Some(x));
+        Ok(true)
+    }
+
     /// Whether the finisher's page fired at a candidate its piece went
     /// on past ([`FIRE_USED`]'s second list), where the piece's next
     /// pass can read the routine's `\\aftergroup` tokens.

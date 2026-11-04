@@ -1157,3 +1157,15 @@ fn pdf_savepos_texxet() {
 fn routine_global_read_by_position() {
     check_threads("routine_global_read_by_position", "pdf");
 }
+
+/// TeX Live manual kotex-utf-doc (pdflatex): a definition in an environment
+/// and a page that ends in its last paragraph. The routine runs inside the
+/// group and reads the binding (a header's macro; kotex-utf's `\interhchar`,
+/// 3pt in its header's letterspacing); the finisher stands after the node
+/// that closes the group, which lists only its own definitions, and read
+/// the value outside. At -j1 and -j4 (oracle: pdflatex in the CI image, accl
+/// 24082; the base differs).
+#[test]
+fn routine_reads_binding_of_closed_scope() {
+    check_threads("kotex_scope_binding", "pdf");
+}
