@@ -189,8 +189,10 @@ when the value it sees was bound before `k` and read after it. The finisher
 of a page firing at candidate `k` compares each field its routine defined
 globally with the value it began with (the piece's value at the candidate).
 Where one it changed was read across `k`, or a box it used up, or it left
-`\aftergroup` tokens, it defines `pages:conflict:<piece>:<k>` with every field
-it changed. The piece reads that field at `k` and puts those values in force
+`\aftergroup` tokens, it defines `pages:conflict:<piece>:<k>` with those fields
+only: what the piece did not read across `k` is not looked at, and moves
+nothing. A field read on another way a routine's value took comes on the next
+pass. The piece reads that field at `k` and puts those values in force
 there, in one pass (`Run::apply_fire_conflict`, `State::apply_global`). Code:
 `State::note_read`, `Run::order_after_fires` (pages/piece.rs),
 `Run::define_fire_conflict` (pages/routine.rs).
@@ -215,7 +217,7 @@ from markers cannot be dated (`state::read_by_position`: category and other
 codes, font cells, `\endlinechar`, page parameters, boxes, math families), so
 everything of those it holds counts as read across all its candidates.
 
-**The chain.** A conflict re-asks the text at once (`Ctx::settle_now`). Held to
+**The chain.** A conflict re-asks the text at once (`Operation::settles_now`: its own field, not the finisher's other definitions). Held to
 a quiet point, a chain through the pages took one pass per page: past 12
 conflicts the layout did not settle and the output was a pass's that never
 settled (texpower's page links one low, run to run). The fixture

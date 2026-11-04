@@ -1083,12 +1083,6 @@ impl Run<'_, '_> {
                 v.list(pairs),
                 Locality::Global,
             );
-            // (TeX's own serial chain from the text to the routine and
-            // back: the piece goes again at once, on what the pages before
-            // it left; held to a quiet point, a chain through the pages
-            // takes one pass a page, and past the settling limit the
-            // output is a pass's that never settled: texpower's links)
-            self.cx.settle_now();
         }
         Ok(())
     }

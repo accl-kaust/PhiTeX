@@ -196,6 +196,15 @@ impl Operation for Finish {
         Effect::None
     }
 
+    /// (TeX's own serial chain from the text to the routine and back: the
+    /// piece goes again at once, on what the pages before it left; held to
+    /// a quiet point, a chain through the pages takes one pass a page, and
+    /// past the settling limit the output is a pass's that never settled:
+    /// texpower's links)
+    fn settles_now(&self, f: Field, values: &Values) -> bool {
+        values.with_str(f.0, |s| s.starts_with(FIRE_CONFLICT)) == Some(true)
+    }
+
     /// The page layer settles at quiet points (docs/spec-settle.md): what
     /// a finisher defines re-asks the loop and the other finishers at
     /// once, and the text at the next quiet point.
