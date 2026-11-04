@@ -1584,6 +1584,7 @@ fn a_file_the_run_opened_reads_nothing_before_it() {
             "-j{t}"
         );
     }
+}
 
 /// A paragraph that reads `\pagetotal` before its first checkpoint and
 /// again after it, the first read leaving no trace in its state. An edit
