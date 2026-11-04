@@ -1441,12 +1441,10 @@ impl Run<'_, '_> {
         let mut pre = None;
         if p == 0 && q == cmd::ADVANCE && self.step_ok(l, global) {
             let x = self.scan_int()?;
-            // (steps on both sides of a candidate: the routine of a page
-            // firing there needs the value they make there, so the run
-            // reads the register, `State::add` keeps the value at it)
-            if !self.cand_marks.is_empty() && self.st.has_map(l) {
-                self.load(l)?;
-            }
+            // (steps on both sides of a candidate: the value they make
+            // there is what reached the run plus the steps before it, kept
+            // unread, `State::add`; the routine of a page firing there
+            // reads it so, `crate::pages::before_plus`)
             if self.st.add(self.v, l, x, global) {
                 self.muts += 1;
                 return Ok(());

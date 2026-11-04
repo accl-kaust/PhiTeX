@@ -614,6 +614,56 @@ fn watch_word_edit() {
     }
 }
 
+/// `PHITEX_TIME_LIMIT_SECS=0` is no limit for the watch's builds, as it is
+/// for `phitex build`: the scoreboard's cold builds and reference rebuilds
+/// run under it so that none is cut short. The watch's session read it as
+/// a limit of zero seconds, so every such build ended at once with the
+/// engine's deadline ("ran past its time limit" after 88 ms: mc 80017,
+/// circuitikz at every thread count, no PDF, every edit failed).
+#[test]
+fn watch_cold_build_under_no_time_limit_finishes() {
+    let _one = one();
+    let body = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("a body");
+    let text = "\\pdfoutput=1\n".to_string() + &plain() + &body;
+    let dir = scratch("watch-no-limit");
+    std::fs::write(dir.join("story.tex"), &text).expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "2",
+            "story.tex",
+        ])
+        .env("PHITEX_TIME_LIMIT_SECS", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    // (a failure is an event with the build's number too)
+    let first = until(&mut lines, "build", &1.into(), &mut seen);
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    assert!(
+        first["event"] != "failed" && first["ok"] == true,
+        "the cold build under PHITEX_TIME_LIMIT_SECS=0 did not finish: {first}"
+    );
+    assert!(
+        dir.join("story.pdf").is_file(),
+        "the cold build under PHITEX_TIME_LIMIT_SECS=0 wrote no PDF"
+    );
+}
+
 /// Two copies of the binary (other paths, other times) share the format
 /// cache: a format is cached under the build's identity (a hash of its
 /// sources, `tex::build_id`), not the executable's path, size or time.
