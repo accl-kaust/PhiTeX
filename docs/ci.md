@@ -149,6 +149,12 @@ there is no override.
    digit a milestone: AGENTS.md). The tag's commit must
    carry a green `gate`. The release workflow checks this and stops
    otherwise.
+   **The first stable tag** (v1.0) also flips the editor plugins' default
+   download channel from nightly to stable, one line each in the
+   frontends: `phitex-channel` in editors/emacs/phitex.el and `channel` in
+   editors/nvim/phitex.lua's PhitexInstall. Until a stable release exists,
+   GitHub's releases/latest is not found (it skips the nightly, a
+   pre-release); the nightly is signed with its own key, ci/nightly.pub.
 2. **`.github/workflows/release.yml`** builds the CLI for x86_64 and
    aarch64 Linux and for macOS (arm64, x86_64) and writes `SHA256SUMS`.
    Its last job runs in the GitHub environment `release`, which:

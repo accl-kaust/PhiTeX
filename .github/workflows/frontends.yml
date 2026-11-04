@@ -86,7 +86,9 @@ jobs:
       - run: npm ci --prefix fe/vscode
       - name: Emacs, Neovim and VS Code's native engine against the binary
         run: fe/test/editors/run.sh bin/phitex emacs nvim vscode
-      - name: the plugins' download, on a release signed here
+      - name: the plugins' download, on a release signed here, and from their own channel on GitHub
+        env:
+          PHITEX_INSTALL_LIVE: "1"
         run: fe/test/editors/install-check.sh
   browsers:
     runs-on: ubuntu-24.04
