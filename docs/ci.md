@@ -68,6 +68,16 @@ one is said (the image is not the one pinned from). Every manual is red
 unless identical, but those in `ci/manuals-not-identical.tsv` (its id, a
 tab, the cause, as the user decides): they run and are reported apart
 (`known-red.txt`), and one identical again is said. A manual in
+`ci/manuals-slow.tsv` is identical at -j1 and -j4 given time but slower
+than its limit (the sweep's 300 s, or its own `time_limit_s`, pdflatex's
+wall on the gate's runner): a speed item, not a correctness one (the
+user, 2026-11-04: an exact PDF is correct however long it takes). Its
+row holds its measured times (PhiTeX at each -j, pdflatex, the node, the
+job, the date). The gate keeps its limit for it, so the gate does not
+grow by hours: a build of it that only runs past the limit is expected,
+reported apart as `slow (listed)` in `known-red.txt`, never red, and
+one within the limit at every -j is said there; a PDF of it that differs,
+or an error, stays red. A manual in
 `ci/manuals-pdftex-bugs.tsv` differs only where pdfTeX has a bug PhiTeX
 does not copy (`docs/differences.md`). Its row lists that entry, a mask
 and the oracle's objects the mask may change, and the manual passes as
