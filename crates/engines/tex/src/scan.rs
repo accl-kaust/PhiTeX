@@ -978,6 +978,13 @@ impl Run<'_, '_> {
 
     #[allow(clippy::too_many_lines)]
     fn scan_toks_r(&mut self, macro_def: bool, xpand: bool) -> R<(Vec<Tok>, Vec<Tok>)> {
+        self.xpand_depth += 1;
+        let r = self.scan_toks_at(macro_def, xpand);
+        self.xpand_depth -= 1;
+        r
+    }
+
+    fn scan_toks_at(&mut self, macro_def: bool, xpand: bool) -> R<(Vec<Tok>, Vec<Tok>)> {
         // §473: `scanner_status:=defining` or `absorbing`;
         // `warning_index:=cur_cs`
         let status = if macro_def {
@@ -1077,7 +1084,11 @@ impl Run<'_, '_> {
                         break;
                     }
                     if self.cur.cmd == cmd::THE {
+                        self.the_in_text = self.cur.chr == 0
+                            && self.log_marks.is_some()
+                            && self.marks_depth == self.xpand_depth;
                         let q = self.the_toks();
+                        self.the_in_text = false;
                         self.ck()?;
                         body.extend(q);
                     } else if self.cur.cmd >= cmd::END_TEMPLATE
