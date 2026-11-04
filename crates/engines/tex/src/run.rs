@@ -1553,6 +1553,18 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         let gl = self.loc_of(g);
         let Some(s) = crate::defer::Sym::at(self, gl, node) else {
+            // (any other field's alias, a value kept unseen
+            // ([`Run::note_pre`]): the value of `g` reaching `node`, read
+            // now; the binding published stays the alias)
+            let x = match self.cx.read_at(g, phitex_defuse::At::Before(node)) {
+                Ok(phitex_defuse::FieldAt::Def(x, _)) => Some(x),
+                Ok(phitex_defuse::FieldAt::Unset | phitex_defuse::FieldAt::Gone) => None,
+                Err(e) => {
+                    note_stop(self.op_name(), g);
+                    return Err(e.into());
+                }
+            };
+            self.st.preload(self.v, loc, x);
             return Ok(());
         };
         let x = match self.op_name() {
@@ -2279,15 +2291,32 @@ impl<'c, 'a> Run<'c, 'a> {
             self.pre_noted.insert(loc);
             return;
         }
-        // (a stop here stops the run: it runs again from its start,
-        // the definition that brought it here made in vain; gone on from,
-        // the run would commit without this value kept, its publication
-        // what it is where the location goes unread)
-        if let Err(h) = self.load(loc) {
-            self.raise(h);
-            return;
-        }
-        let old = self.st.id_of(loc, v).unwrap_or(ValueId::UNIT);
+        // (the run has not read the location nor written it: its value
+        // here is the one reaching the node, kept as an alias of it,
+        // `Entry::alias`, not read: the run depends on it only where
+        // a line read later uses it, which reads it there. Read, every
+        // definition after a read-back made the run depend on the value
+        // it replaced: each of the circuitikz manual's code examples,
+        // which reads its own `.tmp` back, re-ran whole when a heading
+        // before it renamed hyperref's anchor, `\HyperLocalCurrentHref`,
+        // which the example's `\let` replaces unseen)
+        let unseen = !self.st.is_loaded(loc)
+            && !self.st.has_map(loc)
+            && !self.st.defined_after(loc, 0)
+            && self.st.lazy(loc).is_none();
+        let old = if unseen {
+            phitex_defuse::alias_value(v, f, self.cx.node())
+        } else {
+            // (a stop here stops the run: it runs again from its start,
+            // the definition that brought it here made in vain; gone on
+            // from, the run would commit without this value kept, its
+            // publication what it is where the location goes unread)
+            if let Err(h) = self.load(loc) {
+                self.raise(h);
+                return;
+            }
+            self.st.id_of(loc, v).unwrap_or(ValueId::UNIT)
+        };
         if self.read_point_pending.is_some() {
             if self.pending_locs.insert(loc) {
                 self.muts += 1;
@@ -2317,7 +2346,11 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         let grp = self.innermost_group();
-        self.st.set(pl, Entry::raw(Some(old)), true, grp);
+        let e = match phitex_defuse::alias_of(v, old) {
+            Some((g, at)) => Entry::alias(v, g, at),
+            None => Entry::raw(Some(old)),
+        };
+        self.st.set(pl, e, true, grp);
     }
 
     /// The parameter `p`.
