@@ -672,6 +672,48 @@ fn latex_marginpars_settle() {
     }
 }
 
+/// `pdflatex` on thirty pages made by one loop, each ended by `\newpage`
+/// and each beginning by reading a counter the shipout hook stepped
+/// (`pdfdocs/newpages20.tex`, as thumbs' overview does; the hook loops
+/// a while, so the text runs ahead of the routines): a serial chain
+/// from the text to the routine and back through a page fired at
+/// `\penalty-10000`, the text's own break. The finisher of such a page
+/// re-asks the text at once (docs/spec-settle.md §2); held to the quiet
+/// point, each pass advanced one page, and a text that speculated wrong
+/// early ran out the 12 passes ('the page layout did not settle', a
+/// page count off: thumbs-example -j4, 2 to 6 builds in 24). The PDF
+/// equals pdfTeX's at -j1, -j4 and -j8, settled, in each of three
+/// builds.
+#[test]
+fn latex_newpage_chain_settles() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let name = "newpages20";
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+        .expect("the oracle");
+    for threads in [1, 4, 8] {
+        for k in 0..3 {
+            let opts = Options {
+                threads: Some(threads),
+                ..pdf_opts(name, &dir)
+            };
+            let b = common::build(opts, Some(&prelude(true)), &src);
+            let (pdf, _) = b.output();
+            let bad: Vec<String> = b
+                .diagnostics()
+                .into_iter()
+                .map(|d| d.message)
+                .filter(|m| m.contains("did not settle"))
+                .collect();
+            eprintln!("{name} -j {threads} build {k}: {}", report(name, &b));
+            assert!(bad.is_empty(), "{name} -j {threads} build {k}: {bad:?}");
+            if let Some(d) = common::first_difference(&pdf, &want) {
+                panic!("{name} -j {threads} build {k}: pdf {d}");
+            }
+        }
+    }
+}
+
 /// `pdflatex` on a two-column article with 56 marginpars, 19 figures, 5
 /// wide figures and 7 tables (`pdfdocs/floats2col.tex`): LaTeX's output
 /// routine gives back floats, `\@freelist` and the column box at every
