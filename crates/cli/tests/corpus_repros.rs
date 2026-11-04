@@ -858,6 +858,28 @@ fn word_across_cut() {
     check_threads("word_across_cut", "pdf");
 }
 
+/// research corpus (classicthesis-xe: `\thepage` and LaTeX's
+/// `\glb@currsize` after a page read as before it): a page fires at a
+/// paragraph's start inside a group the text's run opens, and the
+/// paragraphs after it read a macro the output routine defines globally
+/// (a shipout hook counting the pages). The run went on past the
+/// candidate and read it at its own position, the value before the page.
+/// Now every such candidate is a cut, its rest a resume after the
+/// finisher of a page firing there (oracle: pdflatex in the CI image,
+/// accl 22727).
+#[test]
+fn routine_global_after_own_page() {
+    check_threads("routine_global_after_own_page", "pdf");
+}
+
+/// [`routine_global_after_own_page`] under plain's routine with one
+/// `\xdef`, the paragraphs made by a recursive macro in `\begingroup`
+/// (oracle: pdftex in the CI image).
+#[test]
+fn routine_global_bounded() {
+    check_threads("routine_global_bounded", "pdf");
+}
+
 /// TeX Live manual ryesample (pdflatex): the glossaries package's lists,
 /// `STEM.glo` and `STEM.acn`, made into `STEM.gls` and `STEM.acr` by
 /// makeindex in the style `STEM.ist` the package writes, as the corpus
@@ -1045,6 +1067,32 @@ fn line_end_tab() {
     check_threads("line_end_tab", "pdf");
 }
 
+/// A page fires in paragraphs inside a group the text's run opens, and
+/// its routine leaves tokens with `\aftergroup`: TeX reads them right
+/// after that `build_page` (§1100), so what follows sees what they do. The
+/// piece that went on past the page goes again with them read there.
+/// Oracle: pdftex in the CI image.
+#[test]
+fn routine_aftergroup_in_group() {
+    check_threads("routine_aftergroup_in_group", "pdf");
+}
+
+/// [`routine_aftergroup_in_group`] as afterpage.sty has it: the next
+/// page's colour restored (pagecolor-example). Oracle: pdflatex.
+#[test]
+fn afterpage_in_group() {
+    check_threads("afterpage_in_group", "pdf");
+}
+
+/// A routine's `\box` of a register the text's open group bound: void at
+/// the binding's level (§1079), whatever group the routine runs in
+/// (longtable's `\LT@foot` at `\endlongtable`: typstfun's `\vsize` kept
+/// the foot's height, a row more on a later table's page). Oracle: pdflatex.
+#[test]
+fn routine_box_used_in_group() {
+    check_threads("routine_box_used_in_group", "pdf");
+}
+
 /// TeX Live manual `moderncv_userguide` (pdflatex): a footnote inside
 /// `multicols`, put back after it. multicol multiplies `\count\footins`
 /// and `\skip\footins` by its columns, locally in its group; the routine
@@ -1098,6 +1146,28 @@ fn page_read_after_par_in_cond() {
 #[test]
 fn pdf_savepos_texxet() {
     check_threads("pdf_savepos_texxet", "pdf");
+}
+
+/// A routine's global definitions and what the text's run read across the
+/// page's candidate: a value the run bound itself after the candidate is
+/// its own, an older binding read again after a group (or a group's binding
+/// from before the candidate) is the routine's. At -j1 and -j4 (oracle:
+/// pdftex in the CI image).
+#[test]
+fn routine_global_read_by_position() {
+    check_threads("routine_global_read_by_position", "pdf");
+}
+
+/// TeX Live manual kotex-utf-doc (pdflatex): a definition in an environment
+/// and a page that ends in its last paragraph. The routine runs inside the
+/// group and reads the binding (a header's macro; kotex-utf's `\interhchar`,
+/// 3pt in its header's letterspacing); the finisher stands after the node
+/// that closes the group, which lists only its own definitions, and read
+/// the value outside. At -j1 and -j4 (oracle: pdflatex in the CI image, accl
+/// 24082; the base differs).
+#[test]
+fn routine_reads_binding_of_closed_scope() {
+    check_threads("kotex_scope_binding", "pdf");
 }
 
 /// TeX Live manual typog-example (pdflatex, microtype's contexts): each

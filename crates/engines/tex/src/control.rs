@@ -2904,6 +2904,39 @@ impl Run<'_, '_> {
         Ok(Some(int_of(self.v, x) + i64::from(own.1)))
     }
 
+    /// A line's number for a report in the log (a box's, §663): where the
+    /// client gives its node's lines, not read at all: the mark
+    /// ([`crate::log::LINE_MARK`]) and its node and place go in `marks`
+    /// and the number is made when the log is laid out, so a report does
+    /// not tie a piece to the lines before it. (The read that finds the
+    /// lines are given is taken back; a read of the number the run made
+    /// itself stands.)
+    pub(crate) fn line_for_log(
+        &mut self,
+        m: crate::run::LineMark,
+        marks: &mut Vec<i64>,
+    ) -> R<String> {
+        if let (None, _, Some(_), Some(own)) = m {
+            let f = crate::run::dline_field(self.v, own.0);
+            let given = self.cx.env(f)?.is_some();
+            if !self.dline_reads.contains(&f) {
+                self.cx.unread(f);
+            }
+            if given {
+                marks.extend([own.0.cast_signed(), i64::from(own.1)]);
+                return Ok(crate::log::LINE_MARK.to_string());
+            }
+        }
+        // (no mark's number here: a run's own file, or none, as TeX's `line`)
+        let l = self.line_of_mark(m)?;
+        Ok(if l > 0 {
+            l
+        } else {
+            i64::from(self.input_line_no()?)
+        }
+        .to_string())
+    }
+
     /// The input left as one source line, for `\inputlineno`.
     ///
     /// TeX's `line` (§304): the line of the innermost file read. A line

@@ -1,0 +1,18 @@
+% A page fires at a candidate inside a conditional the text's run opens
+% (\loop's \ifnum around many paragraphs), and the text after it reads a
+% macro the output routine defines globally (a shipout hook counting the
+% pages, as LaTeX's routines set \glb@currsize and the like:
+% classicthesis-xe). TeX ran the routine there, so every paragraph after
+% the break reads what it left; the run read the value reaching its own
+% position, the one before the page.
+\documentclass{article}
+\newcount\n
+\def\x{0}
+\AddToHook{shipout/after}{\xdef\x{\the\numexpr\x+1\relax}}
+\def\t{Some words to fill the lines of a paragraph, and more of them. }
+\begin{document}
+\begingroup
+\loop \advance\n1 Paragraph \the\n\ after \x\ pages. \t\t\t\t\t\par
+\ifnum\n<120 \repeat
+\endgroup
+\end{document}

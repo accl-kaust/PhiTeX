@@ -178,3 +178,55 @@ resumed exactly. This needs measurements from the resume side.
   the routine run on the piece's state at the candidate.
 - milsymb: section.4's `/XYZ` destination on its `\begin{landscape}` page
   (misc2's dest-under-`\pdfsetmatrix` family).
+
+## 6. A piece goes on past a candidate: what a routine changed that it read across it
+
+**Rule.** A text piece that goes on past a candidate where a page may fire
+(a paragraph's start, a candidate inside groups or conditionals of its own)
+defines `pages:used:<piece>`: each field it read across such candidates,
+with the runs of candidates it read across. A read crosses candidate `k`
+when the value it sees was bound before `k` and read after it. The finisher
+of a page firing at candidate `k` compares each field its routine defined
+globally with the value it began with (the piece's value at the candidate).
+Where one it changed was read across `k`, or a box it used up, or it left
+`\aftergroup` tokens, it defines `pages:conflict:<piece>:<k>` with those fields
+only: what the piece did not read across `k` is not looked at, and moves
+nothing. A field read on another way a routine's value took comes on the next
+pass. The piece reads that field at `k` and puts those values in force
+there, in one pass (`Run::apply_fire_conflict`, `State::apply_global`). Code:
+`State::note_read`, `Run::order_after_fires` (pages/piece.rs),
+`Run::define_fire_conflict` (pages/routine.rs).
+
+**What is no conflict.** A value the piece bound itself after the candidate,
+before reading it: the routine's value is never seen (`\font@name`, set by
+every `\selectfont`; scratch macros and registers such as `\Hy@gtemp` and
+skip registers), and the piece's later definition stands over the routine's
+(`Run::give_way`). A field the routine changed and the piece did not read
+after the candidate. `aftertoken` left as nothing where nothing was pending.
+An older binding seen again counts: the group's close restores it and the
+next read dates it by its old definition (§279, §283).
+
+**How reads are seen.** One comparison per read in `State`: a slot's last-read
+stretch against the candidates passed, on `Run::load` and the meaning paths
+(`cmd_chr_fast`, `macro_at`, `mean_of`, `meaning_entry`, `same_macro`,
+`cmd_chr_of`), with a step (`State::add`) and a symbol (`defer::symbol_for`)
+as reads. Reads from the engine by a way past the table (a skipped branch's
+class of a token) are dated from the run's read list at each candidate. Kept
+in checkpoints (`Base::read_across`). What a run reads through memos or takes
+from markers cannot be dated (`state::read_by_position`: category and other
+codes, font cells, `\endlinechar`, page parameters, boxes, math families), so
+everything of those it holds counts as read across all its candidates.
+
+**The chain.** A conflict re-asks the text at once (`Operation::settles_now`: its own field, not the finisher's other definitions). Held to
+a quiet point, a chain through the pages took one pass per page: past 12
+conflicts the layout did not settle and the output was a pass's that never
+settled (texpower's page links one low, run to run). The fixture
+`routine_global_read_by_position` has 38 pages of them.
+
+**Tried and dropped.**
+- A second pass from the start at the first conflict (`Halt::Recut`, then
+  `Halt::Refire`, branch pages3): 2-4x runs, each recut moves the scope's
+  definers and wakes their readers (accl 23294, 23331).
+- Cutting up front at every such candidate: needs every paragraph's start
+  (an engine scope's paragraphs are outer ones). amsldoc then has 4x nodes and
+  6x runs, and amsldoc and multicol come out wrong (accl 23130, 23134, 23154).

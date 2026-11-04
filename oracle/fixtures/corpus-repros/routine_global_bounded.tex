@@ -1,0 +1,16 @@
+% A page fires at a paragraph's start inside a group the text's run opens
+% (a loop of many paragraphs in \begingroup), and the text after it
+% reads a macro the output routine defines globally. TeX ran the routine
+% there, so every paragraph after the break reads what it left. Plain's
+% routine with one \xdef: a routine whose hint is bounded (the macro, the
+% page number), so the piece reads whether a page fired at its candidate
+% only because it reads that macro after it.
+% (PDF: pdftex, the oracle made in the CI image)
+\newcount\n \newcount\shipped
+\def\x{0}
+\output={\plainoutput\global\advance\shipped1 \xdef\x{\the\shipped}}
+\def\t{Some words to fill the lines of a paragraph, and more of them. }
+\long\def\iter{\advance\n1 Paragraph \the\n\ after \x\ pages. \t\t\t\t\t\par
+  \ifnum\n<120 \expandafter\iter\fi}
+\begingroup \iter \endgroup
+\bye
