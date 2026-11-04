@@ -2208,16 +2208,22 @@ pub(crate) fn release_waiting(eng: &Engine, w: Option<&Worker>, n: NodeId) {
     };
     for m in ws.into_iter().flatten() {
         if let Some(x) = eng.placed_node(m).filter(|x| x.state() == State::Dirty) {
-            enqueue(
-                eng,
-                Some(w),
-                x,
+            // (the run goes on for the cause that woke it, which the wait
+            // only paused: told another, an edited node whose reads hold
+            // would stand, its edit lost, `Ctx::last_run_stands`)
+            let wake = x.woke.lock().as_ref().map_or(
                 Wake {
                     by: Some(n),
                     cause: Cause::Output { of: n },
                     at_ns: eng.now_ns(),
                 },
+                |o| Wake {
+                    by: o.by,
+                    cause: o.cause.clone(),
+                    at_ns: eng.now_ns(),
+                },
             );
+            enqueue(eng, Some(w), x, wake);
         }
     }
 }

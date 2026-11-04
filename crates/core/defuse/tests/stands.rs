@@ -169,6 +169,23 @@ impl Operation for SlowDef {
     }
 }
 
+/// `[t, x]`: sleeps `t` ms, defines `x`.
+struct SlowSame;
+
+impl Operation for SlowSame {
+    fn name(&self) -> &'static str {
+        "slowsame"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let t = v.as_int(cx.args()[0]).unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(t.unsigned_abs()));
+        cx.define(v.field("x"), cx.args()[1]);
+        Ok(ValueId::UNIT)
+    }
+}
+
 /// `[y]`: reads `x`, takes 120 ms; outputs x + y; counts its runs.
 struct Long {
     runs: AtomicU64,
@@ -210,5 +227,36 @@ fn a_long_run_waits_for_the_nodes_before_it() {
     let rep = e.evaluate(4).unwrap();
     assert_eq!(e.output(b).and_then(|x| v.as_int(x)), Some(70), "{rep:?}");
     assert_eq!(long_op.runs.load(Ordering::SeqCst), before + 1, "{rep:?}");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+
+/// An edited long node waits for a node before it that makes what it made:
+/// every read of its last run holds, and it is still asked for its edit.
+/// Told only that the node it waited for ended, it stood, its edit lost
+/// (pgfplots' manual at -j32: a figure's lines back in the text, and the
+/// text as if without them).
+#[test]
+fn an_edit_outlasts_the_wait_of_a_long_run() {
+    let e = Engine::new();
+    let v = e.values();
+    let slow = e.register(Arc::new(SlowSame));
+    let long_op = Arc::new(Long {
+        runs: AtomicU64::new(0),
+    });
+    let long = e.register(long_op.clone());
+    let u = e.new_unit();
+    // (three nodes on four threads: one a thread each, the long one
+    // asked while `a` sleeps. `first` at the unit's start: no node waits
+    // for that one, `unsettled_before`)
+    let first = e.push(u, slow, vec![v.int(1), v.int(1)]);
+    let a = e.push(u, slow, vec![v.int(1), v.int(1)]);
+    let b = e.push(u, long, vec![v.int(10)]);
+    e.evaluate(4).unwrap();
+    assert_eq!(e.output(b).and_then(|x| v.as_int(x)), Some(11));
+    e.replace(first, slow, vec![v.int(2), v.int(1)]);
+    e.replace(a, slow, vec![v.int(300), v.int(1)]);
+    e.replace(b, long, vec![v.int(20)]);
+    let rep = e.evaluate(4).unwrap();
+    assert_eq!(e.output(b).and_then(|x| v.as_int(x)), Some(21), "{rep:?}");
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
