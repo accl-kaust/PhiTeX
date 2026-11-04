@@ -1210,6 +1210,18 @@ fn defer(eng: &Engine, sh: &Shared, n: NodeId) -> bool {
 /// Queues a node made dirty (a new node, a released sibling): on `w`'s
 /// deque, or the engine's pending list when no evaluation runs.
 pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) {
+    // (a node of an edit that has never run: what it defines is not known,
+    // so those after it wait for it (`hold_for`))
+    if matches!(wake.cause, Cause::Created { .. })
+        && (eng.holds_on.load(Ordering::Acquire) || (w.is_none() && eng.epoch.load(Ordering::Acquire) > 0))
+        && n.record().is_none()
+    {
+        let op = eng.op(n.op());
+        if !op.chains() && !op.works_at_frontier() && !op.final_only() && !n.moves.swap(true, Ordering::AcqRel) {
+            eng.movers.lock().insert(n.id);
+            eng.movers_n.fetch_add(1, Ordering::Release);
+        }
+    }
     *n.woke.lock() = Some(wake);
     match w {
         Some(w) if defer(eng, &w.shared, n.id) => {}
@@ -1283,6 +1295,7 @@ fn note_stale(n: &Node, wake: Wake) {
 
 /// `mark_stale` with no wake held.
 pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
+    note_move(eng, wake.by, n, &wake.cause);
     frontier_back(eng, n, &wake);
     if n.committing.load(Ordering::Acquire) {
         return mark_dirty_now(eng, w, n, wake);
@@ -1363,6 +1376,7 @@ pub(crate) fn hold_wake(eng: &Engine, w: Option<&Worker>, n: NodeId, wake: Wake)
 
 /// `mark_dirty` with no wake held.
 pub(crate) fn mark_dirty_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
+    note_move(eng, wake.by, n, &wake.cause);
     frontier_back(eng, n, &wake);
     loop {
         match n.state() {
@@ -1650,12 +1664,83 @@ fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), E
 /// order of the runs only: what they make is what they read.
 const LONG_RUN_NS: u64 = 100_000_000;
 
+/// `by`'s definition moved what `reader` read: a node to wait for from now
+/// on (`hold_for`), until a commit of it moves nothing (`clear_move`). Only
+/// what has moved tells: most links of the graph carry no change, and nodes
+/// joined by those run side by side (para4000's deleted paragraph, its pages'
+/// routines; amsldoc's heading edit, 13 runs, 55 ms at -j8 against 64 at -j1).
+pub(crate) fn note_move(eng: &Engine, by: Option<NodeId>, reader: &Node, cause: &Cause) {
+    let Some(by) = by.filter(|&b| b != reader.id) else {
+        return;
+    };
+    let Some(b) = eng.placed_node(by) else { return };
+    // (a routine moving the page loop, by its give-back: the loop goes on on
+    // a guess past it anyway, and no node after it read what moved)
+    if b.moves.load(Ordering::Relaxed) || eng.op(reader.op()).works_at_frontier() || eng.op(reader.op()).final_only() {
+        return;
+    }
+    // (a relation's value, a counter's step: recomputed in place as what it
+    // steps from moves, not by a run of its node: 500 routines shifted by an
+    // inserted one have their answers at once, side by side)
+    if let Cause::Changed { field, .. } = cause
+        && b.record()
+            .is_some_and(|r| r.defs.iter().any(|d| d.f == *field && d.rel.is_some()))
+    {
+        return;
+    }
+    if !b.moves.swap(true, Ordering::AcqRel) && eng.op(b.op()).chains() {
+        eng.movers.lock().insert(by);
+        eng.movers_n.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// A commit publishing what it published moved nothing yet: the walks
+/// after it say whether it does (`note_move`).
+pub(crate) fn clear_move(eng: &Engine, node: &Node) {
+    if node.moves.load(Ordering::Relaxed)
+        && node.moves.swap(false, Ordering::AcqRel)
+        && eng.movers_n.load(Ordering::Acquire) != 0
+        && eng.movers.lock().remove(&node.id)
+    {
+        eng.movers_n.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// The unsettled node `node` should wait for, by the last evaluation's
+/// graph: one before it that has never run or moved a read of its chain
+/// (`read::mover_before`), or that its last run read from and that moved a
+/// reader at its last commit (`read::open_definer_before`). Without this,
+/// on an edit that re-asks many nodes at once each worker ran its node on a
+/// value about to move: a generated 82-page book's added paragraph took
+/// 1.2 s at -j8 and 2 s at -j32 where -j1 takes 125 ms, Grail's deleted
+/// paragraph's finishers 1790 ms of work at -j8 for -j1's 123 (accl 23926,
+/// 23972). The rule comes from the old graph as an edit's whole schedule
+/// (`PHITEX_ORACLE`, branch moonshot, 127 ms at -j8); every link of the graph
+/// counted, unmoving ones too, makes pages that run side by side one chain
+/// (para4000's deleted paragraph, -j8, 108 ms to 228 ms): hence `Node::moves`.
+/// The page loop's rests are not held: they go on on a guess by themselves.
+fn hold_for(eng: &Engine, node: &Node) -> Option<NodeId> {
+    let op = eng.op(node.op());
+    if op.works_at_frontier() || op.final_only() {
+        return None;
+    }
+    if eng.movers_n.load(Ordering::Acquire) != 0
+        && let Some(x) = crate::read::mover_before(eng, node)
+    {
+        return Some(x);
+    }
+    let r = node.run_record()?;
+    crate::read::open_definer_before(eng, node, &r)
+}
+
 fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
     let node = eng.node(n);
     if !node.cas_state(State::Dirty, State::Running) {
         pool.shared.done_one();
         return Ok(());
     }
+    // (a quiet point let it go: nothing it waited for will come first)
+    let quiet = node.held.swap(false, Ordering::AcqRel);
     // (a long run waits for the nodes before it: `LONG_RUN_NS`)
     if node.full_ns.load(Ordering::Relaxed) >= LONG_RUN_NS
         && node.run_record().is_some_and(|r| r.state.is_none())
@@ -1664,6 +1749,22 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         if run_log() {
             eprintln!("long: node {} waits for {}", n.raw(), x.raw());
         }
+        node.held.store(true, Ordering::Release);
+        park_waiting(eng, pool, w, node, Some(x));
+        return Ok(());
+    }
+    // (one of a chain waits for the node before it that moved a read of
+    // the chain's: run sooner, it runs on the value before that one's,
+    // and again. One thread takes them in order anyway)
+    if !quiet
+        && pool.shared.n > 1
+        && eng.holds_on.load(Ordering::Acquire)
+        && let Some(x) = hold_for(eng, node)
+    {
+        if run_log() {
+            eprintln!("chain: node {} waits for {}", n.raw(), x.raw());
+        }
+        node.held.store(true, Ordering::Release);
         park_waiting(eng, pool, w, node, Some(x));
         return Ok(());
     }
@@ -2206,17 +2307,36 @@ pub(crate) fn release_waiting(eng: &Engine, w: Option<&Worker>, n: NodeId) {
         node.awaited.store(false, Ordering::SeqCst);
         m.remove(&n)
     };
+    let alone = ws.as_ref().is_some_and(|l| l.len() == 1);
     for m in ws.into_iter().flatten() {
         if let Some(x) = eng.placed_node(m).filter(|x| x.state() == State::Dirty) {
+            // (stopped before its run: what asked for that run still asks,
+            // an edit or a creation above all, which `Ctx::last_run_stands`
+            // must not take for a read's)
+            let kept = if x.held.swap(false, Ordering::AcqRel) {
+                x.woke.lock().take()
+            } else {
+                None
+            };
+            // (the one a chain goes on with, this worker's next: another
+            // woken for it takes it from here with nothing in its caches.
+            // book5's deleted paragraph at -j8, a chain of text nodes held
+            // and let go: 204 ms to 273 ms, the same runs, accl 23994)
+            if kept.is_some() && alone && !defer(eng, &w.shared, x.id) {
+                *x.woke.lock() = kept;
+                w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
+                w.ready().push(eng, x);
+                continue;
+            }
             enqueue(
                 eng,
                 Some(w),
                 x,
-                Wake {
+                kept.unwrap_or(Wake {
                     by: Some(n),
                     cause: Cause::Output { of: n },
                     at_ns: eng.now_ns(),
-                },
+                }),
             );
         }
     }
