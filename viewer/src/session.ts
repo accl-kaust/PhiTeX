@@ -282,11 +282,36 @@ const defaults: Options = { fuel: 100_000, dpi: 96, checkEveryMs: 5000 };
 
 const image = (r: CoreRes): PageImage | null => (r.canvas && r.size ? { canvas: r.canvas, w: r.size[0], h: r.size[1], links: r.links } : null);
 
+/**
+ * The project's main file, as Overleaf's "Main document" would be: a .tex
+ * file another file inputs (`\input`, `\include`, `\subfile`, `\subfileinclude`,
+ * a subfiles chapter, a standalone figure) is not it, whatever it holds; a
+ * file that inputs others is; then a whole document (`\documentclass` and
+ * `\end{document}`), `main.tex`, the top folder. Never the file open in the
+ * editor for being open.
+ */
 export function guessMain(files: Record<string, string>): string | null {
   const names = Object.keys(files).filter((n) => /\.tex$/i.test(n));
+  const strip = (t: string) => t.replace(/(^|[^\\])%.*$/gm, "$1");
+  // (the names each file inputs, as paths from the project's top, .tex added)
+  const inputs = new Map<string, string[]>();
+  for (const n of names) {
+    const dir = n.includes("/") ? n.slice(0, n.lastIndexOf("/") + 1) : "";
+    const got: string[] = [];
+    for (const m of strip(files[n]).matchAll(/\\(?:input|include|subfile|subfileinclude|includestandalone)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}/g)) {
+      const f = m[1].trim().replace(/^\.\//, "");
+      const tex = /\.tex$/i.test(f) ? f : `${f}.tex`;
+      got.push(tex, dir + tex);
+    }
+    inputs.set(n, got);
+  }
+  const inputted = new Set<string>();
+  for (const [n, got] of inputs) for (const f of got) if (f !== n) inputted.add(f);
   const score = (n: string) => {
-    const t = files[n];
+    const t = strip(files[n]);
     let s = 0;
+    if (inputted.has(n)) s -= 16;
+    if (inputs.get(n)!.some((f) => f !== n && f in files)) s += 8;
     if (/(^|\n)[^%\n]*\\(bye|end\{document\})/.test(t)) s += 4;
     if (/(^|\n)\s*\\documentclass/.test(t)) s += 2;
     if (/^main\.tex$/i.test(n)) s += 1;
@@ -395,6 +420,10 @@ export class PreviewSession {
     core.onEvent?.((e) => {
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
+      // (the watch's build moved the sources of pages it did not draw again,
+      // a comment line added above them: the glyphs kept are asked again, not
+      // left at the old text's bytes, which put a double-click lines off)
+      if (this.o.remote && (e as { event?: string }).event === "origins") return void (this.glyphCache.clear(), this.culprits.clear());
       if (this.o.remote && "event" in e && WATCH.has(e.event)) return this.onWatch(e as WatchEvent);
       // (a build of the core's began or ended; `preparing`, older cores' name for it)
       if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);

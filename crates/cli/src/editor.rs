@@ -88,6 +88,21 @@ fn vim_escape(file: &str) -> String {
     out
 }
 
+/// A project's file name as an argument of a program: one that begins
+/// with `-` is not taken for an option (`-c!cmd`, an editor's way to run
+/// something); one with a control character, which an editor's command line
+/// (`--remote-send`) would read as keys, is not passed at all.
+pub fn safe_file_arg(file: &str) -> Result<String, String> {
+    if file.chars().any(char::is_control) {
+        return Err(format!("a file name with a control character: {file:?}"));
+    }
+    Ok(if file.starts_with('-') {
+        format!("./{file}")
+    } else {
+        file.to_owned()
+    })
+}
+
 impl Editor {
     /// The editor `spec` names (a command with placeholders, or a known
     /// editor's command), if it can be run from the viewer.
@@ -151,7 +166,8 @@ impl Editor {
     /// Open `file` at `line`, `col` (in the background; the process is
     /// waited for on a thread of its own). The error if it did not start.
     pub fn open(&self, file: &str, line: usize, col: usize) -> Result<(), String> {
-        let argv = self.command(file, line, col);
+        let file = safe_file_arg(file)?;
+        let argv = self.command(&file, line, col);
         let (program, rest) = argv.split_first().ok_or("no command")?;
         let mut child = Command::new(program)
             .args(rest)
@@ -168,6 +184,13 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_name_is_never_an_option_or_keys() {
+        assert_eq!(safe_file_arg("-c!touch x").unwrap(), "./-c!touch x");
+        assert_eq!(safe_file_arg("a/b.tex").unwrap(), "a/b.tex");
+        assert!(safe_file_arg("a\n:!x\n.tex").is_err());
+    }
 
     fn cmd(spec: &str) -> Option<Vec<String>> {
         Editor::parse(spec).map(|e| e.command("ch 1.tex", 12, 5))

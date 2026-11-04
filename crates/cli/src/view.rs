@@ -4,11 +4,13 @@
 //! protocol are `phitex_live::view`'s ([`Viewer`], which [`View`] derefs
 //! to); this is how they reach a browser.
 //!
-//! - **Server.** A thread accepts connections on a free port; each is
-//!   served on a thread of its own (`ws.rs`: HTTP, then a `tungstenite`
-//!   WebSocket). Every
-//!   path begins with a random token, so no other page in the browser can
-//!   read the document.
+//! - **Server.** A thread accepts connections on the document's port
+//!   ([`doc_port`]: from its main file's path, the next one up if taken);
+//!   each is served on a thread of its own (`ws.rs`: HTTP, then a
+//!   `tungstenite` WebSocket). Every path begins with a random token, so no
+//!   other page in the browser can read the document; the token is kept in
+//!   the document's cache folder ([`doc_token`]), so the address stays the
+//!   same from one watch to the next and a tab still open joins again.
 //! - **Pages.** Drawn here as strips (`phitex_live::view`'s
 //!   [`Viewer::frame`], `phitex_render`): `frame/K/S` is page K (from 0)
 //!   at S thousandths of a pixel a point, its bands' keys and places, its
@@ -110,15 +112,77 @@ fn token() -> String {
     })
 }
 
+/// The ports a document's viewer is served on: above the registered
+/// services most machines run (1024-19999 holds many) and below Linux's
+/// and macOS's ephemeral ranges (32768 and 49152 up).
+const PORTS: std::ops::Range<u16> = 20000..30000;
+
+/// The port document `main`'s viewer tries first: from its absolute
+/// path, so the same document is served at the same address.
+fn doc_port(main: &std::path::Path) -> u16 {
+    let p = main.canonicalize().unwrap_or_else(|_| main.to_path_buf());
+    let h = crate::tex::Fnv::new().add(p.to_string_lossy().as_bytes()).0;
+    let n = u64::from(PORTS.end - PORTS.start);
+    PORTS.start + u16::try_from(h % n).unwrap_or(0)
+}
+
+/// Document `main`'s token: kept in its cache folder (made the first
+/// time, random, readable by the user alone), never derived from the
+/// path: a token a page could guess would let it read the document. A
+/// fresh one where the cache can't keep it.
+fn doc_token(main: &std::path::Path) -> String {
+    let Ok(c) = crate::cache::Cache::open(None) else {
+        return token();
+    };
+    let f = c.doc_dir(main).join("viewer-token");
+    if let Ok(t) = std::fs::read_to_string(&f)
+        && t.len() == 32
+        && t.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return t;
+    }
+    let t = token();
+    if let Some(d) = f.parent()
+        && std::fs::create_dir_all(d).is_ok()
+    {
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        if let Ok(mut w) = o.open(&f) {
+            let _ = std::io::Write::write_all(&mut w, t.as_bytes());
+        }
+    }
+    t
+}
+
+/// A listener on 127.0.0.1: `port` if given (an error if taken), else
+/// document `main`'s ([`doc_port`]) or the first free one above it in
+/// [`PORTS`], else any free one.
+fn listen(port: Option<u16>, main: &std::path::Path) -> std::io::Result<TcpListener> {
+    if let Some(p) = port {
+        return TcpListener::bind(("127.0.0.1", p));
+    }
+    let first = doc_port(main);
+    let n = PORTS.end - PORTS.start;
+    for k in 0..64u16 {
+        let p = PORTS.start + (first - PORTS.start + k) % n;
+        if let Ok(l) = TcpListener::bind(("127.0.0.1", p)) {
+            return Ok(l);
+        }
+    }
+    TcpListener::bind(("127.0.0.1", 0))
+}
+
 impl View {
-    /// Serve the viewer on 127.0.0.1, on `port` (none: a free one); a
-    /// source place opened by `editor`.
+    /// Serve the viewer on 127.0.0.1, on `port` (none: document `main`'s,
+    /// [`listen`]); a source place opened by `editor`.
     pub fn start(
         editor: Option<crate::editor::Editor>,
         port: Option<u16>,
+        main: &std::path::Path,
     ) -> std::io::Result<View> {
-        let port = port.unwrap_or(0);
-        let listener = TcpListener::bind(("127.0.0.1", port))?;
+        let listener = listen(port, main)?;
         let port = listener.local_addr()?.port();
         // (the directory the watch runs in: the project's files are named
         // from it)
@@ -168,7 +232,7 @@ impl View {
             }));
         }
         let shared = Arc::new(Shared {
-            token: token(),
+            token: doc_token(main),
             clients,
             on_clients: Mutex::new(None),
             viewer,
@@ -210,6 +274,12 @@ impl View {
     /// and pushed to the browsers as `{"event":"console","item":…}`.
     pub fn console(&self) -> Box<dyn Fn(Value) + Send> {
         self.shared.viewer.console()
+    }
+
+    /// How many browsers are connected now, asked from any thread.
+    pub fn clients_handle(&self) -> impl Fn() -> usize + Send + 'static {
+        let c = self.shared.clients.clone();
+        move || lock(&c).len()
     }
 
     /// Call `f` with how many browsers are connected when that changes.
@@ -391,7 +461,8 @@ fn clients(s: &Shared, n: usize) {
 /// Start viewer program `cmd` (its words; `{file}` where the file goes,
 /// else the file last) on `file`, not waited for.
 pub fn open_with(cmd: &str, file: &std::path::Path) -> std::io::Result<()> {
-    let f = file.display().to_string();
+    let f =
+        crate::editor::safe_file_arg(&file.display().to_string()).map_err(std::io::Error::other)?;
     let mut words: Vec<String> = cmd.split_whitespace().map(str::to_owned).collect();
     if words.is_empty() {
         return Err(std::io::Error::other("an empty command"));
@@ -433,4 +504,17 @@ pub fn open_browser(url: &str) -> bool {
             std::thread::spawn(move || c.wait());
         })
         .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_documents_port_is_its_own_and_in_range() {
+        let a = doc_port(std::path::Path::new("/x/paper/main.tex"));
+        assert_eq!(a, doc_port(std::path::Path::new("/x/paper/main.tex")));
+        assert!(PORTS.contains(&a));
+        assert_ne!(a, doc_port(std::path::Path::new("/x/thesis/main.tex")));
+    }
 }

@@ -633,10 +633,10 @@ impl Server {
 
     /// `phitex/status` with `state` and the last build's facts.
     fn status(&self, state: &'static str) {
-        let last = {
+        let (last, root, main) = {
             let mut st = lock(&self.st);
             st.state = state;
-            st.last
+            (st.last, st.root.base.clone(), st.main.clone())
         };
         self.notify(
             "phitex/status",
@@ -647,6 +647,11 @@ impl Server {
                 "errors": last.errors,
                 "warnings": last.warnings,
                 "engine": self.host.engine(),
+                // (the folder the watch runs in and its main file: an
+                // editor opening another file of that folder uses this
+                // watch, not a second one, whatever its own root guess)
+                "root": root,
+                "main": main,
             }),
         );
     }
@@ -1634,7 +1639,7 @@ mod tests {
         );
         assert_eq!(
             got[8]["params"],
-            json!({"state": "ready", "ms": 67.4, "pages": 3, "errors": 0, "warnings": 0, "engine": "wasm"})
+            json!({"state": "ready", "ms": 67.4, "pages": 3, "errors": 0, "warnings": 0, "engine": "wasm", "root": "/p", "main": "main.tex"})
         );
         // (a keystroke's build: no progress, the status after it)
         lock(&sent).clear();

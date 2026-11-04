@@ -52,6 +52,18 @@ fn seen_file() -> Option<PathBuf> {
     Some(d.join("phitex").join("news"))
 }
 
+/// This version's entry, else the newest one (a nightly's version has
+/// none): its version and text, for the viewer's What's new.
+pub fn latest() -> Option<(String, String)> {
+    let v = crate::version();
+    if let Some(e) = entry(CHANGELOG, v) {
+        return Some((v.to_owned(), e.to_owned()));
+    }
+    let h = CHANGELOG.lines().find_map(|l| l.strip_prefix("## "))?;
+    let v2 = h.split_whitespace().next()?;
+    entry(CHANGELOG, v2).map(|e| (v2.to_owned(), e.to_owned()))
+}
+
 /// `phitex news`: this version's entry, whole.
 pub fn print() {
     let v = crate::version();

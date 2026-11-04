@@ -151,8 +151,15 @@ pub struct Compare {
     /// The diff's pages' glyph origins, mapped to the user's files through
     /// the diff's map (follow, selection, a double-click on its pages).
     pub origins: Option<phitex_live::view::Origins>,
+    /// Where each change is on the diff's pages (its first glyph's page
+    /// and height): the viewer's next and previous go there.
+    places: Vec<Option<phitex_diff::Place>>,
     /// The diff's own outputs written (`JOB-diff.*`), for the watcher.
     pub wrote: Vec<(PathBuf, u64)>,
+    /// Whether its outputs are written into the folder (the watch's
+    /// `--write`): else none (`JOB-diff.pdf`, `.cb`, `.cb2`), its PDF
+    /// served from memory.
+    write: bool,
 }
 
 /// The main file's flattened text in `files`.
@@ -180,6 +187,7 @@ impl Compare {
         job: &Job,
         files: crate::tex::Files,
         status: Arc<Status>,
+        write: bool,
     ) -> Result<Compare, String> {
         // (latexdiff's markup is LaTeX's: a plain document can't take it)
         let new_main = match to {
@@ -220,7 +228,9 @@ impl Compare {
             hashes: Vec::new(),
             report: None,
             origins: None,
+            places: Vec::new(),
             wrote: Vec::new(),
+            write,
         };
         let new = match to {
             Some(t) => flat(src.files(t)?.as_ref(), main, "new")?,
@@ -270,7 +280,9 @@ impl Compare {
         let r = self.session.build();
         self.session.flush_records();
         let ok = r.out.errors.is_empty();
-        if let Ok(w) = self.session.write(&r, ok) {
+        if self.write
+            && let Ok(w) = self.session.write(&r, ok)
+        {
             self.wrote = w.files;
         }
         if let Some(("pdf", b)) = r.main_output() {
@@ -278,7 +290,30 @@ impl Compare {
             self.hashes.clone_from(&r.out.page_hashes);
         }
         self.report = Some(r);
-        self.origins = self.session.origins().map(|o| self.mapped(&o));
+        let raw = self.session.origins();
+        self.places = raw.as_ref().map_or_else(Vec::new, |o| self.places_of(o));
+        self.origins = raw.map(|o| self.mapped(&o));
+    }
+
+    /// Where each change is shown on the diff's pages: the glyphs of the
+    /// marked-up text (the main file's), by page, each at its bytes there.
+    fn places_of(&self, o: &phitex_live::view::Origins) -> Vec<Option<phitex_diff::Place>> {
+        let main = self.session.job.path.file_name();
+        let mains: Vec<bool> = o
+            .files
+            .iter()
+            .map(|f| Path::new(f).file_name() == main)
+            .collect();
+        let glyphs = o.pages.iter().enumerate().flat_map(|(k, p)| {
+            let p = p.clone();
+            let mains = &mains;
+            (0..p.as_ref().map_or(0, |p| p.len())).filter_map(move |i| {
+                let p = p.as_ref()?;
+                mains.get(p.file[i] as usize).copied().filter(|&m| m)?;
+                Some((k, p.y[i], p.start[i] as usize, p.end[i] as usize))
+            })
+        });
+        phitex_diff::places(&self.live.out().changes, glyphs)
     }
 
     /// The diff build's origins `o` with each glyph of the marked-up text
@@ -347,7 +382,7 @@ impl Compare {
     /// The viewer's diff state: `{shown, base, to, label, changes, look}`.
     pub fn state(&self, shown: bool) -> Value {
         let changes = &self.live.out().changes;
-        let list: Value = serde_json::from_str(&phitex_diff::changes_json(changes, &[]))
+        let list: Value = serde_json::from_str(&phitex_diff::changes_json(changes, &self.places))
             .unwrap_or_else(|_| json!([]));
         json!({
             "shown": shown,

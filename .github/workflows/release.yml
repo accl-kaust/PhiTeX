@@ -9,6 +9,12 @@
 # (the key file's text; MINISIGN_PASSWORD if it has one) is given only to
 # a run from a v* tag, and only after the user approves that run.
 #
+# The frontends' checks (frontends.yml) on the x86_64 Linux binary built
+# here and the browser build of this commit: Emacs, Neovim, VS Code, the
+# Overleaf extension on the mock, the demo. Neither a release nor a dry
+# run's signing goes ahead unless they pass; overleaf.com itself is a
+# manual step (docs/ci.md).
+#
 # A dry run: a push to the branch release-dry (`git push github
 # dev:release-dry`), or by hand (`gh workflow run release.yml`, once the
 # workflow is on main): every step but the release, signed with a key made
@@ -75,15 +81,21 @@ jobs:
         with:
           name: phitex-${{ matrix.asset }}
           path: phitex-${{ matrix.asset }}.tar.gz
+  frontends:
+    needs: build
+    uses: ./.github/workflows/frontends.yml
+    with:
+      binary: phitex-x86_64-linux
   # (a dry run: the same sums and signing, with a key made here)
   dry-run:
     if: github.ref_type != 'tag'
-    needs: build
+    needs: [build, frontends]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: phitex-*
           merge-multiple: true
       - run: |
           cd dist
@@ -96,7 +108,7 @@ jobs:
           ls -l
   publish:
     if: github.ref_type == 'tag'
-    needs: build
+    needs: [build, frontends]
     runs-on: ubuntu-24.04
     environment: release
     permissions:
@@ -110,6 +122,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: phitex-*
           merge-multiple: true
       - name: SHA256SUMS, signed
         env:
