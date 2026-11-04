@@ -346,14 +346,21 @@ impl Worker {
     /// more than a short run saves, so short runs stay where they are.
     /// [`Worker::offer`] as it takes `node`: what it leaves queued goes to
     /// another worker at once if `node`'s run will be long, as its last
-    /// was, or it has none (a first evaluation's nodes, a new one), whether
-    /// or not the run checks in.
+    /// was, or it has none (a first evaluation's nodes, a new or edited
+    /// one), whether or not the run checks in.
     fn offer_for(&self, node: &Node) {
         let sh = &self.shared;
         if sh.n == 1 {
             return;
         }
-        if self.ready().len() > 0 && (!node.committed() || node.run_ns.load(Ordering::Relaxed) >= offer_ns()) {
+        // (an edited node's last run says nothing of this one)
+        let unknown = !node.committed()
+            || node
+                .woke
+                .lock()
+                .as_ref()
+                .is_some_and(|w| matches!(w.cause, Cause::Edited | Cause::Created { .. }));
+        if self.ready().len() > 0 && (unknown || node.run_ns.load(Ordering::Relaxed) >= offer_ns()) {
             self.ready().since.store(0, Ordering::Relaxed);
             sh.wake_one();
             return;
