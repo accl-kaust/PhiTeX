@@ -1020,15 +1020,31 @@ impl Pool {
     /// moving, for no node before it ran) never ended, and the line never
     /// went quiet. The frontier moves to the earliest held node, which goes
     /// on; the others stay held, each let go in its turn as the one before
-    /// it ends. (Let go all at once, as at a quiet point, every held run
-    /// went on on old values whenever the runs at work were past it for a
-    /// moment: at -j32 a letter typed into a beamer frame ran 285 runs, 2.5
-    /// s.) The order of the runs only: what they make is what they read.
+    /// it ends. (Let go all at once, every held run went on on old values
+    /// whenever the runs at work were past it for a moment: at -j32 a letter
+    /// typed into a beamer frame ran 285 runs, 2.5 s.) Nor past a node
+    /// before the earliest held one that is to run again
+    /// (`read::dirty_between`): re-asked and queued again, or at work and
+    /// re-asked; it commits again, on the new values, and what it defines
+    /// then the held one may read. The order of the runs only: what they
+    /// make is what they read.
     fn release_past_only(&self, eng: &Engine, w: &Worker) -> bool {
         let fr = eng.frontier.load(Ordering::Acquire);
         if fr == 0 || self.shared.frontier_waiting.lock().is_empty() {
             return false;
         }
+        let Some(earliest) = self
+            .shared
+            .frontier_waiting
+            .lock()
+            .iter()
+            .filter_map(|&n| eng.placed_node(n))
+            .filter(|n| n.state() == State::Dirty)
+            .min_by_key(|n| n.pos_hint())
+        else {
+            return false;
+        };
+        let first = earliest.id.raw() + 1;
         let mut any = false;
         for s in &self.shared.at_work {
             let x = s.load(Ordering::Relaxed);
@@ -1046,18 +1062,18 @@ impl Pool {
         if !any {
             return false;
         }
-        let Some(first) = self
-            .shared
-            .frontier_waiting
-            .lock()
-            .iter()
-            .filter_map(|&n| eng.placed_node(n))
-            .filter(|n| n.state() == State::Dirty)
-            .min_by_key(|n| n.pos_hint())
-            .map(|n| n.id.raw() + 1)
-        else {
+        // (and no node between the frontier and the earliest held one is to
+        // run again: re-asked and queued again, not yet at its hold, or at
+        // work and re-asked. The earliest held node is not the earliest to
+        // run; the frontier moved past such a one to the held one, which
+        // read what it had yet to define)
+        let from = fr
+            .checked_sub(1)
+            .and_then(|r| crate::read::pos_of(eng, NodeId::from_raw(r)))
+            .unwrap_or_else(|| crate::read::unit_start(eng, earliest));
+        if crate::read::on_one_layout(eng, || crate::read::dirty_between(eng, from, earliest)).is_some() {
             return false;
-        };
+        }
         if eng
             .frontier
             .compare_exchange(fr, first, Ordering::AcqRel, Ordering::Acquire)
@@ -1298,10 +1314,9 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
                 .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty))
                 .partition(|&n| eng.op(eng.node(n).op()).read_back());
             pool.shared.deferred.lock().extend(outs);
-            // (and the runs that waited for a node that has not committed:
-            // they go on, on its prediction)
             // (and those at the frontier: the layer is quiet, nothing
-            // places a node before them now)
+            // places a node before them now. Let go together: one that
+            // reads what an earlier one defines waits for it, below)
             let old = eng.frontier.swap(0, Ordering::AcqRel);
             log_frontier(eng, old, 0, None, "quiet");
             rel.extend(
@@ -1309,12 +1324,27 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
                     .into_iter()
                     .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty)),
             );
-            rel.extend(
-                std::mem::take(&mut *pool.shared.waiting.lock())
-                    .into_values()
-                    .flatten()
-                    .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty)),
-            );
+            // (and the runs that waited for a node that has not committed:
+            // they go on, on its prediction. Not those waiting for one this
+            // quiet point lets go itself, held at the frontier or deferred:
+            // its commit is coming and lets them go (`release_waiting`); let
+            // go with it, one read what it had yet to define and ran again
+            // once it had: `settle::runs_held_at_the_frontier_are_let_go_
+            // the_earliest_first`, red on every try with T2 waiting for T1)
+            {
+                let going: crate::values::FxHashSet<NodeId> = rel.iter().copied().collect();
+                let mut m = pool.shared.waiting.lock();
+                let (keep, go): (Vec<_>, Vec<_>) = std::mem::take(&mut *m)
+                    .into_iter()
+                    .partition(|(on, _)| going.contains(on));
+                m.extend(keep);
+                drop(m);
+                rel.extend(
+                    go.into_iter()
+                        .flat_map(|(_, ws)| ws)
+                        .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty)),
+                );
+            }
             if !rel.is_empty() {
                 // (on the ready heap, by place, where every idle worker
                 // takes the earliest: as a block they were one worker's,

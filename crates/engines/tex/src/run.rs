@@ -959,6 +959,13 @@ pub(crate) struct Run<'c, 'a> {
     pub lines_entered: i64,
     /// Whether the input is exhausted for good (the file ended).
     pub eof: bool,
+    /// The job's text read to its end ([`Run::eof`] set there, not for a
+    /// line read apart), and whether §362's check of that end has run
+    /// ([`Run::file_ended`], once: "File ended while scanning use of
+    /// \textbf", then what it inserted read; at the end again, §360's
+    /// fatal error).
+    pub doc_ended: bool,
+    pub doc_end_checked: bool,
     /// `radix` (§438) and `cur_order` (§447).
     pub radix: i32,
     pub cur_order: phitex_typeset::glue::Order,
@@ -1367,6 +1374,8 @@ impl<'c, 'a> Run<'c, 'a> {
             incs: Vec::new(),
             lines_entered: 0,
             eof: false,
+            doc_ended: false,
+            doc_end_checked: false,
             radix: 0,
             cur_order: phitex_typeset::glue::Order::Normal,
             pdf_occ: 0,
@@ -3933,19 +3942,14 @@ impl<'c, 'a> Run<'c, 'a> {
             // (a line that does more than define is read back as text:
             // its interpretation stops at the first command that does,
             // its definitions not wanted)
-            // (a group opened in the line shares its list: an item on the
-            // line's own list is more. A box the line builds has a list of
-            // its own, and what is on it is the box's: `\\settowidth` in
-            // hypdoc's `\\HD@SetMacroIndent` only sets a dimension. A box
-            // still open at the line's end is more, below)
+            // (a group opened in the line shares its list: only a level
+            // with a list of its own, or an item on any, is more; a group
+            // still open at the line's end is, below)
             if self.contributed_since(nc)
                 || self.kids.len() != nk
                 || self.nest.len() <= nest_len
-                || !self.nest[nest_len].list.is_empty()
-                || self.nest[nest_len + 1..]
-                    .iter()
-                    .take_while(|l| !l.owns)
-                    .any(|l| !l.list.is_empty())
+                || self.nest[nest_len + 1..].iter().any(|l| l.owns)
+                || self.nest[nest_len..].iter().any(|l| !l.list.is_empty())
             {
                 break;
             }
