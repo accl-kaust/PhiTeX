@@ -1203,7 +1203,8 @@ impl Run<'_, '_> {
             }
             4 => self.scan_int()? % 2 != 0,
             5..=8 => {
-                let m = self.mode()?.m;
+                // (§1370: `mode:=0` while a `\write` is expanded, no test true)
+                let m = if self.mode_zero { 0 } else { self.mode()?.m };
                 match this_if {
                     5 => m.abs() == 1,
                     6 => m.abs() == 102,
