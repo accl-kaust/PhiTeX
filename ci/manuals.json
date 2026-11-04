@@ -16691,8 +16691,8 @@
    "passes": 3,
    "path": "latex/pegmatch/pegmatch.tex",
    "tools": [],
-   "time_limit_s": 584,
-   "time_limit_why": "pdflatex's own wall on the gate's runner: 584 s (manuals.py's oracle loop, 3 passes, in the -doc image on GitHub's ubuntu-24.04, 4 CPUs, Intel Xeon Platinum 8573C; run 41791115512, 2026-11-04). PhiTeX is held to it, not to the sweep's 300 s; it is identical, 378 s at -j1 and 361 s at -j4 on accl against pdflatex's 802 s on the same node (acclnode01, accl 24339)"
+   "time_limit_s": 779,
+   "time_limit_why": "pdflatex's own wall on the gate's runner, the slower of two measured: 779 s on AMD EPYC 7763 (4 CPUs; manuals.py's oracle loop, 3 passes, 258 + 260 + 260 s) where PhiTeX built it exact in 369 s at -j1 and 369 s at -j4 in the same job (run 41858001518, 2026-11-04); 584 s on Intel Xeon Platinum 8573C (run 41791115512). PhiTeX is held to it, not to the sweep's 300 s; it is identical, 378 s at -j1 and 361 s at -j4 on accl against pdflatex's 802 s on the same node (acclnode01, accl 24339)"
   },
   {
    "dir": "latex/perfectcut",
