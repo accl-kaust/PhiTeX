@@ -4130,6 +4130,18 @@ impl<'c, 'a> Run<'c, 'a> {
         if kind == "error" {
             self.diag(true, text);
         }
+        // (an `\errmessage`, LaTeX's errors among them: a diagnostic at
+        // the place it was met, its first line the message; without it
+        // `! LaTeX Error: ...` had no line and no place on the pages)
+        if kind == "errmsg" {
+            let nl = self.ipar(Par::newlinechar)?;
+            let first = u32::try_from(nl)
+                .ok()
+                .and_then(char::from_u32)
+                .and_then(|c| text.split(c).next())
+                .unwrap_or(text);
+            self.diag(true, first);
+        }
         let stop = kind == "error" && {
             self.error_count += 1;
             self.error_count >= 100

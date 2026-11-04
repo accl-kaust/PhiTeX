@@ -82,6 +82,17 @@ pub enum ToolSearch {
 }
 
 impl ToolSearch {
+    /// Every search, each once ([`Build::stage_file`] stages a file under
+    /// each one's field).
+    pub(crate) const ALL: [ToolSearch; 6] = [
+        ToolSearch::BibStyle,
+        ToolSearch::BibData,
+        ToolSearch::IndexStyle,
+        ToolSearch::GsFont,
+        ToolSearch::Mf,
+        ToolSearch::Web2c,
+    ];
+
     /// The search's code in its environment field (`tools::support_field`).
     pub(crate) fn code(self) -> u8 {
         match self {
@@ -6413,6 +6424,7 @@ impl Build {
     /// sent, as one.
     #[allow(clippy::too_many_lines)]
     pub fn stage_file(&mut self, name: &str, text: Option<&[u8]>) {
+        let tools = self.stage_tool_file(name, text);
         let v = self.g.eng.values();
         let f = v.field(&format!("file:{name}"));
         let d = v.field(&format!("dfile:{name}"));
@@ -6435,6 +6447,9 @@ impl Build {
             None
         };
         if k.is_none() && !cut {
+            if tools {
+                self.push_staged();
+            }
             return;
         }
         let old = k.map(|k| list_of(v, self.g.files[k].1)).unwrap_or_default();
@@ -6461,6 +6476,9 @@ impl Build {
             // the build read; each one's package-load record was dropped,
             // so the preamble's loads ran again in full: 4 nodes, 2.5 s)
             if found.is_some() && !cut && self.g.files[k].1 == val {
+                if tools {
+                    self.push_staged();
+                }
                 return;
             }
             if found.is_none() {
@@ -6552,6 +6570,11 @@ impl Build {
             }
         }
         crate::timeline::lap("stage: the loads' records");
+        self.push_staged();
+    }
+
+    /// The environment pushed after a file was staged ([`Build::stage_file`]).
+    fn push_staged(&mut self) {
         self.g.absorb_provided();
         let env = self.g.environment(self.opts.fixpoint);
         let env: Vec<(Field, ValueId)> = (env).into_iter().collect();
@@ -6560,6 +6583,61 @@ impl Build {
         self.g.push_env(env);
         crate::timeline::lap("stage: the environment set");
         self.staged = true;
+    }
+
+    /// File `name` staged where a tool's search found it in the project
+    /// (`tfile:<search>:<name>`, a `.bib` BibTeX or biber read, a `.bst`,
+    /// an `.ist`): its new text there (`text`, else the finder's), or gone,
+    /// or come where the search had found none (its first element is the
+    /// current directory, `./`). A tool's files are not `file:` fields, so
+    /// a database edited during a watch was read as it was at the first
+    /// build. Whether one changed.
+    fn stage_tool_file(&mut self, name: &str, text: Option<&[u8]>) -> bool {
+        let v = self.g.eng.values();
+        let mut changed = false;
+        let mut now: Option<Option<Vec<u8>>> = None;
+        let mut read = |b: &Self| -> Option<Vec<u8>> {
+            now.get_or_insert_with(|| match text {
+                Some(t) => Some(t.to_vec()),
+                None => (b.opts.finder)(name).map(|(_, b)| b),
+            })
+            .clone()
+        };
+        for search in ToolSearch::ALL {
+            let f = crate::tools::support_field(v, search, name);
+            if let Some(k) = self.g.files.iter().position(|(g, _)| *g == f) {
+                let Some(path) = list_of(v, self.g.files[k].1).first().map(|&p| str_of(v, p))
+                else {
+                    continue;
+                };
+                // (found elsewhere by the search, TEXMF's: not this file)
+                if path.trim_start_matches("./") != name {
+                    continue;
+                }
+                match read(self) {
+                    Some(b) => {
+                        let x = v.list(vec![v.str(&path), v.str(&latin1(&b))]);
+                        if self.g.files[k].1 != x {
+                            self.g.files[k].1 = x;
+                            changed = true;
+                        }
+                    }
+                    None => {
+                        self.g.files.remove(k);
+                        self.g.absent.push(f);
+                        changed = true;
+                    }
+                }
+            } else if self.g.absent.contains(&f)
+                && let Some(b) = read(self)
+            {
+                self.g.absent.retain(|g| *g != f);
+                let x = v.list(vec![v.str(&format!("./{name}")), v.str(&latin1(&b))]);
+                self.g.files.push((f, x));
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Cut document file `df` ([`DocFile`]) whose text is now `text`:
@@ -7915,6 +7993,7 @@ impl Build {
             &format!("diagnostics: {n_entries} entries"),
             t_entries.elapsed(),
         );
+        self.why_read_stopped(&mut out);
         out.extend(self.prelude.diags.iter().cloned());
         for m in &self.g.eval_warnings {
             out.push(Diagnostic {
@@ -7946,6 +8025,56 @@ impl Build {
         }
         out.sort_by(|a, b| (&a.file, a.range.0).cmp(&(&b.file, b.range.0)));
         out
+    }
+
+    /// A job stopped at `\read` in a run that cannot ask (`*** (cannot
+    /// \read from terminal in nonstop modes)`): LaTeX asks so after saying
+    /// why with a message, not an error (`\@missingfileerror`'s `!
+    /// LaTeX Error: File `x.sty' not found.`, typed out). That line, the
+    /// last such before the stop, is the diagnostic's message, the stop its
+    /// help; without it the reason was not shown at all. The log is not
+    /// changed.
+    fn why_read_stopped(&self, out: &mut [Diagnostic]) {
+        let Some(d) = out.iter_mut().find(|d| {
+            d.severity == Severity::Error
+                && d.message.starts_with("*** (cannot \\read from terminal")
+        }) else {
+            return;
+        };
+        let v = self.g.eng.values();
+        let mut why = None;
+        for x in self
+            .g
+            .eng
+            .acc_value(self.unit, v.field("log"))
+            .map(|e| v.seq_to_vec(e))
+            .unwrap_or_default()
+        {
+            let xs = list_of(v, x);
+            let Some(&t) = xs.get(1) else { continue };
+            let text = str_of(v, t);
+            let nl = xs.get(2).map_or(-1, |&n| int_of(v, n));
+            let nl = u32::try_from(nl)
+                .ok()
+                .and_then(char::from_u32)
+                .unwrap_or('\n');
+            for line in text.split([nl, '\n']) {
+                if let Some(m) = line.trim_start().strip_prefix("! ")
+                    && m.contains("Error")
+                {
+                    why = Some(m.trim_end().trim_end_matches('.').to_owned());
+                }
+            }
+            if str_of(v, xs[0]) == "error" && text.starts_with("*** (cannot") {
+                break;
+            }
+        }
+        if let Some(m) = why {
+            let stop = std::mem::replace(&mut d.message, m);
+            d.help = Some(format!(
+                "LaTeX then asks for what to do, and a run that cannot ask stops there ({stop}), as pdflatex does"
+            ));
+        }
     }
 
     /// The diagnostics at no place alone (the engine's own warnings and
@@ -9567,4 +9696,22 @@ pub fn rss_kb() -> u64 {
                 .and_then(|v| v.split_whitespace().next().and_then(|n| n.parse().ok()))
         })
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tool_search_tests {
+    use super::ToolSearch;
+
+    /// Every search a `tfile:` field may name is in [`ToolSearch::ALL`],
+    /// which `stage_file` stages a changed file under.
+    #[test]
+    fn every_search_is_staged() {
+        let named: Vec<ToolSearch> = (0..=u8::MAX)
+            .filter_map(|c| ToolSearch::of_code(&c.to_string()))
+            .collect();
+        assert_eq!(named, ToolSearch::ALL);
+        for (k, s) in ToolSearch::ALL.iter().enumerate() {
+            assert_eq!(usize::from(s.code()), k);
+        }
+    }
 }

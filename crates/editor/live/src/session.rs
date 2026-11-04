@@ -1695,6 +1695,10 @@ impl Session {
             .map(|(_, _, p)| p.as_ref().map(|p| plain_name(&p.to_string_lossy())))
             .collect();
         let mut hit = vec![false; self.inputs.len()];
+        // (a changed file TeX did not read: staged too, for a tool that
+        // read it, BibTeX's `.bib`, a `.bst`, makeindex's `.ist`; the
+        // engine stages only what one of its runs read, else nothing)
+        let mut tools: Vec<String> = Vec::new();
         for c in changed {
             let mut any = false;
             for (i, (n, ..)) in self.inputs.iter().enumerate() {
@@ -1714,15 +1718,22 @@ impl Session {
                     && self.host.same_file(f, c)
                 {
                     hit[i] = true;
+                    any = true;
                 }
             }
+            if !any && !tools.contains(c) {
+                tools.push(c.clone());
+            }
         }
-        self.inputs
+        let mut out: Vec<String> = self
+            .inputs
             .iter()
             .zip(hit)
             .filter(|(_, h)| *h)
             .map(|((n, ..), _)| n.clone())
-            .collect()
+            .collect();
+        out.extend(tools);
+        out
     }
 
     /// The main file's name as TeX prints it (`./story.tex`).
