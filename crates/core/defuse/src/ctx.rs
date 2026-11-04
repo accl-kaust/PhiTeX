@@ -997,6 +997,13 @@ impl<'a> Ctx<'a> {
         Ok(h)
     }
 
+    /// Whether this evaluation has more than one thread: work done ahead
+    /// on a guess can stand beside what it guesses at, not only before it.
+    /// Never for what a run makes, only for how far it goes on a guess.
+    pub fn has_other_threads(&self) -> bool {
+        self.worker.is_some_and(|w| w.shared.n > 1)
+    }
+
     /// Stops the run until I stand at the committed frontier: every node
     /// before me in my unit has committed in this pass with no re-ask
     /// pending (none to run, again or for the first time, none running or

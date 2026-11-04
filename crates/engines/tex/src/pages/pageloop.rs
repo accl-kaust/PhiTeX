@@ -284,6 +284,9 @@ pub(crate) struct RestStart {
     pub page: ValueId,
     pub guess: ValueId,
     pub base: usize,
+    /// The loop node that stopped there began on a guess, or one before it
+    /// did ([`Run::rest_begins`]).
+    pub on_guess: bool,
 }
 
 impl RestStart {
@@ -296,12 +299,13 @@ impl RestStart {
             self.page,
             self.guess,
             v.int(i64::try_from(self.base).unwrap_or(0)),
+            v.int(i64::from(self.on_guess)),
         ])
     }
 
     fn decode(v: &Values, x: ValueId) -> Option<RestStart> {
         let xs = list_of(v, x);
-        let [ko, kp, kn, state, page, guess, base] = xs[..] else {
+        let [ko, kp, kn, state, page, guess, base, on_guess] = xs[..] else {
             return None;
         };
         Some(RestStart {
@@ -314,6 +318,7 @@ impl RestStart {
             page,
             guess,
             base: usize::try_from(int_of(v, base)).ok()?,
+            on_guess: int_of(v, on_guess) != 0,
         })
     }
 }
@@ -922,6 +927,14 @@ impl Run<'_, '_> {
 
     /// The page layer's frontier from this run ([`phitex_defuse::Ctx::set_frontier`]).
     fn publish_frontier(&mut self, fold: Fold, ls: &LoopState, lc: &LoopCarry) {
+        // (a fold gone on on a guess: the routine it guessed at has not
+        // run, and the frontier stays before that routine's page. Moved on,
+        // a text reader between took what that routine defined before as
+        // settled and its wake was held to the next quiet point, one page a
+        // pass: ijmsample at -j4 lost or repeated pages, never settling)
+        if self.rest_on_guess {
+            return;
+        }
         // (the frontier: at a hole, the piece not in yet, past which a
         // page may yet fire and its finisher stand before the text that
         // reads what its routine defines; waiting for a give-back, the
@@ -1032,13 +1045,26 @@ impl Run<'_, '_> {
         let out = self
             .cx
             .read_at(r.key.field(v, PAGE_OUT), At::End(self.cx.unit()))?;
+        // (the page's routine not run on the page as it is now, but what it
+        // gave back on the page before it moved being the guess: the fold
+        // goes on, so the pages after it and their routines run beside
+        // this one, not each after the last, the chain of an edit that
+        // moves pages. The read stands: the routine's commit runs this
+        // again, on what it gave back. A guess it has not given back
+        // before, as in a first build, is waited for, and so is any on one
+        // thread, where the routine runs next anyway and the fold on the
+        // guess is done twice: para4000's deleted paragraph 184 -> 206 ms
+        // at -j1, accl 23790)
+        let beside = self.cx.has_other_threads();
+        self.rest_on_guess = r.on_guess;
         let gave = match out {
-            phitex_defuse::FieldAt::Def(x, fin) => {
-                page_out_parts(v, x).filter(|o| o.1 == r.page).map(|o| {
+            phitex_defuse::FieldAt::Def(x, fin) => page_out_parts(v, x)
+                .filter(|o| o.1 == r.page || (beside && o.0 == r.guess))
+                .map(|o| {
+                    self.rest_on_guess |= o.1 != r.page;
                     ls.after = fin.map(|f| (p.node, f));
                     o.0
-                })
-            }
+                }),
             _ => None,
         };
         let Some(gave) = gave else {
@@ -1140,6 +1166,7 @@ impl Run<'_, '_> {
             page: c.page,
             guess: c.guess,
             base: ls.base + i + 1,
+            on_guess: self.rest_on_guess,
         };
         let x = r.encode(v);
         ls.rest_def = Some(x);
