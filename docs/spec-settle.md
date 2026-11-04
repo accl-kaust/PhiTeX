@@ -40,11 +40,21 @@ An operation may declare that its definitions settle at quiet points
   layer's own.
 - A run of a settling operation that says its definitions are no
   decision of the layer (`Ctx::settle_now`) re-asks every reader at once,
-  the text too. A finisher says so for a page fired at a forced special
-  penalty (`\outputpenalty` at -10001 or below, §1013: the text called
-  its routine, the builder decided nothing): that is TeX's own serial
-  chain, text to routine to text, which a quiet point can only cut into
-  one step a pass. Every other page-layer wake stays held.
+  the text too. A finisher says so for a page fired at a forced break
+  (`\outputpenalty` at -10000 or below, §1005's `pi <= eject_penalty`:
+  `\newpage`, `\clearpage`, `\pagebreak`, and §1013's special penalties
+  below it: the text ended the page or called its routine, the builder
+  decided nothing): that is TeX's own serial chain, text to routine to
+  text, which a quiet point can only cut into one step a pass. Every
+  other page-layer wake stays held.
+  Why (2026-11-04): thumbs' overview is one loop making a page a turn,
+  each ended by `\clearpage` and each beginning by reading the counter
+  its shipout hook steps (`ThumbsPage`); the text ran ahead on
+  predictions, and a wrong one early put every page after it one pass
+  behind: thumbs-example at -j4 ran out the 12 passes in 2 to 6 builds
+  of 24, two pages more than pdfTeX's 69 (accl 24561); texpower's
+  manual at -j8 in 1 of 30 the same way (accl 24498). Held at -10001
+  only, those pages (at -10000) were ordinary ones.
   Why (2026-10-28): LaTeX's `\marginpar` (and a float in the text) takes
   two boxes from `\@freelist` where the text is, and its routine at
   `\penalty-10002` (`\@specialoutput`, `\@addmarginpar`) gives them

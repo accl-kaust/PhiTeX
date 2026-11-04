@@ -329,15 +329,21 @@ impl Run<'_, '_> {
             });
             return Ok(());
         };
-        // (a page fired at a forced special penalty, \outputpenalty at
-        // -10001 or below: no layout decision, TeX's own serial chain from
-        // the text to the routine and back (LaTeX's floats and marginpars
-        // taking boxes from \@freelist and giving them back at -10002):
-        // what the routine defines re-asks the text at once,
-        // docs/spec-settle.md §2)
+        // (a page fired at a forced break, \outputpenalty at -10000 or
+        // below (§1005: `pi <= eject_penalty` fires the page there): no
+        // layout decision, TeX's own serial chain from the text to the
+        // routine and back (LaTeX's floats and marginpars taking boxes
+        // from \@freelist and giving them back at -10002; a text whose
+        // every page ends in \newpage and begins by reading a counter a
+        // shipout hook stepped, thumbs' overview): what the routine
+        // defines re-asks the text at once, docs/spec-settle.md §2. Held
+        // to the quiet point, each pass advanced one page of such a chain,
+        // and a text that speculated wrong early ran out the 12 passes:
+        // thumbs-example -j4, 2 to 6 builds in 24 with two pages more
+        // than pdfTeX's 69 (accl 24561), texpower -j8 1 in 30)
         if page
             .as_ref()
-            .is_some_and(|p| p.output_penalty <= FORCED_SPECIAL)
+            .is_some_and(|p| p.output_penalty <= EJECT_PENALTY)
         {
             self.cx.settle_now();
         }
@@ -762,6 +768,11 @@ pub(crate) fn pen_class(p: i32) -> i32 {
 /// -10000, `\penalty-10001` and lower): a page fired there is no layout
 /// decision of the builder but the text calling its routine.
 pub(crate) const FORCED_SPECIAL: i32 = -10001;
+
+/// `eject_penalty` (§157): a penalty at or below it ends the page where
+/// it stands (§1005), `\newpage`, `\clearpage` and `\pagebreak` with it;
+/// the text ended the page, the builder chose nothing.
+pub(crate) const EJECT_PENALTY: i32 = -10000;
 
 /// [`fin_key`] of routine `t` on a page of class `pen`.
 pub(crate) fn fin_key_class(t: ValueId, pen: i32) -> u64 {
