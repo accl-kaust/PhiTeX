@@ -255,6 +255,17 @@ impl Run<'_, '_> {
                     }
                 }
                 self.interp_short = true;
+            } else if self.doc_ended && !self.doc_end_checked {
+                // §362 at the end of the main file: §336 checks what it
+                // ended in, as at an interpreted file's end; pdfTeX then
+                // reads what §339 inserted, and only at the end again is
+                // the job aborted (§360)
+                self.doc_end_checked = true;
+                match self.file_ended() {
+                    Ok(true) => return self.next_or_end(),
+                    Ok(false) => {}
+                    Err(h) => return self.raise(h),
+                }
             }
             return self.raise(Halt::Fatal);
         }
@@ -404,9 +415,12 @@ impl Run<'_, '_> {
             }
             _ => ("text", Tok::ch(2, u32::from(b'}'))),
         };
+        // (`sprint_cs(warning_index)`: the name as it is, LaTeX's robust
+        // `\textbf ` with its space, "use of \textbf .")
         let mut cs = String::new();
-        self.show_toks_into(&mut cs, std::slice::from_ref(&w))?;
-        let msg = format!("File ended while scanning {what} of {}", cs.trim_end());
+        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
+        crate::print::sprint_cs(&mut cs, w, esc);
+        let msg = format!("File ended while scanning {what} of {cs}");
         if self.interp.is_some() {
             // (a written file's text read as its read-back will read it:
             // the error is the read-back's, [`Run::read_back`])
@@ -892,6 +906,7 @@ impl Run<'_, '_> {
                 if self.top {
                     self.muts += 1;
                     self.eof = true;
+                    self.doc_ended = true;
                     Ok(false)
                 } else {
                     Err(Halt::Starve)
