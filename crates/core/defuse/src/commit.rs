@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use crate::api::{Brackets, Cause, Effect, Locality, NodeId, OpId, PathId, Rel, UnitId};
+use crate::api::{Brackets, Cause, Effect, Locality, NodeId, OpId, PathId, UnitId};
 use crate::engine::Engine;
 use crate::index::RangeKey;
 use crate::lock::ns;
@@ -433,7 +433,7 @@ struct Filed {
     f: Field,
     depth: u16,
     value: ValueId,
-    rel: Option<Rel>,
+    rel: Option<i64>,
     multi: bool,
 }
 
@@ -442,7 +442,7 @@ struct Filed {
 /// outermost of all); a relation is never one of several.
 fn filed_defs(v: &Values, defs: &[DefRec], b: &Brackets) -> Vec<Filed> {
     let mut at: FxHashMap<Field, usize> = FxHashMap::default();
-    type Parts = (Field, Option<Rel>, Vec<(u16, ValueId)>);
+    type Parts = (Field, Option<i64>, Vec<(u16, ValueId)>);
     let mut ps: Vec<Parts> = Vec::with_capacity(defs.len());
     for d in defs {
         let depth = def_depth(d.loc, b);
@@ -1074,7 +1074,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let nc = rec.contribs.len() + old_contribs.len();
     let mut changed_defs: Vec<Field> = Vec::with_capacity(nd);
     let mut changed_contribs: Vec<Field> = Vec::with_capacity(nc);
-    let mut rels: Vec<(Field, Rel)> = Vec::with_capacity(rec.defs.len());
+    let mut rels: Vec<(Field, i64)> = Vec::with_capacity(rec.defs.len());
     let mut placed: Vec<NodeId> = Vec::with_capacity(p.placements.len().max(old_placed.len()));
     let mut made: Vec<Arc<Node>> = Vec::with_capacity(p.placements.len());
     // (the scratch of the filing under the lock, each as long as it can
@@ -2074,9 +2074,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     // 5. a first relation by this operation
     for (f, c) in rels.into_iter().filter(|_| eng.op(node.op()).alike()) {
-        if let Rel::Add(c) = c {
-            learn_shape(eng, ww, node.op(), f, c, &mut st);
-        }
+        learn_shape(eng, ww, node.op(), f, c, &mut st);
     }
     // 6. the node's own reads the lock could not answer
     // (one whose field no change has counted since it read stands)
@@ -2367,6 +2365,7 @@ fn walk_here(
     if read::scoped(eng) {
         return Here::From(by);
     }
+    let v = eng.values();
     let op = eng.node(by).op();
     let (mut from, mut by) = (from, by);
     loop {
@@ -2416,7 +2415,7 @@ fn walk_here(
         };
         // (an alias's input, `read::through_aliases`, is not followed under
         // the lock: the relation's own settle puts it right, `settle_rel`)
-        let nv = rel_apply(eng, c, Some(i.value));
+        let nv = v.int(v.as_int(i.value).unwrap_or(0).wrapping_add(c));
         if nv == d.value {
             return Here::Done;
         }
@@ -2456,7 +2455,7 @@ pub(crate) fn settle_predictions(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>
 /// after the write still gives the value written: a walk that read an
 /// older input and wrote after one that read a newer is put right by its
 /// own read after. Whether the filed value changed.
-pub(crate) fn settle_rel(eng: &Engine, f: Field, by: NodeId, c: Rel) -> bool {
+pub(crate) fn settle_rel(eng: &Engine, f: Field, by: NodeId, c: i64) -> bool {
     let n = eng.node(by);
     let mut changed = false;
     loop {
@@ -3377,7 +3376,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
                         depth: 0,
                         value: nv,
                         by: n,
-                        rel: Some(Rel::Add(c)),
+                        rel: Some(c),
                         provisional: true,
                         multi: false,
                     },
@@ -3392,7 +3391,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
                     i += 1;
                 }
                 if let Some(cc) = d.rel {
-                    let nv = rel_apply(eng, cc, carried);
+                    let nv = plus(carried, cc);
                     if nv != d.value {
                         if let Some(e) = m.get_mut(&dp) {
                             e.value = nv;
@@ -3420,7 +3419,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
                 f,
                 loc: Locality::Local,
                 value: nv,
-                rel: Some(Rel::Add(c)),
+                rel: Some(c),
             });
             *last = Some(Arc::new(RunRecord::provisional(defs)));
             st.shaped += 1;
@@ -3524,7 +3523,7 @@ pub(crate) fn predict(eng: &Engine, op: OpId, args: &[ValueId]) -> Predicted {
         f,
         loc: Locality::Local,
         value: ValueId::UNIT,
-        rel: Some(Rel::Add(c)),
+        rel: Some(c),
     }));
     Predicted {
         rec: (!defs.is_empty()).then(|| Arc::new(RunRecord::provisional(defs))),
@@ -3553,6 +3552,7 @@ pub(crate) fn built(
 /// input in this segment or the environment (the commit that places it
 /// puts the value right from the true input, `settle_predictions`).
 pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, node: &Arc<Node>, pred: Predicted) {
+    let v = eng.values();
     let pos = node.pos_hint();
     let Predicted { rec, shaped, effect } = pred;
     // (its brackets before it runs: readers after it see the depth it
@@ -3565,11 +3565,11 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
     };
     let r = Arc::get_mut(&mut rec).expect("a prediction not filed yet");
     for d in &mut r.defs[shaped..] {
-        let c = d.rel.unwrap_or(Rel::Add(0));
+        let c = d.rel.unwrap_or(0);
         let input = Segment::reaching(inner, d.f, pos, false)
             .map(|(_, d)| d.value)
             .or_else(|| read::env_value(eng, d.f));
-        d.value = rel_apply(eng, c, input);
+        d.value = v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c));
     }
     for d in &rec.defs {
         let m = inner.defs.entry(d.f).or_default();
@@ -4777,18 +4777,10 @@ pub(crate) fn match_placements(eng: &Engine, last: &[NodeId], new: &[Placement])
 }
 
 /// `rel_value` at a node's label, read under its segment's lock.
-pub(crate) fn rel_value_at(eng: &Engine, f: Field, at: NodeId, c: Rel) -> ValueId {
-    let input = read::through_aliases(eng, reaching_at(eng, f, at, false).and_then(|r| r.value));
-    rel_apply(eng, c, input)
-}
-
-/// What relation `c` makes of `input`.
-fn rel_apply(eng: &Engine, c: Rel, input: Option<ValueId>) -> ValueId {
+pub(crate) fn rel_value_at(eng: &Engine, f: Field, at: NodeId, c: i64) -> ValueId {
     let v = eng.values();
-    match c {
-        Rel::Add(c) => v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c)),
-        Rel::By(r, k) => eng.relation(r).map_or(ValueId::UNIT, |g| g(input, k, v)),
-    }
+    let input = read::through_aliases(eng, reaching_at(eng, f, at, false).and_then(|r| r.value));
+    v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c))
 }
 
 /// The brackets a commit files for its node: what its run set, else its

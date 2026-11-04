@@ -315,9 +315,6 @@ struct Slot {
     /// [`MAP_GLOBAL`]); none once the register is read or set.
     map: Map,
     mapped: u8,
-    /// A macro only added to: the tokens after what reaches the run
-    /// ([`State::append`]), with [`Slot::mapped`] set.
-    suffix: Option<ValueId>,
     /// The value the run read of a register it steps ([`State::add`]):
     /// what reached it, the steps applied to it in [`Slot::e`].
     base: Option<ValueId>,
@@ -352,7 +349,6 @@ impl Default for Slot {
             field: None,
             map: Map::ID,
             mapped: MAP_NONE,
-            suffix: None,
             base: None,
             base_unread: false,
             lazy: None,
@@ -412,9 +408,6 @@ pub(crate) enum Pub {
     Value(ValueId),
     /// `+c` on the value reaching the run (rule 3).
     Rel(i64),
-    /// These tokens after the plain macro reaching the run
-    /// ([`State::append`], [`crate::val::append_relation`]).
-    Append(ValueId),
 }
 
 /// One publication: the location, what, where, and whether it is a
@@ -1237,12 +1230,6 @@ impl State {
         // (the steps over the value read: the run holds their result and
         // publishes them as before, a relation)
         s.base = x;
-        if let Some(k) = s.suffix {
-            let mut e = Entry::raw(Some(crate::val::append_relation(x, k, v)));
-            e.flags = LOADED | HAS_ID;
-            s.e = e;
-            return;
-        }
         let y = s.map.apply(crate::val::i32_of(v, x));
         let mut e = Entry::int(y);
         e.flags = LOADED;
@@ -1728,7 +1715,6 @@ impl State {
             if global || grp.is_none() {
                 s.map = Map::ID;
                 s.mapped = MAP_NONE;
-                s.suffix = None;
                 s.base = None;
                 s.base_unread = false;
             } else if unread {
@@ -1832,42 +1818,6 @@ impl State {
             s.e = e;
         }
         true
-    }
-
-    /// `\\xdef\\m{\\m<toks>}` of a macro the run neither holds nor defined,
-    /// nor has its value given for ([`Run::append_head`]): the tokens kept
-    /// after those of earlier such definitions, published as a relation on
-    /// what reaches the run. False, nothing changed, otherwise.
-    pub(crate) fn append(&mut self, v: &Values, loc: Loc, toks: &[Tok]) -> bool {
-        if !self.can_append(loc) {
-            return false;
-        }
-        self.changing(loc);
-        self.muts += 1;
-        let s = self.slot(loc);
-        let mut all = crate::val::toks_of(v, s.suffix);
-        all.extend_from_slice(toks);
-        s.suffix = Some(crate::val::toks_value(v, &all));
-        s.map = Map::add(1);
-        s.mapped = MAP_GLOBAL;
-        true
-    }
-
-    /// Whether [`State::append`] can take `loc`.
-    pub(crate) fn can_append(&self, loc: Loc) -> bool {
-        self.slot_ref(loc).is_none_or(|s| {
-            s.e.flags & (PRELOADED | LOADED) == 0
-                && s.meta == 0
-                && s.lazy.is_none()
-                && (s.mapped == MAP_NONE || s.suffix.is_some())
-        })
-    }
-
-    /// The tokens the run added to macro `loc` ([`State::append`]).
-    pub(crate) fn appended(&self, loc: Loc) -> Option<ValueId> {
-        self.slot_ref(loc)
-            .filter(|s| s.mapped != MAP_NONE)
-            .and_then(|s| s.suffix)
     }
 
     /// A restore of `loc` to its own symbol (spec §2.3 rule 1,
@@ -2309,13 +2259,7 @@ impl State {
             // \@ne`, then `\advance\@listdepth\m@ne` in a group left
             // open, KOMA's addmargin, inside it 0 and outside 1)
             let made = s.map.keep && !s.base_unread && self.steps_under_scope(l);
-            let what = if let Some(k) = s.suffix {
-                if made {
-                    Pub::Value(crate::val::append_relation(s.base, k, v))
-                } else {
-                    Pub::Append(k)
-                }
-            } else if made {
+            let what = if made {
                 Pub::Value(crate::val::int_id(
                     v,
                     i64::from(s.map.apply(crate::val::i32_of(v, s.base))),
@@ -2961,7 +2905,6 @@ struct BaseSlot {
     save: (u32, u64, u64),
     map: Map,
     mapped: u8,
-    suffix: Option<ValueId>,
     base: Option<ValueId>,
     lazy: Option<ValueId>,
     sym: bool,
@@ -3032,7 +2975,6 @@ impl State {
                 save: (s.save_gid, s.save_stamp, s.ginert),
                 map: s.map,
                 mapped: s.mapped,
-                suffix: s.suffix,
                 base: s.base,
                 lazy: s.lazy,
                 sym: s.sym,
@@ -3171,7 +3113,6 @@ impl State {
             (slot.save_gid, slot.save_stamp, slot.ginert) = s.save;
             slot.map = s.map;
             slot.mapped = s.mapped;
-            slot.suffix = s.suffix;
             slot.base = s.base;
             slot.lazy = s.lazy;
             slot.sym = s.sym;
@@ -3240,7 +3181,6 @@ impl BaseSlot {
             keep,
             add,
             mapped,
-            suffix,
             base,
             lazy,
             sym,
@@ -3283,7 +3223,6 @@ impl BaseSlot {
                 add: i32::try_from(int_of(v, add)).unwrap_or(0),
             },
             mapped: u8::try_from(int_of(v, mapped)).unwrap_or(0),
-            suffix: bit(8, suffix),
             base: bit(1, base),
             lazy: bit(2, lazy),
             sym: int_of(v, sym) != 0,
@@ -3334,8 +3273,7 @@ impl Base {
                     | i64::from(eng.is_some()) << 4
                     | i64::from(eng.flatten().is_some()) << 5
                     | i64::from(publ.is_some()) << 6
-                    | i64::from(publ.and_then(|p| p.0).is_some()) << 7
-                    | i64::from(s.suffix.is_some()) << 8;
+                    | i64::from(publ.and_then(|p| p.0).is_some()) << 7;
                 let x = v.list(vec![
                     field(s.loc).0,
                     v.int(has),
@@ -3347,7 +3285,6 @@ impl Base {
                     v.int(i64::from(s.map.keep)),
                     v.int(i64::from(s.map.add)),
                     v.int(i64::from(s.mapped)),
-                    val(s.suffix),
                     val(s.base),
                     val(s.lazy),
                     v.int(i64::from(s.sym)),

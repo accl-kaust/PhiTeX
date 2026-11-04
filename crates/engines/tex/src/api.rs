@@ -3181,8 +3181,6 @@ impl Graph {
         let forced_proj = eng.register_projection(Arc::new(crate::val::forced_projection));
         let num_proj = eng.register_projection(Arc::new(crate::val::num_projection));
         let clist_proj = eng.register_projection(Arc::new(crate::val::clist_projection));
-        let plain_list_proj = eng.register_projection(Arc::new(crate::val::plain_list_projection));
-        let append_rel = eng.register_relation(Arc::new(crate::val::append_relation));
         let ops = Ops {
             exec,
             put,
@@ -3235,8 +3233,6 @@ impl Graph {
             forced_proj,
             num_proj,
             clist_proj,
-            plain_list_proj,
-            append_rel,
         };
         let _ = shared.set(ops.clone());
         declare_fields(&eng);

@@ -223,23 +223,6 @@ impl PathId {
 /// A client projection: pure, from a value to a small value.
 pub type Projection = Arc<dyn Fn(ValueId, &Values) -> ValueId + Send + Sync>;
 
-/// A relation's function (`Ctx::define_rel_by`): the value the definition
-/// reaching a node, and the node's constant, make. Pure, as a projection is.
-pub type Relation = Arc<dyn Fn(Option<ValueId>, ValueId, &Values) -> ValueId + Send + Sync>;
-
-/// A registered [`Relation`].
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub struct RelId(pub(crate) u16);
-
-/// What a relation makes of the definition reaching it.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
-pub enum Rel {
-    /// The integer reaching it plus a constant (`Ctx::define_rel`).
-    Add(i64),
-    /// A registered function of it and a constant (`Ctx::define_rel_by`).
-    By(RelId, ValueId),
-}
-
 /// The environment's value of a field, on demand: `None` when the client
 /// cannot say, `Some(None)` for absent.
 pub type EnvProvider = dyn Fn(&Values, Field) -> Option<Option<ValueId>> + Send + Sync;

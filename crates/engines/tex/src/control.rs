@@ -1247,24 +1247,9 @@ impl Run<'_, '_> {
         }
         let e = ch >= 2;
         let p = self.get_r_token()?;
-        // (`\xdef\m{\m...}` of a plain list: the relation it is)
-        let appended = if e && global && a % 4 == 0 && !protected {
-            self.append_head(p)?
-        } else {
-            None
-        };
         let was = e.then(|| self.lines_sink_begin(Sink::Def));
         let (params, body) = self.scan_toks(true, e);
         let hit = was.is_some_and(|w| self.lines_sink_end(w));
-        if let Some(l) = appended {
-            self.ck()?;
-            self.append_tail(p, l, &body)?;
-            self.toks_buf = body;
-            if hit {
-                self.lt.strong = true;
-            }
-            return Ok(());
-        }
         // (the body's list kept for the next scan: the macro's
         // own made from it at its size)
         let rc: Rc<[Tok]> = Rc::from(&body[..]);

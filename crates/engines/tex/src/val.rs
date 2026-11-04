@@ -1008,19 +1008,13 @@ pub(crate) fn show_def(v: &Values, x: ValueId) -> String {
 /// comma list.
 pub(crate) const CLIST_NOT: &str = "\u{1}not a list";
 
-/// The head of the key of a control sequence in a list
-/// ([`clist_projection`]).
-const CLIST_CS: &str = "\u{1}control sequence";
-
-/// A parameterless macro's body as what a match of `,item,` in it gives, for
-/// a membership test (`Run::clist_has`): for each item between its commas, the
-/// first of its occurrences, `[item, next]`, `next` the list of the token after
-/// that comma past any spaces (what an undelimited argument takes after the
-/// match), empty where the body ends there; and for each control sequence
-/// `t` in the body, `[[CLIST_CS, t]]`. `[[CLIST_NOT]]` for any other meaning, or
-/// a body holding a brace or not ending in a comma, where a delimited match is
-/// more than this. A pure projection for the engine: a list grown or reordered
-/// where a reader's item is not leaves it standing.
+/// A parameterless macro's body as the items of a comma list, for a
+/// membership test (`[[item]…]`, each item its tokens between commas at
+/// brace depth 0, `[[CLIST_NOT]]` for any other meaning, or a body
+/// holding a brace, `\\@empty` or `\\@nnil`, where a delimited match is
+/// more than membership): what microtype's `\\MT@in@clist{x}\\list` reads
+/// of `\\list` (`Run::clist_has`). A pure projection for the engine: a
+/// list grown by an item a reader does not test for leaves it standing.
 pub(crate) fn clist_projection(x: ValueId, v: &Values) -> ValueId {
     // (kept per value: every reader of a list the engine asks again
     // answers through it, a whole list decoded each time otherwise)
@@ -1048,108 +1042,27 @@ fn clist_items(x: ValueId, v: &Values) -> ValueId {
     let Mean::Macro(m) = Mean::decode(v, Some(x)) else {
         return not();
     };
-    let comma = |t: &Tok| !t.is_cs_or_active() && t.cat() == Some(12) && t.chr() == u32::from(b',');
-    if !m.params.is_empty()
-        || m.body.last().is_some_and(|t| !comma(t))
-        || m.body
-            .iter()
-            .any(|t| !t.is_cs_or_active() && matches!(t.cat(), Some(1 | 2)))
-    {
+    if !m.params.is_empty() {
         return not();
     }
-    let mut out = Vec::new();
-    let mut start = 0;
-    for (i, t) in m.body.iter().enumerate() {
-        if comma(t) {
-            let next = m.body[i + 1..]
-                .iter()
-                .copied()
-                .find(|t| t.is_cs_or_active() || t.cat() != Some(10));
-            let next: Vec<Tok> = next.into_iter().collect();
-            out.push(v.list(vec![toks_value(v, &m.body[start..i]), toks_value(v, &next)]));
-            start = i + 1;
+    let mut items = Vec::new();
+    let mut cur: Vec<Tok> = Vec::new();
+    for &t in m.body.iter() {
+        if let Some(c) = t.as_cs() {
+            if matches!(c.name(), "@empty" | "@nnil") {
+                return not();
+            }
+        } else if matches!(t.cat(), Some(1 | 2)) {
+            return not();
+        } else if t.cat() == Some(12) && t.chr() == u32::from(b',') {
+            items.push(v.list(vec![toks_value(v, &cur)]));
+            cur.clear();
+            continue;
         }
+        cur.push(t);
     }
-    for t in m.body.iter().filter(|t| t.is_cs_or_active()) {
-        out.push(v.list(vec![clist_cs_key(v, *t)]));
-    }
-    v.list(out)
-}
-
-/// The key [`clist_projection`] has for control sequence `t` in the list.
-pub(crate) fn clist_cs_key(v: &Values, t: Tok) -> ValueId {
-    v.list(vec![v.str(CLIST_CS), tok_value(v, t)])
-}
-
-/// What [`append_relation`] needs of a meaning: `[0]` where it is no
-/// parameterless macro with no prefix whose body \\xdef could store as it is
-/// (braces, a parameter character); else `[kind, cs]`, `cs` its control
-/// sequences, in one order and once each, whose meanings say whether it can
-/// (each must be unexpandable where the `\\xdef` is), and `kind` 2 if the body
-/// is empty or ends in a comma (the items of the body with more added are its
-/// items and theirs, `Run::clist_has`), 1 otherwise. So a list reordered holds
-/// the same answer.
-pub(crate) fn plain_list_projection(x: ValueId, v: &Values) -> ValueId {
-    static MEMO: OnceLock<crate::hints::Shards<(u64, ValueId, ValueId)>> = OnceLock::new();
-    let memo = MEMO.get_or_init(Default::default);
-    let k = x.raw() ^ v.epoch().rotate_left(32);
-    if let Some(&(i, y, r)) = memo.of(k).get(&k)
-        && i == v.epoch()
-        && y == x
-    {
-        return r;
-    }
-    let r = plain_list(x, v);
-    let mut m = memo.of(k);
-    if m.len() > 1 << 12 {
-        m.clear();
-    }
-    m.insert(k, (v.epoch(), x, r));
-    r
-}
-
-fn plain_list(x: ValueId, v: &Values) -> ValueId {
-    let no = || v.list(vec![v.int(0)]);
-    let Mean::Macro(m) = Mean::decode(v, Some(x)) else {
-        return no();
-    };
-    if !m.params.is_empty()
-        || m.flags != 0
-        || m.body
-            .iter()
-            .any(|t| !t.is_cs_or_active() && matches!(t.cat(), Some(1 | 2 | 6)))
-    {
-        return no();
-    }
-    let ends = match m.body.last() {
-        None => true,
-        Some(t) => !t.is_cs_or_active() && t.cat() == Some(12) && t.chr() == u32::from(b','),
-    };
-    let mut cs: Vec<Tok> = m
-        .body
-        .iter()
-        .copied()
-        .filter(Tok::is_cs_or_active)
-        .collect();
-    cs.sort_unstable_by_key(|t| t.encode(v).raw());
-    cs.dedup();
-    v.list(vec![v.int(if ends { 2 } else { 1 }), toks_value(v, &cs)])
-}
-
-/// A relation (`Ctx::define_rel_by`): the macro `\\xdef\\m{\\m<k>}` makes
-/// from a meaning of `\\m` that [`plain_list_projection`] says it copies as
-/// it is, `k` the tokens the rest of the body made. Any other meaning makes
-/// nothing of use: the run read that projection and is run again.
-pub(crate) fn append_relation(x: Option<ValueId>, k: ValueId, v: &Values) -> ValueId {
-    let Some(x) = x else {
-        return ValueId::UNIT;
-    };
-    let Mean::Macro(m) = Mean::decode(v, Some(x)) else {
-        return ValueId::UNIT;
-    };
-    let mut body = m.body.to_vec();
-    body.extend(toks_of(v, Some(k)));
-    Mean::Macro(Rc::new(Macro::new(0, Vec::new(), Rc::from(&body[..])))).encode_new(v)
+    items.push(v.list(vec![toks_value(v, &cur)]));
+    v.list(items)
 }
 
 /// What an insertion class's box register is to the page builder

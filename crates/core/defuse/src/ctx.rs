@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{At, Cause, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Rel, RelId, Step, Stop};
+use crate::api::{At, Cause, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Step, Stop};
 use crate::engine::Engine;
 use crate::node::{Anchor, DefRec, Node, Placement, Product, ReadKind, ReadRec, RunRecord, State};
 use crate::order::Pos;
@@ -502,21 +502,7 @@ impl<'a> Ctx<'a> {
             f,
             loc,
             value: ValueId::UNIT,
-            rel: Some(Rel::Add(c)),
-        });
-    }
-
-    /// `f` := relation `r` ([`Engine::register_relation`]) of the definition
-    /// of `f` reaching me, with its constant `k`: kept as a relation, as
-    /// [`Ctx::define_rel`] is, the engine recomputing it without running me
-    /// when its input changes. What a run needs of the input besides (that
-    /// `r` of it is what the run would make of it) it reads as any read.
-    pub fn define_rel_by(&mut self, f: Field, r: RelId, k: ValueId, loc: Locality) {
-        self.product.defs.push(DefRec {
-            f,
-            loc,
-            value: ValueId::UNIT,
-            rel: Some(Rel::By(r, k)),
+            rel: Some(c),
         });
     }
 
