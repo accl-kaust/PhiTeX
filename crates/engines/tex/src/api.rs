@@ -1292,7 +1292,7 @@ fn page_of(v: &Values, p: ValueId) -> Option<PageOf> {
 
 /// A page-tagged entry's page and, for a page whose break is inside a
 /// piece, that piece and candidate.
-fn page_tag(v: &Values, e: ValueId) -> Option<(PageOf, Option<(i64, i64)>)> {
+pub(crate) fn page_tag(v: &Values, e: ValueId) -> Option<(PageOf, Option<(i64, i64)>)> {
     // (the entry's ids looked at in place: no copy of the list)
     let ids = |xs: &[ValueId]| match xs {
         [j, _] => Some((*j, None)),
@@ -4421,6 +4421,11 @@ pub(crate) fn text_mark(v: &Values) -> ValueId {
 /// did more than define as it was interpreted (`UNIT` in place of its
 /// definitions, [`crate::run::Run::interpret_line`]); every other file
 /// is read back per field.
+/// The tag of a name in a written line's reads that the line looked at only
+/// for whether it is the parameter character or, skipping, a conditional or
+/// `\\outer` (`Run::param_look`, `Run::in_skip`).
+pub(crate) const PARAM_LOOK: &str = "\u{1}#";
+
 pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<String> {
     let streams = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
@@ -4429,46 +4434,80 @@ pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<Strin
     // which TeX reads first and its read-back by fields, each line on its
     // own, does not: beamer's `\headcommand` advances a count line by
     // line, and the file is read back as its text)
-    let mut defined: Vec<(String, phitex_defuse::FxHashSet<String>)> = Vec::new();
+    let mut defined: Vec<(
+        String,
+        phitex_defuse::FxHashSet<String>,
+        phitex_defuse::FxHashSet<String>,
+    )> = Vec::new();
     for e in doc_order(v, &streams) {
         let xs = list_of(v, stream_entry(v, e));
         let name = xs.first().map(|&n| str_of(v, n)).unwrap_or_default();
-        if out.contains(&name) {
+        if out.contains(&name) && !crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             continue;
         }
         // (the file opened again: its lines so far gone)
         if xs.len() == 1 {
-            defined.retain(|(n, _)| *n != name);
+            defined.retain(|(n, _, _)| *n != name);
             continue;
         }
         let Some(&made) = xs.get(2) else { continue };
         if made == ValueId::UNIT {
-            out.push(name);
+            if !out.contains(&name) {
+                out.push(name);
+            }
             continue;
         }
-        let k = if let Some(k) = defined.iter().position(|(n, _)| *n == name) {
+        let k = if let Some(k) = defined.iter().position(|(n, _, _)| *n == name) {
             k
         } else {
-            defined.push((name.clone(), phitex_defuse::FxHashSet::default()));
+            defined.push((
+                name.clone(),
+                phitex_defuse::FxHashSet::default(),
+                phitex_defuse::FxHashSet::default(),
+            ));
             defined.len() - 1
         };
         if let Some(&reads) = xs.get(3)
-            && let Some(&r) = list_of(v, reads)
-                .iter()
-                .find(|&&r| v.with_str(r, |s| defined[k].1.contains(s)).unwrap_or(false))
+            && let Some(&r) = list_of(v, reads).iter().find(|&&r| {
+                v.with_str(r, |s| match s.strip_prefix(PARAM_LOOK) {
+                    // (only a line before it making it the parameter
+                    // character changes what this one did)
+                    Some(n) => defined[k].2.contains(n),
+                    None => defined[k].1.contains(s),
+                })
+                .unwrap_or(false)
+            })
         {
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                 eprintln!(
-                    "aux-trace: {name} read back as text: a line reads {}, which a line before it defines",
+                    "aux-trace: {name} read back as text: line {:?} reads {}, which a line before it defines",
+                    xs.get(1)
+                        .map(|&l| str_of(v, l).chars().take(70).collect::<String>()),
                     str_of(v, r)
                 );
             }
-            out.push(name);
+            if !out.contains(&name) {
+                out.push(name);
+            }
             continue;
         }
         for d in list_of(v, made) {
-            if let [f, _, _] = list_of(v, d).as_slice() {
-                defined[k].1.insert(str_of(v, *f));
+            if let [f, x, _] = list_of(v, d).as_slice() {
+                let name = str_of(v, *f);
+                let looked_at = match crate::val::Mean::decode(v, Some(*x)) {
+                    crate::val::Mean::Prim(_, c, _) | crate::val::Mean::Char(c, _) => {
+                        c == crate::val::cmd::MAC_PARAM
+                            || c == crate::val::cmd::IF_TEST
+                            || c == crate::val::cmd::FI_OR_ELSE
+                    }
+                    // (§336: an `\\outer` macro in skipped text)
+                    crate::val::Mean::Macro(m) => m.flags & 2 != 0,
+                    _ => false,
+                };
+                if looked_at {
+                    defined[k].2.insert(name.clone());
+                }
+                defined[k].1.insert(name);
             }
         }
     }

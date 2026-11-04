@@ -940,6 +940,12 @@ pub(crate) struct Run<'c, 'a> {
     /// The locations the line being interpreted read before it defined
     /// them, if it did ([`Run::interp_reads`]).
     pub interp_first: Vec<Loc>,
+    /// Meanings a line interpreted looked at only for §479's `#`
+    /// ([`Run::param_look`]), not read before it defined them otherwise.
+    pub interp_param: phitex_defuse::FxHashSet<Loc>,
+    /// A `\\def`'s body scanned: the meaning asked for is only looked at for
+    /// whether it is the parameter character.
+    pub param_look: bool,
     /// [`Run::set_mean`] finds the location it defines.
     pub defining: bool,
     /// The fields a read-back nested in a line's interpretation set (a
@@ -1061,6 +1067,10 @@ pub(crate) struct Run<'c, 'a> {
     /// (`profile`, `PHITEX_MACRO_PROF`) The macros the run expanded, by
     /// name, and how often (printed for a run of 5 ms or more).
     pub(crate) mprof: Option<crate::FxHashMap<Tok, u64>>,
+    /// A page loop's rest that began on a guess (`Run::rest_begins`).
+    pub(crate) rest_on_guess: bool,
+    /// The piece of the page a page loop's rest began after.
+    pub(crate) rest_begun_at: Option<phitex_defuse::NodeId>,
     /// An edited node's run: its checkpoints ([`crate::resume`]).
     pub(crate) ck: Option<Box<crate::resume::Checkpoints>>,
     /// The run goes on from no checkpoint (a check's run from the start).
@@ -1096,6 +1106,10 @@ pub(crate) struct Run<'c, 'a> {
     /// A finisher's piece, where the piece closes the engine scope it ran
     /// in after the page's candidate: [`Run::fin_read_in_scope`].
     pub fin_scope_closer: Option<phitex_defuse::NodeId>,
+    /// The fields the piece defined after the candidate whose value there
+    /// a routine before this finisher's replaced ([`Run::preload_candidate`]).
+    #[allow(clippy::option_option)]
+    pub fin_replaced: Vec<(ValueId, Option<Option<ValueId>>)>,
     /// The run's engine reads so far noted against its candidates
     /// ([`Run::note_engine_reads`]).
     pub reads_noted: usize,
@@ -1307,6 +1321,8 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_short: false,
             interp_reads: ValueId::NIL,
             interp_first: Vec::new(),
+            interp_param: phitex_defuse::FxHashSet::default(),
+            param_look: false,
             defining: false,
             interp_nested: phitex_defuse::FxHashMap::default(),
             interp_eof: false,
@@ -1341,6 +1357,8 @@ impl<'c, 'a> Run<'c, 'a> {
             fatal_logged: false,
             mark: crate::getnext::Mark::default(),
             mprof: crate::exec::prof_flag!("PHITEX_MACRO_PROF").then(crate::FxHashMap::default),
+            rest_on_guess: false,
+            rest_begun_at: None,
             ck: None,
             no_resume: false,
             resumed_at: None,
@@ -1352,6 +1370,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cand_marks: Vec::new(),
             page_regs_held: Vec::new(),
             fin_scope_closer: None,
+            fin_replaced: Vec::new(),
             reads_noted: 0,
             fin_rtn_after: None,
             fin_boxes: Vec::new(),
@@ -1506,6 +1525,15 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         };
         if !done.insert(loc) {
+            // (looked at only for `#`, used now)
+            if !self.param_look
+                && !self.in_skip
+                && !self.defining
+                && self.interp_param.remove(&loc)
+                && !self.st.defined_after(loc, self.interp_base)
+            {
+                self.interp_first.push(loc);
+            }
             return Ok(());
         }
         if self.st.defined_after(loc, self.interp_base) {
@@ -1513,8 +1541,15 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (read before the line defined it: what the lines before it
         // left there, [`Run::interp_reads`]; a meaning about to be
-        // defined is not read)
-        if !self.defining {
+        // defined is not read; one in a `\\def`'s body is looked at only
+        // for whether it is the parameter character, §479, one in skipped
+        // text only for whether it is a conditional, §494, which a line
+        // before it would change only by making it that:
+        // `\\providecommand`'s `\\l@ngrel@x` and `\\reserved@c` in every
+        // `.aux` of hyperref)
+        if self.param_look || self.in_skip {
+            self.interp_param.insert(loc);
+        } else if !self.defining {
             self.interp_first.push(loc);
         }
         if self.pre_memo_at != self.interp_point {
@@ -1793,6 +1828,27 @@ impl<'c, 'a> Run<'c, 'a> {
             && (global || self.innermost_group().is_none())
     }
 
+    /// Whether a step of integer register `loc` can be a step of the run's
+    /// map, published as a relation so a reader later on is asked as soon
+    /// as the value moves, not after every stepping run before it has run
+    /// again: as [`Run::map_ok`], and after a candidate too, the value at
+    /// the candidate kept (`State::add`), for a register no routine defines.
+    pub(crate) fn step_ok(&mut self, loc: Loc, global: bool) -> bool {
+        if self.cand_marks.is_empty() {
+            return self.map_ok(loc, global);
+        }
+        let op = self.cx.op();
+        self.count_reg(loc).is_some()
+            && (op == self.ops.exec || op == self.ops.resume)
+            && self.doc
+            && !self.rec_load
+            && self.interp.is_none()
+            && !self.read_back_done
+            && !self.read_point_here
+            && (global || self.innermost_group().is_none())
+            && !crate::defer::deferrable(self, loc)
+    }
+
     /// An integer register's engine value as first loaded
     /// ([`Run::reg_loaded_base`]).
     /// Kept for the registers a restore can name: `\count0`–`\count255`
@@ -1856,13 +1912,18 @@ impl<'c, 'a> Run<'c, 'a> {
     /// set, where it is a page-layer register the run has not loaded and
     /// holds no map of (its own write makes it concrete): no read.
     pub(crate) fn defer_at(&mut self, loc: Loc) -> R<bool> {
-        if self.st.is_loaded(loc) || self.st.has_map(loc) || self.st.lazy(loc).is_some() {
+        if self.st.is_loaded(loc) || self.st.lazy(loc).is_some() {
             return Ok(false);
         }
         if loc as usize >= crate::fields::NSLOT {
             self.loc_field(loc);
         }
-        if self.count_reg(loc).is_none() || !crate::defer::deferrable(self, loc) {
+        // (a page-layer register a piece stepped is concrete, as the
+        // restores of §2 of the spec expect; any other is relative,
+        // docs/note-relative-counters.md §2.1, its steps in the symbol)
+        if self.count_reg(loc).is_none()
+            || (self.st.has_map(loc) && crate::defer::deferrable(self, loc))
+        {
             return Ok(false);
         }
         // (a symbol is resolved as of the piece's position: made after a
@@ -3726,6 +3787,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // [`Run::note_pre`], is not the line's)
         self.interp = Some(phitex_defuse::FxHashSet::default());
         self.interp_first.clear();
+        self.interp_param.clear();
         self.set("cat:64", v.int(11), false);
         // (on a list of its own, dropped after: what a line typesets,
         // an error's text, goes nowhere)
@@ -3810,6 +3872,16 @@ impl<'c, 'a> Run<'c, 'a> {
             .map(|l| str_of(v, self.loc_field(l).0))
             .filter(|n| is_read_back_definition(n))
             .collect();
+        // (looked at for `#` alone: asked of the lines before it by that,
+        // `crate::api::written_as_text`)
+        let looks: Vec<Loc> = std::mem::take(&mut self.interp_param).into_iter().collect();
+        reads.extend(
+            looks
+                .into_iter()
+                .map(|l| str_of(v, self.loc_field(l).0))
+                .filter(|n| is_read_back_definition(n))
+                .map(|n| format!("{}{n}", crate::api::PARAM_LOOK)),
+        );
         reads.sort_unstable();
         reads.dedup();
         self.interp_reads = v.list(reads.iter().map(|n| v.str(n)).collect());

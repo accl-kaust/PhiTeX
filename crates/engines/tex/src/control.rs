@@ -1362,12 +1362,21 @@ impl Run<'_, '_> {
 
     /// `get_r_token` (§1215).
     fn get_r_token(&mut self) -> R<Tok> {
+        // (the name to define: its meaning is not read, [`Run::interp_first`]:
+        // `\\let\\l@ngrel@x` in every `\\providecommand` written to the `.aux`
+        // made the file one read back as its text)
+        let was = std::mem::replace(&mut self.defining, true);
         loop {
-            self.get_name_token()?;
+            let r = self.get_name_token();
+            if r.is_err() {
+                self.defining = was;
+            }
+            r?;
             if self.cur.tok != crate::val::space_tok() {
                 break;
             }
         }
+        self.defining = was;
         if !self.cur.is_cs() {
             // "Missing control sequence inserted": \inaccessible
             self.back_cur();
@@ -1428,8 +1437,14 @@ impl Run<'_, '_> {
         // step of the run's map, nothing read, published as a relation,
         // `State::add`)
         let mut pre = None;
-        if p == 0 && q == cmd::ADVANCE && self.map_ok(l, global) {
+        if p == 0 && q == cmd::ADVANCE && self.step_ok(l, global) {
             let x = self.scan_int()?;
+            // (steps on both sides of a candidate: the routine of a page
+            // firing there needs the value they make there, so the run
+            // reads the register, `State::add` keeps the value at it)
+            if !self.cand_marks.is_empty() && self.st.has_map(l) {
+                self.load(l)?;
+            }
             if self.st.add(self.v, l, x, global) {
                 self.muts += 1;
                 return Ok(());
@@ -2714,18 +2729,32 @@ impl Run<'_, '_> {
         // (that file's stream alone: a write to another file, the `.aux`
         // line of a heading, is not read here)
         let f = crate::run::stream_bucket(v, key);
-        let before = self.cx.fold(f, None, None);
-        if before.is_err() {
-            self.trace_stop("range streams");
-        }
-        let before = before?;
-        let mut all = v.seq_to_vec(before);
-        all.extend(
-            self.contribs
-                .iter()
-                .filter(|(g, _)| *g == f)
-                .flat_map(|(_, x)| v.seq_to_vec(*x)),
-        );
+        let own: Vec<ValueId> = self
+            .contribs
+            .iter()
+            .filter(|(g, _)| *g == f)
+            .flat_map(|(_, x)| v.seq_to_vec(*x))
+            .collect();
+        // (a file this run itself opened, §1374: what was written to it
+        // before is gone, so nothing before the run is read. Read, a
+        // letter typed in one of beamer's fragile frames, each writing and
+        // reading the one `.vrb`, ran every later fragile frame again)
+        let opened = own.iter().rposition(|&e| {
+            !crate::api::is_cand_marker(v, e)
+                && crate::api::page_tag(v, e).is_none()
+                && matches!(list_of(v, e).as_slice(), [n] if str_of(v, *n) == key)
+        });
+        let all = if let Some(i) = opened {
+            own[i..].to_vec()
+        } else {
+            let before = self.cx.fold(f, None, None);
+            if before.is_err() {
+                self.trace_stop("range streams");
+            }
+            let mut all = v.seq_to_vec(before?);
+            all.extend(own);
+            all
+        };
         let text = crate::api::stream_texts(v, &crate::api::doc_order(v, &all))
             .into_iter()
             .find(|(n, _)| n == key)

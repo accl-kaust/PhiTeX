@@ -180,6 +180,22 @@ impl Family {
     }
 }
 
+/// [`State::read_across`]'s length before its first merge.
+const ACROSS_MERGE: usize = 1 << 14;
+
+/// [`State::read_across`]'s entries of a location that overlap taken as one:
+/// a binding read in stretch after stretch is an entry each.
+fn merge_across(xs: &mut Vec<(Loc, u32, u32)>) {
+    xs.sort_unstable();
+    xs.dedup_by(|b, a| {
+        let same = a.0 == b.0 && b.1 <= a.2;
+        if same {
+            a.2 = a.2.max(b.2);
+        }
+        same
+    });
+}
+
 /// Whether every read of `loc`'s value a run makes is one
 /// [`State::note_read`] sees, at the place it is made. Not: what a run reads
 /// through a memo kept while the table is unchanged (category codes, font
@@ -364,11 +380,6 @@ struct Slot {
     /// The candidates gone past when the binding in force was last read
     /// ([`State::note_read`]): reads between two of them count once.
     read_at: std::cell::Cell<u32>,
-    /// Where in [`State::read_across`] this location's latest entry is.
-    across_ix: std::cell::Cell<u32>,
-    /// The candidate number from which the value here is what a global
-    /// definition left: no older binding shows through it (§283).
-    floor: u32,
 }
 
 impl Default for Slot {
@@ -390,8 +401,6 @@ impl Default for Slot {
             def_gid: 0,
             cand_noted: 0,
             read_at: std::cell::Cell::new(0),
-            across_ix: std::cell::Cell::new(0),
-            floor: 0,
         }
     }
 }
@@ -535,6 +544,12 @@ pub(crate) struct State {
     /// ([`State::note_read`]). A [`State::rollback`] leaves a read it took
     /// back as a read made, but for the spill locations it drops.
     read_across: std::cell::RefCell<Vec<(Loc, u32, u32)>>,
+    /// The length of [`State::read_across`] at which it is merged next.
+    across_merge_at: std::cell::Cell<usize>,
+    /// The locations a routine's value was put in force at
+    /// ([`State::apply_global`]), with the candidate: no older binding shows
+    /// through it (§283). Few, and looked at once a stretch.
+    floors: Vec<(Loc, u32)>,
     /// The table as it stood at [`State::checkpoint`], kept as it
     /// changes: [`State::rollback`] puts it back.
     undo: Option<Box<Undo>>,
@@ -650,6 +665,8 @@ impl Clone for State {
             past: self.past.clone(),
             past_n: self.past_n,
             read_across: self.read_across.clone(),
+            across_merge_at: self.across_merge_at.clone(),
+            floors: self.floors.clone(),
             undo: None,
             tainted: self.tainted.clone(),
             taint_read: self.taint_read.clone(),
@@ -714,6 +731,14 @@ impl AtCandidates {
         h.get(h.partition_point(|x| x.0 < i)).map(|x| x.1)
     }
 
+    /// The candidate (by index) after which the binding of `loc` in force
+    /// at candidate `i` was made, where the run made it after one.
+    pub(crate) fn made_after(&self, i: usize, loc: Loc) -> Option<usize> {
+        let h = self.by_loc.get(&loc)?;
+        let p = h.partition_point(|x| x.0 < i);
+        p.checked_sub(1).map(|p| h[p].0)
+    }
+
     /// `loc`'s entries at the candidates, by candidate.
     #[allow(clippy::option_option)]
     pub(crate) fn history(&self, loc: Loc) -> &[AtCandidate] {
@@ -775,6 +800,8 @@ impl State {
             past: Vec::new(),
             past_n: 0,
             read_across: std::cell::RefCell::new(Vec::new()),
+            across_merge_at: std::cell::Cell::new(ACROSS_MERGE),
+            floors: Vec::new(),
             undo: None,
             tainted: Vec::new(),
             taint_read: std::cell::Cell::new(false),
@@ -1032,19 +1059,18 @@ impl State {
             .and_then(|m| m.checked_sub(1))
             .and_then(|m| self.metas.get(m))
             .map_or(0, |m| m.ldef_stamp);
-        let from = u32::try_from(self.past.partition_point(|c| c.0 < ldef))
-            .unwrap_or(u32::MAX)
-            .max(s.floor);
+        let mut from = u32::try_from(self.past.partition_point(|c| c.0 < ldef)).unwrap_or(u32::MAX);
+        for f in &self.floors {
+            if f.0 == loc {
+                from = from.max(f.1);
+            }
+        }
         if from < now {
             let mut xs = self.read_across.borrow_mut();
-            if let Some(x) = xs.get_mut(s.across_ix.get() as usize)
-                && x.0 == loc
-                && x.1 == from
-            {
-                x.2 = now;
-            } else {
-                s.across_ix.set(u32::try_from(xs.len()).unwrap_or(u32::MAX));
-                xs.push((loc, from, now));
+            xs.push((loc, from, now));
+            if xs.len() >= self.across_merge_at.get() {
+                merge_across(&mut xs);
+                self.across_merge_at.set(2 * xs.len() + ACROSS_MERGE);
             }
         }
     }
@@ -1491,6 +1517,14 @@ impl State {
             return;
         }
         self.slot(loc).sym = true;
+    }
+
+    /// The steps the run holds of register `loc`, unread: what a symbol
+    /// made now adds to the value reaching the run.
+    pub(crate) fn steps_of(&self, loc: Loc) -> i32 {
+        self.slot_ref(loc)
+            .filter(|s| s.mapped != MAP_NONE)
+            .map_or(0, |s| s.map.add)
     }
 
     // ---------------------------------------------------------- values
@@ -2015,6 +2049,15 @@ impl State {
         }
         self.changing(loc);
         self.muts += 1;
+        // (after a candidate: what it holds there is kept, unread the value
+        // that reached the run, for the routine of a page firing there,
+        // `State::at_candidates`; the stamp says it came after the candidate,
+        // `State::defined_stamped`)
+        if !self.cands.is_empty() {
+            self.stamp += 1;
+            let prev = self.slot(loc).e;
+            self.note_cand(loc, 0, prev);
+        }
         let loaded = self.is_loaded(loc);
         let cur = if loaded {
             Some(self.int_of(loc, v))
@@ -2279,7 +2322,17 @@ impl State {
         self.slot_ref(loc)
             .and_then(|s| usize::try_from(s.meta).ok().filter(|&m| m > 0))
             .and_then(|m| self.metas.get(m - 1))
-            .is_some_and(|m| !m.ldef_local || m.ldef_gid.is_none())
+            .map_or_else(
+                // (only stepped, even where the steps cancel, `State::add`:
+                // nothing to publish, and what they leave is still later in
+                // TeX's order than a routine run at a candidate before them.
+                // `\\g__kernel_prg_map_int` stepped -1 then +1 around a
+                // candidate in latex_starray: the routine's value of it stood
+                // over the piece's, the next step made -1, and a name built
+                // from it went wrong)
+                || self.slot_ref(loc).is_some_and(|s| s.mapped != MAP_NONE),
+                |m| !m.ldef_local || m.ldef_gid.is_none(),
+            )
     }
 
     /// The groups opened so far: a group [`State::open`] opens after
@@ -2330,11 +2383,26 @@ impl State {
     /// Every location the run defined: its latest definition's stamp,
     /// whether local, and the group it was made in.
     pub(crate) fn defined_stamped(&self) -> Vec<(Loc, u64, bool, Option<u32>)> {
-        self.metas
+        let mut out: Vec<_> = self
+            .metas
             .iter()
             .filter(|m| m.ldef_stamp > 0)
             .map(|m| (m.loc, m.ldef_stamp, m.ldef_local, m.ldef_gid))
-            .collect()
+            .collect();
+        // (a register stepped after a candidate, no definition: as one made
+        // right after the last candidate holding it, [`State::add`])
+        for (st, xs) in &self.cands {
+            for &(l, _) in xs {
+                if self
+                    .slot_ref(l)
+                    .is_some_and(|s| s.meta == 0 && s.mapped != MAP_NONE)
+                {
+                    out.retain(|x: &(Loc, u64, bool, Option<u32>)| x.0 != l);
+                    out.push((l, st + 1, false, None));
+                }
+            }
+        }
+        out
     }
 
     /// The locations whose latest definition after stamp `since` is
@@ -3081,8 +3149,8 @@ impl State {
         s.e = e;
         s.lazy = None;
         s.ginert = st;
-        s.floor = now.saturating_sub(1);
         s.read_at.set(u32::MAX);
+        self.floors.push((loc, now.saturating_sub(1)));
         if is_page_param(loc) {
             self.pp_dirty = true;
         }

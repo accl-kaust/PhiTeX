@@ -46,13 +46,23 @@ use super::*;
 use crate::vprof::{PItem, ScanState};
 
 /// What a piece read across the candidates of its own it went on past,
-/// where a page can fire: `pages:used:<piece>`, a list of the fields by id,
-/// sorted, one for each stretch of candidates it read one across; those
-/// stretches, flat (first k, last k); and the candidates it went on past.
-/// The finisher of a page firing at such a candidate reads it and, where
-/// the routine changed one of them globally and the piece read it across
-/// that candidate, defines [`FIRE_CONFLICT`] (`Run::define_fire_conflict`).
+/// where a page can fire: `pages:used:<piece>`, a list of two. First, the
+/// stretches by [`fire_used_bucket`] of the field, each flat (field, first k,
+/// last k): a piece can read tens of thousands of fields and a finisher asks
+/// after a few. Second, the candidates it went on past. The finisher of a
+/// page firing at such a candidate reads it and, where the routine changed
+/// a field globally and the piece read it across that candidate, defines
+/// [`FIRE_CONFLICT`] (`Run::define_fire_conflict`).
 pub(crate) const FIRE_USED: &str = "pages:used";
+
+/// The lists of [`FIRE_USED`]'s first part.
+pub(crate) const FIRE_USED_BUCKETS: usize = 256;
+
+/// The list of [`FIRE_USED`]'s first part that holds field `f`.
+pub(crate) fn fire_used_bucket(f: ValueId) -> usize {
+    let h = f.raw().wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56;
+    usize::try_from(h).unwrap_or(0)
+}
 
 /// [`FIRE_USED`]' field of `piece`.
 pub(crate) fn fire_used_field(v: &Values, piece: NodeId) -> Field {
@@ -73,6 +83,17 @@ pub(crate) const FIRE_CONFLICT: &str = "pages:conflict";
 /// [`FIRE_CONFLICT`]' field of candidate `k` of `piece`.
 pub(crate) fn fire_conflict_field(v: &Values, piece: NodeId, k: u32) -> Field {
     v.field(&format!("{FIRE_CONFLICT}:{}:{k}", piece.raw()))
+}
+
+/// What a routine left in field `f` where the piece's later definition
+/// stands over it (`Run::give_way`): `pages:left:<piece>:<f>`, `[value]` or
+/// `[]`. The next page's routine in the piece begins with it, TeX's routines
+/// running before that definition.
+pub(crate) const FIRE_LEFT: &str = "pages:left";
+
+/// [`FIRE_LEFT`]' field of `f` in `piece`.
+pub(crate) fn fire_left_field(v: &Values, piece: NodeId, f: Field) -> Field {
+    v.field(&format!("{FIRE_LEFT}:{}:{}", piece.raw(), f.0.raw()))
 }
 
 /// The page of a fired page, as its finisher reads it:
@@ -922,6 +943,22 @@ impl Run<'_, '_> {
 
     /// The page layer's frontier from this run ([`phitex_defuse::Ctx::set_frontier`]).
     fn publish_frontier(&mut self, fold: Fold, ls: &LoopState, lc: &LoopCarry) {
+        // (a fold gone on on a guess: the routine it guessed at has not run,
+        // and the frontier stands at that routine's page; one from a page
+        // past the frontier: a routine before it has not run, a rest before
+        // it on a guess, and the frontier stays. Moved on with the fold, a
+        // text reader between took what that routine defined before as
+        // settled and its wake was held to the next quiet point, one page a
+        // pass: ijmsample at -j4 lost or repeated pages, never settling)
+        if let Some(at) = self.rest_begun_at {
+            if self.rest_on_guess {
+                self.cx.set_frontier(Some(at));
+                return;
+            }
+            if self.cx.past_frontier(at) {
+                return;
+            }
+        }
         // (the frontier: at a hole, the piece not in yet, past which a
         // page may yet fire and its finisher stand before the text that
         // reads what its routine defines; waiting for a give-back, the
@@ -1032,13 +1069,26 @@ impl Run<'_, '_> {
         let out = self
             .cx
             .read_at(r.key.field(v, PAGE_OUT), At::End(self.cx.unit()))?;
+        // (the page's routine not run on the page as it is now, but what it
+        // gave back on the page before it moved being the guess: the fold
+        // goes on, so the pages after it and their routines run beside
+        // this one, not each after the last, the chain of an edit that
+        // moves pages. The read stands: the routine's commit runs this
+        // again, on what it gave back. A guess it has not given back
+        // before, as in a first build, is waited for, and so is any on one
+        // thread, where the routine runs next anyway and the fold on the
+        // guess is done twice: para4000's deleted paragraph 184 -> 206 ms
+        // at -j1, accl 23790)
+        let beside = self.cx.has_other_threads();
+        self.rest_begun_at = Some(p.node);
         let gave = match out {
-            phitex_defuse::FieldAt::Def(x, fin) => {
-                page_out_parts(v, x).filter(|o| o.1 == r.page).map(|o| {
+            phitex_defuse::FieldAt::Def(x, fin) => page_out_parts(v, x)
+                .filter(|o| o.1 == r.page || (beside && o.0 == r.guess))
+                .map(|o| {
+                    self.rest_on_guess = o.1 != r.page;
                     ls.after = fin.map(|f| (p.node, f));
                     o.0
-                })
-            }
+                }),
             _ => None,
         };
         let Some(gave) = gave else {

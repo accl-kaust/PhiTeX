@@ -376,3 +376,70 @@ fn a_queued_node_moved_before_its_readers_runs_before_them() {
     );
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[key]`: places two children, `Def [c, key]` and `Def [d, key]`.
+struct TwoKids {
+    def: phitex_defuse::OpId,
+}
+
+impl Operation for TwoKids {
+    fn name(&self) -> &'static str {
+        "twokids"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        cx.child(self.def, vec![v.field("c").0, cx.args()[0]]);
+        cx.child(self.def, vec![v.field("d").0, cx.args()[0]]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[after_raw, key]`: places `TwoKids [key]` after the node `after_raw`.
+struct PlacerTwo {
+    kids: phitex_defuse::OpId,
+}
+
+impl Operation for PlacerTwo {
+    fn name(&self) -> &'static str {
+        "placertwo"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let after = NodeId::from_raw(v.as_int(cx.args()[0]).unwrap_or(0).unsigned_abs());
+        cx.follow_after(after, self.kids, vec![cx.args()[1]]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// X, with two children, moved back from after B to after A: its children
+/// go with it when it runs there, each right after the one before it. The
+/// first's new place was looked for after the second, its sibling still at
+/// the old place (a page's writers left there, and the finisher placed
+/// after that page's finisher with them, numerica at -j8: a page out of
+/// order).
+#[test]
+fn placements_moved_back_together_stand_with_their_placer() {
+    let e = Engine::new();
+    let def = e.register(Arc::new(Def));
+    let kids = e.register(Arc::new(TwoKids { def }));
+    let placer = e.register(Arc::new(PlacerTwo { kids }));
+    let v = e.values();
+    let u = e.new_unit();
+    let a = e.push(u, def, vec![v.field("a").0, v.int(1)]);
+    let b = e.push(u, def, vec![v.field("b").0, v.int(2)]);
+    let p = e.push(u, placer, vec![v.int(i64::try_from(b.raw()).unwrap()), v.int(7)]);
+    e.evaluate(1).unwrap();
+    let x = e.placed_by(p);
+    let c = e.placed_by(x[0]);
+    assert_eq!(c.len(), 2);
+    assert!(e.before(b, x[0]) && e.before(b, c[0]));
+    e.replace(p, placer, vec![v.int(i64::try_from(a.raw()).unwrap()), v.int(7)]);
+    e.evaluate(1).unwrap();
+    assert_eq!(e.placed_by(p), x, "the same node");
+    assert_eq!(e.placed_by(x[0]), c, "the same children");
+    assert!(e.before(a, x[0]) && e.before(x[0], c[0]) && e.before(c[0], c[1]));
+    assert!(e.before(c[1], b), "its children before B: {:?}", e.order(u));
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

@@ -1317,6 +1317,45 @@ fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usiz
         }
         // (a loading command is vertical: the paragraph ends before it)
         ends.extend(loaders.iter().copied());
+        // (an environment's end right before another's begin or end: no
+        // text of the paragraph comes between. Without this a stretch
+        // with no blank line was one paragraph from its first character
+        // on, so one slice: beamer frames one after another, each a word
+        // inside; a page fired in that stretch, and every rest after it
+        // carried the slice's later frames in its continuation, so a
+        // letter typed in a later frame ran all the frames before it
+        // again. The cut is only a place: a run in a paragraph there
+        // reads on into the next slice)
+        for &k in &an.structural {
+            let k = k as usize;
+            let a = &p.atoms[k];
+            if a.kind != AtomKind::Cs
+                || a.name(text) != "end"
+                || depth(k) != 0
+                || ifd(k) != 0
+                || claimed.has(k)
+            {
+                continue;
+            }
+            let Some(mate) = p
+                .atoms
+                .get(k + 1)
+                .filter(|b| b.kind == AtomKind::Open && b.mate != usize::MAX && b.mate > k + 1)
+                .map(|b| b.mate)
+            else {
+                continue;
+            };
+            let mut j = mate + 1;
+            while p.atoms.get(j).is_some_and(|x| x.kind == AtomKind::Space) {
+                j += 1;
+            }
+            if p.atoms
+                .get(j)
+                .is_some_and(|x| x.kind == AtomKind::Cs && matches!(x.name(text), "begin" | "end"))
+            {
+                ends.push(mate + 1);
+            }
+        }
         ends.sort_unstable();
         ends.dedup();
     }
@@ -6039,6 +6078,32 @@ mod tests {
         };
         assert!(state("more").contains(&"parshape"));
         assert!(!state("third").contains(&"parshape"));
+    }
+
+    #[test]
+    fn an_environments_end_before_another_ends_the_paragraph() {
+        // (no blank line anywhere: each environment's text a slice of its
+        // own, not one paragraph from the first word to the last)
+        let t = "\\begin{frame}{A}\nOne.\n\\end{frame}\n\\begin{frame}{B}\nTwo.\n\\end{frame}\n";
+        let text = analyse(t, FileKind::Document, no_defs());
+        let slice = |needle: &str| -> usize {
+            text.slices
+                .iter()
+                .position(|&(s, e)| t[s..e].contains(needle))
+                .expect("a slice")
+        };
+        assert_ne!(slice("One"), slice("Two"));
+        assert_ne!(slice("One"), slice("begin{frame}{B}"));
+        // (text after an environment's end goes on in its paragraph: a
+        // cut there would have the rest run in the wrong mode, then
+        // taken back)
+        let t = "One\n\\begin{math}x\\end{math}\nTwo\\par\n";
+        let text = analyse(t, FileKind::Document, no_defs());
+        assert!(
+            text.slices
+                .iter()
+                .any(|&(s, e)| { t[s..e].contains("One") && t[s..e].contains("Two") })
+        );
     }
 
     #[test]

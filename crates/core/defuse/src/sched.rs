@@ -90,6 +90,9 @@ pub(crate) struct Shared {
     /// (`Ctx::set_frontier`): queued as it passes them, or at the quiet
     /// point.
     pub(crate) frontier_waiting: Mx<Vec<NodeId>>,
+    /// Each worker's node at work on (its raw id plus one, 0: none), for
+    /// [`Pool::release_past_only`].
+    pub(crate) at_work: Box<[AtomicU64]>,
     /// The roots the caller's edit source holds (`EditSource::roots`),
     /// given by the caller's worker as it comes to the barrier.
     extra_roots: Mx<Vec<crate::values::ValueId>>,
@@ -479,6 +482,7 @@ impl Pool {
             deferred: Mx::new(Vec::new()),
             waiting: Mx::new(crate::values::FxHashMap::default()),
             frontier_waiting: Mx::new(Vec::new()),
+            at_work: (0..n.max(1)).map(|_| AtomicU64::new(0)).collect(),
             extra_roots: Mx::new(Vec::new()),
             panicked_roots: Mx::new(Vec::new()),
             collecting: AtomicBool::new(false),
@@ -848,6 +852,46 @@ impl Pool {
     /// when nothing is outstanding, the pool stops or collects, or (the
     /// worker that asks the edit source, `edits`) [`ABSORB_EVERY`] has
     /// passed, for it to ask.
+    /// Nothing to take, nodes held behind the frontier, and every run going
+    /// stands past the frontier too: nothing before it is at work, so it
+    /// moves only when those runs end, and the frontier is let go as at a
+    /// quiet point. One of them may be reading what a held node would
+    /// change: a run on old values in an endless loop of its own (numerica
+    /// at -j8, a thread at 100% and 14 GB, no read of it moving, for no node
+    /// before it ran) never ended, and the line never went quiet. The order
+    /// of the runs only: what they make is what they read.
+    fn release_past_only(&self, eng: &Engine, w: &Worker) -> bool {
+        let fr = eng.frontier.load(Ordering::Acquire);
+        if fr == 0 || self.shared.frontier_waiting.lock().is_empty() {
+            return false;
+        }
+        let mut any = false;
+        for s in &self.shared.at_work {
+            let x = s.load(Ordering::Relaxed);
+            if x == 0 {
+                continue;
+            }
+            any = true;
+            if !eng
+                .placed_node(NodeId::from_raw(x - 1))
+                .is_some_and(|n| past_frontier(eng, n, fr))
+            {
+                return false;
+            }
+        }
+        if !any
+            || eng
+                .frontier
+                .compare_exchange(fr, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return false;
+        }
+        log_frontier(eng, fr, 0, None, "past only");
+        release_frontier(eng, Some(w));
+        true
+    }
+
     fn idle_wait(&self, eng: &Engine, w: &Worker, edits: bool) -> Option<NodeId> {
         let (m, cv) = &self.shared.park;
         self.shared.idle.fetch_add(1, Ordering::SeqCst);
@@ -887,6 +931,9 @@ impl Pool {
             }
             if self.shared.outstanding.load(Ordering::SeqCst) == 0 {
                 break None;
+            }
+            if self.release_past_only(eng, w) {
+                continue;
             }
             if w.ix == 0 && self.shared.want_spawn.load(Ordering::SeqCst) {
                 break None;
@@ -1631,9 +1678,25 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
 /// a re-ask) ending the evaluation with the error: the worker would die
 /// with `n` counted outstanding, and the others would wait for it for ever;
 /// `n` is pending again, for the next evaluation.
+/// A worker's [`Shared::at_work`] slot, emptied when its task ends.
+struct AtWork<'a>(Option<&'a AtomicU64>);
+
+impl Drop for AtWork<'_> {
+    fn drop(&mut self) {
+        if let Some(s) = self.0 {
+            s.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
     // (the whole task, run, commit and re-asks: no collection meanwhile)
     let _task = eng.values().task();
+    let slot = pool.shared.at_work.get(w.ix);
+    if let Some(s) = slot {
+        s.store(n.raw() + 1, Ordering::Relaxed);
+    }
+    let _done = AtWork(slot);
     catch_unwind(AssertUnwindSafe(|| work(eng, pool, w, n))).unwrap_or_else(|p| {
         let message = p
             .downcast_ref::<&str>()
@@ -2310,19 +2373,16 @@ pub(crate) fn release_waiting(eng: &Engine, w: Option<&Worker>, n: NodeId) {
     let alone = ws.as_ref().is_some_and(|l| l.len() == 1);
     for m in ws.into_iter().flatten() {
         if let Some(x) = eng.placed_node(m).filter(|x| x.state() == State::Dirty) {
-            // (stopped before its run: what asked for that run still asks,
-            // an edit or a creation above all, which `Ctx::last_run_stands`
-            // must not take for a read's)
-            let kept = if x.held.swap(false, Ordering::AcqRel) {
-                x.woke.lock().take()
-            } else {
-                None
-            };
+            // (stopped before its run or in it: what asked for that run
+            // still asks, an edit or a creation above all, which
+            // `Ctx::last_run_stands` must not take for a read's)
+            let chained = x.held.swap(false, Ordering::AcqRel);
+            let kept = x.woke.lock().take();
             // (the one a chain goes on with, this worker's next: another
             // woken for it takes it from here with nothing in its caches.
             // book5's deleted paragraph at -j8, a chain of text nodes held
             // and let go: 204 ms to 273 ms, the same runs, accl 23994)
-            if kept.is_some() && alone && !defer(eng, &w.shared, x.id) {
+            if chained && kept.is_some() && alone && !defer(eng, &w.shared, x.id) {
                 *x.woke.lock() = kept;
                 w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
                 w.ready().push(eng, x);

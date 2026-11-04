@@ -157,6 +157,7 @@ impl Operation for Finish {
         ps.push(PAGE_OUT.to_owned());
         ps.push(RTN.to_owned());
         ps.push(FIRE_CONFLICT.to_owned());
+        ps.push(FIRE_LEFT.to_owned());
         MayDefine::Prefixes(ps)
     }
 

@@ -1551,6 +1551,41 @@ fn a_routine_runs_again_for_the_line_number_only_where_it_shows() {
     assert!(ran > 0, "the routines that show it run again");
 }
 
+/// A run that opens a file, writes it and reads it back, as each of
+/// beamer's fragile frames does with the one `.vrb`, reads nothing written
+/// before it opened the file (§1374): a word edited in one such run runs
+/// no later one again, and the PDF equals a cold build's.
+#[test]
+fn a_file_the_run_opened_reads_nothing_before_it() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("own-opened");
+    let _ = std::fs::create_dir_all(&dir);
+    let prelude = common::plain();
+    let doc = "\\newwrite\\w\n\\def\\frag#1{\\immediate\\openout\\w=one.vrb \\immediate\\write\\w{#1}\\immediate\\closeout\\w \\input one.vrb \\par}\n\n\\frag{First word}\n\n\\frag{Second word}\n\n\\frag{Third word}\n\n\\bye\n";
+    let text = doc.replacen("First", "Firsu", 1);
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./main.tex", "main", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude), doc);
+        b.edit(&text);
+        let later: Vec<String> = b
+            .stats
+            .reruns
+            .iter()
+            .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+            .filter(|x| x.contains("Second") || x.contains("Third"))
+            .collect();
+        assert!(later.is_empty(), "-j{t}: {later:?}");
+        let cold = common::build(opts(), Some(&prelude), &text);
+        assert_eq!(
+            common::first_difference(&b.output().0, &cold.output().0),
+            None,
+            "-j{t}"
+        );
+    }
+}
+
 /// A paragraph that reads `\pagetotal` before its first checkpoint and
 /// again after it, the first read leaving no trace in its state. An edit
 /// on an earlier page moves the page start reaching it (not the items
