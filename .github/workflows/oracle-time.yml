@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        id: [latex_pegmatch_pegmatch]
+        id: [latex_codehigh_codehigh, latex_lineno_lineno, latex_xassoccnt_xassoccnt_doc]
     steps:
       - uses: actions/checkout@v4
         with:

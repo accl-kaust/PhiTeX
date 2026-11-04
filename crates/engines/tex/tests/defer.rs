@@ -624,6 +624,75 @@ fn a_routines_value_gives_way_to_steps_that_cancel_after_its_candidate() {
     }
 }
 
+/// Steps a piece makes of a register it never reads, after a candidate where
+/// a page fires inside the piece, go on what the routine left there, as in
+/// TeX: here every routine adds 1 to `\\count200` and the text steps it -1
+/// and +1 around each paragraph's start, so each page's value counts the
+/// routines before it (`p2=6.p3=8.`, as the text setting by value gives).
+/// Putting
+/// back the value reaching the finisher (the text's steps on what reached
+/// the piece) dropped the routines' steps. Against the same text setting by
+/// value.
+#[test]
+fn steps_after_a_candidate_go_on_the_routines_value() {
+    let src = |down: &str, up: &str| {
+        let mut s = String::from(
+            "\\openout1=\\jobname.out\n\\count200=5\n\
+             \\output={\\global\\advance\\count200 1 \\count1=\\count200 \
+             \\immediate\\write1{p\\the\\count0=\\the\\count200.}\\shipout\\box255\\global\\advance\\count0 1 }\n",
+        );
+        for b in 0..6 {
+            s.push_str("\\begingroup\n");
+            for i in 0..12 {
+                let _ = write!(
+                    s,
+                    "{down}Paragraph {b} {i}, long enough to make a line or two when set in the \
+                     plain format's ten point roman, and one more clause to be sure, then more \
+                     text which runs on to another line of the paragraph.\n\n{up}"
+                );
+            }
+            s.push_str("\\endgroup\n\n");
+        }
+        s.push_str("The counter ends at \\the\\count200.\n\n\\closeout1\n\\bye\n");
+        s
+    };
+    let (want_dvi, want_out) = cold(
+        "steps-routine-val",
+        &src(
+            "\\global\\count200=\\numexpr\\count200-1\\relax ",
+            "\\global\\count200=\\numexpr\\count200+1\\relax ",
+        ),
+        1,
+    );
+    assert!(
+        want_out.contains("p2=6.") && want_out.contains("p3=8."),
+        "the routines' steps counted: {want_out:?}"
+    );
+    for threads in [1, 4, 8] {
+        let dir = common::scratch(&format!("defer-steps-routine-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let b = common::build(
+            opts,
+            Some(&common::plain()),
+            &src(
+                "\\global\\advance\\count200 -1 ",
+                "\\global\\advance\\count200 1 ",
+            ),
+        );
+        let got: String = b
+            .writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(got, want_out, "-j{threads}: each page's value");
+        assert_eq!(b.output().0, want_dvi, "-j{threads}: cold");
+    }
+}
+
 /// The first `\outer` macro, made by an edit before a run that scanned a list
 /// holding its token (no format, so none was made before): that run stops at
 /// the token with TeX's error (§357), and goes on past it once the edit is

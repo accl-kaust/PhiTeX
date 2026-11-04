@@ -213,6 +213,20 @@ pub fn tex_text(s: &str) -> String {
 /// places, each a whole problem (the viewer's `Problem`: its line, the
 /// culprit underlined, TeX's context and help), else the transcript's.
 pub fn diagnostics(s: &Session, r: &Report, log: &str) -> Vec<Value> {
+    let mut v = items(s, r, log);
+    // (each one's kind, the filters' (problems::kind_of): the viewer's and
+    // the editor's alike)
+    for d in &mut v {
+        let k = crate::problems::kind_of(
+            d["severity"].as_str().unwrap_or(""),
+            d["message"].as_str().unwrap_or(""),
+        );
+        d["kind"] = json!(k);
+    }
+    v
+}
+
+fn items(s: &Session, r: &Report, log: &str) -> Vec<Value> {
     if r.internal.is_none() && !r.diagnostics.is_empty() {
         return r
             .diagnostics

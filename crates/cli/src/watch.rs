@@ -1014,17 +1014,23 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if let (Some(rx), Some(r)) = (rx.filter(|_| raw), unwritten.borrow_mut().take()) {
             ui.finish();
             asking.store(true, Ordering::Relaxed);
-            ui.line(&format!(
+            // (the cursor after the question, where the key is typed; the
+            // key said after it and the line ended, so what follows, the
+            // files written or the shell's prompt, starts a line)
+            ui.ask(&format!(
                 "write {}.pdf and its .synctex.gz here? [y/N]",
                 s.job.jobname
             ));
             let yes = loop {
                 match rx.recv() {
-                    Ok((_, Event::Key(Key::Other('y' | 'Y')))) => break true,
-                    Ok((_, Event::Key(_))) | Err(_) => break false,
+                    Ok((_, Event::Key(Key::Other('y' | 'Y')))) => break Some(true),
+                    Ok((_, Event::Key(_))) => break Some(false),
+                    Err(_) => break None,
                     Ok(_) => {}
                 }
             };
+            ui.answered(yes.map(|y| if y { "y" } else { "n" }));
+            let yes = yes == Some(true);
             if yes {
                 match s.write(&r, true) {
                     Ok(w) => {
