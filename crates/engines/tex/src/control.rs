@@ -2267,7 +2267,9 @@ impl Run<'_, '_> {
         // (a stream open on no file: the text goes to the log, where a line
         // number is made when the log is laid out, so a message saying
         // "on input line" does not tie its piece to the lines above)
-        let to_log = k != 18
+        let op = self.cx.op();
+        let to_log = (op == self.ops.exec || op == self.ops.resume)
+            && k != 18
             && !((0..16).contains(&k)
                 && !self.closed.contains(&k)
                 && self
