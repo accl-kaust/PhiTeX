@@ -298,3 +298,89 @@ fn an_edit_outlasts_a_wait_in_the_run() {
     assert_eq!(e.output(b).and_then(|x| v.as_int(x)), Some(21), "{rep:?}");
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[x]`: defines `t` := x; `[]`: nothing.
+struct Target;
+
+impl Operation for Target {
+    fn name(&self) -> &'static str {
+        "target"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        if let Some(&x) = cx.args().first() {
+            cx.define(v.field("t"), x);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[]`: reads `t`, and sets it back to 0 where it was not; parks a
+/// state (a checkpoint for a later run) and runs to its end; counts its
+/// runs. A beamer frame and its deferred hypertargets.
+struct Frame {
+    runs: AtomicU64,
+}
+
+impl Operation for Frame {
+    fn name(&self) -> &'static str {
+        "frame"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        let v = cx.values();
+        let t = cx.read(v.field("t"))?.unwrap_or(ValueId::UNIT);
+        if v.as_int(t) != Some(0) {
+            cx.define(v.field("t"), v.int(0));
+        }
+        cx.park(v.int(7));
+        Ok(t)
+    }
+}
+
+/// A node whose last run ran to its end and parked a state (a text
+/// piece's checkpoint, not a page loop stopped at a hole) stands as any
+/// node does when what woke it moved back. Line: t := 0, L (defines
+/// nothing), frames F1, F2, F3 (each reads t, sets it back to 0). L
+/// edited to t := 1: L's walk asks every frame again, F1 runs and sets
+/// t back to 0 before F2's turn at -j1, and F2 and F3 read 0 as they
+/// did: they do not run (beamer, a \label typed between frames: every
+/// later frame ran again, and its page's finisher, 240 ms at -j1).
+#[test]
+fn a_run_that_parked_a_state_at_its_end_stands() {
+    let e = Engine::new();
+    let v = e.values();
+    let target = e.register(Arc::new(Target));
+    let frame_op = Arc::new(Frame {
+        runs: AtomicU64::new(0),
+    });
+    let frame = e.register(frame_op.clone());
+    let u = e.new_unit();
+    let _init = e.push(u, target, vec![v.int(0)]);
+    let l = e.push(u, target, vec![]);
+    let fs: Vec<_> = (0..3).map(|_| e.push(u, frame, vec![])).collect();
+    e.evaluate(1).unwrap();
+    assert_eq!(frame_op.runs.load(Ordering::SeqCst), 3);
+    let before = frame_op.runs.load(Ordering::SeqCst);
+    e.replace(l, target, vec![v.int(1)]);
+    let rep = e.evaluate(1).unwrap();
+    assert_eq!(
+        frame_op.runs.load(Ordering::SeqCst),
+        before + 1,
+        "only the first frame runs: {rep:?}"
+    );
+    assert_eq!(e.output(fs[0]).and_then(|x| v.as_int(x)), Some(1));
+    assert_eq!(e.output(fs[1]).and_then(|x| v.as_int(x)), Some(0));
+    assert_eq!(e.output(fs[2]).and_then(|x| v.as_int(x)), Some(0));
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+    // (and back, at more threads: the same outputs)
+    for x in [0, 1, 0] {
+        e.replace(l, target, if x == 0 { vec![] } else { vec![v.int(x)] });
+        e.evaluate(4).unwrap();
+        assert_eq!(e.output(fs[0]).and_then(|y| v.as_int(y)), Some(x));
+        assert_eq!(e.output(fs[2]).and_then(|y| v.as_int(y)), Some(0));
+    }
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}

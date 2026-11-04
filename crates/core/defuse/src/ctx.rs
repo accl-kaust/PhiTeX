@@ -1296,8 +1296,16 @@ impl<'a> Ctx<'a> {
     /// Grail's last pages' routines ran 3.8 s of hyperxmp on such wakes at
     /// -j8 to make what they had made.
     ///
-    /// Not for a node with a parked state, whose runs fold on from it (a
-    /// page loop); not for one relocated (its definitions are filed where it stood:
+    /// Not for a node whose last run parked on an answer it had not got
+    /// (`Ctx::parked_on`: a page loop at a hole, woken to fold on from
+    /// where it stopped); one that ran to its end and parked a state only
+    /// for a run after an edit to go on from (a text piece's checkpoint)
+    /// made that state of its reads as it made the rest (a run that went
+    /// on from a state keeps the reads it rests on), and stands with it
+    /// (beamer: every frame after a \label typed between two frames ran
+    /// again, and its page's finisher, on the empty
+    /// `\beamer@framehypertargets` the first frame had set back; 29
+    /// frames, 240 ms at -j1). Not for one relocated (its definitions are filed where it stood:
     /// `commit::relocate`), or refuted by its own commit (the state it
     /// parked rests on what moved, though the reads hold now:
     /// `resumed_reread.rs`), or asked for anything but a read (an edit, a
@@ -1319,7 +1327,10 @@ impl<'a> Ctx<'a> {
         {
             return None;
         }
-        let r = self.last.as_ref().filter(|r| !r.provisional && r.state.is_none())?;
+        let r = self
+            .last
+            .as_ref()
+            .filter(|r| !r.provisional && (r.state.is_none() || self.me.parked_on.lock().is_none()))?;
         let mut memo = crate::read::FoldMemo::new();
         if !r
             .reads
