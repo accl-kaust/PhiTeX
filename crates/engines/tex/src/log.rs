@@ -463,6 +463,15 @@ impl LayoutMemo {
                 }
                 self.marked.push((k, marks, lines));
             }
+            if kind == CONTEXT || kind == CONTEXT_ONLY {
+                // (the terminal's line: what the job was given, `main.tex`
+                // for `./main.tex`)
+                let mut cmd = String::new();
+                for c in name.strip_prefix("./").unwrap_or(name).chars() {
+                    printable(u32::from(c), &mut cmd);
+                }
+                text = text.replace(crate::context::CMDLINE, &cmd);
+            }
             log.event(&kind, &text, nl);
             self.after.push((log.text.len(), log.offset));
         }

@@ -29,6 +29,11 @@ pub(crate) const PART: char = '\u{10FFFA}';
 /// line, §311's `...`).
 pub(crate) const NL: char = '\u{10FFF9}';
 
+/// In a context event's text: the job's command line (`main.tex`), which
+/// the log's layout knows (the name it opens the log with,
+/// [`crate::log::LayoutMemo::update`]); the run reads nothing for it.
+pub(crate) const CMDLINE: char = '\u{10FFF8}';
+
 /// TeX Live's `error_line` (texmf.cnf), §317's limit for a context line.
 const ERROR_LINE: usize = 79;
 
@@ -184,11 +189,7 @@ impl Run<'_, '_> {
         if !bottom && self.doc_ended {
             // (the main file ended: the terminal's line, read, is below,
             // §313's `<*>`: what the job was given, `main.tex`)
-            let name = self
-                .get("cmdline")?
-                .map(|x| crate::val::str_of(self.v, x))
-                .unwrap_or_default();
-            level(out, "<*> ", &printed(&name), "");
+            level(out, "<*> ", &CMDLINE.to_string(), "");
         }
         Ok(())
     }

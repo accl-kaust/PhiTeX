@@ -9306,13 +9306,6 @@ fn job_env(
     let v = g.eng.values();
     let mut sets = vec![
         (v.field("jobname"), v.str(&opts.jobname)),
-        // (the terminal's first line, what the job was given: `main.tex`
-        // for `./main.tex`, an error's context's `<*>` line once the
-        // main file ended, `crate::context`)
-        (
-            v.field("cmdline"),
-            v.str(opts.name.strip_prefix("./").unwrap_or(&opts.name)),
-        ),
         (v.field(PROGRAM), v.str(&opts.program)),
         (v.field("dvicomment"), v.str(&opts.comment)),
         (v.field("shellescape"), v.int(i64::from(opts.shell_escape))),
