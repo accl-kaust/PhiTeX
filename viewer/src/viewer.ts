@@ -211,6 +211,16 @@ export class Viewer {
     if (first && !seen) this.scroller.scrollTo({ top: first.offsetTop + first.parentElement!.offsetTop - this.scroller.clientHeight / 3, behavior: "auto" });
   }
 
+  /** Esc: the highlights gone (the editor's selection and cursor's word, a double-click's place, find's matches) and the text selected on the pages; whether there were any. */
+  unmark(): boolean {
+    const ms = this.root.querySelectorAll(".mark");
+    const sel = this.root.ownerDocument.getSelection();
+    const had = ms.length > 0 || (!!sel && !sel.isCollapsed && this.root.contains(sel.anchorNode));
+    for (const m of ms) m.remove();
+    if (had) sel?.removeAllRanges();
+    return had;
+  }
+
   /**
    * Collaborators' cursors: each its word's `boxes` on page `k` tinted in
    * its `hue`, its `label` above the first box; the whole set, the last

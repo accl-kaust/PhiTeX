@@ -60,6 +60,12 @@ pub struct Config {
     /// (dev's nightly build, or a later stable release), read from the
     /// user's file only.
     pub update_channel: Option<String>,
+    /// Whether `phitex watch` writes the PDF (its `.synctex.gz`), the log
+    /// and the aux files into the folder after each build (off: nothing
+    /// there, the pages in the viewer; `--write` asks for it once).
+    pub watch_write: Option<bool>,
+    /// The viewer's feature tips seen (yours only, set by the viewer).
+    pub tips_seen: Option<Vec<String>>,
     /// What reading the files warned of (unknown keys).
     #[serde(skip)]
     pub warnings: Vec<String>,
@@ -84,6 +90,8 @@ const KEYS: &[&str] = &[
     "phitex",
     "update-check",
     "update-channel",
+    "watch-write",
+    "tips-seen",
 ];
 
 /// `copy-pdf`'s value.
@@ -257,6 +265,12 @@ fn with_key(text: &str, key: &str, value: &str) -> Result<String, String> {
         _ if value.parse::<i64>().is_ok() => value.to_owned(),
         _ => format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")),
     };
+    with_line(text, key, &v).map_err(|e| format!("{key} = {value}: {e}"))
+}
+
+/// `text` with top-level `key = v` (`v` TOML already), its line replaced
+/// or added, the rest kept; checked by reading it back.
+fn with_line(text: &str, key: &str, v: &str) -> Result<String, String> {
     let line = format!("{key} = {v}");
     let mut out = Vec::new();
     let mut done = false;
@@ -286,8 +300,48 @@ fn with_key(text: &str, key: &str, value: &str) -> Result<String, String> {
         out.push(line);
     }
     let text = out.join("\n") + "\n";
-    parse_named(&text, "phitex.toml").map_err(|e| format!("{key} = {value}: {e}"))?;
+    parse_named(&text, "phitex.toml")?;
     Ok(text)
+}
+
+/// The viewer's preferences the user's `phitex.toml` keeps (the `prefs`
+/// op): their keys, each a list of names.
+pub const PREFS: &[&str] = &["tips-seen"];
+
+/// The viewer's preferences (`set`: those keys set first, each a list of
+/// names, in the user's file, its other lines kept), as JSON.
+pub fn prefs(
+    set: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p = user_file().ok_or("no home directory for ~/.config/phitex/phitex.toml")?;
+    let mut text = std::fs::read_to_string(&p).unwrap_or_default();
+    if let Some(set) = set {
+        for (k, v) in set {
+            if !PREFS.contains(&k.as_str()) {
+                return Err(format!("no preference '{k}' here"));
+            }
+            let names: Vec<String> = v
+                .as_array()
+                .ok_or(format!("{k}: a list of names"))?
+                .iter()
+                .filter_map(|n| n.as_str())
+                .filter(|n| {
+                    n.len() <= 64
+                        && n.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                })
+                .map(str::to_owned)
+                .collect();
+            let v = toml::Value::Array(names.into_iter().map(toml::Value::String).collect());
+            text = with_line(&text, k, &v.to_string())?;
+        }
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+        }
+        std::fs::write(&p, &text).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    let c = parse_named(&text, &p.display().to_string())?;
+    Ok(serde_json::json!({ "tips-seen": c.tips_seen.unwrap_or_default() }))
 }
 
 /// `phitex config KEY VALUE`: the user's `phitex.toml` with it set (made
@@ -304,6 +358,166 @@ pub fn set_user(key: &str, value: &str) -> Result<PathBuf, String> {
     }
     std::fs::write(&p, new).map_err(|e| format!("{}: {e}", p.display()))?;
     Ok(p)
+}
+
+/// Every setting `phitex config` lists: its key, its default, and what it
+/// does (aliases left out; `main` and `phitex` are a project's alone).
+pub const SETTINGS: &[(&str, &str, &str)] = &[
+    (
+        "main",
+        "the one .tex file with \\documentclass",
+        "the main file (a project's phitex.toml only)",
+    ),
+    (
+        "engine",
+        "pdflatex",
+        "the engine: pdflatex, xelatex, latex, pdftex, tex",
+    ),
+    (
+        "output-dir",
+        "the main file's folder",
+        "where the outputs go (TeX's -output-directory)",
+    ),
+    (
+        "shell-escape",
+        "off",
+        "let the document run shell commands (\\write18)",
+    ),
+    (
+        "viewer",
+        "none",
+        "a program --open shows the PDF with (zathura, okular, ...)",
+    ),
+    (
+        "editor",
+        "$PHITEX_EDITOR, else none",
+        "the editor a double-click on a page opens (code, nvim, emacsclient, ...)",
+    ),
+    (
+        "copy-pdf",
+        "off",
+        "copy the PDF after each good build: true (where phitex runs) or a folder",
+    ),
+    ("synctex", "off", "write JOB.synctex.gz beside the PDF"),
+    (
+        "cache-limit",
+        "4GB",
+        "the cache's size (\"500MB\", \"4GB\"; 0: no cache)",
+    ),
+    (
+        "files",
+        "texlive",
+        "where TeX's files come from: texlive (kpathsea) or shelf",
+    ),
+    (
+        "phitex",
+        "any",
+        "the oldest PhiTeX the project needs (\">=1.0\"; a project's only)",
+    ),
+    (
+        "update-check",
+        "off",
+        "say when a newer PhiTeX is out (yours only)",
+    ),
+    (
+        "update-channel",
+        "stable",
+        "what phitex upgrade follows: stable or nightly (yours only)",
+    ),
+    (
+        "watch-write",
+        "off",
+        "phitex watch writes the PDF (with its .synctex.gz) and the aux files here after each build",
+    ),
+];
+
+/// `phitex config` (no key: every setting; a key: that one): each with
+/// its value in your file and in the project's `phitex.toml` above `dir`,
+/// the one that holds, and what it does.
+pub fn listing(key: Option<&str>, dir: &Path, st: crate::ui::Style) -> Result<Vec<String>, String> {
+    let read = |p: &Path| -> Result<toml::Table, String> {
+        match std::fs::read_to_string(p) {
+            Ok(t) => t
+                .parse::<toml::Table>()
+                .map_err(|e| format!("{}: {e}", p.display())),
+            Err(_) => Ok(toml::Table::new()),
+        }
+    };
+    let user_path = user_file();
+    let user = match &user_path {
+        Some(p) => read(p)?,
+        None => toml::Table::new(),
+    };
+    let project_path = find_file(dir);
+    let project = match &project_path {
+        Some(p) => read(p)?,
+        None => toml::Table::new(),
+    };
+    let rows: Vec<&(&str, &str, &str)> = match key {
+        Some(k) => {
+            let canon = canonical(k);
+            let r: Vec<_> = SETTINGS.iter().filter(|s| s.0 == canon).collect();
+            if r.is_empty() {
+                return Err(match nearest(k) {
+                    Some(n) => format!("no setting '{k}': did you mean '{n}'?"),
+                    None => format!("no setting '{k}' (phitex config lists them)"),
+                });
+            }
+            r
+        }
+        None => SETTINGS.iter().collect(),
+    };
+    let value = |t: &toml::Table, k: &str| -> Option<String> {
+        KEYS.iter()
+            .filter(|a| canonical(a) == k)
+            .find_map(|a| t.get(*a))
+            .map(|v| match v {
+                toml::Value::String(s) => s.clone(),
+                v => v.to_string(),
+            })
+    };
+    let home = |p: &Option<PathBuf>| {
+        p.as_ref()
+            .map_or("none".to_owned(), |p| crate::cache::home_relative(p))
+    };
+    let mut out = vec![st.dim(&format!(
+        "yours: {} · project: {} (the project's wins)",
+        home(&user_path),
+        home(&project_path)
+    ))];
+    let w = rows.iter().map(|r| r.0.len()).max().unwrap_or(0);
+    for &&(k, default, what) in &rows {
+        let (u, p) = (value(&user, k), value(&project, k));
+        let now = match (&p, &u) {
+            (Some(p), _) => format!("{p} {}", st.dim("(project)")),
+            (None, Some(u)) => format!("{u} {}", st.dim("(yours)")),
+            (None, None) => format!("{default} {}", st.dim("(default)")),
+        };
+        out.push(format!(
+            "  {}  {now}",
+            st.bold(&crate::ui::pad(k, w, false))
+        ));
+        out.push(format!("  {}  {}", " ".repeat(w), st.dim(what)));
+    }
+    if key.is_none() {
+        out.push(st.dim("phitex config KEY VALUE sets one in yours (on, off, a number or text)"));
+    }
+    Ok(out)
+}
+
+/// A key's own name (an alias's: the key it stands for).
+fn canonical(k: &str) -> &str {
+    match k {
+        "file" => "main",
+        "program" => "engine",
+        "output-directory" | "out-dir" => "output-dir",
+        k => k,
+    }
+}
+
+/// The project's `phitex.toml` at `dir` or above.
+fn find_file(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors().map(|d| d.join(FILE)).find(|p| p.is_file())
 }
 
 /// The user's settings (none there: the defaults). They name no main
@@ -343,6 +557,8 @@ impl Config {
             phitex: self.phitex.or(under.phitex),
             update_check: self.update_check.or(under.update_check),
             update_channel: self.update_channel.or(under.update_channel),
+            watch_write: self.watch_write.or(under.watch_write),
+            tips_seen: self.tips_seen.or(under.tips_seen),
             warnings: [self.warnings, under.warnings].concat(),
         }
     }
@@ -622,6 +838,8 @@ mod tests {
                 phitex: None,
                 update_check: None,
                 update_channel: None,
+                watch_write: None,
+                tips_seen: None,
                 warnings: vec![],
             }
         );

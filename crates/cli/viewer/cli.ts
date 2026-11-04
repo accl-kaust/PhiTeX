@@ -28,7 +28,7 @@ import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.t
 /** The watch's core, over a WebSocket: requests answered in order, events pushed; joined again when it drops. */
 class Socket implements CoreTransport {
   ws?: WebSocket;
-  /** The wait before the next try (doubled to 30 s while the watch is away). */
+  /** The wait before the next try (doubled to 3 s while the watch is away: a watch started again on this document serves this same address, and the tab joins it within that). */
   private wait = 1000;
   private next = 1;
   private waiting = new Map<number, (r: CoreRes) => void>();
@@ -43,7 +43,7 @@ class Socket implements CoreTransport {
    * those after failures: such a tab would hold back every other's).
    */
   async connect(): Promise<void> {
-    if (document.hidden) return void addEventListener("visibilitychange", () => void this.connect(), { once: true });
+    // (a tab in the background asks too, over HTTP first: the watch then sees it and opens no second tab)
     if (!(await this.there())) return this.again();
     this.open();
   }
@@ -59,7 +59,7 @@ class Socket implements CoreTransport {
 
   private again(): void {
     setTimeout(() => void this.connect(), this.wait);
-    this.wait = Math.min(this.wait * 2, 30000);
+    this.wait = Math.min(this.wait * 2, 3000);
   }
 
   private open(): void {
@@ -246,7 +246,8 @@ const panel = new Panel(
     },
     onMain: () => {},
     onReload: () => void session.resync(),
-    onClean: () => void session.resync(),
+    // (Clean rebuild: the watch drops its build and makes it again from nothing, its format kept)
+    onClean: () => void sock.request({ op: "cold" }),
     // (the watch builds again from the files on disk, as `r` in its terminal)
     onRebuild: () => void sock.request({ op: "rebuild" }),
     onCompare: () => openPick(),
@@ -257,6 +258,8 @@ const panel = new Panel(
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
     onContents: () => void session.outline(),
     onFind: (q) => pages.find(q),
+    // (the tips seen: the user's phitex.toml through the watch, the same on every port and browser)
+    onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } }),
   },
   // (the panel's settings: this browser's)
   {
@@ -349,18 +352,26 @@ const save = (name: string) => {
 /** A change's first words as the page shows them: its source without commands, braces and math marks. */
 const words = (src: string) =>
   src.replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#\[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
-let lastAt = { k: -1, page: 0 };
+/**
+ * Change k shown: on the page the watch placed it (its first glyph's page
+ * and height on the diff's pages), its words marked there, the match
+ * nearest that height; a change with no place (none of its glyphs shown:
+ * a deletion hidden) found by its words alone, the first match.
+ */
 const gotoChange = async (k: number) => {
-  const c = (diffState.changes ?? [])[k - 1] as { new_text?: string; old_text?: string; page?: number } | undefined;
+  const c = (diffState.changes ?? [])[k - 1] as { new_text?: string; old_text?: string; page?: number; y?: number } | undefined;
   if (!c) return;
   const q = words(c.new_text || "") || words(c.old_text || "");
-  if (!q) return;
-  const hits = await pages.find(q);
+  const hits = q ? await pages.find(q) : [];
+  if (typeof c.page === "number") {
+    const y = c.y ?? 0;
+    const near = hits
+      .filter((h) => h.k === c.page)
+      .sort((a, b) => Math.abs(a.boxes[0][1] + a.boxes[0][3] - y) - Math.abs(b.boxes[0][1] + b.boxes[0][3] - y))[0];
+    return panel.reveal([near ?? { k: c.page, boxes: [[18, Math.max(0, y - 10), 14, 12]] }]);
+  }
   if (!hits.length) return void panel.msg(`Change ${k} isn't on the pages`, false, true);
-  const from = k > lastAt.k ? lastAt.page : 0;
-  const at = Math.max(0, hits.findIndex((h) => h.k >= from));
-  lastAt = { k, page: hits[at].k };
-  panel.reveal(hits.slice(at, at + 1));
+  panel.reveal(hits.slice(0, 1));
 };
 
 const runner: DiffRunner<Pair> = {
@@ -568,9 +579,13 @@ const said = (s: Said, live: boolean) => {
   log.append(line);
   while (log.childElementCount > 2000) log.firstElementChild!.remove();
   if (at) log.scrollTop = log.scrollHeight;
-  if (live && con.hidden) {
+  // (the count is the last build's: its result line starts it again, its
+  // `error:` and `warning:` lines after it counted; the result line itself
+  // is not one more. Opening the drawer reads them)
+  if (live && /^(✓|ok:|✗|failed:)/.test(s.text ?? "")) (unseen = { errors: 0, warnings: 0 }), showBar();
+  else if (live && con.hidden && /^(error|warning): /.test(line.textContent ?? "")) {
     if (line.className === "error") unseen.errors++;
-    else if (line.className === "warning") unseen.warnings++;
+    else unseen.warnings++;
     showBar();
   }
 };
@@ -603,6 +618,11 @@ const backlog = async () => {
   for (const s of (r.json?.items ?? []) as Said[]) said(s, false);
   if (r.json?.status) said(r.json.status as Said, false);
 };
+/** The user's viewer preferences, as the watch keeps them (`prefs`). */
+const prefs = async () => {
+  const r = await sock.request({ op: "prefs" });
+  if (r.ok) panel.tipsSeen(((r.json?.["tips-seen"] ?? []) as string[]).filter((x) => typeof x === "string"));
+};
 const opened = sock.onOpen;
-sock.onOpen = () => (opened(), void backlog());
+sock.onOpen = () => (opened(), void backlog(), void prefs());
 showBar();

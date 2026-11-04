@@ -244,6 +244,78 @@ pub struct Lsp {
     pending: Mutex<Vec<Value>>,
 }
 
+/// The `.tex` files of `dir` (not below it), sorted.
+fn tex_files(dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "tex") && p.is_file())
+        .collect();
+    v.sort();
+    v
+}
+
+/// The document that inputs `file` (`\input`, `\include`, `\subfile`,
+/// through other inputs too: a chapter's part): a `.tex` file with a
+/// `\documentclass` in `file`'s folder or one of the three above it (a
+/// project's folder holds no `phitex.toml` or `.git` above it), its names
+/// read from its own folder or the main file's. None: no file inputs it.
+fn includer(file: &Path) -> Option<PathBuf> {
+    let file = file.canonicalize().ok()?;
+    let mut dirs = Vec::new();
+    for d in file.ancestors().skip(1).take(4) {
+        dirs.push(d.to_path_buf());
+        if d.join("phitex.toml").exists() || d.join(".git").exists() {
+            break;
+        }
+    }
+    let candidates: Vec<PathBuf> = dirs.iter().flat_map(|d| tex_files(d)).collect();
+    let names = |t: &str| -> Vec<String> {
+        let mut out: Vec<String> = crate::config::braced_inputs(t)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut rest = t;
+        while let Some(i) = rest.find("\\subfile{") {
+            rest = &rest[i + 9..];
+            if let Some(j) = rest.find('}') {
+                out.push(rest[..j].trim().to_owned());
+            }
+        }
+        out
+    };
+    let names_file = |from: &Path, n: &str, target: &Path| {
+        let p = Path::new(n);
+        let with = if p.extension().is_some() {
+            p.to_path_buf()
+        } else {
+            p.with_extension("tex")
+        };
+        dirs.iter()
+            .map(PathBuf::as_path)
+            .chain(from.parent())
+            .any(|d| d.join(&with).canonicalize().is_ok_and(|c| c == target))
+    };
+    // (from the file up its chain of inputs, at most four links)
+    let mut target = file;
+    for _ in 0..4 {
+        let by = candidates.iter().find_map(|c| {
+            let t = String::from_utf8_lossy(&std::fs::read(c).ok()?).into_owned();
+            let c = c.canonicalize().ok()?;
+            (c != target && names(&t).iter().any(|n| names_file(&c, n, &target)))
+                .then_some((c, t.contains("\\documentclass")))
+        });
+        match by {
+            Some((c, true)) => return Some(c),
+            Some((c, false)) => target = c,
+            None => return None,
+        }
+    }
+    None
+}
+
 /// The main file to build in `root` when nothing names one: the one
 /// `.tex` file there with a `\documentclass`, `main.tex` among several.
 fn find_main(root: &Path) -> Option<String> {
@@ -397,13 +469,22 @@ impl Lsp {
             let Some(path) = path.filter(|p| p.extension().is_some_and(|e| e == "tex")) else {
                 continue;
             };
-            if d["text"]
-                .as_str()
-                .is_some_and(|t| t.contains("\\documentclass"))
+            let text = d["text"].as_str().unwrap_or("");
+            let dir = path.parent().unwrap_or(Path::new("/")).to_path_buf();
+            // (the file names its main one, `% !TEX root = ../paper.tex`)
+            if let (_, Some(r)) = crate::config::magic_comments(text)
+                && dir.join(&r).is_file()
             {
+                break dir.join(r);
+            }
+            if text.contains("\\documentclass") {
                 break path;
             }
-            let dir = path.parent().unwrap_or(Path::new("/")).to_path_buf();
+            // (a file the main one inputs, opened first: that main file,
+            // beside it or above, never the file itself or none)
+            if let Some(main) = includer(&path) {
+                break main;
+            }
             if let Some(n) = find_main(&dir) {
                 break dir.join(n);
             }
@@ -417,6 +498,14 @@ impl Lsp {
         };
         *lock(&self.input) = Some(input);
         *lock(&self.pending) = pending;
+        // (the watch runs in the main file's folder: its inputs are named
+        // from there, and the editor's root may be a folder below it)
+        if let Some(dir) = main.parent()
+            && std::env::set_current_dir(dir).is_ok()
+            && let Some(name) = main.file_name()
+        {
+            return name.to_string_lossy().into_owned();
+        }
         main.to_string_lossy().into_owned()
     }
 

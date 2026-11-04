@@ -208,7 +208,7 @@ header:active { cursor: grabbing; }
 .diffbar button:disabled { opacity: .4; cursor: default; }
 .diffbar button.cur { background: var(--ph-hover); color: var(--ph-fg); }
 .diffbar .sep { width: 1px; align-self: stretch; margin: 2px; background: var(--ph-border); }
-.diffset { display: none; left: 50%; transform: translateX(-50%); top: 4px; width: 320px; padding: 12px; font-size: 12px; }
+.diffset { display: none; left: 50%; transform: translateX(-50%); top: 4px; width: 320px; max-height: calc(100% - 12px); overflow: auto; padding: 12px; font-size: 12px; }
 .diffset.on { display: block; }
 .diffset h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--ph-fg2); }
 .diffset h4:not(:first-child) { margin-top: 12px; }

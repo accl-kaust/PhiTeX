@@ -168,6 +168,15 @@ var Viewer = class {
     }
     if (first && !seen) this.scroller.scrollTo({ top: first.offsetTop + first.parentElement.offsetTop - this.scroller.clientHeight / 3, behavior: "auto" });
   }
+  /** Esc: the highlights gone (the editor's selection and cursor's word, a double-click's place, find's matches) and the text selected on the pages; whether there were any. */
+  unmark() {
+    const ms = this.root.querySelectorAll(".mark");
+    const sel = this.root.ownerDocument.getSelection();
+    const had = ms.length > 0 || !!sel && !sel.isCollapsed && this.root.contains(sel.anchorNode);
+    for (const m of ms) m.remove();
+    if (had) sel?.removeAllRanges();
+    return had;
+  }
   /**
    * Collaborators' cursors: each its word's `boxes` on page `k` tinted in
    * its `hue`, its `label` above the first box; the whole set, the last
@@ -778,7 +787,7 @@ header:active { cursor: grabbing; }
 .diffbar button:disabled { opacity: .4; cursor: default; }
 .diffbar button.cur { background: var(--ph-hover); color: var(--ph-fg); }
 .diffbar .sep { width: 1px; align-self: stretch; margin: 2px; background: var(--ph-border); }
-.diffset { display: none; left: 50%; transform: translateX(-50%); top: 4px; width: 320px; padding: 12px; font-size: 12px; }
+.diffset { display: none; left: 50%; transform: translateX(-50%); top: 4px; width: 320px; max-height: calc(100% - 12px); overflow: auto; padding: 12px; font-size: 12px; }
 .diffset.on { display: block; }
 .diffset h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--ph-fg2); }
 .diffset h4:not(:first-child) { margin-top: 12px; }
@@ -2025,7 +2034,7 @@ var Panel = class {
       const open = this.root.querySelector(".dialog:not([hidden])");
       if (open) open.hidden = true;
       else if (this.menus.some(([, m]) => !this.$(m).hidden)) this.menu(null);
-      else this.escapeProblems();
+      else if (!this.escapeProblems()) this.unmark();
     });
     this.$("#gonex").onclick = () => this.dismissOffline();
     addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("offline") && this.dismissOffline());
@@ -2292,9 +2301,9 @@ var Panel = class {
     } else if (this.warm) t = "Preparing instant typing\u2026", m = `${Math.round((Date.now() - this.warm.since) / 1e3)} s`;
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet", err = !!errs;
     else if (this.reopen || !this.last && this.viewer.pages === 0) t = this.stepNow || "Opening\u2026";
-    else if (errs) t = `Built with ${errs} error${errs === 1 ? "" : "s"}`, err = true;
-    else if (this.speed?.first) t = "First build", m = this.speed.ms < 1e3 ? `${Math.round(this.speed.ms)} ms` : `${(this.speed.ms / 1e3).toFixed(this.speed.ms < 1e4 ? 1 : 0)} s`;
-    else t = "Built", m = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "";
+    else if (errs) t = `Built with ${errs} error${errs === 1 ? "" : "s"}`, m = this.speed ? dur(this.speed.ms) : "", err = true;
+    else if (this.speed?.first) t = "First build", m = dur(this.speed.ms);
+    else t = "Built", m = this.speed ? dur(this.speed.ms) : "";
     text.textContent = t;
     more.textContent = m ? `\xB7 ${m}` : "";
     const was = this.statusNow;
@@ -2923,7 +2932,7 @@ var Panel = class {
       "keydown",
       (e) => {
         if (e.ctrlKey || e.altKey || e.metaKey || e.target?.closest?.("input, textarea, select, [contenteditable=true]")) return;
-        if (e.key === "Escape" && this.escapeProblems()) {
+        if (e.key === "Escape" && (this.escapeProblems() || this.unmark())) {
         } else if (e.key === "e") this.diagnostics();
         else if (e.key === "t" && this.contents) this.side();
         else return;
@@ -2973,6 +2982,12 @@ var Panel = class {
     if (was !== on) this.emit();
   }
   /** Esc on the problems: the list closed; false when it wasn't open. */
+  /** The pages' highlights cleared (Esc), find's included: whether there were any. */
+  unmark() {
+    const had = this.viewer.unmark();
+    if (had) this.hits = [];
+    return had;
+  }
   escapeProblems() {
     if (this.$("#logs").hidden) return false;
     this.diagnostics(false);
@@ -3285,25 +3300,36 @@ var Panel = class {
    * features' (What's new: `fresh`), or every one (the tour); `asked`: the
    * host's tour().
    */
+  /** The tips seen: this browser's, and the host's (tipsSeen). */
+  seenIds = (() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]"));
+    } catch {
+      return /* @__PURE__ */ new Set();
+    }
+  })();
+  /** The tips seen as the host keeps them (the watch: the user's phitex.toml, the same on every port): not offered by themselves again. */
+  tipsSeen(ids) {
+    for (const id of ids) this.seenIds.add(id);
+    if (!this.$("#tip").hidden && this.tipList.every((t) => this.seenIds.has(t.id))) this.tip(-1);
+  }
   tips(which, asked = false) {
     if (!this.ownBar || this.prefs.collapsed || which === "unseen" && !asked && !this.autoTips) return;
-    let seen = [];
-    try {
-      seen = JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]");
-    } catch {
-    }
+    const seen = [...this.seenIds];
     const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
     this.tipList = which === "all" ? offered : which === "fresh" ? offered.filter((t) => t.fresh) : offered.filter((t) => !seen.includes(t.id));
     this.tip(0);
   }
   /** Tips seen: not offered by themselves again (What's new and the tour still show them). */
   seen(ids) {
+    const before = this.seenIds.size;
+    for (const id of ids) this.seenIds.add(id);
+    if (this.seenIds.size === before) return;
     try {
-      const seen = new Set(JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]"));
-      for (const id of ids) seen.add(id);
-      localStorage.setItem("phitex.tips.seen", JSON.stringify([...seen]));
+      localStorage.setItem("phitex.tips.seen", JSON.stringify([...this.seenIds]));
     } catch {
     }
+    this.ev.onTipsSeen?.([...this.seenIds]);
   }
   tip(i) {
     const el = this.$("#tip");
@@ -3356,7 +3382,7 @@ var Panel = class {
   diffSettings(look2, change, defaults2) {
     const el = this.$("#diffset");
     if (!look2) {
-      el.className = "diffset";
+      el.className = "menu diffset";
       return;
     }
     look2 = { ...look2, add_color: safeColor(look2.add_color, "#0000ff"), del_color: safeColor(look2.del_color, "#ff0000") };
@@ -3387,7 +3413,7 @@ var Panel = class {
       return `color:${c};${strike ? `text-decoration: line-through ${c};` : ""}${line}${look2.markup === "bold" && add ? "font-weight:700;" : ""}`;
     };
     el.innerHTML = `<h4>Style</h4>${seg("markup", MARKUP)}<h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => `<button class="pair" data-pair="${a},${d}" aria-pressed="${look2.add_color === a && look2.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`).join("")}</div><div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look2.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look2.del_color}"></div><h4>Mode</h4>${seg("subtype", SUB)}<div class="sample">The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div><div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`;
-    el.className = "diffset on";
+    el.className = "menu diffset on";
     const set = (l) => {
       const next = { ...look2, ...l };
       change?.(next);
@@ -3976,9 +4002,25 @@ var defaults = { fuel: 1e5, dpi: 96, checkEveryMs: 5e3 };
 var image = (r) => r.canvas && r.size ? { canvas: r.canvas, w: r.size[0], h: r.size[1], links: r.links } : null;
 function guessMain(files) {
   const names = Object.keys(files).filter((n) => /\.tex$/i.test(n));
+  const strip = (t) => t.replace(/(^|[^\\])%.*$/gm, "$1");
+  const inputs = /* @__PURE__ */ new Map();
+  for (const n of names) {
+    const dir = n.includes("/") ? n.slice(0, n.lastIndexOf("/") + 1) : "";
+    const got = [];
+    for (const m of strip(files[n]).matchAll(/\\(?:input|include|subfile|subfileinclude|includestandalone)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}/g)) {
+      const f = m[1].trim().replace(/^\.\//, "");
+      const tex = /\.tex$/i.test(f) ? f : `${f}.tex`;
+      got.push(tex, dir + tex);
+    }
+    inputs.set(n, got);
+  }
+  const inputted = /* @__PURE__ */ new Set();
+  for (const [n, got] of inputs) for (const f of got) if (f !== n) inputted.add(f);
   const score = (n) => {
-    const t = files[n];
+    const t = strip(files[n]);
     let s = 0;
+    if (inputted.has(n)) s -= 16;
+    if (inputs.get(n).some((f) => f !== n && f in files)) s += 8;
     if (/(^|\n)[^%\n]*\\(bye|end\{document\})/.test(t)) s += 4;
     if (/(^|\n)\s*\\documentclass/.test(t)) s += 2;
     if (/^main\.tex$/i.test(n)) s += 1;
@@ -4075,6 +4117,7 @@ var PreviewSession = class {
     core.onEvent?.((e) => {
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
+      if (this.o.remote && e.event === "origins") return void (this.glyphCache.clear(), this.culprits.clear());
       if (this.o.remote && "event" in e && WATCH2.has(e.event)) return this.onWatch(e);
       if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);
       if (e.event === "switched") {
@@ -5734,7 +5777,7 @@ click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
 // crates/cli/viewer/cli.ts
 var Socket = class {
   ws;
-  /** The wait before the next try (doubled to 30 s while the watch is away). */
+  /** The wait before the next try (doubled to 3 s while the watch is away: a watch started again on this document serves this same address, and the tab joins it within that). */
   wait = 1e3;
   next = 1;
   waiting = /* @__PURE__ */ new Map();
@@ -5750,7 +5793,6 @@ var Socket = class {
    * those after failures: such a tab would hold back every other's).
    */
   async connect() {
-    if (document.hidden) return void addEventListener("visibilitychange", () => void this.connect(), { once: true });
     if (!await this.there()) return this.again();
     this.open();
   }
@@ -5764,7 +5806,7 @@ var Socket = class {
   }
   again() {
     setTimeout(() => void this.connect(), this.wait);
-    this.wait = Math.min(this.wait * 2, 3e4);
+    this.wait = Math.min(this.wait * 2, 3e3);
   }
   open() {
     const url = new URL("ws", location.href);
@@ -5910,7 +5952,8 @@ var panel = new Panel(
     onMain: () => {
     },
     onReload: () => void session.resync(),
-    onClean: () => void session.resync(),
+    // (Clean rebuild: the watch drops its build and makes it again from nothing, its format kept)
+    onClean: () => void sock.request({ op: "cold" }),
     // (the watch builds again from the files on disk, as `r` in its terminal)
     onRebuild: () => void sock.request({ op: "rebuild" }),
     onCompare: () => openPick(),
@@ -5920,7 +5963,9 @@ var panel = new Panel(
     onGoto: (file, line) => source(file, line),
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
     onContents: () => void session.outline(),
-    onFind: (q) => pages.find(q)
+    onFind: (q) => pages.find(q),
+    // (the tips seen: the user's phitex.toml through the watch, the same on every port and browser)
+    onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } })
   },
   // (the panel's settings: this browser's)
   {
@@ -5999,18 +6044,18 @@ var save = (name) => {
   a.click();
 };
 var words = (src) => src.replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#\[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
-var lastAt = { k: -1, page: 0 };
 var gotoChange = async (k) => {
   const c = (diffState.changes ?? [])[k - 1];
   if (!c) return;
   const q = words(c.new_text || "") || words(c.old_text || "");
-  if (!q) return;
-  const hits = await pages.find(q);
+  const hits = q ? await pages.find(q) : [];
+  if (typeof c.page === "number") {
+    const y = c.y ?? 0;
+    const near = hits.filter((h) => h.k === c.page).sort((a, b) => Math.abs(a.boxes[0][1] + a.boxes[0][3] - y) - Math.abs(b.boxes[0][1] + b.boxes[0][3] - y))[0];
+    return panel.reveal([near ?? { k: c.page, boxes: [[18, Math.max(0, y - 10), 14, 12]] }]);
+  }
   if (!hits.length) return void panel.msg(`Change ${k} isn't on the pages`, false, true);
-  const from2 = k > lastAt.k ? lastAt.page : 0;
-  const at = Math.max(0, hits.findIndex((h) => h.k >= from2));
-  lastAt = { k, page: hits[at].k };
-  panel.reveal(hits.slice(at, at + 1));
+  panel.reveal(hits.slice(0, 1));
 };
 var runner = {
   async start(v, say, count) {
@@ -6193,9 +6238,10 @@ var said = (s, live) => {
   log.append(line);
   while (log.childElementCount > 2e3) log.firstElementChild.remove();
   if (at) log.scrollTop = log.scrollHeight;
-  if (live && con.hidden) {
+  if (live && /^(✓|ok:|✗|failed:)/.test(s.text ?? "")) unseen = { errors: 0, warnings: 0 }, showBar();
+  else if (live && con.hidden && /^(error|warning): /.test(line.textContent ?? "")) {
     if (line.className === "error") unseen.errors++;
-    else if (line.className === "warning") unseen.warnings++;
+    else unseen.warnings++;
     showBar();
   }
 };
@@ -6227,6 +6273,10 @@ var backlog = async () => {
   for (const s of r.json?.items ?? []) said(s, false);
   if (r.json?.status) said(r.json.status, false);
 };
+var prefs = async () => {
+  const r = await sock.request({ op: "prefs" });
+  if (r.ok) panel.tipsSeen((r.json?.["tips-seen"] ?? []).filter((x) => typeof x === "string"));
+};
 var opened = sock.onOpen;
-sock.onOpen = () => (opened(), void backlog());
+sock.onOpen = () => (opened(), void backlog(), void prefs());
 showBar();

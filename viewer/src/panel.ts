@@ -116,6 +116,8 @@ export interface PanelEvents {
   onTour?(): void;
   /** "What's new" (settings). */
   onNews?(): void;
+  /** The feature tips seen, every one so far: kept by the host where every port and browser reads them (the watch: the user's phitex.toml); absent, this browser's storage alone. */
+  onTipsSeen?(ids: string[]): void;
   /** The contents beside the pages opened: the outline wanted now (the host's session's `outline()`). */
   onContents?(): void;
   /** A link to a web address on a page (absent: opened in a new tab). */
@@ -565,7 +567,7 @@ export class Panel {
       const open = this.root.querySelector<HTMLElement>(".dialog:not([hidden])");
       if (open) open.hidden = true;
       else if (this.menus.some(([, m]) => !this.$(m).hidden)) this.menu(null);
-      else this.escapeProblems();
+      else if (!this.escapeProblems()) this.unmark();
     });
     this.$("#gonex").onclick = () => this.dismissOffline();
     addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("offline") && this.dismissOffline());
@@ -878,9 +880,10 @@ export class Panel {
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) (t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet"), (err = !!errs);
     // (an opening up, a rebuild's too: its step, not the last build's status)
     else if (this.reopen || (!this.last && this.viewer.pages === 0)) t = this.stepNow || "Opening…";
-    else if (errs) (t = `Built with ${errs} error${errs === 1 ? "" : "s"}`), (err = true);
-    else if (this.speed?.first) (t = "First build"), (m = this.speed.ms < 1000 ? `${Math.round(this.speed.ms)} ms` : `${(this.speed.ms / 1000).toFixed(this.speed.ms < 10000 ? 1 : 0)} s`);
-    else (t = "Built"), (m = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "");
+    // (the time, errors or not: "Built with 2 errors · 42 ms")
+    else if (errs) (t = `Built with ${errs} error${errs === 1 ? "" : "s"}`), (m = this.speed ? dur(this.speed.ms) : ""), (err = true);
+    else if (this.speed?.first) (t = "First build"), (m = dur(this.speed.ms));
+    else (t = "Built"), (m = this.speed ? dur(this.speed.ms) : "");
     text.textContent = t;
     more.textContent = m ? `· ${m}` : "";
     const was = this.statusNow;
@@ -1607,8 +1610,8 @@ export class Panel {
       "keydown",
       (e) => {
         if (e.ctrlKey || e.altKey || e.metaKey || (e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable=true]")) return;
-        if (e.key === "Escape" && this.escapeProblems()) {
-          /* (the list closed) */
+        if (e.key === "Escape" && (this.escapeProblems() || this.unmark())) {
+          /* (the list closed, else the highlights cleared) */
         } else if (e.key === "e") this.diagnostics();
         else if (e.key === "t" && this.contents) this.side();
         else return;
@@ -1662,6 +1665,13 @@ export class Panel {
   }
 
   /** Esc on the problems: the list closed; false when it wasn't open. */
+  /** The pages' highlights cleared (Esc), find's included: whether there were any. */
+  private unmark(): boolean {
+    const had = this.viewer.unmark();
+    if (had) this.hits = [];
+    return had;
+  }
+
   private escapeProblems(): boolean {
     if (this.$("#logs").hidden) return false;
     this.diagnostics(false);
@@ -2021,14 +2031,25 @@ export class Panel {
    * features' (What's new: `fresh`), or every one (the tour); `asked`: the
    * host's tour().
    */
+  /** The tips seen: this browser's, and the host's (tipsSeen). */
+  private seenIds = (() => {
+    try {
+      return new Set<string>(JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]"));
+    } catch {
+      return new Set<string>();
+    }
+  })();
+
+  /** The tips seen as the host keeps them (the watch: the user's phitex.toml, the same on every port): not offered by themselves again. */
+  tipsSeen(ids: string[]): void {
+    for (const id of ids) this.seenIds.add(id);
+    // (one offered meanwhile and seen now: gone)
+    if (!this.$("#tip").hidden && this.tipList.every((t) => this.seenIds.has(t.id))) this.tip(-1);
+  }
+
   private tips(which: "unseen" | "fresh" | "all", asked = false): void {
     if (!this.ownBar || this.prefs.collapsed || (which === "unseen" && !asked && !this.autoTips)) return;
-    let seen: string[] = [];
-    try {
-      seen = JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]");
-    } catch {
-      /* (none seen) */
-    }
+    const seen = [...this.seenIds];
     // (Overleaf's welcome callout says "as you type" already: not twice)
     const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
     this.tipList = which === "all" ? offered : which === "fresh" ? offered.filter((t) => t.fresh) : offered.filter((t) => !seen.includes(t.id));
@@ -2037,13 +2058,15 @@ export class Panel {
 
   /** Tips seen: not offered by themselves again (What's new and the tour still show them). */
   private seen(ids: string[]): void {
+    const before = this.seenIds.size;
+    for (const id of ids) this.seenIds.add(id);
+    if (this.seenIds.size === before) return;
     try {
-      const seen = new Set<string>(JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]"));
-      for (const id of ids) seen.add(id);
-      localStorage.setItem("phitex.tips.seen", JSON.stringify([...seen]));
+      localStorage.setItem("phitex.tips.seen", JSON.stringify([...this.seenIds]));
     } catch {
-      /* (shown again next time) */
+      /* (the host's copy only) */
     }
+    this.ev.onTipsSeen?.([...this.seenIds]);
   }
 
   private tip(i: number): void {
@@ -2109,7 +2132,7 @@ export class Panel {
   diffSettings(look: DiffLook | null, change?: (l: DiffLook) => void, defaults?: DiffLook): void {
     const el = this.$("#diffset");
     if (!look) {
-      el.className = "diffset";
+      el.className = "menu diffset";
       return;
     }
     // (the look comes from a host, a store or a server: its colors go into
@@ -2139,7 +2162,7 @@ export class Panel {
       `<h4>Mode</h4>${seg("subtype", SUB)}` +
       `<div class="sample">The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div>` +
       `<div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`;
-    el.className = "diffset on";
+    el.className = "menu diffset on";
     const set = (l: Partial<DiffLook>) => {
       const next = { ...look, ...l };
       change?.(next);

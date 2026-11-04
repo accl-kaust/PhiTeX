@@ -69,6 +69,8 @@ struct Kept {
     view_made: bool,
     building: Arc<AtomicBool>,
     told: Arc<AtomicBool>,
+    /// The way out asks whether to write the PDF ([`Here::asking`]).
+    asking: Arc<AtomicBool>,
     /// Whether standard input is read (by the first session).
     reading: bool,
 }
@@ -288,6 +290,8 @@ struct Here {
     told: Arc<AtomicBool>,
     /// For the cache's line on the way out.
     target: Target,
+    /// The watch asks a question on the way out: every key is its answer.
+    asking: Arc<AtomicBool>,
 }
 
 fn help(ui: &Ui) {
@@ -299,6 +303,9 @@ fn help(ui: &Ui) {
 impl Here {
     /// Key `k` answered here (true), or for the watch's loop.
     fn answer(&self, k: Key) -> bool {
+        if self.asking.load(Ordering::Relaxed) {
+            return false;
+        }
         let ui = &self.ui;
         let busy = self.building.load(Ordering::Relaxed);
         match k {
@@ -545,6 +552,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         view_made: false,
         building: Arc::default(),
         told: Arc::default(),
+        asking: Arc::default(),
         reading: false,
     };
     let (mut t, mut o) = (t.clone(), o.clone());
@@ -621,6 +629,16 @@ fn reconfigured(
 fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Options) {
     let st = ui.st;
     let lsp = kept.lsp.clone();
+    // (a watch writes nothing into the folder unless asked, `--write` or
+    // `watch-write`: the pages are in the viewer. Without a viewer the file
+    // is the only way to see them; `copy-pdf` copies the file written.
+    // Writing, the PDF comes with its .synctex.gz unless that was turned off)
+    let writing = o.write || t.watch_write || !o.view || t.copy_pdf.is_some();
+    let mut t2 = t.clone();
+    if writing && !t.synctex_said {
+        t2.synctex = true;
+    }
+    let t = &t2;
     let mut job = modern::job(t, o).unwrap_or_else(|e| {
         if let Some(l) = &lsp {
             l.refuse(&e);
@@ -653,6 +671,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     for n in session::waiting_notes(&job) {
         ui.line(&format!("{}: {n}", st.yellow("note")));
     }
+    if !writing && !ui.quiet && lsp.is_none() {
+        ui.line(&st.dim(&format!(
+            "files: nothing written here while watching, the pages are in the viewer (a PDF viewer on {}.pdf won't update); --write or `phitex config watch-write on` writes the PDF and its .synctex.gz after each build",
+            job.jobname
+        )));
+    }
     // (a watch's readers guess past a long piece rather than wait on its
     // learned fields: an edit reruns it with the same values, and readers
     // that waited would wait for nothing; `--wait-long` is the one-shot
@@ -674,7 +698,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // section after each edit, the exact file written when idle, but
     // with `--exact`)
     s.watching = true;
-    if !o.exact_file {
+    if writing && !o.exact_file {
         s.set_updates(Some(Arc::default()));
     }
     // (since when the PDF file is not the exact one: written when the
@@ -708,7 +732,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     let view: Option<View> = if std::mem::replace(&mut kept.view_made, true) {
         kept.view.take()
     } else if o.view {
-        match View::start(editor, o.port) {
+        match View::start(editor, o.port, &main_file) {
             Ok(v) => {
                 // (the viewer's Clear cache: its size, emptied as
                 // `phitex clean --all` empties it)
@@ -727,6 +751,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         "freed": freed,
                     }))
                 }));
+                // (the viewer's preferences, the tips seen: the user's
+                // phitex.toml, so they hold on every port and browser)
+                v.on_prefs(Box::new(crate::config::prefs));
                 // (the diff's picker: the project's git history)
                 let here = root.clone();
                 v.on_log(Box::new(move |skip, limit| {
@@ -766,8 +793,24 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     v.on_select_source(Box::new(move |f, a, b| l.select(f, a, b)));
                 }
                 ui.event(&json!({"event": "viewer", "url": v.url()}));
-                if o.open && t.viewer.is_none() && !view::open_browser(v.url()) {
-                    ui.warning("could not start a browser");
+                if o.open && t.viewer.is_none() {
+                    // (the same document's tab left open from the last watch
+                    // joins again by itself, at the same address: a second
+                    // tab only when none came)
+                    let (url, ui2) = (v.url().to_owned(), ui.clone());
+                    let shared = v.clients_handle();
+                    std::thread::spawn(move || {
+                        let end = Instant::now() + Duration::from_millis(3500);
+                        while Instant::now() < end {
+                            if shared() > 0 {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        if !view::open_browser(&url) {
+                            ui2.warning("could not start a browser");
+                        }
+                    });
                 }
                 Some(v)
             }
@@ -861,6 +904,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             building: building.clone(),
             told: told.clone(),
             target: t.clone(),
+            asking: kept.asking.clone(),
         };
         match &lsp {
             // (the editor's `exit`, or its end: as `q`)
@@ -887,7 +931,38 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         ui.keys(keys::BAR);
     }
     let last = RefCell::new(Last::default());
-    let quit = |ui: &Ui, s: &mut Session| -> ! {
+    // (the last build when nothing is written: what the way out writes on a yes)
+    let unwritten: RefCell<Option<session::Report>> = RefCell::new(None);
+    let asking = kept.asking.clone();
+    let quit = |ui: &Ui, s: &mut Session, rx: Option<&mut mpsc::Receiver<(Instant, Event)>>| -> ! {
+        // (nothing written while watching: asked whether to write the PDF
+        // now, where a person is at the terminal; an editor's or a pipe's
+        // way out writes nothing)
+        if let (Some(rx), Some(r)) = (rx.filter(|_| raw), unwritten.borrow_mut().take()) {
+            ui.finish();
+            asking.store(true, Ordering::Relaxed);
+            ui.line(&format!(
+                "write {}.pdf and its .synctex.gz here? [y/N]",
+                s.job.jobname
+            ));
+            let yes = loop {
+                match rx.recv() {
+                    Ok((_, Event::Key(Key::Other('y' | 'Y')))) => break true,
+                    Ok((_, Event::Key(_))) | Err(_) => break false,
+                    Ok(_) => {}
+                }
+            };
+            if yes {
+                match s.write(&r, true) {
+                    Ok(w) => {
+                        for (p, _) in &w.files {
+                            ui.line(&st.dim(&format!("wrote {}", p.display())));
+                        }
+                    }
+                    Err(e) => ui.error(&e),
+                }
+            }
+        }
         // (the records the builds changed, stored before the watch ends;
         // the exact PDF file and, with `--log`, the log)
         s.flush_records();
@@ -1047,7 +1122,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // or not: the pages shipped; none when nothing was shipped)
         // (an engine failure, `Report::internal`: nothing written, the
         // last good build's files kept)
-        let written = match if r.internal.is_some() {
+        let written = match if r.internal.is_some() || !writing {
             Err(String::new())
         } else {
             s.write(&r, true)
@@ -1498,7 +1573,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             eprintln!("watch phases: after the event {:?}", tevent.elapsed());
         }
         last.borrow_mut().diags = std::mem::take(&mut r.diagnostics);
-        drop(r);
+        // (nothing written: the last build kept, for the way out's question)
+        if writing {
+            drop(r);
+        } else {
+            *unwritten.borrow_mut() = Some(r);
+        }
         phitex_tex::timeline::lap("watch: the report dropped");
         phitex_tex::timeline::end(&format!("build {builds}"));
     };
@@ -1542,7 +1622,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 Err(mpsc::TryRecvError::Empty) => {
                     origins_due.set(false);
                     if let Some(v) = &view {
-                        v.set_origins(s.origins(), None);
+                        // (the viewers told which pages' origins changed and how
+                        // far an edit moved the rest: a page no build drew again
+                        // keeps its origins, shifted, not those of the old text)
+                        v.set_origins(s.origins(), s.origins_changed());
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => break,
@@ -1617,7 +1700,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     }
                 }
                 Event::Key(k) => match k {
-                    Key::Quit => quit(ui, &mut s),
+                    Key::Quit => quit(ui, &mut s, Some(&mut rx)),
                     Key::Rebuild => {
                         // (every input read again from disk: a change made
                         // outside that no event told)
@@ -1811,6 +1894,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 show(ui, &l);
                             }
                             Applied::Rebuild => {
+                                // (as `r`: every input read again from
+                                // disk, a change no event told)
+                                s.reread_all();
                                 why.push("asked in the viewer".to_owned());
                                 again = true;
                             }
@@ -1952,6 +2038,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 &s.job,
                                 s.files(),
                                 Arc::new(Status::default()),
+                                writing,
                             )
                         });
                         spin.done();
@@ -2008,7 +2095,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             }
         }
     }
-    quit(ui, &mut s)
+    quit(ui, &mut s, None)
 }
 
 #[cfg(test)]
