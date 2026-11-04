@@ -859,3 +859,24 @@ fn an_opened_pdf_without_pages_is_empty() {
         assert_eq!(b.empty_pdf(), want, "{doc}:\n{log}");
     }
 }
+
+/// A sum of dimensions past 2^31 sp: the oracle's `integer` has 64 bits
+/// (Arch's `--disable-dump-share`), its box holds 48000.0pt and a `\count`
+/// takes 3145728000 (pdftex -ini in the CI image). Our `Scaled` is 32
+/// bits and shows -17536.0pt. docs/note-width-arithmetic.md.
+#[test]
+#[ignore = "open for v1.0: Scaled is i32, see docs/note-width-arithmetic.md"]
+fn widths_past_2_31_sp_as_pdftex() {
+    let fx = common::fixtures().join("dvi");
+    let src = "\\setbox0\\hbox{\\hskip16000pt\\hskip16000pt\\hskip16000pt}\n\
+               \\immediate\\write16{wd=\\the\\wd0}\n\
+               \\count1=\\wd0 \\immediate\\write16{count=\\the\\count1}\n\\bye\n";
+    let b = common::build(
+        common::options("./wide.tex", "wide", "", &fx),
+        Some(&common::plain()),
+        src,
+    );
+    let log = b.output().1;
+    assert!(log.contains("wd=48000.0pt"), "{log}");
+    assert!(log.contains("count=3145728000"), "{log}");
+}

@@ -2353,6 +2353,59 @@ fn a_toc_edit_keeps_every_rest_and_finisher() {
     }
 }
 
+/// The `.aux` hyperref's kind of package writes: `\providecommand` lines,
+/// each of which goes through `\def`'s body and skipped text naming
+/// `\l@ngrel@x` and `\reserved@c`, which the lines before it define. Those
+/// looks ask only whether the name is `#` or a conditional, so the file stays
+/// read back per field, and a heading's new `.aux` line runs no reader of the
+/// file's text. A line before it that does make such a name a conditional
+/// makes it the text (tested against cold).
+#[test]
+fn providecommand_lines_keep_the_aux_read_back_per_field() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/aux-provide");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |title: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\\AtBeginDocument{{\\if@filesw\
+             \\immediate\\write\\@auxout{{\\string\\providecommand\\string\\aone[1]{{}}}}\
+             \\immediate\\write\\@auxout{{\\string\\providecommand\\string\\atwo[1]{{}}}}\
+             \\immediate\\write\\@auxout{{\\string\\providecommand\\string\\athree[2]{{}}}}\\fi}}\n\
+             \\makeatother\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{a}}\nFirst, see section~\\ref{{b}}.\n\n\
+             \\section{{{title}}}\\label{{b}}\nText of the second section.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("auxprovide", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc("Second"));
+        for title in ["Xsecond", "Second part"] {
+            b.edit(&doc(title));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(title));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {title}"
+            );
+            assert!(
+                !r.iter()
+                    .any(|x| x.contains("wunit:") || x.contains("wfile:")),
+                "-j{threads} {title}: a reader of the .aux's text ran again: {r:?}"
+            );
+        }
+    }
+}
+
 /// A file the job writes and reads back itself (a listing's temporary, as
 /// tcolorbox makes for every example) is read from that file's own stream:
 /// a heading's edit moves the `.aux`'s, and no such reader runs again. All
@@ -2397,6 +2450,68 @@ fn a_file_read_back_by_its_writer_reads_its_own_stream_alone() {
             assert!(
                 !r.iter().any(|x| x.contains("Range streams")),
                 "-j{threads} {title}: a reader ran again on all the streams: {r:?}"
+            );
+        }
+    }
+}
+
+/// A box's report in the log names the lines of its paragraph, and an
+/// edit above moves them: the report's number is made when the log is laid
+/// out, so the paragraph does not run again (the 306-page circuitikz
+/// manual: a paragraph added near the start re-ran 133 pieces with such a
+/// report, 3.6 s), and the log still says what a whole build's does.
+#[test]
+fn a_box_report_does_not_tie_its_paragraph_to_the_lines_above() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/report-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |above: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\begin{{document}}\n\
+             First paragraph.\n{above}\n\
+             \\newpage\n\
+             Another paragraph.\n\n\
+             \\hbox to 10pt{{Far too wide for the box it is set in.}}\n\n\
+             \\parbox{{5pt}}{{Words\nunderfullwordstoolongforitswidth}}\n\n\
+             The end.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("reportlines", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(""));
+        for above in [
+            "One line more.\n",
+            "Two lines\nmore here.\n\nAnd a paragraph.\n",
+            "",
+        ] {
+            b.edit(&doc(above));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(above));
+            let (mine, want) = (b.output(), cold.output());
+            assert_eq!(
+                common::first_difference(&mine.0, &want.0),
+                None,
+                "-j{threads} {above:?}"
+            );
+            assert_eq!(mine.1, want.1, "-j{threads} {above:?}: the log");
+            assert!(
+                mine.1.contains("at lines") || mine.1.contains("detected at line"),
+                "{}",
+                mine.1
+            );
+            assert!(
+                !r.iter()
+                    .any(|x| x.contains("wide") || x.contains("underfullwords")),
+                "-j{threads} {above:?}: a piece with a report ran again: {r:?}"
             );
         }
     }

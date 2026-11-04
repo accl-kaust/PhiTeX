@@ -156,6 +156,8 @@ impl Operation for Finish {
         ps.extend(FINISHER_FIELDS.iter().map(|&s| s.to_owned()));
         ps.push(PAGE_OUT.to_owned());
         ps.push(RTN.to_owned());
+        ps.push(FIRE_CONFLICT.to_owned());
+        ps.push(FIRE_LEFT.to_owned());
         MayDefine::Prefixes(ps)
     }
 
@@ -195,10 +197,25 @@ impl Operation for Finish {
         Effect::None
     }
 
+    /// (TeX's own serial chain from the text to the routine and back: the
+    /// piece goes again at once, on what the pages before it left; held to
+    /// a quiet point, a chain through the pages takes one pass a page, and
+    /// past the settling limit the output is a pass's that never settled:
+    /// texpower's links)
+    fn settles_now(&self, f: Field, values: &Values) -> bool {
+        values.with_str(f.0, |s| s.starts_with(FIRE_CONFLICT)) == Some(true)
+    }
+
     /// The page layer settles at quiet points (docs/spec-settle.md): what
     /// a finisher defines re-asks the loop and the other finishers at
     /// once, and the text at the next quiet point.
     fn settles_at_quiet(&self) -> bool {
+        true
+    }
+
+    /// A page's routine reads the counters and marks the routines of the
+    /// pages before it left.
+    fn chains(&self) -> bool {
         true
     }
 
@@ -338,6 +355,12 @@ impl Run<'_, '_> {
             page_x,
             brk,
         });
+        self.fin_scope_closer = self
+            .fin
+            .as_ref()
+            .and_then(|c| c.brk)
+            .map(|b| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(b.0.to_ne_bytes())))
+            .filter(|&p| self.cx.closes_scope_after(p));
         self.preload_candidate(&fargs)?;
         if let Some(names) = crate::exec::obs_str!("PHITEX_FIN_SHOW") {
             let mut shown = Vec::new();
@@ -381,6 +404,10 @@ impl Run<'_, '_> {
             .as_ref()
             .map(|c| c.args.clone())
             .unwrap_or_default();
+        // (what the routine itself changed, before the piece's later
+        // definitions stand over it: the piece puts these in force at
+        // the candidate, [`Run::order_after_fires`])
+        self.define_fire_conflict(&args)?;
         self.give_way(&args)?;
         let g = self.contribute_global_defs();
         self.record_finisher_defs(&args, g);

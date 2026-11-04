@@ -933,8 +933,14 @@ pub(crate) fn hole_before(eng: &Engine, me: &Node) -> Option<NodeId> {
 }
 
 /// The first node before `me` in its unit that is to run, again or for
-/// the first time (`Node::is_open`): while one is, what `me` read before
-/// it may be a guess its run will change.
+/// the first time (`Node::is_open`), and that a run of this pass can bring
+/// a commit of: while one is, what `me` read before it may be a guess its
+/// run will change. Not one of an operation that runs only once the line
+/// is quiet (`Operation::final_only`) or one whose run panicked on inputs
+/// that hold (`Node::held_panic`), as for [`unsettled_before`]: a stuck
+/// run went on waiting for such a node, `park_waiting` found it settled
+/// and queued the run again, and the build ran it for ever and never said
+/// it was stuck (`latex_starray_starray` on a branch of relative registers).
 pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     let to = pos_of(eng, me.id)?;
     let from = unit_start(eng, me);
@@ -948,7 +954,12 @@ pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
             let inner = seg.inner.read();
             for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
                 let n = eng.node(*id);
-                if *id != me.id && n.unit == me.unit && n.is_open() {
+                if *id != me.id
+                    && n.unit == me.unit
+                    && n.is_open()
+                    && !eng.op(n.op()).final_only()
+                    && !n.held_panic.load(Ordering::Acquire)
+                {
                     return Some(*id);
                 }
             }
@@ -998,6 +1009,54 @@ pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
         cur = eng.order.next(sid, seg.lo);
     }
     None
+}
+
+/// The last node before `me` in its unit whose last commit moved a read of
+/// their chain (`sched::note_move`) and that is yet to commit again; none
+/// where every such node has settled.
+pub(crate) fn mover_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let open: Vec<NodeId> = eng
+        .movers
+        .lock()
+        .iter()
+        .copied()
+        .filter(|&x| {
+            x != me.id
+                && eng.placed_node(x).is_some_and(|n| {
+                    n.unit == me.unit
+                        && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
+                        && !n.held_panic.load(Ordering::Acquire)
+                })
+        })
+        .collect();
+    if open.is_empty() {
+        return None;
+    }
+    on_one_layout(eng, || {
+        let to = pos_of(eng, me.id)?;
+        open.iter()
+            .filter_map(|&x| pos_of(eng, x).filter(|&p| p < to).map(|p| (p, x)))
+            .max_by_key(|&(p, _)| p)
+            .map(|(_, x)| x)
+    })
+}
+
+/// An unsettled node among those whose definitions `r`, `me`'s last run,
+/// read, that moved a reader at its last commit (`Node::moves`): it may
+/// move them again. The page loop's rests do not count.
+pub(crate) fn open_definer_before(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
+    r.sources.iter().copied().find(|&by| {
+        eng.placed_node(by).is_some_and(|x| {
+            x.moves.load(Ordering::Acquire)
+                && matches!(x.state(), State::Dirty | State::Running | State::RunningDirty)
+                && x.unit == me.unit
+                && !x.held_panic.load(Ordering::Acquire)
+                && {
+                    let op = eng.op(x.op());
+                    !op.works_at_frontier() && !op.final_only()
+                }
+        })
+    })
 }
 
 /// [`hole_before`]'s answer as a read's value: the node's id.

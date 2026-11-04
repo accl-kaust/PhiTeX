@@ -1314,7 +1314,12 @@ fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
     let words = |n: usize, tag: &str| {
         let mut s = String::new();
         for k in 0..n {
-            let _ = write!(s, "{tag}{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            let _ = write!(
+                s,
+                "{tag}{}rd{}\\kern0pt\\penalty0",
+                ["o", "a", "e"][k % 3],
+                k % 17
+            );
             s.push(if k % 10 == 9 { '\n' } else { ' ' });
         }
         s
@@ -1365,7 +1370,7 @@ fn a_run_with_doubled_checkpoints_serves_a_later_edit_further_on() {
     let prelude = common::plain();
     let opts = || common::options("./long.tex", "long", "", &fx);
     let words: Vec<String> = (0..6000)
-        .map(|k| format!("w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17))
+        .map(|k| format!("w{}rd{}\\kern0pt\\penalty0", ["o", "a", "e"][k % 3], k % 17))
         .collect();
     let par = |ws: &[String]| format!("\\hsize=300pt\n{}\n\n\\bye\n", ws.join(" "));
     let mut ws = words.clone();
@@ -1379,7 +1384,7 @@ fn a_run_with_doubled_checkpoints_serves_a_later_edit_further_on() {
         (3, 5900, true),
         (4, 5950, true),
     ] {
-        ws[at] = format!("edit{k}\\kern0pt");
+        ws[at] = format!("edit{k}\\kern0pt\\penalty0");
         let text = par(&ws);
         b.edit(&text);
         let cold = common::build(opts(), Some(&prelude), &text);
@@ -1442,11 +1447,11 @@ fn a_paragraph_deleted_places_every_later_page_compressed_once() {
 }
 
 /// A page's routine that gives back a line only on a page whose last mark
-/// says so: a paragraph deleted moves the mark to another page, so a rest
-/// that went on past a moved page on what its routine gave back before
-/// (`Run::rest_begins`) has the wrong guess, on the page that now gives
-/// back and on the page that no longer does. The routine's commit runs
-/// it again: the PDF is a cold build's at every thread count.
+/// says so: a paragraph deleted moves the mark to another page, so what
+/// its routine gave back before is wrong, on the page that now gives back
+/// and on the page that no longer does. A rest waits for what the routine
+/// gives back on the page as it is now (`Run::rest_begins`): the PDF is a
+/// cold build's at every thread count.
 #[test]
 fn a_rest_gone_on_on_a_guess_is_run_again_on_what_the_routine_gave_back() {
     use std::fmt::Write as _;
@@ -1579,4 +1584,63 @@ fn a_file_the_run_opened_reads_nothing_before_it() {
             "-j{t}"
         );
     }
+
+/// A paragraph that reads `\pagetotal` before its first checkpoint and
+/// again after it, the first read leaving no trace in its state. An edit
+/// on an earlier page moves the page start reaching it (not the items
+/// between the old start and the paragraph), so it runs again and reaches
+/// the checkpoint in the same state; the page start read before the
+/// checkpoint was answered again from the run's memo after it, so it was
+/// among neither the state compared nor the reads the cutoff checks: the
+/// cutoff kept the old run's `\the\pagetotal` (ribbonproofs' framed.sty).
+#[test]
+fn cutoff_sees_the_page_start_read_before_its_checkpoint() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from(
+        "\\hsize=4in \\vsize=100pt \\parindent=0pt \\baselineskip=12pt \\parskip=0pt\n",
+    );
+    for p in 0..12 {
+        let _ = writeln!(src, "Filler {p}.\n");
+    }
+    src.push_str(
+        "Reader \\ifdim\\pagetotal<-1pt x\\fi \\count1=0 \\loop\\advance\\count1 by 1 \
+         \\ifnum\\count1<3000 \\repeat [\\the\\pagetotal]\n\n\\bye\n",
+    );
+    let prelude = common::plain();
+    let opts = || common::options("./cs.tex", "cs", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replacen("Filler 3.", "Filler 3.\\vrule height 40pt", 1);
+    b.edit(&text);
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+}
+
+/// A long line with an overfull box before the run's checkpoint on it and
+/// a paragraph overfull after it, edited past the checkpoint: the run goes
+/// on from there, and its diagnostics hold what a cold build's do. A place
+/// held the whole line: the box's report made before the checkpoint and
+/// the paragraph's start held the line without the new word (Grail, under
+/// `PHITEX_RESUME_CHECK`). What a diagnostic shows comes from the text.
+#[test]
+fn a_run_gone_on_holds_the_places_of_a_cold_build() {
+    let fx = common::fixtures().join("dvi");
+    let src = "\\hsize=1in \\parindent=0pt\n\
+         Reader \\setbox0\\hbox to 1pt{wide words} \\count1=0 \\loop\\advance\\count1 by 1 \
+         \\ifnum\\count1<3000 \\repeat \\hbox to 2in{}. Tail\n\n\\bye\n"
+        .to_owned();
+    let prelude = common::plain();
+    let opts = || common::options("./dl.tex", "dl", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replacen(". Tail", ". Tail typed", 1);
+    b.edit(&text);
+    assert!(
+        b.stats.resumed_at_mark > 0,
+        "the edit went on from no checkpoint"
+    );
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let (x, y) = (b.diagnostic_places(), cold.diagnostic_places());
+    assert!(y.len() >= 2, "{y:?}");
+    assert_eq!(x, y);
 }

@@ -678,6 +678,8 @@ pub(crate) struct Run<'c, 'a> {
     /// Macro expansions so far: told the engine every 4096 as its work
     /// (`Ctx::tick`), as the commands are.
     pub exps: u64,
+    /// The macro call next is the command loop's own ([`Run::counted_loop`]).
+    pub command_call: bool,
     pub hb_at: u64,
     pub hb_done: u64,
     /// Whether the glue `scan_glue` last gave has a spec of its own
@@ -929,6 +931,12 @@ pub(crate) struct Run<'c, 'a> {
     /// The locations the line being interpreted read before it defined
     /// them, if it did ([`Run::interp_reads`]).
     pub interp_first: Vec<Loc>,
+    /// Meanings a line interpreted looked at only for §479's `#`
+    /// ([`Run::param_look`]), not read before it defined them otherwise.
+    pub interp_param: phitex_defuse::FxHashSet<Loc>,
+    /// A `\\def`'s body scanned: the meaning asked for is only looked at for
+    /// whether it is the parameter character.
+    pub param_look: bool,
     /// [`Run::set_mean`] finds the location it defines.
     pub defining: bool,
     /// The fields a read-back nested in a line's interpretation set (a
@@ -1082,6 +1090,22 @@ pub(crate) struct Run<'c, 'a> {
     /// fire at, loaded or its own: its next read of one asks first whether
     /// a page fired there ([`Run::order_page_reg_read`]).
     pub page_regs_held: Vec<Loc>,
+    /// A finisher's piece, where the piece closes the engine scope it ran
+    /// in after the page's candidate: [`Run::fin_read_in_scope`].
+    pub fin_scope_closer: Option<phitex_defuse::NodeId>,
+    /// The fields the piece defined after the candidate whose value there
+    /// a routine before this finisher's replaced ([`Run::preload_candidate`]).
+    #[allow(clippy::option_option)]
+    pub fin_replaced: Vec<(ValueId, Option<Option<ValueId>>)>,
+    /// The run's engine reads so far noted against its candidates
+    /// ([`Run::note_engine_reads`]).
+    pub reads_noted: usize,
+    /// A finisher's routine's `\\aftergroup` tokens where its piece went on
+    /// past the candidate: for its [`crate::pages::FIRE_CONFLICT`].
+    pub fin_rtn_after: Option<ValueId>,
+    /// The box registers a finisher's routine used up that the text's
+    /// open groups bound (`\\box`, §1079): each field with what it left.
+    pub fin_boxes: Vec<(Field, ValueId)>,
     /// The serial of the writer command the command in progress recorded
     /// ([`crate::pdfout::command`]), until a read-time allocation takes
     /// it as its own ([`crate::pdfout::note_read_time`]); 0: none.
@@ -1195,6 +1219,7 @@ impl<'c, 'a> Run<'c, 'a> {
             mode_zero: false,
             cmds: 0,
             exps: 0,
+            command_call: false,
             hb_at: Run::heartbeat_start(),
             glue_own: false,
             glue_fresh: false,
@@ -1279,6 +1304,8 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_short: false,
             interp_reads: ValueId::NIL,
             interp_first: Vec::new(),
+            interp_param: phitex_defuse::FxHashSet::default(),
+            param_look: false,
             defining: false,
             interp_nested: phitex_defuse::FxHashMap::default(),
             interp_eof: false,
@@ -1323,6 +1350,11 @@ impl<'c, 'a> Run<'c, 'a> {
             cand: 0,
             cand_marks: Vec::new(),
             page_regs_held: Vec::new(),
+            fin_scope_closer: None,
+            fin_replaced: Vec::new(),
+            reads_noted: 0,
+            fin_rtn_after: None,
+            fin_boxes: Vec::new(),
             pdf_cmd: 0,
             scope_kind_memo: None,
             pubs: None,
@@ -1359,6 +1391,17 @@ impl<'c, 'a> Run<'c, 'a> {
         f
     }
 
+    /// [`Run::loc_field`] for a location the run may not have touched: its
+    /// slot is left as it is (the touched locations are the run's order,
+    /// [`crate::state::State::used_locs`]).
+    pub(crate) fn loc_field_peek(&self, loc: Loc) -> Field {
+        self.st.field(loc).unwrap_or_else(|| {
+            self.ops
+                .fields
+                .field_of(self.v, self.cx.values_epoch(), loc as usize)
+        })
+    }
+
     /// The location of field `f` (a fixed one, a meaning's, or the
     /// spill's).
     pub(crate) fn loc_of(&mut self, f: Field) -> Loc {
@@ -1384,6 +1427,7 @@ impl<'c, 'a> Run<'c, 'a> {
             self.page_regs_held.retain(|&l| l != loc);
             self.order_page_reg_read(loc)?;
         }
+        self.st.note_read(loc);
         match self.st.load_state(loc) {
             1 => Ok(()),
             2 => self.unalias(loc),
@@ -1434,6 +1478,15 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         };
         if !done.insert(loc) {
+            // (looked at only for `#`, used now)
+            if !self.param_look
+                && !self.in_skip
+                && !self.defining
+                && self.interp_param.remove(&loc)
+                && !self.st.defined_after(loc, self.interp_base)
+            {
+                self.interp_first.push(loc);
+            }
             return Ok(());
         }
         if self.st.defined_after(loc, self.interp_base) {
@@ -1441,8 +1494,15 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (read before the line defined it: what the lines before it
         // left there, [`Run::interp_reads`]; a meaning about to be
-        // defined is not read)
-        if !self.defining {
+        // defined is not read; one in a `\\def`'s body is looked at only
+        // for whether it is the parameter character, §479, one in skipped
+        // text only for whether it is a conditional, §494, which a line
+        // before it would change only by making it that:
+        // `\\providecommand`'s `\\l@ngrel@x` and `\\reserved@c` in every
+        // `.aux` of hyperref)
+        if self.param_look || self.in_skip {
+            self.interp_param.insert(loc);
+        } else if !self.defining {
             self.interp_first.push(loc);
         }
         if self.pre_memo_at != self.interp_point {
@@ -1643,6 +1703,9 @@ impl<'c, 'a> Run<'c, 'a> {
         // a page fires at: the run ends there, [`Run::order_page_reg_read`])
         self.order_page_reg_read(loc)?;
         let f = self.loc_field(loc);
+        if self.fin_scope_closer.is_some() && self.fin_read_in_scope(loc, f)? {
+            return Ok(());
+        }
         let r = self.st.get(self.cx, self.v, loc, f);
         if r.is_err() {
             note_stop(self.op_name(), f);
@@ -1715,6 +1778,27 @@ impl<'c, 'a> Run<'c, 'a> {
             && (global || self.innermost_group().is_none())
     }
 
+    /// Whether a step of integer register `loc` can be a step of the run's
+    /// map, published as a relation so a reader later on is asked as soon
+    /// as the value moves, not after every stepping run before it has run
+    /// again: as [`Run::map_ok`], and after a candidate too, the value at
+    /// the candidate kept (`State::add`), for a register no routine defines.
+    pub(crate) fn step_ok(&mut self, loc: Loc, global: bool) -> bool {
+        if self.cand_marks.is_empty() {
+            return self.map_ok(loc, global);
+        }
+        let op = self.cx.op();
+        self.count_reg(loc).is_some()
+            && (op == self.ops.exec || op == self.ops.resume)
+            && self.doc
+            && !self.rec_load
+            && self.interp.is_none()
+            && !self.read_back_done
+            && !self.read_point_here
+            && (global || self.innermost_group().is_none())
+            && !crate::defer::deferrable(self, loc)
+    }
+
     /// An integer register's engine value as first loaded
     /// ([`Run::reg_loaded_base`]).
     /// Kept for the registers a restore can name: `\count0`–`\count255`
@@ -1778,13 +1862,18 @@ impl<'c, 'a> Run<'c, 'a> {
     /// set, where it is a page-layer register the run has not loaded and
     /// holds no map of (its own write makes it concrete): no read.
     pub(crate) fn defer_at(&mut self, loc: Loc) -> R<bool> {
-        if self.st.is_loaded(loc) || self.st.has_map(loc) || self.st.lazy(loc).is_some() {
+        if self.st.is_loaded(loc) || self.st.lazy(loc).is_some() {
             return Ok(false);
         }
         if loc as usize >= crate::fields::NSLOT {
             self.loc_field(loc);
         }
-        if self.count_reg(loc).is_none() || !crate::defer::deferrable(self, loc) {
+        // (a page-layer register a piece stepped is concrete, as the
+        // restores of §2 of the spec expect; any other is relative,
+        // docs/note-relative-counters.md §2.1, its steps in the symbol)
+        if self.count_reg(loc).is_none()
+            || (self.st.has_map(loc) && crate::defer::deferrable(self, loc))
+        {
             return Ok(false);
         }
         // (a symbol is resolved as of the piece's position: made after a
@@ -2202,7 +2291,11 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         match (fixed, table) {
             (Some(s), _) => Loc::try_from(s).unwrap_or(0),
-            (None, Some(t)) => self.numbered_loc(crate::val::CODE_NAMES[t], c.into()),
+            (None, Some(t)) => {
+                let l = self.numbered_loc(crate::val::CODE_NAMES[t], c.into());
+                self.st.bulk_take(t, c, l);
+                l
+            }
             (None, None) => self.numbered_loc("cat", c.into()),
         }
     }
@@ -2248,7 +2341,10 @@ impl<'c, 'a> Run<'c, 'a> {
         let l = if let Some(s) = crate::fields::code_slot(table, c) {
             Loc::try_from(s).unwrap_or(0)
         } else {
-            self.numbered_loc(crate::val::CODE_NAMES[table], c.into())
+            let n = c.cast_signed();
+            let l = self.numbered_loc(crate::val::CODE_NAMES[table], c.into());
+            self.st.bulk_take(table, n, l);
+            l
         };
         if self.xe && c >= 256 {
             // (XeTeX's INITEX, xetex.web §232: `\sfcode` 1000, the math
@@ -3221,6 +3317,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.set(&f, self.v.int(i64::from_ne_bytes(n.to_ne_bytes())), true);
         self.read_point_here = true;
+        self.flush_bulk_codes();
         self.read_back_done = true;
         // (a file looked for in vain before, pending: this run is the
         // read-back point now, the definitions from here keep their
@@ -3625,6 +3722,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
         // (the table kept as it changes and put back after, not copied
         // whole for each line: a copy where it keeps changes already)
+        self.flush_bulk_codes();
         let st = (!self.st.checkpoint()).then(|| self.st.clone());
         let (nc, nk) = (self.contribs.len(), self.kids.len());
         let nest_len = self.nest.len();
@@ -3639,6 +3737,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // [`Run::note_pre`], is not the line's)
         self.interp = Some(phitex_defuse::FxHashSet::default());
         self.interp_first.clear();
+        self.interp_param.clear();
         self.set("cat:64", v.int(11), false);
         // (on a list of its own, dropped after: what a line typesets,
         // an error's text, goes nowhere)
@@ -3723,6 +3822,16 @@ impl<'c, 'a> Run<'c, 'a> {
             .map(|l| str_of(v, self.loc_field(l).0))
             .filter(|n| is_read_back_definition(n))
             .collect();
+        // (looked at for `#` alone: asked of the lines before it by that,
+        // `crate::api::written_as_text`)
+        let looks: Vec<Loc> = std::mem::take(&mut self.interp_param).into_iter().collect();
+        reads.extend(
+            looks
+                .into_iter()
+                .map(|l| str_of(v, self.loc_field(l).0))
+                .filter(|n| is_read_back_definition(n))
+                .map(|n| format!("{}{n}", crate::api::PARAM_LOOK)),
+        );
         reads.sort_unstable();
         reads.dedup();
         self.interp_reads = v.list(reads.iter().map(|n| v.str(n)).collect());
@@ -3996,6 +4105,21 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// A log event (laid out by the client, [`crate::log`]).
+    /// A report for the log whose text holds a [`crate::log::LINE_MARK`]
+    /// for each line named in `marks` (a node and its line there, in
+    /// turn; [`Run::line_for_log`]).
+    pub(crate) fn log_lines(&mut self, kind: &str, text: &str, marks: Vec<i64>) -> R<()> {
+        if marks.is_empty() {
+            return self.log(kind, text);
+        }
+        let v = self.v;
+        let nl = i64::from(self.ipar(Par::newlinechar)?);
+        let marks = v.list(marks.into_iter().map(|x| v.int(x)).collect());
+        let e = v.list(vec![v.str(kind), v.str(text), v.int(nl), marks]);
+        self.contribute("log", v.seq_unit(e));
+        Ok(())
+    }
+
     pub(crate) fn log(&mut self, kind: &str, text: &str) -> R<()> {
         if kind == "error" {
             self.diag(true, text);
@@ -4104,16 +4228,27 @@ impl<'c, 'a> Run<'c, 'a> {
             });
         match &src {
             Some(s) => {
-                let mut buf = s.buf.clone();
-                if s.endch >= 0 && buf.len() > s.loc && s.ends {
+                let mut n = s.buf.len();
+                if s.endch >= 0 && n > s.loc && s.ends {
                     // the end of line character TeX appended
-                    buf.pop();
+                    n -= 1;
                 }
-                let seg: String = buf
+                let loc = s.loc.min(n);
+                // (a line of a file: its place there says where it is,
+                // its text only up to the column, for the column's bytes.
+                // What the line goes on with is not the diagnostic's, and
+                // an edit past the column leaves the place as it was: a
+                // run going on from a checkpoint before the edit holds
+                // the same one as a run from the start)
+                if let Some((f, _, _)) = s.origin
+                    && f != ValueId::UNIT
+                {
+                    n = loc;
+                }
+                let seg: String = s.buf[..n]
                     .iter()
                     .map(|&c| char::from_u32(c).unwrap_or('?'))
                     .collect();
-                let loc = s.loc.min(buf.len());
                 match s.origin {
                     Some((n, a, u)) => (n, i64::try_from(a).unwrap_or(0), u, seg, loc),
                     None => (ValueId::UNIT, -1, ValueId::UNIT, seg, loc),
@@ -4533,7 +4668,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Whether `l` is a finisher's field given where the routine reads
     /// it ([`crate::state::State::lazy`]): the run's own, read in full.
     fn lazy_pre(&self, l: Loc) -> bool {
-        self.st.lazy(l).is_some()
+        self.st.lazy(l).is_some() || self.fin_scope_closer.is_some()
     }
 
     /// Whether `tok`'s meaning is a macro whose body is a number
@@ -4954,7 +5089,14 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             let a = s.max(f.off);
             let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
-            let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a, ValueId::UNIT);
+            let mut args = slice_args_in_file(
+                v,
+                file_slice(&text, a, e).as_ref(),
+                starts,
+                f.name,
+                a,
+                ValueId::UNIT,
+            );
             let own = crate::hints::slice_hint_of(&t, s);
             let rec = loads
                 .as_deref()
@@ -6081,6 +6223,18 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
 /// start, the frame
 /// `[.., name, offset, 0, unit]`): every segment carries its origin
 /// `(name, offset, unit)`; the kind is 2 (a document's piece, not the top).
+/// Bytes `a..e` of file `text` as a slice to read: at the file's end, its
+/// last line ended even where it has no newline (§31: every line of a file
+/// ends, and its `\endlinechar` is read). A slice without one ends mid-line.
+pub(crate) fn file_slice(text: &str, a: usize, e: usize) -> std::borrow::Cow<'_, str> {
+    let s = &text[a..e];
+    if e == text.len() && !s.is_empty() && !s.ends_with('\n') {
+        format!("{s}\n").into()
+    } else {
+        s.into()
+    }
+}
+
 pub(crate) fn slice_args_in_file(
     v: &Values,
     text: &str,

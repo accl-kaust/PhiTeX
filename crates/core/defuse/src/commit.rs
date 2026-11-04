@@ -803,6 +803,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // at once: before any walk of this commit asks, `sched::settles_edge`)
     if !p.unchanged {
         node.settle_now.store(p.settle_now, Ordering::Release);
+        crate::sched::clear_move(eng, node);
     }
     if let Some(r) = node.record().filter(|_| p.unchanged) {
         p.defs.clone_from(&r.defs);
@@ -1047,6 +1048,18 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             let mut r = std::mem::take(&mut p.reads);
             r.shrink_to_fit();
             r
+        },
+        sources: {
+            let mut s = std::mem::take(&mut p.sources);
+            if (p.unchanged || p.resumed.get())
+                && let Some(r) = node.record()
+            {
+                s.extend_from_slice(&r.sources);
+            }
+            s.sort_unstable();
+            s.dedup();
+            s.retain(|&x| x != node.id);
+            s.into_boxed_slice()
         },
         // (`placed`, swapped in under the lock)
         placed: Vec::new(),
@@ -2283,7 +2296,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             Cause::Changed { field, .. } => read::reaching_at(eng, *field, node.id, false).and_then(|r| r.by),
             _ => None,
         };
+        // (its definer's walk came before this run filed the read: it
+        // moved the read all the same)
+        crate::sched::note_move(eng, by, node, &cause);
+        let at_once = |by: NodeId| match &cause {
+            Cause::Changed { field, .. } => eng
+                .placed_node(by)
+                .is_some_and(|b| eng.op(b.op()).settles_now(*field, eng.values())),
+            _ => false,
+        };
         if let Some(by) = by
+            && !at_once(by)
             && crate::sched::settles_edge(eng, by, node)
         {
             let cause = match cause {
@@ -4145,6 +4168,7 @@ pub(crate) fn edit_placed(eng: &Engine, placer: NodeId, f: impl FnOnce(&mut Vec<
         defs: r.defs.clone(),
         contribs: r.contribs.clone(),
         reads: r.reads.clone(),
+        sources: r.sources.clone(),
         placed,
         claim: r.claim,
         effect: r.effect,

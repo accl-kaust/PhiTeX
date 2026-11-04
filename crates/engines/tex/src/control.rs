@@ -92,6 +92,7 @@ impl Run<'_, '_> {
                 {
                     return Ok(());
                 }
+                self.command_call = self.cur.cmd == cmd::CALL;
                 self.expand();
                 self.ck()?;
                 if self.expansion_goes_on() {
@@ -470,6 +471,25 @@ impl Run<'_, '_> {
         // (§1210's prefixed commands are the same in every mode, and
         // `\relax` does nothing: no mode read)
         let c = self.cur.cmd;
+        // (code entries waiting: only the commands that can see no more of
+        // the table than they ask for leave them waiting)
+        if self.st.bulk_waits()
+            && !matches!(
+                c,
+                cmd::RELAX
+                    | cmd::DEF
+                    | cmd::LET
+                    | cmd::ASSIGN_INT
+                    | cmd::REGISTER
+                    | cmd::ADVANCE
+                    | cmd::DEF_CODE
+                    | cmd::CASE_SHIFT
+                    | cmd::END_GROUP
+                    | cmd::RIGHT_BRACE
+            )
+        {
+            self.flush_bulk_codes();
+        }
         // (XeTeX's `othercases` after a run of characters:
         // `check_for_post_char_toks(big_switch)`)
         if self.xe
@@ -1342,12 +1362,21 @@ impl Run<'_, '_> {
 
     /// `get_r_token` (§1215).
     fn get_r_token(&mut self) -> R<Tok> {
+        // (the name to define: its meaning is not read, [`Run::interp_first`]:
+        // `\\let\\l@ngrel@x` in every `\\providecommand` written to the `.aux`
+        // made the file one read back as its text)
+        let was = std::mem::replace(&mut self.defining, true);
         loop {
-            self.get_name_token()?;
+            let r = self.get_name_token();
+            if r.is_err() {
+                self.defining = was;
+            }
+            r?;
             if self.cur.tok != crate::val::space_tok() {
                 break;
             }
         }
+        self.defining = was;
         if !self.cur.is_cs() {
             // "Missing control sequence inserted": \inaccessible
             self.back_cur();
@@ -1408,8 +1437,14 @@ impl Run<'_, '_> {
         // step of the run's map, nothing read, published as a relation,
         // `State::add`)
         let mut pre = None;
-        if p == 0 && q == cmd::ADVANCE && self.map_ok(l, global) {
+        if p == 0 && q == cmd::ADVANCE && self.step_ok(l, global) {
             let x = self.scan_int()?;
+            // (steps on both sides of a candidate: the routine of a page
+            // firing there needs the value they make there, so the run
+            // reads the register, `State::add` keeps the value at it)
+            if !self.cand_marks.is_empty() && self.st.has_map(l) {
+                self.load(l)?;
+            }
             if self.st.add(self.v, l, x, global) {
                 self.muts += 1;
                 return Ok(());
@@ -2901,6 +2936,39 @@ impl Run<'_, '_> {
         }
         self.note_lines_read();
         Ok(Some(int_of(self.v, x) + i64::from(own.1)))
+    }
+
+    /// A line's number for a report in the log (a box's, §663): where the
+    /// client gives its node's lines, not read at all: the mark
+    /// ([`crate::log::LINE_MARK`]) and its node and place go in `marks`
+    /// and the number is made when the log is laid out, so a report does
+    /// not tie a piece to the lines before it. (The read that finds the
+    /// lines are given is taken back; a read of the number the run made
+    /// itself stands.)
+    pub(crate) fn line_for_log(
+        &mut self,
+        m: crate::run::LineMark,
+        marks: &mut Vec<i64>,
+    ) -> R<String> {
+        if let (None, _, Some(_), Some(own)) = m {
+            let f = crate::run::dline_field(self.v, own.0);
+            let given = self.cx.env(f)?.is_some();
+            if !self.dline_reads.contains(&f) {
+                self.cx.unread(f);
+            }
+            if given {
+                marks.extend([own.0.cast_signed(), i64::from(own.1)]);
+                return Ok(crate::log::LINE_MARK.to_string());
+            }
+        }
+        // (no mark's number here: a run's own file, or none, as TeX's `line`)
+        let l = self.line_of_mark(m)?;
+        Ok(if l > 0 {
+            l
+        } else {
+            i64::from(self.input_line_no()?)
+        }
+        .to_string())
     }
 
     /// The input left as one source line, for `\inputlineno`.

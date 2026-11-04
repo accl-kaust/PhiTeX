@@ -45,6 +45,57 @@ use phitex_defuse::{At, Cause, Ctx, Effect, MayDefine, NodeId, Operation, Stop, 
 use super::*;
 use crate::vprof::{PItem, ScanState};
 
+/// What a piece read across the candidates of its own it went on past,
+/// where a page can fire: `pages:used:<piece>`, a list of two. First, the
+/// stretches by [`fire_used_bucket`] of the field, each flat (field, first k,
+/// last k): a piece can read tens of thousands of fields and a finisher asks
+/// after a few. Second, the candidates it went on past. The finisher of a
+/// page firing at such a candidate reads it and, where the routine changed
+/// a field globally and the piece read it across that candidate, defines
+/// [`FIRE_CONFLICT`] (`Run::define_fire_conflict`).
+pub(crate) const FIRE_USED: &str = "pages:used";
+
+/// The lists of [`FIRE_USED`]'s first part.
+pub(crate) const FIRE_USED_BUCKETS: usize = 256;
+
+/// The list of [`FIRE_USED`]'s first part that holds field `f`.
+pub(crate) fn fire_used_bucket(f: ValueId) -> usize {
+    let h = f.raw().wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56;
+    usize::try_from(h).unwrap_or(0)
+}
+
+/// [`FIRE_USED`]' field of `piece`.
+pub(crate) fn fire_used_field(v: &Values, piece: NodeId) -> Field {
+    v.field(&format!("{FIRE_USED}:{}", piece.raw()))
+}
+
+/// A page fired at candidate `k` of a piece's own items, and its routine
+/// changed globally a field the piece used ([`FIRE_USED`]):
+/// `pages:conflict:<piece>:<k>`, every field the routine changed with the
+/// value it left (`[field, value]`, `[field]` for none), and the tokens it
+/// left after its group ([`RTN_AFTER`]), defined by that page's finisher. The piece, which went on past the candidate, goes
+/// again with those values in force there (`Run::order_after_fires`):
+/// TeX runs the routine at that `build_page`, and the text after it sees
+/// every global it set (classicthesis-xe's `\thepage` and
+/// `\glb@currsize` after a page).
+pub(crate) const FIRE_CONFLICT: &str = "pages:conflict";
+
+/// [`FIRE_CONFLICT`]' field of candidate `k` of `piece`.
+pub(crate) fn fire_conflict_field(v: &Values, piece: NodeId, k: u32) -> Field {
+    v.field(&format!("{FIRE_CONFLICT}:{}:{k}", piece.raw()))
+}
+
+/// What a routine left in field `f` where the piece's later definition
+/// stands over it (`Run::give_way`): `pages:left:<piece>:<f>`, `[value]` or
+/// `[]`. The next page's routine in the piece begins with it, TeX's routines
+/// running before that definition.
+pub(crate) const FIRE_LEFT: &str = "pages:left";
+
+/// [`FIRE_LEFT`]' field of `f` in `piece`.
+pub(crate) fn fire_left_field(v: &Values, piece: NodeId, f: Field) -> Field {
+    v.field(&format!("{FIRE_LEFT}:{}:{}", piece.raw(), f.0.raw()))
+}
+
 /// The page of a fired page, as its finisher reads it:
 /// `pages:page:<owner>:<piece>:<nth>` (raw ids, [`PageKey`]), defined by
 /// the [`Pages`] node that fired it,
@@ -1002,24 +1053,13 @@ impl Run<'_, '_> {
         let out = self
             .cx
             .read_at(r.key.field(v, PAGE_OUT), At::End(self.cx.unit()))?;
-        // (the page's routine not run on the page as it is now, but what it
-        // gave back on the page before it moved being the guess: the fold
-        // goes on, so the pages after it and their routines run beside
-        // this one, not each after the last, the chain of an edit that
-        // moves pages. The read stands: the routine's commit runs this
-        // again, on what it gave back. A guess it has not given back
-        // before, as in a first build, is waited for, and so is any on one
-        // thread, where the routine runs next anyway and the fold on the
-        // guess is done twice: para4000's deleted paragraph 184 -> 206 ms
-        // at -j1, accl 23790)
-        let beside = self.cx.has_other_threads();
         let gave = match out {
-            phitex_defuse::FieldAt::Def(x, fin) => page_out_parts(v, x)
-                .filter(|o| o.1 == r.page || (beside && o.0 == r.guess))
-                .map(|o| {
+            phitex_defuse::FieldAt::Def(x, fin) => {
+                page_out_parts(v, x).filter(|o| o.1 == r.page).map(|o| {
                     ls.after = fin.map(|f| (p.node, f));
                     o.0
-                }),
+                })
+            }
             _ => None,
         };
         let Some(gave) = gave else {

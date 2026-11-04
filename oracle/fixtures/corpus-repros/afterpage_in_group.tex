@@ -1,0 +1,15 @@
+% \afterpage{\restorepagecolor} with the page firing in a run of paragraphs
+% inside a group: the routine's \aftergroup tokens run right after that
+% build_page, so the next page has its colour back.
+% (PDF: pdflatex in the CI image)
+\documentclass{article}
+\usepackage{xcolor}
+\usepackage{pagecolor}
+\usepackage{afterpage}
+\usepackage{lipsum}
+\begin{document}
+\pagecolor{green}
+\newpage
+\newpagecolor{blue}\afterpage{\restorepagecolor}
+{\color{red}\textbf{\lipsum[1-11]}}
+\end{document}

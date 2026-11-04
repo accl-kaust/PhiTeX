@@ -530,7 +530,7 @@ impl Run<'_, '_> {
             .map(|c| std::mem::take(&mut c.memo))
             .unwrap_or_default();
         let base = self.st.base_of(v, &mut memo);
-        let base = base.map(|b| b.to_value(v, &mut |l| self.loc_field(l), &mut memo));
+        let base = base.map(|b| b.to_value(v, &mut |l| self.loc_field_peek(l), &mut memo));
         if let Some(c) = self.ck.as_mut() {
             c.memo = memo;
         }
@@ -645,6 +645,9 @@ impl Run<'_, '_> {
             c.fresh.push((c.taken.len(), unread));
             c.taken.push(ck);
         }
+        // (the reads after it are those a cutoff here or at the next run
+        // checks: what the run reads again from now on among them)
+        self.cx.reads_begin_again();
         self.cut_off(ck)
     }
 

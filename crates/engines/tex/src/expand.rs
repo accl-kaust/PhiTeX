@@ -315,6 +315,7 @@ impl Run<'_, '_> {
     /// pushed as the macro's level. No list per argument, no buffer of
     /// the run's own. A halt is raised, never returned.
     pub(crate) fn macro_call(&mut self) {
+        let command = std::mem::take(&mut self.command_call);
         // (the engine bounds a run on a guess by its work: an expansion
         // that never ends, as `\edef` of a macro calling itself, makes
         // no command)
@@ -341,6 +342,13 @@ impl Run<'_, '_> {
             return;
         };
         if m.params.is_empty() {
+            // (the passes of a loop that are plain arithmetic)
+            if command
+                && crate::countloop::has_loop_tail(&m.body, name)
+                && let Err(h) = self.counted_loop(name, &m.body)
+            {
+                return self.raise(h);
+            }
             // no arguments: the body is read in place (§390); a body
             // already in the arena is pushed by its range
             let r = self.body_range(&m.body);
@@ -1203,7 +1211,8 @@ impl Run<'_, '_> {
             }
             4 => self.scan_int()? % 2 != 0,
             5..=8 => {
-                let m = self.mode()?.m;
+                // (§1370: `mode:=0` while a `\write` is expanded, no test true)
+                let m = if self.mode_zero { 0 } else { self.mode()?.m };
                 match this_if {
                     5 => m.abs() == 1,
                     6 => m.abs() == 102,
