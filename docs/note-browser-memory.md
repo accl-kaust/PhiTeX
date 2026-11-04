@@ -30,26 +30,70 @@ does not fit: 1 + 4 + 4 GiB > 8. It says so in its panel.
 
 ## What documents use
 
-The VS Code engine (`vscode/dist/smoke.mjs`, the same core), `-j4`.
-"Written" counts the wasm pages with any byte set after the first build
-and the edits, so a page freed again still counts: it is the peak. The
-"high-water" is the highest written address below the allocator's top
-chunk, the size the memory must have.
+**Documents over about 300 pages do not build in the browser today.**
+A dense manual (the beamer user guide) needs about 8 MiB of the core's
+memory a page at 4 threads on top of about 1.1 GiB, so it fits to
+about 350 pages; plain text needs about 1.5 MiB a page and fits to
+about 1,800. The core has 4 GiB (below) and no more.
 
-| document | pages | written | high-water |
-|---|---|---|---|
-| circuitikz scenario (test/scenarios) | 1 | 366 MiB | 521 MiB |
-| one page with figures (longdoc) | 1 | 415 MiB | 575 MiB |
-| amsldoc | 44 | 684 MiB | 856 MiB |
-| a 60-frame Madrid beamer deck | 60 | 747 MiB | 915 MiB |
-| Grail (acmart, minted) | 18 | 1550 MiB | 1853 MiB |
-| beamer user guide (beameruserguide.tex) | 227 | the cold build completes (652 s at -j4, 227 pages); the first edit after it fails an allocation (496 144 bytes) and the core traps | over 4 GiB |
-| pgf manual | ~1300 | not measured: it stopped at a fatal error after 2.8 s in this setup | |
+Measured on dev 3b9fe3bfa (2026-11-04), the VS Code engine
+(`vscode/test/smoke.ts`, the same core) with a core built with
+`--features memstats` (frontends `core/src/mem.rs`: the allocations
+counted, the bytes live, their peak, and the highest end of any block,
+which on the fixed memory is the size the memory must have), a cold
+build and six edits. "Written" counts the wasm pages with any byte set
+at the end, so a page freed again still counts.
 
-A book-sized document overflows the 4 GiB a wasm32 core can have, at
--j4, by its first edit, though the native engine builds the beamer guide in about
-1 GB resident. Why the wasm core needs more than four times that is the
-question to answer before any split of the memory between tabs.
+| document | pages | -j | cold build | live peak | high-water | written |
+|---|---|---|---|---|---|---|
+| amsldoc | 44 | 4 | 202 s (its format made in the run) | 1092 MiB | 1280 MiB | 1142 MiB |
+| beamer user guide | 241 | 1 | 115 s | 2250 MiB | 2415 MiB | 2243 MiB |
+| beamer user guide | 241 | 4 | 428 s | 2794 MiB | 3114 MiB | 2758 MiB |
+| 200 sections of plain text with equations | 462 | 4 | 101 s | 1596 MiB | 1875 MiB | 1753 MiB |
+
+The same documents natively (`phitex watch --json`, jemalloc, the
+process's resident set, accl 24826 and 24832):
+
+| document | -j | cold build | resident after it | peak over the edits | `phitex build`'s peak |
+|---|---|---|---|---|---|
+| amsldoc | 1 / 4 | 3 / 4 s | 704 / 962 MiB | 739 / 1005 MiB | |
+| beamer user guide | 1 | 31-44 s | 2313-2436 MiB | 2466-2601 MiB | 2350 MiB |
+| beamer user guide | 4 | 115-119 s | 3602-3618 MiB | 3737-3763 MiB | 4141 MiB |
+
+So the wasm core needs no more than the native engine: less (its
+pointers are 4 bytes). The figure of "about 1 GB native" this note had
+was not this document's: the native engine holds 2.3 GB building the
+beamer user guide at -j1 and 3.6-4.1 GB at -j4. What the footprint is:
+
+- Not the allocator. dlmalloc's high-water is 1.07 to 1.17 times the
+  live peak in every run above: about 10% lost to fragmentation. That it
+  never returns memory does not matter on a memory that never shrinks
+  or grows. It has no per-thread arenas (one heap, one lock), and the
+  native build's jemalloc, which has them, needs more, not less.
+- Not the files. The texmf files and packs the host gives the core
+  were 23 MiB for the beamer user guide.
+- The engine's state kept per page. Live memory grows with the pages
+  typeset: 5.4 MiB a page at -j1 (1.1 GiB at the start of the text, 2.25
+  GiB at 241 pages) and 8.3 at -j4, for the beamer user guide; 1.4 MiB
+  a page for plain text. Natively the engine's tables after the beamer
+  user guide's cold build at -j1 are 8737 nodes and 1 555 095 values
+  for 2.3 GB resident.
+- -j4 does more and keeps it. At -j4 the beamer user guide's cold build
+  makes 5.4 times the allocations of -j1 in wasm (782 M against 146 M)
+  and takes 3.6 times as long (428 s against 115 s); natively it runs
+  226 141 runs against 16 440 (its second pass 191 900 against 3 955), its
+  tables 1 931 413 values (24% more) and 3.6 GB resident (56% more),
+  and 118 s against 31 s. Nothing is collected after the cold build
+  ("0 us collecting, 0 nodes freed").
+- The edit's second copy: the first edit adds about 300 MiB over the
+  cold build's live memory, at -j1 and at -j4 alike.
+
+An engine design item, not the wasm build's: what a page keeps for its
+edits (the values and checkpoints behind 5 MiB a page), and the cold
+build at -j4 making 14 times the runs of -j1 (its second pass 49
+times). ux3's
+trap at the beamer user guide's first edit (on 5a0b41465) does not
+recur on 3b9fe3bfa: 3.1 GiB of the 4 at -j4.
 
 ## Why the memory does not grow
 

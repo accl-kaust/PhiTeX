@@ -1905,6 +1905,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     show(ui, &l);
                 }
                 Event::Files(ps) => {
+                    // (asked again of what the last build read: an event
+                    // that came while the cold build ran passed when every
+                    // file did, so a save's temporary file (written, then
+                    // renamed to the main file) or a folder the build made
+                    // would build again a document no file of changed)
+                    let ps: Vec<PathBuf> = {
+                        let w = wanted.lock().unwrap_or_else(PoisonError::into_inner);
+                        ps.into_iter().filter(|p| w.wants(&root, p)).collect()
+                    };
                     for p in ps {
                         let rel = p
                             .strip_prefix(&root)

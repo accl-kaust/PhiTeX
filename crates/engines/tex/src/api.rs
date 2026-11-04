@@ -5329,6 +5329,18 @@ pub fn byte_ends(o: &[u8], n: &[u8]) -> (usize, usize) {
     while s < room && o[o.len() - 1 - s] == n[n.len() - 1 - s] {
         s += 1;
     }
+    // (at a character's start in both, for texts: two characters that
+    // differ only in their last UTF-8 byte, a Latin-1 file's é and è, share
+    // its first; a range from inside one cuts no text. A figure replaced by
+    // a JPG of its size, cut as a document's text, stopped the engine:
+    // "byte index 303 is not a char boundary")
+    let inside = |b: &[u8], i: usize| b.get(i).is_some_and(|&c| c & 0xC0 == 0x80);
+    while p > 0 && (inside(o, p) || inside(n, p)) {
+        p -= 1;
+    }
+    while s > 0 && inside(o, o.len() - s) {
+        s -= 1;
+    }
     (p, s)
 }
 

@@ -236,9 +236,9 @@ impl Run<'_, '_> {
     /// §396: "Paragraph ended before \\x was complete".
     fn runaway(&mut self, name: Tok) -> R<()> {
         let mut s = String::from("Paragraph ended before ");
-        let mut cs = String::new();
-        self.show_toks_into(&mut cs, std::slice::from_ref(&name))?;
-        s.push_str(cs.trim_end());
+        // (`sprint_cs(warning_index)`, as §338's)
+        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
+        crate::print::sprint_cs(&mut s, name, esc);
         s.push_str(" was complete");
         self.log("error", &s)
     }
