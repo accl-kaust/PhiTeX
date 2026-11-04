@@ -1175,7 +1175,13 @@ impl Run<'_, '_> {
         let mut held: Vec<(Field, Loc, Option<ValueId>)> = Vec::new();
         for l in at.locs() {
             let f = self.loc_field(l);
-            held.push((f, l, self.st.id_of(l, v)));
+            // (a register only stepped, unread: nothing it holds is a value)
+            let end = if self.st.is_loaded(l) {
+                self.st.id_of(l, v)
+            } else {
+                None
+            };
+            held.push((f, l, end));
         }
         held.sort_unstable_by_key(|x| (x.0.0.raw(), x.1));
         // (a candidate's `[value]` lists, one per value: the same value
@@ -1634,6 +1640,7 @@ impl Run<'_, '_> {
                 self.st.debug_marks(l)
             );
         }
+        self.flush_bulk_codes();
         let mut c = self.st.cont(v, &open);
         // (a checkpoint's table is its base table, the save stack with
         // it, `State::base_of`: none here, and its stamps and groups as

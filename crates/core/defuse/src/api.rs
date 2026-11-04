@@ -315,6 +315,17 @@ pub trait Operation: Send + Sync {
         false
     }
 
+    /// Whether its nodes stand in a chain (default no): each reads what
+    /// the ones before it defined, one after another along the document
+    /// (a page's routine reads the counters and marks the page before's
+    /// left). A value moving down it passes through nodes that are not
+    /// asked yet, so one waits for any node before it in the chain whose
+    /// last commit moved a read (`Node::moves`), not only for those it read
+    /// from (`sched::work`). The order of the runs only.
+    fn chains(&self) -> bool {
+        false
+    }
+
     /// Whether its nodes define alike (default yes): a relation one of
     /// them makes (`Ctx::define_rel`) is then predicted for the others
     /// that have not run (`commit::learn_shape`). An operation whose nodes

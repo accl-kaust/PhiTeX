@@ -260,3 +260,41 @@ fn an_edit_outlasts_the_wait_of_a_long_run() {
     assert_eq!(e.output(b).and_then(|x| v.as_int(x)), Some(21), "{rep:?}");
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[y]`: waits for the nodes before it, reads `x`; outputs x + y.
+struct Waits;
+
+impl Operation for Waits {
+    fn name(&self) -> &'static str {
+        "waits"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.wait_settled()?;
+        let v = cx.values();
+        let x = cx.read(v.field("x"))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+        Ok(v.int(x + v.as_int(cx.args()[0]).unwrap_or(0)))
+    }
+}
+
+/// The same for a run that began and stopped to wait: it too still owes
+/// its edit when the node it waited for ends.
+#[test]
+fn an_edit_outlasts_a_wait_in_the_run() {
+    let e = Engine::new();
+    let v = e.values();
+    let slow = e.register(Arc::new(SlowSame));
+    let waits = e.register(Arc::new(Waits));
+    let u = e.new_unit();
+    let first = e.push(u, slow, vec![v.int(1), v.int(1)]);
+    let a = e.push(u, slow, vec![v.int(1), v.int(1)]);
+    let b = e.push(u, waits, vec![v.int(10)]);
+    e.evaluate(4).unwrap();
+    assert_eq!(e.output(b).and_then(|x| v.as_int(x)), Some(11));
+    e.replace(first, slow, vec![v.int(2), v.int(1)]);
+    e.replace(a, slow, vec![v.int(300), v.int(1)]);
+    e.replace(b, waits, vec![v.int(20)]);
+    let rep = e.evaluate(4).unwrap();
+    assert_eq!(e.output(b).and_then(|x| v.as_int(x)), Some(21), "{rep:?}");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
