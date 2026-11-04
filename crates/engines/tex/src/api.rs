@@ -6682,19 +6682,16 @@ impl Build {
                 if path.trim_start_matches("./") != name {
                     continue;
                 }
-                match read(self) {
-                    Some(b) => {
-                        let x = v.list(vec![v.str(&path), v.str(&latin1(&b))]);
-                        if self.g.files[k].1 != x {
-                            self.g.files[k].1 = x;
-                            changed = true;
-                        }
-                    }
-                    None => {
-                        self.g.files.remove(k);
-                        self.g.absent.push(f);
+                if let Some(b) = read(self) {
+                    let x = v.list(vec![v.str(&path), v.str(&latin1(&b))]);
+                    if self.g.files[k].1 != x {
+                        self.g.files[k].1 = x;
                         changed = true;
                     }
+                } else {
+                    self.g.files.remove(k);
+                    self.g.absent.push(f);
+                    changed = true;
                 }
             } else if self.g.absent.contains(&f)
                 && let Some(b) = read(self)
@@ -7996,7 +7993,7 @@ impl Build {
                 let ls = head.rfind('\n').map_or(0, |k| k + 1);
                 let le = text[b..].find('\n').map_or(text.len(), |k| b + k);
                 phitex_defuse::hash_words(
-                    phitex_defuse::hash_bytes(e.raw(), text[ls..le].as_bytes()),
+                    phitex_defuse::hash_bytes(e.raw(), &text.as_bytes()[ls..le]),
                     &[
                         u64::try_from(at).unwrap_or(0),
                         phitex_defuse::hash_bytes(0, file.as_bytes()),

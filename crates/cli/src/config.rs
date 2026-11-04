@@ -536,11 +536,12 @@ fn canonical(k: &str) -> &str {
     }
 }
 
-/// What a project's `phitex.toml` is to each key, for
-/// [`without_permissions`] and its test: a project folder may be anyone's,
+/// What a project's `phitex.toml` is to each key, as
+/// [`without_permissions`] treats them, checked by its test: a project folder may be anyone's,
 /// and building it, or opening it in an editor, must run nothing it names.
 /// Keys that name a program or allow one to run, or say where files are
 /// written (a folder a program reads from), are the user's.
+#[cfg(test)]
 const USERS_ALONE: &[&str] = &[
     "shell-escape",
     "viewer",
@@ -553,6 +554,7 @@ const USERS_ALONE: &[&str] = &[
 /// Keys a project may set: what its build is, none naming anything to run
 /// (`engine` is one of PhiTeX's own, `tex::engine`, nothing started; the
 /// paths are kept inside the project by [`without_permissions`]).
+#[cfg(test)]
 const PROJECTS_TOO: &[&str] = &[
     "main",
     "file",
