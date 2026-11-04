@@ -1645,3 +1645,38 @@ fn a_run_gone_on_holds_the_places_of_a_cold_build() {
     assert!(y.len() >= 2, "{y:?}");
     assert_eq!(x, y);
 }
+
+/// A macro whose body is a head gobbling every group after it (a `.nav`
+/// file's `\sectionentry{1}{Title}{3}`, which beamer's frames expand
+/// with `\sectionentry` gobbling its five): the paragraphs that expand it
+/// read only its head and its groups' count, so a change of the
+/// characters in its groups runs none of them again. Where the head uses
+/// its argument, they all run again. Either way the edit's DVI file is a
+/// cold build's.
+#[test]
+fn a_gobbled_call_is_read_for_its_shape_only() {
+    let fx = common::fixtures().join("dvi");
+    let opts = || common::options("./t.tex", "t", "", &fx);
+    let runs = |head: &str| {
+        let mut src = format!(
+            "\\catcode`\\{{=1 \\catcode`\\}}=2 \\catcode`\\#=6\n\\font\\tenrm=cmr10 \\tenrm \\hsize=100pt \\vsize=600pt \\parindent=0pt\n\\def\\gob#1#2{{{head}}}\\gdef\\h{{\\gob{{Title one}}{{3}}}}\n\n"
+        );
+        for i in 0..20 {
+            src.push_str(&format!("\\h Paragraph {i} of the text.\\par\n\n"));
+        }
+        src.push_str("\\end\n");
+        let mut b = common::build(opts(), None, &src);
+        let text = src.replacen("Title one", "Title two", 1);
+        b.edit(&text);
+        let cold = common::build(opts(), None, &text);
+        let d = common::first_difference(&b.output().0, &cold.output().0);
+        assert!(d.is_none(), "{head:?}: the edit's DVI differs from a cold build's: {d:?}");
+        b.stats.nodes_run
+    };
+    let (gobbled, used) = (runs(""), runs("#1"));
+    eprintln!("nodes run by the edit: {gobbled} with the groups gobbled, {used} with the first used");
+    assert!(
+        gobbled + 20 <= used,
+        "the paragraphs expanding a gobbled call ran again: {gobbled} nodes run, {used} where they use it"
+    );
+}

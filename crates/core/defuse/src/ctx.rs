@@ -483,6 +483,42 @@ impl<'a> Ctx<'a> {
         Ok(x)
     }
 
+    /// `read` with one look-up, answered whole or through `p` as
+    /// `through_path` decides from the value itself: where it is true the
+    /// run depends only on `p`'s answer (recorded as `read_path` records
+    /// it, and not kept as the field's whole value, so a later `read` of
+    /// `f` records that too); where false, a whole read as `read` makes.
+    /// The value reaching me, and whether `p` was taken. (An alias
+    /// definition is read whole, followed.)
+    pub fn read_or_path(
+        &mut self,
+        f: Field,
+        p: PathId,
+        through_path: impl FnOnce(&Values, ValueId) -> bool,
+    ) -> Result<(Option<ValueId>, bool), Stop> {
+        self.check()?;
+        if let Some(&x) = self.seen.get(&f) {
+            return Ok((x, false));
+        }
+        self.before_read(f);
+        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        self.note_source(r.by);
+        self.wait_for_settling(&r)?;
+        self.hold_at_frontier(f)?;
+        if let Some(x) = r.value
+            && read::alias_of(self.values(), x).is_none()
+            && through_path(self.values(), x)
+        {
+            let y = read::apply_path(self.eng, Some(x), p);
+            self.record(ReadKind::Field { f, at: Anchor::Me }, p, y);
+            return Ok((Some(x), true));
+        }
+        self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
+        let x = self.follow_aliases(r.value)?;
+        self.seen.insert(f, x);
+        Ok((x, false))
+    }
+
     /// The node whose definition of `f` reaches me (None: the environment).
     pub fn def_site(&mut self, f: Field) -> Result<Option<NodeId>, Stop> {
         self.check()?;
