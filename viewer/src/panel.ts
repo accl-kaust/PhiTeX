@@ -2414,6 +2414,12 @@ export class Panel {
     if (!this.$("#m-time").hidden) this.timing();
   }
 
+  /** This tab joined `builds` builds in: `first` the first build's time; only the first of them is called one. */
+  joinedLate(first: number | undefined, builds: number): void {
+    if (first !== undefined && this.times.first === undefined) this.times.first = first;
+    if (builds > 1) this.paints = Math.max(this.paints, 1);
+  }
+
   /** The bars: the first build, the last edit, the edits' median, each as long as its time (the longest the full width; a short one at least a sliver). */
   private timeBars(): string {
     const t = this.times;

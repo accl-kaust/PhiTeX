@@ -116,8 +116,8 @@ test("Next change goes to the page of that change; the style popover floats over
   await t.click("#diffbar button[data-a='settings']");
   const box = await t.q(`(() => { const b = $("#diffset").getBoundingClientRect(), s = $("#stage").getBoundingClientRect(); return { pos: getComputedStyle($("#diffset")).position, w: b.width, stage: s.width }; })()`);
   assert.equal(box.pos, "absolute", "a popover, not a column beside the pages");
-  await t.click("#diffset button[data-v='changebar']");
-  await t.until(`$("#diffset button[data-v='changebar']").getAttribute("aria-pressed") === "true"`, "the style picked");
+  await t.click("#diffset button[data-bars]");
+  await t.until(`$("#diffset button[data-bars]").getAttribute("aria-checked") === "true"`, "the change bars on");
   await w.stop();
 });
 
@@ -254,6 +254,12 @@ test("a figure or a file of any extension replaced on disk rebuilds, as a full b
   await w.stop();
 });
 
+/** The problems' popover open (an error may have opened it already). */
+async function problems(t) {
+  await t.until(`$("#b-probs") && !$("#b-probs").hidden`, "the problems' button");
+  await sleep(300);
+  if (await t.q(`$("#logs").hidden`)) await t.click("#b-probs");
+}
 /** The rectangle of `word` on the pages, as find marks it (find closed after). */
 async function wordAt(t, word) {
   await t.q(`(() => { const i = $("#findq"); $("#find").hidden = false; i.value = ${JSON.stringify(word)}; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
@@ -300,8 +306,8 @@ test("the problems' kinds filter the list, the page's marks and the scrollbar's,
   const fresh = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
   const body = "{\\hsize=2cm \\noindent Incomprehensibilities characteristically.\\par}\n\nSee \\ref{nosuch}.";
   const { w, t } = await open({ "main.tex": doc(body) }, { at: fresh });
-  await t.click("#b-probs");
-  await t.until(`$("#diags [data-kind='overfull']") && $("#diags [data-kind='reference']")`, "the kinds' filters");
+  await problems(t);
+  await t.until(`!!$("#diags [data-kind='overfull']") && !!$("#diags [data-kind='reference']")`, "the kinds' filters");
   await t.until(`$$(".slot .culprit.rule.overfull").length > 0`, "the overfull box's bar on the page");
   const marks0 = await t.q(`$$("#smarks i").length`);
   assert.ok(marks0 >= 2, `scrollbar marks: ${marks0}`);
@@ -316,7 +322,7 @@ test("the problems' kinds filter the list, the page's marks and the scrollbar's,
   await w.stop();
   // (another document: the choice held)
   const { w: w2, t: t2 } = await open({ "main.tex": doc(body + "\n\nOther.") }, { at: fresh });
-  await t2.click("#b-probs");
+  await problems(t2);
   await t2.until(`$("#diags [data-kind='overfull']")?.getAttribute("aria-pressed") === "false"`, "overfull still off");
   await w2.stop();
 });
@@ -325,8 +331,8 @@ test("a problem's card shows its place on the pages (item 2); which kinds have a
   const filler = Array.from({ length: 12 }, (_, i) => `Paragraph ${i} ` + "words fill the page ".repeat(40)).join("\n\n");
   const { w, t } = await open({ "main.tex": doc(`${filler}\n\nLate \\nosuchcommand here.`) });
   await t.until(`+$("#pgn")?.textContent > 1`, "two pages");
-  await t.click("#b-probs");
-  await t.until(`$("#diags .phx-card, #diags li")`, "the card");
+  await problems(t);
+  await t.until(`!!$("#diags .phx-card, #diags li")`, "the card");
   await t.q(`($("#stage").scrollTop = 0, 1)`);
   await sleep(500);
   await t.click("#diags .phx-card li, #diags li");
@@ -362,15 +368,16 @@ test("the tab's title says the state; Settings writes the user's file; What's ne
   // (an edit: the times' bars, first build and this edit)
   w.write("main.tex", doc("Hello there."));
   await waitBuild(w, 2);
+  await t.until(`$("#st").innerText.startsWith("Built")`, "an edit's time, not called a first build");
   await t.click("#st");
-  await t.until(`$("#m-time .tbars")`, "the times as bars");
+  await t.until(`!!$("#m-time .tbars")`, "the times as bars");
   await t.key("Escape", "Escape", 27);
   // (an error: the title; Copy for an AI, its source line and nothing sent)
   await t.js(`(() => { window.__copied = null; Object.defineProperty(navigator, "clipboard", { value: { writeText: async (s) => void (window.__copied = s) }, configurable: true }); return 1; })()`);
   w.write("main.tex", bad);
   await waitBuild(w, 3);
   await t.until(`/1 error/.test(document.title)`, "the title: an error");
-  await t.click("#b-probs");
+  await problems(t);
   await t.click("#copyai");
   const copied = await t.until(`window.__copied`, "copied");
   assert.match(copied, /Undefined control sequence/);

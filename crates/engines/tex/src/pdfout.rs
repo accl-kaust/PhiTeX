@@ -2441,7 +2441,8 @@ pub(crate) fn ship(
     ];
     let marks = mark_events(v, &bx, &resolved, side);
     page_allocs(r, ids, &bx, &side.lazy, &fonts, &side.whats, marks)?;
-    ship_apart(r, page, &p, bx, side, &resolved, fonts, margins)
+    let pictures = images_shown(r, &side.whats)?;
+    ship_apart(r, page, &p, bx, side, &resolved, fonts, margins, pictures)
 }
 
 /// The page's whatsits as the writer asks for them: a form's from the
@@ -2478,6 +2479,7 @@ fn ship_apart(
     resolved: &FxHashMap<u32, ValueId>,
     fonts: Fonts,
     margins: [i32; 3],
+    pictures: u64,
 ) -> R<()> {
     let v = r.v;
     let (side_lazy, side_whats) = (&side.lazy, &side.whats);
@@ -2566,6 +2568,10 @@ fn ship_apart(
         // for among them: a run that read other ones writes another page)
         pc.fonts.digest(),
         u64::from(pc.fonts.ps.is_some()),
+        // (the pictures it shows: their bytes, which its content stream
+        // does not hold, a page showing another picture of the same size
+        // being another page to a viewer)
+        pictures,
     ];
     words.extend(pc.margins.iter().map(|&m| u64::from(m.cast_unsigned())));
     // (where its sealed lines' units are read: a page whose window moved
@@ -3042,11 +3048,6 @@ pub(crate) fn page_allocs(
                             v.int(at(10)),
                             v.int(at(11)),
                             v.int(at(13)),
-                            // (what the image is: the page shows another
-                            // picture when its file's bytes change, the
-                            // same objects counted; only the page's
-                            // identity reads it, [`images_written`] not)
-                            v.int(at(14)),
                         ]));
                     }
                 }
@@ -3389,6 +3390,45 @@ pub(crate) fn forms_named(r: &mut Run<'_, '_>, whats: &[ValueId]) -> R<Vec<i64>>
         }
     }
     out.sort_unstable();
+    Ok(out)
+}
+
+/// The bytes of the images `whats` show, directly or in the forms they
+/// name, hashed together in the order met (0: none): what a page's
+/// content stream does not hold of the pictures it draws.
+fn images_shown(r: &mut Run<'_, '_>, whats: &[ValueId]) -> R<u64> {
+    let v = r.v;
+    let mut out = 0u64;
+    let mut seen: Vec<(bool, i64)> = Vec::new();
+    let mut todo: Vec<ValueId> = whats.to_vec();
+    while let Some(w) = todo.pop() {
+        let xs = list_of(v, w);
+        let kind = xs.first().map(|&k| str_of(v, k));
+        let form = match kind.as_deref() {
+            Some("pdf:refximage") => false,
+            Some("pdf:refxform") => true,
+            _ => continue,
+        };
+        let n = xs.get(1).map_or(0, |&x| int_of(v, x));
+        if seen.contains(&(form, n)) {
+            continue;
+        }
+        seen.push((form, n));
+        if form {
+            let Some(x) = r.get(&format!("pdf:xform:{n}"))? else {
+                continue;
+            };
+            if let Some(&b) = list_of(v, x).first() {
+                let mut side = Side::default();
+                if crate::nodes::decode(v, b, &mut side).is_some() {
+                    todo.extend(side.whats);
+                }
+            }
+        } else if let Some(x) = r.get(&format!("pdf:ximage:{n}"))? {
+            let bytes = crate::val::int_at(v, x, 14).cast_unsigned();
+            out = phitex_defuse::hash_words(out.max(1), &[bytes]);
+        }
+    }
     Ok(out)
 }
 

@@ -236,6 +236,9 @@ pub type SelectFn = Box<dyn Fn(&str, (usize, usize), (usize, usize)) + Send>;
 pub struct Viewer {
     pages: Mutex<Pages>,
     diagnostics: Mutex<Value>,
+    /// The first build's time and the builds so far: what a tab that joins
+    /// later was not told.
+    built_times: Mutex<(Option<f64>, u64)>,
     asks: Mutex<Vec<Ask>>,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
     building: AtomicBool,
@@ -281,6 +284,7 @@ impl Default for Viewer {
         Viewer {
             pages: Mutex::new(Pages::default()),
             diagnostics: Mutex::new(json!([])),
+            built_times: Mutex::new((None, 0)),
             asks: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
             building: AtomicBool::new(false),
@@ -727,6 +731,13 @@ impl Viewer {
         if let Some(c) = &b.changed {
             self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
         }
+        {
+            let mut t = lock(&self.built_times);
+            t.1 += 1;
+            if b.parts.get("cold") == Some(&json!(true)) {
+                t.0 = Some(b.ms);
+            }
+        }
         // (the build's time and parts: a timing popover's, the first build's
         // too, which has no change to time from)
         let mut e = serde_json::Map::new();
@@ -968,6 +979,10 @@ impl Viewer {
                     Some(Err(e)) => fail(&e),
                     None => fail("no preferences here"),
                 }
+            }
+            "info" if text("what").as_deref() == Some("built") => {
+                let t = lock(&s.built_times);
+                ok(json!({"first_ms": t.0, "builds": t.1}))
             }
             "info" => {
                 let what = text("what").unwrap_or_default();

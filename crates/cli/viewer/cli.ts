@@ -482,6 +482,10 @@ sock.onOpen = () => {
   panel.connection(true);
   if (started) return void session.resync();
   started = true;
+  // (a tab that joins after the first build: its time for the bars, and its first page not called one)
+  void sock.request({ op: "info", what: "built" }).then((r) => {
+    if (r.ok && Number(r.json?.builds) > 0) panel.joinedLate(typeof r.json?.first_ms === "number" ? r.json.first_ms : undefined, Number(r.json.builds));
+  });
   void session.start();
 };
 // (never connected: the card says so, not "Reading" forever; a browser add-on
