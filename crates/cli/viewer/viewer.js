@@ -1,5 +1,146 @@
 // phitex's live viewer: viewer/src and crates/cli/viewer/cli.ts; made by scripts/viewer-bundle.sh (AGPL-3.0-only)
 
+// viewer/src/diagnostics.ts
+var KINDS = [
+  ["error", "Errors"],
+  ["overfull", "Overfull"],
+  ["underfull", "Underfull"],
+  ["reference", "References"],
+  ["font", "Fonts"],
+  ["other", "Other"]
+];
+function kindOf(d) {
+  if (d.severity === "error" || d.severity === "fatal") return "error";
+  const m = d.message;
+  if (/^Overfull \\[hv]box|^Tight \\[hv]box/.test(m)) return "overfull";
+  if (/^Underfull \\[hv]box|^Loose \\[hv]box/.test(m)) return "underfull";
+  if (/[Rr]eference|[Cc]itation|database entry|undefined references|\bLabel\b/.test(m)) return "reference";
+  if (/[Ff]ont|Missing character/.test(m)) return "font";
+  return "other";
+}
+function lineAt(text, i) {
+  let n = 1;
+  for (let k = 0; k < i; k++) if (text.charCodeAt(k) === 10) n++;
+  return n;
+}
+function scan(text) {
+  const open = [];
+  const stray = [];
+  const dollars = [];
+  let paraDollars = [];
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (c === "%") {
+      while (i < text.length && text[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "{") open.push(i);
+    else if (c === "}") {
+      if (open.length) open.pop();
+      else stray.push(i);
+    } else if (c === "$") {
+      if (text[i + 1] === "$") i++;
+      paraDollars.push(i);
+    } else if (c === "\n" && /^[ \t]*\n/.test(text.slice(i + 1, i + 40))) {
+      if (paraDollars.length % 2) dollars.push(paraDollars.at(-1));
+      paraDollars = [];
+    }
+  }
+  if (paraDollars.length % 2) dollars.push(paraDollars.at(-1));
+  return { openBraces: open, strayBraces: stray, openDollars: dollars };
+}
+var LATEX = /\\(documentclass|usepackage|begin\{[A-Za-z*]+\}|end\{[A-Za-z*]+\}|section|subsection|maketitle|cite|ref|label|emph|textbf|textit)\b/g;
+function diagnose(files, main, build) {
+  const out = [];
+  for (const [file, text] of Object.entries(files)) {
+    if (!/\.(tex|sty|def)$/i.test(file)) continue;
+    const s = scan(text);
+    if (s.openBraces.length) {
+      const at = s.openBraces[0];
+      out.push({
+        severity: "warning",
+        code: "unclosed-brace",
+        message: `{ never closed${s.openBraces.length > 1 ? ` (${s.openBraces.length} open)` : ""}: the group runs to the end of the file`,
+        file,
+        line: lineAt(text, at)
+      });
+    }
+    for (const at of s.strayBraces.slice(0, 3))
+      out.push({ severity: "warning", code: "stray-brace", message: "} with no { to close", file, line: lineAt(text, at) });
+    for (const at of s.openDollars.slice(0, 3))
+      out.push({ severity: "warning", code: "unclosed-math", message: "$ never closed in this paragraph", file, line: lineAt(text, at) });
+    for (const m of text.matchAll(/(^|[^\\])\\[gex]?def\s*\\([A-Za-z@]+)([^{\n%]*)$/gm))
+      out.push({ severity: "warning", code: "def-no-body", message: `\\${m[2]} is defined with no { body } on its line`, file, line: lineAt(text, m.index + m[1].length) });
+    const ifs = [...text.matchAll(/\\if[a-z]*\b/g)];
+    const fis = (text.match(/\\fi\b/g) ?? []).length;
+    if (ifs.length > fis && !/\\[gex]?def/.test(text))
+      out.push({ severity: "info", code: "unclosed-if", message: `${ifs.length - fis} \\if\u2026 without \\fi`, file, line: lineAt(text, ifs.at(-1).index) });
+    for (const m of text.matchAll(/\\input\s*\{?([^\s}\\%]+)/g)) {
+      const n = m[1];
+      if (!(n in files) && !(`${n}.tex` in files) && !/\.(aux|bbl|ind|toc)$/.test(n) && !n.startsWith("\\"))
+        out.push({ severity: "warning", code: "missing-file", message: `\\input ${n}: no such file in the project`, file, line: lineAt(text, m.index) });
+    }
+    const latex = build?.latex ? [] : [...new Set(text.match(LATEX) ?? [])];
+    if (latex.length) {
+      const first = text.search(LATEX);
+      out.push({
+        severity: "error",
+        code: "latex",
+        message: `LaTeX is not supported yet (dropped): ${latex.slice(0, 5).join(" ")}${latex.length > 5 ? " \u2026" : ""}`,
+        file,
+        line: lineAt(text, first)
+      });
+    }
+    let nonAscii = 0;
+    let firstNon = -1;
+    for (let i = 0; i < text.length; i++)
+      if (text.charCodeAt(i) > 127) {
+        nonAscii++;
+        if (firstNon < 0) firstNon = i;
+      }
+    if (nonAscii && !build?.latex)
+      out.push({ severity: "info", code: "non-ascii", message: `${nonAscii} non-ASCII characters: PhiTeX's fonts may not typeset them`, file, line: lineAt(text, firstNon) });
+  }
+  if (main && files[main] !== void 0 && !/\\(bye|end|enddocument)\b/.test(files[main]))
+    out.push({ severity: "info", code: "no-end", message: "no \\bye: the last page ships at the end of the file anyway", file: main });
+  for (const f of build?.packageErrors ?? [])
+    out.push({ severity: "error", code: "package-download", message: `couldn't download ${f.name}: ${f.error}` });
+  if (build?.texError) {
+    const e = build.texError;
+    const stuck = e.missing && build.unavailable?.includes(e.missing);
+    const failed = e.missing && build.packageErrors?.some((f) => f.name === e.missing);
+    out.push({
+      severity: "error",
+      code: e.missing ? "tex-missing-file" : "tex-error",
+      message: e.missing ? `${e.missing} not found${stuck ? ` in the project or ${build.packageSource ?? "the package source"}` : failed ? " (its download failed, above)" : " (still downloading?)"}: the build stopped here` : e.message,
+      file: e.file ?? void 0,
+      line: e.line ?? void 0,
+      detail: e.context
+    });
+  }
+  if (build) {
+    if (build.pending)
+      out.push({ severity: "warning", code: "pending", message: `${build.pending} part${build.pending === 1 ? "" : "s"} not read: out of fuel (a loop?) or unsupported` });
+    if (build.undefinedNames?.length) out.push({ severity: "warning", code: "undefined", message: `undefined: ${build.undefinedNames.join(" ")}` });
+    const optional = [...new Set(build.unavailable?.filter((n) => n !== build.texError?.missing).map((n) => n.replace(/(\.[a-z]+)\.tex$/, "$1")))];
+    if (optional.length) {
+      const names = optional.slice(0, 6).join(" ") + (optional.length > 6 ? " \u2026" : "");
+      out.push({
+        severity: "info",
+        code: "package-unavailable",
+        message: build.packageSource ? `looked for and not found in ${build.packageSource} (usually optional): ${names}` : `packages are not downloaded yet: ${names}`
+      });
+    }
+    if (build.pages === 0) out.push({ severity: "warning", code: "no-pages", message: "no page shipped yet" });
+  }
+  const rank = { error: 0, warning: 1, info: 2 };
+  return out.sort((a, b) => rank[a.severity] - rank[b.severity]);
+}
+
 // viewer/src/engines.ts
 var ENGINES = {
   pdflatex: { label: "pdfLaTeX", ready: true },
@@ -330,12 +471,57 @@ var Viewer = class {
    * set, the last one's replaced ([] clears). Never scrolls, never asks
    * for a page: a page not drawn yet shows them when it is (paint keeps them).
    */
+  /**
+   * Where places on the pages are along the whole scroll, as fractions
+   * (0 the top of the first page, 1 the end of the last): the scrollbar's
+   * marks (panel.ts). `y` in PDF points from the page's top.
+   */
+  fractions(places) {
+    const total = this.scroller.scrollHeight || 1;
+    return places.map(({ k, y }) => {
+      const s = this.slots[k];
+      if (!s) return -1;
+      return (s.el.offsetTop + y / this.size.h * s.el.offsetHeight) / total;
+    });
+  }
+  /** Scroll so page `k`'s place `y` (PDF points from its top) is a third down the view. */
+  scrollToPlace(k, y) {
+    const s = this.slots[k];
+    if (!s) return;
+    this.scroller.scrollTo({ top: s.el.offsetTop + y / this.size.h * s.el.offsetHeight - this.scroller.clientHeight / 3 });
+  }
+  /** The culprits drawn last (a page painted later draws its bars again). */
+  culpritMarks = [];
   culprits(marks) {
+    this.culpritMarks = marks;
     for (const m of this.root.querySelectorAll(".culprit")) m.remove();
     const { w, h } = this.size;
-    for (const { k, boxes: boxes2, severity, i } of marks) {
+    for (const { k, boxes: boxes2, severity, i, rule, amount } of marks) {
       const s = this.slots[k];
       if (!s) continue;
+      if (rule && boxes2.length) {
+        const [x, y, bw, bh] = boxes2[0];
+        const lines2 = [...s.el.querySelectorAll("text")].map((t) => LAYER_LINES.get(t)).filter((l) => !!l && !!l.text).sort((a, b) => a.y - b.y);
+        const right = (l) => l.rs?.[l.rs.length - 1] ?? l.x + l.w;
+        let at = lines2.findIndex((l) => l.y >= y && l.y - l.size <= y + bh);
+        let line = at >= 0 ? lines2[at] : void 0;
+        if (line && amount) {
+          const par = [line];
+          for (let j = at + 1; j < lines2.length && lines2[j].y - lines2[j - 1].y <= lines2[j].size * 1.6; j++) par.push(lines2[j]);
+          const ends = par.map(right).sort((a, b) => a - b);
+          const just = ends[ends.length >> 1];
+          line = par.reduce((best, l) => Math.abs(right(l) - just - amount) < Math.abs(right(best) - just - amount) ? l : best, line);
+        }
+        const end = line ? right(line) : x + bw;
+        const top = line ? line.y - line.size * 0.75 : y;
+        const ht = line ? line.size * 0.95 : bh;
+        const m = document.createElement("div");
+        m.className = `culprit rule ${rule}`;
+        if (i !== void 0) m.dataset.i = String(i);
+        Object.assign(m.style, { left: `${(end + 1.5) / w * 100}%`, top: `${top / h * 100}%`, width: `${5 / w * 100}%`, height: `${ht / h * 100}%` });
+        s.el.append(m);
+        continue;
+      }
       for (const [x, y, bw, bh] of boxes2) {
         const m = document.createElement("div");
         m.className = `culprit ${severity}`;
@@ -510,6 +696,7 @@ var Viewer = class {
     }
     const boxes2 = painted.map((s) => s.el.getBoundingClientRect());
     painted.forEach((s, i) => this.snap(s, boxes2[i]));
+    if (this.culpritMarks.some((m) => m.rule && painted.some((s) => Number(s.el.dataset.k) === m.k))) this.culprits(this.culpritMarks);
     if (this.toPaint.size) this.paintFrame = requestAnimationFrame(() => this.paintSome());
   }
   /** The format changed: every page is to be drawn again (as it comes into view). */
@@ -859,6 +1046,16 @@ header:active { cursor: grabbing; }
 .timing { width: 340px; padding: 12px 14px; font-variant-numeric: tabular-nums; }
 .timing .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 8px; }
 .timing .head span { color: var(--ph-fg2); }
+/* (Did you know: under the opening's step, quiet) */
+.opening .steps .hint { margin-top: 10px; color: var(--ph-fg2); font-size: 12px; line-height: 1.4; max-width: 420px; }
+/* (the first build beside the edits: bars as long as their times) */
+.timing .tbars { padding: 4px 12px 8px; display: grid; gap: 4px; }
+.timing .tb { display: grid; grid-template-columns: 88px 1fr auto; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+.timing .tb .k { color: var(--ph-fg2); }
+.timing .tb .track { height: 8px; border-radius: 4px; background: var(--ph-hover, rgb(0 0 0 / 6%)); overflow: hidden; }
+.timing .tb .track i { display: block; height: 100%; border-radius: 4px; background: var(--ph-fg2); }
+.timing .tb .track i.edit, .timing .tb .track i.median { background: var(--ph-progress, #f58f2d); }
+.timing .tb.x { display: block; color: var(--ph-fg2); font-size: 11px; }
 .timing .head b { font-size: 20px; font-weight: 600; }
 .timing .row { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; padding: 7px 0; border-top: 1px solid var(--ph-border); }
 .timing .row .k { color: var(--ph-fg2); }
@@ -874,6 +1071,12 @@ header:active { cursor: grabbing; }
 .timing .foot.err { color: var(--ph-danger); }
 
 /* problems: Overleaf's log entries, in a popover under the bar */
+/* (the problems' filters: a kind a pill, on or off) */
+.logs .kinds { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 12px 8px; border-bottom: 1px solid var(--ph-border); }
+.logs .kinds button { all: unset; cursor: pointer; padding: 2px 9px; border: 1px solid var(--ph-border); border-radius: var(--ph-pill); font-size: 12px; font-variant-numeric: tabular-nums; }
+.logs .kinds button[aria-pressed=true] { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.logs .kinds button:hover { background: var(--ph-hover); }
+.logs .kinds button[aria-pressed=true]:hover { background: var(--ph-accent); }
 .logs { right: 6px; top: 4px; width: min(460px, calc(100% - 12px)); max-height: calc(100% - 8px); overflow: auto; padding: 0; }
 .logs > header { all: unset; display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 14px; position: sticky; top: 0; z-index: 1;
   background: var(--ph-menu); border-bottom: 1px solid var(--ph-border); font-weight: 600; }
@@ -903,6 +1106,15 @@ header:active { cursor: grabbing; }
 .diffbar button { all: unset; cursor: pointer; padding: 2px 8px; border-radius: var(--ph-radius); color: var(--ph-fg2); white-space: nowrap; }
 .diffbar button:hover:not(:disabled) { background: var(--ph-hover); color: var(--ph-fg); }
 .diffbar button:disabled { opacity: .4; cursor: default; }
+/* (Diff | Current: which pages are shown, the one shown filled; the diff's style on its half) */
+.diffbar .seg { display: inline-flex; border: 1px solid var(--ph-accent); border-radius: var(--ph-pill); overflow: hidden; }
+.diffbar .seg button { border-radius: 0; padding: 2px 10px; color: var(--ph-accent); font-weight: 600; }
+.diffbar .seg button[aria-pressed=true] { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.diffbar .seg button[aria-pressed=true]:hover:not(:disabled) { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.diffbar .seg .chev { font-weight: 400; margin-left: 2px; }
+.diffset .row.bars button { padding: 1px 10px; }
+.diffset .row.bars button[aria-checked=true] { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg); }
+.diffset .row.bars button:disabled { opacity: .45; cursor: default; }
 .diffbar button.cur { background: var(--ph-hover); color: var(--ph-fg); }
 .diffbar .sep { width: 1px; align-self: stretch; margin: 2px; background: var(--ph-border); }
 .diffset { display: none; left: 50%; transform: translateX(-50%); top: 4px; width: 320px; max-height: calc(100% - 12px); overflow: auto; padding: 12px; font-size: 12px; }
@@ -955,6 +1167,17 @@ header:active { cursor: grabbing; }
 .slot .mark.fnd { background: rgb(255 214 0 / 40%); box-shadow: none; transition: none; }
 .slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); box-shadow: 0 0 0 1px rgb(150 100 0 / 90%); }
 .slot .culprit { position: absolute; pointer-events: none; }
+/* (the marks along the pages' scrollbar: the problems' places and the diff's changes) */
+.smarks { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
+.smarks[hidden] { display: none; }
+.smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); }
+.smarks i.error { background: var(--ph-danger, #d93025); }
+.smarks i.change { background: var(--ph-accent, #1d3e72); }
+.phx-card[data-key] { cursor: pointer; }
+/* (an overfull box's bar at its line's end, pdflatex's draft rule, drawn by the viewer only; an underfull's hollow) */
+.slot .culprit.rule::after { display: none; }
+.slot .culprit.rule.overfull { background: #1b222c; }
+.slot .culprit.rule.underfull { box-shadow: inset 0 0 0 1.5px #c77700; }
 /* (a culprit hovered: its problem's message, a small tooltip under the line) */
 .ctip { position: absolute; z-index: 8; max-width: min(420px, calc(100% - 16px)); display: flex; gap: 6px; align-items: flex-start; padding: 5px 9px;
   background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius);
@@ -1801,6 +2024,21 @@ function still() {
   } };
 }
 
+// viewer/src/hints.ts
+var HINTS = [
+  { text: "Double-click a word on the page to go to its source." },
+  { text: "Builds run by themselves as you type: Rebuild is for a change made outside the editor." },
+  { text: "Press ` to see everything phitex watch printed in the terminal.", hosts: ["watch"] },
+  { text: "Press ? over the pages for the keyboard shortcuts.", hosts: ["watch"] },
+  { text: "Compare shows what changed since an earlier version, marked as latexdiff marks it.", hosts: ["watch", "vscode"] },
+  { text: "Put \\label after \\caption: \\ref then gives the figure's number, not the section's." },
+  { text: "A ~ is a space the line never breaks at: Figure~\\ref{fig:plot}." },
+  { text: "Donald Knuth began TeX in 1977; its version number gets one more digit of \u03C0 at each release (3.141592653)." }
+];
+function hintsFor(host2) {
+  return HINTS.filter((h) => !h.hosts || h.hosts.includes(host2)).map((h) => h.text);
+}
+
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
 var MAKING = "Making the format, once per PhiTeX update";
@@ -2008,6 +2246,7 @@ var Panel = class {
       <button type="button" role="menuitemcheckbox" id="x-culprits" aria-checked="true"><span class="check">\u2713</span><span>Underline problems<span class="desc">A wavy line under what each error and warning is about</span></span></button>
       <button type="button" role="menuitemcheckbox" id="dbg" aria-checked="false"><span class="check"></span><span>Debug check<span class="desc">Compare with a fresh build every 5 s</span></span></button>
       <hr>
+      ${item2("x-settings", "tips", "Settings\u2026")}
       ${item2("x-tips", "tips", "What's new")}
       ${item2("x-keys", "keyboard", "Keyboard shortcuts", "?")}
       ${item2("x-about", "info", "About PhiTeX")}
@@ -2017,8 +2256,8 @@ var Panel = class {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
-    <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div></div></div>
+    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
     <div class="menu sheet-pop" id="sheet" role="dialog" aria-label="PhiTeX settings" hidden>
@@ -2056,6 +2295,7 @@ var Panel = class {
     offer("#x-culprits", !!ev.onBoxes);
     offer("#tour", !!ev.onTour);
     offer("#news", !!ev.onNews);
+    offer("#x-settings", !!ev.onSettings);
     const menus = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
     this.menus = menus;
     for (const [b, m] of menus)
@@ -2078,7 +2318,8 @@ var Panel = class {
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
     this.$("#x-contents").onclick = this.$("#b-side").onclick = () => (this.menu(null), this.side());
     this.$("#x-find").onclick = this.$("#b-find").onclick = () => (this.menu(null), this.find(true));
-    this.$("#x-tips").onclick = () => (this.menu(null), this.tips("fresh"));
+    this.$("#x-tips").onclick = () => (this.menu(null), ev.onNews ? ev.onNews() : this.tips("fresh"));
+    this.$("#x-settings").onclick = () => (this.menu(null), ev.onSettings?.());
     this.$("#x-keys").onclick = () => {
       this.menu(null);
       this.$("#keyhelp").hidden = false;
@@ -2141,7 +2382,11 @@ var Panel = class {
         return ev.onGoto(at.dataset.file, Number(at.dataset.line) || 1);
       }
       const d = e.target.closest(".diag[data-line]");
-      if (d) ev.onGoto(d.dataset.file, Number(d.dataset.line));
+      if (d) return ev.onGoto(d.dataset.file, Number(d.dataset.line));
+      const card = e.target.closest(".phx-card[data-key]");
+      const place3 = card && this.culpritPlaces.get(card.dataset.key);
+      if (place3) this.viewer.mark(place3.k, [place3.box]);
+      else if (card) this.msg("Not on the pages (no text of it was typeset)", false, true);
     };
     this.$("#stage").addEventListener("pointerdown", () => {
       this.menu(null);
@@ -2184,7 +2429,7 @@ var Panel = class {
     this.darkPdf(this.darkPref(), false);
     window.addEventListener("resize", () => this.place());
     const stage = this.$("#stage");
-    new ResizeObserver(() => this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }).observe(stage);
+    new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }, this.drawScrollMarks())).observe(stage);
     new ResizeObserver(() => {
       this.fitSheet();
       if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : void 0;
@@ -2537,15 +2782,50 @@ var Panel = class {
     if (!this.ev.onBoxes) return;
     this.culpritDiags = diags;
     if (!this.culpritsOn) return void (++this.culpritsSeq, this.culpritsOf = "", this.viewer.culprits([]), this.$("#ctip").hidden = true);
-    const want = diags.filter((d) => !!d.problem?.file && !!d.problem.range && d.problem.severity !== "note").map((d) => ({ file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? "warning" : "error", message: d.message })).sort((a, b) => a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1).slice(0, 20);
-    const of = JSON.stringify([want, this.pageHashes]);
+    const want = diags.filter((d) => !!d.problem?.file && !!d.problem.range && d.problem.severity !== "note").filter((d) => !this.hiddenKinds.has(kindOf(d))).map((d) => {
+      const k = kindOf(d);
+      const amount = Number(/\(([\d.]+)pt too (?:wide|high)\)/.exec(d.message)?.[1]) || void 0;
+      return { file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? "warning" : "error", message: d.message, rule: k === "overfull" || k === "underfull" ? k : void 0, amount };
+    }).sort((a, b) => a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1).slice(0, 20);
+    const of = JSON.stringify([want, this.pageHashes, [...this.hiddenKinds]]);
     if (of === this.culpritsOf) return;
     this.culpritsOf = of;
     const seq = ++this.culpritsSeq;
-    const found = await Promise.all(want.map((w, i) => this.ev.onBoxes(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i })), () => [])));
+    const found = await Promise.all(want.map((w, i) => this.ev.onBoxes(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i, rule: w.rule, amount: w.amount })), () => [])));
     if (seq !== this.culpritsSeq) return;
     this.culpritsDrawn = want;
     this.viewer.culprits(found.flat());
+    this.culpritPlaces = new Map(want.map((w, i) => [`${w.file}\0${w.range[0]}`, found[i][0] ? { k: found[i][0].k, box: found[i][0].boxes[0] } : null]));
+    this.problemMarks = want.flatMap((w, i) => found[i][0]?.boxes[0] ? [{ k: found[i][0].k, y: found[i][0].boxes[0][1], cls: w.severity, title: w.message }] : []);
+    this.drawScrollMarks();
+  }
+  /** Each problem's first place on the pages, by its file and byte (a card's "on the page"). */
+  culpritPlaces = /* @__PURE__ */ new Map();
+  /** The scrollbar's marks: the problems' places, and the diff's changes (diffMarks). */
+  problemMarks = [];
+  changeMarks = [];
+  /** The diff's changes' places (page from 0, height in PDF points), marked along the scrollbar; none: gone. */
+  diffMarks(changes) {
+    this.changeMarks = changes.map((c) => ({ ...c, cls: "change" }));
+    this.drawScrollMarks();
+  }
+  /** The marks along the pages' scrollbar, each where its place is in the whole scroll; a click goes there. */
+  drawScrollMarks() {
+    const el = this.$("#smarks");
+    const marks = [...this.problemMarks, ...this.changeMarks];
+    el.replaceChildren();
+    el.hidden = !marks.length;
+    if (!marks.length) return;
+    const fr = this.viewer.fractions(marks);
+    marks.forEach((m, i) => {
+      if (fr[i] < 0) return;
+      const t = document.createElement("i");
+      t.className = m.cls;
+      t.title = m.title;
+      t.style.top = `${(fr[i] * 100).toFixed(3)}%`;
+      t.onclick = () => this.viewer.scrollToPlace(m.k, m.y);
+      el.append(t);
+    });
   }
   /** The underlines on or off (`keep`: remembered). */
   culpritsShown(on, keep = true) {
@@ -2598,12 +2878,36 @@ var Panel = class {
     };
     const list = this.$("#diags");
     list.innerHTML = "";
-    for (const d of diags.slice(0, 50)) {
+    const byKind = /* @__PURE__ */ new Map();
+    for (const d of diags) byKind.set(kindOf(d), (byKind.get(kindOf(d)) ?? 0) + 1);
+    if (byKind.size > 1 || this.hiddenKinds.size) {
+      const f = document.createElement("div");
+      f.className = "kinds";
+      f.setAttribute("role", "group");
+      f.setAttribute("aria-label", "Show");
+      for (const [k, name] of KINDS) {
+        const n = byKind.get(k);
+        if (!n) continue;
+        const b = document.createElement("button");
+        b.type = "button";
+        b.dataset.kind = k;
+        b.setAttribute("aria-pressed", String(!this.hiddenKinds.has(k)));
+        b.textContent = `${name} ${n}`;
+        b.onclick = (e) => (e.stopPropagation(), this.toggleKind(k));
+        f.append(b);
+      }
+      list.append(f);
+    }
+    for (const d of diags.filter((d2) => !this.hiddenKinds.has(kindOf(d2))).slice(0, 50)) {
       if (d.problem) {
         const card = document.createElement("ol");
         card.className = "phx-card phx-inline";
         card.setAttribute("role", "listitem");
         card.innerHTML = problemHtml(d.problem);
+        if (d.problem.file && d.problem.range) {
+          card.dataset.key = `${d.problem.file}\0${d.problem.range[0]}`;
+          card.title = "Show it on the page (its file:line opens it in the editor)";
+        }
         list.append(card);
         continue;
       }
@@ -2633,6 +2937,15 @@ var Panel = class {
       more.textContent = `\u2026 and ${diags.length - 50} more`;
       list.append(more);
     }
+    if (diags.some((d) => d.severity === "error" || d.severity === "warning")) {
+      const b = document.createElement("button");
+      b.className = "reportbtn";
+      b.id = "copyai";
+      b.textContent = "Copy for an AI assistant";
+      b.title = "The errors, the source lines around them and the end of the log, to paste into the assistant you use: nothing is sent anywhere";
+      b.onclick = (e) => (e.stopPropagation(), void this.copyForAi(diags));
+      list.append(b);
+    }
     if (this.ev.onReport) {
       const b = document.createElement("button");
       b.className = "reportbtn";
@@ -2659,6 +2972,30 @@ var Panel = class {
     this.stale(s);
     this.renderStatus();
     queueMicrotask(() => this.emit());
+  }
+  /** Copy for an AI assistant: the first problems (errors first), each with its place, message, help and source lines around it, and the log's end; on the clipboard, nothing sent. */
+  async copyForAi(diags) {
+    const pick2 = [...diags].sort((a, b) => a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1).slice(0, 5);
+    const parts = ["I'm building a LaTeX document and get these problems. What is wrong, and how do I fix it?", ""];
+    for (const d of pick2) {
+      const p = d.problem;
+      const file = p?.file ?? d.file, line = p?.line ?? d.line;
+      parts.push(`${d.severity}: ${d.message}${file ? ` (${file}${line ? `:${line}` : ""})` : ""}`);
+      if (p?.help.length) parts.push(p.help.join(" "));
+      const lines2 = file && line ? await this.ev.onLines?.(file, line).catch(() => null) : null;
+      if (lines2?.length) parts.push("```latex", ...lines2.map(([n, t]) => `${String(n).padStart(4)}${n === line ? ">" : " "} ${t}`), "```");
+      else if (p?.excerpt) parts.push("```latex", p.excerpt.text, "```");
+      parts.push("");
+    }
+    const log2 = await this.ev.onLog?.().catch(() => null);
+    if (log2) parts.push("The end of the log:", "```", ...log2.split("\n").slice(-40), "```");
+    const text = parts.join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      this.msg("Copied: paste it into your AI assistant", false, true);
+    } catch {
+      this.msg("Couldn't copy to the clipboard", true, true);
+    }
   }
   /** The reading step's last state, and when the sheet last changed (redrawn at most every 50 ms). */
   readNow;
@@ -2742,9 +3079,25 @@ var Panel = class {
   /** The sheet's step: what, how far (undefined: not known), and the detail; the sheet put up first if it isn't. */
   /** This opening's typesetting has begun (the build running, or pages shipped): a later fetch said under it. */
   typesetting = false;
+  /** The "Did you know" under the opening: one hint a few seconds, from 2 s into a first build, gone with the sheet. */
+  hintTimer;
+  hintAt = Math.floor(Math.random() * 1e3);
+  hints(on) {
+    const el = this.$("#hint");
+    if (!on) return void (clearTimeout(this.hintTimer), this.hintTimer = void 0, el.hidden = true);
+    if (this.hintTimer) return;
+    const list = hintsFor(this.kind);
+    const show = () => {
+      el.textContent = `Did you know? ${list[this.hintAt++ % list.length]}`;
+      el.hidden = false;
+      this.hintTimer = setTimeout(show, 7e3);
+    };
+    this.hintTimer = setTimeout(show, 2e3);
+  }
   step(what, pct, detail = "") {
     if (!this.firstPending()) return;
     this.sheetUp();
+    this.hints(true);
     const el = this.$("#opening");
     this.stepNow = what;
     el.querySelector(".what").textContent = what;
@@ -2812,6 +3165,7 @@ var Panel = class {
   }
   /** The sheet gone (played out, or a card in its place). */
   stopSheet() {
+    this.hints(false);
     const was = !!this.anim;
     this.anim?.stop();
     this.anim = null;
@@ -3089,6 +3443,29 @@ var Panel = class {
   shownKey = "";
   problemsKey() {
     return JSON.stringify((this.lastStatus?.diagnostics ?? []).map((d) => [d.severity, d.message, d.file, d.line]));
+  }
+  /** The kinds of problem not shown (the filters): this browser's, and the host's (problemsHidden). */
+  hiddenKinds = (() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem("phitex.kinds.hidden") ?? "[]"));
+    } catch {
+      return /* @__PURE__ */ new Set();
+    }
+  })();
+  /** The kinds hidden as the host keeps them (the watch: the user's phitex.toml, on every port and document). */
+  problemsHidden(kinds) {
+    this.hiddenKinds = new Set(kinds.filter((k) => KINDS.some(([x]) => x === k)));
+    if (this.lastStatus) this.status(this.lastStatus);
+  }
+  /** A kind's filter clicked: shown or hidden, everywhere, and kept. */
+  toggleKind(k) {
+    if (!this.hiddenKinds.delete(k)) this.hiddenKinds.add(k);
+    try {
+      localStorage.setItem("phitex.kinds.hidden", JSON.stringify([...this.hiddenKinds]));
+    } catch {
+    }
+    this.ev.onProblemsHidden?.([...this.hiddenKinds]);
+    if (this.lastStatus) this.status(this.lastStatus);
   }
   /** The problems' list opened or closed. */
   diagnostics(on = this.$("#logs").hidden === true) {
@@ -3433,6 +3810,15 @@ var Panel = class {
     for (const id of ids) this.seenIds.add(id);
     if (!this.$("#tip").hidden && this.tipList.every((t) => this.seenIds.has(t.id))) this.tip(-1);
   }
+  /** Every tip unseen again (Settings' Show again): offered from the start at the next page. */
+  tipsReset() {
+    this.seenIds.clear();
+    try {
+      localStorage.removeItem("phitex.tips.seen");
+    } catch {
+    }
+    this.tips("unseen", true);
+  }
   tips(which, asked = false) {
     if (!this.ownBar || this.prefs.collapsed || which === "unseen" && !asked && !this.autoTips) return;
     const seen = [...this.seenIds];
@@ -3488,7 +3874,7 @@ var Panel = class {
     }
     const esc5 = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
     const n = d.busy ? `<span class="n busy">${esc5(d.busy)}</span>` : `<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
-    el.innerHTML = `<span class="what" title="${esc5(d.title)} against the current version">${esc5(d.title)} vs current <small>${esc5(d.when)}</small></span><button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>\u2039</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>\u203A</button><span class="sep"></span><button data-a="toggle" class="${d.showing === "current" ? "cur" : ""}" title="Show the ${d.showing === "diff" ? "current version" : "diff"} (D)">${d.showing === "diff" ? "Current" : "Diff"}</button><button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>\u2B07 PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>\u2B07 .tex</button><button data-a="settings" title="Diff style: colors, markup" aria-label="Diff style">\u2699</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">\u2715</button>`;
+    el.innerHTML = `<span class="what" title="${esc5(d.title)} against the current version">${esc5(d.title)} vs current <small>${esc5(d.when)}</small></span><button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>\u2039</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>\u203A</button><span class="sep"></span><span class="seg" role="group" aria-label="Pages shown (D)"><button data-a="${d.showing === "diff" ? "settings" : "toggle"}" class="on-diff" aria-pressed="${d.showing === "diff"}" title="${d.showing === "diff" ? "The diff is shown: its style (colors, markup, change bars)" : "Show the diff (D)"}">Diff${d.showing === "diff" ? ` <span class="chev" aria-label="Diff style">\u25BE</span>` : ""}</button><button data-a="${d.showing === "current" ? "" : "toggle"}" class="on-current" aria-pressed="${d.showing === "current"}" title="${d.showing === "current" ? "The current version is shown" : "Show the current version (D)"}">Current</button></span><button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>\u2B07 PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>\u2B07 .tex</button><button data-a="settings" title="Diff style: colors, markup, change bars" aria-label="Diff style">\u2699</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">\u2715</button>`;
     el.className = "diffbar on";
     el.onclick = (e) => {
       const a = e.target.closest("button[data-a]")?.dataset.a;
@@ -3513,10 +3899,12 @@ var Panel = class {
       ["cfont", "Color + size"],
       ["fontstrike", "Strike"],
       ["bold", "Bold"],
-      ["changebar", "Change bars"],
-      ["culinechbar", "Underline + bars"],
       ["invisible", "Hide deletions"]
     ];
+    const WITH_BARS = { underline: "culinechbar", cfont: "cfontchbar", invisible: "changebar", ctraditional: "cchangebar" };
+    const BASE2 = Object.fromEntries(Object.entries(WITH_BARS).map(([a, b]) => [b, a]));
+    const base = BASE2[look2.markup] ?? look2.markup;
+    const bars = look2.markup in BASE2;
     const SUB = [["safe", "Plain"], ["color", "Colored"], ["marker", "Margin marks"]];
     const PAIRS = [
       ["#0000ff", "#ff0000", "Blue / red"],
@@ -3524,7 +3912,8 @@ var Panel = class {
       ["#0072b2", "#d55e00", "Colorblind-safe"],
       ["#7e22ce", "#6b7280", "Purple / gray"]
     ];
-    const seg = (key, opts) => `<div class="opts">${opts.map(([v, t]) => `<button data-k="${key}" data-v="${v}" aria-pressed="${look2[key] === v}">${t}</button>`).join("")}</div>`;
+    const seg = (key, opts) => `<div class="opts">${opts.map(([v, t]) => `<button data-k="${key}" data-v="${v}" aria-pressed="${(key === "markup" ? base : look2[key]) === v}">${t}</button>`).join("")}</div>`;
+    const canBars = base in WITH_BARS;
     const deco = (add) => {
       const c = add ? look2.add_color : look2.del_color;
       if (look2.markup === "invisible" && !add) return "display:none";
@@ -3532,7 +3921,7 @@ var Panel = class {
       const line = add && /^(underline|culinechbar)$/.test(look2.markup) ? `text-decoration: underline wavy ${c}; text-underline-offset: 3px;` : "";
       return `color:${c};${strike ? `text-decoration: line-through ${c};` : ""}${line}${look2.markup === "bold" && add ? "font-weight:700;" : ""}`;
     };
-    el.innerHTML = `<h4>Style</h4>${seg("markup", MARKUP)}<h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => `<button class="pair" data-pair="${a},${d}" aria-pressed="${look2.add_color === a && look2.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`).join("")}</div><div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look2.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look2.del_color}"></div><h4>Mode</h4>${seg("subtype", SUB)}<div class="sample">The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div><div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`;
+    el.innerHTML = `<h4>Style</h4>${seg("markup", MARKUP)}<div class="row bars"><span>Change bars in the margin</span><button data-bars="1" role="switch" aria-checked="${bars}" aria-pressed="${bars}" ${canBars ? "" : 'disabled title="Not with this style"'}>${bars ? "On" : "Off"}</button></div><h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => `<button class="pair" data-pair="${a},${d}" aria-pressed="${look2.add_color === a && look2.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`).join("")}</div><div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look2.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look2.del_color}"></div><h4>Mode</h4>${seg("subtype", SUB)}<div class="sample"${bars ? ` style="box-shadow: inset 3px 0 0 ${look2.add_color}; padding-left: 12px"` : ""}>The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div><div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`;
     el.className = "menu diffset on";
     const set = (l) => {
       const next = { ...look2, ...l };
@@ -3547,6 +3936,8 @@ var Panel = class {
         const [a, d] = b.dataset.pair.split(",");
         return set({ add_color: a, del_color: d });
       }
+      if (b.dataset.bars) return canBars && set({ markup: bars ? base : WITH_BARS[base] });
+      if (b.dataset.k === "markup") return set({ markup: bars && b.dataset.v in WITH_BARS ? WITH_BARS[b.dataset.v] : b.dataset.v });
       if (b.dataset.k) set({ [b.dataset.k]: b.dataset.v });
     };
     el.onchange = (e) => {
@@ -3583,6 +3974,28 @@ var Panel = class {
     this.$("#details").textContent = details ?? summary;
     if (!this.$("#m-time").hidden) this.timing();
   }
+  /** The first build's time and the edits' since (the watch's), for the popover's bars. */
+  times = { edits: [] };
+  /** A build's time: the first (cold) one's, or an edit's: drawn as bars beside each other in the timing popover. */
+  buildTime(ms, first) {
+    if (first) this.times = { first: ms, edits: [] };
+    else this.times.edits.push(ms);
+    if (!this.$("#m-time").hidden) this.timing();
+  }
+  /** The bars: the first build, the last edit, the edits' median, each as long as its time (the longest the full width; a short one at least a sliver). */
+  timeBars() {
+    const t = this.times;
+    if (t.first === void 0 || !t.edits.length) return "";
+    const sorted = [...t.edits].sort((a, b) => a - b);
+    const rows = [
+      ["First build", t.first, "first"],
+      ["This edit", t.edits[t.edits.length - 1], "edit"],
+      ...t.edits.length > 2 ? [["Edits, median", sorted[sorted.length >> 1], "median"]] : []
+    ];
+    const max = Math.max(...rows.map((r) => r[1]), 1e-3);
+    const x = t.first / Math.max(t.edits[t.edits.length - 1], 1e-3);
+    return `<div class="tbars" role="img" aria-label="First build ${esc3(dur(t.first))}, this edit ${esc3(dur(t.edits[t.edits.length - 1]))}">` + rows.map(([k, ms, c]) => `<div class="tb"><span class="k">${k}</span><span class="track"><i class="${c}" style="width:${Math.max(0.6, 100 * ms / max).toFixed(2)}%"></i></span><span class="v">${esc3(dur(ms))}</span></div>`).join("") + (x >= 1.5 ? `<div class="tb x">${x < 10 ? x.toFixed(1) : Math.round(x)}\xD7 faster than the first build</div>` : "") + `</div>`;
+  }
   /** The last build's parts as the session lists them: [what, how long]. */
   timingParts() {
     return (this.lat?.details ?? "").split("\n").filter(Boolean).map((l) => l.trim().split(/\s{2,}/)).map(([k, ...v]) => [k ?? "", v.join(" ")]);
@@ -3598,7 +4011,7 @@ var Panel = class {
       return `<div class="row"><span class="k">${esc3(p.label)}</span><span class="v">${esc3(p.value)}</span>${bar2}${p.note ? `<span class="note">${esc3(p.note)}</span>` : ""}</div>`;
     }).join("");
     const strips2 = this.$("#stripsline").textContent;
-    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + rows + (strips2 ? `<div class="row"><span class="k">Page drawn</span><span class="v">${esc3(strips2)}</span></div>` : "") + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
+    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.timeBars() + rows + (strips2 ? `<div class="row"><span class="k">Page drawn</span><span class="v">${esc3(strips2)}</span></div>` : "") + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
     el.querySelector(".foot").textContent = parts.length ? "" : this.lat?.summary ?? "";
     el.querySelector(".msg").textContent = this.msgText;
   }
@@ -3652,10 +4065,31 @@ var Panel = class {
     s.innerHTML = "";
     for (const n of names) s.append(new Option(n, n, n === main, n === main));
   }
+  /** What's new (the host's news, `text` as plain lines), in a dialog over the pages, with the new features' tips a click away. */
+  news(version, text) {
+    const box = this.$("#logview"), pre = this.$("#logtext");
+    box.querySelector("header").firstChild.textContent = `What's new in ${version}`;
+    pre.textContent = text;
+    let b = box.querySelector("#newstips");
+    if (!b) {
+      b = document.createElement("button");
+      b.id = "newstips";
+      b.className = "btn";
+      b.textContent = "Show the new features";
+      b.onclick = () => (box.hidden = true, this.tips("fresh"));
+      box.append(b);
+    }
+    b.hidden = false;
+    box.hidden = false;
+    box.querySelector("[data-close]")?.focus();
+  }
   /** The last build's log (the host's), in a dialog over the pages. */
   async showLog() {
     const box = this.$("#logview"), pre = this.$("#logtext");
     pre.textContent = "Reading the log\u2026";
+    box.querySelector("header").firstChild.textContent = "The last build's log";
+    const nb = box.querySelector("#newstips");
+    if (nb) nb.hidden = true;
     box.hidden = false;
     box.querySelector("[data-close]")?.focus();
     const text = await this.ev.onLog?.().catch((e) => `Couldn't read the log: ${e instanceof Error ? e.message : String(e)}`);
@@ -3663,6 +4097,7 @@ var Panel = class {
   }
   redraw() {
     this.viewer?.redraw();
+    if (this.viewer) requestAnimationFrame(() => this.drawScrollMarks());
   }
   /** The page box, for the page in view. */
   nav() {
@@ -3902,7 +4337,7 @@ function boxes(gs, all) {
   }
   return [...lines2].map(([y, [a, b]]) => [a - 1, y - 8, b - a + 2, 11]);
 }
-function lineAt(hits, at) {
+function lineAt2(hits, at) {
   let best = null;
   for (const g of hits) if (!best || Math.abs(g.start - at) < Math.abs(best.start - at)) best = g;
   return best ? hits.filter((g) => Math.abs(g.y - best.y) < 0.5) : [];
@@ -3930,130 +4365,6 @@ function wordBytes(text, at) {
   while (lo > 0 && w(text[lo - 1])) lo--;
   while (hi < text.length && w(text[hi])) hi++;
   return lo < hi ? [lo, hi] : null;
-}
-
-// viewer/src/diagnostics.ts
-function lineAt2(text, i) {
-  let n = 1;
-  for (let k = 0; k < i; k++) if (text.charCodeAt(k) === 10) n++;
-  return n;
-}
-function scan(text) {
-  const open = [];
-  const stray = [];
-  const dollars = [];
-  let paraDollars = [];
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === "\\") {
-      i++;
-      continue;
-    }
-    if (c === "%") {
-      while (i < text.length && text[i] !== "\n") i++;
-      continue;
-    }
-    if (c === "{") open.push(i);
-    else if (c === "}") {
-      if (open.length) open.pop();
-      else stray.push(i);
-    } else if (c === "$") {
-      if (text[i + 1] === "$") i++;
-      paraDollars.push(i);
-    } else if (c === "\n" && /^[ \t]*\n/.test(text.slice(i + 1, i + 40))) {
-      if (paraDollars.length % 2) dollars.push(paraDollars.at(-1));
-      paraDollars = [];
-    }
-  }
-  if (paraDollars.length % 2) dollars.push(paraDollars.at(-1));
-  return { openBraces: open, strayBraces: stray, openDollars: dollars };
-}
-var LATEX = /\\(documentclass|usepackage|begin\{[A-Za-z*]+\}|end\{[A-Za-z*]+\}|section|subsection|maketitle|cite|ref|label|emph|textbf|textit)\b/g;
-function diagnose(files, main, build) {
-  const out = [];
-  for (const [file, text] of Object.entries(files)) {
-    if (!/\.(tex|sty|def)$/i.test(file)) continue;
-    const s = scan(text);
-    if (s.openBraces.length) {
-      const at = s.openBraces[0];
-      out.push({
-        severity: "warning",
-        code: "unclosed-brace",
-        message: `{ never closed${s.openBraces.length > 1 ? ` (${s.openBraces.length} open)` : ""}: the group runs to the end of the file`,
-        file,
-        line: lineAt2(text, at)
-      });
-    }
-    for (const at of s.strayBraces.slice(0, 3))
-      out.push({ severity: "warning", code: "stray-brace", message: "} with no { to close", file, line: lineAt2(text, at) });
-    for (const at of s.openDollars.slice(0, 3))
-      out.push({ severity: "warning", code: "unclosed-math", message: "$ never closed in this paragraph", file, line: lineAt2(text, at) });
-    for (const m of text.matchAll(/(^|[^\\])\\[gex]?def\s*\\([A-Za-z@]+)([^{\n%]*)$/gm))
-      out.push({ severity: "warning", code: "def-no-body", message: `\\${m[2]} is defined with no { body } on its line`, file, line: lineAt2(text, m.index + m[1].length) });
-    const ifs = [...text.matchAll(/\\if[a-z]*\b/g)];
-    const fis = (text.match(/\\fi\b/g) ?? []).length;
-    if (ifs.length > fis && !/\\[gex]?def/.test(text))
-      out.push({ severity: "info", code: "unclosed-if", message: `${ifs.length - fis} \\if\u2026 without \\fi`, file, line: lineAt2(text, ifs.at(-1).index) });
-    for (const m of text.matchAll(/\\input\s*\{?([^\s}\\%]+)/g)) {
-      const n = m[1];
-      if (!(n in files) && !(`${n}.tex` in files) && !/\.(aux|bbl|ind|toc)$/.test(n) && !n.startsWith("\\"))
-        out.push({ severity: "warning", code: "missing-file", message: `\\input ${n}: no such file in the project`, file, line: lineAt2(text, m.index) });
-    }
-    const latex = build?.latex ? [] : [...new Set(text.match(LATEX) ?? [])];
-    if (latex.length) {
-      const first = text.search(LATEX);
-      out.push({
-        severity: "error",
-        code: "latex",
-        message: `LaTeX is not supported yet (dropped): ${latex.slice(0, 5).join(" ")}${latex.length > 5 ? " \u2026" : ""}`,
-        file,
-        line: lineAt2(text, first)
-      });
-    }
-    let nonAscii = 0;
-    let firstNon = -1;
-    for (let i = 0; i < text.length; i++)
-      if (text.charCodeAt(i) > 127) {
-        nonAscii++;
-        if (firstNon < 0) firstNon = i;
-      }
-    if (nonAscii && !build?.latex)
-      out.push({ severity: "info", code: "non-ascii", message: `${nonAscii} non-ASCII characters: PhiTeX's fonts may not typeset them`, file, line: lineAt2(text, firstNon) });
-  }
-  if (main && files[main] !== void 0 && !/\\(bye|end|enddocument)\b/.test(files[main]))
-    out.push({ severity: "info", code: "no-end", message: "no \\bye: the last page ships at the end of the file anyway", file: main });
-  for (const f of build?.packageErrors ?? [])
-    out.push({ severity: "error", code: "package-download", message: `couldn't download ${f.name}: ${f.error}` });
-  if (build?.texError) {
-    const e = build.texError;
-    const stuck = e.missing && build.unavailable?.includes(e.missing);
-    const failed = e.missing && build.packageErrors?.some((f) => f.name === e.missing);
-    out.push({
-      severity: "error",
-      code: e.missing ? "tex-missing-file" : "tex-error",
-      message: e.missing ? `${e.missing} not found${stuck ? ` in the project or ${build.packageSource ?? "the package source"}` : failed ? " (its download failed, above)" : " (still downloading?)"}: the build stopped here` : e.message,
-      file: e.file ?? void 0,
-      line: e.line ?? void 0,
-      detail: e.context
-    });
-  }
-  if (build) {
-    if (build.pending)
-      out.push({ severity: "warning", code: "pending", message: `${build.pending} part${build.pending === 1 ? "" : "s"} not read: out of fuel (a loop?) or unsupported` });
-    if (build.undefinedNames?.length) out.push({ severity: "warning", code: "undefined", message: `undefined: ${build.undefinedNames.join(" ")}` });
-    const optional = [...new Set(build.unavailable?.filter((n) => n !== build.texError?.missing).map((n) => n.replace(/(\.[a-z]+)\.tex$/, "$1")))];
-    if (optional.length) {
-      const names = optional.slice(0, 6).join(" ") + (optional.length > 6 ? " \u2026" : "");
-      out.push({
-        severity: "info",
-        code: "package-unavailable",
-        message: build.packageSource ? `looked for and not found in ${build.packageSource} (usually optional): ${names}` : `packages are not downloaded yet: ${names}`
-      });
-    }
-    if (build.pages === 0) out.push({ severity: "warning", code: "no-pages", message: "no page shipped yet" });
-  }
-  const rank = { error: 0, warning: 1, info: 2 };
-  return out.sort((a, b) => rank[a.severity] - rank[b.severity]);
 }
 
 // viewer/src/packages.ts
@@ -4953,7 +5264,7 @@ var PreviewSession = class {
       const gw = g && t !== void 0 ? wordBytes(new TextEncoder().encode(t), g.start) : null;
       word = gw ? from(onLine, file, gw[0], gw[1]) : g ? onLine.filter((x) => x.start === g.start) : [];
     }
-    return word.length ? word : lineAt(onLine, at);
+    return word.length ? word : lineAt2(onLine, at);
   }
   /**
    * The cursor at byte `at` of `file`'s text (the glyph origins' offsets),
@@ -5067,7 +5378,7 @@ var PreviewSession = class {
     const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
     for (const k of order) {
       const all = this.cached(k) ?? await this.glyphsOf(k);
-      const hit = lineAt(from(all, file, a, b), byteOffset(t, pos));
+      const hit = lineAt2(from(all, file, a, b), byteOffset(t, pos));
       if (hit.length) {
         this.tr("sync\u2192page", { file, pos, k, glyphs: hit.length });
         this.sink.mark?.(k, boxes(hit, all));
@@ -5237,7 +5548,7 @@ var PreviewSession = class {
     const first = hint ?? this.page;
     for (const k of [first, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== first)]) {
       const all = this.cached(k) ?? await this.glyphsOf(k);
-      const hit = lineAt(from(all, file, lo, hi), at);
+      const hit = lineAt2(from(all, file, lo, hi), at);
       if (hit.length) return this.sink.mark?.(k, boxes(hit, all), true);
     }
   }
@@ -5692,7 +6003,7 @@ var COMMITS_CSS = `
 .phx-commits .note.err { color: #e5484d; opacity: 1; }
 .phx-commits button { font: inherit; border: 1px solid rgba(127,127,127,.4); background: none; color: inherit; border-radius: 5px; padding: 2px 8px; cursor: pointer; }
 `;
-var KINDS = /* @__PURE__ */ new Set(["head", "branch", "remote", "tag"]);
+var KINDS2 = /* @__PURE__ */ new Set(["head", "branch", "remote", "tag"]);
 var Commits = class {
   el;
   host;
@@ -5800,7 +6111,7 @@ var Commits = class {
       const col = COLORS[r.lane % COLORS.length];
       const svg = r.down.map(([a, b]) => `<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
       svg.push(c.parents.length > 1 ? `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
-      const pills = c.refs.map((f) => `<span class="pill ${KINDS.has(f.kind) ? f.kind : "branch"}">${esc4(f.name)}</span>`).join("");
+      const pills = c.refs.map((f) => `<span class="pill ${KINDS2.has(f.kind) ? f.kind : "branch"}">${esc4(f.name)}</span>`).join("");
       const lo = this.to ? ti : -1;
       const cls = i === fi ? " from" : i === ti ? " to" : fi >= 0 && i > lo && i < fi ? " inrange" : "";
       const end = i === fi ? '<span class="end">FROM</span>' : i === ti ? '<span class="end">TO</span>' : "";
@@ -5909,6 +6220,7 @@ var Pages = class {
       const since = typeof s.since_ms === "number" ? s.since_ms : s.cold && typeof s.ms === "number" ? s.ms : null;
       this.change = since === null ? null : { since, at: performance.now() };
       if (typeof s.ms === "number") panel.latency(...timing(s));
+      if (typeof s.ms === "number") panel.buildTime(s.ms, !!s.cold);
     });
   }
   async request(op) {
@@ -6004,8 +6316,21 @@ var panel = new Panel(
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
     onContents: () => void session.outline(),
     onFind: (q) => pages.find(q),
+    onSettings: () => void openSettings(),
+    // (a problem's source lines, for Copy for an AI assistant)
+    onLines: async (file, line) => {
+      const r = await sock.request({ op: "info", what: "lines", file, line });
+      return r.ok ? r.json?.lines ?? [] : null;
+    },
+    // (What's new: this version's CHANGELOG entry, from the binary)
+    onNews: () => void sock.request({ op: "info", what: "news" }).then((r) => {
+      if (r.ok) panel.news(String(r.json?.version ?? ""), String(r.json?.text ?? ""));
+      else panel.msg("No news for this version", false, true);
+    }),
     // (the tips seen: the user's phitex.toml through the watch, the same on every port and browser)
-    onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } })
+    onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } }),
+    // (the problems' filters: kept the same way)
+    onProblemsHidden: (kinds) => void sock.request({ op: "prefs", set: { "problems-hidden": kinds } })
   },
   // (the panel's settings: this browser's)
   {
@@ -6068,6 +6393,8 @@ var counted;
 sock.onEvent((e) => {
   if (e.event !== "diff") return;
   diffState = e.diff ?? {};
+  const placed = (diffState.changes ?? []).map((c, i) => typeof c.page === "number" ? { k: c.page, y: c.y ?? 0, title: `Change ${i + 1}: ${words(c.new_text || "") || words(c.old_text || "")}` } : null).filter((c) => !!c);
+  panel.diffMarks(diffState.shown === false ? [] : placed);
   const n = diffState.changes?.length;
   if (n === void 0) return;
   if (diffWait) diffWait(diffState), diffWait = void 0;
@@ -6114,7 +6441,7 @@ var runner = {
   download: (what) => save(`diff.${what}`),
   look: async () => ({ ...LATEXDIFF_LOOK, ...diffState.look }),
   restyle: (l) => void ask({ op: "diff_restyle", markup: l.markup, subtype: l.subtype, add_color: l.add_color, del_color: l.del_color }),
-  stop: () => void ask({ op: "diff_stop" })
+  stop: () => (panel.diffMarks([]), void ask({ op: "diff_stop" }))
 };
 var controls = new DiffControls(panel, runner);
 addEventListener("keydown", (e) => controls.key(e));
@@ -6134,7 +6461,14 @@ document.head.append(Object.assign(document.createElement("style"), {
 #phx-pick header small { grid-column: 1 / -1; color: var(--fg2); font-size: 12px; }
 #phx-pick .phx-commits { flex: 1; min-height: 0; }
 #phx-pick header button { grid-row: 1; grid-column: 2; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
-#phx-pick header button:hover { background: var(--hover); }`
+#phx-pick header button:hover { background: var(--hover); }
+#phx-pick.phx-settings { width: min(460px, calc(100vw - 24px)); }
+.phx-settings .rows { overflow: auto; padding: 4px 0; }
+.phx-settings .srow { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; }
+.phx-settings .srow:hover { background: var(--hover); }
+.phx-settings .srow span { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.phx-settings .srow small { color: var(--fg2); font-size: 12px; }
+.phx-settings .srow button { border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }`
 }));
 var pick;
 var graph;
@@ -6240,7 +6574,26 @@ var badge = bar.querySelector(".new");
 var status = { kind: "status", text: "" };
 var busy = "";
 var unseen = { errors: 0, warnings: 0 };
+var favicon = (() => {
+  const link = Object.assign(document.createElement("link"), { rel: "icon" });
+  document.head.append(link);
+  let was = "";
+  return (colour) => {
+    if (colour === was) return;
+    was = colour;
+    link.href = `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="${colour}"/></svg>`)}`;
+  };
+})();
+var showTitle = () => {
+  const file = (status.text ?? "").split(" \xB7 ")[0] || "phitex watch";
+  const connected = !/not connected/.test(status.text ?? "");
+  const errs = /(\d+) errors?/.exec(status.text ?? "")?.[1];
+  const [what, colour] = !connected ? ["Not connected", "#8a93a3"] : busy ? ["Building\u2026", "#f58f2d"] : status.ok === false ? [errs ? `${errs} error${errs === "1" ? "" : "s"}` : "Failed", "#d1453b"] : status.ok === true ? ["Built", "#2e9d63"] : ["Loading\u2026", "#8a93a3"];
+  document.title = connected && file !== "phitex watch" ? `${file} \xB7 ${what}` : `${what} \xB7 phitex watch`;
+  favicon(colour);
+};
 var showBar = () => {
+  showTitle();
   dot.className = "dot" + (busy ? " busy" : status.ok === true ? " ok" : status.ok === false ? " bad" : "");
   barText.textContent = busy ? `${busy}\u2026` : status.text || "phitex watch";
   const n = unseen.errors + unseen.warnings;
@@ -6313,9 +6666,46 @@ var backlog = async () => {
   for (const s of r.json?.items ?? []) said(s, false);
   if (r.json?.status) said(r.json.status, false);
 };
+var SETTINGS = [
+  ["watch-write", "Write the PDF into the folder", "After each build, the PDF with its .synctex.gz, as phitex build does (for a PDF viewer outside this page). From the next phitex watch on."],
+  ["synctex", "SyncTeX file with a written PDF", "JOB.synctex.gz beside the PDF, for a PDF viewer's jumps to the source."],
+  ["update-check", "Say when a newer PhiTeX is out", "Asked once a day, in the terminal."]
+];
+var settingsEl;
+async function openSettings() {
+  if (settingsEl && !settingsEl.hidden) return void (settingsEl.hidden = true);
+  const r = await sock.request({ op: "prefs" });
+  if (!r.ok) return void panel.msg(`Couldn't read the settings: ${r.error ?? "not available"}`, true, true);
+  const p = r.json ?? {};
+  if (!settingsEl) {
+    settingsEl = document.createElement("div");
+    settingsEl.id = "phx-pick";
+    settingsEl.className = "phx-settings";
+    document.body.append(settingsEl);
+    addEventListener("keydown", (e) => e.key === "Escape" && settingsEl && !settingsEl.hidden && (settingsEl.hidden = true, e.stopImmediatePropagation()), { capture: true });
+  }
+  const el = settingsEl;
+  const esc5 = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+  el.innerHTML = `<header><b>Settings</b><small>Yours, in ${esc5(String(p.file ?? "phitex.toml"))}: every document and port</small><button type="button" data-x>Close</button></header><div class="rows">${SETTINGS.map(([k, name, what]) => `<label class="srow"><input type="checkbox" data-k="${k}" ${p[k] ? "checked" : ""}><span><b>${esc5(name)}</b><small>${esc5(what)}</small></span></label>`).join("")}<div class="srow"><span><b>Tips</b><small>The feature tips shown again, from the start</small></span><button type="button" data-tips>Show again</button></div><div class="srow"><span><b>Problems shown</b><small>Which kinds: the filters at the top of the problems list (e)</small></span></div></div>`;
+  el.hidden = false;
+  el.querySelector("[data-x]").onclick = () => el.hidden = true;
+  el.querySelector("[data-tips]").onclick = () => {
+    void sock.request({ op: "prefs", set: { "tips-seen": [] } });
+    el.hidden = true;
+    panel.tipsReset();
+  };
+  for (const c of el.querySelectorAll("input[data-k]"))
+    c.onchange = async () => {
+      const r2 = await sock.request({ op: "prefs", set: { [c.dataset.k]: c.checked } });
+      panel.msg(r2.ok ? `${c.checked ? "On" : "Off"}: ${c.closest("label").querySelector("b").textContent}` : `Not saved: ${r2.error}`, !r2.ok, true);
+      if (!r2.ok) c.checked = !c.checked;
+    };
+}
 var prefs = async () => {
   const r = await sock.request({ op: "prefs" });
-  if (r.ok) panel.tipsSeen((r.json?.["tips-seen"] ?? []).filter((x) => typeof x === "string"));
+  if (!r.ok) return;
+  panel.tipsSeen((r.json?.["tips-seen"] ?? []).filter((x) => typeof x === "string"));
+  panel.problemsHidden((r.json?.["problems-hidden"] ?? []).filter((x) => typeof x === "string"));
 };
 var opened = sock.onOpen;
 sock.onOpen = () => (opened(), void backlog(), void prefs());

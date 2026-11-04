@@ -61,6 +61,11 @@ pub type CacheFn = Box<dyn Fn(bool) -> Result<Value, String> + Send>;
 pub type PrefsFn =
     Box<dyn Fn(Option<&serde_json::Map<String, Value>>) -> Result<Value, String> + Send>;
 
+/// What the host tells the viewer when asked (`{"op":"info","what":...}`):
+/// this version's news, a file's lines around a problem (the request's
+/// other fields), ...; `None`: not here ([`Viewer::on_info`]).
+pub type InfoFn = Box<dyn Fn(&str, &Value) -> Option<Value> + Send>;
+
 /// What a build left, for the viewer.
 pub struct Built {
     /// The PDF to show (none: no pages, or a DVI that dvipdfmx refused).
@@ -248,6 +253,7 @@ pub struct Viewer {
     /// the viewer's Clear cache; the host's).
     cache: Mutex<Option<CacheFn>>,
     prefs: Mutex<Option<PrefsFn>>,
+    info: Mutex<Option<InfoFn>>,
     /// The commits of the project's history (the diff's picker).
     log: Mutex<Option<Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>>>,
     /// Shows a source place (file, line, column from 1, and the place as
@@ -284,6 +290,7 @@ impl Default for Viewer {
             builds: std::sync::atomic::AtomicU64::new(0),
             cache: Mutex::new(None),
             prefs: Mutex::new(None),
+            info: Mutex::new(None),
             log: Mutex::new(None),
             goto: Mutex::new(None),
             select: Mutex::new(None),
@@ -566,6 +573,11 @@ impl Viewer {
     /// The user's preferences for the `prefs` op ([`PrefsFn`]).
     pub fn on_prefs(&self, prefs: PrefsFn) {
         *lock(&self.prefs) = Some(prefs);
+    }
+
+    /// What the host tells for the `info` op ([`InfoFn`]).
+    pub fn on_info(&self, info: InfoFn) {
+        *lock(&self.info) = Some(info);
     }
 
     pub fn on_log(&self, log: Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>) {
@@ -955,6 +967,13 @@ impl Viewer {
                     Some(Ok(v)) => ok(v),
                     Some(Err(e)) => fail(&e),
                     None => fail("no preferences here"),
+                }
+            }
+            "info" => {
+                let what = text("what").unwrap_or_default();
+                match lock(&s.info).as_ref().and_then(|f| f(&what, req)) {
+                    Some(v) => ok(v),
+                    None => fail(&format!("no {what:?} here")),
                 }
             }
             "diff" => ok(lock(&s.diff).state.clone()),

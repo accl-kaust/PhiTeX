@@ -127,7 +127,8 @@ impl Wanted {
         }
         let r = rel.to_string_lossy();
         self.names.contains(r.as_ref())
-            || r.strip_suffix(".tex").is_some_and(|n| self.names.contains(n))
+            || r.strip_suffix(".tex")
+                .is_some_and(|n| self.names.contains(n))
     }
 }
 
@@ -797,6 +798,34 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 // (the viewer's preferences, the tips seen: the user's
                 // phitex.toml, so they hold on every port and browser)
                 v.on_prefs(Box::new(crate::config::prefs));
+                // (what the viewer shows that the binary holds: the news)
+                let here = root.clone();
+                v.on_info(Box::new(move |what, req| match what {
+                    "news" => {
+                        crate::news::latest().map(|(v, text)| json!({"version": v, "text": text}))
+                    }
+                    // (a problem's lines, five each side, for Copy for an AI
+                    // assistant: a project file only, by its name from here)
+                    "lines" => {
+                        let file = req["file"].as_str()?;
+                        let line = usize::try_from(req["line"].as_u64()?).ok()?.max(1);
+                        if file.starts_with('/') || file.split('/').any(|c| c == "..") {
+                            return None;
+                        }
+                        let text = std::fs::read(here.join(file)).ok()?;
+                        let text = String::from_utf8_lossy(&text);
+                        let from = line.saturating_sub(6);
+                        let lines: Vec<Value> = text
+                            .lines()
+                            .enumerate()
+                            .skip(from)
+                            .take(11)
+                            .map(|(k, l)| json!([k + 1, l]))
+                            .collect();
+                        Some(json!({"lines": lines}))
+                    }
+                    _ => None,
+                }));
                 // (the diff's picker: the project's git history)
                 let here = root.clone();
                 v.on_log(Box::new(move |skip, limit| {
@@ -1337,7 +1366,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         let mut tail = Vec::new();
         let cold = last.borrow().cold;
         match cold {
-            None if !failed => last.borrow_mut().cold = Some(r.wall),
+            None if !failed => {
+                last.borrow_mut().cold = Some(r.wall);
+                crate::star::built(&main_file, ui, lsp.is_some());
+            }
             Some(c) if !failed && !noop => {
                 last.borrow_mut().edits.push(r.wall);
                 if let Some(x) = faster(c, r.wall) {

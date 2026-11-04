@@ -66,6 +66,9 @@ pub struct Config {
     pub watch_write: Option<bool>,
     /// The viewer's feature tips seen (yours only, set by the viewer).
     pub tips_seen: Option<Vec<String>>,
+    /// The kinds of problem the viewer does not show (yours only, set by
+    /// the viewer's filters).
+    pub problems_hidden: Option<Vec<String>>,
     /// What reading the files warned of (unknown keys).
     #[serde(skip)]
     pub warnings: Vec<String>,
@@ -92,6 +95,7 @@ const KEYS: &[&str] = &[
     "update-channel",
     "watch-write",
     "tips-seen",
+    "problems-hidden",
 ];
 
 /// `copy-pdf`'s value.
@@ -306,7 +310,12 @@ fn with_line(text: &str, key: &str, v: &str) -> Result<String, String> {
 
 /// The viewer's preferences the user's `phitex.toml` keeps (the `prefs`
 /// op): their keys, each a list of names.
-pub const PREFS: &[&str] = &["tips-seen"];
+pub const PREFS: &[&str] = &["tips-seen", "problems-hidden"];
+
+/// The settings the viewer's Settings dialog sets, each on or off (in the
+/// user's file; never a command, which a page could make run: `editor`,
+/// `viewer` are the terminal's to set).
+pub const SWITCHES: &[&str] = &["watch-write", "synctex", "update-check"];
 
 /// The viewer's preferences (`set`: those keys set first, each a list of
 /// names, in the user's file, its other lines kept), as JSON.
@@ -317,6 +326,11 @@ pub fn prefs(
     let mut text = std::fs::read_to_string(&p).unwrap_or_default();
     if let Some(set) = set {
         for (k, v) in set {
+            if SWITCHES.contains(&k.as_str()) {
+                let on = v.as_bool().ok_or(format!("{k}: on or off"))?;
+                text = with_line(&text, k, if on { "true" } else { "false" })?;
+                continue;
+            }
             if !PREFS.contains(&k.as_str()) {
                 return Err(format!("no preference '{k}' here"));
             }
@@ -341,7 +355,14 @@ pub fn prefs(
         std::fs::write(&p, &text).map_err(|e| format!("{}: {e}", p.display()))?;
     }
     let c = parse_named(&text, &p.display().to_string())?;
-    Ok(serde_json::json!({ "tips-seen": c.tips_seen.unwrap_or_default() }))
+    Ok(serde_json::json!({
+        "tips-seen": c.tips_seen.unwrap_or_default(),
+        "problems-hidden": c.problems_hidden.unwrap_or_default(),
+        "watch-write": c.watch_write.unwrap_or(false),
+        "synctex": c.synctex,
+        "update-check": c.update_check.unwrap_or(false),
+        "file": crate::cache::home_relative(&p),
+    }))
 }
 
 /// `phitex config KEY VALUE`: the user's `phitex.toml` with it set (made
@@ -559,6 +580,7 @@ impl Config {
             update_channel: self.update_channel.or(under.update_channel),
             watch_write: self.watch_write.or(under.watch_write),
             tips_seen: self.tips_seen.or(under.tips_seen),
+            problems_hidden: self.problems_hidden.or(under.problems_hidden),
             warnings: [self.warnings, under.warnings].concat(),
         }
     }
@@ -840,6 +862,7 @@ mod tests {
                 update_channel: None,
                 watch_write: None,
                 tips_seen: None,
+                problems_hidden: None,
                 warnings: vec![],
             }
         );

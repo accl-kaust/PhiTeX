@@ -13,7 +13,7 @@
 // dimmed, with why; problems jump to their line.
 
 import type { PageImage, Status } from "./session.ts";
-import type { Diagnostic } from "./diagnostics.ts";
+import { KINDS, kindOf, type Diagnostic, type Kind } from "./diagnostics.ts";
 import type { PackageState } from "./packages.ts";
 import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
 import { Viewer } from "./viewer.ts";
@@ -24,6 +24,7 @@ import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys } from "./keys.ts";
 import { REPORT_TO } from "./report.ts";
 import { opening, retro, still, type Opening } from "./opening.ts";
+import { hintsFor } from "./hints.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
@@ -116,6 +117,12 @@ export interface PanelEvents {
   onTour?(): void;
   /** "What's new" (settings). */
   onNews?(): void;
+  /** Settings (the host's own dialog: the watch's, its user settings): absent, not offered. */
+  onSettings?(): void;
+  /** The kinds of problem hidden (the problems' filters), every one: kept by the host (the watch: the user's phitex.toml). */
+  onProblemsHidden?(kinds: string[]): void;
+  /** A file's lines around `line` (`[number, text]`), for Copy for an AI assistant: absent, the problem's own line alone. */
+  onLines?(file: string, line: number): Promise<[number, string][] | null>;
   /** The feature tips seen, every one so far: kept by the host where every port and browser reads them (the watch: the user's phitex.toml); absent, this browser's storage alone. */
   onTipsSeen?(ids: string[]): void;
   /** The contents beside the pages opened: the outline wanted now (the host's session's `outline()`). */
@@ -416,6 +423,7 @@ export class Panel {
       <button type="button" role="menuitemcheckbox" id="x-culprits" aria-checked="true"><span class="check">✓</span><span>Underline problems<span class="desc">A wavy line under what each error and warning is about</span></span></button>
       <button type="button" role="menuitemcheckbox" id="dbg" aria-checked="false"><span class="check"></span><span>Debug check<span class="desc">Compare with a fresh build every 5 s</span></span></button>
       <hr>
+      ${item("x-settings", "tips", "Settings…")}
       ${item("x-tips", "tips", "What's new")}
       ${item("x-keys", "keyboard", "Keyboard shortcuts", "?")}
       ${item("x-about", "info", "About PhiTeX")}
@@ -425,8 +433,8 @@ export class Panel {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
-    <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div></div></div>
+    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
     <div class="menu sheet-pop" id="sheet" role="dialog" aria-label="PhiTeX settings" hidden>
@@ -466,6 +474,7 @@ export class Panel {
     offer("#x-culprits", !!ev.onBoxes);
     offer("#tour", !!ev.onTour);
     offer("#news", !!ev.onNews);
+    offer("#x-settings", !!ev.onSettings);
     // (the menus: one open at a time, closed by a click elsewhere or Esc)
     const menus: [string, string][] = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
     this.menus = menus;
@@ -489,7 +498,10 @@ export class Panel {
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
     this.$("#x-contents").onclick = this.$("#b-side").onclick = () => (this.menu(null), this.side());
     this.$("#x-find").onclick = this.$("#b-find").onclick = () => (this.menu(null), this.find(true));
-    this.$("#x-tips").onclick = () => (this.menu(null), this.tips("fresh"));
+    // (What's new: the host's news where it has some (the watch: this version's
+    // CHANGELOG entry), the new features' tips under it; else the tips)
+    this.$("#x-tips").onclick = () => (this.menu(null), ev.onNews ? ev.onNews() : this.tips("fresh"));
+    this.$("#x-settings").onclick = () => (this.menu(null), ev.onSettings?.());
     this.$("#x-keys").onclick = () => {
       this.menu(null);
       this.$("#keyhelp").hidden = false;
@@ -554,7 +566,11 @@ export class Panel {
         return ev.onGoto(at.dataset.file!, Number(at.dataset.line) || 1);
       }
       const d = (e.target as HTMLElement).closest<HTMLElement>(".diag[data-line]");
-      if (d) ev.onGoto(d.dataset.file!, Number(d.dataset.line));
+      if (d) return ev.onGoto(d.dataset.file!, Number(d.dataset.line));
+      const card = (e.target as HTMLElement).closest<HTMLElement>(".phx-card[data-key]");
+      const place = card && this.culpritPlaces.get(card.dataset.key!);
+      if (place) this.viewer.mark(place.k, [place.box]);
+      else if (card) this.msg("Not on the pages (no text of it was typeset)", false, true);
     };
     this.$("#stage").addEventListener("pointerdown", () => {
       this.menu(null);
@@ -602,7 +618,7 @@ export class Panel {
     // not on every call, where after a page's writes it laid the view out
     // again; observed before the window's, whose redraw reads it)
     const stage = this.$("#stage");
-    new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight })).observe(stage);
+    new ResizeObserver(() => ((this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }), this.drawScrollMarks())).observe(stage);
     new ResizeObserver(() => {
       this.fitSheet();
       if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : undefined;
@@ -1016,19 +1032,59 @@ export class Panel {
     if (!this.culpritsOn) return void (++this.culpritsSeq, (this.culpritsOf = ""), this.viewer.culprits([]), (this.$("#ctip").hidden = true));
     const want = diags
       .filter((d): d is Diagnostic & { problem: { severity: string; file: string; range: [number, number] } } => !!d.problem?.file && !!d.problem.range && d.problem.severity !== "note")
-      .map((d) => ({ file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? ("warning" as const) : ("error" as const), message: d.message }))
+      .filter((d) => !this.hiddenKinds.has(kindOf(d)))
+      .map((d) => {
+        const k = kindOf(d);
+        const amount = Number(/\(([\d.]+)pt too (?:wide|high)\)/.exec(d.message)?.[1]) || undefined;
+        return { file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? ("warning" as const) : ("error" as const), message: d.message, rule: k === "overfull" || k === "underfull" ? k : undefined, amount };
+      })
       .sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1))
       .slice(0, 20);
     // (the same problems on the same pages: the same boxes, drawn already)
-    const of = JSON.stringify([want, this.pageHashes]);
+    const of = JSON.stringify([want, this.pageHashes, [...this.hiddenKinds]]);
     if (of === this.culpritsOf) return;
     this.culpritsOf = of;
     const seq = ++this.culpritsSeq;
-    const found = await Promise.all(want.map((w, i) => this.ev.onBoxes!(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i })), () => [])));
+    const found = await Promise.all(want.map((w, i) => this.ev.onBoxes!(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i, rule: w.rule, amount: w.amount })), () => [])));
     // (a newer status came while these were looked up: its own call draws them)
     if (seq !== this.culpritsSeq) return;
     this.culpritsDrawn = want;
     this.viewer.culprits(found.flat());
+    // (each problem's place on the pages, for its card's link and the scrollbar)
+    this.culpritPlaces = new Map(want.map((w, i) => [`${w.file}\0${w.range[0]}`, found[i][0] ? { k: found[i][0].k, box: found[i][0].boxes[0] } : null]));
+    this.problemMarks = want.flatMap((w, i) => (found[i][0]?.boxes[0] ? [{ k: found[i][0].k, y: found[i][0].boxes[0][1], cls: w.severity, title: w.message }] : []));
+    this.drawScrollMarks();
+  }
+
+  /** Each problem's first place on the pages, by its file and byte (a card's "on the page"). */
+  private culpritPlaces = new Map<string, { k: number; box: [number, number, number, number] } | null>();
+  /** The scrollbar's marks: the problems' places, and the diff's changes (diffMarks). */
+  private problemMarks: { k: number; y: number; cls: string; title: string }[] = [];
+  private changeMarks: { k: number; y: number; cls: string; title: string }[] = [];
+
+  /** The diff's changes' places (page from 0, height in PDF points), marked along the scrollbar; none: gone. */
+  diffMarks(changes: { k: number; y: number; title: string }[]): void {
+    this.changeMarks = changes.map((c) => ({ ...c, cls: "change" }));
+    this.drawScrollMarks();
+  }
+
+  /** The marks along the pages' scrollbar, each where its place is in the whole scroll; a click goes there. */
+  private drawScrollMarks(): void {
+    const el = this.$("#smarks");
+    const marks = [...this.problemMarks, ...this.changeMarks];
+    el.replaceChildren();
+    el.hidden = !marks.length;
+    if (!marks.length) return;
+    const fr = this.viewer.fractions(marks);
+    marks.forEach((m, i) => {
+      if (fr[i] < 0) return;
+      const t = document.createElement("i");
+      t.className = m.cls;
+      t.title = m.title;
+      t.style.top = `${(fr[i] * 100).toFixed(3)}%`;
+      t.onclick = () => this.viewer.scrollToPlace(m.k, m.y);
+      el.append(t);
+    });
   }
 
   /** The underlines on or off (`keep`: remembered). */
@@ -1089,13 +1145,40 @@ export class Panel {
     };
     const list = this.$("#diags");
     list.innerHTML = "";
-    for (const d of diags.slice(0, 50)) {
+    // (the filters: each kind there is, its count, on or off; what is off is
+    // gone from the list, the page's marks and the scrollbar's)
+    const byKind = new Map<Kind, number>();
+    for (const d of diags) byKind.set(kindOf(d), (byKind.get(kindOf(d)) ?? 0) + 1);
+    if (byKind.size > 1 || this.hiddenKinds.size) {
+      const f = document.createElement("div");
+      f.className = "kinds";
+      f.setAttribute("role", "group");
+      f.setAttribute("aria-label", "Show");
+      for (const [k, name] of KINDS) {
+        const n = byKind.get(k);
+        if (!n) continue;
+        const b = document.createElement("button");
+        b.type = "button";
+        b.dataset.kind = k;
+        b.setAttribute("aria-pressed", String(!this.hiddenKinds.has(k)));
+        b.textContent = `${name} ${n}`;
+        b.onclick = (e) => (e.stopPropagation(), this.toggleKind(k));
+        f.append(b);
+      }
+      list.append(f);
+    }
+    for (const d of diags.filter((d) => !this.hiddenKinds.has(kindOf(d))).slice(0, 50)) {
       // (a problem the build told whole: its card, its places links)
       if (d.problem) {
         const card = document.createElement("ol");
         card.className = "phx-card phx-inline";
         card.setAttribute("role", "listitem");
         card.innerHTML = problemHtml(d.problem);
+        // (a click on the card: its place on the pages; its file:line link: the editor)
+        if (d.problem.file && d.problem.range) {
+          card.dataset.key = `${d.problem.file}\0${d.problem.range[0]}`;
+          card.title = "Show it on the page (its file:line opens it in the editor)";
+        }
         list.append(card);
         continue;
       }
@@ -1125,6 +1208,15 @@ export class Panel {
       more.textContent = `… and ${diags.length - 50} more`;
       list.append(more);
     }
+    if (diags.some((d) => d.severity === "error" || d.severity === "warning")) {
+      const b = document.createElement("button");
+      b.className = "reportbtn";
+      b.id = "copyai";
+      b.textContent = "Copy for an AI assistant";
+      b.title = "The errors, the source lines around them and the end of the log, to paste into the assistant you use: nothing is sent anywhere";
+      b.onclick = (e) => (e.stopPropagation(), void this.copyForAi(diags));
+      list.append(b);
+    }
     if (this.ev.onReport) {
       const b = document.createElement("button");
       b.className = "reportbtn";
@@ -1153,6 +1245,31 @@ export class Panel {
     this.stale(s);
     this.renderStatus();
     queueMicrotask(() => this.emit());
+  }
+
+  /** Copy for an AI assistant: the first problems (errors first), each with its place, message, help and source lines around it, and the log's end; on the clipboard, nothing sent. */
+  private async copyForAi(diags: Diagnostic[]): Promise<void> {
+    const pick = [...diags].sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1)).slice(0, 5);
+    const parts: string[] = ["I'm building a LaTeX document and get these problems. What is wrong, and how do I fix it?", ""];
+    for (const d of pick) {
+      const p = d.problem;
+      const file = p?.file ?? d.file, line = p?.line ?? d.line;
+      parts.push(`${d.severity}: ${d.message}${file ? ` (${file}${line ? `:${line}` : ""})` : ""}`);
+      if (p?.help.length) parts.push(p.help.join(" "));
+      const lines = file && line ? await this.ev.onLines?.(file, line).catch(() => null) : null;
+      if (lines?.length) parts.push("```latex", ...lines.map(([n, t]) => `${String(n).padStart(4)}${n === line ? ">" : " "} ${t}`), "```");
+      else if (p?.excerpt) parts.push("```latex", p.excerpt.text, "```");
+      parts.push("");
+    }
+    const log = await this.ev.onLog?.().catch(() => null);
+    if (log) parts.push("The end of the log:", "```", ...log.split("\n").slice(-40), "```");
+    const text = parts.join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      this.msg("Copied: paste it into your AI assistant", false, true);
+    } catch {
+      this.msg("Couldn't copy to the clipboard", true, true);
+    }
   }
 
   /** The reading step's last state, and when the sheet last changed (redrawn at most every 50 ms). */
@@ -1254,9 +1371,26 @@ export class Panel {
   /** This opening's typesetting has begun (the build running, or pages shipped): a later fetch said under it. */
   private typesetting = false;
 
+  /** The "Did you know" under the opening: one hint a few seconds, from 2 s into a first build, gone with the sheet. */
+  private hintTimer: ReturnType<typeof setTimeout> | undefined;
+  private hintAt = Math.floor(Math.random() * 1000);
+  private hints(on: boolean): void {
+    const el = this.$("#hint");
+    if (!on) return void (clearTimeout(this.hintTimer), (this.hintTimer = undefined), (el.hidden = true));
+    if (this.hintTimer) return;
+    const list = hintsFor(this.kind);
+    const show = () => {
+      el.textContent = `Did you know? ${list[this.hintAt++ % list.length]}`;
+      el.hidden = false;
+      this.hintTimer = setTimeout(show, 7000);
+    };
+    this.hintTimer = setTimeout(show, 2000);
+  }
+
   private step(what: string, pct: number | undefined, detail = ""): void {
     if (!this.firstPending()) return;
     this.sheetUp();
+    this.hints(true);
     const el = this.$("#opening");
     this.stepNow = what;
     el.querySelector(".what")!.textContent = what;
@@ -1334,6 +1468,7 @@ export class Panel {
 
   /** The sheet gone (played out, or a card in its place). */
   private stopSheet(): void {
+    this.hints(false);
     const was = !!this.anim;
     this.anim?.stop();
     this.anim = null;
@@ -1650,6 +1785,33 @@ export class Panel {
 
   private problemsKey(): string {
     return JSON.stringify((this.lastStatus?.diagnostics ?? []).map((d) => [d.severity, d.message, d.file, d.line]));
+  }
+
+  /** The kinds of problem not shown (the filters): this browser's, and the host's (problemsHidden). */
+  private hiddenKinds = (() => {
+    try {
+      return new Set<Kind>(JSON.parse(localStorage.getItem("phitex.kinds.hidden") ?? "[]"));
+    } catch {
+      return new Set<Kind>();
+    }
+  })();
+
+  /** The kinds hidden as the host keeps them (the watch: the user's phitex.toml, on every port and document). */
+  problemsHidden(kinds: string[]): void {
+    this.hiddenKinds = new Set(kinds.filter((k) => KINDS.some(([x]) => x === k)) as Kind[]);
+    if (this.lastStatus) this.status(this.lastStatus);
+  }
+
+  /** A kind's filter clicked: shown or hidden, everywhere, and kept. */
+  private toggleKind(k: Kind): void {
+    if (!this.hiddenKinds.delete(k)) this.hiddenKinds.add(k);
+    try {
+      localStorage.setItem("phitex.kinds.hidden", JSON.stringify([...this.hiddenKinds]));
+    } catch {
+      /* (the host's copy only) */
+    }
+    this.ev.onProblemsHidden?.([...this.hiddenKinds]);
+    if (this.lastStatus) this.status(this.lastStatus);
   }
 
   /** The problems' list opened or closed. */
@@ -2047,6 +2209,17 @@ export class Panel {
     if (!this.$("#tip").hidden && this.tipList.every((t) => this.seenIds.has(t.id))) this.tip(-1);
   }
 
+  /** Every tip unseen again (Settings' Show again): offered from the start at the next page. */
+  tipsReset(): void {
+    this.seenIds.clear();
+    try {
+      localStorage.removeItem("phitex.tips.seen");
+    } catch {
+      /* (none kept) */
+    }
+    this.tips("unseen", true);
+  }
+
   private tips(which: "unseen" | "fresh" | "all", asked = false): void {
     if (!this.ownBar || this.prefs.collapsed || (which === "unseen" && !asked && !this.autoTips)) return;
     const seen = [...this.seenIds];
@@ -2114,9 +2287,13 @@ export class Panel {
     el.innerHTML =
       `<span class="what" title="${esc(d.title)} against the current version">${esc(d.title)} vs current <small>${esc(d.when)}</small></span>` +
       `<button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>‹</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>›</button>` +
-      `<span class="sep"></span><button data-a="toggle" class="${d.showing === "current" ? "cur" : ""}" title="Show the ${d.showing === "diff" ? "current version" : "diff"} (D)">${d.showing === "diff" ? "Current" : "Diff"}</button>` +
+      // (which pages are shown, said by a switch of two, the one shown pressed;
+      // the diff's style a click away on its own half: D switches)
+      `<span class="sep"></span><span class="seg" role="group" aria-label="Pages shown (D)">` +
+      `<button data-a="${d.showing === "diff" ? "settings" : "toggle"}" class="on-diff" aria-pressed="${d.showing === "diff"}" title="${d.showing === "diff" ? "The diff is shown: its style (colors, markup, change bars)" : "Show the diff (D)"}">Diff${d.showing === "diff" ? ` <span class="chev" aria-label="Diff style">▾</span>` : ""}</button>` +
+      `<button data-a="${d.showing === "current" ? "" : "toggle"}" class="on-current" aria-pressed="${d.showing === "current"}" title="${d.showing === "current" ? "The current version is shown" : "Show the current version (D)"}">Current</button></span>` +
       `<button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>⬇ PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>⬇ .tex</button>` +
-      `<button data-a="settings" title="Diff style: colors, markup" aria-label="Diff style">⚙</button>` +
+      `<button data-a="settings" title="Diff style: colors, markup, change bars" aria-label="Diff style">⚙</button>` +
       `<button data-a="close" title="Stop comparing" aria-label="Stop comparing">✕</button>`;
     el.className = "diffbar on";
     el.onclick = (e) => {
@@ -2138,16 +2315,23 @@ export class Panel {
     // (the look comes from a host, a store or a server: its colors go into
     // attributes, so only #rrggbb is taken, its names only as the lists have them)
     look = { ...look, add_color: safeColor(look.add_color, "#0000ff"), del_color: safeColor(look.del_color, "#ff0000") };
+    // (the styles, and change bars in the margin as a switch beside them:
+    // latexdiff's types with bars are a style's with them, where it has one)
     const MARKUP: [string, string][] = [
       ["underline", "Underline"], ["ctraditional", "Color + font"], ["traditional", "Font"], ["cfont", "Color + size"],
-      ["fontstrike", "Strike"], ["bold", "Bold"], ["changebar", "Change bars"], ["culinechbar", "Underline + bars"], ["invisible", "Hide deletions"],
+      ["fontstrike", "Strike"], ["bold", "Bold"], ["invisible", "Hide deletions"],
     ];
+    const WITH_BARS: Record<string, string> = { underline: "culinechbar", cfont: "cfontchbar", invisible: "changebar", ctraditional: "cchangebar" };
+    const BASE: Record<string, string> = Object.fromEntries(Object.entries(WITH_BARS).map(([a, b]) => [b, a]));
+    const base = BASE[look.markup] ?? look.markup;
+    const bars = look.markup in BASE;
     const SUB: [string, string][] = [["safe", "Plain"], ["color", "Colored"], ["marker", "Margin marks"]];
     const PAIRS: [string, string, string][] = [
       ["#0000ff", "#ff0000", "Blue / red"], ["#15803d", "#b91c1c", "Green / red"], ["#0072b2", "#d55e00", "Colorblind-safe"], ["#7e22ce", "#6b7280", "Purple / gray"],
     ];
     const seg = (key: "markup" | "subtype", opts: [string, string][]) =>
-      `<div class="opts">${opts.map(([v, t]) => `<button data-k="${key}" data-v="${v}" aria-pressed="${look[key] === v}">${t}</button>`).join("")}</div>`;
+      `<div class="opts">${opts.map(([v, t]) => `<button data-k="${key}" data-v="${v}" aria-pressed="${(key === "markup" ? base : look[key]) === v}">${t}</button>`).join("")}</div>`;
+    const canBars = base in WITH_BARS;
     const deco = (add: boolean) => {
       const c = add ? look.add_color : look.del_color;
       if (look.markup === "invisible" && !add) return "display:none";
@@ -2157,10 +2341,11 @@ export class Panel {
     };
     el.innerHTML =
       `<h4>Style</h4>${seg("markup", MARKUP)}` +
+      `<div class="row bars"><span>Change bars in the margin</span><button data-bars="1" role="switch" aria-checked="${bars}" aria-pressed="${bars}" ${canBars ? "" : 'disabled title="Not with this style"'}>${bars ? "On" : "Off"}</button></div>` +
       `<h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => `<button class="pair" data-pair="${a},${d}" aria-pressed="${look.add_color === a && look.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`).join("")}</div>` +
       `<div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look.del_color}"></div>` +
       `<h4>Mode</h4>${seg("subtype", SUB)}` +
-      `<div class="sample">The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div>` +
+      `<div class="sample"${bars ? ` style="box-shadow: inset 3px 0 0 ${look.add_color}; padding-left: 12px"` : ""}>The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div>` +
       `<div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`;
     el.className = "menu diffset on";
     const set = (l: Partial<DiffLook>) => {
@@ -2176,6 +2361,9 @@ export class Panel {
         const [a, d] = b.dataset.pair.split(",");
         return set({ add_color: a, del_color: d });
       }
+      // (a style picked keeps the bars where it can have them)
+      if (b.dataset.bars) return canBars && set({ markup: bars ? base : WITH_BARS[base] });
+      if (b.dataset.k === "markup") return set({ markup: bars && b.dataset.v! in WITH_BARS ? WITH_BARS[b.dataset.v!] : b.dataset.v! });
       if (b.dataset.k) set({ [b.dataset.k]: b.dataset.v } as Partial<DiffLook>);
     };
     el.onchange = (e) => {
@@ -2216,6 +2404,34 @@ export class Panel {
     if (!this.$("#m-time").hidden) this.timing();
   }
 
+  /** The first build's time and the edits' since (the watch's), for the popover's bars. */
+  private times: { first?: number; edits: number[] } = { edits: [] };
+
+  /** A build's time: the first (cold) one's, or an edit's: drawn as bars beside each other in the timing popover. */
+  buildTime(ms: number, first: boolean): void {
+    if (first) this.times = { first: ms, edits: [] };
+    else this.times.edits.push(ms);
+    if (!this.$("#m-time").hidden) this.timing();
+  }
+
+  /** The bars: the first build, the last edit, the edits' median, each as long as its time (the longest the full width; a short one at least a sliver). */
+  private timeBars(): string {
+    const t = this.times;
+    if (t.first === undefined || !t.edits.length) return "";
+    const sorted = [...t.edits].sort((a, b) => a - b);
+    const rows: [string, number, string][] = [
+      ["First build", t.first, "first"],
+      ["This edit", t.edits[t.edits.length - 1], "edit"],
+      ...(t.edits.length > 2 ? [["Edits, median", sorted[sorted.length >> 1], "median"] as [string, number, string]] : []),
+    ];
+    const max = Math.max(...rows.map((r) => r[1]), 1e-3);
+    const x = t.first / Math.max(t.edits[t.edits.length - 1], 1e-3);
+    return `<div class="tbars" role="img" aria-label="First build ${esc(dur(t.first))}, this edit ${esc(dur(t.edits[t.edits.length - 1]))}">` +
+      rows.map(([k, ms, c]) => `<div class="tb"><span class="k">${k}</span><span class="track"><i class="${c}" style="width:${Math.max(0.6, (100 * ms) / max).toFixed(2)}%"></i></span><span class="v">${esc(dur(ms))}</span></div>`).join("") +
+      (x >= 1.5 ? `<div class="tb x">${x < 10 ? x.toFixed(1) : Math.round(x)}× faster than the first build</div>` : "") +
+      `</div>`;
+  }
+
   /** The last build's parts as the session lists them: [what, how long]. */
   private timingParts(): [string, string][] {
     return (this.lat?.details ?? "")
@@ -2245,6 +2461,7 @@ export class Panel {
     const strips = this.$("#stripsline").textContent;
     el.innerHTML =
       (head ? `<div class="head"><span>${esc(String(head[0]))}</span><b>${esc(dur(head[1] as number))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) +
+      this.timeBars() +
       rows +
       (strips ? `<div class="row"><span class="k">Page drawn</span><span class="v">${esc(strips)}</span></div>` : "") +
       `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
@@ -2311,10 +2528,32 @@ export class Panel {
     for (const n of names) s.append(new Option(n, n, n === main, n === main));
   }
 
+  /** What's new (the host's news, `text` as plain lines), in a dialog over the pages, with the new features' tips a click away. */
+  news(version: string, text: string): void {
+    const box = this.$("#logview"), pre = this.$("#logtext");
+    box.querySelector("header")!.firstChild!.textContent = `What's new in ${version}`;
+    pre.textContent = text;
+    let b = box.querySelector<HTMLButtonElement>("#newstips");
+    if (!b) {
+      b = document.createElement("button");
+      b.id = "newstips";
+      b.className = "btn";
+      b.textContent = "Show the new features";
+      b.onclick = () => ((box.hidden = true), this.tips("fresh"));
+      box.append(b);
+    }
+    b.hidden = false;
+    box.hidden = false;
+    box.querySelector<HTMLElement>("[data-close]")?.focus();
+  }
+
   /** The last build's log (the host's), in a dialog over the pages. */
   private async showLog(): Promise<void> {
     const box = this.$("#logview"), pre = this.$("#logtext");
     pre.textContent = "Reading the log…";
+    box.querySelector("header")!.firstChild!.textContent = "The last build's log";
+    const nb = box.querySelector<HTMLElement>("#newstips");
+    if (nb) nb.hidden = true;
     box.hidden = false;
     // (the focus in the dialog: Esc reaches the panel's keys and closes it, the menu that opened it being gone)
     box.querySelector<HTMLElement>("[data-close]")?.focus();
@@ -2324,6 +2563,8 @@ export class Panel {
 
   private redraw(): void {
     this.viewer?.redraw();
+    // (the pages' heights changed with the zoom: the marks along the scroll with them)
+    if (this.viewer) requestAnimationFrame(() => this.drawScrollMarks());
   }
 
   /** The page box, for the page in view. */

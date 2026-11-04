@@ -935,6 +935,9 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     if !o.lsp && !o.json && !o.quiet {
         crate::upgrade::check(ui);
     }
+    if r.out.errors.is_empty() {
+        crate::star::built(Path::new(&t.file), ui, o.lsp);
+    }
     let code = i32::from(!r.out.errors.is_empty());
     // (the process exits next: the session's engine and tables, hundreds
     // of megabytes, are left to it instead of freed one by one)

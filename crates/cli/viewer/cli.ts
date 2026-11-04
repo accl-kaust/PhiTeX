@@ -143,6 +143,8 @@ class Pages implements CoreTransport {
       const since = typeof s.since_ms === "number" ? s.since_ms : s.cold && typeof s.ms === "number" ? s.ms : null;
       this.change = since === null ? null : { since, at: performance.now() };
       if (typeof s.ms === "number") panel.latency(...timing(s));
+      // (the bars: the first build's time, then each edit's)
+      if (typeof s.ms === "number") panel.buildTime(s.ms, !!s.cold);
     });
   }
 
@@ -258,8 +260,22 @@ const panel = new Panel(
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
     onContents: () => void session.outline(),
     onFind: (q) => pages.find(q),
+    onSettings: () => void openSettings(),
+    // (a problem's source lines, for Copy for an AI assistant)
+    onLines: async (file, line) => {
+      const r = await sock.request({ op: "info", what: "lines", file, line });
+      return r.ok ? ((r.json?.lines ?? []) as [number, string][]) : null;
+    },
+    // (What's new: this version's CHANGELOG entry, from the binary)
+    onNews: () =>
+      void sock.request({ op: "info", what: "news" }).then((r) => {
+        if (r.ok) panel.news(String(r.json?.version ?? ""), String(r.json?.text ?? ""));
+        else panel.msg("No news for this version", false, true);
+      }),
     // (the tips seen: the user's phitex.toml through the watch, the same on every port and browser)
     onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } }),
+    // (the problems' filters: kept the same way)
+    onProblemsHidden: (kinds) => void sock.request({ op: "prefs", set: { "problems-hidden": kinds } }),
   },
   // (the panel's settings: this browser's)
   {
@@ -332,6 +348,11 @@ let counted: ((n: number) => void) | undefined;
 sock.onEvent((e: any) => {
   if (e.event !== "diff") return;
   diffState = e.diff ?? {};
+  // (the changes along the scrollbar while the diff is shown: where the watch placed them)
+  const placed = ((diffState.changes ?? []) as { page?: number; y?: number; new_text?: string; old_text?: string }[])
+    .map((c, i) => (typeof c.page === "number" ? { k: c.page, y: c.y ?? 0, title: `Change ${i + 1}: ${words(c.new_text || "") || words(c.old_text || "")}` } : null))
+    .filter((c): c is { k: number; y: number; title: string } => !!c);
+  panel.diffMarks(diffState.shown === false ? [] : placed);
   const n = diffState.changes?.length;
   if (n === undefined) return;
   if (diffWait) (diffWait(diffState), (diffWait = undefined));
@@ -391,7 +412,7 @@ const runner: DiffRunner<Pair> = {
   download: (what) => save(`diff.${what}`),
   look: async () => ({ ...LATEXDIFF_LOOK, ...diffState.look }),
   restyle: (l) => void ask({ op: "diff_restyle", markup: l.markup, subtype: l.subtype, add_color: l.add_color, del_color: l.del_color }),
-  stop: () => void ask({ op: "diff_stop" }),
+  stop: () => (panel.diffMarks([]), void ask({ op: "diff_stop" })),
 };
 const controls = new DiffControls(panel, runner);
 addEventListener("keydown", (e) => controls.key(e));
@@ -413,7 +434,14 @@ document.head.append(Object.assign(document.createElement("style"), {
 #phx-pick header small { grid-column: 1 / -1; color: var(--fg2); font-size: 12px; }
 #phx-pick .phx-commits { flex: 1; min-height: 0; }
 #phx-pick header button { grid-row: 1; grid-column: 2; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
-#phx-pick header button:hover { background: var(--hover); }`,
+#phx-pick header button:hover { background: var(--hover); }
+#phx-pick.phx-settings { width: min(460px, calc(100vw - 24px)); }
+.phx-settings .rows { overflow: auto; padding: 4px 0; }
+.phx-settings .srow { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; }
+.phx-settings .srow:hover { background: var(--hover); }
+.phx-settings .srow span { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.phx-settings .srow small { color: var(--fg2); font-size: 12px; }
+.phx-settings .srow button { border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }`,
 }));
 let pick: HTMLElement | undefined;
 let graph: Commits | undefined;
@@ -537,7 +565,38 @@ let status: Said = { kind: "status", text: "" };
 let busy = "";
 let unseen = { errors: 0, warnings: 0 };
 
+/** The tab's icon: a dot in the status's colour (green built, orange building, red errors, grey not connected). */
+const favicon = (() => {
+  const link = Object.assign(document.createElement("link"), { rel: "icon" });
+  document.head.append(link);
+  let was = "";
+  return (colour: string) => {
+    if (colour === was) return;
+    was = colour;
+    link.href = `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="${colour}"/></svg>`)}`;
+  };
+})();
+
+/** The tab's title and icon: the document and what the watch is doing ("paper.tex · Building…", "· 2 errors", "· Built", "· Not connected"). */
+const showTitle = () => {
+  const file = (status.text ?? "").split(" · ")[0] || "phitex watch";
+  const connected = !/not connected/.test(status.text ?? "");
+  const errs = /(\d+) errors?/.exec(status.text ?? "")?.[1];
+  const [what, colour] = !connected
+    ? ["Not connected", "#8a93a3"]
+    : busy
+      ? ["Building…", "#f58f2d"]
+      : status.ok === false
+        ? [errs ? `${errs} error${errs === "1" ? "" : "s"}` : "Failed", "#d1453b"]
+        : status.ok === true
+          ? ["Built", "#2e9d63"]
+          : ["Loading…", "#8a93a3"];
+  document.title = connected && file !== "phitex watch" ? `${file} · ${what}` : `${what} · phitex watch`;
+  favicon(colour);
+};
+
 const showBar = () => {
+  showTitle();
   dot.className = "dot" + (busy ? " busy" : status.ok === true ? " ok" : status.ok === false ? " bad" : "");
   barText.textContent = busy ? `${busy}…` : status.text || "phitex watch";
   const n = unseen.errors + unseen.warnings;
@@ -618,10 +677,54 @@ const backlog = async () => {
   for (const s of (r.json?.items ?? []) as Said[]) said(s, false);
   if (r.json?.status) said(r.json.status as Said, false);
 };
+// ---- Settings (the user's phitex.toml, through the watch: on every port and document) ----
+
+const SETTINGS: [string, string, string][] = [
+  ["watch-write", "Write the PDF into the folder", "After each build, the PDF with its .synctex.gz, as phitex build does (for a PDF viewer outside this page). From the next phitex watch on."],
+  ["synctex", "SyncTeX file with a written PDF", "JOB.synctex.gz beside the PDF, for a PDF viewer's jumps to the source."],
+  ["update-check", "Say when a newer PhiTeX is out", "Asked once a day, in the terminal."],
+];
+let settingsEl: HTMLElement | undefined;
+async function openSettings(): Promise<void> {
+  if (settingsEl && !settingsEl.hidden) return void (settingsEl.hidden = true);
+  const r = await sock.request({ op: "prefs" });
+  if (!r.ok) return void panel.msg(`Couldn't read the settings: ${r.error ?? "not available"}`, true, true);
+  const p = r.json ?? {};
+  if (!settingsEl) {
+    settingsEl = document.createElement("div");
+    settingsEl.id = "phx-pick";
+    settingsEl.className = "phx-settings";
+    document.body.append(settingsEl);
+    addEventListener("keydown", (e) => e.key === "Escape" && settingsEl && !settingsEl.hidden && ((settingsEl.hidden = true), e.stopImmediatePropagation()), { capture: true });
+  }
+  const el = settingsEl;
+  const esc = (t: string) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+  el.innerHTML =
+    `<header><b>Settings</b><small>Yours, in ${esc(String(p.file ?? "phitex.toml"))}: every document and port</small><button type="button" data-x>Close</button></header>` +
+    `<div class="rows">${SETTINGS.map(([k, name, what]) => `<label class="srow"><input type="checkbox" data-k="${k}" ${p[k] ? "checked" : ""}><span><b>${esc(name)}</b><small>${esc(what)}</small></span></label>`).join("")}` +
+    `<div class="srow"><span><b>Tips</b><small>The feature tips shown again, from the start</small></span><button type="button" data-tips>Show again</button></div>` +
+    `<div class="srow"><span><b>Problems shown</b><small>Which kinds: the filters at the top of the problems list (e)</small></span></div></div>`;
+  el.hidden = false;
+  (el.querySelector("[data-x]") as HTMLElement).onclick = () => (el.hidden = true);
+  (el.querySelector("[data-tips]") as HTMLElement).onclick = () => {
+    void sock.request({ op: "prefs", set: { "tips-seen": [] } });
+    el.hidden = true;
+    panel.tipsReset();
+  };
+  for (const c of el.querySelectorAll<HTMLInputElement>("input[data-k]"))
+    c.onchange = async () => {
+      const r = await sock.request({ op: "prefs", set: { [c.dataset.k!]: c.checked } });
+      panel.msg(r.ok ? `${c.checked ? "On" : "Off"}: ${c.closest("label")!.querySelector("b")!.textContent}` : `Not saved: ${r.error}`, !r.ok, true);
+      if (!r.ok) c.checked = !c.checked;
+    };
+}
+
 /** The user's viewer preferences, as the watch keeps them (`prefs`). */
 const prefs = async () => {
   const r = await sock.request({ op: "prefs" });
-  if (r.ok) panel.tipsSeen(((r.json?.["tips-seen"] ?? []) as string[]).filter((x) => typeof x === "string"));
+  if (!r.ok) return;
+  panel.tipsSeen(((r.json?.["tips-seen"] ?? []) as string[]).filter((x) => typeof x === "string"));
+  panel.problemsHidden(((r.json?.["problems-hidden"] ?? []) as string[]).filter((x) => typeof x === "string"));
 };
 const opened = sock.onOpen;
 sock.onOpen = () => (opened(), void backlog(), void prefs());
