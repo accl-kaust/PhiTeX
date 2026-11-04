@@ -3585,7 +3585,9 @@ fn watch_open_starts_only_the_users_viewer() {
 
 /// `phitex watch` writing a file a `\write18` command made in a folder of
 /// its own (minted's `_minted/`) makes that folder: the folder's own event
-/// is the watch's write, not a source changed, so the cold build is not
+/// is the watch's write, not a source changed (though the build looked
+/// for that name before it was there, as minted looks for its folder),
+/// so the cold build is not
 /// followed by a second one and the exact file said written is the cold
 /// build's (Grail: every cold build was followed by a build "why
 /// _minted", and the bench waiting for build 1's written event never
@@ -3596,7 +3598,8 @@ fn watch_a_folder_it_makes_is_no_change() {
     let dir = scratch("watch-own-folder");
     std::fs::write(
         dir.join("doc.tex"),
-        plain() + "\\immediate\\write18{mkdir -p made && echo hello > made/note.txt}Alpha.\\bye\n",
+        plain()
+            + "\\openin1=made \\closein1 \\immediate\\write18{mkdir -p made && echo hello > made/note.txt}Alpha.\\bye\n",
     )
     .expect("the document");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)

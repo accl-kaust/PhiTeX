@@ -1202,7 +1202,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         } {
             Ok(w) => {
                 let ours = &mut *mine;
-                let top = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+                let top = root.canonicalize().unwrap_or_else(|_| root.clone());
                 for (p, h) in &w.files {
                     let p = p.canonicalize().unwrap_or_else(|_| root.join(p));
                     // (the folders it went into below the root, made by
