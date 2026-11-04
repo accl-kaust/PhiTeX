@@ -977,15 +977,15 @@ impl Run<'_, '_> {
                 v.with_str(d.0.0, |s| {
                     s.starts_with("pages:") || PAGE_FIELDS.contains(&s) || s == MAIN_PREVGRAF
                 }) == Some(false)
+                    && used_here(d.0.0)
             })
             .collect();
-        // (whether the routine changed them matters only for what the run
-        // read across the candidate: the rest is not looked at, nor the
-        // finisher's run made to depend on what reaches it)
-        if rtn_after.is_none()
-            && !boxes.iter().any(|b| used_here(b.0.0))
-            && !changes.iter().any(|d| used_here(d.0.0))
-        {
+        let boxes: Vec<_> = boxes.into_iter().filter(|b| used_here(b.0.0)).collect();
+        // (what the run did not read across the candidate is not looked
+        // at, nor the finisher's run made to depend on what reaches it, nor
+        // the run asked again when it moves. Read on another way the
+        // routine's value took, a field comes here on the next pass)
+        if rtn_after.is_none() && boxes.is_empty() && changes.is_empty() {
             return Ok(());
         }
         let locals: Vec<ValueId> = args
@@ -1050,13 +1050,9 @@ impl Run<'_, '_> {
                     .join(" "),
             );
         }
-        if rtn_after.is_some()
-            || changed.iter().any(|&f| used_here(f))
-            || boxes.iter().any(|b| used_here(b.0.0))
-        {
-            // (every field the routine changed, with the value it left:
-            // the piece puts them in force at the candidate, as TeX's
-            // text after the routine has them)
+        if rtn_after.is_some() || !changed.is_empty() || !boxes.is_empty() {
+            // (each with the value it left: the piece puts them in force at
+            // the candidate, as TeX's text after the routine has them)
             let mut pairs = Vec::with_capacity(changed.len());
             for f in changed {
                 let loc = self.loc_of(Field(f));
