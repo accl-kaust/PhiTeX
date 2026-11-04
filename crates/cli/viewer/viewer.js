@@ -10,6 +10,7 @@ var KINDS = [
   ["other", "Other"]
 ];
 function kindOf(d) {
+  if (d.kind && KINDS.some(([k]) => k === d.kind)) return d.kind;
   if (d.severity === "error" || d.severity === "fatal") return "error";
   const m = d.message;
   if (/^Overfull \\[hv]box|^Tight \\[hv]box/.test(m)) return "overfull";
