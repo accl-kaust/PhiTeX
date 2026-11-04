@@ -1103,6 +1103,12 @@ export class Panel {
     }
   }
 
+  /** The pages' origins came after the problems did: their underlines looked up again (the memo held an answer with no pages). */
+  origins(): void {
+    this.culpritsOf = "";
+    void this.underline(this.culpritDiags);
+  }
+
   /** The pointer over an underline: its problem's message, under it. */
   private culpritAt(e: PointerEvent): void {
     const tip = this.$("#ctip");

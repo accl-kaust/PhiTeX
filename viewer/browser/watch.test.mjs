@@ -378,12 +378,16 @@ test("a problem's card shows its place on the pages (item 2); which kinds have a
   for (const [kind, text] of Object.entries(kinds)) {
     const { w, t } = await open({ "main.tex": text }, { pages: false });
     await t.until(`$("#diags")?.innerText.trim().length > 0 || +$("#pgn")?.textContent > 0`, `${kind}: built`, 120000);
-    await sleep(2500);
-    got[kind] = await t.q(`({ underline: $$(".slot .culprit").length > 0, said: $("#diags").innerText.split("\\n").find((l) => l.trim()) ?? "" })`);
+    // (the underline comes once the page is laid out: waited for, not long)
+    const underline = await t.until(`$$(".slot .culprit").length > 0`, `${kind}: an underline`, 8000).then(() => true, () => false);
+    got[kind] = { underline, ...(await t.q(`({ pages: +$("#pgn")?.textContent, said: $("#diags").innerText.split("\\n").find((l) => l.trim()) ?? "" })`)) };
     await w.stop();
   }
   console.log("underlines by kind:", JSON.stringify(got, null, 1));
-  assert.ok(got["undefined command"].underline, "an undefined command is underlined");
+  // (a kind whose build gives no page cannot be underlined: a missing file
+  // and an unclosed brace stop the job; their places are in the card)
+  for (const kind of ["missing citation", "undefined reference", "font fallback", "undefined command"]) assert.ok(got[kind].underline, `${kind} is underlined`);
+  assert.match(got["missing file"].said, /nosuchfile\.tex' not found/);
 });
 
 test("the tab's title says the state; Settings writes the user's file; What's new and the times show; Copy for an AI has the source (items 12, 15, 7, 3, 11)", async () => {
