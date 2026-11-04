@@ -2662,3 +2662,49 @@ fn a_piece_of_an_input_file_has_its_lines_given() {
         }
     }
 }
+
+/// LaTeX's warnings (an undefined `\ref` or `\cite`, a font shape
+/// substituted) are warning diagnostics at the command that raised them,
+/// the command with its argument the culprit, so a viewer underlines it;
+/// the rerun warning at `\end{document}`, which names nothing, has no
+/// culprit. The output is not changed by them.
+#[test]
+fn latex_warnings_are_diagnostics() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latex-warnings");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let src = "\\documentclass{article}\n\\begin{document}\n\
+               See \\ref{nosuchlabel} and \\cite[p.~3]{nosuchkey} here.\n\n\
+               Shape {\\fontshape{sc}\\bfseries bold small caps} here.\n\
+               \\end{document}\n";
+    std::fs::write(dir.join("lw.tex"), src).expect("the document");
+    let b = common::build(pdf_opts("lw", &dir), Some(&prelude(true)), src);
+    let ds = b.diagnostics();
+    for d in &ds {
+        eprintln!("{d:?}");
+    }
+    let at = |needle: &str| {
+        let d = ds
+            .iter()
+            .find(|d| d.message.contains(needle))
+            .unwrap_or_else(|| panic!("no diagnostic saying {needle:?}: {ds:#?}"));
+        assert_eq!(d.severity, phitex_tex::Severity::Warning, "{d:?}");
+        (d.line, &src[d.range.0..d.range.1], d.help.clone())
+    };
+    let r = at("Reference `nosuchlabel'");
+    assert_eq!((r.0, r.1), (3, "\\ref{nosuchlabel}"));
+    assert_eq!(at("Citation `nosuchkey'").1, "\\cite[p.~3]{nosuchkey}");
+    let (line, culprit, help) = at("Font shape `OT1/cmr/bx/sc' undefined");
+    assert_eq!((line, culprit), (5, "\\bfseries"));
+    assert!(
+        help.as_deref()
+            .is_some_and(|h| h.contains("using `OT1/cmr/bx/n' instead")),
+        "{help:?}"
+    );
+    let rerun = at("There were undefined references");
+    assert_eq!(rerun.1, "");
+    assert!(
+        ds.iter().all(|d| d.severity != phitex_tex::Severity::Error),
+        "{ds:#?}"
+    );
+}
