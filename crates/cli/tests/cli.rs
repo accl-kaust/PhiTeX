@@ -2569,7 +2569,14 @@ fn watch_absorbs_an_edit_during_the_cold_build() {
         first["absorbed"].as_u64().unwrap_or(0) >= 1,
         "the cold build did not take the edit: {first}"
     );
-    std::thread::sleep(Duration::from_millis(500));
+    // (the session idle: every event the save made taken, its temporary
+    // file's among them, which came while every file was wanted; the
+    // exact file written is the cold build's, no build after it)
+    let written = until(&mut lines, "event", &"written".into(), &mut seen);
+    assert_eq!(
+        written["build"], 1,
+        "the exact file is a later build's: {seen:?}"
+    );
     let watched = std::fs::read(dir.join("slow.dvi")).expect("the watch's DVI");
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
