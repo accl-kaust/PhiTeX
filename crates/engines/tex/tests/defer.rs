@@ -500,7 +500,7 @@ fn a_routines_value_gives_way_to_steps_that_cancel_after_its_candidate() {
     let src = |down: &str, up: &str| {
         let mut s = String::from(
             "\\openout1=\\jobname.out\n\\count200=5\n\
-             \\output={\\global\\advance\\count200 1 \\global\\advance\\count200 -1 \
+             \\output={\\global\\advance\\count200 1 \\count1=\\count200 \\global\\advance\\count200 -1 \
              \\immediate\\write1{p\\the\\count0=\\the\\count200.}\\shipout\\box255\\global\\advance\\count0 1 }\n",
         );
         for b in 0..6 {
