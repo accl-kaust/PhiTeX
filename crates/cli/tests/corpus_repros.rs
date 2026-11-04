@@ -1168,6 +1168,7 @@ fn routine_global_read_by_position() {
 #[test]
 fn routine_reads_binding_of_closed_scope() {
     check_threads("kotex_scope_binding", "pdf");
+}
 
 /// TeX Live manual typog-example (pdflatex, microtype's contexts): each
 /// copy of a font expands to fonts of its own, even at a ratio another copy

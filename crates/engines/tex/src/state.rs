@@ -3080,8 +3080,11 @@ pub(crate) struct CkMemo {
     touched: Vec<(Vec<Loc>, ValueId)>,
     /// [`State::read_across`]' list by chunks of [`TOUCHED_CHUNK`]: a
     /// chunk's entries change where the run reads them again.
-    across: Vec<(Vec<(Loc, u32, u32)>, ValueId)>,
+    across: Vec<(Vec<ReadAcross>, ValueId)>,
 }
+
+/// An entry of [`State::read_across`]: location, from, to.
+type ReadAcross = (Loc, u32, u32);
 
 /// The touched locations a chunk of [`Base::to_value`]'s list holds: the
 /// list grows at its end, its chunks before the last stay as they were.
@@ -3626,6 +3629,7 @@ impl Base {
     }
 
     /// From [`Base::to_value`]'s value, each field's location (`loc`).
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn of_value(
         v: &Values,
         x: ValueId,

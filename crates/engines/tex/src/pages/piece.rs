@@ -477,16 +477,16 @@ impl Run<'_, '_> {
     /// What the run read in ways it cannot date
     /// ([`crate::state::read_by_position`]) counts as read across all its
     /// candidates.
-    pub(crate) fn order_after_fires(&mut self) -> R<()> {
+    pub(crate) fn order_after_fires(&mut self) {
         let op = self.cx.op();
         let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
         if !piece || self.interp.is_some() {
-            return Ok(());
+            return;
         }
         let v = self.v;
         let ks = self.st.past_ks();
         if ks.is_empty() {
-            return Ok(());
+            return;
         }
         self.note_engine_reads();
         let ranges = self.fire_read_across(&ks);
@@ -512,7 +512,6 @@ impl Run<'_, '_> {
             v.list(vec![v.list(fs), v.list(rs), passed]),
             Locality::Global,
         );
-        Ok(())
     }
 
     /// Each stretch of candidates the run read a field across, sorted by

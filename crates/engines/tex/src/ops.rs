@@ -90,7 +90,7 @@ fn hint_log(
 fn pass(r: &mut Run<'_, '_>, body: &mut impl FnMut(&mut Run<'_, '_>) -> R<()>) -> R<()> {
     let res = body(r);
     if matches!(res, Ok(()) | Err(Halt::Cut)) {
-        r.order_after_fires()?;
+        r.order_after_fires();
     }
     res
 }

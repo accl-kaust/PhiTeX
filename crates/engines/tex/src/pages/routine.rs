@@ -944,6 +944,7 @@ impl Run<'_, '_> {
     /// page state a piece folds, `pages:*`, the main list's `\prevgraf`:
     /// the routine runs in a list of its own, §1025, and a `\par` in it
     /// sets that list's, §1244).
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn define_fire_conflict(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
         let Some((at, k)) = self
@@ -1006,7 +1007,7 @@ impl Run<'_, '_> {
             .into_iter()
             .filter_map(|e| list_of(v, e).first().copied())
             .collect();
-        let mut changed = Vec::new();
+        let mut moved = Vec::new();
         for (f, what, _) in changes {
             let same = !locals.contains(&f.0)
                 && match what {
@@ -1035,7 +1036,7 @@ impl Run<'_, '_> {
                     crate::state::Pub::Rel(c) => c == 0,
                 };
             if !same {
-                changed.push(f.0);
+                moved.push(f.0);
             }
         }
         if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
@@ -1048,12 +1049,12 @@ impl Run<'_, '_> {
                     .map(|b| crate::val::field_name(v, b.0))
                     .collect::<Vec<_>>()
                     .join(" "),
-                changed
+                moved
                     .iter()
                     .map(|&f| crate::val::field_name(v, Field(f)))
                     .collect::<Vec<_>>()
                     .join(" "),
-                changed
+                moved
                     .iter()
                     .filter(|&&f| used_here(f))
                     .map(|&f| crate::val::field_name(v, Field(f)))
@@ -1061,11 +1062,11 @@ impl Run<'_, '_> {
                     .join(" "),
             );
         }
-        if rtn_after.is_some() || !changed.is_empty() || !boxes.is_empty() {
+        if rtn_after.is_some() || !moved.is_empty() || !boxes.is_empty() {
             // (each with the value it left: the piece puts them in force at
             // the candidate, as TeX's text after the routine has them)
-            let mut pairs = Vec::with_capacity(changed.len());
-            for f in changed {
+            let mut pairs = Vec::with_capacity(moved.len());
+            for f in moved {
                 let loc = self.loc_of(Field(f));
                 pairs.push(match self.st.id_of(loc, v) {
                     Some(x) => v.list(vec![f, x]),
