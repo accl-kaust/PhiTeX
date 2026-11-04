@@ -627,7 +627,9 @@ fn a_routines_value_gives_way_to_steps_that_cancel_after_its_candidate() {
 /// Steps a piece makes of a register it never reads, after a candidate where
 /// a page fires inside the piece, go on what the routine left there, as in
 /// TeX: here every routine adds 1 to `\\count200` and the text steps it -1
-/// and +1 around each paragraph's start, so page `n` writes `4 + n`. Putting
+/// and +1 around each paragraph's start, so each page's value counts the
+/// routines before it (`p2=6.p3=8.`, as the text setting by value gives).
+/// Putting
 /// back the value reaching the finisher (the text's steps on what reached
 /// the piece) dropped the routines' steps. Against the same text setting by
 /// value.
@@ -663,8 +665,8 @@ fn steps_after_a_candidate_go_on_the_routines_value() {
         1,
     );
     assert!(
-        want_out.contains("p1=5.") && want_out.contains("p2=6."),
-        "each page one more: {want_out:?}"
+        want_out.contains("p2=6.") && want_out.contains("p3=8."),
+        "the routines' steps counted: {want_out:?}"
     );
     for threads in [1, 4, 8] {
         let dir = common::scratch(&format!("defer-steps-routine-{threads}"));
