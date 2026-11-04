@@ -2676,18 +2676,32 @@ impl Run<'_, '_> {
         // (that file's stream alone: a write to another file, the `.aux`
         // line of a heading, is not read here)
         let f = crate::run::stream_bucket(v, key);
-        let before = self.cx.fold(f, None, None);
-        if before.is_err() {
-            self.trace_stop("range streams");
-        }
-        let before = before?;
-        let mut all = v.seq_to_vec(before);
-        all.extend(
-            self.contribs
-                .iter()
-                .filter(|(g, _)| *g == f)
-                .flat_map(|(_, x)| v.seq_to_vec(*x)),
-        );
+        let own: Vec<ValueId> = self
+            .contribs
+            .iter()
+            .filter(|(g, _)| *g == f)
+            .flat_map(|(_, x)| v.seq_to_vec(*x))
+            .collect();
+        // (a file this run itself opened, §1374: what was written to it
+        // before is gone, so nothing before the run is read. Read, a
+        // letter typed in one of beamer's fragile frames, each writing and
+        // reading the one `.vrb`, ran every later fragile frame again)
+        let opened = own.iter().rposition(|&e| {
+            !crate::api::is_cand_marker(v, e)
+                && crate::api::page_tag(v, e).is_none()
+                && matches!(list_of(v, e).as_slice(), [n] if str_of(v, *n) == key)
+        });
+        let all = if let Some(i) = opened {
+            own[i..].to_vec()
+        } else {
+            let before = self.cx.fold(f, None, None);
+            if before.is_err() {
+                self.trace_stop("range streams");
+            }
+            let mut all = v.seq_to_vec(before?);
+            all.extend(own);
+            all
+        };
         let text = crate::api::stream_texts(v, &crate::api::doc_order(v, &all))
             .into_iter()
             .find(|(n, _)| n == key)
