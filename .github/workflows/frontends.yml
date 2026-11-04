@@ -154,6 +154,8 @@ jobs:
           # data, a core 4 GiB; a reload's core, and a second tab's, which says why)
           node scripts/dev/mock-run.mjs test/scenarios/ci-reload.json
           node scripts/dev/mock-run.mjs test/scenarios/ci-tabs.json
+          # (Overleaf's own main document, its Menu's, followed: the socket's join and change)
+          node scripts/dev/mock-run.mjs test/scenarios/ci-rootdoc.json
       - name: the demo (build/web, served here)
         if: ${{ !cancelled() }}
         working-directory: fe

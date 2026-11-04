@@ -987,6 +987,13 @@ pub(crate) struct Run<'c, 'a> {
     pub lines_entered: i64,
     /// Whether the input is exhausted for good (the file ended).
     pub eof: bool,
+    /// The job's text read to its end ([`Run::eof`] set there, not for a
+    /// line read apart), and whether §362's check of that end has run
+    /// ([`Run::file_ended`], once: "File ended while scanning use of
+    /// \textbf", then what it inserted read; at the end again, §360's
+    /// fatal error).
+    pub doc_ended: bool,
+    pub doc_end_checked: bool,
     /// `radix` (§438) and `cur_order` (§447).
     pub radix: i32,
     pub cur_order: phitex_typeset::glue::Order,
@@ -1398,6 +1405,8 @@ impl<'c, 'a> Run<'c, 'a> {
             incs: Vec::new(),
             lines_entered: 0,
             eof: false,
+            doc_ended: false,
+            doc_end_checked: false,
             radix: 0,
             cur_order: phitex_typeset::glue::Order::Normal,
             pdf_occ: 0,

@@ -457,3 +457,60 @@ fn written_warnings_are_diagnostics() {
     assert_eq!(ws[3].help.as_deref(), Some("and more."));
     assert!(ds.iter().all(|d| d.severity != Severity::Error), "{ds:?}");
 }
+
+/// §362 at the end of the main file: what the text ended in is TeX's
+/// error (§338, "File ended while scanning use of \a"), then what §339
+/// inserted is read, and only at the end again is the job aborted (§360,
+/// "*** (job aborted, no legal \end found)"), as pdfTeX's log has them.
+/// Before, the job was aborted at once and the error never said: an
+/// unclosed brace in an editor had no problem but the abort. The name as
+/// `sprint_cs` shows it, a space in it kept (LaTeX's robust `\textbf `,
+/// "use of \textbf ."). Oracle: pdflatex on the same shapes in LaTeX
+/// (TeX Live 2026, accl 24838).
+#[test]
+fn the_text_ending_inside_an_argument_or_a_definition() {
+    for threads in [1, 4] {
+        for (doc, msg) in [
+            (
+                "\\long\\def\\a#1{}\nText \\a{one\ntwo.\n",
+                "File ended while scanning use of \\a",
+            ),
+            (
+                "Text.\n\\def\\x{abc\n",
+                "File ended while scanning definition of \\x",
+            ),
+            (
+                "\\expandafter\\long\\expandafter\\def\\csname b \\endcsname#1{}\nText \\csname b \\endcsname{one\n",
+                "File ended while scanning use of \\b ",
+            ),
+            // (plain's `\bye` is `\outer`: §336's other error there, the
+            // name as shown the same way; `\bye` then ends the job)
+            (
+                "\\expandafter\\long\\expandafter\\def\\csname b \\endcsname#1{}\nText \\csname b \\endcsname{one\n\\bye\n",
+                "Forbidden control sequence found while scanning use of \\b ",
+            ),
+        ] {
+            let b = build(doc, |o| Options {
+                threads: Some(threads),
+                ..o
+            });
+            let ds = b.diagnostics();
+            show(&ds);
+            let errs: Vec<&str> = ds
+                .iter()
+                .filter(|d| d.severity == Severity::Error)
+                .map(|d| d.message.as_str())
+                .collect();
+            assert!(
+                errs.iter().any(|m| m.trim_end_matches('.') == msg),
+                "-j{threads} {doc:?}: {errs:?}"
+            );
+            let at = errs.iter().position(|m| m.trim_end_matches('.') == msg);
+            let abort = errs.iter().position(|m| m.contains("no legal \\end found"));
+            assert!(
+                msg.starts_with("Forbidden") || abort.is_some_and(|a| at.is_some_and(|i| i < a)),
+                "-j{threads} {doc:?}: the abort after the error: {errs:?}"
+            );
+        }
+    }
+}
