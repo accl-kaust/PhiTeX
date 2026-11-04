@@ -380,7 +380,7 @@ test("a problem's card shows its place on the pages (item 2); which kinds have a
     await t.until(`$("#diags")?.innerText.trim().length > 0 || +$("#pgn")?.textContent > 0`, `${kind}: built`, 120000);
     // (the underline comes once the page is laid out: waited for, not long)
     const underline = await t.until(`$$(".slot .culprit").length > 0`, `${kind}: an underline`, 8000).then(() => true, () => false);
-    got[kind] = { underline, ...(await t.q(`({ pages: +$("#pgn")?.textContent, said: $("#diags").innerText.split("\\n").find((l) => l.trim()) ?? "" })`)) };
+    got[kind] = { underline, ...(await t.q(`({ pages: +$("#pgn")?.textContent, said: $("#diags").innerText.replace(/\\s+/g, " ").slice(0, 160) })`)) };
     await w.stop();
   }
   console.log("underlines by kind:", JSON.stringify(got, null, 1));
