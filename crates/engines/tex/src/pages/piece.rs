@@ -1253,14 +1253,29 @@ impl Run<'_, '_> {
         let monotone = marks.windows(2).all(|w| {
             w[0].stamp <= w[1].stamp && w[0].gids <= w[1].gids && w[0].contribs <= w[1].contribs
         });
+        // (how a name standing at the run's end stands: a definition, put
+        // back over the routine's (1), or steps of a register the run
+        // never read, `b` after candidate `i`, which TeX makes on whatever
+        // the routine left there ([`stands_as_steps`]): the finisher adds
+        // them to the routine's value and reads nothing)
+        let st = &self.st;
+        let stand_code = |i: usize, l: Loc, stands: bool| -> i64 {
+            if !stands {
+                return 0;
+            }
+            match (st.unread_steps(l), at.get(i, l)) {
+                (Some(s), Some(AtVal::Reaching(c))) => stands_as_steps(s.wrapping_sub(c)),
+                _ => 1,
+            }
+        };
         let mut stretches = if monotone {
-            src.by_field(&kv_at)
+            src.by_field(&kv_at, &stand_code)
         } else {
-            src.by_candidate(&kv_at)
+            src.by_candidate(&kv_at, &stand_code)
         };
         if crate::exec::obs_flag!("PHITEX_STRETCHES_CHECK") && monotone {
             let mut a = stretches.clone();
-            let mut b = src.by_candidate(&kv_at);
+            let mut b = src.by_candidate(&kv_at, &stand_code);
             a.sort_unstable_by_key(|x| (x.0.raw(), x.3));
             b.sort_unstable_by_key(|x| (x.0.raw(), x.3));
             assert!(
@@ -1282,11 +1297,11 @@ impl Run<'_, '_> {
         let n = |x: usize| v.int(i64::try_from(x).unwrap_or(i64::MAX));
         let mut index = Vec::with_capacity(stretches.len() * 5);
         for &(f, g, kv, lo, hi) in &stretches {
-            index.extend([f, v.int(i64::from(g)), v.int(kv_kind(v, kv)), n(lo), n(hi)]);
+            index.extend([f, v.int(g), v.int(kv_kind(v, kv)), n(lo), n(hi)]);
         }
         let stretches = stretches
             .into_iter()
-            .flat_map(|(f, g, kv, lo, hi)| [f, v.int(i64::from(g)), kv, n(lo), n(hi)])
+            .flat_map(|(f, g, kv, lo, hi)| [f, v.int(g), kv, n(lo), n(hi)])
             .collect();
         (
             ValueId::UNIT,
@@ -1448,14 +1463,13 @@ impl Run<'_, '_> {
         for e in list_of(v, a(8)) {
             let xs = list_of(v, e);
             let Some(&f) = xs.first() else { continue };
-            let stands = xs.get(1).is_some_and(|&g| int_of(v, g) != 0);
-            if stands && gdefs.contains(&f) {
-                restore.push(Field(f));
+            let code = xs.get(1).map_or(0, |&g| int_of(v, g));
+            if code != 0 && gdefs.contains(&f) {
+                restore.push((Field(f), steps_standing(code)));
             }
         }
         let at = self.fin_page().map(|p| p.at);
-        for f in restore {
-            let x = self.eng_read(f)?;
+        for (f, steps) in restore {
             let loc = self.loc_of(f);
             if let Some(at) = at {
                 let left = self.st.id_of(loc, v);
@@ -1465,6 +1479,20 @@ impl Run<'_, '_> {
                     Locality::Global,
                 );
             }
+            // (steps of a register the piece never read: TeX makes them on
+            // what the routine left, so they go on the routine's value, as
+            // a step of its own where it only stepped the register too; the
+            // value reaching here is the piece's steps on what reached the
+            // piece, without the routine's, and reading it made every such
+            // finisher a reader of `\g__mark_int` (amsldoc at -j8))
+            if let Some(b) = steps {
+                if b != 0 && !self.st.add(v, loc, b, true) {
+                    let x = self.int_loc(loc)?;
+                    self.set_loc(loc, crate::state::Entry::int(x.wrapping_add(b)), true);
+                }
+                continue;
+            }
+            let x = self.eng_read(f)?;
             self.set_loc(loc, crate::state::Entry::raw(x), true);
         }
         Ok(())
@@ -2269,10 +2297,10 @@ impl Operation for Resume {
 /// Two lists each sorted by field then standing first, merged in that
 /// order, `a`'s before `b`'s at a tie: a stable sort of `a` then `b`.
 fn merge_stable(
-    a: impl Iterator<Item = (ValueId, bool, ValueId)>,
-    b: Vec<(ValueId, bool, ValueId)>,
-) -> Vec<(ValueId, bool, ValueId)> {
-    let key = |x: &(ValueId, bool, ValueId)| (x.0.raw(), !x.1);
+    a: impl Iterator<Item = (ValueId, i64, ValueId)>,
+    b: Vec<(ValueId, i64, ValueId)>,
+) -> Vec<(ValueId, i64, ValueId)> {
+    let key = |x: &(ValueId, i64, ValueId)| (x.0.raw(), x.1 == 0);
     let mut out = Vec::with_capacity(b.len());
     let mut b = b.into_iter().peekable();
     for x in a {
@@ -2326,8 +2354,22 @@ pub(crate) fn names_index_at(
 type RunDef = (Field, bool, Loc, u64, bool, Option<u32>);
 
 /// A field's name over a stretch of candidates `[lo, hi)`: the field,
-/// whether its definition stands, its value there.
-type Stretch = (ValueId, bool, ValueId, usize, usize);
+/// how its definition stands (0 not, 1 as a definition, else
+/// [`stands_as_steps`]), its value there.
+type Stretch = (ValueId, i64, ValueId, usize, usize);
+
+/// A standing name's code in a piece's check data for steps `b` the run
+/// made of an integer register it never read, after the candidate: bit 1
+/// set, `b` above the two low bits ([`steps_standing`]).
+pub(crate) fn stands_as_steps(b: i32) -> i64 {
+    (i64::from(b) << 2) | 2
+}
+
+/// The steps a standing name's code holds ([`stands_as_steps`]), if it is
+/// one of steps.
+pub(crate) fn steps_standing(code: i64) -> Option<i32> {
+    (code & 2 != 0).then(|| i32::try_from(code >> 2).unwrap_or(0))
+}
 
 /// What a piece's names at its candidates are made of
 /// ([`Run::check_data`]): a candidate's names are its locals, the
@@ -2358,8 +2400,12 @@ struct NameSource {
 
 impl NameSources<'_> {
     /// Every candidate's names, each made in full, folded into stretches.
-    fn by_candidate(&self, kv_at: &dyn Fn(usize, Loc) -> ValueId) -> Vec<Stretch> {
-        let mut open: phitex_defuse::FxHashMap<ValueId, (bool, ValueId, usize, usize)> =
+    fn by_candidate(
+        &self,
+        kv_at: &dyn Fn(usize, Loc) -> ValueId,
+        code: &dyn Fn(usize, Loc, bool) -> i64,
+    ) -> Vec<Stretch> {
+        let mut open: phitex_defuse::FxHashMap<ValueId, (i64, ValueId, usize, usize)> =
             phitex_defuse::FxHashMap::default();
         let mut stretches: Vec<Stretch> = Vec::new();
         for (i, m) in self.marks.iter().enumerate() {
@@ -2373,12 +2419,12 @@ impl NameSources<'_> {
                     self.held
                         .iter()
                         .filter_map(|&(f, l, end)| match self.at.get(i, l) {
-                            Some(AtVal::Known(x)) if x != end => Some((f.0, false, kv_of(l))),
+                            Some(AtVal::Known(x)) if x != end => Some((f.0, 0, kv_of(l))),
                             _ => None,
                         });
-                let mut streams: Vec<(ValueId, bool, ValueId)> = self.streams[i]
+                let mut streams: Vec<(ValueId, i64, ValueId)> = self.streams[i]
                     .iter()
-                    .map(|f| (f.0, false, ValueId::UNIT))
+                    .map(|f| (f.0, 0, ValueId::UNIT))
                     .collect();
                 streams.sort_by_key(|x| x.0.raw());
                 let names = merge_stable(restored, streams);
@@ -2386,9 +2432,9 @@ impl NameSources<'_> {
                     .defs
                     .iter()
                     .filter(|d| d.3 > m.stamp && !(d.4 && d.5.is_some_and(|g| g > m.gids)))
-                    .map(|d| (d.0.0, d.1, kv_of(d.2)));
+                    .map(|d| (d.0.0, code(i, d.2, d.1), kv_of(d.2)));
                 let own = merge_stable(after, names);
-                let locals = self.locals.iter().map(|&(l, f)| (f.0, false, kv_of(l)));
+                let locals = self.locals.iter().map(|&(l, f)| (f.0, 0, kv_of(l)));
                 let mut names = merge_stable(locals, own);
                 names.dedup_by_key(|x| x.0);
                 for (f, g, kv) in names {
@@ -2420,7 +2466,11 @@ impl NameSources<'_> {
     /// covers the candidates before it that its group is open at, a
     /// value changes only where a candidate holds the location, so a
     /// field's name is looked at only where one of its sources changes.
-    fn by_field(&self, kv_at: &dyn Fn(usize, Loc) -> ValueId) -> Vec<Stretch> {
+    fn by_field(
+        &self,
+        kv_at: &dyn Fn(usize, Loc) -> ValueId,
+        code: &dyn Fn(usize, Loc, bool) -> i64,
+    ) -> Vec<Stretch> {
         let n = self.n;
         let lasts: Vec<usize> = (0..n).filter(|&i| self.is_last[i]).collect();
         let mut out: Vec<Stretch> = Vec::new();
@@ -2451,7 +2501,10 @@ impl NameSources<'_> {
                 } else {
                     srcs.iter()
                         .find(|s| s.covers.iter().any(|&(lo, hi)| lo <= a && a < hi))
-                        .map(|s| (s.stands, s.loc.map_or(ValueId::UNIT, |l| kv_at(a, l))))
+                        .map(|s| match s.loc {
+                            Some(l) => (code(a, l, s.stands), kv_at(a, l)),
+                            None => (i64::from(s.stands), ValueId::UNIT),
+                        })
                 };
                 match (&mut cur, name) {
                     (Some(c), Some((g, kv))) if c.1 == g && c.2 == kv && c.4 == a => c.4 = b,
