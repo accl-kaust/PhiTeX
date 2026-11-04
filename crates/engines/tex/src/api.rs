@@ -8509,8 +8509,8 @@ impl Build {
 
     /// `d`'s range as [`culprit`] finds it for its message on the line
     /// it is at: for a diagnostic whose message is given after its place
-    /// was made ([`Build::why_read_stopped`]: `File `x.tex' not found`
-    /// at the stop after it, so `\input{x}`).
+    /// was made ([`Build::why_read_stopped`]: a file not found, named in
+    /// quotes by the message at the stop after it, so `\input{x}`).
     fn place_culprit(&self, d: &mut Diagnostic) {
         // (the document's range is in its raw text's bytes; a file's in
         // its characters, which are its bytes)
