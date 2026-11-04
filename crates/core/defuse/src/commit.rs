@@ -2117,9 +2117,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // woken by this commit past it reads what the layer defines and waits
     // there (`Ctx::hold_at_frontier`). Set after the re-asks, the woken
     // reader began on the old frontier and read on past the new one, and
-    // ran again on what a run held before it then defined; and before the
-    // placements are queued: they are queued by where they stand against
-    // it, `sched::sched_key`)
+    // ran again on what a run held before it then defined)
     if let Some(at) = frontier {
         eng.frontier_by.store(node.id.raw() + 1, Ordering::Release);
         let new = at.map_or(0, |n| n.raw() + 1);
@@ -2179,7 +2177,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     // (queued in their order: the ready heap takes the first queued first
     // among equal keys (`sched::Ready`), so its placements run in their
-    // order, a child before the node after it, where `sched::sched_key`
+    // order, a child before the node after it, where `sched::Ready`
     // ties them (the settling layer's, keyed at the frontier, which this
     // run moved above))
     for n in &made {
