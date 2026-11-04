@@ -1216,3 +1216,12 @@ fn count_loop_xe() {
 fn eof_no_newline() {
     check_threads("eof_no_newline", "pdf");
 }
+
+/// Found in amsldoc-vi's probes: `\ifhmode` and its like are all false while
+/// a `\write` is expanded (§1370, `mode:=0`); they answered the mode around
+/// it, though `\prevdepth` and `\spacefactor` there already knew. Oracle:
+/// pdftex in the CI image.
+#[test]
+fn write_mode_zero() {
+    check_threads("write_mode_zero", "pdf");
+}
