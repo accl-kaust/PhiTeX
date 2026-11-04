@@ -337,7 +337,7 @@ test("LaTeX's warnings are problems: an undefined \\ref and \\cite are warnings 
   assert.match(text, /Reference `nosuchlabel' on page 1 undefined/);
   assert.match(text, /Citation `nosuchkey' on page 1 undefined/);
   assert.match(text, /main\.tex:3/, "the warnings' line");
-  assert.match(text, /\d+ warnings/, "counted as warnings");
+  assert.match(text, /References \d+/, "counted under the reference kind");
   await t.until(`$$(".slot .culprit.warning").length >= 2`, "the warnings' underlines on the page");
   await t.until(`$$(".slot .culprit.error").length >= 1`, "the error's underline");
   await t.click("#diags [data-kind='reference']");

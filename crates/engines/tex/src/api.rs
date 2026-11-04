@@ -8295,6 +8295,17 @@ impl Build {
                 Some((m, h)) if kind == 3 => (m.to_owned(), Some(h.to_owned())),
                 _ => (message, None),
             };
+            // (a line number the format wrote, `\on@line`'s, is a mark the
+            // log's layout resolves ([`crate::log::LINE_MARK`]): here it
+            // is the line read when the text was written, this one)
+            let mark = |m: String| {
+                if m.contains(crate::log::LINE_MARK) {
+                    m.replace(crate::log::LINE_MARK, &line.to_string())
+                } else {
+                    m
+                }
+            };
+            let (message, more) = (mark(message), more.map(mark));
             let undefined = message == "Undefined control sequence";
             // the culprit's bytes in `text`: an undefined name is the one
             // just read; else the command whose argument holds the key
