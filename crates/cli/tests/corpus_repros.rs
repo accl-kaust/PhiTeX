@@ -1099,3 +1099,34 @@ fn page_read_after_par_in_cond() {
 fn pdf_savepos_texxet() {
     check_threads("pdf_savepos_texxet", "pdf");
 }
+
+/// TeX Live manual typog-example (pdflatex, microtype's contexts): each
+/// copy of a font expands to fonts of its own, even at a ratio another copy
+/// already has; they took one font by name and size, so every font loaded
+/// after them had a number six too small (`/F559` for `/F565`). A `\font`
+/// loaded anew after `\pdffontexpand` (`LaTeX_RefSheet`) does find those of
+/// its name and size. Oracle: pdftex in the CI image.
+#[test]
+fn expand_copies_numbered() {
+    check_threads("expand_copies_numbered", "pdf");
+}
+
+/// TeX Live manual asmejour-template (pdflatex, flushend): `\pagediscards`
+/// gave nothing and `\savingvdiscards` was not followed, so flushend's
+/// measure of the glue between its balanced columns was 0 pt, not 1.72 pt:
+/// the last page's second column came out 1.73 pt short and all its glue set
+/// differently. Also `\splitdiscards`. Oracle: pdftex in the CI image.
+#[test]
+fn page_discards() {
+    check_threads("page_discards", "pdf");
+}
+
+/// TeX Live manual ualberta: an `\\input` file whose last line has no newline.
+/// That line still ends (§31) and gives its space; a slice of the file took
+/// it as cut mid-line, one space short, so a paragraph running on into the
+/// next chapter's `\\clearpage` set its last line looser than pdflatex. Oracle:
+/// pdftex in the CI image (accl 23980; the base is one space short, 23978).
+#[test]
+fn eof_no_newline() {
+    check_threads("eof_no_newline", "pdf");
+}

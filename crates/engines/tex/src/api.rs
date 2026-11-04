@@ -4616,7 +4616,14 @@ fn node_args(
         (&DocNode::Doc(s, e), Some(inc)) => {
             let starts = s == 0 || text.as_bytes()[s - 1] == b'\n';
             let name = file.unwrap_or_else(|| v.str(DOC_NAME));
-            let mut a = slice_args_in_file(v, &text[s..e], starts, name, s, ValueId::UNIT);
+            let mut a = slice_args_in_file(
+                v,
+                crate::run::file_slice(text, s, e).as_ref(),
+                starts,
+                name,
+                s,
+                ValueId::UNIT,
+            );
             // (a document node is a top-level node)
             if file.is_none() {
                 a[1] = v.int(3);
@@ -7525,6 +7532,25 @@ impl Build {
         near.into_iter()
             .take(3)
             .map(|(_, _, k)| k.clone())
+            .collect()
+    }
+
+    /// Each diagnostic's message and what it holds of its line, as the
+    /// runs made them ([`Run::diag_place`]).
+    #[must_use]
+    pub fn diagnostic_places(&self) -> Vec<(String, String)> {
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .acc_value(self.unit, v.field("diags"))
+            .map(|s| v.seq_to_vec(s))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| {
+                let xs = list_of(v, e);
+                let s = |i: usize| xs.get(i).map(|&x| str_of(v, x)).unwrap_or_default();
+                (s(1), s(5))
+            })
             .collect()
     }
 

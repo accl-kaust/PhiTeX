@@ -81,6 +81,11 @@ pub(crate) const END_R: i32 = 11;
 /// Parameters: modifiers past every `TeX82` one of their command.
 const P: i32 = 1000;
 
+/// `\pagediscards`' items (`page_disc`, set while a routine runs).
+pub(crate) const PAGE_DISCARDS: &str = "disc:page";
+/// `\splitdiscards`' items (`split_disc`, of the last `\vsplit`).
+pub(crate) const SPLIT_DISCARDS: &str = "disc:split";
+
 /// `\\savinghyphcodes`'s code among the integer parameters.
 pub(crate) const SAVING_HYPH_CODES: i32 = P + 8;
 
@@ -1235,7 +1240,11 @@ fn command_mine(r: &mut Run<'_, '_>, md: &Mode) -> R<bool> {
         cmd::UN_VBOX if chr >= 2 => {
             // pdfTeX §1110: \pagediscards, \splitdiscards
             if am == 1 {
-                let name = if chr == 2 { "disc:page" } else { "disc:split" };
+                let name = if chr == 2 {
+                    PAGE_DISCARDS
+                } else {
+                    SPLIT_DISCARDS
+                };
                 let items = r.get(name)?.map(|x| list_of(r.v, x)).unwrap_or_default();
                 for x in items {
                     r.append(md.lid, x);

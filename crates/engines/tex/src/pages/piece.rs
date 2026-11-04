@@ -664,6 +664,7 @@ impl Run<'_, '_> {
             "param:maxdepth",
             "param:topskip",
             "param:holdinginserts",
+            "param:savingvdiscards",
         ];
         let mut defined = false;
         for n in names {
@@ -689,6 +690,7 @@ impl Run<'_, '_> {
             v.int(int(xs[1])),
             glue_value(v, &glue_of(v, xs[2])),
             v.int(int(xs[3])),
+            v.int(int(xs[4])),
         ]);
         for x in raw.iter_mut() {
             if nodes::tag(v, *x) == nodes::T_PAGE_PARAMS && list_of(v, *x).len() == 1 {

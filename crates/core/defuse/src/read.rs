@@ -933,8 +933,14 @@ pub(crate) fn hole_before(eng: &Engine, me: &Node) -> Option<NodeId> {
 }
 
 /// The first node before `me` in its unit that is to run, again or for
-/// the first time (`Node::is_open`): while one is, what `me` read before
-/// it may be a guess its run will change.
+/// the first time (`Node::is_open`), and that a run of this pass can bring
+/// a commit of: while one is, what `me` read before it may be a guess its
+/// run will change. Not one of an operation that runs only once the line
+/// is quiet (`Operation::final_only`) or one whose run panicked on inputs
+/// that hold (`Node::held_panic`), as for [`unsettled_before`]: a stuck
+/// run went on waiting for such a node, `park_waiting` found it settled
+/// and queued the run again, and the build ran it for ever and never said
+/// it was stuck (`latex_starray_starray` on a branch of relative registers).
 pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     let to = pos_of(eng, me.id)?;
     let from = unit_start(eng, me);
@@ -948,7 +954,12 @@ pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
             let inner = seg.inner.read();
             for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
                 let n = eng.node(*id);
-                if *id != me.id && n.unit == me.unit && n.is_open() {
+                if *id != me.id
+                    && n.unit == me.unit
+                    && n.is_open()
+                    && !eng.op(n.op()).final_only()
+                    && !n.held_panic.load(Ordering::Acquire)
+                {
                     return Some(*id);
                 }
             }

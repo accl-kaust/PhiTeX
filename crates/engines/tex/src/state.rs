@@ -2594,6 +2594,7 @@ pub(crate) fn is_page_param(loc: Loc) -> bool {
         Par::maxdepth as Loc,
         Par::topskip as Loc,
         Par::holdinginserts as Loc,
+        Par::savingvdiscards as Loc,
     ]
     .contains(&loc)
 }

@@ -3046,13 +3046,14 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// The page parameters in force (§980), as a `T_PAGE_PARAMS` marker:
-    /// `[tag, vsize, maxdepth, topskip, holdinginserts]`.
+    /// `[tag, vsize, maxdepth, topskip, holdinginserts, savingvdiscards]`.
     pub(crate) fn page_params_marker(&mut self) -> R<ValueId> {
         let v = self.v;
         let vsize = self.ipar(Par::vsize)?;
         let maxdepth = self.ipar(Par::maxdepth)?;
         let topskip = self.gpar(Par::topskip)?;
         let holding = self.ipar(Par::holdinginserts)?;
+        let saving = self.ipar(Par::savingvdiscards)?;
         if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
             eprintln!(
                 "page-trace: node {} op {:?} params marker vsize {vsize} topskip {}",
@@ -3067,6 +3068,7 @@ impl<'c, 'a> Run<'c, 'a> {
             v.int(i64::from(maxdepth)),
             crate::val::glue_value(v, &topskip),
             v.int(i64::from(holding)),
+            v.int(i64::from(saving)),
         ]))
     }
 
@@ -4102,16 +4104,27 @@ impl<'c, 'a> Run<'c, 'a> {
             });
         match &src {
             Some(s) => {
-                let mut buf = s.buf.clone();
-                if s.endch >= 0 && buf.len() > s.loc && s.ends {
+                let mut n = s.buf.len();
+                if s.endch >= 0 && n > s.loc && s.ends {
                     // the end of line character TeX appended
-                    buf.pop();
+                    n -= 1;
                 }
-                let seg: String = buf
+                let loc = s.loc.min(n);
+                // (a line of a file: its place there says where it is,
+                // its text only up to the column, for the column's bytes.
+                // What the line goes on with is not the diagnostic's, and
+                // an edit past the column leaves the place as it was: a
+                // run going on from a checkpoint before the edit holds
+                // the same one as a run from the start)
+                if let Some((f, _, _)) = s.origin
+                    && f != ValueId::UNIT
+                {
+                    n = loc;
+                }
+                let seg: String = s.buf[..n]
                     .iter()
                     .map(|&c| char::from_u32(c).unwrap_or('?'))
                     .collect();
-                let loc = s.loc.min(buf.len());
                 match s.origin {
                     Some((n, a, u)) => (n, i64::try_from(a).unwrap_or(0), u, seg, loc),
                     None => (ValueId::UNIT, -1, ValueId::UNIT, seg, loc),
@@ -4952,7 +4965,14 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             let a = s.max(f.off);
             let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
-            let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a, ValueId::UNIT);
+            let mut args = slice_args_in_file(
+                v,
+                file_slice(&text, a, e).as_ref(),
+                starts,
+                f.name,
+                a,
+                ValueId::UNIT,
+            );
             let own = crate::hints::slice_hint_of(&t, s);
             let rec = loads
                 .as_deref()
@@ -6079,6 +6099,18 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
 /// start, the frame
 /// `[.., name, offset, 0, unit]`): every segment carries its origin
 /// `(name, offset, unit)`; the kind is 2 (a document's piece, not the top).
+/// Bytes `a..e` of file `text` as a slice to read: at the file's end, its
+/// last line ended even where it has no newline (§31: every line of a file
+/// ends, and its `\endlinechar` is read). A slice without one ends mid-line.
+pub(crate) fn file_slice(text: &str, a: usize, e: usize) -> std::borrow::Cow<'_, str> {
+    let s = &text[a..e];
+    if e == text.len() && !s.is_empty() && !s.ends_with('\n') {
+        format!("{s}\n").into()
+    } else {
+        s.into()
+    }
+}
+
 pub(crate) fn slice_args_in_file(
     v: &Values,
     text: &str,

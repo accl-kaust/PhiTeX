@@ -1587,6 +1587,15 @@ impl<'a> Ctx<'a> {
         None
     }
 
+    /// The run took a checkpoint: a read of a field after it is filed
+    /// again, not answered from [`Ctx::read`]'s memo of a read before it.
+    /// The cutoff ([`Ctx::last_reads_hold_from`]) checks only the reads
+    /// after the checkpoint: what a run's rest learns from a read before
+    /// it has to be among them, or in the state the checkpoint compares.
+    pub fn reads_begin_again(&mut self) {
+        self.seen.clear();
+    }
+
     /// How many reads `unread` has taken out so far (with a count of
     /// [`Ctx::reads_made`], for [`Ctx::reads_kept_of`]).
     pub fn unread_count(&self) -> usize {
