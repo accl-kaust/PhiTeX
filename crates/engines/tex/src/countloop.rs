@@ -160,7 +160,7 @@ impl Run<'_, '_> {
     /// `\advance`'s operands at `body[*i]`, added to the plan: false for
     /// another shape.
     fn loop_advance(&mut self, p: &mut Plan, body: &[Tok], i: &mut usize) -> R<bool> {
-        if !body.get(*i).is_some_and(|r| r.is_cs_or_active()) {
+        if !body.get(*i).is_some_and(Tok::is_cs_or_active) {
             return Ok(false);
         }
         let Some(Arg::Reg(reg)) = self.loop_arg(p, body, i)? else {
