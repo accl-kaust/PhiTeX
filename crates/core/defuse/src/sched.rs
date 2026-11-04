@@ -1477,6 +1477,7 @@ pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
         // end, a TeX loop on a stale float state, and the quiet point the
         // wake is held for never comes while it runs)
         if n.state() == State::Running {
+            n.asked.store(true, Ordering::SeqCst);
             note_stale(
                 n,
                 Wake {
@@ -1518,7 +1519,16 @@ pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
     }
     match n.state() {
         State::Dirty => merge_woke(eng, n, wake),
-        State::Running => note_stale(n, wake),
+        State::Running => {
+            // (told before looking again: either its commit, which sets
+            // `committing` and then reads `asked`, sees this, or this
+            // sees `committing`. Its filed reads rest on it)
+            n.asked.store(true, Ordering::SeqCst);
+            if n.committing.load(Ordering::SeqCst) {
+                return mark_dirty_now(eng, w, n, wake);
+            }
+            note_stale(n, wake);
+        }
         _ => {}
     }
     false
