@@ -7,7 +7,7 @@
 // keeps. The host gives the two calls (`StripSource`): the CLI's over
 // HTTP from the watch, the frontends' cores over their wasm calls.
 
-import { composeLine, type TextLine } from "./text.ts";
+import { composeLine, type TextLine, LAYER_LINES } from "./text.ts";
 import type { Link } from "./types.ts";
 
 /** A page as the core gives it (Viewer::frame): sizes, bands `[key, top, height]`, text, links, what drawing it took. */
@@ -230,6 +230,7 @@ export function textLayer(lines: TextLine[], w: number, h: number): SVGElement {
     t.setAttribute("y", String(l.y));
     t.setAttribute("font-size", String(l.size));
     t.textContent = l.text;
+    LAYER_LINES.set(t, l);
     svg.append(t);
   }
   return svg;
