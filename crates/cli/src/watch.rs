@@ -1202,8 +1202,19 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         } {
             Ok(w) => {
                 let ours = &mut *mine;
+                let top = root.canonicalize().unwrap_or_else(|_| root.clone());
                 for (p, h) in &w.files {
                     let p = p.canonicalize().unwrap_or_else(|_| root.join(p));
+                    // (the folders it went into below the root, made by
+                    // this write or not: a folder's own event, minted's
+                    // `_minted/` made, is the watch's, no source changed;
+                    // what changes in it comes as its files' events)
+                    for d in p.ancestors().skip(1) {
+                        if d == top || !d.starts_with(&top) {
+                            break;
+                        }
+                        ours.insert(d.to_path_buf(), tex::ANY_BYTES);
+                    }
                     ours.insert(p, *h);
                 }
                 w.main

@@ -3582,3 +3582,63 @@ fn watch_open_starts_only_the_users_viewer() {
         assert_eq!(dir.join("ran").exists(), runs, "{name}");
     }
 }
+
+/// `phitex watch` writing a file a `\write18` command made in a folder of
+/// its own (minted's `_minted/`) makes that folder: the folder's own event
+/// is the watch's write, not a source changed (though the build looked
+/// for that name before it was there, as minted looks for its folder),
+/// so the cold build is not
+/// followed by a second one and the exact file said written is the cold
+/// build's (Grail: every cold build was followed by a build "why
+/// _minted", and the bench waiting for build 1's written event never
+/// saw it).
+#[test]
+fn watch_a_folder_it_makes_is_no_change() {
+    let _one = one();
+    let dir = scratch("watch-own-folder");
+    std::fs::write(
+        dir.join("doc.tex"),
+        plain()
+            + "\\openin1=made \\closein1 \\immediate\\write18{mkdir -p made && echo hello > made/note.txt}Alpha.\\bye\n",
+    )
+    .expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--shell-escape",
+            "--idle",
+            "1000",
+            "--ini",
+            "--etex",
+            "doc.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let written = until(&mut lines, "event", &"written".into(), &mut seen);
+    assert!(
+        dir.join("made").join("note.txt").is_file(),
+        "the command's file was not written in its folder:\n{}",
+        seen.join("\n")
+    );
+    assert_eq!(written["build"], 1, "{}", seen.join("\n"));
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    assert!(
+        !seen.iter().any(|l| l.contains("\"builds\":2")),
+        "a second build after the cold one:\n{}",
+        seen.join("\n")
+    );
+}
