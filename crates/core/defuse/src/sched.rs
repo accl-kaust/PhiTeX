@@ -59,13 +59,17 @@ pub(crate) struct Shared {
     /// Counts the wakes: a worker that looked for work outside the park's
     /// lock rests only if none came since it looked.
     wakes: AtomicU64,
-    park: (Mutex<()>, Condvar),
+    park: Mutex<()>,
+    /// Each worker's place to rest ([`Rest`]), indexed by its `ix`.
+    rest: Vec<Rest>,
     stop: AtomicBool,
-    /// Workers running so far; the rest start when a deque holds more than
-    /// its owner will run next (`want_spawn`), so a small evaluation spawns
-    /// no thread.
+    /// Workers running so far; the rest start one at a time, each when work
+    /// has waited ([`Worker::offer`]) and no worker is idle, so a small
+    /// evaluation starts no thread.
     spawned: AtomicUsize,
-    want_spawn: AtomicBool,
+    /// Starts one more worker while the evaluation's scope stands
+    /// ([`Pool::run`]).
+    spawner: Mx<Option<Spawner>>,
     pub(crate) n: usize,
     /// `Limits::final_reruns`.
     final_limit: u32,
@@ -108,25 +112,81 @@ pub(crate) struct Shared {
     collect_next: AtomicU64,
 }
 
+/// A worker's place to rest: its own condition, so that a wake chooses
+/// the worker.
+#[derive(Default)]
+struct Rest {
+    cv: Condvar,
+    parked: AtomicBool,
+}
+
+/// [`Shared::spawner`]: the closure of [`Pool::run`], which clears this
+/// under its lock before the closure ends ([`ClearSpawner`]).
+struct Spawner(*const (dyn Fn() + Sync));
+
+// SAFETY: the closure is `Sync`, and is called only under `Shared::spawner`'s
+// lock while `Pool::run` keeps it alive.
+#[allow(unsafe_code)]
+unsafe impl Send for Spawner {}
+
+/// Clears [`Shared::spawner`] as the closure it points to is about to go.
+struct ClearSpawner<'a>(&'a Shared);
+
+impl Drop for ClearSpawner<'_> {
+    fn drop(&mut self) {
+        *self.0.spawner.lock() = None;
+    }
+}
+
 impl Shared {
+    /// One more worker at work: the lowest-numbered at rest, the one whose
+    /// thread ran most lately and whose caches are the warmest (a condition
+    /// shared by all woke the one that had waited longest, so an edit's 200
+    /// runs went through 27 of 32 threads, each cold), else one not started.
     fn wake_one(&self) {
         self.wakes.fetch_add(1, Ordering::SeqCst);
         if self.idle.load(Ordering::SeqCst) > 0 {
-            let _g = self.park.0.lock().unwrap_or_else(PoisonError::into_inner);
-            self.park.1.notify_one();
+            let _g = self.park.lock().unwrap_or_else(PoisonError::into_inner);
+            for r in &self.rest {
+                if r.parked.swap(false, Ordering::SeqCst) {
+                    r.cv.notify_one();
+                    break;
+                }
+            }
+            return;
+        }
+        if self.spawned.load(Ordering::Relaxed) < self.n
+            && let Some(g) = self.spawner.try_lock()
+            && let Some(sp) = &*g
+        {
+            // SAFETY: `Spawner`: set, so the closure is alive, and we hold
+            // the lock that clears it.
+            #[allow(unsafe_code)]
+            unsafe {
+                (*sp.0)();
+            }
         }
     }
 
     fn wake_all(&self) {
         self.wakes.fetch_add(1, Ordering::SeqCst);
-        let _g = self.park.0.lock().unwrap_or_else(PoisonError::into_inner);
-        self.park.1.notify_all();
+        let _g = self.park.lock().unwrap_or_else(PoisonError::into_inner);
+        for r in &self.rest {
+            r.parked.store(false, Ordering::SeqCst);
+            r.cv.notify_one();
+        }
     }
 
-    /// One queue entry or running node less; the last one wakes everyone.
+    /// One queue entry or running node less. The last one wakes the worker
+    /// that decides what the quiet point does, the caller's; waking them
+    /// all had each thread of the pool off its core at every quiet point
+    /// for nothing.
     fn done_one(&self) {
         if self.outstanding.fetch_sub(1, Ordering::SeqCst) == 1 {
-            self.wake_all();
+            self.wakes.fetch_add(1, Ordering::SeqCst);
+            let _g = self.park.lock().unwrap_or_else(PoisonError::into_inner);
+            self.rest[0].parked.store(false, Ordering::SeqCst);
+            self.rest[0].cv.notify_one();
         }
     }
 }
@@ -189,6 +249,9 @@ pub(crate) struct Worker {
     block: Deque<(NodeId, u32)>,
     /// The runs it has put in its block.
     block_runs: AtomicU32,
+    /// When it may next wake a worker for its queue ([`Worker::offer`]),
+    /// ns on the pool's clock.
+    next_offer: AtomicU64,
     pub(crate) shared: Arc<Shared>,
     pub(crate) runs: AtomicU64,
     pub(crate) nodes_run: AtomicU64,
@@ -266,25 +329,51 @@ impl Worker {
         for &n in nodes {
             self.ready().push(eng, eng.node(n));
         }
-        let sh = &self.shared;
-        if sh.spawned.load(Ordering::Relaxed) < sh.n && nodes.len() >= 2 {
-            sh.want_spawn.store(true, Ordering::SeqCst);
-        }
     }
 
-    /// A node just put on its ready heap: another worker woken only for
-    /// work this one will not run next, its own next node among what it
-    /// queues. A wake per node handed every step of a chain, a page's
-    /// finisher to the page's fold to the next finisher, to a worker
-    /// with none of the run's tables and none of its cache: the steps ran
-    /// one after another all the same, each 1.5 times as long as on one
-    /// worker and through a futex (Grail, a sentence: its 18 finishers
-    /// 89 ms at -j1, 180 ms at -j8, with no two running at once).
-    /// What is passed over here is found by an idle worker's next look
-    /// (`idle_wait`'s timeout) at the latest.
-    pub(crate) fn wake_for_more(&self) {
+    /// Wakes another worker if its queue has stood non-empty for
+    /// [`offer_ns`] (or its block can be stolen from): looked at as it
+    /// queues a node, takes one, and at a run's checks (`Ctx::tick`), so
+    /// nothing waits much past that behind a long run.
+    ///
+    /// A queue that empties at each take is a chain, a page's finisher to
+    /// the page's fold to the next finisher, each step reading what the
+    /// last just wrote: on the same thread and core that is 1 to 1.5 times
+    /// faster than handed over, and no one is woken for it (Grail, delete a
+    /// paragraph: 1 run at a time for 90% of the edit, 1050 ms at -j1, 1400
+    /// ms at -j8, 1650 ms at -j32; node 133's one run 34, 60, 61 ms, and 35
+    /// ms at -j8 pinned to one cpu). Waking a thread and moving a node costs
+    /// more than a short run saves, so short runs stay where they are.
+    /// [`Worker::offer`] as it takes `node`: what it leaves queued goes to
+    /// another worker at once if `node`'s run will be long, as its last
+    /// was, or it has none (a first evaluation's nodes, a new one), whether
+    /// or not the run checks in.
+    fn offer_for(&self, node: &Node) {
         let sh = &self.shared;
-        if self.ready().len() + self.block.len() >= 2 {
+        if sh.n == 1 {
+            return;
+        }
+        if self.ready().len() > 0 && (!node.committed() || node.run_ns.load(Ordering::Relaxed) >= offer_ns()) {
+            self.ready().since.store(0, Ordering::Relaxed);
+            sh.wake_one();
+            return;
+        }
+        self.offer();
+    }
+
+    pub(crate) fn offer(&self) {
+        let sh = &self.shared;
+        if sh.n == 1 {
+            return;
+        }
+        let r = self.ready();
+        let stands = self.block.len() >= BLOCK_MIN;
+        if !stands && r.len() == 0 {
+            return;
+        }
+        let now = ns(sh.t0);
+        if (stands || r.waited(now)) && now >= self.next_offer.load(Ordering::Relaxed) {
+            self.next_offer.store(now + offer_ns(), Ordering::Relaxed);
             sh.wake_one();
         }
     }
@@ -314,19 +403,29 @@ pub(crate) struct Ready {
     heap: Mx<std::collections::BinaryHeap<std::cmp::Reverse<ReadyKey>>>,
     seq: AtomicU64,
     len: AtomicUsize,
+    /// When it last went from empty to not, ns on the pool's clock.
+    since: AtomicU64,
+    t0: Instant,
 }
 
-impl Default for Ready {
-    fn default() -> Ready {
+impl Ready {
+    fn new(t0: Instant) -> Ready {
         Ready {
             heap: Mx::new(std::collections::BinaryHeap::new()),
             seq: AtomicU64::new(0),
             len: AtomicUsize::new(0),
+            since: AtomicU64::new(0),
+            t0,
         }
     }
-}
 
-impl Ready {
+    /// Whether it has stood non-empty for [`offer_ns`]: a thief's to take
+    /// from. Before that its owner, about to take the node, runs it on the
+    /// caches that hold what it reads.
+    fn waited(&self, now: u64) -> bool {
+        now >= self.since.load(Ordering::Relaxed).saturating_add(offer_ns())
+    }
+
     pub(crate) fn push(&self, eng: &Engine, n: &Node) {
         let k = sched_key(eng, n);
         // (at one place the settling layer first: TeX builds the page
@@ -334,7 +433,9 @@ impl Ready {
         let text = !eng.op(n.op()).settles_at_quiet();
         let s = self.seq.fetch_add(1, Ordering::Relaxed);
         self.heap.lock().push(std::cmp::Reverse((k, text, s, n.id.raw())));
-        self.len.fetch_add(1, Ordering::Relaxed);
+        if self.len.fetch_add(1, Ordering::Relaxed) == 0 {
+            self.since.store(ns(self.t0), Ordering::Relaxed);
+        }
     }
 
     pub(crate) fn pop(&self) -> Option<NodeId> {
@@ -350,9 +451,10 @@ impl Ready {
     /// another thief) holds it, never waited for (every idle worker
     /// locking every other's heap in turn made the heaps' locks the
     /// engine's: 5.3% of worker time at 32 threads,
-    /// `commits_do_not_wait_on_each_other`).
+    /// `commits_do_not_wait_on_each_other`). None before it has waited
+    /// ([`Ready::waited`]).
     fn steal(&self) -> Option<NodeId> {
-        if self.len.load(Ordering::Relaxed) == 0 {
+        if self.len.load(Ordering::Relaxed) == 0 || !self.waited(ns(self.t0)) {
             return None;
         }
         let x = self.heap.try_lock()?.pop()?;
@@ -366,6 +468,14 @@ impl Ready {
             return None;
         }
         self.heap.lock().peek().map(|x| x.0.0)
+    }
+
+    /// A thief's `pop`, waiting for the lock of a heap that has waited.
+    fn steal_waiting(&self) -> Option<NodeId> {
+        if self.len.load(Ordering::Relaxed) == 0 || !self.waited(ns(self.t0)) {
+            return None;
+        }
+        self.pop()
     }
 
     fn len(&self) -> usize {
@@ -418,7 +528,7 @@ fn spawn_tree<'s, 'e: 's>(
         let right = ws.split_off(ws.len() / 2);
         spawn_tree(s, eng, pool, back, ws);
         spawn_tree(s, eng, pool, back, right);
-        run_worker(eng, pool, &w, None, None);
+        run_worker(eng, pool, &w, None);
         back.lock().unwrap_or_else(PoisonError::into_inner).push(w);
     });
 }
@@ -437,6 +547,13 @@ fn held_trace() -> bool {
     }
 }
 
+/// How long a queue stands non-empty before another worker is woken for
+/// it and may take from it ([`Worker::offer`]): about what moving a run
+/// costs, a thread's wake and a run's worth of cold caches.
+const fn offer_ns() -> u64 {
+    200_000
+}
+
 /// Spins before parking.
 const SPINS: u32 = 64;
 /// A block is stolen from only with this much left, half of it at a time
@@ -445,7 +562,7 @@ const SPINS: u32 = 64;
 /// right after it, and two thieves of a block seldom share a segment. A
 /// reader at the head of a stolen run is re-asked once its owner's chain
 /// reaches it (`commit::first_hole`), not once per definer before it.
-const BLOCK_MIN: usize = 96;
+pub(crate) const BLOCK_MIN: usize = 96;
 const BLOCK_STEAL: usize = 32;
 /// An idle worker with no wake looks for work again after this (the
 /// caller's, which also asks for edits and starts the spare workers, after
@@ -461,23 +578,25 @@ impl Pool {
         let n = n.max(1);
         let blocks: Vec<Deque<(NodeId, u32)>> = (0..n).map(|_| Deque::new_lifo()).collect();
         let block_stealers = blocks.iter().map(Deque::stealer).collect();
+        let t0 = Instant::now();
         let shared = Arc::new(Shared {
             injector: Injector::new(),
             passes: AtomicU64::new(0),
             runs_now: AtomicU64::new(0),
-            ready: (0..n).map(|_| Ready::default()).collect(),
+            ready: (0..n).map(|_| Ready::new(t0)).collect(),
             block_stealers,
             block_busy: (0..n).map(|_| AtomicBool::new(false)).collect(),
             outstanding: AtomicUsize::new(0),
             idle: AtomicUsize::new(0),
             wakes: AtomicU64::new(0),
-            park: (Mutex::new(()), Condvar::new()),
+            park: Mutex::new(()),
+            rest: (0..n).map(|_| Rest::default()).collect(),
             stop: AtomicBool::new(false),
             spawned: AtomicUsize::new(1),
-            want_spawn: AtomicBool::new(false),
+            spawner: Mx::new(None),
             n,
             final_limit: limits.final_reruns,
-            t0: Instant::now(),
+            t0,
             collect_wanted: AtomicBool::new(false),
             deferred: Mx::new(Vec::new()),
             waiting: Mx::new(crate::values::FxHashMap::default()),
@@ -502,6 +621,7 @@ impl Pool {
                 ix,
                 block,
                 block_runs: AtomicU32::new(0),
+                next_offer: AtomicU64::new(0),
                 shared: shared.clone(),
                 runs: AtomicU64::new(0),
                 nodes_run: AtomicU64::new(0),
@@ -583,12 +703,24 @@ impl Pool {
             // works: no thread waits for the others' starts, the caller's
             // least of all)
             spawn_tree(s, eng, self, &back, std::mem::take(&mut rest));
-            let spawn_more = || {
-                self.shared.want_spawn.store(false, Ordering::SeqCst);
-                let more: Vec<Worker> = spare.lock().unwrap_or_else(PoisonError::into_inner).drain(..).collect();
-                spawn_tree(s, eng, self, &back, more);
+            let spawn_one = || {
+                let mut more = spare.lock().unwrap_or_else(PoisonError::into_inner);
+                if more.is_empty() {
+                    return;
+                }
+                let w = more.remove(0);
+                drop(more);
+                spawn_tree(s, eng, self, &back, vec![w]);
             };
-            run_worker(eng, self, &first, src, Some(&spawn_more));
+            let spawn_one: &(dyn Fn() + Sync) = &spawn_one;
+            // SAFETY: the lifetime only: `ClearSpawner` clears it before
+            // `spawn_one` goes, under the lock each call holds.
+            #[allow(unsafe_code)]
+            let spawn_one: &'static (dyn Fn() + Sync) =
+                unsafe { std::mem::transmute::<&(dyn Fn() + Sync), &'static (dyn Fn() + Sync)>(spawn_one) };
+            *self.shared.spawner.lock() = Some(Spawner(spawn_one));
+            let _clear = ClearSpawner(&self.shared);
+            run_worker(eng, self, &first, src);
         });
         let mut rest = back.into_inner().unwrap_or_else(PoisonError::into_inner);
         rest.extend(spare.into_inner().unwrap_or_else(PoisonError::into_inner));
@@ -657,7 +789,17 @@ impl Pool {
         nodes.len()
     }
 
+    /// The next node for `w`, and another worker woken if what is left
+    /// behind it has waited.
     fn find_work(&self, eng: &Engine, w: &Worker) -> Option<NodeId> {
+        let n = self.take_work(eng, w);
+        if let Some(n) = n {
+            w.offer_for(eng.node(n));
+        }
+        n
+    }
+
+    fn take_work(&self, eng: &Engine, w: &Worker) -> Option<NodeId> {
         // (its earliest runnable node by place ([`Ready`]), or the head of
         // its block where that stands first: a node run before one ahead
         // of it on the line reads what that one will change, and runs again
@@ -698,14 +840,21 @@ impl Pool {
             let v = (w.ix + k) % n;
             if let Some(x) = self.shared.ready[v].steal() {
                 Worker::add(&w.steals, 1);
+                // (one woken at a time, each for what is left)
+                if self.shared.ready[v].len() > 0 {
+                    self.shared.wake_one();
+                }
                 return Some(x);
             }
         }
         // (one held meanwhile, not empty: waited for, no work left behind)
         for k in 1..n {
             let v = (w.ix + k) % n;
-            if let Some(x) = self.shared.ready[v].pop() {
+            if let Some(x) = self.shared.ready[v].steal_waiting() {
                 Worker::add(&w.steals, 1);
+                if self.shared.ready[v].len() > 0 {
+                    self.shared.wake_one();
+                }
                 return Some(x);
             }
         }
@@ -766,6 +915,9 @@ impl Pool {
                 continue;
             }
             Worker::add(&w.steals, 1);
+            if st.len() >= BLOCK_MIN {
+                self.shared.wake_one();
+            }
             if let Some(x) = stray {
                 let run = w.block_runs.fetch_add(1, Ordering::Relaxed);
                 w.block.push((x, run));
@@ -805,7 +957,8 @@ impl Pool {
         let sh = &self.shared;
         let seen = sh.collect_gen.load(Ordering::SeqCst);
         sh.arrived.fetch_add(1, Ordering::SeqCst);
-        let (m, cv) = &sh.park;
+        let m = &sh.park;
+        let cv = &sh.rest[w.ix].cv;
         let mut g = m.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if sh.collect_gen.load(Ordering::SeqCst) != seen || sh.stop.load(Ordering::SeqCst) {
@@ -893,7 +1046,11 @@ impl Pool {
     }
 
     fn idle_wait(&self, eng: &Engine, w: &Worker, edits: bool) -> Option<NodeId> {
-        let (m, cv) = &self.shared.park;
+        let m = &self.shared.park;
+        let me = &self.shared.rest[w.ix];
+        // (at a quiet point the caller's worker decides; the others rest
+        // until it has work for them or stops, no thread spinning beside it)
+        let quiet_ends = w.ix == 0;
         self.shared.idle.fetch_add(1, Ordering::SeqCst);
         fence(Ordering::SeqCst);
         let t_idle = Instant::now();
@@ -929,21 +1086,18 @@ impl Pool {
             if let Some(n) = self.find_work(eng, w) {
                 break Some(n);
             }
-            if self.shared.outstanding.load(Ordering::SeqCst) == 0 {
+            if quiet_ends && self.shared.outstanding.load(Ordering::SeqCst) == 0 {
                 break None;
             }
             if self.release_past_only(eng, w) {
                 continue;
-            }
-            if w.ix == 0 && self.shared.want_spawn.load(Ordering::SeqCst) {
-                break None;
             }
             if edits && t_idle.elapsed() >= ABSORB_EVERY {
                 break None;
             }
             let g = m.lock().unwrap_or_else(PoisonError::into_inner);
             if self.shared.stop.load(Ordering::SeqCst)
-                || self.shared.outstanding.load(Ordering::SeqCst) == 0
+                || (quiet_ends && self.shared.outstanding.load(Ordering::SeqCst) == 0)
                 || self.shared.collect_wanted.load(Ordering::SeqCst)
             {
                 break None;
@@ -957,23 +1111,20 @@ impl Pool {
             // workers preempting the busy ones, and with 31 of them on 2 ms
             // one looked every 65 microseconds and took the node a worker
             // had just queued for itself)
-            drop(
-                cv.wait_timeout(g, if w.ix == 0 { ABSORB_EVERY } else { IDLE_LOOK })
-                    .unwrap_or_else(PoisonError::into_inner),
-            );
+            me.parked.store(true, Ordering::SeqCst);
+            let (g, _) = me
+                .cv
+                .wait_timeout(g, if w.ix == 0 { ABSORB_EVERY } else { IDLE_LOOK })
+                .unwrap_or_else(PoisonError::into_inner);
+            me.parked.store(false, Ordering::SeqCst);
+            drop(g);
         };
         self.shared.idle.fetch_sub(1, Ordering::SeqCst);
         r
     }
 }
 
-fn run_worker(
-    eng: &Engine,
-    pool: &Pool,
-    w: &Worker,
-    mut src: Option<&mut dyn EditSource>,
-    spawn_more: Option<&dyn Fn()>,
-) {
+fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn EditSource>) {
     let mut last_absorb = Instant::now();
     loop {
         if pool.shared.stop.load(Ordering::SeqCst) {
@@ -988,11 +1139,6 @@ fn run_worker(
             }
             pool.barrier(eng, w);
             continue;
-        }
-        if let Some(sp) = spawn_more
-            && pool.shared.want_spawn.load(Ordering::SeqCst)
-        {
-            sp();
         }
         if let Some(n) = pool.find_work(eng, w) {
             if let Err(e) = work_caught(eng, pool, w, n) {
@@ -1114,7 +1260,6 @@ fn run_worker(
                 if k > 0 {
                     Worker::add(&w.held_fired, k);
                     Worker::add(&w.held_passes, 1);
-                    pool.shared.wake_all();
                     continue;
                 }
             }
@@ -1153,7 +1298,6 @@ fn run_worker(
                 // quiet point inside a pass: worker 0 busy 7.5 s of 10.3,
                 // the other seven 0.9-2 s each, accl 23051)
                 w.ready_all(eng, &rel);
-                pool.shared.wake_all();
                 continue;
             }
             let (k, pass) = crate::commit::publish_finals(eng, w);
@@ -1185,7 +1329,6 @@ fn run_worker(
                 .collect();
             if !outs.is_empty() {
                 w.seed(&outs);
-                pool.shared.wake_all();
                 continue;
             }
             if let Some(s) = src.as_deref_mut() {
@@ -1275,11 +1418,7 @@ pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wak
         Some(w) => {
             w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
             w.ready().push(eng, n);
-            let sh = &w.shared;
-            if sh.spawned.load(Ordering::Relaxed) < sh.n && w.ready().len() >= 2 {
-                sh.want_spawn.store(true, Ordering::SeqCst);
-            }
-            w.wake_for_more();
+            w.offer();
         }
         None => eng.pend(n.id),
     }
@@ -1298,7 +1437,7 @@ pub(crate) fn requeue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>) {
     }
     w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
     w.ready().push(eng, n);
-    w.wake_for_more();
+    w.offer();
 }
 
 /// A walk's re-ask: marks a clean node dirty and queues it. A running node
@@ -2166,8 +2305,13 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
             release_waiting(eng, Some(w), node.id);
         }
         if to == State::Dirty && !defer(eng, &pool.shared, node.id) {
+            // (stopped, to run again: another worker may take it at once.
+            // A run stopped at a node its own worker has yet to run, taken
+            // again by that worker before it, stopped again for ever, as
+            // review.rs's `next` readers did)
             w.ready().push(eng, node);
-            w.wake_for_more();
+            w.ready().since.store(0, Ordering::Relaxed);
+            pool.shared.wake_one();
         } else {
             pool.shared.done_one();
         }
@@ -2218,7 +2362,7 @@ fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<N
     if committed(on) {
         drop(m);
         w.ready().push(eng, node);
-        w.wake_for_more();
+        w.offer();
         return;
     }
     m.entry(on).or_default().push(node.id);
@@ -2290,7 +2434,7 @@ fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
     if !held() {
         drop(m);
         w.ready().push(eng, node);
-        w.wake_for_more();
+        w.offer();
         return;
     }
     m.push(node.id);

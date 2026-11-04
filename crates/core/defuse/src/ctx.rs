@@ -1001,7 +1001,11 @@ impl<'a> Ctx<'a> {
     /// ([`Ctx::set_frontier`]). Not a read.
     pub fn past_frontier(&self, n: NodeId) -> bool {
         self.eng.placed_node(n).is_some_and(|x| {
-            crate::sched::past_frontier(self.eng, x, self.eng.frontier.load(std::sync::atomic::Ordering::Acquire))
+            crate::sched::past_frontier(
+                self.eng,
+                x,
+                self.eng.frontier.load(std::sync::atomic::Ordering::Acquire),
+            )
         })
     }
 
@@ -1676,6 +1680,10 @@ impl<'a> Ctx<'a> {
     /// commit, as before.
     pub fn tick(&mut self, _n: u64) -> Result<(), Stop> {
         self.check()?;
+        // (what waits behind a run gone long)
+        if let Some(w) = self.worker {
+            w.offer();
+        }
         self.ticks += 1;
         if self.ticks >= LONG_RUN_TICKS
             && (self.ticks.is_power_of_two() || self.me.stale.load(std::sync::atomic::Ordering::Acquire))
