@@ -253,3 +253,146 @@ test("a figure or a file of any extension replaced on disk rebuilds, as a full b
   }
   await w.stop();
 });
+
+/** The rectangle of `word` on the pages, as find marks it (find closed after). */
+async function wordAt(t, word) {
+  await t.q(`(() => { const i = $("#findq"); $("#find").hidden = false; i.value = ${JSON.stringify(word)}; i.dispatchEvent(new Event("input", { bubbles: true })); return 1; })()`);
+  const r = await t.until(`(() => { const m = $(".mark.fnd"); if (!m) return null; const r = m.getBoundingClientRect(); return { l: r.left, r: r.right, t: r.top, b: r.bottom, n: $$(".mark.fnd").length }; })()`, `${word} found`);
+  await t.q(`(() => { const i = $("#findq"); i.value = ""; i.dispatchEvent(new Event("input", { bubbles: true })); $("#find").hidden = true; return 1; })()`);
+  await t.until(`$$(".mark.fnd").length === 0`, "find's marks gone");
+  return r;
+}
+/** The selected text on the pages, and its blocks (`.mark.seltext`) by line: [top, count, gaps]. */
+const selected = (t) =>
+  t.q(`(() => { const s = (R.getSelection?.() ?? getSelection()); const bs = $$(".mark.seltext").map((m) => m.getBoundingClientRect()); const lines = new Map(); for (const b of bs) { const k = Math.round(b.top); (lines.get(k) ?? lines.set(k, []).get(k)).push(b); } return { text: s?.toString() ?? "", blocks: bs.length, lines: [...lines.values()].map((l) => l.length) }; })()`);
+
+test("a selection is one block a line; its text has its spaces, no space inside a kerned word, and ligatures as letters (selection)", async () => {
+  const words = "Quokka office efficient AVAWATER Toyota waffle fluffy official ".repeat(3);
+  const { w, t } = await open({ "main.tex": doc(`Start ${words}\n\n\\parbox{4cm}{Narrow incomprehensibilities characteristically unconstitutional Zebra end.}`) });
+  const a = await wordAt(t, "Quokka"), b = await wordAt(t, "Zebra");
+  // (across words and lines, into the narrow box with its hyphenated breaks)
+  await t.drag(a.l + 1, (a.t + a.b) / 2, b.r - 1, (b.t + b.b) / 2);
+  await sleep(300);
+  const s = await selected(t);
+  assert.ok(s.lines.length >= 3, `several lines: ${JSON.stringify(s.lines)}`);
+  assert.ok(s.lines.every((n) => n === 1), `one block a line: ${JSON.stringify(s.lines)}`);
+  const flat = s.text.replace(/\s+/g, " ");
+  assert.match(flat, /^Quokka office efficient AVAWATER Toyota waffle fluffy official Quokka/, `words and their spaces: ${JSON.stringify(s.text.slice(0, 120))}`);
+  assert.doesNotMatch(s.text, /[ﬀﬁﬂﬃﬄ]/, "ligatures given as their letters");
+  assert.match(s.text, /Zebra/);
+  // (a hyphenated break: the word's halves around a hyphen, nothing lost)
+  assert.match(s.text, /-\s*\n?/, `a hyphen at a break: ${JSON.stringify(s.text.slice(-160))}`);
+  // (double-click: the word, one block)
+  await t.key("Escape", "Escape", 27);
+  const o = await wordAt(t, "Toyota");
+  await t.mouse((o.l + o.r) / 2, (o.t + o.b) / 2, 1);
+  await t.mouse((o.l + o.r) / 2, (o.t + o.b) / 2, 2);
+  await sleep(300);
+  const d = await selected(t);
+  assert.equal(d.text.trim(), "Toyota", "a double-click selects the word");
+  assert.equal(d.blocks, 1, "the word one block");
+  // (find: one mark a match)
+  assert.equal((await wordAt(t, "efficient")).n, 3, "three matches, three marks");
+  await w.stop();
+});
+
+test("the problems' kinds filter the list, the page's marks and the scrollbar's, kept in phitex.toml (item 1, kinds)", async () => {
+  const fresh = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
+  const body = "{\\hsize=2cm \\noindent Incomprehensibilities characteristically.\\par}\n\nSee \\ref{nosuch}.";
+  const { w, t } = await open({ "main.tex": doc(body) }, { at: fresh });
+  await t.click("#b-probs");
+  await t.until(`$("#diags [data-kind='overfull']") && $("#diags [data-kind='reference']")`, "the kinds' filters");
+  await t.until(`$$(".slot .culprit.rule.overfull").length > 0`, "the overfull box's bar on the page");
+  const marks0 = await t.q(`$$("#smarks i").length`);
+  assert.ok(marks0 >= 2, `scrollbar marks: ${marks0}`);
+  assert.match(await t.q(`$("#diags").innerText`), /Overfull/);
+  await t.click("#diags [data-kind='overfull']");
+  await t.until(`$("#diags [data-kind='overfull']")?.getAttribute("aria-pressed") === "false"`, "overfull off");
+  assert.equal(await t.q(`$$(".slot .culprit.rule").length`), 0, "the bar gone from the page");
+  assert.doesNotMatch(await t.q(`[...$$("#diags .phx-card, #diags li")].map((e) => e.innerText).join(" ")`), /Overfull/, "gone from the list");
+  assert.ok((await t.q(`$$("#smarks i").length`)) < marks0, "fewer scrollbar marks");
+  await sleep(500);
+  assert.match(readFileSync(join(fresh, ".config", "phitex", "phitex.toml"), "utf8"), /problems-hidden = \[\s*"overfull"/);
+  await w.stop();
+  // (another document: the choice held)
+  const { w: w2, t: t2 } = await open({ "main.tex": doc(body + "\n\nOther.") }, { at: fresh });
+  await t2.click("#b-probs");
+  await t2.until(`$("#diags [data-kind='overfull']")?.getAttribute("aria-pressed") === "false"`, "overfull still off");
+  await w2.stop();
+});
+
+test("a problem's card shows its place on the pages (item 2); which kinds have an underline (batch 3)", async () => {
+  const filler = Array.from({ length: 12 }, (_, i) => `Paragraph ${i} ` + "words fill the page ".repeat(40)).join("\n\n");
+  const { w, t } = await open({ "main.tex": doc(`${filler}\n\nLate \\nosuchcommand here.`) });
+  await t.until(`+$("#pgn")?.textContent > 1`, "two pages");
+  await t.click("#b-probs");
+  await t.until(`$("#diags .phx-card, #diags li")`, "the card");
+  await t.q(`($("#stage").scrollTop = 0, 1)`);
+  await sleep(500);
+  await t.click("#diags .phx-card li, #diags li");
+  await t.until(`+$("#pgin").value > 1`, "the error's page shown");
+  await w.stop();
+  // (each kind as a real build reports it: whether its place has an underline)
+  const kinds = {
+    "missing citation": doc("Cite \\cite{nosuchkey} here."),
+    "undefined reference": doc("See \\ref{nosuchlabel} here."),
+    "missing file": doc("Include \\input{nosuchfile} here."),
+    "font fallback": doc("Shape {\\fontshape{sc}\\bfseries Bold small caps} here."),
+    "unclosed brace": doc("Open \\textbf{never closed here.\n\nMore."),
+    "undefined command": doc("Bad \\nosuchcommand here."),
+  };
+  const got = {};
+  for (const [kind, text] of Object.entries(kinds)) {
+    const { w, t } = await open({ "main.tex": text }, { pages: false });
+    await t.until(`$("#diags")?.innerText.trim().length > 0 || +$("#pgn")?.textContent > 0`, `${kind}: built`, 120000);
+    await sleep(2500);
+    got[kind] = await t.q(`({ underline: $$(".slot .culprit").length > 0, said: $("#diags").innerText.split("\\n").find((l) => l.trim()) ?? "" })`);
+    await w.stop();
+  }
+  console.log("underlines by kind:", JSON.stringify(got, null, 1));
+  assert.ok(got["undefined command"].underline, "an undefined command is underlined");
+});
+
+test("the tab's title says the state; Settings writes the user's file; What's new and the times show; Copy for an AI has the source (items 12, 15, 7, 3, 11)", async () => {
+  const fresh = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
+  const good = doc("Hello."), bad = doc("Hello \\nosuch.");
+  const { w, t } = await open({ "main.tex": good }, { at: fresh });
+  await waitBuild(w, 1);
+  await t.until(`/main\\.tex · Built/.test(document.title)`, "the title: built");
+  // (an edit: the times' bars, first build and this edit)
+  w.write("main.tex", doc("Hello there."));
+  await waitBuild(w, 2);
+  await t.click("#st");
+  await t.until(`$("#m-time .tbars")`, "the times as bars");
+  await t.key("Escape", "Escape", 27);
+  // (an error: the title; Copy for an AI, its source line and nothing sent)
+  await t.js(`(() => { window.__copied = null; Object.defineProperty(navigator, "clipboard", { value: { writeText: async (s) => void (window.__copied = s) }, configurable: true }); return 1; })()`);
+  w.write("main.tex", bad);
+  await waitBuild(w, 3);
+  await t.until(`/1 error/.test(document.title)`, "the title: an error");
+  await t.click("#b-probs");
+  await t.click("#copyai");
+  const copied = await t.until(`window.__copied`, "copied");
+  assert.match(copied, /Undefined control sequence/);
+  assert.match(copied, /Hello \\nosuch/, "the source line");
+  await t.key("Escape", "Escape", 27);
+  w.write("main.tex", good);
+  await waitBuild(w, 4);
+  // (What's new: this version's entry, from the binary)
+  await t.click("#b-more");
+  await t.click("#x-tips");
+  await t.until(`!$("#logview").hidden && /What's new in/.test($("#logview").innerText) && $("#logtext").textContent.trim().length > 0`, "the news");
+  await t.key("Escape", "Escape", 27);
+  // (Settings: a switch written to the user's phitex.toml)
+  await sleep(300);
+  await t.click("#b-more");
+  await t.click("#x-settings");
+  await t.until(`document.querySelector(".phx-settings input[data-k='watch-write']")`, "the settings");
+  await t.click(".phx-settings input[data-k='watch-write']");
+  const end = Date.now() + 5000;
+  const toml = join(fresh, ".config", "phitex", "phitex.toml");
+  while (!(existsSync(toml) && /watch-write = true/.test(readFileSync(toml, "utf8"))) && Date.now() < end) await sleep(50);
+  assert.match(readFileSync(toml, "utf8"), /watch-write = true/);
+  await w.stop();
+  assert.equal(await t.until(`/not connected|Not connected/i.test(document.title) && document.title`, "the title: not connected").then((x) => /not connected/i.test(x)), true);
+});

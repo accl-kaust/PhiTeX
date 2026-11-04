@@ -204,6 +204,16 @@ export class Tab {
     await this.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount });
     await this.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount });
   }
+  /** A press at (x0, y0), moved in steps with the button down, let go at (x1, y1): a drag that selects. */
+  async drag(x0, y0, x1, y1, steps = 12) {
+    await this.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: x0, y: y0 });
+    await this.send("Input.dispatchMouseEvent", { type: "mousePressed", x: x0, y: y0, button: "left", clickCount: 1 });
+    for (let i = 1; i <= steps; i++) {
+      await this.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: x0 + ((x1 - x0) * i) / steps, y: y0 + ((y1 - y0) * i) / steps, button: "left", buttons: 1 });
+      await sleep(16);
+    }
+    await this.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: x1, y: y1, button: "left", clickCount: 1 });
+  }
   async key(key, code = key, vk = 0) {
     const base = { key, code, windowsVirtualKeyCode: vk };
     await this.send("Input.dispatchKeyEvent", { type: "keyDown", ...base, ...(key.length === 1 ? { text: key } : {}) });

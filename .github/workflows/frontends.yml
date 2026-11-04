@@ -76,7 +76,7 @@ jobs:
       - run: bin/phitex --version
       - name: Emacs, Neovim 0.11, Node
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq emacs-nox
+          sudo apt-get update -qq && sudo apt-get install -y -qq emacs-nox minisign
           curl -fsSL https://github.com/neovim/neovim/releases/download/v0.11.4/nvim-linux-x86_64.tar.gz | tar -xz -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
       - uses: actions/setup-node@v4
@@ -85,6 +85,8 @@ jobs:
       - run: npm ci --prefix fe/vscode
       - name: Emacs, Neovim and VS Code's native engine against the binary
         run: fe/test/editors/run.sh bin/phitex emacs nvim vscode
+      - name: the plugins' download, on a release signed here
+        run: fe/test/editors/install-check.sh
   browsers:
     runs-on: ubuntu-24.04
     timeout-minutes: 120

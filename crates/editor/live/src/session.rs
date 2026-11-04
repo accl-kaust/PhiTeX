@@ -1698,6 +1698,9 @@ impl Session {
     /// names the tools' searches asked for. Empty before a build.
     pub fn watched(&self) -> Watched {
         let mut w = Watched::default();
+        // (the main file: never asked of the finder, it is what the build begins with)
+        w.names.push(plain_name(&self.job.path.to_string_lossy()));
+        w.paths.push(self.job.path.clone());
         for (n, _, p) in &self.inputs {
             w.names.push(plain_name(n));
             if let Some(p) = p {
