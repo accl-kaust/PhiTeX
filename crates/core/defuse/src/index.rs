@@ -754,6 +754,38 @@ impl RangeIndex {
             .unwrap_or_default()
     }
 
+    /// Each field with `At::End` readers filed, with each unit they read
+    /// at.
+    pub(crate) fn end_fields(&self) -> Vec<(Field, UnitId)> {
+        let mut out = Vec::new();
+        for sh in &*self.shards {
+            for (f, m) in sh.0.read().iter() {
+                let mut us: Vec<UnitId> = Vec::new();
+                for (u, _) in &m.ends_of {
+                    if !us.contains(u) {
+                        us.push(*u);
+                    }
+                }
+                out.extend(us.into_iter().map(|u| (*f, u)));
+            }
+        }
+        out
+    }
+
+    /// [`Self::mark_dirty`] for every field published.
+    pub(crate) fn mark_all_dirty(&self) {
+        for sh in &*self.shards {
+            if !sh.0.read().values().any(|m| m.published.is_some() && !m.dirty) {
+                continue;
+            }
+            for m in sh.0.write().values_mut() {
+                if m.published.is_some() {
+                    m.dirty = true;
+                }
+            }
+        }
+    }
+
     /// Files an `At::End(u)` reader of `f`, the dead dropped when the
     /// list is about to grow.
     pub(crate) fn add_end(&self, f: Field, u: UnitId, r: Reader, live: impl Fn(&Reader) -> bool) {

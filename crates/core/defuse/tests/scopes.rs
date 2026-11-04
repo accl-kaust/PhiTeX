@@ -668,3 +668,148 @@ fn an_edit_keeps_the_brackets_its_last_run_found_where_the_text_shows_the_same()
     eng.evaluate(1).unwrap();
     assert_eq!(eng.scope_changes(), c0 + 2, "and taken back by the run");
 }
+
+/// `[f]`: outputs the definition of f reaching the end of its unit.
+struct EndGet;
+
+impl Operation for EndGet {
+    fn name(&self) -> &'static str {
+        "end_get"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let f = Field(cx.args()[0]);
+        Ok(match cx.read_at(f, phitex_defuse::At::End(cx.unit()))? {
+            phitex_defuse::FieldAt::Def(x, _) => x,
+            _ => ValueId::UNIT,
+        })
+    }
+}
+
+/// A close that goes asks again the readers a walk meets that are not
+/// filed at positions: the one at the unit's end and the relation after
+/// it (`x := x + 10`, its input read through the brackets); filed at
+/// positions, only the plain reader was, and the end reader kept the
+/// inner definition hidden.
+#[test]
+fn a_close_that_goes_asks_the_end_reader_and_the_relation_after_it() {
+    let (e, o) = engine();
+    let end_get = e.register(Arc::new(EndGet));
+    let v = e.values();
+    let (x, c, z) = (v.field("x").0, v.field("c").0, v.field("z").0);
+    let u = e.new_unit();
+    e.push(u, o.def, vec![x, v.int(1)]);
+    e.push(u, o.def, vec![c, v.int(1)]);
+    e.push(u, o.open, vec![]);
+    e.push(u, o.def, vec![x, v.int(2)]);
+    e.push(u, o.def, vec![c, v.int(2)]);
+    let closing = |k: i64| vec![z, v.int(9), v.int(k), v.int(0)];
+    let p = e.push(u, o.pending, closing(1));
+    let gx = e.push(u, o.get, vec![x]);
+    e.push(u, o.rel_global, vec![c, v.int(10)]);
+    let gc = e.push(u, o.get, vec![c]);
+    let ex = e.push(u, end_get, vec![x]);
+    let check = |e: &Engine, closes: bool| {
+        let (xv, cv) = if closes { (1, 11) } else { (2, 12) };
+        assert_eq!(int(e, gx), xv, "x after it (closes {closes})");
+        assert_eq!(int(e, ex), xv, "x at the unit's end (closes {closes})");
+        assert_eq!(int(e, gc), cv, "the relation's value after it (closes {closes})");
+        assert!(e.check_invariants().is_empty());
+    };
+    e.evaluate(1).unwrap();
+    check(&e, true);
+    for threads in [1, 4] {
+        e.replace(p, o.pending, closing(0));
+        e.evaluate(threads).unwrap();
+        check(&e, false);
+        e.replace(p, o.pending, closing(1));
+        e.evaluate(threads).unwrap();
+        check(&e, true);
+    }
+}
+
+/// `[k]`: closes `k` scopes before itself (known only by running) and
+/// places after itself an opener whose text names `k`, made anew at each
+/// change of it: one commit files its own brackets and then its new
+/// child's, so its walk finds the scopes moved since its own were filed
+/// (a race, though at one thread) and asks every reader after it.
+struct CloseAndOpen(OpId);
+
+impl Operation for CloseAndOpen {
+    fn name(&self) -> &'static str {
+        "close_and_open"
+    }
+
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::Pending
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let k = cx.values().as_int(cx.args()[0]).unwrap();
+        cx.set_effect(Effect::Scope(Brackets {
+            closes: k as u8,
+            opens: 0,
+            before: true,
+        }));
+        let arg = cx.args()[0];
+        cx.follow(self.0, vec![arg]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[k]`: opens one scope after itself; `k` only names it.
+struct OpenNamed;
+
+impl Operation for OpenNamed {
+    fn name(&self) -> &'static str {
+        "open_named"
+    }
+
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::Open
+    }
+
+    fn run(&self, _cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// The walk after a race (the scopes moved since the node's brackets were
+/// filed: here by its own new child's) asks every reader after the change
+/// by its answer, and with them the end reader, which is not filed at a
+/// position: it kept the inner definition hidden.
+#[test]
+fn a_walk_after_a_race_asks_the_end_reader_too() {
+    let (e, o) = engine();
+    let end_get = e.register(Arc::new(EndGet));
+    let open_named = e.register(Arc::new(OpenNamed));
+    let cao = e.register(Arc::new(CloseAndOpen(open_named)));
+    let v = e.values();
+    let x = v.field("x").0;
+    let u = e.new_unit();
+    e.push(u, o.def, vec![x, v.int(1)]);
+    e.push(u, o.open, vec![]);
+    e.push(u, o.def, vec![x, v.int(2)]);
+    let p = e.push(u, cao, vec![v.int(0)]);
+    e.push(u, o.close, vec![]);
+    let gx = e.push(u, o.get, vec![x]);
+    let ex = e.push(u, end_get, vec![x]);
+    // (closes 0: the inner scope stays open, the child's opener closed by
+    // the close; closes 1: the inner scope closed, so is the child's)
+    let check = |e: &Engine, closes: bool| {
+        let xv = if closes { 1 } else { 2 };
+        assert_eq!(int(e, gx), xv, "x after both (closes {closes})");
+        assert_eq!(int(e, ex), xv, "x at the unit's end (closes {closes})");
+        assert!(e.check_invariants().is_empty());
+    };
+    e.evaluate(1).unwrap();
+    check(&e, false);
+    for threads in [1, 4] {
+        e.replace(p, cao, vec![v.int(1)]);
+        e.evaluate(threads).unwrap();
+        check(&e, true);
+        e.replace(p, cao, vec![v.int(0)]);
+        e.evaluate(threads).unwrap();
+        check(&e, false);
+    }
+}
