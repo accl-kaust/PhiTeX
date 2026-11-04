@@ -1174,7 +1174,11 @@ pub(crate) fn skeleton_of(m: &Macro) -> Option<(Tok, u8)> {
 pub(crate) fn skeleton_projection(x: ValueId, v: &Values) -> ValueId {
     match Mean::decode(v, Some(x)) {
         Mean::Macro(m) => match skeleton_of(&m) {
-            Some((head, k)) => v.list(vec![str_id(v, SKELETON), tok_value(v, head), v.int(i64::from(k))]),
+            Some((head, k)) => v.list(vec![
+                str_id(v, SKELETON),
+                tok_value(v, head),
+                v.int(i64::from(k)),
+            ]),
             None => x,
         },
         _ => x,

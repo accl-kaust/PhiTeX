@@ -1655,6 +1655,7 @@ fn a_run_gone_on_holds_the_places_of_a_cold_build() {
 /// cold build's.
 #[test]
 fn a_gobbled_call_is_read_for_its_shape_only() {
+    use std::fmt::Write as _;
     let fx = common::fixtures().join("dvi");
     let opts = || common::options("./t.tex", "t", "", &fx);
     let runs = |head: &str| {
@@ -1662,7 +1663,7 @@ fn a_gobbled_call_is_read_for_its_shape_only() {
             "\\catcode`\\{{=1 \\catcode`\\}}=2 \\catcode`\\#=6\n\\font\\tenrm=cmr10 \\tenrm \\hsize=100pt \\vsize=600pt \\parindent=0pt\n\\def\\gob#1#2{{{head}}}\\gdef\\h{{\\gob{{Title one}}{{3}}}}\n\n"
         );
         for i in 0..20 {
-            src.push_str(&format!("\\h Paragraph {i} of the text.\\par\n\n"));
+            let _ = write!(src, "\\h Paragraph {i} of the text.\\par\n\n");
         }
         src.push_str("\\end\n");
         let mut b = common::build(opts(), None, &src);
@@ -1670,11 +1671,16 @@ fn a_gobbled_call_is_read_for_its_shape_only() {
         b.edit(&text);
         let cold = common::build(opts(), None, &text);
         let d = common::first_difference(&b.output().0, &cold.output().0);
-        assert!(d.is_none(), "{head:?}: the edit's DVI differs from a cold build's: {d:?}");
+        assert!(
+            d.is_none(),
+            "{head:?}: the edit's DVI differs from a cold build's: {d:?}"
+        );
         b.stats.nodes_run
     };
     let (gobbled, used) = (runs(""), runs("#1"));
-    eprintln!("nodes run by the edit: {gobbled} with the groups gobbled, {used} with the first used");
+    eprintln!(
+        "nodes run by the edit: {gobbled} with the groups gobbled, {used} with the first used"
+    );
     assert!(
         gobbled + 20 <= used,
         "the paragraphs expanding a gobbled call ran again: {gobbled} nodes run, {used} where they use it"

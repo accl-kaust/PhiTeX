@@ -4635,7 +4635,11 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.cmd_fetch
             && let Some(c) = self.skeleton_lookup(tok)?
         {
-            self.cur = Cur { tok, cmd: c, chr: 0 };
+            self.cur = Cur {
+                tok,
+                cmd: c,
+                chr: 0,
+            };
             return Ok(());
         }
         if self.class_reads
