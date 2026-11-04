@@ -1189,6 +1189,38 @@ impl Run<'_, '_> {
             copy = crate::pdfprim::is_font_copy(self, fi)?;
             let base = copy.then_some(f);
             let key = |e: i32| crate::fonts::expanded_key(base, &name, size, e);
+            // (the ratios the font has asked for, pdfTeX's `pdf_font_elink`,
+            // and what those fonts are bound to now, `pdf_font_blink`:
+            // another font's first ask since may have bound them to it,
+            // [`crate::pdfprim::get_expand_font`])
+            let linked: Vec<i32> = self
+                .get(&format!("pdf:elink:{fi}"))?
+                .map(|x| {
+                    crate::val::list_of(self.v, x)
+                        .iter()
+                        .filter_map(|&y| i32::try_from(crate::val::int_of(self.v, y)).ok())
+                        .collect()
+                })
+                .unwrap_or_default();
+            view.elink.insert(f, linked.clone());
+            for &e in &linked {
+                let k = key(e);
+                if view.ex_base.contains_key(&k) {
+                    continue;
+                }
+                let kinfo = self.font_get(k, crate::fields::FontCell::Info)?;
+                if let Some((b, ..)) = crate::fonts::info(self.v, kinfo).and_then(|j| j.ex) {
+                    let b = u32::try_from(b).unwrap_or(0);
+                    view.ex_base.insert(k, b);
+                    // (the codes are that font's: in the view with it,
+                    // though no character of the list is in it)
+                    if b != f && b != 0 && !view.px.contains_key(&b) && !view.elink.contains_key(&b)
+                    {
+                        self.add_font_metrics(view, b)?;
+                        self.add_px(view, b)?;
+                    }
+                }
+            }
             expansion = Some(phitex_typeset::fonts::Expansion {
                 stretch: (st > 0).then(|| (key(st), st)),
                 shrink: (sh > 0).then(|| (key(-sh), -sh)),

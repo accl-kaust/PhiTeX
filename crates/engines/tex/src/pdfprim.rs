@@ -2385,9 +2385,42 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
     }
     let base = is_font_copy(r, f)?.then(|| u32::try_from(f).unwrap_or(0));
     let k = i64::from(crate::fonts::expanded_key(base, &i.name, i.size, e));
-    let held = crate::fonts::info(v, r.font_get(k, FontCell::Info)?)
-        .is_some_and(|j| j.name == name && j.size == i.size);
+    let held_info = r.font_get(k, FontCell::Info)?;
+    let held = crate::fonts::info(v, held_info).is_some_and(|j| j.name == name && j.size == i.size);
+    // (pdfTeX's `pdf_font_elink`: the ratios `f` has asked for. Its first
+    // ask for `e` goes through `load_expand_font`, whose
+    // `copy_expand_params(k, f, e)` binds the font found or made to `f`:
+    // its `pdf_font_blink`, and its protrusion and expansion codes `f`'s
+    // from then on, until another font's first ask for `e` binds it anew;
+    // a later ask of `f`'s finds it in `f`'s chain and binds nothing.
+    // easyformat (microtype): `\scshape` under `\bfseries` has no shape,
+    // and LaTeX's substitute is the bold font loaded anew after its
+    // `\pdffontexpand`, a font of its own with microtype's small-caps
+    // protrusion; its `\pdffontexpand` binds the shared `ec-lmbx10-20` and
+    // `+20` to it, and the bold text after the group, whose font asked for
+    // them before, still sets its margin kerns by the small-caps codes
+    // (pdflatex's `y` 0.299 pt, 26 of the quad, where the bold font's own
+    // code gives 37))
+    let link = format!("pdf:elink:{f}");
+    let linked: Vec<ValueId> = r.get(&link)?.map(|x| list_of(v, x)).unwrap_or_default();
+    let first = !linked.iter().any(|&y| int_of(v, y) == i64::from(e));
+    let note = |r: &mut Run<'_, '_>| {
+        if first {
+            let mut l = linked.clone();
+            l.push(v.int(i64::from(e)));
+            r.set(&link, v.list(l), true);
+        }
+    };
     if held {
+        if first && let Some(x) = held_info {
+            let mut xs = list_of(v, x);
+            while xs.len() < 7 {
+                xs.push(ValueId::UNIT);
+            }
+            xs[6] = v.list(vec![v.int(f), v.int(i64::from(e)), v.int(i64::from(auto))]);
+            r.font_set(k, FontCell::Info, v.list(xs), true);
+        }
+        note(r);
         return Ok(k);
     }
     let Some(file) = i.file else { return Ok(0) };
@@ -2413,6 +2446,7 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
         let x = i64::from(r.font_int(f, c)?);
         r.font_set(k, c, v.int(x), true);
     }
+    note(r);
     Ok(k)
 }
 
