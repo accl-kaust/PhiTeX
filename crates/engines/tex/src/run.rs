@@ -680,6 +680,15 @@ pub(crate) struct Run<'c, 'a> {
     pub exps: u64,
     /// The macro call next is the command loop's own ([`Run::counted_loop`]).
     pub command_call: bool,
+    /// The lines named by a line being expanded for the log ([`Run::write_out`]);
+    /// none where its text can go elsewhere.
+    pub log_marks: Option<Vec<i64>>,
+    /// The `scan_toks` depth now, and the one of that line's own text: a
+    /// `\the` there lands in the text as it is, one deeper (`\pdfstrcmp`) does not.
+    pub xpand_depth: u32,
+    pub marks_depth: u32,
+    /// The `\the` being expanded is one of that line's own ([`Run::the_toks`]).
+    pub the_in_text: bool,
     pub hb_at: u64,
     pub hb_done: u64,
     /// Whether the glue `scan_glue` last gave has a spec of its own
@@ -844,6 +853,10 @@ pub(crate) struct Run<'c, 'a> {
     /// body, a token list's body, §392, §473–§479): a meaning not this
     /// run's own is read only by its class ([`Run::step_lookup`]).
     pub step_reads: bool,
+    /// What this run knows of [`crate::val::OUTER_MADE`]: `OUTER_UNREAD`
+    /// until a list's token is first scanned, then whether none is made
+    /// (`OUTER_NONE`) or some may be (`OUTER_SOME`).
+    pub outer_known: u8,
     /// The meanings this run read as outer or not only (kept over a park
     /// like [`Run::class_memo`]).
     /// The meanings this run read through the step projection only, with
@@ -1224,6 +1237,10 @@ impl<'c, 'a> Run<'c, 'a> {
             cmds: 0,
             exps: 0,
             command_call: false,
+            log_marks: None,
+            xpand_depth: 0,
+            marks_depth: 0,
+            the_in_text: false,
             hb_at: Run::heartbeat_start(),
             glue_own: false,
             glue_fresh: false,
@@ -1274,6 +1291,7 @@ impl<'c, 'a> Run<'c, 'a> {
             toks_buf: Vec::new(),
             outer_reads: false,
             step_reads: false,
+            outer_known: OUTER_UNREAD,
             num_reads: false,
             lt: crate::control::LinesTaint::default(),
             contribs: Vec::new(),
@@ -1439,6 +1457,34 @@ impl<'c, 'a> Run<'c, 'a> {
             2 => self.unalias(loc),
             _ => self.load_slow(loc),
         }
+    }
+
+    /// (observe) `PHITEX_LOAD_TRACE=<field>`: what reads the field first in
+    /// each run: the token being acted on and the next tokens of the
+    /// innermost lists.
+    #[cold]
+    #[inline(never)]
+    fn load_trace(&self, f: Field) {
+        if crate::exec::obs_str!("PHITEX_LOAD_TRACE") != Some(&crate::val::field_name(self.v, f)) {
+            return;
+        }
+        let mut lists = Vec::new();
+        for l in self.input.levels.iter().rev().take(4) {
+            if l.kind == crate::input::kind::TOKS {
+                let r = crate::input::Range {
+                    start: l.a,
+                    end: l.b.min(l.a + 10),
+                };
+                lists.push(format!("{:?}", self.input.arena.get(r)));
+            }
+        }
+        eprintln!(
+            "load-trace: node {} {:?} at {:?} before {}",
+            self.cx.node().raw(),
+            self.cx.op(),
+            self.cur.tok,
+            lists.join(" | ")
+        );
     }
 
     /// Integer register `loc` holds an alias definition's value (a
@@ -1709,6 +1755,9 @@ impl<'c, 'a> Run<'c, 'a> {
         // a page fires at: the run ends there, [`Run::order_page_reg_read`])
         self.order_page_reg_read(loc)?;
         let f = self.loc_field(loc);
+        if crate::exec::obs_str!("PHITEX_LOAD_TRACE").is_some() {
+            self.load_trace(f);
+        }
         if self.fin_scope_closer.is_some() && self.fin_read_in_scope(loc, f)? {
             return Ok(());
         }
@@ -4390,6 +4439,10 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Defines token `t`'s meaning (`\def`, `\let`, …): kept native,
     /// encoded only if the run publishes it.
     pub(crate) fn set_mean(&mut self, t: Tok, m: Mean, global: bool) {
+        if matches!(&m, Mean::Macro(x) if x.flags & 2 != 0) {
+            self.outer_known = OUTER_SOME;
+            self.set(crate::val::OUTER_MADE, self.v.bool(true), true);
+        }
         // (the meaning defined is not read: [`Run::interp_first`] keeps
         // what the line read)
         self.defining = true;
@@ -6353,6 +6406,14 @@ pub(crate) struct Seeded {
 pub(crate) const SCAN_DEFINING: u8 = 2;
 pub(crate) const SCAN_MATCHING: u8 = 3;
 pub(crate) const SCAN_ABSORBING: u8 = 5;
+
+/// [`Run::outer_known`]: not read yet.
+pub(crate) const OUTER_UNREAD: u8 = 0;
+/// [`Run::outer_known`]: no macro is `\outer` here.
+pub(crate) const OUTER_NONE: u8 = 1;
+/// [`Run::outer_known`]: a macro may be `\outer`.
+pub(crate) const OUTER_SOME: u8 = 2;
+
 impl Run<'_, '_> {
     pub(crate) fn file_line_here(&self) -> Option<FileLine> {
         for l in self.input.levels.iter().rev() {
@@ -6444,6 +6505,18 @@ pub(crate) type LineMark = (Option<i64>, i64, Option<ValueId>, Option<(u64, u32)
 /// the line's place there ([`crate::input::Line::owner`]).
 pub(crate) fn dline_field(v: &Values, n: u64) -> Field {
     v.field(&format!("dline:{n}"))
+}
+
+/// Whose lines a node's text `args` are ([`own_lines`], [`dline_field`]): a
+/// top-level node's its own; a piece of a cut file's, its text's frames: a
+/// reader that runs again makes the node anew, and a file two nodes read
+/// has the same lines under both (the client gives them,
+/// `DocFile::dlines`; a sequence's id never is a node's).
+pub(crate) fn lines_owner(v: &Values, node: u64, args: &[ValueId]) -> u64 {
+    match args {
+        [frames, top, ..] if int_of(v, *top) != 3 => frames.raw(),
+        _ => node,
+    }
 }
 
 /// Node `owner`'s text's lines (`segs`, decoded from its arguments,

@@ -1343,8 +1343,23 @@ impl Run<'_, '_> {
         if self.cur.cmd == cmd::THE && self.cur.chr != 0 {
             return crate::etex::the_toks(self);
         }
+        let in_text = std::mem::take(&mut self.the_in_text);
         self.get_x_token();
         self.ck()?;
+        // (`\inputlineno` into the text of a line for the log: its number
+        // made when the log is laid out, [`crate::log::LINE_MARK`])
+        if in_text && self.cur.cmd == cmd::LAST_ITEM && self.cur.chr == 3 {
+            let m = self.line_mark();
+            let mut marks = self.log_marks.take().unwrap_or_default();
+            let s = self.line_for_log(m, &mut marks);
+            self.log_marks = Some(marks);
+            let s = s?;
+            return Ok(if s == crate::log::LINE_MARK.to_string() {
+                vec![Tok::ch(12, u32::from(crate::log::LINE_MARK))]
+            } else {
+                str_toks(&s)
+            });
+        }
         // (a page-layer register alone, unread, in a piece: its symbol,
         // docs/spec-deferred-reads.md §2)
         self.defer_ok = self.defer_allowed();
