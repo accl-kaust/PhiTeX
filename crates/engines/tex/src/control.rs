@@ -92,6 +92,7 @@ impl Run<'_, '_> {
                 {
                     return Ok(());
                 }
+                self.command_call = self.cur.cmd == cmd::CALL;
                 self.expand();
                 self.ck()?;
                 if self.expansion_goes_on() {

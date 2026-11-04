@@ -678,6 +678,8 @@ pub(crate) struct Run<'c, 'a> {
     /// Macro expansions so far: told the engine every 4096 as its work
     /// (`Ctx::tick`), as the commands are.
     pub exps: u64,
+    /// The macro call next is the command loop's own ([`Run::counted_loop`]).
+    pub command_call: bool,
     pub hb_at: u64,
     pub hb_done: u64,
     /// Whether the glue `scan_glue` last gave has a spec of its own
@@ -1195,6 +1197,7 @@ impl<'c, 'a> Run<'c, 'a> {
             mode_zero: false,
             cmds: 0,
             exps: 0,
+            command_call: false,
             hb_at: Run::heartbeat_start(),
             glue_own: false,
             glue_fresh: false,
