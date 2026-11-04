@@ -53,6 +53,9 @@ pub(crate) struct Shared {
     /// One thief at a time per block: a steal takes an even run of nodes
     /// from its far end, whole.
     block_busy: Vec<AtomicBool>,
+    /// Each worker, from its run's end to its commit's: its next node is
+    /// about to be its own (`Pool::find_work`).
+    committing: Vec<AtomicBool>,
     /// Queue entries plus running nodes; zero ends the evaluation.
     outstanding: AtomicUsize,
     idle: AtomicUsize,
@@ -465,6 +468,7 @@ impl Pool {
             ready: (0..n).map(|_| Ready::default()).collect(),
             block_stealers,
             block_busy: (0..n).map(|_| AtomicBool::new(false)).collect(),
+            committing: (0..n).map(|_| AtomicBool::new(false)).collect(),
             outstanding: AtomicUsize::new(0),
             idle: AtomicUsize::new(0),
             wakes: AtomicU64::new(0),
@@ -690,8 +694,18 @@ impl Pool {
             }
         }
         let n = self.n;
+        // (a worker's one ready node while its commit goes on is its next:
+        // taken from it, a chain's next step starts with none of the run's
+        // tables and cache, every step on another worker and half again as
+        // long at -j8, twice at -j32 (Grail's deleted paragraph, 71 hops
+        // in 116 runs, exec 352 ms at -j1, 471 and 741, the same runs, accl
+        // 24023, 23959). Two, and the second is what a thief is for)
+        let leave = |v: usize| self.shared.ready[v].len() < 2 && self.shared.committing[v].load(Ordering::Acquire);
         for k in 1..n {
             let v = (w.ix + k) % n;
+            if leave(v) {
+                continue;
+            }
             if let Some(x) = self.shared.ready[v].steal() {
                 Worker::add(&w.steals, 1);
                 return Some(x);
@@ -700,6 +714,9 @@ impl Pool {
         // (one held meanwhile, not empty: waited for, no work left behind)
         for k in 1..n {
             let v = (w.ix + k) % n;
+            if leave(v) {
+                continue;
+            }
             if let Some(x) = self.shared.ready[v].pop() {
                 Worker::add(&w.steals, 1);
                 return Some(x);
@@ -1627,7 +1644,9 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
 fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
     // (the whole task, run, commit and re-asks: no collection meanwhile)
     let _task = eng.values().task();
-    catch_unwind(AssertUnwindSafe(|| work(eng, pool, w, n))).unwrap_or_else(|p| {
+    let r = catch_unwind(AssertUnwindSafe(|| work(eng, pool, w, n)));
+    pool.shared.committing[w.ix].store(false, Ordering::Release);
+    r.unwrap_or_else(|p| {
         let message = p
             .downcast_ref::<&str>()
             .map(|s| (*s).to_owned())
@@ -1979,6 +1998,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             // (commits under way at once, `Report::commits_at_once`)
             let at_once = eng.committing.fetch_add(1, Ordering::Relaxed) + 1;
             eng.commit_peak.fetch_max(at_once, Ordering::Relaxed);
+            pool.shared.committing[w.ix].store(true, Ordering::Release);
             let st = commit(eng, w, node, product);
             eng.committing.fetch_sub(1, Ordering::Relaxed);
             // (the store past the collection's mark: the workers called to
