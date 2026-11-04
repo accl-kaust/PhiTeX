@@ -81,17 +81,32 @@ pub(crate) fn load_info(v: &Values, i: &Info) -> Option<Arc<Loaded>> {
     }
 }
 
+/// A memo of fonts made from a font (`expanded`, `untagged`) by its
+/// allocation: each entry holds the font it was made from, so that
+/// allocation is never freed and given to another font, whose memo hit
+/// would answer the first font's widths (a font loaded twice at once
+/// by two threads left one copy to drop; ArsClassica -j8, 1 build in 72,
+/// a letter-spaced heading set by another font's widths), and a hit is
+/// checked to be the font held.
+type Made<K> = Mutex<FxHashMap<(usize, K), (Arc<Loaded>, Arc<Loaded>)>>;
+
+/// [`Made`]'s answer for `l` under `k`, if the entry is `l`'s.
+fn made<K: std::hash::Hash + Eq>(m: &Made<K>, l: &Arc<Loaded>, k: K) -> Option<Arc<Loaded>> {
+    m.locked()
+        .get(&(Arc::as_ptr(l) as usize, k))
+        .filter(|(from, _)| Arc::ptr_eq(from, l))
+        .map(|(_, x)| x.clone())
+}
+
 /// `auto_expand_font(f, e)` (pdfTeX): font `l` expanded by `e`
 /// thousandths, its widths, italic corrections and kerns
-/// `round_xn_over_d(x, 1000+e, 1000)`; a memo by the font (the loads'
-/// cache keeps it) and `e`.
+/// `round_xn_over_d(x, 1000+e, 1000)`; a memo by the font ([`Made`])
+/// and `e`.
 pub(crate) fn expanded(l: &Arc<Loaded>, e: i32) -> Arc<Loaded> {
-    type Memo = Mutex<FxHashMap<(usize, i32), Arc<Loaded>>>;
-    static M: OnceLock<Memo> = OnceLock::new();
-    let key = (Arc::as_ptr(l) as usize, e);
+    static M: OnceLock<Made<i32>> = OnceLock::new();
     let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
-    if let Some(x) = m.locked().get(&key) {
-        return x.clone();
+    if let Some(x) = made(m, l, e) {
+        return x;
     }
     let r = |x: i32| phitex_typeset::arith::round_xn_over_d(x, 1000 + e, 1000);
     let mut at = l.at.clone();
@@ -108,19 +123,18 @@ pub(crate) fn expanded(l: &Arc<Loaded>, e: i32) -> Arc<Loaded> {
         at_hash: OnceLock::new(),
         whd: OnceLock::new(),
     });
-    m.locked().insert(key, x.clone());
+    m.locked()
+        .insert((Arc::as_ptr(l) as usize, e), (l.clone(), x.clone()));
     x
 }
 
 /// Font `l` with the tags `\tagcode` took off its characters
-/// (`set_tag_code`, pdfTeX); a memo by the font and the tags.
+/// (`set_tag_code`, pdfTeX); a memo by the font ([`Made`]) and the tags.
 fn untagged(l: &Arc<Loaded>, tags: &[(u8, u8)]) -> Arc<Loaded> {
-    type Memo = Mutex<FxHashMap<(usize, Vec<(u8, u8)>), Arc<Loaded>>>;
-    static M: OnceLock<Memo> = OnceLock::new();
-    let key = (Arc::as_ptr(l) as usize, tags.to_vec());
+    static M: OnceLock<Made<Vec<(u8, u8)>>> = OnceLock::new();
     let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
-    if let Some(x) = m.locked().get(&key) {
-        return x.clone();
+    if let Some(x) = made(m, l, tags.to_vec()) {
+        return x;
     }
     let tfm = l.tfm.clone().without_tags(tags);
     let x = Arc::new(Loaded {
@@ -129,7 +143,8 @@ fn untagged(l: &Arc<Loaded>, tags: &[(u8, u8)]) -> Arc<Loaded> {
         at_hash: OnceLock::new(),
         whd: OnceLock::new(),
     });
-    m.locked().insert(key, x.clone());
+    m.locked()
+        .insert((Arc::as_ptr(l) as usize, tags.to_vec()), (l.clone(), x.clone()));
     x
 }
 
@@ -177,8 +192,9 @@ fn load_spaced(v: &Values, file: ValueId, s: i32, dw: i32, nolig: bool) -> Optio
             whd: OnceLock::new(),
         }))
     });
-    cache().locked().insert(key, loaded.clone());
-    loaded
+    // (two threads parsing the same font at once: the first one in is
+    // the font, the other's copy is dropped here and held by nothing)
+    cache().locked().entry(key).or_insert(loaded).clone()
 }
 
 /// A letter-spaced font's making (`letter_space_font`, pdfTeX): the
@@ -854,5 +870,87 @@ mod tests {
         // (the key held by the same font: that font)
         let k = pick_key::<()>("cmr10", 655_360, &mut |_| Ok(Some(false))).unwrap();
         assert_eq!(k, first);
+    }
+
+    /// A TFM of two characters, A (width `wa`) and B (width 1), at design
+    /// size 10pt.
+    fn tfm_bytes(wa: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        let pair = |b: &mut Vec<u8>, v: u16| b.extend_from_slice(&v.to_be_bytes());
+        let quad = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_be_bytes());
+        // lf lh bc ec nw nh nd ni nl nk ne np
+        for v in [27u16, 12, 65, 66, 3, 2, 1, 1, 0, 0, 0, 0] {
+            pair(&mut b, v);
+        }
+        quad(&mut b, 0x1234_5678);
+        quad(&mut b, 10 << 20);
+        quad(&mut b, 0x0854_6558);
+        quad(&mut b, 0x2074_6578);
+        quad(&mut b, 0x7400_0000);
+        for _ in 5..12 {
+            quad(&mut b, 0);
+        }
+        quad(&mut b, 0x0110_0000); // A: width 1, height 1
+        quad(&mut b, 0x0200_0000); // B: width 2
+        quad(&mut b, 0);
+        quad(&mut b, wa);
+        quad(&mut b, 0x8_0000);
+        quad(&mut b, 0);
+        quad(&mut b, 0x7_0000);
+        quad(&mut b, 0); // depths
+        quad(&mut b, 0); // italics
+        b
+    }
+
+    fn loaded(wa: u32) -> Arc<Loaded> {
+        let tfm = phitex_tfm::parse(&tfm_bytes(wa)).unwrap();
+        let at = tfm.at(10 << 16).unwrap();
+        Arc::new(Loaded {
+            tfm,
+            at,
+            at_hash: OnceLock::new(),
+            whd: OnceLock::new(),
+        })
+    }
+
+    #[test]
+    fn a_font_made_from_a_font_keeps_it_and_answers_for_it_alone() {
+        // (the memos of `expanded` and `untagged` are by the font's
+        // allocation: each entry holds its font, so the allocation is
+        // never another font's while the entry stands, and an entry
+        // answers only for the font it holds)
+        let a = loaded(0x8_0000);
+        let xa = expanded(&a, 100);
+        assert_eq!(Arc::strong_count(&a), 2, "the memo holds the font it expanded");
+        assert!(Arc::ptr_eq(&expanded(&a, 100), &xa), "a hit");
+        let r = |x: i32| phitex_typeset::arith::round_xn_over_d(x, 1100, 1000);
+        assert_eq!(xa.at.width(b'A'), a.at.width(b'A').map(r));
+        let ua = untagged(&a, &[(b'A', 1)]);
+        assert_eq!(Arc::strong_count(&a), 3, "the memo holds the font it untagged");
+        assert!(Arc::ptr_eq(&untagged(&a, &[(b'A', 1)]), &ua));
+        // (a hit on the allocation is checked to be the font held: a
+        // key of the same address as another font is answered afresh)
+        let b = loaded(0x4_0000);
+        let xb = expanded(&b, 100);
+        assert!(!Arc::ptr_eq(&xb, &xa));
+        assert_eq!(xb.at.width(b'A'), b.at.width(b'A').map(r));
+        assert_ne!(xb.at.width(b'A'), xa.at.width(b'A'));
+    }
+
+    #[test]
+    fn a_font_parsed_twice_at_once_is_one_font() {
+        // (the loads' cache: the first font in stays; a second parse of
+        // the same file at the same size, by another thread between the
+        // miss and the insert, gets the first)
+        let v = Values::new();
+        let text: String = tfm_bytes(0x8_0000).iter().map(|&b| char::from(b)).collect();
+        let file = v.list(vec![v.str("ab.tfm"), v.str(&text)]);
+        let first = load(&v, file, 10 << 16).unwrap();
+        let again = load(&v, file, 10 << 16).unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        let ls = load_spaced(&v, file, 10 << 16, 0x1_0000, false).unwrap();
+        assert!(!Arc::ptr_eq(&first, &ls));
+        assert_eq!(ls.at.width(b'A'), first.at.width(b'A').map(|w| w + 0x1_0000));
+        assert!(Arc::ptr_eq(&ls, &load_spaced(&v, file, 10 << 16, 0x1_0000, false).unwrap()));
     }
 }
