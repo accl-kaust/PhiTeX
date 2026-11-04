@@ -289,7 +289,7 @@ mod tests {
             "LaTeX Warning: Reference `secretlabel' on page 1 undefined on input line 3.",
         );
         assert_eq!(m, "LaTeX Warning (reference; its text left out)");
-        assert!(!shown_message("Package natbib Warning: Citation `k' undefined").contains('k'));
+        assert!(!shown_message("Package natbib Warning: Citation `k' undefined").contains("`k'"));
         assert_eq!(
             shown_message("Undefined control sequence."),
             "Undefined control sequence."
