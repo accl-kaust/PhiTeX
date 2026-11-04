@@ -1,0 +1,38 @@
+# One-off (branch oracle-time only): on the gate's runner, in one job so
+# on one machine, pdflatex's own wall time (the oracle's full loop as
+# scripts/ci/manuals.py runs it) and PhiTeX's at -j1 and -j4 (sweep.py,
+# against the pinned md5) for the manuals named.
+name: oracle time
+on:
+  push:
+    branches: [oracle-time]
+permissions:
+  contents: read
+  packages: read
+env:
+  IMAGE: ghcr.io/accl-kaust/phitex-ci:2026-09-25
+jobs:
+  time:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        id: [latex_pegmatch_pegmatch]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE" && docker pull -q "$IMAGE-doc"
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - run: |
+          nproc; grep -m1 'model name' /proc/cpuinfo
+          mkdir -p out/target
+          docker run --rm -v "$PWD:/src" -w /src -e CARGO_TARGET_DIR=/src/out/target "$IMAGE" cargo build --release -p phitex-cli
+          ls -la out/target/release/phitex
+      - run: |
+          grep -m1 'model name' /proc/cpuinfo
+          docker run --rm -v "$PWD:/src" -w /src -e CI_WORK=/src/out/w "$IMAGE-doc" bash -c \
+            'mkdir -p out/w out/oracle out/no-oracle out/m && python3 -I scripts/ci/manuals.py oracle --list ci/manuals.json --doc /usr/share/doc/texlive --cache /src/out/oracle --ids ${{ matrix.id }}; find out/oracle -name result.json -exec grep -H "\"wall_s\"\|\"passes\"\|\"status\"" {} \; ; python3 -I scripts/ci/sweep.py run --list ci/manuals.json --doc /usr/share/doc/texlive --cache /src/out/no-oracle --bin /src/out/target/release/phitex --out /src/out/m --ids ${{ matrix.id }} --jobs 1,4 --par 1:1,4:1 --timeout 1500 --engines pdflatex; for f in out/m/*.json; do echo "$f"; grep -o "\"status\": \"[^\"]*\"\|\"wall_s\": [0-9.]*\|\"note\": \"[^\"]\{0,120\}" "$f"; done'
