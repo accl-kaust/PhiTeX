@@ -2279,9 +2279,27 @@ impl Run<'_, '_> {
         if crate::exec::obs_flag!("PHITEX_CMD_TRACE") && self.cmd_traced() {
             eprintln!("cmd-trace {} write_out {k}", self.cx.node().raw());
         }
+        // (a stream open on no file: the text goes to the log, where a line
+        // number is made when the log is laid out, so a message saying
+        // "on input line" does not tie its piece to the lines above)
+        let op = self.cx.op();
+        let to_log = (op == self.ops.exec || op == self.ops.resume)
+            && k != 18
+            && !((0..16).contains(&k)
+                && !self.closed.contains(&k)
+                && self
+                    .get(&format!("write:{k}"))?
+                    .is_some_and(|x| x != ValueId::UNIT));
+        let outer = (self.log_marks.take(), self.marks_depth);
+        if to_log {
+            self.log_marks = Some(Vec::new());
+            self.marks_depth = self.xpand_depth + 1;
+        }
         let was = self.lines_sink_begin(Sink::Log);
         let s = self.expand_late(body);
         let hit = self.lines_sink_end(was);
+        let marks = self.log_marks.take().unwrap_or_default();
+        (self.log_marks, self.marks_depth) = outer;
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && s.is_err() {
             eprintln!(
                 "aux-trace: write_out stream {k} node {} halted expanding its text",
@@ -2446,7 +2464,7 @@ impl Run<'_, '_> {
             };
             self.contribute_stream(e);
         } else {
-            self.log("wlog", &s)?;
+            self.log_lines("wlog", &s, marks)?;
         }
         Ok(())
     }
