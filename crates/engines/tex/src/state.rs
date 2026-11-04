@@ -728,6 +728,14 @@ impl AtCandidates {
         h.get(h.partition_point(|x| x.0 < i)).map(|x| x.1)
     }
 
+    /// The candidate (by index) after which the binding of `loc` in force
+    /// at candidate `i` was made, where the run made it after one.
+    pub(crate) fn made_after(&self, i: usize, loc: Loc) -> Option<usize> {
+        let h = self.by_loc.get(&loc)?;
+        let p = h.partition_point(|x| x.0 < i);
+        p.checked_sub(1).map(|p| h[p].0)
+    }
+
     /// `loc`'s entries at the candidates, by candidate.
     #[allow(clippy::option_option)]
     pub(crate) fn history(&self, loc: Loc) -> &[AtCandidate] {

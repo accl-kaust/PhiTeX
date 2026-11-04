@@ -85,6 +85,17 @@ pub(crate) fn fire_conflict_field(v: &Values, piece: NodeId, k: u32) -> Field {
     v.field(&format!("{FIRE_CONFLICT}:{}:{k}", piece.raw()))
 }
 
+/// What a routine left in field `f` where the piece's later definition
+/// stands over it (`Run::give_way`): `pages:left:<piece>:<f>`, `[value]` or
+/// `[]`. The next page's routine in the piece begins with it, TeX's routines
+/// running before that definition.
+pub(crate) const FIRE_LEFT: &str = "pages:left";
+
+/// [`FIRE_LEFT`]' field of `f` in `piece`.
+pub(crate) fn fire_left_field(v: &Values, piece: NodeId, f: Field) -> Field {
+    v.field(&format!("{FIRE_LEFT}:{}:{}", piece.raw(), f.0.raw()))
+}
+
 /// The page of a fired page, as its finisher reads it:
 /// `pages:page:<owner>:<piece>:<nth>` (raw ids, [`PageKey`]), defined by
 /// the [`Pages`] node that fired it,

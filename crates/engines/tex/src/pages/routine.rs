@@ -14,8 +14,8 @@
 
 use super::{
     BEFORE_PIECE, Field, GDEFS, List, Locality, Mode, Node, PAGE_FIELDS, PITEMS, PackParams, Page,
-    Par, R, Run, Side, Spec, ValueId, Values, fire_conflict_field, fire_used_field, group, int_of,
-    list_of, nodes, some, str_of, toks_of,
+    Par, R, Run, Side, Spec, ValueId, Values, fire_conflict_field, fire_left_field,
+    fire_used_field, group, int_of, list_of, nodes, some, str_of, toks_of,
 };
 
 /// A routine's give-back as [`RTN`] holds it: `[markers, list]`, and
@@ -862,11 +862,63 @@ impl Run<'_, '_> {
         let piece =
             phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, a(5)).to_ne_bytes()));
         let before = v.str(BEFORE_PIECE);
-        for e in list_of(v, a(8)) {
+        // (a routine of a page before this one, in this piece at a candidate
+        // the piece's binding was made before: what it defined globally is
+        // what this one begins with (§279), not the piece's value there,
+        // which the piece put in force only if it read it after)
+        let names = list_of(v, a(8));
+        let gdefs = match self
+            .fin_page()
+            .map(|p| i64::from_ne_bytes(p.at.raw().to_ne_bytes()))
+        {
+            Some(at)
+                if names
+                    .iter()
+                    .any(|&e| list_of(v, e).get(2) != Some(&ValueId::UNIT)) =>
+            {
+                self.gdefs_after(at)?.into_iter().map(|g| (at, g)).collect()
+            }
+            _ => Vec::new(),
+        };
+        for e in names {
             let ys = list_of(v, e);
             let [f, _, kv] = ys[..] else { continue };
             if kv == ValueId::UNIT {
                 continue;
+            }
+            if gdefs
+                .iter()
+                .any(|(_, g): &(i64, GDef)| g.names.contains(&f))
+            {
+                let made = if kv == before {
+                    -1
+                } else if self.is_lazy(kv) {
+                    let y = self.fin_lazy_value(kv)?;
+                    list_of(v, y).first().map_or(-1, |&x| int_of(v, x))
+                } else {
+                    list_of(v, kv).first().map_or(-1, |&x| int_of(v, x))
+                };
+                if gdefs
+                    .iter()
+                    .any(|(at, g)| g.names.contains(&f) && (g.pid != *at || made < g.k))
+                {
+                    // (what the routine before it left, where the piece's
+                    // later definition stood over it there)
+                    let left = self.fin_page().map(|p| fire_left_field(v, p.at, Field(f)));
+                    let left = match left {
+                        Some(l) => self.cx.read(l)?,
+                        None => None,
+                    };
+                    if let Some(l) = left {
+                        let x = list_of(v, l).first().copied();
+                        let loc = self.loc_of(Field(f));
+                        self.st.preload(v, loc, x);
+                        self.fin_replaced.push((f, Some(x)));
+                    } else {
+                        self.fin_replaced.push((f, None));
+                    }
+                    continue;
+                }
             }
             let x = if kv == before {
                 match self.field_at(Field(f), piece, true)? {
@@ -879,7 +931,7 @@ impl Run<'_, '_> {
                 self.st.set_lazy(loc, Some(kv));
                 continue;
             } else {
-                list_of(v, kv).first().copied()
+                list_of(v, kv).get(1).copied()
             };
             let loc = self.loc_of(Field(f));
             self.st.preload(v, loc, x);
@@ -1148,7 +1200,13 @@ impl Run<'_, '_> {
     #[allow(clippy::option_option)]
     fn fire_start_value(&mut self, args: &[ValueId], f: Field) -> R<Option<Option<ValueId>>> {
         let v = self.v;
-        if let Some(&after) = args.get(8) {
+        let replaced = self.fin_replaced.iter().find(|r| r.0 == f.0).map(|r| r.1);
+        if let Some(Some(x)) = replaced {
+            return Ok(Some(x));
+        }
+        if let Some(&after) = args.get(8)
+            && replaced.is_none()
+        {
             for e in list_of(v, after) {
                 let ys = list_of(v, e);
                 let [g, _, kv] = ys[..] else { continue };
@@ -1168,7 +1226,7 @@ impl Run<'_, '_> {
                 if self.is_lazy(kv) {
                     return Ok(Some(self.fin_lazy_preload(kv)?));
                 }
-                return Ok(Some(list_of(v, kv).first().copied()));
+                return Ok(Some(list_of(v, kv).get(1).copied()));
             }
         }
         Ok(Some(self.cx.read(f)?))
@@ -1292,7 +1350,7 @@ impl Run<'_, '_> {
     }
 
     /// The value a lazily preloaded field takes ([`Run::preload_candidate`]):
-    /// a local's value as it is, a name's `[value]` or `[]`.
+    /// a local's value as it is, a name's `[made after, value]` or `[made after]`.
     pub(crate) fn fin_lazy_preload(&mut self, x: ValueId) -> R<Option<ValueId>> {
         let v = self.v;
         let part = list_of(v, x).get(2).map_or(0, |&p| int_of(v, p));
@@ -1300,7 +1358,7 @@ impl Run<'_, '_> {
         Ok(if part == 5 {
             some(y)
         } else {
-            list_of(v, y).first().copied()
+            list_of(v, y).get(1).copied()
         })
     }
 

@@ -1209,3 +1209,14 @@ fn eof_no_newline() {
 fn write_mode_zero() {
     check_threads("write_mode_zero", "pdf");
 }
+
+/// TeX Live manual ijmsample (pdflatex): pages fire at candidates in the
+/// group a list opens other than a paragraph's start, and the text after
+/// each reads the page counter. A piece applied a routine's values only at
+/// a paragraph's start; a routine then began with the piece's value there,
+/// and the counter stopped stepping (page 20 printed 6). At -j1 and -j4
+/// (oracle: pdflatex in the CI image, accl 24233; the base differs).
+#[test]
+fn routine_page_at_any_candidate() {
+    check_threads("routine_page_at_any_candidate", "pdf");
+}
