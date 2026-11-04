@@ -2060,7 +2060,14 @@ impl State {
             .and_then(|s| usize::try_from(s.meta).ok().filter(|&m| m > 0))
             .and_then(|m| self.metas.get(m - 1))
             .map_or_else(
-                || self.has_map(loc),
+                // (only stepped, even where the steps cancel, `State::add`:
+                // nothing to publish, and what they leave is still later in
+                // TeX's order than a routine run at a candidate before them.
+                // `\\g__kernel_prg_map_int` stepped -1 then +1 around a
+                // candidate in latex_starray: the routine's value of it stood
+                // over the piece's, the next step made -1, and a name built
+                // from it went wrong)
+                || self.slot_ref(loc).is_some_and(|s| s.mapped != MAP_NONE),
                 |m| !m.ldef_local || m.ldef_gid.is_none(),
             )
     }

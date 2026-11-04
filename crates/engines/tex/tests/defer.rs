@@ -488,3 +488,69 @@ fn a_counter_among_a_macros_delimiters_matches_its_digits() {
     let (_, out) = cold("delim", src, 1);
     assert_eq!(out.trim_end(), "[a][x]", "{out:?}");
 }
+
+/// Steps that cancel around a candidate of a run that cannot be cut (a group
+/// open over paragraphs), under a routine that steps the same counter and so
+/// defines its value: the run publishes nothing for them, and what they leave
+/// is still later in TeX's order than the routine, which gives way. As
+/// `\\g__kernel_prg_map_int` in latex_starray, where the routine's value stood
+/// and the next step made it -1. Against the same text setting by value.
+#[test]
+fn a_routines_value_gives_way_to_steps_that_cancel_after_its_candidate() {
+    let src = |down: &str, up: &str| {
+        let mut s = String::from(
+            "\\openout1=\\jobname.out\n\\count200=5\n\
+             \\output={\\global\\advance\\count200 1 \\global\\advance\\count200 -1 \
+             \\immediate\\write1{p\\the\\count0=\\the\\count200.}\\shipout\\box255\\global\\advance\\count0 1 }\n",
+        );
+        for b in 0..6 {
+            s.push_str("\\begingroup\n");
+            for i in 0..12 {
+                let _ = write!(
+                    s,
+                    "{down}Paragraph {b} {i}, long enough to make a line or two when set in the \
+                     plain format's ten point roman, and one more clause to be sure, then more \
+                     text which runs on to another line of the paragraph.\n\n{up}"
+                );
+            }
+            s.push_str("\\endgroup\n\n");
+        }
+        s.push_str("The counter ends at \\the\\count200.\n\n\\closeout1\n\\bye\n");
+        s
+    };
+    let (want_dvi, want_out) = cold(
+        "cancel-val",
+        &src(
+            "\\global\\count200=\\numexpr\\count200-1\\relax ",
+            "\\global\\count200=\\numexpr\\count200+1\\relax ",
+        ),
+        1,
+    );
+    assert!(
+        want_out.contains("p2=4."),
+        "several pages, each at 4: {want_out:?}"
+    );
+    for threads in [1, 4, 8] {
+        let dir = common::scratch(&format!("defer-cancel-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let b = common::build(
+            opts,
+            Some(&common::plain()),
+            &src(
+                "\\global\\advance\\count200 -1 ",
+                "\\global\\advance\\count200 1 ",
+            ),
+        );
+        assert_eq!(b.output().0, want_dvi, "-j{threads}: cold");
+        let got: String = b
+            .writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(got, want_out, "-j{threads}: each page's value");
+    }
+}
