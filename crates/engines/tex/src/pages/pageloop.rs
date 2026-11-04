@@ -46,13 +46,23 @@ use super::*;
 use crate::vprof::{PItem, ScanState};
 
 /// What a piece read across the candidates of its own it went on past,
-/// where a page can fire: `pages:used:<piece>`, a list of the fields by id,
-/// sorted, one for each stretch of candidates it read one across; those
-/// stretches, flat (first k, last k); and the candidates it went on past.
-/// The finisher of a page firing at such a candidate reads it and, where
-/// the routine changed one of them globally and the piece read it across
-/// that candidate, defines [`FIRE_CONFLICT`] (`Run::define_fire_conflict`).
+/// where a page can fire: `pages:used:<piece>`, a list of two. First, the
+/// stretches by [`fire_used_bucket`] of the field, each flat (field, first k,
+/// last k): a piece can read tens of thousands of fields and a finisher asks
+/// after a few. Second, the candidates it went on past. The finisher of a
+/// page firing at such a candidate reads it and, where the routine changed
+/// a field globally and the piece read it across that candidate, defines
+/// [`FIRE_CONFLICT`] (`Run::define_fire_conflict`).
 pub(crate) const FIRE_USED: &str = "pages:used";
+
+/// The lists of [`FIRE_USED`]'s first part.
+pub(crate) const FIRE_USED_BUCKETS: usize = 256;
+
+/// The list of [`FIRE_USED`]'s first part that holds field `f`.
+pub(crate) fn fire_used_bucket(f: ValueId) -> usize {
+    let h = f.raw().wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 56;
+    usize::try_from(h).unwrap_or(0)
+}
 
 /// [`FIRE_USED`]' field of `piece`.
 pub(crate) fn fire_used_field(v: &Values, piece: NodeId) -> Field {

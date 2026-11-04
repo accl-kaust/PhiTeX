@@ -499,17 +499,18 @@ impl Run<'_, '_> {
             );
         }
         let int = |k: u32| v.int(i64::from(k));
-        let mut fs = Vec::with_capacity(ranges.len());
-        let mut rs = Vec::with_capacity(2 * ranges.len());
+        let mut buckets = vec![Vec::new(); super::FIRE_USED_BUCKETS];
         for (f, a, b) in ranges {
-            fs.push(f);
-            rs.push(int(a));
-            rs.push(int(b));
+            let ys: &mut Vec<ValueId> = &mut buckets[super::fire_used_bucket(f)];
+            ys.push(f);
+            ys.push(int(a));
+            ys.push(int(b));
         }
+        let buckets = buckets.into_iter().map(|ys| v.list(ys)).collect();
         let passed = v.list(ks.iter().map(|&k| int(k)).collect());
         self.cx.define_with(
             super::fire_used_field(v, node),
-            v.list(vec![v.list(fs), v.list(rs), passed]),
+            v.list(vec![v.list(buckets), passed]),
             Locality::Global,
         );
     }

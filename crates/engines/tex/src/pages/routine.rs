@@ -967,21 +967,15 @@ impl Run<'_, '_> {
         let Some(used) = self.cx.read(fire_used_field(v, at))? else {
             return Ok(());
         };
-        let (used, ranges) = {
-            let u = list_of(v, used);
-            (list_of(v, u[0]), list_of(v, u[1]))
-        };
+        let buckets = list_of(v, list_of(v, used)[0]);
         // (the run read `f` across this candidate)
         let used_here = |f: ValueId| {
-            let from = used.partition_point(|&g| g < f);
-            used[from..]
+            let k = i64::from(k);
+            list_of(v, buckets[super::fire_used_bucket(f)])
+                .as_chunks::<3>()
+                .0
                 .iter()
-                .take_while(|&&g| g == f)
-                .enumerate()
-                .any(|(i, _)| {
-                    int_of(v, ranges[2 * (from + i)]) <= i64::from(k)
-                        && i64::from(k) <= int_of(v, ranges[2 * (from + i) + 1])
-                })
+                .any(|&[g, a, b]| g == f && int_of(v, a) <= k && k <= int_of(v, b))
         };
         let changes: Vec<_> = changes
             .into_iter()
@@ -1133,13 +1127,13 @@ impl Run<'_, '_> {
         };
         let used = self.cx.read(fire_used_field(v, at))?;
         let passed =
-            used.is_some_and(|u| list_of(v, list_of(v, u)[2]).contains(&v.int(i64::from(k))));
+            used.is_some_and(|u| list_of(v, list_of(v, u)[1]).contains(&v.int(i64::from(k))));
         if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
             eprintln!(
                 "fire-after: finisher {} piece {} candidate {k}: used {} passed {passed}",
                 self.cx.node().raw(),
                 at.raw(),
-                used.map_or_else(|| "-".to_owned(), |u| v.render(list_of(v, u)[2])),
+                used.map_or_else(|| "-".to_owned(), |u| v.render(list_of(v, u)[1])),
             );
         }
         Ok(passed)
