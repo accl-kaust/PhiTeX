@@ -92,6 +92,7 @@ impl Run<'_, '_> {
                 {
                     return Ok(());
                 }
+                self.command_call = self.cur.cmd == cmd::CALL;
                 self.expand();
                 self.ck()?;
                 if self.expansion_goes_on() {
@@ -470,6 +471,25 @@ impl Run<'_, '_> {
         // (§1210's prefixed commands are the same in every mode, and
         // `\relax` does nothing: no mode read)
         let c = self.cur.cmd;
+        // (code entries waiting: only the commands that can see no more of
+        // the table than they ask for leave them waiting)
+        if self.st.bulk_waits()
+            && !matches!(
+                c,
+                cmd::RELAX
+                    | cmd::DEF
+                    | cmd::LET
+                    | cmd::ASSIGN_INT
+                    | cmd::REGISTER
+                    | cmd::ADVANCE
+                    | cmd::DEF_CODE
+                    | cmd::CASE_SHIFT
+                    | cmd::END_GROUP
+                    | cmd::RIGHT_BRACE
+            )
+        {
+            self.flush_bulk_codes();
+        }
         // (XeTeX's `othercases` after a run of characters:
         // `check_for_post_char_toks(big_switch)`)
         if self.xe

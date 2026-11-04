@@ -1,0 +1,159 @@
+% Loops of register arithmetic and code assignments, in the shapes a
+% command loop can make without reading the tokens, and the shapes it
+% must leave to the interpreter.
+\documentclass{article}
+\makeatletter
+\newcount\ca \newcount\cb \newcount\cc
+\newcommand\sect[1]{\texttt{#1}: }
+\def\lc#1{\the\lccode#1\space}
+\begin{document}
+
+\sect{lc in group}
+\begingroup
+  \ca=0 \cb=256
+  \loop
+    \lccode\ca=\ca
+    \advance\ca by 1
+  \ifnum\ca<\cb
+  \repeat
+  \lccode`\_=`\ \relax
+  \lowercase{\xdef\res{Ab_Cd}}%
+  \the\ca\ \lc{65} \lc{200} \lc{`\_}
+\endgroup
+\meaning\res\ \the\ca\ \lc{65} \lc{200} \lc{`\_}
+\par
+
+\sect{uc, chardef step, chardef limit}
+\begingroup
+  \count@=64
+  \chardef\lim=90
+  \loop
+    \uccode\count@=\count@
+    \advance\count@\@ne
+  \ifnum\count@<\lim
+  \repeat
+  \the\count@\ \the\uccode 70 \ \the\uccode 97
+\endgroup
+\the\uccode 70 \ \the\uccode 97
+\par
+
+\sect{cat, constant value}
+\begingroup
+  \count@=48
+  \loop
+    \catcode\count@=11
+    \advance\count@ by 1
+  \ifnum\count@<58 \repeat
+  \the\catcode`\5\ \the\count@
+  \def\a1b{one}\a1b
+\endgroup
+\the\catcode`\5\par
+
+\sect{steps at the base level}
+\ca=5
+\loop
+  \advance\ca by 3
+  \advance\cb\ca
+\ifnum\ca<40 \repeat
+\the\ca\ \the\cb\par
+
+\sect{value out of range}
+\begingroup
+  \count@=250
+  \loop
+    \lccode 65=\count@
+    \edef\x{\the\lccode 65}\advance\count@ by 1
+  \ifnum\count@<260 \repeat
+  \x
+\endgroup
+\begingroup
+  \count@=250
+  \loop
+    \lccode 65=\count@
+    \advance\count@ by 1
+  \ifnum\count@<260 \repeat
+  \the\lccode 65\ \the\count@
+\endgroup
+\par
+
+\sect{character out of range}
+\begingroup
+  \count@=250
+  \loop
+    \lccode\count@=66
+    \advance\count@ by 1
+  \ifnum\count@<260 \repeat
+  \the\lccode 0\ \the\lccode 255\ \the\count@
+\endgroup
+\the\lccode 0\par
+
+\sect{overflow}
+\begingroup
+  \count@=2147483640
+  \cc=0
+  \loop
+    \advance\count@ by 3
+    \advance\cc by 1
+  \ifnum\cc<5 \repeat
+  \the\cc
+\endgroup
+\par
+
+\sect{after assignment}
+\begingroup
+  \def\mk{[M\the\count@]}%
+  \count@=0
+  \afterassignment\mk
+  \loop
+    \advance\count@ by 2
+  \ifnum\count@<9 \repeat
+  \the\count@
+\endgroup
+\par
+
+\sect{global definitions}
+\begingroup
+  \globaldefs=1
+  \ca=0
+  \loop
+    \lccode\ca=7
+    \advance\ca by 1
+  \ifnum\ca<4 \repeat
+  \globaldefs=0
+\endgroup
+\the\ca\ \the\lccode 2\ \the\lccode 5\par
+
+\sect{equal test, and a loop run once}
+\ca=0
+\loop
+  \advance\ca by 1
+\ifnum\ca=1 \repeat
+\the\ca\par
+
+\sect{in an edef: not run}
+\begingroup
+  \ca=0
+  \def\m{\advance\ca by 1 \ifnum\ca<3\relax\expandafter\m\fi}%
+  \m \the\ca
+  \ca=0
+  \edef\n{\noexpand\relax}\n
+\endgroup
+\par
+
+\sect{inside a box}
+\setbox0=\hbox{\ca=0 \loop\advance\ca by 1 \ifnum\ca<7 \repeat\the\ca}\box0\par
+
+\sect{meaning changed}
+\begingroup
+  \ca=0
+  \let\plus\advance
+  \loop
+    \plus\ca by 1
+  \ifnum\ca<3 \repeat
+  \the\ca
+  \ca=0
+  \def\q{\advance\ca by 1 \let\foo\relax \ifnum\ca<3\relax\expandafter\q\fi}\q
+  \the\ca
+\endgroup
+\par
+\end{document}

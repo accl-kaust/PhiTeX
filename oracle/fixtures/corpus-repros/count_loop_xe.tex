@@ -1,0 +1,255 @@
+% !TEX program = xelatex
+% Loops of register arithmetic and code assignments, in the shapes a
+% command loop can make without reading the tokens, and the shapes it
+% must leave to the interpreter; XeTeX: the codes past 255.
+\documentclass{article}
+\makeatletter
+\newcount\ca \newcount\cb \newcount\cc
+\newcommand\sect[1]{\texttt{#1}: }
+\def\lc#1{\the\lccode#1\space}
+\begin{document}
+
+\sect{lc in group}
+\begingroup
+  \ca=0 \cb=256
+  \loop
+    \lccode\ca=\ca
+    \advance\ca by 1
+  \ifnum\ca<\cb
+  \repeat
+  \lccode`\_=`\ \relax
+  \lowercase{\xdef\res{Ab_Cd}}%
+  \the\ca\ \lc{65} \lc{200} \lc{`\_}
+\endgroup
+\meaning\res\ \the\ca\ \lc{65} \lc{200} \lc{`\_}
+\par
+
+\sect{uc, chardef step, chardef limit}
+\begingroup
+  \count@=64
+  \chardef\lim=90
+  \loop
+    \uccode\count@=\count@
+    \advance\count@\@ne
+  \ifnum\count@<\lim
+  \repeat
+  \the\count@\ \the\uccode 70 \ \the\uccode 97
+\endgroup
+\the\uccode 70 \ \the\uccode 97
+\par
+
+\sect{cat, constant value}
+\begingroup
+  \count@=48
+  \loop
+    \catcode\count@=11
+    \advance\count@ by 1
+  \ifnum\count@<58 \repeat
+  \the\catcode`\5\ \the\count@
+  \def\a1b{one}\a1b
+\endgroup
+\the\catcode`\5\par
+
+\sect{steps at the base level}
+\ca=5
+\loop
+  \advance\ca by 3
+  \advance\cb\ca
+\ifnum\ca<40 \repeat
+\the\ca\ \the\cb\par
+
+\sect{value out of range}
+\begingroup
+  \count@=250
+  \loop
+    \lccode 65=\count@
+    \edef\x{\the\lccode 65}\advance\count@ by 1
+  \ifnum\count@<260 \repeat
+  \x
+\endgroup
+\begingroup
+  \count@=250
+  \loop
+    \lccode 65=\count@
+    \advance\count@ by 1
+  \ifnum\count@<260 \repeat
+  \the\lccode 65\ \the\count@
+\endgroup
+\par
+
+\sect{character out of range}
+\begingroup
+  \count@=250
+  \loop
+    \lccode\count@=66
+    \advance\count@ by 1
+  \ifnum\count@<260 \repeat
+  \the\lccode 0\ \the\lccode 255\ \the\count@
+\endgroup
+\the\lccode 0\par
+
+\sect{overflow}
+\begingroup
+  \count@=2147483640
+  \cc=0
+  \loop
+    \advance\count@ by 3
+    \advance\cc by 1
+  \ifnum\cc<5 \repeat
+  \the\cc
+\endgroup
+\par
+
+\sect{after assignment}
+\begingroup
+  \def\mk{[M\the\count@]}%
+  \count@=0
+  \afterassignment\mk
+  \loop
+    \advance\count@ by 2
+  \ifnum\count@<9 \repeat
+  \the\count@
+\endgroup
+\par
+
+\sect{global definitions}
+\begingroup
+  \globaldefs=1
+  \ca=0
+  \loop
+    \lccode\ca=7
+    \advance\ca by 1
+  \ifnum\ca<4 \repeat
+  \globaldefs=0
+\endgroup
+\the\ca\ \the\lccode 2\ \the\lccode 5\par
+
+\sect{equal test, and a loop run once}
+\ca=0
+\loop
+  \advance\ca by 1
+\ifnum\ca=1 \repeat
+\the\ca\par
+
+\sect{in an edef: not run}
+\begingroup
+  \ca=0
+  \def\m{\advance\ca by 1 \ifnum\ca<3\relax\expandafter\m\fi}%
+  \m \the\ca
+  \ca=0
+  \edef\n{\noexpand\relax}\n
+\endgroup
+\par
+
+\sect{inside a box}
+\setbox0=\hbox{\ca=0 \loop\advance\ca by 1 \ifnum\ca<7 \repeat\the\ca}\box0\par
+
+\sect{meaning changed}
+\begingroup
+  \ca=0
+  \let\plus\advance
+  \loop
+    \plus\ca by 1
+  \ifnum\ca<3 \repeat
+  \the\ca
+  \ca=0
+  \def\q{\advance\ca by 1 \let\foo\relax \ifnum\ca<3\relax\expandafter\q\fi}\q
+  \the\ca
+\endgroup
+\par
+\sect{all of the table}
+\begingroup
+  \ca=0 \cb=70000
+  \loop
+    \lccode\ca=\ca
+    \advance\ca by 1
+  \ifnum\ca<\cb
+  \repeat
+  \the\ca\ \lc{65} \lc{1000} \lc{69999} \lc{70000}
+  \lccode`\_=`\ \relax
+  \lowercase{\xdef\res{Ab_Cd}}\meaning\res
+\endgroup
+\lc{1000}\lc{69999}\par
+
+\sect{character past the top}
+\begingroup
+  \count@=1114110
+  \loop
+    \lccode\count@=66
+    \advance\count@ by 1
+  \ifnum\count@<1114113 \repeat
+  \the\lccode 1114111\ \the\count@
+\endgroup
+\the\lccode 1114111\par
+
+\def\fill#1#2{\ca=0 \cb=#2 \loop#1\ca=\ca \advance\ca by 1 \ifnum\ca<\cb \repeat}
+\def\lu#1{\the\lccode#1/\the\uccode#1\space}
+\lccode 3000=7 \uccode 3000=8 \global\lccode 3001=9
+
+\sect{a table read past its fixed entries, in every way}
+\begingroup
+  \fill\lccode{5000}%
+  \lu{65} \lu{300} \lu{3000} \lu{3001} \lu{4999} \lu{5000} \lu{5001}
+  \lowercase{\xdef\res{^^^^0416 ^^^^0100 Q}}%
+  \uppercase{\xdef\resb{^^^^0416 q}}%
+\endgroup
+\lu{65} \lu{300} \lu{3000} \lu{3001} \lu{4999}
+\meaning\res\ \meaning\resb\par
+
+\sect{an entry set after, local and global}
+\begingroup
+  \fill\uccode{5000}%
+  \uccode 300=1 \global\uccode 301=2 \global\uccode 302=3 \uccode 302=4
+  \lu{300} \lu{301} \lu{302} \lu{303}
+\endgroup
+\lu{300} \lu{301} \lu{302} \lu{303}\par
+
+\sect{an entry set before, local and global}
+\begingroup
+  \lccode 400=1 \global\lccode 401=2
+  \fill\lccode{5000}%
+  \lu{400} \lu{401}
+\endgroup
+\lu{400} \lu{401}\par
+
+\sect{a group inside}
+\begingroup
+  \fill\lccode{5000}%
+  \begingroup \lccode 500=11 \lccode 501=12 \lu{500} \lu{502} \endgroup
+  \lu{500} \lu{501} \lu{502}
+\endgroup
+\lu{500} \lu{501}\par
+
+\sect{a box and a paragraph inside}
+\begingroup
+  \fill\lccode{5000}%
+  \setbox0=\hbox{\lu{600}\lccode 600=13 \lu{600}}\box0
+  \par Words \lu{600} that break into lines ^^^^0416^^^^0436^^^^0416 ^^^^0100 and more
+  words to hyphenate, \hskip 0pt hyphenation \hskip 0pt internationalization.\par
+  \lu{601}
+\endgroup
+\lu{600}\par
+
+\sect{two tables and a second loop}
+\begingroup
+  \fill\lccode{5000}%
+  \fill\uccode{4000}%
+  \fill\lccode{6000}%
+  \lu{3500} \lu{4500} \lu{5500}
+\endgroup
+\lu{3500}\par
+
+\sect{no group}
+\fill\lccode{2000}\lu{1500} \the\ca\par
+\lccode 1500=0 \lccode 1999=0
+\begingroup\lccode 1500=5 \lu{1500}\endgroup \lu{1500} \lu{1999}\par
+
+\sect{past the fixed entries only}
+\begingroup
+  \ca=2000 \cb=9000
+  \loop \lccode\ca=\ca \advance\ca by 1 \ifnum\ca<\cb \repeat
+  \lu{1999} \lu{2000} \lu{8999} \lu{9000}
+\endgroup
+\lu{8999}\par
+
+\end{document}

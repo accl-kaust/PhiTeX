@@ -1634,6 +1634,7 @@ impl Run<'_, '_> {
                 self.st.debug_marks(l)
             );
         }
+        self.flush_bulk_codes();
         let mut c = self.st.cont(v, &open);
         // (a checkpoint's table is its base table, the save stack with
         // it, `State::base_of`: none here, and its stamps and groups as
