@@ -862,7 +862,6 @@ impl Run<'_, '_> {
         }
         let piece =
             phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, a(5)).to_ne_bytes()));
-        let before = v.str(BEFORE_PIECE);
         // (a routine of a page before this one, in this piece at a candidate
         // the piece's binding was made before: what it defined globally is
         // what this one begins with (§279), not the piece's value there,
@@ -891,8 +890,8 @@ impl Run<'_, '_> {
                 .iter()
                 .any(|(_, g): &(i64, GDef)| g.names.contains(&f))
             {
-                let made = if kv == before {
-                    -1
+                let made = if let Some((_, after)) = super::reaching_plus(v, kv) {
+                    after
                 } else if self.is_lazy(kv) {
                     let y = self.fin_lazy_value(kv)?;
                     list_of(v, y).first().map_or(-1, |&x| int_of(v, x))
@@ -921,10 +920,10 @@ impl Run<'_, '_> {
                     continue;
                 }
             }
-            let x = if kv == before {
+            let x = if let Some((c, _)) = super::reaching_plus(v, kv) {
                 match self.field_at(Field(f), piece, true)? {
-                    phitex_defuse::FieldAt::Def(x, _) => Some(x),
-                    phitex_defuse::FieldAt::Unset => None,
+                    phitex_defuse::FieldAt::Def(x, _) => plus_steps(v, Some(x), c),
+                    phitex_defuse::FieldAt::Unset => plus_steps(v, None, c),
                     phitex_defuse::FieldAt::Gone => continue,
                 }
             } else if self.is_lazy(kv) {
@@ -1214,13 +1213,13 @@ impl Run<'_, '_> {
                 if g != f.0 || kv == ValueId::UNIT {
                     continue;
                 }
-                if kv == v.str(BEFORE_PIECE) {
+                if let Some((c, _)) = super::reaching_plus(v, kv) {
                     let piece = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(
                         int_of(v, args.get(5).copied().unwrap_or(ValueId::UNIT)).to_ne_bytes(),
                     ));
                     return Ok(match self.field_at(f, piece, true)? {
-                        phitex_defuse::FieldAt::Def(x, _) => Some(Some(x)),
-                        phitex_defuse::FieldAt::Unset => Some(None),
+                        phitex_defuse::FieldAt::Def(x, _) => Some(plus_steps(v, Some(x), c)),
+                        phitex_defuse::FieldAt::Unset => Some(plus_steps(v, None, c)),
                         phitex_defuse::FieldAt::Gone => None,
                     });
                 }
@@ -1232,6 +1231,17 @@ impl Run<'_, '_> {
         }
         Ok(Some(self.cx.read(f)?))
     }
+}
+
+/// An integer register's value `x` stepped by `c` as `\advance` does
+/// (wrapping at 32 bits): what a piece's unread steps make of the value
+/// that reached it ([`super::before_plus`]); `x` itself for no steps.
+fn plus_steps(v: &Values, x: Option<ValueId>, c: i32) -> Option<ValueId> {
+    if c == 0 {
+        return x;
+    }
+    let y = crate::val::i32_of(v, x).wrapping_add(c);
+    Some(crate::val::int_id(v, i64::from(y)))
 }
 
 /// The register of a box register's field (`box:<n>`).
@@ -1331,12 +1341,22 @@ impl Run<'_, '_> {
         let index = self.cx.get(d, Step::Index(2)).unwrap_or(ValueId::UNIT);
         let tag = v.str(LAZY);
         let before = v.str(BEFORE_PIECE);
+        let stretches = self.cx.at(d, Step::Index(0));
         let names = super::piece::names_index_at(v, index, k)
             .into_iter()
             .map(|(f, g, kind, i)| {
                 let kv = match kind {
                     0 => ValueId::UNIT,
                     1 => before,
+                    // (what reached the piece plus its steps: read now,
+                    // the finisher resolves it where it begins,
+                    // [`super::reaching_plus`])
+                    3 => stretches
+                        .and_then(|s| {
+                            self.cx
+                                .get(s, Step::Index(u32::try_from(i * 5 + 2).unwrap_or(0)))
+                        })
+                        .unwrap_or(ValueId::UNIT),
                     _ => v.list(vec![
                         tag,
                         v.int(i64::from(ui)),
