@@ -90,6 +90,9 @@ pub(crate) struct Shared {
     /// (`Ctx::set_frontier`): queued as it passes them, or at the quiet
     /// point.
     pub(crate) frontier_waiting: Mx<Vec<NodeId>>,
+    /// Each worker's node at work on (its raw id plus one, 0: none), for
+    /// [`Pool::release_past_only`].
+    pub(crate) at_work: Box<[AtomicU64]>,
     /// The roots the caller's edit source holds (`EditSource::roots`),
     /// given by the caller's worker as it comes to the barrier.
     extra_roots: Mx<Vec<crate::values::ValueId>>,
@@ -479,6 +482,7 @@ impl Pool {
             deferred: Mx::new(Vec::new()),
             waiting: Mx::new(crate::values::FxHashMap::default()),
             frontier_waiting: Mx::new(Vec::new()),
+            at_work: (0..n.max(1)).map(|_| AtomicU64::new(0)).collect(),
             extra_roots: Mx::new(Vec::new()),
             panicked_roots: Mx::new(Vec::new()),
             collecting: AtomicBool::new(false),
@@ -848,6 +852,64 @@ impl Pool {
     /// when nothing is outstanding, the pool stops or collects, or (the
     /// worker that asks the edit source, `edits`) [`ABSORB_EVERY`] has
     /// passed, for it to ask.
+    /// Nothing to take, nodes held behind the frontier, and every run going
+    /// stands past the frontier too: nothing before it is at work, so it
+    /// moves only when those runs end. One of them may be reading what a
+    /// held node would change: a run on old values in an endless loop of its
+    /// own (numerica at -j8, a thread at 100% and 14 GB, no read of it
+    /// moving, for no node before it ran) never ended, and the line never
+    /// went quiet. The frontier moves to the earliest held node, which goes
+    /// on; the others stay held, each let go in its turn as the one before
+    /// it ends. (Let go all at once, as at a quiet point, every held run
+    /// went on on old values whenever the runs at work were past it for a
+    /// moment: at -j32 a letter typed into a beamer frame ran 285 runs, 2.5
+    /// s.) The order of the runs only: what they make is what they read.
+    fn release_past_only(&self, eng: &Engine, w: &Worker) -> bool {
+        let fr = eng.frontier.load(Ordering::Acquire);
+        if fr == 0 || self.shared.frontier_waiting.lock().is_empty() {
+            return false;
+        }
+        let mut any = false;
+        for s in &self.shared.at_work {
+            let x = s.load(Ordering::Relaxed);
+            if x == 0 {
+                continue;
+            }
+            any = true;
+            if !eng
+                .placed_node(NodeId::from_raw(x - 1))
+                .is_some_and(|n| past_frontier(eng, n, fr))
+            {
+                return false;
+            }
+        }
+        if !any {
+            return false;
+        }
+        let Some(first) = self
+            .shared
+            .frontier_waiting
+            .lock()
+            .iter()
+            .filter_map(|&n| eng.placed_node(n))
+            .filter(|n| n.state() == State::Dirty)
+            .min_by_key(|n| n.pos_hint())
+            .map(|n| n.id.raw() + 1)
+        else {
+            return false;
+        };
+        if eng
+            .frontier
+            .compare_exchange(fr, first, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+        log_frontier(eng, fr, first, None, "past only");
+        release_frontier(eng, Some(w));
+        true
+    }
+
     fn idle_wait(&self, eng: &Engine, w: &Worker, edits: bool) -> Option<NodeId> {
         let (m, cv) = &self.shared.park;
         self.shared.idle.fetch_add(1, Ordering::SeqCst);
@@ -887,6 +949,9 @@ impl Pool {
             }
             if self.shared.outstanding.load(Ordering::SeqCst) == 0 {
                 break None;
+            }
+            if self.release_past_only(eng, w) {
+                continue;
             }
             if w.ix == 0 && self.shared.want_spawn.load(Ordering::SeqCst) {
                 break None;
@@ -1631,9 +1696,25 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
 /// a re-ask) ending the evaluation with the error: the worker would die
 /// with `n` counted outstanding, and the others would wait for it for ever;
 /// `n` is pending again, for the next evaluation.
+/// A worker's [`Shared::at_work`] slot, emptied when its task ends.
+struct AtWork<'a>(Option<&'a AtomicU64>);
+
+impl Drop for AtWork<'_> {
+    fn drop(&mut self) {
+        if let Some(s) = self.0 {
+            s.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
     // (the whole task, run, commit and re-asks: no collection meanwhile)
     let _task = eng.values().task();
+    let slot = pool.shared.at_work.get(w.ix);
+    if let Some(s) = slot {
+        s.store(n.raw() + 1, Ordering::Relaxed);
+    }
+    let _done = AtWork(slot);
     catch_unwind(AssertUnwindSafe(|| work(eng, pool, w, n))).unwrap_or_else(|p| {
         let message = p
             .downcast_ref::<&str>()

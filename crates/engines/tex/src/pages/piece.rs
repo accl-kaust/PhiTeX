@@ -218,8 +218,9 @@ impl Run<'_, '_> {
             return Err(Halt::Cut);
         }
         // (the run goes on past it: the routine of a page firing here
-        // runs before the text after it)
-        if fresh && (restartable || open_cut || par_cut) {
+        // runs before the text after it, wherever it is: a candidate of
+        // nothing contributed fires no page, §994)
+        if fresh {
             self.note_engine_reads();
             self.st.mark_past(k);
             self.apply_fire_conflict(k)?;
@@ -499,17 +500,18 @@ impl Run<'_, '_> {
             );
         }
         let int = |k: u32| v.int(i64::from(k));
-        let mut fs = Vec::with_capacity(ranges.len());
-        let mut rs = Vec::with_capacity(2 * ranges.len());
+        let mut buckets = vec![Vec::new(); super::FIRE_USED_BUCKETS];
         for (f, a, b) in ranges {
-            fs.push(f);
-            rs.push(int(a));
-            rs.push(int(b));
+            let ys: &mut Vec<ValueId> = &mut buckets[super::fire_used_bucket(f)];
+            ys.push(f);
+            ys.push(int(a));
+            ys.push(int(b));
         }
+        let buckets = buckets.into_iter().map(|ys| v.list(ys)).collect();
         let passed = v.list(ks.iter().map(|&k| int(k)).collect());
         self.cx.define_with(
             super::fire_used_field(v, node),
-            v.list(vec![v.list(fs), v.list(rs), passed]),
+            v.list(vec![v.list(buckets), passed]),
             Locality::Global,
         );
     }
@@ -1186,19 +1188,24 @@ impl Run<'_, '_> {
         held.sort_unstable_by_key(|x| (x.0.0.raw(), x.1));
         // (a candidate's `[value]` lists, one per value: the same value
         // stands at many candidates)
-        let kvs: std::cell::RefCell<phitex_defuse::FxHashMap<Option<ValueId>, ValueId>> =
+        let kvs: std::cell::RefCell<phitex_defuse::FxHashMap<(Option<ValueId>, i64), ValueId>> =
             std::cell::RefCell::default();
-        let kv_list = |x: Option<ValueId>| {
+        let kv_list = |x: Option<ValueId>, after: i64| {
             *kvs.borrow_mut()
-                .entry(x)
-                .or_insert_with(|| v.list(x.into_iter().collect()))
+                .entry((x, after))
+                .or_insert_with(|| v.list(std::iter::once(v.int(after)).chain(x).collect()))
         };
         let before = v.str(BEFORE_PIECE);
         // (`[value]` or `[]` (absent) where the run had it; one it had
         // neither read nor defined before is what reached the piece,
         // [`BEFORE_PIECE`], the finisher reads it there)
         let kv_at = |i: usize, l: Loc| match at.get(i, l) {
-            Some(Some(x)) => kv_list(x),
+            Some(Some(x)) => kv_list(
+                x,
+                at.made_after(i, l)
+                    .and_then(|j| marks.get(j))
+                    .map_or(-1, |m| i64::from(m.k)),
+            ),
             Some(None) => before,
             None => ValueId::UNIT,
         };
@@ -1432,9 +1439,18 @@ impl Run<'_, '_> {
                 restore.push(Field(f));
             }
         }
+        let at = self.fin_page().map(|p| p.at);
         for f in restore {
             let x = self.eng_read(f)?;
             let loc = self.loc_of(f);
+            if let Some(at) = at {
+                let left = self.st.id_of(loc, v);
+                self.cx.define_with(
+                    super::fire_left_field(v, at, f),
+                    v.list(left.into_iter().collect()),
+                    Locality::Global,
+                );
+            }
             self.set_loc(loc, crate::state::Entry::raw(x), true);
         }
         Ok(())

@@ -34,6 +34,15 @@ differ on these documents, and "identical to pdfTeX" here means the oracle's.
 | `\shipout` of a 48001pt box | "Huge page cannot be shipped out" | `width + h_offset > max_dimen` |
 | `\shipout` of `\hbox to 100pt` over 48001pt | page written | positions past 2^31 in the writer |
 
+| `\count1=2147483640`, then 5 x `\advance\count1 by 3` | 2147483655, no error | the sum has no bound; a `\count` holds all 64 bits |
+| The same in a loop until `\ifnum\count1>0` is false | does not end (killed after 100 minutes) | the register never turns negative |
+
+PhiTeX on the `\advance` row: -2147483641 (`do_register_command` wraps, and its
+comment says web2c does; the oracle's build does not). `Run::counted_loop`
+leaves any step past `i32` to the interpreter, so this fix changes it in one
+place. Measured with `count_loop.tex` (accl 24140, oracle pdftex in the CI image;
+XeTeX the same, an `\advance` past 2^31 prints the same digits).
+
 PhiTeX on the first row: -17536.0pt. Glue totals (stretch, shrink) were only
 measured to not disturb `\hbox to 100pt`; the last row's DVI bytes were not
 compared with PhiTeX's.
@@ -41,7 +50,7 @@ compared with PhiTeX's.
 ## What a fix needs
 
 The accumulators and the fields they land in hold 64 bits: box width, height,
-depth, `\count` values read from them, the writers' positions. Bounds stay where
+depth, `\count` values (read from them, or stepped past 2^31 on their own), the writers' positions. Bounds stay where
 TeX has them (scanning at 2^30, `mult_and_add`, Huge page), not new ones.
 Changing the alias alone gives 122 compile errors in `phitex-typeset`, and the
 engine has about 1000 lines that mention `i32`; node size and speed need an A/B.

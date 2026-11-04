@@ -2279,9 +2279,27 @@ impl Run<'_, '_> {
         if crate::exec::obs_flag!("PHITEX_CMD_TRACE") && self.cmd_traced() {
             eprintln!("cmd-trace {} write_out {k}", self.cx.node().raw());
         }
+        // (a stream open on no file: the text goes to the log, where a line
+        // number is made when the log is laid out, so a message saying
+        // "on input line" does not tie its piece to the lines above)
+        let op = self.cx.op();
+        let to_log = (op == self.ops.exec || op == self.ops.resume)
+            && k != 18
+            && !((0..16).contains(&k)
+                && !self.closed.contains(&k)
+                && self
+                    .get(&format!("write:{k}"))?
+                    .is_some_and(|x| x != ValueId::UNIT));
+        let outer = (self.log_marks.take(), self.marks_depth);
+        if to_log {
+            self.log_marks = Some(Vec::new());
+            self.marks_depth = self.xpand_depth + 1;
+        }
         let was = self.lines_sink_begin(Sink::Log);
         let s = self.expand_late(body);
         let hit = self.lines_sink_end(was);
+        let marks = self.log_marks.take().unwrap_or_default();
+        (self.log_marks, self.marks_depth) = outer;
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && s.is_err() {
             eprintln!(
                 "aux-trace: write_out stream {k} node {} halted expanding its text",
@@ -2446,7 +2464,7 @@ impl Run<'_, '_> {
             };
             self.contribute_stream(e);
         } else {
-            self.log("wlog", &s)?;
+            self.log_lines("wlog", &s, marks)?;
         }
         Ok(())
     }
@@ -2711,18 +2729,32 @@ impl Run<'_, '_> {
         // (that file's stream alone: a write to another file, the `.aux`
         // line of a heading, is not read here)
         let f = crate::run::stream_bucket(v, key);
-        let before = self.cx.fold(f, None, None);
-        if before.is_err() {
-            self.trace_stop("range streams");
-        }
-        let before = before?;
-        let mut all = v.seq_to_vec(before);
-        all.extend(
-            self.contribs
-                .iter()
-                .filter(|(g, _)| *g == f)
-                .flat_map(|(_, x)| v.seq_to_vec(*x)),
-        );
+        let own: Vec<ValueId> = self
+            .contribs
+            .iter()
+            .filter(|(g, _)| *g == f)
+            .flat_map(|(_, x)| v.seq_to_vec(*x))
+            .collect();
+        // (a file this run itself opened, §1374: what was written to it
+        // before is gone, so nothing before the run is read. Read, a
+        // letter typed in one of beamer's fragile frames, each writing and
+        // reading the one `.vrb`, ran every later fragile frame again)
+        let opened = own.iter().rposition(|&e| {
+            !crate::api::is_cand_marker(v, e)
+                && crate::api::page_tag(v, e).is_none()
+                && matches!(list_of(v, e).as_slice(), [n] if str_of(v, *n) == key)
+        });
+        let all = if let Some(i) = opened {
+            own[i..].to_vec()
+        } else {
+            let before = self.cx.fold(f, None, None);
+            if before.is_err() {
+                self.trace_stop("range streams");
+            }
+            let mut all = v.seq_to_vec(before?);
+            all.extend(own);
+            all
+        };
         let text = crate::api::stream_texts(v, &crate::api::doc_order(v, &all))
             .into_iter()
             .find(|(n, _)| n == key)

@@ -734,16 +734,19 @@ fn dlines_from_starts(
         .iter()
         .map(|(_, n, src)| {
             let Src::Doc(s, _) = *src;
-            // (the line ends before byte s - 1: the starts after them up
-            // to it, the text's own start not one)
-            let end = s.saturating_sub(1).min(len);
-            let nl = starts.partition_point(|&k| k <= end).saturating_sub(1);
-            (
-                n.raw(),
-                i64::try_from(nl).unwrap_or(i64::MAX) + i64::from(s > 0),
-            )
+            (n.raw(), lines_before(starts, len, s))
         })
         .collect()
+}
+
+/// The lines of a text before its byte `s`, as [`dlines_of`] counts them,
+/// from its line starts.
+fn lines_before(starts: &[usize], len: usize, s: usize) -> i64 {
+    // (the line ends before byte s - 1: the starts after them up to it,
+    // the text's own start not one)
+    let end = s.saturating_sub(1).min(len);
+    let nl = starts.partition_point(|&k| k <= end).saturating_sub(1);
+    i64::try_from(nl).unwrap_or(i64::MAX) + i64::from(s > 0)
 }
 
 /// The environment's changes for the nodes' lines now (`dlines_of`)
@@ -1292,7 +1295,7 @@ fn page_of(v: &Values, p: ValueId) -> Option<PageOf> {
 
 /// A page-tagged entry's page and, for a page whose break is inside a
 /// piece, that piece and candidate.
-fn page_tag(v: &Values, e: ValueId) -> Option<(PageOf, Option<(i64, i64)>)> {
+pub(crate) fn page_tag(v: &Values, e: ValueId) -> Option<(PageOf, Option<(i64, i64)>)> {
     // (the entry's ids looked at in place: no copy of the list)
     let ids = |xs: &[ValueId]| match xs {
         [j, _] => Some((*j, None)),
@@ -2925,6 +2928,12 @@ pub(crate) struct DocFile {
     /// ([`DocFile::shifts`]), so a reader running again places the piece
     /// it placed, not one moved; none: made from the text.
     args: Vec<Option<Vec<ValueId>>>,
+    /// The lines before each slice's text, by the value of its frames
+    /// ([`crate::run::lines_owner`]), as given to its runs
+    /// (`dline:<frames>`, [`doc_file_line`]). Empty until a reader reaches
+    /// the file; two slices with the same frames (a kept one's stale place
+    /// a new one's now) have none: their runs fold the lines.
+    dlines: FxHashMap<u64, i64>,
 }
 
 impl DocFile {
@@ -2933,6 +2942,40 @@ impl DocFile {
         self.shifts.values().for_each(|&(x, _)| keep(x));
         self.args.iter().flatten().flatten().for_each(|&x| keep(x));
     }
+
+    /// Each slice's arguments made, and the lines before each text now
+    /// ([`DocFile::dlines`]).
+    fn lines_now(
+        &mut self,
+        v: &Values,
+        loads: Option<&crate::pkgrec::LoadHints>,
+    ) -> Vec<(u64, i64)> {
+        let name = v.str(&self.path);
+        let starts = line_starts(&self.text);
+        let len = self.text.len();
+        self.args.resize(self.slices.len(), None);
+        let mut now: FxHashMap<u64, Option<i64>> = FxHashMap::default();
+        for ((_, n), a) in self.slices.iter().zip(self.args.iter_mut()) {
+            let a = a.get_or_insert_with(|| {
+                node_args(v, &self.text, Some(&self.incr), n, loads, Some(name))
+            });
+            let DocNode::Doc(s, _) = *n;
+            now.entry(a[0].raw())
+                .and_modify(|k| *k = None)
+                .or_insert(Some(lines_before(&starts, len, s)));
+        }
+        now.into_iter()
+            .filter_map(|(n, k)| k.map(|k| (n, k)))
+            .collect()
+    }
+}
+
+/// The lines given for the text of a piece of a cut file
+/// ([`DocFile::dlines`]).
+fn doc_file_line(docs: &DocFiles, n: u64) -> Option<i64> {
+    docs.locked()
+        .values()
+        .find_map(|d| d.locked().dlines.get(&n).copied())
 }
 
 /// The build's cut document files, by name ([`DocFile`]).
@@ -2972,6 +3015,7 @@ fn cut_doc_file(
         shifts: FxHashMap::default(),
         placed: FxHashMap::default(),
         args: Vec::new(),
+        dlines: FxHashMap::default(),
     };
     docs.locked()
         .insert(name.to_owned(), Arc::new(std::sync::Mutex::new(df)));
@@ -2997,17 +3041,14 @@ pub(crate) fn doc_file_pieces(
     if !df.readers.contains(&node) {
         df.readers.push(node);
     }
-    let name = v.str(&df.path);
     let df = &mut *df;
-    df.args.resize(df.slices.len(), None);
-    df.slices
-        .iter()
-        .zip(df.args.iter_mut())
-        .map(|((_, n), a)| {
-            a.get_or_insert_with(|| node_args(v, &df.text, Some(&df.incr), n, loads, Some(name)))
-                .clone()
-        })
-        .collect()
+    // (the lines given as the file is first reached; an edit moves them,
+    // [`Build::stage_doc_file`])
+    let now = df.lines_now(v, loads);
+    if df.dlines.is_empty() {
+        df.dlines = now.into_iter().collect();
+    }
+    df.args.iter().flatten().cloned().collect()
 }
 
 /// The arguments of slices `new` an edit made of `old` (`args` theirs,
@@ -3420,6 +3461,11 @@ impl Graph {
                     }
                     val
                 }));
+            }
+            // (the lines before a piece of a cut file, [`DocFile::dlines`])
+            if let Some(n) = field.strip_prefix("dline:") {
+                let k = doc_file_line(&docs, n.parse().ok()?);
+                return Some(k.map(|k| v.int(k)));
             }
             // (a tool's support file, `tfile:<search>:<name>`: the
             // client's lookup for tools, else its finder by name)
@@ -6499,7 +6545,14 @@ impl Build {
                 (_, found_text) => {
                     self.g.files.retain(|&(g, _)| g != d);
                     self.g.absent.retain(|&g| g != d);
-                    self.g.ops.docs.locked().remove(name);
+                    // (the lines it gave go with it: a run of a later cut's
+                    // text with the same frames asks them anew)
+                    let gone = self.g.ops.docs.locked().remove(name);
+                    if let Some(df) = gone {
+                        let changes =
+                            dline_changes(self.g.eng.values(), &mut df.locked().dlines, Vec::new());
+                        self.g.eng.update_environment(&changes);
+                    }
                     if let (Some((path, bytes)), Some(_)) = (&found, found_text) {
                         let defs = self.g.ops.defs.locked().clone();
                         let x = cut_doc_file(
@@ -6689,6 +6742,16 @@ impl Build {
         df.shifts = shifts;
         df.placed = placed;
         df.slices = new;
+        // (the lines given its pieces, moved with the text; none yet where
+        // no reader has reached it)
+        if !df.dlines.is_empty() {
+            let now = df.lines_now(self.g.eng.values(), loads.as_deref());
+            let changes = dline_changes(self.g.eng.values(), &mut df.dlines, now);
+            drop(df);
+            if !changes.is_empty() {
+                self.g.eng.update_environment(&changes);
+            }
+        }
         crate::timeline::lap("stage: the file's pieces edited");
     }
 
@@ -7451,9 +7514,16 @@ impl Build {
             self.g.eval_errors.len(),
             // (the lines before the text's nodes: the log's reports name
             // lines by them, `crate::log::LINE_MARK`)
-            self.dlines.iter().fold(0u64, |h, (&n, &k)| {
-                h.wrapping_add(phitex_defuse::hash_words(n, &[k.cast_unsigned()]))
-            }),
+            self.g.ops.docs.locked().values().fold(
+                self.dlines.iter().fold(0u64, |h, (&n, &k)| {
+                    h.wrapping_add(phitex_defuse::hash_words(n, &[k.cast_unsigned()]))
+                }),
+                |h, d| {
+                    d.locked().dlines.iter().fold(h, |h, (&n, &k)| {
+                        h.wrapping_add(phitex_defuse::hash_words(n, &[k.cast_unsigned()]))
+                    })
+                },
+            ),
         );
         crate::timeline::note("output: the key (log, pagehash folds)", t0.elapsed());
         if let Some((k, x)) = &self.memo.locked().output
@@ -7481,7 +7551,12 @@ impl Build {
             v,
             &self.opts.name,
             self.g.eng.acc_value(self.unit, v.field("log")),
-            &|n| self.dlines.get(&n).copied(),
+            &|n| {
+                self.dlines
+                    .get(&n)
+                    .copied()
+                    .or_else(|| doc_file_line(&self.g.ops.docs, n))
+            },
         );
         // (TeX's fatal error removes pdfTeX's PDF file only: XeTeX's XDV
         // is closed with the pages shipped and xelatex's xdvipdfmx makes

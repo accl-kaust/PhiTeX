@@ -180,6 +180,22 @@ impl Family {
     }
 }
 
+/// [`State::read_across`]'s length before its first merge.
+const ACROSS_MERGE: usize = 1 << 14;
+
+/// [`State::read_across`]'s entries of a location that overlap taken as one:
+/// a binding read in stretch after stretch is an entry each.
+fn merge_across(xs: &mut Vec<(Loc, u32, u32)>) {
+    xs.sort_unstable();
+    xs.dedup_by(|b, a| {
+        let same = a.0 == b.0 && b.1 <= a.2;
+        if same {
+            a.2 = a.2.max(b.2);
+        }
+        same
+    });
+}
+
 /// Whether every read of `loc`'s value a run makes is one
 /// [`State::note_read`] sees, at the place it is made. Not: what a run reads
 /// through a memo kept while the table is unchanged (category codes, font
@@ -364,11 +380,6 @@ struct Slot {
     /// The candidates gone past when the binding in force was last read
     /// ([`State::note_read`]): reads between two of them count once.
     read_at: std::cell::Cell<u32>,
-    /// Where in [`State::read_across`] this location's latest entry is.
-    across_ix: std::cell::Cell<u32>,
-    /// The candidate number from which the value here is what a global
-    /// definition left: no older binding shows through it (§283).
-    floor: u32,
 }
 
 impl Default for Slot {
@@ -390,8 +401,6 @@ impl Default for Slot {
             def_gid: 0,
             cand_noted: 0,
             read_at: std::cell::Cell::new(0),
-            across_ix: std::cell::Cell::new(0),
-            floor: 0,
         }
     }
 }
@@ -535,6 +544,12 @@ pub(crate) struct State {
     /// ([`State::note_read`]). A [`State::rollback`] leaves a read it took
     /// back as a read made, but for the spill locations it drops.
     read_across: std::cell::RefCell<Vec<(Loc, u32, u32)>>,
+    /// The length of [`State::read_across`] at which it is merged next.
+    across_merge_at: std::cell::Cell<usize>,
+    /// The locations a routine's value was put in force at
+    /// ([`State::apply_global`]), with the candidate: no older binding shows
+    /// through it (§283). Few, and looked at once a stretch.
+    floors: Vec<(Loc, u32)>,
     /// The table as it stood at [`State::checkpoint`], kept as it
     /// changes: [`State::rollback`] puts it back.
     undo: Option<Box<Undo>>,
@@ -650,6 +665,8 @@ impl Clone for State {
             past: self.past.clone(),
             past_n: self.past_n,
             read_across: self.read_across.clone(),
+            across_merge_at: self.across_merge_at.clone(),
+            floors: self.floors.clone(),
             undo: None,
             tainted: self.tainted.clone(),
             taint_read: self.taint_read.clone(),
@@ -714,6 +731,14 @@ impl AtCandidates {
         h.get(h.partition_point(|x| x.0 < i)).map(|x| x.1)
     }
 
+    /// The candidate (by index) after which the binding of `loc` in force
+    /// at candidate `i` was made, where the run made it after one.
+    pub(crate) fn made_after(&self, i: usize, loc: Loc) -> Option<usize> {
+        let h = self.by_loc.get(&loc)?;
+        let p = h.partition_point(|x| x.0 < i);
+        p.checked_sub(1).map(|p| h[p].0)
+    }
+
     /// `loc`'s entries at the candidates, by candidate.
     #[allow(clippy::option_option)]
     pub(crate) fn history(&self, loc: Loc) -> &[AtCandidate] {
@@ -775,6 +800,8 @@ impl State {
             past: Vec::new(),
             past_n: 0,
             read_across: std::cell::RefCell::new(Vec::new()),
+            across_merge_at: std::cell::Cell::new(ACROSS_MERGE),
+            floors: Vec::new(),
             undo: None,
             tainted: Vec::new(),
             taint_read: std::cell::Cell::new(false),
@@ -1032,19 +1059,18 @@ impl State {
             .and_then(|m| m.checked_sub(1))
             .and_then(|m| self.metas.get(m))
             .map_or(0, |m| m.ldef_stamp);
-        let from = u32::try_from(self.past.partition_point(|c| c.0 < ldef))
-            .unwrap_or(u32::MAX)
-            .max(s.floor);
+        let mut from = u32::try_from(self.past.partition_point(|c| c.0 < ldef)).unwrap_or(u32::MAX);
+        for f in &self.floors {
+            if f.0 == loc {
+                from = from.max(f.1);
+            }
+        }
         if from < now {
             let mut xs = self.read_across.borrow_mut();
-            if let Some(x) = xs.get_mut(s.across_ix.get() as usize)
-                && x.0 == loc
-                && x.1 == from
-            {
-                x.2 = now;
-            } else {
-                s.across_ix.set(u32::try_from(xs.len()).unwrap_or(u32::MAX));
-                xs.push((loc, from, now));
+            xs.push((loc, from, now));
+            if xs.len() >= self.across_merge_at.get() {
+                merge_across(&mut xs);
+                self.across_merge_at.set(2 * xs.len() + ACROSS_MERGE);
             }
         }
     }
@@ -3123,8 +3149,8 @@ impl State {
         s.e = e;
         s.lazy = None;
         s.ginert = st;
-        s.floor = now.saturating_sub(1);
         s.read_at.set(u32::MAX);
+        self.floors.push((loc, now.saturating_sub(1)));
         if is_page_param(loc) {
             self.pp_dirty = true;
         }
