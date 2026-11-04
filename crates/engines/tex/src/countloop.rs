@@ -26,6 +26,8 @@ const MAX_PASSES: i32 = 1 << 17;
 const MAX_REGS: usize = 4;
 /// Most statements of a loop body.
 const MAX_STMTS: usize = 8;
+/// Fewest entries left to wait: fewer are written at once.
+const BULK_MIN: i32 = 1024;
 const USV: i32 = crate::xetex::BIGGEST_USV.cast_signed();
 
 /// An integer the body reads.
@@ -269,6 +271,81 @@ impl Run<'_, '_> {
         Ok(Some((p, lhs, rel, rhs)))
     }
 
+    /// A body that sets each entry of a code table to its own character and
+    /// steps to the next, up to a limit, in a group, over enough entries
+    /// past the fixed slots: the passes done at once, the entries past those
+    /// slots left to wait ([`crate::state::BulkCodes`]). The register's
+    /// index in the plan and the passes done.
+    fn bulk_pass(
+        &mut self,
+        p: &Plan,
+        lhs: Arg,
+        rel: u32,
+        rhs: Arg,
+        regs: &[i32; MAX_REGS],
+    ) -> Option<(u8, i32)> {
+        let [Stmt::Code(name, max, Arg::Reg(c), Arg::Reg(val)), Stmt::Advance(step, Arg::Const(1))] =
+            p.stmts[..]
+        else {
+            return None;
+        };
+        let Arg::Reg(l) = lhs else {
+            return None;
+        };
+        if c != val || c != step || c != l || rel != 0x3C || matches!(rhs, Arg::Reg(r) if r == c) {
+            return None;
+        }
+        let table = crate::val::CODE_NAMES.iter().position(|&n| n == name)?;
+        let s = regs[usize::from(c)];
+        let top = if self.xe { USV.min(max) } else { max.min(255) };
+        if s < 0 {
+            return None;
+        }
+        // (the last pass, whose test fails, and one past the table: the
+        // interpreter's)
+        let n = i64::from(value(rhs, regs)) - i64::from(s) - 1;
+        let n = i32::try_from(n.min(i64::from(top) - i64::from(s) + 1)).ok()?;
+        let e = s + n;
+        let lo = s.max(256);
+        if e - lo < BULK_MIN || self.read_back_done || !self.st.bulk_ok() {
+            return None;
+        }
+        let gid = self.innermost_group()?;
+        if crate::fields::code_slot(table, 256).is_some() {
+            return None;
+        }
+        for x in s..lo {
+            let l = self.code_loc(name, x);
+            self.set_loc(l, Entry::int(x), false);
+        }
+        self.st.bulk_codes(table, lo, e, gid);
+        self.muts += 1;
+        Some((c, n))
+    }
+
+    /// Everything waiting ([`crate::state::BulkCodes`]) written, as the
+    /// passes would have written it, before the run does what can see it.
+    #[cold]
+    #[inline(never)]
+    fn flush_bulk_rest(&mut self) {
+        let Some((table, rest, gid)) = self.st.bulk_rest() else {
+            return;
+        };
+        for c in rest {
+            let l = self.numbered_loc(crate::val::CODE_NAMES[table], c.into());
+            self.st.set(l, Entry::int(c), false, Some(gid));
+        }
+        self.muts += 1;
+    }
+
+    /// [`Run::flush_bulk_rest`] where anything waits.
+    #[inline]
+    pub(crate) fn flush_bulk_codes(&mut self) {
+        if self.st.bulk_waits() {
+            self.flush_bulk_rest();
+        }
+    }
+
     /// The command loop calls macro `name`, of body `body`, which ends as a
     /// loop does: the passes before the last made with no token read, if
     /// the body is one this does ([`crate::countloop`]). The call itself
@@ -307,8 +384,14 @@ impl Run<'_, '_> {
         }
         let start = regs;
         let mut passes = 0;
+        let mut did_bulk = false;
+        if let Some((i, n)) = self.bulk_pass(&p, lhs, rel, rhs, &regs) {
+            regs[usize::from(i)] += n;
+            passes = n;
+            did_bulk = true;
+        }
         let mut codes: Vec<(&'static str, i32, i32)> = Vec::with_capacity(p.stmts.len());
-        'passes: while passes < MAX_PASSES {
+        'passes: while !did_bulk && passes < MAX_PASSES {
             let mut r = regs;
             codes.clear();
             for s in &p.stmts {

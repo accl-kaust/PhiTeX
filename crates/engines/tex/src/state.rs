@@ -483,6 +483,8 @@ pub(crate) struct State {
     /// location defined after it and before the next one for the first
     /// time since it, the entry the location held at the candidate.
     cands: Vec<(u64, Vec<(Loc, Entry)>)>,
+    /// A run of a code table's entries set but not yet written ([`BulkCodes`]).
+    bulk: Option<Box<BulkCodes>>,
     /// The table as it stood at [`State::checkpoint`], kept as it
     /// changes: [`State::rollback`] puts it back.
     undo: Option<Box<Undo>>,
@@ -593,6 +595,7 @@ impl Clone for State {
             font_slow: self.font_slow.clone(),
             muts: self.muts,
             cands: self.cands.clone(),
+            bulk: self.bulk.clone(),
             undo: None,
             tainted: self.tainted.clone(),
             taint_read: self.taint_read.clone(),
@@ -714,6 +717,7 @@ impl State {
             font_slow: phitex_defuse::FxHashSet::default(),
             muts: 0,
             cands: Vec::new(),
+            bulk: None,
             undo: None,
             tainted: Vec::new(),
             taint_read: std::cell::Cell::new(false),
@@ -1684,6 +1688,55 @@ impl State {
         i
     }
 
+    /// Whether a run of code entries can wait ([`BulkCodes`]): none waits
+    /// already, and no undo log or candidate's entries keep each write.
+    pub(crate) fn bulk_ok(&self) -> bool {
+        self.bulk.is_none() && self.undo.is_none() && self.cands.is_empty()
+    }
+
+    /// Whether entries wait ([`BulkCodes`]).
+    #[inline]
+    pub(crate) fn bulk_waits(&self) -> bool {
+        self.bulk.is_some()
+    }
+
+    /// Entries `lo..hi` of code table `table` each set locally in group
+    /// `gid` to the character itself, to be written when asked for.
+    pub(crate) fn bulk_codes(&mut self, table: usize, lo: i32, hi: i32, gid: u32) {
+        self.any_gen = new_cat_gen();
+        self.muts += 1;
+        self.stamp += 1;
+        self.bulk = Some(Box::new(BulkCodes {
+            table,
+            lo,
+            hi,
+            gid,
+            save_at: self.save.len(),
+            done: phitex_defuse::FxHashSet::default(),
+        }));
+    }
+
+    /// Entry `c` of code table `table` is asked for, at `loc`: written now if
+    /// it waits.
+    #[inline]
+    pub(crate) fn bulk_take(&mut self, table: usize, c: i32, loc: Loc) {
+        let Some(b) = self.bulk.as_mut() else {
+            return;
+        };
+        if b.table == table && (b.lo..b.hi).contains(&c) && b.done.insert(c) {
+            let gid = b.gid;
+            self.set(loc, Entry::int(c), false, Some(gid));
+        }
+    }
+
+    /// All that waits taken off, to be written: table, the entries not
+    /// written yet, their group.
+    pub(crate) fn bulk_rest(&mut self) -> Option<(usize, Vec<i32>, u32)> {
+        let b = self.bulk.take()?;
+        let rest = (b.lo..b.hi).filter(|c| !b.done.contains(c)).collect();
+        Some((b.table, rest, b.gid))
+    }
+
     /// A write (spec §2.3; §277–§279: `eq_define` / `geq_define`): `grp`
     /// is the innermost group of the run open now, if any. A local write
     /// inside it saves the value it hides, once per group while that
@@ -1955,6 +2008,10 @@ impl State {
     /// group dies with it: nothing of it is published.
     pub(crate) fn close(&mut self, save_base: usize, def_base: usize) {
         self.muts += 1;
+        if self.bulk.as_ref().is_some_and(|b| b.save_at >= save_base) {
+            self.bulk = None;
+            self.any_gen = new_cat_gen();
+        }
         while self.save.len() > save_base {
             let Some(s) = self.save.pop() else { break };
             let slot = self.slot(s.loc);
@@ -2584,6 +2641,28 @@ fn stored(val: Entry) -> Entry {
     let mut e = val;
     e.flags = LOADED | (val.flags & (HAS_ID | CC | ALIAS));
     e
+}
+
+/// Local definitions in the group open now of a code table's entries
+/// `lo..hi` past its fixed slots, each character's entry the character,
+/// not yet written ([`State::bulk_codes`]): a table of 65536 entries set
+/// whole in a group that then reads three of them and ends. No slot, no
+/// save entry and no definition mark exist until an entry is asked for
+/// ([`State::bulk_take`]), or the run does anything other than the few
+/// commands that cannot see the table ([`crate::run::Run::flush_bulk_codes`]);
+/// the group's close forgets what was never asked for, which leaves each
+/// entry as restoring it would.
+#[derive(Clone)]
+pub(crate) struct BulkCodes {
+    table: usize,
+    lo: i32,
+    hi: i32,
+    gid: u32,
+    /// The save stack's height when made: the group that holds it closes
+    /// to no more than this.
+    save_at: usize,
+    /// Entries written since.
+    done: phitex_defuse::FxHashSet<i32>,
 }
 
 /// Whether `loc` is one of the page builder's parameters (§980).

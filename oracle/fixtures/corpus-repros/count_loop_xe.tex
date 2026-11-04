@@ -182,4 +182,74 @@
 \endgroup
 \the\lccode 1114111\par
 
+\def\fill#1#2{\ca=0 \cb=#2 \loop#1\ca=\ca \advance\ca by 1 \ifnum\ca<\cb \repeat}
+\def\lu#1{\the\lccode#1/\the\uccode#1\space}
+\lccode 3000=7 \uccode 3000=8 \global\lccode 3001=9
+
+\sect{a table read past its fixed entries, in every way}
+\begingroup
+  \fill\lccode{5000}%
+  \lu{65} \lu{300} \lu{3000} \lu{3001} \lu{4999} \lu{5000} \lu{5001}
+  \lowercase{\xdef\res{^^^^0416 ^^^^0100 Q}}%
+  \uppercase{\xdef\resb{^^^^0416 q}}%
+\endgroup
+\lu{65} \lu{300} \lu{3000} \lu{3001} \lu{4999}
+\meaning\res\ \meaning\resb\par
+
+\sect{an entry set after, local and global}
+\begingroup
+  \fill\uccode{5000}%
+  \uccode 300=1 \global\uccode 301=2 \global\uccode 302=3 \uccode 302=4
+  \lu{300} \lu{301} \lu{302} \lu{303}
+\endgroup
+\lu{300} \lu{301} \lu{302} \lu{303}\par
+
+\sect{an entry set before, local and global}
+\begingroup
+  \lccode 400=1 \global\lccode 401=2
+  \fill\lccode{5000}%
+  \lu{400} \lu{401}
+\endgroup
+\lu{400} \lu{401}\par
+
+\sect{a group inside}
+\begingroup
+  \fill\lccode{5000}%
+  \begingroup \lccode 500=11 \lccode 501=12 \lu{500} \lu{502} \endgroup
+  \lu{500} \lu{501} \lu{502}
+\endgroup
+\lu{500} \lu{501}\par
+
+\sect{a box and a paragraph inside}
+\begingroup
+  \fill\lccode{5000}%
+  \setbox0=\hbox{\lu{600}\lccode 600=13 \lu{600}}\box0
+  \par Words \lu{600} that break into lines ^^^^0416^^^^0436^^^^0416 ^^^^0100 and more
+  words to hyphenate, \hskip 0pt hyphenation \hskip 0pt internationalization.\par
+  \lu{601}
+\endgroup
+\lu{600}\par
+
+\sect{two tables and a second loop}
+\begingroup
+  \fill\lccode{5000}%
+  \fill\uccode{4000}%
+  \fill\lccode{6000}%
+  \lu{3500} \lu{4500} \lu{5500}
+\endgroup
+\lu{3500}\par
+
+\sect{no group}
+\fill\lccode{2000}\lu{1500} \the\ca\par
+\lccode 1500=0 \lccode 1999=0
+\begingroup\lccode 1500=5 \lu{1500}\endgroup \lu{1500} \lu{1999}\par
+
+\sect{past the fixed entries only}
+\begingroup
+  \ca=2000 \cb=9000
+  \loop \lccode\ca=\ca \advance\ca by 1 \ifnum\ca<\cb \repeat
+  \lu{1999} \lu{2000} \lu{8999} \lu{9000}
+\endgroup
+\lu{8999}\par
+
 \end{document}

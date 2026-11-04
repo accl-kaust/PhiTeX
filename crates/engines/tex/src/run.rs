@@ -2205,7 +2205,11 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         match (fixed, table) {
             (Some(s), _) => Loc::try_from(s).unwrap_or(0),
-            (None, Some(t)) => self.numbered_loc(crate::val::CODE_NAMES[t], c.into()),
+            (None, Some(t)) => {
+                let l = self.numbered_loc(crate::val::CODE_NAMES[t], c.into());
+                self.st.bulk_take(t, c, l);
+                l
+            }
             (None, None) => self.numbered_loc("cat", c.into()),
         }
     }
@@ -2251,7 +2255,10 @@ impl<'c, 'a> Run<'c, 'a> {
         let l = if let Some(s) = crate::fields::code_slot(table, c) {
             Loc::try_from(s).unwrap_or(0)
         } else {
-            self.numbered_loc(crate::val::CODE_NAMES[table], c.into())
+            let n = c.cast_signed();
+            let l = self.numbered_loc(crate::val::CODE_NAMES[table], c.into());
+            self.st.bulk_take(table, n, l);
+            l
         };
         if self.xe && c >= 256 {
             // (XeTeX's INITEX, xetex.web §232: `\sfcode` 1000, the math
@@ -3224,6 +3231,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.set(&f, self.v.int(i64::from_ne_bytes(n.to_ne_bytes())), true);
         self.read_point_here = true;
+        self.flush_bulk_codes();
         self.read_back_done = true;
         // (a file looked for in vain before, pending: this run is the
         // read-back point now, the definitions from here keep their
@@ -3628,6 +3636,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let input = std::mem::replace(&mut self.input, crate::input::Input::new());
         // (the table kept as it changes and put back after, not copied
         // whole for each line: a copy where it keeps changes already)
+        self.flush_bulk_codes();
         let st = (!self.st.checkpoint()).then(|| self.st.clone());
         let (nc, nk) = (self.contribs.len(), self.kids.len());
         let nest_len = self.nest.len();

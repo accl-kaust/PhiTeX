@@ -295,6 +295,7 @@ impl Run<'_, '_> {
         };
         // (the group's local definitions are the scope's, the base
         // level's stay the run's: `Locality::Scope`)
+        self.flush_bulk_codes();
         self.st
             .abandon_to_scope(v, l.save_base, l.def_base, l.open_stamp, self.rec_load);
         self.read_step_bases()?;
@@ -401,6 +402,7 @@ impl Run<'_, '_> {
             .iter()
             .map(|l| (l.save_base, l.def_base, l.open_stamp))
             .collect();
+        self.flush_bulk_codes();
         self.st.abandon_to_frames(&spans);
         let f = self.ops.fields.get_at(v, self.cx.values_epoch(), "ag");
         let loc = self.loc_of(f);
