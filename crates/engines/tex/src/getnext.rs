@@ -788,7 +788,10 @@ impl Run<'_, '_> {
                     l.state = st;
                 }
                 if let Some(n) = self.cx.followed(self.pulled) {
-                    crate::run::own_lines(&mut segs, n.raw());
+                    crate::run::own_lines(
+                        &mut segs,
+                        crate::run::lines_owner(self.v, n.raw(), &args),
+                    );
                 }
                 // (where the sibling's text begins, unless its first
                 // segment continues the line before it)

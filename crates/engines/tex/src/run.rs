@@ -6434,6 +6434,18 @@ pub(crate) fn dline_field(v: &Values, n: u64) -> Field {
     v.field(&format!("dline:{n}"))
 }
 
+/// Whose lines a node's text `args` are ([`own_lines`], [`dline_field`]): a
+/// top-level node's its own; a piece of a cut file's, its text's frames: a
+/// reader that runs again makes the node anew, and a file two nodes read
+/// has the same lines under both (the client gives them,
+/// `DocFile::dlines`; a sequence's id never is a node's).
+pub(crate) fn lines_owner(v: &Values, node: u64, args: &[ValueId]) -> u64 {
+    match args {
+        [frames, top, ..] if int_of(v, *top) != 3 => frames.raw(),
+        _ => node,
+    }
+}
+
 /// Node `owner`'s text's lines (`segs`, decoded from its arguments,
 /// none placed yet): each with that node and its line there, the lines
 /// begun up to it, this one with them ([`crate::input::Line::owner`]).
