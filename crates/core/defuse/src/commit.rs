@@ -4329,9 +4329,14 @@ struct Left {
 
 /// Relocates `k`, a placement of `placer`'s kept by its (op, args) whose
 /// place moved (docs/spec-continuations.md §2.3): its id, record and own
-/// placements are kept. The nodes that go: `k`, and those of its subtree
-/// that would stand before its new place (placed by it, or by its
-/// placements), after it in their order. Each is lifted from its old
+/// placements are kept. The nodes that go: `k` and every node that stands
+/// under it (placed by it or by its placements, or placed after it or
+/// after one of those by another node: `follow_after`), after it in their
+/// order, wherever the move goes: a subtree left behind where `k` moved
+/// back stood after the nodes between its old and its new place, and a
+/// node placed after `k` meanwhile went after `k`'s children there
+/// (`children_end`), past those nodes (numerica at -j4: a page's
+/// finisher after its piece's next pages). Each is lifted from its old
 /// label (`lift`: its definitions, contributions, brackets taken out
 /// there), put at the new one with its record's definitions filed as
 /// predictions and its brackets (`land`), then the readers at the new
@@ -4370,6 +4375,25 @@ pub(crate) fn relocate(
             todo.push(c);
         }
     }
+    // (and what others placed after it or under it: the nodes after it
+    // whose anchor chain reaches it, as they stand in its segment)
+    if let Some(seg) = eng.seg_for_pos(k.pos_hint()) {
+        let inner = seg.inner.read();
+        for (_, &x) in inner.nodes.range((Excluded(k.pos_hint()), Unbounded)) {
+            let Some(xn) = eng.placed_node(x) else {
+                continue;
+            };
+            if xn.state() == State::Gone || xn.pos_hint() == Pos(0) {
+                continue;
+            }
+            if slot_under(eng, x, k.id).is_none() {
+                break;
+            }
+            if skip.insert(x) {
+                sub.push(x);
+            }
+        }
+    }
     // where it goes: after `end`, or before `before`
     let (end, before) = match to {
         Target::AfterChildren(at) => (children_end_skip(eng, at, Some(&skip)).0, None),
@@ -4384,11 +4408,7 @@ pub(crate) fn relocate(
     }
     let lim = before.map_or_else(|| eng.node(end).pos_hint(), |b| eng.node(b).pos_hint());
     let mut movers: Vec<Arc<Node>> = vec![k.clone()];
-    let mut rest: Vec<Arc<Node>> = sub
-        .iter()
-        .map(|&c| eng.node(c).clone())
-        .filter(|c| c.pos_hint() < lim)
-        .collect();
+    let mut rest: Vec<Arc<Node>> = sub.iter().map(|&c| eng.node(c).clone()).collect();
     // (each label read once, as above: a rebalance elsewhere may move one
     // during the sort)
     rest.sort_by_cached_key(|c| c.pos_hint());
