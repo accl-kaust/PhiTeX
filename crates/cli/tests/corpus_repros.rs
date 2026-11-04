@@ -1120,3 +1120,13 @@ fn expand_copies_numbered() {
 fn page_discards() {
     check_threads("page_discards", "pdf");
 }
+
+/// TeX Live manual ualberta: an `\\input` file whose last line has no newline.
+/// That line still ends (§31) and gives its space; a slice of the file took
+/// it as cut mid-line, one space short, so a paragraph running on into the
+/// next chapter's `\\clearpage` set its last line looser than pdflatex. Oracle:
+/// pdftex in the CI image (accl 23980; the base is one space short, 23978).
+#[test]
+fn eof_no_newline() {
+    check_threads("eof_no_newline", "pdf");
+}

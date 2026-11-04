@@ -4965,7 +4965,14 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             let a = s.max(f.off);
             let starts = a == 0 || text.as_bytes()[a - 1] == b'\n';
-            let mut args = slice_args_in_file(v, &text[a..e], starts, f.name, a, ValueId::UNIT);
+            let mut args = slice_args_in_file(
+                v,
+                file_slice(&text, a, e).as_ref(),
+                starts,
+                f.name,
+                a,
+                ValueId::UNIT,
+            );
             let own = crate::hints::slice_hint_of(&t, s);
             let rec = loads
                 .as_deref()
@@ -6092,6 +6099,18 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
 /// start, the frame
 /// `[.., name, offset, 0, unit]`): every segment carries its origin
 /// `(name, offset, unit)`; the kind is 2 (a document's piece, not the top).
+/// Bytes `a..e` of file `text` as a slice to read: at the file's end, its
+/// last line ended even where it has no newline (§31: every line of a file
+/// ends, and its `\endlinechar` is read). A slice without one ends mid-line.
+pub(crate) fn file_slice(text: &str, a: usize, e: usize) -> std::borrow::Cow<'_, str> {
+    let s = &text[a..e];
+    if e == text.len() && !s.is_empty() && !s.ends_with('\n') {
+        format!("{s}\n").into()
+    } else {
+        s.into()
+    }
+}
+
 pub(crate) fn slice_args_in_file(
     v: &Values,
     text: &str,
