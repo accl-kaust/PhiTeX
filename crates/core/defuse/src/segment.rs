@@ -1029,7 +1029,14 @@ pub(crate) struct RangeReader {
 /// Whether a reader record still stands for its node.
 pub(crate) fn live(eng: &Engine, node: NodeId, serial: u32) -> bool {
     let n = eng.node(node);
-    n.serial.load(Ordering::Acquire) == serial && n.state() != State::Gone
+    let now = n.serial.load(Ordering::Acquire);
+    let stands = if serial & crate::commit::FILED == 0 {
+        now == serial
+    } else {
+        let s = serial & !crate::commit::FILED;
+        s <= now && s >= n.filed_floor.load(Ordering::Acquire)
+    };
+    stands && n.state() != State::Gone
 }
 
 /// Pushes a record, pruning the stale ones when the list is about to grow.
