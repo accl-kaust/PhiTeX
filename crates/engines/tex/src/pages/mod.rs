@@ -407,12 +407,14 @@ fn span_of_ints(v: &Values, c: &[ValueId]) -> Option<Span> {
 pub(crate) const PITEMS: &str = "pitems";
 
 /// The page builder's parameters (§980), each its own item: `\vsize`,
-/// `\maxdepth`, `\topskip`, `\holdinginserts`.
-pub(crate) const PAGE_PARAMS: [crate::fields::Par; 4] = [
+/// `\maxdepth`, `\topskip`, `\holdinginserts`, and e-TeX's
+/// `\savingvdiscards` (§999: what it discards, it saves or not).
+pub(crate) const PAGE_PARAMS: [crate::fields::Par; 5] = [
     crate::fields::Par::vsize,
     crate::fields::Par::maxdepth,
     crate::fields::Par::topskip,
     crate::fields::Par::holdinginserts,
+    crate::fields::Par::savingvdiscards,
 ];
 
 /// The fields a finisher defined globally, one unit per finisher: read
