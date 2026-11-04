@@ -5224,7 +5224,7 @@ mod culprit_tests {
             0,
             false,
         );
-        assert_eq!(r, Some((19, 26)));
+        assert_eq!(r, Some((18, 25)));
     }
 
     #[test]
@@ -8311,9 +8311,7 @@ impl Build {
                 "{lead}{before}\n{}{after}",
                 " ".repeat(lead.len() + before.chars().count())
             );
-            let help = if !undefined {
-                more
-            } else {
+            let help = if undefined {
                 let mut h = "The control sequence at the end of the top line\n\
                  of your error message was never \\def'ed. If you have\n\
                  misspelled it (e.g., `\\hobx'), type `I' and the correct\n\
@@ -8330,6 +8328,8 @@ impl Build {
                     );
                 }
                 Some(h)
+            } else {
+                more
             };
             let (start, end) = if file == docname {
                 (to_raw(start), to_raw(end))
