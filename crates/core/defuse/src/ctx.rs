@@ -112,6 +112,7 @@ impl<'a> Ctx<'a> {
                 resumed: std::cell::Cell::new(false),
                 kept_reads: std::cell::Cell::new(None),
                 woken_at: None,
+                on_park: false,
                 settle_now: false,
                 waits: Vec::new(),
                 frontier: None,
@@ -141,6 +142,12 @@ impl<'a> Ctx<'a> {
         self.product.woken_at = match self.woke {
             Some(Cause::Range { by, .. } | Cause::Changed { site: Some(by), .. }) => Some(by),
             _ => None,
+        };
+        self.product.on_park = match &self.woke {
+            Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => {
+                *self.me.parked_on.lock() == Some(*field)
+            }
+            _ => false,
         };
         self.product
     }
@@ -181,6 +188,7 @@ impl<'a> Ctx<'a> {
             path,
             seen,
             epoch,
+            filed: false,
         });
     }
 
