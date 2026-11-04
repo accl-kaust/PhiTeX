@@ -3872,21 +3872,9 @@ impl Run<'_, '_> {
     ) -> R<()> {
         use phitex_typeset::pack::Report;
         let Some(r) = r else { return Ok(()) };
-        // (the paragraph's first line: read here, where a report names it)
-        let begin = match begin {
-            Begin::No => 0,
-            Begin::Par(m) => {
-                let l = match m {
-                    Some(m) => self.line_of_mark(m)?,
-                    None => 0,
-                };
-                if l > 0 {
-                    l
-                } else {
-                    i64::from(self.input_line_no()?)
-                }
-            }
-        };
+        // (a paragraph's: its line's number is the log's, made when the
+        // log is laid out, [`crate::log::LINE_MARK`])
+        let par = matches!(begin, Begin::Par(_));
         let what = if h { "\\hbox" } else { "\\vbox" };
         let head = match r {
             Report::Underfull(b) => format!("Underfull {what} (badness {b}"),
@@ -3904,7 +3892,7 @@ impl Run<'_, '_> {
         let mut s = format!("{head})");
         // (a paragraph's at its start, where it began; another box's where
         // it ends, as TeX's `line`)
-        let place = if begin > 0 {
+        let place = if par {
             s.push_str(" in paragraph");
             self.last_par_place.clone()
         } else {
@@ -3912,19 +3900,25 @@ impl Run<'_, '_> {
         };
         let place = place.unwrap_or_else(|| self.diag_place());
         self.diag_at(0, &s, place);
-        let line = self.input_line_no()?;
         let output =
             self.cx.op() == self.ops.finish || self.nest.iter().any(|l| l.group == group::OUTPUT);
+        let mut marks = Vec::new();
         let at = if output {
             ") has occurred while \\output is active".to_owned()
-        } else if begin != 0 {
-            format!(
-                ") in {} at lines {}--{line}",
-                if begin > 0 { "paragraph" } else { "alignment" },
-                begin.abs()
-            )
         } else {
-            format!(") detected at line {line}")
+            let first = match begin {
+                Begin::No => None,
+                Begin::Par(Some(m)) => Some(self.line_for_log(m, &mut marks)?),
+                Begin::Par(None) => None,
+            };
+            let m = self.line_mark();
+            let line = self.line_for_log(m, &mut marks)?;
+            if par {
+                let first = first.unwrap_or_else(|| line.clone());
+                format!(") in paragraph at lines {first}--{line}")
+            } else {
+                format!(") detected at line {line}")
+            }
         };
         let sep = crate::log::BOX_LINE.to_string();
         let mut text = format!("{head}{at}");
@@ -3936,13 +3930,14 @@ impl Run<'_, '_> {
         let shown = self.show_node_lines(&Node::Box(Box::new(b.clone())), side)?;
         text.push_str(&sep);
         text.push_str(&shown.join(&sep));
-        self.log(
+        self.log_lines(
             if h {
                 crate::log::HREPORT
             } else {
                 crate::log::VREPORT
             },
             &text,
+            marks,
         )
     }
 
