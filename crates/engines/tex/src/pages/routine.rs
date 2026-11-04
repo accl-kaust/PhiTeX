@@ -803,6 +803,7 @@ impl Run<'_, '_> {
     /// candidate as it was there, where the piece had it (its ninth): the
     /// routine runs at the candidate, before those definitions. One the
     /// piece had not read stays as it reaches here.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn preload_candidate(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
         let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
