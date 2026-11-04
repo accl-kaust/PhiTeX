@@ -101,6 +101,7 @@ impl<'a> Ctx<'a> {
                 defs: Vec::new(),
                 contribs: Vec::new(),
                 reads: Vec::new(),
+                sources: Vec::new(),
                 placements: Vec::new(),
                 ranks: Vec::new(),
                 claim: 0,
@@ -183,6 +184,15 @@ impl<'a> Ctx<'a> {
         });
     }
 
+    /// The node whose definition a read got (`RunRecord::sources`).
+    fn note_source(&mut self, by: Option<NodeId>) {
+        if let Some(by) = by
+            && self.product.sources.last() != Some(&by)
+        {
+            self.product.sources.push(by);
+        }
+    }
+
     /// How many reads my run has made so far (a mark for
     /// [`Ctx::fields_read_since`]).
     pub fn reads_len(&self) -> usize {
@@ -237,6 +247,7 @@ impl<'a> Ctx<'a> {
         let mut pairs = Vec::with_capacity(fields.len());
         for f in fields {
             let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+            self.note_source(r.by);
             if let Some(x) = r.value {
                 pairs.push(v.list(vec![f.0, x]));
             }
@@ -273,6 +284,7 @@ impl<'a> Ctx<'a> {
         }
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        self.note_source(r.by);
         self.wait_for_settling(&r)?;
         self.hold_at_frontier(f)?;
         self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
@@ -414,6 +426,7 @@ impl<'a> Ctx<'a> {
             ),
         };
         if let (Some(x), Anchor::Before(_) | Anchor::AfterOwn(_)) = (&r, &anchor) {
+            self.note_source(x.by);
             self.wait_for_settling(x)?;
             self.hold_at_frontier(f)?;
         }
@@ -457,6 +470,7 @@ impl<'a> Ctx<'a> {
         self.check()?;
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        self.note_source(r.by);
         if let Some(x) = r.value
             && read::alias_of(self.values(), x).is_some()
         {
@@ -474,6 +488,7 @@ impl<'a> Ctx<'a> {
         self.check()?;
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        self.note_source(r.by);
         let seen = through(self.eng, r, SITE);
         self.record(ReadKind::Field { f, at: Anchor::Me }, SITE, seen);
         Ok(r.by)
@@ -693,6 +708,7 @@ impl<'a> Ctx<'a> {
         self.check()?;
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        self.note_source(r.by);
         self.views.push(ViewRec {
             kind: ReadKind::Field { f, at: Anchor::Me },
             path: PathId::WHOLE,
@@ -979,13 +995,6 @@ impl<'a> Ctx<'a> {
             self.record(ReadKind::Hole, PathId::WHOLE, read::hole_value(self.eng, h));
         }
         Ok(h)
-    }
-
-    /// Whether this evaluation has more than one thread: work done ahead
-    /// on a guess can stand beside what it guesses at, not only before it.
-    /// Never for what a run makes, only for how far it goes on a guess.
-    pub fn has_other_threads(&self) -> bool {
-        self.worker.is_some_and(|w| w.shared.n > 1)
     }
 
     /// Stops the run until I stand at the committed frontier: every node

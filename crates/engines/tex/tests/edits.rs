@@ -1447,11 +1447,11 @@ fn a_paragraph_deleted_places_every_later_page_compressed_once() {
 }
 
 /// A page's routine that gives back a line only on a page whose last mark
-/// says so: a paragraph deleted moves the mark to another page, so a rest
-/// that went on past a moved page on what its routine gave back before
-/// (`Run::rest_begins`) has the wrong guess, on the page that now gives
-/// back and on the page that no longer does. The routine's commit runs
-/// it again: the PDF is a cold build's at every thread count.
+/// says so: a paragraph deleted moves the mark to another page, so what
+/// its routine gave back before is wrong, on the page that now gives back
+/// and on the page that no longer does. A rest waits for what the routine
+/// gives back on the page as it is now (`Run::rest_begins`): the PDF is a
+/// cold build's at every thread count.
 #[test]
 fn a_rest_gone_on_on_a_guess_is_run_again_on_what_the_routine_gave_back() {
     use std::fmt::Write as _;
