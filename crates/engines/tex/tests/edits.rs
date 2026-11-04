@@ -1314,7 +1314,12 @@ fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
     let words = |n: usize, tag: &str| {
         let mut s = String::new();
         for k in 0..n {
-            let _ = write!(s, "{tag}{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            let _ = write!(
+                s,
+                "{tag}{}rd{}\\kern0pt\\penalty0",
+                ["o", "a", "e"][k % 3],
+                k % 17
+            );
             s.push(if k % 10 == 9 { '\n' } else { ' ' });
         }
         s
@@ -1365,7 +1370,7 @@ fn a_run_with_doubled_checkpoints_serves_a_later_edit_further_on() {
     let prelude = common::plain();
     let opts = || common::options("./long.tex", "long", "", &fx);
     let words: Vec<String> = (0..6000)
-        .map(|k| format!("w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17))
+        .map(|k| format!("w{}rd{}\\kern0pt\\penalty0", ["o", "a", "e"][k % 3], k % 17))
         .collect();
     let par = |ws: &[String]| format!("\\hsize=300pt\n{}\n\n\\bye\n", ws.join(" "));
     let mut ws = words.clone();
@@ -1379,7 +1384,7 @@ fn a_run_with_doubled_checkpoints_serves_a_later_edit_further_on() {
         (3, 5900, true),
         (4, 5950, true),
     ] {
-        ws[at] = format!("edit{k}\\kern0pt");
+        ws[at] = format!("edit{k}\\kern0pt\\penalty0");
         let text = par(&ws);
         b.edit(&text);
         let cold = common::build(opts(), Some(&prelude), &text);
