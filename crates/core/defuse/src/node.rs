@@ -165,9 +165,10 @@ pub(crate) struct Node {
     /// resumed on moved): its record's reads may hold while the state it
     /// parked rests on the old answers (`Ctx::last_run_stands`).
     pub(crate) refuted: AtomicBool,
-    /// Its last commit that published anything moved what a later node of
-    /// its chain read (`Operation::chains`, `sched::note_move`): those
-    /// wait for it to settle. Listed in `Engine::movers`.
+    /// Its last commit that published anything moved what a later node
+    /// read, or it never ran (`sched::note_move`): those wait for it to
+    /// settle (`sched::hold_for`). A node of a chain, or one that never ran,
+    /// is listed in `Engine::movers`.
     pub(crate) moves: AtomicBool,
     /// It was stopped before a run to wait for a node (`sched::work`): the
     /// wake that asked for the run still stands; its waiting ended by

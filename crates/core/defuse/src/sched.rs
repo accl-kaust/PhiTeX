@@ -1657,22 +1657,20 @@ fn work_caught(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), E
 /// order of the runs only: what they make is what they read.
 const LONG_RUN_NS: u64 = 100_000_000;
 
-/// `by`'s definition moved what `reader`, a later node of its chain, read
-/// (`Operation::chains`): `by` is one to wait for from now on. Thrown-away
-/// work is what this saves, and only what has moved tells: at any -j the
-/// finishers of independent pages run side by side (para4000's deleted
-/// paragraph), and on a value moving down the chain each worker's finisher
-/// ran on the value before the last (Grail's deleted paragraph, -j8: 230
-/// finisher runs for -j1's 29, accl 23886).
+/// `by`'s definition moved what `reader` read: a node to wait for from now
+/// on (`hold_for`), until a commit of it moves nothing (`clear_move`). Only
+/// what has moved tells: most links of the graph carry no change, and nodes
+/// joined by those run side by side (para4000's deleted paragraph, its pages'
+/// routines; amsldoc's heading edit, 13 runs, 55 ms at -j8 against 64 at -j1).
 pub(crate) fn note_move(eng: &Engine, by: Option<NodeId>, reader: &Node) {
     let Some(by) = by.filter(|&b| b != reader.id) else {
         return;
     };
     let Some(b) = eng.placed_node(by) else { return };
-    if b.op() != reader.op() || !eng.op(b.op()).chains() || b.moves.load(Ordering::Relaxed) {
+    if b.moves.load(Ordering::Relaxed) {
         return;
     }
-    if !b.moves.swap(true, Ordering::AcqRel) {
+    if !b.moves.swap(true, Ordering::AcqRel) && eng.op(b.op()).chains() {
         eng.movers.lock().insert(by);
         eng.movers_n.fetch_add(1, Ordering::Release);
     }
@@ -1681,24 +1679,28 @@ pub(crate) fn note_move(eng: &Engine, by: Option<NodeId>, reader: &Node) {
 /// A commit publishing what it published moved nothing yet: the walks
 /// after it say whether it does (`note_move`).
 pub(crate) fn clear_move(eng: &Engine, node: &Node) {
-    if node.moves.load(Ordering::Relaxed) && node.moves.swap(false, Ordering::AcqRel) {
-        eng.movers.lock().remove(&node.id);
+    if node.moves.load(Ordering::Relaxed)
+        && node.moves.swap(false, Ordering::AcqRel)
+        && eng.movers_n.load(Ordering::Acquire) != 0
+        && eng.movers.lock().remove(&node.id)
+    {
         eng.movers_n.fetch_sub(1, Ordering::Release);
     }
 }
 
 /// The unsettled node `node` should wait for, by the last evaluation's
-/// graph: one before it that moved a read of its chain or has never run
-/// (`read::mover_before`), or whose definition its last run read
-/// (`read::open_definer_before`). Without this, on an edit that re-asks
-/// many nodes at once every worker ran its node on a value about to move:
-/// a generated 82-page book's added paragraph took 1.2 s at -j8 and 2 s at
-/// -j32 where -j1 takes 125 ms (accl 23926). The rule and that measure
-/// come from the old graph used as an edit's whole schedule (`PHITEX_ORACLE`
-/// on branch moonshot, 127 ms at -j8), which the links of the chain would
-/// make one run after another (para4000's deleted paragraph, -j8, 108 ms
-/// to 228 ms): hence `Operation::chains`. The page loop's rests are not
-/// held: they go on on a guess by themselves, the routines' give-backs.
+/// graph: one before it that has never run or moved a read of its chain
+/// (`read::mover_before`), or that its last run read from and that moved a
+/// reader at its last commit (`read::open_definer_before`). Without this,
+/// on an edit that re-asks many nodes at once each worker ran its node on a
+/// value about to move: a generated 82-page book's added paragraph took
+/// 1.2 s at -j8 and 2 s at -j32 where -j1 takes 125 ms, Grail's deleted
+/// paragraph's finishers 1790 ms of work at -j8 for -j1's 123 (accl 23926,
+/// 23972). The rule comes from the old graph as an edit's whole schedule
+/// (`PHITEX_ORACLE`, branch moonshot, 127 ms at -j8); every link of the graph
+/// counted, unmoving ones too, makes pages that run side by side one chain
+/// (para4000's deleted paragraph, -j8, 108 ms to 228 ms): hence `Node::moves`.
+/// The page loop's rests are not held: they go on on a guess by themselves.
 fn hold_for(eng: &Engine, node: &Node) -> Option<NodeId> {
     let op = eng.op(node.op());
     if op.works_at_frontier() || op.final_only() {

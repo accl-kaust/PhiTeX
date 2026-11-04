@@ -1031,20 +1031,19 @@ pub(crate) fn mover_before(eng: &Engine, me: &Node) -> Option<NodeId> {
 }
 
 /// An unsettled node among those whose definitions `r`, `me`'s last run,
-/// read: it may be about to move them. In a chain one that did not move a
-/// later node's read last does not count (`Operation::chains`); nor do the
-/// page loop's rests.
+/// read, that moved a reader at its last commit (`Node::moves`): it may
+/// move them again. The page loop's rests do not count.
 pub(crate) fn open_definer_before(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
-    let chain = eng.op(me.op()).chains();
     r.sources.iter().copied().find(|&by| {
         eng.placed_node(by).is_some_and(|x| {
-            matches!(x.state(), State::Dirty | State::Running | State::RunningDirty) && x.unit == me.unit && {
-                let op = eng.op(x.op());
-                !x.held_panic.load(Ordering::Acquire)
-                    && !op.works_at_frontier()
-                    && !op.final_only()
-                    && !(chain && op.chains() && !x.moves.load(Ordering::Acquire))
-            }
+            x.moves.load(Ordering::Acquire)
+                && matches!(x.state(), State::Dirty | State::Running | State::RunningDirty)
+                && x.unit == me.unit
+                && !x.held_panic.load(Ordering::Acquire)
+                && {
+                    let op = eng.op(x.op());
+                    !op.works_at_frontier() && !op.final_only()
+                }
         })
     })
 }
