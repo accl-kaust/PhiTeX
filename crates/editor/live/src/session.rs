@@ -948,15 +948,13 @@ impl Session {
                 let opts = Options {
                     edits: Some(self.absorb.tx.clone()),
                     // (`PHITEX_TIME_LIMIT_SECS`: a longer limit for a
-                    // measurement of a document the kernel is still slow on)
-                    time_limit: match std::env::var("PHITEX_TIME_LIMIT_SECS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                    {
-                        Some(secs) => Some(Duration::from_secs(secs)),
-                        None if first => Some(Duration::from_mins(30)),
-                        None => opts.time_limit,
-                    },
+                    // measurement of a document the kernel is still slow on,
+                    // 0 for none, as `phitex_tex::Options::default` reads it)
+                    time_limit: time_limit_of(
+                        std::env::var("PHITEX_TIME_LIMIT_SECS").ok().as_deref(),
+                        first,
+                        opts.time_limit,
+                    ),
                     ..opts
                 };
                 phitex_tex::timeline::lap("session: the options (records read)");
@@ -1987,6 +1985,19 @@ pub fn waiting_notes(_job: &Job) -> Vec<String> {
 /// needs one run, not two.
 const LATEXMK_AUX: &str = "\\relax \n\\gdef \\@abspage@last{1}\n";
 
+/// The build's time limit from `PHITEX_TIME_LIMIT_SECS` (`var`): that
+/// many seconds, none for 0 (a measurement's cold build is never cut
+/// short); unset or unreadable, 30 minutes for the session's first build
+/// (`first`), else the options' own (`fallback`).
+fn time_limit_of(var: Option<&str>, first: bool, fallback: Option<Duration>) -> Option<Duration> {
+    match var.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(0) => None,
+        Some(secs) => Some(Duration::from_secs(secs)),
+        None if first => Some(Duration::from_mins(30)),
+        None => fallback,
+    }
+}
+
 /// Whether a file the document writes may be written under `name`
 /// (kpathsea's `kpse_out_name_ok` in its paranoid mode, TeX Live's
 /// default `openout_any = p`): a relative name, no `..` component, no
@@ -2147,6 +2158,30 @@ fn main_byte_as_line(s: &str, text: &str, file: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    /// `PHITEX_TIME_LIMIT_SECS=0` is no limit, as the engine's options
+    /// read it: the scoreboard's cold builds set it so, and the watch
+    /// read it as a limit of zero seconds, so every build ended at once
+    /// with the engine's deadline (mc 80017: circuitikz "ran past its time
+    /// limit" after 88 ms at every thread count).
+    #[test]
+    fn a_time_limit_of_zero_is_none() {
+        let fb = Some(Duration::from_secs(600));
+        assert_eq!(super::time_limit_of(Some("0"), true, fb), None);
+        assert_eq!(super::time_limit_of(Some(" 0\n"), false, fb), None);
+        assert_eq!(
+            super::time_limit_of(Some("90"), true, fb),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(
+            super::time_limit_of(None, true, fb),
+            Some(Duration::from_mins(30))
+        );
+        assert_eq!(super::time_limit_of(None, false, fb), fb);
+        assert_eq!(super::time_limit_of(Some("x"), false, fb), fb);
+    }
+
     #[test]
     fn a_main_file_byte_inside_a_character_is_its_line() {
         let text = "a\n\u{a9} b\nc";

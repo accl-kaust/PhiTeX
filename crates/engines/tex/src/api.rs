@@ -978,7 +978,17 @@ impl Default for Options {
             prelude_jobname: "texput".to_owned(),
             program: "pdftex".to_owned(),
             prelude_bytes: None,
-            time_limit: Some(std::time::Duration::from_secs(600)),
+            // (`PHITEX_TIME_LIMIT_SECS`: another bound, 0 for none; a
+            // measurement's cold build or reference must never be cut
+            // short, a truncated reference compares as a wrong edit)
+            time_limit: match std::env::var("PHITEX_TIME_LIMIT_SECS")
+                .ok()
+                .and_then(|x| x.trim().parse::<u64>().ok())
+            {
+                Some(0) => None,
+                Some(n) => Some(std::time::Duration::from_secs(n)),
+                None => Some(std::time::Duration::from_secs(600)),
+            },
             stuck_after: None,
             memory_limit: None,
             threads: None,
@@ -3237,6 +3247,7 @@ impl Graph {
         let forced_proj = eng.register_projection(Arc::new(crate::val::forced_projection));
         let num_proj = eng.register_projection(Arc::new(crate::val::num_projection));
         let clist_proj = eng.register_projection(Arc::new(crate::val::clist_projection));
+        let skel_proj = eng.register_projection(Arc::new(crate::val::skeleton_projection));
         let ops = Ops {
             exec,
             put,
@@ -3289,6 +3300,7 @@ impl Graph {
             forced_proj,
             num_proj,
             clist_proj,
+            skel_proj,
         };
         let _ = shared.set(ops.clone());
         declare_fields(&eng);

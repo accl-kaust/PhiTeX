@@ -637,6 +637,32 @@ pub(crate) fn page_out_parts(v: &Values, x: ValueId) -> Option<(ValueId, ValueId
 /// it ([`phitex_defuse::Ctx::use_field_before`]).
 pub(crate) const BEFORE_PIECE: &str = "\u{1}before the piece";
 
+/// An integer register's value at a candidate in a piece's check data
+/// that the piece stepped by `c` and did not read: what reached the piece
+/// plus `c`, `[BEFORE_PIECE, c, after]`, `after` the candidate after which
+/// the piece made its last step before it (-1: none).
+pub(crate) fn before_plus(v: &Values, c: i32, after: i64) -> ValueId {
+    v.list(vec![v.str(BEFORE_PIECE), v.int(i64::from(c)), v.int(after)])
+}
+
+/// What a check data value says reached the piece: `(c, after)` of
+/// [`BEFORE_PIECE`] (`(0, -1)`) or of [`before_plus`]; `None` for any
+/// other value.
+pub(crate) fn reaching_plus(v: &Values, kv: ValueId) -> Option<(i32, i64)> {
+    let before = v.str(BEFORE_PIECE);
+    if kv == before {
+        return Some((0, -1));
+    }
+    v.with_list(kv, |xs| match *xs {
+        [t, c, a] if t == before => Some((
+            i32::try_from(crate::val::int_of(v, c)).unwrap_or(0),
+            crate::val::int_of(v, a),
+        )),
+        _ => None,
+    })
+    .flatten()
+}
+
 /// `max_dimen` (§421).
 pub(crate) const MAX_DIMEN: i32 = 0o7777777777;
 

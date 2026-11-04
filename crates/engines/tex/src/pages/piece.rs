@@ -24,6 +24,7 @@ use super::{
     R, Run, Seg, Shared, State, Stop, ValueId, Values, glue_of, glue_value, group, int_of, list_of,
     nodes, ops, replaced, run_node, some, str_of, toks_of, toks_value,
 };
+use crate::state::AtVal;
 
 /// What a run had done when it passed a candidate: at its end, a page
 /// finishing at its last candidate finishes at the end of the piece iff
@@ -1196,18 +1197,31 @@ impl Run<'_, '_> {
                 .or_insert_with(|| v.list(std::iter::once(v.int(after)).chain(x).collect()))
         };
         let before = v.str(BEFORE_PIECE);
+        let pluses: std::cell::RefCell<phitex_defuse::FxHashMap<(i32, i64), ValueId>> =
+            std::cell::RefCell::default();
         // (`[value]` or `[]` (absent) where the run had it; one it had
         // neither read nor defined before is what reached the piece,
-        // [`BEFORE_PIECE`], the finisher reads it there)
-        let kv_at = |i: usize, l: Loc| match at.get(i, l) {
-            Some(Some(x)) => kv_list(
-                x,
+        // [`BEFORE_PIECE`], the finisher reads it there; a register it
+        // stepped and did not read, that plus the steps, [`before_plus`]:
+        // the piece needs no read of it for its page's routine)
+        let kv_at = |i: usize, l: Loc| {
+            let after = || {
                 at.made_after(i, l)
                     .and_then(|j| marks.get(j))
-                    .map_or(-1, |m| i64::from(m.k)),
-            ),
-            Some(None) => before,
-            None => ValueId::UNIT,
+                    .map_or(-1, |m| i64::from(m.k))
+            };
+            match at.get(i, l) {
+                Some(AtVal::Known(x)) => kv_list(x, after()),
+                Some(AtVal::Reaching(0)) => before,
+                Some(AtVal::Reaching(c)) => {
+                    let a = after();
+                    *pluses
+                        .borrow_mut()
+                        .entry((c, a))
+                        .or_insert_with(|| super::before_plus(v, c, a))
+                }
+                None => ValueId::UNIT,
+            }
         };
         // (the files written after each candidate)
         let streams: Vec<Vec<Field>> = marks
@@ -2273,12 +2287,14 @@ fn merge_stable(
 
 /// The kind of a name's value in a piece's check data: 0 none (`UNIT`), 1
 /// what reached the piece ([`BEFORE_PIECE`]), 2 a value (`[value]` or
-/// `[]`).
+/// `[]`), 3 what reached the piece plus steps ([`super::before_plus`]).
 fn kv_kind(v: &Values, kv: ValueId) -> i64 {
     if kv == ValueId::UNIT {
         0
     } else if kv == v.str(BEFORE_PIECE) {
         1
+    } else if super::reaching_plus(v, kv).is_some() {
+        3
     } else {
         2
     }
@@ -2357,7 +2373,7 @@ impl NameSources<'_> {
                     self.held
                         .iter()
                         .filter_map(|&(f, l, end)| match self.at.get(i, l) {
-                            Some(Some(x)) if x != end => Some((f.0, false, kv_of(l))),
+                            Some(AtVal::Known(x)) if x != end => Some((f.0, false, kv_of(l))),
                             _ => None,
                         });
                 let mut streams: Vec<(ValueId, bool, ValueId)> = self.streams[i]
@@ -2487,7 +2503,7 @@ impl NameSources<'_> {
             let mut covers = Vec::new();
             let mut from = 0;
             for &(j, x) in self.at.history(l) {
-                if let Some(x) = x
+                if let AtVal::Known(x) = x
                     && x != end
                 {
                     covers.push((from, j + 1));

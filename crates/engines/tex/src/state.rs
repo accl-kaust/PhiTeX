@@ -257,6 +257,10 @@ const CC: u8 = 8;
 /// piece, a symbol written to this item ([`Entry::alias`]); a use
 /// resolves it first (`Run::load`, [`State::resolve_alias`]).
 const ALIAS: u8 = 16;
+/// An entry kept at a candidate ([`State::note_cand`]) of an integer
+/// register the run had stepped there and not read: its value there is
+/// what reached the run plus `chr` ([`AtVal::Reaching`]).
+const STEPPED: u8 = 32;
 
 /// One slot's value (spec-final §2.1): a meaning's record, `cmd`, `chr`
 /// and a `payload` (a macro's handle in the table's macro store, a
@@ -711,10 +715,20 @@ impl Drop for State {
     }
 }
 
+/// A location's value at a candidate ([`State::at_candidates`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum AtVal {
+    /// The value there (`None`: absent).
+    Known(Option<ValueId>),
+    /// Not read by the run: what reached the run, plus the steps the run
+    /// made of the integer register before the candidate (0 for any other
+    /// location, [`State::add`]).
+    Reaching(i32),
+}
+
 /// A location's value at a candidate ([`State::at_candidates`]): the
-/// candidate's index, and the value (`None`: not known there).
-#[allow(clippy::option_option)]
-pub(crate) type AtCandidate = (usize, Option<Option<ValueId>>);
+/// candidate's index, and the value.
+pub(crate) type AtCandidate = (usize, AtVal);
 
 /// The values at the candidates of the locations defined after them
 /// ([`State::at_candidates`]).
@@ -725,8 +739,7 @@ pub(crate) struct AtCandidates {
 impl AtCandidates {
     /// `loc`'s value at candidate `i`: `None` where nothing after the
     /// candidate defined it.
-    #[allow(clippy::option_option)]
-    pub(crate) fn get(&self, i: usize, loc: Loc) -> Option<Option<Option<ValueId>>> {
+    pub(crate) fn get(&self, i: usize, loc: Loc) -> Option<AtVal> {
         let h = self.by_loc.get(&loc)?;
         h.get(h.partition_point(|x| x.0 < i)).map(|x| x.1)
     }
@@ -740,7 +753,6 @@ impl AtCandidates {
     }
 
     /// `loc`'s entries at the candidates, by candidate.
-    #[allow(clippy::option_option)]
     pub(crate) fn history(&self, loc: Loc) -> &[AtCandidate] {
         self.by_loc.get(&loc).map_or(&[], Vec::as_slice)
     }
@@ -1116,6 +1128,7 @@ impl State {
     /// since the last candidate (its latest definition `ldef` before it).
     #[inline]
     fn note_cand(&mut self, loc: Loc, ldef: u64, prev: Entry) {
+        let prev = self.stepped_entry(loc, prev);
         // (once per candidate: a location a loop's group restores and
         // the loop defines again was noted at every pass, a million
         // entries in xkcdcolors' `\foreach`, each written by every
@@ -1127,6 +1140,24 @@ impl State {
         self.slot(loc).cand_noted = k;
         if let Some((_, xs)) = self.cands.last_mut() {
             xs.push((loc, prev));
+        }
+    }
+
+    /// `prev`, `loc`'s entry, as kept at a candidate: where the run holds
+    /// steps of the register it has not read, marked with them
+    /// ([`STEPPED`]), its value there what reached the run plus them.
+    fn stepped_entry(&self, loc: Loc, prev: Entry) -> Entry {
+        if prev.flags & (LOADED | STEPPED) != 0 {
+            return prev;
+        }
+        match self.slot_ref(loc) {
+            Some(s) if s.mapped != MAP_NONE && s.map.keep && s.map.add != 0 => {
+                let mut e = UNLOADED;
+                e.flags = STEPPED;
+                e.chr = s.map.add;
+                e
+            }
+            _ => prev,
         }
     }
 
@@ -1145,7 +1176,13 @@ impl State {
                 if h.last().is_some_and(|x| x.0 == i) {
                     continue;
                 }
-                let x = (e.flags & LOADED != 0).then(|| self.encode(&e, v));
+                let x = if e.flags & LOADED != 0 {
+                    AtVal::Known(self.encode(&e, v))
+                } else if e.flags & STEPPED != 0 {
+                    AtVal::Reaching(e.chr)
+                } else {
+                    AtVal::Reaching(0)
+                };
                 h.push((i, x));
             }
         }
@@ -1959,6 +1996,12 @@ impl State {
         self.changing(loc);
         self.muts += 1;
         let mi = self.meta(loc);
+        // (its entry at the candidate before, taken before a set below
+        // replaces the steps, [`State::stepped_entry`])
+        let cand_prev = (!self.cands.is_empty()).then(|| {
+            let e = self.slot(loc).e;
+            self.stepped_entry(loc, e)
+        });
         // (a register only stepped so far: its steps are no binding once
         // it is set at the run's base level or globally, the value
         // replaces them; a local write in a group keeps them, the run's
@@ -1985,8 +2028,7 @@ impl State {
             let m = &self.metas[mi];
             (m.ldef_stamp, m.ldef_local, m.ldef_gid)
         };
-        if !self.cands.is_empty() {
-            let prev = self.slot(loc).e;
+        if let Some(prev) = cand_prev {
             self.note_cand(loc, ldef.0, prev);
         }
         let s = self.slot(loc);
@@ -3249,9 +3291,11 @@ struct BaseSave {
     lazy: Option<ValueId>,
 }
 
-/// An entry noted at a candidate ([`Base`]): `None` not loaded.
+/// A candidate's kept entry in a [`Base`]: its location, its value where
+/// loaded (`None` not loaded), and the steps of an unread register
+/// ([`STEPPED`], else 0).
 #[allow(clippy::option_option)]
-type BaseCand = (Loc, Option<Option<ValueId>>);
+type BaseCand = (Loc, Option<Option<ValueId>>, i32);
 
 #[derive(Clone, PartialEq)]
 struct BaseSlot {
@@ -3350,6 +3394,7 @@ impl State {
                             (
                                 *l,
                                 (e.flags & LOADED != 0).then(|| self.encode_memo(e, v, memo)),
+                                if e.flags & STEPPED != 0 { e.chr } else { 0 },
                             )
                         })
                         .collect(),
@@ -3487,7 +3532,7 @@ impl State {
         for (st, xs) in b.cands {
             let xs = xs
                 .into_iter()
-                .map(|(l, x)| (l, x.map_or(UNLOADED, |x| ent(x, LOADED))))
+                .map(|(l, x, c)| (l, x.map_or_else(|| unloaded_stepped(c), |x| ent(x, LOADED))))
                 .collect();
             self.cands.push((st, xs));
         }
@@ -3519,6 +3564,17 @@ impl State {
         self.cont_locs = b.carried;
         self.muts += 1;
     }
+}
+
+/// The entry of a candidate's register not loaded ([`State::with_base`]):
+/// unloaded, and where `c` is not 0 stepped by `c` ([`STEPPED`]).
+fn unloaded_stepped(c: i32) -> Entry {
+    let mut e = UNLOADED;
+    if c != 0 {
+        e.flags = STEPPED;
+        e.chr = c;
+    }
+    e
 }
 
 impl BaseSlot {
@@ -3678,14 +3734,20 @@ impl Base {
                 // 2 a value, and the value or UNIT)
                 let mut ys = Vec::with_capacity(1 + 3 * xs.len());
                 ys.push(u(*st));
-                for &(l, x) in xs {
+                // (3: not loaded, stepped, the steps in place of the value)
+                for &(l, x, c) in xs {
                     ys.push(field(l).0);
                     ys.push(v.int(match x {
+                        None if c != 0 => 3,
                         None => 0,
                         Some(None) => 1,
                         Some(Some(_)) => 2,
                     }));
-                    ys.push(x.flatten().unwrap_or(ValueId::UNIT));
+                    ys.push(if c != 0 && x.is_none() {
+                        v.int(i64::from(c))
+                    } else {
+                        x.flatten().unwrap_or(ValueId::UNIT)
+                    });
                 }
                 v.list(ys)
             })
@@ -3866,9 +3928,10 @@ impl Base {
             for &[f, tag, x] in es.as_chunks::<3>().0 {
                 let l = loc(Field(f));
                 ys.push(match int_of(v, tag) {
-                    0 => (l, None),
-                    1 => (l, Some(None)),
-                    _ => (l, Some(Some(x))),
+                    0 => (l, None, 0),
+                    1 => (l, Some(None), 0),
+                    3 => (l, None, i32::try_from(int_of(v, x)).unwrap_or(0)),
+                    _ => (l, Some(Some(x)), 0),
                 });
             }
             out.cands.push((u(st), ys));
