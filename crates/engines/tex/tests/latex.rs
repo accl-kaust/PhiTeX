@@ -2788,7 +2788,7 @@ fn a_missing_files_input_is_the_culprit() {
 /// replaced was read to keep it for the lines written to the file later
 /// (`Run::note_pre`); now it is kept unseen, an alias of the value
 /// reaching the run. In the manual, 282 such runs, 24.9 s of the edit's
-/// 109 s of runs at -j8 (mc 80209, the read found by PHITEX_LOAD_TRACE
+/// 109 s of runs at -j8 (mc 80209, the read found by `PHITEX_LOAD_TRACE`
 /// in mc 80218 and 80224). The edited PDF equals a cold build's.
 #[test]
 fn latex_examples_do_not_run_again_on_a_renamed_anchor() {
