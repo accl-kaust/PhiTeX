@@ -442,8 +442,13 @@ impl Run<'_, '_> {
     #[inline]
     pub(crate) fn get_token_tok(&mut self) -> Tok {
         // (an alignment of this run counts every brace, §342: the slow
-        // path then)
-        if self.aopen == 0 {
+        // path then; so does a token made `\outer`, §357, whose meaning the
+        // slow path reads: none is unless [`crate::val::OUTER_MADE`] reaches
+        // this run, read here once)
+        if self.outer_known == crate::run::OUTER_UNREAD && !self.outer_read() {
+            return self.cur.tok;
+        }
+        if self.aopen == 0 && self.outer_known == crate::run::OUTER_NONE {
             let next = match self.input.next_plain_of_top() {
                 Some(t) => Some(t),
                 None if self.input.pop_spent_top() => self.input.next_plain_of_top(),
@@ -456,6 +461,27 @@ impl Run<'_, '_> {
         }
         self.get_token_stored();
         self.cur.tok
+    }
+
+    /// Reads whether any macro is `\outer` for [`Run::get_token_tok`]; false
+    /// where the read raised a halt.
+    #[cold]
+    #[inline(never)]
+    fn outer_read(&mut self) -> bool {
+        match self.get(crate::val::OUTER_MADE) {
+            Ok(x) => {
+                self.outer_known = if x.is_some() {
+                    crate::run::OUTER_SOME
+                } else {
+                    crate::run::OUTER_NONE
+                };
+                true
+            }
+            Err(h) => {
+                self.raise(h);
+                false
+            }
+        }
     }
 
     /// `get_token` for a token that is stored or matched, never expanded

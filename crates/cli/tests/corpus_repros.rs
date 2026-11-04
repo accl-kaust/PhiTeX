@@ -1236,3 +1236,13 @@ fn write_mode_zero() {
 fn routine_page_at_any_candidate() {
     check_threads("routine_page_at_any_candidate", "pdf");
 }
+
+/// An `\outer` macro met in a token list while a macro's arguments or a
+/// list's body are scanned: "Forbidden control sequence found" (§336, §357).
+/// The scans took a list's tokens without looking at their meanings, so the
+/// macro went into the argument as a plain token and the text came out
+/// otherwise. Oracle: pdftex in the CI image.
+#[test]
+fn outer_in_scan() {
+    check_threads("outer_in_scan", "pdf");
+}
