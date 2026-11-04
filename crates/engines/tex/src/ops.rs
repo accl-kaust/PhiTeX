@@ -155,9 +155,9 @@ pub(crate) fn run_node(
     // makes the run again from its start, the picture inline, and that
     // picture is never placed again, `crate::pic`)
     if matches!(res, Ok(()) | Err(Halt::Cut))
-        && let Some(why) = r.pic_conflict()
+        && let Some((hash, why)) = r.pic_conflict()
     {
-        crate::pic::refused_now(&r, &why);
+        crate::pic::refused_now(&r, hash, &why);
         let cx = r.cx;
         cx.begin_again();
         r = Run::new(cx, o);

@@ -80,8 +80,7 @@ fn refuse(hash: u64) {
 
 /// A check at the run's end refused its picture child's output (`why`):
 /// the picture is never placed again; the run goes again inline.
-pub(crate) fn refused_now(r: &Run<'_, '_>, why: &str) {
-    let hash = r.pic_mark.as_ref().map_or(0, |m| m.hash);
+pub(crate) fn refused_now(r: &Run<'_, '_>, hash: u64, why: &str) {
     refuse(hash);
     if crate::exec::obs_flag!("PHITEX_PIC_TRACE") {
         eprintln!(
@@ -93,16 +92,13 @@ pub(crate) fn refused_now(r: &Run<'_, '_>, why: &str) {
 
 /// What the figure's run keeps of its placement ([`Run::pic_begin`]).
 pub(crate) struct PicMark {
-    /// The state table's stamp at the placement: the run's definitions
-    /// after it have later stamps.
+    /// The state table's stamp once the child's output is in the run
+    /// (its definitions made): the run's definitions after the picture
+    /// have later stamps.
     pub stamp: u64,
     pub hash: u64,
-    /// The child's output taken: the names it defined globally and the
-    /// names it read; `None` where the run ran the picture inline.
-    pub out: Option<(
-        phitex_defuse::FxHashSet<ValueId>,
-        phitex_defuse::FxHashSet<ValueId>,
-    )>,
+    /// The names the child read from outside its text.
+    pub reads: phitex_defuse::FxHashSet<ValueId>,
 }
 
 /// What the child's run keeps ([`Run::pic_run`]).
@@ -304,11 +300,6 @@ impl Run<'_, '_> {
         ];
         let i = self.cx.child_once(self.ops.pic, args);
         self.muts += 1;
-        self.pic_mark = Some(PicMark {
-            stamp: self.st.stamp(),
-            hash,
-            out: None,
-        });
         let Some(x) = self.cx.placed_output_peek(i) else {
             // (no output yet: this run runs the picture inline, and the
             // child's commit asks it again)
@@ -335,6 +326,13 @@ impl Run<'_, '_> {
         }
         let x = self.cx.placed_output_or(i, ValueId::UNIT);
         self.pic_apply(&body, x);
+        self.pic_marks.push(PicMark {
+            stamp: self.st.stamp(),
+            hash,
+            reads: list_of(v, list_of(v, x).get(12).copied().unwrap_or(ValueId::UNIT))
+                .into_iter()
+                .collect(),
+        });
         if trace() {
             eprintln!(
                 "pic: node {node} {} {hash:x}: the child's output taken ({} items)",
@@ -603,9 +601,16 @@ impl Run<'_, '_> {
         self.astate = some(a(13)).map(|x| int_of(v, x));
         self.aopen = n(14);
         self.ic_prev = i32::try_from(n(15)).unwrap_or(self.ic_prev);
-        let names = |i: usize| list_of(v, a(i)).into_iter().collect();
-        if let Some(m) = self.pic_mark.as_mut() {
-            m.out = Some((names(11), names(12)));
+        // (its global definitions, made here, where TeX made them: the
+        // run's own reads and definitions after the picture see them and
+        // override them as TeX's do)
+        for e in list_of(v, a(11)) {
+            let [name, val] = list_of(v, e)[..] else {
+                continue;
+            };
+            let loc = self.loc_of(Field(name));
+            let grp = self.innermost_group();
+            self.st.set(loc, Entry::raw_seen(v, some(val)), true, grp);
         }
     }
 
@@ -655,39 +660,27 @@ impl Run<'_, '_> {
         }
     }
 
-    /// At the run's end, the child's output taken: what the run read
-    /// after the placement against what the child defined globally, and
-    /// what the run defined for the engine after it against what the
-    /// child read or defined; the first conflict, by name.
-    pub(crate) fn pic_conflict(&mut self) -> Option<String> {
-        let m = self.pic_mark.as_ref()?;
-        let (gdefs, reads) = m.out.as_ref()?;
+    /// At the run's end, each child's output taken: what the run
+    /// defined for the engine after the picture against what the child
+    /// read (the child, placed after the run, saw the run's later value
+    /// where TeX's picture saw the earlier one); the first conflict: the
+    /// picture's hash and why. The child's own definitions are the run's,
+    /// made at the picture ([`Run::pic_apply`]), so what the run reads or
+    /// defines after them is TeX's order already.
+    pub(crate) fn pic_conflict(&mut self) -> Option<(u64, String)> {
         let v = self.v;
-        let name = |f: Field| crate::val::field_name(v, f);
-        let after: Vec<Loc> = self.pic_reads.iter().copied().collect();
-        for loc in after {
-            let f = self.loc_field_peek(loc);
-            if gdefs.contains(&f.0) {
-                return Some(format!(
-                    "the run reads {} after the picture, which defines it",
-                    name(f)
-                ));
-            }
-        }
-        let stamp = m.stamp;
-        for loc in self.st.published_since(stamp) {
-            let f = self.loc_field_peek(loc);
-            if gdefs.contains(&f.0) {
-                return Some(format!(
-                    "the run defines {} after the picture, which defines it too",
-                    name(f)
-                ));
-            }
-            if reads.contains(&f.0) {
-                return Some(format!(
-                    "the run defines {} after the picture, which read it",
-                    name(f)
-                ));
+        for m in &self.pic_marks {
+            for loc in self.st.published_since(m.stamp) {
+                let f = self.loc_field_peek(loc);
+                if m.reads.contains(&f.0) {
+                    return Some((
+                        m.hash,
+                        format!(
+                            "the run defines {} after the picture, which read it",
+                            crate::val::field_name(v, f)
+                        ),
+                    ));
+                }
             }
         }
         None
@@ -894,7 +887,7 @@ impl Run<'_, '_> {
         for (f, x, l) in self.published_values() {
             match l {
                 Locality::Local => locals.push(v.list(vec![f.0, x])),
-                _ => gdefs.push(f.0),
+                _ => gdefs.push(v.list(vec![f.0, x])),
             }
         }
         let mut reads: Vec<ValueId> = self

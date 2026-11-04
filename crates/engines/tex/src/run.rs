@@ -768,8 +768,7 @@ pub(crate) struct Run<'c, 'a> {
     /// run's end, the reads since it; `no_child`: a run made again
     /// inline after a check failed. `pic_child`: this run is the child.
     pub pic_on: bool,
-    pub pic_mark: Option<crate::pic::PicMark>,
-    pub pic_reads: phitex_defuse::FxHashSet<crate::state::Loc>,
+    pub pic_marks: Vec<crate::pic::PicMark>,
     /// The hashes of the pictures this run met, in order.
     pub pic_seen: Vec<u64>,
     pub no_child: bool,
@@ -1312,8 +1311,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pull_orig: Vec::new(),
             pull_box: Vec::new(),
             pic_on: false,
-            pic_mark: None,
-            pic_reads: phitex_defuse::FxHashSet::default(),
+            pic_marks: Vec::new(),
             pic_seen: Vec::new(),
             no_child: false,
             pic_child: None,
@@ -1520,11 +1518,6 @@ impl<'c, 'a> Run<'c, 'a> {
             self.order_page_reg_read(loc)?;
         }
         self.st.note_read(loc);
-        // (a picture child placed: what the run reads from here on is
-        // checked against what the child defines, `crate::pic`)
-        if self.pic_mark.is_some() {
-            self.pic_reads.insert(loc);
-        }
         match self.st.load_state(loc) {
             1 => Ok(()),
             2 => self.unalias(loc),
@@ -5684,14 +5677,12 @@ impl<'c, 'a> Run<'c, 'a> {
         let t_pub = std::time::Instant::now();
         // (a finisher's sealed lines in a definition stay sealed: a run
         // that opens the box reads their lists then, `crate::pages::seal`)
-        // (a picture child's local definitions at its base level are its
-        // parent's, carried in its output, never the engine's: `crate::pic`)
+        // (a picture child's definitions are its parent's, carried in its
+        // output and made there at the picture's place, never the
+        // engine's at the child's: `crate::pic`)
         let pic = self.pic_child.is_some();
-        let publication: Vec<(Field, crate::state::Pub, Locality)> = self
-            .publication()
-            .into_iter()
-            .filter(|&(_, _, l)| !(pic && l == Locality::Local))
-            .collect();
+        let publication: Vec<(Field, crate::state::Pub, Locality)> =
+            self.publication().into_iter().filter(|_| !pic).collect();
         let published: Vec<(Field, ValueId, Locality)> = publication
             .iter()
             .filter_map(|&(f, w, l)| match w {
