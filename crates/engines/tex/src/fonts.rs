@@ -85,7 +85,7 @@ pub(crate) fn load_info(v: &Values, i: &Info) -> Option<Arc<Loaded>> {
 /// allocation: each entry holds the font it was made from, so that
 /// allocation is never freed and given to another font, whose memo hit
 /// would answer the first font's widths (a font loaded twice at once
-/// by two threads left one copy to drop; ArsClassica -j8, 1 build in 72,
+/// by two threads left one copy to drop; `ArsClassica` -j8, 1 build in 72,
 /// a letter-spaced heading set by another font's widths), and a hit is
 /// checked to be the font held.
 type Made<K> = Mutex<FxHashMap<(usize, K), (Arc<Loaded>, Arc<Loaded>)>>;
