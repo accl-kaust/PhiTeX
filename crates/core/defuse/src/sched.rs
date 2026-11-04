@@ -2310,19 +2310,16 @@ pub(crate) fn release_waiting(eng: &Engine, w: Option<&Worker>, n: NodeId) {
     let alone = ws.as_ref().is_some_and(|l| l.len() == 1);
     for m in ws.into_iter().flatten() {
         if let Some(x) = eng.placed_node(m).filter(|x| x.state() == State::Dirty) {
-            // (stopped before its run: what asked for that run still asks,
-            // an edit or a creation above all, which `Ctx::last_run_stands`
-            // must not take for a read's)
-            let kept = if x.held.swap(false, Ordering::AcqRel) {
-                x.woke.lock().take()
-            } else {
-                None
-            };
+            // (stopped before its run or in it: what asked for that run
+            // still asks, an edit or a creation above all, which
+            // `Ctx::last_run_stands` must not take for a read's)
+            let chained = x.held.swap(false, Ordering::AcqRel);
+            let kept = x.woke.lock().take();
             // (the one a chain goes on with, this worker's next: another
             // woken for it takes it from here with nothing in its caches.
             // book5's deleted paragraph at -j8, a chain of text nodes held
             // and let go: 204 ms to 273 ms, the same runs, accl 23994)
-            if kept.is_some() && alone && !defer(eng, &w.shared, x.id) {
+            if chained && kept.is_some() && alone && !defer(eng, &w.shared, x.id) {
                 *x.woke.lock() = kept;
                 w.shared.outstanding.fetch_add(1, Ordering::SeqCst);
                 w.ready().push(eng, x);

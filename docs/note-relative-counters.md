@@ -192,3 +192,32 @@ relative registers (their maps are the finishers' steps).
    and the oracle.
 5. **Sweep:** biblatex manuals, hyperref documents, tikz `remember
    picture` documents, at -j1/-j4/-j8.
+
+## 6. Where it stands (2026-11-03)
+
+Built: step 1 (size symbols); step 2 (`\\the`/`\\number` of any integer register
+unread in a piece is a symbol with the piece's steps j, named by the register's
+number; a symbol among a macro's delimiters is its digits). Steps after a
+candidate are a relation too (`Run::step_ok`), which removes a strict chain: the
+walk of a change stopped at each run that had published a value, so citations
+ran one after another at any thread count.
+
+Not built: steps 3-5. Measured on 50-style-authoryear after step 2 (mc 79454,
+profile+observe, -j1 / -j8): citeadd 1591 / 1532 ms, of which `\\printbibliography`
+and its neighbours through `count:302` 615 / 650 ms (6 runs) and `cs:blx@page@63`
+527 / 564 ms (1 run), citations through `count:332` 103 / 170 ms (18 runs), the
+rest of `\\begin{document}` on the `.aux` as text 113 / 143 ms. The `.aux` stays
+text there because of real reads: `\\blx@pagesum@old` (`\\blx@checksum`, an
+`\\xdef` per line), `blx@segm@...`, `blx@prelim@lastcites@...`. Needed beyond §2.2:
+`\\numexpr` of a symbol plus a constant and `\\ifnum` of a symbol against a constant
+(`Step::Cmp` with j), as `\\blx@iffirstonpage` and `\\blx@initsep` do.
+
+`Step::Derived` can be filed thus: the read on the base field with the path
+(`read::step` has `eng`; the anchor goes in the step), and a witness reader on
+the name's field whose answer is the composed lookup, so an old name's move
+compares equal; a re-ask that stands with a new name files a witness there,
+after the walk's lock (`commit::reask_reader` runs with none held).
+
+A relative `\\csname` result must itself be a symbol (`cmd::SYM`, its default the
+forced read), not the concrete token: the token can reach a macro body, and the
+run would then depend on the name with no read of it.

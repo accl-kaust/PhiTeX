@@ -1362,12 +1362,21 @@ impl Run<'_, '_> {
 
     /// `get_r_token` (§1215).
     fn get_r_token(&mut self) -> R<Tok> {
+        // (the name to define: its meaning is not read, [`Run::interp_first`]:
+        // `\\let\\l@ngrel@x` in every `\\providecommand` written to the `.aux`
+        // made the file one read back as its text)
+        let was = std::mem::replace(&mut self.defining, true);
         loop {
-            self.get_name_token()?;
+            let r = self.get_name_token();
+            if r.is_err() {
+                self.defining = was;
+            }
+            r?;
             if self.cur.tok != crate::val::space_tok() {
                 break;
             }
         }
+        self.defining = was;
         if !self.cur.is_cs() {
             // "Missing control sequence inserted": \inaccessible
             self.back_cur();
@@ -1428,8 +1437,14 @@ impl Run<'_, '_> {
         // step of the run's map, nothing read, published as a relation,
         // `State::add`)
         let mut pre = None;
-        if p == 0 && q == cmd::ADVANCE && self.map_ok(l, global) {
+        if p == 0 && q == cmd::ADVANCE && self.step_ok(l, global) {
             let x = self.scan_int()?;
+            // (steps on both sides of a candidate: the routine of a page
+            // firing there needs the value they make there, so the run
+            // reads the register, `State::add` keeps the value at it)
+            if !self.cand_marks.is_empty() && self.st.has_map(l) {
+                self.load(l)?;
+            }
             if self.st.add(self.v, l, x, global) {
                 self.muts += 1;
                 return Ok(());
