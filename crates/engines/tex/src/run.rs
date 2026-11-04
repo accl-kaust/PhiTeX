@@ -262,6 +262,11 @@ pub(crate) struct Ops {
     /// a membership test of a list macro reads whether the item is in it
     /// ([`Run::clist_has`]).
     pub clist_proj: phitex_defuse::ProjId,
+    /// What an append relation reads of a meaning
+    /// ([`crate::val::plain_list_projection`], [`Run::append_head`]).
+    pub plain_list_proj: phitex_defuse::ProjId,
+    /// The append relation ([`crate::val::append_relation`]).
+    pub append_rel: phitex_defuse::RelId,
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
@@ -1643,7 +1648,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .into_iter()
             .filter_map(|(f, w, l)| match w {
                 crate::state::Pub::Value(x) => Some((f, x, l)),
-                crate::state::Pub::Rel(_) => None,
+                crate::state::Pub::Rel(_) | crate::state::Pub::Append(_) => None,
             })
             .collect()
     }
@@ -1726,10 +1731,14 @@ impl<'c, 'a> Run<'c, 'a> {
     /// not where a job-written file is read back (the read-back keeps the
     /// values its writes replace, [`Run::note_pre`]).
     pub(crate) fn map_ok(&self, loc: Loc, global: bool) -> bool {
+        self.count_reg(loc).is_some() && self.relation_ok(global)
+    }
+
+    /// [`Run::map_ok`] whatever the location.
+    fn relation_ok(&self, global: bool) -> bool {
         let op = self.cx.op();
         let routine = op == self.ops.finish && global;
-        self.count_reg(loc).is_some()
-            && (op == self.ops.exec || op == self.ops.resume || routine)
+        (op == self.ops.exec || op == self.ops.resume || routine)
             && (self.doc || routine)
             && !self.rec_load
             && self.interp.is_none()
@@ -1758,6 +1767,74 @@ impl<'c, 'a> Run<'c, 'a> {
             && !self.read_point_here
             && (global || self.innermost_group().is_none())
             && !crate::defer::deferrable(self, loc)
+    }
+
+    /// `\\xdef\\m{\\m...}`, the next tokens the body's `{` and `\\m` itself,
+    /// where the run may keep it as a relation ([`Run::relation_ok`]) and
+    /// `\\m` reaches it as a macro \\xdef copies unchanged, read as that alone
+    /// ([`crate::val::plain_list_projection`]): `\\m` is taken from the input
+    /// and its location returned; the body scanned is what follows it
+    /// ([`Run::append_tail`]). A list grown by first users of its items then
+    /// leaves a user after them standing, with no read of what they added.
+    pub(crate) fn append_head(&mut self, p: Tok) -> R<Option<Loc>> {
+        let head = self.input.top().filter(|l| {
+            l.kind == crate::input::kind::TOKS
+                && l.a + 1 < l.b
+                && self.input.arena.at(l.a + 1) == p
+                && {
+                    let t = self.input.arena.at(l.a);
+                    !t.is_cs_or_active() && t.cat() == Some(1)
+                }
+        });
+        if head.is_none() || !self.relation_ok(true) {
+            return Ok(None);
+        }
+        let Some(l) = self.mean_loc(p).filter(|&l| self.st.can_append(l)) else {
+            return Ok(None);
+        };
+        let f = self.loc_field(l);
+        let path = self
+            .cx
+            .path(&[phitex_defuse::Step::Proj(self.ops.plain_list_proj)]);
+        let v = self.v;
+        let shape = self.cx.read_path(f, path)?.map(|x| list_of(v, x));
+        let Some([kind, cs]) = shape.as_deref() else {
+            return Ok(None);
+        };
+        debug_assert_ne!(*kind, v.int(0));
+        for t in crate::val::toks_of(v, Some(*cs)) {
+            // (\\xdef stores it as it is: what it means here read as that,
+            // or, the run holding it, what it holds)
+            if self.class_lookup(t)?.is_none()
+                && !(self.mean_loc(t).is_some_and(|l| self.st.is_loaded(l))
+                    && self.mean_of(t)?.cmd_chr().0 <= cmd::MAX_COMMAND)
+            {
+                return Ok(None);
+            }
+        }
+        let (Some(brace), Some(_)) = (self.input.next_of_top(), self.input.next_of_top()) else {
+            return Ok(None);
+        };
+        self.back_input(brace);
+        Ok(Some(l))
+    }
+
+    /// The body of a definition [`Run::append_head`] took: kept as the
+    /// relation, or, where its expansion read the macro itself (the run now
+    /// holds it), the macro as \\xdef makes it from what the run holds.
+    pub(crate) fn append_tail(&mut self, p: Tok, l: Loc, body: &[Tok]) -> R<()> {
+        let v = self.v;
+        if self.st.append(v, l, body) {
+            return Ok(());
+        }
+        let mut all = self.mean_of(p).map(|m| match m {
+            crate::val::Mean::Macro(m) => m.body.to_vec(),
+            _ => Vec::new(),
+        })?;
+        all.extend_from_slice(body);
+        let m = crate::val::Macro::new(0, Vec::new(), Rc::from(&all[..]));
+        self.define_cs_owned(p, crate::val::Mean::Macro(Rc::new(m)), true);
+        Ok(())
     }
 
     /// An integer register's engine value as first loaded
@@ -1926,6 +2003,12 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         if crate::exec::obs_flag!("PHITEX_DEF_TRACE") {
             self.def_trace(loc, &val, global);
+        }
+        // (a macro added to before a candidate, replaced after it: a
+        // candidate's value there is one the run has, [`State::note_cand`])
+        if !self.cand_marks.is_empty() && self.st.appended(loc).is_some() && !self.st.is_loaded(loc)
+        {
+            let _ = self.lift(|r| r.load(loc));
         }
         if self.read_back_done && self.interp.is_none() {
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
@@ -4652,14 +4735,24 @@ impl<'c, 'a> Run<'c, 'a> {
             .map_or(0, |x| i32::try_from(int_of(v, x)).unwrap_or(0)))
     }
 
-    /// Whether `item` is an item of the comma list `tok`'s meaning holds
-    /// (a parameterless macro, [`crate::val::clist_projection`]), read
-    /// through that projection and the item's membership: a list grown by
-    /// other items leaves this run standing. `None` where the meaning is
-    /// no such list, or the run has it in full or bound it itself (as
+    /// What the match of `,item,` in the comma list `tok`'s meaning holds
+    /// gives a test ([`crate::val::clist_projection`]; `nil` ends the test's
+    /// last argument): `Some(None)` where the item is not in it, `Some(Some(t))`
+    /// where it is, `t` the token after it, read as those alone: a list grown
+    /// or reordered elsewhere leaves this run standing. `None` where the
+    /// meaning is no such list, holds `nil` or `\\par` (which end the match, or
+    /// an argument), or the run has it in full or bound it itself (as
     /// [`Run::defined_lookup`]).
-    pub(crate) fn clist_has(&mut self, tok: Tok, item: &[Tok]) -> R<Option<bool>> {
+    #[allow(clippy::option_option)]
+    pub(crate) fn clist_next(
+        &mut self,
+        tok: Tok,
+        item: &[Tok],
+        nil: Tok,
+    ) -> R<Option<Option<Tok>>> {
+        use phitex_defuse::Step;
         let v = self.v;
+        let comma = Tok::ch(12, u32::from(b','));
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
@@ -4667,10 +4760,31 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(None);
         }
         let f = self.loc_field(l);
-        let not = self.cx.path(&[
-            phitex_defuse::Step::Proj(self.ops.clist_proj),
-            phitex_defuse::Step::Has(v.str(crate::val::CLIST_NOT)),
-        ]);
+        let proj = Step::Proj(self.ops.clist_proj);
+        let par = crate::expand::par_tok();
+        // (what the run added, [`State::append`], after what reaches it: its
+        // items are that list's and these where that list ends an item)
+        let own = self.st.appended(l).map(|k| crate::val::toks_of(v, Some(k)));
+        if let Some(toks) = &own {
+            let path = self.cx.path(&[Step::Proj(self.ops.plain_list_proj)]);
+            let two = self
+                .cx
+                .read_path(f, path)?
+                .is_some_and(|x| list_of(v, x).first() == Some(&v.int(2)));
+            if !two
+                || toks.last() != Some(&comma)
+                || toks.iter().any(|t| {
+                    *t == nil
+                        || *t == par
+                        || (!t.is_cs_or_active() && matches!(t.cat(), Some(1 | 2)))
+                })
+            {
+                return Ok(None);
+            }
+        }
+        let not = self
+            .cx
+            .path(&[proj, Step::Has(v.str(crate::val::CLIST_NOT))]);
         if self
             .cx
             .read_path(f, not)?
@@ -4678,12 +4792,43 @@ impl<'c, 'a> Run<'c, 'a> {
         {
             return Ok(None);
         }
+        for t in [nil, par] {
+            let p = self
+                .cx
+                .path(&[proj, Step::Has(crate::val::clist_cs_key(v, t))]);
+            if self.cx.read_path(f, p)?.is_none_or(|x| x != v.bool(false)) {
+                return Ok(None);
+            }
+        }
+        let first = |xs: &[Tok]| {
+            xs.iter()
+                .copied()
+                .find(|t| t.is_cs_or_active() || t.cat() != Some(10))
+                .unwrap_or(comma)
+        };
         let key = crate::val::toks_value(v, item);
-        let has = self.cx.path(&[
-            phitex_defuse::Step::Proj(self.ops.clist_proj),
-            phitex_defuse::Step::Has(key),
-        ]);
-        Ok(self.cx.read_path(f, has)?.map(|x| x == v.bool(true)))
+        let p = self.cx.path(&[proj, Step::Key(key)]);
+        if let Some(next) = self.cx.read_path(f, p)? {
+            let next = crate::val::toks_of(v, Some(next));
+            return Ok(Some(Some(match next.first() {
+                Some(&t) => t,
+                None => own.as_deref().map_or(comma, first),
+            })));
+        }
+        // (not there: among the items the run added)
+        let Some(toks) = own else {
+            return Ok(Some(None));
+        };
+        let mut start = 0;
+        for (i, t) in toks.iter().enumerate() {
+            if *t == comma {
+                if &toks[start..i] == item {
+                    return Ok(Some(Some(first(&toks[i + 1..]))));
+                }
+                start = i + 1;
+            }
+        }
+        Ok(Some(None))
     }
 
     /// Whether `tok`'s meaning is defined, read through the engine's
@@ -5332,7 +5477,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .iter()
             .filter_map(|&(f, w, l)| match w {
                 crate::state::Pub::Value(x) => Some((f, x, l)),
-                crate::state::Pub::Rel(_) => None,
+                crate::state::Pub::Rel(_) | crate::state::Pub::Append(_) => None,
             })
             .collect();
         self.audit(&publication);
@@ -5447,6 +5592,9 @@ impl<'c, 'a> Run<'c, 'a> {
                         None => self.cx.define_with(f, x, l),
                     },
                     crate::state::Pub::Rel(c) => self.cx.define_rel_with(f, c, l),
+                    crate::state::Pub::Append(k) => {
+                        self.cx.define_rel_by(f, self.ops.append_rel, k, l);
+                    }
                 }
             }
             if n >= 10_000 && crate::exec::prof_flag!("PHITEX_TEX_TIME") {

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::api::{
     Cause, EditSource, EnvProvider, EvalError, Limits, Monoid, NodeId, NodeInfo, NodeState, OpId, Operation, PathId,
-    ProjId, Projection, Report, SeqMonoid, Settled, Step, UnitId,
+    ProjId, Projection, RelId, Relation, Report, SeqMonoid, Settled, Step, UnitId,
 };
 use crate::commit::{self, CommitStats, Predicted, own_write, place_after, settle_predictions, unfile};
 use crate::index::{FieldIndex, RangeIndex};
@@ -106,6 +106,7 @@ pub struct Engine {
     pub(crate) env: Env,
     pub(crate) paths: Paths,
     pub(crate) projections: Table<Projection>,
+    pub(crate) rel_fns: Table<Relation>,
     /// Relations each operation has made: (op, field) -> c (`commit::learn_shape`).
     pub(crate) shapes: Lock<FxHashMap<(OpId, Field), i64>>,
     pub(crate) shapes_n: AtomicUsize,
@@ -336,6 +337,7 @@ impl Engine {
             },
             paths,
             projections,
+            rel_fns: Table::new(),
             shapes: Lock::new(FxHashMap::default()),
             shapes_n: AtomicUsize::new(0),
             memo: Lock::new(FxHashMap::default()),
@@ -461,6 +463,10 @@ impl Engine {
         self.projections.get(usize::from(p.0))
     }
 
+    pub(crate) fn relation(&self, r: RelId) -> Option<&Relation> {
+        self.rel_fns.get(usize::from(r.0))
+    }
+
     pub(crate) fn pend(&self, n: NodeId) {
         self.pending.lock().nodes.push(n);
     }
@@ -546,6 +552,11 @@ impl Engine {
         let i = self.projections.push(p);
         assert!(i < PROJ_PATHS, "too many projections");
         ProjId(u16::try_from(i).expect("projection ids"))
+    }
+
+    /// A relation for [`Ctx::define_rel_by`].
+    pub fn register_relation(&self, r: Relation) -> RelId {
+        RelId(u16::try_from(self.rel_fns.push(r)).expect("relation ids"))
     }
 
     /// A path interned; the same steps give the same id.
@@ -2043,7 +2054,7 @@ impl Engine {
                     "  def {} = {}{} {:?}\n",
                     v.render(d.f.0),
                     v.render(self.def_value(n, d.f).unwrap_or(d.value)),
-                    d.rel.map(|c| format!(" (rel {c:+})")).unwrap_or_default(),
+                    d.rel.map(|c| format!(" (rel {c:?})")).unwrap_or_default(),
                     d.loc
                 ));
             }
@@ -2282,7 +2293,7 @@ impl Engine {
                     let have = self.def_value(n, d.f);
                     if have != Some(want) {
                         out.push(format!(
-                            "node {} relation {} {c:+}: holds {} but the input gives {}",
+                            "node {} relation {} {c:?}: holds {} but the input gives {}",
                             n.raw(),
                             v.render(d.f.0),
                             have.map_or("none".to_owned(), |x| v.render(x)),

@@ -9,7 +9,7 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::api::{Brackets, NodeId, OpId, PathId, UnitId};
+use crate::api::{Brackets, NodeId, OpId, PathId, Rel, UnitId};
 use crate::engine::Engine;
 use crate::index::RangeKey;
 use crate::lock::Lock;
@@ -931,8 +931,8 @@ impl Inner {
 pub(crate) struct Def {
     pub(crate) value: ValueId,
     pub(crate) by: NodeId,
-    /// `Some(c)`: value = the definition reaching `by` + c.
-    pub(crate) rel: Option<i64>,
+    /// `Some(r)`: value = `r` of the definition reaching `by`.
+    pub(crate) rel: Option<Rel>,
     /// Filed before its node ran (a prediction, a learned shape): the run
     /// replaces it.
     pub(crate) provisional: bool,

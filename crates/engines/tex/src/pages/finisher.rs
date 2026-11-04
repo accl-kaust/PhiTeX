@@ -1519,6 +1519,7 @@ impl Run<'_, '_> {
                     out.push((f, x));
                 }
                 crate::state::Pub::Rel(c) => rels.push((f, c)),
+                crate::state::Pub::Append(_) => {}
             }
         }
         if let Some(x) = self.fin.as_ref().and_then(|c| c.rtn) {

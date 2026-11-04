@@ -359,7 +359,7 @@ impl Run<'_, '_> {
         let base = self.input.arena.scratch_begin();
         let ok = self.macro_args(&m, base);
         self.scanner = was;
-        if ok && self.halt.is_none() && m.params.len() == 2 && self.clist_call(name, &m, base) {
+        if ok && self.halt.is_none() && m.params.len() == 2 && self.clist_call(&m, base) {
             self.input.arena.scratch_end(base);
             return;
         }
@@ -378,42 +378,69 @@ impl Run<'_, '_> {
         self.input.arena.scratch_end(base);
     }
 
-    /// microtype's `\\MT@in@clist{x}\\list` (whether `x` is an item of the
-    /// comma list `\\list` holds: `\\ifMT@inlist@`), its arguments
-    /// matched since `base`: the list read as the item's membership
-    /// ([`Run::clist_has`]), so a list grown by other items (a font
-    /// another piece used first) leaves the run standing. Its body runs
-    /// as written up to its `\\def\\MT@res@a…{…}`, then the switch its
-    /// match would set (`\\MT@inlist@true` or `false`): the same
-    /// definitions, the list's expansion and the match left out. False
-    /// (the call runs whole) for any other macro, an item holding a comma,
-    /// a brace or `\\@empty`/`\\@nnil`, a list that is not one
-    /// ([`crate::val::clist_projection`]). (No macro is traced here:
-    /// `\\tracingmacros` writes nothing in this engine.)
-    fn clist_call(&mut self, name: Tok, m: &Macro, base: crate::input::Scratch) -> bool {
-        const BODY: [&str; 14] = [
-            "def",
-            "MT@res@a",
-            "@nnil",
-            "ifx",
-            "@empty",
-            "MT@inlist@false",
-            "else",
-            "MT@inlist@true",
-            "fi",
-            "expandafter",
-            "MT@res@a",
-            "expandafter",
-            "@empty",
-            "@nnil",
-        ];
-        static CLIST: std::sync::OnceLock<Tok> = std::sync::OnceLock::new();
-        if name != *CLIST.get_or_init(|| Tok::cs("MT@in@clist"))
-            || !m
-                .body
-                .iter()
-                .filter_map(|t| t.as_cs().map(crate::val::CsId::name))
-                .eq(BODY)
+    /// A membership test of a comma list, in the one shape it has as TeX
+    /// macros (the names any):
+    ///
+    /// ```tex
+    /// \\def\\test#1#2{\\def\\match##1,#1,##2##3\\nil{\\ifx##2\\end <then> \\fi}%
+    ///   \\expandafter\\match\\expandafter,#2,#1,\\end\\nil}
+    /// ```
+    ///
+    /// called with an item and one control sequence, a list. The list is read
+    /// as what the match gives `##2` ([`Run::clist_next`]), so a list grown by
+    /// other items (a font another piece used first) leaves the run standing.
+    /// The body runs as written up to its `\\def`, then its conditional on that
+    /// token: the same definitions and the same text, the list's expansion and
+    /// the match left out. False (the call runs whole) for any other macro or
+    /// item, a list that is not one ([`crate::val::clist_projection`]). (No
+    /// macro is traced here: `\\tracingmacros` writes nothing in this engine. A
+    /// list item made `\\outer` after it went in, which the match would
+    /// stop at, is not seen.)
+    fn clist_call(&mut self, m: &Macro, base: crate::input::Scratch) -> bool {
+        let [s0, s1, s2, s3] = &m.segs[..] else {
+            return false;
+        };
+        if (s0.param, s1.param, s2.param, s3.param) != (1, 2, 1, 0) {
+            return false;
+        }
+        let sg = |s: &crate::val::Seg| &m.body[s.lo as usize..s.hi as usize];
+        let comma = Tok::ch(12, u32::from(b','));
+        let digit = |d: u8| Tok::ch(12, u32::from(b'0' + d));
+        let hash = |t: Tok| !t.is_cs_or_active() && t.cat() == Some(6);
+        let (a, b, c, d) = (sg(s0), sg(s1), sg(s2), sg(s3));
+        let n = b.len();
+        if a.len() != 5 || n < 18 || c != [comma] || d.len() != 3 || d[0] != comma {
+            return false;
+        }
+        let (def, matcher, ifx, end, nil) = (a[0], a[1], b[7], b[10], b[5]);
+        let (xa1, xa2) = (b[n - 4], b[n - 2]);
+        // (the conditional's text balanced, so the `\\def` ends where it seems
+        // to, and no parameter of `\\match`'s in it)
+        let mut depth = 0i32;
+        let plain_cond = b[11..n - 5].iter().all(|t| {
+            if !t.is_cs_or_active() {
+                match t.cat() {
+                    Some(1) => depth += 1,
+                    Some(2) => depth -= 1,
+                    Some(6) => return false,
+                    _ => {}
+                }
+            }
+            depth >= 0
+        }) && depth == 0;
+        if !(hash(a[2]) && a[3] == digit(1) && a[4] == comma && b[0] == comma)
+            || !(hash(b[1]) && b[2] == digit(2) && hash(b[3]) && b[4] == digit(3))
+            || !(hash(b[8]) && b[9] == digit(2) && plain_cond)
+            || b[6].is_cs_or_active()
+            || b[6].cat() != Some(1)
+            || b[n - 5].is_cs_or_active()
+            || b[n - 5].cat() != Some(2)
+            || b[n - 3] != matcher
+            || b[n - 1] != comma
+            || d[1] != end
+            || d[2] != nil
+            || !nil.is_cs()
+            || !end.is_cs()
         {
             return false;
         }
@@ -424,63 +451,41 @@ impl Run<'_, '_> {
             return false;
         };
         let (item, list) = (item.to_vec(), list.to_vec());
-        let plain = |t: &Tok| match t.as_cs() {
-            Some(c) => !matches!(c.name(), "@empty" | "@nnil"),
-            None => {
-                !matches!(t.cat(), Some(1 | 2))
-                    && (t.cat() != Some(12) || t.chr() != u32::from(b','))
-            }
+        let plain = |t: &Tok| {
+            *t != comma && *t != nil && (t.is_cs_or_active() || !matches!(t.cat(), Some(1 | 2 | 6)))
         };
+
         if item.is_empty() || !item.iter().all(plain) || list.len() != 1 || !list[0].is_cs() {
             return false;
         }
-        let has = match self.lift(|r| r.clist_has(list[0], &item)) {
+        // (what the body's words mean: the shape's are the primitives)
+        let meant = self.lift(|r| {
+            let prim = |x: &crate::val::Mean, name: &str| {
+                matches!(x, crate::val::Mean::Prim(n, _, _) if *n == name)
+            };
+            Ok(prim(&r.mean_of(def)?, "def")
+                && prim(&r.mean_of(ifx)?, "ifx")
+                && prim(&r.mean_of(xa1)?, "expandafter")
+                && prim(&r.mean_of(xa2)?, "expandafter"))
+        });
+        match meant {
+            None => return true,
+            Some(false) => return false,
+            Some(true) => {}
+        }
+        let next = match self.lift(|r| r.clist_next(list[0], &item, nil)) {
             None => return true,
             Some(None) => return false,
             Some(Some(h)) => h,
         };
-        // the body with its arguments, to the end of its `\def`
-        let mut toks: Vec<Tok> = Vec::with_capacity(m.body.len() + item.len());
-        for sg in &m.segs {
-            toks.extend_from_slice(&m.body[sg.lo as usize..sg.hi as usize]);
-            match sg.param {
-                0 => {}
-                1 => toks.extend_from_slice(&item),
-                _ => toks.extend_from_slice(&list),
-            }
-        }
-        let Some(open) = toks.iter().position(|t| t.cat() == Some(1)) else {
-            return false;
-        };
-        let mut depth = 0i32;
-        let mut close = None;
-        for (i, t) in toks.iter().enumerate().skip(open) {
-            match t.cat() {
-                Some(1) => depth += 1,
-                Some(2) => {
-                    depth -= 1;
-                    if depth == 0 {
-                        close = Some(i);
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let want = if has {
-            "MT@inlist@true"
-        } else {
-            "MT@inlist@false"
-        };
-        let (Some(close), Some(&sw)) = (
-            close,
-            toks.iter()
-                .find(|t| t.as_cs().is_some_and(|c| c.name() == want)),
-        ) else {
-            return false;
-        };
-        toks.truncate(close + 1);
-        toks.push(sw);
+        let mut toks: Vec<Tok> = Vec::with_capacity(n + item.len() + a.len());
+        toks.extend_from_slice(a);
+        toks.extend_from_slice(&item);
+        toks.extend_from_slice(&b[..=n - 5]);
+        toks.push(ifx);
+        toks.push(next.unwrap_or(end));
+        toks.push(end);
+        toks.extend_from_slice(&b[11..n - 5]);
         if self.aopen != 0 {
             self.end_spent_lists();
         }

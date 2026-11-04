@@ -488,3 +488,182 @@ fn a_counter_among_a_macros_delimiters_matches_its_digits() {
     let (_, out) = cold("delim", src, 1);
     assert_eq!(out.trim_end(), "[a][x]", "{out:?}");
 }
+
+/// `\xdef\list{\list item,}` is a relation: an item added earlier gives every
+/// later adder another value without running it, and what the list holds is
+/// what TeX's copy would be, in every shape of its use: the macro read back in
+/// the same paragraph, a body that expands it again, a replacement after it, a
+/// local one in a group, and a list that stops being plain text (its `\foo`
+/// expanded by each `\xdef`, so each adder is run again).
+#[test]
+fn a_list_added_to_is_a_relation() {
+    let sentence = "long enough to make a few lines when set in the plain format's ten point roman \
+                    type, so that the paragraphs do fill a page or two of the document in the end.";
+    let src = |first: &str, mid: &str| {
+        let mut s = String::from(
+            "\\openout1=\\jobname.out\n\\def\\list{}\\def\\foo{x}\n\\def\\add#1{\\xdef\\list{\\list #1}}\n",
+        );
+        s.push_str(first);
+        s.push_str("\n\n");
+        for i in 0..12 {
+            let _ = write!(s, "\\add{{a{i},}}Paragraph {i}, {sentence}\n\n");
+            if i == 5 {
+                s.push_str(mid);
+                s.push_str("\n\n");
+            }
+        }
+        s.push_str("\\write1{[\\list]}\nEnd.\\par\n\\closeout1\n\\bye\n");
+        s
+    };
+    let items = |r: std::ops::Range<usize>| {
+        let mut s = String::new();
+        for i in r {
+            let _ = write!(s, "a{i},");
+        }
+        s
+    };
+    for (name, first, mid, want) in [
+        ("plain", "Start.", "Middle.", format!("[{}]", items(0..12))),
+        (
+            "added first",
+            "\\add{z,}Start.",
+            "Middle.",
+            format!("[z,{}]", items(0..12)),
+        ),
+        (
+            "read back",
+            "Start.",
+            "\\add{m,}\\edef\\copy{\\list}\\xdef\\list{\\copy n,}Middle.",
+            format!("[{}m,n,{}]", items(0..6), items(6..12)),
+        ),
+        (
+            "twice over",
+            "Start.",
+            "\\add{\\list}Middle.",
+            format!("[{}{}{}]", items(0..6), items(0..6), items(6..12)),
+        ),
+        (
+            "replaced",
+            "Start.",
+            "\\add{m,}\\gdef\\list{r,}Middle.",
+            format!("[r,{}]", items(6..12)),
+        ),
+        (
+            "local",
+            "Start.",
+            "{\\add{m,}\\def\\list{l,}\\add{k,}}Middle.",
+            format!("[l,k,{}]", items(6..12)),
+        ),
+        (
+            "not plain",
+            "\\gdef\\list{\\foo,}Start.",
+            "Middle.",
+            format!("[x,{}]", items(0..12)),
+        ),
+        (
+            "not plain later",
+            "Start.",
+            "\\gdef\\list{\\foo,}Middle.",
+            format!("[x,{}]", items(6..12)),
+        ),
+    ] {
+        let (dvi, out) = cold("append", &src(first, mid), 1);
+        assert_eq!(out.trim_end(), want, "{name}");
+        for threads in [1, 4] {
+            let dir = common::scratch(&format!("defer-append-{threads}"));
+            let opts = Options {
+                threads: Some(threads),
+                ..common::options("./d.tex", "d", "", &dir)
+            };
+            let mut b = common::build(opts, Some(&common::plain()), &src("Start.", "Middle."));
+            common::rebuild(&mut b, &src(first, mid));
+            let got: String = b
+                .writes()
+                .into_iter()
+                .filter(|(k, _)| *k == 1)
+                .map(|(_, t)| t)
+                .collect();
+            assert_eq!(got.trim_end(), want, "{name} -j{threads}: the edit");
+            assert_eq!(b.output().0, dvi, "{name} -j{threads}: the edit's output");
+            common::rebuild(&mut b, &src("Start.", "Middle."));
+        }
+    }
+    // (the later adders stand: an item added first runs the piece it is in,
+    // and what reads the whole list, not one adder)
+    let dir = common::scratch("defer-append-runs");
+    let opts = Options {
+        threads: Some(1),
+        ..common::options("./d.tex", "d", "", &dir)
+    };
+    let mut b = common::build(opts, Some(&common::plain()), &src("Start.", "Middle."));
+    let r = common::rebuild(&mut b, &src("\\add{z,}Start.", "Middle."));
+    let execs = runs_of_report(&r, "exec") + runs_of_report(&r, "resume");
+    assert!(execs <= 4, "runs after an item added first: {execs}");
+}
+
+/// A membership test of a comma list as macros write it, whatever their names:
+/// the same answers as the match it stands for, a list grown by another item
+/// makes no read of its text, and an item that moves earlier changes the
+/// answers it should.
+#[test]
+fn a_membership_test_of_a_list_reads_the_items_membership() {
+    let sentence = "long enough to make a few lines when set in the plain format's ten point roman \
+                    type, so that the paragraphs do fill a page or two of the document in the end.";
+    let src = |first: &str| {
+        let mut s = String::from(
+            "\\openout1=\\jobname.out\n\\def\\list{}\\def\\res{}\n\
+             \\def\\test#1#2{\\def\\match##1,#1,##2##3\\nil{\\ifx##2\\empty \
+             \\xdef\\res{\\res N}\\else\\ifx\\relax\\relax\\xdef\\res{\\res Y}\\fi\\fi}%\n\
+             \\expandafter\\match\\expandafter,#2,#1,\\empty\\nil}\n\
+             \\def\\add#1{\\xdef\\list{\\list #1,}}\n",
+        );
+        s.push_str(first);
+        s.push_str("\n\n");
+        for i in 0..8 {
+            let _ = write!(
+                s,
+                "\\test{{f{i}}}\\list\\add{{f{i}}}\\test{{f{i}}}\\list Paragraph {i}, {sentence}\n\n"
+            );
+        }
+        s.push_str("\\write1{[\\list|\\res]}\nEnd.\\par\n\\closeout1\n\\bye\n");
+        s
+    };
+    let mut list = String::new();
+    for i in 0..8 {
+        let _ = write!(list, "f{i},");
+    }
+    for (first, want) in [
+        (
+            // (an item's next token is what the match compares: `\\empty`
+            // after `f0`, as TeX's `\\ifx##2\\empty` has it; then the `\\xdef`
+            // that adds to the list expands it away)
+            "\\font\\fa=cmr10 \\gdef\\list{f0,\\empty,\\fa,}\\test{\\fa}\\list Start.",
+            format!("[f0,,\\fa ,{list}|YNY{}]", "NY".repeat(7)),
+        ),
+        ("Start.", format!("[{list}|{}]", "NY".repeat(8))),
+        (
+            "\\add{f3}Start.",
+            format!("[f3,{list}|{}YY{}]", "NY".repeat(3), "NY".repeat(4)),
+        ),
+    ] {
+        let (dvi, out) = cold("clist", &src(first), 1);
+        assert_eq!(out.trim_end(), want, "{first}");
+        for threads in [1, 4] {
+            let dir = common::scratch(&format!("defer-clist-{threads}"));
+            let opts = Options {
+                threads: Some(threads),
+                ..common::options("./d.tex", "d", "", &dir)
+            };
+            let mut b = common::build(opts, Some(&common::plain()), &src("Start."));
+            common::rebuild(&mut b, &src(first));
+            let got: String = b
+                .writes()
+                .into_iter()
+                .filter(|(k, _)| *k == 1)
+                .map(|(_, t)| t)
+                .collect();
+            assert_eq!(got.trim_end(), want, "{first} -j{threads}");
+            assert_eq!(b.output().0, dvi, "{first} -j{threads}: the output");
+        }
+    }
+}

@@ -221,3 +221,23 @@ after the walk's lock (`commit::reask_reader` runs with none held).
 A relative `\\csname` result must itself be a symbol (`cmd::SYM`, its default the
 forced read), not the concrete token: the token can reach a macro body, and the
 run would then depend on the name with no read of it.
+
+## 7. Lists only added to (2026-11-04)
+
+The same defect, on macros: `\xdef\list{\list item,}` (microtype's font list, a
+font's first user adds it) defined a value, so a first user that moved gave every
+later adder another value, and every later adder ran again.
+
+- **Append relation** (`Ctx::define_rel_by`, `val::append_relation`,
+  `Run::append_head`): where such a `\xdef` stands in a macro's body and the list
+  is a parameterless macro holding no brace or parameter character, the run keeps
+  the rest of the body as a relation on what reaches it, as `\advance` is kept. It
+  reads `val::plain_list_projection`: the list's shape and the set of control
+  sequences in it, then each one's class where the `\xdef` is (that it stores as
+  itself). A list reordered answers the same. A list holding a control sequence
+  it has not checked answers otherwise and runs it again.
+- **Membership** (`Run::clist_next`, `Expand::clist_call`): a macro of the shape
+  `\def\test#1#2{\def\match##1,#1,##2##3\nil{\ifx##2\end ...\fi}%
+  \expandafter\match\expandafter,#2,#1,\end\nil}`, by shape, not by name, reads
+  of the list what the match gives `##2`: the token after the item's first
+  occurrence (`val::clist_projection`), none where it is not there.
