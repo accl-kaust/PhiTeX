@@ -2103,10 +2103,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     // (queued in their order: the ready heap takes the first queued first
     // among equal keys (`sched::Ready`), so its placements run in their
-    // order, a child before the node after it, where `sched::sched_key`
+    // order, a child before the node after it, where `sched::Ready`
     // ties them (the settling layer's, keyed at the frontier))
-    // (the frontier this run moved, before its placements are queued: they
-    // are queued by where they stand against it, `sched::sched_key`)
+    // (the frontier this run moved, before its placements are queued)
     if let Some(at) = frontier {
         eng.frontier_by.store(node.id.raw() + 1, Ordering::Release);
         let new = at.map_or(0, |n| n.raw() + 1);

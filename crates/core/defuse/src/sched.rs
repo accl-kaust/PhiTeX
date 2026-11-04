@@ -385,29 +385,85 @@ impl Worker {
         }
     }
 
-    /// Seeds the block with nodes to run in this order.
-    pub(crate) fn seed(&self, nodes: &[NodeId]) {
+    /// Seeds the block with nodes to run in this order; a node whose work
+    /// is at the settling layer's frontier on the ready heap, ordered by the
+    /// frontier ([`Queues`]): in a block it ran by its label, after the
+    /// document (at one thread every edit's nodes are a block).
+    pub(crate) fn seed(&self, eng: &Engine, nodes: &[NodeId]) {
         let run = self.block_runs.fetch_add(1, Ordering::Relaxed);
         // (counted before pushed: a count that reaches zero ends the
         // evaluation, so no entry may be seen before its count)
         self.shared.outstanding.fetch_add(nodes.len(), Ordering::SeqCst);
         for &n in nodes.iter().rev() {
-            self.block.push((n, run));
+            let node = eng.node(n);
+            if eng.op(node.op()).works_at_frontier() {
+                self.ready().push(eng, node);
+            } else {
+                self.block.push((n, run));
+            }
         }
     }
 }
 
-/// A worker's runnable nodes, the earliest by place first ([`sched_key`]),
+/// A worker's runnable nodes, the earliest by place first,
 /// the first queued first among equals: on one thread TeX's own order (a
 /// predecessor before its reader, the page built after each piece and a
 /// routine run before the text after its page), on more the earliest work
 /// first, the critical path's.
-/// A queued node's order: its place (`sched_key`), text after the settling
+/// A queued node's order: its place, text after the settling
 /// layer at one place, the order it was queued in, its raw id.
 type ReadyKey = (u64, bool, u64, u64);
 
+/// A queued node whose work is at the settling layer's frontier
+/// (`Operation::works_at_frontier`): its label, the order it was queued
+/// in, its raw id.
+type FrontierKey = (u64, u64, u64);
+
+/// [`Ready`]'s two queues.
+#[derive(Default)]
+struct Queues {
+    /// Those keyed by their label, for good.
+    placed: std::collections::BinaryHeap<std::cmp::Reverse<ReadyKey>>,
+    /// Those keyed where the frontier stands when they are taken
+    /// ([`frontier_place`]), not where it stood when they were queued.
+    /// Keyed once, a loop node dirty since the edit kept the key of the
+    /// frontier then, the document's end, while the runs before it moved
+    /// the frontier back to the page they changed: it ran only after every
+    /// finisher in the queue, each of those on a page it had not fired yet
+    /// and on the float list of a page it would fire differently, one such
+    /// wave of the document's pages per loop node (amsldoc, a figure
+    /// deleted: 582 finisher runs at -j1).
+    at_frontier: std::collections::BinaryHeap<std::cmp::Reverse<FrontierKey>>,
+}
+
+impl Queues {
+    /// The next node's key and whether it is at the frontier.
+    fn first(&self, eng: &Engine) -> Option<(ReadyKey, bool)> {
+        let placed = self.placed.peek().map(|x| x.0);
+        let front = self.at_frontier.peek().map(|x| {
+            let (p, s, id) = x.0;
+            ((frontier_place(eng).map_or(p, |f| p.min(f)), false, s, id), true)
+        });
+        match (placed, front) {
+            (Some(a), Some((b, f))) if b < a => Some((b, f)),
+            (Some(a), _) => Some((a, false)),
+            (None, b) => b,
+        }
+    }
+
+    fn pop(&mut self, eng: &Engine) -> Option<NodeId> {
+        let (k, front) = self.first(eng)?;
+        if front {
+            self.at_frontier.pop();
+        } else {
+            self.placed.pop();
+        }
+        Some(NodeId::from_raw(k.3))
+    }
+}
+
 pub(crate) struct Ready {
-    heap: Mx<std::collections::BinaryHeap<std::cmp::Reverse<ReadyKey>>>,
+    heap: Mx<Queues>,
     seq: AtomicU64,
     len: AtomicUsize,
     /// When it last went from empty to not, ns on the pool's clock.
@@ -418,7 +474,7 @@ pub(crate) struct Ready {
 impl Ready {
     fn new(t0: Instant) -> Ready {
         Ready {
-            heap: Mx::new(std::collections::BinaryHeap::new()),
+            heap: Mx::new(Queues::default()),
             seq: AtomicU64::new(0),
             len: AtomicUsize::new(0),
             since: AtomicU64::new(0),
@@ -434,24 +490,32 @@ impl Ready {
     }
 
     pub(crate) fn push(&self, eng: &Engine, n: &Node) {
-        let k = sched_key(eng, n);
-        // (at one place the settling layer first: TeX builds the page
-        // after the paragraph that ends there, before the text after it)
-        let text = !eng.op(n.op()).settles_at_quiet();
+        let p = n.pos_hint().0;
         let s = self.seq.fetch_add(1, Ordering::Relaxed);
-        self.heap.lock().push(std::cmp::Reverse((k, text, s, n.id.raw())));
+        let op = eng.op(n.op());
+        if op.works_at_frontier() {
+            self.heap.lock().at_frontier.push(std::cmp::Reverse((p, s, n.id.raw())));
+        } else {
+            // (at one place the settling layer first: TeX builds the page
+            // after the paragraph that ends there, before the text after it)
+            let text = !op.settles_at_quiet();
+            self.heap
+                .lock()
+                .placed
+                .push(std::cmp::Reverse((p, text, s, n.id.raw())));
+        }
         if self.len.fetch_add(1, Ordering::Relaxed) == 0 {
             self.since.store(ns(self.t0), Ordering::Relaxed);
         }
     }
 
-    pub(crate) fn pop(&self) -> Option<NodeId> {
+    pub(crate) fn pop(&self, eng: &Engine) -> Option<NodeId> {
         if self.len.load(Ordering::Relaxed) == 0 {
             return None;
         }
-        let x = self.heap.lock().pop()?;
+        let x = self.heap.lock().pop(eng)?;
         self.len.fetch_sub(1, Ordering::Relaxed);
-        Some(NodeId::from_raw(x.0.3))
+        Some(x)
     }
 
     /// A thief's `pop`: none where the heap is empty or its owner (or
@@ -460,29 +524,29 @@ impl Ready {
     /// engine's: 5.3% of worker time at 32 threads,
     /// `commits_do_not_wait_on_each_other`). None before it has waited
     /// ([`Ready::waited`]).
-    fn steal(&self) -> Option<NodeId> {
+    fn steal(&self, eng: &Engine) -> Option<NodeId> {
         if self.len.load(Ordering::Relaxed) == 0 || !self.waited(ns(self.t0)) {
             return None;
         }
-        let x = self.heap.try_lock()?.pop()?;
+        let x = self.heap.try_lock()?.pop(eng)?;
         self.len.fetch_sub(1, Ordering::Relaxed);
-        Some(NodeId::from_raw(x.0.3))
+        Some(x)
     }
 
     /// The earliest node's key, if any.
-    fn first_key(&self) -> Option<u64> {
+    fn first_key(&self, eng: &Engine) -> Option<u64> {
         if self.len.load(Ordering::Relaxed) == 0 {
             return None;
         }
-        self.heap.lock().peek().map(|x| x.0.0)
+        self.heap.lock().first(eng).map(|x| x.0.0)
     }
 
     /// A thief's `pop`, waiting for the lock of a heap that has waited.
-    fn steal_waiting(&self) -> Option<NodeId> {
+    fn steal_waiting(&self, eng: &Engine) -> Option<NodeId> {
         if self.len.load(Ordering::Relaxed) == 0 || !self.waited(ns(self.t0)) {
             return None;
         }
-        self.pop()
+        self.pop(eng)
     }
 
     fn len(&self) -> usize {
@@ -490,29 +554,26 @@ impl Ready {
     }
 }
 
-/// Where a node stands for the order it runs in: its label; a node whose
-/// work is at the settling layer's frontier (`Operation::works_at_frontier`)
-/// past the frontier (`Ctx::set_frontier`) at the frontier (the page loop
-/// stands after the whole text and folds the piece at its hole, a rest
-/// folds from the page its loop node waited at). A finisher keeps its
-/// label: keyed at the frontier, a finisher of a page past it, re-asked
-/// by the finisher before (a counter, a mark), ran ahead of the loop
-/// still remaking the pages before it, and re-asked the finishers after
+/// Where the settling layer's frontier stands (`Ctx::set_frontier`), for
+/// the order of a node whose work is at it (`Operation::works_at_frontier`):
+/// the page loop stands after the whole text and folds the piece at its
+/// hole, a rest folds from the page its loop node waited at. A finisher
+/// keeps its label: keyed at the frontier, a finisher of a page past it,
+/// re-asked by the finisher before (a counter, a mark), ran ahead of the
+/// loop still remaking the pages before it, and re-asked the finishers after
 /// it for every intermediate state of each one before: lineno's numbered
 /// lines, a routine fired at every line, ran the finishers of the
 /// pages after the loop's 100 to 150 times each a pass (-j1, 60 000
 /// finisher runs for 2 900 pages; more than 600 s where pdflatex takes
 /// 4.4 s; accl 22446).
-fn sched_key(eng: &Engine, n: &Node) -> u64 {
-    let p = n.pos_hint().0;
-    if !eng.op(n.op()).works_at_frontier() {
-        return p;
-    }
+///
+/// A frontier at a node an edit removed stands where that node stood, for
+/// this order: the layer folds again from there (`frontier_back`).
+fn frontier_place(eng: &Engine) -> Option<u64> {
     let fr = eng.frontier.load(Ordering::Acquire);
-    match fr.checked_sub(1).and_then(|f| eng.placed_node(NodeId::from_raw(f))) {
-        Some(f) if f.state() != State::Gone => p.min(f.pos_hint().0),
-        _ => p,
-    }
+    fr.checked_sub(1)
+        .and_then(|f| eng.placed_node(NodeId::from_raw(f)))
+        .map(|f| f.pos_hint().0)
 }
 
 /// Starts `ws` on threads of scope `s`: the first's thread starts two
@@ -748,7 +809,7 @@ impl Pool {
     fn leave_queued(&self, eng: &Engine, workers: &[Worker]) {
         let mut left = Vec::new();
         for w in workers {
-            while let Some(n) = w.ready().pop() {
+            while let Some(n) = w.ready().pop(eng) {
                 left.push(n);
             }
             while let Some((n, _)) = w.block.pop() {
@@ -792,7 +853,7 @@ impl Pool {
     fn drain_pending(&self, eng: &Engine, w: &Worker) -> usize {
         let mut nodes = eng.take_pending(w);
         nodes.retain(|&n| !defer(eng, &self.shared, n));
-        w.seed(&nodes);
+        w.seed(eng, &nodes);
         nodes.len()
     }
 
@@ -817,18 +878,18 @@ impl Pool {
         // page's break on its routine's state before that page and again
         // as each finisher came)
         let me = w.ready();
-        match (me.first_key(), w.block.pop()) {
+        match (me.first_key(eng), w.block.pop()) {
             (Some(k), Some((b, run))) => {
                 if eng.node(b).pos_hint().0 < k {
                     return Some(b);
                 }
                 w.block.push((b, run));
-                if let Some(n) = me.pop() {
+                if let Some(n) = me.pop(eng) {
                     return Some(n);
                 }
             }
             (Some(_), None) => {
-                if let Some(n) = me.pop() {
+                if let Some(n) = me.pop(eng) {
                     return Some(n);
                 }
             }
@@ -845,7 +906,7 @@ impl Pool {
         let n = self.n;
         for k in 1..n {
             let v = (w.ix + k) % n;
-            if let Some(x) = self.shared.ready[v].steal() {
+            if let Some(x) = self.shared.ready[v].steal(eng) {
                 Worker::add(&w.steals, 1);
                 // (one woken at a time, each for what is left)
                 if self.shared.ready[v].len() > 0 {
@@ -857,7 +918,7 @@ impl Pool {
         // (one held meanwhile, not empty: waited for, no work left behind)
         for k in 1..n {
             let v = (w.ix + k) % n;
-            if let Some(x) = self.shared.ready[v].steal_waiting() {
+            if let Some(x) = self.shared.ready[v].steal_waiting(eng) {
                 Worker::add(&w.steals, 1);
                 if self.shared.ready[v].len() > 0 {
                     self.shared.wake_one();
@@ -1353,7 +1414,7 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
                 .filter(|&n| eng.placed_node(n).is_some_and(|x| x.state() == State::Dirty))
                 .collect();
             if !outs.is_empty() {
-                w.seed(&outs);
+                w.seed(eng, &outs);
                 continue;
             }
             if let Some(s) = src.as_deref_mut() {
@@ -2700,6 +2761,124 @@ mod frontier_tests {
         super::mark_stale_now(&e, None, ln, range(b));
         assert_eq!(e.frontier.load(Ordering::Acquire), at(b));
         e.evaluate(1).unwrap();
+        assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(3));
+    }
+
+    /// A layer's node queued while the frontier stood at the line's end is
+    /// taken by where the frontier stands when it is taken: moved back to
+    /// A, the layer goes before B's piece, queued first and standing before
+    /// the layer; moved on past B, after it.
+    #[test]
+    fn a_node_at_the_frontier_is_ordered_by_where_the_frontier_stands_when_taken() {
+        let e = Engine::new();
+        let (piece, layer) = (e.register(Arc::new(Piece)), e.register(Arc::new(Layer)));
+        let v = e.values();
+        e.declare_accumulator(v.field("vp"), Arc::new(SumMonoid));
+        let u = e.new_unit();
+        let a = e.push(u, piece, vec![v.int(1)]);
+        let b = e.push(u, piece, vec![v.int(2)]);
+        let l = e.push(u, layer, vec![]);
+        e.evaluate(1).unwrap();
+        let (ln, bn) = (e.placed_node(l).unwrap(), e.placed_node(b).unwrap());
+        let ready = super::Ready::new(std::time::Instant::now());
+        let queue = || {
+            ready.push(&e, bn);
+            ready.push(&e, ln);
+        };
+        e.frontier.store(l.raw() + 1, Ordering::Release);
+        queue();
+        e.frontier.store(a.raw() + 1, Ordering::Release);
+        assert_eq!(ready.first_key(&e), Some(e.placed_node(a).unwrap().pos_hint().0));
+        assert_eq!(ready.pop(&e), Some(l), "the frontier moved back after it was queued");
+        assert_eq!(ready.pop(&e), Some(b));
+        queue();
+        e.frontier.store(l.raw() + 1, Ordering::Release);
+        assert_eq!(ready.pop(&e), Some(b), "the frontier past the piece");
+        assert_eq!(ready.pop(&e), Some(l));
+        queue();
+        e.frontier.store(0, Ordering::Release);
+        assert_eq!(ready.pop(&e), Some(b), "no frontier: by their places");
+        assert_eq!(ready.pop(&e), Some(l));
+        assert_eq!(ready.pop(&e), None);
+    }
+
+    /// An edit's nodes at one thread are a block, run by their labels; the
+    /// layer's, re-asked with them, is not one of it: with the frontier back
+    /// at A, removed or not, it runs before B's piece and sees B's value on
+    /// a second fold, not after the whole line has run once on what it had.
+    #[test]
+    fn an_edit_at_one_thread_runs_the_layer_at_its_frontier_not_after_the_text() {
+        static ORDER: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+        struct Logged(&'static str);
+        impl Operation for Logged {
+            fn name(&self) -> &'static str {
+                self.0
+            }
+
+            fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+                ORDER.lock().unwrap().push(self.0);
+                let f = cx.values().field("vp");
+                let x = cx.args()[0];
+                cx.contribute(f, x);
+                Ok(ValueId::UNIT)
+            }
+        }
+        struct LoggedLayer;
+        impl Operation for LoggedLayer {
+            fn name(&self) -> &'static str {
+                "layer"
+            }
+
+            fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+                ORDER.lock().unwrap().push("layer");
+                let vp = cx.values().field("vp");
+                let x = cx.fold(vp, None, None)?;
+                cx.set_frontier(None);
+                Ok(x)
+            }
+
+            fn contributes(&self, _: &[ValueId], _: &Values, _: Field) -> bool {
+                false
+            }
+
+            fn settles_at_quiet(&self) -> bool {
+                true
+            }
+
+            fn works_at_frontier(&self) -> bool {
+                true
+            }
+        }
+        let e = Engine::new();
+        let (pa, pb) = (e.register(Arc::new(Logged("a"))), e.register(Arc::new(Logged("b"))));
+        let layer = e.register(Arc::new(LoggedLayer));
+        let v = e.values();
+        let vp = v.field("vp");
+        e.declare_accumulator(vp, Arc::new(SumMonoid));
+        let u = e.new_unit();
+        let a = e.push(u, pa, vec![v.int(1)]);
+        let b = e.push(u, pb, vec![v.int(2)]);
+        let l = e.push(u, layer, vec![]);
+        e.evaluate(1).unwrap();
+        ORDER.lock().unwrap().clear();
+        // (the frontier back at A: the layer's and B's re-asks both pending)
+        let wake = |by: NodeId| Wake {
+            by: Some(by),
+            cause: Cause::Range { field: vp, by },
+            at_ns: 0,
+        };
+        super::mark_stale_now(&e, None, e.placed_node(l).unwrap(), wake(a));
+        super::mark_stale_now(&e, None, e.placed_node(b).unwrap(), wake(a));
+        e.evaluate(1).unwrap();
+        // (the layer first; its fold meets B dirty, a hole, and goes on
+        // once B has run)
+        assert_eq!(
+            ORDER.lock().unwrap().first(),
+            Some(&"layer"),
+            "{:?}",
+            ORDER.lock().unwrap()
+        );
+        assert!(!ORDER.lock().unwrap().contains(&"a"), "A was not asked");
         assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(3));
     }
 }
