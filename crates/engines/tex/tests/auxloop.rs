@@ -582,5 +582,5 @@ Value: \the\count300.
     };
     let b = common::build(opts, Some(&common::plain()), DOC);
     let (dvi, _) = b.output();
-    assert!(!dvi.is_empty());
+    assert!(dvi.windows(4).any(|w| w == b"alue"), "no page text");
 }
