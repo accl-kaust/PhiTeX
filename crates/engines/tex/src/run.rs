@@ -262,6 +262,11 @@ pub(crate) struct Ops {
     /// a membership test of a list macro reads whether the item is in it
     /// ([`Run::clist_has`]).
     pub clist_proj: phitex_defuse::ProjId,
+    /// The gobbled-call projection of meanings
+    /// ([`crate::val::skeleton_projection`]): a macro the command loop
+    /// expands whose body's head gobbles every group after it reads only
+    /// the head and the groups' count ([`Run::skeleton_lookup`]).
+    pub skel_proj: phitex_defuse::ProjId,
     /// The build's read-time PDF commands, kept for the link by serial
     /// (`crate::pdfout::command`).
     pub pdf_cmds: std::sync::Arc<crate::pdfout::CmdMemo>,
@@ -680,6 +685,13 @@ pub(crate) struct Run<'c, 'a> {
     pub exps: u64,
     /// The macro call next is the command loop's own ([`Run::counted_loop`]).
     pub command_call: bool,
+    /// Set while the command loop fetches its next token
+    /// ([`Run::skeleton_lookup`]).
+    pub cmd_fetch: bool,
+    /// The token the command loop fetched, read through the gobbled-call
+    /// projection: its location, its body's head and the groups' count
+    /// ([`Run::skeleton_call`]).
+    pub skel: Option<(Tok, Loc, Tok, u8)>,
     /// The lines named by a line being expanded for the log ([`Run::write_out`]);
     /// none where its text can go elsewhere.
     pub log_marks: Option<Vec<i64>>,
@@ -1237,6 +1249,8 @@ impl<'c, 'a> Run<'c, 'a> {
             cmds: 0,
             exps: 0,
             command_call: false,
+            cmd_fetch: false,
+            skel: None,
             log_marks: None,
             xpand_depth: 0,
             marks_depth: 0,
@@ -1737,7 +1751,7 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     #[inline(never)]
-    fn load_slow(&mut self, loc: Loc) -> R<()> {
+    pub(crate) fn load_slow(&mut self, loc: Loc) -> R<()> {
         if self.in_skip && self.rec_load {
             self.skip_first.push(loc);
         }
@@ -4188,6 +4202,18 @@ impl<'c, 'a> Run<'c, 'a> {
         if kind == "error" {
             self.diag(true, text);
         }
+        // (an `\errmessage`, LaTeX's errors among them: a diagnostic at
+        // the place it was met, its first line the message; without it
+        // `! LaTeX Error: ...` had no line and no place on the pages)
+        if kind == "errmsg" {
+            let nl = self.ipar(Par::newlinechar)?;
+            let first = u32::try_from(nl)
+                .ok()
+                .and_then(char::from_u32)
+                .and_then(|c| text.split(c).next())
+                .unwrap_or(text);
+            self.diag(true, first);
+        }
         let stop = kind == "error" && {
             self.error_count += 1;
             self.error_count >= 100
@@ -4618,6 +4644,16 @@ impl<'c, 'a> Run<'c, 'a> {
             };
             return Ok(());
         }
+        if self.cmd_fetch
+            && let Some(c) = self.skeleton_lookup(tok)?
+        {
+            self.cur = Cur {
+                tok,
+                cmd: c,
+                chr: 0,
+            };
+            return Ok(());
+        }
         if self.class_reads
             && let Some(c) = self.class_lookup(tok)?
         {
@@ -4629,6 +4665,53 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         }
         self.set_cur_cs_slow(tok)
+    }
+
+    /// The command loop's next token, a macro not yet read whose body is
+    /// a head followed by groups of characters only
+    /// ([`crate::val::skeleton_of`]): read through the gobbled-call
+    /// projection, kept with its head and the groups' count for
+    /// [`Run::skeleton_call`], which goes on only if the head gobbles
+    /// them all; its command code ([`cmd::CALL`]). `None` (read in full,
+    /// as before) for any other meaning, one this run holds, or where the
+    /// meaning comes from elsewhere than the engine.
+    #[inline(never)]
+    fn skeleton_lookup(&mut self, tok: Tok) -> R<Option<u8>> {
+        self.skel = None;
+        if self.interp.is_some()
+            || self.in_skip
+            || self.rec_load
+            || self.fin_scope_closer.is_some()
+            || tok.is_internal_cs()
+            || !tok.is_cs()
+        {
+            return Ok(None);
+        }
+        let Some(l) = self.mean_loc(tok) else {
+            return Ok(None);
+        };
+        if self.st.is_loaded(l) || self.st.lazy(l).is_some() || self.lazy_pre(l) {
+            return Ok(None);
+        }
+        let f = self.loc_field(l);
+        let p = phitex_defuse::PathId::of_proj(self.ops.skel_proj);
+        let mut shape = None;
+        let (_, through) = self.cx.read_or_path(f, p, |v, x| {
+            shape = match crate::val::Mean::decode(v, Some(x)) {
+                crate::val::Mean::Macro(m) => crate::val::skeleton_of(&m),
+                _ => None,
+            };
+            shape.is_some()
+        })?;
+        match shape {
+            Some((head, k)) if through => {
+                self.skel = Some((tok, l, head, k));
+                Ok(Some(cmd::CALL))
+            }
+            // (read whole: `load_slow` loads it, its read answered from
+            // the one made)
+            _ => Ok(None),
+        }
     }
 
     /// A class read (spec-redesign §8): the command code of `tok`'s

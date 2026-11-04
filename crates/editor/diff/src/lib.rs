@@ -785,6 +785,12 @@ pub fn dif_preamble(opts: &Options, preamble: &str) -> String {
         if !colored {
             return l;
         }
+        // (the change bars in the added text's colour too)
+        let l = if l.contains("{changebar}") {
+            format!("{l}\\cbcolor{{DIFaddcolor}}")
+        } else {
+            l
+        };
         l.replace("\\RequirePackage{color}", "\\RequirePackage{xcolor}")
             .replace("\\color{blue}", "\\color{DIFaddcolor}")
             .replace("\\color{red}", "\\color{DIFdelcolor}")

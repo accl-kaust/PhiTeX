@@ -161,7 +161,8 @@ pdflatex leaves `_minted/` there.
   process (a file read by the host itself), and `None` where access times
   do not move (`noatime`), or when a directory's moved (listed);
 - unrestricted (`shell_escape = 1`) only with `-shell-escape` or
-  `shell-escape = true` in `phitex.toml`; restricted otherwise.
+  `shell-escape = true` in the user's `phitex.toml` (a project's is ignored
+  and said: a project folder may be anyone's); restricted otherwise.
 
 The runner lives in the CLI and is passed in through `Options`; nothing in
 the engine spawns a process or touches the file system.

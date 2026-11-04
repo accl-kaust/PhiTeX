@@ -81,6 +81,14 @@ pub(crate) struct Node {
     /// says one waits, read without the lock.
     pub(crate) stale_wake: Mx<Option<Wake>>,
     pub(crate) stale: AtomicBool,
+    /// The first commit whose filed readers stand
+    /// ([`crate::commit::FILED`], [`ReadRec::filed`]): every commit after it
+    /// went on from the run before and kept its reads.
+    pub(crate) filed_floor: AtomicU32,
+    /// A re-ask came while this run ran. Unlike [`Node::stale`] it stays
+    /// set to the commit: what the commit does not check of itself, the
+    /// filed reads, it checks when this says one may have moved.
+    pub(crate) asked: AtomicBool,
     /// Fields whose walks stopped at it while it had not committed
     /// (`commit::first_hole`), each with the scope depth of the definition
     /// walked from: walked on from it when it commits, is taken or is
@@ -279,6 +287,8 @@ impl Node {
             last: Mx::new(None),
             woke: Mx::new(None),
             stale_wake: Mx::new(None),
+            filed_floor: AtomicU32::new(0),
+            asked: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             stopped: Mx::new(Vec::new()),
             waiters: Mx::new(Vec::new()),
@@ -556,6 +566,13 @@ pub(crate) struct ReadRec {
     /// Its field's change count before it read ([`crate::Engine`]'s
     /// `field_epoch`; `u64::MAX` for a read of none).
     pub(crate) epoch: u64,
+    /// Kept by a run going on from a commit before, which filed it: its
+    /// reader stands ([`Node::filed_floor`]), and a commit neither files nor
+    /// checks it again. A page loop parked on a long page keeps every
+    /// read since the page began, and files and checks them all at every
+    /// contributor otherwise (knowledge's manual: 6440 commits of up to
+    /// 35 000 reads, half its build).
+    pub(crate) filed: bool,
 }
 
 impl ReadKind {
@@ -638,6 +655,10 @@ pub(crate) struct Product {
     /// at the commit is one the run did not read again where it was told
     /// to go back before it.
     pub(crate) woken_at: Option<NodeId>,
+    /// The run was woken by the answer its last run parked on
+    /// (`Ctx::parked_on`): a wake merged into it would have named another
+    /// cause, so the kept reads it does not check stood until it ran.
+    pub(crate) on_park: bool,
     /// `Ctx::settle_now`: its definitions reach readers outside the
     /// settling layer at once.
     pub(crate) settle_now: bool,

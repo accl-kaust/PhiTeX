@@ -28,7 +28,7 @@ import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.t
 /** The watch's core, over a WebSocket: requests answered in order, events pushed; joined again when it drops. */
 class Socket implements CoreTransport {
   ws?: WebSocket;
-  /** The wait before the next try (doubled to 30 s while the watch is away). */
+  /** The wait before the next try (doubled to 3 s while the watch is away: a watch started again on this document serves this same address, and the tab joins it within that). */
   private wait = 1000;
   private next = 1;
   private waiting = new Map<number, (r: CoreRes) => void>();
@@ -43,7 +43,7 @@ class Socket implements CoreTransport {
    * those after failures: such a tab would hold back every other's).
    */
   async connect(): Promise<void> {
-    if (document.hidden) return void addEventListener("visibilitychange", () => void this.connect(), { once: true });
+    // (a tab in the background asks too, over HTTP first: the watch then sees it and opens no second tab)
     if (!(await this.there())) return this.again();
     this.open();
   }
@@ -59,7 +59,7 @@ class Socket implements CoreTransport {
 
   private again(): void {
     setTimeout(() => void this.connect(), this.wait);
-    this.wait = Math.min(this.wait * 2, 30000);
+    this.wait = Math.min(this.wait * 2, 3000);
   }
 
   private open(): void {
@@ -143,6 +143,8 @@ class Pages implements CoreTransport {
       const since = typeof s.since_ms === "number" ? s.since_ms : s.cold && typeof s.ms === "number" ? s.ms : null;
       this.change = since === null ? null : { since, at: performance.now() };
       if (typeof s.ms === "number") panel.latency(...timing(s));
+      // (the bars: the first build's time, then each edit's)
+      if (typeof s.ms === "number") panel.buildTime(s.ms, !!s.cold);
     });
   }
 
@@ -246,7 +248,8 @@ const panel = new Panel(
     },
     onMain: () => {},
     onReload: () => void session.resync(),
-    onClean: () => void session.resync(),
+    // (Clean rebuild: the watch drops its build and makes it again from nothing, its format kept)
+    onClean: () => void sock.request({ op: "cold" }),
     // (the watch builds again from the files on disk, as `r` in its terminal)
     onRebuild: () => void sock.request({ op: "rebuild" }),
     onCompare: () => openPick(),
@@ -257,6 +260,22 @@ const panel = new Panel(
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
     onContents: () => void session.outline(),
     onFind: (q) => pages.find(q),
+    onSettings: () => void openSettings(),
+    // (a problem's source lines, for Copy for an AI assistant)
+    onLines: async (file, line) => {
+      const r = await sock.request({ op: "info", what: "lines", file, line });
+      return r.ok ? ((r.json?.lines ?? []) as [number, string][]) : null;
+    },
+    // (What's new: this version's CHANGELOG entry, from the binary)
+    onNews: () =>
+      void sock.request({ op: "info", what: "news" }).then((r) => {
+        if (r.ok) panel.news(String(r.json?.version ?? ""), String(r.json?.text ?? ""));
+        else panel.msg("No news for this version", false, true);
+      }),
+    // (the tips seen: the user's phitex.toml through the watch, the same on every port and browser)
+    onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } }),
+    // (the problems' filters: kept the same way)
+    onProblemsHidden: (kinds) => void sock.request({ op: "prefs", set: { "problems-hidden": kinds } }),
   },
   // (the panel's settings: this browser's)
   {
@@ -329,6 +348,11 @@ let counted: ((n: number) => void) | undefined;
 sock.onEvent((e: any) => {
   if (e.event !== "diff") return;
   diffState = e.diff ?? {};
+  // (the changes along the scrollbar while the diff is shown: where the watch placed them)
+  const placed = ((diffState.changes ?? []) as { page?: number; y?: number; new_text?: string; old_text?: string }[])
+    .map((c, i) => (typeof c.page === "number" ? { k: c.page, y: c.y ?? 0, title: `Change ${i + 1}: ${words(c.new_text || "") || words(c.old_text || "")}` } : null))
+    .filter((c): c is { k: number; y: number; title: string } => !!c);
+  panel.diffMarks(diffState.shown === false ? [] : placed);
   const n = diffState.changes?.length;
   if (n === undefined) return;
   if (diffWait) (diffWait(diffState), (diffWait = undefined));
@@ -349,18 +373,26 @@ const save = (name: string) => {
 /** A change's first words as the page shows them: its source without commands, braces and math marks. */
 const words = (src: string) =>
   src.replace(/\\[a-zA-Z@]+\*?/g, " ").replace(/[{}$\\%&~^_#\[\]]/g, " ").split(/\s+/).filter(Boolean).slice(0, 5).join(" ");
-let lastAt = { k: -1, page: 0 };
+/**
+ * Change k shown: on the page the watch placed it (its first glyph's page
+ * and height on the diff's pages), its words marked there, the match
+ * nearest that height; a change with no place (none of its glyphs shown:
+ * a deletion hidden) found by its words alone, the first match.
+ */
 const gotoChange = async (k: number) => {
-  const c = (diffState.changes ?? [])[k - 1] as { new_text?: string; old_text?: string; page?: number } | undefined;
+  const c = (diffState.changes ?? [])[k - 1] as { new_text?: string; old_text?: string; page?: number; y?: number } | undefined;
   if (!c) return;
   const q = words(c.new_text || "") || words(c.old_text || "");
-  if (!q) return;
-  const hits = await pages.find(q);
+  const hits = q ? await pages.find(q) : [];
+  if (typeof c.page === "number") {
+    const y = c.y ?? 0;
+    const near = hits
+      .filter((h) => h.k === c.page)
+      .sort((a, b) => Math.abs(a.boxes[0][1] + a.boxes[0][3] - y) - Math.abs(b.boxes[0][1] + b.boxes[0][3] - y))[0];
+    return panel.reveal([near ?? { k: c.page, boxes: [[18, Math.max(0, y - 10), 14, 12]] }]);
+  }
   if (!hits.length) return void panel.msg(`Change ${k} isn't on the pages`, false, true);
-  const from = k > lastAt.k ? lastAt.page : 0;
-  const at = Math.max(0, hits.findIndex((h) => h.k >= from));
-  lastAt = { k, page: hits[at].k };
-  panel.reveal(hits.slice(at, at + 1));
+  panel.reveal(hits.slice(0, 1));
 };
 
 const runner: DiffRunner<Pair> = {
@@ -380,7 +412,7 @@ const runner: DiffRunner<Pair> = {
   download: (what) => save(`diff.${what}`),
   look: async () => ({ ...LATEXDIFF_LOOK, ...diffState.look }),
   restyle: (l) => void ask({ op: "diff_restyle", markup: l.markup, subtype: l.subtype, add_color: l.add_color, del_color: l.del_color }),
-  stop: () => void ask({ op: "diff_stop" }),
+  stop: () => (panel.diffMarks([]), void ask({ op: "diff_stop" })),
 };
 const controls = new DiffControls(panel, runner);
 addEventListener("keydown", (e) => controls.key(e));
@@ -402,7 +434,14 @@ document.head.append(Object.assign(document.createElement("style"), {
 #phx-pick header small { grid-column: 1 / -1; color: var(--fg2); font-size: 12px; }
 #phx-pick .phx-commits { flex: 1; min-height: 0; }
 #phx-pick header button { grid-row: 1; grid-column: 2; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
-#phx-pick header button:hover { background: var(--hover); }`,
+#phx-pick header button:hover { background: var(--hover); }
+#phx-pick.phx-settings { width: min(460px, calc(100vw - 24px)); }
+.phx-settings .rows { overflow: auto; padding: 4px 0; }
+.phx-settings .srow { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; }
+.phx-settings .srow:hover { background: var(--hover); }
+.phx-settings .srow span { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.phx-settings .srow small { color: var(--fg2); font-size: 12px; }
+.phx-settings .srow button { border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }`,
 }));
 let pick: HTMLElement | undefined;
 let graph: Commits | undefined;
@@ -443,6 +482,10 @@ sock.onOpen = () => {
   panel.connection(true);
   if (started) return void session.resync();
   started = true;
+  // (a tab that joins after the first build: its time for the bars, and its first page not called one)
+  void sock.request({ op: "info", what: "built" }).then((r) => {
+    if (r.ok && Number(r.json?.builds) > 0) panel.joinedLate(typeof r.json?.first_ms === "number" ? r.json.first_ms : undefined, Number(r.json.builds));
+  });
   void session.start();
 };
 // (never connected: the card says so, not "Reading" forever; a browser add-on
@@ -526,7 +569,38 @@ let status: Said = { kind: "status", text: "" };
 let busy = "";
 let unseen = { errors: 0, warnings: 0 };
 
+/** The tab's icon: a dot in the status's colour (green built, orange building, red errors, grey not connected). */
+const favicon = (() => {
+  const link = Object.assign(document.createElement("link"), { rel: "icon" });
+  document.head.append(link);
+  let was = "";
+  return (colour: string) => {
+    if (colour === was) return;
+    was = colour;
+    link.href = `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="${colour}"/></svg>`)}`;
+  };
+})();
+
+/** The tab's title and icon: the document and what the watch is doing ("paper.tex · Building…", "· 2 errors", "· Built", "· Not connected"). */
+const showTitle = () => {
+  const file = (status.text ?? "").split(" · ")[0] || "phitex watch";
+  const connected = !/not connected/.test(status.text ?? "");
+  const errs = /(\d+) errors?/.exec(status.text ?? "")?.[1];
+  const [what, colour] = !connected
+    ? ["Not connected", "#8a93a3"]
+    : busy
+      ? ["Building…", "#f58f2d"]
+      : status.ok === false
+        ? [errs ? `${errs} error${errs === "1" ? "" : "s"}` : "Failed", "#d1453b"]
+        : status.ok === true
+          ? ["Built", "#2e9d63"]
+          : ["Loading…", "#8a93a3"];
+  document.title = connected && file !== "phitex watch" ? `${file} · ${what}` : `${what} · phitex watch`;
+  favicon(colour);
+};
+
 const showBar = () => {
+  showTitle();
   dot.className = "dot" + (busy ? " busy" : status.ok === true ? " ok" : status.ok === false ? " bad" : "");
   barText.textContent = busy ? `${busy}…` : status.text || "phitex watch";
   const n = unseen.errors + unseen.warnings;
@@ -568,9 +642,13 @@ const said = (s: Said, live: boolean) => {
   log.append(line);
   while (log.childElementCount > 2000) log.firstElementChild!.remove();
   if (at) log.scrollTop = log.scrollHeight;
-  if (live && con.hidden) {
+  // (the count is the last build's: its result line starts it again, its
+  // `error:` and `warning:` lines after it counted; the result line itself
+  // is not one more. Opening the drawer reads them)
+  if (live && /^(✓|ok:|✗|failed:)/.test(s.text ?? "")) (unseen = { errors: 0, warnings: 0 }), showBar();
+  else if (live && con.hidden && /^(error|warning): /.test(line.textContent ?? "")) {
     if (line.className === "error") unseen.errors++;
-    else if (line.className === "warning") unseen.warnings++;
+    else unseen.warnings++;
     showBar();
   }
 };
@@ -603,6 +681,55 @@ const backlog = async () => {
   for (const s of (r.json?.items ?? []) as Said[]) said(s, false);
   if (r.json?.status) said(r.json.status as Said, false);
 };
+// ---- Settings (the user's phitex.toml, through the watch: on every port and document) ----
+
+const SETTINGS: [string, string, string][] = [
+  ["watch-write", "Write the PDF into the folder", "After each build, the PDF with its .synctex.gz, as phitex build does (for a PDF viewer outside this page). From the next phitex watch on."],
+  ["synctex", "SyncTeX file with a written PDF", "JOB.synctex.gz beside the PDF, for a PDF viewer's jumps to the source."],
+  ["update-check", "Say when a newer PhiTeX is out", "Asked once a day, in the terminal."],
+];
+let settingsEl: HTMLElement | undefined;
+async function openSettings(): Promise<void> {
+  if (settingsEl && !settingsEl.hidden) return void (settingsEl.hidden = true);
+  const r = await sock.request({ op: "prefs" });
+  if (!r.ok) return void panel.msg(`Couldn't read the settings: ${r.error ?? "not available"}`, true, true);
+  const p = r.json ?? {};
+  if (!settingsEl) {
+    settingsEl = document.createElement("div");
+    settingsEl.id = "phx-pick";
+    settingsEl.className = "phx-settings";
+    document.body.append(settingsEl);
+    addEventListener("keydown", (e) => e.key === "Escape" && settingsEl && !settingsEl.hidden && ((settingsEl.hidden = true), e.stopImmediatePropagation()), { capture: true });
+  }
+  const el = settingsEl;
+  const esc = (t: string) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
+  el.innerHTML =
+    `<header><b>Settings</b><small>Yours, in ${esc(String(p.file ?? "phitex.toml"))}: every document and port</small><button type="button" data-x>Close</button></header>` +
+    `<div class="rows">${SETTINGS.map(([k, name, what]) => `<label class="srow"><input type="checkbox" data-k="${k}" ${p[k] ? "checked" : ""}><span><b>${esc(name)}</b><small>${esc(what)}</small></span></label>`).join("")}` +
+    `<div class="srow"><span><b>Tips</b><small>The feature tips shown again, from the start</small></span><button type="button" data-tips>Show again</button></div>` +
+    `<div class="srow"><span><b>Problems shown</b><small>Which kinds: the filters at the top of the problems list (e)</small></span></div></div>`;
+  el.hidden = false;
+  (el.querySelector("[data-x]") as HTMLElement).onclick = () => (el.hidden = true);
+  (el.querySelector("[data-tips]") as HTMLElement).onclick = () => {
+    void sock.request({ op: "prefs", set: { "tips-seen": [] } });
+    el.hidden = true;
+    panel.tipsReset();
+  };
+  for (const c of el.querySelectorAll<HTMLInputElement>("input[data-k]"))
+    c.onchange = async () => {
+      const r = await sock.request({ op: "prefs", set: { [c.dataset.k!]: c.checked } });
+      panel.msg(r.ok ? `${c.checked ? "On" : "Off"}: ${c.closest("label")!.querySelector("b")!.textContent}` : `Not saved: ${r.error}`, !r.ok, true);
+      if (!r.ok) c.checked = !c.checked;
+    };
+}
+
+/** The user's viewer preferences, as the watch keeps them (`prefs`). */
+const prefs = async () => {
+  const r = await sock.request({ op: "prefs" });
+  if (!r.ok) return;
+  panel.tipsSeen(((r.json?.["tips-seen"] ?? []) as string[]).filter((x) => typeof x === "string"));
+  panel.problemsHidden(((r.json?.["problems-hidden"] ?? []) as string[]).filter((x) => typeof x === "string"));
+};
 const opened = sock.onOpen;
-sock.onOpen = () => (opened(), void backlog());
+sock.onOpen = () => (opened(), void backlog(), void prefs());
 showBar();

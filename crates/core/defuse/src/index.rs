@@ -323,6 +323,9 @@ impl FieldIndex {
 pub(crate) struct RangeIndex {
     shards: Box<[RangeShard]>,
     seq: AtomicU64,
+    /// The entries [`RangeIndex::holding`] stepped over since the last
+    /// report ([`crate::Report::range_stepped`]).
+    pub(crate) stepped: AtomicU64,
 }
 
 #[repr(align(64))]
@@ -459,6 +462,7 @@ impl RangeIndex {
                 .map(|_| RangeShard(Lock::new(FxHashMap::default()), Lock::new(Vec::new())))
                 .collect(),
             seq: AtomicU64::new(0),
+            stepped: AtomicU64::new(0),
         }
     }
 
@@ -581,6 +585,7 @@ impl RangeIndex {
             return Vec::new();
         };
         let mut out = Vec::new();
+        let mut stepped = 0u64;
         for ((class, by_lo), (_, by_hi)) in m.classes.iter().zip(&m.ends) {
             let floor = if *class >= 64 {
                 0
@@ -596,6 +601,7 @@ impl RangeIndex {
             let mut b = by_hi.range((Pos(at.0.saturating_add(1)), 0)..=(Pos(ceil), u64::MAX));
             let (mut ra, mut rb) = (Vec::new(), Vec::new());
             loop {
+                stepped += 1;
                 let Some(((_, seq), (hi, rr))) = a.next() else {
                     out.append(&mut ra);
                     break;
@@ -612,6 +618,7 @@ impl RangeIndex {
                 }
             }
         }
+        self.stepped.fetch_add(stepped, Ordering::Relaxed);
         out
     }
 

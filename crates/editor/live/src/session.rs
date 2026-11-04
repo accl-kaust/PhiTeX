@@ -421,6 +421,17 @@ impl Report {
     }
 }
 
+/// What the builds read ([`Session::watched`]).
+#[derive(Clone, Debug, Default)]
+pub struct Watched {
+    /// The names asked for, as TeX gave them (`./` dropped).
+    pub names: Vec<String>,
+    /// Where those found were found.
+    pub paths: Vec<PathBuf>,
+    /// Whether a build is there (before one: nothing is known yet).
+    pub built: bool,
+}
+
 /// What was written.
 #[derive(Default)]
 pub struct Written {
@@ -1681,6 +1692,29 @@ impl Session {
         }
     }
 
+    /// What the builds read, for a watch's file events ([`Watched`]):
+    /// every name TeX asked the finder for (found or not: a file that
+    /// appears is a change too) with the paths of those found, and the
+    /// names the tools' searches asked for. Empty before a build.
+    pub fn watched(&self) -> Watched {
+        let mut w = Watched::default();
+        // (the main file: never asked of the finder, it is what the build begins with)
+        w.names.push(plain_name(&self.job.path.to_string_lossy()));
+        w.paths.push(self.job.path.clone());
+        for (n, _, p) in &self.inputs {
+            w.names.push(plain_name(n));
+            if let Some(p) = p {
+                w.paths.push(p.clone());
+            }
+        }
+        if let Some(b) = &self.build {
+            w.names
+                .extend(b.tool_reads().into_iter().map(|(n, _)| plain_name(&n)));
+        }
+        w.built = self.build.is_some();
+        w
+    }
+
     /// The names the builds asked the finder for (`inputs`)
     /// that stand for one of `changed` (as found, or as named): by the
     /// names and the files kept, no lookup; a changed name equal to
@@ -1695,6 +1729,10 @@ impl Session {
             .map(|(_, _, p)| p.as_ref().map(|p| plain_name(&p.to_string_lossy())))
             .collect();
         let mut hit = vec![false; self.inputs.len()];
+        // (a changed file TeX did not read: staged too, for a tool that
+        // read it, BibTeX's `.bib`, a `.bst`, makeindex's `.ist`; the
+        // engine stages only what one of its runs read, else nothing)
+        let mut tools: Vec<String> = Vec::new();
         for c in changed {
             let mut any = false;
             for (i, (n, ..)) in self.inputs.iter().enumerate() {
@@ -1714,15 +1752,22 @@ impl Session {
                     && self.host.same_file(f, c)
                 {
                     hit[i] = true;
+                    any = true;
                 }
             }
+            if !any && !tools.contains(c) {
+                tools.push(c.clone());
+            }
         }
-        self.inputs
+        let mut out: Vec<String> = self
+            .inputs
             .iter()
             .zip(hit)
             .filter(|(_, h)| *h)
             .map(|((n, ..), _)| n.clone())
-            .collect()
+            .collect();
+        out.extend(tools);
+        out
     }
 
     /// The main file's name as TeX prints it (`./story.tex`).

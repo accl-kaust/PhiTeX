@@ -338,6 +338,19 @@ impl Run<'_, '_> {
         if let Some(p) = self.mprof.as_mut() {
             *p.entry(name).or_default() += 1;
         }
+        if let Some((tok, l, head, k)) = self.skel.take()
+            && tok == name
+        {
+            if command && !self.st.is_loaded(l) && self.skeleton_call(head, k) {
+                return;
+            }
+            // (read whole after all: the macro runs as written)
+            if !self.st.is_loaded(l)
+                && let Err(h) = self.load_slow(l)
+            {
+                return self.raise(h);
+            }
+        }
         let Some(m) = self.cur_macro() else {
             return;
         };
@@ -384,6 +397,42 @@ impl Run<'_, '_> {
             self.push_range(range, crate::input::ty::MACRO);
         }
         self.input.arena.scratch_end(base);
+    }
+
+    /// The command loop's macro read through the gobbled-call
+    /// projection ([`Run::skeleton_lookup`]): its body is `head` followed
+    /// by `k` groups of characters. Where `head`'s meaning is a macro of
+    /// `k` undelimited parameters, not `\\outer`, whose body uses none of
+    /// them, the call is the two expansions at once: the macro's body
+    /// pushed, then `head` reading the groups as its arguments, §391-§399
+    /// (the characters only scanned for braces), and its body put in
+    /// their place, §400. True where done; false, nothing done, for any
+    /// other head.
+    fn skeleton_call(&mut self, head: Tok, k: u8) -> bool {
+        let m = match self.mean_of(head) {
+            Ok(Mean::Macro(m)) => m,
+            Ok(_) => return false,
+            Err(h) => {
+                self.raise(h);
+                return true;
+            }
+        };
+        let is_match = |t: &Tok| t.raw() >> 21 == u32::from(MATCH_CAT);
+        if m.flags & 2 != 0
+            || m.params.len() != usize::from(k)
+            || !m.params.iter().all(is_match)
+            || m.segs.iter().any(|s| s.param != 0)
+        {
+            return false;
+        }
+        self.exps += 1;
+        if self.aopen != 0 {
+            self.end_spent_lists();
+        }
+        self.input.pop_spent();
+        let r = self.body_range(&m.body);
+        self.push_range(r, crate::input::ty::MACRO);
+        true
     }
 
     /// microtype's `\\MT@in@clist{x}\\list` (whether `x` is an item of the

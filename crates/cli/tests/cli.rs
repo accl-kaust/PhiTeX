@@ -555,6 +555,7 @@ fn watch_word_edit() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--ini",
@@ -729,7 +730,16 @@ fn watch_editor_buffer() {
     let dir = scratch("watch-editor");
     std::fs::write(dir.join("story.tex"), &text).expect("the document");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["watch", "--json", "--ini", "--etex", "-j", "8", "story.tex"])
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--ini",
+            "--etex",
+            "-j",
+            "8",
+            "story.tex",
+        ])
         .env("XDG_RUNTIME_DIR", &dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -963,7 +973,9 @@ fn watch_lsp() {
     let root = dir.canonicalize().expect("the directory");
     let uri = format!("file://{}/doc.tex", root.display());
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["watch", "--lsp", "--ini", "--etex", "-j", "4", "doc.tex"])
+        .args([
+            "watch", "--write", "--lsp", "--ini", "--etex", "-j", "4", "doc.tex",
+        ])
         .env("XDG_RUNTIME_DIR", &dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1170,6 +1182,7 @@ fn watch_lsp_progress() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--lsp",
             "--no-view",
             "--ini",
@@ -1275,7 +1288,9 @@ fn watch_lsp_commands() {
     .expect("a file not built");
     let root = dir.canonicalize().expect("the directory");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["watch", "--lsp", "--ini", "--etex", "-j", "4", "doc.tex"])
+        .args([
+            "watch", "--write", "--lsp", "--ini", "--etex", "-j", "4", "doc.tex",
+        ])
         .env("XDG_RUNTIME_DIR", &dir)
         .env("PHITEX_CACHE_DIR", dir.join("cache"))
         .stdin(Stdio::piped())
@@ -1450,7 +1465,7 @@ fn watch_lsp_main_from_open() {
     let root = repo.canonicalize().expect("the directory");
     let uri = format!("file://{}/paper/doc.tex", root.display());
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &repo)
-        .args(["watch", "--lsp", "--ini", "--etex", "-j", "4"])
+        .args(["watch", "--write", "--lsp", "--ini", "--etex", "-j", "4"])
         .env("XDG_RUNTIME_DIR", &repo)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1916,6 +1931,7 @@ fn watch_plain_edit() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--engine",
@@ -2001,6 +2017,7 @@ fn watch_save_by_rename_builds_the_new_text() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--engine",
@@ -2223,6 +2240,7 @@ fn help_is_sectioned() {
         "Examples:",
         "build",
         "watch",
+        "--write",
         "clean",
         "--json",
         "--no-view",
@@ -2255,6 +2273,7 @@ fn watch_tables_bounded() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--ini",
@@ -2324,7 +2343,7 @@ fn watch_gc_series(name: &str, file: &str, text: &str, args: &[&str], word: usiz
     let _one = one();
     let dir = scratch(name);
     std::fs::write(dir.join(file), text).expect("the document");
-    let mut a = vec!["watch", "--json", "--no-view"];
+    let mut a = vec!["watch", "--write", "--json", "--no-view"];
     a.extend_from_slice(args);
     a.push(file);
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
@@ -2470,6 +2489,7 @@ fn watch_absorbs_an_edit_during_the_cold_build() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--engine",
@@ -2680,6 +2700,7 @@ fn xelatex_watch_compacts_a_series() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--idle",
@@ -2803,6 +2824,7 @@ fn xelatex_exact_edits(name: &str, collect_mb: Option<&str>) {
     let mut child = watch
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--exact-pdf",
@@ -2888,6 +2910,7 @@ fn xelatex_watch_edit() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--engine",
@@ -3243,6 +3266,7 @@ fn watch_says_the_file_is_exact_with_nothing_to_compact() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--idle",
@@ -3274,4 +3298,237 @@ fn watch_says_the_file_is_exact_with_nothing_to_compact() {
         let _ = i.write_all(b"q\n");
     }
     let _ = child.wait();
+}
+
+/// `phitex watch` writes nothing into the folder unless asked (the pages
+/// are in the viewer): no DVI, no log, no aux file after a build and an
+/// edit, its build event naming no output, and none on the way out of a
+/// pipe (no one to ask); `--write` writes the file as before.
+#[test]
+fn watch_writes_nothing_unless_asked() {
+    let _one = one();
+    let text = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("story.tex");
+    for write in [false, true] {
+        let dir = scratch(if write {
+            "watch-writes"
+        } else {
+            "watch-writes-not"
+        });
+        std::fs::write(dir.join("story.tex"), &text).expect("the document");
+        let mut args = vec!["watch", "--json", "--engine", "tex", "story.tex"];
+        if write {
+            args.insert(1, "--write");
+        }
+        let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("phitex watch runs");
+        let stdout = child.stdout.take().expect("its output");
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        let mut seen = Vec::new();
+        let cold = until(&mut lines, "build", &1.into(), &mut seen);
+        assert_eq!(cold["ok"], true, "{cold}");
+        assert_eq!(cold["output"].is_null(), !write, "{cold}");
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(dir.join("story.tex"), text.replacen(" the ", " thy ", 1))
+            .expect("the edit");
+        let ev = until(&mut lines, "build", &2.into(), &mut seen);
+        assert_eq!(ev["ok"], true, "{ev}");
+        if let Some(mut i) = child.stdin.take() {
+            let _ = i.write_all(b"q\n");
+        }
+        let _ = child.wait();
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the folder")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        if write {
+            assert!(names.iter().any(|n| n == "story.dvi"), "{names:?}");
+        } else {
+            assert_eq!(names, ["story.tex"], "written while watching");
+        }
+    }
+}
+
+/// A tool's support file edited during a watch is read again: BibTeX's
+/// style (`.bst`, through its search, not TeX's own reads) changed on disk
+/// is build 2, its page drawn again; the database (`.bib`) too. Both were
+/// read as they were at the first build (the watch said "unchanged").
+#[test]
+fn watch_reads_a_changed_bst_and_bib() {
+    let _one = one();
+    let dir = scratch("watch-bst");
+    let bst = |pre: &str| {
+        format!(
+            "ENTRY {{ title }} {{}} {{}}\n\
+             FUNCTION {{book}} {{ \"\\bibitem{{\" cite$ * \"}}\" * write$ newline$ \"{pre} \" title * write$ newline$ }}\n\
+             READ\n\
+             FUNCTION {{begin.bib}} {{ \"\\begin{{thebibliography}}{{1}}\" write$ newline$ }}\n\
+             EXECUTE {{begin.bib}}\n\
+             ITERATE {{call.type$}}\n\
+             FUNCTION {{end.bib}} {{ \"\\end{{thebibliography}}\" write$ newline$ }}\n\
+             EXECUTE {{end.bib}}\n"
+        )
+    };
+    std::fs::write(dir.join("mine.bst"), bst("Before")).expect("the style");
+    std::fs::write(dir.join("refs.bib"), "@book{x, title = {Tea}}\n").expect("the database");
+    std::fs::write(
+        dir.join("doc.tex"),
+        "\\documentclass{article}\n\\begin{document}\nSee \\cite{x}.\n\\bibliographystyle{mine}\n\\bibliography{refs}\n\\end{document}\n",
+    )
+    .expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--json", "--no-view", "doc.tex"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("mine.bst"), bst("After")).expect("the edit");
+    let ev = until(&mut lines, "build", &2.into(), &mut seen);
+    assert_eq!(
+        ev["pages_changed"],
+        serde_json::json!([1]),
+        "the .bst edit: {ev}"
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("refs.bib"), "@book{x, title = {Coffee}}\n").expect("the edit");
+    let ev = until(&mut lines, "build", &3.into(), &mut seen);
+    assert_eq!(
+        ev["pages_changed"],
+        serde_json::json!([1]),
+        "the .bib edit: {ev}"
+    );
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+}
+
+/// A project's `phitex.toml` runs nothing, whatever it names: `\\write18`'s
+/// any command only with `--shell-escape` or the user's own setting; the
+/// viewer `--open` starts only the user's; each key ignored is said.
+#[test]
+fn a_projects_settings_run_nothing() {
+    let _one = one();
+    let doc = "\\immediate\\write18{echo made > made.tex}\n\\openin1=made.tex\n\
+               \\ifeof1 \\message{NOTMADE}\\else \\message{MADE}\\fi\n\\bye\n";
+    let build = |name: &str, toml: Option<&str>, user: Option<&str>, args: &[&str]| {
+        let dir = scratch(name);
+        std::fs::write(dir.join("d.tex"), doc).expect("the document");
+        // (the program a setting names: leaves a mark if it is ever run)
+        let script = dir.join("mark.sh");
+        std::fs::write(&script, "#!/bin/sh\ntouch \"$(dirname \"$0\")/ran\"\n")
+            .expect("the program");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("runnable");
+        let fill = |t: &str| t.replace("MARK", &script.display().to_string());
+        if let Some(t) = toml {
+            std::fs::write(dir.join("phitex.toml"), fill(t)).expect("the project's settings");
+        }
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join("phitex")).expect("a home");
+        if let Some(u) = user {
+            std::fs::write(home.join("phitex/phitex.toml"), fill(u)).expect("the user's settings");
+        }
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .env("XDG_CONFIG_HOME", &home)
+            .args(args)
+            .args(["--engine", "pdftex", "d.tex"])
+            .output()
+            .expect("phitex runs");
+        let log = std::fs::read_to_string(dir.join("d.log")).unwrap_or_default();
+        (
+            log,
+            String::from_utf8_lossy(&out.stderr).into_owned()
+                + &String::from_utf8_lossy(&out.stdout),
+            dir.join("ran").exists(),
+        )
+    };
+    let all = "shell-escape = true\nviewer = \"MARK\"\neditor = \"MARK {file}\"\n\
+               output-dir = \"/tmp/phitex-not-here\"\ncopy-pdf = \"../not-here\"\n";
+    let (log, said, ran) = build("run-project", Some(all), None, &["build"]);
+    assert!(
+        log.contains("NOTMADE"),
+        "a project allowed itself \\write18:\n{log}"
+    );
+    assert!(!ran, "a project's setting ran:\n{said}");
+    for key in ["shell-escape", "viewer", "editor", "output-dir", "copy-pdf"] {
+        assert!(
+            said.contains(&format!("`{key}` in a project's phitex.toml is ignored")),
+            "{key} not said:\n{said}"
+        );
+    }
+    assert!(!Path::new("/tmp/phitex-not-here").exists());
+    let (log, ..) = build("run-flag", None, None, &["build", "--shell-escape"]);
+    assert!(
+        log.contains("MADE") && !log.contains("NOTMADE"),
+        "--shell-escape:\n{log}"
+    );
+    let (log, ..) = build("run-user", None, Some("shell-escape = true\n"), &["build"]);
+    assert!(
+        log.contains("MADE") && !log.contains("NOTMADE"),
+        "the user's:\n{log}"
+    );
+    watch_open_starts_only_the_users_viewer();
+}
+
+/// `phitex watch --open` starts the viewer the user's phitex.toml names, never a project's.
+fn watch_open_starts_only_the_users_viewer() {
+    for (name, toml, user, runs) in [
+        (
+            "run-watch-project",
+            Some("viewer = \"MARK\"\n"),
+            None,
+            false,
+        ),
+        ("run-watch-user", None, Some("viewer = \"MARK\"\n"), true),
+    ] {
+        let dir = scratch(name);
+        std::fs::write(dir.join("d.tex"), "Hello.\n\\bye\n").expect("the document");
+        let script = dir.join("mark.sh");
+        std::fs::write(&script, "#!/bin/sh\ntouch \"$(dirname \"$0\")/ran\"\n")
+            .expect("the program");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("runnable");
+        let fill = |t: &str| t.replace("MARK", &script.display().to_string());
+        if let Some(t) = toml {
+            std::fs::write(dir.join("phitex.toml"), fill(t)).expect("the project's settings");
+        }
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join("phitex")).expect("a home");
+        if let Some(u) = user {
+            std::fs::write(home.join("phitex/phitex.toml"), fill(u)).expect("the user's settings");
+        }
+        let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .env("XDG_CONFIG_HOME", &home)
+            .args([
+                "watch", "--write", "--open", "--json", "--engine", "tex", "d.tex",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("phitex watch runs");
+        let stdout = child.stdout.take().expect("its output");
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        let mut seen = Vec::new();
+        let _ = until(&mut lines, "build", &1.into(), &mut seen);
+        // (a viewer started is not waited for)
+        std::thread::sleep(Duration::from_millis(500));
+        drop(child.stdin.take());
+        let _ = child.wait();
+        assert_eq!(dir.join("ran").exists(), runs, "{name}");
+    }
 }
