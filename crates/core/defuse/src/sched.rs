@@ -1667,7 +1667,9 @@ pub(crate) fn note_move(eng: &Engine, by: Option<NodeId>, reader: &Node) {
         return;
     };
     let Some(b) = eng.placed_node(by) else { return };
-    if b.moves.load(Ordering::Relaxed) {
+    // (a routine moving the page loop, by its give-back: the loop goes on on
+    // a guess past it anyway, and no node after it read what moved)
+    if b.moves.load(Ordering::Relaxed) || eng.op(reader.op()).works_at_frontier() || eng.op(reader.op()).final_only() {
         return;
     }
     if !b.moves.swap(true, Ordering::AcqRel) && eng.op(b.op()).chains() {
