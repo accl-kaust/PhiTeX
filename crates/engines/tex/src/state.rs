@@ -3291,10 +3291,9 @@ struct BaseSave {
     lazy: Option<ValueId>,
 }
 
-/// An entry noted at a candidate ([`Base`]): `None` not loaded.
-#[allow(clippy::option_option)]
 /// A candidate's kept entry in a [`Base`]: its location, its value where
-/// loaded, and the steps of an unread register ([`STEPPED`], else 0).
+/// loaded (`None` not loaded), and the steps of an unread register
+/// ([`STEPPED`], else 0).
 #[allow(clippy::option_option)]
 type BaseCand = (Loc, Option<Option<ValueId>>, i32);
 
@@ -3533,22 +3532,7 @@ impl State {
         for (st, xs) in b.cands {
             let xs = xs
                 .into_iter()
-                .map(|(l, x, c)| {
-                    (
-                        l,
-                        x.map_or_else(
-                            || {
-                                let mut e = UNLOADED;
-                                if c != 0 {
-                                    e.flags = STEPPED;
-                                    e.chr = c;
-                                }
-                                e
-                            },
-                            |x| ent(x, LOADED),
-                        ),
-                    )
-                })
+                .map(|(l, x, c)| (l, x.map_or_else(|| unloaded_stepped(c), |x| ent(x, LOADED))))
                 .collect();
             self.cands.push((st, xs));
         }
@@ -3580,6 +3564,17 @@ impl State {
         self.cont_locs = b.carried;
         self.muts += 1;
     }
+}
+
+/// The entry of a candidate's register not loaded ([`State::with_base`]):
+/// unloaded, and where `c` is not 0 stepped by `c` ([`STEPPED`]).
+fn unloaded_stepped(c: i32) -> Entry {
+    let mut e = UNLOADED;
+    if c != 0 {
+        e.flags = STEPPED;
+        e.chr = c;
+    }
+    e
 }
 
 impl BaseSlot {
