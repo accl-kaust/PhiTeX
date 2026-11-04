@@ -263,6 +263,46 @@ fn a_line_that_typesets_reads_the_file_back_as_text() {
     );
 }
 
+/// A line that measures a box and sets a dimension from it only defines
+/// (hypdoc's `\\HD@SetMacroIndent` in the `.aux` of every manual with its
+/// source): the file is read back per field, the value as TeX's. A box left
+/// on the page by a line (the second document) still reads it back as text.
+#[test]
+fn a_line_that_measures_a_box_only_defines() {
+    let doc = |line: &str| {
+        format!(
+            "\\newdimen\\ind \\newbox\\tmp\n\\def\\set#1{{\\begingroup\\setbox\\tmp\\hbox{{{{#1}}}}\\global\\ind=\\wd\\tmp\\endgroup}}\n\
+             \\openin15=\\jobname.aux \\ifeof15 \\else\\closein15 \\input\\jobname.aux \\fi\n\
+             \\immediate\\openout1=\\jobname.aux\n\\immediate\\write1{{{line}}}\n\\immediate\\closeout1\n\
+             Width \\the\\ind.\n\\bye\n"
+        )
+    };
+    let dir = common::fixtures().join("plain");
+    let build = |name: &str, text: &str| {
+        let opts = Options {
+            fixpoint: true,
+            ..common::options(&format!("./{name}.tex"), name, "", &dir)
+        };
+        common::build(opts, Some(&common::plain()), text)
+    };
+    let b = build("m", &doc("\\noexpand\\set{abc}"));
+    assert!(
+        b.wkeys().iter().any(|(n, _)| n == "m.aux"),
+        "read back per field: {:?}",
+        b.wkeys()
+    );
+    // (cmr10's "abc": 5pt, 5.55557pt, 4.44444pt less a kern: not zero)
+    let (dvi, _) = b.output();
+    let text = String::from_utf8_lossy(&dvi);
+    assert!(!text.contains("0.0pt"), "the width reached the text");
+    let c = build("n", &doc("\\noexpand\\hbox{abc}"));
+    assert!(
+        !c.wkeys().iter().any(|(n, _)| n == "n.aux"),
+        "a box left by the line: as text: {:?}",
+        c.wkeys()
+    );
+}
+
 /// A file the job writes only where it is missing, then reads (a package
 /// a document carries in its own text): TeX's next run finds the file the
 /// run before wrote, so it does not write it again and reads it; the
