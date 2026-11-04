@@ -1426,7 +1426,7 @@ impl Engine {
             } else if !seed.is_empty() {
                 let per = seed.len().div_ceil(n);
                 for (i, chunk) in seed.chunks(per).enumerate() {
-                    workers[i].seed(self, chunk);
+                    workers[i].seed(chunk);
                 }
             }
             // (the trait object's lifetime shortened for the reborrow, which
