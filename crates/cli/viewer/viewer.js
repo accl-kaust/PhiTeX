@@ -12,88 +12,6 @@ function errorNeeds(message) {
   return null;
 }
 
-// viewer/src/text.ts
-var LAYER_LINES = /* @__PURE__ */ new WeakMap();
-function fold(c) {
-  const f = c.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
-  return f.length === 1 ? f : c.toLowerCase().length === 1 ? c.toLowerCase() : c;
-}
-var COMBINING = {
-  "\xA8": "\u0308",
-  "\xB4": "\u0301",
-  "`": "\u0300",
-  "\u02C6": "\u0302",
-  "^": "\u0302",
-  "\u02DC": "\u0303",
-  "~": "\u0303",
-  "\xAF": "\u0304",
-  "\u02C9": "\u0304",
-  "\u02D8": "\u0306",
-  "\u02D9": "\u0307",
-  "\u02DA": "\u030A",
-  "\xB8": "\u0327",
-  "\u02C7": "\u030C",
-  "\u02DD": "\u030B",
-  "\u02DB": "\u0328"
-};
-function compose(cs) {
-  const out = cs.map((c) => ({ ...c }));
-  const over = (a, b) => b !== void 0 && !COMBINING[b.c] && b.c.trim() !== "" && (a.x + a.r) / 2 >= b.x - 0.5 && (a.x + a.r) / 2 <= b.r + 0.5;
-  for (let k = 0; k < out.length; k++) {
-    const a = out[k];
-    const mark = COMBINING[a.c];
-    if (!mark) continue;
-    const on = over(a, out[k + 1]) ? k + 1 : over(a, out[k - 1]) ? k - 1 : -1;
-    if (on < 0) continue;
-    out[on].c = (out[on].c + mark).normalize("NFC");
-    a.c = "";
-  }
-  return out.filter((c) => c.c !== "");
-}
-function composeLine(l) {
-  if (!l.xs || !l.rs) return l;
-  const units = Array.from({ length: l.text.length }, (_, i) => l.text[i]);
-  const cs = compose(units.map((c, i) => ({ c, x: l.xs[i] ?? l.x, r: l.rs[i] ?? l.x + l.w })));
-  const text = cs.map((c) => c.c).join("");
-  const xs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.x));
-  const rs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.r));
-  return { ...l, text, xs, rs };
-}
-function search(pages2, q, max = 1e3) {
-  const needle = Array.from(q.replace(/\s+/g, " ").trim(), fold).join("");
-  if (!needle) return [];
-  const out = [];
-  for (let k = 0; k < pages2.length && out.length < max; k++) {
-    const lines2 = pages2[k];
-    let hay = "";
-    const at = [];
-    const col = [];
-    lines2.forEach((l, i) => {
-      if (i) hay += " ", at.push(-1), col.push(-1);
-      for (let j = 0; j < l.text.length; j++) hay += fold(l.text[j]), at.push(i), col.push(j);
-    });
-    for (let from2 = hay.indexOf(needle); from2 >= 0 && out.length < max; from2 = hay.indexOf(needle, from2 + needle.length)) {
-      const boxes2 = [];
-      let cur = -1, x = 0, r = 0;
-      const flush = () => {
-        if (cur < 0) return;
-        const l = lines2[cur];
-        boxes2.push([x, l.y - l.size * 0.78, r - x, l.size * 1.02]);
-      };
-      for (let u = from2; u < from2 + needle.length; u++) {
-        const i = at[u];
-        if (i < 0) continue;
-        const l = lines2[i], xl = l.xs?.[col[u]] ?? l.x, xr = l.rs?.[col[u]] ?? l.x + l.w;
-        if (i !== cur) flush(), cur = i, x = xl, r = xr;
-        else x = Math.min(x, xl), r = Math.max(r, xr);
-      }
-      flush();
-      if (boxes2.length) out.push({ k, boxes: boxes2 });
-    }
-  }
-  return out;
-}
-
 // viewer/src/viewer.ts
 var LETTER = { w: 612, h: 792 };
 var Viewer = class {
@@ -162,14 +80,6 @@ var Viewer = class {
       host2.selected?.(sel2);
     }, 0);
     root.addEventListener("pointerup", pick2);
-    let drawing = 0;
-    root.ownerDocument.addEventListener("selectionchange", () => {
-      if (drawing) return;
-      drawing = requestAnimationFrame(() => {
-        drawing = 0;
-        this.drawSelection();
-      });
-    });
     let dragFrame = 0;
     root.addEventListener("pointerdown", () => told = "");
     root.addEventListener("pointermove", (e) => {
@@ -257,34 +167,6 @@ var Viewer = class {
       }
     }
     if (first && !seen) this.scroller.scrollTo({ top: first.offsetTop + first.parentElement.offsetTop - this.scroller.clientHeight / 3, behavior: "auto" });
-  }
-  /** The text selected on the pages, as blocks a line (`.mark.seltext`), the old ones gone. */
-  drawSelection() {
-    for (const m of this.root.querySelectorAll(".seltext")) m.remove();
-    const rn = this.root.getRootNode();
-    const sel = rn.getSelection?.() ?? this.root.ownerDocument.getSelection();
-    if (!sel || sel.isCollapsed || !sel.rangeCount) return;
-    const { w, h } = this.size;
-    for (let i = 0; i < sel.rangeCount; i++) {
-      const r = sel.getRangeAt(i);
-      for (const s of this.slots) {
-        if (!r.intersectsNode(s.el)) continue;
-        for (const t of s.el.querySelectorAll("text")) {
-          const l = LAYER_LINES.get(t);
-          if (!l || !l.text || !r.intersectsNode(t)) continue;
-          const node = t.firstChild;
-          const from2 = node && r.startContainer === node ? r.startOffset : 0;
-          const to = node && r.endContainer === node ? r.endOffset : l.text.length;
-          if (to <= from2) continue;
-          const x0 = l.xs?.[from2] ?? l.x, x1 = l.rs?.[to - 1] ?? l.x + l.w;
-          const m = document.createElement("div");
-          m.className = "mark seltext";
-          const top = l.y - l.size * 0.8, ht = l.size * 1.05;
-          Object.assign(m.style, { left: `${x0 / w * 100}%`, top: `${top / h * 100}%`, width: `${(x1 - x0) / w * 100}%`, height: `${ht / h * 100}%` });
-          s.el.append(m);
-        }
-      }
-    }
   }
   /** Esc: the highlights gone (the editor's selection and cursor's word, a double-click's place, find's matches) and the text selected on the pages; whether there were any. */
   unmark() {
@@ -943,13 +825,11 @@ header:active { cursor: grabbing; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
-.phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
+.phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: rgb(0 100 255 / 25%); }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
 .slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: rgb(255 214 0 / 45%); mix-blend-mode: multiply;
   box-shadow: 0 0 0 1px rgb(232 172 0 / 80%); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
-/* (the text selected on the pages, one block a line: viewer.ts drawSelection) */
-.slot .mark.seltext { background: rgb(0 100 255 / 25%); mix-blend-mode: normal; border-radius: 0; }
 .slot .mark.fade { opacity: 0; transition: opacity 1.2s; }
 .slot .mark.sel { transition: none; }
 .slot .mark.fnd { background: rgb(255 214 0 / 40%); box-shadow: none; transition: none; }
@@ -5361,6 +5241,87 @@ var PreviewSession = class {
   }
 };
 
+// viewer/src/text.ts
+function fold(c) {
+  const f = c.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase();
+  return f.length === 1 ? f : c.toLowerCase().length === 1 ? c.toLowerCase() : c;
+}
+var COMBINING = {
+  "\xA8": "\u0308",
+  "\xB4": "\u0301",
+  "`": "\u0300",
+  "\u02C6": "\u0302",
+  "^": "\u0302",
+  "\u02DC": "\u0303",
+  "~": "\u0303",
+  "\xAF": "\u0304",
+  "\u02C9": "\u0304",
+  "\u02D8": "\u0306",
+  "\u02D9": "\u0307",
+  "\u02DA": "\u030A",
+  "\xB8": "\u0327",
+  "\u02C7": "\u030C",
+  "\u02DD": "\u030B",
+  "\u02DB": "\u0328"
+};
+function compose(cs) {
+  const out = cs.map((c) => ({ ...c }));
+  const over = (a, b) => b !== void 0 && !COMBINING[b.c] && b.c.trim() !== "" && (a.x + a.r) / 2 >= b.x - 0.5 && (a.x + a.r) / 2 <= b.r + 0.5;
+  for (let k = 0; k < out.length; k++) {
+    const a = out[k];
+    const mark = COMBINING[a.c];
+    if (!mark) continue;
+    const on = over(a, out[k + 1]) ? k + 1 : over(a, out[k - 1]) ? k - 1 : -1;
+    if (on < 0) continue;
+    out[on].c = (out[on].c + mark).normalize("NFC");
+    a.c = "";
+  }
+  return out.filter((c) => c.c !== "");
+}
+function composeLine(l) {
+  if (!l.xs || !l.rs) return l;
+  const units = Array.from({ length: l.text.length }, (_, i) => l.text[i]);
+  const cs = compose(units.map((c, i) => ({ c, x: l.xs[i] ?? l.x, r: l.rs[i] ?? l.x + l.w })));
+  const text = cs.map((c) => c.c).join("");
+  const xs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.x));
+  const rs = cs.flatMap((c) => Array.from({ length: c.c.length }, () => c.r));
+  return { ...l, text, xs, rs };
+}
+function search(pages2, q, max = 1e3) {
+  const needle = Array.from(q.replace(/\s+/g, " ").trim(), fold).join("");
+  if (!needle) return [];
+  const out = [];
+  for (let k = 0; k < pages2.length && out.length < max; k++) {
+    const lines2 = pages2[k];
+    let hay = "";
+    const at = [];
+    const col = [];
+    lines2.forEach((l, i) => {
+      if (i) hay += " ", at.push(-1), col.push(-1);
+      for (let j = 0; j < l.text.length; j++) hay += fold(l.text[j]), at.push(i), col.push(j);
+    });
+    for (let from2 = hay.indexOf(needle); from2 >= 0 && out.length < max; from2 = hay.indexOf(needle, from2 + needle.length)) {
+      const boxes2 = [];
+      let cur = -1, x = 0, r = 0;
+      const flush = () => {
+        if (cur < 0) return;
+        const l = lines2[cur];
+        boxes2.push([x, l.y - l.size * 0.78, r - x, l.size * 1.02]);
+      };
+      for (let u = from2; u < from2 + needle.length; u++) {
+        const i = at[u];
+        if (i < 0) continue;
+        const l = lines2[i], xl = l.xs?.[col[u]] ?? l.x, xr = l.rs?.[col[u]] ?? l.x + l.w;
+        if (i !== cur) flush(), cur = i, x = xl, r = xr;
+        else x = Math.min(x, xl), r = Math.max(r, xr);
+      }
+      flush();
+      if (boxes2.length) out.push({ k, boxes: boxes2 });
+    }
+  }
+  return out;
+}
+
 // viewer/src/strips.ts
 var BUDGET = 16e6;
 var BASE = 4e6;
@@ -5515,7 +5476,6 @@ function textLayer(lines2, w, h) {
     t.setAttribute("y", String(l.y));
     t.setAttribute("font-size", String(l.size));
     t.textContent = l.text;
-    LAYER_LINES.set(t, l);
     svg.append(t);
   }
   return svg;

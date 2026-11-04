@@ -10,9 +10,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Browser, Watch, project, sleep, git } from "./lib.mjs";
 
-// (the PDFs dated alike: an edited one compared with a full build)
-process.env.SOURCE_DATE_EPOCH = "0";
-process.env.FORCE_SOURCE_DATE = "1";
 const home = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
 process.env.PHITEX_CACHE_DIR ??= join(home, "cache");
 let browser;
@@ -197,59 +194,4 @@ test("Skip on the tips holds on another port and another document (item 6)", asy
   await sleep(2500);
   assert.equal(await t2.q(`$("#tip").hidden`), true, "no tips again");
   await w2.stop();
-});
-
-/** `phitex build` of a copy of `dir`'s sources (its outputs left out): the cold PDF an edited one must equal. */
-async function coldPdf(dir, main = "main.tex") {
-  const { cpSync } = await import("node:fs");
-  const { spawnSync } = await import("node:child_process");
-  const copy = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-cold-"));
-  cpSync(dir, copy, { recursive: true, filter: (p) => !/\.(pdf|log|aux|synctex\.gz)$/.test(p) || /fig/.test(p) });
-  const r = spawnSync(process.env.PHITEX_BIN ?? "phitex", ["build", "--no-synctex", main], { cwd: copy, env: { ...process.env, HOME: home } });
-  if (r.status !== 0) throw new Error(`cold build: ${r.stderr}`);
-  return readFileSync(join(copy, main.replace(/\.tex$/, ".pdf")));
-}
-
-test("a figure or a file of any extension replaced on disk rebuilds, as a full build makes it (images, unlisted extensions)", async () => {
-  const { spawnSync } = await import("node:child_process");
-  const { writeFileSync, copyFileSync } = await import("node:fs");
-  const magick = (args, out) => spawnSync("magick", [...args, out]);
-  const tex = doc("Figures.\n\n\\includegraphics{figpng}\n\\includegraphics{figjpg}\n\\includegraphics[width=3cm]{figpdf}\n\n\\input{notes.md}", "\\usepackage{graphicx}\n");
-  const dir = project({ "main.tex": tex, "notes.md": "Notes one.\n" });
-  // (the PDF figure made elsewhere, copied in: its own build's files stay out of the project)
-  const side = project({ "inc.tex": doc("Inner text A.") });
-  const figure = (text) => {
-    writeFileSync(join(side, "inc.tex"), doc(text));
-    spawnSync(process.env.PHITEX_BIN ?? "phitex", ["build", "--no-synctex", "inc.tex"], { cwd: side, env: { ...process.env, HOME: home } });
-    copyFileSync(join(side, "inc.pdf"), join(dir, "figpdf.pdf"));
-  };
-  magick(["-size", "40x30", "xc:red"], join(dir, "figpng.png"));
-  magick(["-size", "40x30", "xc:blue"], join(dir, "figjpg.jpg"));
-  // (a PDF figure with fonts in it: a page PhiTeX built)
-  figure("Inner text A.");
-  const w = new Watch(dir, { home, args: ["--write", "--exact"] });
-  const t = await browser.tab(await w.url());
-  await t.until(`+$("#pgn")?.textContent > 0`, "the first page");
-  await waitBuild(w, 1);
-  const edits = [
-    // (the same size, another picture: the page's boxes are the same, its picture not)
-    ["figpng.png", () => magick(["-size", "40x30", "xc:green"], join(dir, "figpng.png"))],
-    ["figjpg.jpg", () => magick(["-size", "40x30", "xc:yellow"], join(dir, "figjpg.jpg"))],
-    ["figpdf.pdf", () => figure("Inner text B.")],
-    ["notes.md", () => writeFileSync(join(dir, "notes.md"), "Notes two, edited.\n")],
-  ];
-  let n = 1;
-  for (const [name, edit] of edits) {
-    const before = readFileSync(join(dir, "main.pdf"));
-    edit();
-    n++;
-    await waitBuild(w, n);
-    await sleep(800);
-    const now = readFileSync(join(dir, "main.pdf"));
-    assert.notDeepEqual(now, before, `${name}: the PDF changed`);
-    assert.match(w.out, new RegExp(`\\b${n}\\s+${name.replace(".", "\\.")}\\s+pages? \\d`), `${name}: the build says why, and that a page changed`);
-    await t.until(`$("#phx-bar").innerText.includes("build ${n} ")`, `the viewer told of build ${n}`);
-    assert.ok(now.equals(await coldPdf(dir)), `${name}: the edited PDF is a full build's`);
-  }
-  await w.stop();
 });

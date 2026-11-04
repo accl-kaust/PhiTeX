@@ -3042,11 +3042,6 @@ pub(crate) fn page_allocs(
                             v.int(at(10)),
                             v.int(at(11)),
                             v.int(at(13)),
-                            // (what the image is: the page shows another
-                            // picture when its file's bytes change, the
-                            // same objects counted; only the page's
-                            // identity reads it, [`images_written`] not)
-                            v.int(at(14)),
                         ]));
                     }
                 }

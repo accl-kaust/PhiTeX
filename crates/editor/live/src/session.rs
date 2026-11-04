@@ -421,17 +421,6 @@ impl Report {
     }
 }
 
-/// What the builds read ([`Session::watched`]).
-#[derive(Clone, Debug, Default)]
-pub struct Watched {
-    /// The names asked for, as TeX gave them (`./` dropped).
-    pub names: Vec<String>,
-    /// Where those found were found.
-    pub paths: Vec<PathBuf>,
-    /// Whether a build is there (before one: nothing is known yet).
-    pub built: bool,
-}
-
 /// What was written.
 #[derive(Default)]
 pub struct Written {
@@ -1690,26 +1679,6 @@ impl Session {
                 );
             }
         }
-    }
-
-    /// What the builds read, for a watch's file events ([`Watched`]):
-    /// every name TeX asked the finder for (found or not: a file that
-    /// appears is a change too) with the paths of those found, and the
-    /// names the tools' searches asked for. Empty before a build.
-    pub fn watched(&self) -> Watched {
-        let mut w = Watched::default();
-        for (n, _, p) in &self.inputs {
-            w.names.push(plain_name(n));
-            if let Some(p) = p {
-                w.paths.push(p.clone());
-            }
-        }
-        if let Some(b) = &self.build {
-            w.names
-                .extend(b.tool_reads().into_iter().map(|(n, _)| plain_name(&n)));
-        }
-        w.built = self.build.is_some();
-        w
     }
 
     /// The names the builds asked the finder for (`inputs`)

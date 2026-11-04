@@ -75,60 +75,21 @@ struct Kept {
     reading: bool,
 }
 
-/// What the last build read ([`phitex_live::session::Session::watched`]):
-/// a change of one of these files rebuilds, whatever its extension (an
-/// image, a `.bib`, `\input{notes.md}`, a figure another program made),
-/// and so does a file appearing under a name the build looked for and did
-/// not find. Before the first build every file does (nothing is known).
-#[derive(Default)]
-struct Wanted {
-    built: bool,
-    /// Where the files read were found, canonical.
-    paths: HashSet<PathBuf>,
-    /// The names asked for, from the watch's folder.
-    names: HashSet<String>,
-}
+/// The extensions of the files a change of rebuilds.
+const SOURCES: &[&str] = &[
+    "tex", "sty", "cls", "bib", "bst", "def", "cfg", "clo", "fd", "ltx", "ist", "bbx", "cbx",
+    "lbx", "dbx", "png", "jpg", "jpeg", "pdf", "eps", "mp", "txt", "dat", "csv", "tikz", "pgf",
+    "inc",
+];
 
-type WantedRef = Arc<Mutex<Wanted>>;
-
-impl Wanted {
-    fn of(w: phitex_live::session::Watched, root: &Path) -> Wanted {
-        Wanted {
-            built: w.built,
-            paths: w
-                .paths
-                .iter()
-                .map(|p| {
-                    let p = root.join(p);
-                    p.canonicalize().unwrap_or(p)
-                })
-                .collect(),
-            names: w.names.into_iter().collect(),
-        }
-    }
-
-    /// Whether a change of `p` (under `root`) is one the build reads: in
-    /// no hidden folder, and read, or looked for by its name (`fig`, as
-    /// `\includegraphics{fig}` asks for `fig.png`, is asked for whole).
-    fn wants(&self, root: &Path, p: &Path) -> bool {
-        let rel = p.strip_prefix(root).unwrap_or(p);
-        if rel
-            .components()
-            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-        {
-            return false;
-        }
-        if !self.built {
-            return true;
-        }
-        let c = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-        if self.paths.contains(&c) || self.paths.contains(p) {
-            return true;
-        }
-        let r = rel.to_string_lossy();
-        self.names.contains(r.as_ref())
-            || r.strip_suffix(".tex").is_some_and(|n| self.names.contains(n))
-    }
+/// Whether a change of `p` (under `root`) is one of the project's
+/// sources: a source's extension, in no hidden directory.
+fn source(root: &Path, p: &Path) -> bool {
+    let rel = p.strip_prefix(root).unwrap_or(p);
+    !rel.components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        && p.extension()
+            .is_some_and(|x| SOURCES.contains(&&*x.to_string_lossy().to_ascii_lowercase()))
 }
 
 /// The files the watch wrote itself, with their bytes' hashes: a change
@@ -171,7 +132,6 @@ fn not_ours(ours: &Ours, changed: &mut Vec<PathBuf>) {
 /// name for a moment, and a build read then is one of an empty text.
 fn watcher(
     root: &Path,
-    wanted: WantedRef,
     ours: Ours,
     tx: mpsc::Sender<(Instant, Event)>,
 ) -> notify::Result<notify::RecommendedWatcher> {
@@ -201,10 +161,7 @@ fn watcher(
         {
             return;
         }
-        let mut changed: Vec<PathBuf> = {
-            let w = wanted.lock().unwrap_or_else(PoisonError::into_inner);
-            ev.paths.into_iter().filter(|p| w.wants(&r, p)).collect()
-        };
+        let mut changed: Vec<PathBuf> = ev.paths.into_iter().filter(|p| source(&r, p)).collect();
         if CLOSES {
             let written = matches!(
                 ev.kind,
@@ -928,8 +885,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     let owned = |f: &str| lsp.as_ref().is_some_and(|l| l.owns(f));
     let ours: Ours = Arc::default();
     // (kept for the watch's life: dropping it stops the events)
-    let wanted: WantedRef = Arc::default();
-    let _files = watcher(&root, wanted.clone(), ours.clone(), tx.clone()).unwrap_or_else(|e| {
+    let _files = watcher(&root, ours.clone(), tx.clone()).unwrap_or_else(|e| {
         ui.error(&format!("can't watch {}: {e}", root.display()));
         std::process::exit(crate::EXIT_FAILED);
     });
@@ -1624,8 +1580,6 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             *unwritten.borrow_mut() = Some(r);
         }
         phitex_tex::timeline::lap("watch: the report dropped");
-        // (the files a change of rebuilds: what this build read)
-        *wanted.lock().unwrap_or_else(PoisonError::into_inner) = Wanted::of(s.watched(), &root);
         phitex_tex::timeline::end(&format!("build {builds}"));
     };
     // (what came while a build ran and it could not take: done after it)

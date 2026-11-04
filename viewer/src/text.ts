@@ -17,13 +17,6 @@ export interface TextLine {
   rs?: number[];
 }
 
-/**
- * The line each text element of a page's text layer shows (strips.ts's
- * textLayer): the viewer draws a selection from its characters' edges,
- * one block a line, not the browser's box a glyph.
- */
-export const LAYER_LINES = new WeakMap<Element, TextLine>();
-
 /** A match of a search: its page (from 0) and its boxes, [x, y top, w, h] in PDF points from the page's top left. */
 export interface Hit {
   k: number;

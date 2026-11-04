@@ -4,7 +4,6 @@
 // core). The page most in view is the one an edit paints first.
 
 import type { Link, PageImage } from "./types.ts";
-import { LAYER_LINES } from "./text.ts";
 
 export interface ViewerHost {
   /** Draw page `k` (the viewer wants it: in view, and not drawn at its hash). */
@@ -113,18 +112,6 @@ export class Viewer {
         host.selected?.(sel2);
       }, 0);
     root.addEventListener("pointerup", pick);
-    // (the selection drawn as pdf.js draws it: one block a line, from its
-    // first character's left edge to its last's right, the line's height,
-    // word spaces and kerns included; the browser's own box a glyph made
-    // it striped. What is copied is the text layer's, as before)
-    let drawing = 0;
-    root.ownerDocument.addEventListener("selectionchange", () => {
-      if (drawing) return;
-      drawing = requestAnimationFrame(() => {
-        drawing = 0;
-        this.drawSelection();
-      });
-    });
     // (while a drag selects: told as it goes, at most once a frame, not only when the button is let go)
     let dragFrame = 0;
     root.addEventListener("pointerdown", () => (told = ""));
@@ -222,35 +209,6 @@ export class Viewer {
       }
     }
     if (first && !seen) this.scroller.scrollTo({ top: first.offsetTop + first.parentElement!.offsetTop - this.scroller.clientHeight / 3, behavior: "auto" });
-  }
-
-  /** The text selected on the pages, as blocks a line (`.mark.seltext`), the old ones gone. */
-  private drawSelection(): void {
-    for (const m of this.root.querySelectorAll(".seltext")) m.remove();
-    const rn = this.root.getRootNode() as ShadowRoot & { getSelection?: () => Selection | null };
-    const sel = rn.getSelection?.() ?? this.root.ownerDocument.getSelection();
-    if (!sel || sel.isCollapsed || !sel.rangeCount) return;
-    const { w, h } = this.size;
-    for (let i = 0; i < sel.rangeCount; i++) {
-      const r = sel.getRangeAt(i);
-      for (const s of this.slots) {
-        if (!r.intersectsNode(s.el)) continue;
-        for (const t of s.el.querySelectorAll("text")) {
-          const l = LAYER_LINES.get(t);
-          if (!l || !l.text || !r.intersectsNode(t)) continue;
-          const node = t.firstChild;
-          const from = node && r.startContainer === node ? r.startOffset : 0;
-          const to = node && r.endContainer === node ? r.endOffset : l.text.length;
-          if (to <= from) continue;
-          const x0 = l.xs?.[from] ?? l.x, x1 = l.rs?.[to - 1] ?? l.x + l.w;
-          const m = document.createElement("div");
-          m.className = "mark seltext";
-          const top = l.y - l.size * 0.8, ht = l.size * 1.05;
-          Object.assign(m.style, { left: `${(x0 / w) * 100}%`, top: `${(top / h) * 100}%`, width: `${((x1 - x0) / w) * 100}%`, height: `${(ht / h) * 100}%` });
-          s.el.append(m);
-        }
-      }
-    }
   }
 
   /** Esc: the highlights gone (the editor's selection and cursor's word, a double-click's place, find's matches) and the text selected on the pages; whether there were any. */
