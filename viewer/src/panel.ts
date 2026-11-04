@@ -2600,6 +2600,10 @@ export class Panel {
     if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
     if (hashes.length) this.sheetDown();
     this.nav();
+    // (a fast build's problems reach the view before its pages do: their
+    // underlines, looked up on no page, are looked up again on these; the
+    // same pages as before are not)
+    if (this.culpritDiags.length) void this.underline(this.culpritDiags);
   }
 
     /** The editor to a page's source (a double-click on it). */
