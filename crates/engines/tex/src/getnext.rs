@@ -352,12 +352,11 @@ impl Run<'_, '_> {
                 }
                 _ => ("text", Tok::ch(2, u32::from(b'}'))),
             };
+            // (`sprint_cs(warning_index)`, §338)
             let mut cs = String::new();
-            self.show_toks_into(&mut cs, std::slice::from_ref(&w))?;
-            let msg = format!(
-                "Forbidden control sequence found while scanning {what} of {}",
-                cs.trim_end()
-            );
+            let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
+            crate::print::sprint_cs(&mut cs, w, esc);
+            let msg = format!("Forbidden control sequence found while scanning {what} of {cs}");
             self.outer_error(msg)?;
             self.push_toks([ins]);
             return Ok(());

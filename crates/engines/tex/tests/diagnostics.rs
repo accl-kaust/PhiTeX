@@ -472,16 +472,22 @@ fn the_text_ending_inside_an_argument_or_a_definition() {
     for threads in [1, 4] {
         for (doc, msg) in [
             (
-                "\\long\\def\\a#1{}\nText \\a{one\ntwo.\n\\bye\n",
+                "\\long\\def\\a#1{}\nText \\a{one\ntwo.\n",
                 "File ended while scanning use of \\a",
             ),
             (
-                "Text.\n\\def\\x{abc\n\\bye\n",
+                "Text.\n\\def\\x{abc\n",
                 "File ended while scanning definition of \\x",
             ),
             (
-                "\\expandafter\\long\\expandafter\\def\\csname b \\endcsname#1{}\nText \\csname b \\endcsname{one\n\\bye\n",
+                "\\expandafter\\long\\expandafter\\def\\csname b \\endcsname#1{}\nText \\csname b \\endcsname{one\n",
                 "File ended while scanning use of \\b ",
+            ),
+            // (plain's `\bye` is `\outer`: §336's other error there, the
+            // name as shown the same way; `\bye` then ends the job)
+            (
+                "\\expandafter\\long\\expandafter\\def\\csname b \\endcsname#1{}\nText \\csname b \\endcsname{one\n\\bye\n",
+                "Forbidden control sequence found while scanning use of \\b ",
             ),
         ] {
             let b = build(doc, |o| Options {
@@ -502,7 +508,7 @@ fn the_text_ending_inside_an_argument_or_a_definition() {
             let at = errs.iter().position(|m| m.trim_end_matches('.') == msg);
             let abort = errs.iter().position(|m| m.contains("no legal \\end found"));
             assert!(
-                abort.is_some_and(|a| at.is_some_and(|i| i < a)),
+                msg.starts_with("Forbidden") || abort.is_some_and(|a| at.is_some_and(|i| i < a)),
                 "-j{threads} {doc:?}: the abort after the error: {errs:?}"
             );
         }
