@@ -997,6 +997,21 @@ impl<'a> Ctx<'a> {
         Ok(h)
     }
 
+    /// Whether node `n` stands past the settling layer's frontier
+    /// ([`Ctx::set_frontier`]). Not a read.
+    pub fn past_frontier(&self, n: NodeId) -> bool {
+        self.eng.placed_node(n).is_some_and(|x| {
+            crate::sched::past_frontier(self.eng, x, self.eng.frontier.load(std::sync::atomic::Ordering::Acquire))
+        })
+    }
+
+    /// Whether this evaluation has more than one thread: work done ahead
+    /// on a guess can stand beside what it guesses at, not only before it.
+    /// Never for what a run makes, only for how far it goes on a guess.
+    pub fn has_other_threads(&self) -> bool {
+        self.worker.is_some_and(|w| w.shared.n > 1)
+    }
+
     /// Stops the run until I stand at the committed frontier: every node
     /// before me in my unit has committed in this pass with no re-ask
     /// pending (none to run, again or for the first time, none running or

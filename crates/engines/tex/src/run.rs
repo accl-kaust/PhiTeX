@@ -1058,6 +1058,10 @@ pub(crate) struct Run<'c, 'a> {
     /// (`profile`, `PHITEX_MACRO_PROF`) The macros the run expanded, by
     /// name, and how often (printed for a run of 5 ms or more).
     pub(crate) mprof: Option<crate::FxHashMap<Tok, u64>>,
+    /// A page loop's rest that began on a guess (`Run::rest_begins`).
+    pub(crate) rest_on_guess: bool,
+    /// The piece of the page a page loop's rest began after.
+    pub(crate) rest_begun_at: Option<phitex_defuse::NodeId>,
     /// An edited node's run: its checkpoints ([`crate::resume`]).
     pub(crate) ck: Option<Box<crate::resume::Checkpoints>>,
     /// The run goes on from no checkpoint (a check's run from the start).
@@ -1340,6 +1344,8 @@ impl<'c, 'a> Run<'c, 'a> {
             fatal_logged: false,
             mark: crate::getnext::Mark::default(),
             mprof: crate::exec::prof_flag!("PHITEX_MACRO_PROF").then(crate::FxHashMap::default),
+            rest_on_guess: false,
+            rest_begun_at: None,
             ck: None,
             no_resume: false,
             resumed_at: None,
