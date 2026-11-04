@@ -853,6 +853,10 @@ pub(crate) struct Run<'c, 'a> {
     /// body, a token list's body, §392, §473–§479): a meaning not this
     /// run's own is read only by its class ([`Run::step_lookup`]).
     pub step_reads: bool,
+    /// What this run knows of [`crate::val::OUTER_MADE`]: `OUTER_UNREAD`
+    /// until a list's token is first scanned, then whether none is made
+    /// (`OUTER_NONE`) or some may be (`OUTER_SOME`).
+    pub outer_known: u8,
     /// The meanings this run read as outer or not only (kept over a park
     /// like [`Run::class_memo`]).
     /// The meanings this run read through the step projection only, with
@@ -1287,6 +1291,7 @@ impl<'c, 'a> Run<'c, 'a> {
             toks_buf: Vec::new(),
             outer_reads: false,
             step_reads: false,
+            outer_known: OUTER_UNREAD,
             num_reads: false,
             lt: crate::control::LinesTaint::default(),
             contribs: Vec::new(),
@@ -4422,6 +4427,10 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Defines token `t`'s meaning (`\def`, `\let`, …): kept native,
     /// encoded only if the run publishes it.
     pub(crate) fn set_mean(&mut self, t: Tok, m: Mean, global: bool) {
+        if matches!(&m, Mean::Macro(x) if x.flags & 2 != 0) {
+            self.outer_known = OUTER_SOME;
+            self.set(crate::val::OUTER_MADE, self.v.bool(true), true);
+        }
         // (the meaning defined is not read: [`Run::interp_first`] keeps
         // what the line read)
         self.defining = true;
@@ -6385,6 +6394,14 @@ pub(crate) struct Seeded {
 pub(crate) const SCAN_DEFINING: u8 = 2;
 pub(crate) const SCAN_MATCHING: u8 = 3;
 pub(crate) const SCAN_ABSORBING: u8 = 5;
+
+/// [`Run::outer_known`]: not read yet.
+pub(crate) const OUTER_UNREAD: u8 = 0;
+/// [`Run::outer_known`]: no macro is `\outer` here.
+pub(crate) const OUTER_NONE: u8 = 1;
+/// [`Run::outer_known`]: a macro may be `\outer`.
+pub(crate) const OUTER_SOME: u8 = 2;
+
 impl Run<'_, '_> {
     pub(crate) fn file_line_here(&self) -> Option<FileLine> {
         for l in self.input.levels.iter().rev() {
