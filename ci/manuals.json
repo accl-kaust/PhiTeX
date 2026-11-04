@@ -9832,8 +9832,8 @@
    "oracle_wall_s": 700.27,
    "passes": 3,
    "path": "latex/codehigh/codehigh.tex",
-   "time_limit_s": 394,
-   "time_limit_why": "pdflatex's own wall on the gate's runner: 394 s (manuals.py's oracle loop, 3 passes, in the -doc image on GitHub's ubuntu-24.04, 4 CPUs, AMD EPYC 9V45; run 41432138147, 2026-11-02). PhiTeX is held to it, not to the sweep's 300 s; it is identical with the limit raised (accl 23041)",
+   "time_limit_s": 1042,
+   "time_limit_why": "twice pdflatex's own wall on the slower gate runner measured: PhiTeX is within 2x of pdflatex but slower than it. On GitHub's ubuntu-24.04 (4 CPUs, AMD EPYC 9V74) pdflatex took 358.7 s (manuals.py's oracle loop, 3 passes) and PhiTeX built it exact in 441 s at -j1 and 312 s at -j4 in the same job (run 41903382314, the limit lifted on that branch); on another such runner pdflatex took 521 s and PhiTeX stopped at the old 394 s limit (run 41896988046); on acclnode04 pdflatex 701 s, PhiTeX -j1 exact 781 s (accl 24812, 2026-11-04). Before: 394 s, pdflatex's wall on an AMD EPYC 9V45 runner (run 41432138147)",
    "tools": []
   },
   {
