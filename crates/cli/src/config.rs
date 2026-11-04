@@ -402,12 +402,12 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     (
         "shell-escape",
         "off",
-        "let documents run any shell command (\\write18); yours only: a project's is ignored",
+        "let documents run any shell command (\\write18); yours only, a project's is ignored",
     ),
     (
         "viewer",
         "none",
-        "a program --open shows the PDF with (zathura, okular, ...)",
+        "a program --open shows the PDF with (zathura, okular, ...); yours only",
     ),
     (
         "editor",
@@ -536,20 +536,116 @@ fn canonical(k: &str) -> &str {
     }
 }
 
-/// A project's settings without what only the user can allow: its
-/// `shell-escape = true` is ignored and said, since a project folder may
-/// be anyone's and building it must not run what it asks.
+/// What a project's `phitex.toml` is to each key, for
+/// [`without_permissions`] and its test: a project folder may be anyone's,
+/// and building it, or opening it in an editor, must run nothing it names.
+/// Keys that name a program or allow one to run, or say where files are
+/// written (a folder a program reads from), are the user's.
+const USERS_ALONE: &[&str] = &[
+    "shell-escape",
+    "viewer",
+    "editor",
+    "update-check",
+    "update-channel",
+    "tips-seen",
+    "problems-hidden",
+];
+/// Keys a project may set: what its build is, none naming anything to run
+/// (`engine` is one of PhiTeX's own, `tex::engine`, nothing started; the
+/// paths are kept inside the project by [`without_permissions`]).
+const PROJECTS_TOO: &[&str] = &[
+    "main",
+    "file",
+    "engine",
+    "program",
+    "output-dir",
+    "output-directory",
+    "out-dir",
+    "copy-pdf",
+    "synctex",
+    "cache-limit",
+    "files",
+    "phitex",
+    "watch-write",
+];
+
+/// Whether `dir` (relative to `root`) stays in `root`, as written and on
+/// disk: a symbolic link in a project may point anywhere.
+fn inside(root: &Path, dir: &str) -> bool {
+    let p = Path::new(dir);
+    if p.is_absolute()
+        || dir.starts_with('~')
+        || p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let Ok(root) = root.canonicalize() else {
+        return false;
+    };
+    // (the deepest part of it that exists: what is not there yet is made under it)
+    root.join(p)
+        .ancestors()
+        .find_map(|a| a.canonicalize().ok())
+        .is_some_and(|a| a.starts_with(&root))
+}
+
+/// A project's settings (`root` its folder) without what only the user can
+/// allow; each one dropped is said. See [`USERS_ALONE`].
 #[must_use]
-pub fn without_permissions(mut project: Config) -> Config {
+pub fn without_permissions(mut project: Config, root: &Path) -> Config {
+    let mut warnings = std::mem::take(&mut project.warnings);
+    let mut said = |key: &str, why: &str| project_warning(&mut warnings, key, why);
     if project.shell_escape == Some(true) {
-        project.warnings.push(
-            "`shell-escape` in a project's phitex.toml is ignored: the document could run any command. \
-             If you trust it: --shell-escape, or `phitex config shell-escape on` for all your documents"
-                .to_owned(),
+        said(
+            "shell-escape",
+            "the document could run any command. If you trust it: --shell-escape, or `phitex config shell-escape on` for all your documents",
         );
     }
+    if project.viewer.is_some() {
+        said(
+            "viewer",
+            "it names a program to run. Yours: `phitex config viewer ...`",
+        );
+    }
+    if project.editor.is_some() {
+        said(
+            "editor",
+            "it names a program to run. Yours: --editor, or `phitex config editor ...`",
+        );
+    }
+    if project
+        .output_dir
+        .as_deref()
+        .is_some_and(|d| !inside(root, d))
+    {
+        said(
+            "output-dir",
+            "it is outside the project. Yours: --output-dir",
+        );
+        project.output_dir = None;
+    }
+    if let Some(CopyPdf::Dir(d)) = &project.copy_pdf
+        && !inside(root, d)
+    {
+        said("copy-pdf", "it is outside the project. Yours: --copy-pdf");
+        project.copy_pdf = None;
+    }
+    project.warnings = warnings;
     project.shell_escape = None;
+    project.viewer = None;
+    project.editor = None;
+    project.update_check = None;
+    project.update_channel = None;
+    project.tips_seen = None;
+    project.problems_hidden = None;
     project
+}
+
+fn project_warning(warnings: &mut Vec<String>, key: &str, why: &str) {
+    warnings.push(format!(
+        "`{key}` in a project's phitex.toml is ignored: {why}"
+    ));
 }
 
 /// The project's `phitex.toml` at `dir` or above.
@@ -853,20 +949,50 @@ mod tests {
 
     use super::*;
 
+    /// Every key is decided: a new one must say whether a project may set it.
     #[test]
-    fn a_project_cannot_allow_itself_shell_escape() {
-        let project = parse("shell-escape = true").unwrap();
-        let c = without_permissions(project).over(Config::default());
+    fn every_key_is_a_projects_or_the_users_alone() {
+        for k in KEYS {
+            assert!(
+                USERS_ALONE.contains(k) != PROJECTS_TOO.contains(k),
+                "{k}: in neither or both of USERS_ALONE and PROJECTS_TOO"
+            );
+        }
+    }
+
+    #[test]
+    fn a_project_allows_nothing_to_run() {
+        let dir = std::env::temp_dir().join(format!("phitex-perm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = || {
+            parse(
+                "shell-escape = true\nviewer = \"./x\"\neditor = \"./x {file}\"\n\
+                 update-check = true\nupdate-channel = \"nightly\"\noutput-dir = \"/tmp/x\"\ncopy-pdf = \"../x\"\n",
+            )
+            .unwrap()
+        };
+        let c = without_permissions(project(), &dir).over(Config::default());
         assert_eq!(c.shell_escape, None);
-        assert_eq!(c.warnings.len(), 1);
-        let user = parse("shell-escape = true").unwrap();
-        let c = without_permissions(parse("synctex = true").unwrap()).over(user);
+        assert_eq!(c.viewer, None);
+        assert_eq!(c.editor, None);
+        assert_eq!(c.update_check, None);
+        assert_eq!(c.update_channel, None);
+        assert_eq!(c.output_dir, None);
+        assert_eq!(c.copy_pdf, None);
+        assert_eq!(c.warnings.len(), 5, "{:?}", c.warnings);
+        // (the user's own stand, a project's `false` or not)
+        let user = parse("shell-escape = true\neditor = \"vi\"\n").unwrap();
+        let c = without_permissions(parse("shell-escape = false").unwrap(), &dir).over(user);
         assert_eq!(c.shell_escape, Some(true));
-        assert!(c.warnings.is_empty());
-        // (a project's `false` says nothing of the user's choice: the user's own switch stands)
-        let user = parse("shell-escape = true").unwrap();
-        let c = without_permissions(parse("shell-escape = false").unwrap()).over(user);
-        assert_eq!(c.shell_escape, Some(true));
+        assert_eq!(c.editor.as_deref(), Some("vi"));
+        // (inside the project: as before; a symbolic link out of it: not)
+        assert!(inside(&dir, "out/deep"));
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink("/tmp", dir.join("away"));
+            assert!(!inside(&dir, "away/x"));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

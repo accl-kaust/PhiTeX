@@ -73,9 +73,10 @@ fn after_help() -> String {
   Without a file, `phitex.toml` (here or above) names it:
       main = \"paper.tex\"   engine = \"pdflatex\"   output-dir = \"out\"
       copy-pdf = true   (or a directory, relative to phitex.toml's)
-      synctex = false   editor = \"code\"   viewer = \"zathura\"
-      shell-escape = true   (yours only, `phitex config shell-escape on`, or --shell-escape:
-                          the document may run any command; a project's is ignored)
+      synctex = false
+      editor = \"code\"   viewer = \"zathura\"   shell-escape = true
+                          (yours only, `phitex config KEY VALUE`: a project's are ignored,
+                          so that a folder someone sent runs nothing it names)
       cache-limit = \"4GB\"   (0: no cache; or PHITEX_CACHE_LIMIT)
       update-check = true   (yours only: a daily check for a newer release)
       files = \"shelf\"   (TeX's files from Shelf's packs, kept in the cache's shelf/;
@@ -535,9 +536,9 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         (Some(_), Some((root, cfg))) if root == cwd => (root, cfg, true),
         _ => (cwd.clone(), config::Config::default(), false),
     };
-    // (the project's settings over the user's, key by key; but running any
-    // command is the user's to allow: a project someone sent can't ask for it)
-    let cfg = config::without_permissions(cfg).over(user);
+    // (the project's settings over the user's, key by key; but anything that
+    // runs is the user's to allow: a project someone sent can't ask for it)
+    let cfg = config::without_permissions(cfg, &root).over(user);
     let copy_pdf = match (&o.copy_pdf, &cfg.copy_pdf) {
         (Some(c), _) => copy_dir(c, &cwd, &cwd),
         (None, Some(c)) => copy_dir(c, &cwd, &root),

@@ -461,7 +461,8 @@ fn clients(s: &Shared, n: usize) {
 /// Start viewer program `cmd` (its words; `{file}` where the file goes,
 /// else the file last) on `file`, not waited for.
 pub fn open_with(cmd: &str, file: &std::path::Path) -> std::io::Result<()> {
-    let f = file.display().to_string();
+    let f =
+        crate::editor::safe_file_arg(&file.display().to_string()).map_err(std::io::Error::other)?;
     let mut words: Vec<String> = cmd.split_whitespace().map(str::to_owned).collect();
     if words.is_empty() {
         return Err(std::io::Error::other("an empty command"));

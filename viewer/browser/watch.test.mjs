@@ -22,9 +22,9 @@ after(async () => (Watch.killAll(), await browser?.stop()));
 const doc = (body, pre = "") => `\\documentclass{article}\n${pre}\\begin{document}\n${body}\n\\end{document}\n`;
 
 /** A watch on `files` and a tab on its viewer, its first page in. */
-async function open(files, { args = [], pages = true, at = home } = {}) {
+async function open(files, { args = [], pages = true, at = home, env = {} } = {}) {
   const dir = project(files);
-  const w = new Watch(dir, { home: at, args });
+  const w = new Watch(dir, { home: at, args, env });
   const t = await browser.tab(await w.url());
   if (pages) await t.until(`+$("#pgn")?.textContent > 0`, "the first page", 240000);
   return { dir, w, t };
@@ -402,4 +402,31 @@ test("the tab's title says the state; Settings writes the user's file; What's ne
   assert.match(readFileSync(toml, "utf8"), /watch-write = true/);
   await w.stop();
   assert.equal(await t.until(`/not connected|Not connected/i.test(document.title) && document.title`, "the title: not connected").then((x) => /not connected/i.test(x)), true);
+});
+
+test("a double-click starts only the user's editor; a project's phitex.toml runs nothing (item 20)", async () => {
+  const { chmodSync, writeFileSync, mkdirSync } = await import("node:fs");
+  const run = async (toml, user) => {
+    const fresh = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
+    const marks = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-mark-"));
+    const script = join(marks, "mark.sh");
+    writeFileSync(script, `#!/bin/sh\ntouch "${marks}/ran"\n`);
+    chmodSync(script, 0o755);
+    const line = `editor = "${script} {file}"\n`;
+    if (user) {
+      mkdirSync(join(fresh, ".config", "phitex"), { recursive: true });
+      writeFileSync(join(fresh, ".config", "phitex", "phitex.toml"), line);
+    }
+    const { w, t } = await open({ "main.tex": doc("Find Quokka here."), ...(toml ? { "phitex.toml": line } : {}) }, { at: fresh, env: { PHITEX_EDITOR: "", VISUAL: "", EDITOR: "" } });
+    const a = await wordAt(t, "Quokka");
+    await t.mouse((a.l + a.r) / 2, (a.t + a.b) / 2, 1);
+    await t.mouse((a.l + a.r) / 2, (a.t + a.b) / 2, 2);
+    await sleep(1500);
+    await w.stop();
+    return { ran: existsSync(join(marks, "ran")), out: w.out };
+  };
+  const p = await run(true, false);
+  assert.equal(p.ran, false, "a project's editor ran");
+  assert.match(p.out, /`editor` in a project's phitex\.toml is ignored/);
+  assert.equal((await run(false, true)).ran, true, "the user's editor did not run");
 });

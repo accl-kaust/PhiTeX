@@ -3416,50 +3416,115 @@ fn watch_reads_a_changed_bst_and_bib() {
     let _ = child.wait();
 }
 
-/// `\write18` runs any command only when the user allows it: `--shell-escape`
-/// or their own `phitex.toml`; a project's `shell-escape = true` is ignored
-/// and said (item 20).
+/// A project's `phitex.toml` runs nothing, whatever it names: `\\write18`'s
+/// any command only with `--shell-escape` or the user's own setting; the
+/// viewer `--open` starts only the user's; each key ignored is said.
 #[test]
-fn only_the_user_allows_shell_escape() {
+fn a_projects_settings_run_nothing() {
     let _one = one();
     let doc = "\\immediate\\write18{echo made > made.tex}\n\\openin1=made.tex\n\
                \\ifeof1 \\message{NOTMADE}\\else \\message{MADE}\\fi\n\\bye\n";
     let build = |name: &str, toml: Option<&str>, user: Option<&str>, args: &[&str]| {
         let dir = scratch(name);
         std::fs::write(dir.join("d.tex"), doc).expect("the document");
+        // (the program a setting names: leaves a mark if it is ever run)
+        let script = dir.join("mark.sh");
+        std::fs::write(&script, "#!/bin/sh\ntouch \"$(dirname \"$0\")/ran\"\n")
+            .expect("the program");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("runnable");
+        let fill = |t: &str| t.replace("MARK", &script.display().to_string());
         if let Some(t) = toml {
-            std::fs::write(dir.join("phitex.toml"), t).expect("the project's settings");
+            std::fs::write(dir.join("phitex.toml"), fill(t)).expect("the project's settings");
         }
         let home = dir.join("home");
         std::fs::create_dir_all(home.join("phitex")).expect("a home");
         if let Some(u) = user {
-            std::fs::write(home.join("phitex/phitex.toml"), u).expect("the user's settings");
+            std::fs::write(home.join("phitex/phitex.toml"), fill(u)).expect("the user's settings");
         }
         let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
             .env("XDG_CONFIG_HOME", &home)
-            .args(["build", "--engine", "pdftex"])
             .args(args)
-            .arg("d.tex")
+            .args(["--engine", "pdftex", "d.tex"])
             .output()
-            .expect("phitex build runs");
+            .expect("phitex runs");
         let log = std::fs::read_to_string(dir.join("d.log")).unwrap_or_default();
         (
             log,
             String::from_utf8_lossy(&out.stderr).into_owned()
                 + &String::from_utf8_lossy(&out.stdout),
+            dir.join("ran").exists(),
         )
     };
-    let (log, said) = build("shell-project", Some("shell-escape = true\n"), None, &[]);
-    assert!(log.contains("NOTMADE"), "a project allowed itself:\n{log}");
-    assert!(said.contains("is ignored"), "not said:\n{said}");
-    let (log, _) = build("shell-flag", None, None, &["--shell-escape"]);
+    let all = "shell-escape = true\nviewer = \"MARK\"\neditor = \"MARK {file}\"\n\
+               output-dir = \"/tmp/phitex-not-here\"\ncopy-pdf = \"../not-here\"\n";
+    let (log, said, ran) = build("run-project", Some(all), None, &["build"]);
+    assert!(
+        log.contains("NOTMADE"),
+        "a project allowed itself \\write18:\n{log}"
+    );
+    assert!(!ran, "a project's setting ran:\n{said}");
+    for key in ["shell-escape", "viewer", "editor", "output-dir", "copy-pdf"] {
+        assert!(
+            said.contains(&format!("`{key}` in a project's phitex.toml is ignored")),
+            "{key} not said:\n{said}"
+        );
+    }
+    assert!(!Path::new("/tmp/phitex-not-here").exists());
+    let (log, ..) = build("run-flag", None, None, &["build", "--shell-escape"]);
     assert!(
         log.contains("MADE") && !log.contains("NOTMADE"),
         "--shell-escape:\n{log}"
     );
-    let (log, _) = build("shell-user", None, Some("shell-escape = true\n"), &[]);
+    let (log, ..) = build("run-user", None, Some("shell-escape = true\n"), &["build"]);
     assert!(
         log.contains("MADE") && !log.contains("NOTMADE"),
         "the user's:\n{log}"
     );
+    // (`watch --open`: only the user's viewer is started)
+    for (name, toml, user, runs) in [
+        (
+            "run-watch-project",
+            Some("viewer = \"MARK\"\n"),
+            None,
+            false,
+        ),
+        ("run-watch-user", None, Some("viewer = \"MARK\"\n"), true),
+    ] {
+        let dir = scratch(name);
+        std::fs::write(dir.join("d.tex"), "Hello.\n\\bye\n").expect("the document");
+        let script = dir.join("mark.sh");
+        std::fs::write(&script, "#!/bin/sh\ntouch \"$(dirname \"$0\")/ran\"\n")
+            .expect("the program");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("runnable");
+        let fill = |t: &str| t.replace("MARK", &script.display().to_string());
+        if let Some(t) = toml {
+            std::fs::write(dir.join("phitex.toml"), fill(t)).expect("the project's settings");
+        }
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join("phitex")).expect("a home");
+        if let Some(u) = user {
+            std::fs::write(home.join("phitex/phitex.toml"), fill(u)).expect("the user's settings");
+        }
+        let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .env("XDG_CONFIG_HOME", &home)
+            .args([
+                "watch", "--write", "--open", "--json", "--engine", "tex", "d.tex",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("phitex watch runs");
+        let stdout = child.stdout.take().expect("its output");
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        let mut seen = Vec::new();
+        let _ = until(&mut lines, "build", &1.into(), &mut seen);
+        // (a viewer started is not waited for)
+        std::thread::sleep(Duration::from_millis(500));
+        drop(child.stdin.take());
+        let _ = child.wait();
+        assert_eq!(dir.join("ran").exists(), runs, "{name}");
+    }
 }
