@@ -409,3 +409,51 @@ fn box_reports_are_in_the_log_as_tex_writes_them() {
     common::rebuild(&mut b, &doc.replace("Other text.", "Other words."));
     check(&b, "after an edit of the paragraph between");
 }
+
+/// A warning written to the log in the kernel's shapes (`LaTeX
+/// Warning: `, `LaTeX Font Warning: `, `Package <name> Warning: `,
+/// `Class <name> Warning: `; LaTeX's `\GenericWarning` is a `\write` on
+/// a stream no file is open on) is a warning diagnostic where the write
+/// was met: its first line the message, its continuation lines (without
+/// their `(name)` lead) the help; the culprit the command whose
+/// argument holds the key the message quotes, else the last control
+/// sequence read. A text of another shape is none.
+#[test]
+fn written_warnings_are_diagnostics() {
+    let doc = "\\def\\r#1{\\immediate\\write16{LaTeX Warning: Reference `#1' on page 1 undefined on input line 1.}}\n\
+               \\def\\warn{\\immediate\\write16{LaTeX Font Warning: Font shape `OT1/cmr/bx/sc' undefined^^J(Font)              using `OT1/cmr/bx/n' instead on input line 2.}}\n\
+               See \\r{lbl} here.\n\
+               A \\warn B\n\
+               \\immediate\\write16{Package foo Warning: Something odd.}\n\
+               \\immediate\\write16{Class bar Warning: Odd too^^J(bar)                and more.}\n\
+               \\immediate\\write16{A plain message}\\immediate\\write-1{LaTeX Warning: Not from a \\string\\typeout.}\n\
+               \\bye\n";
+    let b = build(doc, |o| o);
+    let ds = b.diagnostics();
+    show(&ds);
+    let ws: Vec<&Diagnostic> = ds
+        .iter()
+        .filter(|d| d.severity == Severity::Warning)
+        .collect();
+    let ms: Vec<&str> = ws.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        ms,
+        [
+            "LaTeX Warning: Reference `lbl' on page 1 undefined on input line 1.",
+            "LaTeX Font Warning: Font shape `OT1/cmr/bx/sc' undefined",
+            "Package foo Warning: Something odd.",
+            "Class bar Warning: Odd too",
+            "LaTeX Warning: Not from a \\typeout.",
+        ]
+    );
+    assert_eq!(&doc[ws[0].range.0..ws[0].range.1], "\\r{lbl}");
+    assert_eq!((ws[0].line, ws[0].help.as_deref()), (3, None));
+    assert_eq!(&doc[ws[1].range.0..ws[1].range.1], "\\warn");
+    assert_eq!(
+        (ws[1].line, ws[1].help.as_deref()),
+        (4, Some("using `OT1/cmr/bx/n' instead on input line 2."))
+    );
+    assert_eq!(ws[2].range.0, ws[2].range.1);
+    assert_eq!(ws[3].help.as_deref(), Some("and more."));
+    assert!(ds.iter().all(|d| d.severity != Severity::Error), "{ds:?}");
+}

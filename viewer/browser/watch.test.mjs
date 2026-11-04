@@ -327,6 +327,33 @@ test("the problems' kinds filter the list, the page's marks and the scrollbar's,
   await w2.stop();
 });
 
+test("LaTeX's warnings are problems: an undefined \\ref and \\cite are warnings of kind reference, underlined on the page, hidden by their kind's filter (item 16, warnings)", async () => {
+  const fresh = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
+  // (an error too, so that the list has two kinds and offers the filters)
+  const { w, t } = await open({ "main.tex": doc("See \\ref{nosuchlabel} here and \\cite{nosuchkey}.\n\nThen \\nosuchcommandhere here.") }, { at: fresh });
+  await problems(t);
+  await t.until(`!!$("#diags [data-kind='reference']") && !!$("#diags [data-kind='error']")`, "the reference kind's filter");
+  const text = await t.q(`$("#diags").innerText`);
+  assert.match(text, /Reference `nosuchlabel' on page 1 undefined/);
+  assert.match(text, /Citation `nosuchkey' on page 1 undefined/);
+  assert.match(text, /main\.tex:3/, "the warnings' line");
+  assert.match(text, /References \d+/, "counted under the reference kind");
+  await t.until(`$$(".slot .culprit.warning").length >= 2`, "the warnings' underlines on the page");
+  await t.until(`$$(".slot .culprit.error").length >= 1`, "the error's underline");
+  await t.click("#diags [data-kind='reference']");
+  await t.until(`$("#diags [data-kind='reference']")?.getAttribute("aria-pressed") === "false"`, "reference off");
+  await t.until(`$$(".slot .culprit.warning").length === 0`, "the warnings' underlines gone");
+  assert.ok((await t.q(`$$(".slot .culprit.error").length`)) >= 1, "the error's underline stays");
+  assert.doesNotMatch(await t.q(`[...$$("#diags .phx-card, #diags li")].map((e) => e.innerText).join(" ")`), /undefined on page/, "gone from the list");
+  await sleep(500);
+  assert.match(readFileSync(join(fresh, ".config", "phitex", "phitex.toml"), "utf8"), /problems-hidden = \[\s*"reference"/);
+  // (the label defined: the warnings go, the underlines with them)
+  await t.click("#diags [data-kind='reference']");
+  w.write("main.tex", doc("See \\ref{lbl} here\\label{lbl} and \\cite{nosuchkey}.\n\nThen \\nosuchcommandhere here."));
+  await t.until(`!/Reference \`nosuchlabel'/.test($("#diags").innerText) && /Citation \`nosuchkey'/.test($("#diags").innerText)`, "the reference's warning gone, the citation's kept");
+  await w.stop();
+});
+
 test("a problem's card shows its place on the pages (item 2); which kinds have an underline (batch 3)", async () => {
   const filler = Array.from({ length: 12 }, (_, i) => `Paragraph ${i} ` + "words fill the page ".repeat(40)).join("\n\n");
   const { w, t } = await open({ "main.tex": doc(`${filler}\n\nLate \\nosuchcommand here.`) });
@@ -351,12 +378,16 @@ test("a problem's card shows its place on the pages (item 2); which kinds have a
   for (const [kind, text] of Object.entries(kinds)) {
     const { w, t } = await open({ "main.tex": text }, { pages: false });
     await t.until(`$("#diags")?.innerText.trim().length > 0 || +$("#pgn")?.textContent > 0`, `${kind}: built`, 120000);
-    await sleep(2500);
-    got[kind] = await t.q(`({ underline: $$(".slot .culprit").length > 0, said: $("#diags").innerText.split("\\n").find((l) => l.trim()) ?? "" })`);
+    // (the underline comes once the page is laid out: waited for, not long)
+    const underline = await t.until(`$$(".slot .culprit").length > 0`, `${kind}: an underline`, 8000).then(() => true, () => false);
+    got[kind] = { underline, ...(await t.q(`({ pages: +$("#pgn")?.textContent, said: $("#diags").innerText.replace(/\\s+/g, " ").slice(0, 160) })`)) };
     await w.stop();
   }
   console.log("underlines by kind:", JSON.stringify(got, null, 1));
-  assert.ok(got["undefined command"].underline, "an undefined command is underlined");
+  // (a kind whose build gives no page cannot be underlined: a missing file
+  // and an unclosed brace stop the job; their places are in the card)
+  for (const kind of ["missing citation", "undefined reference", "font fallback", "undefined command"]) assert.ok(got[kind].underline, `${kind} is underlined`);
+  assert.match(got["missing file"].said, /nosuchfile\.tex' not found/);
 });
 
 test("the tab's title says the state; Settings writes the user's file; What's new and the times show; Copy for an AI has the source (items 12, 15, 7, 3, 11)", async () => {

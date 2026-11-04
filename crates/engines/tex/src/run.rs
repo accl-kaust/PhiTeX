@@ -651,6 +651,44 @@ pub(crate) type KindFields = (i64, i64, i64, i32, i64, Vec<ValueId>);
 /// the column.
 pub(crate) type DiagPlace = (ValueId, i64, ValueId, String, usize);
 
+/// Whether `line`, the first of a text written to the log, begins a
+/// warning in the kernel's shapes ([`Run::written_warning`]): `LaTeX
+/// Warning: `, `LaTeX Font Warning: `, `Package <name> Warning: `,
+/// `Class <name> Warning: `.
+pub(crate) fn warning_shape(line: &str) -> bool {
+    if line.starts_with("LaTeX Warning: ") || line.starts_with("LaTeX Font Warning: ") {
+        return true;
+    }
+    let Some(rest) = line
+        .strip_prefix("Package ")
+        .or_else(|| line.strip_prefix("Class "))
+    else {
+        return false;
+    };
+    match rest.split_once(' ') {
+        Some((name, rest)) => !name.is_empty() && rest.starts_with("Warning: "),
+        None => false,
+    }
+}
+
+/// A continuation line of a written warning without its lead: the
+/// kernel's `\MessageBreak` begins each with the warning's source in
+/// parentheses, one word, and blanks (`(Font)              using ...`,
+/// `(hyperref)                ...`; one blank where the text was a
+/// macro's body, whose blanks TeX read as one), or blanks alone (a `LaTeX
+/// Warning`'s).
+pub(crate) fn continuation(line: &str) -> &str {
+    let t = line.trim_start();
+    if let Some(r) = t.strip_prefix('(')
+        && let Some(k) = r.find(')')
+        && !r[..k].contains(' ')
+        && r[k + 1..].starts_with(' ')
+    {
+        return r[k + 1..].trim();
+    }
+    t.trim_end()
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Run<'c, 'a> {
     /// Encodings through the worker's cache at this run's values epoch
@@ -4338,10 +4376,47 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// [`Self::diag`] of kind `kind`: 0 a warning, 1 TeX's error, 2 the
-    /// engine's diagnostic.
+    /// engine's diagnostic, 3 a warning the format wrote
+    /// ([`Self::written_warning`]).
     fn diag_kind(&mut self, kind: i64, msg: &str) {
         let at = self.diag_place();
         self.diag_at(kind, msg, at);
+    }
+
+    /// A warning LaTeX, a class or a package wrote to the log (`text`, a
+    /// `\write` on a stream no file is open on, [`Run::write_out`]): a
+    /// diagnostic where the write was met (an undefined `\ref` at the
+    /// `\ref`, a font substitution at the command that selected the
+    /// font), its first line the message, its continuation lines after
+    /// it on lines of their own (the help). The shapes are the kernel's
+    /// (`\GenericWarning`): `LaTeX Warning: `, `LaTeX Font Warning: `,
+    /// `Package <name> Warning: ` and `Class <name> Warning: `; a text
+    /// of another shape (a `\typeout`, a `\wlog`) is no diagnostic. Not
+    /// in the log's text, which is as TeX writes it.
+    pub(crate) fn written_warning(&mut self, text: &str) -> R<()> {
+        let nl = u32::try_from(self.ipar(Par::newlinechar)?)
+            .ok()
+            .and_then(char::from_u32);
+        let mut lines = text
+            .split(|c: char| Some(c) == nl || c == '\n')
+            .map(str::trim_end)
+            .skip_while(|l| l.trim().is_empty());
+        let Some(first) = lines.next().map(str::trim_start) else {
+            return Ok(());
+        };
+        if !warning_shape(first) {
+            return Ok(());
+        }
+        let mut msg = first.to_owned();
+        for l in lines {
+            let l = continuation(l);
+            if !l.is_empty() {
+                msg.push('\n');
+                msg.push_str(l);
+            }
+        }
+        self.diag_kind(3, &msg);
+        Ok(())
     }
 
     /// Where a diagnostic made now is: the input line being read (its
@@ -4392,7 +4467,8 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// A diagnostic of kind `kind` (0 a warning, 1 TeX's error, 2 the
-    /// engine's) at place `p` ([`Self::diag_place`]).
+    /// engine's, 3 a warning the format wrote) at place `p`
+    /// ([`Self::diag_place`]).
     pub(crate) fn diag_at(&mut self, kind: i64, msg: &str, p: DiagPlace) {
         let v = self.v;
         let (file, at, unit, seg, loc) = p;

@@ -2841,6 +2841,11 @@ var Panel = class {
       void this.underline(this.culpritDiags);
     }
   }
+  /** The pages' origins came after the problems did: their underlines looked up again (the memo held an answer with no pages). */
+  origins() {
+    this.culpritsOf = "";
+    void this.underline(this.culpritDiags);
+  }
   /** The pointer over an underline: its problem's message, under it. */
   culpritAt(e) {
     const tip = this.$("#ctip");
@@ -4123,6 +4128,7 @@ var Panel = class {
     if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
     if (hashes.length) this.sheetDown();
     this.nav();
+    if (this.culpritDiags.length) void this.underline(this.culpritDiags);
   }
   /** The editor to a page's source (a double-click on it). */
   goto(file, from2, to, focus) {
@@ -4553,7 +4559,7 @@ var PreviewSession = class {
     core.onEvent?.((e) => {
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
-      if (this.o.remote && e.event === "origins") return void (this.glyphCache.clear(), this.culprits.clear());
+      if (this.o.remote && e.event === "origins") return void (this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
       if (this.o.remote && "event" in e && WATCH2.has(e.event)) return this.onWatch(e);
       if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);
       if (e.event === "switched") {

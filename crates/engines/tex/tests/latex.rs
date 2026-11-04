@@ -672,6 +672,48 @@ fn latex_marginpars_settle() {
     }
 }
 
+/// `pdflatex` on thirty pages made by one loop, each ended by `\newpage`
+/// and each beginning by reading a counter the shipout hook stepped
+/// (`pdfdocs/newpages20.tex`, as thumbs' overview does; the hook loops
+/// a while, so the text runs ahead of the routines): a serial chain
+/// from the text to the routine and back through a page fired at
+/// `\penalty-10000`, the text's own break. The finisher of such a page
+/// re-asks the text at once (docs/spec-settle.md §2); held to the quiet
+/// point, each pass advanced one page, and a text that speculated wrong
+/// early ran out the 12 passes ('the page layout did not settle', a
+/// page count off: thumbs-example -j4, 2 to 6 builds in 24). The PDF
+/// equals pdfTeX's at -j1, -j4 and -j8, settled, in each of three
+/// builds.
+#[test]
+fn latex_newpage_chain_settles() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let name = "newpages20";
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+        .expect("the oracle");
+    for threads in [1, 4, 8] {
+        for k in 0..3 {
+            let opts = Options {
+                threads: Some(threads),
+                ..pdf_opts(name, &dir)
+            };
+            let b = common::build(opts, Some(&prelude(true)), &src);
+            let (pdf, _) = b.output();
+            let bad: Vec<String> = b
+                .diagnostics()
+                .into_iter()
+                .map(|d| d.message)
+                .filter(|m| m.contains("did not settle"))
+                .collect();
+            eprintln!("{name} -j {threads} build {k}: {}", report(name, &b));
+            assert!(bad.is_empty(), "{name} -j {threads} build {k}: {bad:?}");
+            if let Some(d) = common::first_difference(&pdf, &want) {
+                panic!("{name} -j {threads} build {k}: pdf {d}");
+            }
+        }
+    }
+}
+
 /// `pdflatex` on a two-column article with 56 marginpars, 19 figures, 5
 /// wide figures and 7 tables (`pdfdocs/floats2col.tex`): LaTeX's output
 /// routine gives back floats, `\@freelist` and the column box at every
@@ -2661,4 +2703,77 @@ fn a_piece_of_an_input_file_has_its_lines_given() {
             );
         }
     }
+}
+
+/// LaTeX's warnings (an undefined `\ref` or `\cite`, a font shape
+/// substituted) are warning diagnostics at the command that raised them,
+/// the command with its argument the culprit, so a viewer underlines it;
+/// the rerun warning at `\end{document}`, which names nothing, has no
+/// culprit. The output is not changed by them.
+#[test]
+fn latex_warnings_are_diagnostics() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latex-warnings");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let src = "\\documentclass{article}\n\\begin{document}\n\
+               See \\ref{nosuchlabel} and \\cite[p.~3]{nosuchkey} here.\n\n\
+               Shape {\\fontshape{sc}\\bfseries bold small caps} here.\n\
+               \\end{document}\n";
+    std::fs::write(dir.join("lw.tex"), src).expect("the document");
+    let b = common::build(pdf_opts("lw", &dir), Some(&prelude(true)), src);
+    let ds = b.diagnostics();
+    for d in &ds {
+        eprintln!("{d:?}");
+    }
+    let at = |needle: &str| {
+        let d = ds
+            .iter()
+            .find(|d| d.message.contains(needle))
+            .unwrap_or_else(|| panic!("no diagnostic saying {needle:?}: {ds:#?}"));
+        assert_eq!(d.severity, phitex_tex::Severity::Warning, "{d:?}");
+        (d.line, &src[d.range.0..d.range.1], d.help.clone())
+    };
+    let r = at("Reference `nosuchlabel'");
+    assert_eq!((r.0, r.1), (3, "\\ref{nosuchlabel}"));
+    assert_eq!(at("Citation `nosuchkey'").1, "\\cite[p.~3]{nosuchkey}");
+    let (line, culprit, help) = at("Font shape `OT1/cmr/bx/sc' undefined");
+    assert_eq!((line, culprit), (5, "\\bfseries"));
+    assert!(
+        help.as_deref()
+            .is_some_and(|h| h.contains("using `OT1/cmr/bx/n' instead")),
+        "{help:?}"
+    );
+    let rerun = at("There were undefined references");
+    assert_eq!(rerun.1, "");
+    assert!(
+        ds.iter().all(|d| d.severity != phitex_tex::Severity::Error),
+        "{ds:#?}"
+    );
+}
+
+/// A file `\input` names and the run cannot find: LaTeX's error, given
+/// after the stop it ends in (`why_read_stopped`), has the `\input` with
+/// its argument as its culprit.
+#[test]
+fn a_missing_files_input_is_the_culprit() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latex-missing-file");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let src = "\\documentclass{article}\n\\begin{document}\n\
+               Include \\input{nosuchfile} here.\n\\end{document}\n";
+    std::fs::write(dir.join("mf.tex"), src).expect("the document");
+    let b = common::build(pdf_opts("mf", &dir), Some(&prelude(true)), src);
+    let ds = b.diagnostics();
+    for d in &ds {
+        eprintln!("{d:?}");
+    }
+    let d = ds
+        .iter()
+        .find(|d| d.message.contains("nosuchfile.tex' not found"))
+        .unwrap_or_else(|| panic!("no diagnostic naming the file: {ds:#?}"));
+    assert_eq!(d.severity, phitex_tex::Severity::Error);
+    assert_eq!(
+        (d.line, &src[d.range.0..d.range.1]),
+        (3, "\\input{nosuchfile}")
+    );
 }

@@ -2464,6 +2464,9 @@ impl Run<'_, '_> {
             };
             self.contribute_stream(e);
         } else {
+            // (a warning LaTeX writes this way: a diagnostic at the
+            // command that raised it, with the line as it is logged)
+            self.written_warning(&s)?;
             self.log_lines("wlog", &s, marks)?;
         }
         Ok(())

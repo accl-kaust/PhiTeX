@@ -222,6 +222,8 @@ export interface PreviewSink {
   goto?(file: string, from: number, to: number, focus?: boolean): void;
   /** The editor's selection, highlighted on its pages until it changes ([] clears). */
   marks?(marks: { k: number; boxes: [number, number, number, number][] }[]): void;
+  /** The pages' glyph origins came, or changed (a watch makes a build's after it is announced): what was looked up on them before is looked up again. */
+  origins?(): void;
   /**
    * Whether the document's outline is shown (the contents beside the
    * pages): none, or false, it is not asked for after each build; the view
@@ -423,7 +425,10 @@ export class PreviewSession {
       // (the watch's build moved the sources of pages it did not draw again,
       // a comment line added above them: the glyphs kept are asked again, not
       // left at the old text's bytes, which put a double-click lines off)
-      if (this.o.remote && (e as { event?: string }).event === "origins") return void (this.glyphCache.clear(), this.culprits.clear());
+      // (and the problems' underlines, looked up before the origins were
+      // there, are looked up again: a build's problems reach the view
+      // before its origins do)
+      if (this.o.remote && (e as { event?: string }).event === "origins") return void (this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
       if (this.o.remote && "event" in e && WATCH.has(e.event)) return this.onWatch(e as WatchEvent);
       // (a build of the core's began or ended; `preparing`, older cores' name for it)
       if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);

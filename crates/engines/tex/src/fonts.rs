@@ -3,7 +3,7 @@
 //! `phitex-typeset` through its `Fonts` trait.
 
 use crate::exec::LockWait as _;
-use phitex_defuse::FxHashMap;
+use phitex_defuse::{FxHashMap, FxHashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use phitex_defuse::{ValueId, Values};
@@ -323,11 +323,22 @@ pub(crate) struct View {
     /// XeTeX's `cur_f` as math leaves it (-1: the null font).
     pub math_cur_f: std::sync::atomic::AtomicI64,
     pub px: FxHashMap<FontId, Box<Px>>,
-    /// An expanded font's base, for its codes.
+    /// An expanded font's base, for its codes (pdfTeX's `pdf_font_blink`:
+    /// the font whose first ask for the ratio made or found it last,
+    /// `copy_expand_params`), as the engine holds it where the view is made.
     pub ex_base: FxHashMap<FontId, FontId>,
+    /// The ratios each font has asked for before this view (pdfTeX's
+    /// `pdf_font_elink`, the engine's `pdf:elink:<f>`).
+    pub elink: FxHashMap<FontId, Vec<i32>>,
+    /// An expanded font bound anew here, by a font's first ask for its
+    /// ratio ([`View::expand`]): the base its codes are from now on.
+    rebound: Mutex<FxHashMap<FontId, FontId>>,
+    /// The fonts' first asks here, by font and ratio.
+    linked_here: Mutex<FxHashSet<(FontId, i32)>>,
     /// The fonts expanded here: their base and the slot of their metrics.
     exp_index: Mutex<FxHashMap<FontId, (FontId, usize)>>,
-    /// `get_expand_font`'s requests, in order (the first of each).
+    /// `get_expand_font`'s requests, in order (the first of each font's
+    /// for a ratio: what the engine binds as pdfTeX does).
     pub exp_log: Mutex<Vec<(FontId, i32)>>,
 }
 
@@ -526,8 +537,13 @@ impl View {
         self.px.get(&base)?.slots.get(i)?.get()
     }
 
-    /// The font whose codes and quad `f` has: an expanded font's base.
+    /// The font whose codes and quad `f` has: an expanded font's base
+    /// (bound anew here, else as the engine holds it, else the font that
+    /// made it here).
     fn base_of(&self, f: FontId) -> FontId {
+        if let Some(&b) = self.rebound.locked().get(&f) {
+            return b;
+        }
         if let Some(&b) = self.ex_base.get(&f) {
             return b;
         }
@@ -773,8 +789,30 @@ impl View {
             return font;
         };
         p.slots[i].get_or_init(|| (expanded(l, e), params.clone()));
-        if self.exp_index.locked().insert(k, (font, i)).is_none() && log {
-            self.exp_log.locked().push((font, e));
+        let new = {
+            let mut idx = self.exp_index.locked();
+            if let std::collections::hash_map::Entry::Vacant(v) = idx.entry(k) {
+                v.insert((font, i));
+                true
+            } else {
+                false
+            }
+        };
+        // (pdfTeX's `get_expand_font`: a font's first ask for a ratio goes
+        // through `load_expand_font`, which binds the font `tfm_lookup`
+        // finds, or makes, to the asking font (`copy_expand_params`: its
+        // codes); a later ask finds it in the font's own chain and binds
+        // nothing. The engine binds it so when the run is committed
+        // (`exp_log`); here, for the lines after it in this paragraph)
+        let first = !self.elink.get(&font).is_some_and(|l| l.contains(&e))
+            && self.linked_here.locked().insert((font, e));
+        if first {
+            if !new || self.ex_base.contains_key(&k) {
+                self.rebound.locked().insert(k, font);
+            }
+            if log {
+                self.exp_log.locked().push((font, e));
+            }
         }
         k
     }

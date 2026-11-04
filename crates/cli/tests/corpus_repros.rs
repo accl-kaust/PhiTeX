@@ -1269,3 +1269,18 @@ fn aux_pre_other_point() {
         assert!(got == want, "{name} -j{j}: the PDF differs from pdflatex's");
     }
 }
+
+/// TeX Live manual easyformat (microtype): `\scshape` under `\bfseries` has
+/// no shape, and LaTeX's substitute is the bold font loaded anew after its
+/// `\pdffontexpand`, a font of its own with microtype's small-caps
+/// protrusion. Its `\pdffontexpand` binds the expanded fonts the two fonts
+/// share to it (pdfTeX's `load_expand_font` over what `tfm_lookup` finds:
+/// `copy_expand_params`, the blink and the codes), and the bold text after
+/// the group, whose font asked for those ratios before, still sets its
+/// margin kerns by the small-caps codes. `PhiTeX` bound an expanded font to
+/// whichever font last asked for it. Oracle: pdflatex in the CI image, at
+/// -j1 and -j4.
+#[test]
+fn expand_bound_anew() {
+    check_threads("expand_bound_anew", "pdf");
+}

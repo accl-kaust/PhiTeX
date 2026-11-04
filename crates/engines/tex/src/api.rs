@@ -5033,6 +5033,260 @@ fn line_starts(s: &str) -> Vec<usize> {
     v
 }
 
+/// The culprit of a diagnostic as bytes of `text`, the file it is in,
+/// where the line read so far is `text[ls..b]`: `message` names a key in
+/// quotes (``Reference `x' on page 1 undefined``, ``File `x.tex' not
+/// found``), the command whose argument holds the key on that line
+/// (`\ref{x}`, `\cite[p.~3]{x,y}`, `\input{x}`; the key without its
+/// extension too); it names a control sequence (``Paragraph ended before
+/// \textbf was complete``), the last one read as a token since `from`
+/// (the line's text node: a runaway argument began lines above); else a
+/// written warning's (`written`) is the last control sequence read
+/// (`\bfseries` before a font substitution). None found: none.
+fn culprit(
+    message: &str,
+    text: &str,
+    ls: usize,
+    b: usize,
+    from: usize,
+    written: bool,
+) -> Option<(usize, usize)> {
+    let before = &text[ls..b];
+    if let Some(key) = quoted(message) {
+        let stem = key
+            .rsplit_once('.')
+            .map(|(s, _)| s)
+            .filter(|s| !s.is_empty());
+        if let Some((s, e)) =
+            key_argument(before, key).or_else(|| stem.and_then(|s| key_argument(before, s)))
+        {
+            return Some((ls + s, ls + e));
+        }
+    }
+    if let Some(cs) = named_cs(message)
+        && let Some(k) = last_cs_token(&text[from..b], &cs)
+    {
+        return Some((from + k, from + k + cs.len()));
+    }
+    if written {
+        let t = before.trim_end();
+        let n = trailing_cs(t);
+        if n > 0 {
+            return Some((ls + t.len() - n, ls + t.len()));
+        }
+    }
+    None
+}
+
+/// The first text `m` quotes TeX's way (`` `x' ``).
+fn quoted(m: &str) -> Option<&str> {
+    let i = m.find('`')?;
+    let r = &m[i + 1..];
+    let k = &r[..r.find('\'')?];
+    (!k.is_empty() && !k.contains(['\n', '`'])).then_some(k)
+}
+
+/// Bytes of `before` of the command whose argument holds `key` (`{key}`,
+/// one of `{a,key,b}`), the last on the line, from its control sequence
+/// (over blanks, `*` and `[...]`; none: from the brace) to the argument's
+/// closing brace.
+fn key_argument(before: &str, key: &str) -> Option<(usize, usize)> {
+    let (k, _) = before.rmatch_indices(key).find(|&(k, _)| {
+        let lead = before[..k].trim_end_matches(' ');
+        let after = before[k + key.len()..].trim_start_matches(' ');
+        lead.ends_with(['{', ',']) && (after.is_empty() || after.starts_with(['}', ',']))
+    })?;
+    let open = before[..k].rfind('{')?;
+    if before[open..k].contains('}') {
+        return None;
+    }
+    let end = before[k + key.len()..]
+        .find('}')
+        .map_or(before.len(), |e| k + key.len() + e + 1);
+    let mut p = open;
+    loop {
+        let t = before[..p].trim_end_matches([' ', '*']).len();
+        if before[..t].ends_with(']')
+            && let Some(o) = before[..t].rfind('[')
+        {
+            p = o;
+            continue;
+        }
+        p = t;
+        break;
+    }
+    let n = trailing_cs(&before[..p]);
+    Some((if n > 0 { p - n } else { open }, end))
+}
+
+/// The control sequence `msg` names (`Paragraph ended before \textbf was
+/// complete`), with its backslash.
+fn named_cs(msg: &str) -> Option<String> {
+    let i = msg.find('\\')?;
+    let rest = &msg[i + 1..];
+    let letters = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
+    if letters > 0 {
+        Some(format!("\\{}", &rest[..letters]))
+    } else {
+        rest.chars()
+            .next()
+            .filter(|c| !c.is_whitespace())
+            .map(|c| format!("\\{c}"))
+    }
+}
+
+/// Where `cs` is last in `text` as a token: a control word not followed
+/// by a letter, its backslash not escaped.
+fn last_cs_token(text: &str, cs: &str) -> Option<usize> {
+    let word = cs.len() > 2 || cs.as_bytes().get(1).is_some_and(u8::is_ascii_alphabetic);
+    text.rmatch_indices(cs)
+        .find(|&(k, _)| {
+            (!word || !text[k + cs.len()..].starts_with(|c: char| c.is_ascii_alphabetic()))
+                && !text[..k].ends_with('\\')
+        })
+        .map(|(k, _)| k)
+}
+
+/// The bytes of the control sequence `s` ends with (a control word, a
+/// control symbol), 0 when it ends with none.
+fn trailing_cs(s: &str) -> usize {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut i = n;
+    while i > 0 && b[i - 1].is_ascii_alphabetic() {
+        i -= 1;
+    }
+    if i > 0 && i < n && b[i - 1] == b'\\' {
+        return n - i + 1;
+    }
+    if n >= 2 && b[n - 2] == b'\\' && b[n - 1].is_ascii() {
+        return 2;
+    }
+    0
+}
+
+#[cfg(test)]
+mod culprit_tests {
+    use super::*;
+
+    #[test]
+    fn a_key_names_its_command() {
+        let line = "See \\ref{nosuchlabel} here.";
+        let b = line.find(" here").unwrap();
+        let r = culprit(
+            "LaTeX Warning: Reference `nosuchlabel' on page 1 undefined on input line 3.",
+            line,
+            0,
+            b,
+            0,
+            true,
+        );
+        assert_eq!(r.map(|(s, e)| &line[s..e]), Some("\\ref{nosuchlabel}"));
+        let line = "Cite \\cite[p.~3]{a, nosuchkey,b} and";
+        let b = line.len();
+        let r = culprit(
+            "LaTeX Warning: Citation `nosuchkey' on page 1 undefined on input line 3.",
+            line,
+            0,
+            b,
+            0,
+            true,
+        );
+        assert_eq!(
+            r.map(|(s, e)| &line[s..e]),
+            Some("\\cite[p.~3]{a, nosuchkey,b}")
+        );
+        let line = "Include \\input{nosuchfile}";
+        let r = culprit(
+            "LaTeX Error: File `nosuchfile.tex' not found.",
+            line,
+            0,
+            line.len(),
+            0,
+            false,
+        );
+        assert_eq!(r.map(|(s, e)| &line[s..e]), Some("\\input{nosuchfile}"));
+        // (the key on an earlier line: not on this one)
+        let text = "a \\ref{x}\nb";
+        assert_eq!(
+            culprit("Reference `x' undefined", text, 10, 11, 0, false),
+            None
+        );
+    }
+
+    #[test]
+    fn a_named_control_sequence_is_found_in_the_node() {
+        let text = "Open \\textbf{never closed here.\n\n";
+        let r = culprit(
+            "Paragraph ended before \\textbf was complete",
+            text,
+            32,
+            32,
+            0,
+            false,
+        );
+        assert_eq!(r.map(|(s, e)| &text[s..e]), Some("\\textbf"));
+        // (not inside a longer name, not escaped)
+        let text = "\\textbfx \\\\textbf \\textbf{} y";
+        let r = culprit(
+            "Paragraph ended before \\textbf was complete",
+            text,
+            0,
+            text.len(),
+            0,
+            false,
+        );
+        assert_eq!(r, Some((18, 25)));
+    }
+
+    #[test]
+    fn a_written_warning_falls_back_on_the_last_control_sequence() {
+        let line = "Shape {\\fontshape{sc}\\bfseries ";
+        let r = culprit(
+            "LaTeX Font Warning: Font shape `OT1/cmr/bx/sc' undefined",
+            line,
+            0,
+            line.len(),
+            0,
+            true,
+        );
+        assert_eq!(r.map(|(s, e)| &line[s..e]), Some("\\bfseries"));
+        assert_eq!(
+            culprit(
+                "LaTeX Warning: Label(s) may have changed.",
+                "x\\\\",
+                0,
+                3,
+                0,
+                true
+            ),
+            Some((1, 3))
+        );
+        assert_eq!(
+            culprit(
+                "LaTeX Warning: Label(s) may have changed.",
+                "plain",
+                0,
+                5,
+                0,
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            culprit(
+                "LaTeX Warning: Label(s) may have changed.",
+                "plain \\x",
+                0,
+                8,
+                0,
+                false
+            ),
+            None
+        );
+    }
+}
+
 /// [`canonical_text`] of `new`, made in `canon` from that of `old` (the
 /// text `canon` and its `marks` are made from): the lines where the
 /// texts differ made again in place, the rest kept (each line's
@@ -7920,6 +8174,9 @@ impl Build {
             let before: String = seg.chars().take(loc).collect();
             let in_doc = xs.get(2).is_some_and(|&n| str_of(v, n) == DOC_NAME);
             let file_text: Arc<str>;
+            // (the document's text node the line is in: where a culprit
+            // is looked for past the line, [`culprit`])
+            let mut node_from: Option<usize> = None;
             let (file, text, at): (String, &str, usize) = if int(3) >= 0 && in_doc {
                 // a line of the document's own text: the position the
                 // node's frame carries is the byte in the document as the
@@ -7945,6 +8202,7 @@ impl Build {
                 });
                 let at = usize::try_from(int(3) + shift).unwrap_or(0)
                     + seg.chars().take(loc).map(char::len_utf8).sum::<usize>();
+                node_from = spans.get(i).copied();
                 (docname.clone(), doc, at)
             } else if int(3) >= 0
                 && let Some(&n) = xs.get(2)
@@ -8032,18 +8290,51 @@ impl Build {
             let le = text[b..].find('\n').map_or(text.len(), |k| b + k);
             let before: String = text[ls..b].to_owned();
             let after: String = text[b..le].trim_end_matches('\r').to_owned();
-            let undefined = message == "Undefined control sequence";
-            let start = if undefined {
-                before.rfind('\\').map_or(at, |k| at - (before.len() - k))
-            } else {
-                at
+            // (a written warning's continuation lines are its help)
+            let (message, more) = match message.split_once('\n') {
+                Some((m, h)) if kind == 3 => (m.to_owned(), Some(h.to_owned())),
+                _ => (message, None),
             };
+            // (a line number the format wrote, `\on@line`'s, is a mark the
+            // log's layout resolves ([`crate::log::LINE_MARK`]): here it
+            // is the line read when the text was written, this one)
+            let mark = |m: String| {
+                if m.contains(crate::log::LINE_MARK) {
+                    m.replace(crate::log::LINE_MARK, &line.to_string())
+                } else {
+                    m
+                }
+            };
+            let (message, more) = (mark(message), more.map(mark));
+            let undefined = message == "Undefined control sequence";
+            // the culprit's bytes in `text`: an undefined name is the one
+            // just read; else the command whose argument holds the key
+            // the message names, the control sequence it names, or the
+            // last one read before a written warning ([`culprit`])
+            let found = if undefined {
+                before.rfind('\\').map(|k| (ls + k, b))
+            } else if kind == 1 || kind == 3 {
+                let from = node_from.map_or(ls, |f| f.min(ls));
+                culprit(&message, text, ls, b, from, kind == 3)
+            } else {
+                None
+            };
+            // (in the file's units: the document's bytes, a file's
+            // characters)
+            let unit = |p: usize| {
+                if file == docname {
+                    at - (b - p)
+                } else {
+                    at - text[p..b].chars().count()
+                }
+            };
+            let (start, end) = found.map_or((at, at), |(s, e)| (unit(s), unit(e)));
             let lead = format!("l.{line} ");
             let context = format!(
                 "{lead}{before}\n{}{after}",
                 " ".repeat(lead.len() + before.chars().count())
             );
-            let help = undefined.then(|| {
+            let help = if undefined {
                 let mut h = "The control sequence at the end of the top line\n\
                  of your error message was never \\def'ed. If you have\n\
                  misspelled it (e.g., `\\hobx'), type `I' and the correct\n\
@@ -8059,19 +8350,21 @@ impl Build {
                         format_args!("\nDid you mean {}?", l.join(", ")),
                     );
                 }
-                h
-            });
-            let (start, at) = if file == docname {
-                (to_raw(start), to_raw(at))
+                Some(h)
             } else {
-                (start, at)
+                more
+            };
+            let (start, end) = if file == docname {
+                (to_raw(start), to_raw(end))
+            } else {
+                (start, end)
             };
             let d = Diagnostic {
                 file,
-                range: (start, at),
+                range: (start, end),
                 line,
                 severity: match kind {
-                    0 => Severity::Warning,
+                    0 | 3 => Severity::Warning,
                     1 => Severity::Error,
                     _ => Severity::Diagnostic,
                 },
@@ -8209,6 +8502,45 @@ impl Build {
             d.help = Some(format!(
                 "LaTeX then asks for what to do, and a run that cannot ask stops there ({stop}), as pdflatex does"
             ));
+            // (the message now names the file: its command is the culprit)
+            self.place_culprit(d);
+        }
+    }
+
+    /// `d`'s range as [`culprit`] finds it for its message on the line
+    /// it is at: for a diagnostic whose message is given after its place
+    /// was made ([`Build::why_read_stopped`]: a file not found, named in
+    /// quotes by the message at the stop after it, so `\input{x}`).
+    fn place_culprit(&self, d: &mut Diagnostic) {
+        // (the document's range is in its raw text's bytes; a file's in
+        // its characters, which are its bytes)
+        let (text, bytes): (String, bool) = if d.file == self.opts.name {
+            (
+                self.raw
+                    .as_deref()
+                    .map_or_else(|| self.text.clone(), str::to_owned),
+                true,
+            )
+        } else {
+            let b = (self.opts.finder)(d.file.trim_start_matches("./"))
+                .map(|(_, b)| b)
+                .unwrap_or_default();
+            (b.iter().map(|&c| char::from(c)).collect(), false)
+        };
+        let b = if bytes {
+            d.range.0.min(text.len())
+        } else {
+            text.char_indices()
+                .nth(d.range.0)
+                .map_or(text.len(), |(k, _)| k)
+        };
+        if !text.is_char_boundary(b) {
+            return;
+        }
+        let ls = text[..b].rfind('\n').map_or(0, |k| k + 1);
+        if let Some((s, e)) = culprit(&d.message, &text, ls, b, ls, false) {
+            let unit = |p: usize| if bytes { p } else { text[..p].chars().count() };
+            d.range = (unit(s), unit(e));
         }
     }
 
