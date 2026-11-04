@@ -2279,7 +2279,14 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             Cause::Changed { field, .. } => read::reaching_at(eng, *field, node.id, false).and_then(|r| r.by),
             _ => None,
         };
+        let at_once = |by: NodeId| match &cause {
+            Cause::Changed { field, .. } => eng
+                .placed_node(by)
+                .is_some_and(|b| eng.op(b.op()).settles_now(*field, eng.values())),
+            _ => false,
+        };
         if let Some(by) = by
+            && !at_once(by)
             && crate::sched::settles_edge(eng, by, node)
         {
             let cause = match cause {

@@ -120,6 +120,7 @@ fn routine_regs(r: &mut Run<'_, '_>) {
 pub(crate) fn symbol_for(r: &mut Run<'_, '_>, loc: Loc) -> Tok {
     let node = r.cx.node();
     r.st.note_symbol(loc);
+    r.st.note_read(loc);
     let reg = r.count_reg(loc).expect("deferrable: an integer register");
     sym_tok(Sym { reg, node })
 }

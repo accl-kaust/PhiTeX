@@ -284,8 +284,10 @@ impl Run<'_, '_> {
         rhs: Arg,
         regs: &[i32; MAX_REGS],
     ) -> Option<(u8, i32)> {
-        let [Stmt::Code(name, max, Arg::Reg(c), Arg::Reg(val)), Stmt::Advance(step, Arg::Const(1))] =
-            p.stmts[..]
+        let [
+            Stmt::Code(name, max, Arg::Reg(c), Arg::Reg(val)),
+            Stmt::Advance(step, Arg::Const(1)),
+        ] = p.stmts[..]
         else {
             return None;
         };
