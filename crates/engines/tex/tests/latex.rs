@@ -2401,3 +2401,65 @@ fn a_file_read_back_by_its_writer_reads_its_own_stream_alone() {
         }
     }
 }
+
+/// A box's report in the log names the lines of its paragraph, and an
+/// edit above moves them: the report's number is made when the log is laid
+/// out, so the paragraph does not run again (the 306-page circuitikz
+/// manual: a paragraph added near the start re-ran 133 pieces with such a
+/// report, 3.6 s), and the log still says what a whole build's does.
+#[test]
+fn a_box_report_does_not_tie_its_paragraph_to_the_lines_above() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/report-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |above: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\begin{{document}}\n\
+             First paragraph.\n{above}\n\
+             \\newpage\n\
+             Another paragraph.\n\n\
+             \\hbox to 10pt{{Far too wide for the box it is set in.}}\n\n\
+             \\parbox{{5pt}}{{Words\nunderfullwordstoolongforitswidth}}\n\n\
+             The end.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("reportlines", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(""));
+        for above in [
+            "One line more.\n",
+            "Two lines\nmore here.\n\nAnd a paragraph.\n",
+            "",
+        ] {
+            b.edit(&doc(above));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(above));
+            let (mine, want) = (b.output(), cold.output());
+            assert_eq!(
+                common::first_difference(&mine.0, &want.0),
+                None,
+                "-j{threads} {above:?}"
+            );
+            assert_eq!(mine.1, want.1, "-j{threads} {above:?}: the log");
+            assert!(
+                mine.1.contains("at lines") || mine.1.contains("detected at line"),
+                "{}",
+                mine.1
+            );
+            assert!(
+                !r.iter()
+                    .any(|x| x.contains("wide") || x.contains("underfullwords")),
+                "-j{threads} {above:?}: a piece with a report ran again: {r:?}"
+            );
+        }
+    }
+}
