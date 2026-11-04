@@ -554,3 +554,33 @@ fn a_definition_kept_for_a_read_back_stops_at_the_frontier() {
     let b = common::build(opts, Some(&common::plain()), &doc);
     assert!(!b.output().0.is_empty(), "no output");
 }
+
+/// A read-back line that defines a register past the fixed ones (a spill
+/// location numbered by the line), then a long run of commands in the same
+/// node: the line's changes are rolled back after it, its location with
+/// them, and the checkpoints after it name the registers the run defined by
+/// their fields. Kept from the line, the register's location had no field
+/// any more (`Fields::field_of` of a spill location, a debug assertion), and
+/// in a release build that location was cached as the empty name's and a
+/// later resume wrote the empty name's slot over another field's
+/// (simpledarkblue -j4: `\fontdimen6` of the current font read as 0, a
+/// `0.25em` skip as 0pt, about 1 build in 5).
+#[test]
+fn a_read_back_line_s_register_location_goes_with_its_rollback() {
+    const DOC: &str = r"\openin15=\jobname.aux \ifeof15 \else\closein15 \input\jobname.aux \fi
+\immediate\openout1=\jobname.aux
+\immediate\write1{\global\count300=7 }
+\immediate\closeout1
+\count1=0 \loop\advance\count1 by1 \ifnum\count1<4000 \repeat
+Value: \the\count300.
+\bye
+";
+    let dir = common::fixtures().join("plain");
+    let opts = Options {
+        fixpoint: true,
+        ..common::options("./r.tex", "r", "", &dir)
+    };
+    let b = common::build(opts, Some(&common::plain()), DOC);
+    let (dvi, _) = b.output();
+    assert!(!dvi.is_empty());
+}

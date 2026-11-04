@@ -3720,6 +3720,14 @@ impl<'c, 'a> Run<'c, 'a> {
         self.flush_bulk_codes();
         let st = (!self.st.checkpoint()).then(|| self.st.clone());
         let (nc, nk) = (self.contribs.len(), self.kids.len());
+        // (keyed by location, as the table is: put back with it. A spill
+        // location the line numbered is dropped by the rollback and is
+        // another field's when numbered again; kept here, a checkpoint
+        // named it by that field, or by none: `Fields::field_of` on a
+        // spill location, which cached it as the empty name's, and the
+        // empty name's slot in a later resume overwrote `\fontdimen6` of
+        // the current font, simpledarkblue -j4's 0.25em as 0pt)
+        let reg_kept = (self.reg_first_def.clone(), self.reg_loaded_base.clone());
         let nest_len = self.nest.len();
         let conds = self.conds.clone();
         let codes = self.if_codes.clone();
@@ -3841,6 +3849,7 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             None => self.st.rollback(),
         }
+        (self.reg_first_def, self.reg_loaded_base) = reg_kept;
         // (what the line writes to other files is not kept: TeX writes
         // it as `\enddocument` reads the file back, which this run does
         // where it reads the text it wrote, `start_input`)
