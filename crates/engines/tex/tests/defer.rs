@@ -493,7 +493,7 @@ fn a_counter_among_a_macros_delimiters_matches_its_digits() {
 /// open over paragraphs), under a routine that steps the same counter and so
 /// defines its value: the run publishes nothing for them, and what they leave
 /// is still later in TeX's order than the routine, which gives way. As
-/// `\\g__kernel_prg_map_int` in latex_starray, where the routine's value stood
+/// `\\g__kernel_prg_map_int` in `latex_starray`, where the routine's value stood
 /// and the next step made it -1. Against the same text setting by value.
 #[test]
 fn a_routines_value_gives_way_to_steps_that_cancel_after_its_candidate() {
