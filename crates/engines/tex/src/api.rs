@@ -5887,6 +5887,11 @@ pub struct Build {
     /// `text`'s line starts, made when a diagnostic asks and kept
     /// through edits (`Absorb` moves them).
     lines: Mutex<Option<Vec<usize>>>,
+    /// The diagnostics placed by the last [`Build::diagnostics`], by
+    /// their entry, place and line ([`diag_key`]): an edit places only
+    /// the entries it made or moved (a viewer asks after each edit; a
+    /// document of thousands of LaTeX errors placed them all again).
+    diag_memo: Mutex<FxHashMap<u64, Diagnostic>>,
     /// The document's units and their analyses ([`Incr`]).
     incr: Incr,
     /// Whether a package load ran in the last evaluation: only then do
@@ -6141,6 +6146,7 @@ impl Build {
             raw: g_canon.then(|| Arc::from(document)),
             memo: Mutex::default(),
             lines: Mutex::default(),
+            diag_memo: Mutex::default(),
             loads_ran: false,
             staged: false,
             evaluated: false,
@@ -7893,6 +7899,8 @@ impl Build {
                     .collect::<Vec<_>>()
             })
             .collect();
+        let memo_old = std::mem::take(&mut *self.diag_memo.locked());
+        let mut memo_new: FxHashMap<u64, Diagnostic> = FxHashMap::default();
         for e in entries {
             let xs = list_of(v, e);
             let int = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
@@ -7982,6 +7990,29 @@ impl Build {
                 text.char_indices().nth(at).map_or(text.len(), |(k, _)| k)
             };
             let head = &text[..b];
+            // (placed by the last call: the same entry at the same place
+            // in the same line)
+            let key = {
+                let ls = head.rfind('\n').map_or(0, |k| k + 1);
+                let le = text[b..].find('\n').map_or(text.len(), |k| b + k);
+                phitex_defuse::hash_words(
+                    phitex_defuse::hash_bytes(e.raw(), text[ls..le].as_bytes()),
+                    &[
+                        u64::try_from(at).unwrap_or(0),
+                        phitex_defuse::hash_bytes(0, file.as_bytes()),
+                    ],
+                )
+            };
+            // (an undefined name's help names the names defined near it,
+            // which the edit may have changed: placed again)
+            if let Some(d) = memo_old
+                .get(&key)
+                .filter(|_| message != "Undefined control sequence")
+            {
+                memo_new.insert(key, d.clone());
+                out.push(d.clone());
+                continue;
+            }
             // (the document's line by its line starts; a file's counted)
             let line = if file == docname {
                 doc_lines.partition_point(|&k| k <= b)
@@ -8026,7 +8057,7 @@ impl Build {
             } else {
                 (start, at)
             };
-            out.push(Diagnostic {
+            let d = Diagnostic {
                 file,
                 range: (start, at),
                 line,
@@ -8038,8 +8069,11 @@ impl Build {
                 message,
                 context,
                 help,
-            });
+            };
+            memo_new.insert(key, d.clone());
+            out.push(d);
         }
+        *self.diag_memo.locked() = memo_new;
         // pdfTeX's fatal `pdftex_fail` (the output's: a font without a
         // map entry), or XeTeX's driver's: at no place of the text, so at
         // its end, where the job stopped; its message as pdfTeX's line has
