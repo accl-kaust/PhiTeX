@@ -791,11 +791,11 @@ impl View {
         p.slots[i].get_or_init(|| (expanded(l, e), params.clone()));
         let new = {
             let mut idx = self.exp_index.locked();
-            if idx.contains_key(&k) {
-                false
-            } else {
-                idx.insert(k, (font, i));
+            if let std::collections::hash_map::Entry::Vacant(v) = idx.entry(k) {
+                v.insert((font, i));
                 true
+            } else {
+                false
             }
         };
         // (pdfTeX's `get_expand_font`: a font's first ask for a ratio goes
