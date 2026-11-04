@@ -1292,7 +1292,7 @@ fn page_of(v: &Values, p: ValueId) -> Option<PageOf> {
 
 /// A page-tagged entry's page and, for a page whose break is inside a
 /// piece, that piece and candidate.
-fn page_tag(v: &Values, e: ValueId) -> Option<(PageOf, Option<(i64, i64)>)> {
+pub(crate) fn page_tag(v: &Values, e: ValueId) -> Option<(PageOf, Option<(i64, i64)>)> {
     // (the entry's ids looked at in place: no copy of the list)
     let ids = |xs: &[ValueId]| match xs {
         [j, _] => Some((*j, None)),

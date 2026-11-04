@@ -2516,3 +2516,75 @@ fn a_box_report_does_not_tie_its_paragraph_to_the_lines_above() {
         }
     }
 }
+
+/// A message written to the log says "on input line" (`\PackageInfo`,
+/// `\on@line`): its number is made when the log is laid out, so a line added
+/// above does not run the piece again, and the log still says what a whole
+/// build's does. A number that goes anywhere else in such a line's expansion
+/// (a comparison, a file) is read as ever.
+#[test]
+fn a_message_on_a_line_does_not_tie_its_paragraph_to_the_lines_above() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/message-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |above: &str, body: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\\begin{{document}}\n\
+             First paragraph.\n{above}\n\
+             \\newpage\n\
+             Another paragraph.\n\n\
+             {body}\n\n\
+             The end.\n\\end{{document}}\n"
+        )
+    };
+    let quiet = "\\PackageInfo{mine}{A message\\MessageBreak over lines}\n\
+                 A paragraph.\\immediate\\write-1{twice \\the\\inputlineno, \\the\\inputlineno}\n\n\
+                 \\immediate\\write\\@unused{Direct\\on@line.}";
+    // (each of these must see the digits: its result shows them)
+    let digits = "\\immediate\\write-1{\\ifnum\\the\\inputlineno>5 past\\else before\\fi}\n\
+                  \\immediate\\write-1{\\pdfstrcmp{\\the\\inputlineno}{9}}\n\
+                  \\newwrite\\f\\immediate\\openout\\f=\\jobname.lines\n\
+                  \\immediate\\write\\f{in a file \\the\\inputlineno}\\immediate\\closeout\\f\n\
+                  \\def\\m{\\the\\inputlineno}\\immediate\\write-1{through \\m}\n\
+                  \\edef\\n{\\the\\inputlineno}\\immediate\\write-1{kept \\n}\n\
+                  Page \\the\\inputlineno.";
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("messagelines", &dir)
+        };
+        for body in [quiet, digits] {
+            let mut b = common::build(opts(), Some(&prelude(true)), &doc("", body));
+            for above in [
+                "One line more.\n",
+                "Two lines\nmore here.\n\nA paragraph.\n",
+                "",
+            ] {
+                b.edit(&doc(above, body));
+                let r: Vec<String> = b
+                    .stats
+                    .reruns
+                    .iter()
+                    .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                    .collect();
+                let cold = common::build(opts(), Some(&prelude(true)), &doc(above, body));
+                let (mine, want) = (b.output(), cold.output());
+                assert_eq!(
+                    common::first_difference(&mine.0, &want.0),
+                    None,
+                    "-j{threads} {above:?}"
+                );
+                assert_eq!(mine.1, want.1, "-j{threads} {above:?}: the log");
+                if body == quiet {
+                    assert!(mine.1.contains("on input line"), "{}", mine.1);
+                    assert!(
+                        !r.iter()
+                            .any(|x| x.contains("PackageInfo") || x.contains("A paragraph")),
+                        "-j{threads} {above:?}: {r:?}"
+                    );
+                }
+            }
+        }
+    }
+}

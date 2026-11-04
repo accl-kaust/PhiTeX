@@ -1899,6 +1899,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // deferred placements: after a node elsewhere (one placed after this
     // node was removed or taken, which withdrew this record, goes with it)
     let mut moves = 0u64;
+    // (those still to move: the place of one is not after another that
+    // stands where it stood, about to come after it)
+    let mut to_move: FxHashSet<NodeId> = deferred.iter().filter(|d| d.4.is_none()).map(|d| d.3.id).collect();
     for (i, at, before, n, pred) in deferred {
         // (a relocation: after what it is placed after now, if this run
         // still stands)
@@ -1916,7 +1919,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             } else {
                 Target::After(at)
             };
-            if relocate(eng, ww, node.id, &n, to, &mut st) {
+            to_move.remove(&n.id);
+            if relocate(eng, ww, node.id, &n, to, &to_move, &mut st) {
                 moves += 1;
                 *w.log.lock().moved_by_op.entry(n.op()).or_default() += 1;
             }
@@ -4353,6 +4357,7 @@ pub(crate) fn relocate(
     placer: NodeId,
     k: &Arc<Node>,
     to: Target,
+    moving: &FxHashSet<NodeId>,
     st: &mut CommitStats,
 ) -> bool {
     // its subtree, as it stands
@@ -4375,8 +4380,12 @@ pub(crate) fn relocate(
             todo.push(c);
         }
     }
+    // (and its placer's other placements about to move: they are no part
+    // of what it goes after)
+    skip.extend(moving.iter().copied());
     // (and what others placed after it or under it: the nodes after it
-    // whose anchor chain reaches it, as they stand in its segment)
+    // whose anchor chain reaches it, as they stand in its segment, but
+    // for those about to move)
     if let Some(seg) = eng.seg_for_pos(k.pos_hint()) {
         let inner = seg.inner.read();
         for (_, &x) in inner.nodes.range((Excluded(k.pos_hint()), Unbounded)) {
@@ -5431,7 +5440,15 @@ mod tests {
             .unwrap();
         e.remove(a);
         let mut st = super::CommitStats::default();
-        let moved = super::relocate(&e, None, p, e.node(k), super::Target::After(a), &mut st);
+        let moved = super::relocate(
+            &e,
+            None,
+            p,
+            e.node(k),
+            super::Target::After(a),
+            &Default::default(),
+            &mut st,
+        );
         assert!(!moved, "K had nowhere to go");
         assert_eq!(e.node(k).state(), crate::node::State::Gone);
         assert_eq!(e.node(l).state(), crate::node::State::Gone, "K's child L");

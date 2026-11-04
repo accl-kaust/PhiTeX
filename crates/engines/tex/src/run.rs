@@ -680,6 +680,15 @@ pub(crate) struct Run<'c, 'a> {
     pub exps: u64,
     /// The macro call next is the command loop's own ([`Run::counted_loop`]).
     pub command_call: bool,
+    /// The lines named by a line being expanded for the log ([`Run::write_out`]);
+    /// none where its text can go elsewhere.
+    pub log_marks: Option<Vec<i64>>,
+    /// The `scan_toks` depth now, and the one of that line's own text: a
+    /// `\the` there lands in the text as it is, one deeper (`\pdfstrcmp`) does not.
+    pub xpand_depth: u32,
+    pub marks_depth: u32,
+    /// The `\the` being expanded is one of that line's own ([`Run::the_toks`]).
+    pub the_in_text: bool,
     pub hb_at: u64,
     pub hb_done: u64,
     /// Whether the glue `scan_glue` last gave has a spec of its own
@@ -1058,6 +1067,10 @@ pub(crate) struct Run<'c, 'a> {
     /// (`profile`, `PHITEX_MACRO_PROF`) The macros the run expanded, by
     /// name, and how often (printed for a run of 5 ms or more).
     pub(crate) mprof: Option<crate::FxHashMap<Tok, u64>>,
+    /// A page loop's rest that began on a guess (`Run::rest_begins`).
+    pub(crate) rest_on_guess: bool,
+    /// The piece of the page a page loop's rest began after.
+    pub(crate) rest_begun_at: Option<phitex_defuse::NodeId>,
     /// An edited node's run: its checkpoints ([`crate::resume`]).
     pub(crate) ck: Option<Box<crate::resume::Checkpoints>>,
     /// The run goes on from no checkpoint (a check's run from the start).
@@ -1220,6 +1233,10 @@ impl<'c, 'a> Run<'c, 'a> {
             cmds: 0,
             exps: 0,
             command_call: false,
+            log_marks: None,
+            xpand_depth: 0,
+            marks_depth: 0,
+            the_in_text: false,
             hb_at: Run::heartbeat_start(),
             glue_own: false,
             glue_fresh: false,
@@ -1340,6 +1357,8 @@ impl<'c, 'a> Run<'c, 'a> {
             fatal_logged: false,
             mark: crate::getnext::Mark::default(),
             mprof: crate::exec::prof_flag!("PHITEX_MACRO_PROF").then(crate::FxHashMap::default),
+            rest_on_guess: false,
+            rest_begun_at: None,
             ck: None,
             no_resume: false,
             resumed_at: None,
@@ -1433,6 +1452,34 @@ impl<'c, 'a> Run<'c, 'a> {
             2 => self.unalias(loc),
             _ => self.load_slow(loc),
         }
+    }
+
+    /// (observe) `PHITEX_LOAD_TRACE=<field>`: what reads the field first in
+    /// each run: the token being acted on and the next tokens of the
+    /// innermost lists.
+    #[cold]
+    #[inline(never)]
+    fn load_trace(&self, f: Field) {
+        if crate::exec::obs_str!("PHITEX_LOAD_TRACE") != Some(&crate::val::field_name(self.v, f)) {
+            return;
+        }
+        let mut lists = Vec::new();
+        for l in self.input.levels.iter().rev().take(4) {
+            if l.kind == crate::input::kind::TOKS {
+                let r = crate::input::Range {
+                    start: l.a,
+                    end: l.b.min(l.a + 10),
+                };
+                lists.push(format!("{:?}", self.input.arena.get(r)));
+            }
+        }
+        eprintln!(
+            "load-trace: node {} {:?} at {:?} before {}",
+            self.cx.node().raw(),
+            self.cx.op(),
+            self.cur.tok,
+            lists.join(" | ")
+        );
     }
 
     /// Integer register `loc` holds an alias definition's value (a
@@ -1703,6 +1750,9 @@ impl<'c, 'a> Run<'c, 'a> {
         // a page fires at: the run ends there, [`Run::order_page_reg_read`])
         self.order_page_reg_read(loc)?;
         let f = self.loc_field(loc);
+        if crate::exec::obs_str!("PHITEX_LOAD_TRACE").is_some() {
+            self.load_trace(f);
+        }
         if self.fin_scope_closer.is_some() && self.fin_read_in_scope(loc, f)? {
             return Ok(());
         }

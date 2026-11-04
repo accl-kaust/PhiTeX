@@ -943,6 +943,22 @@ impl Run<'_, '_> {
 
     /// The page layer's frontier from this run ([`phitex_defuse::Ctx::set_frontier`]).
     fn publish_frontier(&mut self, fold: Fold, ls: &LoopState, lc: &LoopCarry) {
+        // (a fold gone on on a guess: the routine it guessed at has not run,
+        // and the frontier stands at that routine's page; one from a page
+        // past the frontier: a routine before it has not run, a rest before
+        // it on a guess, and the frontier stays. Moved on with the fold, a
+        // text reader between took what that routine defined before as
+        // settled and its wake was held to the next quiet point, one page a
+        // pass: ijmsample at -j4 lost or repeated pages, never settling)
+        if let Some(at) = self.rest_begun_at {
+            if self.rest_on_guess {
+                self.cx.set_frontier(Some(at));
+                return;
+            }
+            if self.cx.past_frontier(at) {
+                return;
+            }
+        }
         // (the frontier: at a hole, the piece not in yet, past which a
         // page may yet fire and its finisher stand before the text that
         // reads what its routine defines; waiting for a give-back, the
@@ -1053,13 +1069,26 @@ impl Run<'_, '_> {
         let out = self
             .cx
             .read_at(r.key.field(v, PAGE_OUT), At::End(self.cx.unit()))?;
+        // (the page's routine not run on the page as it is now, but what it
+        // gave back on the page before it moved being the guess: the fold
+        // goes on, so the pages after it and their routines run beside
+        // this one, not each after the last, the chain of an edit that
+        // moves pages. The read stands: the routine's commit runs this
+        // again, on what it gave back. A guess it has not given back
+        // before, as in a first build, is waited for, and so is any on one
+        // thread, where the routine runs next anyway and the fold on the
+        // guess is done twice: para4000's deleted paragraph 184 -> 206 ms
+        // at -j1, accl 23790)
+        let beside = self.cx.has_other_threads();
+        self.rest_begun_at = Some(p.node);
         let gave = match out {
-            phitex_defuse::FieldAt::Def(x, fin) => {
-                page_out_parts(v, x).filter(|o| o.1 == r.page).map(|o| {
+            phitex_defuse::FieldAt::Def(x, fin) => page_out_parts(v, x)
+                .filter(|o| o.1 == r.page || (beside && o.0 == r.guess))
+                .map(|o| {
+                    self.rest_on_guess = o.1 != r.page;
                     ls.after = fin.map(|f| (p.node, f));
                     o.0
-                })
-            }
+                }),
             _ => None,
         };
         let Some(gave) = gave else {

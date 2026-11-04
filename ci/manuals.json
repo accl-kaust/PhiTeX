@@ -10803,7 +10803,9 @@
    "path": "latex/dynkin-diagrams/dynkin-diagrams.tex",
    "tools": [
     "bibtex"
-   ]
+   ],
+   "time_limit_s": 333,
+   "time_limit_why": "pdflatex's own wall on the gate's runner: 333 s (manuals.py's oracle loop, 4 passes and bibtex, in the -doc image on GitHub's ubuntu-24.04, 4 CPUs, AMD EPYC 9V74; run 41791115512, 2026-11-04). PhiTeX is held to it, not to the sweep's 300 s; it is identical, 342 s at -j1 and 318 s at -j4 on accl against pdflatex's 335 s on the same node (acclnode01, accl 24339): -j1 is not faster there"
   },
   {
    "dir": "latex/easy-todo",
@@ -16688,7 +16690,9 @@
    "oracle_wall_s": 798.248,
    "passes": 3,
    "path": "latex/pegmatch/pegmatch.tex",
-   "tools": []
+   "tools": [],
+   "time_limit_s": 584,
+   "time_limit_why": "pdflatex's own wall on the gate's runner: 584 s (manuals.py's oracle loop, 3 passes, in the -doc image on GitHub's ubuntu-24.04, 4 CPUs, Intel Xeon Platinum 8573C; run 41791115512, 2026-11-04). PhiTeX is held to it, not to the sweep's 300 s; it is identical, 378 s at -j1 and 361 s at -j4 on accl against pdflatex's 802 s on the same node (acclnode01, accl 24339)"
   },
   {
    "dir": "latex/perfectcut",
