@@ -2358,6 +2358,22 @@ impl State {
             .is_some_and(|m| m.ldef_stamp > since)
     }
 
+    /// The sum of the steps of integer register `loc` the run made, where
+    /// it only stepped it and never read it (nothing loaded, preloaded or
+    /// lazy, no other definition): the run's value of it is what reached
+    /// the run plus this.
+    pub(crate) fn unread_steps(&self, loc: Loc) -> Option<i32> {
+        self.slot_ref(loc)
+            .filter(|s| {
+                s.meta == 0
+                    && s.mapped != MAP_NONE
+                    && s.map.keep
+                    && s.e.flags & (LOADED | PRELOADED) == 0
+                    && s.lazy.is_none()
+            })
+            .map(|s| s.map.add)
+    }
+
     /// Whether the latest definition of `loc` stands at the run's end
     /// as its own: global, or local outside every group of the run.
     pub(crate) fn def_stands(&self, loc: Loc) -> bool {

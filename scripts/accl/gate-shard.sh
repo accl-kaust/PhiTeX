@@ -853,7 +853,7 @@ print(r["verdict"] + (": " + ", ".join(bad) if bad else ""))' "$r/editkinds-j$j.
     fetched
     bin=$w/bin/cli/prof/phitex
     echo "big node ${SLURMD_NODENAME:-$(cat /proc/sys/kernel/hostname 2>/dev/null)} cpus $(awk '/Cpus_allowed_list/{print $2}' /proc/self/status)" >> "$r/big.txt"
-    mkdir -p "$w/big" && cp bench/para40000.tex "$w/big/"
+    mkdir -p "$w/big" && bench/para40000.sh "$w/big/para40000.tex"
     (cd "$w/big" && SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 timeout 900 "$bin" build -j 8 --output-dir=warm --program pdftex para40000.tex > "$r/big-warm.log" 2>&1)
     cores=$(one_per_core); all=$(awk '/Cpus_allowed_list/{print $2}' /proc/self/status)
     echo "big cores (one sibling each) $cores" >> "$r/big.txt"
@@ -870,14 +870,14 @@ print(r["verdict"] + (": " + ", ".join(bad) if bad else ""))' "$r/editkinds-j$j.
       grep -E '^acct: (round|1 rounds)|^pdf exact|^link:' "$L" | sed 's/^/  /' >> "$r/big.txt"
       [ "$e" = 0 ] || red "para40000 -j $j: exit $e"
     done
-    rm -rf "$w/bige" && mkdir -p "$w/bige" && cp bench/para40000.tex "$w/bige/"
+    rm -rf "$w/bige" && mkdir -p "$w/bige" && bench/para40000.sh "$w/bige/para40000.tex"
     # (the exact file after every edit, --exact, as before; then the
     # watch's default, update sections)
     echo "para40000 watch --exact:" >> "$r/big.txt"
     (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 timeout 1800 python3 -I scripts/accl/edit-one.py "$bin" "$w/bige" para40000.tex 8 3 "$r/big-watch-exact.err" --program pdftex --exact) >> "$r/big.txt" 2>&1
     grep -E '^(edit phases|session phases|pdf exact|link:)' "$r/big-watch-exact.err" | tail -8 | sed 's/^/  /' >> "$r/big.txt"
     phases "$r/big-watch-exact.err" "para40000 --exact edit phases -j 8" >> "$r/big.txt"
-    rm -rf "$w/bige" && mkdir -p "$w/bige" && cp bench/para40000.tex "$w/bige/"
+    rm -rf "$w/bige" && mkdir -p "$w/bige" && bench/para40000.sh "$w/bige/para40000.tex"
     echo "para40000 watch (update sections):" >> "$r/big.txt"
     (SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 PHITEX_TEX_TIME=1 timeout 1800 python3 -I scripts/accl/edit-one.py "$bin" "$w/bige" para40000.tex 8 5 "$r/big-watch.err" --program pdftex) >> "$r/big.txt" 2>&1
     grep -E '^(edit phases|session phases|pdf exact|link:)' "$r/big-watch.err" | tail -8 | sed 's/^/  /' >> "$r/big.txt"

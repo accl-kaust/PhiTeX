@@ -338,7 +338,7 @@ impl Document {
                     origins: None,
                     changed: None,
                     diagnostics: vec![
-                        json!({"severity": "error", "code": "engine", "message": first}),
+                        json!({"severity": "error", "code": "engine", "kind": "error", "message": first}),
                     ],
                     parts: serde_json::Map::new(),
                 };
