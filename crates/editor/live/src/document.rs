@@ -274,6 +274,9 @@ impl Document {
                     again = true;
                 }
                 Applied::Rebuild => {
+                    // (every file read again: what the host gave since, a
+                    // figure replaced in Overleaf, is what this build reads)
+                    self.session.reread_all();
                     why.push("asked in the viewer".to_owned());
                     asked = true;
                     again = true;

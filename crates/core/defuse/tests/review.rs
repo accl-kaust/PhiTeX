@@ -126,27 +126,46 @@ fn an_environment_reader_run_again_and_again_is_asked_once() {
 
 #[test]
 fn folds_from_the_start_cost_what_holds_a_change() {
-    // Five thousand folds from the unit's start, then five thousand
-    // contributions after them: a contribution asks for the folds whose
-    // interval holds it by their ends, not by their common start.
-    let e = Engine::new();
-    let c = e.register(Arc::new(Contrib));
-    let fa = e.register(Arc::new(FoldAll));
-    let v = e.values();
-    let s = v.field("s");
-    e.declare_accumulator(s, Arc::new(SumMonoid));
-    let u = e.new_unit();
-    let readers: Vec<NodeId> = (0..5000).map(|_| e.push(u, fa, vec![s.0])).collect();
-    for _ in 0..5000 {
-        e.push(u, c, vec![s.0, v.int(1)]);
-    }
-    let last = e.push(u, fa, vec![s.0]);
-    let t = Instant::now();
-    e.evaluate(1).unwrap();
-    assert!(t.elapsed() < Duration::from_millis(400), "{:?}", t.elapsed());
-    assert_eq!(int(&e, readers[4999]), 0);
-    assert_eq!(int(&e, last), 5000);
-    assert!(e.check_invariants().is_empty());
+    // `n` folds from the unit's start, then `n` contributions after them:
+    // a contribution asks for the folds whose interval holds it by their
+    // ends, not by their common start. Counted, not timed: the interval
+    // entries the range index steps over grow with the contributions (a
+    // few each, one more span class each time `n` doubles), never with
+    // the folds behind them (`n` each, four times as many for twice `n`);
+    // and no fold runs again.
+    let stepped = |n: usize| {
+        let e = Engine::new();
+        let c = e.register(Arc::new(Contrib));
+        let fa = e.register(Arc::new(FoldAll));
+        let v = e.values();
+        let s = v.field("s");
+        e.declare_accumulator(s, Arc::new(SumMonoid));
+        let u = e.new_unit();
+        let readers: Vec<NodeId> = (0..n).map(|_| e.push(u, fa, vec![s.0])).collect();
+        for _ in 0..n {
+            e.push(u, c, vec![s.0, v.int(1)]);
+        }
+        let last = e.push(u, fa, vec![s.0]);
+        let t = Instant::now();
+        let rep = e.evaluate(1).unwrap();
+        // (the time printed, not asserted: a loaded machine's)
+        eprintln!(
+            "{n} folds, {n} contributions: {:?}, {} runs, {} interval entries stepped",
+            t.elapsed(),
+            rep.runs,
+            rep.range_stepped
+        );
+        assert_eq!(rep.runs, 2 * n as u64 + 1, "a fold ran again");
+        assert_eq!(int(&e, readers[n - 1]), 0);
+        assert_eq!(int(&e, last), n as i64);
+        assert!(e.check_invariants().is_empty());
+        rep.range_stepped
+    };
+    let (a, b) = (stepped(2500), stepped(5000));
+    assert!(
+        b <= 2 * a + 4 * 2500,
+        "a contribution steps over the folds before it: {a} entries for 2500, {b} for 5000"
+    );
 }
 
 #[test]
