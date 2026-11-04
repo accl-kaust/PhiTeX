@@ -826,6 +826,20 @@ impl<'a> Ctx<'a> {
         self.product.placements.len() - 1
     }
 
+    /// Takes back my placements of this run from the `n`-th on, and my
+    /// reads of their outputs: a pass that a run throws away and makes
+    /// again leaves none of what it placed (its other reads stay, as a
+    /// second pass's do).
+    pub fn unplace_from(&mut self, n: usize) {
+        let p = &mut self.product;
+        p.placements.truncate(n);
+        p.ranks.truncate(n);
+        p.waits.retain(|&j| j < n);
+        p.reads
+            .retain(|rd| !matches!(rd.kind, ReadKind::Placed { i, .. } if i >= n));
+        self.placed_keys = None;
+    }
+
     /// Places a node after me and my children.
     pub fn follow(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
         self.product.placements.push(Placement::Follow(op, args));
@@ -904,6 +918,38 @@ impl<'a> Ctx<'a> {
         let x = out.unwrap_or(guess);
         self.record(ReadKind::Placed { i, guess: true }, PathId::WHOLE, Some(x));
         x
+    }
+
+    /// [`Ctx::placed_output_or`] through path `p`: the answer of `p` on
+    /// the output of the node my `i`-th placement of this run stands for,
+    /// if it has run, else on the output `guess` gives (asked only then,
+    /// None: no output); recorded as that
+    /// answer alone, so a child's output that changes elsewhere than `p`
+    /// leaves me standing, and one whose first output answers otherwise
+    /// than the guess re-asks me.
+    pub fn placed_output_path_or(
+        &mut self,
+        i: usize,
+        p: PathId,
+        guess: impl FnOnce(&Self) -> Option<ValueId>,
+    ) -> Option<ValueId> {
+        let x = match self.placed_child_output(i) {
+            Some(o) => read::apply_path(self.eng, Some(o), p),
+            None => {
+                let g = guess(self);
+                read::apply_path(self.eng, g, p)
+            }
+        };
+        self.record(ReadKind::Placed { i, guess: true }, p, x);
+        x
+    }
+
+    /// The value of `f` at the line's end (`At::Final`, a loop-back), not
+    /// recorded: for a guess that a recorded read checks
+    /// ([`Ctx::placed_output_path_or`]), never for what a run makes.
+    #[must_use]
+    pub fn peek_final(&self, f: Field) -> Option<ValueId> {
+        read::final_read(self.eng, f).value
     }
 
     /// The output of the node my `i`-th placement of this run stands for
