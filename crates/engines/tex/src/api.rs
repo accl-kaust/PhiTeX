@@ -4754,7 +4754,13 @@ pub(crate) struct Marks(Arc<Mutex<MarksState>>);
 struct OutMemo {
     #[allow(clippy::type_complexity)]
     output: Option<(
-        (Option<ValueId>, Option<ValueId>, Option<ValueId>, usize, u64),
+        (
+            Option<ValueId>,
+            Option<ValueId>,
+            Option<ValueId>,
+            usize,
+            u64,
+        ),
         (Arc<Vec<u8>>, String),
     )>,
     pages: Option<(Option<ValueId>, Vec<u64>)>,
