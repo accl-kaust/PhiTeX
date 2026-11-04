@@ -5,3 +5,4 @@
 /tools/minted-pyodide/node_modules
 __pycache__/
 /nightly.key
+/bench/para40000.tex
