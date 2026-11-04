@@ -410,6 +410,14 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// The bottom lines written again, over what they were.
+/// The question `q`, the bottom lines erased first, with a blank after it
+/// and no line's end: the key typed next is answered after it, on its line.
+fn asked(e: &mut impl std::io::Write, b: &mut Bottom, q: &str) {
+    b.erase(e);
+    let _ = write!(e, "{q} ");
+    let _ = e.flush();
+}
+
 fn redraw(e: &mut impl std::io::Write, b: &mut Bottom) {
     b.erase(e);
     if b.gone {
@@ -469,6 +477,27 @@ impl Ui {
     pub fn line(&self, s: &str) {
         self.print(s);
         self.tell("line", s);
+    }
+
+    /// A question on standard error, left open after `q` and a blank for
+    /// its answer (the cursor where a key is typed), until
+    /// [`Ui::answered`].
+    pub fn ask(&self, q: &str) {
+        if !self.json {
+            let mut b = lock(&self.bottom);
+            asked(&mut std::io::stderr().lock(), &mut b, q);
+        }
+        self.tell("line", q);
+    }
+
+    /// The asked question's answer, `a` (none: no key came), and its line
+    /// ended: what is printed next starts a line of its own.
+    pub fn answered(&self, a: Option<&str>) {
+        if !self.json {
+            let mut e = std::io::stderr().lock();
+            let _ = writeln!(e, "{}", a.unwrap_or(""));
+            let _ = e.flush();
+        }
     }
 
     /// `--json`: one event, a line on standard output.
@@ -738,6 +767,23 @@ impl Spin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The quit's question leaves the cursor after "[y/N] ", not on the
+    /// line below (it was printed as a line); the answer then ends it.
+    #[test]
+    fn a_question_is_left_open_for_its_key() {
+        let mut b = Bottom::default();
+        let mut out = Vec::new();
+        asked(
+            &mut out,
+            &mut b,
+            "write x.pdf and its .synctex.gz here? [y/N]",
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "write x.pdf and its .synctex.gz here? [y/N] "
+        );
+    }
 
     #[test]
     fn plain_text() {

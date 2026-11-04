@@ -358,3 +358,105 @@ mod tests {
         assert_eq!(find_cs("\\abc \\ab", "\\ab"), Some(5));
     }
 }
+
+/// A problem's kind, for the problems' filters (the viewer's, and what
+/// `watch --lsp` publishes, both `problems-hidden`): `error`; a box's
+/// `overfull` ("Overfull \\hbox", "Tight \\vbox") or `underfull`
+/// ("Underfull", "Loose"); a `reference` (an undefined reference or
+/// citation, LaTeX's, BibTeX's); a `font` (a missing character, a
+/// substitution); else `other`. The one rule: the viewer reads it from
+/// each problem's `kind`.
+pub fn kind_of(severity: &str, message: &str) -> &'static str {
+    if severity == "error" || severity == "fatal" {
+        return "error";
+    }
+    let m = message;
+    let boxed = |w: &str| {
+        ["\\hbox", "\\vbox"]
+            .iter()
+            .any(|b| m.starts_with(&format!("{w} {b}")))
+    };
+    if boxed("Overfull") || boxed("Tight") {
+        return "overfull";
+    }
+    if boxed("Underfull") || boxed("Loose") {
+        return "underfull";
+    }
+    let word = |w: &str| {
+        m.match_indices(w).any(|(i, _)| {
+            let before = m[..i].chars().next_back();
+            let after = m[i + w.len()..].chars().next();
+            let edge = |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+            edge(before) && edge(after)
+        })
+    };
+    if [
+        "Reference",
+        "reference",
+        "Citation",
+        "citation",
+        "database entry",
+        "undefined references",
+    ]
+    .iter()
+    .any(|w| m.contains(w))
+        || word("Label")
+    {
+        return "reference";
+    }
+    if m.contains("Font") || m.contains("font") || m.contains("Missing character") {
+        return "font";
+    }
+    "other"
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use super::kind_of;
+
+    #[test]
+    fn kinds_as_the_filters_name_them() {
+        assert_eq!(kind_of("error", "Undefined control sequence."), "error");
+        assert_eq!(
+            kind_of("warning", "Overfull \\hbox (3.2pt too wide) in paragraph"),
+            "overfull"
+        );
+        assert_eq!(kind_of("warning", "Tight \\vbox (badness 0)"), "overfull");
+        assert_eq!(
+            kind_of("warning", "Underfull \\hbox (badness 10000)"),
+            "underfull"
+        );
+        assert_eq!(kind_of("warning", "Loose \\hbox (badness 0)"), "underfull");
+        assert_eq!(
+            kind_of(
+                "warning",
+                "Reference `x' on page 1 undefined on input line 3."
+            ),
+            "reference"
+        );
+        assert_eq!(
+            kind_of(
+                "warning",
+                "Citation `k' on page 1 undefined on input line 4."
+            ),
+            "reference"
+        );
+        assert_eq!(
+            kind_of("warning", "Label `a' multiply defined."),
+            "reference"
+        );
+        assert_eq!(kind_of("warning", "Labels may have changed."), "other");
+        assert_eq!(
+            kind_of("warning", "Font shape `OT1/cmr/bx/sc' undefined"),
+            "font"
+        );
+        assert_eq!(
+            kind_of(
+                "warning",
+                "Missing character: There is no ^^A in font cmr10!"
+            ),
+            "font"
+        );
+        assert_eq!(kind_of("diagnostic", "the engine stopped"), "other");
+    }
+}

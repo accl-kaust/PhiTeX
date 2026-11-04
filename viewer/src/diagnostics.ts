@@ -12,6 +12,8 @@ export interface Diagnostic {
   severity: Severity;
   /** Stable, for filtering and a JSON mode: "unclosed-brace", "latex", ... */
   code: string;
+  /** The filters' kind, as the build named it (phitex-live's problems::kind_of, the editor's filter too); none: `kindOf` reads it off the message. */
+  kind?: Kind;
   message: string;
   file?: string;
   /** 1-based. */
@@ -35,8 +37,9 @@ export const KINDS: [Kind, string][] = [
   ["other", "Other"],
 ];
 
-/** What `d` is about: an error; an overfull or underfull box (TeX's "Overfull \hbox", "Underfull \vbox", "Tight", "Loose"); an undefined reference or citation (LaTeX's, BibTeX's); a font (a missing character, a substitution); else other. */
-export function kindOf(d: { severity: string; message: string }): Kind {
+/** What `d` is about: its `kind` when the build gave it (phitex-live's problems::kind_of: one rule for the viewer and the editor), else read here the same way: an error; an overfull or underfull box (TeX's "Overfull \hbox", "Underfull \vbox", "Tight", "Loose"); an undefined reference or citation (LaTeX's, BibTeX's); a font (a missing character, a substitution); else other. */
+export function kindOf(d: { severity: string; message: string; kind?: string }): Kind {
+  if (d.kind && KINDS.some(([k]) => k === d.kind)) return d.kind as Kind;
   if (d.severity === "error" || d.severity === "fatal") return "error";
   const m = d.message;
   if (/^Overfull \\[hv]box|^Tight \\[hv]box/.test(m)) return "overfull";
