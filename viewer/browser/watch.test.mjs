@@ -327,6 +327,33 @@ test("the problems' kinds filter the list, the page's marks and the scrollbar's,
   await w2.stop();
 });
 
+test("LaTeX's warnings are problems: an undefined \\ref and \\cite are warnings of kind reference, underlined on the page, hidden by their kind's filter (item 16, warnings)", async () => {
+  const fresh = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
+  // (an error too, so that the list has two kinds and offers the filters)
+  const { w, t } = await open({ "main.tex": doc("See \\ref{nosuchlabel} here and \\cite{nosuchkey}.\n\nThen \\nosuchcommandhere here.") }, { at: fresh });
+  await problems(t);
+  await t.until(`!!$("#diags [data-kind='reference']") && !!$("#diags [data-kind='error']")`, "the reference kind's filter");
+  const text = await t.q(`$("#diags").innerText`);
+  assert.match(text, /Reference `nosuchlabel' on page 1 undefined/);
+  assert.match(text, /Citation `nosuchkey' on page 1 undefined/);
+  assert.match(text, /main\.tex:3/, "the warnings' line");
+  assert.match(text, /\d+ warnings/, "counted as warnings");
+  await t.until(`$$(".slot .culprit.warning").length >= 2`, "the warnings' underlines on the page");
+  await t.until(`$$(".slot .culprit.error").length >= 1`, "the error's underline");
+  await t.click("#diags [data-kind='reference']");
+  await t.until(`$("#diags [data-kind='reference']")?.getAttribute("aria-pressed") === "false"`, "reference off");
+  await t.until(`$$(".slot .culprit.warning").length === 0`, "the warnings' underlines gone");
+  assert.ok((await t.q(`$$(".slot .culprit.error").length`)) >= 1, "the error's underline stays");
+  assert.doesNotMatch(await t.q(`[...$$("#diags .phx-card, #diags li")].map((e) => e.innerText).join(" ")`), /undefined on page/, "gone from the list");
+  await sleep(500);
+  assert.match(readFileSync(join(fresh, ".config", "phitex", "phitex.toml"), "utf8"), /problems-hidden = \[\s*"reference"/);
+  // (the label defined: the warnings go, the underlines with them)
+  await t.click("#diags [data-kind='reference']");
+  w.write("main.tex", doc("See \\ref{lbl} here\\label{lbl} and \\cite{nosuchkey}.\n\nThen \\nosuchcommandhere here."));
+  await t.until(`!/Reference \`nosuchlabel'/.test($("#diags").innerText) && /Citation \`nosuchkey'/.test($("#diags").innerText)`, "the reference's warning gone, the citation's kept");
+  await w.stop();
+});
+
 test("a problem's card shows its place on the pages (item 2); which kinds have an underline (batch 3)", async () => {
   const filler = Array.from({ length: 12 }, (_, i) => `Paragraph ${i} ` + "words fill the page ".repeat(40)).join("\n\n");
   const { w, t } = await open({ "main.tex": doc(`${filler}\n\nLate \\nosuchcommand here.`) });
