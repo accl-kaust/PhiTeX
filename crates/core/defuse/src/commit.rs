@@ -2887,6 +2887,13 @@ pub(crate) fn reask_final(eng: &Engine, f: Field) {
     }
 }
 
+/// [`reask_final`] for every field published (a walk of every reader).
+pub(crate) fn reask_final_all(eng: &Engine) {
+    if eng.has_finals.load(Ordering::Acquire) {
+        eng.ranges.mark_all_dirty();
+    }
+}
+
 /// At a quiet point (nothing queued or running), on one thread: each
 /// loop-back value marked since the last (`reask_final`) published again
 /// as the field's last definition now, then the readers whose answer
@@ -5124,10 +5131,15 @@ fn reask_after_effect_at(
     // other, and the readers after both kept a definition both closes
     // hide (note-intermittents §1: \begin's scope kind at -j16). Then
     // every reader past the stop is re-asked too, each by its answer)
+    // (what is not filed at positions: the end readers, the relations and,
+    // to the end of the line, the finals: in the region, or from the
+    // change on after a race)
+    let mut rest = (at, end.map(|(_, q)| q));
     if let Some((sid, q)) = end
         && eng.scope_gen.load(Ordering::Acquire) != by.bracket_gen.load(Ordering::Acquire)
     {
         end = None;
+        rest = (at, None);
         let mut cur = Some(sid);
         let mut first = true;
         while let Some(sid) = cur {
@@ -5149,6 +5161,7 @@ fn reask_after_effect_at(
     for (f, r) in &readers {
         reask_reader(eng, w, *f, r, Some(by.id), st);
     }
+    reask_rest(eng, w, by, rest.0, rest.1, None, st);
     // (past the region only the readers of what is defined in it can see
     // another answer)
     if let Some((sid, q)) = end {
@@ -5156,6 +5169,84 @@ fn reask_after_effect_at(
         fields.dedup();
         for f in fields {
             reask_from(eng, w, f, q, sid, None, None, 0, st);
+        }
+    }
+}
+
+/// What a walk of every reader from `from` (to `to`, inclusive, where
+/// given; of the fields `only` where given) asks besides the readers
+/// filed at positions: each relation defined in that span put right from its input (and the readers of one
+/// whose value moved, by its own walk), the end readers of each unit
+/// that ends in it and, with no bound, every published final. (After the
+/// research version, `xwalk::reask_rest` of the parallelism branch.)
+fn reask_rest(
+    eng: &Engine,
+    w: Option<&Worker>,
+    by: &Node,
+    from: Pos,
+    to: Option<Pos>,
+    only: Option<&FxHashSet<Field>>,
+    st: &mut CommitStats,
+) {
+    let wanted = |f: &Field| only.is_none_or(|o| o.contains(f));
+    let inside = |q: Pos| q >= from && to.is_none_or(|t| q <= t);
+    // (relations in line order: one put right feeds the next one's input)
+    let mut rels: Vec<(Field, NodeId, i64)> = Vec::new();
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id);
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        let inner = seg.inner.read();
+        let mut here: Vec<(Pos, Field, NodeId, i64)> = Vec::new();
+        for (f, m) in inner.defs.iter().filter(|(f, _)| wanted(f)) {
+            for (q, d) in m.iter() {
+                if let Some(c) = d.rel
+                    && inside(*q)
+                {
+                    here.push((*q, *f, d.by, c));
+                }
+            }
+        }
+        let past = to.is_some_and(|t| inner.hi > t);
+        let lo = seg.lo;
+        drop(inner);
+        here.sort_unstable_by_key(|x| x.0);
+        rels.extend(here.into_iter().map(|(_, f, n, c)| (f, n, c)));
+        if past {
+            break;
+        }
+        cur = eng.order.next(sid, lo);
+    }
+    for (f, n, c) in rels {
+        if settle_rel(eng, f, n, c) {
+            st.relative_resolved += 1;
+            let dn = eng.node(n);
+            reask(eng, w, f, dn.pos_hint(), dn.seg_hint(), n, st);
+        }
+    }
+    reask_ends_after(eng, w, by, from, to, only, st);
+    if to.is_none() {
+        match only {
+            None => reask_final_all(eng),
+            Some(o) => o.iter().for_each(|&f| reask_final(eng, f)),
+        }
+    }
+}
+
+/// The end readers of each unit ending from `from` (to `to`, inclusive,
+/// where given), of the fields `only` where given.
+fn reask_ends_after(
+    eng: &Engine,
+    w: Option<&Worker>,
+    by: &Node,
+    from: Pos,
+    to: Option<Pos>,
+    only: Option<&FxHashSet<Field>>,
+    st: &mut CommitStats,
+) {
+    for (f, u) in eng.ranges.end_fields() {
+        let q = Pos(eng.unit(u).end.0.saturating_sub(1));
+        if only.is_none_or(|o| o.contains(&f)) && q >= from && to.is_none_or(|t| q <= t) {
+            reask_ends(eng, w, f, u, Some(by.id), st);
         }
     }
 }
