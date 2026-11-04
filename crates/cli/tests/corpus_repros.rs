@@ -1205,6 +1205,7 @@ fn count_loop() {
 #[test]
 fn count_loop_xe() {
     check_threads("count_loop_xe", "pdf");
+}
 
 /// TeX Live manual ualberta: an `\\input` file whose last line has no newline.
 /// That line still ends (§31) and gives its space; a slice of the file took

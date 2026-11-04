@@ -85,6 +85,12 @@ pub(crate) fn has_loop_tail(body: &[Tok], name: Tok) -> bool {
     matches!(body, [.., _, n, _] if *n == name)
 }
 
+fn skip_spaces(body: &[Tok], i: &mut usize) {
+    while body.get(*i).is_some_and(|t| t.cat() == Some(10)) {
+        *i += 1;
+    }
+}
+
 impl Run<'_, '_> {
     /// The meaning of `t` as a command and its code, read as the
     /// interpreter would read it.
@@ -151,6 +157,85 @@ impl Run<'_, '_> {
         Ok(Some(Arg::Const(n)))
     }
 
+    /// `\advance`'s operands at `body[*i]`, added to the plan: false for
+    /// another shape.
+    fn loop_advance(&mut self, p: &mut Plan, body: &[Tok], i: &mut usize) -> R<bool> {
+        if !body.get(*i).is_some_and(|r| r.is_cs_or_active()) {
+            return Ok(false);
+        }
+        let Some(Arg::Reg(reg)) = self.loop_arg(p, body, i)? else {
+            return Ok(false);
+        };
+        skip_spaces(body, i);
+        if let (Some(a), Some(b)) = (body.get(*i), body.get(*i + 1))
+            && a.cat().is_some_and(|c| c == 11 || c == 12)
+            && b.cat().is_some_and(|c| c == 11 || c == 12)
+            && a.chr() == u32::from(b'b')
+            && b.chr() == u32::from(b'y')
+        {
+            *i += 2;
+        }
+        skip_spaces(body, i);
+        let Some(by) = self.loop_arg(p, body, i)? else {
+            return Ok(false);
+        };
+        p.advanced[usize::from(reg)] = true;
+        p.stmts.push(Stmt::Advance(reg, by));
+        Ok(true)
+    }
+
+    /// A code assignment's operands at `body[*i]`, of the table at `chr`,
+    /// added to the plan: false for another table or shape.
+    fn loop_code(&mut self, p: &mut Plan, chr: i32, body: &[Tok], i: &mut usize) -> R<bool> {
+        let (table, max) = match chr {
+            crate::val::LC_CODE_BASE if self.xe => ("lc", USV),
+            crate::val::UC_CODE_BASE if self.xe => ("uc", USV),
+            crate::val::LC_CODE_BASE => ("lc", 255),
+            crate::val::UC_CODE_BASE => ("uc", 255),
+            crate::val::CAT_CODE_BASE => ("cat", 15),
+            _ => return Ok(false),
+        };
+        let Some(ch) = self.loop_arg(p, body, i)? else {
+            return Ok(false);
+        };
+        if body
+            .get(*i)
+            .is_some_and(|t| t.cat() == Some(12) && t.chr() == u32::from(b'='))
+        {
+            *i += 1;
+        }
+        let Some(val) = self.loop_arg(p, body, i)? else {
+            return Ok(false);
+        };
+        p.stmts.push(Stmt::Code(table, max, ch, val));
+        Ok(true)
+    }
+
+    /// `\ifnum`'s operands at `body[*i]`.
+    fn loop_test(
+        &mut self,
+        p: &mut Plan,
+        body: &[Tok],
+        i: &mut usize,
+    ) -> R<Option<(Arg, u32, Arg)>> {
+        let Some(lhs) = self.loop_arg(p, body, i)? else {
+            return Ok(None);
+        };
+        skip_spaces(body, i);
+        let Some(&r) = body.get(*i) else {
+            return Ok(None);
+        };
+        if r.cat() != Some(12) || !matches!(r.chr(), 0x3C..=0x3E) {
+            return Ok(None);
+        }
+        *i += 1;
+        skip_spaces(body, i);
+        let Some(rhs) = self.loop_arg(p, body, i)? else {
+            return Ok(None);
+        };
+        Ok(Some((lhs, r.chr(), rhs)))
+    }
+
     /// The statements of `body` up to the `\ifnum`, then the test and the
     /// tail: the plan and the test, or `None` where the body is another
     /// shape or a meaning is another.
@@ -171,79 +256,20 @@ impl Run<'_, '_> {
             i += 1;
             match c {
                 cmd::ADVANCE if chr == 0 => {
-                    let Some(&r) = body.get(i) else {
-                        return Ok(None);
-                    };
-                    if !r.is_cs_or_active() {
+                    if !self.loop_advance(&mut p, body, &mut i)? {
                         return Ok(None);
                     }
-                    let Some(Arg::Reg(reg)) = self.loop_arg(&mut p, body, &mut i)? else {
-                        return Ok(None);
-                    };
-                    while body.get(i).is_some_and(|t| t.cat() == Some(10)) {
-                        i += 1;
-                    }
-                    if let (Some(a), Some(b)) = (body.get(i), body.get(i + 1))
-                        && a.cat().is_some_and(|c| c == 11 || c == 12)
-                        && b.cat().is_some_and(|c| c == 11 || c == 12)
-                        && a.chr() == u32::from(b'b')
-                        && b.chr() == u32::from(b'y')
-                    {
-                        i += 2;
-                    }
-                    while body.get(i).is_some_and(|t| t.cat() == Some(10)) {
-                        i += 1;
-                    }
-                    let Some(by) = self.loop_arg(&mut p, body, &mut i)? else {
-                        return Ok(None);
-                    };
-                    p.advanced[usize::from(reg)] = true;
-                    p.stmts.push(Stmt::Advance(reg, by));
                 }
                 cmd::DEF_CODE => {
-                    let (table, max) = match chr {
-                        crate::val::LC_CODE_BASE if self.xe => ("lc", USV),
-                        crate::val::UC_CODE_BASE if self.xe => ("uc", USV),
-                        crate::val::LC_CODE_BASE => ("lc", 255),
-                        crate::val::UC_CODE_BASE => ("uc", 255),
-                        crate::val::CAT_CODE_BASE => ("cat", 15),
-                        _ => return Ok(None),
-                    };
-                    let Some(ch) = self.loop_arg(&mut p, body, &mut i)? else {
+                    if !self.loop_code(&mut p, chr, body, &mut i)? {
                         return Ok(None);
-                    };
-                    if body
-                        .get(i)
-                        .is_some_and(|t| t.cat() == Some(12) && t.chr() == u32::from(b'='))
-                    {
-                        i += 1;
                     }
-                    let Some(val) = self.loop_arg(&mut p, body, &mut i)? else {
-                        return Ok(None);
-                    };
-                    p.stmts.push(Stmt::Code(table, max, ch, val));
                 }
                 cmd::IF_TEST if chr == 2 => {
-                    let Some(lhs) = self.loop_arg(&mut p, body, &mut i)? else {
+                    let Some(test) = self.loop_test(&mut p, body, &mut i)? else {
                         return Ok(None);
                     };
-                    while body.get(i).is_some_and(|t| t.cat() == Some(10)) {
-                        i += 1;
-                    }
-                    let Some(&r) = body.get(i) else {
-                        return Ok(None);
-                    };
-                    if r.cat() != Some(12) || !matches!(r.chr(), 0x3C..=0x3E) {
-                        return Ok(None);
-                    }
-                    i += 1;
-                    while body.get(i).is_some_and(|t| t.cat() == Some(10)) {
-                        i += 1;
-                    }
-                    let Some(rhs) = self.loop_arg(&mut p, body, &mut i)? else {
-                        return Ok(None);
-                    };
-                    break (lhs, r.chr(), rhs);
+                    break test;
                 }
                 _ => return Ok(None),
             }
