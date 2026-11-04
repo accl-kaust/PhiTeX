@@ -3907,9 +3907,8 @@ impl Run<'_, '_> {
             ") has occurred while \\output is active".to_owned()
         } else {
             let first = match begin {
-                Begin::No => None,
+                Begin::No | Begin::Par(None) => None,
                 Begin::Par(Some(m)) => Some(self.line_for_log(m, &mut marks)?),
-                Begin::Par(None) => None,
             };
             let m = self.line_mark();
             let line = self.line_for_log(m, &mut marks)?;
