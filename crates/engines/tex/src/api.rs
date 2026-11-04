@@ -7535,6 +7535,25 @@ impl Build {
             .collect()
     }
 
+    /// Each diagnostic's message and what it holds of its line, as the
+    /// runs made them ([`Run::diag_place`]).
+    #[must_use]
+    pub fn diagnostic_places(&self) -> Vec<(String, String)> {
+        let v = self.g.eng.values();
+        self.g
+            .eng
+            .acc_value(self.unit, v.field("diags"))
+            .map(|s| v.seq_to_vec(s))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|e| {
+                let xs = list_of(v, e);
+                let s = |i: usize| xs.get(i).map(|&x| str_of(v, x)).unwrap_or_default();
+                (s(1), s(5))
+            })
+            .collect()
+    }
+
     #[allow(clippy::too_many_lines)]
     /// The diagnostics of the last build or edit: TeX's errors and
     /// warnings (box reports, missing characters) where the input was,
