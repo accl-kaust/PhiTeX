@@ -2405,3 +2405,52 @@ fn providecommand_lines_keep_the_aux_read_back_per_field() {
         }
     }
 }
+
+/// A file the job writes and reads back itself (a listing's temporary, as
+/// tcolorbox makes for every example) is read from that file's own stream:
+/// a heading's edit moves the `.aux`'s, and no such reader runs again. All
+/// of `streams` was read: the 306-page circuitikz manual's heading edit
+/// re-ran 960 examples on it, 94 s.
+#[test]
+fn a_file_read_back_by_its_writer_reads_its_own_stream_alone() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/own-stream");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |title: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\newwrite\\w\n\\begin{{document}}\n\
+             \\tableofcontents\n\\section{{{title}}}\nText of the section.\n\n\\newpage\n\
+             Before the listing.\n\n\
+             \\immediate\\openout\\w=ex.tmp \\immediate\\write\\w{{Written and read.}}\
+             \\immediate\\closeout\\w \\input{{ex.tmp}}\n\n\
+             After the listing.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("ownstream", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc("First"));
+        for title in ["Xfirst", "First part of it", "First"] {
+            b.edit(&doc(title));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(title));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {title}"
+            );
+            assert!(
+                !r.iter().any(|x| x.contains("Range streams")),
+                "-j{threads} {title}: a reader ran again on all the streams: {r:?}"
+            );
+        }
+    }
+}

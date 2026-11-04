@@ -40,6 +40,22 @@ use crate::val::{int_of, list_of};
 /// next is due that many times its length after it, at least [`every`].
 const SPACE: u64 = 4;
 
+/// The commands from a checkpoint to the next: `spacing` (`SPACE` times
+/// what the run's parts cost) apart at least, or `every` apart in a dense
+/// run (an edited one); doubling in a dense run gone on from a checkpoint
+/// before the edit (`resumed`): those it takes stand past the edit, of use
+/// only to a later edit further on. `taken`: the checkpoints this run has
+/// taken so far.
+fn ck_gap(dense: bool, resumed: bool, taken: usize, every: u64, spacing: u64) -> u64 {
+    if dense && resumed {
+        every << (taken + 1).min(16)
+    } else if dense {
+        every
+    } else {
+        every.max(SPACE * spacing)
+    }
+}
+
 fn every() -> u64 {
     crate::exec::obs_str!("PHITEX_CK_EVERY")
         .and_then(|x| x.parse().ok())
@@ -465,16 +481,13 @@ impl Run<'_, '_> {
             + self.nest.iter().map(|l| l.list.len() as u64).sum::<u64>();
         if let Some(c) = self.ck.as_mut() {
             c.next = self.cmds
-                + if c.dense && self.resumed_at.is_some() {
-                    // (a run gone on from a checkpoint before the edit:
-                    // those it takes now stand past the edit, of use only
-                    // to a later edit further on; doubling)
-                    every() << (c.fresh.len() + 1).min(16)
-                } else if c.dense {
-                    every()
-                } else {
-                    every().max(SPACE * spacing)
-                };
+                + ck_gap(
+                    c.dense,
+                    self.resumed_at.is_some(),
+                    c.fresh.len(),
+                    every(),
+                    spacing,
+                );
         }
         if crate::exec::obs_flag!("PHITEX_CK_SIZE") {
             eprintln!(
@@ -632,6 +645,9 @@ impl Run<'_, '_> {
             c.fresh.push((c.taken.len(), unread));
             c.taken.push(ck);
         }
+        // (the reads after it are those a cutoff here or at the next run
+        // checks: what the run reads again from now on among them)
+        self.cx.reads_begin_again();
         self.cut_off(ck)
     }
 
@@ -1866,6 +1882,28 @@ fn cand_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::pages::CandMa
 
 #[cfg(test)]
 mod tests {
+    /// A dense run gone on from a checkpoint before its edit spaces its
+    /// checkpoints doubling, capped; a dense run that did not go on, and a
+    /// run not dense, do not.
+    #[test]
+    fn checkpoints_double_apart_only_where_a_dense_run_went_on() {
+        let gap = super::ck_gap;
+        assert_eq!(
+            [0, 1, 2, 3].map(|k| gap(true, true, k, 600, 10_000)),
+            [1200, 2400, 4800, 9600],
+            "doubling, whatever the parts cost"
+        );
+        assert_eq!(gap(true, true, 15, 600, 0), 600 << 16);
+        assert_eq!(gap(true, true, 40, 600, 0), 600 << 16, "capped");
+        assert_eq!(gap(true, false, 5, 600, 10_000), 600, "dense: every");
+        assert_eq!(
+            gap(false, true, 5, 600, 10_000),
+            40_000,
+            "not dense: by what they cost"
+        );
+        assert_eq!(gap(false, false, 5, 600, 1), 600, "at least every");
+    }
+
     /// A paragraph that closes the group an earlier node opened, its
     /// first checkpoint due inside a conditional of its own that the
     /// closing command's expansion ends: the checkpoint came at that

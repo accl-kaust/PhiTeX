@@ -615,3 +615,56 @@ fn a_global_relation_adds_to_the_local_binding_it_sees() {
     assert_eq!(int(&e, after), 6);
     assert!(e.check_invariants().is_empty());
 }
+
+/// `[k, shown]`: predicted to open a scope, its text shows one, and its
+/// run opens none (`\\begin{x}` in a short verbatim). The same shape
+/// (`shown`) through an edit: the same effect.
+struct Shows;
+
+impl Operation for Shows {
+    fn name(&self) -> &'static str {
+        "shows"
+    }
+
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::Scope(Brackets {
+            closes: 0,
+            opens: 1,
+            before: false,
+        })
+    }
+
+    fn same_effect(&self, old: &[ValueId], new: &[ValueId], _: &Values) -> bool {
+        old[1] == new[1]
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.set_effect(Effect::None);
+        Ok(cx.args()[0])
+    }
+}
+
+/// An edit that leaves what a node's text shows files no brackets its last
+/// run refuted, so no walk of the readers after it, at the edit or at the
+/// run's commit; one that changes it files the prediction, as ever, and
+/// the run takes it back.
+#[test]
+fn an_edit_keeps_the_brackets_its_last_run_found_where_the_text_shows_the_same() {
+    let eng = Engine::new();
+    let shows = eng.register(Arc::new(Shows));
+    let v = eng.values();
+    let (one, two, three) = (v.int(1), v.int(2), v.int(3));
+    let (a, b) = (v.int(10), v.int(11));
+    let u = eng.new_unit();
+    let n = eng.push(u, shows, vec![one, a]);
+    eng.evaluate(1).unwrap();
+    let c0 = eng.scope_changes();
+    eng.replace(n, shows, vec![two, a]);
+    assert_eq!(eng.scope_changes(), c0, "the edit files nothing");
+    eng.evaluate(1).unwrap();
+    assert_eq!(eng.scope_changes(), c0, "the run takes nothing back");
+    eng.replace(n, shows, vec![three, b]);
+    assert_eq!(eng.scope_changes(), c0 + 1, "another shape: the prediction filed");
+    eng.evaluate(1).unwrap();
+    assert_eq!(eng.scope_changes(), c0 + 2, "and taken back by the run");
+}

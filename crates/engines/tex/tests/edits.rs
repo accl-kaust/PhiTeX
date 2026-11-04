@@ -1355,6 +1355,47 @@ fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
     }
 }
 
+/// A run gone on from a checkpoint before its edit takes its later
+/// checkpoints doubling apart (`resume::ck_gap`): a later edit further on
+/// in the same paragraph, past those it took sparsely, still goes on from
+/// one, and the output is a cold build's.
+#[test]
+fn a_run_with_doubled_checkpoints_serves_a_later_edit_further_on() {
+    let fx = common::fixtures().join("plain");
+    let prelude = common::plain();
+    let opts = || common::options("./long.tex", "long", "", &fx);
+    let words: Vec<String> = (0..6000)
+        .map(|k| format!("w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17))
+        .collect();
+    let par = |ws: &[String]| format!("\\hsize=300pt\n{}\n\n\\bye\n", ws.join(" "));
+    let mut ws = words.clone();
+    let mut b = common::build(opts(), Some(&prelude), &par(&ws));
+    // (the first, dense, leaves checkpoints all along; the second goes on
+    // from one and takes those after it doubling; the rest are past them)
+    for (k, at, resumes) in [
+        (0, 5990, false),
+        (1, 2000, true),
+        (2, 4000, true),
+        (3, 5900, true),
+        (4, 5950, true),
+    ] {
+        ws[at] = format!("edit{k}\\kern0pt");
+        let text = par(&ws);
+        b.edit(&text);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        assert!(
+            common::first_difference(&b.output().0, &cold.output().0).is_none(),
+            "edit {k} at word {at}: the output is not the cold build's"
+        );
+        assert_eq!(
+            b.stats.resumed_at_mark > 0,
+            resumes,
+            "edit {k} at word {at}: {} runs went on from a checkpoint",
+            b.stats.resumed_at_mark
+        );
+    }
+}
+
 /// Exact PDF, compressed, a paragraph deleted near the start of 300:
 /// every later page's lines move, so the link places a new record for
 /// each. A page's content is compressed once, where the link places it
@@ -1503,4 +1544,64 @@ fn a_routine_runs_again_for_the_line_number_only_where_it_shows() {
     let cold = common::build(opts(), Some(&prelude), &text);
     assert!(common::first_difference(&b.output().0, &cold.output().0).is_none());
     assert!(ran > 0, "the routines that show it run again");
+}
+
+/// A paragraph that reads `\pagetotal` before its first checkpoint and
+/// again after it, the first read leaving no trace in its state. An edit
+/// on an earlier page moves the page start reaching it (not the items
+/// between the old start and the paragraph), so it runs again and reaches
+/// the checkpoint in the same state; the page start read before the
+/// checkpoint was answered again from the run's memo after it, so it was
+/// among neither the state compared nor the reads the cutoff checks: the
+/// cutoff kept the old run's `\the\pagetotal` (ribbonproofs' framed.sty).
+#[test]
+fn cutoff_sees_the_page_start_read_before_its_checkpoint() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from(
+        "\\hsize=4in \\vsize=100pt \\parindent=0pt \\baselineskip=12pt \\parskip=0pt\n",
+    );
+    for p in 0..12 {
+        let _ = writeln!(src, "Filler {p}.\n");
+    }
+    src.push_str(
+        "Reader \\ifdim\\pagetotal<-1pt x\\fi \\count1=0 \\loop\\advance\\count1 by 1 \
+         \\ifnum\\count1<3000 \\repeat [\\the\\pagetotal]\n\n\\bye\n",
+    );
+    let prelude = common::plain();
+    let opts = || common::options("./cs.tex", "cs", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replacen("Filler 3.", "Filler 3.\\vrule height 40pt", 1);
+    b.edit(&text);
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+}
+
+/// A long line with an overfull box before the run's checkpoint on it and
+/// a paragraph overfull after it, edited past the checkpoint: the run goes
+/// on from there, and its diagnostics hold what a cold build's do. A place
+/// held the whole line: the box's report made before the checkpoint and
+/// the paragraph's start held the line without the new word (Grail, under
+/// `PHITEX_RESUME_CHECK`). What a diagnostic shows comes from the text.
+#[test]
+fn a_run_gone_on_holds_the_places_of_a_cold_build() {
+    let fx = common::fixtures().join("dvi");
+    let src = "\\hsize=1in \\parindent=0pt\n\
+         Reader \\setbox0\\hbox to 1pt{wide words} \\count1=0 \\loop\\advance\\count1 by 1 \
+         \\ifnum\\count1<3000 \\repeat \\hbox to 2in{}. Tail\n\n\\bye\n"
+        .to_owned();
+    let prelude = common::plain();
+    let opts = || common::options("./dl.tex", "dl", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replacen(". Tail", ". Tail typed", 1);
+    b.edit(&text);
+    assert!(
+        b.stats.resumed_at_mark > 0,
+        "the edit went on from no checkpoint"
+    );
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let (x, y) = (b.diagnostic_places(), cold.diagnostic_places());
+    assert!(y.len() >= 2, "{y:?}");
+    assert_eq!(x, y);
 }

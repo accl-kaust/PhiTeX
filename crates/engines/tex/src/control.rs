@@ -2688,7 +2688,9 @@ impl Run<'_, '_> {
     /// A file this run wrote before this point: the text written so far.
     fn read_own_written(&mut self, key: &str) -> R<Option<ValueId>> {
         let v = self.v;
-        let f = v.field("streams");
+        // (that file's stream alone: a write to another file, the `.aux`
+        // line of a heading, is not read here)
+        let f = crate::run::stream_bucket(v, key);
         let before = self.cx.fold(f, None, None);
         if before.is_err() {
             self.trace_stop("range streams");
