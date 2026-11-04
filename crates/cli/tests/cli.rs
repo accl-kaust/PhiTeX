@@ -3481,7 +3481,11 @@ fn a_projects_settings_run_nothing() {
         log.contains("MADE") && !log.contains("NOTMADE"),
         "the user's:\n{log}"
     );
-    // (`watch --open`: only the user's viewer is started)
+    watch_open_starts_only_the_users_viewer();
+}
+
+/// `phitex watch --open` starts the viewer the user's phitex.toml names, never a project's.
+fn watch_open_starts_only_the_users_viewer() {
     for (name, toml, user, runs) in [
         (
             "run-watch-project",
