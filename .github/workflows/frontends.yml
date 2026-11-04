@@ -134,6 +134,13 @@ jobs:
           scripts/build/build-web.sh
           scripts/build/mock-editor.sh
           scripts/build/build-vscode.sh
+      # (what the runner's Chrome allows the core, before the checks: a check
+      # that fails on its memory says why here)
+      - name: the runner's Chrome and memory
+        working-directory: fe
+        env:
+          PHITEX_CHROME: /usr/bin/google-chrome
+        run: node web/test/chrome-probe.mjs
       - name: Overleaf (the extension on the mock)
         working-directory: fe
         env:
@@ -142,11 +149,13 @@ jobs:
           node scripts/dev/mock-run.mjs test/scenarios/ci.json
           node scripts/dev/mock-run.mjs test/scenarios/ci-figure.json
       - name: the demo (build/web, served here)
+        if: ${{ !cancelled() }}
         working-directory: fe
         env:
           PHITEX_CHROME: /usr/bin/google-chrome
         run: node web/test/check.mjs
       - name: VS Code's built-in wasm engine
+        if: ${{ !cancelled() }}
         working-directory: fe
         run: node vscode/dist/smoke.mjs test/scenarios/ci main.tex
       - if: failure()
