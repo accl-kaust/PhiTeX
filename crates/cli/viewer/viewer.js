@@ -3982,10 +3982,10 @@ var Panel = class {
     else this.times.edits.push(ms);
     if (!this.$("#m-time").hidden) this.timing();
   }
-  /** This tab joined `builds` builds in: `first` the first build's time; only the first of them is called one. */
+  /** This tab joined `builds` builds in: `first` the first build's time for the bars; the first build's paint was not this tab's, so its next is not called one. */
   joinedLate(first, builds) {
     if (first !== void 0 && this.times.first === void 0) this.times.first = first;
-    if (builds > 1) this.paints = Math.max(this.paints, 1);
+    if (builds >= 1) this.paints = Math.max(this.paints, 1);
   }
   /** The bars: the first build, the last edit, the edits' median, each as long as its time (the longest the full width; a short one at least a sliver). */
   timeBars() {

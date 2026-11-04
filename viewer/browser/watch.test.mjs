@@ -304,10 +304,10 @@ test("a selection is one block a line; its text has its spaces, no space inside 
 
 test("the problems' kinds filter the list, the page's marks and the scrollbar's, kept in phitex.toml (item 1, kinds)", async () => {
   const fresh = mkdtempSync(join(process.env.PHITEX_BROWSER_TMP ?? tmpdir(), "phitex-home-"));
-  const body = "{\\hsize=2cm \\noindent Incomprehensibilities characteristically.\\par}\n\nSee \\ref{nosuch}.";
+  const body = "{\\hsize=2cm \\noindent Incomprehensibilities characteristically.\\par}\n\nThen \\nosuchcommandhere here.";
   const { w, t } = await open({ "main.tex": doc(body) }, { at: fresh });
   await problems(t);
-  await t.until(`!!$("#diags [data-kind='overfull']") && !!$("#diags [data-kind='reference']")`, "the kinds' filters");
+  await t.until(`!!$("#diags [data-kind='overfull']") && !!$("#diags [data-kind='error']")`, "the kinds' filters");
   await t.until(`$$(".slot .culprit.rule.overfull").length > 0`, "the overfull box's bar on the page");
   const marks0 = await t.q(`$$("#smarks i").length`);
   assert.ok(marks0 >= 2, `scrollbar marks: ${marks0}`);
