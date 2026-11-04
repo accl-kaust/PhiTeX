@@ -1,0 +1,29 @@
+% thuthesis (natbib + bibunits): a line of a second job-written file, read
+% back where its unit starts, must see the meanings there, not the values
+% another file's read-back replaced at its own point.
+% \bibstyle is natbib's shape: the style hook \let's \bibstyle to \@gobble
+% (locally, inside the main .aux's group), and \AtBeginDocument makes it
+% \@gobble globally; so the main .aux's \bibstyle line runs the hook at
+% \begin{document}, and the unit's \bibstyle line, read later, does nothing.
+% (the unit file read between paragraphs, as a bibunit's at a chapter start)
+% pdflatex: "Main: NUM." and "Unit: none." from the second run on, settled.
+\documentclass{article}
+\makeatletter
+\def\bibstyle#1{\csname bibstyle@#1\endcsname}
+\def\bibstyle@num{\gdef\marker{NUM}\let\bibstyle\@gobble}
+\AtBeginDocument{\global\let\bibstyle\@gobble}
+\def\marker{none}
+\newwrite\unitaux
+\def\startunit{%
+  \IfFileExists{\jobname-unit.aux}{\@input{\jobname-unit.aux}}{}%
+  \immediate\openout\unitaux\jobname-unit.aux
+  \immediate\write\unitaux{\string\bibstyle{num}}%
+  \immediate\closeout\unitaux}
+\makeatother
+\begin{document}
+\bibliographystyle{num}
+Main: \marker.\par
+\gdef\marker{none}
+\startunit
+Unit: \marker.\par
+\end{document}
