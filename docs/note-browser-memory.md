@@ -43,11 +43,11 @@ chunk, the size the memory must have.
 | amsldoc | 44 | 684 MiB | 856 MiB |
 | a 60-frame Madrid beamer deck | 60 | 747 MiB | 915 MiB |
 | Grail (acmart, minted) | 18 | 1550 MiB | 1853 MiB |
-| beamer user guide (beameruserguide.tex) | ~250 | over 4 GiB: an allocation failed in the cold build (the core trapped) | over 4 GiB |
-| pgf manual | ~1300 | not yet measured | |
+| beamer user guide (beameruserguide.tex) | 227 | the cold build completes (652 s at -j4, 227 pages); the first edit after it fails an allocation (496 144 bytes) and the core traps | over 4 GiB |
+| pgf manual | ~1300 | not measured: it stopped at a fatal error after 2.8 s in this setup | |
 
-A book-sized document already overflows the 4 GiB a wasm32 core can
-have, at -j4, though the native engine builds the beamer guide in about
+A book-sized document overflows the 4 GiB a wasm32 core can have, at
+-j4, by its first edit, though the native engine builds the beamer guide in about
 1 GB resident. Why the wasm core needs more than four times that is the
 question to answer before any split of the memory between tabs.
 
