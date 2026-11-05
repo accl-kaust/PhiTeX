@@ -401,25 +401,36 @@ impl Run<'_, '_> {
             && self.has_input()
     }
 
-    /// A read of the page (`\pagegoal`, `\pagetotal`, ...) after a
-    /// candidate of the run's own a page fires at (`k`): TeX ran that
-    /// page's routine there, and what the run reads after it (the page,
-    /// what the routine set: LaTeX's `\vsize` for a float it placed) is
-    /// the routine's. The run goes again from its start and ends at that
-    /// candidate ([`Halt::Recut`]), its rest a resume placed after the
-    /// page's finisher.
-    pub(crate) fn order_after_own_page(&mut self, k: u32) -> R<()> {
+    /// A read of the page (`\pagegoal`, `\pagetotal`, ...) after
+    /// candidates of the run's own pages fire at (`ks`, in order): TeX ran
+    /// those pages' routines there, and what the run reads after them (the
+    /// page, what the routine set: LaTeX's `\vsize` for a float it placed)
+    /// is the last one's. The run goes again from its start and ends at
+    /// the last of them a pass can end at ([`Halt::Recut`]), its rest a
+    /// resume placed after that page's finisher; it goes on past those
+    /// before, their finishers run on its state there as at any candidate
+    /// it goes on past ([`Run::preload_candidate`]). Ended at the first,
+    /// the rest ran on to the read again past the next page's candidate
+    /// and was cut there in turn, each rest a pass over what was left
+    /// after it: circuitikz's index in `multicols`, read at its end, 16
+    /// rests from 307 ms down to 69 ms one after another, 1.8 s of an
+    /// edit's 2.7 s. Where the builder's pages after the first are not the
+    /// settled ones (the routines gave something back), the rest reads
+    /// the page after one of its own and is cut again.
+    pub(crate) fn order_after_own_page(&mut self, ks: &[u32]) -> R<()> {
         let op = self.cx.op();
         let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
         if !piece || self.cut.is_some() || self.stop_at.is_some() {
             return Ok(());
         }
-        let Some(m) = self.cand_marks.iter().find(|m| m.k == k) else {
+        let Some(m) = ks.iter().rev().find_map(|&k| {
+            self.cand_marks
+                .iter()
+                .find(|m| m.k == k && m.fresh && (m.restartable || m.open_cut || m.par_cut))
+        }) else {
             return Ok(());
         };
-        if !m.fresh || !(m.restartable || m.open_cut || m.par_cut) {
-            return Ok(());
-        }
+        let k = m.k;
         if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
             eprintln!(
                 "page-trace: node {} ends at candidate {k}: a read of the page after a page fired there",

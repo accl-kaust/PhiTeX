@@ -159,10 +159,14 @@ pub(crate) fn run_node(
     // (a second pass from the start, ending at the candidate the first
     // asked for: deterministic, one at most, `Halt::Recut`)
     if let Err(Halt::Recut(k)) = res {
+        // (from the first pass's last checkpoint before that candidate,
+        // `Run::resume_recut`)
+        let cks = r.ck_taken();
         let cx = r.cx;
         r = Run::new(cx, o);
         r.stop_at = Some(k);
         r.no_rb = no_rb;
+        r.recut_cks = cks;
         // (a second pass to a candidate takes no marks)
         res = pass(&mut r, &mut body);
     }

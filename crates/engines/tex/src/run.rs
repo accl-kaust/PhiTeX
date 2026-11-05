@@ -1243,6 +1243,10 @@ pub(crate) struct Run<'c, 'a> {
     pub cut: Option<u32>,
     /// The candidate a second pass ends at ([`Halt::Recut`]).
     pub stop_at: Option<u32>,
+    /// A second pass's first pass's checkpoints, with the indices of those
+    /// it took itself and their counts of `unread`
+    /// (`Run::resume_recut`).
+    pub(crate) recut_cks: Option<crate::resume::RecutCks>,
     /// While a character run's lookahead expands (§1038): its list and
     /// its effect on the space factor so far, its nodes not on the list
     /// yet; the tail is its last character ([`Run::space_factor`],
@@ -1484,6 +1488,7 @@ impl<'c, 'a> Run<'c, 'a> {
             loop_keys: crate::pages::LoopKeys::default(),
             cut: None,
             stop_at: None,
+            recut_cks: None,
             chars_live: None,
             chars_eff: i32::MIN,
             tool_cut: None,

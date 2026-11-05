@@ -305,11 +305,9 @@ impl Run<'_, '_> {
         if let Some(p) = self.fin.as_ref().and_then(|f| f.page.as_ref()) {
             return Ok(p.so_far[i]);
         }
-        let (st, fired, own_k) = self.page_so_far()?;
-        if fired == Some(true)
-            && let Some(k) = own_k
-        {
-            self.order_after_own_page(k)?;
+        let (st, fired, own_ks) = self.page_so_far()?;
+        if fired == Some(true) {
+            self.order_after_own_page(&own_ks)?;
         }
         if st.pb.contents == Contents::Empty {
             return Ok(if m == 0 { MAX_DIMEN } else { 0 });
@@ -325,11 +323,9 @@ impl Run<'_, '_> {
         if self.fin.is_some() {
             return self.int_loc(crate::fields::cell::INSPEN);
         }
-        let (st, fired, own_k) = self.page_so_far()?;
-        if fired == Some(true)
-            && let Some(k) = own_k
-        {
-            self.order_after_own_page(k)?;
+        let (st, fired, own_ks) = self.page_so_far()?;
+        if fired == Some(true) {
+            self.order_after_own_page(&own_ks)?;
         }
         Ok(st.pb.insert_penalties)
     }
@@ -393,10 +389,10 @@ impl Run<'_, '_> {
         {
             return Ok(());
         }
-        let (_, fired, own_k) = self.page_so_far()?;
+        let (_, fired, own_ks) = self.page_so_far()?;
         if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
             eprintln!(
-                "page-trace: node {} reads page register {loc} after its candidates: fired {fired:?} at {own_k:?}, marks {:?}",
+                "page-trace: node {} reads page register {loc} after its candidates: fired {fired:?} at {own_ks:?}, marks {:?}",
                 self.cx.node().raw(),
                 self.cand_marks
                     .iter()
@@ -404,10 +400,8 @@ impl Run<'_, '_> {
                     .collect::<Vec<_>>()
             );
         }
-        if fired == Some(true)
-            && let Some(k) = own_k
-        {
-            self.order_after_own_page(k)?;
+        if fired == Some(true) {
+            self.order_after_own_page(&own_ks)?;
         }
         Ok(())
     }
@@ -466,8 +460,10 @@ impl Run<'_, '_> {
     /// ([`PAGE_START`]) to its own last candidate: its state, stopped at
     /// the first page firing, and where that page fired (`Some(true)` in
     /// this piece's own items, `Some(false)` before them), and the own
-    /// candidate it fired at.
-    fn page_so_far(&mut self) -> R<(crate::vprof::ScanState, Option<bool>, Option<u32>)> {
+    /// candidates pages fired at, in order (the first where it fired; the
+    /// later ones as the builder goes on, each routine giving back
+    /// nothing).
+    fn page_so_far(&mut self) -> R<(crate::vprof::ScanState, Option<bool>, Vec<u32>)> {
         let v = self.v;
         let raw = self.own_outer_items();
         let last = raw
@@ -542,19 +538,20 @@ impl Run<'_, '_> {
         let own = items.len() - 1;
         let mut rd = RunReaching(self, None);
         let mut fired = None;
-        let mut own_k = None;
+        let mut own_ks = Vec::new();
         'items: for (i, x) in items.iter().enumerate() {
             let mut rest: &[crate::vprof::PItem] = x;
             let mut n_fires = 0;
             while st.fold_items(rest, dead, &mut rd) {
                 n_fires += 1;
-                // (the candidate the first page fired at in its own items:
-                // its build)
-                if fired.is_none() && i == own {
-                    own_k = match rest.get(st.fired_at) {
-                        Some(crate::vprof::PItem::Build(c)) => Some(*c),
-                        _ => None,
-                    };
+                // (the candidates pages fired at in its own items: their
+                // builds; none after one at no build, the first page's
+                // place unknown)
+                if i == own
+                    && (fired.is_none() || !own_ks.is_empty())
+                    && let Some(crate::vprof::PItem::Build(c)) = rest.get(st.fired_at)
+                {
+                    own_ks.push(*c);
                 }
                 if fired.is_none() {
                     fired = Some(i == own);
@@ -588,6 +585,6 @@ impl Run<'_, '_> {
             }
         }
         self.ins_fold = None;
-        Ok((st, fired, own_k))
+        Ok((st, fired, own_ks))
     }
 }
