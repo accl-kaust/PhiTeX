@@ -2866,3 +2866,48 @@ fn a_new_label_leaves_the_read_back_run_standing() {
         }
     }
 }
+
+/// A long `\begin{document}` run whose read-back through its child is
+/// refused (it defines a name the `.aux` defines, after the read-back
+/// point: uspace's and `ClassicThesis`'s `\@gtempa`), in a round whose
+/// `.aux` changed: the run's own checks while it runs read the output of
+/// its read-back child by the placement's key, not the last run's
+/// placement at the same index (a page's node there after a pass that
+/// read back inline). Read by the index, the read moved at every check,
+/// the run stopped each time and never committed, and its child never
+/// ran: no progress (dev 1fa65f142's revert, gate run 41954286956).
+#[test]
+fn a_long_run_refusing_its_read_back_child_ends() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rb-long");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    // (`\rbseen` is 1 the first round, 2 once `\rbprev` came back: the
+    // `.aux` changes once more after its first read-back; the hook defines
+    // `\rbkey`, which the `.aux` defines too, after the read-back point,
+    // then works long enough for the run to check its reads)
+    let doc = "\\documentclass{article}\n\\makeatletter\n\
+         \\AtBeginDocument{\\gdef\\rbkey{run}\\count@\\z@\
+         \\@whilenum\\count@<120000\\do{\\advance\\count@\\@ne\\edef\\rbtmp{\\the\\count@}}}\n\
+         \\AtEndDocument{\\immediate\\write\\@auxout{\\gdef\\string\\rbkey{aux}\
+         \\gdef\\string\\rbprev{}\\gdef\\string\\rbseen{\\ifdefined\\rbprev 2\\else 1\\fi}}}\n\
+         \\makeatother\n\\begin{document}\nSeen \\ifdefined\\rbseen\\rbseen\\else 0\\fi, key \\rbkey.\n\\end{document}\n";
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("rblong", &dir)
+        };
+        let b = common::build(opts(), Some(&prelude(true)), doc);
+        let (pdf, log) = b.output();
+        assert!(
+            !pdf.is_empty(),
+            "-j{threads}: a PDF: {}",
+            common::log_excerpt(&log)
+        );
+        assert!(
+            !log.contains("no progress"),
+            "-j{threads}: {}",
+            common::log_excerpt(&log)
+        );
+    }
+}
