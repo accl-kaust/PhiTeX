@@ -491,6 +491,9 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
         }
         Step::Key(k) => {
             let x = v?;
+            if let Some(ix) = assoc_index(vals, x) {
+                return ix.get(&k).copied().flatten();
+            }
             vals.with_list(x, |xs| {
                 xs.iter()
                     .find_map(|&e| {
@@ -503,6 +506,9 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
         }
         Step::Has(k) => {
             let x = v?;
+            if let Some(ix) = assoc_index(vals, x) {
+                return Some(vals.bool(ix.contains_key(&k)));
+            }
             vals.with_list(x, |xs| {
                 xs.iter()
                     .any(|&e| vals.with_list(e, |kv| kv.first() == Some(&k)).unwrap_or(false))
@@ -528,6 +534,75 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
             unimplemented!("path step: next run")
         }
     }
+}
+
+/// An association list's keys at least this many: looked up through an
+/// index ([`assoc_index`]), not passed over.
+const ASSOC_INDEXED: usize = 32;
+
+/// The index of association list `x` (a list of lists `[k, v, ..]`):
+/// each key to the value of the first entry it heads (`None` for an entry
+/// of the key alone), as [`Step::Key`] and [`Step::Has`] answer by
+/// passing over it. Only for a list of [`ASSOC_INDEXED`] entries or more;
+/// made once a list and values epoch (a value never changes, and an id
+/// never names another value: a collected list's slot stays empty),
+/// shared by the threads. A read-back child's output holds every key of
+/// a document's `.aux` (tikz-cd: 397), and its parent looks up each name
+/// it uses there, again when the child commits (`reask_parent`): passed
+/// over, 6 000 reads of a 400-entry list cost 7 ms a commit (mc 80248).
+fn assoc_index(vals: &Values, x: ValueId) -> Option<Arc<crate::values::FxHashMap<ValueId, Option<ValueId>>>> {
+    type Ix = Arc<crate::values::FxHashMap<ValueId, Option<ValueId>>>;
+    struct Shard {
+        epoch: u64,
+        map: crate::values::FxHashMap<ValueId, Ix>,
+    }
+    const SHARDS: usize = 16;
+    // (entries kept per shard before it is emptied: a bound)
+    const MAX: usize = 256;
+    static S: std::sync::OnceLock<Box<[std::sync::Mutex<Shard>]>> = std::sync::OnceLock::new();
+    if vals.with_list(x, <[ValueId]>::len)? < ASSOC_INDEXED {
+        return None;
+    }
+    let s = S.get_or_init(|| {
+        (0..SHARDS)
+            .map(|_| {
+                std::sync::Mutex::new(Shard {
+                    epoch: u64::MAX,
+                    map: crate::values::FxHashMap::default(),
+                })
+            })
+            .collect()
+    });
+    let raw = x.raw();
+    #[allow(clippy::cast_possible_truncation)]
+    let sh = &s[(raw ^ (raw >> 29)) as usize % SHARDS];
+    let e = vals.epoch();
+    {
+        let g = sh.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if g.epoch == e
+            && let Some(ix) = g.map.get(&x)
+        {
+            return Some(ix.clone());
+        }
+    }
+    let mut m = crate::values::FxHashMap::default();
+    vals.with_list(x, |xs| {
+        for &el in xs {
+            vals.with_list(el, |kv| {
+                if let Some(&k) = kv.first() {
+                    m.entry(k).or_insert_with(|| kv.get(1).copied());
+                }
+            });
+        }
+    });
+    let ix: Ix = Arc::new(m);
+    let mut g = sh.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if g.epoch != e || g.map.len() >= MAX {
+        g.epoch = e;
+        g.map.clear();
+    }
+    g.map.insert(x, ix.clone());
+    Some(ix)
 }
 
 /// `true` for an empty, zero, nil or unit value, `false` otherwise
@@ -1595,6 +1670,53 @@ mod tests {
     use crate::engine::Engine;
     use crate::node::ReadKind;
     use crate::values::{Field, ValueId};
+
+    /// A long association list answers `Key` and `Has` through its index
+    /// as passing over it answers: the first entry a key heads, an entry
+    /// of the key alone (no value), entries that are no lists or empty.
+    #[test]
+    fn an_indexed_association_list_answers_as_passed_over() {
+        use crate::api::Step;
+        let eng = Engine::new();
+        let v = eng.values();
+        let mut xs = Vec::new();
+        for i in 0..100 {
+            let k = v.str(&format!("k{}", i % 70));
+            xs.push(v.list(vec![k, v.int(i)]));
+            if i % 13 == 0 {
+                xs.push(v.int(i));
+                xs.push(v.list(vec![]));
+                xs.push(v.list(vec![v.str(&format!("alone{i}"))]));
+            }
+        }
+        let x = v.list(xs.clone());
+        for name in (0..80)
+            .map(|i| format!("k{i}"))
+            .chain((0..100).map(|i| format!("alone{i}")))
+        {
+            let k = v.str(&name);
+            let scan_key = v
+                .with_list(x, |es| {
+                    es.iter()
+                        .find_map(|&e| {
+                            v.with_list(e, |kv| (kv.first() == Some(&k)).then(|| kv.get(1).copied()))
+                                .flatten()
+                        })
+                        .flatten()
+                })
+                .flatten();
+            let scan_has = v.with_list(x, |es| {
+                es.iter()
+                    .any(|&e| v.with_list(e, |kv| kv.first() == Some(&k)).unwrap_or(false))
+            });
+            assert_eq!(super::step(&eng, Some(x), Step::Key(k)), scan_key, "{name}");
+            assert_eq!(
+                super::step(&eng, Some(x), Step::Has(k)),
+                scan_has.map(|b| v.bool(b)),
+                "{name}"
+            );
+        }
+    }
 
     /// `[x]`: contributes x to the field `acc`.
     struct Contrib(Field);

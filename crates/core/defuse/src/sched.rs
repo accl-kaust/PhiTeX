@@ -469,6 +469,14 @@ impl Ready {
         Some(NodeId::from_raw(x.0.3))
     }
 
+    /// The node a `pop` takes next, if any: a peek.
+    fn first(&self) -> Option<NodeId> {
+        if self.len.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        self.heap.lock().peek().map(|x| NodeId::from_raw(x.0.3))
+    }
+
     /// The earliest node's key, if any.
     fn first_key(&self) -> Option<u64> {
         if self.len.load(Ordering::Relaxed) == 0 {
@@ -560,6 +568,11 @@ fn held_trace() -> bool {
 const fn offer_ns() -> u64 {
     200_000
 }
+
+/// A run this long or longer (its last) is kept on the worker whose
+/// queue holds it rather than run after a much shorter one there
+/// (`Pool::keep_longest`).
+const LONG_NS: u64 = 1_000_000;
 
 /// Spins before parking.
 const SPINS: u32 = 64;
@@ -806,6 +819,64 @@ impl Pool {
         n
     }
 
+    /// `n`, just taken from `w`'s own queue, or the node queued after it
+    /// where that one's last run was much longer (`LONGER` times, and at
+    /// least [`LONG_NS`]) and a worker is idle: `n` goes back for that
+    /// worker (or one started for it), and `w` runs the long one on the
+    /// caches its last runs left (what they read is what it reads). Moved to another worker, a long
+    /// run costs up to twice its time there (tikz-cd's heading edit at
+    /// -j8: the `\tableofcontents` run 28-30 ms where `\begin{document}`
+    /// had just run, 47-55 ms on another worker, the same 59 719 commands,
+    /// reads and decodings, mc 80254), a short one little: before, the
+    /// short read-back child placed between the two took the warm worker
+    /// and the long run went at once to a cold one (`offer_for`). Order
+    /// within one worker only: with no worker idle, `n` runs first.
+    fn keep_longest(&self, eng: &Engine, w: &Worker, n: NodeId) -> NodeId {
+        const LONGER: u64 = 4;
+        let sh = &self.shared;
+        if self.n == 1 || (sh.idle.load(Ordering::SeqCst) == 0 && sh.spawned.load(Ordering::Relaxed) >= sh.n) {
+            return n;
+        }
+        let me = w.ready();
+        let Some(y) = me.first() else {
+            return n;
+        };
+        let known = |x: &Node| {
+            x.committed()
+                && !x
+                    .woke
+                    .lock()
+                    .as_ref()
+                    .is_some_and(|w| matches!(w.cause, Cause::Edited | Cause::Created { .. }))
+        };
+        let (nx, ny) = (eng.node(n), eng.node(y));
+        let (tx, ty) = (nx.run_ns.load(Ordering::Relaxed), ny.run_ns.load(Ordering::Relaxed));
+        // (its last run an earlier evaluation's: in a first build a run
+        // measured on unsettled input says little of the next, and there
+        // the order is the one to keep, -j4 cold builds up to 11% slower
+        // with it on every node, mc 80270)
+        if !known(nx)
+            || !known(ny)
+            || ny.run_epoch.load(Ordering::Relaxed) == self.epoch
+            || ty < LONG_NS
+            || ty < LONGER.saturating_mul(tx.max(offer_ns()))
+        {
+            return n;
+        }
+        match me.pop() {
+            Some(m) if m == y => {
+                me.push(eng, nx);
+                y
+            }
+            Some(m) => {
+                // (another node came first meanwhile: as taken)
+                me.push(eng, eng.node(m));
+                n
+            }
+            None => n,
+        }
+    }
+
     fn take_work(&self, eng: &Engine, w: &Worker) -> Option<NodeId> {
         // (its earliest runnable node by place ([`Ready`]), or the head of
         // its block where that stands first: a node run before one ahead
@@ -824,12 +895,12 @@ impl Pool {
                 }
                 w.block.push((b, run));
                 if let Some(n) = me.pop() {
-                    return Some(n);
+                    return Some(self.keep_longest(eng, w, n));
                 }
             }
             (Some(_), None) => {
                 if let Some(n) = me.pop() {
-                    return Some(n);
+                    return Some(self.keep_longest(eng, w, n));
                 }
             }
             (None, Some((b, _))) => return Some(b),
