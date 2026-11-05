@@ -2117,6 +2117,13 @@ impl Engine {
                 continue;
             };
             let op = self.op(node.op()).clone();
+            // (`PHITEX_RERUN_CHECK=<op>`: only that operation's nodes)
+            if let Ok(only) = std::env::var("PHITEX_RERUN_CHECK")
+                && only != "1"
+                && op.name() != only
+            {
+                continue;
+            }
             let mut cx = crate::ctx::Ctx::new(self, None, node);
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.run(&mut cx)));
             let name = op.name();
@@ -2192,6 +2199,68 @@ impl Engine {
                 why.push(format!("claims {} was {}", p.claim, rec.claim));
             }
             if !why.is_empty() {
+                // (where the run again first read otherwise than the run
+                // recorded: the read it took, the value, against the record's)
+                let show = |r: Option<&crate::node::ReadRec>| {
+                    r.map_or_else(
+                        || "none".to_owned(),
+                        |r| {
+                            let f = r.kind.field().map_or(String::new(), |f| v.render(f.0));
+                            let s = r
+                                .seen
+                                .map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(120).collect::<String>());
+                            format!("{f} {:?} seen {s}", r.kind)
+                        },
+                    )
+                };
+                let k = (0..p.reads.len().max(rec.reads.len())).find(|&k| match (p.reads.get(k), rec.reads.get(k)) {
+                    (Some(a), Some(b)) => a.seen != b.seen || format!("{:?}", a.kind) != format!("{:?}", b.kind),
+                    _ => true,
+                });
+                if let Some(k) = k {
+                    why.push(format!(
+                        "reads {} recorded {}: first apart at {k}: now {} | recorded {}",
+                        p.reads.len(),
+                        rec.reads.len(),
+                        show(p.reads.get(k)),
+                        show(rec.reads.get(k))
+                    ));
+                }
+                // (as sets by kind: what only one of them read, or read
+                // otherwise)
+                let key = |r: &crate::node::ReadRec| format!("{:?}", r.kind);
+                let recd: FxHashMap<String, Option<ValueId>> = rec.reads.iter().map(|r| (key(r), r.seen)).collect();
+                let recr: FxHashMap<String, &crate::node::ReadRec> = rec.reads.iter().map(|r| (key(r), r)).collect();
+                let nowd: FxHashMap<String, Option<ValueId>> = p.reads.iter().map(|r| (key(r), r.seen)).collect();
+                for r in &p.reads {
+                    match recd.get(&key(r)) {
+                        None => why.push(format!("only now: {}", show(Some(r)))),
+                        Some(s) if *s != r.seen => why.push(format!(
+                            "read otherwise: {} | answer {} filed {} epoch {} now-epoch {} | recorded {}",
+                            show(Some(r)),
+                            recr.get(&key(r)).map_or("?", |x| {
+                                let a = crate::read::answer(self, node, &x.kind, x.path);
+                                if a == r.seen {
+                                    "as now"
+                                } else if a == x.seen {
+                                    "as recorded"
+                                } else {
+                                    "neither"
+                                }
+                            }),
+                            recr.get(&key(r)).is_some_and(|x| x.filed),
+                            recr.get(&key(r)).map_or(0, |x| x.epoch),
+                            r.kind.field().map_or(0, |f| self.field_epoch(f)),
+                            s.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(120).collect())
+                        )),
+                        _ => {}
+                    }
+                }
+                for r in &rec.reads {
+                    if !nowd.contains_key(&key(r)) {
+                        why.push(format!("only recorded: {}", show(Some(r))));
+                    }
+                }
                 out.push(format!("node {} ({name}): {}", node.id.raw(), why.join("; ")));
             }
         }

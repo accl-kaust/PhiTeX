@@ -50,6 +50,8 @@ pub struct Ctx<'a> {
     /// Why this run was asked for, as it began (`woken_by`): a cause a
     /// re-ask stores while it runs is the next run's.
     pub(crate) woke: Option<Cause>,
+    /// My wake was more than one cause (`Node::woke_merged`, taken).
+    woke_merged: bool,
     /// My last run's placements by operation and arguments, made on the
     /// first `placed_output_or`.
     placed_keys: Option<PlacedKeys>,
@@ -106,6 +108,7 @@ impl<'a> Ctx<'a> {
                 ranks: Vec::new(),
                 claim: 0,
                 effect: None,
+                place_effects: Vec::new(),
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
                 unchanged: false,
                 state: None,
@@ -126,6 +129,7 @@ impl<'a> Ctx<'a> {
             stashed: Vec::new(),
             stop_at: None,
             woke: me.woke.lock().as_ref().map(|w| w.cause.clone()),
+            woke_merged: me.woke_merged.swap(false, std::sync::atomic::Ordering::SeqCst),
             placed_keys: None,
             last: me.run_record(),
             stuck: None,
@@ -143,12 +147,13 @@ impl<'a> Ctx<'a> {
             Some(Cause::Range { by, .. } | Cause::Changed { site: Some(by), .. }) => Some(by),
             _ => None,
         };
-        self.product.on_park = match &self.woke {
-            Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => {
-                *self.me.parked_on.lock() == Some(*field)
-            }
-            _ => false,
-        };
+        self.product.on_park = !self.woke_merged
+            && match &self.woke {
+                Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => {
+                    *self.me.parked_on.lock() == Some(*field)
+                }
+                _ => false,
+            };
         self.product
     }
 
@@ -887,10 +892,37 @@ impl<'a> Ctx<'a> {
         self.product.placements.len() - 1
     }
 
+    /// Takes back my placements of this run from the `n`-th on, and my
+    /// reads of their outputs: a pass that a run throws away and makes
+    /// again leaves none of what it placed (its other reads stay, as a
+    /// second pass's do).
+    pub fn unplace_from(&mut self, n: usize) {
+        let p = &mut self.product;
+        p.placements.truncate(n);
+        p.ranks.truncate(n);
+        p.waits.retain(|&j| j < n);
+        p.reads
+            .retain(|rd| !matches!(rd.kind, ReadKind::Placed { i, .. } if i >= n));
+        self.placed_keys = None;
+    }
+
     /// Places a node after me and my children.
     pub fn follow(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
         self.product.placements.push(Placement::Follow(op, args));
         self.product.placements.len() - 1
+    }
+
+    /// The brackets my `i`-th placement is filed with until it runs,
+    /// where its operation leaves them to its run (`Effect::Pending`):
+    /// its text is not its arguments, but I know it (a cut piece's rest,
+    /// whose continuation I made). Filed in my commit with my own: a
+    /// close my text predicted that moves into the rest leaves the depth
+    /// after the rest as it was, and the readers there stand. A guess:
+    /// the node's run files what it does.
+    pub fn predict_placed_effect(&mut self, i: usize, e: Effect) {
+        if e != Effect::Pending && e != Effect::None {
+            self.product.place_effects.push((i, e));
+        }
     }
 
     /// Places a node after `at` and its placements.
@@ -965,6 +997,38 @@ impl<'a> Ctx<'a> {
         let x = out.unwrap_or(guess);
         self.record(ReadKind::Placed { i, guess: true }, PathId::WHOLE, Some(x));
         x
+    }
+
+    /// [`Ctx::placed_output_or`] through path `p`: the answer of `p` on
+    /// the output of the node my `i`-th placement of this run stands for,
+    /// if it has run, else on the output `guess` gives (asked only then,
+    /// None: no output); recorded as that
+    /// answer alone, so a child's output that changes elsewhere than `p`
+    /// leaves me standing, and one whose first output answers otherwise
+    /// than the guess re-asks me.
+    pub fn placed_output_path_or(
+        &mut self,
+        i: usize,
+        p: PathId,
+        guess: impl FnOnce(&Self) -> Option<ValueId>,
+    ) -> Option<ValueId> {
+        let x = match self.placed_child_output(i) {
+            Some(o) => read::apply_path(self.eng, Some(o), p),
+            None => {
+                let g = guess(self);
+                read::apply_path(self.eng, g, p)
+            }
+        };
+        self.record(ReadKind::Placed { i, guess: true }, p, x);
+        x
+    }
+
+    /// The value of `f` at the line's end (`At::Final`, a loop-back), not
+    /// recorded: for a guess that a recorded read checks
+    /// ([`Ctx::placed_output_path_or`]), never for what a run makes.
+    #[must_use]
+    pub fn peek_final(&self, f: Field) -> Option<ValueId> {
+        read::final_read(self.eng, f).value
     }
 
     /// The output of the node my `i`-th placement of this run stands for
@@ -1098,6 +1162,22 @@ impl<'a> Ctx<'a> {
         let h = read::on_one_layout(self.eng, || read::hole_before(self.eng, self.me));
         if h.is_some() {
             self.record(ReadKind::Hole, PathId::WHOLE, read::hole_value(self.eng, h));
+        }
+        Ok(h)
+    }
+
+    /// [`Ctx::hole_before`] where the text before me can change what I
+    /// read: the first node before me that has not committed and whose
+    /// operation may define one of `fields` (`Operation::may_define`),
+    /// None where no such node is. A node found is recorded as
+    /// `hole_before` records the first hole (its commit, or its being
+    /// taken, removed or moved, runs me again, and I look again); None is
+    /// not recorded.
+    pub fn hole_before_defining(&mut self, fields: &[Field]) -> Result<Option<NodeId>, Stop> {
+        self.check()?;
+        let (h, first) = read::on_one_layout(self.eng, || read::hole_before_defining(self.eng, self.me, fields));
+        if h.is_some() {
+            self.record(ReadKind::Hole, PathId::WHOLE, read::hole_value(self.eng, first));
         }
         Ok(h)
     }
@@ -1821,9 +1901,41 @@ impl<'a> Ctx<'a> {
         let scope_moved =
             read::scoped(self.eng) && self.eng.scope_gen.load(Ordering::Acquire) != self.product.scope_gen;
         let mut memo = crate::read::FoldMemo::new();
+        // (a read of a placement's output is of this run's `i`-th placement,
+        // which the last run's `i`-th need not be: a pass that placed a
+        // child its last run did not (the read-back child after a pass
+        // read back inline) reads another node's output there. So the
+        // child this placement stands for, by its key, as the read found
+        // it: its output now, or none where it has not run (a guess, which
+        // its commit checks, `reask_parent`). Read through `holds`, a
+        // read moved on every check, the run stopped each time and never
+        // committed, and its child never ran: no progress)
+        let placed: Vec<usize> = self
+            .product
+            .reads
+            .iter()
+            .filter_map(|rd| match rd.kind {
+                ReadKind::Placed { i, .. } => Some(i),
+                _ => None,
+            })
+            .collect();
+        let mut outs: FxHashMap<usize, Option<ValueId>> = FxHashMap::default();
+        for i in placed {
+            if let std::collections::hash_map::Entry::Vacant(e) = outs.entry(i) {
+                e.insert(self.placed_child_output(i));
+            }
+        }
         let moved = self.product.reads.iter().any(|rd| {
             if matches!(rd.kind, ReadKind::Following { .. }) {
                 return false;
+            }
+            if let ReadKind::Placed { i, guess } = rd.kind {
+                return match outs.get(&i).copied().flatten() {
+                    Some(o) => read::apply_path(self.eng, Some(o), rd.path) != rd.seen,
+                    // (no child of that key has run: a guess holds until
+                    // the child commits; a real read of none saw none)
+                    None => !guess && rd.seen.is_some(),
+                };
             }
             if !scope_moved
                 && !matches!(rd.kind, ReadKind::Next { .. })
