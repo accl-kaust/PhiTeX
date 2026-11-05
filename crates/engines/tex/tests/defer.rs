@@ -809,7 +809,12 @@ fn a_name_built_from_a_stepped_counter_reads_through_the_name() {
             oracle("dname-lit", "", 0),
             "cold equals the names written out"
         );
-        assert!(out.contains("n0=6.") && out.contains("n59=65."), "{out:?}");
+        let log = b.output().1;
+        assert!(
+            out.contains("n0=6.") && out.contains("n59=65."),
+            "{out:?}\n{}",
+            log.lines().rev().take(60).collect::<Vec<_>>().join("\n")
+        );
         let asked = |b: &phitex_tex::Build| {
             b.stats.refuted_by_op("exec", "count:200")
                 + b.stats.refuted_by_op("resume", "count:200")
