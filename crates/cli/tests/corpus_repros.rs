@@ -1284,3 +1284,20 @@ fn aux_pre_other_point() {
 fn expand_bound_anew() {
     check_threads("expand_bound_anew", "pdf");
 }
+
+/// TeX Live manual auguide4-1 (revtex 4.1's author guide, pdflatex; its
+/// file as it is, renamed, with its docs.sty): a loop rest of the page
+/// builder keeps the pages it fired while it waits for the give-back of
+/// the page it starts after. Its first
+/// page's finisher stood after that page's finisher, both pages firing in
+/// one piece; that page then fired in an earlier piece, its finisher moved
+/// there, and the kept one moved with it, before the piece its own page
+/// fired in. Its routine read the text there as it was before that piece
+/// and refuted itself for ever, and the rest's wake by the give-back was
+/// held for a quiet point that never came: -j1 never ended. Now a waiting
+/// rest whose start moved that finisher places its kept pages again. The
+/// PDF is pdflatex's (latexmk in the CI image, accl 24905) at -j1 and -j4.
+#[test]
+fn loop_rest_kept_finisher_moved() {
+    check_threads("revtex_rest_finisher_moved", "pdf");
+}

@@ -151,11 +151,6 @@ pub struct Engine {
     /// cached at an older count is stale (`read::chain_start`), and a run
     /// that began before one checks every read at its commit.
     pub(crate) scope_gen: AtomicU64,
-    /// The bracket walks under way (`walk::change`), each with its span.
-    pub(crate) walks: crate::lock::Mx<Vec<std::sync::Arc<crate::walk::Walk>>>,
-    /// The latest bracket changes, by scope count (`walk::filed`), and
-    /// the count of the last one dropped from the list.
-    pub(crate) filings: crate::lock::Mx<crate::walk::Filings>,
     /// Nodes with brackets filed: none, and no scope is walked.
     pub(crate) bracket_nodes: AtomicUsize,
     /// The field a read of the scope depth is recorded under
@@ -324,8 +319,6 @@ impl Engine {
             pred_pending: Mx::new(Vec::new()),
             swept_left: AtomicU64::new(0),
             scope_gen: AtomicU64::new(1),
-            walks: crate::lock::Mx::new(Vec::new()),
-            filings: crate::lock::Mx::new((std::collections::VecDeque::new(), 0)),
             bracket_nodes: AtomicUsize::new(0),
             depth_field,
             has_finals: std::sync::atomic::AtomicBool::new(false),

@@ -12,6 +12,37 @@ use crate::val::{int_of, list_of, str_of};
 
 const MAX_PRINT_LINE: usize = 79;
 
+/// TeX Live's `error_line` and `half_error_line` (texmf.cnf): a context
+/// line's limits (§317).
+const ERROR_LINE: usize = 79;
+const HALF_ERROR_LINE: usize = 50;
+
+/// A log event's kind: §306's runaway list, before the error it is of
+/// (`crate::context`).
+pub(crate) const RUNAWAY: &str = "runaway";
+/// A log event's kind: an error's context and help, after it
+/// (`crate::context`).
+pub(crate) const CONTEXT: &str = "errctx";
+/// The context alone, the hundredth error's (§82: the job ends before
+/// the help).
+pub(crate) const CONTEXT_ONLY: &str = "errctx0";
+
+/// Character `c` as `print` puts it in the log (§59, [`Log::print_char`]
+/// apart from the new-line character): itself, or its `^^` form.
+pub(crate) fn printable(c: u32, out: &mut String) {
+    if (32..127).contains(&c) || c >= 256 {
+        out.push(char::from_u32(c).unwrap_or('?'));
+    } else if c < 128 {
+        out.push_str("^^");
+        out.push(char::from_u32(if c < 64 { c + 64 } else { c - 64 }).unwrap_or('?'));
+    } else {
+        let hex = |d: u32| char::from_digit(d, 16).unwrap_or('0');
+        out.push_str("^^");
+        out.push(hex(c / 16));
+        out.push(hex(c % 16));
+    }
+}
+
 /// The line break of a `box` event's text: no character TeX prints.
 pub(crate) const BOX_LINE: char = '\u{10FFFD}';
 
@@ -86,6 +117,96 @@ impl Log {
         self.print(s, nl);
     }
 
+    /// What `error` prints after its message (§90): each level of the
+    /// context in the two lines of §317, the help lines, `print_ln`
+    /// twice ([`crate::context`]'s text: a level's prefix, its text
+    /// before the place read and after, printed already).
+    fn context(&mut self, text: &str, help: bool) {
+        use crate::context::{LEVEL, NL, PART};
+        let mut rest = text;
+        while let Some(c) = rest.chars().next() {
+            rest = &rest[c.len_utf8()..];
+            let end = rest.find([LEVEL, NL]).unwrap_or(rest.len());
+            let (part, more) = rest.split_at(end);
+            rest = more;
+            if c == NL {
+                self.print_nl(part, -1);
+                continue;
+            }
+            if c != LEVEL {
+                continue;
+            }
+            let mut ps = part.split(PART);
+            let prefix = ps.next().unwrap_or_default();
+            let a: Vec<char> = ps.next().unwrap_or_default().chars().collect();
+            let b: Vec<char> = ps.next().unwrap_or_default().chars().collect();
+            self.print_nl(prefix, -1);
+            // §317, with `first_count` where the place read is and
+            // `trick_count` past it (§316)
+            let l = prefix.chars().count();
+            let fc = a.len();
+            let tally = fc + b.len();
+            let trick = (fc + 1 + ERROR_LINE - HALF_ERROR_LINE).max(ERROR_LINE);
+            let m = if tally < trick {
+                tally - fc
+            } else {
+                trick - fc
+            };
+            let (p, n) = if l + fc <= HALF_ERROR_LINE {
+                (0, l + fc)
+            } else {
+                self.print_plain("...");
+                (l + fc - HALF_ERROR_LINE + 3, HALF_ERROR_LINE)
+            };
+            for &c in &a[p.min(fc)..] {
+                self.raw(c);
+            }
+            self.print_ln();
+            for _ in 0..n {
+                self.raw(' ');
+            }
+            let q = if m + n <= ERROR_LINE {
+                m
+            } else {
+                ERROR_LINE.saturating_sub(n + 3)
+            };
+            for &c in &b[..q.min(b.len())] {
+                self.raw(c);
+            }
+            if m + n > ERROR_LINE {
+                self.print_plain("...");
+            }
+        }
+        if help {
+            self.print_ln();
+            self.print_ln();
+        }
+    }
+
+    /// §306: `print_nl("Runaway ")`, what and `?`, `print_ln`, the list
+    /// so far (printed already, `crate::context`).
+    fn runaway(&mut self, text: &str, nl: i64) {
+        let (what, list) = text.split_once('\n').unwrap_or((text, ""));
+        self.print_nl("", nl);
+        self.print_plain(what);
+        self.print_ln();
+        self.print_plain(list);
+    }
+
+    /// `print_err` and the message's `.` (§73): `fatal_error`'s (§93)
+    /// "Emergency stop", the text its help line, in the context event
+    /// that follows.
+    fn error(&mut self, text: &str, nl: i64) {
+        self.print_nl("! ", nl);
+        if text.starts_with("*** (") {
+            self.print_plain("Emergency stop");
+        } else {
+            self.print_plain(text);
+        }
+        self.raw('.');
+        self.print_ln();
+    }
+
     /// One event.
     pub fn event(&mut self, kind: &str, text: &str, nl: i64) {
         let len = text.chars().count();
@@ -105,12 +226,9 @@ impl Log {
                 self.raw('.');
                 self.print_ln();
             }
-            "error" => {
-                self.print_nl("! ", nl);
-                self.print_plain(text);
-                self.raw('.');
-                self.print_ln();
-            }
+            "error" => self.error(text, nl),
+            RUNAWAY => self.runaway(text, nl),
+            CONTEXT | CONTEXT_ONLY => self.context(text, kind == CONTEXT),
             "wlog" => {
                 // §1370
                 self.print_nl("", nl);
@@ -344,6 +462,15 @@ impl LayoutMemo {
                     text = text.replacen(LINE_MARK, &l.to_string(), 1);
                 }
                 self.marked.push((k, marks, lines));
+            }
+            if kind == CONTEXT || kind == CONTEXT_ONLY {
+                // (the terminal's line: what the job was given, `main.tex`
+                // for `./main.tex`)
+                let mut cmd = String::new();
+                for c in name.strip_prefix("./").unwrap_or(name).chars() {
+                    printable(u32::from(c), &mut cmd);
+                }
+                text = text.replace(crate::context::CMDLINE, &cmd);
             }
             log.event(&kind, &text, nl);
             self.after.push((log.text.len(), log.offset));
