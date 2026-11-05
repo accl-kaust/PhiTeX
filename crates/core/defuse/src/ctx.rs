@@ -1867,9 +1867,41 @@ impl<'a> Ctx<'a> {
         let scope_moved =
             read::scoped(self.eng) && self.eng.scope_gen.load(Ordering::Acquire) != self.product.scope_gen;
         let mut memo = crate::read::FoldMemo::new();
+        // (a read of a placement's output is of this run's `i`-th placement,
+        // which the last run's `i`-th need not be: a pass that placed a
+        // child its last run did not (the read-back child after a pass
+        // read back inline) reads another node's output there. So the
+        // child this placement stands for, by its key, as the read found
+        // it: its output now, or none where it has not run (a guess, which
+        // its commit checks, `reask_parent`). Read through `holds`, a
+        // read moved on every check, the run stopped each time and never
+        // committed, and its child never ran: no progress)
+        let placed: Vec<usize> = self
+            .product
+            .reads
+            .iter()
+            .filter_map(|rd| match rd.kind {
+                ReadKind::Placed { i, .. } => Some(i),
+                _ => None,
+            })
+            .collect();
+        let mut outs: FxHashMap<usize, Option<ValueId>> = FxHashMap::default();
+        for i in placed {
+            if let std::collections::hash_map::Entry::Vacant(e) = outs.entry(i) {
+                e.insert(self.placed_child_output(i));
+            }
+        }
         let moved = self.product.reads.iter().any(|rd| {
             if matches!(rd.kind, ReadKind::Following { .. }) {
                 return false;
+            }
+            if let ReadKind::Placed { i, guess } = rd.kind {
+                return match outs.get(&i).copied().flatten() {
+                    Some(o) => read::apply_path(self.eng, Some(o), rd.path) != rd.seen,
+                    // (no child of that key has run: a guess holds until
+                    // the child commits; a real read of none saw none)
+                    None => !guess && rd.seen.is_some(),
+                };
             }
             if !scope_moved
                 && !matches!(rd.kind, ReadKind::Next { .. })
