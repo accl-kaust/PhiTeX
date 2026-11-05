@@ -196,6 +196,17 @@ pub enum Step {
     Eq(ValueId),
     /// The order of an integer against `k`: -1, 0 or 1.
     Cmp(ValueId),
+    /// A derived read (docs/note-relative-counters.md §3), `spec` the
+    /// list `[base, prefix, j, suffix]`: the value of the field named
+    /// `prefix`, the decimal digits of `v + j`, `suffix`, where `v` is the
+    /// integer value of field `base` (0 where it has none); both read at
+    /// the reader's position. Its input is ignored: it is the path's
+    /// first step, and a reader through it, filed on `base` and on the
+    /// named field (a witness), answers the composed look-up on either, so
+    /// a move of `v` whose new name holds what the old one held leaves the
+    /// reader standing. Answered only where a read has a position
+    /// ([`crate::Ctx::read_derived`]); elsewhere it gives none.
+    Derived(ValueId),
     Each(PathId),
     Indices(ValueId),
     Keys(ValueId),
