@@ -704,7 +704,7 @@ pub(crate) fn derived_read(
     prefix: &str,
     suffix: &str,
     p: phitex_defuse::PathId,
-) -> crate::run::R<Option<Option<ValueId>>> {
+) -> crate::run::R<Option<Answer>> {
     if s.node != r.cx.node()
         || !r.defer_allowed()
         || r.rb.is_some()
@@ -729,8 +729,12 @@ pub(crate) fn derived_read(
             x.map(|x| r.v.render(x).chars().take(60).collect::<String>())
         );
     }
-    Ok(Some(x))
+    Ok(Some(Answer(x)))
 }
+
+/// A derived read's answer ([`derived_read`]): the named field's value
+/// through the path, `None` where the name is not defined.
+pub(crate) struct Answer(pub Option<ValueId>);
 
 /// Whether the run binds a control sequence named `prefix`, a number,
 /// `suffix` itself (a definition of its own, or one a continuation
@@ -774,7 +778,9 @@ pub(crate) fn dname_concrete(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<Tok> 
 /// concrete name's where that read cannot stand.
 pub(crate) fn dname_meaning(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<crate::val::Mean> {
     let d = dname_of(t).expect("a derived name's token");
-    if let Some(x) = derived_read(r, d.s, &d.prefix, &d.suffix, phitex_defuse::PathId::WHOLE)? {
+    if let Some(Answer(x)) =
+        derived_read(r, d.s, &d.prefix, &d.suffix, phitex_defuse::PathId::WHOLE)?
+    {
         return Ok(crate::val::Mean::decode(r.v, x));
     }
     let g = dname_concrete(r, t)?;
@@ -787,7 +793,8 @@ pub(crate) fn dname_meaning(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<crate:
 /// for the fetch to take as TeX's.
 pub(crate) fn expand_dname(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<()> {
     let d = dname_of(t).expect("a derived name's token");
-    if let Some(x) = derived_read(r, d.s, &d.prefix, &d.suffix, phitex_defuse::PathId::WHOLE)?
+    if let Some(Answer(x)) =
+        derived_read(r, d.s, &d.prefix, &d.suffix, phitex_defuse::PathId::WHOLE)?
         && let crate::val::Mean::Macro(m) = crate::val::Mean::decode(r.v, x)
         && m.params.is_empty()
         && m.flags & (2 | crate::etex::PROTECTED) == 0

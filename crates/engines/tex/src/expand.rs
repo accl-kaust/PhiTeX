@@ -235,7 +235,8 @@ impl Run<'_, '_> {
                 suffix: suf,
             };
             if let Some(tok) = crate::defer::dname_tok(&d)
-                && let Some(x) = crate::defer::derived_read(self, s, &d.prefix, &d.suffix, p)?
+                && let Some(crate::defer::Answer(x)) =
+                    crate::defer::derived_read(self, s, &d.prefix, &d.suffix, p)?
                 && x.is_some_and(|x| int_of(self.v, x) != 0)
             {
                 self.back_input(tok);

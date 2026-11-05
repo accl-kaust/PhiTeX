@@ -392,24 +392,23 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
             // (a relative name, docs/note-relative-counters.md §2.2: of
             // the meaning only whether it is defined, through the derived
             // read; where that cannot stand, the name made concrete)
-            let (t, derived) = match kept {
-                Some((at, s)) => {
-                    let (pre, suf) = (name[..at].to_owned(), name[at..].to_owned());
-                    crate::expand::NAME.with(|c| c.set(name));
-                    let p = phitex_defuse::PathId::of_proj(r.ops.defined_proj);
-                    match crate::defer::derived_read(r, s, &pre, &suf, p)? {
-                        Some(x) => (None, Some(x.is_some_and(|x| int_of(r.v, x) != 0))),
-                        None => (
-                            Some(Tok::cs(&crate::defer::forced_name(r, s, &pre, &suf)?)),
-                            None,
-                        ),
+            let (t, derived) = if let Some((at, s)) = kept {
+                let (pre, suf) = (name[..at].to_owned(), name[at..].to_owned());
+                crate::expand::NAME.with(|c| c.set(name));
+                let p = phitex_defuse::PathId::of_proj(r.ops.defined_proj);
+                match crate::defer::derived_read(r, s, &pre, &suf, p)? {
+                    Some(crate::defer::Answer(x)) => {
+                        (None, Some(x.is_some_and(|x| int_of(r.v, x) != 0)))
                     }
+                    None => (
+                        Some(Tok::cs(&crate::defer::forced_name(r, s, &pre, &suf)?)),
+                        None,
+                    ),
                 }
-                None => {
-                    let t = Tok::cs(&name);
-                    crate::expand::NAME.with(|c| c.set(name));
-                    (Some(t), None)
-                }
+            } else {
+                let t = Tok::cs(&name);
+                crate::expand::NAME.with(|c| c.set(name));
+                (Some(t), None)
             };
             if r.cur.cmd != cmd::END_CS_NAME {
                 // "Missing \endcsname inserted"
