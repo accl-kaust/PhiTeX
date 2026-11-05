@@ -40,7 +40,15 @@ fn build_j(name: &str, threads: usize) -> (Vec<u8>, String) {
 
 /// [`build_j`]'s output file `NAME.ext` (a DVI's, `ext` `dvi`).
 fn build_out(name: &str, threads: usize, ext: &str) -> (Vec<u8>, String) {
-    let dir = scratch(name, threads);
+    build_out_in(name, "", threads, ext)
+}
+
+/// [`build_out`] in a scratch directory of its own, `NAME<tag>-jN`: for a
+/// test building a document another test builds at the same thread count
+/// (the tests run side by side; in one directory one's build removed the
+/// other's output, "can't write ./NAME.pdf").
+fn build_out_in(name: &str, tag: &str, threads: usize, ext: &str) -> (Vec<u8>, String) {
+    let dir = scratch(&format!("{name}{tag}"), threads);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let tex = format!("{name}.tex");
@@ -1313,7 +1321,7 @@ fn loop_rest_kept_finisher_moved() {
 fn page_discards_marker_held_at_the_frontier() {
     let want = std::fs::read(fixtures().join("page_discards.pdf")).expect("the oracle");
     for i in 0..24 {
-        let (got, term) = build_out("page_discards", 4, "pdf");
+        let (got, term) = build_out_in("page_discards", "-held", 4, "pdf");
         assert!(
             got == want,
             "page_discards -j4 build {i} differs from the oracle: {}",
