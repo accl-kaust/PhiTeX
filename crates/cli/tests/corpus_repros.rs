@@ -40,7 +40,15 @@ fn build_j(name: &str, threads: usize) -> (Vec<u8>, String) {
 
 /// [`build_j`]'s output file `NAME.ext` (a DVI's, `ext` `dvi`).
 fn build_out(name: &str, threads: usize, ext: &str) -> (Vec<u8>, String) {
-    let dir = scratch(name, threads);
+    build_out_in(name, "", threads, ext)
+}
+
+/// [`build_out`] in a scratch directory of its own, `NAME<tag>-jN`: for a
+/// test building a document another test builds at the same thread count
+/// (the tests run side by side; in one directory one's build removed the
+/// other's output, "can't write ./NAME.pdf").
+fn build_out_in(name: &str, tag: &str, threads: usize, ext: &str) -> (Vec<u8>, String) {
+    let dir = scratch(&format!("{name}{tag}"), threads);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let tex = format!("{name}.tex");
@@ -1300,4 +1308,25 @@ fn expand_bound_anew() {
 #[test]
 fn loop_rest_kept_finisher_moved() {
     check_threads("revtex_rest_finisher_moved", "pdf");
+}
+
+/// [`page_discards`] at eight threads, 24 builds: a `\penalty` after
+/// `\savingvdiscards=0` adds the page parameters' marker before its
+/// candidate; when that marker's read of `\vsize` was held at the
+/// settling layer's frontier, the halt it raised was dropped as the
+/// candidate cut the run, the marker was missing with every read
+/// holding, and the last two pages showed discards pdflatex drops (with
+/// the fix taken out, 18 builds in 60 at -j8, 4 in 60 at -j4, mc 80536).
+/// Each build is the oracle's.
+#[test]
+fn page_discards_marker_held_at_the_frontier() {
+    let want = std::fs::read(fixtures().join("page_discards.pdf")).expect("the oracle");
+    for i in 0..24 {
+        let (got, term) = build_out_in("page_discards", "-held", 8, "pdf");
+        assert!(
+            got == want,
+            "page_discards -j8 build {i} differs from the oracle: {}",
+            term.lines().last().unwrap_or("")
+        );
+    }
 }

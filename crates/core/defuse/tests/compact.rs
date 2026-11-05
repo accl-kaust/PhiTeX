@@ -28,8 +28,9 @@ impl Operation for Step {
     }
 }
 
-/// `[]`: runs until `n` runs of it stand at once, checking in as a TeX run
-/// does (`Ctx::tick`); only another thread can end it.
+/// `[k]`: with k = 1, runs until `n` runs of it stand at once, checking in
+/// as a TeX run does (`Ctx::tick`); only another thread can end it. With
+/// k = 0, ends at once.
 struct Meet(Arc<AtomicUsize>, usize);
 
 impl Operation for Meet {
@@ -38,6 +39,9 @@ impl Operation for Meet {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        if cx.values().as_int(cx.args()[0]) == Some(0) {
+            return Ok(ValueId::UNIT);
+        }
         self.0.fetch_add(1, Ordering::SeqCst);
         let t = Instant::now();
         while self.0.load(Ordering::SeqCst) < self.1 {
@@ -91,14 +95,19 @@ fn a_chain_stays_on_one_thread() {
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
 
+/// An edit's few nodes all begin on the first worker's queue: the ones
+/// behind a long run reach the others as it checks in.
 #[test]
 fn work_behind_a_long_run_goes_to_another_thread() {
     for n in [2, 3, 8] {
         let e = Engine::new();
+        let v = e.values();
         let meet = e.register(Arc::new(Meet(Arc::new(AtomicUsize::new(0)), n)));
         let u = e.new_unit();
-        for _ in 0..n {
-            e.push(u, meet, vec![]);
+        let nodes: Vec<_> = (0..n).map(|_| e.push(u, meet, vec![v.int(0)])).collect();
+        e.evaluate(n).unwrap();
+        for &x in &nodes {
+            e.replace(x, meet, vec![v.int(1)]);
         }
         let r = e.evaluate(n).unwrap();
         assert_eq!(r.runs, n as u64, "{r:?}");
