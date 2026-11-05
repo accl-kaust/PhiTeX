@@ -884,7 +884,7 @@ impl Operation for CountGet {
 /// that depth, is not run on a scope left open until the rest's run (the
 /// beamer user guide at -j4: each such cut filed the piece's close away
 /// and the rest's run filed it back, the readers after woken twice). Left
-/// to the rest's run, the reader runs again: the test sees the difference.
+/// to the rest's run, the reader is woken: the test sees the difference.
 #[test]
 fn a_cut_pieces_rest_is_filed_with_the_close_its_piece_predicted() {
     for predict in [1, 0] {
@@ -906,15 +906,22 @@ fn a_cut_pieces_rest_is_filed_with_the_close_its_piece_predicted() {
         let n0 = n.load(std::sync::atomic::Ordering::Relaxed);
         // (its run now cut before its close: a rest placed)
         e.replace(c, cut, vec![v.int(1), v.int(predict)]);
-        e.evaluate(1).unwrap();
+        let rep = e.evaluate(1).unwrap();
+        // (woken: run, or found standing by its reads when it came up)
+        let woken = rep.rerun_causes.iter().any(|(m, _)| *m == r)
+            || rep.runs_by_op.iter().any(|(name, k)| *name == "count_get" && *k > 0);
         assert_eq!(e.order(u).len(), 6, "the rest placed");
         assert_eq!(int(&e, r), 1, "the rest closed the scope");
         assert!(e.check_invariants().is_empty());
         let again = n.load(std::sync::atomic::Ordering::Relaxed) - n0;
         if predict == 1 {
             assert_eq!(again, 0, "the reader after the new rest stands");
+            assert!(!woken, "the reader after the new rest is not woken: {rep:?}");
         } else {
-            assert!(again > 0, "left to the rest's run, the reader ran on the open scope");
+            assert!(
+                woken,
+                "left to the rest's run, the reader was woken on the open scope: {rep:?}"
+            );
         }
     }
 }
