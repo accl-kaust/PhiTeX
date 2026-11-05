@@ -438,8 +438,9 @@ fn socket(s: &Arc<Shared>, sock: WebSocket<TcpStream>) {
         let Ok(req) = serde_json::from_str::<Value>(text.as_str()) else {
             continue;
         };
-        let reply = s.viewer.answer(&req);
-        if !client.send(&reply) {
+        // (in the broadcasts' turn: no event made after the answer goes
+        // before it, `Viewer::answer_in_turn`)
+        if !s.viewer.answer_in_turn(&req, |reply| client.send(reply)) {
             break;
         }
     }
