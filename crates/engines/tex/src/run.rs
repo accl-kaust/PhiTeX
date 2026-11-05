@@ -2309,10 +2309,21 @@ impl<'c, 'a> Run<'c, 'a> {
         // which reads its own `.tmp` back, re-ran whole when a heading
         // before it renamed hyperref's anchor, `\HyperLocalCurrentHref`,
         // which the example's `\let` replaces unseen)
+        // (a macro's meaning, where a load would read just that, the
+        // value reaching the node: not while a written line is
+        // interpreted, nor a finisher's read in its scope, a page-layer
+        // register held or any integer register, whose loads have their
+        // own answers, nor with code-table entries waiting to be written)
         let unseen = !self.st.is_loaded(loc)
             && !self.st.has_map(loc)
             && !self.st.defined_after(loc, 0)
-            && self.st.lazy(loc).is_none();
+            && self.st.lazy(loc).is_none()
+            && self.interp.is_none()
+            && self.fin_scope_closer.is_none()
+            && !self.st.bulk_waits()
+            && self.count_reg(loc).is_none()
+            && !self.page_regs_held.contains(&loc)
+            && v.with_str(f.0, |n| n.starts_with("cs:")) == Some(true);
         let old = if unseen {
             phitex_defuse::alias_value(v, f, self.cx.node())
         } else {
