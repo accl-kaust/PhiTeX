@@ -179,13 +179,21 @@ impl Order {
                 continue;
             }
             let asking = ids.iter().position(|&x| x == seg).expect("the asking segment");
+            // (the window's end as it is now: `spread` absorbs a narrow
+            // last segment into the one before it and leaves it empty, its
+            // `hi` at its `lo`, and the window's end read after it fell to
+            // that segment's start; a range filed over that segment then
+            // kept its old end while its nodes moved past it into the
+            // segment before: the beamer user guide at -j1, a page
+            // finisher's fold of the index's items never asked again
+            // when the index text re-ran)
+            let hi = gs[gs.len() - 1].hi;
             {
                 // (a move of every segment of the window: under their
                 // locks, ended before them)
                 let _moving: Vec<_> = win.iter().map(|x| x.moving()).collect();
                 self.spread(eng, &win, &mut gs, n, asking, more);
             }
-            let hi = gs[gs.len() - 1].hi;
             drop(gs);
             crate::obs::long_hold("rebalance", win.len(), t_held);
             // (a range read through a moved node now reaches anywhere in
