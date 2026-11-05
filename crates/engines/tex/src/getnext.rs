@@ -52,6 +52,17 @@ impl Run<'_, '_> {
         Ok(b)
     }
 
+    /// [`Run::next_ck`] for a fetch whose token is expanded at once where
+    /// it expands (a character run's lookahead, §1038, then `x_token`): a
+    /// derived name's symbol kept for its expansion ([`Run::d_ok`]).
+    pub(crate) fn next_ck_x(&mut self) -> R<bool> {
+        self.d_ok = true;
+        let b = self.get_next();
+        self.d_ok = false;
+        self.ck()?;
+        Ok(b)
+    }
+
     /// `get_next` without a `Result`: a halt is raised ([`Run::raise`]).
     #[allow(clippy::inline_always)]
     #[inline(always)]
@@ -709,7 +720,9 @@ impl Run<'_, '_> {
             if self.halt.is_some() {
                 return;
             }
+            self.d_ok = true;
             self.next_or_end();
+            self.d_ok = false;
         }
     }
 
