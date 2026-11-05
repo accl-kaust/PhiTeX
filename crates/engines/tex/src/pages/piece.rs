@@ -1427,10 +1427,21 @@ impl Run<'_, '_> {
         if let Some(t) = self.tool_cut {
             self.cx.follow(self.ops.toolnode, list_of(v, t));
         }
-        self.cx.follow(
+        let i = self.cx.follow(
             self.ops.resume,
             vec![v.int(flags), pid, v.int(i64::from(k))],
         );
+        // (its brackets until it runs, from its continuation's scope
+        // shape as a piece's are from its text: a close the piece's text
+        // predicted that the cut moves into the rest is filed there in
+        // this commit, so the readers after the rest keep their depth.
+        // Left to the rest's run, each such cut filed the piece's close
+        // away and the rest's run filed it back, two walks of every
+        // reader after them and the runs between woken on a scope left
+        // open: 268 of the 956 bracket changes at commit in the beamer
+        // user guide's -j4 build, mc 80293.)
+        let e = crate::ops::predicted_effect(self.ops, v, &[cont], true);
+        self.cx.predict_placed_effect(i, e);
         Ok(())
     }
 

@@ -813,3 +813,102 @@ fn a_walk_after_a_race_asks_the_end_reader_too() {
         check(&e, false);
     }
 }
+
+/// `[k, predict]`: a piece predicted to close its scope (its effect is
+/// static) whose run is cut before its close: it closes nothing itself and
+/// places its rest `[k]`, which closes; with `predict` 1 the rest's
+/// brackets are filed with the piece's commit
+/// (`Ctx::predict_placed_effect`), not left to the rest's run.
+struct CutPiece(OpId);
+
+impl Operation for CutPiece {
+    fn name(&self) -> &'static str {
+        "cut_piece"
+    }
+
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::Close
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let (k, predict) = (cx.args()[0], cx.values().as_int(cx.args()[1]) == Some(1));
+        cx.set_effect(Effect::None);
+        let i = cx.follow(self.0, vec![k]);
+        if predict {
+            cx.predict_placed_effect(i, Effect::Close);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[k]`: a cut piece's rest: its brackets are its run's (it closes).
+struct PieceRest;
+
+impl Operation for PieceRest {
+    fn name(&self) -> &'static str {
+        "piece_rest"
+    }
+
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::Pending
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.set_effect(Effect::Close);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[f]`: outputs the definition of f reaching it, counting its runs.
+struct CountGet(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Operation for CountGet {
+    fn name(&self) -> &'static str {
+        "count_get"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(cx.read(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// A piece cut again at another candidate places a new rest in its
+/// commit: filed with the close the piece's text predicted, the depth
+/// after the rest is as it was, and the reader after it is not run on a
+/// scope left open until the rest's run (the beamer user guide at -j4:
+/// each such cut filed the piece's close away and the rest's run filed it
+/// back, the readers between woken twice). Left to the rest's run, the
+/// reader runs again: the test sees the difference.
+#[test]
+fn a_cut_pieces_rest_is_filed_with_the_close_its_piece_predicted() {
+    for predict in [1, 0] {
+        let (e, o) = engine();
+        let rest = e.register(Arc::new(PieceRest));
+        let cut = e.register(Arc::new(CutPiece(rest)));
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let get = e.register(Arc::new(CountGet(n.clone())));
+        let v = e.values();
+        let x = v.field("x").0;
+        let u = e.new_unit();
+        e.push(u, o.def, vec![x, v.int(1)]);
+        e.push(u, o.open, vec![]);
+        e.push(u, o.def, vec![x, v.int(2)]);
+        let c = e.push(u, cut, vec![v.int(1), v.int(predict)]);
+        let r = e.push(u, get, vec![x]);
+        e.evaluate(1).unwrap();
+        assert_eq!(int(&e, r), 1, "the rest closed the scope");
+        let n0 = n.load(std::sync::atomic::Ordering::Relaxed);
+        // (cut at another candidate: another rest)
+        e.replace(c, cut, vec![v.int(2), v.int(predict)]);
+        e.evaluate(1).unwrap();
+        assert_eq!(int(&e, r), 1);
+        assert!(e.check_invariants().is_empty());
+        let again = n.load(std::sync::atomic::Ordering::Relaxed) - n0;
+        if predict == 1 {
+            assert_eq!(again, 0, "the reader after the new rest stands");
+        } else {
+            assert!(again > 0, "left to the rest's run, the reader ran on the open scope");
+        }
+    }
+}

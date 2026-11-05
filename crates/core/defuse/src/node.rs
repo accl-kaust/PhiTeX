@@ -632,6 +632,10 @@ pub(crate) struct Product {
     pub(crate) claim: usize,
     /// What the run set (`Ctx::set_effect`); None: its operation's.
     pub(crate) effect: Option<Effect>,
+    /// The brackets placements of an operation whose effect waits for
+    /// its run (`Effect::Pending`) are filed with until they run
+    /// (`Ctx::predict_placed_effect`), by placement index.
+    pub(crate) place_effects: Vec<(usize, Effect)>,
     /// The scope epoch when the run began (`Engine::scope_gen`): a
     /// bracket changed since may have moved any of its reads.
     pub(crate) scope_gen: u64,

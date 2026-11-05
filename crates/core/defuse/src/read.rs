@@ -1067,6 +1067,63 @@ pub(crate) fn hole_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     None
 }
 
+/// The first node before `me` in its unit that has not committed (as
+/// [`hole_before`]) whose operation says it may define one of `fields`
+/// (`Operation::may_define`), with the first hole of all: a run that
+/// waits for the text before it only where that text can change what it
+/// read.
+pub(crate) fn hole_before_defining(eng: &Engine, me: &Node, fields: &[Field]) -> (Option<NodeId>, Option<NodeId>) {
+    let Some(to) = pos_of(eng, me.id) else {
+        return (None, None);
+    };
+    let from = unit_start(eng, me);
+    let v = eng.values();
+    let names: Vec<String> = fields.iter().filter_map(|f| v.as_str(f.0)).collect();
+    let mut first: Option<NodeId> = None;
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            break;
+        }
+        if seg.unit == me.unit {
+            let holes: Vec<NodeId> = {
+                let inner = seg.inner.read();
+                if inner.holes == 0 {
+                    Vec::new()
+                } else {
+                    inner
+                        .nodes
+                        .range((Excluded(from), Excluded(to)))
+                        .map(|(_, id)| *id)
+                        .filter(|id| {
+                            let n = eng.node(*id);
+                            *id != me.id && n.unit == me.unit && n.is_hole() && eng.op(n.op()).text()
+                        })
+                        .collect()
+                }
+            };
+            for id in holes {
+                first = first.or(Some(id));
+                let n = eng.node(id);
+                let may = match eng.op(n.op()).may_define(&n.args(), v) {
+                    crate::api::MayDefine::Nothing => false,
+                    crate::api::MayDefine::Any => true,
+                    crate::api::MayDefine::Names(ns) => ns.iter().any(|f| fields.contains(f)),
+                    crate::api::MayDefine::Prefixes(ps) => {
+                        names.iter().any(|f| ps.iter().any(|p| f.starts_with(p.as_str())))
+                    }
+                };
+                if may {
+                    return (Some(id), first);
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    (None, first)
+}
+
 /// The first node before `me` in its unit that is to run, again or for
 /// the first time (`Node::is_open`), and that a run of this pass can bring
 /// a commit of: while one is, what `me` read before it may be a guess its
@@ -1910,5 +1967,49 @@ mod tests {
             retries, 0,
             "{retries} of {reads} fold reads computed again for {moves} moves elsewhere"
         );
+    }
+
+    /// `[f]`: a text node that may define `f` only; defines it.
+    struct MayDef;
+
+    impl Operation for MayDef {
+        fn name(&self) -> &'static str {
+            "may_def"
+        }
+
+        fn text(&self) -> bool {
+            true
+        }
+
+        fn may_define(&self, args: &[ValueId], _: &crate::values::Values) -> crate::api::MayDefine {
+            crate::api::MayDefine::Names(vec![Field(args[0])])
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let f = Field(cx.args()[0]);
+            cx.define(f, ValueId::UNIT);
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// The holes before a node that may define what it read: the first
+    /// whose operation says it may define one of the fields, past those
+    /// that may not, with the first hole of all; none once all have run.
+    #[test]
+    fn a_hole_before_that_may_define_a_field_is_found_past_those_that_may_not() {
+        let e = Engine::new();
+        let op = e.register(Arc::new(MayDef));
+        let v = e.values();
+        let (x, y, z) = (v.field("x"), v.field("y"), v.field("z"));
+        let u = e.new_unit();
+        let h1 = e.push(u, op, vec![y.0]);
+        let h2 = e.push(u, op, vec![x.0]);
+        let w = e.push(u, op, vec![z.0]);
+        let me = e.node(w).clone();
+        assert_eq!(super::hole_before_defining(&e, &me, &[x]), (Some(h2), Some(h1)));
+        assert_eq!(super::hole_before_defining(&e, &me, &[z, y]), (Some(h1), Some(h1)));
+        assert_eq!(super::hole_before_defining(&e, &me, &[z]), (None, Some(h1)));
+        e.evaluate(1).unwrap();
+        assert_eq!(super::hole_before_defining(&e, &me, &[x]), (None, None));
     }
 }
