@@ -50,6 +50,8 @@ pub struct Ctx<'a> {
     /// Why this run was asked for, as it began (`woken_by`): a cause a
     /// re-ask stores while it runs is the next run's.
     pub(crate) woke: Option<Cause>,
+    /// My wake was more than one cause (`Node::woke_merged`, taken).
+    woke_merged: bool,
     /// My last run's placements by operation and arguments, made on the
     /// first `placed_output_or`.
     placed_keys: Option<PlacedKeys>,
@@ -106,6 +108,7 @@ impl<'a> Ctx<'a> {
                 ranks: Vec::new(),
                 claim: 0,
                 effect: None,
+                place_effects: Vec::new(),
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
                 unchanged: false,
                 state: None,
@@ -126,6 +129,7 @@ impl<'a> Ctx<'a> {
             stashed: Vec::new(),
             stop_at: None,
             woke: me.woke.lock().as_ref().map(|w| w.cause.clone()),
+            woke_merged: me.woke_merged.swap(false, std::sync::atomic::Ordering::SeqCst),
             placed_keys: None,
             last: me.run_record(),
             stuck: None,
@@ -143,12 +147,13 @@ impl<'a> Ctx<'a> {
             Some(Cause::Range { by, .. } | Cause::Changed { site: Some(by), .. }) => Some(by),
             _ => None,
         };
-        self.product.on_park = match &self.woke {
-            Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => {
-                *self.me.parked_on.lock() == Some(*field)
-            }
-            _ => false,
-        };
+        self.product.on_park = !self.woke_merged
+            && match &self.woke {
+                Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => {
+                    *self.me.parked_on.lock() == Some(*field)
+                }
+                _ => false,
+            };
         self.product
     }
 
@@ -907,6 +912,19 @@ impl<'a> Ctx<'a> {
         self.product.placements.len() - 1
     }
 
+    /// The brackets my `i`-th placement is filed with until it runs,
+    /// where its operation leaves them to its run (`Effect::Pending`):
+    /// its text is not its arguments, but I know it (a cut piece's rest,
+    /// whose continuation I made). Filed in my commit with my own: a
+    /// close my text predicted that moves into the rest leaves the depth
+    /// after the rest as it was, and the readers there stand. A guess:
+    /// the node's run files what it does.
+    pub fn predict_placed_effect(&mut self, i: usize, e: Effect) {
+        if e != Effect::Pending && e != Effect::None {
+            self.product.place_effects.push((i, e));
+        }
+    }
+
     /// Places a node after `at` and its placements.
     pub fn follow_after(&mut self, at: NodeId, op: OpId, args: Vec<ValueId>) -> usize {
         self.product.placements.push(Placement::FollowAfter(at, op, args));
@@ -1144,6 +1162,22 @@ impl<'a> Ctx<'a> {
         let h = read::on_one_layout(self.eng, || read::hole_before(self.eng, self.me));
         if h.is_some() {
             self.record(ReadKind::Hole, PathId::WHOLE, read::hole_value(self.eng, h));
+        }
+        Ok(h)
+    }
+
+    /// [`Ctx::hole_before`] where the text before me can change what I
+    /// read: the first node before me that has not committed and whose
+    /// operation may define one of `fields` (`Operation::may_define`),
+    /// None where no such node is. A node found is recorded as
+    /// `hole_before` records the first hole (its commit, or its being
+    /// taken, removed or moved, runs me again, and I look again); None is
+    /// not recorded.
+    pub fn hole_before_defining(&mut self, fields: &[Field]) -> Result<Option<NodeId>, Stop> {
+        self.check()?;
+        let (h, first) = read::on_one_layout(self.eng, || read::hole_before_defining(self.eng, self.me, fields));
+        if h.is_some() {
+            self.record(ReadKind::Hole, PathId::WHOLE, read::hole_value(self.eng, first));
         }
         Ok(h)
     }
