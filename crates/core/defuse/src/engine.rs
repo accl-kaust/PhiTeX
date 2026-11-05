@@ -1730,6 +1730,7 @@ impl Engine {
             | Step::Has(x)
             | Step::Eq(x)
             | Step::Cmp(x)
+            | Step::Derived(x)
             | Step::Indices(x)
             | Step::Keys(x)
             | Step::Rank(x)
