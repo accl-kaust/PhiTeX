@@ -166,7 +166,7 @@ export type CursorEvent =
 /** A Shelf pack the host fetches for a core that fetches its own (asked or prefetched, once per id), with its size once in. */
 export type PackEvent = { event: "pack"; id: string; state: "fetching" | "done" | "failed"; bytes?: number };
 
-export type CoreEvent = StreamEvent | WatchEvent | CursorEvent | PackEvent | { event: "building"; on: boolean } | { event: "preparing"; on: boolean } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
+export type CoreEvent = StreamEvent | WatchEvent | CursorEvent | PackEvent | { event: "building"; on: boolean } | { event: "preparing"; on: boolean } | { event: "switched" } | { event: "trapped"; error: string } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
 /** A collaborator's mark: its page, its glyphs' boxes, their label and hue. */
 type Peer = { k: number; boxes: [number, number, number, number][]; label: string; hue: number };
 
@@ -448,6 +448,9 @@ export class PreviewSession {
         return;
       }
       if (e.event === "pack") return this.onPack(e);
+      // (a thread of the core trapped while no request waited on it, a cold
+      // build's: said now, not at the next request, which may never come)
+      if (e.event === "trapped") return this.coreLost(e.error);
       if (e.event === "page" || e.event === "progress" || e.event === "done") this.onStream(e as StreamEvent);
     });
     this.core = {
@@ -482,31 +485,7 @@ export class PreviewSession {
         const lost = res.json?.error === "no such handle" || /^(core trapped|PDF driver failed)/.test(res.error ?? "");
         // (a build that came back whole: a trap after it is a new one)
         if (res.ok && (r.op === "edit" || r.op === "status")) this.traps = 0;
-        // (a core that ran out of the memory it got: the same document
-        // outgrows it again, so it is said, not reopened, the host's words
-        // naming the size and what to close)
-        if (lost && this.opened && /needs more than the [\d.]+ GiB of memory/.test(res.error ?? "")) {
-          this.opened = false;
-          this.sink.error(res.error!);
-          this.sink.connection?.(false, res.error!);
-          return res;
-        }
-        if (lost && this.opened && r.op !== "open") {
-          this.opened = false;
-          // (a trap again with no good build between is the same trap, the
-          // same input to the same engine: reopened once, then stopped, however
-          // long each takes; counted by time, a slow one would loop forever)
-          this.traps++;
-          const why = res.error ?? "the core restarted";
-          if (this.traps <= 1) {
-            this.sink.error(`${why}; reopening`);
-            this.sink.connection?.(false, `${why}; reopening`);
-            this.chain = this.chain.then(() => this.reopen());
-          } else {
-            this.sink.error(`${why}, again: the preview stops here (reload the page to retry)`);
-            this.sink.connection?.(false, `${why}, again: reload the page to retry`);
-          }
-        }
+        if (lost && this.opened && r.op !== "open") this.coreLost(res.error ?? "the core restarted");
         return res;
       },
       onLost: core.onLost?.bind(core),
@@ -531,6 +510,36 @@ export class PreviewSession {
       this.sink.connection?.(false, "the engine stopped; reopening");
       this.reopen();
     });
+  }
+
+  /**
+   * The core stopped under the open document (`why`: a request's error, or
+   * the host's "trapped" event when no request was in flight, a thread's
+   * trap mid-build): reopened once, said after.
+   */
+  private coreLost(why: string): void {
+    if (!this.opened) return;
+    this.opened = false;
+    // (a core that ran out of the memory it got: the same document
+    // outgrows it again, so it is said, not reopened, the host's words
+    // naming the size and what to close)
+    if (/needs more than the [\d.]+ GiB of memory/.test(why)) {
+      this.sink.error(why);
+      this.sink.connection?.(false, why);
+      return;
+    }
+    // (a trap again with no good build between is the same trap, the
+    // same input to the same engine: reopened once, then stopped, however
+    // long each takes; counted by time, a slow one would loop forever)
+    this.traps++;
+    if (this.traps <= 1) {
+      this.sink.error(`${why}; reopening`);
+      this.sink.connection?.(false, `${why}; reopening`);
+      this.chain = this.chain.then(() => this.reopen());
+    } else {
+      this.sink.error(`${why}, again: the preview stops here (reload the page to retry)`);
+      this.sink.connection?.(false, `${why}, again: reload the page to retry`);
+    }
   }
 
   /** Files whose whole text was asked for again (host.resend), until it comes (onOpen). */

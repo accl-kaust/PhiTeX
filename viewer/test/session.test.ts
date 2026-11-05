@@ -233,3 +233,30 @@ test("a core that outgrew its memory is said, not reopened", async () => {
   assert.deepEqual(said, [why]);
   assert.equal(w.opened, false);
 });
+
+// A thread of the core trapped mid-build, no request in flight (a cold
+// build's thread outgrowing its tab's memory): the host's "trapped" event
+// said at once. The tab heard of a trap only from a request's reply, so a
+// cold build that outgrew its core waited for ever with nothing said (the
+// Overleaf extension's two-tab outgrow, 25 minutes and no message).
+test("a core that trapped mid-build is said from the host's event, no request needed", async () => {
+  const host: EditorHost = { loadProject: async () => ({ "main.tex": "x" }), onOpen: () => undefined, onChanges: () => undefined };
+  const ops: string[] = [];
+  let tell: (e: unknown) => void = () => undefined;
+  const core = { request: async (r: { op: string }) => (ops.push(r.op), { ok: true, json: {} }), onEvent: (f: (e: unknown) => void) => void (tell = f) };
+  const said: string[] = [];
+  const sink = new Proxy({ error: (e: string) => said.push(e) }, { get: (t, p) => (t as Record<string | symbol, unknown>)[p] ?? (() => undefined) });
+  const s = new PreviewSession(host, core as never, sink as never, { schedule: () => undefined });
+  const w = s as unknown as { opened: boolean; chain: Promise<unknown> };
+  w.opened = true;
+  const why = "core trapped (thread 4): This document needs more than the 2 GiB of memory PhiTeX's engine got in this tab: close them.";
+  tell({ event: "trapped", error: why });
+  await w.chain;
+  assert.deepEqual(said, [why], "said, not reopened");
+  assert.deepEqual(ops, []);
+  assert.equal(w.opened, false);
+  // (another trap, a panic: reopened once)
+  w.opened = true;
+  tell({ event: "trapped", error: "core trapped (thread 3): panicked at x.rs" });
+  assert.match(said[1], /panicked at x\.rs; reopening/);
+});

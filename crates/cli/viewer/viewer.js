@@ -4576,6 +4576,7 @@ var PreviewSession = class {
         return;
       }
       if (e.event === "pack") return this.onPack(e);
+      if (e.event === "trapped") return this.coreLost(e.error);
       if (e.event === "page" || e.event === "progress" || e.event === "done") this.onStream(e);
     });
     this.core = {
@@ -4605,25 +4606,7 @@ var PreviewSession = class {
         if (res.error) this.errorsSeen = [...this.errorsSeen.slice(-19), `${r.op}: ${res.error}`];
         const lost = res.json?.error === "no such handle" || /^(core trapped|PDF driver failed)/.test(res.error ?? "");
         if (res.ok && (r.op === "edit" || r.op === "status")) this.traps = 0;
-        if (lost && this.opened && /needs more than the [\d.]+ GiB of memory/.test(res.error ?? "")) {
-          this.opened = false;
-          this.sink.error(res.error);
-          this.sink.connection?.(false, res.error);
-          return res;
-        }
-        if (lost && this.opened && r.op !== "open") {
-          this.opened = false;
-          this.traps++;
-          const why = res.error ?? "the core restarted";
-          if (this.traps <= 1) {
-            this.sink.error(`${why}; reopening`);
-            this.sink.connection?.(false, `${why}; reopening`);
-            this.chain = this.chain.then(() => this.reopen());
-          } else {
-            this.sink.error(`${why}, again: the preview stops here (reload the page to retry)`);
-            this.sink.connection?.(false, `${why}, again: reload the page to retry`);
-          }
-        }
+        if (lost && this.opened && r.op !== "open") this.coreLost(res.error ?? "the core restarted");
         return res;
       },
       onLost: core.onLost?.bind(core)
@@ -4648,6 +4631,29 @@ var PreviewSession = class {
       this.sink.connection?.(false, "the engine stopped; reopening");
       this.reopen();
     });
+  }
+  /**
+   * The core stopped under the open document (`why`: a request's error, or
+   * the host's "trapped" event when no request was in flight, a thread's
+   * trap mid-build): reopened once, said after.
+   */
+  coreLost(why) {
+    if (!this.opened) return;
+    this.opened = false;
+    if (/needs more than the [\d.]+ GiB of memory/.test(why)) {
+      this.sink.error(why);
+      this.sink.connection?.(false, why);
+      return;
+    }
+    this.traps++;
+    if (this.traps <= 1) {
+      this.sink.error(`${why}; reopening`);
+      this.sink.connection?.(false, `${why}; reopening`);
+      this.chain = this.chain.then(() => this.reopen());
+    } else {
+      this.sink.error(`${why}, again: the preview stops here (reload the page to retry)`);
+      this.sink.connection?.(false, `${why}, again: reload the page to retry`);
+    }
   }
   /** Files whose whole text was asked for again (host.resend), until it comes (onOpen). */
   resending = /* @__PURE__ */ new Set();
