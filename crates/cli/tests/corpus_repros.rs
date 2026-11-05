@@ -1301,3 +1301,23 @@ fn expand_bound_anew() {
 fn loop_rest_kept_finisher_moved() {
     check_threads("revtex_rest_finisher_moved", "pdf");
 }
+
+/// [`page_discards`] at four threads, 24 builds: a `\penalty` after
+/// `\savingvdiscards=0` adds the page parameters' marker before its
+/// candidate; when that marker's read of `\vsize` was held at the
+/// settling layer's frontier, the halt it raised was dropped as the
+/// candidate cut the run, the marker was missing with every read
+/// holding, and the last two pages showed discards pdflatex drops (1 build
+/// in 3 on dev, mc 80332). Each build is the oracle's.
+#[test]
+fn page_discards_marker_held_at_the_frontier() {
+    let want = std::fs::read(fixtures().join("page_discards.pdf")).expect("the oracle");
+    for i in 0..24 {
+        let (got, term) = build_out("page_discards", 4, "pdf");
+        assert!(
+            got == want,
+            "page_discards -j4 build {i} differs from the oracle: {}",
+            term.lines().last().unwrap_or("")
+        );
+    }
+}
