@@ -1199,6 +1199,18 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     path: r.path,
                     seen: r.seen,
                 };
+                // (a derived read's witness, kept from an earlier run (one
+                // that stood, a state resumed from): filed on the field its
+                // name gives now as well, before the lock, so a change of
+                // that field asks it again)
+                if matches!(at, Anchor::Me | Anchor::Before(_) | Anchor::AfterOwn(_))
+                    && let Some(spec) = read::derived_spec(eng, r.path)
+                    && read::derived_base(eng.values(), spec) != Some(*f)
+                    && let Some(g) = read::derived_field_at(eng, spec, anchor, inclusive)
+                    && g != *f
+                {
+                    here_reads.push((g, rec.clone()));
+                }
                 match at {
                     // (a loop-back read: filed under the field, re-asked when
                     // the last definition of it lands, changes or goes)
@@ -1783,6 +1795,26 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         node.committing.store(true, Ordering::SeqCst);
         for (f, r) in here_reads.drain(..) {
             let a = eng.node(r.anchor);
+            if walk_trace(eng, f) {
+                eprintln!(
+                    "walk-trace: commit of node {} serial {} files a read anchored at {} (pos {} seg {}) in seg {} lo {} hi {}: {}",
+                    node.id.raw(),
+                    r.serial,
+                    r.anchor.raw(),
+                    a.pos_hint().0,
+                    a.seg_hint().0,
+                    seg.id.0,
+                    seg.lo.0,
+                    inner.hi.0,
+                    if r.anchor == node.id
+                        || (a.seg_hint() == seg.id && inner.nodes.get(&a.pos_hint()) == Some(&r.anchor))
+                    {
+                        "here"
+                    } else {
+                        "elsewhere"
+                    }
+                );
+            }
             if r.anchor == node.id || (a.seg_hint() == seg.id && inner.nodes.get(&a.pos_hint()) == Some(&r.anchor)) {
                 if file_reader(eng, &mut inner, f, r, &mut spare_readers) {
                     ix.readers_add.push(f);
@@ -2751,6 +2783,16 @@ pub(crate) fn reask_from(
     let scoped = read::scoped(eng);
     let (mut cur, mut from, mut by, mut level) = (seg, from, by, level);
     let mut passed = false;
+    let trace = walk_trace(eng, f);
+    if trace {
+        eprintln!(
+            "walk-trace: from {} seg {} by {:?} stop_op {:?} level {level}",
+            from.0,
+            seg.0,
+            by.map(NodeId::raw),
+            stop_op
+        );
+    }
     loop {
         let s = eng.seg(cur);
         let start = scoped.then(|| read::chain_start(eng, s));
@@ -2769,6 +2811,21 @@ pub(crate) fn reask_from(
             let hole = stop_op.and_then(|op| first_hole(eng, &inner, op, from, next.map(|x| x.0)));
             let stop = hole.map(|h| h.0).or(next.map(|x| x.0));
             deeper.retain(|x| stop.is_none_or(|s| x.0 < s));
+            if trace {
+                eprintln!(
+                    "walk-trace:   seg {cur:?} holds readers of the field: [{}]",
+                    inner.readers.get(&f).map_or(String::new(), |rs| rs
+                        .iter()
+                        .map(|r| format!(
+                            "{}@{}{}",
+                            r.node.raw(),
+                            eng.node(r.anchor).pos_hint().0,
+                            if live(eng, r.node, r.serial) { "" } else { "x" }
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(" "))
+                );
+            }
             let readers: Vec<Reader> = match inner.readers.get(&f) {
                 Some(rs) => {
                     st.walked += rs.len() as u64;
@@ -2785,6 +2842,21 @@ pub(crate) fn reask_from(
             };
             (readers, next, hole, deeper)
         };
+        if trace {
+            eprintln!(
+                "walk-trace:   seg {cur:?} lo {} from {} readers [{}] next {:?} hole {:?} deeper {}",
+                s.lo.0,
+                from.0,
+                readers
+                    .iter()
+                    .map(|r| r.node.raw().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                next.map(|x| (x.0.0, x.1.by.raw(), x.2)),
+                hole.map(|h| (h.0.0, h.1.raw())),
+                deeper.len()
+            );
+        }
         for r in &readers {
             reask_reader(eng, w, f, r, by, st);
         }
@@ -2836,6 +2908,17 @@ pub(crate) fn reask_from(
             }
         }
     }
+}
+
+/// (`PHITEX_WALK_TRACE=<field>`, profile) Whether walks of `f` are
+/// printed: where each starts and, segment by segment, the readers it
+/// asks and where it stops.
+fn walk_trace(eng: &Engine, f: Field) -> bool {
+    static W: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    crate::obs::enabled()
+        && W.get_or_init(|| std::env::var("PHITEX_WALK_TRACE").ok())
+            .as_deref()
+            .is_some_and(|x| eng.values().render(f.0) == format!("{x:?}") || eng.values().render(f.0) == x)
 }
 
 /// The first segment after the one starting at `lo` with a definition or
@@ -3010,6 +3093,14 @@ fn walk_stopped(
     wake_waiters(eng, w, node, st);
     let fs = std::mem::take(&mut *node.stopped.lock());
     for (f, level) in fs {
+        if walk_trace(eng, f) {
+            eprintln!(
+                "walk-trace: stopped walks at node {} go on from {} (level {level}; its own: {})",
+                node.id.raw(),
+                pos.0,
+                defined.iter().any(|&(g, k)| g == f && k <= level)
+            );
+        }
         if !defined.iter().any(|&(g, k)| g == f && k <= level) {
             reask_from(eng, w, f, pos, seg, Some(node.id), None, level, st);
         }
@@ -3129,6 +3220,18 @@ fn note_refute(
 }
 
 fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Option<NodeId>, st: &mut CommitStats) {
+    if walk_trace(eng, f) {
+        let alive = live(eng, r.node, r.serial);
+        let now = if alive { reader_answer(eng, f, r) } else { None };
+        eprintln!(
+            "walk-trace:     reader {} serial {} anchor {} live {alive} seen {} now {}",
+            r.node.raw(),
+            r.serial,
+            r.anchor.raw(),
+            r.seen.map_or("-".to_owned(), |x| eng.values().render(x)),
+            now.map_or("-".to_owned(), |x| eng.values().render(x))
+        );
+    }
     if !live(eng, r.node, r.serial) {
         return;
     }
@@ -3143,6 +3246,20 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
     if now != r.seen {
         note_refute(eng, f, r.node, by, r.seen, now);
     }
+    // (a derived read that stands where its name moved: the field named
+    // now gets a witness, so its own change re-asks the reader; then it is
+    // asked again, for a definition of that field landing meanwhile, whose
+    // walk passed before the witness was there)
+    let now = if now == r.seen
+        && let Some(spec) = read::derived_spec(eng, r.path)
+        && let Some(g) = read::derived_field_at(eng, spec, r.anchor, r.inclusive)
+        && g != f
+        && file_witness(eng, g, r)
+    {
+        reader_answer(eng, g, r)
+    } else {
+        now
+    };
     if now != r.seen
         && mark_stale(
             eng,
@@ -3156,6 +3273,35 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
         )
     {
         st.woken += 1;
+    }
+}
+
+/// Files reader `r` again on field `g` (a derived read's witness,
+/// `Step::Derived`), in the segment its anchor stands in, unless the node's
+/// record is filed there already; under that segment's lock, the reader
+/// index with it. False where the anchor is gone or it was there.
+fn file_witness(eng: &Engine, g: Field, r: &Reader) -> bool {
+    let a = eng.node(r.anchor);
+    loop {
+        if a.state() == State::Gone {
+            return false;
+        }
+        let seg = eng.seg(a.seg_hint());
+        let mut inner = seg.inner.write();
+        if inner.nodes.get(&a.pos_hint()) != Some(&r.anchor) {
+            continue;
+        }
+        if inner.readers.get(&g).is_some_and(|rs| {
+            rs.iter()
+                .any(|x| x.node == r.node && x.serial == r.serial && x.path == r.path)
+        }) {
+            return false;
+        }
+        let mut spare = Vec::new();
+        if file_reader(eng, &mut inner, g, r.clone(), &mut spare) {
+            eng.readers.add(g, seg.lo, seg.id);
+        }
+        return true;
     }
 }
 
@@ -3217,6 +3363,28 @@ fn reask_ranges_in(
     let held = readers.len();
     let mut asked = 0usize;
     let mut starts: Vec<Option<NodeId>> = Vec::new();
+    if walk_trace(eng, f) {
+        eprintln!(
+            "walk-trace: ranges at {} by {} fixed {fixed}: [{}]",
+            at.0,
+            by.raw(),
+            readers
+                .iter()
+                .map(|(k, r)| format!(
+                    "{}(from {:?} to {:?} next {} incl {} live {} stop {} covers {})",
+                    r.node.raw(),
+                    r.from.map(NodeId::raw),
+                    r.to.map(NodeId::raw),
+                    r.next,
+                    r.incl,
+                    live(eng, r.node, r.serial),
+                    stops.iter().any(|s| s.0 == f && s.1 == *k),
+                    covers(eng, r, by, at, fixed)
+                ))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
     for (k, r) in readers {
         if stops.iter().any(|s| s.0 == f && s.1 == k) {
             continue;
@@ -4419,6 +4587,14 @@ pub(crate) enum Target {
 struct Left {
     pos: Pos,
     seg: SegId,
+    /// The nodes it stood right after and right before in its segment
+    /// (none: it was the segment's first, or last), and the segment's
+    /// count of label moves then (`Segment::moved`): its old label names
+    /// its place only while the segment's labels have not moved
+    /// (`old_place`).
+    before: Option<NodeId>,
+    after: Option<NodeId>,
+    moves: u64,
     defs: Vec<Field>,
     contribs: Vec<Field>,
     brackets: Option<Brackets>,
@@ -4660,7 +4836,22 @@ pub(crate) fn relocate(
 /// anchored at it there (filed again where it landed), those after its
 /// brackets, definitions and contributions there, the `next`s and ranges
 /// it bounded, the walks that stopped at it while it had not committed.
-fn lifted_walks(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>, left: Left, st: &mut CommitStats) {
+fn lifted_walks(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>, mut left: Left, st: &mut CommitStats) {
+    let (pos, seg) = old_place(eng, &left);
+    for &f in &left.defs {
+        if walk_trace(eng, f) {
+            eprintln!(
+                "walk-trace: lifted node {} from {} seg {} (lifted at {} seg {}) hole {}",
+                m.id.raw(),
+                pos.0,
+                seg.0,
+                left.pos.0,
+                left.seg.0,
+                left.hole
+            );
+        }
+    }
+    (left.pos, left.seg) = (pos, seg);
     for (f, r) in &left.readers {
         reask_reader(eng, w, *f, r, Some(m.id), st);
     }
@@ -4681,6 +4872,35 @@ fn lifted_walks(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>, left: Left, st:
             reask_from(eng, w, f, left.pos, left.seg, None, Some(m.op()), level, st);
         }
     }
+}
+
+/// Where a lifted node's place is now, as the walks from it start: its
+/// old label while its segment's labels have not moved since the lift;
+/// else just after the node it stood after there, at that node's label
+/// now (a relabel renumbers every node but leaves a free label as it
+/// was: the moved node's landing in its own segment relabelled it, its
+/// old label fell after nodes that had stood after it, and the walk from
+/// there passed over their readers: cleanthesis at -j4, a page's
+/// finisher kept the page number a later page's finisher, landed ahead
+/// of it before, had given it); else just before the node it stood
+/// before; else (both gone, or it stood alone) the segment's start.
+fn old_place(eng: &Engine, left: &Left) -> (Pos, SegId) {
+    let seg = eng.seg(left.seg);
+    if seg.moved.load(Ordering::Acquire) == left.moves {
+        return (left.pos, left.seg);
+    }
+    if let Some(b) = left.before
+        && let Some(p) = read::pos_of(eng, b)
+    {
+        return (p, eng.node(b).seg_hint());
+    }
+    // (the node after it, gone or moved: just before the one after it)
+    if let Some(a) = left.after
+        && let Some(p) = read::pos_of(eng, a)
+    {
+        return (Pos(p.0.saturating_sub(1)), eng.node(a).seg_hint());
+    }
+    (Pos(seg.lo.0.saturating_sub(1)), left.seg)
 }
 
 /// Takes a node off its label for `relocate`, under its segment's lock:
@@ -4718,6 +4938,9 @@ fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
             });
         }
     }
+    let before = inner.nodes.range(..pos).next_back().map(|(_, &n)| n);
+    let after = inner.nodes.range((Excluded(pos), Unbounded)).next().map(|(_, &n)| n);
+    let moves = seg.moved.load(Ordering::Acquire);
     inner.nodes.remove(&pos);
     if hole {
         inner.holes = inner.holes.saturating_sub(1);
@@ -4775,6 +4998,9 @@ fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
     Some(Left {
         pos,
         seg: seg_id,
+        before,
+        after,
+        moves,
         defs,
         contribs,
         brackets,
@@ -4973,9 +5199,7 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
         node.has_brackets.store(false, Ordering::Release);
     }
     inner.sum_depth();
-    let sg = eng.scope_changed();
-    node.bracket_gen.store(sg, Ordering::Release);
-    crate::walk::filed(eng, sg, node.id, pos);
+    node.bracket_gen.store(eng.scope_changed(), Ordering::Release);
     eng.bump(eng.depth_field);
     Some(old.unwrap_or_default())
 }
@@ -5045,7 +5269,7 @@ pub(crate) fn reask_after_effect(
     st: &mut CommitStats,
 ) {
     let at = read::pos_of(eng, by.id).unwrap_or(at);
-    crate::walk::change(eng, w, by, true, at, old, new, st);
+    reask_after_effect_at(eng, w, by, at, old, new, st);
 }
 
 /// `reask_after_effect` from label `at` whatever `by`'s label is now
@@ -5059,24 +5283,6 @@ fn reask_after_effect_at(
     new: Brackets,
     st: &mut CommitStats,
 ) {
-    crate::walk::change(eng, w, by, false, at, old, new, st);
-}
-
-/// The region walk of `by`'s bracket change at `at`, as walker `pw`
-/// (`walk::change`): its span bounded at the region's stop once the
-/// readers in the region are asked.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn walk_region(
-    eng: &Engine,
-    w: Option<&Worker>,
-    by: &Node,
-    at: Pos,
-    old: Brackets,
-    new: Brackets,
-    pw: &crate::walk::Walk,
-    st: &mut CommitStats,
-) {
-    let mut stop_node: Option<NodeId> = None;
     let d0 = i64::from(read::depth_at(eng, at));
     let (co, cn) = ((d0 - i64::from(old.closes)).max(0), (d0 - i64::from(new.closes)).max(0));
     let (mut a, mut b) = (co + i64::from(old.opens), cn + i64::from(new.opens));
@@ -5133,9 +5339,6 @@ pub(crate) fn walk_region(
                 fields.push(*f);
             }
         }
-        if let Some(q) = stop {
-            stop_node = inner.nodes.range(..=q).next_back().map(|(_, id)| *id);
-        }
         let lo = seg.lo;
         drop(inner);
         if let Some(q) = stop {
@@ -5153,16 +5356,13 @@ pub(crate) fn walk_region(
     // just after another close's walk began made each walk stop at the
     // other, and the readers after both kept a definition both closes
     // hide (note-intermittents §1: \begin's scope kind at -j16). Then
-    // every reader past the stop is re-asked too, each by its answer. Only
-    // a change filed since this one at or before the stop counts: brackets
-    // move the chains after them alone, so one past the stop moves none
-    // this walk read (`walk::raced`))
+    // every reader past the stop is re-asked too, each by its answer)
     // (what is not filed at positions: the end readers, the relations and,
     // to the end of the line, the finals: in the region, or from the
     // change on after a race)
     let mut rest = (at, end.map(|(_, q)| q));
     if let Some((sid, q)) = end
-        && crate::walk::raced(eng, by.bracket_gen.load(Ordering::Acquire), stop_node, q)
+        && eng.scope_gen.load(Ordering::Acquire) != by.bracket_gen.load(Ordering::Acquire)
     {
         end = None;
         rest = (at, None);
@@ -5188,7 +5388,6 @@ pub(crate) fn walk_region(
         reask_reader(eng, w, *f, r, Some(by.id), st);
     }
     reask_rest(eng, w, by, rest.0, rest.1, None, st);
-    pw.bound(end.and(stop_node));
     // (past the region only the readers of what is defined in it can see
     // another answer)
     if let Some((sid, q)) = end {
@@ -5198,34 +5397,6 @@ pub(crate) fn walk_region(
             reask_from(eng, w, f, q, sid, None, None, 0, st);
         }
     }
-}
-
-/// Every reader anchored at or after `from` asked again by its answer,
-/// and what is not filed at positions from there to the line's end
-/// (`reask_rest`): a walk that needs no region.
-pub(crate) fn reask_all_after(eng: &Engine, w: Option<&Worker>, by: &Node, from: Pos, st: &mut CommitStats) {
-    let mut readers: Vec<(Field, Reader)> = Vec::new();
-    let mut cur = eng.seg_for_pos(from).map(|s| s.id);
-    let mut first = true;
-    while let Some(sid) = cur {
-        let seg = eng.seg(sid);
-        let inner = seg.inner.read();
-        for (f, rs) in &inner.readers {
-            for r in rs {
-                if (!first || eng.node(r.anchor).pos_hint() >= from) && live(eng, r.node, r.serial) {
-                    readers.push((*f, r.clone()));
-                }
-            }
-        }
-        let lo = seg.lo;
-        drop(inner);
-        first = false;
-        cur = eng.order.next(sid, lo);
-    }
-    for (f, r) in &readers {
-        reask_reader(eng, w, *f, r, Some(by.id), st);
-    }
-    reask_rest(eng, w, by, from, None, None, st);
 }
 
 /// What a walk of every reader from `from` (to `to`, inclusive, where
@@ -5993,6 +6164,97 @@ mod tests {
         assert_eq!(
             missed, 0,
             "{missed} of {asks} contributions before a reader missed during {moves} gap fills"
+        );
+    }
+
+    /// `[name, x]`: defines `name` := x.
+    struct SetField;
+
+    impl Operation for SetField {
+        fn name(&self) -> &'static str {
+            "set"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            cx.define(crate::values::Field(cx.args()[0]), cx.args()[1]);
+            Ok(cx.args()[1])
+        }
+    }
+
+    /// `[name]`: reads `name` and outputs it.
+    struct GetField;
+
+    impl Operation for GetField {
+        fn name(&self) -> &'static str {
+            "get"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            Ok(cx.read(crate::values::Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
+        }
+    }
+
+    /// A node lifted off its label (`relocate`) and its segment's labels
+    /// moved before the walks from its old place: a relabel leaves the
+    /// free label as it was and renumbers the nodes, so the reader that
+    /// stood after the node now stands at or before that label. The walk
+    /// from the old place still asks it (`old_place`: from the node the
+    /// lifted one stood after). The walk from the old label passed over
+    /// it: cleanthesis at -j4, a page's finisher kept the page number of
+    /// a later page's finisher that had stood before it and moved past it.
+    #[test]
+    fn the_walk_from_a_lifted_nodes_place_reaches_its_readers_after_a_relabel() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let e = Engine::new();
+        let set = e.register(Arc::new(SetField));
+        let get = e.register(Arc::new(GetField));
+        let v = e.values();
+        let (m, o) = (v.field("m"), v.field("other"));
+        let u = e.new_unit();
+        let _d = e.push(u, set, vec![m.0, v.int(1)]);
+        let x = e.push(u, set, vec![m.0, v.int(7)]);
+        let r = e.push(u, get, vec![m.0]);
+        for i in 0..8 {
+            e.push(u, set, vec![o.0, v.int(i)]);
+        }
+        e.evaluate(1).unwrap();
+        assert_eq!(e.output(r).and_then(|y| v.as_int(y)), Some(7));
+        let xn = Arc::clone(e.node(x));
+        let left = super::lift(&e, &xn).expect("x lifted");
+        // (its segment's labels moved: relabelled as a landing's relabel
+        // does, packed near the segment's start, as a narrow segment's are)
+        {
+            let seg = e.seg(left.seg);
+            let mut inner = seg.inner.write();
+            let hi = inner.hi;
+            inner.hi = crate::order::Pos(seg.lo.0 + 64);
+            seg.relabel(&mut inner, &e);
+            inner.hi = hi;
+        }
+        assert!(
+            e.node(r).pos_hint() <= left.pos,
+            "the reader now at or before the free label: {} vs {}",
+            e.node(r).pos_hint().0,
+            left.pos.0
+        );
+        let pos = super::old_place(&e, &left).0;
+        let how = format!(
+            "moves {} -> {}, before {:?} at {:?}, after {:?}, lifted at {} seg {}",
+            left.moves,
+            e.seg(left.seg).moved.load(Ordering::Acquire),
+            left.before.map(NodeId::raw),
+            left.before.and_then(|b| crate::read::pos_of(&e, b)).map(|p| p.0),
+            left.after.map(NodeId::raw),
+            left.pos.0,
+            left.seg.0
+        );
+        super::lifted_walks(&e, None, &xn, left, &mut super::CommitStats::default());
+        assert_eq!(
+            e.node(r).state(),
+            crate::node::State::Dirty,
+            "the reader that read x's definition is asked again (reader at {}, the old place's walk from {}; {how})",
+            e.node(r).pos_hint().0,
+            pos.0
         );
     }
 }

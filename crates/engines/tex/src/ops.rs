@@ -139,21 +139,6 @@ pub(crate) fn run_node(
     let t_new = t_new.elapsed();
     let t_body = std::time::Instant::now();
     let mut res = pass(&mut r, &mut body);
-    // (a read-back through its child that the run cannot keep, a name the
-    // file defines defined by the run after it, `Run::rb_def_check`: the
-    // run again from its start with the read-back inline, the child the
-    // first pass placed taken back with its reads)
-    if r.rb_refused && !matches!(res, Err(Halt::Stop(_))) {
-        if let Some(rb) = &r.rb {
-            let i = rb.i;
-            r.cx.unplace_from(i);
-        }
-        let cx = r.cx;
-        r = Run::new(cx, o);
-        r.no_rb = true;
-        res = pass(&mut r, &mut body);
-    }
-    let no_rb = r.no_rb;
     let t_first = t_body.elapsed();
     let recut = matches!(res, Err(Halt::Recut(_)));
     // (a second pass from the start, ending at the candidate the first
@@ -162,7 +147,6 @@ pub(crate) fn run_node(
         let cx = r.cx;
         r = Run::new(cx, o);
         r.stop_at = Some(k);
-        r.no_rb = no_rb;
         // (a second pass to a candidate takes no marks)
         res = pass(&mut r, &mut body);
     }
@@ -708,119 +692,6 @@ impl Operation for Exec {
         }
         res
     }
-}
-
-/// The read-back of a file read back per field, as a child of the run
-/// that reads it back (args: the file's key, the reading run's node;
-/// [`Run::read_back`], docs/spec-readback-child.md): it reads the file's
-/// key set and each key's definition, and defines each key globally where
-/// the reading run did not define it itself (so a later definition by the
-/// run stands, as in TeX, where it comes after the read-back). Its output
-/// ([`readback_output`]) is `[flags, [[name, value]…] global, [[name,
-/// value]…] local]`, whose global keys the reading
-/// run reads one key at a time: a key added or changed asks again only a
-/// run that looked that name up. Flags not 0 (a key not a meaning, an
-/// error the file's end gives, the key set unknown or the file read as
-/// its text): no key is defined here, and the run reads the file back
-/// itself.
-pub(crate) struct ReadBack(pub Shared);
-
-impl Operation for ReadBack {
-    fn name(&self) -> &'static str {
-        "readback"
-    }
-    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        let args = cx.args().to_vec();
-        let v = cx.values();
-        let o = ops(&self.0);
-        let [key, parent] = args[..] else {
-            return Ok(v.list(vec![v.int(1), v.list(vec![])]));
-        };
-        let key = str_of(v, key);
-        let parent =
-            phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, parent).to_ne_bytes()));
-        let epoch = cx.values_epoch();
-        let out = readback_output(v, o, epoch, &key, &mut |f| lb_read(cx, f))?;
-        let xs = list_of(v, out);
-        if int_of(v, xs[0]) != 0 {
-            return Ok(out);
-        }
-        // (the global keys: the local ones the reading run makes itself
-        // at its read-back point, `Run::rb_read_back`)
-        for e in list_of(v, xs[1]) {
-            let kv = list_of(v, e);
-            let f = v.field(&str_of(v, kv[0]));
-            // (one the reading run defined itself after its read-back:
-            // its definition stands, as TeX's later one replaces the
-            // read-back's)
-            if let phitex_defuse::FieldAt::Def(_, Some(by)) =
-                cx.read_at(f, phitex_defuse::At::AfterOwn(parent))?
-                && by == parent
-            {
-                continue;
-            }
-            cx.define_with(f, kv[1], Locality::Global);
-        }
-        Ok(out)
-    }
-}
-
-/// Whether a read-back child answers for key `name`: a location the
-/// reading run reads only through `Run::load_slow` and the meaning
-/// look-ups (`Run::rb_check`): not an integer register, which a symbol
-/// reads directly (`crate::defer`), nor a box (more than a definition).
-pub(crate) fn rb_answers(name: &str) -> bool {
-    !(name.starts_with("count:") || name.starts_with("box:") || name.starts_with("tbox:"))
-}
-
-/// [`ReadBack`]'s output for file `key`, its loop-backs read by `lb` (the
-/// node's recorded reads, or a peek for the reading run's guess):
-/// `[flags, [[name, value]…] global, [[name, value]…] local]`, the keys
-/// in the key set's order, those
-/// whose definition is not there yet left out.
-pub(crate) fn readback_output(
-    v: &Values,
-    o: &Ops,
-    epoch: u64,
-    key: &str,
-    lb: &mut dyn FnMut(Field) -> Result<Option<ValueId>, Stop>,
-) -> Result<ValueId, Stop> {
-    let refused = |v: &Values, why: &str| {
-        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
-            eprintln!("aux-trace: read-back child of {key}: inline ({why})");
-        }
-        v.list(vec![v.int(1), v.list(vec![]), v.list(vec![])])
-    };
-    let k = o.fields.keyed(v, epoch, crate::fields::Fam::Wkeys, key);
-    let Some(keys) = lb(k)? else {
-        return Ok(refused(v, "no key set"));
-    };
-    if keys == crate::api::text_mark(v) {
-        return Ok(refused(v, "read as its text"));
-    }
-    let mut out = Vec::new();
-    let mut local = Vec::new();
-    for k in list_of(v, keys) {
-        let k = str_of(v, k);
-        if k == crate::api::WRITTEN_KEY {
-            continue;
-        }
-        let id = crate::api::wdef_id(key, &k);
-        let name = crate::api::wdef_field(&id).to_owned();
-        if !rb_answers(&name) {
-            return Ok(refused(v, &name));
-        }
-        let wd = o.fields.keyed(v, epoch, crate::fields::Fam::Wdef, &id);
-        let Some(x) = lb(wd)? else {
-            continue;
-        };
-        match list_of(v, x)[..] {
-            [val, g] if int_of(v, g) != 0 => out.push(v.list(vec![v.str(&name), val])),
-            [val, _] => local.push(v.list(vec![v.str(&name), val])),
-            _ => return Ok(refused(v, &format!("{name}: no [value, global]"))),
-        }
-    }
-    Ok(v.list(vec![v.int(0), v.list(out), v.list(local)]))
 }
 
 /// Definitions made by a group's end for outside it: `[[name, value,

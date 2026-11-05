@@ -491,6 +491,9 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
         }
         Step::Key(k) => {
             let x = v?;
+            if let Some(ix) = assoc_index(vals, x) {
+                return ix.get(&k).copied().flatten();
+            }
             vals.with_list(x, |xs| {
                 xs.iter()
                     .find_map(|&e| {
@@ -503,6 +506,9 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
         }
         Step::Has(k) => {
             let x = v?;
+            if let Some(ix) = assoc_index(vals, x) {
+                return Some(vals.bool(ix.contains_key(&k)));
+            }
             vals.with_list(x, |xs| {
                 xs.iter()
                     .any(|&e| vals.with_list(e, |kv| kv.first() == Some(&k)).unwrap_or(false))
@@ -524,10 +530,81 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
                 std::cmp::Ordering::Greater => 1,
             }))
         }
+        // (answered at a position only, `through_at`)
+        Step::Derived(_) => None,
         Step::Each(_) | Step::Indices(_) | Step::Keys(_) | Step::Rank(_) | Step::Ranks(_) | Step::Distinct => {
             unimplemented!("path step: next run")
         }
     }
+}
+
+/// An association list's keys at least this many: looked up through an
+/// index ([`assoc_index`]), not passed over.
+const ASSOC_INDEXED: usize = 32;
+
+/// The index of association list `x` (a list of lists `[k, v, ..]`):
+/// each key to the value of the first entry it heads (`None` for an entry
+/// of the key alone), as [`Step::Key`] and [`Step::Has`] answer by
+/// passing over it. Only for a list of [`ASSOC_INDEXED`] entries or more;
+/// made once a list and values epoch (a value never changes, and an id
+/// never names another value: a collected list's slot stays empty),
+/// shared by the threads. A read-back child's output holds every key of
+/// a document's `.aux` (tikz-cd: 397), and its parent looks up each name
+/// it uses there, again when the child commits (`reask_parent`): passed
+/// over, 6 000 reads of a 400-entry list cost 7 ms a commit (mc 80248).
+fn assoc_index(vals: &Values, x: ValueId) -> Option<Arc<crate::values::FxHashMap<ValueId, Option<ValueId>>>> {
+    type Ix = Arc<crate::values::FxHashMap<ValueId, Option<ValueId>>>;
+    struct Shard {
+        epoch: u64,
+        map: crate::values::FxHashMap<ValueId, Ix>,
+    }
+    const SHARDS: usize = 16;
+    // (entries kept per shard before it is emptied: a bound)
+    const MAX: usize = 256;
+    static S: std::sync::OnceLock<Box<[std::sync::Mutex<Shard>]>> = std::sync::OnceLock::new();
+    if vals.with_list(x, <[ValueId]>::len)? < ASSOC_INDEXED {
+        return None;
+    }
+    let s = S.get_or_init(|| {
+        (0..SHARDS)
+            .map(|_| {
+                std::sync::Mutex::new(Shard {
+                    epoch: u64::MAX,
+                    map: crate::values::FxHashMap::default(),
+                })
+            })
+            .collect()
+    });
+    let raw = x.raw();
+    #[allow(clippy::cast_possible_truncation)]
+    let sh = &s[(raw ^ (raw >> 29)) as usize % SHARDS];
+    let e = vals.epoch();
+    {
+        let g = sh.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if g.epoch == e
+            && let Some(ix) = g.map.get(&x)
+        {
+            return Some(ix.clone());
+        }
+    }
+    let mut m = crate::values::FxHashMap::default();
+    vals.with_list(x, |xs| {
+        for &el in xs {
+            vals.with_list(el, |kv| {
+                if let Some(&k) = kv.first() {
+                    m.entry(k).or_insert_with(|| kv.get(1).copied());
+                }
+            });
+        }
+    });
+    let ix: Ix = Arc::new(m);
+    let mut g = sh.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if g.epoch != e || g.map.len() >= MAX {
+        g.epoch = e;
+        g.map.clear();
+    }
+    g.map.insert(x, ix.clone());
+    Some(ix)
 }
 
 /// `true` for an empty, zero, nil or unit value, `false` otherwise
@@ -567,12 +644,67 @@ pub(crate) fn apply_path(eng: &Engine, v: Option<ValueId>, p: PathId) -> Option<
 /// commit applies it after its segment's lock, never under it, where a
 /// projection's allocations would take the allocator's lock while the
 /// other threads wait for the segment.
+/// A derived read's path (`Step::Derived`) too: its answer reads two
+/// fields where its reader stands, which takes their segments' locks.
 pub(crate) fn client_path(eng: &Engine, p: PathId) -> bool {
     p != PathId::WHOLE
         && p != SITE
         && eng
             .path_steps(p)
-            .is_some_and(|s| s.iter().any(|x| matches!(x, Step::Proj(_))))
+            .is_some_and(|s| s.iter().any(|x| matches!(x, Step::Proj(_) | Step::Derived(_))))
+}
+
+/// The spec of a derived path's first step (`Step::Derived`), if it has one.
+pub(crate) fn derived_spec(eng: &Engine, p: PathId) -> Option<ValueId> {
+    if p == PathId::WHOLE || p == SITE {
+        return None;
+    }
+    match eng.path_steps(p)?.first()? {
+        Step::Derived(s) => Some(*s),
+        _ => None,
+    }
+}
+
+/// The field a derived read's spec names where `base` has value `v`:
+/// `prefix`, the digits of `v + j`, `suffix`.
+pub(crate) fn derived_name(vals: &Values, spec: ValueId, v: Option<ValueId>) -> Option<Field> {
+    let parts = vals.with_list(spec, <[ValueId]>::to_vec)?;
+    let [_, prefix, j, suffix] = parts[..] else {
+        return None;
+    };
+    let v = v.and_then(|x| vals.as_int(x)).unwrap_or(0);
+    let n = v.checked_add(vals.as_int(j)?)?;
+    let name = format!("{}{n}{}", vals.as_str(prefix)?, vals.as_str(suffix)?);
+    Some(Field(vals.str(&name)))
+}
+
+/// The base field of a derived read's spec.
+pub(crate) fn derived_base(vals: &Values, spec: ValueId) -> Option<Field> {
+    vals.with_list(spec, |xs| xs.first().copied()).flatten().map(Field)
+}
+
+/// The field a derived read at `anchor` names now (None: the anchor gone).
+pub(crate) fn derived_field_at(eng: &Engine, spec: ValueId, anchor: NodeId, inclusive: bool) -> Option<Field> {
+    let base = derived_base(eng.values(), spec)?;
+    let v = reaching_at(eng, base, anchor, inclusive)?;
+    derived_name(eng.values(), spec, v.value)
+}
+
+/// A read through path `p` at `anchor` (`At::Before`/`AfterOwn`, the
+/// reader's own position as `Before` itself) of the definition `r`: a
+/// derived path answers its composed look-up there, any other `through`.
+pub(crate) fn through_at(eng: &Engine, r: Reaching, p: PathId, anchor: NodeId, inclusive: bool) -> Option<ValueId> {
+    let Some(spec) = derived_spec(eng, p) else {
+        return through(eng, r, p);
+    };
+    let g = derived_field_at(eng, spec, anchor, inclusive)?;
+    let x = reaching_at(eng, g, anchor, inclusive)?.value;
+    let steps = eng.path_steps(p)?;
+    let mut cur = x;
+    for s in &steps[1..] {
+        cur = step(eng, cur, *s);
+    }
+    cur
 }
 
 /// `Reaching` through a path, `SITE` giving the defining node.
@@ -845,14 +977,17 @@ fn answer_on_layout(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, memo
                 let d = depth_of(eng, me.id)?;
                 return apply_path(eng, Some(eng.values().int(i64::from(d))), path);
             }
-            let r = match *at {
-                Anchor::Me => reaching_at(eng, *f, me.id, false)?,
-                Anchor::Before(n) => reaching_at(eng, *f, n, false)?,
-                Anchor::AfterOwn(n) => reaching_at(eng, *f, n, true)?,
-                Anchor::End(u) => reaching_visible(eng, *f, Pos(eng.unit(u).end.0 - 1), true),
-                Anchor::Final => final_reaching(eng, *f),
+            let (r, pos) = match *at {
+                Anchor::Me => (reaching_at(eng, *f, me.id, false)?, Some((me.id, false))),
+                Anchor::Before(n) => (reaching_at(eng, *f, n, false)?, Some((n, false))),
+                Anchor::AfterOwn(n) => (reaching_at(eng, *f, n, true)?, Some((n, true))),
+                Anchor::End(u) => (reaching_visible(eng, *f, Pos(eng.unit(u).end.0 - 1), true), None),
+                Anchor::Final => (final_reaching(eng, *f), None),
             };
-            through(eng, r, path)
+            match pos {
+                Some((n, incl)) => through_at(eng, r, path, n, incl),
+                None => through(eng, r, path),
+            }
         }
         ReadKind::Env { f } => apply_path(eng, env_value(eng, *f), path),
         ReadKind::Fold { f, from, to, incl } => {
@@ -1108,7 +1243,7 @@ pub(crate) fn reader_answer(eng: &Engine, f: Field, r: &Reader) -> Option<ValueI
             return apply_path(eng, Some(eng.values().int(i64::from(d))), r.path);
         }
         let rc = reaching_at(eng, f, r.anchor, r.inclusive)?;
-        through(eng, rc, r.path)
+        through_at(eng, rc, r.path, r.anchor, r.inclusive)
     })
 }
 
@@ -1595,6 +1730,53 @@ mod tests {
     use crate::engine::Engine;
     use crate::node::ReadKind;
     use crate::values::{Field, ValueId};
+
+    /// A long association list answers `Key` and `Has` through its index
+    /// as passing over it answers: the first entry a key heads, an entry
+    /// of the key alone (no value), entries that are no lists or empty.
+    #[test]
+    fn an_indexed_association_list_answers_as_passed_over() {
+        use crate::api::Step;
+        let eng = Engine::new();
+        let v = eng.values();
+        let mut xs = Vec::new();
+        for i in 0..100 {
+            let k = v.str(&format!("k{}", i % 70));
+            xs.push(v.list(vec![k, v.int(i)]));
+            if i % 13 == 0 {
+                xs.push(v.int(i));
+                xs.push(v.list(vec![]));
+                xs.push(v.list(vec![v.str(&format!("alone{i}"))]));
+            }
+        }
+        let x = v.list(xs.clone());
+        for name in (0..80)
+            .map(|i| format!("k{i}"))
+            .chain((0..100).map(|i| format!("alone{i}")))
+        {
+            let k = v.str(&name);
+            let scan_key = v
+                .with_list(x, |es| {
+                    es.iter()
+                        .find_map(|&e| {
+                            v.with_list(e, |kv| (kv.first() == Some(&k)).then(|| kv.get(1).copied()))
+                                .flatten()
+                        })
+                        .flatten()
+                })
+                .flatten();
+            let scan_has = v.with_list(x, |es| {
+                es.iter()
+                    .any(|&e| v.with_list(e, |kv| kv.first() == Some(&k)).unwrap_or(false))
+            });
+            assert_eq!(super::step(&eng, Some(x), Step::Key(k)), scan_key, "{name}");
+            assert_eq!(
+                super::step(&eng, Some(x), Step::Has(k)),
+                scan_has.map(|b| v.bool(b)),
+                "{name}"
+            );
+        }
+    }
 
     /// `[x]`: contributes x to the field `acc`.
     struct Contrib(Field);
