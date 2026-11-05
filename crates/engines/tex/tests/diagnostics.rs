@@ -514,3 +514,41 @@ fn the_text_ending_inside_an_argument_or_a_definition() {
         }
     }
 }
+
+/// An error's context and help in the log as pdfTeX's `error` writes them
+/// in a run that cannot ask (§90): the list so far of a runaway (§306),
+/// the message, the context's two lines a level (§311-§318: the line of
+/// the file with its place read, `<inserted text>` and `<to be read
+/// again>` above it, the terminal's `<*>` line once the main file ended),
+/// the help lines and an empty line. The engine wrote the message alone.
+/// Oracle: pdflatex on the same shapes under LaTeX (accl 24909, the
+/// blocks byte for byte; bench/ux5-ctx), here under plain.
+#[test]
+fn an_error_has_its_context_and_help_in_the_log() {
+    for threads in [1, 4] {
+        for (doc, want) in [
+            (
+                "Bad \\nosuchcommand here.\n\\bye\n",
+                "! Undefined control sequence.\nl.1 Bad \\nosuchcommand\n                       here.\nThe control sequence at the end of the top line\nof your error message was never \\def'ed. If you have\nmisspelled it (e.g., `\\hobx'), type `I' and the correct\nspelling (e.g., `I\\hbox'). Otherwise just continue,\nand I'll forget about whatever was undefined.\n\n",
+            ),
+            (
+                "\\def\\x#1{}\nText \\x{abc\n\nrest.\n\\bye\n",
+                "Runaway argument?\n{abc \n! Paragraph ended before \\x was complete.\n<to be read again> \n                   \\par \nl.3 \n    \nI suspect you've forgotten a `}', causing me to apply this\ncontrol sequence to too much text. How can we recover?\nMy plan is to forget the whole thing and hope for the best.\n\n",
+            ),
+            (
+                "\\long\\def\\x#1{}\nText \\x{abc\ndef\n",
+                "Runaway argument?\n{abc def \n! File ended while scanning use of \\x.\n<inserted text> \n                \\par \n<*> doc.tex\n           \nI suspect you have forgotten a `}', causing me\nto read past where you wanted me to stop.\nI'll try to recover; but if the error is serious,\nyou'd better type `E' or `X' now and fix your file.\n\n! Emergency stop.\n<*> doc.tex\n           \n*** (job aborted, no legal \\end found)\n\n",
+            ),
+        ] {
+            let b = build(doc, |o| Options {
+                threads: Some(threads),
+                ..o
+            });
+            let (_, log) = b.output();
+            assert!(
+                log.contains(want),
+                "-j{threads} {doc:?}: the log has not\n{want}\nlog:\n{log}"
+            );
+        }
+    }
+}

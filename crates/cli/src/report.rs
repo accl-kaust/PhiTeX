@@ -103,7 +103,18 @@ impl Report {
             r.out.errors.len()
         );
         for d in &r.diagnostics {
-            let _ = writeln!(b, "  {:?} {}:{}: {}", d.severity, d.file, d.line, d.message);
+            let _ = writeln!(
+                b,
+                "  {:?} {}:{}: {}",
+                d.severity,
+                d.file,
+                d.line,
+                if self.full {
+                    d.message.as_str().into()
+                } else {
+                    shown_message(&d.message)
+                }
+            );
             if self.full && !d.context.is_empty() {
                 let _ = writeln!(b, "    {}", d.context.replace('\n', "\n    "));
             }
@@ -186,6 +197,28 @@ impl Report {
 
 /// The TeX Live files a transcript names (each `(…/texmf-dist/…/name`),
 /// by name, in order, once each: the classes and packages a job loaded.
+/// A problem's message as a report without the document's text has it: a
+/// warning LaTeX, a class or a package wrote (`LaTeX Warning: Reference
+/// `key' on page 1 undefined`) quotes the document's names, so only who
+/// wrote it and its kind (the problems' filters' name: reference, font,
+/// other); TeX's own messages as they are.
+fn shown_message(m: &str) -> std::borrow::Cow<'_, str> {
+    let first = m.lines().next().unwrap_or_default();
+    let Some((who, _)) = first.split_once(": ") else {
+        return m.into();
+    };
+    let written = who == "LaTeX Warning"
+        || who == "LaTeX Font Warning"
+        || ["Package ", "Class "]
+            .iter()
+            .any(|p| who.starts_with(p) && who.ends_with(" Warning"));
+    if !written {
+        return m.into();
+    }
+    let kind = phitex_live::problems::kind_of("warning", first);
+    format!("{who} ({kind}; its text left out)").into()
+}
+
 fn texlive_files(log: &str) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
     let mut out = Vec::new();
@@ -249,6 +282,23 @@ fn sources(root: &Path, log: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn written_warnings_without_their_text() {
+        let m = shown_message(
+            "LaTeX Warning: Reference `secretlabel' on page 1 undefined on input line 3.",
+        );
+        assert_eq!(m, "LaTeX Warning (reference; its text left out)");
+        assert!(!shown_message("Package natbib Warning: Citation `k' undefined").contains("`k'"));
+        assert_eq!(
+            shown_message("Undefined control sequence."),
+            "Undefined control sequence."
+        );
+        assert_eq!(
+            shown_message("Overfull \\hbox (3.0pt too wide) in paragraph at lines 3--4"),
+            "Overfull \\hbox (3.0pt too wide) in paragraph at lines 3--4"
+        );
+    }
 
     #[test]
     fn texlive_files_by_name() {

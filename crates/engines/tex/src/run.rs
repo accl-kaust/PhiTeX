@@ -114,6 +114,9 @@ pub(crate) struct Ops {
     /// A page's PDF side, run once the loop-backs settle
     /// (`crate::pdfout::PdfPage`).
     pub pdfpage: OpId,
+    /// A per-field read-back as a child of the run reading it back
+    /// (`crate::ops::ReadBack`).
+    pub readback: OpId,
     /// The tools' settings ([`crate::Options::bibtex`]).
     pub tool_opts: std::sync::Arc<std::sync::Mutex<crate::tools::ToolOptions>>,
     /// The build's field handles (`crate::fields`).
@@ -689,6 +692,20 @@ pub(crate) fn continuation(line: &str) -> &str {
     t.trim_end()
 }
 
+/// A per-field read-back through its child ([`Run::rb`]).
+pub(crate) struct RbChild {
+    /// The file's key.
+    pub key: String,
+    /// The child's placement in this run.
+    pub i: usize,
+    /// The child's output as the run guesses it where the child has not
+    /// run (its loop-backs peeked, [`crate::ops::readback_output`]).
+    pub guess: Option<ValueId>,
+    /// The locations looked up in the child's output, or held before the
+    /// read-back point.
+    pub checked: phitex_defuse::FxHashSet<Loc>,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Run<'c, 'a> {
     /// Encodings through the worker's cache at this run's values epoch
@@ -845,6 +862,17 @@ pub(crate) struct Run<'c, 'a> {
     /// The register a scan under [`Run::defer_ok`] met unread: the
     /// caller makes its symbol ([`crate::defer::symbol_for`]).
     pub defer_hit: Option<Loc>,
+    /// A file read back per field through its child
+    /// ([`crate::ops::ReadBack`], [`Run::read_back`]): from its read-back
+    /// point on, a name the run has not held is looked up in the child's
+    /// output first ([`Run::rb_check`]).
+    pub rb: Option<RbChild>,
+    /// This pass met what the read-back child cannot answer for (the run
+    /// defined a key after its read-back point, interpreted a line, ...):
+    /// it is made again with the read-back inline (`ops::run_node`).
+    pub rb_refused: bool,
+    /// The read-back inline, as before the child ([`Run::rb_refused`]).
+    pub no_rb: bool,
     /// Per integer register, its value as first read from the engine,
     /// before any map of this run: what a restore to the register's own
     /// symbol puts back ([`Run::reg_restore`]).
@@ -1019,6 +1047,9 @@ pub(crate) struct Run<'c, 'a> {
     pub interp_eof: bool,
     /// The errors §338 gave as the interpreted file ended.
     pub interp_errs: Vec<String>,
+    /// §338's error met while a list was scanned, logged once the scan
+    /// has the list for its runaway lines ([`Run::take_runaway`]).
+    pub runaway_due: Option<RunawayDue>,
     /// Whether the last line interpreted ([`Run::interpret_line`]) only
     /// defined: it contributed nothing, typeset nothing, called no
     /// node, left no group or conditional open. A file every line of
@@ -1333,6 +1364,9 @@ impl<'c, 'a> Run<'c, 'a> {
             skip_first: Vec::new(),
             defer_ok: false,
             defer_hit: None,
+            rb: None,
+            rb_refused: false,
+            no_rb: false,
             reg_loaded_base: phitex_defuse::FxHashMap::default(),
             defer_regs: None,
             reg_first_def: phitex_defuse::FxHashMap::default(),
@@ -1393,6 +1427,7 @@ impl<'c, 'a> Run<'c, 'a> {
             interp_nested: phitex_defuse::FxHashMap::default(),
             interp_eof: false,
             interp_errs: Vec::new(),
+            runaway_due: None,
             interp_plain: false,
             text_written: Vec::new(),
             seeded: Vec::new(),
@@ -1814,6 +1849,12 @@ impl<'c, 'a> Run<'c, 'a> {
 
     #[inline(never)]
     pub(crate) fn load_slow(&mut self, loc: Loc) -> R<()> {
+        if self.rb.is_some() {
+            self.rb_check(loc)?;
+            if self.st.load_state(loc) != 0 {
+                return Ok(());
+            }
+        }
         if self.in_skip && self.rec_load {
             self.skip_first.push(loc);
         }
@@ -2096,6 +2137,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         if crate::exec::obs_flag!("PHITEX_DEF_TRACE") {
             self.def_trace(loc, &val, global);
+        }
+        if self.rb.is_some() && self.interp.is_none() {
+            self.rb_def_check(loc);
         }
         if self.read_back_done && self.interp.is_none() {
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
@@ -2601,7 +2645,9 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.lb_same(key)? {
             return Ok(false);
         }
-        Ok(self.lb(f)?.is_some())
+        // (read for its presence alone: a file's key set, its text, read
+        // whole only where they are used)
+        self.lb_present(f)
     }
 
     /// [`Run::lb_known`], `f` read for its presence alone
@@ -2746,7 +2792,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(false);
         }
         let k = self.keyed(crate::fields::Fam::Wkeys, key);
-        if !self.lb_known(key, k)? || self.lb(k)? != Some(crate::api::text_mark(v)) {
+        if !self.lb_known(key, k)? || self.per_field_known(key, k)? {
             return Ok(false);
         }
         if self.tool_makes(key)? {
@@ -2778,7 +2824,7 @@ impl<'c, 'a> Run<'c, 'a> {
             let mark = crate::api::text_mark(self.v);
             return Ok(self.seeded(key).is_some_and(|s| s.keys != mark) && !self.tool_makes(key)?);
         }
-        Ok(self.per_field(key, k)?.is_some() && !self.tool_makes(key)?)
+        Ok(self.per_field_known(key, k)? && !self.tool_makes(key)?)
     }
 
     /// [`Run::file`], a file the job writes as `[path, UNIT, order]`
@@ -3019,7 +3065,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let per_field = if made.is_some() {
             None
         } else {
-            self.per_field(key, k)?
+            self.per_field_known(key, k)?.then_some(())
         };
         if crate::exec::obs_flag!("PHITEX_ROUND_TRACE") && known_k {
             let (kx, wx) = (self.lb(k)?, self.lb(w)?);
@@ -3033,10 +3079,10 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let x = if made.is_some() {
             made
-        } else if let Some(keys) = per_field {
+        } else if per_field.is_some() {
             // a file whose read-back only defines: it exists (empty) once
             // the job wrote it ([`Run::read_back`])
-            if keys.is_some_and(|x| !list_of(v, x).is_empty()) {
+            if self.keys_nonempty(k)? {
                 Some(v.list(vec![v.str(&format!("./{key}")), v.str("")]))
             } else {
                 None
@@ -3391,6 +3437,29 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok((x != Some(crate::api::text_mark(self.v))).then_some(x))
     }
 
+    /// [`Run::per_field`]'s answer alone: whether `name`'s read-back is per
+    /// field this round, its key set read only as being the text mark or
+    /// not (`Step::Eq`).
+    fn per_field_known(&mut self, key: &str, k: Field) -> R<bool> {
+        if !self.lb_known(key, k)? {
+            return Ok(false);
+        }
+        let v = self.v;
+        let p = self
+            .cx
+            .path(&[phitex_defuse::Step::Eq(crate::api::text_mark(v))]);
+        Ok(self.cx.read_final_path(k, p)?.and_then(|x| v.as_bool(x)) == Some(false))
+    }
+
+    /// Whether loop-back key set `k` has a key, read as that alone.
+    fn keys_nonempty(&mut self, k: Field) -> R<bool> {
+        let v = self.v;
+        let p = self
+            .cx
+            .path(&[phitex_defuse::Step::Index(0), phitex_defuse::Step::Present]);
+        Ok(self.cx.read_final_path(k, p)?.and_then(|x| v.as_bool(x)) == Some(true))
+    }
+
     /// The read-back point of a file whose read-back only defines (where
     /// the macro on top reads it back, or looks for it in vain): the
     /// fields this macro defines after it keep their value here for the
@@ -3535,6 +3604,9 @@ impl<'c, 'a> Run<'c, 'a> {
             self.note_read_back(key)?;
             return Ok(false);
         }
+        if seed.is_none() && self.rb_read_back(key, wk)? {
+            return Ok(true);
+        }
         let keys = match &seed {
             Some(sd) if sd.keys == crate::api::text_mark(v) => return Ok(false),
             Some(sd) => list_of(v, sd.keys),
@@ -3648,6 +3720,197 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         Ok(true)
+    }
+
+    /// [`Run::read_back`] of file `key` (key set `wk`) through its child
+    /// ([`crate::ops::ReadBack`], docs/spec-readback-child.md): in a
+    /// document's run, not a line's interpretation nor a recorded load, the
+    /// file per field, its first read-back in the run. The child placed;
+    /// where its output says the file is one it answers for (flags 0), the
+    /// keys the run holds now are defined as the inline read-back defines
+    /// them, every other one where the run first uses its name
+    /// ([`Run::rb_check`]): the run reads the keys it uses, not the key
+    /// set. True where it was so read back; false: inline.
+    fn rb_read_back(&mut self, key: &str, wk: Field) -> R<bool> {
+        let op = self.cx.op();
+        if self.no_rb
+            || self.rb.is_some()
+            || self.interp.is_some()
+            || self.rec_load
+            || !self.doc
+            || !(op == self.ops.exec || op == self.ops.resume)
+            || crate::exec::obs_flag!("PHITEX_NO_RB_CHILD")
+            || self.get(&format!("{REREAD}{key}"))?.is_some()
+            // (the file's first read-back in the job: a later one,
+            // `\\enddocument`'s, compares every label, `\\@testdef`, so
+            // reads every key, and is as cheap inline)
+            || self.get(&format!("wread:{key}"))?.is_some()
+            || !self.per_field_known(key, wk)?
+        {
+            return Ok(false);
+        }
+        let v = self.v;
+        let me = self.cx.node().raw();
+        let i = self.cx.child(
+            self.ops.readback,
+            vec![v.str(key), v.int(i64::from_ne_bytes(me.to_ne_bytes()))],
+        );
+        let guess = if self.cx.placed_output_peek(i).is_none() {
+            let epoch = self.cx.values_epoch();
+            let cx = &*self.cx;
+            let ops = &self.ops;
+            Some(
+                crate::ops::readback_output(v, ops, epoch, key, &mut |f| Ok(cx.peek_final(f)))
+                    .map_err(Halt::Stop)?,
+            )
+        } else {
+            None
+        };
+        let p = self.cx.path(&[phitex_defuse::Step::Index(0)]);
+        let flags = self.cx.placed_output_path_or(i, p, |_| guess);
+        if flags.is_none_or(|x| int_of(v, x) != 0) {
+            // (the child defines nothing: the read-back is the run's)
+            return Ok(false);
+        }
+        self.rb = Some(RbChild {
+            key: key.to_owned(),
+            i,
+            guess,
+            checked: phitex_defuse::FxHashSet::default(),
+        });
+        // (the local keys, made here as without the child: their list
+        // read whole, the global ones one by one)
+        let p = self.cx.path(&[phitex_defuse::Step::Index(2)]);
+        let locals = self.cx.placed_output_path_or(i, p, |_| guess);
+        for e in locals.map(|x| list_of(v, x)).unwrap_or_default() {
+            let kv = list_of(v, e);
+            let name = str_of(v, kv[0]);
+            let l = self.loc_of(v.field(&name));
+            if let Some(rb) = &mut self.rb {
+                rb.checked.insert(l);
+            }
+            self.read_back_pre(key, &name, kv[1])?;
+            self.set(&name, kv[1], false);
+        }
+        // (what the run holds now: defined here as without the child)
+        let mut held: Vec<Loc> = self.st.held_locs().collect();
+        held.sort_unstable();
+        held.dedup();
+        for l in held {
+            if let Some(rb) = &mut self.rb {
+                rb.checked.insert(l);
+            }
+            let name = crate::val::field_name(v, self.loc_field(l));
+            if !crate::ops::rb_answers(&name) {
+                continue;
+            }
+            let fl = self.loc_field(l).0;
+            if let Some(val) = self.rb_key(fl) {
+                self.read_back_pre(key, &name, val)?;
+                self.set(&name, val, true);
+            }
+        }
+        self.note_read_point();
+        self.mark_read_point(key)?;
+        self.note_read_back(key)?;
+        if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+            eprintln!(
+                "read-back: {key} in node {} at command {} (child)",
+                self.cx.node().raw(),
+                self.cmds
+            );
+        }
+        Ok(true)
+    }
+
+    /// The definition the read-back child's output gives name `name`, read
+    /// as that key alone ([`crate::ops::ReadBack`]): None where the file
+    /// defines no such key.
+    fn rb_key(&mut self, name: ValueId) -> Option<ValueId> {
+        let rb = self.rb.as_ref()?;
+        let (i, guess) = (rb.i, rb.guess);
+        let p = self.cx.path(&[
+            phitex_defuse::Step::Index(1),
+            phitex_defuse::Step::Key(name),
+        ]);
+        self.cx.placed_output_path_or(i, p, |_| guess)
+    }
+
+    /// Location `loc` used for the first time after the read-back point of
+    /// a file read back through its child ([`Run::rb`]): where the file
+    /// defines its name, the read-back's definition made now, as
+    /// [`Run::read_back`] makes it for every key without the child (the
+    /// value it replaces kept, then the key defined globally). Nothing
+    /// came between: the run had not held the location since the point.
+    /// A line being interpreted reads what was there before the
+    /// read-back, as it reads it without the child (`Run::pre_value`).
+    pub(crate) fn rb_check(&mut self, loc: Loc) -> R<()> {
+        if self.interp.is_some() {
+            return Ok(());
+        }
+        let Some(rb) = &mut self.rb else {
+            return Ok(());
+        };
+        if !rb.checked.insert(loc) {
+            return Ok(());
+        }
+        let f = self.loc_field(loc);
+        let v = self.v;
+        if v.with_str(f.0, crate::ops::rb_answers) != Some(true) {
+            return Ok(());
+        }
+        let Some(val) = self.rb_key(f.0) else {
+            return Ok(());
+        };
+        let key = self
+            .rb
+            .as_ref()
+            .map(|rb| rb.key.clone())
+            .unwrap_or_default();
+        let name = crate::val::field_name(v, f);
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "aux-trace: read-back child {key} gives {name} in node {}",
+                self.cx.node().raw()
+            );
+        }
+        self.read_back_pre(&key, &name, val)?;
+        self.set(&name, val, true);
+        Ok(())
+    }
+
+    /// The pass cannot keep the read-back through its child
+    /// ([`Run::rb_refused`]).
+    fn rb_refuse(&mut self, name: &str, why: &str) {
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            eprintln!(
+                "aux-trace: read-back child refused: node {} {name}: {why}",
+                self.cx.node().raw()
+            );
+        }
+        self.rb_refused = true;
+    }
+
+    /// Location `loc` about to be defined after the read-back point of a
+    /// file read back through its child: a name the file defines is one
+    /// the child cannot answer for (the run's definition is not the first
+    /// after the read-back; the value the read-back replaced is kept for
+    /// the lines written later from the read-back's, [`Run::note_pre`]),
+    /// so the run is made again with the read-back inline
+    /// ([`Run::rb_refused`]).
+    fn rb_def_check(&mut self, loc: Loc) {
+        let Some(rb) = &mut self.rb else {
+            return;
+        };
+        if !rb.checked.insert(loc) {
+            return;
+        }
+        let f = self.loc_field(loc);
+        if self.v.with_str(f.0, crate::ops::rb_answers) == Some(true) && self.rb_key(f.0).is_some()
+        {
+            let name = crate::val::field_name(self.v, f);
+            self.rb_refuse(&name, "defined after the point");
+        }
     }
 
     /// The value the read-back of `name` (`val`, from file `key`)
@@ -3942,14 +4205,20 @@ impl<'c, 'a> Run<'c, 'a> {
             // (a line that does more than define is read back as text:
             // its interpretation stops at the first command that does,
             // its definitions not wanted)
-            // (a group opened in the line shares its list: only a level
-            // with a list of its own, or an item on any, is more; a group
-            // still open at the line's end is, below)
+            // (a group opened in the line shares its list: an item on the
+            // line's own list is more. A box the line builds has a list of
+            // its own, and what is on it is the box's: `\settowidth` in
+            // hypdoc's `\HD@SetMacroIndent` only sets a dimension. A box
+            // still open at the line's end is more, below, and so is one
+            // the line keeps in a register, [`Run::line_keeps_box`])
             if self.contributed_since(nc)
                 || self.kids.len() != nk
                 || self.nest.len() <= nest_len
-                || self.nest[nest_len + 1..].iter().any(|l| l.owns)
-                || self.nest[nest_len..].iter().any(|l| !l.list.is_empty())
+                || !self.nest[nest_len].list.is_empty()
+                || self.nest[nest_len + 1..]
+                    .iter()
+                    .take_while(|l| !l.owns)
+                    .any(|l| !l.list.is_empty())
             {
                 break;
             }
@@ -3971,7 +4240,8 @@ impl<'c, 'a> Run<'c, 'a> {
             && self.kids.len() == nk
             && self.nest.len() == nest_len + 1
             && self.nest.last().is_some_and(|l| l.list.is_empty())
-            && self.conds == conds;
+            && self.conds == conds
+            && !line_keeps_box(v, &made);
         if !self.interp_plain && crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             self.trace_more_than_define(res.is_ok(), (nc, nk, nest_len), &conds);
         }
@@ -4284,6 +4554,81 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn log(&mut self, kind: &str, text: &str) -> R<()> {
+        self.log_help(kind, text, &[])
+    }
+
+    /// An error of TeX's `error` (§82, §90; `kind` "error" or "errmsg"),
+    /// its context and help lines after it in the log
+    /// ([`crate::context`]); another kind of event as it is.
+    pub(crate) fn log_help(&mut self, kind: &str, text: &str, help: &[&str]) -> R<()> {
+        self.log_event(kind, text)?;
+        if kind != "error" && kind != "errmsg" {
+            return Ok(());
+        }
+        let stop = kind == "error" && self.error_count >= 100;
+        let mut marks = Vec::new();
+        let tail = self.error_tail(if stop { &[] } else { help }, &mut marks)?;
+        let k = if stop {
+            crate::log::CONTEXT_ONLY
+        } else {
+            crate::log::CONTEXT
+        };
+        self.log_lines_any(k, &tail, marks)?;
+        if stop {
+            self.log_hundred()?;
+        }
+        Ok(())
+    }
+
+    /// An error's event alone, no context after it (a message that is
+    /// not `error`'s: §530's "I can't find file").
+    pub(crate) fn log_bare(&mut self, text: &str) -> R<()> {
+        self.log_event("error", text)?;
+        if self.error_count >= 100 {
+            self.log_hundred()?;
+        }
+        Ok(())
+    }
+
+    /// §306's runaway list ([`Run::runaway_text`]), before its error.
+    pub(crate) fn log_runaway(&mut self, what: &str, toks: &[Tok]) -> R<()> {
+        let t = self.runaway_text(what, toks)?;
+        self.log_lines_any(crate::log::RUNAWAY, &t, Vec::new())
+    }
+
+    /// [`Run::log_lines`] for any kind (marks or none).
+    pub(crate) fn log_lines_any(&mut self, kind: &str, text: &str, marks: Vec<i64>) -> R<()> {
+        let v = self.v;
+        let nl = i64::from(self.ipar(Par::newlinechar)?);
+        let mut e = vec![v.str(kind), v.str(text), v.int(nl)];
+        if !marks.is_empty() {
+            e.push(v.list(marks.into_iter().map(|x| v.int(x)).collect()));
+        }
+        let e = v.list(e);
+        self.contribute("log", v.seq_unit(e));
+        Ok(())
+    }
+
+    /// §82: the hundredth error ends the job.
+    pub(crate) fn log_hundred(&mut self) -> R<()> {
+        let nl = i64::from(self.ipar(Par::newlinechar)?);
+        let e = self.v.list(vec![
+            self.v.str("wlog"),
+            self.v.str("(That makes 100 errors; please try again.)"),
+            self.v.int(nl),
+        ]);
+        let s = self.v.seq_unit(e);
+        self.contribute("log", s);
+        self.fatal_logged = true;
+        Err(Halt::Fatal)
+    }
+
+    pub(crate) fn log_event(&mut self, kind: &str, text: &str) -> R<()> {
+        // (an error left due by a scan that did not take it: logged before
+        // this one, without its list)
+        if self.runaway_due.is_some() {
+            self.take_runaway(None)?;
+        }
         if kind == "error" {
             self.diag(true, text);
         }
@@ -4299,10 +4644,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 .unwrap_or(text);
             self.diag(true, first);
         }
-        let stop = kind == "error" && {
+        if kind == "error" {
             self.error_count += 1;
-            self.error_count >= 100
-        };
+        }
         let nl = i64::from(self.ipar(Par::newlinechar)?);
         let e = self
             .v
@@ -4312,18 +4656,6 @@ impl<'c, 'a> Run<'c, 'a> {
         if kind == "error" || kind == "errmsg" {
             let one = self.v.int(1);
             self.contribute(LOG_ERRORS, one);
-        }
-        if stop {
-            // §82: history is fatal_error_stop and the job ends
-            let e = self.v.list(vec![
-                self.v.str("wlog"),
-                self.v.str("(That makes 100 errors; please try again.)"),
-                self.v.int(nl),
-            ]);
-            let s = self.v.seq_unit(e);
-            self.contribute("log", s);
-            self.fatal_logged = true;
-            return Err(Halt::Fatal);
         }
         Ok(())
     }
@@ -4351,7 +4683,10 @@ impl<'c, 'a> Run<'c, 'a> {
         self.contribute("log", s);
         let one = self.v.int(1);
         self.contribute(LOG_ERRORS, one);
-        Ok(())
+        // (§1298's `error`: the context, `help0`)
+        let mut marks = Vec::new();
+        let tail = self.error_tail(&[], &mut marks)?;
+        self.log_lines_any(crate::log::CONTEXT, &tail, marks)
     }
 
     /// `fatal_error` (§93): `s` logged, and the job ends there (§1335).
@@ -4359,7 +4694,13 @@ impl<'c, 'a> Run<'c, 'a> {
     /// read from the terminal and every file error ends the job (§71,
     /// §484, §530).
     pub(crate) fn fatal<T>(&mut self, s: &str) -> R<T> {
-        self.log("error", s)?;
+        // (§93's "Emergency stop", `s` its help line; the log shows it
+        // so, [`crate::log`])
+        if s.starts_with("*** (") {
+            self.log_help("error", s, &[s])?;
+        } else {
+            self.log("error", s)?;
+        }
         self.fatal_logged = true;
         Err(Halt::Fatal)
     }
@@ -4813,6 +5154,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
+        self.rb_check(l)?;
         if self.st.is_loaded(l) || self.st.lazy(l).is_some() || self.lazy_pre(l) {
             return Ok(None);
         }
@@ -4850,6 +5192,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
+        self.rb_check(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
@@ -4884,6 +5227,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
+        self.rb_check(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
@@ -4914,6 +5258,7 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn box_shape(&mut self, n: i32) -> R<Option<(bool, i32)>> {
         let v = self.v;
         let l = self.box_loc(i64::from(n));
+        self.rb_check(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             let b = self.box_reg(n)?;
             return Ok(b.map(|b| {
@@ -4955,6 +5300,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(false);
         };
+        self.rb_check(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(false);
         }
@@ -5013,6 +5359,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
+        self.rb_check(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) || self.interp.is_some() || self.rec_load {
             return Ok(None);
         }
@@ -5045,6 +5392,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
+        self.rb_check(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) || self.interp.is_some() || self.rec_load {
             return Ok(None);
         }
@@ -5073,6 +5421,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
+        self.rb_check(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
@@ -6606,6 +6955,15 @@ pub(crate) struct Seeded {
 }
 
 /// `scanner_status` (§305) values kept in [`Run::scanner`].
+/// An error [`Run::runaway_error`] left due: its message, what was
+/// scanned, its context (made when it was met) and the lines' marks.
+pub(crate) struct RunawayDue {
+    pub msg: String,
+    pub what: &'static str,
+    pub tail: String,
+    pub marks: Vec<i64>,
+}
+
 pub(crate) const SCAN_DEFINING: u8 = 2;
 pub(crate) const SCAN_MATCHING: u8 = 3;
 pub(crate) const SCAN_ABSORBING: u8 = 5;
@@ -6782,6 +7140,20 @@ pub(crate) fn frame_line(v: &Values, f: ValueId) -> Option<FileLine> {
 /// contents, the streams, `\afterassignment`'s token, the dead cycles,
 /// ...) is never a read-back definition, nor are category codes (the
 /// read-back reads under `\makeatletter`).
+/// Whether a line's definitions ([`Run::made_since`]) leave a box in a
+/// register (`\global\setbox`, or `\setbox` at the line's own level):
+/// a box kept, for a shipout or a later `\box`, is more than a
+/// definition (abspos's `\absput` keeps its box for shipout), where one
+/// built and dropped inside the line's groups (`\settowidth`) is not.
+fn line_keeps_box(v: &Values, made: &[ValueId]) -> bool {
+    made.iter().any(|&d| {
+        list_of(v, d).first().is_some_and(|&f| {
+            let n = str_of(v, f);
+            n.starts_with("box:") || n.starts_with("tbox:")
+        })
+    })
+}
+
 fn is_read_back_definition(name: &str) -> bool {
     const NOT: [&str; 18] = [
         "cat:",

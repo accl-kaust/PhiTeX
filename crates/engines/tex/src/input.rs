@@ -336,6 +336,9 @@ pub(crate) mod ty {
     /// XeTeX's `inter_char_text`.
     pub const INTER_CHAR: u8 = 18;
     pub const MACRO: u8 = 5;
+    /// §307's `inserted`: what §339 inserts to end a runaway list
+    /// (`ins_list`), shown as "<inserted text>" (`crate::context`).
+    pub const INSERTED: u8 = 19;
     /// A list no diagnostic names (`\the`, `\csname`, conversions).
     pub const OTHER: u8 = 17;
 }

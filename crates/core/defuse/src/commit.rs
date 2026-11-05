@@ -5144,9 +5144,7 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
         node.has_brackets.store(false, Ordering::Release);
     }
     inner.sum_depth();
-    let sg = eng.scope_changed();
-    node.bracket_gen.store(sg, Ordering::Release);
-    crate::walk::filed(eng, sg, node.id, pos);
+    node.bracket_gen.store(eng.scope_changed(), Ordering::Release);
     eng.bump(eng.depth_field);
     Some(old.unwrap_or_default())
 }
@@ -5216,7 +5214,7 @@ pub(crate) fn reask_after_effect(
     st: &mut CommitStats,
 ) {
     let at = read::pos_of(eng, by.id).unwrap_or(at);
-    crate::walk::change(eng, w, by, true, at, old, new, st);
+    reask_after_effect_at(eng, w, by, at, old, new, st);
 }
 
 /// `reask_after_effect` from label `at` whatever `by`'s label is now
@@ -5230,24 +5228,6 @@ fn reask_after_effect_at(
     new: Brackets,
     st: &mut CommitStats,
 ) {
-    crate::walk::change(eng, w, by, false, at, old, new, st);
-}
-
-/// The region walk of `by`'s bracket change at `at`, as walker `pw`
-/// (`walk::change`): its span bounded at the region's stop once the
-/// readers in the region are asked.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn walk_region(
-    eng: &Engine,
-    w: Option<&Worker>,
-    by: &Node,
-    at: Pos,
-    old: Brackets,
-    new: Brackets,
-    pw: &crate::walk::Walk,
-    st: &mut CommitStats,
-) {
-    let mut stop_node: Option<NodeId> = None;
     let d0 = i64::from(read::depth_at(eng, at));
     let (co, cn) = ((d0 - i64::from(old.closes)).max(0), (d0 - i64::from(new.closes)).max(0));
     let (mut a, mut b) = (co + i64::from(old.opens), cn + i64::from(new.opens));
@@ -5304,9 +5284,6 @@ pub(crate) fn walk_region(
                 fields.push(*f);
             }
         }
-        if let Some(q) = stop {
-            stop_node = inner.nodes.range(..=q).next_back().map(|(_, id)| *id);
-        }
         let lo = seg.lo;
         drop(inner);
         if let Some(q) = stop {
@@ -5324,16 +5301,13 @@ pub(crate) fn walk_region(
     // just after another close's walk began made each walk stop at the
     // other, and the readers after both kept a definition both closes
     // hide (note-intermittents §1: \begin's scope kind at -j16). Then
-    // every reader past the stop is re-asked too, each by its answer. Only
-    // a change filed since this one at or before the stop counts: brackets
-    // move the chains after them alone, so one past the stop moves none
-    // this walk read (`walk::raced`))
+    // every reader past the stop is re-asked too, each by its answer)
     // (what is not filed at positions: the end readers, the relations and,
     // to the end of the line, the finals: in the region, or from the
     // change on after a race)
     let mut rest = (at, end.map(|(_, q)| q));
     if let Some((sid, q)) = end
-        && crate::walk::raced(eng, by.bracket_gen.load(Ordering::Acquire), stop_node, q)
+        && eng.scope_gen.load(Ordering::Acquire) != by.bracket_gen.load(Ordering::Acquire)
     {
         end = None;
         rest = (at, None);
@@ -5359,7 +5333,6 @@ pub(crate) fn walk_region(
         reask_reader(eng, w, *f, r, Some(by.id), st);
     }
     reask_rest(eng, w, by, rest.0, rest.1, None, st);
-    pw.bound(end.and(stop_node));
     // (past the region only the readers of what is defined in it can see
     // another answer)
     if let Some((sid, q)) = end {
@@ -5369,34 +5342,6 @@ pub(crate) fn walk_region(
             reask_from(eng, w, f, q, sid, None, None, 0, st);
         }
     }
-}
-
-/// Every reader anchored at or after `from` asked again by its answer,
-/// and what is not filed at positions from there to the line's end
-/// (`reask_rest`): a walk that needs no region.
-pub(crate) fn reask_all_after(eng: &Engine, w: Option<&Worker>, by: &Node, from: Pos, st: &mut CommitStats) {
-    let mut readers: Vec<(Field, Reader)> = Vec::new();
-    let mut cur = eng.seg_for_pos(from).map(|s| s.id);
-    let mut first = true;
-    while let Some(sid) = cur {
-        let seg = eng.seg(sid);
-        let inner = seg.inner.read();
-        for (f, rs) in &inner.readers {
-            for r in rs {
-                if (!first || eng.node(r.anchor).pos_hint() >= from) && live(eng, r.node, r.serial) {
-                    readers.push((*f, r.clone()));
-                }
-            }
-        }
-        let lo = seg.lo;
-        drop(inner);
-        first = false;
-        cur = eng.order.next(sid, lo);
-    }
-    for (f, r) in &readers {
-        reask_reader(eng, w, *f, r, Some(by.id), st);
-    }
-    reask_rest(eng, w, by, from, None, None, st);
 }
 
 /// What a walk of every reader from `from` (to `to`, inclusive, where

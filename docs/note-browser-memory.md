@@ -135,13 +135,4 @@ it.
 
 Decided (the user, 2026-11-04): B now; D designed after v1.0; C no.
 
-For B, the size must reach the allocator, and every growth must happen
-on thread 0 before the first thread is spawned. One way: link with
-`--initial-memory` at 2 GiB and `--max-memory` at 4 GiB. Before any
-thread starts, the host asks the core (thread 0) to take and free the
-rest, trying 4, then 3, then 2 GiB. Each try is a `memory.grow` inside
-dlmalloc with no other thread in wasm. Open: nothing may grow the memory
-after that. Either the memory's maximum is the size chosen, which means
-one memory per try, and a refused try's 2 GiB is freed only when it is
-collected; or dlmalloc's footprint limit is set to it, if wasi-libc's
-build exposes it.
+Built (frontends 2e426ed, 1577611, 2026-11-05). The core is linked with `--initial-memory` at 2 GiB and `--max-memory` at 65535 pages. The host makes the shared memory at 2 GiB and, on thread 0 before the first thread is spawned, calls `ph_grow` for 4 GiB, then 3, else keeps 2, then `ph_seal`. `ph_grow` makes dlmalloc grow its own heap (big blocks taken and freed: each `sbrk` is one `memory.grow`, whole or nothing, so a refused size grows nothing), since memory grown from the host would lie past dlmalloc's `__heap_end`. The seal is the core's own `sbrk`, which dlmalloc calls in place of libc's: libc's, refusing to grow once sealed. Nothing grows the memory under the threads, and a document that outgrows its size fails an allocation; the tab then says the size it got and what to close (the preview does not reopen it: the same document would outgrow it again). A reload's core starts while the old page's still holds its 4 GiB, so it asks for 4 again every 100 ms for up to 5 s before taking less. Measured on Chrome for Testing 156, sandboxed, made to see 15983 MB (the renderers' data limit 8.0 GiB): the first tab's core 4 GiB, a second tab's 2 GiB beside it, the extension's process at 7.55 GB with both (peak 7.7 GB); the second tab's first page in 2.5 s; three reloads each got 4 GiB again, a first page in 3.8-3.9 s. So on a 16 GB Linux machine a second tab builds documents that fit in 2 GiB: about 110 pages of a dense manual at 4 threads, about 600 of plain text.
