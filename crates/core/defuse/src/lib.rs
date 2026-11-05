@@ -75,6 +75,9 @@ mod sched;
 mod segment;
 mod table;
 mod values;
+mod walk;
+#[doc(hidden)]
+pub use walk::walks_most;
 
 pub use api::{
     At, Brackets, Cause, EditSource, Effect, EnvProvider, EvalError, FieldAt, Limits, Locality, MayDefine, Monoid,
