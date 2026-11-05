@@ -813,3 +813,115 @@ fn a_walk_after_a_race_asks_the_end_reader_too() {
         check(&e, false);
     }
 }
+
+/// `[cut, predict]`: a piece predicted to close its scope (its effect is
+/// static). With `cut` 0 its run closes; with 1 it is cut before its
+/// close: it closes nothing itself and places its rest, which closes;
+/// with `predict` 1 the rest's brackets are filed with the piece's commit
+/// (`Ctx::predict_placed_effect`), not left to the rest's run.
+struct CutPiece(OpId);
+
+impl Operation for CutPiece {
+    fn name(&self) -> &'static str {
+        "cut_piece"
+    }
+
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::Close
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let (cut, predict) = (v.as_int(cx.args()[0]) == Some(1), v.as_int(cx.args()[1]) == Some(1));
+        if !cut {
+            cx.set_effect(Effect::Close);
+            return Ok(ValueId::UNIT);
+        }
+        cx.set_effect(Effect::None);
+        let i = cx.follow(self.0, vec![]);
+        if predict {
+            cx.predict_placed_effect(i, Effect::Close);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[]`: a cut piece's rest: its brackets are its run's (it closes).
+struct PieceRest;
+
+impl Operation for PieceRest {
+    fn name(&self) -> &'static str {
+        "piece_rest"
+    }
+
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::Pending
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.set_effect(Effect::Close);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[f]`: outputs the definition of f reaching it, counting its runs.
+struct CountGet(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Operation for CountGet {
+    fn name(&self) -> &'static str {
+        "count_get"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(cx.read(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// A piece whose run is now cut before its close places its rest in its
+/// commit: filed with the close the piece's text predicted, the depth
+/// after the rest is as it was, and the reader after it, which ran on
+/// that depth, is not run on a scope left open until the rest's run (the
+/// beamer user guide at -j4: each such cut filed the piece's close away
+/// and the rest's run filed it back, the readers after woken twice). Left
+/// to the rest's run, the reader is woken: the test sees the difference.
+#[test]
+fn a_cut_pieces_rest_is_filed_with_the_close_its_piece_predicted() {
+    for predict in [1, 0] {
+        let (e, o) = engine();
+        let rest = e.register(Arc::new(PieceRest));
+        let cut = e.register(Arc::new(CutPiece(rest)));
+        let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let get = e.register(Arc::new(CountGet(n.clone())));
+        let v = e.values();
+        let x = v.field("x").0;
+        let u = e.new_unit();
+        e.push(u, o.def, vec![x, v.int(1)]);
+        e.push(u, o.open, vec![]);
+        e.push(u, o.def, vec![x, v.int(2)]);
+        let c = e.push(u, cut, vec![v.int(0), v.int(predict)]);
+        let r = e.push(u, get, vec![x]);
+        e.evaluate(1).unwrap();
+        assert_eq!(int(&e, r), 1, "the piece closed the scope");
+        let n0 = n.load(std::sync::atomic::Ordering::Relaxed);
+        // (its run now cut before its close: a rest placed)
+        e.replace(c, cut, vec![v.int(1), v.int(predict)]);
+        let rep = e.evaluate(1).unwrap();
+        // (woken: run, or found standing by its reads when it came up)
+        let woken = rep.rerun_causes.iter().any(|(m, _)| *m == r)
+            || rep.runs_by_op.iter().any(|(name, k)| *name == "count_get" && *k > 0);
+        assert_eq!(e.order(u).len(), 6, "the rest placed");
+        assert_eq!(int(&e, r), 1, "the rest closed the scope");
+        assert!(e.check_invariants().is_empty());
+        let again = n.load(std::sync::atomic::Ordering::Relaxed) - n0;
+        if predict == 1 {
+            assert_eq!(again, 0, "the reader after the new rest stands");
+            assert!(!woken, "the reader after the new rest is not woken: {rep:?}");
+        } else {
+            assert!(
+                woken,
+                "left to the rest's run, the reader was woken on the open scope: {rep:?}"
+            );
+        }
+    }
+}

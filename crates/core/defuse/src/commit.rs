@@ -1038,6 +1038,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             let (op, args) = what.key();
             let id = NodeId::from_raw(eng.nodes.reserve() as u64);
             let (n, mut pred) = built(eng, node.unit, Some(node.id), op, args.to_vec(), id);
+            placed_effect(&p.place_effects, i, &n, &mut pred);
             // (made anew in place of the one at its index, of its
             // operation, which goes: that one's definitions are its
             // prediction, so that a reader after it whose answer stays
@@ -1694,7 +1695,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 (None, None) => {
                     let (op, args) = what.key();
                     let id = NodeId::from_raw(eng.nodes.reserve() as u64);
-                    let (n, pred) = built(eng, node.unit, Some(node.id), op, args.to_vec(), id);
+                    let (n, mut pred) = built(eng, node.unit, Some(node.id), op, args.to_vec(), id);
+                    placed_effect(&p.place_effects, i, &n, &mut pred);
                     (n, Some(pred))
                 }
             };
@@ -3837,6 +3839,18 @@ pub(crate) fn built(
     let n = Node::new(id, unit, op, args, parent, SegId(0), Pos(0));
     n.effect.store(pack_effect(pred.effect), Ordering::Release);
     (Arc::new(n), pred)
+}
+
+/// A new placement's brackets from its placer's run where its operation
+/// leaves them to its own (`Ctx::predict_placed_effect`).
+fn placed_effect(effects: &[(usize, Effect)], i: usize, n: &Node, pred: &mut Predicted) {
+    if pred.effect != Effect::Pending {
+        return;
+    }
+    if let Some(&(_, e)) = effects.iter().find(|x| x.0 == i) {
+        pred.effect = e;
+        n.effect.store(pack_effect(e), Ordering::Release);
+    }
 }
 
 /// Files a new node's predictions at its label: the relations from the

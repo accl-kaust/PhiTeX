@@ -1745,6 +1745,37 @@ impl Run<'_, '_> {
         // read, `Run::read_cut`; else its text)
         let cut = if self.doc { self.read_cut(&key)? } else { None };
         if let Some(x) = cut {
+            // (a document's `\input` of a file the client cut places the
+            // file's text as the nodes after this one, so the name it was
+            // given decides which nodes those are. Where a node before this
+            // one has not run yet and may define what this run read (its
+            // name's macros among it), the name may be a guess that text
+            // changes: the run waits for it, as a read-on waits for the
+            // text before it (`Run::pull`), and that node's commit runs it
+            // again. ltnews's `\input{ltnews\theissue}` run while
+            // `\theissue` was not yet defined opened `ltnews.tex` itself, 82
+            // times at -j4, its 101 pieces placed, run and removed each
+            // time, accl 24936; a wait for every node before (csquotes)
+            // never ended, accl 24991.)
+            let read: Vec<phitex_defuse::Field> = {
+                let mut fs: Vec<phitex_defuse::Field> =
+                    self.cx.fields_read_since(0).map(|(_, f)| f).collect();
+                fs.sort_unstable_by_key(|f| f.0.raw());
+                fs.dedup();
+                fs
+            };
+            let h = self.cx.hole_before_defining(&read)?;
+            if crate::exec::obs_flag!("PHITEX_INPUT_TRACE") {
+                eprintln!(
+                    "input-wait: node {} file {key} read {} hole {:?}",
+                    self.cx.node().raw(),
+                    read.len(),
+                    h.map(phitex_defuse::NodeId::raw)
+                );
+            }
+            if h.is_some() {
+                return Err(crate::run::Halt::Hole);
+            }
             let path = crate::val::list_of(self.v, x)[0];
             self.log("open", &str_of(self.v, path))?;
             self.push_toks([Tok::cs("\u{10FFFE}eof")]);
