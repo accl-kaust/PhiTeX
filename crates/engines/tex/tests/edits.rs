@@ -1686,3 +1686,70 @@ fn a_gobbled_call_is_read_for_its_shape_only() {
         "the paragraphs expanding a gobbled call ran again: {gobbled} nodes run, {used} where they use it"
     );
 }
+
+/// Pages fired inside a group of a piece's own (one command's text, as
+/// `\printindex`'s), and the piece read `\pagetotal` after them: the run
+/// ends at a candidate a page fired at in a second pass (`Halt::Recut`),
+/// which goes on from the first pass's last checkpoint before it, not
+/// from the piece's start (the first pass ran to there as the second
+/// does). The output and the value read are those of the same text
+/// outside the group, where the piece is cut at every candidate.
+#[test]
+fn a_second_pass_goes_on_from_the_first_pass_checkpoint() {
+    let fx = common::fixtures().join("plain");
+    let prelude = common::plain();
+    let opts = |name: &str| common::options(&format!("./{name}.tex"), name, "", &fx);
+    // (lines as boxes on the main vertical list: a candidate after each,
+    // no paragraph to end at; a checkpoint every 600 commands, 50 a
+    // line, so some before the first page's candidate)
+    let words = (0..400).fold(String::new(), |mut s, k| {
+        let _ = std::fmt::Write::write_fmt(
+            &mut s,
+            format_args!(
+                "\\hbox{{w{}rd{}{}}}\n",
+                ["o", "a", "e"][k % 3],
+                k % 17,
+                "\\kern0pt x".repeat(50)
+            ),
+        );
+        s
+    });
+    let body = |group: bool| {
+        let (open, close) = if group {
+            ("\\begingroup ", "\\endgroup ")
+        } else {
+            ("", "")
+        };
+        format!(
+            "\\hsize=300pt \\vsize=200pt\n\\long\\def\\stuff{{{open}{words}\\message{{PT=\\the\\pagetotal}}{close}}}\n\\stuff\n\\bye\n"
+        )
+    };
+    let read = |log: &str| {
+        log.split("PT=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .map(str::to_owned)
+    };
+    let b = common::build(opts("recut"), Some(&prelude), &body(true));
+    let plain = common::build(opts("recutflat"), Some(&prelude), &body(false));
+    let ((bd, bl), (pd, pl)) = (b.output(), plain.output());
+    assert!(
+        common::first_difference(&bd, &pd).is_none(),
+        "the second pass's output is the text's"
+    );
+    assert!(
+        read(&pl).is_some(),
+        "the read is logged: {}",
+        common::log_excerpt(&pl)
+    );
+    assert_eq!(
+        read(&bl),
+        read(&pl),
+        "\\pagetotal as the ungrouped text reads it"
+    );
+    assert!(
+        b.stats.resumed_at_mark > 0,
+        "the second pass went on from a checkpoint ({} runs did)",
+        b.stats.resumed_at_mark
+    );
+}

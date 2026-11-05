@@ -63,6 +63,11 @@ fn every() -> u64 {
         .unwrap_or(600)
 }
 
+/// A first pass's checkpoints for its second pass ([`Run::recut_cks`]):
+/// those taken, and the indices of those it took itself with their counts
+/// of `unread` ([`Checkpoints::fresh`]).
+pub(crate) type RecutCks = (Vec<ValueId>, Vec<(usize, usize)>);
+
 /// A run's checkpoints ([`Run::ck`]).
 #[derive(Default)]
 pub(crate) struct Checkpoints {
@@ -130,7 +135,13 @@ impl Run<'_, '_> {
         if !self.ck_op() {
             return;
         }
-        let taken = self.ck.take().map(|c| c.taken).unwrap_or_default();
+        // (those a second pass went on with keep their counts of
+        // `unread`, `Run::resume_recut`)
+        let (taken, fresh) = self
+            .ck
+            .take()
+            .map(|c| (c.taken, c.fresh))
+            .unwrap_or_default();
         // (the last run's checkpoints on this text, for the cutoff: not
         // a second pass's, which ends at its candidate whatever the
         // state there)
@@ -149,7 +160,7 @@ impl Run<'_, '_> {
             next: self.cmds + every(),
             dense: matches!(self.cx.woken_by(), Some(phitex_defuse::Cause::Edited)),
             taken,
-            fresh: Vec::new(),
+            fresh,
             why: Vec::new(),
             memo: crate::state::CkMemo::default(),
             levels: phitex_defuse::FxHashMap::default(),
@@ -1194,6 +1205,13 @@ impl Run<'_, '_> {
         self.lt.strong = b & 4 != 0;
     }
 
+    /// The checkpoints taken so far, with the indices of those this run
+    /// took and their counts of `unread` ([`Checkpoints::fresh`]), taken
+    /// out: a second pass goes on from them (`Run::resume_recut`).
+    pub(crate) fn ck_taken(&mut self) -> Option<RecutCks> {
+        self.ck.take().map(|c| (c.taken, c.fresh))
+    }
+
     /// The checkpoints taken, with the run's record: the node's
     /// arguments they were taken in first.
     pub(crate) fn ck_park(&mut self) {
@@ -1248,6 +1266,14 @@ impl Run<'_, '_> {
         if self.no_resume || !self.ck_op() {
             return Ok(false);
         }
+        // (a second pass from its first pass's last checkpoint before the
+        // candidate it ends at, `Halt::Recut`: up to there the two are
+        // one run in one state, so only the stretch from it on runs again)
+        if let Some((cks, fresh)) = self.recut_cks.take()
+            && self.resume_recut(&cks, fresh)?
+        {
+            return Ok(true);
+        }
         // (an edit of the node's text, or another wake: a read of the last
         // run that moved, with the text the same; then the checkpoint must
         // stand before every read that moved: the reads made before it
@@ -1268,6 +1294,47 @@ impl Run<'_, '_> {
                 }
             },
         };
+        self.resume_from(p, edit)
+    }
+
+    /// A second pass ([`Run::stop_at`]) goes on from the last of its
+    /// first pass's checkpoints `cks` taken before the candidate it ends
+    /// at: the first pass ran to that candidate as the second does (the
+    /// cut there is the only difference, `Run::finish_candidate`), and
+    /// its reads are this run's already. Not from one a second pass took
+    /// (`ck_more`'s candidate): it went on in that pass's state. `fresh`:
+    /// those the first pass took itself ([`Checkpoints::fresh`]).
+    fn resume_recut(&mut self, cks: &[ValueId], fresh: Vec<(usize, usize)>) -> R<bool> {
+        let Some(k) = self.stop_at else {
+            return Ok(false);
+        };
+        let v = self.v;
+        for (i, &ck) in cks.iter().enumerate().rev() {
+            let c = list_of(v, ck);
+            if c.len() < 18 {
+                continue;
+            }
+            let cand = list_of(v, c[10]).get(5).map_or(i64::MAX, |&x| int_of(v, x));
+            if cand > i64::from(k) || int_of(v, c[17]) != -1 {
+                continue;
+            }
+            if crate::exec::obs_flag!("PHITEX_CK_TRACE") {
+                eprintln!(
+                    "ck: node {} second pass to candidate {k} goes on from its first pass's checkpoint {i} at command {}",
+                    self.cx.node().raw(),
+                    int_of(v, c[5])
+                );
+            }
+            let segs = self.input.text.clone();
+            return self.resume_at(cks, i, &c, segs, Some(fresh));
+        }
+        Ok(false)
+    }
+
+    /// [`Run::resume_edit`] from the parked state `p` (an edit's: a point
+    /// of the text the edit left; else one whose reads before it hold).
+    #[allow(clippy::too_many_lines)]
+    fn resume_from(&mut self, p: ValueId, edit: bool) -> R<bool> {
         let v = self.v;
         let xs = list_of(v, p);
         let Some((&old, cks)) = xs.split_first() else {
@@ -1405,6 +1472,26 @@ impl Run<'_, '_> {
             }
             return Ok(false);
         };
+        self.resume_at(cks, k, &c, new_segs, None)
+    }
+
+    /// The run goes on from checkpoint `cks[k]` (`c`, its parts) on the
+    /// text `new_segs`: its state restored, the checkpoints up to it its
+    /// own. `same_run`: a second pass going on from its first pass's
+    /// ([`Run::recut_cks`]), the indices of those it took with their
+    /// counts of `unread` then: the reads before it are this run's own,
+    /// made by that pass; else those of the last run before it stand
+    /// with this one's.
+    #[allow(clippy::too_many_lines)]
+    fn resume_at(
+        &mut self,
+        cks: &[ValueId],
+        k: usize,
+        c: &[ValueId],
+        new_segs: Vec<crate::input::Seg>,
+        same_run: Option<Vec<(usize, usize)>>,
+    ) -> R<bool> {
+        let v = self.v;
         let li = usize::try_from(int_of(v, c[0])).unwrap_or(0);
         let loc = usize::try_from(int_of(v, c[1])).unwrap_or(0);
         // (one taken anywhere: its input whole; at a line of the text,
@@ -1473,7 +1560,7 @@ impl Run<'_, '_> {
             }
         }
         self.cont_lines = lines;
-        self.ck_restore(&c);
+        self.ck_restore(c);
         if let Some(&x) = c.get(18) {
             self.ck_run_restore(x);
         }
@@ -1502,16 +1589,21 @@ impl Run<'_, '_> {
         // (the last run's reads made before the checkpoint stand with
         // this run's, the rest dropped; a checkpoint with no count of
         // them, every read kept)
-        match c.get(14).map(|&x| usize::try_from(int_of(v, x))) {
-            Some(Ok(made)) => self.cx.goes_on_after_reads(made),
-            _ => self.cx.goes_on_from_edit(),
-        }
+        let fresh = if let Some(fresh) = same_run {
+            fresh.into_iter().filter(|&(i, _)| i <= k).collect()
+        } else {
+            match c.get(14).map(|&x| usize::try_from(int_of(v, x))) {
+                Some(Ok(made)) => self.cx.goes_on_after_reads(made),
+                _ => self.cx.goes_on_from_edit(),
+            }
+            Vec::new()
+        };
         // (the checkpoints up to this one stand for the next run)
         self.ck = Some(Box::new(Checkpoints {
             next: self.cmds + every(),
             dense: matches!(self.cx.woken_by(), Some(phitex_defuse::Cause::Edited)),
             taken: cks[..=k].to_vec(),
-            fresh: Vec::new(),
+            fresh,
             why: Vec::new(),
             memo: crate::state::CkMemo::default(),
             levels: phitex_defuse::FxHashMap::default(),
