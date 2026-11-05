@@ -778,7 +778,7 @@ fn a_name_built_from_a_stepped_counter_reads_through_the_name() {
             };
             let _ = write!(
                 s,
-                "\\global\\advance\\cn 1 \\edef\\w{{\\write1{{n{i}=\\the\\count200.}}}}\\w{own}\
+                "\\global\\advance\\cn 1 \\edef\\w{{\\write1{{n{i}=\\the\\count200.}}}}\\w{{}}{own}\
                  Paragraph {i} \\ifcsname pg@{num}\\endcsname has\\else lacks\\fi{{}} \
                  \\expandafter\\ifx\\csname pg@{less}\\endcsname\\relax relax\\else set\\fi{{}} \
                  [\\csname pg@{num}\\endcsname] \
