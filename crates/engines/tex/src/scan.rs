@@ -995,6 +995,21 @@ impl Run<'_, '_> {
         let was = self.scanner.replace((status, self.cur.tok));
         let r = self.scan_toks_in(macro_def, xpand);
         self.scanner = was;
+        // (§338's error met in the scan: logged now, its runaway list the
+        // parameter text and the body as scanned, §306's `def_ref`)
+        if self.runaway_due.is_some() {
+            match &r {
+                Ok((params, body)) => {
+                    let mut all = params.clone();
+                    if macro_def {
+                        all.push(crate::val::end_match());
+                    }
+                    all.extend_from_slice(body);
+                    self.take_runaway(Some(&all))?;
+                }
+                Err(_) => self.take_runaway(None)?,
+            }
+        }
         r
     }
 

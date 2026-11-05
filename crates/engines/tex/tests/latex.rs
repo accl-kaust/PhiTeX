@@ -2849,3 +2849,92 @@ fn latex_examples_do_not_run_again_on_a_renamed_anchor() {
         }
     }
 }
+
+/// A `\label` added to a paragraph adds a key to the `.aux` the
+/// `\begin{document}` run reads back per field: that run reads the keys
+/// it looks up through the read-back's child (docs/spec-readback-child.md),
+/// not the key set, so it does not run again; a `\ref` to the new label
+/// finds it, and every edited PDF equals a cold build's.
+#[test]
+fn a_new_label_leaves_the_read_back_run_standing() {
+    use std::fmt::Write as _;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rb-label");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    // (pages of text between the start and the end: `\\begin{document}`'s
+    // run is not the end's, whose `\\@testdef`s compare every label)
+    let filler: String = (0..40).fold(String::new(), |mut s, i| {
+        let _ = write!(
+            s,
+            "Paragraph {i} of filler, long enough to make a line or two when set in the \
+             article class's ten point roman, and a few words more.\n\n"
+        );
+        s
+    });
+    let doc = |extra: &str, re: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\usepackage{{hyperref}}\n\
+             \\newcommand\\sect[1]{{\\section{{#1}}}}\n\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{sec:intro}}\nFirst section, see \\ref{{sec:last}}.\n\n\
+             \\section{{Middle}}\nText of the second section.{extra}\n\n{filler}\
+             \\section{{Last}}\\label{{sec:last}}\nThe end{re}.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("rblabel", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc("", ""));
+        let mut prev = "";
+        for (extra, re) in [
+            ("\\label{new}", ""),
+            ("\\label{new}", ", see \\ref{new}"),
+            ("", ""),
+            ("\\label{newer}", ""),
+        ] {
+            b.edit(&doc(extra, re));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {extra:?} {re:?}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(extra, re));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {extra:?} {re:?}"
+            );
+            // (the `\\begin{document}` run reads the keys it uses;
+            // `\\enddocument`'s piece compares every label, `\\@testdef`,
+            // so reads the key set, as TeX's does: one run at most)
+            let mut on_keys: Vec<&str> = r
+                .iter()
+                .filter(|x| {
+                    !x.starts_with("readback") && !x.starts_with("files") && x.contains("wkeys:")
+                })
+                .filter_map(|x| x.rsplit_once(" [").map(|(_, n)| n))
+                .collect();
+            on_keys.sort_unstable();
+            on_keys.dedup();
+            assert!(
+                on_keys.len() <= 1,
+                "-j{threads} {extra:?} {re:?}: the document's start read the key set again: {r:?}"
+            );
+            // (the read-back's child answers for the keys: a key added or
+            // gone runs it)
+            if extra != prev {
+                assert!(
+                    r.iter().any(|x| x.starts_with("readback")),
+                    "-j{threads} {extra:?} {re:?}: no read-back child ran: {r:?}"
+                );
+            }
+            prev = extra;
+        }
+    }
+}

@@ -252,6 +252,16 @@ pub(crate) struct LoopState {
     pub began: Option<ValueId>,
 }
 
+/// Which [`LoopState::after`] a rest that holds what it made places its
+/// first page's finisher by ([`Run::hold_for_start_after`]).
+#[derive(Clone, Copy)]
+enum After {
+    /// The kept state's.
+    Kept,
+    /// The start's as it is now.
+    Now(Option<(NodeId, NodeId)>),
+}
+
 /// The tag of a parked [`LoopState`] of this version.
 const STATE_TAG: &str = "\u{1}pages-loop-12";
 
@@ -792,7 +802,30 @@ impl Run<'_, '_> {
                     // 1 048 577 times, accl 23339)
                     // (its state stale, none offered: its last one, as
                     // where its start is not decided)
-                    if took.is_none() {
+                    // (unless the first page it keeps had its finisher
+                    // placed after the finisher of the page it starts
+                    // after, and that page's loop node has since fired it
+                    // in another piece ([`LoopState::after`] from the
+                    // start it has now): kept, its finisher moved with
+                    // that one and stood before the piece its own page
+                    // fired in, its routine read the text there as it was
+                    // before that piece and refuted itself for ever, and
+                    // this rest's wake by the give-back it waits for was
+                    // held for a quiet point that never came (revtex 4.1's
+                    // author guide at -j1: one finisher run 666 000 times
+                    // in 40 s, accl 24697, 24859). Its pages are placed
+                    // again as they were, their finishers where they
+                    // belong now)
+                    let kept = if took.is_none() {
+                        self.cx.last_state().and_then(|x| LoopState::decode(v, x))
+                    } else {
+                        Some(old.clone())
+                    };
+                    if let Some(k) = kept.filter(|k| {
+                        k.after != ls.after && !(k.checkpoints.is_empty() && k.beyond.is_empty())
+                    }) {
+                        self.hold_for_start_after(Some(&k), false, After::Now(ls.after));
+                    } else if took.is_none() {
                         self.wait_keeping(None);
                     } else if old.checkpoints.is_empty()
                         && old.beyond.is_empty()
@@ -1082,13 +1115,19 @@ impl Run<'_, '_> {
         let beside = self.cx.has_other_threads();
         self.rest_begun_at = Some(p.node);
         let gave = match out {
-            phitex_defuse::FieldAt::Def(x, fin) => page_out_parts(v, x)
-                .filter(|o| o.1 == r.page || (beside && o.0 == r.guess))
-                .map(|o| {
-                    self.rest_on_guess = o.1 != r.page;
-                    ls.after = fin.map(|f| (p.node, f));
-                    o.0
-                }),
+            // (its finisher, the definer of the give-back, whether or not
+            // that is in for the page as it is now: the one this rest's
+            // first page firing in the same piece has its finisher placed
+            // after)
+            phitex_defuse::FieldAt::Def(x, fin) => {
+                ls.after = fin.map(|f| (p.node, f));
+                page_out_parts(v, x)
+                    .filter(|o| o.1 == r.page || (beside && o.0 == r.guess))
+                    .map(|o| {
+                        self.rest_on_guess = o.1 != r.page;
+                        o.0
+                    })
+            }
             _ => None,
         };
         let Some(gave) = gave else {
@@ -1122,6 +1161,13 @@ impl Run<'_, '_> {
     /// one cheap run each. The state is parked with the start forgotten
     /// ([`Run::wait_keeping`]). A rest that made nothing holds nothing.
     fn hold_for_start(&mut self, old: Option<&LoopState>, child: bool) {
+        self.hold_for_start_after(old, child, After::Kept);
+    }
+
+    /// [`Run::hold_for_start`], the first page's finisher placed by
+    /// `after`: the kept state's [`LoopState::after`] or the start's as
+    /// it is now.
+    fn hold_for_start_after(&mut self, old: Option<&LoopState>, child: bool, after: After) {
         let v = self.v;
         let me = self.cx.node();
         let st = match old {
@@ -1138,7 +1184,10 @@ impl Run<'_, '_> {
         self.loop_keys = LoopKeys::of(&st, me);
         let mut ls = LoopState {
             base: st.base,
-            after: st.after,
+            after: match after {
+                After::Kept => st.after,
+                After::Now(a) => a,
+            },
             rest_at: st.rest_at,
             ..LoopState::default()
         };
