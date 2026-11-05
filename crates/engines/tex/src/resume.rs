@@ -232,7 +232,7 @@ impl Run<'_, '_> {
     /// joined by `+`.
     fn ck_refusal(&self) -> String {
         let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
-        let checks: [(bool, &'static str); 24] = [
+        let checks: [(bool, &'static str); 25] = [
             (self.input.levels.is_empty(), "no input"),
             (
                 !self.input.levels.iter().skip(1).all(toks)
@@ -263,6 +263,7 @@ impl Run<'_, '_> {
             (!self.incs.is_empty(), "incompleat noad"),
             (!self.seeded.is_empty(), "seeded"),
             (self.defer_hit.is_some(), "defer"),
+            (self.rb.is_some(), "read-back child"),
             (self.mode_zero, "mode zero"),
             (
                 self.fin_box.is_some() || self.tool_cut.is_some(),
@@ -325,6 +326,7 @@ impl Run<'_, '_> {
             || !self.incs.is_empty()
             || !self.seeded.is_empty()
             || self.defer_hit.is_some()
+            || self.rb.is_some()
             || self.mode_zero
             || self.fin_box.is_some()
             || self.tool_cut.is_some()
