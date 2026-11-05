@@ -1502,6 +1502,19 @@ pub(crate) fn requeue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>) {
 /// commit has checked (`Node::committing`), it is marked as `mark_dirty`
 /// marks it.
 pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
+    if let Cause::Changed { field, .. } = wake.cause
+        && crate::commit::ftrace(eng, field)
+    {
+        eprintln!(
+            "ftrace: mark-stale {} node {} state {:?} held {} woke {:?} t {}",
+            eng.values().as_str(field.0).unwrap_or_default(),
+            n.id.raw(),
+            n.state(),
+            held_edge(eng, &wake, n),
+            n.woke.lock().as_ref().map(|w| w.cause.clone()),
+            eng.now_ns()
+        );
+    }
     if held_edge(eng, &wake, n) {
         // (a running reader is told too: a run on what moved may never
         // end, a TeX loop on a stale float state, and the quiet point the
@@ -1529,7 +1542,9 @@ pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: 
 fn note_stale(n: &Node, wake: Wake) {
     let mut s = n.stale_wake.lock();
     match &*s {
-        Some(_) => {}
+        // (the cause told is the first: the run this one is for checks
+        // what it kept, `Node::woke_merged`)
+        Some(_) => n.woke_merged.store(true, Ordering::SeqCst),
         None => *s = Some(wake),
     }
     n.stale.store(true, Ordering::Release);
@@ -1662,6 +1677,16 @@ pub(crate) fn mark_dirty_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
 /// that change made stale.
 fn merge_woke(eng: &Engine, n: &Node, wake: Wake) {
     let mut w = n.woke.lock();
+    // (two causes, one told: the run checks the reads it keeps, which the
+    // one dropped may have moved (`Node::woke_merged`). A loop rest woken
+    // by the hole it parked at filling, its start page's give-back changed
+    // meanwhile, went on from its tail on the give-back it had and kept
+    // that read unchecked, as one woken by the answer it parked on alone:
+    // argumentation-doc at -j4, a page's float and its links from the
+    // routine's earlier run, 2 to 7 builds in 60, accl 24790, 24989)
+    if w.is_some() {
+        n.woke_merged.store(true, Ordering::SeqCst);
+    }
     if !keeps_woke(eng, w.as_ref(), &wake.cause) {
         *w = Some(wake);
     }

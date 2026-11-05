@@ -89,6 +89,12 @@ pub(crate) struct Node {
     /// set to the commit: what the commit does not check of itself, the
     /// filed reads, it checks when this says one may have moved.
     pub(crate) asked: AtomicBool,
+    /// Its wake is more than one: a re-ask came while it was queued (or a
+    /// re-ask kept for a run's check while one was) and only one cause is
+    /// told ([`crate::sched`]'s `merge_woke`, `note_stale`). The next run
+    /// takes it (`Ctx::new`): woken by the answer it parked on, it is not
+    /// woken by that answer alone, and its commit checks the reads it kept.
+    pub(crate) woke_merged: AtomicBool,
     /// Fields whose walks stopped at it while it had not committed
     /// (`commit::first_hole`), each with the scope depth of the definition
     /// walked from: walked on from it when it commits, is taken or is
@@ -289,6 +295,7 @@ impl Node {
             stale_wake: Mx::new(None),
             filed_floor: AtomicU32::new(0),
             asked: AtomicBool::new(false),
+            woke_merged: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             stopped: Mx::new(Vec::new()),
             waiters: Mx::new(Vec::new()),
@@ -656,8 +663,8 @@ pub(crate) struct Product {
     /// to go back before it.
     pub(crate) woken_at: Option<NodeId>,
     /// The run was woken by the answer its last run parked on
-    /// (`Ctx::parked_on`): a wake merged into it would have named another
-    /// cause, so the kept reads it does not check stood until it ran.
+    /// (`Ctx::parked_on`), and by nothing else (`Node::woke_merged`), so
+    /// the kept reads it does not check stood until it ran.
     pub(crate) on_park: bool,
     /// `Ctx::settle_now`: its definitions reach readers outside the
     /// settling layer at once.

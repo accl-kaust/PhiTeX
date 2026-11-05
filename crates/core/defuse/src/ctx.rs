@@ -50,6 +50,8 @@ pub struct Ctx<'a> {
     /// Why this run was asked for, as it began (`woken_by`): a cause a
     /// re-ask stores while it runs is the next run's.
     pub(crate) woke: Option<Cause>,
+    /// My wake was more than one cause (`Node::woke_merged`, taken).
+    woke_merged: bool,
     /// My last run's placements by operation and arguments, made on the
     /// first `placed_output_or`.
     placed_keys: Option<PlacedKeys>,
@@ -126,6 +128,7 @@ impl<'a> Ctx<'a> {
             stashed: Vec::new(),
             stop_at: None,
             woke: me.woke.lock().as_ref().map(|w| w.cause.clone()),
+            woke_merged: me.woke_merged.swap(false, std::sync::atomic::Ordering::SeqCst),
             placed_keys: None,
             last: me.run_record(),
             stuck: None,
@@ -143,12 +146,13 @@ impl<'a> Ctx<'a> {
             Some(Cause::Range { by, .. } | Cause::Changed { site: Some(by), .. }) => Some(by),
             _ => None,
         };
-        self.product.on_park = match &self.woke {
-            Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => {
-                *self.me.parked_on.lock() == Some(*field)
-            }
-            _ => false,
-        };
+        self.product.on_park = !self.woke_merged
+            && match &self.woke {
+                Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => {
+                    *self.me.parked_on.lock() == Some(*field)
+                }
+                _ => false,
+            };
         self.product
     }
 
