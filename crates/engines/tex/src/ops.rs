@@ -88,7 +88,20 @@ fn hint_log(
 /// what it used for the finishers of pages firing at candidates it went
 /// on past ([`Run::order_after_fires`]).
 fn pass(r: &mut Run<'_, '_>, body: &mut impl FnMut(&mut Run<'_, '_>) -> R<()>) -> R<()> {
-    let res = body(r);
+    let mut res = body(r);
+    // (a halt raised where a command could not return it (`Run::raise`)
+    // that no `get_next` took before the run ended: a read that did not
+    // answer, so what the run did after it rests on nothing it read. It
+    // ends the run as it would have at the next token. Dropped, a page
+    // parameter's marker an `\penalty` raised for, its read held at the
+    // settling layer's frontier, was lost when the penalty's candidate
+    // cut the run at once: the piece's items lacked it, every read held,
+    // and the next page began with `\savingvdiscards` as it had been,
+    // corpus_repros::page_discards at -j4 about 1 in 3)
+    if matches!(res, Ok(()) | Err(Halt::Cut)) && matches!(r.halt, Some(Halt::Stop(_) | Halt::Hole))
+    {
+        res = Err(r.halt.take().expect("the halt raised"));
+    }
     if matches!(res, Ok(()) | Err(Halt::Cut)) {
         r.order_after_fires();
     }
