@@ -530,6 +530,8 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
                 std::cmp::Ordering::Greater => 1,
             }))
         }
+        // (answered at a position only, `through_at`)
+        Step::Derived(_) => None,
         Step::Each(_) | Step::Indices(_) | Step::Keys(_) | Step::Rank(_) | Step::Ranks(_) | Step::Distinct => {
             unimplemented!("path step: next run")
         }
@@ -642,12 +644,67 @@ pub(crate) fn apply_path(eng: &Engine, v: Option<ValueId>, p: PathId) -> Option<
 /// commit applies it after its segment's lock, never under it, where a
 /// projection's allocations would take the allocator's lock while the
 /// other threads wait for the segment.
+/// A derived read's path (`Step::Derived`) too: its answer reads two
+/// fields where its reader stands, which takes their segments' locks.
 pub(crate) fn client_path(eng: &Engine, p: PathId) -> bool {
     p != PathId::WHOLE
         && p != SITE
         && eng
             .path_steps(p)
-            .is_some_and(|s| s.iter().any(|x| matches!(x, Step::Proj(_))))
+            .is_some_and(|s| s.iter().any(|x| matches!(x, Step::Proj(_) | Step::Derived(_))))
+}
+
+/// The spec of a derived path's first step (`Step::Derived`), if it has one.
+pub(crate) fn derived_spec(eng: &Engine, p: PathId) -> Option<ValueId> {
+    if p == PathId::WHOLE || p == SITE {
+        return None;
+    }
+    match eng.path_steps(p)?.first()? {
+        Step::Derived(s) => Some(*s),
+        _ => None,
+    }
+}
+
+/// The field a derived read's spec names where `base` has value `v`:
+/// `prefix`, the digits of `v + j`, `suffix`.
+pub(crate) fn derived_name(vals: &Values, spec: ValueId, v: Option<ValueId>) -> Option<Field> {
+    let parts = vals.with_list(spec, <[ValueId]>::to_vec)?;
+    let [_, prefix, j, suffix] = parts[..] else {
+        return None;
+    };
+    let v = v.and_then(|x| vals.as_int(x)).unwrap_or(0);
+    let n = v.checked_add(vals.as_int(j)?)?;
+    let name = format!("{}{n}{}", vals.as_str(prefix)?, vals.as_str(suffix)?);
+    Some(Field(vals.str(&name)))
+}
+
+/// The base field of a derived read's spec.
+pub(crate) fn derived_base(vals: &Values, spec: ValueId) -> Option<Field> {
+    vals.with_list(spec, |xs| xs.first().copied()).flatten().map(Field)
+}
+
+/// The field a derived read at `anchor` names now (None: the anchor gone).
+pub(crate) fn derived_field_at(eng: &Engine, spec: ValueId, anchor: NodeId, inclusive: bool) -> Option<Field> {
+    let base = derived_base(eng.values(), spec)?;
+    let v = reaching_at(eng, base, anchor, inclusive)?;
+    derived_name(eng.values(), spec, v.value)
+}
+
+/// A read through path `p` at `anchor` (`At::Before`/`AfterOwn`, the
+/// reader's own position as `Before` itself) of the definition `r`: a
+/// derived path answers its composed look-up there, any other `through`.
+pub(crate) fn through_at(eng: &Engine, r: Reaching, p: PathId, anchor: NodeId, inclusive: bool) -> Option<ValueId> {
+    let Some(spec) = derived_spec(eng, p) else {
+        return through(eng, r, p);
+    };
+    let g = derived_field_at(eng, spec, anchor, inclusive)?;
+    let x = reaching_at(eng, g, anchor, inclusive)?.value;
+    let steps = eng.path_steps(p)?;
+    let mut cur = x;
+    for s in &steps[1..] {
+        cur = step(eng, cur, *s);
+    }
+    cur
 }
 
 /// `Reaching` through a path, `SITE` giving the defining node.
@@ -920,14 +977,17 @@ fn answer_on_layout(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, memo
                 let d = depth_of(eng, me.id)?;
                 return apply_path(eng, Some(eng.values().int(i64::from(d))), path);
             }
-            let r = match *at {
-                Anchor::Me => reaching_at(eng, *f, me.id, false)?,
-                Anchor::Before(n) => reaching_at(eng, *f, n, false)?,
-                Anchor::AfterOwn(n) => reaching_at(eng, *f, n, true)?,
-                Anchor::End(u) => reaching_visible(eng, *f, Pos(eng.unit(u).end.0 - 1), true),
-                Anchor::Final => final_reaching(eng, *f),
+            let (r, pos) = match *at {
+                Anchor::Me => (reaching_at(eng, *f, me.id, false)?, Some((me.id, false))),
+                Anchor::Before(n) => (reaching_at(eng, *f, n, false)?, Some((n, false))),
+                Anchor::AfterOwn(n) => (reaching_at(eng, *f, n, true)?, Some((n, true))),
+                Anchor::End(u) => (reaching_visible(eng, *f, Pos(eng.unit(u).end.0 - 1), true), None),
+                Anchor::Final => (final_reaching(eng, *f), None),
             };
-            through(eng, r, path)
+            match pos {
+                Some((n, incl)) => through_at(eng, r, path, n, incl),
+                None => through(eng, r, path),
+            }
         }
         ReadKind::Env { f } => apply_path(eng, env_value(eng, *f), path),
         ReadKind::Fold { f, from, to, incl } => {
@@ -1183,7 +1243,7 @@ pub(crate) fn reader_answer(eng: &Engine, f: Field, r: &Reader) -> Option<ValueI
             return apply_path(eng, Some(eng.values().int(i64::from(d))), r.path);
         }
         let rc = reaching_at(eng, f, r.anchor, r.inclusive)?;
-        through(eng, rc, r.path)
+        through_at(eng, rc, r.path, r.anchor, r.inclusive)
     })
 }
 

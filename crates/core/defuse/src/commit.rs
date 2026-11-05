@@ -1199,6 +1199,18 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     path: r.path,
                     seen: r.seen,
                 };
+                // (a derived read's witness, kept from an earlier run (one
+                // that stood, a state resumed from): filed on the field its
+                // name gives now as well, before the lock, so a change of
+                // that field asks it again)
+                if matches!(at, Anchor::Me | Anchor::Before(_) | Anchor::AfterOwn(_))
+                    && let Some(spec) = read::derived_spec(eng, r.path)
+                    && read::derived_base(eng.values(), spec) != Some(*f)
+                    && let Some(g) = read::derived_field_at(eng, spec, anchor, inclusive)
+                    && g != *f
+                {
+                    here_reads.push((g, rec.clone()));
+                }
                 match at {
                     // (a loop-back read: filed under the field, re-asked when
                     // the last definition of it lands, changes or goes)
@@ -3143,6 +3155,20 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
     if now != r.seen {
         note_refute(eng, f, r.node, by, r.seen, now);
     }
+    // (a derived read that stands where its name moved: the field named
+    // now gets a witness, so its own change re-asks the reader; then it is
+    // asked again, for a definition of that field landing meanwhile, whose
+    // walk passed before the witness was there)
+    let now = if now == r.seen
+        && let Some(spec) = read::derived_spec(eng, r.path)
+        && let Some(g) = read::derived_field_at(eng, spec, r.anchor, r.inclusive)
+        && g != f
+        && file_witness(eng, g, r)
+    {
+        reader_answer(eng, g, r)
+    } else {
+        now
+    };
     if now != r.seen
         && mark_stale(
             eng,
@@ -3156,6 +3182,35 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
         )
     {
         st.woken += 1;
+    }
+}
+
+/// Files reader `r` again on field `g` (a derived read's witness,
+/// `Step::Derived`), in the segment its anchor stands in, unless the node's
+/// record is filed there already; under that segment's lock, the reader
+/// index with it. False where the anchor is gone or it was there.
+fn file_witness(eng: &Engine, g: Field, r: &Reader) -> bool {
+    let a = eng.node(r.anchor);
+    loop {
+        if a.state() == State::Gone {
+            return false;
+        }
+        let seg = eng.seg(a.seg_hint());
+        let mut inner = seg.inner.write();
+        if inner.nodes.get(&a.pos_hint()) != Some(&r.anchor) {
+            continue;
+        }
+        if inner.readers.get(&g).is_some_and(|rs| {
+            rs.iter()
+                .any(|x| x.node == r.node && x.serial == r.serial && x.path == r.path)
+        }) {
+            return false;
+        }
+        let mut spare = Vec::new();
+        if file_reader(eng, &mut inner, g, r.clone(), &mut spare) {
+            eng.readers.add(g, seg.lo, seg.id);
+        }
+        return true;
     }
 }
 
