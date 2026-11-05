@@ -2911,3 +2911,75 @@ fn a_long_run_refusing_its_read_back_child_ends() {
         );
     }
 }
+
+/// showexpl's code examples under hyperref (the circuitikz manual's
+/// shape): each `LTXexample` writes its code to `\jobname.tmp` and reads
+/// it back, and after that its caption step's `\hyper@makecurrent`
+/// `\let`s `\HyperLocalCurrentHref`, which the last heading set, never
+/// looking at it. A section added before them renames every later
+/// heading's anchor; the examples' products do not change, so none may
+/// run again on that field. Each did, whole: the value its `\let`
+/// replaced was read to keep it for the lines written to the file later
+/// (`Run::note_pre`); now it is kept unseen, an alias of the value
+/// reaching the run. In the manual, 282 such runs, 24.9 s of the edit's
+/// 109 s of runs at -j8 (mc 80209, the read found by `PHITEX_LOAD_TRACE`
+/// in mc 80218 and 80224). The edited PDF equals a cold build's.
+#[test]
+fn latex_examples_do_not_run_again_on_a_renamed_anchor() {
+    use std::fmt::Write as _;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-showexpl-anchor");
+    let _ = std::fs::create_dir_all(&dir);
+    let doc = |added: bool| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\usepackage{showexpl}\n\\usepackage{hyperref}\n\\begin{document}\n",
+        );
+        if added {
+            s.push_str("\\section{An added section}\n\n");
+        }
+        for k in 0..4 {
+            let _ = write!(
+                s,
+                "\\section{{Part {k}}}\nSome text of part {k}.\n\n\\begin{{LTXexample}}\nExample {k}: \\textbf{{bold}}.\n\\end{{LTXexample}}\n\nMore text after example {k}.\n\n"
+            );
+        }
+        s.push_str("\\end{document}\n");
+        s
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("showexpl", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(false));
+        for added in [true, false] {
+            b.edit(&doc(added));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!(
+                    "  -j{threads} added {added}: rerun {}",
+                    x.chars().take(200).collect::<String>()
+                );
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(added));
+            let d = common::first_difference(&b.output().0, &cold.output().0);
+            assert!(
+                d.is_none(),
+                "-j{threads} added {added}: edit differs from cold: {d:?}"
+            );
+            let bad: Vec<&String> = r
+                .iter()
+                .filter(|x| x.contains("HyperLocalCurrentHref"))
+                .collect();
+            assert!(
+                bad.is_empty(),
+                "-j{threads} added {added}: runs again on the anchor a \\let replaces: {bad:?}"
+            );
+        }
+    }
+}
