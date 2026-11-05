@@ -523,9 +523,11 @@ export class PreviewSession {
     // (a core that ran out of the memory it got: the same document
     // outgrows it again, so it is said, not reopened, the host's words
     // naming the size and what to close)
+    // (said as the host's words alone: which thread trapped is no one's business)
     if (/needs more than the [\d.]+ GiB of memory/.test(why)) {
-      this.sink.error(why);
-      this.sink.connection?.(false, why);
+      const words = why.replace(/^core trapped \(thread \d+\): /, "");
+      this.sink.error(words);
+      this.sink.connection?.(false, words);
       return;
     }
     // (a trap again with no good build between is the same trap, the

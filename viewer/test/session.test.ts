@@ -230,7 +230,7 @@ test("a core that outgrew its memory is said, not reopened", async () => {
   await w.core.request({ op: "status" });
   await w.chain;
   assert.deepEqual(ops, ["status"], "no reopen");
-  assert.deepEqual(said, [why]);
+  assert.deepEqual(said, [why.replace("core trapped (thread 2): ", "")], "the host's words, not which thread trapped");
   assert.equal(w.opened, false);
 });
 
@@ -252,7 +252,7 @@ test("a core that trapped mid-build is said from the host's event, no request ne
   const why = "core trapped (thread 4): This document needs more than the 2 GiB of memory PhiTeX's engine got in this tab: close them.";
   tell({ event: "trapped", error: why });
   await w.chain;
-  assert.deepEqual(said, [why], "said, not reopened");
+  assert.deepEqual(said, [why.replace("core trapped (thread 4): ", "")], "said, not reopened");
   assert.deepEqual(ops, []);
   assert.equal(w.opened, false);
   // (another trap, a panic: reopened once)

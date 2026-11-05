@@ -4641,8 +4641,9 @@ var PreviewSession = class {
     if (!this.opened) return;
     this.opened = false;
     if (/needs more than the [\d.]+ GiB of memory/.test(why)) {
-      this.sink.error(why);
-      this.sink.connection?.(false, why);
+      const words2 = why.replace(/^core trapped \(thread \d+\): /, "");
+      this.sink.error(words2);
+      this.sink.connection?.(false, words2);
       return;
     }
     this.traps++;
