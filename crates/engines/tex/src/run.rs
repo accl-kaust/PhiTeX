@@ -846,6 +846,29 @@ pub(crate) struct Run<'c, 'a> {
     /// symbol there instead of forcing it (docs/note-relative-counters.md
     /// §2.4, `Run::if_operand`). Deeper expansions force as anywhere.
     pub(crate) size_stop: Option<u32>,
+    /// A control sequence name or a number being scanned at this
+    /// expansion depth: `get_x_token` stops at a register's symbol there
+    /// instead of forcing it (docs/note-relative-counters.md §2.2: a
+    /// relative name, a comparison, an expression's first factor;
+    /// [`crate::defer::name_chars`]). Deeper expansions force as anywhere.
+    pub(crate) reg_stop: Option<u32>,
+    /// A derived name's symbol ([`crate::defer::DName`]) may be the
+    /// token fetched now: by an expanding fetch (its expansion is its
+    /// meaning's, read through the derived name) or `\ifx`'s operands.
+    /// Anywhere else it is made concrete as it is fetched.
+    pub(crate) d_ok: bool,
+    /// `\numexpr` scanned as a deferring scan's one quantity
+    /// ([`Run::defer_ok`]): its value may be a register's symbol plus a
+    /// constant ([`Run::defer_sym`]).
+    pub(crate) expr_defer: bool,
+    /// What a deferring scan met: a register's symbol with its steps
+    /// (`j`), the register's or an expression's on it; the caller makes
+    /// the symbol ([`crate::defer::symbol_with`]).
+    pub(crate) defer_sym: Option<(Loc, i32)>,
+    /// Which derived names the run binds itself, by (prefix, suffix):
+    /// the run's own definitions looked over up to the count kept
+    /// ([`crate::defer::binds_like`]).
+    pub(crate) derived_own: crate::FxHashMap<(String, String), (usize, bool)>,
     /// The path `[Step::Present]`, interned once a run ([`Run::lb_present`]).
     pub(crate) present_path: Option<phitex_defuse::PathId>,
     /// Where the conditional text being skipped began (§494's
@@ -1359,6 +1382,11 @@ impl<'c, 'a> Run<'c, 'a> {
             in_skip: false,
             expand_depth: 0,
             size_stop: None,
+            reg_stop: None,
+            d_ok: false,
+            expr_defer: false,
+            defer_sym: None,
+            derived_own: crate::FxHashMap::default(),
             present_path: None,
             skip_from: (None, 0, None, None),
             skip_first: Vec::new(),
@@ -5012,6 +5040,21 @@ impl<'c, 'a> Run<'c, 'a> {
     /// [`Self::set_cur_cs`] past its common case.
     #[inline(never)]
     fn set_cur_cs_rest(&mut self, tok: Tok) -> R<()> {
+        // (a derived name's symbol fetched where it may not stay one,
+        // [`Run::d_ok`]: its concrete name, the register forced; never a
+        // name about to be defined)
+        if crate::defer::is_dname(tok) {
+            if self.d_ok && !self.bare {
+                self.cur = Cur {
+                    tok,
+                    cmd: cmd::SYM,
+                    chr: 0,
+                };
+                return Ok(());
+            }
+            let g = crate::defer::dname_concrete(self, tok)?;
+            return self.set_cur_cs(g);
+        }
         if self.bare {
             // (a name about to be defined: its present meaning is never
             // used, so it is not read)
@@ -5332,6 +5375,31 @@ impl<'c, 'a> Run<'c, 'a> {
             phitex_defuse::Step::Cmp(v.int(k)),
         ]);
         Ok(self.cx.read_path(f, p)?.map_or(0, |x| int_of(v, x)))
+    }
+
+    /// The order of integer register `loc`'s value reaching the piece plus
+    /// `j` ([`crate::scan::Num::Reg`]) against `k`: -1, 0 or 1, read as
+    /// that alone (the reaching value against `k - j`, `Step::Cmp`), so
+    /// a run stepping the register before this piece moves this run only
+    /// where the outcome moves. Where the field holds no integer (an
+    /// alias, none) or `k - j` overflows: forced, an ordinary read.
+    pub(crate) fn reg_order(&mut self, loc: Loc, j: i32, k: i32) -> R<i64> {
+        let v = self.v;
+        if let Some(d) = k.checked_sub(j)
+            && !crate::exec::obs_flag!("PHITEX_NO_DERIVED")
+        {
+            let f = self.loc_field(loc);
+            let p = self
+                .cx
+                .path(&[phitex_defuse::Step::Cmp(v.int(i64::from(d)))]);
+            if let Some(x) = self.cx.read_path(f, p)?
+                && crate::defer::int_of(v, x).is_some()
+            {
+                return Ok(int_of(v, x));
+            }
+        }
+        let n = self.num_int(crate::scan::Num::Reg(loc, j))?;
+        Ok(if n < k { -1 } else { i64::from(n > k) })
     }
 
     /// The number of `tok`'s meaning (a macro [`Run::num_lookup`] found
