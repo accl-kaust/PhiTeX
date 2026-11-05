@@ -811,6 +811,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         p.output = r.output;
         p.effect = Some(r.effect);
         p.claim = r.claim;
+        p.claim_all = r.claim_all;
         p.placements.clear();
         if moved {
             p.ranks.clear();
@@ -1106,6 +1107,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // (`placed`, swapped in under the lock)
         placed: Vec::new(),
         claim: p.claim,
+        claim_all: p.claim_all,
         effect: if brackets == Brackets::default() {
             Effect::None
         } else {
@@ -2111,6 +2113,16 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
     }
     if p.claim > 0 || last.as_ref().is_some_and(|r| r.claim > 0) {
+        // (the claim the record keeps, of the rest or of siblings, as its
+        // count says: a run that published nothing new (`Ctx::unchanged`)
+        // keeps its last run's claim, and the flag its own run's walk
+        // left (a claim of none: siblings) read that last run's claim of
+        // the rest, usize::MAX, as one of every sibling. A page's
+        // finisher whose routine ended in a fatal error on values not
+        // settled, run again with its page stale, took 43 finishers of
+        // the next loop that way, inert ever after: thumbs at -j8, a
+        // timeout in 48, accl 25360)
+        node.claim_all.store(p.claim_all, Ordering::Release);
         apply_claim(eng, ww, node, p.claim);
     }
     // (the frontier this run moved, before any reader is asked again: one
@@ -4532,6 +4544,7 @@ pub(crate) fn edit_placed(eng: &Engine, placer: NodeId, f: impl FnOnce(&mut Vec<
         sources: r.sources.clone(),
         placed,
         claim: r.claim,
+        claim_all: r.claim_all,
         effect: r.effect,
         provisional: r.provisional,
         state: r.state,
@@ -5814,6 +5827,81 @@ mod tests {
             );
         }
         assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+    }
+
+    /// `[f]`: claims the rest of the text where f is 1; where f is 2 claims
+    /// nothing and keeps what it published last (`Ctx::unchanged`: a
+    /// finisher whose page is stale); nothing otherwise. Not text.
+    struct RestOrKeep;
+
+    impl Operation for RestOrKeep {
+        fn name(&self) -> &'static str {
+            "rest_or_keep"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let v = cx.values();
+            let f = cx.read(crate::values::Field(cx.args()[0]))?.and_then(|x| v.as_int(x));
+            if f == Some(1) {
+                cx.claim_rest();
+            } else {
+                if f == Some(2) {
+                    cx.unchanged();
+                }
+                cx.claim(0);
+            }
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// `[x]`: not text, a sibling to a claim.
+    struct Mark;
+
+    impl Operation for Mark {
+        fn name(&self) -> &'static str {
+            "mark"
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            Ok(cx.args()[0])
+        }
+    }
+
+    #[test]
+    fn a_kept_claim_of_the_rest_stays_one_of_the_rest() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // C claims the rest of the text (f = 1): the piece T, not the mark
+        // M, which is no text. Run again with f = 2, C publishes nothing
+        // new (`Ctx::unchanged`): its last claim stands, of the rest, so M
+        // stays free. The claim kept was read as one of usize::MAX
+        // siblings, and took M (a page's finisher, its routine ended by a
+        // fatal error on values not settled, run again on a stale page:
+        // it took the next loop's finishers, inert for good; thumbs at
+        // -j8, accl 25360).
+        let e = Engine::new();
+        let piece = e.register(Arc::new(Piece));
+        let keep = e.register(Arc::new(RestOrKeep));
+        let mark = e.register(Arc::new(Mark));
+        let def = e.register(Arc::new(Def));
+        let v = e.values();
+        let f = v.field("f");
+        let u = e.new_unit();
+        let d = e.push(u, def, vec![f.0, v.int(1)]);
+        let c = e.push(u, keep, vec![f.0]);
+        let m = e.push(u, mark, vec![v.int(0)]);
+        let t = e.push(u, piece, vec![v.int(1)]);
+        for threads in [1, 4] {
+            e.evaluate(threads).unwrap();
+            assert_eq!(e.node_info(t).unwrap().claimer, Some(c), "-j{threads}");
+            assert_eq!(e.node_info(m).unwrap().claimer, None, "-j{threads}");
+            e.replace(d, def, vec![f.0, v.int(2)]);
+            e.evaluate(threads).unwrap();
+            assert_eq!(e.node_info(t).unwrap().claimer, Some(c), "kept: -j{threads}");
+            let i = e.node_info(m).unwrap();
+            assert_eq!((i.state, i.claimer), (NodeState::Done, None), "-j{threads}");
+            assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+            e.replace(d, def, vec![f.0, v.int(1)]);
+        }
     }
 
     /// `[f, x]`: defines f = x.

@@ -471,6 +471,10 @@ pub(crate) struct RunRecord {
     /// (op, args) at the next commit so unchanged ones are kept.
     pub(crate) placed: Vec<NodeId>,
     pub(crate) claim: usize,
+    /// Its claim was of the rest (`Ctx::claim_rest`, `Node::claim_all`):
+    /// kept with the count, which means every text node after it then,
+    /// not that many siblings.
+    pub(crate) claim_all: bool,
     pub(crate) effect: Effect,
     /// Filed before any run: predictions, replaced by the first commit.
     pub(crate) provisional: bool,
@@ -495,6 +499,7 @@ impl RunRecord {
             sources: Box::default(),
             placed: Vec::new(),
             claim: 0,
+            claim_all: false,
             state: None,
             effect: Effect::None,
             provisional: true,
@@ -637,6 +642,8 @@ pub(crate) struct Product {
     /// the end is 0.
     pub(crate) ranks: Vec<u64>,
     pub(crate) claim: usize,
+    /// The claim is of the rest (`Ctx::claim_rest`).
+    pub(crate) claim_all: bool,
     /// What the run set (`Ctx::set_effect`); None: its operation's.
     pub(crate) effect: Option<Effect>,
     /// The brackets placements of an operation whose effect waits for

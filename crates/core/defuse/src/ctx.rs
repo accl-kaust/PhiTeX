@@ -107,6 +107,7 @@ impl<'a> Ctx<'a> {
                 placements: Vec::new(),
                 ranks: Vec::new(),
                 claim: 0,
+                claim_all: false,
                 effect: None,
                 place_effects: Vec::new(),
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
@@ -1098,6 +1099,7 @@ impl<'a> Ctx<'a> {
     pub fn claim(&mut self, n: usize) {
         self.me.claim_all.store(false, std::sync::atomic::Ordering::Release);
         self.product.claim = n;
+        self.product.claim_all = false;
         crate::commit::apply_claim(self.eng, self.worker, self.me, n);
     }
 
@@ -1112,6 +1114,7 @@ impl<'a> Ctx<'a> {
     pub fn claim_rest(&mut self) {
         self.me.claim_all.store(true, std::sync::atomic::Ordering::Release);
         self.product.claim = usize::MAX;
+        self.product.claim_all = true;
         crate::commit::apply_claim(self.eng, self.worker, self.me, usize::MAX);
     }
 
