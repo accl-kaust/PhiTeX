@@ -1038,6 +1038,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             let (op, args) = what.key();
             let id = NodeId::from_raw(eng.nodes.reserve() as u64);
             let (n, mut pred) = built(eng, node.unit, Some(node.id), op, args.to_vec(), id);
+            placed_effect(&p.place_effects, i, &n, &mut pred);
             // (made anew in place of the one at its index, of its
             // operation, which goes: that one's definitions are its
             // prediction, so that a reader after it whose answer stays
@@ -1694,7 +1695,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 (None, None) => {
                     let (op, args) = what.key();
                     let id = NodeId::from_raw(eng.nodes.reserve() as u64);
-                    let (n, pred) = built(eng, node.unit, Some(node.id), op, args.to_vec(), id);
+                    let (n, mut pred) = built(eng, node.unit, Some(node.id), op, args.to_vec(), id);
+                    placed_effect(&p.place_effects, i, &n, &mut pred);
                     (n, Some(pred))
                 }
             };
@@ -1874,6 +1876,35 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             &mut placed,
         );
         let old = node.last.lock().replace(rec.clone());
+        for r in rec.reads.iter().filter(|_| crate::obs::enabled()) {
+            if let Some(f) = r.kind.field()
+                && ftrace(eng, f)
+            {
+                eprintln!(
+                    "ftrace: read {} by {} ({}) serial {serial} seen {} filed {} {:?} t {}",
+                    eng.values().as_str(f.0).unwrap_or_default(),
+                    node.id.raw(),
+                    eng.op(node.op()).name(),
+                    r.seen.map_or(0, ValueId::raw),
+                    r.filed,
+                    r.kind,
+                    eng.now_ns()
+                );
+            }
+        }
+        for d in rec.defs.iter().filter(|_| crate::obs::enabled()) {
+            if ftrace(eng, d.f) {
+                eprintln!(
+                    "ftrace: def {} by {} ({}) serial {serial} value {} changed {} t {}",
+                    eng.values().as_str(d.f.0).unwrap_or_default(),
+                    node.id.raw(),
+                    eng.op(node.op()).name(),
+                    d.value.raw(),
+                    changed_defs.contains(&d.f),
+                    eng.now_ns()
+                );
+            }
+        }
         if file_all {
             node.filed_floor.store(serial, Ordering::Release);
         }
@@ -2308,14 +2339,24 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         };
         let c = cause_of_read(&rec.reads[i]);
         let kept = |j: usize| kept_first.map_or(j >= own_reads, |n| j < n);
+        // (a run that parks a state: the state rests on its own reads as
+        // on those it kept, and its next run, offered it, is told only
+        // the causes found here; each read that moved is one of them. Told
+        // the first alone, a loop rest whose fold moved and whose start
+        // page's give-back moved too went on from that state, its read of
+        // the give-back kept, unchecked as one woken by the answer it
+        // parked on, and stood on the routine's earlier run: a float and
+        // its links on argumentation-doc's page 9, 2 to 7 builds in 60 at
+        // -j4, accl 24790, 25034)
+        let rests = |j: usize| kept(j) || parks;
         if kept(i) {
             stale = !range(&rec.reads[i].kind, &c);
         }
         causes.push(c);
-        if kept(i) {
+        if rests(i) {
             let mut memo = read::FoldMemo::new();
             for (j, r) in rec.reads.iter().enumerate() {
-                if !kept(j) || j == i || stale {
+                if !rests(j) || j == i || stale {
                     continue;
                 }
                 // (as the check above: a field no change has counted
@@ -2323,7 +2364,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 // only in turn with the ones before it, is taken as
                 // moved)
                 let moved = match r.kind {
-                    ReadKind::Following { .. } => true,
+                    ReadKind::Following { .. } => kept(j),
                     _ if !scope_moved
                         && !matches!(r.kind, ReadKind::Next { .. })
                         && r.kind.field().is_some_and(|f| eng.field_epoch(f) == r.epoch) =>
@@ -2336,7 +2377,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     continue;
                 }
                 let c = cause_of_read(r);
-                if range(&r.kind, &c) {
+                if !kept(j) || range(&r.kind, &c) {
                     causes.push(c);
                 } else {
                     stale = true;
@@ -3113,6 +3154,14 @@ fn walk_stopped(
 fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<NodeId>, st: &mut CommitStats) {
     let rs = eng.ranges.ends(f, u, |x| live(eng, x.node, x.serial));
     if rs.is_empty() {
+        if ftrace(eng, f) {
+            eprintln!(
+                "ftrace: end-walk {} by {} no reader t {}",
+                eng.values().as_str(f.0).unwrap_or_default(),
+                by.map_or(0, NodeId::raw),
+                eng.now_ns()
+            );
+        }
         return;
     }
     let now = read::on_one_layout(eng, || read::reaching_visible(eng, f, Pos(eng.unit(u).end.0 - 1), true));
@@ -3123,7 +3172,23 @@ fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<
         },
         None => Cause::Environment { field: f },
     };
+    let tr = ftrace(eng, f);
     for r in rs {
+        if tr {
+            let n = eng.node(r.node);
+            eprintln!(
+                "ftrace: end-walk {} by {} reader {} serial {} (now {}) state {:?} seen {} now {} t {}",
+                eng.values().as_str(f.0).unwrap_or_default(),
+                by.map_or(0, NodeId::raw),
+                r.node.raw(),
+                r.serial,
+                n.serial.load(Ordering::Acquire),
+                n.state(),
+                r.seen.map_or(0, ValueId::raw),
+                through(eng, now, r.path).map_or(0, ValueId::raw),
+                eng.now_ns()
+            );
+        }
         if through(eng, now, r.path) != r.seen
             && mark_stale(
                 eng,
@@ -3139,6 +3204,17 @@ fn reask_ends(eng: &Engine, w: Option<&Worker>, f: Field, u: UnitId, by: Option<
             st.woken += 1;
         }
     }
+}
+
+/// (`PHITEX_FIELD_TRACE=<prefix>`, observe) Whether `f`'s name begins with
+/// the prefix: its definitions, committed reads, end walks and removals
+/// are printed (`ftrace:` lines).
+pub(crate) fn ftrace(eng: &Engine, f: Field) -> bool {
+    static P: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    crate::obs::enabled()
+        && P.get_or_init(|| std::env::var("PHITEX_FIELD_TRACE").ok())
+            .as_deref()
+            .is_some_and(|p| eng.values().as_str(f.0).is_some_and(|s| s.starts_with(p)))
 }
 
 /// (`PHITEX_REFUTE_LOG`, observe) A read refuted: the field, the reader,
@@ -3839,6 +3915,18 @@ pub(crate) fn built(
     (Arc::new(n), pred)
 }
 
+/// A new placement's brackets from its placer's run where its operation
+/// leaves them to its own (`Ctx::predict_placed_effect`).
+fn placed_effect(effects: &[(usize, Effect)], i: usize, n: &Node, pred: &mut Predicted) {
+    if pred.effect != Effect::Pending {
+        return;
+    }
+    if let Some(&(_, e)) = effects.iter().find(|x| x.0 == i) {
+        pred.effect = e;
+        n.effect.store(pack_effect(e), Ordering::Release);
+    }
+}
+
 /// Files a new node's predictions at its label: the relations from the
 /// input in this segment or the environment (the commit that places it
 /// puts the value right from the true input, `settle_predictions`).
@@ -4004,6 +4092,15 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
         reask_after_effect(eng, w, node, pos, old, Brackets::default(), &mut st);
     }
     for f in changed_defs {
+        if ftrace(eng, f) {
+            eprintln!(
+                "ftrace: retract {} by {} ({}) t {}",
+                eng.values().as_str(f.0).unwrap_or_default(),
+                node.id.raw(),
+                eng.op(node.op()).name(),
+                eng.now_ns()
+            );
+        }
         reask(eng, w, f, pos, seg_id, node.id, &mut st);
     }
     for f in changed_contribs {
