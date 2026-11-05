@@ -39,13 +39,19 @@ nodes at the candidates a page may fire at, and no page decides it.
 
 ### 2.1 Identity
 
-A rest-of-piece node is identified by the piece and the candidate:
-arguments `[flags, piece, k]`. Nothing in its arguments depends on the
-piece's run state.
+A rest-of-piece node is identified by the piece: arguments
+`[flags, piece, k]`, where `k` is `CUT_K` (0) for a cut at any candidate
+and `CLOSE_K` for a close (`pages/piece.rs`). Nothing in its arguments
+depends on the piece's run state or on the candidate it was cut at.
+(Until 2026-11-05 `k` was the candidate. A page that fired a line earlier
+inside a paragraph then made the rest anew, and every rest after it, one
+link per commit; each new link was for a moment the definition every
+reader after it met. lineno's second pass at -j1 never ended, and thumbs'
+overview loop at -j4 and -j8 now and then ran on for ever.)
 
 ### 2.2 The continuation is a field
 
-At the cut, the piece defines `cont:<piece>:<k>` (Global) with the
+At the cut, the piece defines `cont:<piece>:<k>` (Global; `k` as in 2.1) with the
 continuation value it encodes today (`cont_encode`'s value), and
 `claim:<piece>:<k>` with the claim guess (or the two in one field). The
 rest reads them at its start (`Ctx::read`), claims from the guess, and

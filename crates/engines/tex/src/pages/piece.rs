@@ -1430,8 +1430,18 @@ impl Run<'_, '_> {
         // the piece's and the candidate's, a change of the piece's state
         // at the cut a definition that changed, which reruns the rest in
         // place, docs/spec-continuations.md §2.2)
+        // (the rest is the piece's, whichever candidate it is cut at,
+        // [`CUT_K`]: a cut that moves to another candidate, a page firing
+        // a line earlier inside a paragraph, changes the continuation and
+        // reruns the same rest in place. Keyed by the candidate, the rest
+        // was made anew, and so was every rest after it, one link per
+        // commit, each one for a moment the definition every reader after
+        // it met: lineno's second pass at -j1, whose routine fires at every
+        // line, never ended (a finisher re-asked 17 times by one field,
+        // the rests' page chain folded again for each), and thumbs'
+        // overview loop at -j4 and -j8 now and then ran on for ever)
         self.cx.define_with(
-            cont_field(v, pid, k),
+            cont_field(v, pid, CUT_K),
             v.list(vec![cont, v.int(rest)]),
             Locality::Global,
         );
@@ -1440,7 +1450,7 @@ impl Run<'_, '_> {
         }
         self.cx.follow(
             self.ops.resume,
-            vec![v.int(flags), pid, v.int(i64::from(k))],
+            vec![v.int(flags), pid, v.int(i64::from(CUT_K))],
         );
         Ok(())
     }
@@ -2197,6 +2207,11 @@ impl Run<'_, '_> {
 /// inside a level of its own ([`Run::close_resume`]): no candidate's.
 pub(crate) const CLOSE_K: u32 = u32::MAX;
 
+/// The candidate number of the rest of a piece cut at a candidate
+/// ([`Run::fold_here`]): one for every candidate, so the rest is the same
+/// node wherever the piece is cut (docs/spec-continuations.md §2.1).
+pub(crate) const CUT_K: u32 = 0;
+
 impl Run<'_, '_> {
     /// A run that closed the engine scope it ran in with a level of its
     /// own open ([`Run::closed_scope`]): its rest, the continuation taken
@@ -2228,10 +2243,11 @@ pub(crate) fn cont_field(v: &Values, pid: ValueId, k: u32) -> Field {
     v.field(&format!("cont:{}:{k}", int_of(v, pid)))
 }
 
-/// The rest of a piece after a cut: arguments `[flags, piece,
-/// candidate]`, the piece's text kind, the cutting piece's node and the
-/// candidate cut at: nothing of the piece's state, so a changed state at
-/// the cut reruns the same node (docs/spec-continuations.md §2.1). Its
+/// The rest of a piece after a cut: arguments `[flags, piece, k]`, the
+/// piece's text kind, the cutting piece's node and [`CUT_K`] (a cut at a
+/// candidate) or [`CLOSE_K`] (a close): nothing of the piece's state or of
+/// where it was cut, so a changed state at the cut, or a cut at another
+/// candidate, reruns the same node (docs/spec-continuations.md §2.1). Its
 /// continuation and claim guess it reads from the piece's field
 /// ([`cont_field`]). It runs the input left in the groups left open, as
 /// the piece would have gone on, reading what the finishers before it

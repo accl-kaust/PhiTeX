@@ -151,11 +151,6 @@ pub struct Engine {
     /// cached at an older count is stale (`read::chain_start`), and a run
     /// that began before one checks every read at its commit.
     pub(crate) scope_gen: AtomicU64,
-    /// The bracket walks under way (`walk::change`), each with its span.
-    pub(crate) walks: crate::lock::Mx<Vec<std::sync::Arc<crate::walk::Walk>>>,
-    /// The latest bracket changes, by scope count (`walk::filed`), and
-    /// the count of the last one dropped from the list.
-    pub(crate) filings: crate::lock::Mx<crate::walk::Filings>,
     /// Nodes with brackets filed: none, and no scope is walked.
     pub(crate) bracket_nodes: AtomicUsize,
     /// The field a read of the scope depth is recorded under
@@ -324,8 +319,6 @@ impl Engine {
             pred_pending: Mx::new(Vec::new()),
             swept_left: AtomicU64::new(0),
             scope_gen: AtomicU64::new(1),
-            walks: crate::lock::Mx::new(Vec::new()),
-            filings: crate::lock::Mx::new((std::collections::VecDeque::new(), 0)),
             bracket_nodes: AtomicUsize::new(0),
             depth_field,
             has_finals: std::sync::atomic::AtomicBool::new(false),
@@ -1737,6 +1730,7 @@ impl Engine {
             | Step::Has(x)
             | Step::Eq(x)
             | Step::Cmp(x)
+            | Step::Derived(x)
             | Step::Indices(x)
             | Step::Keys(x)
             | Step::Rank(x)
@@ -2295,18 +2289,36 @@ impl Engine {
                             .and_then(|r| r.by)
                             .map_or(String::new(), |b| {
                                 let bn = self.node(b);
+                                let head = |x: NodeId| {
+                                    self.debug_node(x).lines().next().unwrap_or("").chars().take(300).collect::<String>()
+                                };
                                 format!(
-                                    " (by {} at {} seg {} serial {}; reader at {} seg {} serial {})",
+                                    " (by {} at {} seg {} serial {}; reader at {} seg {} serial {}; field {}; reader: {}; definer: {})",
                                     b.raw(),
                                     bn.pos_hint().0,
                                     bn.seg_hint().0,
                                     bn.serial.load(std::sync::atomic::Ordering::Relaxed),
                                     node.pos_hint().0,
                                     node.seg_hint().0,
-                                    node.serial.load(std::sync::atomic::Ordering::Relaxed)
+                                    node.serial.load(std::sync::atomic::Ordering::Relaxed),
+                                    v.render(f.0),
+                                    head(n),
+                                    head(b)
                                 )
                             }),
-                        _ => String::new(),
+                        crate::node::ReadKind::Fold { f, from, to, .. } => {
+                            let head = |x: NodeId| {
+                                self.debug_node(x).lines().next().unwrap_or("").chars().take(300).collect::<String>()
+                            };
+                            format!(
+                                " (field {}; reader: {}; from: {}; to: {})",
+                                v.render(f.0),
+                                head(n),
+                                from.map_or("-".to_owned(), head),
+                                to.map_or("-".to_owned(), head)
+                            )
+                        }
+                        _ => rd.kind.field().map_or(String::new(), |f| format!(" (field {})", v.render(f.0))),
                     };
                     out.push(format!(
                         "node {} ({}) read {:?} path {} saw {} but now {}{site}",

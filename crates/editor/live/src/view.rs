@@ -306,6 +306,12 @@ impl Default for Viewer {
     }
 }
 
+thread_local! {
+    /// The events made on this thread while it answers in the broadcasts'
+    /// turn ([`Viewer::answer_in_turn`]), sent after its reply.
+    static ANSWERING: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
 impl Viewer {
     /// The events from now on go to `emit` (each a JSON text).
     pub fn on_emit(&self, emit: Box<dyn Fn(&str) + Send>) {
@@ -313,9 +319,45 @@ impl Viewer {
     }
 
     fn emit(&self, text: &str) {
+        // (an answer under way on this thread holds the broadcasts' turn:
+        // the event goes out after its reply, [`Viewer::answer_in_turn`])
+        if ANSWERING.with(|a| {
+            a.borrow_mut()
+                .as_mut()
+                .map(|q| q.push(text.to_owned()))
+                .is_some()
+        }) {
+            return;
+        }
         if let Some(e) = lock(&self.emit).as_ref() {
             e(text);
         }
+    }
+
+    /// [`Viewer::answer`] for a browser, its reply given to `send` in the
+    /// broadcasts' turn (the `emit` lock): an event made after the answer
+    /// was made reaches the browser after the reply, never before it. The
+    /// socket's sends take turns with the broadcasts, and a reply made
+    /// before an event but sent after it misled the browser: the console's
+    /// backlog made before a build's end, replayed after the end's live
+    /// "busy" line, left the tab saying "Building…" (the browser suite's
+    /// title red, 1 run in 20); a page's origins answered "not made yet"
+    /// after the `origins` event said they were. An event the answer makes
+    /// itself goes after the reply. `send`'s result returned.
+    pub fn answer_in_turn(&self, req: &Value, send: impl FnOnce(&str) -> bool) -> bool {
+        let turn = lock(&self.emit);
+        ANSWERING.with(|a| *a.borrow_mut() = Some(Vec::new()));
+        let reply = self.answer(req);
+        let later = ANSWERING
+            .with(|a| a.borrow_mut().take())
+            .unwrap_or_default();
+        let ok = send(&reply);
+        if let Some(e) = turn.as_ref() {
+            for t in &later {
+                e(t);
+            }
+        }
+        ok
     }
 
     /// A `source` place shown by `goto(file, line, col, place)`.
@@ -520,6 +562,11 @@ impl Viewer {
     pub fn console(self: &Arc<Self>) -> Box<dyn Fn(Value) + Send> {
         let s = self.clone();
         Box::new(move |item: Value| {
+            // (kept and sent in one turn of the broadcasts: a backlog
+            // answered in its turn holds every item sent before it and
+            // none sent after, [`Viewer::answer_in_turn`])
+            let answering = ANSWERING.with(|a| a.borrow().is_some());
+            let turn = (!answering).then(|| lock(&s.emit));
             {
                 let mut c = lock(&s.console);
                 if item["kind"] == "status" {
@@ -531,7 +578,15 @@ impl Viewer {
                     c.0.push_back(item.clone());
                 }
             }
-            s.emit(&json!({"event": "console", "item": item}).to_string());
+            let text = json!({"event": "console", "item": item}).to_string();
+            match &turn {
+                Some(t) => {
+                    if let Some(e) = t.as_ref() {
+                        e(&text);
+                    }
+                }
+                None => s.emit(&text),
+            }
         })
     }
 
@@ -1164,6 +1219,50 @@ pub fn base64(b: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A reply made before an event is sent before it: the console's
+    /// backlog answered while a build ends, its live "busy" clear made
+    /// meanwhile on another thread, reaches the browser after the reply
+    /// (it went first, and the replayed backlog left the tab "Building…").
+    #[test]
+    fn a_reply_goes_before_the_events_made_after_it() {
+        use std::sync::mpsc;
+        let v = Arc::new(Viewer::default());
+        let got: Arc<Mutex<Vec<String>>> = Arc::default();
+        {
+            let got = got.clone();
+            v.on_emit(Box::new(move |t: &str| lock(&got).push(t.to_owned())));
+        }
+        let tell = v.console();
+        tell(json!({"kind": "busy", "text": "build 1"}));
+        let (answered, go) = mpsc::channel();
+        let w = {
+            let (v, got) = (v.clone(), got.clone());
+            std::thread::spawn(move || {
+                v.answer_in_turn(&json!({"id": 1, "op": "console"}), |r| {
+                    answered.send(()).unwrap();
+                    // (the other thread's event made now, while the reply waits to go)
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    lock(&got).push(format!("reply {r}"));
+                    true
+                })
+            })
+        };
+        go.recv().unwrap();
+        tell(json!({"kind": "busy", "text": ""}));
+        assert!(w.join().unwrap());
+        let got = lock(&got).clone();
+        let reply = got.iter().position(|t| t.starts_with("reply")).unwrap();
+        assert!(
+            got[reply].contains("build 1") && !got[reply].contains(r#""text":"""#),
+            "{got:?}"
+        );
+        let clear = got.iter().position(|t| t.contains(r#""text":"""#)).unwrap();
+        assert!(
+            reply < clear,
+            "the clear made after the answer went before its reply: {got:?}"
+        );
+    }
+
     use super::*;
 
     #[test]

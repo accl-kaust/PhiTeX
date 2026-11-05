@@ -439,7 +439,8 @@ pub(crate) fn run_node(
         // as pdfTeX's close_files_and_terminate leaves it)
         Err(Halt::Fatal) => {
             if !r.fatal_logged {
-                let _ = r.log("error", "*** (job aborted, no legal \\end found)");
+                let m = "*** (job aborted, no legal \\end found)";
+                let _ = r.log_help("error", m, &[m]);
             }
             // nothing after the error is read: the rest of the input is
             // claimed, and the main list ends here for the page builder

@@ -357,17 +357,18 @@ impl Run<'_, '_> {
             let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
             crate::print::sprint_cs(&mut cs, w, esc);
             let msg = format!("Forbidden control sequence found while scanning {what} of {cs}");
-            self.outer_error(msg)?;
-            self.push_toks([ins]);
+            // (§339 inserts before `error`: the context shows it)
+            self.push_inserted(ins);
+            self.runaway_error(msg, status)?;
             return Ok(());
         }
         // §336's skipping case
-        self.incomplete_if()
+        self.incomplete_if(false)
     }
 
     /// §336's skipping case: "Incomplete \if...; all text was ignored
     /// after line n", and a `\fi` inserted to end the skip.
-    pub(crate) fn incomplete_if(&mut self) -> R<()> {
+    pub(crate) fn incomplete_if(&mut self, ended: bool) -> R<()> {
         let code = self.if_codes.last().copied().unwrap_or(0);
         let name = crate::prims::PRIMS
             .iter()
@@ -377,18 +378,85 @@ impl Run<'_, '_> {
         // input included)
         let line = self.line_of_mark(self.skip_from)?;
         let msg = format!("Incomplete \\{name}; all text was ignored after line {line}");
-        self.outer_error(msg)?;
-        self.push_toks([crate::expand::frozen_fi_tok()]);
-        Ok(())
-    }
-
-    fn outer_error(&mut self, msg: String) -> R<()> {
+        // (§336's `ins_error`: the `\fi` inserted, then `error`)
+        self.push_inserted(crate::expand::frozen_fi_tok());
+        // (§336's help3, its first line another where the file ended)
+        let help = [
+            if ended {
+                "The file ended while I was skipping conditional text."
+            } else {
+                "A forbidden control sequence occurred in skipped text."
+            },
+            "This kind of error happens when you say `\\if...' and forget",
+            "the matching `\\fi'. I've inserted a `\\fi'; this might work.",
+        ];
         if self.interp.is_some() {
             self.interp_errs.push(msg);
             Ok(())
         } else {
-            self.log("error", &msg)
+            self.log_help("error", &msg, &help)
         }
+    }
+
+    /// `ins_list` (§323): `t` pushed as inserted text (§307), shown so in
+    /// an error's context.
+    pub(crate) fn push_inserted(&mut self, t: Tok) {
+        let r = self.input.arena.alloc(&[t]);
+        self.input.push_toks(r, ty::INSERTED);
+    }
+
+    /// §338's error, its runaway list before it (§306): logged where the
+    /// list's scan sees what §339 inserted ([`Run::take_runaway`]), the
+    /// context as it is now (the inserted list on top).
+    fn runaway_error(&mut self, msg: String, status: u8) -> R<()> {
+        if self.interp.is_some() {
+            self.interp_errs.push(msg);
+            return Ok(());
+        }
+        let mut marks = Vec::new();
+        let tail = self.error_tail(&[], &mut marks)?;
+        self.runaway_due = Some(crate::run::RunawayDue {
+            msg,
+            what: match status {
+                crate::run::SCAN_DEFINING => "definition",
+                crate::run::SCAN_MATCHING => "argument",
+                _ => "text",
+            },
+            tail,
+            marks,
+        });
+        Ok(())
+    }
+
+    /// The error [`Run::runaway_error`] left due, now that the list's scan
+    /// has it (`toks`; `None`: lost to a halt), logged: the runaway list,
+    /// the message, the context and §338's help.
+    pub(crate) fn take_runaway(&mut self, toks: Option<&[Tok]>) -> R<()> {
+        let Some(d) = self.runaway_due.take() else {
+            return Ok(());
+        };
+        if let Some(t) = toks {
+            self.log_runaway(d.what, t)?;
+        }
+        self.log_event("error", &d.msg)?;
+        let stop = self.error_count >= 100;
+        let mut tail = d.tail;
+        if !stop {
+            for h in RUNAWAY_HELP {
+                tail.push(crate::context::NL);
+                tail.push_str(h);
+            }
+        }
+        let k = if stop {
+            crate::log::CONTEXT_ONLY
+        } else {
+            crate::log::CONTEXT
+        };
+        self.log_lines_any(k, &tail, d.marks)?;
+        if stop {
+            self.log_hundred()?;
+        }
+        Ok(())
     }
 
     /// §336–§339 at the end of a file (§362), or of an interpreted one: a token list being
@@ -400,7 +468,7 @@ impl Run<'_, '_> {
         // (§362's `check_outer_validity` while skipping: the skip ends at
         // the file's end, §336)
         if self.in_skip {
-            self.incomplete_if()?;
+            self.incomplete_if(true)?;
             return Ok(true);
         }
         let Some((status, w)) = self.scanner else {
@@ -420,14 +488,11 @@ impl Run<'_, '_> {
         let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
         crate::print::sprint_cs(&mut cs, w, esc);
         let msg = format!("File ended while scanning {what} of {cs}");
-        if self.interp.is_some() {
-            // (a written file's text read as its read-back will read it:
-            // the error is the read-back's, [`Run::read_back`])
-            self.interp_errs.push(msg);
-        } else {
-            self.log("error", &msg)?;
-        }
-        self.push_toks([ins]);
+        // (§339 inserts before `error`: the context shows it; a written
+        // file's text read as its read-back will read it: the error is
+        // the read-back's, [`Run::read_back`])
+        self.push_inserted(ins);
+        self.runaway_error(msg, status)?;
         Ok(true)
     }
 
@@ -2127,3 +2192,12 @@ fn hex(c: u32) -> u32 {
         c - u32::from(b'a') + 10
     }
 }
+
+/// §338's help (the runaway's): "File ended" and "Forbidden control
+/// sequence found".
+const RUNAWAY_HELP: [&str; 4] = [
+    "I suspect you have forgotten a `}', causing me",
+    "to read past where you wanted me to stop.",
+    "I'll try to recover; but if the error is serious,",
+    "you'd better type `E' or `X' now and fix your file.",
+];
