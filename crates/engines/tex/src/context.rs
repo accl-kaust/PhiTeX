@@ -12,9 +12,12 @@
 //! Shown: the lines of files (`l.N`), the terminal's line when no file is
 //! open (`<*>`, the job's command line, after the main file ended), and
 //! the token lists the run knows the type of: inserted text (§339's
-//! recovery, `ins_list`) and lists backed up to be read again. A macro's
-//! level is not shown: the run reads a macro's body with its arguments
-//! in place and does not keep its name with the level.
+//! recovery, `ins_list`) and lists backed up to be read again, and a
+//! macro's level (§314's name, the parameter text and body with the place
+//! read in the body) from the call its level keeps
+//! ([`crate::input::Call`]): the run reads a macro's body with its
+//! arguments in place, so an argument being read is shown as TeX's own
+//! level ("<argument>") from the arguments' lengths the call kept.
 
 use crate::input::{Line, Seg, kind, ty};
 use crate::run::{FileLine, LineMark, R, Run};
@@ -28,6 +31,11 @@ pub(crate) const PART: char = '\u{10FFFA}';
 /// In a context event's text: `print_nl` of the text that follows (a help
 /// line, §311's `...`).
 pub(crate) const NL: char = '\u{10FFF9}';
+
+/// In a context event's text: `\errhelp`'s list, shown as `error` shows
+/// it (§90 `give_err_help`: a line ended, then the list printed as
+/// `print` prints, `\newlinechar` a line's end).
+pub(crate) const ERRHELP: char = '\u{10FFF7}';
 
 /// In a context event's text: the job's command line (`main.tex`), which
 /// the log's layout knows (the name it opens the log with,
@@ -45,10 +53,54 @@ enum Shown {
     /// A line of a file or a pseudo file: its characters (the
     /// `\endlinechar` TeX put at its end left out), the place read, its
     /// number as the log makes it; whether it is a file's (§311's
-    /// `bottom_line`).
-    Line(Vec<u32>, usize, LineMark, bool),
+    /// `bottom_line`); whether the node's text was cut inside it (its
+    /// rest is the next text's, [`Run::line_rest`]).
+    Line(Vec<u32>, usize, LineMark, bool, bool),
     /// A token list: its §314 name, its tokens, the place read.
     Toks(&'static str, Vec<Tok>, usize),
+    /// A macro's level (§314, §319): its name, its definition (the
+    /// parameter text, `->` and the body), the place read in it.
+    Macro(Tok, Vec<Tok>, usize),
+}
+
+/// Where a macro's level stands in its definition ([`Shown::Macro`]):
+/// the place `at` tokens into its expansion (the body with arguments of
+/// `lens` tokens in place of its parameters) is the place in the body,
+/// counted in the definition (the parameter text and `->` before the
+/// body), and, inside an argument, the argument's start in the expansion,
+/// its length and the place in it (TeX reads an argument as a level of
+/// its own on top of the macro's, §390, that level still there once its
+/// last token is read).
+fn place_in(
+    m: &crate::val::Macro,
+    lens: &[u32],
+    at: usize,
+) -> (usize, Option<(usize, usize, usize)>) {
+    let off = m.params.len() + 1;
+    if m.segs.is_empty() {
+        return (off + at.min(m.body.len()), None);
+    }
+    let (mut p, mut pos) = (at, 0usize);
+    for s in &m.segs {
+        let lit = (s.hi - s.lo) as usize;
+        if p <= lit {
+            return (off + s.lo as usize + p, None);
+        }
+        p -= lit;
+        pos += lit;
+        if s.param != 0 {
+            let len = lens
+                .get(usize::from(s.param) - 1)
+                .map_or(0, |&n| n as usize);
+            if p <= len {
+                // (after the parameter's `#n` in the body)
+                return (off + s.hi as usize + 1, Some((pos, len, p)));
+            }
+            p -= len;
+            pos += len;
+        }
+    }
+    (off + m.body.len(), None)
 }
 
 impl Run<'_, '_> {
@@ -59,6 +111,10 @@ impl Run<'_, '_> {
         let mut out = String::new();
         self.show_context(&mut out, marks)?;
         for h in help {
+            if h.starts_with(ERRHELP) {
+                out.push_str(h);
+                continue;
+            }
             out.push(NL);
             out.push_str(h);
         }
@@ -76,8 +132,93 @@ impl Run<'_, '_> {
                 buf.pop();
             }
             let file = !l.rescanned;
-            Shown::Line(buf, l.loc, self.line_mark_of(l), file)
+            Shown::Line(buf, l.loc, self.line_mark_of(l), file, file && !l.ends)
         };
+        for (i, l) in self.input.levels.iter().enumerate().rev() {
+            match l.kind {
+                kind::LINE => out.push(line(self.input.line(*l))),
+                kind::TOKS => self.toks_shown(i, l, &mut out),
+                _ => {
+                    // (a file's rest between its lines: its last line read
+                    // is not held; its number)
+                    let n = i64::from(self.input.file(*l).line);
+                    out.push(Shown::Line(
+                        Vec::new(),
+                        0,
+                        (Some(n), 0, None, None),
+                        true,
+                        false,
+                    ));
+                }
+            }
+        }
+        // (a run resumed from a park: the levels it parked with, below)
+        let parked = self.input.text_at..self.parked_levels.min(self.input.text.len());
+        for s in self.input.text.get(parked).unwrap_or_default() {
+            match s {
+                Seg::Line(l) => out.push(match line(l) {
+                    Shown::Line(b, at, m, f, _) => Shown::Line(b, at, m, f, false),
+                    s => s,
+                }),
+                Seg::Toks(_) => {}
+                Seg::File(f) => {
+                    let n = i64::from(f.line);
+                    out.push(Shown::Line(
+                        Vec::new(),
+                        0,
+                        (Some(n), 0, None, None),
+                        true,
+                        false,
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// The rest of the line the node's text was cut in (§318 shows the
+    /// whole line): the text after it, the node's own or its next
+    /// siblings' (`Ctx::following`, a read of their
+    /// text), while each goes on with the line.
+    fn line_rest(&mut self) -> R<Vec<u32>> {
+        let mut out = Vec::new();
+        let mut segs: Vec<Seg> = self
+            .input
+            .text
+            .get(self.input.text_at..)
+            .unwrap_or_default()
+            .to_vec();
+        let mut next = self.pulled;
+        for _ in 0..16 {
+            if segs.is_empty() {
+                match self.cx.following(next) {
+                    Some((op, args)) if op == self.ops.exec => {
+                        let args = self.resolve_units(&args)?;
+                        segs = crate::run::decode_segs(self.v, &args);
+                        next += 1;
+                    }
+                    _ => break,
+                }
+            }
+            match segs.first() {
+                Some(Seg::Line(l)) if !l.starts => {
+                    out.extend_from_slice(&l.buf);
+                    if l.ends {
+                        break;
+                    }
+                    segs.remove(0);
+                }
+                _ => break,
+            }
+        }
+        Ok(out)
+    }
+
+    /// Token list level `i`, `l`, as §312 shows it, into `out`: the
+    /// tokens put back in its place each a level above it, a macro's call
+    /// (an argument being read on top of it), the list types §314 names.
+    fn toks_shown(&self, i: usize, l: &crate::input::Level, out: &mut Vec<Shown>) {
+        let n = self.input.levels.len();
         let toks = |ty: u8, all: Vec<Tok>, at: usize| match ty {
             ty::BACKED_UP | ty::BACKED_UP_CHAR => Some(Shown::Toks(
                 if at < all.len() {
@@ -89,41 +230,67 @@ impl Run<'_, '_> {
                 at,
             )),
             ty::INSERTED => Some(Shown::Toks("<inserted text> ", all, at)),
+            // (a token TeX keeps in hand: none of its levels once read)
+            ty::REREAD if at < all.len() => Some(Shown::Toks("<to be read again> ", all, at)),
             _ => None,
         };
-        for l in self.input.levels.iter().rev() {
-            match l.kind {
-                kind::LINE => out.push(line(self.input.line(*l))),
-                kind::TOKS => {
-                    let all = self.input.arena.get(crate::input::Range {
-                        start: l.c,
-                        end: l.b,
-                    });
-                    if let Some(s) = toks(l.ty, all.to_vec(), (l.a - l.c) as usize) {
-                        out.push(s);
-                    }
-                }
-                _ => {
-                    // (a file's rest between its lines: its last line read
-                    // is not held; its number)
-                    let n = i64::from(self.input.file(*l).line);
-                    out.push(Shown::Line(Vec::new(), 0, (Some(n), 0, None, None), true));
-                }
+        let all = self.input.arena.get(crate::input::Range {
+            start: l.c,
+            end: l.b,
+        });
+        let mut at = (l.a - l.c) as usize;
+        // (tokens put back in place, [`crate::input::Unread`]:
+        // each TeX's level of its own above this one, the last
+        // put back on top; one read again is the top's
+        // "<recently read>" while nothing was read after it)
+        if let Some(u) = self.input.unread
+            && u.of(i, l)
+            && u.from < u.to
+            && (u.from..=u.to).contains(&l.a)
+        {
+            let (from, to) = ((u.from - l.c) as usize, (u.to - l.c) as usize);
+            if at > from && i + 1 == n {
+                out.push(Shown::Toks("<recently read> ", all[at - 1..at].to_vec(), 1));
+            }
+            for k in at..to {
+                out.push(Shown::Toks("<to be read again> ", all[k..=k].to_vec(), 0));
+            }
+            at = to;
+            // (put back from its end: TeX's `back_input` ended
+            // the level first, §325)
+            if u.to == l.b {
+                return;
             }
         }
-        // (a run resumed from a park: the levels it parked with, below)
-        let parked = self.input.text_at..self.parked_levels.min(self.input.text.len());
-        for s in self.input.text.get(parked).unwrap_or_default() {
-            match s {
-                Seg::Line(l) => out.push(line(l)),
-                Seg::Toks(_) => {}
-                Seg::File(f) => {
-                    let n = i64::from(f.line);
-                    out.push(Shown::Line(Vec::new(), 0, (Some(n), 0, None, None), true));
-                }
-            }
+        // (a macro without parameters: its body is the list)
+        if l.ty == ty::MACRO
+            && let Some(name) = crate::input::Input::name_of(l)
+        {
+            let mut def = vec![crate::val::end_match()];
+            def.extend_from_slice(all);
+            out.push(Shown::Macro(name, def, 1 + at));
+            return;
         }
-        out
+        if l.ty == ty::MACRO
+            && let Some((c, lens)) = self.input.call_of(l)
+        {
+            let (k, arg) = place_in(&c.mac, lens, at);
+            if let Some((from, len, p)) = arg {
+                out.push(Shown::Toks(
+                    "<argument> ",
+                    all.get(from..from + len).unwrap_or_default().to_vec(),
+                    p,
+                ));
+            }
+            let mut def = c.mac.params.clone();
+            def.push(crate::val::end_match());
+            def.extend(c.mac.body.iter().copied());
+            out.push(Shown::Macro(c.name, def, k));
+            return;
+        }
+        if let Some(s) = toks(l.ty, all.to_vec(), at) {
+            out.push(s);
+        }
     }
 
     /// Line `l`'s number as [`Run::line_for_log`] takes it.
@@ -155,7 +322,7 @@ impl Run<'_, '_> {
         let mut bottom = false;
         for (i, s) in levels.into_iter().enumerate() {
             let top = i == 0;
-            bottom = matches!(s, Shown::Line(.., true));
+            bottom = matches!(s, Shown::Line(_, _, _, true, _));
             // (§312: a list backed up and read to its end is not shown
             // below the top)
             if !top && matches!(s, Shown::Toks("<recently read> ", ..)) {
@@ -163,7 +330,10 @@ impl Run<'_, '_> {
             }
             if top || bottom || nn < ecl {
                 match s {
-                    Shown::Line(buf, loc, m, _) => {
+                    Shown::Line(mut buf, loc, m, _, cut) => {
+                        if cut {
+                            buf.extend(self.line_rest()?);
+                        }
                         let num = self.line_for_log(m, marks)?;
                         let (a, b) = split_printed(&buf, loc);
                         level(out, &format!("l.{num} "), &a, &b);
@@ -174,6 +344,36 @@ impl Run<'_, '_> {
                         self.show_toks_into(&mut a, &all[..at.min(all.len())])?;
                         self.show_toks_into(&mut b, &all[at.min(all.len())..])?;
                         level(out, name, &printed(&a), &printed(&b));
+                    }
+                    Shown::Macro(name, def, at) => {
+                        // (§314 `print_cs(name)`, then §319's list as one:
+                        // the match character and the parameters' numbers
+                        // run on through the body)
+                        let mut cs = String::new();
+                        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
+                        let single = name.as_cs().and_then(|n| {
+                            let mut it = n.chars();
+                            it.next().filter(|_| it.next().is_none()).map(u32::from)
+                        });
+                        let cat = match single {
+                            Some(c) => Some((c, i64::from(self.cat(c)?))),
+                            None => None,
+                        };
+                        crate::print::print_cs(&mut cs, name, esc, &mut |c| {
+                            cat.filter(|x| x.0 == c).map_or(12, |x| x.1)
+                        });
+                        let mut a = String::new();
+                        let mut whole = String::new();
+                        self.show_toks_into(&mut a, &def[..at.min(def.len())])?;
+                        self.show_toks_into(&mut whole, &def)?;
+                        let b = if let Some(b) = whole.strip_prefix(a.as_str()) {
+                            b.to_owned()
+                        } else {
+                            let mut b = String::new();
+                            self.show_toks_into(&mut b, &def[at.min(def.len())..])?;
+                            b
+                        };
+                        level(out, &printed(&cs), &printed(&a), &printed(&b));
                     }
                 }
                 nn += 1;

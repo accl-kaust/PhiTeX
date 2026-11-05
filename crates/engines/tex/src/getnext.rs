@@ -1092,7 +1092,10 @@ impl Run<'_, '_> {
             (Seg::Line(orig), [line, back]) => {
                 if line.kind != kind::LINE
                     || back.kind != kind::TOKS
-                    || back.ty != crate::input::ty::BACKED_UP
+                    || !matches!(
+                        back.ty,
+                        crate::input::ty::BACKED_UP | crate::input::ty::REREAD
+                    )
                     || back.b - back.a != 1
                 {
                     return refuse(&|| {
@@ -2055,7 +2058,7 @@ impl Run<'_, '_> {
             }
         }
         keep.reverse();
-        self.input.levels = keep;
+        self.input.set_levels(keep);
         if found {
             return true;
         }

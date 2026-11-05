@@ -311,7 +311,9 @@ fn class_state_of(name: &str) -> Option<&'static [&'static str]> {
         // begun before the node is a fragment's, [`fragment_context`])
         "endgroup" | "egroup" => &["badness", "lvlfix", "inspen"],
         // arguments expanded while read: a conditional may end (§366, §498)
-        "edef" | "xdef" | "csname" | "message" | "errmessage" | "special" => &["cs:"],
+        "edef" | "xdef" | "csname" | "message" | "special" => &["cs:"],
+        // (and §1283's `long_help_seen`, `errmsg:longhelp`)
+        "errmessage" => &["cs:", "errmsg:"],
         "mark" => &[],
         // (e-TeX's mark classes, §1494 ff.)
         "marks" => &["markclasses"],

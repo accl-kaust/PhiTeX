@@ -121,16 +121,21 @@ impl Log {
     /// context in the two lines of §317, the help lines, `print_ln`
     /// twice ([`crate::context`]'s text: a level's prefix, its text
     /// before the place read and after, printed already).
-    fn context(&mut self, text: &str, help: bool) {
-        use crate::context::{LEVEL, NL, PART};
+    fn context(&mut self, text: &str, help: bool, nl: i64) {
+        use crate::context::{ERRHELP, LEVEL, NL, PART};
         let mut rest = text;
         while let Some(c) = rest.chars().next() {
             rest = &rest[c.len_utf8()..];
-            let end = rest.find([LEVEL, NL]).unwrap_or(rest.len());
+            let end = rest.find([LEVEL, NL, ERRHELP]).unwrap_or(rest.len());
             let (part, more) = rest.split_at(end);
             rest = more;
             if c == NL {
                 self.print_nl(part, -1);
+                continue;
+            }
+            if c == ERRHELP {
+                self.print_ln();
+                self.print(part, nl);
                 continue;
             }
             if c != LEVEL {
@@ -228,7 +233,7 @@ impl Log {
             }
             "error" => self.error(text, nl),
             RUNAWAY => self.runaway(text, nl),
-            CONTEXT | CONTEXT_ONLY => self.context(text, kind == CONTEXT),
+            CONTEXT | CONTEXT_ONLY => self.context(text, kind == CONTEXT, nl),
             "wlog" => {
                 // §1370
                 self.print_nl("", nl);

@@ -387,6 +387,12 @@ impl Tok {
         self.0
     }
 
+    /// The token whose [`Tok::raw`] is `r`.
+    #[inline]
+    pub(crate) fn from_raw(r: u32) -> Tok {
+        Tok(r)
+    }
+
     /// `cat << 21 | char` of a character token.
     #[inline]
     pub(crate) fn as_char(self) -> Option<u32> {

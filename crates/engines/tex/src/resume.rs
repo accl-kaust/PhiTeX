@@ -725,6 +725,72 @@ impl Run<'_, '_> {
         Err(crate::run::Halt::Same)
     }
 
+    /// What [`Run::ck_input`] encodes of token list level `i`, `l`, after
+    /// its tokens: a macro's call, what an error's context shows of its
+    /// level (`crate::context`; a body read in place is the level's own
+    /// list, not encoded again), and its tokens put back in place
+    /// (`crate::input::Unread`).
+    fn ck_level_extras(
+        &self,
+        i: usize,
+        l: &crate::input::Level,
+        e: &mut Vec<ValueId>,
+        cost: &mut u64,
+        memo: &mut phitex_defuse::FxHashMap<(u64, u32, u32), ValueId>,
+    ) {
+        let v = self.v;
+        let int = |x: i64| v.int(x);
+        if let Some((c, lens)) = self.input.call_of(l) {
+            // (a call's level is its own range of the arena: encoded once
+            // while the arena stands, as the levels' lists)
+            let key = (self.input.arena_id | 1 << 63, l.c, l.b);
+            if let Some(&x) = memo.get(&key) {
+                *cost += 1;
+                e.push(x);
+                return self.ck_unread_extra(i, l, e);
+            }
+            let in_place = c.mac.params.is_empty();
+            *cost += (c.mac.params.len() + if in_place { 0 } else { c.mac.body.len() }) as u64;
+            let x = v.list(vec![
+                crate::val::toks_value(v, &[c.name]),
+                crate::val::toks_value(v, &c.mac.params),
+                if in_place {
+                    int(0)
+                } else {
+                    crate::val::toks_value(v, &c.mac.body)
+                },
+                int(i64::from(c.mac.flags)),
+                v.list(lens.iter().map(|&n| int(i64::from(n))).collect()),
+            ]);
+            memo.insert(key, x);
+            e.push(x);
+        } else if let Some(name) = crate::input::Input::name_of(l) {
+            e.push(v.list(vec![crate::val::toks_value(v, &[name])]));
+        }
+        self.ck_unread_extra(i, l, e);
+    }
+
+    /// [`Run::ck_level_extras`]'s tokens put back in place.
+    fn ck_unread_extra(&self, i: usize, l: &crate::input::Level, e: &mut Vec<ValueId>) {
+        let v = self.v;
+        let int = |x: i64| v.int(x);
+        // (only while some are still to be read again: one read again, or
+        // a record its level's place has left, is no state of the input)
+        if let Some(u) = self
+            .input
+            .unread
+            .filter(|u| u.of(i, l) && u.from <= l.a && l.a < u.to)
+        {
+            if e.len() == 5 {
+                e.push(int(0));
+            }
+            e.push(v.list(vec![
+                int(i64::from(u.from - l.c)),
+                int(i64::from(u.to - l.c)),
+            ]));
+        }
+    }
+
     /// The input as a checkpoint taken anywhere holds it
     /// ([`Run::ck_input_restore`]), and how long it is: every level,
     /// bottom first (a token list with all its tokens and how many were
@@ -745,7 +811,8 @@ impl Run<'_, '_> {
             .input
             .levels
             .iter()
-            .map(|l| match l.kind {
+            .enumerate()
+            .map(|(i, l)| match l.kind {
                 kind::TOKS => {
                     let r = crate::input::Range {
                         start: l.c,
@@ -764,13 +831,15 @@ impl Run<'_, '_> {
                         memo.insert(key, t);
                         t
                     };
-                    v.list(vec![
+                    let mut e = vec![
                         int(0),
                         int(i64::from(l.ty)),
                         t,
                         int(i64::from(l.a - l.c)),
                         int(i64::from(l.rb)),
-                    ])
+                    ];
+                    self.ck_level_extras(i, l, &mut e, &mut cost, memo);
+                    v.list(e)
                 }
                 kind::LINE => {
                     cost += 1;
@@ -859,8 +928,9 @@ impl Run<'_, '_> {
         input.text_at = at;
         for e in list_of(v, levels) {
             match list_of(v, e)[..] {
-                [k, ty, t, read, rb] if int_of(v, k) == i64::from(kind::TOKS) => {
+                [k, ty, t, read, rb, ..] if int_of(v, k) == i64::from(kind::TOKS) => {
                     let toks = crate::val::toks_of(v, Some(t));
+                    let call = ck_call_of(v, e, &toks, &mut input);
                     input.push_toks_at(
                         &toks,
                         n(read).unwrap_or(0),
@@ -869,6 +939,7 @@ impl Run<'_, '_> {
                     if let Some(l) = input.levels.last_mut() {
                         l.rb = int_of(v, rb) != 0;
                     }
+                    ck_unread_put(v, e, &mut input, call);
                 }
                 [k, l] if int_of(v, k) == i64::from(kind::LINE) => {
                     input.push_line(crate::input::Line::of_value(v, l)?);
@@ -1880,6 +1951,79 @@ fn cand_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::pages::CandMa
         open_cut: b & 8 != 0,
         par_cut: false,
     })
+}
+
+/// A macro's call as [`Run::ck_level_extras`] encodes it, a record of
+/// `input` again (`toks`: its level's list): its index, or a
+/// [`crate::input::Level::named`] level's name and `true`.
+fn ck_call_of(
+    v: &phitex_defuse::Values,
+    e: ValueId,
+    toks: &[crate::val::Tok],
+    input: &mut crate::input::Input,
+) -> (u32, bool) {
+    // (a macro's call, as encoded: its level's again)
+    let call = list_of(v, e).get(5).and_then(|&c| match list_of(v, c)[..] {
+        // (a macro without parameters: its name, [`Level::named`])
+        [name] => {
+            let name = *crate::val::toks_of(v, Some(name)).first()?;
+            Some((name, None, Vec::new()))
+        }
+        [name, params, body, flags, lens] => {
+            let name = *crate::val::toks_of(v, Some(name)).first()?;
+            let params = crate::val::toks_of(v, Some(params));
+            let body = if params.is_empty() {
+                toks.to_vec()
+            } else {
+                crate::val::toks_of(v, Some(body))
+            };
+            let mac = crate::val::Macro::new(
+                u8::try_from(int_of(v, flags)).unwrap_or(0),
+                params,
+                body.into(),
+            );
+            let lens: Vec<u32> = list_of(v, lens)
+                .into_iter()
+                .map(|x| u32::try_from(int_of(v, x)).unwrap_or(0))
+                .collect();
+            Some((name, Some(std::rc::Rc::new(mac)), lens))
+        }
+        _ => None,
+    });
+    call.map_or(
+        (crate::input::NO_CALL, false),
+        |(name, mac, lens)| match mac {
+            Some(mac) => (input.new_call(name, &mac, &lens), false),
+            None => (name.raw(), true),
+        },
+    )
+}
+
+/// The level just pushed again ([`ck_call_of`]): its call, and its
+/// tokens put back in place as [`Run::ck_level_extras`] encodes them.
+fn ck_unread_put(
+    v: &phitex_defuse::Values,
+    e: ValueId,
+    input: &mut crate::input::Input,
+    (call, named): (u32, bool),
+) {
+    if let Some(l) = input.levels.last_mut() {
+        l.call = call;
+        l.named = named;
+    }
+    if let Some(&u) = list_of(v, e).get(6)
+        && let [from, to] = list_of(v, u)[..]
+        && let Some(l) = input.levels.last().copied()
+    {
+        let at = |x| l.c + u32::try_from(int_of(v, x)).unwrap_or(0);
+        input.unread = Some(crate::input::Unread {
+            level: u32::try_from(input.levels.len() - 1).unwrap_or(u32::MAX),
+            c: l.c,
+            b: l.b,
+            from: at(from),
+            to: at(to),
+        });
+    }
 }
 
 #[cfg(test)]

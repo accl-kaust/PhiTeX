@@ -2491,7 +2491,13 @@ impl Run<'_, '_> {
             group::VCENTER => self.vcenter_end(md),
             group::MATH_CHOICE => self.build_choices(md),
             // §1069: an extra one at the bottom level, ignored
-            group::BOTTOM => self.log("error", "Too many }'s"),
+            group::BOTTOM => self.error_help(
+                "Too many }'s",
+                &[
+                    "You've closed more groups than you opened.",
+                    "Such booboos are generally harmless, so keep going.",
+                ],
+            ),
             // §1069 `extra_right_brace`: ignored, `align_state` counting
             // it as read
             group::SEMI_SIMPLE | group::MATH_SHIFT | group::MATH_LEFT => {
@@ -2500,7 +2506,16 @@ impl Run<'_, '_> {
                     group::MATH_SHIFT => "$",
                     _ => "\\right",
                 };
-                self.log("error", &format!("Extra }}, or forgotten {what}"))?;
+                self.error_help(
+                    &format!("Extra }}, or forgotten {what}"),
+                    &[
+                        "I've deleted a group-closing symbol because it seems to be",
+                        "spurious, as in `$x}$'. But perhaps the } is legitimate and",
+                        "you forgot something else, as in `\\hbox{$x}'. In such cases",
+                        "the way to recover is to insert both the forgotten and the",
+                        "deleted material, e.g., by typing `I$}'.",
+                    ],
+                )?;
                 if let Some(s) = self.astate {
                     self.set_astate(s + 1);
                 }
@@ -2755,7 +2770,7 @@ impl Run<'_, '_> {
                     }
                 }
                 _ => {
-                    self.back_cur();
+                    self.reread_cur();
                     break;
                 }
             }
@@ -2785,7 +2800,7 @@ impl Run<'_, '_> {
                     | cmd::SPACER
                     | cmd::EX_SPACE
             ) {
-                self.back_cur();
+                self.reread_cur();
                 break;
             }
         }

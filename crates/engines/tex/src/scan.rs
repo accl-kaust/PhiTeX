@@ -117,6 +117,17 @@ impl Run<'_, '_> {
         self.back_input(t);
     }
 
+    /// [`Run::back_cur`] where TeX keeps the token in hand
+    /// ([`crate::input::ty::REREAD`]).
+    pub(crate) fn reread_cur(&mut self) {
+        let t = self.cur.tok;
+        if self.aopen != 0 {
+            self.end_spent_lists();
+        }
+        self.uncount_brace(t);
+        self.input.back_as(t, crate::input::ty::REREAD);
+    }
+
     /// §441: the next non-blank non-sign token; whether it is negative.
     pub(crate) fn skip_signs(&mut self) -> R<bool> {
         let mut negative = false;
@@ -378,8 +389,9 @@ impl Run<'_, '_> {
                 self.ck()?;
             }
             if vacuous {
-                // "Missing number, treated as zero"
+                // §446 `back_error`
                 self.back_cur();
+                self.error_help("Missing number, treated as zero", &MISSING_NUMBER_HELP)?;
             } else if self.cur.cmd != cmd::SPACER {
                 self.back_cur();
             }
@@ -797,8 +809,9 @@ impl Run<'_, '_> {
             | cmd::DEF_FONT => {
                 // §415
                 if level != 5 {
-                    // "Missing number, treated as zero"
+                    // §428 `back_error`
                     self.back_cur();
+                    self.error_help("Missing number, treated as zero", &MISSING_NUMBER_HELP)?;
                     IVal::Dimen(0)
                 } else if c <= cmd::ASSIGN_TOKS {
                     let loc = if c < cmd::ASSIGN_TOKS {
@@ -1238,3 +1251,10 @@ fn coerce_glue(x: IVal) -> IVal {
         other => other,
     }
 }
+
+/// §446's help (and §428's).
+const MISSING_NUMBER_HELP: [&str; 3] = [
+    "A number should have been here; I inserted `0'.",
+    "(If you can't figure out why I needed to see a number,",
+    "look up `weird error' in the index to The TeXbook.)",
+];

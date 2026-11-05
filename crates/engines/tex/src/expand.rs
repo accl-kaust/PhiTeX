@@ -391,7 +391,7 @@ impl Run<'_, '_> {
             if self.aopen != 0 {
                 self.end_spent_lists();
             }
-            self.push_range(r, crate::input::ty::MACRO);
+            self.input.push_named(r, name);
             return;
         }
         // §389: `scanner_status:=matching; warning_index:=warning_index`
@@ -415,7 +415,15 @@ impl Run<'_, '_> {
             }
             self.input.pop_spent();
             let range = self.input.arena.expand_body(&m.body, &m.segs, base);
-            self.push_range(range, crate::input::ty::MACRO);
+            // (the arguments' lengths kept with the call: an error's
+            // context shows the body with the place read in it, §314)
+            let mut lens = [0u32; 9];
+            let mut n = 0;
+            for (k, x) in self.input.arena.scratch_lens(base).take(9).enumerate() {
+                lens[k] = x;
+                n = k + 1;
+            }
+            self.input.push_macro(range, name, &m, &lens[..n]);
         }
         self.input.arena.scratch_end(base);
     }
@@ -452,7 +460,7 @@ impl Run<'_, '_> {
         }
         self.input.pop_spent();
         let r = self.body_range(&m.body);
-        self.push_range(r, crate::input::ty::MACRO);
+        self.input.push_macro(r, head, &m, &[]);
         true
     }
 
@@ -1724,8 +1732,7 @@ impl Run<'_, '_> {
             && self.int32("shellescape")? != 0
         {
             let Some(text) = self.pipe_text(cmd)? else {
-                self.log_bare("I can't find file")?;
-                return self.fatal("*** (job aborted, file error in nonstop mode)");
+                return self.cant_find(&name);
             };
             self.log("open", &name)?;
             self.push_toks([Tok::cs("\u{10FFFE}eof")]);
@@ -1755,13 +1762,11 @@ impl Run<'_, '_> {
         let Some(x) = self.read_file_lazy(&key)? else {
             // §530: in the nonstop modes (a build's, [`Run::fatal`]) the
             // job ends
-            self.log_bare("I can't find file")?;
-            return self.fatal("*** (job aborted, file error in nonstop mode)");
+            return self.cant_find(&name);
         };
         let xs = crate::val::list_of(self.v, x);
         if xs.len() < 2 {
-            self.log_bare("I can't find file")?;
-            return self.fatal("*** (job aborted, file error in nonstop mode)");
+            return self.cant_find(&name);
         }
         // (a job-written file whose read-back only defines: its
         // definitions from the per-field loop-backs; the text, when this

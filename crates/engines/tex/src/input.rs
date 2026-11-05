@@ -234,6 +234,13 @@ impl Arena {
         }
     }
 
+    /// The lengths of the arguments of the call begun at `b`, as matched.
+    pub(crate) fn scratch_lens(&self, b: Scratch) -> impl Iterator<Item = u32> + '_ {
+        self.sbounds[b.bounds as usize..]
+            .iter()
+            .map(|&(lo, hi)| hi - lo)
+    }
+
     /// Argument `i` (0-based) of the call begun at `b`, as matched.
     pub(crate) fn scratch_arg(&self, b: Scratch, i: usize) -> Option<&[Tok]> {
         let &(lo, hi) = self.sbounds.get(b.bounds as usize + i)?;
@@ -278,6 +285,53 @@ pub(crate) struct Level {
     /// while this level is on the stack, the run's definitions keep their
     /// value at the read-back (a checkpoint's input carries it).
     pub rb: bool,
+    /// A macro's level: its call in [`Input::calls`] (the name, the
+    /// meaning and the arguments' lengths, what §314 shows of it in an
+    /// error's context), or, [`Level::named`], its name's [`Tok::raw`];
+    /// [`NO_CALL`] for any other level.
+    pub call: u32,
+    /// A macro without parameters' level, its body read in place: `call`
+    /// is the macro's name (its body is the level's list), no call kept.
+    pub named: bool,
+}
+
+/// Tokens of a token list level put back in place ([`Input::back`]): TeX's
+/// `back_input` makes each a level of its own, "<to be read again>" in an
+/// error's context (§325, §312); here the level's place moves back. Its
+/// level (index, start and end), and the tokens `from..to` put back, the
+/// last one first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Unread {
+    pub level: u32,
+    pub c: u32,
+    pub b: u32,
+    pub from: u32,
+    pub to: u32,
+}
+
+impl Unread {
+    /// Whether it is level `i`'s, `l`.
+    pub(crate) fn of(&self, i: usize, l: &Level) -> bool {
+        self.level as usize == i && self.c == l.c && self.b == l.b && l.kind == kind::TOKS
+    }
+}
+
+/// [`Level::call`] of a level that is no macro's call.
+pub(crate) const NO_CALL: u32 = u32::MAX;
+
+/// A macro's call, as an error's context shows its level (§314, §319:
+/// the name, then the parameter text and body with the place read in
+/// the body; an argument being read is a level of its own, "<argument>").
+pub(crate) struct Call {
+    /// Its level's index in [`Input::levels`]: the calls are a stack, a
+    /// call at or above a new one's index is its level's no longer.
+    pub depth: u32,
+    pub name: Tok,
+    pub mac: std::rc::Rc<crate::val::Macro>,
+    /// The arguments' lengths ([`Input::call_lens`] from here, one per
+    /// parameter, in order).
+    pub lens_at: u32,
+    pub nlens: u8,
 }
 
 impl Level {
@@ -290,6 +344,8 @@ impl Level {
             b: r.end,
             c: r.start,
             rb: false,
+            call: NO_CALL,
+            named: false,
         }
     }
 
@@ -302,6 +358,8 @@ impl Level {
             b: 0,
             c: 0,
             rb: false,
+            call: NO_CALL,
+            named: false,
         }
     }
 
@@ -314,6 +372,8 @@ impl Level {
             b: 0,
             c: 0,
             rb: false,
+            call: NO_CALL,
+            named: false,
         }
     }
 
@@ -339,6 +399,11 @@ pub(crate) mod ty {
     /// §307's `inserted`: what §339 inserts to end a runaway list
     /// (`ins_list`), shown as "<inserted text>" (`crate::context`).
     pub const INSERTED: u8 = 19;
+    /// The token a run of characters ended at, put back for the command
+    /// loop (TeX's main loop goes to `reswitch` with it in hand, §1034,
+    /// and puts nothing back): read, it is no level of TeX's, so an
+    /// error's context leaves it out (`crate::context`).
+    pub const REREAD: u8 = 20;
     /// A list no diagnostic names (`\the`, `\csname`, conversions).
     pub const OTHER: u8 = 17;
 }
@@ -594,6 +659,13 @@ pub(crate) struct Input {
     /// The levels as the command in progress found them, saved as they
     /// come on top ([`Input::snapshot`]).
     snap: Option<Snap>,
+    /// The macro calls of the levels ([`Level::call`]), in the order
+    /// made; kept while the arena is (made again with it by
+    /// [`Input::compact`], for the levels left).
+    pub calls: Vec<Call>,
+    pub call_lens: Vec<u32>,
+    /// The tokens last put back in place ([`Unread`]).
+    pub unread: Option<Unread>,
 }
 
 /// The levels a command found, saved lazily ([`Input::snapshot`]): a
@@ -654,6 +726,9 @@ impl Input {
             compact_at: ARENA_COMPACT,
             arena_id: next_arena_id(),
             snap: None,
+            calls: Vec::new(),
+            call_lens: Vec::new(),
+            unread: None,
         }
     }
 
@@ -718,7 +793,123 @@ impl Input {
             return;
         }
         self.pop_spent();
+        self.unread_gone();
         self.levels.push(Level::toks(r, ty));
+    }
+
+    /// Pushes the level of macro `name` without parameters (§390), its
+    /// body `r` read in place, as [`Input::push_toks`]: its name kept
+    /// with it ([`Level::named`]).
+    #[inline]
+    pub(crate) fn push_named(&mut self, r: Range, name: Tok) {
+        if r.is_empty() {
+            return;
+        }
+        self.pop_spent();
+        self.unread_gone();
+        let mut l = Level::toks(r, ty::MACRO);
+        l.call = name.raw();
+        l.named = true;
+        self.levels.push(l);
+    }
+
+    /// Pushes a macro's level (§390), as [`Input::push_toks`]: its
+    /// call kept with it, `name` called with meaning `mac`, arguments of
+    /// `lens` tokens.
+    #[inline]
+    pub(crate) fn push_macro(
+        &mut self,
+        r: Range,
+        name: Tok,
+        mac: &std::rc::Rc<crate::val::Macro>,
+        lens: &[u32],
+    ) {
+        if r.is_empty() {
+            return;
+        }
+        self.pop_spent();
+        let mut l = Level::toks(r, ty::MACRO);
+        l.call = self.new_call(name, mac, lens);
+        self.unread_gone();
+        self.levels.push(l);
+    }
+
+    /// The record ([`Call`]) of a macro's level about to be pushed: its
+    /// index. The calls of levels gone (at its index or above) go.
+    pub(crate) fn new_call(
+        &mut self,
+        name: Tok,
+        mac: &std::rc::Rc<crate::val::Macro>,
+        lens: &[u32],
+    ) -> u32 {
+        let depth = u32::try_from(self.levels.len()).unwrap_or(u32::MAX);
+        while let Some(c) = self.calls.last()
+            && c.depth >= depth
+        {
+            self.call_lens.truncate(c.lens_at as usize);
+            self.calls.pop();
+        }
+        let i = u32::try_from(self.calls.len()).unwrap_or(NO_CALL);
+        self.calls.push(Call {
+            depth,
+            name,
+            mac: std::rc::Rc::clone(mac),
+            lens_at: u32::try_from(self.call_lens.len()).unwrap_or(0),
+            nlens: u8::try_from(lens.len()).unwrap_or(u8::MAX),
+        });
+        self.call_lens.extend_from_slice(lens);
+        i
+    }
+
+    /// The levels replaced by `keep` (the same levels, some left out, in
+    /// their order): each call's level index made its level's again.
+    pub(crate) fn set_levels(&mut self, keep: Vec<Level>) {
+        self.levels = keep;
+        self.unread = None;
+        for (i, l) in self.levels.iter().enumerate() {
+            if !l.named
+                && let Some(c) = self.calls.get_mut(l.call as usize)
+            {
+                c.depth = u32::try_from(i).unwrap_or(u32::MAX);
+            }
+        }
+    }
+
+    /// Before a level is pushed: the tokens put back in place in a level
+    /// at its index or above are no longer ([`Unread`]).
+    #[inline]
+    fn unread_gone(&mut self) {
+        if let Some(u) = self.unread
+            && u.level as usize >= self.levels.len()
+        {
+            self.unread = None;
+        }
+    }
+
+    /// A [`Level::named`] level's macro name.
+    pub(crate) fn name_of(l: &Level) -> Option<Tok> {
+        (l.named && l.kind == kind::TOKS).then(|| Tok::from_raw(l.call))
+    }
+
+    /// A macro level's call, if it has one.
+    pub(crate) fn call_of(&self, l: &Level) -> Option<(&Call, &[u32])> {
+        if l.named {
+            return None;
+        }
+        let c = self.calls.get(l.call as usize)?;
+        debug_assert!(
+            self.levels
+                .get(c.depth as usize)
+                .is_some_and(|x| x.call == l.call),
+            "a call's level moved"
+        );
+        let at = c.lens_at as usize;
+        Some((
+            c,
+            self.call_lens
+                .get(at..at + usize::from(c.nlens))
+                .unwrap_or_default(),
+        ))
     }
 
     /// Pops the token-list levels on top that are read to their end.
@@ -768,6 +959,7 @@ impl Input {
         let r = self.arena.alloc(toks);
         let mut l = Level::toks(r, ty);
         l.a = l.c + u32::try_from(read.min(toks.len())).unwrap_or(0);
+        self.unread_gone();
         self.levels.push(l);
     }
 
@@ -783,6 +975,7 @@ impl Input {
         self.pushes += 1;
         self.line_push.resize(self.lines.len(), 0);
         self.line_push[i] = self.pushes;
+        self.unread_gone();
         self.levels.push(Level::line(i));
         i
     }
@@ -799,6 +992,7 @@ impl Input {
         self.pushes += 1;
         self.file_push.resize(self.files.len(), 0);
         self.file_push[i] = self.pushes;
+        self.unread_gone();
         self.levels.push(Level::file(i));
         i
     }
@@ -890,17 +1084,41 @@ impl Input {
     /// list steps back (no allocation).
     #[inline]
     pub(crate) fn back(&mut self, t: Tok) {
+        self.back_as(t, ty::BACKED_UP);
+    }
+
+    /// [`Input::back`], a level it pushes of type `ty`.
+    pub(crate) fn back_as(&mut self, t: Tok, ty: u8) {
+        let i = self.levels.len().wrapping_sub(1);
         if let Some(l) = self.levels.last_mut()
             && l.kind == kind::TOKS
             && l.a > l.c
             && self.arena.at(l.a - 1) == t
         {
             l.a -= 1;
+            // (TeX's level of its own: kept for an error's context; a
+            // token TeX keeps in hand is none)
+            if ty == ty::BACKED_UP {
+                let l = *l;
+                match &mut self.unread {
+                    Some(u) if u.of(i, &l) && (u.from..=u.to).contains(&(l.a + 1)) => u.from = l.a,
+                    u => {
+                        *u = Some(Unread {
+                            level: u32::try_from(i).unwrap_or(u32::MAX),
+                            c: l.c,
+                            b: l.b,
+                            from: l.a,
+                            to: l.a + 1,
+                        });
+                    }
+                }
+            }
             return;
         }
         self.pop_spent();
         let r = self.arena.alloc(&[t]);
-        self.levels.push(Level::toks(r, ty::BACKED_UP));
+        self.unread_gone();
+        self.levels.push(Level::toks(r, ty));
     }
 
     /// Reaches the next segment of the text: pushed as a level (a line,
@@ -919,6 +1137,7 @@ impl Input {
             }
             Seg::Toks(t) => {
                 let r = self.arena.alloc(&t);
+                self.unread_gone();
                 self.levels.push(Level::toks(r, ty::OTHER));
             }
             Seg::File(f) => {
@@ -994,7 +1213,12 @@ impl Input {
             .map(|l| (l.b - l.c) as usize)
             .sum();
         let mut fresh = Arena::with_capacity((live * 2).max(1 << 14));
-        for l in &mut self.levels {
+        let (calls, lens) = (
+            std::mem::take(&mut self.calls),
+            std::mem::take(&mut self.call_lens),
+        );
+        let old_c: Vec<u32> = self.levels.iter().map(|l| l.c).collect();
+        for (depth, l) in self.levels.iter_mut().enumerate() {
             if l.kind != kind::TOKS {
                 continue;
             }
@@ -1004,6 +1228,22 @@ impl Input {
                 l.rb = rb;
                 continue;
             }
+            // (the calls of the levels left, made again in their order)
+            if !l.named
+                && let Some(c) = calls.get(l.call as usize)
+            {
+                let at = c.lens_at as usize;
+                let ls = lens.get(at..at + usize::from(c.nlens)).unwrap_or_default();
+                l.call = u32::try_from(self.calls.len()).unwrap_or(NO_CALL);
+                self.calls.push(Call {
+                    depth: u32::try_from(depth).unwrap_or(u32::MAX),
+                    name: c.name,
+                    mac: std::rc::Rc::clone(&c.mac),
+                    lens_at: u32::try_from(self.call_lens.len()).unwrap_or(0),
+                    nlens: c.nlens,
+                });
+                self.call_lens.extend_from_slice(ls);
+            }
             let r = fresh.alloc(&self.arena.toks[l.c as usize..l.b as usize]);
             let read = l.a - l.c;
             l.c = r.start;
@@ -1011,6 +1251,20 @@ impl Input {
             l.b = r.end;
         }
         self.compact_at = (fresh.len() * 4).max(ARENA_COMPACT);
+        // (a level's tokens put back, at its new place)
+        if let Some(u) = self.unread.take()
+            && let Some(l) = self.levels.get(u.level as usize)
+            && old_c.get(u.level as usize) == Some(&u.c)
+            && l.b > l.c
+        {
+            self.unread = Some(Unread {
+                c: l.c,
+                b: l.b,
+                from: l.c + (u.from - u.c),
+                to: l.c + (u.to - u.c),
+                ..u
+            });
+        }
         self.arena = fresh;
         self.arena_id = next_arena_id();
     }

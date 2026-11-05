@@ -848,7 +848,11 @@ impl Run<'_, '_> {
                 self.ck()?;
                 let mut s = String::new();
                 self.show_toks_into(&mut s, &body)?;
-                self.log(if ch == 0 { "msg" } else { "errmsg" }, &s)?;
+                if ch == 0 {
+                    self.log("msg", &s)?;
+                } else {
+                    self.errmessage(&s)?;
+                }
             }
             cmd::CASE_SHIFT => {
                 // §1288

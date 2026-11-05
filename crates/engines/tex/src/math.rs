@@ -244,8 +244,15 @@ impl Run<'_, '_> {
     /// `insert_dollar_sign` (§1047).
     pub(crate) fn insert_dollar_sign(&mut self) -> R<()> {
         self.back_cur();
-        self.back_input(Tok::ch(3, u32::from(b'$')));
-        self.log("error", "Missing $ inserted")
+        // (`ins_error`: the `$` is inserted text, §327)
+        self.push_inserted(Tok::ch(3, u32::from(b'$')));
+        self.error_help(
+            "Missing $ inserted",
+            &[
+                "I've inserted a begin-math/end-math symbol since I think",
+                "you left one out. Proceed, with fingers crossed.",
+            ],
+        )
     }
 
     /// `off_save` (§1064–§1066): a token that closes a group other than
@@ -259,7 +266,10 @@ impl Run<'_, '_> {
                 cmd::END_GROUP => "\\endgroup",
                 _ => "\\right",
             };
-            return self.log("error", &format!("Extra {what}"));
+            return self.error_help(
+                &format!("Extra {what}"),
+                &["Things are pretty mixed up, but I think the worst is over."],
+            );
         }
         self.back_cur();
         let (toks, what) = match md.group {
@@ -271,8 +281,10 @@ impl Run<'_, '_> {
             ),
             _ => (vec![Tok::ch(2, u32::from(b'}'))], "}"),
         };
-        self.push_toks(toks);
-        self.log("error", &format!("Missing {what} inserted"))
+        // (§1065 `ins_list`: inserted text, §327)
+        let r = self.input.arena.alloc(&toks);
+        self.input.push_toks(r, crate::input::ty::INSERTED);
+        self.error_help(&format!("Missing {what} inserted"), &OFF_SAVE_HELP)
     }
 
     /// `init_math` (§1138–§1139, §1145).
@@ -1622,3 +1634,12 @@ pub(crate) type MathMemo = (
     [[Option<u32>; 16]; 3],
     Rc<(crate::fonts::View, crate::FxHashMap<u32, i32>)>,
 );
+
+/// §1065's help.
+const OFF_SAVE_HELP: [&str; 5] = [
+    "I've inserted something that you may have forgotten.",
+    "(See the <inserted text> above.)",
+    "With luck, this will get me unwedged. But if you",
+    "really didn't forget anything, try typing `2' now; then",
+    "my insertion and my current dilemma will both disappear.",
+];
