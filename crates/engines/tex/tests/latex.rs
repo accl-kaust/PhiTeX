@@ -2869,7 +2869,7 @@ fn a_new_label_leaves_the_read_back_run_standing() {
 
 /// A long `\begin{document}` run whose read-back through its child is
 /// refused (it defines a name the `.aux` defines, after the read-back
-/// point: uspace's and ClassicThesis's `\@gtempa`), in a round whose
+/// point: uspace's and `ClassicThesis`'s `\@gtempa`), in a round whose
 /// `.aux` changed: the run's own checks while it runs read the output of
 /// its read-back child by the placement's key, not the last run's
 /// placement at the same index (a page's node there after a pass that
