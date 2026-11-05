@@ -1949,6 +1949,15 @@ enum IfOp {
     Tail(String),
 }
 
+/// §370's help.
+const UNDEFINED_HELP: [&str; 5] = [
+    "The control sequence at the end of the top line",
+    "of your error message was never \\def'ed. If you have",
+    "misspelled it (e.g., `\\hobx'), type `I' and the correct",
+    "spelling (e.g., `I\\hbox'). Otherwise just continue,",
+    "and I'll forget about whatever was undefined.",
+];
+
 #[cfg(test)]
 mod tests {
     /// A line ends at LF, CR or CR LF, as web2c's `input_line` reads.
@@ -1960,12 +1969,3 @@ mod tests {
         assert_eq!(super::split_lines("%a\r\\x"), ["%a\n", "\\x"]);
     }
 }
-
-/// §370's help.
-const UNDEFINED_HELP: [&str; 5] = [
-    "The control sequence at the end of the top line",
-    "of your error message was never \\def'ed. If you have",
-    "misspelled it (e.g., `\\hobx'), type `I' and the correct",
-    "spelling (e.g., `I\\hbox'). Otherwise just continue,",
-    "and I'll forget about whatever was undefined.",
-];
