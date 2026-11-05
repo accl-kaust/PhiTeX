@@ -2295,18 +2295,36 @@ impl Engine {
                             .and_then(|r| r.by)
                             .map_or(String::new(), |b| {
                                 let bn = self.node(b);
+                                let head = |x: NodeId| {
+                                    self.debug_node(x).lines().next().unwrap_or("").chars().take(300).collect::<String>()
+                                };
                                 format!(
-                                    " (by {} at {} seg {} serial {}; reader at {} seg {} serial {})",
+                                    " (by {} at {} seg {} serial {}; reader at {} seg {} serial {}; field {}; reader: {}; definer: {})",
                                     b.raw(),
                                     bn.pos_hint().0,
                                     bn.seg_hint().0,
                                     bn.serial.load(std::sync::atomic::Ordering::Relaxed),
                                     node.pos_hint().0,
                                     node.seg_hint().0,
-                                    node.serial.load(std::sync::atomic::Ordering::Relaxed)
+                                    node.serial.load(std::sync::atomic::Ordering::Relaxed),
+                                    v.render(f.0),
+                                    head(n),
+                                    head(b)
                                 )
                             }),
-                        _ => String::new(),
+                        crate::node::ReadKind::Fold { f, from, to, .. } => {
+                            let head = |x: NodeId| {
+                                self.debug_node(x).lines().next().unwrap_or("").chars().take(300).collect::<String>()
+                            };
+                            format!(
+                                " (field {}; reader: {}; from: {}; to: {})",
+                                v.render(f.0),
+                                head(n),
+                                from.map_or("-".to_owned(), head),
+                                to.map_or("-".to_owned(), head)
+                            )
+                        }
+                        _ => rd.kind.field().map_or(String::new(), |f| format!(" (field {})", v.render(f.0))),
                     };
                     out.push(format!(
                         "node {} ({}) read {:?} path {} saw {} but now {}{site}",
