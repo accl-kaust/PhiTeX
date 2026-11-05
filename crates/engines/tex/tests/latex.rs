@@ -2912,7 +2912,6 @@ fn a_long_run_refusing_its_read_back_child_ends() {
     }
 }
 
-
 /// showexpl's code examples under hyperref (the circuitikz manual's
 /// shape): each `LTXexample` writes its code to `\jobname.tmp` and reads
 /// it back, and after that its caption step's `\hyper@makecurrent`
