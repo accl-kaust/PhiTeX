@@ -1770,7 +1770,7 @@ impl Run<'_, '_> {
                     "input-wait: node {} file {key} read {} hole {:?}",
                     self.cx.node().raw(),
                     read.len(),
-                    h.map(|n| n.raw())
+                    h.map(phitex_defuse::NodeId::raw)
                 );
             }
             if h.is_some() {
