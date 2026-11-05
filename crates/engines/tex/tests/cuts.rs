@@ -1,7 +1,7 @@
 //! Continuations as fields and relocated placements
 //! (docs/spec-continuations.md): the rest of a cut piece is keyed by the
-//! piece and the candidate, a changed continuation reruns it in place,
-//! a moved page fire relocates it and keeps its finisher, and an
+//! piece, a changed continuation or a cut at another candidate reruns it
+//! in place, a moved page fire relocates it and keeps its finisher, and an
 //! edit history ends where a cold build does.
 
 mod common;
@@ -56,7 +56,7 @@ fn cold(name: &str, src: &str) -> Vec<u8> {
 }
 
 #[test]
-fn a_rest_of_a_piece_is_keyed_by_the_piece_and_the_candidate() {
+fn a_rest_of_a_piece_is_keyed_by_the_piece() {
     let src = doc(60, 30, &group_mid());
     for threads in [1, 8] {
         let b = build("keyed", &src, threads);
@@ -177,5 +177,38 @@ fn a_line_of_blanks_after_a_group_ends_the_paragraph() {
                 panic!("{blanks:?} at {threads} threads differs from the empty lines' DVI: {d}");
             }
         }
+    }
+}
+
+/// A piece that runs again and cuts at another candidate keeps its rest:
+/// the rest is the piece's, whatever candidate it was cut at, and runs
+/// again in place on the new continuation, with the chain after it kept
+/// (keyed by the candidate, the rest and every rest after it were made
+/// anew, one link a commit; the beamer user guide at -j4 made 13,400
+/// pieces where -j1 makes 5,400, accl 24931). Here an edit opens a group
+/// of its own across the end of the group's second paragraph, so the
+/// piece that cut there cuts at the next paragraph end.
+#[test]
+fn a_cut_moved_to_another_candidate_keeps_the_rest() {
+    let src = doc(60, 30, &group_mid());
+    let edited = src
+        .replacen("by 1 Group paragraph 1,", "by 1 {Group paragraph 1,", 1)
+        .replacen("by 1 Group paragraph 2,", "by 1 }Group paragraph 2,", 1);
+    assert_ne!(edited, src);
+    for threads in [1, 8] {
+        let mut b = build(&format!("recut-{threads}"), &src, threads);
+        let before = b.nodes_by_op("resume");
+        let r = common::rebuild(&mut b, &edited);
+        assert_eq!(b.output().0, cold("recut-edited", &edited), "-j{threads}");
+        assert_eq!(
+            r.placements_made("resume"),
+            0,
+            "-j{threads}: the rests run again in place, none made anew: {r:?}"
+        );
+        assert_eq!(
+            b.nodes_by_op("resume") + 1,
+            before,
+            "-j{threads}: one cut fewer, one rest fewer"
+        );
     }
 }

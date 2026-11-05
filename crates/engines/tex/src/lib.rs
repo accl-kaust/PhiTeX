@@ -29,6 +29,7 @@ mod api;
 mod assemble;
 mod build;
 mod collect;
+mod context;
 mod control;
 mod countloop;
 mod defer;
