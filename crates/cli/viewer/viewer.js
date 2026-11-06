@@ -462,6 +462,7 @@ var Viewer = class {
       tag.className = "peer peer-tag";
       tag.style.setProperty("--hue", String(hue));
       tag.textContent = label;
+      tag.style.setProperty("--fs", String(boxes2[0][3] * 0.72 / w));
       at(tag, boxes2[0][0], boxes2[0][1]);
       s.el.append(tag);
     }
@@ -1156,7 +1157,7 @@ header:active { cursor: grabbing; }
 .win.reopening .viewer { visibility: hidden; }
 /* (the first page's sheet up: the stage holds still under it, its width kept, so nothing scrolls behind the sheet) */
 .win.sheet-up .stage, .win.docked.sheet-up .stage { overflow: hidden; scrollbar-gutter: stable; }
-.slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+.slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); container-type: inline-size; }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
@@ -1197,8 +1198,9 @@ header:active { cursor: grabbing; }
 .slot .culprit::after { content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 3px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23d93025' stroke-width='1'/%3E%3C/svg%3E") repeat-x left bottom / 6px 3px; }
 .slot .culprit.warning::after { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23c77700' stroke-width='1'/%3E%3C/svg%3E"); }
 .slot .peer { position: absolute; pointer-events: none; border-radius: 2px; background: hsl(var(--hue) 70% 50% / 22%); box-shadow: inset 0 -1.5px 0 hsl(var(--hue) 70% 45%); }
-.slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 5px; border-radius: 3px 3px 3px 0; background: hsl(var(--hue) 70% 42%);
-  box-shadow: none; color: #fff; font: 600 11px/16px var(--ph-font); white-space: nowrap; z-index: 2; }
+/* (the name as large as the line it marks, so it zooms with the page; readable when far out, never a headline when close) */
+.slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 .4em; border-radius: .25em .25em .25em 0; background: hsl(var(--hue) 70% 42%);
+  box-shadow: none; color: #fff; font: 600 clamp(7px, calc(var(--fs, .012) * 100cqw), 22px)/1.35 var(--ph-font); white-space: nowrap; z-index: 2; }
 
 /* strips over the pages: plain, in the host's colours */
 .strip { position: sticky; top: 0; z-index: 2; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
