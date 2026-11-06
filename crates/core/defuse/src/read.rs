@@ -1808,13 +1808,7 @@ impl Drop for WalkMemo {
 /// every bracket were gone over by each reader passing it: biblatex at
 /// -j4, readers going back 170 segments each, 10 M segments and 47 M
 /// brackets for one walk's 59 k readers, 10 s (mc 80642).
-fn survivors(
-    eng: &Engine,
-    seg: &Segment,
-    inner: &Inner,
-    f: Field,
-    start: &Arc<[u64]>,
-) -> Arc<[(Def, (usize, u64))]> {
+fn survivors(eng: &Engine, seg: &Segment, inner: &Inner, f: Field, start: &Arc<[u64]>) -> Arc<[(Def, (usize, u64))]> {
     let w = seg.inner.writes();
     if let Some(e) = seg.surv.lock().get(&f)
         && e.0 == w

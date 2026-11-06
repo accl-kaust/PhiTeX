@@ -825,11 +825,7 @@ impl Run<'_, '_> {
                         k.after != ls.after && !(k.checkpoints.is_empty() && k.beyond.is_empty())
                     }) {
                         let from = self.start_cursor(r);
-                        self.hold_for_start_after(
-                            Some(&k),
-                            (false, from),
-                            After::Now(ls.after),
-                        );
+                        self.hold_for_start_after(Some(&k), (false, from), After::Now(ls.after));
                     } else if took.is_none() {
                         self.wait_keeping(None);
                     } else if old.checkpoints.is_empty()
