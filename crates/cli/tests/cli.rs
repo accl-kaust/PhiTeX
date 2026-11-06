@@ -2020,8 +2020,32 @@ fn watch_plain_edit() {
     let broken = edited.replacen(" thy ", " \\undefinedcs ", 1);
     std::thread::sleep(Duration::from_millis(50));
     std::fs::write(dir.join("story.tex"), &broken).expect("the broken edit");
+    let edit = ev;
     let ev = until(&mut lines, "build", &3.into(), &mut seen);
     assert_eq!(ev["ok"], false, "{ev}");
+    // (every build's stats, the same fields each: the viewer's debug info)
+    let keys = |e: &serde_json::Value| -> Vec<String> {
+        e["stats"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    for k in [
+        "nodes",
+        "runs",
+        "phases_ms",
+        "threads",
+        "cores_busy",
+        "resident_kb",
+        "engine",
+        "files",
+        "version",
+        "wall_ms",
+    ] {
+        assert!(keys(&cold).iter().any(|x| x == k), "no stats.{k}: {cold}");
+    }
+    assert_eq!(keys(&cold), keys(&edit), "{cold} {edit}");
+    assert_eq!(keys(&cold), keys(&ev), "{cold} {ev}");
     let failed = std::fs::read(dir.join("story.dvi")).expect("the failed build's DVI");
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
