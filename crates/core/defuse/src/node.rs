@@ -229,6 +229,11 @@ pub(crate) struct Node {
     /// alone (`Ctx::claim_rest`: the job is over at it); cleared by an
     /// ordinary claim.
     pub(crate) claim_all: AtomicBool,
+    /// Its last run stopped before a claim that moved what the line after
+    /// it holds while the text before it was still to run
+    /// (`Ctx::wait_claim_settled`): its next run waits for that text first
+    /// (`sched::work`). Cleared by a claim made.
+    pub(crate) claim_waits: AtomicBool,
 }
 
 /// An effect as 32 bits: closes, opens, `before`, and whether pending.
@@ -287,6 +292,7 @@ impl Node {
             anchored: Mx::new(Vec::new()),
             moved: AtomicBool::new(false),
             claim_all: AtomicBool::new(false),
+            claim_waits: AtomicBool::new(false),
             id,
             unit,
             op: AtomicU32::new(op.0),
