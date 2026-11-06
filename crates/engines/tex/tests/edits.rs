@@ -953,7 +953,8 @@ fn a_line_inserted_at_the_top_reruns_no_weak_reader_of_the_line_number() {
     assert_eq!(weak, 0, "no weak reader of the line runs again");
 }
 
-/// A box register voided globally by a paragraph, then deleted with it:
+/// A box register voided globally by a paragraph (from another, void, register:
+/// a restore of the value it read would publish nothing), then deleted with it:
 /// the register is unset again, which TeX reads as the same void box, so
 /// the paragraph after it that reads the register does not run again
 /// (tikz's `\pgf@layerbox@background`, voided by every picture's end:
@@ -964,7 +965,7 @@ fn a_box_voided_globally_and_deleted_reruns_no_reader_of_it() {
     let fx = common::fixtures().join("dvi");
     let mut src = String::from("\\vsize=200pt \\hsize=150pt \\parindent=0pt\n");
     src.push_str("Paragraph zero has a few words.\n\n");
-    src.push_str("\\global\\setbox7=\\box7 Paragraph one voids a box.\n\n");
+    src.push_str("\\global\\setbox7=\\box6 Paragraph one voids a box.\n\n");
     for k in 2..6 {
         let _ = writeln!(
             src,
@@ -975,7 +976,7 @@ fn a_box_voided_globally_and_deleted_reruns_no_reader_of_it() {
     let prelude = common::plain();
     let opts = || common::options("./vb.tex", "vb", "", &fx);
     let mut b = common::build(opts(), Some(&prelude), &src);
-    let text = src.replace("\\global\\setbox7=\\box7 ", "");
+    let text = src.replace("\\global\\setbox7=\\box6 ", "");
     assert_ne!(text, src);
     b.edit(&text);
     for (n, op, why) in &b.stats.reruns {
