@@ -143,7 +143,7 @@ impl Run<'_, '_> {
                 cmd::SYM => {
                     // (a deferred read's symbol where its digits are
                     // needed: docs/spec-deferred-reads.md §2; a file
-                    // size's, docs/note-relative-counters.md §2.4)
+                    // size's, docs/spec-relative-counters.md §2.4)
                     let t = self.cur.tok;
                     crate::defer::expand_any(self, t)?;
                 }
@@ -210,15 +210,55 @@ impl Run<'_, '_> {
         let _in_csname = crate::etex::InCsname::enter();
         let mut name = NAME.with(std::cell::Cell::take);
         name.clear();
-        let r = self.cs_name_chars(&mut name);
+        let r = crate::defer::name_chars(self, &mut name);
+        let kept = match r {
+            Ok(k) => k,
+            Err(e) => {
+                NAME.with(|c| c.set(name));
+                return Err(e);
+            }
+        };
+        // (a relative name, docs/spec-relative-counters.md §2.2: where the
+        // derived read says it is defined, its symbol; undefined, TeX
+        // defines it, so its name is made concrete)
+        if let Some((at, s)) = kept {
+            let (pre, suf) = (name[..at].to_owned(), name[at..].to_owned());
+            NAME.with(|c| c.set(name));
+            if self.cur.cmd != cmd::END_CS_NAME {
+                let t = self.cur.tok;
+                self.back_input(t);
+            }
+            let p = phitex_defuse::PathId::of_proj(self.ops.defined_proj);
+            let d = crate::defer::DName {
+                s,
+                prefix: pre,
+                suffix: suf,
+            };
+            if let Some(tok) = crate::defer::dname_tok(&d)
+                && let Some(crate::defer::Answer(x)) =
+                    crate::defer::derived_read(self, s, &d.prefix, &d.suffix, p)?
+                && x.is_some_and(|x| int_of(self.v, x) != 0)
+            {
+                self.back_input(tok);
+                return Ok(());
+            }
+            let n = crate::defer::forced_name(self, s, &d.prefix, &d.suffix)?;
+            let t = Tok::cs(&n);
+            return self.cs_name_end(t);
+        }
         let t = Tok::cs(&name);
         NAME.with(|c| c.set(name));
-        r?;
         if self.cur.cmd != cmd::END_CS_NAME {
             // §373: back_error
             let t = self.cur.tok;
             self.back_input(t);
         }
+        self.cs_name_end(t)
+    }
+
+    /// §372's end: control sequence `t` made `\relax` where undefined,
+    /// and put back.
+    fn cs_name_end(&mut self, t: Tok) -> R<()> {
         // (§372: of the name's meaning only whether it is defined)
         let undefined = match self.defined_lookup(t)? {
             Some(d) => !d,
@@ -315,18 +355,14 @@ impl Run<'_, '_> {
         }
     }
 
-    /// §372: the characters of a `\\csname` into `name`.
-    fn cs_name_chars(&mut self, name: &mut String) -> R<()> {
-        loop {
-            self.get_x_token();
-            self.ck()?;
-            if self.cur.is_cs() {
-                return Ok(());
-            }
-            // (XeTeX's names take every Unicode character)
-            let c = self.cur.tok.chr();
-            print::push_code(name, if self.xe { c } else { c & 0xFF });
+    /// A macro without parameters expanded: its body read in place
+    /// (§390), as [`Run::macro_call`] reads one.
+    pub(crate) fn push_macro_body(&mut self, m: &Macro) {
+        let r = self.body_range(&m.body);
+        if self.aopen != 0 {
+            self.end_spent_lists();
         }
+        self.push_range(r, crate::input::ty::MACRO);
     }
 
     /// `macro_call` (§389–§400) over the arena (spec-final §2.3): the
@@ -601,7 +637,7 @@ impl Run<'_, '_> {
                 // its digits one by one, docs/spec-deferred-reads.md §2)
                 // (a file size's symbol taken whole as an undelimited
                 // argument: TeX took its first digit and left the rest,
-                // docs/note-relative-counters.md §2.4, so the argument
+                // docs/spec-relative-counters.md §2.4, so the argument
                 // is the first digit's symbol and the rest's goes back;
                 // the first digit's symbol alone is one digit)
                 let mut tok = tok;
@@ -777,7 +813,7 @@ impl Run<'_, '_> {
 
     /// A symbol met outside braces while a macro's arguments are matched
     /// ([`Run::macro_args`]): the token to take (an undelimited
-    /// argument's file size digit, docs/note-relative-counters.md §2.4:
+    /// argument's file size digit, docs/spec-relative-counters.md §2.4:
     /// the first digit's symbol, the rest's put back), or its digits put
     /// on the input to be matched one by one (`Some(None)`); None: a halt.
     #[cold]
@@ -924,7 +960,7 @@ impl Run<'_, '_> {
     }
 
     /// One operand of `\if` or `\ifcat` (§506), where a file size's
-    /// symbol is kept (docs/note-relative-counters.md §2.4): all its
+    /// symbol is kept (docs/spec-relative-counters.md §2.4): all its
     /// digits taken there are the first digit's symbol taken and the
     /// rest's left on the input, as TeX takes one digit.
     fn if_operand(&mut self) -> R<IfOp> {
@@ -957,7 +993,7 @@ impl Run<'_, '_> {
     }
 
     /// `\if` (`cat` false) or `\ifcat` (§506). An operand that is a file
-    /// size's digit (docs/note-relative-counters.md §2.4: a non-empty
+    /// size's digit (docs/spec-relative-counters.md §2.4: a non-empty
     /// digit string's first) is not read where the answer is the same
     /// for every digit: `\ifcat` against any token, `\if` against one
     /// whose character code is not a digit's (expl3's `\if:w
@@ -1080,13 +1116,13 @@ impl Run<'_, '_> {
 
     /// §507: `\ifx`'s two tokens compared.
     fn if_x(&mut self) -> R<bool> {
-        if !self.next_ck()? {
+        if !self.ifx_next()? {
             return Ok(false);
         }
         // (a deferred read's symbol: TeX compared its first digit)
         self.unsym_cur()?;
         let (p, h1, m1) = self.ifx_side()?;
-        if !self.next_ck()? {
+        if !self.ifx_next()? {
             return Ok(false);
         }
         self.unsym_cur()?;
@@ -1138,7 +1174,26 @@ impl Run<'_, '_> {
     /// One side of `\ifx` (§507): the current token's command code, its
     /// modifier (0 for a macro), and its macro if it is one: a decoded
     /// meaning of the run's table by its location, read in place.
+    /// `\\ifx`'s operand fetched: a derived name's symbol kept
+    /// ([`Run::d_ok`]), its meaning read through the derived read.
+    fn ifx_next(&mut self) -> R<bool> {
+        self.d_ok = true;
+        let b = self.get_next();
+        self.d_ok = false;
+        self.ck()?;
+        Ok(b)
+    }
+
     fn ifx_side(&mut self) -> R<(u8, i32, IfxMacro)> {
+        if self.cur.cmd == cmd::SYM && crate::defer::is_dname(self.cur.tok) {
+            let t = self.cur.tok;
+            let m = crate::defer::dname_meaning(self, t)?;
+            let (c, h) = m.cmd_chr();
+            return Ok(match m {
+                Mean::Macro(x) => (c, 0, IfxMacro::Rc(x)),
+                _ => (c, h, IfxMacro::No),
+            });
+        }
         let (c, h) = (self.cur.cmd, self.cur.chr);
         if self.interp.is_none()
             && !(c == cmd::RELAX && h == crate::val::NO_EXPAND_FLAG)
@@ -1251,6 +1306,8 @@ impl Run<'_, '_> {
                             -self.num_order(t, i64::from(n))?
                         }
                     }
+                    (Num::Reg(l, j), Num::Int(x)) => self.reg_order(l, j, x)?,
+                    (Num::Int(n), Num::Reg(l, j)) => -self.reg_order(l, j, n)?,
                     (a, b) => {
                         let (n, x) = (self.num_int(a)?, self.num_int(b)?);
                         order(n, x)
@@ -1441,6 +1498,9 @@ impl Run<'_, '_> {
         let val = self.scan_something_internal(5, false);
         self.defer_ok = false;
         let val = val?;
+        if let Some((loc, j)) = self.defer_sym.take() {
+            return Ok(vec![crate::defer::symbol_with(self, loc, j)]);
+        }
         if let Some(loc) = self.defer_hit.take() {
             return Ok(vec![crate::defer::symbol_for(self, loc)]);
         }
@@ -1470,6 +1530,11 @@ impl Run<'_, '_> {
             // a page-layer register alone, unread, in a piece: its symbol,
             // docs/spec-deferred-reads.md §2)
             let n = self.scan_int_deferring()?;
+            if let Some((loc, j)) = self.defer_sym.take() {
+                let t = crate::defer::symbol_with(self, loc, j);
+                self.push_toks([t]);
+                return Ok(());
+            }
             if let Some(loc) = self.defer_hit.take() {
                 let t = crate::defer::symbol_for(self, loc);
                 self.push_toks([t]);

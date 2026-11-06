@@ -488,12 +488,19 @@ impl<'a> Ctx<'a> {
     /// ([`Ctx::define_alias`]).
     fn follow_aliases(&mut self, mut x: Option<ValueId>) -> Result<Option<ValueId>, Stop> {
         for _ in 0..32 {
-            let Some((g, at)) = x.and_then(|y| read::alias_of(self.values(), y)) else {
+            let Some((g, at, c)) = x.and_then(|y| read::alias_parts(self.values(), y)) else {
                 return Ok(x);
             };
-            x = match self.read_at_raw(g, At::Before(at))? {
+            let y = match self.read_at_raw(g, At::Before(at))? {
                 FieldAt::Def(y, _) => Some(y),
                 FieldAt::Unset | FieldAt::Gone => None,
+            };
+            // (an alias plus an offset, a relation on an alias: the
+            // target's integer plus it; an alias of one, the offset carried)
+            let v = self.values();
+            x = match y.and_then(|z| read::alias_parts(v, z)) {
+                Some((h, hat, k)) => Some(read::alias_value_plus(v, h, hat, k.wrapping_add(c))),
+                None => read::alias_target_plus(v, y, c),
             };
         }
         Ok(x)

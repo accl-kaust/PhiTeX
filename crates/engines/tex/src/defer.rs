@@ -25,7 +25,7 @@ pub(crate) struct Sym {
     pub reg: i32,
     pub node: NodeId,
     /// The steps the piece made of the register before the read
-    /// (docs/note-relative-counters.md §2.1): the value is the one reaching
+    /// (docs/spec-relative-counters.md §2.1): the value is the one reaching
     /// the piece plus these.
     pub j: i32,
 }
@@ -132,6 +132,16 @@ fn routine_regs(r: &mut Run<'_, '_>) {
 pub(crate) fn symbol_for(r: &mut Run<'_, '_>, loc: Loc) -> Tok {
     let node = r.cx.node();
     let j = r.st.steps_of(loc);
+    r.st.note_symbol(loc);
+    r.st.note_read(loc);
+    let reg = r.count_reg(loc).expect("deferrable: an integer register");
+    sym_tok(Sym { reg, node, j })
+}
+
+/// [`symbol_for`] with steps `j` given: a register's value reaching the
+/// piece plus `j` (an expression's on it, [`Run::defer_sym`]).
+pub(crate) fn symbol_with(r: &mut Run<'_, '_>, loc: Loc, j: i32) -> Tok {
+    let node = r.cx.node();
     r.st.note_symbol(loc);
     r.st.note_read(loc);
     let reg = r.count_reg(loc).expect("deferrable: an integer register");
@@ -276,9 +286,11 @@ pub(crate) fn try_symbolic(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate
         // as it is, §413's internal integer, nothing scanned after it)
         if c == cmd::ASSIGN_INT {
             let l = r.quantity_loc(cmd::ASSIGN_INT, r.cur.chr);
-            if let Some((g, node)) = r.st.alias_at(l, r.v) {
+            if let Some((g, node, off)) = r.st.alias_at(l, r.v)
+                && let Ok(off) = i32::try_from(off)
+            {
                 let gl = r.loc_of(g);
-                if let Some(s) = Sym::at(r, gl, node)
+                if let Some(s) = Sym::at(r, gl, node).map(|s| Sym { j: off, ..s })
                     && symbolic(r, loc, s, global)
                 {
                     return Ok(true);
@@ -328,8 +340,35 @@ fn symbolic(r: &mut Run<'_, '_>, loc: Loc, s: Sym, global: bool) -> bool {
     if Sym::at(r, loc, node) == Some(s) {
         return restore_reaching(r, loc, global);
     }
-    // (a value plus steps is neither: the digits are read)
+    // (this piece's own symbol of the register with its steps: the value
+    // reaching the piece plus them, a step of it again)
+    if s.j != 0 && Sym::at(r, loc, node).is_some_and(|o| o.reg == s.reg && o.node == s.node) {
+        return restore_plus(r, loc, s.j, global);
+    }
+    // (another register's or piece's value plus steps is neither: the
+    // digits are read)
     s.j == 0 && alias(r, loc, s, global)
+}
+
+/// Integer register `loc` set to this piece's own symbol of it with steps
+/// `j` (docs/spec-relative-counters.md §2.5): the value reaching the
+/// piece plus `j`, which is a step of that value, so the run's map of the
+/// register becomes `+j` whatever it held, neither a read nor a
+/// definition (beamer's `\beamer@restorecounter`: a counter saved as
+/// `\the\c@figure` after the frame stepped it, set back at each overlay).
+/// Only where a step could be a relation ([`Run::map_ok`]) and the run
+/// made no definition of it; false elsewhere (the caller forces the
+/// digits and assigns as TeX does).
+fn restore_plus(r: &mut Run<'_, '_>, loc: Loc, j: i32, global: bool) -> bool {
+    if !r.map_ok(loc, global) || r.st.defined_after(loc, 0) {
+        return false;
+    }
+    let v = r.v;
+    if !r.st.restore_plus(v, loc, j, global) {
+        return false;
+    }
+    r.muts += 1;
+    true
 }
 
 /// Integer register `loc` set to symbol `s` of another register (or of
@@ -411,7 +450,7 @@ pub(crate) fn int_of(v: &phitex_defuse::Values, x: ValueId) -> Option<i32> {
 const SIZE_TAG: &str = "fsz\u{2}";
 
 /// Which digits of a file's size a size symbol stands for
-/// (docs/note-relative-counters.md §2.4): all of them (`\pdffilesize`'s
+/// (docs/spec-relative-counters.md §2.4): all of them (`\pdffilesize`'s
 /// expansion, a non-empty digit string), the first (an undelimited
 /// argument TeX took of them, one digit), or the rest after the first
 /// (what TeX left on the input, possibly none).
@@ -556,8 +595,244 @@ pub(crate) fn digits_str(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<Option<St
 /// delimited argument, `\string`): they go onto the input, as
 /// `conv_toks` puts `\number`'s.
 pub(crate) fn expand_any(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<()> {
+    if is_dname(t) {
+        return expand_dname(r, t);
+    }
     if let Some(d) = digits_str(r, t)? {
         r.push_toks(crate::expand::str_toks(&d));
     }
+    Ok(())
+}
+
+// ------------------------------------------------------- derived names
+
+/// The tag of a derived name's symbol, past [`SYM_PREFIX`]:
+/// `<SYM_PREFIX>dn\u{2}<register>\u{2}<node raw>\u{2}<j>\u{2}<prefix>\u{2}<suffix>`.
+const DNAME_TAG: &str = "dn\u{2}";
+
+/// A relative name (docs/spec-relative-counters.md §2.2): the control
+/// sequence named `prefix`, the digits of symbol `s`, `suffix`, a
+/// `\csname` made with the symbol inside. As a token ([`dname_tok`]) it
+/// is what `\csname` gives where the name is defined: expanded or
+/// compared by `\ifx` through the derived read of its meaning
+/// (`Ctx::read_derived`), made concrete anywhere else ([`Run::d_ok`]).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(crate) struct DName {
+    pub s: Sym,
+    pub prefix: String,
+    pub suffix: String,
+}
+
+/// The token of derived name `d`, if its parts can be told apart in one.
+pub(crate) fn dname_tok(d: &DName) -> Option<Tok> {
+    if d.prefix.contains('\u{2}') || d.suffix.contains('\u{2}') {
+        return None;
+    }
+    Some(Tok::cs(&format!(
+        "{SYM_PREFIX}{DNAME_TAG}{}\u{2}{}\u{2}{}\u{2}{}\u{2}{}",
+        d.s.reg,
+        d.s.node.raw(),
+        d.s.j,
+        d.prefix,
+        d.suffix
+    )))
+}
+
+/// Whether `t` is a derived name's symbol.
+#[inline]
+pub(crate) fn is_dname(t: Tok) -> bool {
+    t.is_internal_cs()
+        && t.as_cs().is_some_and(|c| {
+            c.name()
+                .strip_prefix(SYM_PREFIX)
+                .is_some_and(|r| r.starts_with(DNAME_TAG))
+        })
+}
+
+/// The derived name a token is, if it is one.
+pub(crate) fn dname_of(t: Tok) -> Option<DName> {
+    let c = t.as_cs()?;
+    let name = c.name();
+    let rest = name.strip_prefix(SYM_PREFIX)?.strip_prefix(DNAME_TAG)?;
+    let mut it = rest.splitn(5, '\u{2}');
+    let reg = it.next()?.parse().ok()?;
+    let node = NodeId::from_raw(it.next()?.parse().ok()?);
+    let j = it.next()?.parse().ok()?;
+    let prefix = it.next()?.to_owned();
+    let suffix = it.next()?.to_owned();
+    Some(DName {
+        s: Sym { reg, node, j },
+        prefix,
+        suffix,
+    })
+}
+
+/// The characters of a `\csname` or `\ifcsname` name into `name`, as
+/// §372 takes them, to the first non-character token (the current token
+/// then): a register's symbol of this piece met there (the first one)
+/// is kept as the place in the name where its digits go, not forced; any
+/// other symbol's digits go in as TeX's. The kept symbol and its place.
+pub(crate) fn name_chars(
+    r: &mut Run<'_, '_>,
+    name: &mut String,
+) -> crate::run::R<Option<(usize, Sym)>> {
+    use crate::val::cmd;
+    let keep = r.defer_allowed() && r.rb.is_none();
+    let was = r.reg_stop.replace(r.expand_depth);
+    let mut kept = None;
+    let out = loop {
+        r.get_x_token();
+        if let Err(e) = r.ck() {
+            break Err(e);
+        }
+        if r.cur.cmd == cmd::SYM
+            && let Some(s) = sym_of(r.cur.tok)
+        {
+            if keep && kept.is_none() && s.node == r.cx.node() {
+                kept = Some((name.len(), s));
+                continue;
+            }
+            match print_sym(r, s, name) {
+                Ok(()) => continue,
+                Err(e) => break Err(e),
+            }
+        }
+        if r.cur.is_cs() {
+            break Ok(kept);
+        }
+        // (XeTeX's names take every Unicode character)
+        let c = r.cur.tok.chr();
+        crate::print::push_code(name, if r.xe { c } else { c & 0xFF });
+    };
+    r.reg_stop = was;
+    out
+}
+
+/// The name `prefix`, symbol `s`'s digits (forced), `suffix`.
+pub(crate) fn forced_name(
+    r: &mut Run<'_, '_>,
+    s: Sym,
+    prefix: &str,
+    suffix: &str,
+) -> crate::run::R<String> {
+    let mut n = String::with_capacity(prefix.len() + suffix.len() + 4);
+    n.push_str(prefix);
+    print_sym(r, s, &mut n)?;
+    n.push_str(suffix);
+    Ok(n)
+}
+
+/// The derived read (`Ctx::read_derived`) of the meaning of the control
+/// sequence named `prefix`, symbol `s`'s digits, `suffix`, through `p`:
+/// its answer, or None where it cannot stand for the look-up (the caller
+/// forces the symbol): another piece's symbol, a run that may not defer,
+/// digits that could run into the name's own, a name of that shape the
+/// run binds itself (the engine's answer is not the run's).
+pub(crate) fn derived_read(
+    r: &mut Run<'_, '_>,
+    s: Sym,
+    prefix: &str,
+    suffix: &str,
+    p: phitex_defuse::PathId,
+) -> crate::run::R<Option<Answer>> {
+    if s.node != r.cx.node()
+        || !r.defer_allowed()
+        || r.rb.is_some()
+        || prefix.ends_with(|c: char| c.is_ascii_digit() || c == '-')
+        || suffix.starts_with(|c: char| c.is_ascii_digit())
+        || crate::exec::obs_flag!("PHITEX_NO_DERIVED")
+        || binds_like(r, prefix, suffix)
+    {
+        return Ok(None);
+    }
+    let loc = s.loc(r);
+    let base = r.loc_field(loc);
+    let pre = format!("cs:{prefix}");
+    let (x, g) = r.cx.read_derived(base, &pre, i64::from(s.j), suffix, p)?;
+    if crate::exec::obs_flag!("PHITEX_SYM_TRACE") {
+        eprintln!(
+            "sym-derived: node {} count {} j {} name {} answer {:?}",
+            r.cx.node().raw(),
+            s.reg,
+            s.j,
+            crate::val::field_name(r.v, g),
+            x.map(|x| r.v.render(x).chars().take(60).collect::<String>())
+        );
+    }
+    Ok(Some(Answer(x)))
+}
+
+/// A derived read's answer ([`derived_read`]): the named field's value
+/// through the path, `None` where the name is not defined.
+pub(crate) struct Answer(pub Option<ValueId>);
+
+/// Whether the run binds a control sequence named `prefix`, a number,
+/// `suffix` itself (a definition of its own, or one a continuation
+/// brought): the run's definitions looked over once, from where the
+/// last ask of that shape stopped ([`Run::derived_own`]).
+pub(crate) fn binds_like(r: &mut Run<'_, '_>, prefix: &str, suffix: &str) -> bool {
+    let key = (prefix.to_owned(), suffix.to_owned());
+    let (from, found) = r.derived_own.get(&key).copied().unwrap_or((0, false));
+    if found {
+        return true;
+    }
+    let (ls, n) = r.st.defined_locs_from(from);
+    let pre = format!("cs:{prefix}");
+    let v = r.v;
+    let hit = ls.into_iter().any(|l| {
+        let f = r.loc_field_peek(l);
+        v.with_str(f.0, |name| numbered_like(name, &pre, suffix)) == Some(true)
+    });
+    r.derived_own.insert(key, (n, hit));
+    hit
+}
+
+/// Whether `name` is `pre`, an optional minus, decimal digits, `suf`.
+fn numbered_like(name: &str, pre: &str, suf: &str) -> bool {
+    let Some(mid) = name.strip_prefix(pre).and_then(|m| m.strip_suffix(suf)) else {
+        return false;
+    };
+    let mid = mid.strip_prefix('-').unwrap_or(mid);
+    !mid.is_empty() && mid.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// A derived name made concrete: its symbol's digits forced (resolved
+/// in a finisher), the control sequence they name.
+pub(crate) fn dname_concrete(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<Tok> {
+    let d = dname_of(t).expect("a derived name's token");
+    let n = forced_name(r, d.s, &d.prefix, &d.suffix)?;
+    Ok(Tok::cs(&n))
+}
+
+/// A derived name's meaning, read through the derived read (whole); its
+/// concrete name's where that read cannot stand.
+pub(crate) fn dname_meaning(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<crate::val::Mean> {
+    let d = dname_of(t).expect("a derived name's token");
+    if let Some(Answer(x)) =
+        derived_read(r, d.s, &d.prefix, &d.suffix, phitex_defuse::PathId::WHOLE)?
+    {
+        return Ok(crate::val::Mean::decode(r.v, x));
+    }
+    let g = dname_concrete(r, t)?;
+    r.mean_of(g)
+}
+
+/// A derived name expanded (an expanding fetch, [`Run::d_ok`]): a macro
+/// without parameters, not outer or protected, its body read through
+/// the derived read; any other meaning by its concrete name, put back
+/// for the fetch to take as TeX's.
+pub(crate) fn expand_dname(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<()> {
+    let d = dname_of(t).expect("a derived name's token");
+    if let Some(Answer(x)) =
+        derived_read(r, d.s, &d.prefix, &d.suffix, phitex_defuse::PathId::WHOLE)?
+        && let crate::val::Mean::Macro(m) = crate::val::Mean::decode(r.v, x)
+        && m.params.is_empty()
+        && m.flags & (2 | crate::etex::PROTECTED) == 0
+    {
+        r.push_macro_body(&m);
+        return Ok(());
+    }
+    let g = dname_concrete(r, t)?;
+    r.back_input(g);
     Ok(())
 }
