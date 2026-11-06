@@ -29,7 +29,7 @@
 //! relation met on the way.
 
 use std::collections::VecDeque;
-use std::ops::Bound::{Excluded, Unbounded};
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
@@ -5557,6 +5557,142 @@ impl ScopeReach {
     }
 }
 
+/// A definition's scope as `read::level` gives it.
+type Level = (usize, u64);
+
+/// Which definitions of a bracket walk's region a reader past its stop
+/// can see otherwise: the scopes open on both sides are the same again at
+/// the stop, so a definition there reaches the same readers past it on
+/// both sides where its scope is the same scope on both and still open at
+/// the stop, or closed by then on both; a global one is seen alike. Each
+/// definition's scope on each side is found as a read finds it
+/// (`read::levels`), the two sides' scopes carried through the region's
+/// brackets, `by`'s own old and new. The fields of the others are walked
+/// past the stop. (Every field defined in the region was walked past it,
+/// each to its next definition, mostly the line's end: 890 of the 990
+/// thread-s of biblatex's non-raced bracket walks in 400 s at -j4, walks
+/// with a region of 3 to 11 segments, mc 80711.)
+struct PastStop {
+    old: Vec<u64>,
+    new: Vec<u64>,
+    by: NodeId,
+    by_old: Brackets,
+    by_new: Brackets,
+    /// Fields walked whatever the scopes: `by`'s own definitions, several
+    /// scopes' and relations.
+    always: Vec<Field>,
+    /// The others: a field, its definition's scope on the old side and on
+    /// the new.
+    defs: Vec<(Field, Level, Level)>,
+}
+
+impl PastStop {
+    fn new(open: &[u64], by: NodeId, by_old: Brackets, by_new: Brackets) -> PastStop {
+        PastStop {
+            old: open.to_vec(),
+            new: open.to_vec(),
+            by,
+            by_old,
+            by_new,
+            always: Vec::new(),
+            defs: Vec::new(),
+        }
+    }
+
+    /// The region's part in this segment: its brackets and definitions
+    /// after `at` (in the first segment) to `stop` (inclusive, where it
+    /// stops here). `by`'s own definitions, at `at`, kept where `own` says.
+    fn segment(
+        &mut self,
+        inner: &Inner,
+        first: bool,
+        at: Pos,
+        stop: Option<Pos>,
+        by: NodeId,
+        own: impl Fn(&Field, &Def) -> bool,
+    ) {
+        let lo = if first { Excluded(at) } else { Unbounded };
+        let hi = stop.map_or(Unbounded, Included);
+        if first {
+            for (f, m) in &inner.defs {
+                if let Some(d) = m.get(&at)
+                    && d.by == by
+                    && own(f, d)
+                {
+                    self.always.push(*f);
+                }
+            }
+            read::close(&mut self.old, &self.by_old);
+            read::open(&mut self.old, self.by, &self.by_old);
+            read::close(&mut self.new, &self.by_new);
+            read::open(&mut self.new, self.by, &self.by_new);
+        }
+        let mut defs: Vec<(Pos, Field, Def)> = Vec::new();
+        for (f, m) in &inner.defs {
+            for (q, d) in m.range((lo, hi)) {
+                if d.multi || d.rel.is_some() {
+                    self.always.push(*f);
+                } else {
+                    defs.push((*q, *f, *d));
+                }
+            }
+        }
+        defs.sort_unstable_by_key(|x| x.0);
+        let mut brs = inner.brackets.range((lo, hi)).peekable();
+        for (q, f, d) in defs {
+            while let Some((bp, (n, b))) = brs.peek() {
+                if **bp >= q {
+                    break;
+                }
+                for c in [&mut self.old, &mut self.new] {
+                    read::close(c, b);
+                    read::open(c, *n, b);
+                }
+                brs.next();
+            }
+            let own = brs.peek().filter(|(bp, _)| **bp == q).map(|(_, x)| *x);
+            let lv = |chain: &[u64]| {
+                let after = own.is_some_and(|x| x.1.before || (d.depth > 0 && x.1.opens > 0));
+                let closed = match own {
+                    Some(x) if after && x.1.closes > 0 => {
+                        let mut c = chain.to_vec();
+                        read::close(&mut c, &x.1);
+                        c
+                    }
+                    _ => chain.to_vec(),
+                };
+                read::level(&d, &closed, own)
+            };
+            let (lo_, ln) = (lv(&self.old), lv(&self.new));
+            if (lo_, ln) != ((0, 0), (0, 0)) {
+                self.defs.push((f, lo_, ln));
+            }
+        }
+        for (_, (n, b)) in brs {
+            for c in [&mut self.old, &mut self.new] {
+                read::close(c, b);
+                read::open(c, *n, b);
+            }
+        }
+    }
+
+    /// The fields to walk past the stop.
+    fn fields(&self) -> Vec<Field> {
+        let mut out = self.always.clone();
+        // (the sides' scopes not the same at the stop, as when a bracket
+        // filed meanwhile was met on one reading and not another: every
+        // field)
+        let same = self.old == self.new;
+        for &(f, a, b) in &self.defs {
+            let (va, vb) = (read::visible(&self.old, a), read::visible(&self.new, b));
+            if !same || va != vb || (va && a != b) {
+                out.push(f);
+            }
+        }
+        out
+    }
+}
+
 /// Re-asks the readers anchored at and after `at` (all fields) whose
 /// answer moved, after `by`'s brackets changed from `old` to `new`: up to
 /// where the scopes open on both sides are the same again (whole segments
@@ -5649,7 +5785,6 @@ fn reask_after_effect_with(
         co.min(cn)
     };
     let mut readers: Vec<(Field, Reader)> = Vec::new();
-    let mut fields: Vec<Field> = Vec::new();
     let mut end: Option<(SegId, Pos)> = None;
     let mut cur = eng.seg_for_pos(at).map(|s| s.id);
     let mut first = true;
@@ -5660,6 +5795,7 @@ fn reask_after_effect_with(
     // line's end in biblatex's -j4 build, ~15 s each, of which 2 to 5 %
     // read such a field, accl 25435)
     let mut reach = ScopeReach::new(eng, at);
+    let mut past = PastStop::new(&reach.open, by.id, old, new);
     while let Some(sid) = cur {
         let seg = eng.seg(sid);
         let mut inner = seg.inner.read();
@@ -5705,11 +5841,7 @@ fn reask_after_effect_with(
                 }
             }
         }
-        for (f, m) in &inner.defs {
-            if m.iter().any(|(q, d)| inside(*q) && !inside_new_open(f, d)) {
-                fields.push(*f);
-            }
-        }
+        past.segment(&inner, first, at, stop, by.id, |f, d| !inside_new_open(f, d));
         let lo = seg.lo;
         drop(inner);
         if let Some(q) = stop {
@@ -5747,17 +5879,31 @@ fn reask_after_effect_with(
         // changed: what this walk passed over as no field of a scope it
         // moves was found on one reading of the brackets, the other's
         // walk on another, and together they may move what neither
-        // walk's fields name: asked whatever their field, as before the
-        // fields were looked at)
+        // walk's fields name: asked whatever the scopes this walk found,
+        // as before the fields were looked at; but only those of a field
+        // with a definition whose reach scopes can move anywhere on the
+        // line (`scoped_def`): no change of brackets, this one or any
+        // other, moves a read of a field defined only at the global
+        // level, or not on the line at all. Every reader of the region
+        // was asked: 195 such walks in the first 300 s of biblatex's
+        // manual at -j4, 4.2 M readers each, 361 of its 473 thread-s of
+        // bracket walks, mc 80695)
+        let mut movable = Movable::default();
         if !reach.all {
             let mut cur = Some(from);
             while let Some(sid) = cur {
                 let seg = eng.seg(sid);
+                movable.learn(eng, seg);
                 let inner = seg.inner.read();
                 for (f, rs) in &inner.readers {
+                    let m = movable.of(eng, *f);
                     for r in rs {
                         let ap = eng.node(r.anchor).pos_hint();
-                        if ap >= at && end.is_none_or(|(_, q)| ap <= q) && live(eng, r.node, r.serial) {
+                        if (m || read::derived_spec(eng, r.path).is_some())
+                            && ap >= at
+                            && end.is_none_or(|(_, q)| ap <= q)
+                            && live(eng, r.node, r.serial)
+                        {
                             readers.push((*f, r.clone()));
                         }
                     }
@@ -5778,10 +5924,15 @@ fn reask_after_effect_with(
             let mut first = true;
             while let Some(sid) = cur {
                 let seg = eng.seg(sid);
+                movable.learn(eng, seg);
                 let inner = seg.inner.read();
                 for (f, rs) in &inner.readers {
+                    let m = movable.of(eng, *f);
                     for r in rs {
-                        if (!first || eng.node(r.anchor).pos_hint() > q) && live(eng, r.node, r.serial) {
+                        if (m || read::derived_spec(eng, r.path).is_some())
+                            && (!first || eng.node(r.anchor).pos_hint() > q)
+                            && live(eng, r.node, r.serial)
+                        {
                             readers.push((*f, r.clone()));
                         }
                     }
@@ -5812,11 +5963,43 @@ fn reask_after_effect_with(
     // (past the region only the readers of what is defined in it can see
     // another answer)
     if let Some((sid, q)) = end {
+        let mut fields = past.fields();
         fields.sort_unstable();
         fields.dedup();
         for f in fields {
             reask_from(eng, w, f, q, sid, None, None, 0, st);
         }
+    }
+}
+
+/// Per field, whether a change of brackets can move a read of it: it has
+/// a definition on the line whose reach scopes can end or extend
+/// (`scoped_def`), or it is the depth itself. Found once per field for a
+/// walk, under no segment's lock but the defining segment's own.
+#[derive(Default)]
+struct Movable(FxHashMap<Field, bool>);
+
+impl Movable {
+    /// The fields `seg`'s readers read, looked up before its readers are
+    /// (each defining segment read under its own lock alone).
+    fn learn(&mut self, eng: &Engine, seg: &Segment) {
+        let fs: Vec<Field> = {
+            let inner = seg.inner.read();
+            inner.readers.keys().filter(|f| !self.0.contains_key(f)).copied().collect()
+        };
+        for f in fs {
+            let m = f == eng.depth_field
+                || eng.defs.between(f, Pos(0), Pos(u64::MAX)).into_iter().any(|s| {
+                    let inner = eng.seg(s).inner.read();
+                    inner.defs.get(&f).is_some_and(|m| m.iter().any(|(_, d)| scoped_def(d)))
+                });
+            self.0.insert(f, m);
+        }
+    }
+
+    /// One `learn` gave (a field filed since: movable, as found nowhere).
+    fn of(&self, eng: &Engine, f: Field) -> bool {
+        f == eng.depth_field || self.0.get(&f).copied().unwrap_or(true)
     }
 }
 
