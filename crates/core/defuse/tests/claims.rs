@@ -725,12 +725,12 @@ impl Operation for GuessClaimer {
     }
 }
 
-/// `[x]`: a piece of the text.
-struct Piece;
+/// `[x]`: a piece of the text; counts its runs by `x`.
+struct CountedPiece(Arc<std::sync::Mutex<std::collections::HashMap<ValueId, u64>>>);
 
-impl Operation for Piece {
+impl Operation for CountedPiece {
     fn name(&self) -> &'static str {
-        "piece"
+        "counted_piece"
     }
 
     fn text(&self) -> bool {
@@ -738,7 +738,9 @@ impl Operation for Piece {
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
-        Ok(cx.args()[0])
+        let x = cx.args()[0];
+        *self.0.lock().unwrap().entry(x).or_default() += 1;
+        Ok(x)
     }
 }
 
@@ -748,17 +750,17 @@ fn a_claim_on_a_guess_of_the_text_before_waits_for_it() {
     // f before S has committed and, on that guess, would read on into its
     // next 30 siblings, the third and fourth workers' among them, run
     // already; on S's f it reads on into 2. Its claim on the guess waits
-    // for the text before it: the 32 pieces after it run once each, as at
-    // one thread (a run whose last run stands counted too). Before, the
-    // claim took back the products of the 20 that had run, gave them back
-    // once C ran again on S's f, and they ran a second time, 50 runs
-    // (biblatex at -j4: a piece run on a guess took back the 98 000 after
-    // it, mc 80752).
+    // for the text before it: the siblings it would have taken back and
+    // then given back run once each, as at one thread. Before, the claim
+    // took back the products of the 20 that had run, gave them back once
+    // C ran again on S's f, and they ran a second time (biblatex at -j4:
+    // a piece run on a guess took back the 98 000 after it, mc 80752).
     let (e, o) = engine();
     let v = e.values();
+    let counts = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let slow = e.register(Arc::new(SlowPiece));
     let guess = e.register(Arc::new(GuessClaimer));
-    let piece = e.register(Arc::new(Piece));
+    let piece = e.register(Arc::new(CountedPiece(counts.clone())));
     let f = v.field("f").0;
     let u = e.new_unit();
     // (44 nodes, four blocks of 11: S and ten pieces; C and ten; 11; 11)
@@ -768,11 +770,13 @@ fn a_claim_on_a_guess_of_the_text_before_waits_for_it() {
     }
     let c = e.push(u, guess, vec![f, v.int(100), v.int(2), v.int(30)]);
     let ts: Vec<NodeId> = (0..32).map(|i| e.push(u, piece, vec![v.int(i)])).collect();
-    let rep = e.evaluate(4).unwrap();
+    e.evaluate(4).unwrap();
     assert_eq!(e.claimed(c), vec![ts[0], ts[1]]);
-    let runs = rep.runs_by_op.iter().find(|x| x.0 == "piece").map_or(0, |x| x.1);
-    eprintln!("piece runs {runs}");
-    assert!(runs <= 32, "{runs} runs of the 32 pieces: {:?}", rep.runs_by_op);
+    let counts = counts.lock().unwrap();
+    let twice: Vec<i64> = (0..32)
+        .filter(|&i| counts.get(&v.int(i)).copied().unwrap_or(0) > 1)
+        .collect();
+    assert!(twice.is_empty(), "pieces run twice: {twice:?}");
     for t in &ts[2..] {
         assert_eq!(e.node_info(*t).unwrap().state, NodeState::Done);
     }
