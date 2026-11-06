@@ -799,6 +799,14 @@ impl Run<'_, '_> {
             }
             return Ok(false);
         };
+        if trace() {
+            eprintln!(
+                "pic: child {} reads its parent's {} = {}",
+                self.cx.node().raw(),
+                crate::val::field_name(self.v, f),
+                self.v.render(x).chars().take(120).collect::<String>()
+            );
+        }
         let x = some(x);
         self.st.load_read(self.v, loc, x);
         if self.st.load_state(loc) == 2 {
