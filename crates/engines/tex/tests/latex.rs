@@ -2941,6 +2941,52 @@ fn a_name_defined_after_the_read_back_point_keeps_the_child() {
     }
 }
 
+/// The `.aux` sets a switch globally (KOMA-Script's
+/// `\global\csname @altsecnumformattrue\endcsname`, written where an
+/// appendix's numbers are letters) and a `\begin{document}` hook sets it
+/// back locally (KOMA's `numbers=noenddot` hook, `\@altsecnumformatfalse`),
+/// in the document's group: the hook's value stands, as with no such
+/// line. The run's local value equals the one it read before the
+/// read-back, so it published nothing, and the read-back child defined
+/// the `.aux`'s value globally after it: every section number in the
+/// biblatex manual's contents got KOMA's end dot, its `.aux` widths 2.4pt
+/// more (accl 25680).
+#[test]
+fn a_hook_setting_back_what_the_aux_set_keeps_its_value() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rb-setback");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |line: bool| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\\newif\\if@tswitch\n\
+             \\AtBeginDocument{{\\@tswitchfalse}}\n{}\
+             \\makeatother\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{sec:intro}}\nText of the first section.\n\n\
+             \\makeatletter Switch \\if@tswitch on\\else off\\fi.\\makeatother\n\n\
+             \\section{{Last}}\nThe end, see \\ref{{sec:intro}}.\n\\end{{document}}\n",
+            if line {
+                "\\AtEndDocument{\\immediate\\write\\@auxout{\\global\\string\\csname\\space @tswitchtrue\\string\\endcsname}}\n"
+            } else {
+                ""
+            }
+        )
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("rbsetback", &dir)
+        };
+        let with = common::build(opts(), Some(&prelude(true)), &doc(true));
+        let without = common::build(opts(), Some(&prelude(true)), &doc(false));
+        assert_eq!(
+            common::first_difference(&with.output().0, &without.output().0),
+            None,
+            "-j{threads}: the .aux's switch outlived the hook's"
+        );
+    }
+}
+
 /// A long `\begin{document}` run that defines a name the `.aux` defines,
 /// after the read-back point (uspace's and `ClassicThesis`'s `\@gtempa`;
 /// such a pass was once refused and made again inline), in a round whose
