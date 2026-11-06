@@ -870,6 +870,9 @@ pub(crate) struct Run<'c, 'a> {
     /// the run's own definitions looked over up to the count kept
     /// ([`crate::defer::binds_like`]).
     pub(crate) derived_own: crate::FxHashMap<(String, String), (usize, bool)>,
+    /// The integer registers the run compared relative to a constant
+    /// ([`Run::reg_order`]): a second comparison reads the value.
+    pub(crate) reg_cmps: phitex_defuse::FxHashSet<Loc>,
     /// The path `[Step::Present]`, interned once a run ([`Run::lb_present`]).
     pub(crate) present_path: Option<phitex_defuse::PathId>,
     /// Where the conditional text being skipped began (§494's
@@ -1392,6 +1395,7 @@ impl<'c, 'a> Run<'c, 'a> {
             expr_defer: false,
             defer_sym: None,
             derived_own: crate::FxHashMap::default(),
+            reg_cmps: phitex_defuse::FxHashSet::default(),
             present_path: None,
             skip_from: (None, 0, None, None),
             skip_first: Vec::new(),
@@ -5453,9 +5457,17 @@ impl<'c, 'a> Run<'c, 'a> {
     /// a run stepping the register before this piece moves this run only
     /// where the outcome moves. Where the field holds no integer (an
     /// alias, none) or `k - j` overflows: forced, an ordinary read.
+    ///
+    /// Only the run's first comparison of the register: a loop comparing
+    /// it at every step (`\loop\advance\count1 1 \ifnum\count1<N
+    /// \repeat`) would make one read per step, each against another
+    /// constant, where one read of the value answers them all (a
+    /// stuck-detection test's loop of 40 million steps ran twice as long,
+    /// accl 25815, callgrind 25832).
     pub(crate) fn reg_order(&mut self, loc: Loc, j: i32, k: i32) -> R<i64> {
         let v = self.v;
-        if let Some(d) = k.checked_sub(j)
+        if self.reg_cmps.insert(loc)
+            && let Some(d) = k.checked_sub(j)
             && !crate::exec::obs_flag!("PHITEX_NO_DERIVED")
         {
             let f = self.loc_field(loc);
