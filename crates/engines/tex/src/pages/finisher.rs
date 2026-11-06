@@ -266,9 +266,6 @@ impl Run<'_, '_> {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn finish_page(&mut self) -> R<()> {
         let v = self.v;
-        if self.cx.has_other_threads() {
-            self.cx.wait_text_before()?;
-        }
         let args = self.cx.args().to_vec();
         let key = FinishArgs::decode(v, &args).map(|a| a.key);
         // 1. its page, the loop's definition read at the unit's end
