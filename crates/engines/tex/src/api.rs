@@ -3271,6 +3271,7 @@ impl Graph {
         let origins_on: Arc<std::sync::atomic::AtomicBool> = Arc::default();
         let pdfpage = eng.register(Arc::new(crate::pdfout::PdfPage(origins_on.clone())));
         let readback = eng.register(Arc::new(crate::ops::ReadBack(shared.clone())));
+        let pic = eng.register(Arc::new(crate::pic::Pic(shared.clone())));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
         let box_shape_proj = eng.register_projection(Arc::new(crate::val::box_shape_projection));
@@ -3282,6 +3283,9 @@ impl Graph {
         let forced_proj = eng.register_projection(Arc::new(crate::val::forced_projection));
         let num_proj = eng.register_projection(Arc::new(crate::val::num_projection));
         let clist_proj = eng.register_projection(Arc::new(crate::val::clist_projection));
+        let append_proj = eng.register_projection(Arc::new(crate::val::append_projection));
+        let set_proj = eng.register_projection(Arc::new(crate::val::set_projection));
+        eng.set_append(Arc::new(crate::val::append_items));
         let skel_proj = eng.register_projection(Arc::new(crate::val::skeleton_projection));
         let ops = Ops {
             exec,
@@ -3295,6 +3299,7 @@ impl Graph {
             toolnode,
             pdfpage,
             readback,
+            pic,
             tool_opts: Arc::default(),
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
@@ -3336,6 +3341,8 @@ impl Graph {
             forced_proj,
             num_proj,
             clist_proj,
+            append_proj,
+            set_proj,
             skel_proj,
         };
         let _ = shared.set(ops.clone());
