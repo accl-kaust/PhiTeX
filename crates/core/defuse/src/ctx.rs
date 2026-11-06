@@ -112,6 +112,7 @@ impl<'a> Ctx<'a> {
                 place_effects: Vec::new(),
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
                 unchanged: false,
+                at_hole: false,
                 state: None,
                 resumed: std::cell::Cell::new(false),
                 kept_reads: std::cell::Cell::new(None),
@@ -1177,12 +1178,17 @@ impl<'a> Ctx<'a> {
     /// came back with the next run: each such stop a change of every
     /// reader after me (biblatex at -j4: example pieces flipping between
     /// four scopes open and none, each flip a walk of 3.4 M readers, mc
-    /// 80562). False on a first run: nothing to keep.
+    /// 80562). Not my last run's state: its checkpoints count that run's
+    /// reads, which this record does not hold (a run going on from one,
+    /// or cut off at one, rested on reads it never checked: csquotes at
+    /// -j8, an example environment's body typeset as text, accl 25423).
+    /// False on a first run: nothing to keep.
     pub fn keep_last_at_hole(&mut self) -> bool {
         if self.last.is_none() {
             return false;
         }
         self.product.unchanged = true;
+        self.product.at_hole = true;
         true
     }
 

@@ -817,7 +817,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             p.ranks.clear();
             p.placements = replay_placements(eng, node.id, &r.placed, &mut p.ranks);
         }
-        if p.state.is_none() {
+        if p.state.is_none() && !p.at_hole {
             p.state = r.state;
         }
     }
