@@ -2271,10 +2271,22 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::obs_flag!("PHITEX_DEF_TRACE") {
             self.def_trace(loc, &val, global);
         }
-        if !self.appending.is_empty()
-            && let Err(h) = self.append_force(loc)
-        {
-            self.raise(h);
+        // (a list with appends pending set over at the run's base level
+        // or globally: what the appends made is gone, unread; set in a
+        // group, it comes back at the group's end, made now)
+        if !self.appending.is_empty() {
+            if global || self.innermost_group().is_none() {
+                self.appending.retain(|x| x.0 != loc);
+            } else if let Err(h) = self.append_force(loc) {
+                self.raise(h);
+            }
+        }
+        if !self.appending_vals.is_empty() {
+            if global || self.innermost_group().is_none() {
+                self.appending_vals.retain(|x| x.0 != loc);
+            } else if let Err(h) = self.vals_force(loc) {
+                self.raise(h);
+            }
         }
         if self.rb.is_some() && self.interp.is_none() {
             self.rb_def_check(loc);
@@ -5865,6 +5877,11 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
+        // (a macro the run appended to without reading it: an \\xdef's,
+        // no parameters, not \\outer, whatever its body, `Run::append_def`)
+        if self.appending.iter().any(|x| x.0 == l) {
+            return Ok(Some(0));
+        }
         self.touch(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
@@ -6074,6 +6091,11 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
+        // (a macro the run appended to without reading it: an \\xdef's,
+        // no parameters, not \\outer, whatever its body, `Run::append_def`)
+        if self.appending.iter().any(|x| x.0 == l) {
+            return Ok(Some(true));
+        }
         self.touch(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) || self.interp.is_some() || self.rec_load {
             return Ok(None);
@@ -6103,6 +6125,11 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
+        // (a macro the run appended to without reading it: an \\xdef's,
+        // no parameters, not \\outer, whatever its body, `Run::append_def`)
+        if self.appending.iter().any(|x| x.0 == l) {
+            return Ok(Some(false));
+        }
         self.touch(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
