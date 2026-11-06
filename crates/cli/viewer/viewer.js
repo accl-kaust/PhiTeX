@@ -351,7 +351,7 @@ var Viewer = class {
     });
     root.addEventListener("mousemove", (e) => {
       const el = e.target.closest(".slot");
-      if (el) el.style.cursor = this.linkAt(e) ? "pointer" : "";
+      if (el) el.classList.toggle("on-link", !!this.linkAt(e));
     });
   }
   /** The link under a pointer event (its page's, from MuPDF), if any. */
@@ -1166,6 +1166,8 @@ header:active { cursor: grabbing; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
+/* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
+.slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
