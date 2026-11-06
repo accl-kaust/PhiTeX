@@ -5693,19 +5693,33 @@ fn reask_after_effect_with(
     // to the end of the line, the finals: in the region, or from the
     // change on after a race)
     let mut rest = (at, end.map(|(_, q)| q));
+    // (none where the region is empty, the two sides alike from `at` on:
+    // a close at the bottom level, which closes nothing, whatever filed
+    // around it. A change that moves the depth at `at` walks on past it
+    // itself, and found here the depth it made)
     if let Some((sid, q)) = end
+        && q != at
         && brackets_changed_since(eng, at, sid, by.bracket_gen.load(Ordering::Acquire))
     {
         end = None;
         rest = (at, None);
+        // (of the fields whose scopes this change can move, as on the
+        // walk: past the stop the two sides agree, and what the other
+        // change and this one move together is a definition in one of
+        // their regions, or before it in a scope open there, whose scope
+        // ends elsewhere now; the other's walk asks those of its own)
         let mut cur = Some(sid);
         let mut first = true;
         while let Some(sid) = cur {
             let seg = eng.seg(sid);
             let inner = seg.inner.read();
             for (f, rs) in &inner.readers {
+                let all = reach.all || *f == eng.depth_field || reach.fields.contains(f);
                 for r in rs {
-                    if (!first || eng.node(r.anchor).pos_hint() > q) && live(eng, r.node, r.serial) {
+                    if (all || read::derived_spec(eng, r.path).is_some())
+                        && (!first || eng.node(r.anchor).pos_hint() > q)
+                        && live(eng, r.node, r.serial)
+                    {
                         readers.push((*f, r.clone()));
                     }
                 }
