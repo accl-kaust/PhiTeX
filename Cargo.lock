@@ -2259,6 +2259,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "phitex-wasm-diff"
+version = "0.0.0"
+dependencies = [
+ "phitex-diff",
+ "serde_json",
+]
+
+[[package]]
+name = "phitex-wasm-live"
+version = "0.0.0"
+dependencies = [
+ "phitex-defuse",
+ "phitex-live",
+ "phitex-shelf",
+ "phitex-tex",
+ "serde_json",
+]
+
+[[package]]
 name = "phitex-xdvipdfmx"
 version = "0.0.0"
 dependencies = [

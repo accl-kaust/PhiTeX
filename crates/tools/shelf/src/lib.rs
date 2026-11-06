@@ -756,7 +756,7 @@ pub fn gzip_stored(b: &[u8]) -> Vec<u8> {
     }
     out.extend_from_slice(&crc32(b).to_le_bytes());
     out.extend_from_slice(
-        &u32::try_from(b.len() & 0xffff_ffff)
+        &u32::try_from(u64::try_from(b.len()).unwrap_or(0) & 0xffff_ffff)
             .unwrap_or(0)
             .to_le_bytes(),
     );
