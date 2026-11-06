@@ -146,6 +146,12 @@ pub(crate) struct Node {
     /// so it waits for the frontier first (`sched::work`). Only when it
     /// runs: what it makes is what it would make anyway.
     pub(crate) held_frontier: AtomicBool,
+    /// A wake of it moved the settling layer's frontier back
+    /// (`sched::frontier_back`): the frontier it set, the one it replaced
+    /// and `Engine::frontier_gen` then. Its commit puts the replaced one
+    /// back when nothing has set the frontier since and the layer is not
+    /// to run again (`sched::frontier_restore`).
+    pub(crate) back_frontier: Mx<Option<(u64, u64, u64)>>,
     /// Placed as its placer's continuation (`Ctx::follow`,
     /// `Ctx::follow_after`), not as its child: a node placed after the
     /// placer and its children goes before it.
@@ -258,6 +264,7 @@ impl Node {
             claim_end: AtomicU64::new(0),
             claim_mx: Mx::new(false),
             held_frontier: AtomicBool::new(false),
+            back_frontier: Mx::new(None),
             follows: AtomicBool::new(false),
             anchor: AtomicU64::new(0),
             state_stale: AtomicBool::new(false),

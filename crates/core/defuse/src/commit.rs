@@ -2131,6 +2131,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // reader began on the old frontier and read on past the new one, and
     // ran again on what a run held before it then defined)
     if let Some(at) = frontier {
+        eng.frontier_gen.fetch_add(1, Ordering::AcqRel);
         eng.frontier_by.store(node.id.raw() + 1, Ordering::Release);
         let new = at.map_or(0, |n| n.raw() + 1);
         let old = eng.frontier.swap(new, Ordering::AcqRel);
@@ -3590,6 +3591,7 @@ fn reask_range(
                             )
                             .is_ok()
                     {
+                        eng.frontier_gen.fetch_add(1, Ordering::AcqRel);
                         crate::sched::log_frontier(
                             eng,
                             to.raw() + 1,

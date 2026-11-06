@@ -191,6 +191,9 @@ pub struct Engine {
     /// The node that set the frontier, its raw id plus one: a stop of its
     /// that moves on moves the frontier with it (`commit::reask_range`).
     pub(crate) frontier_by: AtomicU64,
+    /// Counts the frontier's moves other than a wake's move back and its
+    /// undoing (`sched::frontier_back`, `sched::frontier_restore`).
+    pub(crate) frontier_gen: AtomicU64,
     /// (`PHITEX_TEX_TIME`) Reads by readers outside the settling layer of
     /// a field it defines held past its frontier (`Ctx::set_frontier`).
     pub(crate) frontier_held: AtomicU64,
@@ -331,6 +334,7 @@ impl Engine {
             holds_on: std::sync::atomic::AtomicBool::new(false),
             collect_mark: AtomicU64::new(0),
             frontier_by: AtomicU64::new(0),
+            frontier_gen: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
