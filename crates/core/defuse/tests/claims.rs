@@ -665,3 +665,148 @@ fn a_taken_placement_remade_re_asks_its_claimer() {
         assert!(e.check_invariants().is_empty());
     }
 }
+
+/// `[x, y, t]`: defines the fields `x`, `y` and `t` as given.
+struct Def3;
+
+impl Operation for Def3 {
+    fn name(&self) -> &'static str {
+        "def3"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        for (i, name) in ["x", "y", "t"].into_iter().enumerate() {
+            cx.define(v.field(name), cx.args()[i]);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[]`: reads `x`; where it is 1, spins 300 ms and claims its next
+/// sibling.
+struct ClaimIfLate;
+
+impl Operation for ClaimIfLate {
+    fn name(&self) -> &'static str {
+        "claim_if_late"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let x = cx.read(v.field("x"))?.and_then(|x| v.as_int(x));
+        if x == Some(1) {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_millis(300) {
+                std::hint::spin_loop();
+            }
+            let _ = cx.following(0);
+            cx.claim(1);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[]`: runs only at a quiet point (`final_only`); reads `x` and places
+/// a `WaitPlacer` child.
+struct QuietPlacer(std::sync::OnceLock<OpId>);
+
+impl Operation for QuietPlacer {
+    fn name(&self) -> &'static str {
+        "quiet_placer"
+    }
+
+    fn final_only(&self) -> bool {
+        true
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let _ = cx.read(v.field("x"))?;
+        cx.child(*self.0.get().expect("registered"), vec![]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[]`: reads `y`; waits for its placer while that has a run to come
+/// (`Ctx::wait_for_placer`), then defines `z` = `y`.
+struct WaitPlacer;
+
+impl Operation for WaitPlacer {
+    fn name(&self) -> &'static str {
+        "wait_placer"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let y = cx.read(v.field("y"))?.unwrap_or(ValueId::UNIT);
+        if !cx.placer_settled() {
+            return Err(cx.wait_for_placer());
+        }
+        cx.define(v.field("z"), y);
+        Ok(y)
+    }
+}
+
+/// `[]`: reads `z` and `t`; while both are set and differ, goes on
+/// checking whether a read moved (`Ctx::tick`): a run on a value that
+/// only a re-ask ends, as a TeX loop on a stale counter.
+struct UntilEqual;
+
+impl Operation for UntilEqual {
+    fn name(&self) -> &'static str {
+        "until_equal"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let z = cx.read(v.field("z"))?;
+        let t = cx.read(v.field("t"))?;
+        if let (Some(z), Some(t)) = (z, t)
+            && z != t
+        {
+            loop {
+                cx.tick(1)?;
+                std::hint::spin_loop();
+            }
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A run parked waiting for its placer's commit (W on P) goes on when a
+/// claim takes the placer, which then commits nothing: C claims P, which
+/// waits for the quiet point, while W waits for P and R runs on until
+/// W's definition reaches it. Left parked until a quiet point that R
+/// keeps away, W never ran and R ran for ever (csquotes -j8, mhchem -j4:
+/// a run went on without end, accl 25662, mc 80815).
+#[test]
+fn a_run_waiting_for_a_node_a_claim_takes_goes_on() {
+    let e = Engine::new();
+    let v = e.values();
+    let def3 = e.register(Arc::new(Def3));
+    let claim = e.register(Arc::new(ClaimIfLate));
+    let placer = Arc::new(QuietPlacer(std::sync::OnceLock::new()));
+    let p_op = e.register(placer.clone());
+    let w_op = e.register(Arc::new(WaitPlacer));
+    let _ = placer.0.set(w_op);
+    let r_op = e.register(Arc::new(UntilEqual));
+    let u = e.new_unit();
+    let d = e.push(u, def3, vec![v.int(0), v.int(0), v.int(0)]);
+    let c = e.push(u, claim, vec![]);
+    let p = e.push(u, p_op, vec![]);
+    e.push(u, r_op, vec![]);
+    e.evaluate(4).unwrap();
+    let w = op_nodes(&e, u, "wait_placer")[0];
+    assert_eq!(e.output(w), Some(v.int(0)));
+    e.replace(d, def3, vec![v.int(1), v.int(1), v.int(1)]);
+    e.set_limits(phitex_defuse::Limits {
+        time: Some(Duration::from_secs(20)),
+        ..Default::default()
+    });
+    let r = e.evaluate(4);
+    assert!(r.is_ok(), "W left waiting for P, which the claim took: {r:?}");
+    assert_eq!(e.claimed(c), vec![p]);
+    assert_eq!(e.output(w), Some(v.int(1)), "W ran on y = 1");
+    assert!(e.check_invariants().is_empty());
+}
