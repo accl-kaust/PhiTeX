@@ -159,8 +159,8 @@ export interface PanelEvents {
   onPref?<K extends keyof ViewPrefs>(key: K, value: ViewPrefs[K]): Promise<string | void> | string | void;
   /** The kinds of problem hidden (the problems' filters), every one: kept by the host (the watch: the user's phitex.toml). */
   onProblemsHidden?(kinds: string[]): void;
-  /** A file's lines around `line` (`[number, text]`), for Copy for an AI assistant: absent, the problem's own line alone. */
-  onLines?(file: string, line: number): Promise<[number, string][] | null>;
+  /** A project file's text as built (for Copy for an AI assistant: its lines around a problem, the main file's preamble), or null. */
+  onSource(file: string): Promise<string | null>;
   /** The feature tips seen, every one so far: kept by the host where every port and browser reads them (the watch: the user's phitex.toml); absent, this browser's storage alone. */
   onTipsSeen?(ids: string[]): void;
   /** The contents beside the pages opened: the outline wanted now (the host's session's `outline()`). */
@@ -300,7 +300,7 @@ const PATHS: Record<string, string> = {
 };
 /** A problem's Copy for an AI assistant button (`i`: its row's place in the list). */
 const copyBtn = (i: number) =>
-  `<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem, its source lines and the log's end, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
+  `<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
 
 const icon = (name: string, size = 18) =>
   `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
@@ -1257,21 +1257,54 @@ export class Panel {
   /** The problems listed (by the rows' data-i). */
   private listed: Diagnostic[] = [];
 
-  /** Copy for an AI assistant: one problem, its place, message, help and the source lines around it, and for an error the log's end; on the clipboard, nothing sent. */
+  /**
+   * Copy for an AI assistant: one problem with what an assistant needs to
+   * explain it: its place, message, TeX's notes, help and suggestions, the
+   * macros it was in, the files that included its file, its source lines
+   * around it, the main file's preamble (the packages and definitions), the
+   * other problems listed, and the log where it was met (and its end, for
+   * an error). On the clipboard, nothing sent.
+   */
   private async copyForAi(d: Diagnostic | undefined): Promise<void> {
     if (!d) return;
     const p = d.problem;
     const file = p?.file ?? d.file, line = p?.line ?? d.line;
-    const parts: string[] = [`I'm building a LaTeX document and get this ${d.severity}. What is wrong, and how do I fix it?`, ""];
-    parts.push(`${d.severity}: ${d.message}${file ? ` (${file}${line ? `:${line}` : ""})` : ""}`);
-    if (p?.help.length) parts.push(p.help.join(" "));
-    const lines = file && line ? await this.ev.onLines?.(file, line).catch(() => null) : null;
-    if (lines?.length) parts.push("```latex", ...lines.map(([n, t]) => `${String(n).padStart(4)}${n === line ? ">" : " "} ${t}`), "```");
-    else if (p?.excerpt) parts.push("```latex", p.excerpt.text, "```");
-    parts.push("");
-    // (the log's end: where TeX stopped, an error's; a warning's is elsewhere)
-    const log = d.severity === "error" ? await this.ev.onLog?.().catch(() => null) : null;
-    if (log) parts.push("The end of the log:", "```", ...log.split("\n").slice(-40), "```");
+    const main = this.lastStatus?.main ?? this.mainFiles.main;
+    const source = async (f: string) => (await this.ev.onSource(f).catch(() => null))?.split("\n") ?? null;
+    const numbered = (lines: string[], from: number, to: number, at?: number) =>
+      lines.slice(from - 1, to).map((t, i) => `${String(from + i).padStart(4)}${from + i === at ? ">" : " "} ${t}`);
+    const parts: string[] = [
+      `I'm writing a LaTeX document (typeset by PhiTeX, a pdfLaTeX/XeLaTeX-compatible engine) and the build reports this ${d.severity}. What is wrong, and how do I fix it in my source?`,
+      "",
+      `## The ${d.severity}`,
+      `${d.message}${file ? ` (${file}${line ? `, line ${line}${p?.col ? `, column ${p.col}` : ""}` : ""})` : ""}${p?.code ? ` [${p.code}]` : ""}`,
+    ];
+    if (p?.notes.length) parts.push(...p.notes.map((n) => `- ${n}`));
+    if (p?.context.length) parts.push(`TeX was inside: ${p.context.map((m) => `\\${m.name.replace(/^\\/, "")} (${m.before}‸${m.after})`).join(" ← ")}`);
+    if (p?.included.length) parts.push(`Its file was included from: ${p.included.map((i) => `${i.file}:${i.line}`).join(" ← ")}`);
+    if (p?.help.length || p?.suggestions.length) parts.push(`PhiTeX's hint: ${[...(p?.help ?? []), ...(p?.suggestions ?? [])].join(" ")}`);
+    // (the source around it: fifteen lines each side, the problem's marked)
+    const lines = file ? await source(file) : null;
+    if (lines && line) parts.push("", `## ${file}, lines around ${line}`, "```latex", ...numbered(lines, Math.max(1, line - 15), Math.min(lines.length, line + 15), line), "```");
+    else if (p?.excerpt) parts.push("", "## The source line", "```latex", p.excerpt.text, "```");
+    // (the main file's preamble: the class, the packages, the definitions; at most 120 lines)
+    const mainLines = main ? (main === file ? lines : await source(main)) : null;
+    if (main && mainLines) {
+      const end = mainLines.findIndex((l) => /\\begin\s*\{document\}/.test(l));
+      const upto = Math.min(end >= 0 ? end + 1 : 60, 120);
+      if (!(main === file && line && line <= upto + 15)) parts.push("", `## The preamble of ${main}`, "```latex", ...numbered(mainLines, 1, upto), "```");
+    }
+    // (the other problems, one line each: a cause is often one of them)
+    const others = this.listed.filter((x) => x !== d && (x.severity === "error" || x.severity === "warning")).slice(0, 10);
+    if (others.length) parts.push("", "## Other problems in the same build", ...others.map((x) => `- ${x.severity}: ${x.message}${x.file ? ` (${x.file}${x.line ? `:${x.line}` : ""})` : ""}`));
+    // (the log where TeX met it, and for an error the log's end, where TeX stopped)
+    const log = (await this.ev.onLog?.().catch(() => null))?.split("\n") ?? null;
+    if (log) {
+      const key = d.message.replace(/^.*?:\s*/, "").slice(0, 40);
+      const at = key ? log.findIndex((l) => l.includes(key)) : -1;
+      if (at >= 0) parts.push("", "## The log where it was met", "```", ...log.slice(Math.max(0, at - 10), at + 15), "```");
+      if (d.severity === "error" && (at < 0 || at + 15 < log.length - 40)) parts.push("", "## The end of the log", "```", ...log.slice(-40), "```");
+    }
     const text = parts.join("\n");
     try {
       await navigator.clipboard.writeText(text);
@@ -2104,18 +2137,34 @@ export class Panel {
       else groups.push({ title: g.title, rows: [...g.rows] });
     }
     this.settingRows.clear();
-    el.innerHTML = `<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><div class="sbody"></div>`;
+    // (one group at a time, by its tab: the last one shown, else the first)
+    const shown = groups.filter((g) => g.rows.length);
+    const at = Math.max(0, shown.findIndex((g) => g.title === this.settingsTab));
+    el.innerHTML =
+      `<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header>` +
+      `<nav class="stabs" role="tablist">${shown.map((g, i) => `<button type="button" role="tab" data-tab="${i}" data-group="${esc(g.title)}" aria-selected="${i === at}">${esc(g.title)}</button>`).join("")}</nav><div class="sbody"></div>`;
     const body = el.querySelector(".sbody")!;
-    for (const g of groups.filter((g) => g.rows.length)) {
+    shown.forEach((g, i) => {
       const sec = document.createElement("section");
-      sec.innerHTML = `<h3></h3>`;
-      sec.querySelector("h3")!.textContent = g.title;
+      sec.setAttribute("role", "tabpanel");
+      sec.hidden = i !== at;
       for (const r of g.rows) sec.append(this.settingRow(r));
       body.append(sec);
-    }
+    });
+    el.querySelector<HTMLElement>(".stabs")!.onclick = (e) => {
+      const t = (e.target as HTMLElement).closest<HTMLElement>("[data-tab]");
+      if (!t) return;
+      const k = Number(t.dataset.tab);
+      this.settingsTab = shown[k].title;
+      el.querySelectorAll<HTMLElement>("[data-tab]").forEach((b) => b.setAttribute("aria-selected", String(b === t)));
+      body.querySelectorAll<HTMLElement>("section").forEach((s, i) => (s.hidden = i !== k));
+    };
     el.hidden = false;
     this.emit();
   }
+
+  /** The Settings tab last shown (its group's title). */
+  private settingsTab = "";
 
   /** One row: its label and help, its control, a line for the host's error. */
   private settingRow(r: SettingRow): HTMLElement {
@@ -2123,14 +2172,14 @@ export class Panel {
     const row = document.createElement("div");
     row.className = `srow ${r.kind}${r.disabled ? " off" : ""}`;
     row.dataset.id = r.id;
-    row.innerHTML = `<div class="lab"><b></b><small></small></div><div class="ctl"></div><div class="err" hidden></div>`;
+    row.innerHTML = `<b class="lab"></b><div class="ctl"></div><small class="help"></small><div class="err" hidden></div>`;
     row.querySelector("b")!.textContent = r.label;
     row.querySelector("small")!.textContent = r.disabled ?? r.help ?? "";
     const ctl = row.querySelector(".ctl")!;
     const dis = r.disabled || !r.set ? " disabled" : "";
     if (r.kind === "toggle") ctl.innerHTML = `<button type="button" role="switch" class="switch" aria-checked="${r.value === true}" aria-label="${esc(r.label)}"${dis}><i></i></button>`;
     else if (r.kind === "choice")
-      ctl.innerHTML = `<div class="radios" role="group" aria-label="${esc(r.label)}">${(r.options ?? []).map(([v, l]) => `<button type="button" data-v="${esc(v)}" aria-pressed="${r.value === v}"${dis}>${esc(l)}</button>`).join("")}</div>`;
+      ctl.innerHTML = `<div class="seg" role="group" aria-label="${esc(r.label)}">${(r.options ?? []).map(([v, l]) => `<button type="button" data-v="${esc(v)}" aria-pressed="${r.value === v}"${dis}>${esc(l)}</button>`).join("")}</div>`;
     else if (r.kind === "select") {
       const s = document.createElement("select");
       s.setAttribute("aria-label", r.label);
@@ -2165,7 +2214,7 @@ export class Panel {
     if (r.kind === "choice") row.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
   }
 
-  /** The panel's own rows: the pages' look, the main file, the debug check, the tips. */
+  /** The panel's own rows: the main file, the pages' look, the debug check, the tips. */
   private ownSettings(): SettingsGroup[] {
     const ev = this.ev;
     // (a choice of the panel's: applied here, kept by the host)
@@ -2178,11 +2227,12 @@ export class Panel {
     const preview: SettingRow[] = [];
     if (this.mainFiles.names.length)
       preview.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
-    preview.push(
+    const look: SettingRow[] = [];
+    look.push(
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
       { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset", kind: "choice", options: [["phitex", "PhiTeX"], ["retro", "Windows 98"], ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => (this.look = l)) },
     );
-    if (ev.onBoxes) preview.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
+    if (ev.onBoxes) look.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     preview.push({ id: "problems", label: "Problems shown", help: "Which kinds: the filters at the top of the problems list", kind: "info", value: this.hiddenKinds.size ? `${this.hiddenKinds.size} kind${this.hiddenKinds.size === 1 ? "" : "s"} hidden` : "All" });
     const build: SettingRow[] = [];
     if (ev.onDebug) build.push({ id: "debug", label: "Debug check", help: "Compare with a fresh build every 5 s (this session only)", kind: "toggle", value: this.debugOn, set: () => this.toggleDebug() });
@@ -2192,6 +2242,7 @@ export class Panel {
     if (ev.onNews) tips.push({ id: "news", label: "What's new", kind: "action", button: "Show", set: () => (this.settings(false), ev.onNews!()) });
     return [
       { title: "Preview", rows: preview },
+      { title: "Appearance", rows: look },
       { title: "Build", rows: build },
       { title: "Packages", rows: [] },
       { title: "Updates and tips", rows: tips },

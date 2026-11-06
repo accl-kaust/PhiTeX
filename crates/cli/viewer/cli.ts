@@ -273,10 +273,10 @@ const panel = new Panel(
       const r = await sock.request({ op: "prefs", set: { [key]: value } });
       return r.ok ? undefined : `Not saved: ${r.error ?? "the watch did not answer"}`;
     },
-    // (a problem's source lines, for Copy for an AI assistant)
-    onLines: async (file, line) => {
-      const r = await sock.request({ op: "info", what: "lines", file, line });
-      return r.ok ? ((r.json?.lines ?? []) as [number, string][]) : null;
+    // (a project file's text, for Copy for an AI assistant)
+    onSource: async (file) => {
+      const r = await sock.request({ op: "info", what: "source", file });
+      return r.ok ? String(r.json?.text ?? "") : null;
     },
     // (What's new: this version's CHANGELOG entry, from the binary)
     onNews: () =>

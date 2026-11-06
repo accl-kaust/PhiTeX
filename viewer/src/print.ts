@@ -165,7 +165,7 @@ header:active { cursor: grabbing; }
 .timing .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 8px; }
 .timing .head span { color: var(--ph-fg2); }
 /* (Did you know: under the opening's step, quiet) */
-.opening .steps .hint { margin-top: 10px; color: var(--ph-fg2); font-size: 12px; line-height: 1.4; max-width: 420px; }
+.opening .steps .hint { margin: 10px auto 0; color: var(--ph-fg2); font-size: 12px; line-height: 1.4; max-width: 420px; }
 /* (the first build beside the edits: bars as long as their times) */
 .timing .tbars { padding: 4px 12px 8px; display: grid; gap: 4px; }
 .timing .tb { display: grid; grid-template-columns: 88px 1fr auto; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
@@ -510,31 +510,37 @@ header:active { cursor: grabbing; }
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .byline:hover { color: var(--ph-fg); }
 .win.docked:not(.own-header) .byline { display: block; }
-/* Settings: the panel's own rows and the host's, one dialog in every host */
-.settings { inset: 12px; max-width: 560px; margin: 0 auto; padding: 0; gap: 0; overflow: hidden; }
-.settings > header { padding: 12px 14px 10px; border-bottom: 1px solid var(--ph-border); }
-.settings .sbody { overflow: auto; padding: 4px 0 10px; }
-.settings h3 { margin: 12px 14px 4px; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ph-fg2); }
-.settings .srow { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 12px; padding: 7px 14px; }
+/* Settings: the panel's own rows and the host's, one dialog in every host, a tab per group */
+.settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; }
+.settings > header { padding: 12px 14px 0; }
+.settings .stabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); overflow-x: auto; scrollbar-width: none; }
+.settings .stabs button { all: unset; cursor: pointer; white-space: nowrap; padding: 6px 8px 7px; font-size: 13px; color: var(--ph-fg2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.settings .stabs button:hover { color: var(--ph-fg); }
+.settings .stabs button[aria-selected="true"] { color: var(--ph-fg); font-weight: 600; border-bottom-color: var(--ph-accent); }
+.settings .stabs button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
+.settings .sbody { overflow: auto; padding: 4px 0 8px; }
+.settings .srow { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "lab ctl" "help help" "err err"; align-items: center; column-gap: 16px; padding: 10px 16px; }
 .settings .srow + .srow { border-top: 1px solid var(--ph-border); }
-.settings .srow .lab { display: grid; gap: 1px; min-width: 0; }
-.settings .srow .lab b { font-weight: 600; }
-.settings .srow .lab small { font-size: 12px; color: var(--ph-fg2); }
-.settings .srow.off .lab b, .settings .srow.off .ctl { opacity: .55; }
-.settings .srow .err { grid-column: 1 / -1; font-size: 12px; color: var(--ph-danger); }
+.settings .srow .lab { grid-area: lab; font-weight: 600; min-width: 0; }
+.settings .srow .ctl { grid-area: ctl; justify-self: end; }
+.settings .srow .help { grid-area: help; margin-top: 2px; font-size: 12px; line-height: 1.4; color: var(--ph-fg2); }
+.settings .srow .help:empty { display: none; }
+.settings .srow.off .lab, .settings .srow.off .ctl { opacity: .55; }
+.settings .srow .err { grid-area: err; margin-top: 4px; font-size: 12px; color: var(--ph-danger); }
 .settings .srow .val { color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
-.settings select { font: inherit; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 2px 4px; max-width: 220px; }
-.settings .radios { display: inline-flex; border: 1px solid var(--ph-border); border-radius: var(--ph-pill); overflow: hidden; }
-.settings .radios button { all: unset; cursor: pointer; padding: 2px 10px; font-size: 12px; }
-.settings .radios button + button { border-left: 1px solid var(--ph-border); }
-.settings .radios button[aria-pressed="true"] { background: var(--ph-accent); color: var(--ph-on-accent, #fff); }
-.settings .radios button:disabled { cursor: default; }
+.settings select { font: inherit; font-size: 12px; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 3px 6px; max-width: 220px; }
+.settings .btn { padding: 3px 12px; font-size: 12px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.settings .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--ph-pill); background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.settings .seg button { all: unset; cursor: pointer; padding: 3px 11px; border-radius: var(--ph-pill); font-size: 12px; line-height: 1.4; white-space: nowrap; color: var(--ph-fg); }
+.settings .seg button:hover:not([aria-pressed="true"]):not(:disabled) { background: var(--ph-border); }
+.settings .seg button[aria-pressed="true"] { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.settings .seg button:disabled { cursor: default; }
 .settings .switch { all: unset; cursor: pointer; position: relative; width: 30px; height: 18px; border-radius: 9px; background: var(--ph-border); transition: background .12s; }
 .settings .switch i { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 25%); transition: left .12s; }
 .settings .switch[aria-checked="true"] { background: var(--ph-accent); }
 .settings .switch[aria-checked="true"] i { left: 14px; }
 .settings .switch:disabled { cursor: default; }
-.settings .switch:focus-visible, .settings .radios button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
+.settings .switch:focus-visible, .settings .seg button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
 
 /* docked: the panel fills the host's pane under its toolbar */
 .win.docked { position: relative; left: auto !important; top: auto !important; width: 100% !important; height: 100% !important; max-width: none; max-height: none;
