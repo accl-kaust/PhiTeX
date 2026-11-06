@@ -3061,3 +3061,82 @@ fn a_font_list_append_does_not_run_again_when_the_list_moves() {
         }
     }
 }
+
+/// pdfTeX's ratios a font has asked for (`pdf_font_elink`, the engine's
+/// `pdf:elink:<f>`) grow by each paragraph whose lines first ask for one
+/// (microtype's font expansion). A reader cares which ratios are there,
+/// not in what order they were first asked: deleting the paragraph that
+/// asked first moves the first asks to the paragraphs after it, and only
+/// those that now ask first run again on the list, never every paragraph
+/// set in the font after them. Every edited PDF equals a cold build's,
+/// at one and eight threads.
+#[test]
+fn a_fonts_expansion_list_reader_does_not_run_again_when_a_first_ask_moves() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/elink-set");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let words = "expansion stretches and shrinks the glyphs of a line a little, so that \
+                 the spaces between the words stay even where a justified paragraph is set";
+    let doc = |first: bool| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\usepackage[expansion=true,protrusion=true]{microtype}\n\
+             \\begin{document}\n",
+        );
+        if first {
+            s += "A first paragraph that asks for the ratios first: ";
+            s += words;
+            s += ".\n\n";
+        }
+        for k in 0..10 {
+            let w = if k % 2 == 0 { "\\itshape " } else { "" };
+            s += "{";
+            s += w;
+            s += "Paragraph ";
+            s += &k.to_string();
+            s += ": ";
+            s += words;
+            s += "; and again ";
+            s += words;
+            s += ".}\n\n";
+        }
+        s.push_str("\\end{document}\n");
+        s
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("elinkset", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(true));
+        for first in [false, true] {
+            b.edit(&doc(first));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} first {first}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(first));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} first {first}"
+            );
+            let mut on_list: Vec<&str> = r
+                .iter()
+                .filter(|x| x.contains("pdf:elink"))
+                .filter_map(|x| x.rsplit_once(" [").map(|(_, n)| n))
+                .collect();
+            on_list.sort_unstable();
+            on_list.dedup();
+            assert!(
+                on_list.len() <= 2,
+                "-j{threads} first {first}: paragraphs ran again on a font's expansion list: {r:?}"
+            );
+        }
+    }
+}
