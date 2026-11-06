@@ -502,6 +502,9 @@ pub struct Target {
     pub viewer: Option<String>,
     /// The cache's limit (`cache-limit`; none: the default).
     pub cache_limit: Option<u64>,
+    /// The engine's threads (`threads` in the user's file; none or 0: one
+    /// per core), under `-j`.
+    pub threads: Option<usize>,
     /// Where TeX's files come from (`--shelf`, `files`; TeX Live by
     /// default).
     pub files: tex::Files,
@@ -671,6 +674,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,
         cache_limit: cfg.cache_limit,
+        threads: cfg.threads.filter(|&n| n > 0),
         files,
         warnings: cfg.warnings,
     })
@@ -699,7 +703,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
             .as_ref()
             .map_or_else(|| PathBuf::from("."), PathBuf::from),
         // (batch mode, as the oracles run: the CLI shows the errors itself)
-        threads: o.threads,
+        threads: o.threads.or(t.threads),
         spec: o.spec.clone(),
         wait_long: o.wait_long,
         node_records: o.node_records,

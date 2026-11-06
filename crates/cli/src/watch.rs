@@ -800,7 +800,16 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 v.on_prefs(Box::new(crate::config::prefs));
                 // (what the viewer shows that the binary holds: the news)
                 let here = root.clone();
+                // (what the Settings dialog shows of this project, set in its
+                // phitex.toml or on the command line: never written by a page)
+                let project = json!({
+                    "main": t.file,
+                    "engine": t.engine.name,
+                    "files": if t.files == crate::tex::Files::Shelf { "shelf" } else { "texlive" },
+                    "jobs": o.threads,
+                });
                 v.on_info(Box::new(move |what, req| match what {
+                    "settings" => Some(project.clone()),
                     "news" => {
                         crate::news::latest().map(|(v, text)| json!({"version": v, "text": text}))
                     }

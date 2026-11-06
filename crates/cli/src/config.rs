@@ -69,6 +69,19 @@ pub struct Config {
     /// The kinds of problem the viewer does not show (yours only, set by
     /// the viewer's filters).
     pub problems_hidden: Option<Vec<String>>,
+    /// The engine's threads (yours only: a machine's, not a document's; 0:
+    /// one per core), `-j` over it; read when the build starts.
+    pub threads: Option<usize>,
+    /// When the viewer's page follows an editor's place (yours only):
+    /// `cursor` as it moves, `selection` what is selected, `dblclick` a
+    /// double-click alone. See [`CHOICES`].
+    pub follow: Option<String>,
+    /// The viewer's dark pages (yours only): `off`, `on`, `theme`.
+    pub dark_pdf: Option<String>,
+    /// The viewer's loading animation (yours only): `phitex`, `retro`, `off`.
+    pub opening: Option<String>,
+    /// Whether the viewer underlines what each problem is about (yours only).
+    pub underline: Option<bool>,
     /// What reading the files warned of (unknown keys).
     #[serde(skip)]
     pub warnings: Vec<String>,
@@ -96,6 +109,18 @@ const KEYS: &[&str] = &[
     "watch-write",
     "tips-seen",
     "problems-hidden",
+    "threads",
+    "follow",
+    "dark-pdf",
+    "opening",
+    "underline",
+];
+
+/// The viewer's settings that are one of a few names: each key, its names.
+pub const CHOICES: &[(&str, &[&str])] = &[
+    ("follow", &["cursor", "selection", "dblclick"]),
+    ("dark-pdf", &["off", "on", "theme"]),
+    ("opening", &["phitex", "retro", "off"]),
 ];
 
 /// `copy-pdf`'s value.
@@ -167,6 +192,13 @@ fn parse_named(text: &str, name: &str) -> Result<Config, String> {
             Some(n) => format!("{name}: unknown key `{k}` (did you mean `{n}`?), ignored"),
             None => format!("{name}: unknown key `{k}` (a newer PhiTeX's?), ignored"),
         });
+    }
+    for (k, names) in CHOICES {
+        if let Some(v) = table.get(*k)
+            && !v.as_str().is_some_and(|v| names.contains(&v))
+        {
+            return Err(format!("{name}: `{k}` is one of {}", names.join(", ")));
+        }
     }
     let mut c: Config = table.try_into().map_err(|e| said(&e))?;
     if let Some(req) = &c.phitex {
@@ -263,7 +295,10 @@ fn with_key(text: &str, key: &str, value: &str) -> Result<String, String> {
             None => format!("no setting '{key}' (phitex --help-all lists them)"),
         });
     }
+    // (a choice's names are names, `off` too: never a boolean)
+    let choice = CHOICES.iter().any(|(c, _)| *c == key);
     let v = match value {
+        _ if choice => toml::Value::String(value.to_owned()).to_string(),
         "on" | "true" => "true".to_owned(),
         "off" | "false" => "false".to_owned(),
         _ if value.parse::<i64>().is_ok() => value.to_owned(),
@@ -314,8 +349,9 @@ pub const PREFS: &[&str] = &["tips-seen", "problems-hidden"];
 
 /// The settings the viewer's Settings dialog sets, each on or off (in the
 /// user's file; never a command, which a page could make run: `editor`,
-/// `viewer` are the terminal's to set).
-pub const SWITCHES: &[&str] = &["watch-write", "synctex", "update-check"];
+/// `viewer` are the terminal's to set, as are `shell-escape` and
+/// `update-channel`). Its others: [`CHOICES`], `threads`, `cache-limit`.
+pub const SWITCHES: &[&str] = &["watch-write", "synctex", "update-check", "underline"];
 
 /// The viewer's preferences (`set`: those keys set first, each a list of
 /// names, in the user's file, its other lines kept), as JSON.
@@ -329,6 +365,39 @@ pub fn prefs(
             if SWITCHES.contains(&k.as_str()) {
                 let on = v.as_bool().ok_or(format!("{k}: on or off"))?;
                 text = with_line(&text, k, if on { "true" } else { "false" })?;
+                continue;
+            }
+            if let Some((_, names)) = CHOICES.iter().find(|(c, _)| c == k) {
+                let n = v
+                    .as_str()
+                    .filter(|n| names.contains(n))
+                    .ok_or(format!("{k}: one of {}", names.join(", ")))?;
+                text = with_line(&text, k, &format!("\"{n}\""))?;
+                continue;
+            }
+            if k == "threads" {
+                let most = std::thread::available_parallelism().map_or(1, usize::from);
+                let n = v
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .filter(|&n| n <= most)
+                    .ok_or(format!("threads: 0 (one per core) to {most}"))?;
+                text = with_line(&text, k, &n.to_string())?;
+                continue;
+            }
+            if k == "cache-limit" {
+                let t = match v {
+                    serde_json::Value::Number(n) if n.as_u64() == Some(0) => "0".to_owned(),
+                    serde_json::Value::String(t) if parse_size(t).is_some() => {
+                        toml::Value::String(t.clone()).to_string()
+                    }
+                    _ => {
+                        return Err(
+                            "cache-limit: a size (\"500MB\", \"4GB\") or 0: no cache".to_owned()
+                        );
+                    }
+                };
+                text = with_line(&text, k, &t)?;
                 continue;
             }
             if !PREFS.contains(&k.as_str()) {
@@ -361,6 +430,13 @@ pub fn prefs(
         "watch-write": c.watch_write.unwrap_or(false),
         "synctex": c.synctex,
         "update-check": c.update_check.unwrap_or(false),
+        "underline": c.underline.unwrap_or(true),
+        "follow": c.follow.unwrap_or_else(|| "cursor".to_owned()),
+        "dark-pdf": c.dark_pdf.unwrap_or_else(|| "off".to_owned()),
+        "opening": c.opening.unwrap_or_else(|| "phitex".to_owned()),
+        "threads": c.threads.unwrap_or(0),
+        "cores": std::thread::available_parallelism().map_or(1, usize::from),
+        "cache-limit": c.cache_limit,
         "file": crate::cache::home_relative(&p),
     }))
 }
@@ -449,6 +525,31 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
         "watch-write",
         "off",
         "phitex watch writes the PDF (with its .synctex.gz) and the aux files here after each build",
+    ),
+    (
+        "threads",
+        "0: one per core",
+        "the engine's threads, -j over it (yours only)",
+    ),
+    (
+        "follow",
+        "cursor",
+        "when the viewer's page follows your editor: cursor, selection, dblclick (yours only)",
+    ),
+    (
+        "dark-pdf",
+        "off",
+        "the viewer's dark pages: off, on, theme (yours only)",
+    ),
+    (
+        "opening",
+        "phitex",
+        "the viewer's loading animation: phitex, retro, off (yours only)",
+    ),
+    (
+        "underline",
+        "on",
+        "the viewer underlines what each problem is about (yours only)",
     ),
 ];
 
@@ -550,6 +651,11 @@ const USERS_ALONE: &[&str] = &[
     "update-channel",
     "tips-seen",
     "problems-hidden",
+    "threads",
+    "follow",
+    "dark-pdf",
+    "opening",
+    "underline",
 ];
 /// Keys a project may set: what its build is, none naming anything to run
 /// (`engine` is one of PhiTeX's own, `tex::engine`, nothing started; the
@@ -633,6 +739,12 @@ pub fn without_permissions(mut project: Config, root: &Path) -> Config {
         said("copy-pdf", "it is outside the project. Yours: --copy-pdf");
         project.copy_pdf = None;
     }
+    if project.threads.is_some() {
+        said(
+            "threads",
+            "they are a machine's, not a document's. Yours: -j, or `phitex config threads N`",
+        );
+    }
     project.warnings = warnings;
     project.shell_escape = None;
     project.viewer = None;
@@ -641,6 +753,11 @@ pub fn without_permissions(mut project: Config, root: &Path) -> Config {
     project.update_channel = None;
     project.tips_seen = None;
     project.problems_hidden = None;
+    project.threads = None;
+    project.follow = None;
+    project.dark_pdf = None;
+    project.opening = None;
+    project.underline = None;
     project
 }
 
@@ -695,6 +812,11 @@ impl Config {
             watch_write: self.watch_write.or(under.watch_write),
             tips_seen: self.tips_seen.or(under.tips_seen),
             problems_hidden: self.problems_hidden.or(under.problems_hidden),
+            threads: self.threads.or(under.threads),
+            follow: self.follow.or(under.follow),
+            dark_pdf: self.dark_pdf.or(under.dark_pdf),
+            opening: self.opening.or(under.opening),
+            underline: self.underline.or(under.underline),
             warnings: [self.warnings, under.warnings].concat(),
         }
     }
@@ -1023,6 +1145,11 @@ mod tests {
                 watch_write: None,
                 tips_seen: None,
                 problems_hidden: None,
+                threads: None,
+                follow: None,
+                dark_pdf: None,
+                opening: None,
+                underline: None,
                 warnings: vec![],
             }
         );

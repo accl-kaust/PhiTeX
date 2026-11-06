@@ -1093,6 +1093,12 @@ header:active { cursor: grabbing; }
 .folded { margin-top: 6px; font-size: 12px; font-weight: 400; }
 .folded summary { cursor: pointer; color: var(--ph-fg2); }
 .diags .phx-inline { margin: 0; padding: 0; list-style: none; }
+/* a problem's Copy for an AI assistant: its row's top right corner, clear when the row is pointed at or focused */
+.diag, .diags .phx-inline > li { position: relative; padding-right: 40px; }
+.copyai { all: unset; position: absolute; top: 6px; right: 8px; display: inline-flex; padding: 4px; border-radius: var(--ph-radius, 4px); color: var(--ph-fg2); opacity: .45; cursor: pointer; }
+.diag:hover .copyai, .phx-inline > li:hover .copyai, .copyai:focus-visible { opacity: 1; }
+.copyai:hover { background: var(--ph-hover); color: var(--ph-fg); }
+.copyai:focus-visible { outline: 2px solid var(--ph-link); }
 .reportbtn { all: unset; margin: 8px 14px; color: var(--ph-link); cursor: pointer; }
 .reportbtn:hover { text-decoration: underline; }
 
@@ -1389,13 +1395,31 @@ header:active { cursor: grabbing; }
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .byline:hover { color: var(--ph-fg); }
 .win.docked:not(.own-header) .byline { display: block; }
-/* Overleaf's own settings, docked: the main file, the debug check, the latency's details */
-.sheet-pop { right: 8px; top: 6px; width: min(340px, calc(100% - 16px)); padding: 12px; display: grid; gap: 8px; }
-.sheet-pop label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.sheet-pop select { font: inherit; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 2px 4px; max-width: 180px; }
-.sheet-pop .links { display: flex; flex-wrap: wrap; gap: 12px; }
-.sheet-pop .links button { all: unset; cursor: pointer; color: var(--ph-link); }
-.details { margin: 0; font: 11px/1.4 ui-monospace, monospace; color: var(--ph-fg2); white-space: pre-wrap; }
+/* Settings: the panel's own rows and the host's, one dialog in every host */
+.settings { inset: 12px; max-width: 560px; margin: 0 auto; padding: 0; gap: 0; overflow: hidden; }
+.settings > header { padding: 12px 14px 10px; border-bottom: 1px solid var(--ph-border); }
+.settings .sbody { overflow: auto; padding: 4px 0 10px; }
+.settings h3 { margin: 12px 14px 4px; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ph-fg2); }
+.settings .srow { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 12px; padding: 7px 14px; }
+.settings .srow + .srow { border-top: 1px solid var(--ph-border); }
+.settings .srow .lab { display: grid; gap: 1px; min-width: 0; }
+.settings .srow .lab b { font-weight: 600; }
+.settings .srow .lab small { font-size: 12px; color: var(--ph-fg2); }
+.settings .srow.off .lab b, .settings .srow.off .ctl { opacity: .55; }
+.settings .srow .err { grid-column: 1 / -1; font-size: 12px; color: var(--ph-danger); }
+.settings .srow .val { color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
+.settings select { font: inherit; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 2px 4px; max-width: 220px; }
+.settings .radios { display: inline-flex; border: 1px solid var(--ph-border); border-radius: var(--ph-pill); overflow: hidden; }
+.settings .radios button { all: unset; cursor: pointer; padding: 2px 10px; font-size: 12px; }
+.settings .radios button + button { border-left: 1px solid var(--ph-border); }
+.settings .radios button[aria-pressed="true"] { background: var(--ph-accent); color: var(--ph-on-accent, #fff); }
+.settings .radios button:disabled { cursor: default; }
+.settings .switch { all: unset; cursor: pointer; position: relative; width: 30px; height: 18px; border-radius: 9px; background: var(--ph-border); transition: background .12s; }
+.settings .switch i { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 25%); transition: left .12s; }
+.settings .switch[aria-checked="true"] { background: var(--ph-accent); }
+.settings .switch[aria-checked="true"] i { left: 14px; }
+.settings .switch:disabled { cursor: default; }
+.settings .switch:focus-visible, .settings .radios button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
 
 /* docked: the panel fills the host's pane under its toolbar */
 .win.docked { position: relative; left: auto !important; top: auto !important; width: 100% !important; height: 100% !important; max-width: none; max-height: none;
@@ -2091,6 +2115,7 @@ var PATHS = {
   more_horiz: "M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z",
   search: "M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z",
   compare: "M9.01 14H2v2h7.01v3L13 15l-3.99-4v3zm5.98-1v-3H22V8h-7.01V5L11 9l3.99 4z",
+  copy: "M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z",
   close: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
   log: "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z",
   toc: "M3 9h14V7H3v2zm0 4h14v-2H3v2zm0 4h14v-2H3v2zm16 0h2v-2h-2v2zm0-10v2h2V7h-2zm0 6h2v-2h-2v2z",
@@ -2099,10 +2124,17 @@ var PATHS = {
   bolt: "M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z",
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"
 };
+var copyBtn = (i) => `<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem, its source lines and the log's end, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
 var icon = (name, size = 18) => `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
 var ZOOMS = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
 var mb = (b) => b ? ` \xB7 ${b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`}` : "";
 var dur = (ms) => ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1e3 ? `${Math.round(ms)} ms` : `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s`;
+function framePart(json) {
+  if (!json) return "";
+  const f = JSON.parse(json);
+  const split = [["probe", f.probe], ["draw", f.draw], ["transfer", Math.max(0, f.request - f.watch)], ["decode", f.decode]];
+  return `<div class="row"><span class="k">Page ${f.page} drawn${f.inView ? " (in view)" : ""}</span><span class="v">${esc3(dur(f.request + f.decode))}</span><div class="tbar">${split.map(([, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${split.map(([n, ms], i) => `<span><i class="c${i}"></i>${n} ${esc3(dur(ms))}</span>`).join("")}</div><span class="note">${f.drawn} strip${f.drawn === 1 ? "" : "s"} drawn, ${f.kept} reused</span></div>`;
+}
 var PART_NAMES = {
   "first paint": "First page painted",
   "fixed point": "All pages settled",
@@ -2242,13 +2274,6 @@ var Panel = class {
       ${item2("x-find", "search", "Find", "Ctrl+F", "narrow")}
       ${item2("x-compare", "compare", "Compare\u2026", "", "narrow")}
       <hr>
-      <div class="mi"><span class="icon">dark</span>Dark PDF</div>
-      <div class="radios" id="darkpdf" role="group" aria-label="Dark PDF"><button type="button" data-dark="off">Off</button><button type="button" data-dark="on">On</button><button type="button" data-dark="theme">Match theme</button></div>
-      <div class="mi"><span class="icon">tips</span>Loading animation</div>
-      <div class="radios" id="openlook" role="group" aria-label="Loading animation"><button type="button" data-look="phitex">PhiTeX</button><button type="button" data-look="retro">Windows 98</button><button type="button" data-look="off">Off</button></div>
-      <button type="button" role="menuitemcheckbox" id="x-culprits" aria-checked="true"><span class="check">\u2713</span><span>Underline problems<span class="desc">A wavy line under what each error and warning is about</span></span></button>
-      <button type="button" role="menuitemcheckbox" id="dbg" aria-checked="false"><span class="check"></span><span>Debug check<span class="desc">Compare with a fresh build every 5 s</span></span></button>
-      <hr>
       ${item2("x-settings", "tips", "Settings\u2026")}
       ${item2("x-tips", "tips", "What's new")}
       ${item2("x-keys", "keyboard", "Keyboard shortcuts", "?")}
@@ -2263,12 +2288,7 @@ var Panel = class {
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
-    <div class="menu sheet-pop" id="sheet" role="dialog" aria-label="PhiTeX settings" hidden>
-      <label>Main file <select id="main" title="The file PhiTeX typesets"></select></label>
-      <label id="dbglabel">Debug check <input type="checkbox" id="dbg2"></label>
-      <div class="links"><button type="button" id="reload">Reload the files</button><button type="button" id="tour">Take the tour</button><button type="button" id="news">What's new</button></div>
-      <pre class="details" id="details"></pre>
-    </div>
+    <div class="dialog settings" id="settings" role="dialog" aria-label="Settings" hidden></div>
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <div class="dialog keys" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
     <div class="dialog small about" id="about" role="dialog" aria-label="About the PhiTeX preview" hidden><header>About PhiTeX<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><div>${w.about}</div></div>
@@ -2294,11 +2314,6 @@ var Panel = class {
     offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
     offer("#b-find, #x-find", !!ev.onFind);
-    offer("#dbg, #dbglabel", !!ev.onDebug);
-    offer("#x-culprits", !!ev.onBoxes);
-    offer("#tour", !!ev.onTour);
-    offer("#news", !!ev.onNews);
-    offer("#x-settings", !!ev.onSettings);
     const menus = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
     this.menus = menus;
     for (const [b, m] of menus)
@@ -2322,7 +2337,7 @@ var Panel = class {
     this.$("#x-contents").onclick = this.$("#b-side").onclick = () => (this.menu(null), this.side());
     this.$("#x-find").onclick = this.$("#b-find").onclick = () => (this.menu(null), this.find(true));
     this.$("#x-tips").onclick = () => (this.menu(null), ev.onNews ? ev.onNews() : this.tips("fresh"));
-    this.$("#x-settings").onclick = () => (this.menu(null), ev.onSettings?.());
+    this.$("#x-settings").onclick = () => (this.menu(null), void this.settings(true));
     this.$("#x-keys").onclick = () => {
       this.menu(null);
       this.$("#keyhelp").hidden = false;
@@ -2336,15 +2351,6 @@ var Panel = class {
       const z = e.target.closest("[data-zoom]")?.dataset.zoom;
       if (z) this.menu(null), this.zoomTo(z);
     };
-    this.$("#darkpdf").onclick = (e) => {
-      const d = e.target.closest("[data-dark]")?.dataset.dark;
-      if (d) this.darkPdf(d);
-    };
-    this.$("#openlook").onclick = (e) => {
-      const l = e.target.closest("[data-look]")?.dataset.look;
-      if (l) this.openingLook(l);
-    };
-    this.openingLook(this.openingLook());
     this.$("#logsx").onclick = () => this.diagnostics(false);
     const pg = this.$("#pgin");
     pg.onfocus = () => pg.select();
@@ -2355,30 +2361,16 @@ var Panel = class {
       pg.blur();
     };
     pg.onblur = () => this.nav();
-    this.$("#dbg").onclick = () => this.toggleDebug();
-    this.$("#x-culprits").onclick = () => this.culpritsShown(!this.culpritsOn);
-    try {
-      this.culpritsOn = localStorage.getItem("phitex.culprits") !== "0";
-    } catch {
-    }
-    this.culpritsShown(this.culpritsOn, false);
     this.$("#stage").addEventListener("pointermove", (e) => this.culpritAt(e), { passive: true });
     this.$("#stage").addEventListener("pointerleave", () => this.$("#ctip").hidden = true);
-    this.$("#dbg2").onchange = () => this.toggleDebug();
-    this.$("#reload").onclick = () => (this.sheet(false), ev.onReload());
     const license = this.$("#license");
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
-    this.$("#news").onclick = () => {
-      this.sheet(false);
-      ev.onNews?.();
-    };
-    this.$("#tour").onclick = () => {
-      this.sheet(false);
-      ev.onTour?.();
-    };
-    this.$("#main").onchange = (e) => ev.onMain(e.target.value);
+    this.$("#settings").onclick = (e) => void this.settingClicked(e);
+    this.$("#settings").onchange = (e) => void this.settingClicked(e);
     this.$("#min").onclick = () => this.collapse(!this.prefs.collapsed);
     this.$("#diags").onclick = (e) => {
+      const copy = e.target.closest(".copyai");
+      if (copy) return void this.copyForAi(this.listed[Number(copy.dataset.i)]);
       const at = e.target.closest(".phx-place[data-file]");
       if (at) {
         e.preventDefault();
@@ -2394,7 +2386,7 @@ var Panel = class {
     this.$("#stage").addEventListener("pointerdown", () => {
       this.menu(null);
       this.diagnostics(false);
-      this.sheet(false);
+      this.settings(false);
       this.$("#about").hidden = true;
     });
     this.root.addEventListener("keydown", (e) => {
@@ -2429,7 +2421,7 @@ var Panel = class {
       link: ev.onLink ? (u) => ev.onLink(u) : void 0
     });
     this.extras(opts);
-    this.darkPdf(this.darkPref(), false);
+    this.darkPdf("off");
     window.addEventListener("resize", () => this.place());
     const stage = this.$("#stage");
     new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }, this.drawScrollMarks())).observe(stage);
@@ -2830,19 +2822,10 @@ var Panel = class {
       el.append(t);
     });
   }
-  /** The underlines on or off (`keep`: remembered). */
-  culpritsShown(on, keep = true) {
+  /** The underlines on or off. */
+  culpritsShown(on) {
     this.culpritsOn = on;
-    const b = this.$("#x-culprits");
-    b.setAttribute("aria-checked", String(on));
-    b.querySelector(".check").textContent = on ? "\u2713" : "";
-    if (keep) {
-      try {
-        localStorage.setItem("phitex.culprits", on ? "1" : "0");
-      } catch {
-      }
-      void this.underline(this.culpritDiags);
-    }
+    void this.underline(this.culpritDiags);
   }
   /** The pages' origins came after the problems did: their underlines looked up again (the memo held an answer with no pages). */
   origins() {
@@ -2906,12 +2889,15 @@ var Panel = class {
       }
       list.append(f);
     }
-    for (const d of diags.filter((d2) => !this.hiddenKinds.has(kindOf(d2))).slice(0, 50)) {
+    this.listed = diags.filter((d) => !this.hiddenKinds.has(kindOf(d))).slice(0, 50);
+    for (const [i, d] of this.listed.entries()) {
+      const copy = d.severity === "error" || d.severity === "warning" ? copyBtn(i) : "";
       if (d.problem) {
         const card = document.createElement("ol");
         card.className = "phx-card phx-inline";
         card.setAttribute("role", "listitem");
         card.innerHTML = problemHtml(d.problem);
+        card.firstElementChild.insertAdjacentHTML("afterbegin", copy);
         if (d.problem.file && d.problem.range) {
           card.dataset.key = `${d.problem.file}\0${d.problem.range[0]}`;
           card.title = "Show it on the page (its file:line opens it in the editor)";
@@ -2927,7 +2913,7 @@ var Panel = class {
         row.dataset.line = String(d.line);
         row.title = `Go to ${d.file}:${d.line}`;
       }
-      row.innerHTML = `<span class="where"></span><div class="text"></div>`;
+      row.innerHTML = `${copy}<span class="where"></span><div class="text"></div>`;
       row.querySelector(".text").textContent = d.message;
       if (d.detail && d.code === "engine") row.append(foldedDetail(d.detail, "Engine details"));
       else if (d.detail) {
@@ -2944,15 +2930,6 @@ var Panel = class {
       more.className = "diag info";
       more.textContent = `\u2026 and ${diags.length - 50} more`;
       list.append(more);
-    }
-    if (diags.some((d) => d.severity === "error" || d.severity === "warning")) {
-      const b = document.createElement("button");
-      b.className = "reportbtn";
-      b.id = "copyai";
-      b.textContent = "Copy for an AI assistant";
-      b.title = "The errors, the source lines around them and the end of the log, to paste into the assistant you use: nothing is sent anywhere";
-      b.onclick = (e) => (e.stopPropagation(), void this.copyForAi(diags));
-      list.append(b);
     }
     if (this.ev.onReport) {
       const b = document.createElement("button");
@@ -2981,21 +2958,21 @@ var Panel = class {
     this.renderStatus();
     queueMicrotask(() => this.emit());
   }
-  /** Copy for an AI assistant: the first problems (errors first), each with its place, message, help and source lines around it, and the log's end; on the clipboard, nothing sent. */
-  async copyForAi(diags) {
-    const pick2 = [...diags].sort((a, b) => a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1).slice(0, 5);
-    const parts = ["I'm building a LaTeX document and get these problems. What is wrong, and how do I fix it?", ""];
-    for (const d of pick2) {
-      const p = d.problem;
-      const file = p?.file ?? d.file, line = p?.line ?? d.line;
-      parts.push(`${d.severity}: ${d.message}${file ? ` (${file}${line ? `:${line}` : ""})` : ""}`);
-      if (p?.help.length) parts.push(p.help.join(" "));
-      const lines2 = file && line ? await this.ev.onLines?.(file, line).catch(() => null) : null;
-      if (lines2?.length) parts.push("```latex", ...lines2.map(([n, t]) => `${String(n).padStart(4)}${n === line ? ">" : " "} ${t}`), "```");
-      else if (p?.excerpt) parts.push("```latex", p.excerpt.text, "```");
-      parts.push("");
-    }
-    const log2 = await this.ev.onLog?.().catch(() => null);
+  /** The problems listed (by the rows' data-i). */
+  listed = [];
+  /** Copy for an AI assistant: one problem, its place, message, help and the source lines around it, and for an error the log's end; on the clipboard, nothing sent. */
+  async copyForAi(d) {
+    if (!d) return;
+    const p = d.problem;
+    const file = p?.file ?? d.file, line = p?.line ?? d.line;
+    const parts = [`I'm building a LaTeX document and get this ${d.severity}. What is wrong, and how do I fix it?`, ""];
+    parts.push(`${d.severity}: ${d.message}${file ? ` (${file}${line ? `:${line}` : ""})` : ""}`);
+    if (p?.help.length) parts.push(p.help.join(" "));
+    const lines2 = file && line ? await this.ev.onLines?.(file, line).catch(() => null) : null;
+    if (lines2?.length) parts.push("```latex", ...lines2.map(([n, t]) => `${String(n).padStart(4)}${n === line ? ">" : " "} ${t}`), "```");
+    else if (p?.excerpt) parts.push("```latex", p.excerpt.text, "```");
+    parts.push("");
+    const log2 = d.severity === "error" ? await this.ev.onLog?.().catch(() => null) : null;
     if (log2) parts.push("The end of the log:", "```", ...log2.split("\n").slice(-40), "```");
     const text = parts.join("\n");
     try {
@@ -3125,7 +3102,7 @@ var Panel = class {
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
     this.fitSheet();
     const dark = this.win.classList.contains("dark-pdf") || this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark");
-    const sheet = el.querySelector(".sheet"), look2 = this.openingLook();
+    const sheet = el.querySelector(".sheet"), look2 = this.look;
     this.anim = look2 === "off" ? still() : look2 === "retro" ? retro(sheet) : opening(sheet, dark ? "#e4e6ea" : "#1d3e72", dark ? "#2c2e33" : "#ffffff");
     this.animSince = performance.now();
   }
@@ -3152,18 +3129,18 @@ var Panel = class {
     this.ending = true;
     this.win.classList.remove("reopening");
     const el = this.$("#opening");
-    const follow = () => {
+    const follow2 = () => {
       if (!this.ending) return;
       const slot = this.$("#viewer").querySelector(".slot");
       if (slot) {
         const r = slot.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
         Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${r.top - b.top}px`, width: `${r.width}px`, height: `${r.height}px` });
       }
-      requestAnimationFrame(follow);
+      requestAnimationFrame(follow2);
     };
     if (matchMedia("(prefers-reduced-motion: reduce)").matches) return this.stopSheet();
     requestAnimationFrame(() => {
-      follow();
+      follow2();
       el.classList.add("in");
     });
     const a = this.anim;
@@ -3293,7 +3270,7 @@ var Panel = class {
       chip: this.chip.text,
       chipTitle: this.chip.title,
       speed: this.speed,
-      sheet: !this.$("#sheet").hidden,
+      settings: !this.$("#settings").hidden,
       // (the badge counts what needs a look: info is listed, not counted)
       diagCount: this.lastStatus?.diagnostics?.filter((d) => d.severity !== "info").length ?? 0,
       diagWorst: this.lastStatus?.diagnostics?.[0]?.severity ?? "",
@@ -3690,9 +3667,6 @@ var Panel = class {
   }
   toggleDebug() {
     this.debugOn = !this.debugOn;
-    this.$("#dbg").setAttribute("aria-checked", String(this.debugOn));
-    this.$("#dbg").querySelector(".check").textContent = this.debugOn ? "\u2713" : "";
-    this.$("#dbg2").checked = this.debugOn;
     this.ev.onDebug?.(this.debugOn);
     this.msg(this.debugOn ? "Debug check on" : "Debug check off", false, true);
     this.emit();
@@ -3711,10 +3685,117 @@ var Panel = class {
     el.style.top = `${Math.max(4, a.bottom - w.top + 4)}px`;
     this.menu("#m-time");
   }
-  /** The settings (docked under a host's toolbar: the main file, the debug check, reload, the latency's details). */
-  sheet(on = this.$("#sheet").hidden) {
-    this.$("#sheet").hidden = !(on && !!this.docked);
+  // ---- Settings: the panel's own rows and the host's, one dialog in every host ----
+  /** The rows drawn (by data-id): what a click or a change sets. */
+  settingRows = /* @__PURE__ */ new Map();
+  /** The Settings dialog shown (drawn anew: the host's values as they are now) or hidden. */
+  async settings(on = this.$("#settings").hidden) {
+    const el = this.$("#settings");
+    if (!on) {
+      if (!el.hidden) el.hidden = true, this.emit();
+      return;
+    }
+    const groups = this.ownSettings();
+    for (const g of await this.ev.settings?.() ?? []) {
+      const same = groups.find((x) => x.title === g.title);
+      if (same) same.rows.push(...g.rows);
+      else groups.push({ title: g.title, rows: [...g.rows] });
+    }
+    this.settingRows.clear();
+    el.innerHTML = `<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><div class="sbody"></div>`;
+    const body = el.querySelector(".sbody");
+    for (const g of groups.filter((g2) => g2.rows.length)) {
+      const sec = document.createElement("section");
+      sec.innerHTML = `<h3></h3>`;
+      sec.querySelector("h3").textContent = g.title;
+      for (const r of g.rows) sec.append(this.settingRow(r));
+      body.append(sec);
+    }
+    el.hidden = false;
     this.emit();
+  }
+  /** One row: its label and help, its control, a line for the host's error. */
+  settingRow(r) {
+    this.settingRows.set(r.id, r);
+    const row = document.createElement("div");
+    row.className = `srow ${r.kind}${r.disabled ? " off" : ""}`;
+    row.dataset.id = r.id;
+    row.innerHTML = `<div class="lab"><b></b><small></small></div><div class="ctl"></div><div class="err" hidden></div>`;
+    row.querySelector("b").textContent = r.label;
+    row.querySelector("small").textContent = r.disabled ?? r.help ?? "";
+    const ctl = row.querySelector(".ctl");
+    const dis = r.disabled || !r.set ? " disabled" : "";
+    if (r.kind === "toggle") ctl.innerHTML = `<button type="button" role="switch" class="switch" aria-checked="${r.value === true}" aria-label="${esc3(r.label)}"${dis}><i></i></button>`;
+    else if (r.kind === "choice")
+      ctl.innerHTML = `<div class="radios" role="group" aria-label="${esc3(r.label)}">${(r.options ?? []).map(([v, l]) => `<button type="button" data-v="${esc3(v)}" aria-pressed="${r.value === v}"${dis}>${esc3(l)}</button>`).join("")}</div>`;
+    else if (r.kind === "select") {
+      const s = document.createElement("select");
+      s.setAttribute("aria-label", r.label);
+      s.disabled = !!dis;
+      for (const [v, l] of r.options ?? []) s.append(new Option(l, v, v === r.value, v === r.value));
+      ctl.append(s);
+    } else if (r.kind === "action") ctl.innerHTML = `<button type="button" class="btn"${dis}>${esc3(r.button ?? r.label)}</button>`;
+    else ctl.innerHTML = `<span class="val"></span>`, ctl.querySelector(".val").textContent = String(r.value ?? "");
+    return row;
+  }
+  /** A row's control used: its new value to the row's set, its error (if any) under it. */
+  async settingClicked(e) {
+    const t = e.target;
+    const row = t.closest(".srow");
+    const r = row && this.settingRows.get(row.dataset.id);
+    if (!row || !r?.set || r.disabled) return;
+    let v;
+    if (r.kind === "toggle" && e.type === "click" && t.closest(".switch")) v = r.value !== true;
+    else if (r.kind === "choice" && e.type === "click") v = t.closest("[data-v]")?.dataset.v;
+    else if (r.kind === "select" && e.type === "change") v = t.value;
+    else if (r.kind === "action" && e.type === "click" && t.closest(".btn")) v = void 0;
+    else return;
+    if (r.kind !== "action" && (v === void 0 || v === r.value)) return;
+    const err = row.querySelector(".err");
+    const why = await r.set(v);
+    err.hidden = !why;
+    err.textContent = why || "";
+    if (why) return;
+    r.value = v;
+    if (r.kind === "toggle") row.querySelector(".switch").setAttribute("aria-checked", String(v === true));
+    if (r.kind === "choice") row.querySelectorAll("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+  }
+  /** The panel's own rows: the pages' look, the main file, the debug check, the tips. */
+  ownSettings() {
+    const ev = this.ev;
+    const pref = (k, apply2) => async (v) => {
+      const why = await ev.onPref?.(k, v);
+      if (!why) apply2(v);
+      return why;
+    };
+    const keep = ev.onPref ? void 0 : "This host doesn't keep it";
+    const preview = [];
+    if (this.mainFiles.names.length)
+      preview.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
+    preview.push(
+      { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
+      { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset", kind: "choice", options: [["phitex", "PhiTeX"], ["retro", "Windows 98"], ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => this.look = l) }
+    );
+    if (ev.onBoxes) preview.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
+    preview.push({ id: "problems", label: "Problems shown", help: "Which kinds: the filters at the top of the problems list", kind: "info", value: this.hiddenKinds.size ? `${this.hiddenKinds.size} kind${this.hiddenKinds.size === 1 ? "" : "s"} hidden` : "All" });
+    const build = [];
+    if (ev.onDebug) build.push({ id: "debug", label: "Debug check", help: "Compare with a fresh build every 5 s (this session only)", kind: "toggle", value: this.debugOn, set: () => this.toggleDebug() });
+    build.push({ id: "reload", label: "Reload the files", help: "Read the project's files again", kind: "action", button: "Reload", set: () => (this.settings(false), void ev.onReload()) });
+    const tips = [{ id: "tips", label: "Feature tips", help: "Shown again, from the start", kind: "action", button: "Show again", set: () => (this.tipsReset(), this.settings(false)) }];
+    if (ev.onTour) tips.push({ id: "tour", label: "The tour", kind: "action", button: "Take the tour", set: () => (this.settings(false), ev.onTour()) });
+    if (ev.onNews) tips.push({ id: "news", label: "What's new", kind: "action", button: "Show", set: () => (this.settings(false), ev.onNews()) });
+    return [
+      { title: "Preview", rows: preview },
+      { title: "Build", rows: build },
+      { title: "Packages", rows: [] },
+      { title: "Updates and tips", rows: tips }
+    ];
+  }
+  /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
+  viewPrefs(p) {
+    if (p["dark-pdf"]) this.darkPdf(p["dark-pdf"]);
+    if (p.opening) this.look = p.opening;
+    if (p.underline !== void 0 && p.underline !== this.culpritsOn) this.culpritsShown(p.underline);
   }
   /** Repaints so far: the first is the first build's. */
   paints = 0;
@@ -3731,41 +3812,16 @@ var Panel = class {
     this.emit();
   }
   // ---- Dark PDF: the user's choice, Off by default (a static filter: it inverts figures too) ----
-  darkPref() {
-    try {
-      const d = localStorage.getItem("phitex.darkpdf");
-      return d === "on" || d === "theme" ? d : "off";
-    } catch {
-      return "off";
-    }
-  }
   dark = "off";
   darkQuery = matchMedia("(prefers-color-scheme: dark)");
-  /** Dark pages off, on, or as the host's theme is; remembered on this machine. */
-  darkPdf(d, save2 = true) {
+  /** Dark pages off, on, or as the host's theme is (the host keeps the choice: viewPrefs). */
+  darkPdf(d) {
     this.dark = d;
-    if (save2)
-      try {
-        localStorage.setItem("phitex.darkpdf", d);
-      } catch {
-      }
-    this.root.querySelectorAll("#darkpdf [data-dark]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.dark === d)));
     this.darkQuery.onchange = () => this.applyDark();
     this.applyDark();
   }
-  /** The loading animation chosen (`set`: chosen now, kept in this browser), as it is. */
-  openingLook(set) {
-    let l = "phitex";
-    try {
-      if (set) localStorage.setItem("phitex.opening", set);
-      const v = localStorage.getItem("phitex.opening");
-      if (v === "retro" || v === "off") l = v;
-    } catch {
-      l = set ?? "phitex";
-    }
-    this.root.querySelectorAll("#openlook [data-look]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.look === l)));
-    return l;
-  }
+  /** The loading animation (the host keeps the choice: viewPrefs). */
+  look = "phitex";
   /** The host page's own theme (theme()): undefined, never said. */
   pageTheme = void 0;
   /**
@@ -3979,7 +4035,6 @@ var Panel = class {
   lat = null;
   latency(summary, details) {
     this.lat = { summary, details: details ?? this.lat?.details };
-    this.$("#details").textContent = details ?? summary;
     if (!this.$("#m-time").hidden) this.timing();
   }
   /** The first build's time and the edits' since (the watch's), for the popover's bars. */
@@ -4023,8 +4078,8 @@ var Panel = class {
       const bar2 = p.split?.length ? `<div class="tbar">${p.split.map(([n, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${p.split.map(([n, ms], i) => `<span><i class="c${i}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div>` : "";
       return `<div class="row"><span class="k">${esc3(p.label)}</span><span class="v">${esc3(p.value)}</span>${bar2}${p.note ? `<span class="note">${esc3(p.note)}</span>` : ""}</div>`;
     }).join("");
-    const strips2 = this.$("#stripsline").textContent;
-    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.timeBars() + rows + (strips2 ? `<div class="row"><span class="k">Page drawn</span><span class="v">${esc3(strips2)}</span></div>` : "") + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
+    const strips2 = framePart(this.$("#stripsline").dataset.frame);
+    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.timeBars() + rows + strips2 + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
     el.querySelector(".foot").textContent = parts.length ? "" : this.lat?.summary ?? "";
     el.querySelector(".msg").textContent = this.msgText;
   }
@@ -4073,11 +4128,12 @@ var Panel = class {
   files(names, _skipped, took) {
     this.msg(`${names.length} file${names.length === 1 ? "" : "s"} \xB7 ${took} \xB7 all local`);
   }
+  /** The main files to pick from (Settings' Main file), and the one built. */
   mains(names, main) {
-    const s = this.$("#main");
-    s.innerHTML = "";
-    for (const n of names) s.append(new Option(n, n, n === main, n === main));
+    this.mainFiles = { names, main };
+    if (!this.$("#settings").hidden) void this.settings(true);
   }
+  mainFiles = { names: [], main: null };
   /** What's new (the host's news, `text` as plain lines), in a dialog over the pages, with the new features' tips a click away. */
   news(version, text) {
     const box = this.$("#logview"), pre = this.$("#logtext");
@@ -5785,6 +5841,8 @@ var Strips = class {
     if (want.length) await this.fetch(want);
     const t2 = performance.now();
     if (this.chip)
+      this.chip.dataset.frame = JSON.stringify({ page: k + 1, inView: !!win, drawn: f.drawn, kept: f.kept, probe: f.us.probe / 1e3, draw: f.us.draw / 1e3, watch: f.us.all / 1e3, request: t1 - t0, decode: t2 - t1 });
+    if (this.chip)
       this.chip.textContent = `p${k + 1}${win ? " (in view)" : ""}: ${f.drawn} drawn, ${f.kept} kept \xB7 watch ${(f.us.all / 1e3).toFixed(1)} ms (probe ${(f.us.probe / 1e3).toFixed(1)}, draw ${(f.us.draw / 1e3).toFixed(1)}) \xB7 fetch ${(t1 - t0).toFixed(1)}+${(t2 - t1).toFixed(1)} ms`;
     return f;
   }
@@ -6279,7 +6337,11 @@ var Pages = class {
     return search(await this.texts, q);
   }
   onEvent(cb) {
-    this.sock.onEvent(cb);
+    this.sock.onEvent((e) => {
+      if (e.event === "follow" && follow !== "cursor") return;
+      if (e.event === "select" && follow === "dblclick") return;
+      cb(e);
+    });
   }
 };
 var stripSource = {
@@ -6340,7 +6402,13 @@ var panel = new Panel(
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
     onContents: () => void session.outline(),
     onFind: (q) => pages.find(q),
-    onSettings: () => void openSettings(),
+    // (Settings: the watch's rows, from and into the user's phitex.toml)
+    settings: () => watchSettings(),
+    // (the panel's own choices: the user's phitex.toml too, never this browser's)
+    onPref: async (key, value) => {
+      const r = await sock.request({ op: "prefs", set: { [key]: value } });
+      return r.ok ? void 0 : `Not saved: ${r.error ?? "the watch did not answer"}`;
+    },
     // (a problem's source lines, for Copy for an AI assistant)
     onLines: async (file, line) => {
       const r = await sock.request({ op: "info", what: "lines", file, line });
@@ -6485,14 +6553,7 @@ document.head.append(Object.assign(document.createElement("style"), {
 #phx-pick header small { grid-column: 1 / -1; color: var(--fg2); font-size: 12px; }
 #phx-pick .phx-commits { flex: 1; min-height: 0; }
 #phx-pick header button { grid-row: 1; grid-column: 2; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
-#phx-pick header button:hover { background: var(--hover); }
-#phx-pick.phx-settings { width: min(460px, calc(100vw - 24px)); }
-.phx-settings .rows { overflow: auto; padding: 4px 0; }
-.phx-settings .srow { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; }
-.phx-settings .srow:hover { background: var(--hover); }
-.phx-settings .srow span { flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.phx-settings .srow small { color: var(--fg2); font-size: 12px; }
-.phx-settings .srow button { border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }`
+#phx-pick header button:hover { background: var(--hover); }`
 }));
 var pick;
 var graph;
@@ -6693,46 +6754,80 @@ var backlog = async () => {
   for (const s of r.json?.items ?? []) said(s, false);
   if (r.json?.status) said(r.json.status, false);
 };
-var SETTINGS = [
-  ["watch-write", "Write the PDF into the folder", "After each build, the PDF with its .synctex.gz, as phitex build does (for a PDF viewer outside this page). From the next phitex watch on."],
-  ["synctex", "SyncTeX file with a written PDF", "JOB.synctex.gz beside the PDF, for a PDF viewer's jumps to the source."],
-  ["update-check", "Say when a newer PhiTeX is out", "Asked once a day, in the terminal."]
-];
-var settingsEl;
-async function openSettings() {
-  if (settingsEl && !settingsEl.hidden) return void (settingsEl.hidden = true);
-  const r = await sock.request({ op: "prefs" });
-  if (!r.ok) return void panel.msg(`Couldn't read the settings: ${r.error ?? "not available"}`, true, true);
-  const p = r.json ?? {};
-  if (!settingsEl) {
-    settingsEl = document.createElement("div");
-    settingsEl.id = "phx-pick";
-    settingsEl.className = "phx-settings";
-    document.body.append(settingsEl);
-    addEventListener("keydown", (e) => e.key === "Escape" && settingsEl && !settingsEl.hidden && (settingsEl.hidden = true, e.stopImmediatePropagation()), { capture: true });
-  }
-  const el = settingsEl;
-  const esc5 = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
-  el.innerHTML = `<header><b>Settings</b><small>Yours, in ${esc5(String(p.file ?? "phitex.toml"))}: every document and port</small><button type="button" data-x>Close</button></header><div class="rows">${SETTINGS.map(([k, name, what]) => `<label class="srow"><input type="checkbox" data-k="${k}" ${p[k] ? "checked" : ""}><span><b>${esc5(name)}</b><small>${esc5(what)}</small></span></label>`).join("")}<div class="srow"><span><b>Tips</b><small>The feature tips shown again, from the start</small></span><button type="button" data-tips>Show again</button></div><div class="srow"><span><b>Problems shown</b><small>Which kinds: the filters at the top of the problems list (e)</small></span></div></div>`;
-  el.hidden = false;
-  el.querySelector("[data-x]").onclick = () => el.hidden = true;
-  el.querySelector("[data-tips]").onclick = () => {
-    void sock.request({ op: "prefs", set: { "tips-seen": [] } });
-    el.hidden = true;
-    panel.tipsReset();
-  };
-  for (const c of el.querySelectorAll("input[data-k]"))
-    c.onchange = async () => {
-      const r2 = await sock.request({ op: "prefs", set: { [c.dataset.k]: c.checked } });
-      panel.msg(r2.ok ? `${c.checked ? "On" : "Off"}: ${c.closest("label").querySelector("b").textContent}` : `Not saved: ${r2.error}`, !r2.ok, true);
-      if (!r2.ok) c.checked = !c.checked;
-    };
+var follow = "cursor";
+var setPref = async (k, v) => {
+  const r = await sock.request({ op: "prefs", set: { [k]: v } });
+  return r.ok ? void 0 : r.error ?? "not saved";
+};
+async function watchSettings() {
+  const [r, info, cache] = await Promise.all([sock.request({ op: "prefs" }), sock.request({ op: "info", what: "settings" }), sock.request({ op: "cache" })]);
+  if (!r.ok) return [{ title: "Preview", rows: [{ id: "prefs", label: "Your settings", kind: "info", value: "", disabled: `Couldn't read them: ${r.error ?? "not available"}` }] }];
+  const p = r.json ?? {}, at = info.ok ? info.json ?? {} : {};
+  const file = String(p.file ?? "phitex.toml");
+  const project = "In the project's phitex.toml (or the command line): the page never changes a project's files";
+  const mb2 = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
+  const toggle2 = (id, label, help) => ({ id, label, help, kind: "toggle", value: !!p[id], set: (v) => setPref(id, v) });
+  const cores = Number(p.cores ?? 1);
+  return [
+    {
+      title: "Preview",
+      rows: [
+        { id: "w-main", label: "Main file", help: project, kind: "info", value: String(at.main ?? "") },
+        { id: "w-engine", label: "Engine", help: "Set `engine` in the project's phitex.toml (or a `% !TEX program` line)", kind: "info", value: String(at.engine ?? "") },
+        {
+          id: "follow",
+          label: "Highlight follows",
+          help: "Where your editor is, on the page: as the cursor moves, what you select, or a double-click alone",
+          kind: "choice",
+          options: [["cursor", "Cursor"], ["selection", "Selection"], ["dblclick", "Double-click"]],
+          value: String(p.follow ?? "cursor"),
+          set: async (v) => await setPref("follow", v) ?? void (follow = String(v))
+        }
+      ]
+    },
+    {
+      title: "Build",
+      rows: [
+        toggle2("watch-write", "Write the PDF into the folder", "After each build, the PDF with its .synctex.gz, as phitex build does. From the next phitex watch on."),
+        toggle2("synctex", "SyncTeX file with a written PDF", "JOB.synctex.gz beside the PDF, for a PDF viewer's jumps to the source."),
+        {
+          id: "threads",
+          label: "Threads",
+          help: at.jobs ? `This watch runs with -j ${at.jobs}, over this. After a restart of phitex watch.` : "After a restart of phitex watch. The output is the same at any count.",
+          kind: "select",
+          options: [["0", `One per core (${cores})`], ...Array.from({ length: cores }, (_, i) => [String(i + 1), String(i + 1)])],
+          value: String(p.threads ?? 0),
+          set: (v) => setPref("threads", Number(v))
+        },
+        { id: "w-files", label: "TeX's files", help: "From TeX Live or from Shelf: `files` in your phitex.toml or the project's, or --shelf", kind: "info", value: at.files === "shelf" ? "Shelf" : "TeX Live" }
+      ]
+    },
+    {
+      title: "Packages",
+      rows: [
+        { id: "cache", label: "The cache", help: cache.ok ? `${mb2(Number(cache.json?.bytes ?? 0))} in ${cache.json?.dir ?? "its folder"}: packages and formats, fetched again when a build needs them` : "Its size: not available", kind: "action", button: "Clear", set: () => void clearCache() },
+        {
+          id: "cache-limit",
+          label: "Keep at most",
+          help: "Past it, the least recently used go first",
+          kind: "choice",
+          options: [["500MB", "500 MB"], ["1GB", "1 GB"], ["4GB", "4 GB"], ["16GB", "16 GB"]],
+          value: { 5e8: "500MB", 1e9: "1GB", 4e9: "4GB", 16e9: "16GB" }[Number(p["cache-limit"] ?? 4e9)] ?? "",
+          set: (v) => setPref("cache-limit", v)
+        }
+      ]
+    },
+    { title: "Updates and tips", rows: [toggle2("update-check", "Say when a newer PhiTeX is out", "Asked once a day, in the terminal.")] },
+    { title: "Where", rows: [{ id: "w-file", label: "Your settings", help: "Every document and port: `phitex config` lists them all", kind: "info", value: file }] }
+  ];
 }
 var prefs = async () => {
   const r = await sock.request({ op: "prefs" });
   if (!r.ok) return;
   panel.tipsSeen((r.json?.["tips-seen"] ?? []).filter((x) => typeof x === "string"));
   panel.problemsHidden((r.json?.["problems-hidden"] ?? []).filter((x) => typeof x === "string"));
+  panel.viewPrefs({ "dark-pdf": r.json?.["dark-pdf"], opening: r.json?.opening, underline: r.json?.underline !== false });
+  follow = String(r.json?.follow ?? "cursor");
 };
 var opened = sock.onOpen;
 sock.onOpen = () => (opened(), void backlog(), void prefs());

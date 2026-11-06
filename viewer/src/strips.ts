@@ -150,6 +150,9 @@ export class Strips {
     const want = [...new Set(f.bands.map((b) => b[0]).filter((key) => !this.kept.has(key)))];
     if (want.length) await this.fetch(want);
     const t2 = performance.now();
+    // (the same numbers as data, for the timing popover's bar)
+    if (this.chip)
+      this.chip.dataset.frame = JSON.stringify({ page: k + 1, inView: !!win, drawn: f.drawn, kept: f.kept, probe: f.us.probe / 1000, draw: f.us.draw / 1000, watch: f.us.all / 1000, request: t1 - t0, decode: t2 - t1 });
     if (this.chip)
       this.chip.textContent =
       `p${k + 1}${win ? " (in view)" : ""}: ${f.drawn} drawn, ${f.kept} kept · watch ${(f.us.all / 1000).toFixed(1)} ms ` +
