@@ -48,6 +48,10 @@ struct Doc {
     d5: phitex_defuse::NodeId,
     d6: phitex_defuse::NodeId,
     r: phitex_defuse::NodeId,
+    /// The reader's runs in the first evaluation: one at one thread; on
+    /// several, the reader may also run beside the definers before they
+    /// commit, and again after (a cold build's nodes run side by side).
+    first: u64,
 }
 
 /// n = 5, p@5 = 10, p@6 = 20, then the reader of `p@<n - 1 + 1>`.
@@ -64,6 +68,10 @@ fn doc(threads: usize) -> Doc {
     let r = e.push(u, rd, vec![v.int(0)]);
     e.evaluate(threads).unwrap();
     assert_eq!(e.output(r), Some(v.int(10)));
+    let first = reader.0.load(Ordering::Relaxed);
+    if threads == 1 {
+        assert_eq!(first, 1, "one run at one thread");
+    }
     Doc {
         e,
         def,
@@ -72,12 +80,14 @@ fn doc(threads: usize) -> Doc {
         d5,
         d6,
         r,
+        first,
     }
 }
 
 impl Doc {
+    /// The reader's runs since the first evaluation.
     fn runs(&self) -> u64 {
-        self.reader.0.load(Ordering::Relaxed)
+        self.reader.0.load(Ordering::Relaxed) - self.first
     }
 
     fn set(&self, node: phitex_defuse::NodeId, name: &str, x: i64) {
@@ -100,15 +110,15 @@ fn a_moved_name_holding_the_old_value_leaves_the_reader_standing() {
         d.set(d.n, "n", 6);
         d.set(d.d6, "p@6", 10);
         assert_eq!(d.eval(threads), 10);
-        assert_eq!(d.runs(), 1, "the reader stands (threads {threads})");
+        assert_eq!(d.runs(), 0, "the reader stands (threads {threads})");
         // (the field named now changes: the witness asks the reader again)
         d.set(d.d6, "p@6", 30);
         assert_eq!(d.eval(threads), 30, "threads {threads}");
-        assert_eq!(d.runs(), 2, "threads {threads}");
+        assert_eq!(d.runs(), 1, "threads {threads}");
         // (the old name's field changes: nothing the reader uses)
         d.set(d.d5, "p@5", 40);
         assert_eq!(d.eval(threads), 30, "threads {threads}");
-        assert_eq!(d.runs(), 2, "threads {threads}");
+        assert_eq!(d.runs(), 1, "threads {threads}");
     }
 }
 
@@ -118,14 +128,14 @@ fn a_moved_name_holding_another_value_runs_the_reader_again() {
         let d = doc(threads);
         d.set(d.n, "n", 6);
         assert_eq!(d.eval(threads), 20, "threads {threads}");
-        assert_eq!(d.runs(), 2, "threads {threads}");
+        assert_eq!(d.runs(), 1, "threads {threads}");
         // (and back: p@5 read again, through the read that run made)
         d.set(d.n, "n", 5);
         assert_eq!(d.eval(threads), 10, "threads {threads}");
-        assert_eq!(d.runs(), 3, "threads {threads}");
+        assert_eq!(d.runs(), 2, "threads {threads}");
         d.set(d.d5, "p@5", 11);
         assert_eq!(d.eval(threads), 11, "threads {threads}");
-        assert_eq!(d.runs(), 4, "threads {threads}");
+        assert_eq!(d.runs(), 3, "threads {threads}");
     }
 }
 
@@ -135,7 +145,7 @@ fn the_named_field_changing_runs_the_reader_again() {
         let d = doc(threads);
         d.set(d.d5, "p@5", 12);
         assert_eq!(d.eval(threads), 12, "threads {threads}");
-        assert_eq!(d.runs(), 2, "threads {threads}");
+        assert_eq!(d.runs(), 1, "threads {threads}");
         // (a name no field has: none)
         d.set(d.n, "n", 9);
         d.e.evaluate(threads).unwrap();

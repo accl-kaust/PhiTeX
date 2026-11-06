@@ -4162,9 +4162,19 @@ fn retract(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>) {
     }
 }
 
-/// The claimer's inert siblings made dirty again (its claim is gone).
+/// The claimer's inert siblings made dirty again (its claim is gone): a
+/// node taken by a claim or removed, while it still is. One a claim took
+/// as a hole, then gave back (another claim took it over and let it go),
+/// may have run and committed before the walk that took it comes here
+/// (that walk withdraws every sibling it took first, each re-asking its
+/// readers): its claim is its new run's, and stands. Released then, the
+/// siblings its run reads on into ran as text of their own while its rest
+/// read them too, and nothing ran it again (pmdraw at -j4: exec 1176's
+/// two siblings let go after its last commit, 1178 run inside 1176's open
+/// groups at nest 11, its rests on to the job's end, "Too many unprocessed
+/// floats", 5 builds in 96, accl 25494).
 fn release_claimed(eng: &Engine, w: Option<&Worker>, me: &Node) {
-    apply_claim(eng, w, me, 0);
+    claim_walk(eng, w, me, 0, false, true);
 }
 
 /// Makes the next `want` pushed siblings of `me` inert, and dirty again
@@ -4172,7 +4182,7 @@ fn release_claimed(eng: &Engine, w: Option<&Worker>, me: &Node) {
 /// (`Ctx::claim_rest`), every text node (`Operation::text`) after `me` in
 /// its unit, whatever placed it.
 pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize) {
-    claim_walk(eng, w, me, want, false);
+    claim_walk(eng, w, me, want, false, false);
 }
 
 /// A node about to leave the line gives back what it holds, from where it
@@ -4181,13 +4191,20 @@ pub(crate) fn apply_claim(eng: &Engine, w: Option<&Worker>, me: &Node, want: usi
 /// off the line, which a rebalance may since have given a sibling it
 /// would hold (the walk would begin past it).
 fn release_leaving(eng: &Engine, w: Option<&Worker>, me: &Node) {
-    claim_walk(eng, w, me, 0, true);
+    claim_walk(eng, w, me, 0, true, false);
 }
 
-fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: bool) {
+fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: bool, held: bool) {
     // (one walk of this claimer's at a time, from its `claim_end` to the
     // one it stores: `Node::claim_mx`)
     let mut walk = me.claim_mx.lock();
+    // (`held`, `release_claimed`: only while it is taken or removed, read
+    // under the lock every claim of its own runs takes: given back since,
+    // a run of it claims after this walk, or claimed before it and holds
+    // that)
+    if held && !matches!(me.state(), State::Gone | State::Inert | State::RunningInert) {
+        return;
+    }
     *walk |= leave;
     // (a node removed or taken claims nothing: a run of it still going
     // when it was gives back what it held instead of taking siblings)
@@ -6271,6 +6288,36 @@ mod tests {
         assert_eq!((i.state, i.claimer), (NodeState::Inert, Some(p)), "T held by P");
     }
 
+    /// The give-back of a node a claim took (`release_claimed`) comes after
+    /// the walk that took it withdrew every sibling it took, each re-asking
+    /// its readers. Meanwhile another claim may take it over and let it go,
+    /// and it runs and commits its own claim: the late give-back finds it
+    /// free and leaves that claim standing. Released, its siblings ran as
+    /// text of their own while its rest read them too, and nothing ran it
+    /// again (pmdraw at -j4, "Too many unprocessed floats", accl 25494).
+    #[test]
+    fn a_late_give_back_of_a_node_run_again_keeps_its_claim() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let e = Engine::new();
+        let claimer = e.register(Arc::new(Claimer));
+        let text = e.register(Arc::new(Text));
+        let v = e.values();
+        let u = e.new_unit();
+        let c = e.push(u, claimer, vec![v.int(1)]);
+        let t = e.push(u, text, vec![v.int(0)]);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.claimed(c), vec![t]);
+        // (C free and committed: the give-back of an earlier take of it)
+        super::release_claimed(&e, None, e.node(c));
+        let i = e.node_info(t).unwrap();
+        assert_eq!((i.state, i.claimer), (NodeState::Inert, Some(c)), "T still held by C");
+        // (C taken: then what it holds goes back)
+        assert!(e.node(c).take(), "C taken");
+        super::release_claimed(&e, None, e.node(c));
+        let i = e.node_info(t).unwrap();
+        assert!(i.state != NodeState::Inert && i.claimer.is_none(), "T given back");
+    }
+
     #[test]
     fn a_give_back_interleaved_with_a_claim_leaves_nothing_held() {
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -6312,6 +6359,7 @@ mod tests {
         });
         *PAUSE.lock().unwrap() = None;
         // (C taken or removed: what it holds goes back)
+        assert!(e.node(c).take(), "C taken");
         super::release_claimed(&e, None, e.node(c));
         for (k, &t) in ts.iter().enumerate() {
             let i = e.node_info(t).unwrap();
