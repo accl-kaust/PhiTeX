@@ -87,6 +87,12 @@ pub(crate) const NUM_CHR: i32 = i32::MIN + 7;
 pub(crate) enum Num {
     Int(i32),
     Macro(Tok, bool),
+    /// An integer register's value reaching the piece plus `j`: the
+    /// register alone unread in a piece, its symbol, or an expression of
+    /// one plus a constant (docs/spec-relative-counters.md §2.2), which a
+    /// comparison with a constant reads as its outcome alone
+    /// (`Run::reg_order`).
+    Reg(crate::state::Loc, i32),
 }
 
 impl Run<'_, '_> {
@@ -215,9 +221,40 @@ impl Run<'_, '_> {
     pub(crate) fn scan_int_num(&mut self) -> R<Num> {
         self.radix = 0;
         self.num_reads = true;
+        let defer = self.defer_allowed();
+        let was = if defer {
+            self.reg_stop.replace(self.expand_depth)
+        } else {
+            self.reg_stop
+        };
         let negative = self.skip_signs();
+        self.reg_stop = was;
         self.num_reads = false;
         let negative = negative?;
+        // (a register's symbol of this piece: relative, [`Num::Reg`],
+        // where the number ends at it, §444: no digit after it, one
+        // space taken; else its digits, as TeX's)
+        if self.cur.cmd == cmd::SYM
+            && let Some(s) = crate::defer::sym_of(self.cur.tok)
+        {
+            let t0 = self.cur.tok;
+            self.get_x_token();
+            self.ck()?;
+            let u = self.cur.tok;
+            let digit = !u.is_cs_or_active() && u.cat() == Some(12) && (48..=57).contains(&u.chr());
+            if !negative && !digit && s.node == self.cx.node() {
+                if self.cur.cmd != cmd::SPACER {
+                    self.back_input(u);
+                }
+                let loc = s.loc(self);
+                return Ok(Num::Reg(loc, s.j));
+            }
+            self.back_input(u);
+            crate::defer::expand_any(self, t0)?;
+            self.get_x_token();
+            self.ck()?;
+            return Ok(Num::Int(self.scan_int_from(negative)?));
+        }
         if self.cur.cmd == cmd::RELAX && self.cur.chr == NUM_CHR {
             let tok = self.cur.tok;
             // (the macro's digits read, the scan reads on, §444: a digit
@@ -252,9 +289,26 @@ impl Run<'_, '_> {
             return Ok(match n {
                 Num::Int(x) => Num::Int(if negative { -x } else { x }),
                 Num::Macro(t, neg) => Num::Macro(t, neg != negative),
+                r @ Num::Reg(..) if !negative => r,
+                r @ Num::Reg(..) => Num::Int(self.num_int(r)?.wrapping_neg()),
             });
         }
-        Ok(Num::Int(self.scan_int_from(negative)?))
+        // (an integer register alone, unread in a piece: relative,
+        // [`Num::Reg`], as `\\number` makes its symbol)
+        self.defer_ok = !negative && defer;
+        let x = self.scan_int_from(negative);
+        self.defer_ok = false;
+        let x = x?;
+        if let Some((loc, j)) = self.defer_sym.take() {
+            return Ok(Num::Reg(loc, j));
+        }
+        if let Some(loc) = self.defer_hit.take() {
+            let j = self.st.steps_of(loc);
+            self.st.note_symbol(loc);
+            self.st.note_read(loc);
+            return Ok(Num::Reg(loc, j));
+        }
+        Ok(Num::Int(x))
     }
 
     /// The value of `n`, reading its macro's number where it is one.
@@ -264,6 +318,11 @@ impl Run<'_, '_> {
             Num::Macro(t, neg) => {
                 let x = self.num_value(t)?;
                 if neg { -x } else { x }
+            }
+            Num::Reg(loc, j) => {
+                let node = self.cx.node();
+                let reg = self.count_reg(loc).unwrap_or(0);
+                crate::defer::force(self, crate::defer::Sym { reg, node, j })?
             }
         })
     }
@@ -935,7 +994,14 @@ impl Run<'_, '_> {
                     }
                 }
             }
-            cmd::LAST_ITEM => self.last_item(m)?,
+            cmd::LAST_ITEM => {
+                // (`\\numexpr` as a deferring scan's quantity: its value may
+                // be a register's symbol plus a constant, [`Run::defer_sym`])
+                self.expr_defer = defer && m == crate::etex::li::NUM_EXPR;
+                let x = self.last_item(m);
+                self.expr_defer = false;
+                x?
+            }
             _ => {
                 // §428: "You can't use x after \the"
                 self.back_cur();

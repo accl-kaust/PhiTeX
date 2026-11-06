@@ -2166,7 +2166,7 @@ fn a_heading_edit_reads_no_file_size() {
 }
 
 /// `\pdffilesize` of a file the job writes and reads back is a symbol
-/// read for presence alone (docs/note-relative-counters.md §2.4), and
+/// read for presence alone (docs/spec-relative-counters.md §2.4), and
 /// every use of it answers what TeX's digits answer: printed, as a
 /// number, `\if` and `\ifcat` against a digit and against a non-digit,
 /// an undelimited argument (its first digit, the rest left), kept by

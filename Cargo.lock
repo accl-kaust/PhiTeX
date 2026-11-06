@@ -2036,6 +2036,7 @@ dependencies = [
  "phitex-mf",
  "phitex-otf",
  "phitex-pdf",
+ "phitex-render",
  "phitex-shelf",
  "phitex-tex",
  "rustix",

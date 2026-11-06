@@ -896,9 +896,35 @@ pub(crate) struct Run<'c, 'a> {
     pub(crate) expand_depth: u32,
     /// `\if`/`\ifcat` fetching an operand at this expansion depth
     /// ([`Run::expand_depth`]): `get_x_token` stops at a file size's
-    /// symbol there instead of forcing it (docs/note-relative-counters.md
+    /// symbol there instead of forcing it (docs/spec-relative-counters.md
     /// §2.4, `Run::if_operand`). Deeper expansions force as anywhere.
     pub(crate) size_stop: Option<u32>,
+    /// A control sequence name or a number being scanned at this
+    /// expansion depth: `get_x_token` stops at a register's symbol there
+    /// instead of forcing it (docs/spec-relative-counters.md §2.2: a
+    /// relative name, a comparison, an expression's first factor;
+    /// [`crate::defer::name_chars`]). Deeper expansions force as anywhere.
+    pub(crate) reg_stop: Option<u32>,
+    /// A derived name's symbol ([`crate::defer::DName`]) may be the
+    /// token fetched now: by an expanding fetch (its expansion is its
+    /// meaning's, read through the derived name) or `\ifx`'s operands.
+    /// Anywhere else it is made concrete as it is fetched.
+    pub(crate) d_ok: bool,
+    /// `\numexpr` scanned as a deferring scan's one quantity
+    /// ([`Run::defer_ok`]): its value may be a register's symbol plus a
+    /// constant ([`Run::defer_sym`]).
+    pub(crate) expr_defer: bool,
+    /// What a deferring scan met: a register's symbol with its steps
+    /// (`j`), the register's or an expression's on it; the caller makes
+    /// the symbol ([`crate::defer::symbol_with`]).
+    pub(crate) defer_sym: Option<(Loc, i32)>,
+    /// Which derived names the run binds itself, by (prefix, suffix):
+    /// the run's own definitions looked over up to the count kept
+    /// ([`crate::defer::binds_like`]).
+    pub(crate) derived_own: crate::FxHashMap<(String, String), (usize, bool)>,
+    /// The integer registers the run compared relative to a constant
+    /// ([`Run::reg_order`]): a second comparison reads the value.
+    pub(crate) reg_cmps: phitex_defuse::FxHashSet<Loc>,
     /// The path `[Step::Present]`, interned once a run ([`Run::lb_present`]).
     pub(crate) present_path: Option<phitex_defuse::PathId>,
     /// Where the conditional text being skipped began (§494's
@@ -1429,6 +1455,12 @@ impl<'c, 'a> Run<'c, 'a> {
             in_skip: false,
             expand_depth: 0,
             size_stop: None,
+            reg_stop: None,
+            d_ok: false,
+            expr_defer: false,
+            defer_sym: None,
+            derived_own: crate::FxHashMap::default(),
+            reg_cmps: phitex_defuse::FxHashSet::default(),
             present_path: None,
             skip_from: (None, 0, None, None),
             skip_first: Vec::new(),
@@ -1663,11 +1695,16 @@ impl<'c, 'a> Run<'c, 'a> {
     #[cold]
     #[inline(never)]
     pub(crate) fn unalias(&mut self, loc: Loc) -> R<()> {
-        let Some((g, node)) = self.st.alias_at(loc, self.v) else {
+        let Some((g, node, off)) = self.st.alias_at(loc, self.v) else {
             return Ok(());
         };
         let gl = self.loc_of(g);
-        let Some(s) = crate::defer::Sym::at(self, gl, node) else {
+        // (an offset: the value there plus it, a symbol's steps)
+        let sym = crate::defer::Sym::at(self, gl, node).map(|s| crate::defer::Sym {
+            j: s.j.wrapping_add(i32::try_from(off).unwrap_or(0)),
+            ..s
+        });
+        let Some(s) = sym.filter(|_| i32::try_from(off).is_ok()) else {
             // (any other field's alias, a value kept unseen
             // ([`Run::note_pre`]): the value of `g` reaching `node`, read
             // now; the binding published stays the alias)
@@ -1679,6 +1716,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     return Err(e.into());
                 }
             };
+            let x = phitex_defuse::alias_target_plus(self.v, x, off);
             self.st.preload(self.v, loc, x);
             return Ok(());
         };
@@ -2179,7 +2217,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a page-layer register a piece stepped is concrete, as the
         // restores of §2 of the spec expect; any other is relative,
-        // docs/note-relative-counters.md §2.1, its steps in the symbol)
+        // docs/spec-relative-counters.md §2.1, its steps in the symbol)
         if self.count_reg(loc).is_none()
             || (self.st.has_map(loc) && crate::defer::deferrable(self, loc))
         {
@@ -2559,9 +2597,10 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         let grp = self.innermost_group();
-        let e = match phitex_defuse::alias_of(v, old) {
-            Some((g, at)) => Entry::alias(v, g, at),
-            None => Entry::raw(Some(old)),
+        let e = if phitex_defuse::alias_of(v, old).is_some() {
+            Entry::alias_raw(old)
+        } else {
+            Entry::raw(Some(old))
         };
         self.st.set(pl, e, true, grp);
     }
@@ -5668,9 +5707,30 @@ impl<'c, 'a> Run<'c, 'a> {
         self.set_cur_cs_rest(tok)
     }
 
+    /// A derived name's symbol fetched ([`Self::set_cur_cs_rest`]): kept
+    /// where it may stay one ([`Run::d_ok`]), else its concrete name.
+    fn set_cur_dname(&mut self, tok: Tok) -> R<()> {
+        if self.d_ok && !self.bare {
+            self.cur = Cur {
+                tok,
+                cmd: cmd::SYM,
+                chr: 0,
+            };
+            return Ok(());
+        }
+        let g = crate::defer::dname_concrete(self, tok)?;
+        self.set_cur_cs(g)
+    }
+
     /// [`Self::set_cur_cs`] past its common case.
     #[inline(never)]
     fn set_cur_cs_rest(&mut self, tok: Tok) -> R<()> {
+        // (a derived name's symbol fetched where it may not stay one,
+        // [`Run::d_ok`]: its concrete name, the register forced; never a
+        // name about to be defined)
+        if crate::defer::is_dname(tok) {
+            return self.set_cur_dname(tok);
+        }
         if self.bare {
             // (a name about to be defined: its present meaning is never
             // used, so it is not read)
@@ -5996,6 +6056,39 @@ impl<'c, 'a> Run<'c, 'a> {
             phitex_defuse::Step::Cmp(v.int(k)),
         ]);
         Ok(self.cx.read_path(f, p)?.map_or(0, |x| int_of(v, x)))
+    }
+
+    /// The order of integer register `loc`'s value reaching the piece plus
+    /// `j` ([`crate::scan::Num::Reg`]) against `k`: -1, 0 or 1, read as
+    /// that alone (the reaching value against `k - j`, `Step::Cmp`), so
+    /// a run stepping the register before this piece moves this run only
+    /// where the outcome moves. Where the field holds no integer (an
+    /// alias, none) or `k - j` overflows: forced, an ordinary read.
+    ///
+    /// Only the run's first comparison of the register: a loop comparing
+    /// it at every step (`\loop\advance\count1 1 \ifnum\count1<N
+    /// \repeat`) would make one read per step, each against another
+    /// constant, where one read of the value answers them all (a
+    /// stuck-detection test's loop of 40 million steps ran twice as long,
+    /// accl 25815, callgrind 25832).
+    pub(crate) fn reg_order(&mut self, loc: Loc, j: i32, k: i32) -> R<i64> {
+        let v = self.v;
+        if self.reg_cmps.insert(loc)
+            && let Some(d) = k.checked_sub(j)
+            && !crate::exec::obs_flag!("PHITEX_NO_DERIVED")
+        {
+            let f = self.loc_field(loc);
+            let p = self
+                .cx
+                .path(&[phitex_defuse::Step::Cmp(v.int(i64::from(d)))]);
+            if let Some(x) = self.cx.read_path(f, p)?
+                && crate::defer::int_of(v, x).is_some()
+            {
+                return Ok(int_of(v, x));
+            }
+        }
+        let n = self.num_int(crate::scan::Num::Reg(loc, j))?;
+        Ok(if n < k { -1 } else { i64::from(n > k) })
     }
 
     /// The number of `tok`'s meaning (a macro [`Run::num_lookup`] found
@@ -6887,9 +6980,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 match w {
                     // (a symbol written to the item: the alias it is,
                     // `crate::defer::try_symbolic`)
-                    crate::state::Pub::Value(x) => match phitex_defuse::alias_of(self.v, x) {
-                        Some((g, at)) => self.cx.define_alias(f, g, at, l),
-                        None => self.cx.define_with(f, x, l),
+                    crate::state::Pub::Value(x) => match phitex_defuse::alias_parts(self.v, x) {
+                        Some((g, at, 0)) => self.cx.define_alias(f, g, at, l),
+                        _ => self.cx.define_with(f, x, l),
                     },
                     crate::state::Pub::Rel(c) => self.cx.define_rel_with(f, c, l),
                     crate::state::Pub::Append(x) => self.cx.define_append_with(f, x, l),
