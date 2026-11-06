@@ -335,6 +335,17 @@ pub(crate) struct View {
     rebound: Mutex<FxHashMap<FontId, FontId>>,
     /// The fonts' first asks here, by font and ratio.
     linked_here: Mutex<FxHashSet<(FontId, i32)>>,
+    /// Every ask here, by font and ratio: what the paragraph used of the
+    /// lists in [`View::elink`] (`Run::note_elink_asks`).
+    pub asked: Mutex<FxHashSet<(FontId, i32)>>,
+    /// The fonts whose [`View::elink`] list was looked at, not read: the
+    /// field each, its membership of the ratios asked then recorded.
+    pub elink_peeked: FxHashMap<FontId, phitex_defuse::Field>,
+    /// The expanded fonts' info looked at, not read, by the asking font
+    /// and ratio: the field and the value seen, recorded for the ratios
+    /// the paragraph asks (`Run::note_elink_asks`).
+    pub info_peeked:
+        FxHashMap<(FontId, i32), (phitex_defuse::Field, Option<phitex_defuse::ValueId>)>,
     /// The fonts expanded here: their base and the slot of their metrics.
     exp_index: Mutex<FxHashMap<FontId, (FontId, usize)>>,
     /// `get_expand_font`'s requests, in order (the first of each font's
@@ -804,6 +815,9 @@ impl View {
         // codes); a later ask finds it in the font's own chain and binds
         // nothing. The engine binds it so when the run is committed
         // (`exp_log`); here, for the lines after it in this paragraph)
+        if log {
+            self.asked.locked().insert((font, e));
+        }
         let first = !self.elink.get(&font).is_some_and(|l| l.contains(&e))
             && self.linked_here.locked().insert((font, e));
         if first {

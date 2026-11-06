@@ -1506,16 +1506,39 @@ pub(crate) fn merge_defs(v: &Values, ds: &mut Vec<(String, ValueId)>, made: Valu
 
 /// The key set of file `name` read back per field (`wkeys:<name>`) from
 /// its definitions `ds` ([`written_defs`]): [`WRITTEN_KEY`], then each
-/// field, a key a nested read-back's file publishes by its id.
+/// field, a key a nested read-back's file publishes by its id. A set: in
+/// the order of the fields' names, not of their first definitions, which
+/// moves with the text (biblatex's `.aux` read back as a fold: its
+/// `\blx@prelim@lastcites@0` first defined 14th in one pass and 93rd in
+/// the next, the same 104 keys, and `\begin{document}` and its
+/// bibliography ran again on the key set at every edit, accl 25569). A
+/// read-back sets each key's field apart; two keys of one field (a nested
+/// file's) keep their order, as do the errors (`rberr:`) a file gives.
 pub(crate) fn key_set(v: &Values, name: &str, ds: &[(String, ValueId)]) -> ValueId {
+    let mut keyed: Vec<(usize, String)> = ds
+        .iter()
+        .enumerate()
+        .map(|(i, (f, val))| {
+            (
+                i,
+                if *val == ValueId::UNIT {
+                    wdef_id(name, f)
+                } else {
+                    f.clone()
+                },
+            )
+        })
+        .collect();
+    keyed.sort_by(|(i, a), (j, b)| {
+        let (fa, fb) = (wdef_field(a), wdef_field(b));
+        match (fa.starts_with("rberr:"), fb.starts_with("rberr:")) {
+            (true, true) => i.cmp(j),
+            (x, y) if x != y => x.cmp(&y),
+            _ => fa.cmp(fb).then(i.cmp(j)),
+        }
+    });
     let mut keys = vec![v.str(WRITTEN_KEY)];
-    for (f, val) in ds {
-        keys.push(if *val == ValueId::UNIT {
-            v.str(&wdef_id(name, f))
-        } else {
-            v.str(f)
-        });
-    }
+    keys.extend(keyed.iter().map(|(_, k)| v.str(k)));
     v.list(keys)
 }
 
@@ -3248,6 +3271,7 @@ impl Graph {
         let origins_on: Arc<std::sync::atomic::AtomicBool> = Arc::default();
         let pdfpage = eng.register(Arc::new(crate::pdfout::PdfPage(origins_on.clone())));
         let readback = eng.register(Arc::new(crate::ops::ReadBack(shared.clone())));
+        let pic = eng.register(Arc::new(crate::pic::Pic(shared.clone())));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
         let box_shape_proj = eng.register_projection(Arc::new(crate::val::box_shape_projection));
@@ -3259,6 +3283,9 @@ impl Graph {
         let forced_proj = eng.register_projection(Arc::new(crate::val::forced_projection));
         let num_proj = eng.register_projection(Arc::new(crate::val::num_projection));
         let clist_proj = eng.register_projection(Arc::new(crate::val::clist_projection));
+        let append_proj = eng.register_projection(Arc::new(crate::val::append_projection));
+        let set_proj = eng.register_projection(Arc::new(crate::val::set_projection));
+        eng.set_append(Arc::new(crate::val::append_items));
         let skel_proj = eng.register_projection(Arc::new(crate::val::skeleton_projection));
         let ops = Ops {
             exec,
@@ -3272,6 +3299,7 @@ impl Graph {
             toolnode,
             pdfpage,
             readback,
+            pic,
             tool_opts: Arc::default(),
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
@@ -3313,6 +3341,8 @@ impl Graph {
             forced_proj,
             num_proj,
             clist_proj,
+            append_proj,
+            set_proj,
             skel_proj,
         };
         let _ = shared.set(ops.clone());
