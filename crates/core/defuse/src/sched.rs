@@ -1636,6 +1636,9 @@ pub(crate) fn requeue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>) {
 /// commit has checked (`Node::committing`), it is marked as `mark_dirty`
 /// marks it.
 pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
+    if asked_before(eng, n, &wake) {
+        return false;
+    }
     if let Cause::Changed { field, .. } = wake.cause
         && crate::commit::ftrace(eng, field)
     {
@@ -1713,11 +1716,44 @@ pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
     false
 }
 
+/// Whether node `n` was re-asked already for `wake`'s change: the same
+/// field, by the same run of the same node (its commit's walks can reach
+/// one reader twice, through the readers its lock found and a walk on),
+/// while that commit goes on.
+/// The first re-ask stands for both: it came after the commit had
+/// published what it defines, so a run of `n` begun since reads it, one
+/// at work then was told, and one committing then runs again. Asked
+/// again, a reader taken at once by another worker after the first was
+/// committing by the second and ran a third time, on reads that all held
+/// (`moving_breaks_rescan_touched_pages_and_one` at -j4, 1 build in 60:
+/// the page loop's rest four times, mc 80629). Records the re-ask.
+fn asked_before(eng: &Engine, n: &Node, wake: &Wake) -> bool {
+    let (Some(by), Cause::Changed { field, .. } | Cause::Range { field, .. }) = (wake.by, &wake.cause) else {
+        return false;
+    };
+    // (within its commit only: a reader filed while it committed, at a
+    // stop its commit had taken, is asked again after it,
+    // `commit::reask_late_stops`, for a read the first re-ask did not see)
+    let Some(b) = eng.placed_node(by).filter(|b| b.committing.load(Ordering::Acquire)) else {
+        return false;
+    };
+    let key = (by, b.serial.load(Ordering::Acquire), *field);
+    let mut last = n.last_ask.lock();
+    if *last == Some(key) {
+        return true;
+    }
+    *last = Some(key);
+    false
+}
+
 /// Marks a node dirty for `wake`'s reason and queues it, unless it is
 /// already dirty, inert or gone. A running node becomes `RunningDirty`: its
 /// reads return `Stop` from now, its commit goes through, and it is queued
 /// after. Returns whether it was newly marked.
 pub(crate) fn mark_dirty(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
+    if asked_before(eng, n, &wake) {
+        return false;
+    }
     if held_edge(eng, &wake, n) {
         hold_wake(eng, w, n.id, wake);
         return false;
