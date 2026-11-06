@@ -5412,33 +5412,34 @@ fn through_segment(d: i64, net: i64, min: i64) -> (i64, i64) {
     ((d + min).max(0), (d + net).max(net - min))
 }
 
-/// Whether a bracket changed, or moved, after scope count `g` in the
-/// segments from the one at `at` to `last`: the region of a walk that
-/// stopped in `last`. A change elsewhere has its own walk: one before
-/// `at` walks on past it, one after the stop starts where this walk's
-/// changes no longer reach. (Any change anywhere since counted as such a
-/// race: at -j4 nearly every walk, whose region was a node wide, asked
-/// every reader to the line's end, 4 to 5 M, biblatex, mc 80647.)
-fn brackets_changed_since(eng: &Engine, at: Pos, last: SegId, g: u64) -> bool {
+/// The first segment from the one at `at` (to `last` where given, else
+/// to the line's end) in which a bracket changed, or moved in, after
+/// scope count `g`: the region of a walk that one filed later may share.
+/// A change before `at` has its own walk, which passes `at` and finds
+/// this one in its own region. (Any change anywhere since counted as
+/// such a race: at -j4 nearly every walk, whose region was a node wide,
+/// asked every reader to the line's end, 4 to 5 M, biblatex, mc 80647.)
+fn first_bracket_change_since(eng: &Engine, at: Pos, last: Option<SegId>, g: u64) -> Option<SegId> {
     if eng.scope_gen.load(Ordering::Acquire) == g {
-        return false;
+        return None;
     }
-    let mut cur = eng.seg_for_pos(at).map(|s| s.id);
+    let first = eng.seg_for_pos(at).map(|s| s.id);
+    let mut cur = first;
     while let Some(sid) = cur {
         let seg = eng.seg(sid);
         let inner = seg.inner.read();
         if inner.brk_gen > g {
-            return true;
+            return Some(sid);
         }
         let lo = seg.lo;
         drop(inner);
-        if sid == last {
-            return false;
+        if last == Some(sid) {
+            return None;
         }
         cur = eng.order.next(sid, lo);
     }
     // (the stop's segment no longer after `at`: moved meanwhile)
-    true
+    if last.is_some() { first } else { None }
 }
 
 /// Whether a definition's reach can move with the brackets around it: a
@@ -5711,37 +5712,61 @@ fn reask_after_effect_with(
     // a close at the bottom level, which closes nothing, whatever filed
     // around it. A change that moves the depth at `at` walks on past it
     // itself, and found here the depth it made)
-    if let Some((sid, q)) = end
-        && q != at
-        && brackets_changed_since(eng, at, sid, by.bracket_gen.load(Ordering::Acquire))
-    {
-        end = None;
-        rest = (at, None);
-        // (of the fields whose scopes this change can move, as on the
-        // walk: past the stop the two sides agree, and what the other
-        // change and this one move together is a definition in one of
-        // their regions, or before it in a scope open there, whose scope
-        // ends elsewhere now; the other's walk asks those of its own)
-        let mut cur = Some(sid);
-        let mut first = true;
-        while let Some(sid) = cur {
-            let seg = eng.seg(sid);
-            let inner = seg.inner.read();
-            for (f, rs) in &inner.readers {
-                let all = reach.all || *f == eng.depth_field || reach.fields.contains(f);
-                for r in rs {
-                    if (all || read::derived_spec(eng, r.path).is_some())
-                        && (!first || eng.node(r.anchor).pos_hint() > q)
-                        && live(eng, r.node, r.serial)
-                    {
-                        readers.push((*f, r.clone()));
+    let g = by.bracket_gen.load(Ordering::Acquire);
+    let raced = if end.is_some_and(|(_, q)| q == at) {
+        None
+    } else {
+        first_bracket_change_since(eng, at, end.map(|(sid, _)| sid), g)
+    };
+    if let Some(from) = raced {
+        // (the readers of the region from the first segment where one
+        // changed: what this walk passed over as no field of a scope it
+        // moves was found on one reading of the brackets, the other's
+        // walk on another, and together they may move what neither
+        // walk's fields name: asked whatever their field, as before the
+        // fields were looked at)
+        if !reach.all {
+            let mut cur = Some(from);
+            while let Some(sid) = cur {
+                let seg = eng.seg(sid);
+                let inner = seg.inner.read();
+                for (f, rs) in &inner.readers {
+                    for r in rs {
+                        let ap = eng.node(r.anchor).pos_hint();
+                        if ap >= at && end.is_none_or(|(_, q)| ap <= q) && live(eng, r.node, r.serial) {
+                            readers.push((*f, r.clone()));
+                        }
                     }
                 }
+                let lo = seg.lo;
+                drop(inner);
+                if end.is_some_and(|(last, _)| last == sid) {
+                    break;
+                }
+                cur = eng.order.next(sid, lo);
             }
-            let lo = seg.lo;
-            drop(inner);
-            first = false;
-            cur = eng.order.next(sid, lo);
+        }
+        // (and every reader past the stop, each by its answer)
+        if let Some((sid, q)) = end {
+            end = None;
+            rest = (at, None);
+            let mut cur = Some(sid);
+            let mut first = true;
+            while let Some(sid) = cur {
+                let seg = eng.seg(sid);
+                let inner = seg.inner.read();
+                for (f, rs) in &inner.readers {
+                    for r in rs {
+                        if (!first || eng.node(r.anchor).pos_hint() > q) && live(eng, r.node, r.serial) {
+                            readers.push((*f, r.clone()));
+                        }
+                    }
+                }
+                let lo = seg.lo;
+                drop(inner);
+                first = false;
+                cur = eng.order.next(sid, lo);
+            }
         }
     }
     st.scope_asked += readers.len() as u64;
@@ -5754,7 +5779,7 @@ fn reask_after_effect_with(
     // (the relations, end readers and finals likewise: of those fields;
     // all of them were put right or asked to the line's end at each walk
     // that found no stop, every definition on the way looked at)
-    let only = (!reach.all).then(|| {
+    let only = (!reach.all && raced.is_none()).then(|| {
         let mut o = reach.fields.clone();
         o.insert(eng.depth_field);
         o
