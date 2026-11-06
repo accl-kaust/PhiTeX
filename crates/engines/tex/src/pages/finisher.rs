@@ -303,7 +303,11 @@ impl Run<'_, '_> {
                 page.is_some()
             );
         }
-        // 2. no page, or a stale one: what it published last stands
+        // 2. no page, or a stale one: what it published last stands, but
+        // for a claim of the rest its routine's fatal error made on the
+        // page before (`Ctx::unchanged_unclaimed`): that claim held the
+        // text after this node inert, so the page builder never folded it
+        // again, the page stayed stale and the claim stood to the end
         let shipped = match &page {
             Some(p) => match self.assemble_page(p)? {
                 Some(asm) => self.replay_page(p, &asm)?,
@@ -314,7 +318,7 @@ impl Run<'_, '_> {
         self.ins_fold = None;
         let first = page.as_ref().is_some_and(|f| f.prev_fire.0 == -1);
         let Some(Shipped { args: fargs, brk }) = shipped else {
-            self.cx.unchanged();
+            self.cx.unchanged_unclaimed();
             self.fin = Some(FinCtx {
                 nth,
                 first,

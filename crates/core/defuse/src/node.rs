@@ -669,6 +669,9 @@ pub(crate) struct Product {
     /// record's definitions, contributions, placements and output stand,
     /// with this run's reads.
     pub(crate) unchanged: bool,
+    /// With `unchanged`, the run's own claim stands, not the last
+    /// record's (`Ctx::unchanged_unclaimed`).
+    pub(crate) own_claim: bool,
     /// The run stopped at a hole with nothing to say (`Ctx::keep_last_at_hole`):
     /// its last run's products stand, but not that run's state, whose
     /// checkpoints count reads of that run, not of this one's record.
