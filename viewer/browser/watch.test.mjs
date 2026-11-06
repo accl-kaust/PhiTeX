@@ -425,10 +425,13 @@ test("the tab's title says the state; Settings writes the user's file; What's ne
   await sleep(300);
   await t.click("#b-more");
   await t.click("#x-settings");
-  await t.until(`!!$("#settings [data-id='watch-write'] .switch")`, "the settings");
-  await t.click("#settings [data-id='watch-write'] .switch");
+  await t.until(`!!$("#settings [data-group='Build']")`, "the settings");
   await t.click("#settings [data-id='follow'] [data-v='selection']");
+  await t.click("#settings [data-group='Build']");
+  await t.click("#settings [data-id='watch-write'] .switch");
+  await t.click("#settings [data-group='Appearance']");
   await t.click("#settings [data-id='dark-pdf'] [data-v='on']");
+  await t.click("#settings [data-group='Preview']");
   const end = Date.now() + 5000;
   const toml = join(fresh, ".config", "phitex", "phitex.toml");
   const all = (x) => /watch-write = true/.test(x) && /follow = "selection"/.test(x) && /dark-pdf = "on"/.test(x);

@@ -4157,6 +4157,9 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
 /// remove, not a frame each: a continuation chain is as deep as it is long.
 pub(crate) fn unfile(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>) {
     let mut todo = retract_products(eng, w, node, true);
+    // (gone, it commits no more: the runs waiting for its commit go on,
+    // `sched::release_waiting`)
+    crate::sched::release_waiting(eng, w, node.id);
     todo.reverse();
     while let Some(c) = todo.pop() {
         // (one not on the line yet: its placer's commit removes it once
@@ -4165,6 +4168,7 @@ pub(crate) fn unfile(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>) {
             continue;
         };
         let mut more = retract_products(eng, w, cn, true);
+        crate::sched::release_waiting(eng, w, c);
         more.reverse();
         todo.append(&mut more);
     }
@@ -4213,81 +4217,6 @@ fn release_leaving(eng: &Engine, w: Option<&Worker>, me: &Node) {
     claim_walk(eng, w, me, 0, true, false);
 }
 
-/// Whether a claim of `want` siblings of `me` (`all`: every text node
-/// after it in its unit, `Ctx::claim_rest`) would move what the line after
-/// it holds: take a sibling it does not hold that has run (or has
-/// predictions filed), whose products go back with the walks of their
-/// readers (`retract`), or give back one it holds, which runs. Read as
-/// [`claim_walk`] would walk, under its segments' read locks, and an
-/// answer only: a claim taking siblings that never ran, or none, moves
-/// nothing made. A guess at most: the claim's own walk decides.
-pub(crate) fn claim_moves(eng: &Engine, me: &Node, want: usize, all: bool) -> bool {
-    let all = all && want > 0;
-    let old_end = me
-        .claim_end
-        .load(Ordering::Acquire)
-        .checked_sub(1)
-        .map(NodeId::from_raw);
-    if want == 0 && old_end.is_none() {
-        return false;
-    }
-    let mut ps = read::SiblingParents::of(me);
-    let mut cur = Some(me.seg_hint());
-    let mut lower = Some(me.pos_hint());
-    let mut k = 0usize;
-    while let Some(sid) = cur {
-        let seg = eng.seg(sid);
-        if seg.unit != me.unit {
-            break;
-        }
-        {
-            let inner = seg.inner.read();
-            let lo = lower.map_or(Unbounded, Excluded);
-            for (_, id) in inner.nodes.range((lo, Unbounded)) {
-                let s = eng.node(*id);
-                let mine = s.claimer() == Some(me.id);
-                let takes = if all {
-                    let op = eng.op(s.op());
-                    s.state() != State::Gone && op.sibling() && op.text() && !s.held_before(eng, me.id, me.pos_hint())
-                } else {
-                    ps.takes(eng, s)
-                };
-                if !takes {
-                    if mine {
-                        return true;
-                    }
-                    if k >= want && Some(s.id) == old_end {
-                        return false;
-                    }
-                    continue;
-                }
-                if k < want {
-                    if !mine && !s.taken() && (s.committed() || s.record().is_some()) {
-                        return true;
-                    }
-                    if Some(s.id) == old_end && k + 1 >= want {
-                        return false;
-                    }
-                } else {
-                    if mine {
-                        return true;
-                    }
-                    if Some(s.id) == old_end || old_end.is_none() {
-                        return false;
-                    }
-                }
-                k += 1;
-                if k >= want && old_end.is_none() {
-                    return false;
-                }
-            }
-        }
-        lower = None;
-        cur = eng.order.next(sid, seg.lo);
-    }
-    false
-}
-
 fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: bool, held: bool) {
     // (one walk of this claimer's at a time, from its `claim_end` to the
     // one it stores: `Node::claim_mx`)
@@ -4316,6 +4245,7 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     // (those of `releases` made `Dirty`, for the queue)
     let mut freed: Vec<Arc<Node>> = Vec::new();
     let mut taken_holes: Vec<Arc<Node>> = Vec::new();
+    let mut taken_now: Vec<NodeId> = Vec::new();
     let mut stops: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
     // (what it held before, up to there; what it holds now, to here)
     let old_end = me
@@ -4401,6 +4331,7 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
                         s.claimer.store(me.id.raw() + 1, Ordering::Release);
                     } else if s.take() {
                         s.claimer.store(me.id.raw() + 1, Ordering::Release);
+                        taken_now.push(s.id);
                         // (one that has not run yet: what it was predicted
                         // to define is withdrawn as a run's would be)
                         if s.committed() || s.record().is_some() {
@@ -4449,6 +4380,16 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     tests::paused_after(me.id);
     for s in retracts {
         retract(eng, w, &s);
+    }
+    // (taken, a node commits nothing until it is given back: the runs
+    // parked waiting for its commit (`sched::park_waiting`) go on, as for
+    // a commit. Left parked, they were dirty between the frontier and the
+    // runs held there, the frontier never moved past them, and the runs
+    // past it went on for ever on what the held ones were to change:
+    // csquotes at -j8 3 builds in 320, mhchem at -j4 5 in 60, a run on
+    // without end, 340 parked on 337 taken, accl 25662, mc 80815)
+    for n in taken_now {
+        crate::sched::release_waiting(eng, w, n);
     }
     // (a claimer removed or taken while its run went on claims nothing:
     // what it took after its removal gave back what it held goes back
