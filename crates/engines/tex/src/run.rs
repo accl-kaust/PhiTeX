@@ -4015,6 +4015,14 @@ impl<'c, 'a> Run<'c, 'a> {
         {
             return Ok(false);
         }
+        // (a node recorded as a load replays its values, not relations)
+        if op == self.ops.exec
+            && self.ops.node_rec.load(std::sync::atomic::Ordering::Relaxed)
+            && !crate::pkgrec::is_load(self.v, self.cx.args())
+            && crate::pkgrec::is_recorded(&self.ops.hints, self.v, self.cx.args())
+        {
+            return Ok(false);
+        }
         let Some(l) = self.mean_loc(p) else {
             return Ok(false);
         };
