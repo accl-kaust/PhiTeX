@@ -384,7 +384,8 @@ impl Viewer {
 
     /// Page `k` of the PDF shown ([`Viewer::pdf`]) at `scale` pixels a
     /// point, as strips (`phitex_render`): its size in pixels and points,
-    /// its bands (each `[key, top, height]`, the key in hex), its text and
+    /// its bands (each `[key, top, height, left, width]`, the key in hex:
+    /// a line, or its part in one column), its text and
     /// links (`viewer/src/types.ts`' `Link`), and what drawing it took
     /// (`drawn` and `kept` bands, microseconds).
     pub fn frame(&self, k: usize, scale: f32) -> Option<Value> {
@@ -409,7 +410,7 @@ impl Viewer {
         let bands: Vec<Value> = f
             .bands
             .iter()
-            .map(|b| json!([format!("{:016x}", b.key), b.y, b.h]))
+            .map(|b| json!([format!("{:016x}", b.key), b.y, b.h, b.x, b.w]))
             .collect();
         let links: Vec<Value> = f
             .links

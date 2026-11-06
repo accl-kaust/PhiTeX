@@ -10,13 +10,18 @@
 import { composeLine, type TextLine, LAYER_LINES } from "./text.ts";
 import type { Link } from "./types.ts";
 
-/** A page as the core gives it (Viewer::frame): sizes, bands `[key, top, height]`, text, links, what drawing it took. */
+/**
+ * A page as the core gives it (Viewer::frame): sizes, bands `[key, top,
+ * height, left, width]` (a line, or its part in one column: a core before
+ * columns gave `[key, top, height]`, its strip the window's width from its
+ * left), text, links, what drawing it took.
+ */
 export type Frame = {
   pw: number;
   ph: number;
   w: number;
   h: number;
-  bands: [string, number, number][];
+  bands: [string, number, number, number?, number?][];
   text: TextLine[];
   links: Link[];
   drawn: number;
@@ -163,16 +168,16 @@ export class Strips {
 
   /** `f` composed: a canvas of its window (the page, but for a window's frame), white under its strips. */
   private canvas(f: Frame): HTMLCanvasElement {
-    const [, y, w, h] = f.win ?? [0, 0, f.pw, f.ph];
+    const [x, y, w, h] = f.win ?? [0, 0, f.pw, f.ph];
     const c = document.createElement("canvas");
     c.width = w;
     c.height = h;
     const g = c.getContext("2d")!;
     g.fillStyle = "#fff";
     g.fillRect(0, 0, w, h);
-    for (const [key, top] of f.bands) {
+    for (const [key, top, , left] of f.bands) {
       const b = this.kept.get(key);
-      if (b) g.drawImage(b, 0, top - y);
+      if (b) g.drawImage(b, (left ?? x) - x, top - y);
     }
     return c;
   }

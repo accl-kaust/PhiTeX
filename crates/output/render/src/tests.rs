@@ -47,6 +47,7 @@ fn compose(r: &Renderer, f: &Frame) -> Vec<u8> {
     let mut out = vec![255u8; w * h * 3];
     for b in &f.bands {
         let s = r.strip(b.key).expect("every band's strip is kept");
+        assert_eq!((s.w, s.h), (b.w, b.h), "{b:?}");
         for row in 0..s.h as usize {
             let Ok(y) = usize::try_from(i64::from(b.y) + i64::from(u32::try_from(row).unwrap()))
             else {
@@ -55,8 +56,12 @@ fn compose(r: &Renderer, f: &Frame) -> Vec<u8> {
             if y >= h {
                 continue;
             }
-            for x in 0..(s.w as usize).min(w) {
-                let p = &s.rgba[(row * s.w as usize + x) * 4..][..4];
+            for col in 0..s.w as usize {
+                let x = usize::try_from(b.x).unwrap() + col;
+                if x >= w {
+                    continue;
+                }
+                let p = &s.rgba[(row * s.w as usize + col) * 4..][..4];
                 let a = u32::from(p[3]);
                 let o = &mut out[(y * w + x) * 3..][..3];
                 for c in 0..3 {
@@ -137,7 +142,7 @@ fn lines_are_bands_and_compose_to_the_page() {
 
 /// A window's frame (a zoomed-in viewer's): only the bands it crosses,
 /// each cut to it, composed the same pixels as that part of the whole
-/// page's frame; its strips the window's width, kept apart from the
+/// page's frame; its strips within the window, kept apart from the
 /// whole page's.
 #[test]
 #[allow(
@@ -163,16 +168,21 @@ fn a_window_is_that_part_of_the_page() {
     let mut part = vec![255u8; ww * wh * 3];
     for b in &g.bands {
         let st = r.strip(b.key).expect("kept");
-        assert_eq!(st.w as usize, ww);
+        assert_eq!((st.w, st.h), (b.w, b.h));
         assert!(
-            b.y >= wy as i32 && b.y + st.h as i32 <= (wy as usize + wh) as i32,
+            b.y >= wy as i32
+                && b.y + st.h as i32 <= (wy as usize + wh) as i32
+                && b.x >= wx as i32
+                && b.x + st.w as i32 <= (wx as usize + ww) as i32,
             "{b:?} in {:?}",
             g.win
         );
+        let sw = st.w as usize;
         for row in 0..st.h as usize {
             let y = (b.y - wy as i32) as usize + row;
-            for x in 0..ww {
-                let p = &st.rgba[(row * ww + x) * 4..][..4];
+            for col in 0..sw {
+                let x = (b.x - wx as i32) as usize + col;
+                let p = &st.rgba[(row * sw + col) * 4..][..4];
                 let a = u32::from(p[3]);
                 let o = &mut part[(y * ww + x) * 3..][..3];
                 for c in 0..3 {
@@ -422,5 +432,63 @@ fn named_destinations_are_found() {
     assert_eq!(
         (o[0].title.as_str(), o[0].page, o[0].y),
         ("To b", Some(0), Some(392.0))
+    );
+}
+
+/// Two columns: each line of the left column a band of its own beside a
+/// figure (a filled box) in the right column that spans them all, not one
+/// band of the lines and the figure: a changed line is drawn again alone,
+/// and the bands compose to the page.
+#[test]
+fn a_column_beside_a_figure_is_lines() {
+    let doc = |second: &str| {
+        let mut content = String::new();
+        for (y, t) in [
+            (700, "First line of text"),
+            (686, second),
+            (672, "Third one"),
+        ] {
+            let _ = writeln!(content, "BT /F1 12 Tf 72 {y} Td ({t}) Tj ET");
+        }
+        content.push_str("q 0 0 1 rg 320 600 200 120 re f Q\n");
+        pdf_of(&[
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        ])
+    };
+    let mut r = Renderer::new();
+    let a = doc("Second line");
+    let f = r.frame(&a, 0, 2.0).unwrap();
+    // (three lines and the figure)
+    assert_eq!(f.bands.len(), 4, "{:?}", f.bands);
+    let fig = f.bands.iter().filter(|b| b.x > 500).count();
+    assert_eq!(fig, 1, "{:?}", f.bands);
+    let composed = compose(&r, &f);
+    let page = whole(&a, 2.0);
+    let diff: u64 = composed
+        .iter()
+        .zip(&page)
+        .map(|(x, y)| u64::from(x.abs_diff(*y)))
+        .sum();
+    let ink: u64 = page.iter().map(|x| u64::from(255 - x)).sum();
+    assert!(
+        ink > 0 && diff * 3 < ink,
+        "composed differs: {diff} against ink {ink}"
+    );
+    let g = r.frame(&doc("Second lime"), 0, 2.0).unwrap();
+    assert_eq!((g.drawn, g.kept), (1, 3), "{:?}", g.bands);
+    let px: u32 = g
+        .bands
+        .iter()
+        .filter(|b| !f.bands.contains(b))
+        .map(|b| b.w * b.h)
+        .sum();
+    assert!(
+        px * 10 < f.pw * f.ph,
+        "{px} pixels drawn again of {}",
+        f.pw * f.ph
     );
 }

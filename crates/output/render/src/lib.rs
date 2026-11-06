@@ -59,6 +59,14 @@ use hayro::{RenderCache, RenderSettings, render_into};
 /// drawings.
 const GAP: f64 = 4.0;
 
+/// Columns closer than this (points) are one: wider than a word space,
+/// narrower than the space between two columns (LaTeX's `\columnsep`, 10
+/// points; ACM's 2 picas). A two-column page's line is a band of its
+/// own, not a band of every line beside a figure in the other column
+/// (a keystroke in Grail's two-column text drew 3.4 MB of pixels again,
+/// the whole column beside a figure).
+const COLUMN_GAP: f64 = 6.0;
+
 /// The strips kept for the viewer, at most this many bytes of pixels
 /// (the oldest dropped first): 256 MiB natively; 64 MiB in WebAssembly,
 /// whose 4 GiB memory the engine's threads share.
@@ -75,13 +83,16 @@ pub struct Strip {
     pub rgba: Vec<u8>,
 }
 
-/// A band of a page: its key (its [`Strip`]'s), and its top (pixels from
-/// the page's top) and height.
+/// A band of a page (a cell of its drawings: a line, or the part of a
+/// line in one column): its key (its [`Strip`]'s), its top (pixels from
+/// the page's top) and height, its left and width (its strip's).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Band {
     pub key: u64,
     pub y: i32,
     pub h: u32,
+    pub x: i32,
+    pub w: u32,
 }
 
 /// A line of the page's text, in points from the page's top left: its
@@ -501,7 +512,7 @@ fn dest_of(pages: &[Page<'_>], arr: &Array<'_>) -> Option<(usize, Option<f64>)> 
 }
 
 /// A destination's value (an array, or a dictionary with one under `/D`).
-fn as_dest<'a>(o: Object<'a>) -> Option<Array<'a>> {
+fn as_dest(o: Object<'_>) -> Option<Array<'_>> {
     match o {
         Object::Array(a) => Some(a),
         Object::Dict(d) => d.get::<Array<'_>>(b"D"),
@@ -974,67 +985,63 @@ impl Renderer {
         doc.texts.insert(k, text.clone());
         let links = links_of(pdf, pages, page, &mut doc.names);
 
-        // (the bands: drawings' extents merged where they come within GAP)
-        let mut by_top: Vec<usize> = (0..items.len()).collect();
-        by_top.sort_by(|&a, &b| items[a].bbox.y0.total_cmp(&items[b].bbox.y0));
-        let mut spans: Vec<(f64, f64)> = Vec::new();
-        let mut band_of = vec![0usize; items.len()];
-        for &i in &by_top {
-            let b = items[i].bbox;
-            match spans.last_mut() {
-                Some(last) if b.y0 <= last.1 + GAP => last.1 = last.1.max(b.y1),
-                _ => spans.push((b.y0, b.y1)),
-            }
-            band_of[i] = spans.len() - 1;
-        }
+        // (the bands: the drawings cut where they leave a gap, rows, then
+        // in a row its columns, then their rows, ...)
+        let mut cells: Vec<Vec<usize>> = Vec::new();
+        cut(
+            &items,
+            (0..items.len()).collect(),
+            true,
+            false,
+            &mut cells,
+            s,
+        );
         let probe_us = micros(t1);
 
-        // (each band's key: its drawings in order, placed from its top)
-        let mut keys: Vec<DefaultHasher> = spans
-            .iter()
-            .map(|&(y0, y1)| {
-                let mut h = DefaultHasher::new();
-                (pw, q(y1 - y0), scale.to_bits()).hash(&mut h);
-                h
-            })
-            .collect();
-        for (i, it) in items.iter().enumerate() {
-            let b = band_of[i];
-            let top = spans[b].0 - 1.0;
-            (it.id, q(it.ax), q(it.ay - top)).hash(&mut keys[b]);
-        }
         let t2 = Instant::now();
-        // (cut to the window's rows, a band's key also its cut: its rows
-        // from its own top and the window's columns)
+        // (each band's place in pixels and key: its drawings in order,
+        // placed from its top left, cut to the window, its rows and columns
+        // from its own top left too)
         let (wtop, wbottom) = (wy as i32, (wy + wh) as i32);
-        let bands: Vec<Band> = spans
+        let (wleft, wright) = (wx as i32, (wx + ww) as i32);
+        let mut bands: Vec<Band> = cells
             .iter()
-            .enumerate()
-            .filter_map(|(b, &(y0, y1))| {
-                let top = (y0 - 1.0).round() as i32;
-                let bottom = top + ((y1 + 1.0) - (y0 - 1.0)).ceil().max(1.0) as i32;
+            .filter_map(|c| {
+                let r = c.iter().map(|&i| items[i].bbox).reduce(|a, b| a.union(b))?;
+                let top = (r.y0 - 1.0).round() as i32;
+                let bottom = top + ((r.y1 + 1.0) - (r.y0 - 1.0)).ceil().max(1.0) as i32;
+                let left = (r.x0 - 1.0).round() as i32;
+                let right = left + ((r.x1 + 1.0) - (r.x0 - 1.0)).ceil().max(1.0) as i32;
                 let (from, to) = (top.max(wtop), bottom.min(wbottom));
-                if from >= to {
+                let (l, rt) = (left.max(wleft), right.min(wright));
+                if from >= to || l >= rt {
                     return None;
                 }
-                let mut key = keys[b].clone();
-                if win.is_some() {
-                    (wx, ww, from - top, to - from).hash(&mut key);
+                let mut h = DefaultHasher::new();
+                (right - left, q(r.y1 - r.y0), scale.to_bits()).hash(&mut h);
+                let (x0, y0) = (r.x0 - 1.0, r.y0 - 1.0);
+                for &i in c {
+                    let it = &items[i];
+                    (it.id, q(it.ax - x0), q(it.ay - y0)).hash(&mut h);
                 }
+                (l - left, rt - l, from - top, to - from).hash(&mut h);
                 Some(Band {
-                    key: key.finish(),
+                    key: h.finish(),
                     y: from,
                     h: (to - from) as u32,
+                    x: l,
+                    w: (rt - l) as u32,
                 })
             })
             .collect();
+        bands.sort_by_key(|b| (b.y, b.x));
         let fresh: Vec<bool> = bands
             .iter()
             .map(|b| !self.strips.contains_key(&b.key))
             .collect();
         let drawn = fresh.iter().filter(|f| **f).count();
         let kept = bands.len() - drawn;
-        self.draw(page, base, &settings, &bands, &fresh, [wx, ww], ph)?;
+        self.draw(page, base, &settings, &bands, &fresh)?;
         Some(Frame {
             pw,
             ph,
@@ -1052,11 +1059,15 @@ impl Renderer {
         })
     }
 
-    /// The bands of `bands` that are `fresh` drawn and kept: consecutive
-    /// ones in one pass of the page from the first's top to the last's
-    /// bottom (hayro skipping what falls outside), each band its rows of
-    /// it.
-    #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
+    /// The bands of `bands` that are `fresh` drawn and kept: those near
+    /// each other in one pass of the page over the rectangle around them
+    /// (hayro skipping what falls outside), each band its pixels of it.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap,
+        reason = "a page's pixels: a band's size fits an i32"
+    )]
     fn draw(
         &mut self,
         page: &Page<'_>,
@@ -1064,29 +1075,40 @@ impl Renderer {
         settings: &InterpreterSettings,
         bands: &[Band],
         fresh: &[bool],
-        [wx, pw]: [u32; 2],
-        ph: u32,
     ) -> Option<()> {
         let cache = RenderCache::new();
-        let mut b = 0;
-        while b < bands.len() {
-            if !fresh[b] {
-                b += 1;
-                continue;
-            }
-            let mut e = b;
-            while e + 1 < bands.len() && fresh[e + 1] {
+        let todo: Vec<&Band> = bands
+            .iter()
+            .zip(fresh)
+            .filter_map(|(b, f)| f.then_some(b))
+            .collect();
+        let rect = |b: &Band| (b.x, b.y, b.x + b.w as i32, b.y + b.h as i32);
+        let area = |(x0, y0, x1, y1): (i32, i32, i32, i32)| i64::from(x1 - x0) * i64::from(y1 - y0);
+        let mut i = 0;
+        while i < todo.len() {
+            // (the next bands drawn with it while the rectangle around them
+            // is at most twice their pixels: the lines below an edit in one
+            // pass, a line in each column apart)
+            let mut around = rect(todo[i]);
+            let mut sum = area(around);
+            let mut e = i + 1;
+            while e < todo.len() {
+                let r = rect(todo[e]);
+                let u = (
+                    around.0.min(r.0),
+                    around.1.min(r.1),
+                    around.2.max(r.2),
+                    around.3.max(r.3),
+                );
+                if area(u) > 2 * (sum + area(r)) {
+                    break;
+                }
+                around = u;
+                sum += area(r);
                 e += 1;
             }
-            let top = bands[b].y.max(0);
-            let bottom = bands[b..=e]
-                .iter()
-                .map(|x| x.y + i32::try_from(x.h).unwrap_or(i32::MAX))
-                .max()
-                .unwrap_or(top + 1)
-                .min(i32::try_from(ph).unwrap_or(i32::MAX))
-                .max(top + 1);
-            let (sw, sh) = (u16::try_from(pw).ok()?, u16::try_from(bottom - top).ok()?);
+            let (x0, y0, x1, y1) = around;
+            let (sw, sh) = (u16::try_from(x1 - x0).ok()?, u16::try_from(y1 - y0).ok()?);
             let mut ctx = RenderContext::new(sw, sh);
             render_into(
                 page,
@@ -1094,7 +1116,7 @@ impl Renderer {
                 settings,
                 &RenderSettings::default(),
                 &mut ctx,
-                Affine::translate((-f64::from(wx), -f64::from(top))) * base,
+                Affine::translate((-f64::from(x0), -f64::from(y0))) * base,
             );
             ctx.flush();
             let mut pix = Pixmap::new(sw, sh);
@@ -1109,24 +1131,86 @@ impl Renderer {
                 },
             );
             let all = pix.data_as_u8_slice();
-            let row = pw as usize * 4;
-            for band in &bands[b..=e] {
-                let from = usize::try_from(band.y - top).unwrap_or(0);
-                let to = (from + band.h as usize).min(usize::from(sh));
-                let mut rgba = all[from * row..to * row].to_vec();
+            let row = usize::from(sw) * 4;
+            for band in &todo[i..e] {
+                let (dx, dy) = ((band.x - x0) as usize, (band.y - y0) as usize);
+                let w = band.w as usize;
+                let mut rgba = Vec::with_capacity(w * band.h as usize * 4);
+                for y in dy..dy + band.h as usize {
+                    rgba.extend_from_slice(&all[y * row + dx * 4..][..w * 4]);
+                }
                 unpremultiply(&mut rgba);
                 self.keep(
                     band.key,
                     Strip {
-                        w: pw,
-                        h: u32::try_from(to - from).unwrap_or(0),
+                        w: band.w,
+                        h: band.h,
                         rgba,
                     },
                 );
             }
-            b = e + 1;
+            i = e;
         }
         Some(())
+    }
+}
+
+/// The drawings `idx` of `items` cut into cells, into `out`: where their
+/// boxes leave a gap across the page (`rows`: a gap between rows, of
+/// [`GAP`] pixels; else between columns, of [`COLUMN_GAP`] points at
+/// `scale`), each part cut again the other way, until a part has no gap
+/// either way. A cell holds whole drawings, and no other cell's pixels
+/// reach into it.
+fn cut(
+    items: &[Item],
+    idx: Vec<usize>,
+    rows: bool,
+    tried: bool,
+    out: &mut Vec<Vec<usize>>,
+    scale: f64,
+) {
+    if idx.is_empty() {
+        return;
+    }
+    let gap = if rows {
+        GAP
+    } else {
+        (COLUMN_GAP * scale).max(GAP)
+    };
+    let span = |i: usize| {
+        let b = items[i].bbox;
+        if rows { (b.y0, b.y1) } else { (b.x0, b.x1) }
+    };
+    let mut by: Vec<usize> = idx;
+    by.sort_by(|&a, &b| span(a).0.total_cmp(&span(b).0));
+    let mut parts: Vec<Vec<usize>> = Vec::new();
+    let mut end = f64::NEG_INFINITY;
+    for i in by {
+        let (a, b) = span(i);
+        match parts.last_mut() {
+            Some(p) if a <= end + gap => {
+                p.push(i);
+                end = end.max(b);
+            }
+            _ => {
+                parts.push(vec![i]);
+                end = b;
+            }
+        }
+    }
+    if parts.len() == 1 {
+        let mut part = parts.pop().unwrap_or_default();
+        if tried {
+            // (the drawings in the page's order: a cell's key hashes them so)
+            part.sort_unstable();
+            out.push(part);
+        } else {
+            cut(items, part, !rows, true, out, scale);
+        }
+        return;
+    }
+    for p in parts {
+        cut(items, p, !rows, false, out, scale);
     }
 }
 

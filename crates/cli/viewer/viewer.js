@@ -5979,16 +5979,16 @@ var Strips = class {
   }
   /** `f` composed: a canvas of its window (the page, but for a window's frame), white under its strips. */
   canvas(f) {
-    const [, y, w, h] = f.win ?? [0, 0, f.pw, f.ph];
+    const [x, y, w, h] = f.win ?? [0, 0, f.pw, f.ph];
     const c = document.createElement("canvas");
     c.width = w;
     c.height = h;
     const g = c.getContext("2d");
     g.fillStyle = "#fff";
     g.fillRect(0, 0, w, h);
-    for (const [key, top] of f.bands) {
+    for (const [key, top, , left] of f.bands) {
       const b = this.kept.get(key);
-      if (b) g.drawImage(b, 0, top - y);
+      if (b) g.drawImage(b, (left ?? x) - x, top - y);
     }
     return c;
   }
