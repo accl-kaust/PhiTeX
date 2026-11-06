@@ -3617,12 +3617,9 @@ fn watch_picture_children_exact() {
     }
 }
 
-fn picture_children_exact(threads: &str) {
-    let _one = one();
-    let name = format!("pic-children-j{threads}");
-    let pic2 = "\\begin{tikzpicture}\n\\draw[thick] (0,0) -- (3,0) -- (3,2) -- cycle;\n\\node at (1.5,0.7) {input};\n\\end{tikzpicture}\n";
-    let fig1 = "\\begin{figure}[t]\\centering\n\\resizebox{0.4\\linewidth}{!}{%\n\\begin{tikzpicture}\n\\draw (0,0) -- (2,1) node[right] {left};\n\\node[draw] (a) at (0,0) {A};\n\\end{tikzpicture}}\n\\caption{First figure}\\label{fig:a}\n\\end{figure}\n";
-    let text = format!(
+/// The document of [`picture_children_exact`], its first figure `fig1`.
+fn picture_children_text(fig1: &str) -> String {
+    format!(
         "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\newcount\\picn \\def\\capword{{before}}\n\\begin{{document}}\n\\section{{One}}\nAlpha words come first in this paragraph of the start.\n\nBeta words stand in the second paragraph, before the figures.\n{fig1}\
 Gamma text between the floats, see Figure~\\ref{{fig:a}}.\n\n\\begin{{figure}}[b]\\centering\n\\input{{pic2}}\n\\caption{{Second, after \\ref{{fig:a}}}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\draw[red] (0,0) circle (1);\n\\end{{tikzpicture}}\n\\begin{{tikzpicture}}\n\\fill[blue] (0,0) rectangle (1,1);\n\\end{{tikzpicture}}\n\\caption{{Two pictures}}\n\\end{{figure}}\n\
@@ -3631,7 +3628,18 @@ Gamma text between the floats, see Figure~\\ref{{fig:a}}.\n\n\\begin{{figure}}[b
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped \\the\\picn\\xdef\\capword{{after}}}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped again \\the\\picn}}\n\\end{{figure}}\n\
 Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon words in the next section.\n\\end{{document}}\n"
-    );
+    )
+}
+
+/// One edit of [`picture_children_exact`]'s text.
+type Edit = Box<dyn Fn(&str) -> String>;
+
+fn picture_children_exact(threads: &str) {
+    let _one = one();
+    let name = format!("pic-children-j{threads}");
+    let pic2 = "\\begin{tikzpicture}\n\\draw[thick] (0,0) -- (3,0) -- (3,2) -- cycle;\n\\node at (1.5,0.7) {input};\n\\end{tikzpicture}\n";
+    let fig1 = "\\begin{figure}[t]\\centering\n\\resizebox{0.4\\linewidth}{!}{%\n\\begin{tikzpicture}\n\\draw (0,0) -- (2,1) node[right] {left};\n\\node[draw] (a) at (0,0) {A};\n\\end{tikzpicture}}\n\\caption{First figure}\\label{fig:a}\n\\end{figure}\n";
+    let text = picture_children_text(fig1);
     let dir = scratch(&name);
     std::fs::write(dir.join("pics.tex"), &text).expect("the document");
     std::fs::write(dir.join("pic2.tex"), pic2).expect("the input");
@@ -3659,7 +3667,7 @@ Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon wor
     let cold = until(&mut lines, "build", &1.into(), &mut seen);
     assert_eq!(cold["ok"], true, "{cold}");
     let fig1 = fig1.to_owned();
-    let edits: Vec<Box<dyn Fn(&str) -> String>> = vec![
+    let edits: Vec<Edit> = vec![
         Box::new(move |t| t.replacen(&fig1, "", 1)),
         Box::new(|t| t.replacen("Alpha words", "Alpha letters", 1)),
         Box::new(|t| t.replacen("circle (1)", "circle (0.8)", 1)),
