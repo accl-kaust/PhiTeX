@@ -2254,22 +2254,6 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         park_waiting(eng, pool, w, node, Some(x));
         return Ok(());
     }
-    // (one whose last run stopped before a claim that moved the line
-    // after it, the text before it still to run: not begun before that
-    // text has run, where it would stop at its claim again,
-    // `Ctx::wait_claim_settled`)
-    if !quiet
-        && pool.shared.n > 1
-        && node.claim_waits.load(Ordering::Acquire)
-        && let Some(x) = crate::read::on_one_layout(eng, || crate::read::text_open_before(eng, node))
-    {
-        if run_log() {
-            eprintln!("claim: node {} waits for {}", n.raw(), x.raw());
-        }
-        node.held.store(true, Ordering::Release);
-        park_waiting(eng, pool, w, node, Some(x));
-        return Ok(());
-    }
     // (one that stopped at the frontier before: not begun past it, where
     // it would stop again and its run be thrown away; the end of a Grail
     // edit's document, 65-100 ms of commands an edit)
@@ -2309,7 +2293,6 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     let version = eng.version.load(Ordering::Acquire);
     node.held_panic.store(false, Ordering::Release);
     let mut cx = Ctx::new(eng, Some(w), node);
-    cx.let_go = quiet;
     let retries0 = crate::read::retries();
     let stands = cx.last_run_stands();
     let r = match stands {
