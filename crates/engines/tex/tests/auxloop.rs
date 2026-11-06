@@ -697,11 +697,12 @@ List: \lst.
     }
 }
 
-/// Two lines of a file read back per field written in the other order:
-/// the same fields with the same values, so the run reading the file back
-/// stands. Its key set is a set: in the order of the definitions it moved
-/// at the edit, and the reader ran again on it (biblatex's `.aux` read
-/// back as a fold, `\begin{document}` at every edit, accl 25569).
+/// Two lines of a file read back as a fold (a line adds to what a line
+/// before it defined) written in the other order: the same fields with
+/// the same values, so the run reading the file back stands. Its key set
+/// is a set: in the order of the definitions it moved at the edit, and
+/// the reader ran again on it (biblatex's `.aux`, `\begin{document}` at
+/// every edit, accl 25569).
 #[test]
 fn lines_written_in_another_order_leave_the_reader_standing() {
     let doc = |swap: bool| {
@@ -711,12 +712,12 @@ fn lines_written_in_another_order_leave_the_reader_standing() {
         );
         let (p, q) = if swap { (b, a) } else { (a, b) };
         format!(
-            r"\def\x{{}}\def\y{{}}
+            r"\def\lst{{}}\def\addto#1{{\xdef\lst{{\lst#1,}}}}\def\x{{}}\def\y{{}}
 
 \openin15=\jobname.aux \ifeof15 \else\closein15 \input\jobname.aux \fi X: \x, Y: \y.
 
 \immediate\openout1=\jobname.aux
-{p}{q}
+{p}\immediate\write1{{\noexpand\addto{{a}}}}\immediate\write1{{\noexpand\addto{{b}}}}{q}
 
 Middle.
 \bye
