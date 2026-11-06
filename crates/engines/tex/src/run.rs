@@ -4054,14 +4054,15 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     pub(crate) fn append_def(&mut self, p: Tok) -> R<bool> {
-        // (a document piece's run: a page routine's publication is the
-        // page loop's, `crate::pages`)
+        // (a document piece's run, or a picture's in one (whose appends
+        // its parent makes, `crate::pic`): a page routine's publication
+        // is the page loop's, `crate::pages`)
         let op = self.cx.op();
         if self.interp.is_some()
             || self.rec_load
             || self.rb.is_some()
             || self.lt.sink.is_some()
-            || !(op == self.ops.exec || op == self.ops.resume)
+            || !(op == self.ops.exec || op == self.ops.resume || op == self.ops.pic)
         {
             self.append_trace(p, "1");
             return Ok(false);
