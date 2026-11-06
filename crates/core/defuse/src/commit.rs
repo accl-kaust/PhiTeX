@@ -58,6 +58,8 @@ pub(crate) struct CommitStats {
     /// `reask_from`: each segment's readers of the field, those it passed
     /// by included).
     pub(crate) walked: u64,
+    /// The readers a change of brackets asked again (`ScopeReach`).
+    pub(crate) scope_asked: u64,
     pub(crate) relative_resolved: u64,
     pub(crate) predictions_confirmed: u64,
     pub(crate) shaped: u64,
@@ -75,6 +77,7 @@ impl CommitStats {
     pub(crate) fn add(&mut self, o: &CommitStats) {
         self.woken += o.woken;
         self.walked += o.walked;
+        self.scope_asked += o.scope_asked;
         self.relative_resolved += o.relative_resolved;
         self.predictions_confirmed += o.predictions_confirmed;
         self.shaped += o.shaped;
@@ -5661,6 +5664,7 @@ fn reask_after_effect_with(
             cur = eng.order.next(sid, lo);
         }
     }
+    st.scope_asked += readers.len() as u64;
     for (f, r) in &readers {
         reask_reader(eng, w, *f, r, Some(by.id), st);
     }

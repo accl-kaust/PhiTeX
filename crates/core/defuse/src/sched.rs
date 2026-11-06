@@ -286,6 +286,7 @@ pub(crate) struct Worker {
     pub(crate) held_unsettled: AtomicU64,
     pub(crate) woken: AtomicU64,
     pub(crate) walked: AtomicU64,
+    pub(crate) scope_asked: AtomicU64,
     pub(crate) relative_resolved: AtomicU64,
     pub(crate) predictions_confirmed: AtomicU64,
     pub(crate) shaped: AtomicU64,
@@ -316,6 +317,7 @@ impl Worker {
     pub(crate) fn note(&self, st: &CommitStats) {
         Worker::add(&self.woken, st.woken);
         Worker::add(&self.walked, st.walked);
+        Worker::add(&self.scope_asked, st.scope_asked);
         Worker::add(&self.relative_resolved, st.relative_resolved);
         Worker::add(&self.predictions_confirmed, st.predictions_confirmed);
         Worker::add(&self.shaped, st.shaped);
@@ -730,6 +732,7 @@ impl Pool {
                 held_unsettled: AtomicU64::new(0),
                 woken: AtomicU64::new(0),
                 walked: AtomicU64::new(0),
+                scope_asked: AtomicU64::new(0),
                 relative_resolved: AtomicU64::new(0),
                 predictions_confirmed: AtomicU64::new(0),
                 shaped: AtomicU64::new(0),

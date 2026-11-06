@@ -991,3 +991,45 @@ fn a_definition_inside_a_scope_a_node_comes_to_open_asks_no_reader_after_its_clo
     );
     assert!(e.check_invariants().is_empty());
 }
+
+/// A node that comes to open a scope no close after it closes (its close
+/// not run yet: text run ahead on a guess of the nesting) changes the
+/// scopes from it to the line's end. Asked again are the readers of a
+/// field whose definition there, or before it in a scope open there, the
+/// change can hide or show, not every reader on the way: the readers of a
+/// field defined only globally see what they saw (biblatex at -j4: 3 to
+/// 4 M readers asked at each such change, 2 to 5 % of them of such a
+/// field, ~15 s each, accl 25435). The readers that do see another
+/// answer get it: one of a local definition inside the outer scope,
+/// which the close after the node now leaves open, and one inside the
+/// node's new scope.
+#[test]
+fn a_change_of_brackets_asks_only_the_readers_whose_scopes_can_move() {
+    let (e, o) = engine();
+    let v = e.values();
+    let (g, gx, l) = (v.field("g"), v.field("gx"), v.field("l"));
+    let open = e.register(Arc::new(SwitchOpen(g)));
+    let u = e.new_unit();
+    e.push(u, o.def_global, vec![gx.0, v.int(1)]);
+    e.push(u, o.open, vec![]);
+    e.push(u, o.def, vec![l.0, v.int(5)]);
+    let n = e.push(u, open, vec![v.int(0)]);
+    let inside = e.push(u, o.get, vec![g.0]);
+    let globals: Vec<NodeId> = (0..500).map(|_| e.push(u, o.get, vec![gx.0])).collect();
+    e.push(u, o.close, vec![]);
+    let after = e.push(u, o.get, vec![l.0]);
+    let more: Vec<NodeId> = (0..500).map(|_| e.push(u, o.get, vec![gx.0])).collect();
+    e.evaluate(1).unwrap();
+    assert_eq!(e.output(after), Some(ValueId::UNIT), "the outer scope closed");
+    e.replace(n, open, vec![v.int(1)]);
+    let rep = e.evaluate(1).unwrap();
+    assert_eq!(e.output(inside), Some(v.int(1)), "the reader inside the new scope sees it");
+    assert_eq!(int(&e, after), 5, "the close ends the new scope, the outer one stays open");
+    assert!(globals.iter().chain(&more).all(|&r| int(&e, r) == 1));
+    assert!(
+        rep.scope_asked < 100,
+        "{} readers asked again for a change only a few readers' scopes see",
+        rep.scope_asked
+    );
+    assert!(e.check_invariants().is_empty());
+}
