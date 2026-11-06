@@ -1329,6 +1329,45 @@ pub(crate) fn open_definer_before(eng: &Engine, me: &Node, r: &crate::node::RunR
     })
 }
 
+/// The definer of the field a derived read of `r`, `me`'s last run, names
+/// now (`Step::Derived`), when it is to run (dirty or at work): an edit
+/// in the same evaluation may have changed what it defines. It is no
+/// source of the record where the name moved (the last run read the
+/// field the old name gave), and it moved nothing before it committed,
+/// so [`open_definer_before`] does not hold for it: re-asked by the move
+/// of the name's base, the reader ran on that field's old value and again
+/// once the edited definer committed (`derived.rs`,
+/// `a_moved_name_holding_the_old_value_leaves_the_reader_standing` at four
+/// threads, about 8 in 300).
+pub(crate) fn derived_target_open(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
+    on_one_layout(eng, || {
+        r.reads.iter().find_map(|rd| {
+            let ReadKind::Field { at, .. } = &rd.kind else {
+                return None;
+            };
+            let spec = derived_spec(eng, rd.path)?;
+            let (anchor, incl) = match *at {
+                Anchor::Me => (me.id, false),
+                Anchor::Before(n) => (n, false),
+                Anchor::AfterOwn(n) => (n, true),
+                _ => return None,
+            };
+            let g = derived_field_at(eng, spec, anchor, incl)?;
+            let by = reaching_at(eng, g, anchor, incl)?.by?;
+            let x = eng.placed_node(by)?;
+            (by != me.id
+                && matches!(x.state(), State::Dirty | State::Running | State::RunningDirty)
+                && x.unit == me.unit
+                && !x.held_panic.load(Ordering::Acquire)
+                && {
+                    let op = eng.op(x.op());
+                    !op.works_at_frontier() && !op.final_only()
+                })
+            .then_some(by)
+        })
+    })
+}
+
 /// [`hole_before`]'s answer as a read's value: the node's id.
 pub(crate) fn hole_value(eng: &Engine, h: Option<NodeId>) -> Option<ValueId> {
     h.map(|h| eng.values().int(i64::from_ne_bytes(h.raw().to_ne_bytes())))

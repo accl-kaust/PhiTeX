@@ -205,12 +205,13 @@ pub(crate) fn force(r: &mut Run<'_, '_>, s: Sym) -> crate::run::R<i32> {
 #[cold]
 fn trace_force(r: &Run<'_, '_>, s: Sym) {
     eprintln!(
-        "sym-force: node {} (by {}) count {} j {} cur {:?}",
+        "sym-force: node {} (by {}) count {} j {} cur {:?} | {}",
         r.cx.node().raw(),
         s.node.raw(),
         s.reg,
         s.j,
-        r.cur.tok.as_cs().map(|c| c.name().to_owned())
+        r.cur.tok.as_cs().map(|c| c.name().to_owned()),
+        r.trace_context()
     );
 }
 

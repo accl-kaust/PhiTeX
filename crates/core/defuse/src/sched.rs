@@ -1216,6 +1216,7 @@ impl Pool {
         {
             return false;
         }
+        eng.frontier_gen.fetch_add(1, Ordering::AcqRel);
         log_frontier(eng, fr, first, None, "past only");
         release_frontier(eng, Some(w));
         true
@@ -1452,6 +1453,7 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
             // (and those at the frontier: the layer is quiet, nothing
             // places a node before them now. Let go together: one that
             // reads what an earlier one defines waits for it, below)
+            eng.frontier_gen.fetch_add(1, Ordering::AcqRel);
             let old = eng.frontier.swap(0, Ordering::AcqRel);
             log_frontier(eng, old, 0, None, "quiet");
             rel.extend(
@@ -1637,6 +1639,9 @@ pub(crate) fn requeue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>) {
 /// commit has checked (`Node::committing`), it is marked as `mark_dirty`
 /// marks it.
 pub(crate) fn mark_stale(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
+    if asked_before(eng, n, &wake) {
+        return false;
+    }
     if let Cause::Changed { field, .. } = wake.cause
         && crate::commit::ftrace(eng, field)
     {
@@ -1714,11 +1719,51 @@ pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
     false
 }
 
+/// Whether node `n` was re-asked already for `wake`'s change: the same
+/// field, by the same run of the same node (its commit's walks can reach
+/// one reader twice, through the readers its lock found and a walk on),
+/// while that commit goes on.
+/// The first re-ask stands for both: it came after the commit had
+/// published what it defines, so a run of `n` begun since reads it, one
+/// at work then was told, and one committing then runs again. Asked
+/// again, a reader taken at once by another worker after the first was
+/// committing by the second and ran a third time, on reads that all held
+/// (`moving_breaks_rescan_touched_pages_and_one` at -j4, 1 build in 60:
+/// the page loop's rest four times, mc 80629). Records the re-ask.
+fn asked_before(eng: &Engine, n: &Node, wake: &Wake) -> bool {
+    let (Some(by), Cause::Changed { field, .. } | Cause::Range { field, .. }) = (wake.by, &wake.cause) else {
+        return false;
+    };
+    // (within its commit only: a reader filed while it committed, at a
+    // stop its commit had taken, is asked again after it,
+    // `commit::reask_late_stops`, for a read the first re-ask did not see)
+    let Some(b) = eng.placed_node(by).filter(|b| b.committing.load(Ordering::Acquire)) else {
+        return false;
+    };
+    let key = (by, b.serial.load(Ordering::Acquire), *field);
+    let mut asks = n.asks.lock();
+    if asks.contains(&key) {
+        return true;
+    }
+    // (kept while their commits go on: another node's re-ask between two
+    // of one commit's, the routine's of the page after, left only its own
+    // and the commit's second re-ask went through, 1 build in 160)
+    asks.retain(|&(m, ser, _)| {
+        eng.placed_node(m)
+            .is_some_and(|x| x.committing.load(Ordering::Acquire) && x.serial.load(Ordering::Acquire) == ser)
+    });
+    asks.push(key);
+    false
+}
+
 /// Marks a node dirty for `wake`'s reason and queues it, unless it is
 /// already dirty, inert or gone. A running node becomes `RunningDirty`: its
 /// reads return `Stop` from now, its commit goes through, and it is queued
 /// after. Returns whether it was newly marked.
 pub(crate) fn mark_dirty(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wake) -> bool {
+    if asked_before(eng, n, &wake) {
+        return false;
+    }
     if held_edge(eng, &wake, n) {
         hold_wake(eng, w, n.id, wake);
         return false;
@@ -2157,7 +2202,7 @@ fn hold_for(eng: &Engine, node: &Node) -> Option<NodeId> {
         return Some(x);
     }
     let r = node.run_record()?;
-    crate::read::open_definer_before(eng, node, &r)
+    crate::read::open_definer_before(eng, node, &r).or_else(|| crate::read::derived_target_open(eng, node, &r))
 }
 
 fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
@@ -2529,6 +2574,11 @@ fn end_run(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, done: State) -> b
             // they were listed after that release; settled now, they go on)
             release_waiting(eng, Some(w), node.id);
         }
+        // (a move back of the frontier its wake made, undone when the
+        // layer is not to run again)
+        if to == State::Clean {
+            frontier_restore(eng, Some(w), node);
+        }
         if to == State::Dirty && !defer(eng, &pool.shared, node.id) {
             // (stopped, to run again: another worker may take it at once.
             // A run stopped at a node its own worker has yet to run, taken
@@ -2627,10 +2677,61 @@ fn frontier_back(eng: &Engine, n: &Node, wake: &Wake) {
         {
             Ok(_) => {
                 log_frontier(eng, fr, by.raw() + 1, Some(n.id), "back");
+                let g = eng.frontier_gen.load(Ordering::Acquire);
+                let mut b = n.back_frontier.lock();
+                // (moved back again before it committed: the frontier it
+                // replaced first, if nothing set one since)
+                let from = match *b {
+                    Some((to, from, bg)) if to == fr && bg == g => from,
+                    _ => fr,
+                };
+                *b = Some((by.raw() + 1, from, g));
                 return;
             }
             Err(x) => fr = x,
         }
+    }
+}
+
+/// Undoes, once node `n`'s run has committed, the move back of the frontier its wake
+/// made (`frontier_back`), when nothing has moved the frontier since and
+/// neither `n` nor the layer node that last set it is to run again. The
+/// layer's next run was to set it again; a commit of `n` that re-asks no
+/// node of the layer brings none, and the frontier stayed where `n` put it,
+/// before the page the loop had reached: every reader past it held, the
+/// loop's next step among them, the only work left the later pages'
+/// finishers on their old pages, one wave of them a commit that changed a
+/// counter they pass on (circuitikz, a section added at the start: 4591
+/// finisher runs of 373 finishers at -j1, each run until a quiet point let
+/// the held ones go).
+pub(crate) fn frontier_restore(eng: &Engine, w: Option<&Worker>, n: &Node) {
+    let Some((to, from, g)) = n.back_frontier.lock().take() else {
+        return;
+    };
+    let again = |x: &Node| matches!(x.state(), State::Dirty | State::Running);
+    if again(n) {
+        // (re-asked meanwhile: its next commit decides)
+        *n.back_frontier.lock() = Some((to, from, g));
+        return;
+    }
+    if eng.frontier_gen.load(Ordering::Acquire) != g {
+        return;
+    }
+    let by = eng.frontier_by.load(Ordering::Acquire);
+    if by
+        .checked_sub(1)
+        .and_then(|b| eng.placed_node(NodeId::from_raw(b)))
+        .is_some_and(|x| again(&x))
+    {
+        return;
+    }
+    if eng
+        .frontier
+        .compare_exchange(to, from, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        log_frontier(eng, to, from, Some(n.id), "restore");
+        release_frontier(eng, w);
     }
 }
 
@@ -2891,6 +2992,55 @@ mod frontier_tests {
         assert_eq!(e.frontier.load(Ordering::Acquire), at(b));
         e.evaluate(1).unwrap();
         assert_eq!(e.output(l).and_then(|x| v.as_int(x)), Some(3));
+    }
+
+    /// A wake's move back of the frontier is undone once the node woken
+    /// has committed, nothing having set the frontier since and the layer
+    /// not to run again: back at the fold's end. Two moves back before the
+    /// commit: the first frontier comes back. A frontier set meanwhile, or
+    /// the layer to run again: the move stays, for the layer's run to set.
+    #[test]
+    fn a_move_back_of_the_frontier_is_undone_when_its_node_commits_and_nothing_set_it() {
+        let e = Engine::new();
+        let (piece, layer) = (e.register(Arc::new(Piece)), e.register(Arc::new(Layer)));
+        let v = e.values();
+        let vp = v.field("vp");
+        e.declare_accumulator(vp, Arc::new(SumMonoid));
+        let u = e.new_unit();
+        let a = e.push(u, piece, vec![v.int(1)]);
+        let b = e.push(u, piece, vec![v.int(2)]);
+        let l = e.push(u, layer, vec![]);
+        e.evaluate(1).unwrap();
+        assert_eq!(e.frontier_by.load(Ordering::Acquire), l.raw() + 1, "the layer set it");
+        let ln = e.placed_node(l).unwrap();
+        let range = |by: NodeId| Wake {
+            by: Some(by),
+            cause: Cause::Range { field: vp, by },
+            at_ns: 0,
+        };
+        let at = |n: NodeId| n.raw() + 1;
+        let fr = || e.frontier.load(Ordering::Acquire);
+        super::frontier_back(&e, ln, &range(b));
+        assert_eq!(fr(), at(b));
+        super::frontier_restore(&e, None, ln);
+        assert_eq!(fr(), 0, "undone: the fold's end");
+        super::frontier_back(&e, ln, &range(b));
+        super::frontier_back(&e, ln, &range(a));
+        assert_eq!(fr(), at(a));
+        super::frontier_restore(&e, None, ln);
+        assert_eq!(fr(), 0, "two moves back: the first frontier");
+        super::frontier_back(&e, ln, &range(b));
+        e.frontier_gen.fetch_add(1, Ordering::AcqRel);
+        super::frontier_restore(&e, None, ln);
+        assert_eq!(fr(), at(b), "set meanwhile: stays");
+        e.frontier.store(0, Ordering::Release);
+        super::frontier_back(&e, ln, &range(b));
+        assert!(ln.cas_state(super::State::Clean, super::State::Dirty));
+        super::frontier_restore(&e, None, ln);
+        assert_eq!(fr(), at(b), "the layer to run again: stays");
+        assert!(ln.cas_state(super::State::Dirty, super::State::Clean));
+        super::frontier_restore(&e, None, ln);
+        assert_eq!(fr(), 0, "kept for its next commit");
     }
 
     /// A layer's node queued while the frontier stood at the line's end is
