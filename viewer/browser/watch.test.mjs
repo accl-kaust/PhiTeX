@@ -425,7 +425,7 @@ test("the tab's title says the state; Settings writes the user's file; What's ne
   await sleep(300);
   await t.click("#b-more");
   await t.click("#x-settings");
-  await t.until(`document.querySelector("#settings [data-id='watch-write'] .switch")`, "the settings");
+  await t.until(`!!$("#settings [data-id='watch-write'] .switch")`, "the settings");
   await t.click("#settings [data-id='watch-write'] .switch");
   await t.click("#settings [data-id='follow'] [data-v='selection']");
   await t.click("#settings [data-id='dark-pdf'] [data-v='on']");
@@ -439,7 +439,7 @@ test("the tab's title says the state; Settings writes the user's file; What's ne
   assert.match(written, /dark-pdf = "on"/);
   await t.until(`$(".win").classList.contains("dark-pdf")`, "the dark pages applied");
   // (a project's setting is shown, never set from the page)
-  assert.equal(await t.js(`!!$("#settings [data-id='w-engine'] .val") && !$("#settings [data-id='w-engine'] button, #settings [data-id='w-engine'] select")`), true);
+  await t.until(`!!$("#settings [data-id='w-engine'] .val") && !$("#settings [data-id='w-engine'] button, #settings [data-id='w-engine'] select")`, "the engine shown, not set");
   await w.stop();
   assert.equal(await t.until(`/not connected|Not connected/i.test(document.title) && document.title`, "the title: not connected").then((x) => /not connected/i.test(x)), true);
 });
