@@ -269,10 +269,10 @@ pub(crate) struct Ops {
     /// a membership test of a list macro reads whether the item is in it
     /// ([`Run::clist_has`]).
     pub clist_proj: phitex_defuse::ProjId,
-    /// The set projection of integer lists
-    /// ([`crate::val::int_set_projection`]): a reader of the ratios a
-    /// font has asked for reads which ([`Run::int_set`]).
-    pub int_set_proj: phitex_defuse::ProjId,
+    /// The set projection of lists ([`crate::val::set_projection`]): a
+    /// reader of a list grown by appends reads which elements it holds
+    /// ([`Run::val_set`]).
+    pub set_proj: phitex_defuse::ProjId,
     /// Whether a meaning can be appended to without being read
     /// ([`crate::val::append_projection`], [`Run::append_def`]).
     pub append_proj: phitex_defuse::ProjId,
@@ -4208,12 +4208,13 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(())
     }
 
-    /// The distinct integers of the list field `f` holds where the run
-    /// is, in increasing order: from the run's own binding where it has
-    /// one, else read through the set projection
-    /// ([`crate::val::int_set_projection`]), with the values the run
-    /// appended without reading it. The run depends on the set alone.
-    pub(crate) fn int_set(&mut self, f: Field) -> R<Vec<i64>> {
+    /// The distinct elements of the list field `f` holds where the run
+    /// is, in the order of their ids: from the run's own binding where it
+    /// has one, else read through the set projection
+    /// ([`crate::val::set_projection`]), with the values the run appended
+    /// without reading it ([`Run::append_val`]). The run depends on the
+    /// set alone.
+    pub(crate) fn val_set(&mut self, f: Field) -> R<Vec<ValueId>> {
         let v = self.v;
         let loc = self.loc_of(f);
         self.pic_touch(loc)?;
@@ -4222,26 +4223,46 @@ impl<'c, 'a> Run<'c, 'a> {
             .iter()
             .find(|x| x.0 == loc)
             .map(|x| x.1.clone());
-        let mut es: Vec<i64> = if self.st.load_state(loc) != 0 || self.lazy_pre(loc) {
+        let mut es: Vec<ValueId> = if self.st.load_state(loc) != 0 || self.lazy_pre(loc) {
             self.get_loc(loc)?
-                .map(|x| list_of(v, x).iter().map(|&y| int_of(v, y)).collect())
+                .map(|x| list_of(v, x))
                 .unwrap_or_default()
         } else {
-            let p = phitex_defuse::PathId::of_proj(self.ops.int_set_proj);
+            let p = phitex_defuse::PathId::of_proj(self.ops.set_proj);
             self.cx
                 .read_path(f, p)?
                 .map(|x| {
                     list_of(v, x)
                         .iter()
-                        .map(|&e| list_of(v, e).first().map_or(0, |&y| int_of(v, y)))
+                        .filter_map(|&e| list_of(v, e).first().copied())
                         .collect()
                 })
                 .unwrap_or_default()
         };
-        es.extend(pending.unwrap_or_default().iter().map(|&y| int_of(v, y)));
-        es.sort_unstable();
+        es.extend(pending.unwrap_or_default());
+        es.sort_unstable_by_key(|e| e.raw());
         es.dedup();
         Ok(es)
+    }
+
+    /// [`Run::val_set`] of a list of integers, in increasing order.
+    pub(crate) fn int_set(&mut self, f: Field) -> R<Vec<i64>> {
+        let v = self.v;
+        let mut es: Vec<i64> = self.val_set(f)?.into_iter().map(|x| int_of(v, x)).collect();
+        es.sort_unstable();
+        Ok(es)
+    }
+
+    /// [`Run::val_set`] of the field named `name`.
+    pub(crate) fn val_set_named(&mut self, name: &str) -> R<Vec<ValueId>> {
+        let f = self.ops.fields.get_at(self.v, self.cx.values_epoch(), name);
+        self.val_set(f)
+    }
+
+    /// [`Run::append_val`] to the field named `name`.
+    pub(crate) fn append_val_named(&mut self, name: &str, x: ValueId) -> R<()> {
+        let f = self.ops.fields.get_at(self.v, self.cx.values_epoch(), name);
+        self.append_val(f, x)
     }
 
     /// Value `x` appended to the list field `f` holds, globally, without
