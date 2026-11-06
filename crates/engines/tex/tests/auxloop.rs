@@ -688,9 +688,13 @@ List: \lst.
             }
             let cold = common::build(opts(), Some(&common::plain()), &doc(extra));
             let d = common::first_difference(&b.output().0, &cold.output().0);
-            assert!(d.is_none(), "-j{threads} {extra:?}: edit differs from cold: {d:?}");
             assert!(
-                !r.iter().any(|x| x.starts_with("exec") && x.contains("openin")),
+                d.is_none(),
+                "-j{threads} {extra:?}: edit differs from cold: {d:?}"
+            );
+            assert!(
+                !r.iter()
+                    .any(|x| x.starts_with("exec") && x.contains("openin")),
                 "-j{threads} {extra:?}: the run reading the file back ran again: {r:?}"
             );
         }

@@ -1274,7 +1274,10 @@ fn define_fields(cx: &mut Ctx<'_>, name: &str, ds: &[(String, ValueId)], text: O
         eprintln!(
             "aux-trace: define {name}: {} keys {:?}, text {} bytes:\n{}",
             list_of(v, keys).len(),
-            list_of(v, keys).iter().map(|&x| str_of(v, x)).collect::<Vec<_>>(),
+            list_of(v, keys)
+                .iter()
+                .map(|&x| str_of(v, x))
+                .collect::<Vec<_>>(),
             text.map_or(0, str::len),
             text.unwrap_or("")
         );
@@ -1359,8 +1362,10 @@ pub(crate) fn fold_node(cx: &mut Ctx<'_>, o: &Ops, name: &str) -> Result<ValueId
         eprintln!(
             "aux-trace: fold of {name} at node {}: {}",
             cx.node().raw(),
-            ok.as_ref()
-                .map_or_else(|| "as its text".to_owned(), |ds| format!("{} definitions", ds.len()))
+            ok.as_ref().map_or_else(
+                || "as its text".to_owned(),
+                |ds| format!("{} definitions", ds.len())
+            )
         );
     }
     match ok {

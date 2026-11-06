@@ -2151,10 +2151,11 @@ impl<'c, 'a> Run<'c, 'a> {
         // (a key of a file read back through its child, first touched by
         // this definition: the read-back's definition made first, as
         // inline, the value it replaces kept, [`Run::rb_check`])
-        if self.rb.is_some() && self.interp.is_none() {
-            if let Err(h) = self.rb_check(loc) {
-                self.raise(h);
-            }
+        if self.rb.is_some()
+            && self.interp.is_none()
+            && let Err(h) = self.rb_check(loc)
+        {
+            self.raise(h);
         }
         if self.read_back_done && self.interp.is_none() {
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {

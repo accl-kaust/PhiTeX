@@ -5217,10 +5217,17 @@ mod key_set_tests {
         let a = [d("cs:b", 1), d("cs:a", 2), d("cs:c", 3)];
         let b = [d("cs:c", 3), d("cs:b", 1), d("cs:a", 2)];
         assert_eq!(key_set(&v, "f.aux", &a), key_set(&v, "f.aux", &b));
-        let names = |x: ValueId| -> Vec<String> { list_of(&v, x).iter().map(|&k| str_of(&v, k)).collect() };
-        assert_eq!(names(key_set(&v, "f.aux", &a)), [WRITTEN_KEY, "cs:a", "cs:b", "cs:c"]);
+        let names =
+            |x: ValueId| -> Vec<String> { list_of(&v, x).iter().map(|&k| str_of(&v, k)).collect() };
+        assert_eq!(
+            names(key_set(&v, "f.aux", &a)),
+            [WRITTEN_KEY, "cs:a", "cs:b", "cs:c"]
+        );
         let e = [d("rberr:2", 1), d("cs:a", 2), d("rberr:1", 3)];
-        assert_eq!(names(key_set(&v, "f.aux", &e)), [WRITTEN_KEY, "cs:a", "rberr:2", "rberr:1"]);
+        assert_eq!(
+            names(key_set(&v, "f.aux", &e)),
+            [WRITTEN_KEY, "cs:a", "rberr:2", "rberr:1"]
+        );
     }
 }
 
