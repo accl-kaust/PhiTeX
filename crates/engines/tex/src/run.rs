@@ -4241,6 +4241,16 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         let (_, rest) = self.appending.swap_remove(i);
         self.muts += 1;
+        if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") {
+            let f = self.loc_field(loc);
+            eprintln!(
+                "append-force: node {} {} at {:?}: {}",
+                self.cx.node().raw(),
+                crate::val::field_name(self.v, f),
+                self.cur.tok,
+                self.trace_context().chars().take(600).collect::<String>()
+            );
+        }
         self.load_slow(loc)?;
         let mut body: Vec<Tok> = match self.st.mean_of(loc, self.v) {
             crate::val::Mean::Macro(m) => m.body.to_vec(),
