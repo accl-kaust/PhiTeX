@@ -21,7 +21,7 @@ import { PreviewSession, type CoreEvent, type CoreRes, type CoreTransport, type 
 import { composeLine, search, type Hit, type TextLine } from "../../../viewer/src/text.ts";
 import { Strips, type Frame, type StripSource } from "../../../viewer/src/strips.ts";
 import { DiffControls, LATEXDIFF_LOOK, type DiffRunner } from "../../../viewer/src/compare.ts";
-import type { DiffLook } from "../../../viewer/src/panel.ts";
+import type { DiffLook, SettingRow, SettingsGroup } from "../../../viewer/src/panel.ts";
 import { COMMITS_CSS, Commits, type Commit } from "../../../viewer/src/commits.ts";
 
 
@@ -183,7 +183,13 @@ class Pages implements CoreTransport {
   }
 
   onEvent(cb: (e: CoreEvent) => void): void {
-    this.sock.onEvent(cb);
+    // (the editor's place, as the user's `follow` says: the cursor's
+    // as it moves, its selection, or neither: a double-click's alone)
+    this.sock.onEvent((e) => {
+      if (e.event === "follow" && follow !== "cursor") return;
+      if (e.event === "select" && follow === "dblclick") return;
+      cb(e);
+    });
   }
 }
 
@@ -260,7 +266,13 @@ const panel = new Panel(
     onSyncSource: (k, x, y) => void session.toSource(k, x, y),
     onContents: () => void session.outline(),
     onFind: (q) => pages.find(q),
-    onSettings: () => void openSettings(),
+    // (Settings: the watch's rows, from and into the user's phitex.toml)
+    settings: () => watchSettings(),
+    // (the panel's own choices: the user's phitex.toml too, never this browser's)
+    onPref: async (key, value) => {
+      const r = await sock.request({ op: "prefs", set: { [key]: value } });
+      return r.ok ? undefined : `Not saved: ${r.error ?? "the watch did not answer"}`;
+    },
     // (a problem's source lines, for Copy for an AI assistant)
     onLines: async (file, line) => {
       const r = await sock.request({ op: "info", what: "lines", file, line });
@@ -434,14 +446,7 @@ document.head.append(Object.assign(document.createElement("style"), {
 #phx-pick header small { grid-column: 1 / -1; color: var(--fg2); font-size: 12px; }
 #phx-pick .phx-commits { flex: 1; min-height: 0; }
 #phx-pick header button { grid-row: 1; grid-column: 2; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
-#phx-pick header button:hover { background: var(--hover); }
-#phx-pick.phx-settings { width: min(460px, calc(100vw - 24px)); }
-.phx-settings .rows { overflow: auto; padding: 4px 0; }
-.phx-settings .srow { display: flex; align-items: center; gap: 10px; padding: 8px 12px; cursor: pointer; }
-.phx-settings .srow:hover { background: var(--hover); }
-.phx-settings .srow span { flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.phx-settings .srow small { color: var(--fg2); font-size: 12px; }
-.phx-settings .srow button { border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }`,
+#phx-pick header button:hover { background: var(--hover); }`,
 }));
 let pick: HTMLElement | undefined;
 let graph: Commits | undefined;
@@ -683,44 +688,77 @@ const backlog = async () => {
 };
 // ---- Settings (the user's phitex.toml, through the watch: on every port and document) ----
 
-const SETTINGS: [string, string, string][] = [
-  ["watch-write", "Write the PDF into the folder", "After each build, the PDF with its .synctex.gz, as phitex build does (for a PDF viewer outside this page). From the next phitex watch on."],
-  ["synctex", "SyncTeX file with a written PDF", "JOB.synctex.gz beside the PDF, for a PDF viewer's jumps to the source."],
-  ["update-check", "Say when a newer PhiTeX is out", "Asked once a day, in the terminal."],
-];
-let settingsEl: HTMLElement | undefined;
-async function openSettings(): Promise<void> {
-  if (settingsEl && !settingsEl.hidden) return void (settingsEl.hidden = true);
-  const r = await sock.request({ op: "prefs" });
-  if (!r.ok) return void panel.msg(`Couldn't read the settings: ${r.error ?? "not available"}`, true, true);
-  const p = r.json ?? {};
-  if (!settingsEl) {
-    settingsEl = document.createElement("div");
-    settingsEl.id = "phx-pick";
-    settingsEl.className = "phx-settings";
-    document.body.append(settingsEl);
-    addEventListener("keydown", (e) => e.key === "Escape" && settingsEl && !settingsEl.hidden && ((settingsEl.hidden = true), e.stopImmediatePropagation()), { capture: true });
-  }
-  const el = settingsEl;
-  const esc = (t: string) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
-  el.innerHTML =
-    `<header><b>Settings</b><small>Yours, in ${esc(String(p.file ?? "phitex.toml"))}: every document and port</small><button type="button" data-x>Close</button></header>` +
-    `<div class="rows">${SETTINGS.map(([k, name, what]) => `<label class="srow"><input type="checkbox" data-k="${k}" ${p[k] ? "checked" : ""}><span><b>${esc(name)}</b><small>${esc(what)}</small></span></label>`).join("")}` +
-    `<div class="srow"><span><b>Tips</b><small>The feature tips shown again, from the start</small></span><button type="button" data-tips>Show again</button></div>` +
-    `<div class="srow"><span><b>Problems shown</b><small>Which kinds: the filters at the top of the problems list (e)</small></span></div></div>`;
-  el.hidden = false;
-  (el.querySelector("[data-x]") as HTMLElement).onclick = () => (el.hidden = true);
-  (el.querySelector("[data-tips]") as HTMLElement).onclick = () => {
-    void sock.request({ op: "prefs", set: { "tips-seen": [] } });
-    el.hidden = true;
-    panel.tipsReset();
-  };
-  for (const c of el.querySelectorAll<HTMLInputElement>("input[data-k]"))
-    c.onchange = async () => {
-      const r = await sock.request({ op: "prefs", set: { [c.dataset.k!]: c.checked } });
-      panel.msg(r.ok ? `${c.checked ? "On" : "Off"}: ${c.closest("label")!.querySelector("b")!.textContent}` : `Not saved: ${r.error}`, !r.ok, true);
-      if (!r.ok) c.checked = !c.checked;
-    };
+/** When the page follows the editor's place (`follow`): `cursor`, `selection`, `dblclick`. */
+let follow = "cursor";
+
+/** A setting of the user's phitex.toml set (`prefs`): the watch's error, if any. */
+const setPref = async (k: string, v: unknown): Promise<string | undefined> => {
+  const r = await sock.request({ op: "prefs", set: { [k]: v } });
+  return r.ok ? undefined : (r.error ?? "not saved");
+};
+
+/** The watch's rows of the Settings dialog: the user's file's (set here) and the project's (shown: its phitex.toml's, or the command line's). */
+async function watchSettings(): Promise<SettingsGroup[]> {
+  const [r, info, cache] = await Promise.all([sock.request({ op: "prefs" }), sock.request({ op: "info", what: "settings" }), sock.request({ op: "cache" })]);
+  if (!r.ok) return [{ title: "Preview", rows: [{ id: "prefs", label: "Your settings", kind: "info", value: "", disabled: `Couldn't read them: ${r.error ?? "not available"}` }] }];
+  const p = r.json ?? {}, at = info.ok ? (info.json ?? {}) : {};
+  const file = String(p.file ?? "phitex.toml");
+  const project = "In the project's phitex.toml (or the command line): the page never changes a project's files";
+  const mb = (b: number) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`);
+  const toggle = (id: string, label: string, help: string): SettingRow => ({ id, label, help, kind: "toggle", value: !!p[id], set: (v) => setPref(id, v) });
+  const cores = Number(p.cores ?? 1);
+  return [
+    {
+      title: "Preview",
+      rows: [
+        { id: "w-main", label: "Main file", help: project, kind: "info", value: String(at.main ?? "") },
+        { id: "w-engine", label: "Engine", help: "Set `engine` in the project's phitex.toml (or a `% !TEX program` line)", kind: "info", value: String(at.engine ?? "") },
+        {
+          id: "follow",
+          label: "Highlight follows",
+          help: "Where your editor is, on the page: as the cursor moves, what you select, or a double-click alone",
+          kind: "choice",
+          options: [["cursor", "Cursor"], ["selection", "Selection"], ["dblclick", "Double-click"]],
+          value: String(p.follow ?? "cursor"),
+          set: async (v) => (await setPref("follow", v)) ?? void (follow = String(v)),
+        },
+      ],
+    },
+    {
+      title: "Build",
+      rows: [
+        toggle("watch-write", "Write the PDF into the folder", "After each build, the PDF with its .synctex.gz, as phitex build does. From the next phitex watch on."),
+        toggle("synctex", "SyncTeX file with a written PDF", "JOB.synctex.gz beside the PDF, for a PDF viewer's jumps to the source."),
+        {
+          id: "threads",
+          label: "Threads",
+          help: at.jobs ? `This watch runs with -j ${at.jobs}, over this. After a restart of phitex watch.` : "After a restart of phitex watch. The output is the same at any count.",
+          kind: "select",
+          options: [["0", `One per core (${cores})`], ...Array.from({ length: cores }, (_, i): [string, string] => [String(i + 1), String(i + 1)])],
+          value: String(p.threads ?? 0),
+          set: (v) => setPref("threads", Number(v)),
+        },
+        { id: "w-files", label: "TeX's files", help: "From TeX Live or from Shelf: `files` in your phitex.toml or the project's, or --shelf", kind: "info", value: at.files === "shelf" ? "Shelf" : "TeX Live" },
+      ],
+    },
+    {
+      title: "Packages",
+      rows: [
+        { id: "cache", label: "The cache", help: cache.ok ? `${mb(Number(cache.json?.bytes ?? 0))} in ${cache.json?.dir ?? "its folder"}: packages and formats, fetched again when a build needs them` : "Its size: not available", kind: "action", button: "Clear", set: () => void clearCache() },
+        {
+          id: "cache-limit",
+          label: "Keep at most",
+          help: "Past it, the least recently used go first",
+          kind: "choice",
+          options: [["500MB", "500 MB"], ["1GB", "1 GB"], ["4GB", "4 GB"], ["16GB", "16 GB"]],
+          value: { 5e8: "500MB", 1e9: "1GB", 4e9: "4GB", 16e9: "16GB" }[Number(p["cache-limit"] ?? 4e9)] ?? "",
+          set: (v) => setPref("cache-limit", v),
+        },
+      ],
+    },
+    { title: "Updates and tips", rows: [toggle("update-check", "Say when a newer PhiTeX is out", "Asked once a day, in the terminal.")] },
+    { title: "Where", rows: [{ id: "w-file", label: "Your settings", help: "Every document and port: `phitex config` lists them all", kind: "info", value: file }] },
+  ];
 }
 
 /** The user's viewer preferences, as the watch keeps them (`prefs`). */
@@ -729,6 +767,9 @@ const prefs = async () => {
   if (!r.ok) return;
   panel.tipsSeen(((r.json?.["tips-seen"] ?? []) as string[]).filter((x) => typeof x === "string"));
   panel.problemsHidden(((r.json?.["problems-hidden"] ?? []) as string[]).filter((x) => typeof x === "string"));
+  // (the panel's own choices, as the user's file has them)
+  panel.viewPrefs({ "dark-pdf": r.json?.["dark-pdf"], opening: r.json?.opening, underline: r.json?.underline !== false });
+  follow = String(r.json?.follow ?? "cursor");
 };
 const opened = sock.onOpen;
 sock.onOpen = () => (opened(), void backlog(), void prefs());

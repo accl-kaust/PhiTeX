@@ -3655,3 +3655,64 @@ fn watch_a_folder_it_makes_is_no_change() {
         seen.join("\n")
     );
 }
+
+/// The viewer's settings in the user's file (`phitex config`, as the
+/// Settings dialog's `prefs`): a choice only one of its names, `threads`
+/// read by the build, and a project's `threads` ignored, said.
+#[test]
+fn the_viewers_settings_are_the_users() {
+    let _one = one();
+    let dir = scratch("viewer-settings");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("a home");
+    std::fs::write(dir.join("d.tex"), "Hello.\\bye\n").expect("the document");
+    let phitex = |args: &[&str]| {
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .env("XDG_CONFIG_HOME", &home)
+            .args(args)
+            .output()
+            .expect("phitex runs");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned()
+                + &String::from_utf8_lossy(&out.stdout),
+        )
+    };
+    let user = || std::fs::read_to_string(home.join("phitex/phitex.toml")).unwrap_or_default();
+    for (key, value) in [
+        ("follow", "selection"),
+        ("dark-pdf", "theme"),
+        ("opening", "off"),
+        ("underline", "off"),
+        ("threads", "2"),
+    ] {
+        let (ok, said) = phitex(&["config", key, value]);
+        assert!(ok, "phitex config {key} {value}:\n{said}");
+    }
+    let written = user();
+    for line in [
+        "follow = \"selection\"",
+        "dark-pdf = \"theme\"",
+        "opening = \"off\"",
+        "underline = false",
+        "threads = 2",
+    ] {
+        assert!(written.contains(line), "{line} not written:\n{written}");
+    }
+    // (a name a choice doesn't have: refused, the file as it was)
+    let (ok, said) = phitex(&["config", "follow", "always"]);
+    assert!(
+        !ok && said.contains("cursor, selection, dblclick"),
+        "{said}"
+    );
+    assert_eq!(user(), written);
+    // (the user's threads build; a project's are said and ignored)
+    std::fs::write(dir.join("phitex.toml"), "main = \"d.tex\"\nthreads = 64\n")
+        .expect("the project's settings");
+    let (ok, said) = phitex(&["build", "--engine", "pdftex"]);
+    assert!(ok, "the build:\n{said}");
+    assert!(
+        said.contains("`threads` in a project's phitex.toml is ignored"),
+        "a project's threads not said:\n{said}"
+    );
+}

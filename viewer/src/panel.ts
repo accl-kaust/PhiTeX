@@ -66,7 +66,7 @@ export interface ViewState {
   chipTitle: string;
   /** The last repaint's keystroke→page time, and when it was (for a flourish). */
   speed?: { ms: number; at: number; first?: boolean };
-  sheet: boolean;
+  settings: boolean;
   /** Diagnostics: how many, and the worst severity (or ""). */
   diagCount: number;
   diagWorst: string;
@@ -76,6 +76,37 @@ export interface ViewState {
   status: { text: string; more: string; err: boolean; busy: boolean };
   /** The timing popover's content: the last build's summary, its parts [what, how long], the last message. */
   timing: { summary: string; parts: [string, string][]; message: string };
+}
+
+/** A row of the Settings dialog: the panel's own, or a host's (PanelEvents.settings). */
+export interface SettingRow {
+  id: string;
+  label: string;
+  /** A line under the label: what it does, where it is kept. */
+  help?: string;
+  /** toggle: on or off; choice: a few buttons; select: a list; action: a button (`button` its label); info: `value` shown. */
+  kind: "toggle" | "choice" | "select" | "action" | "info";
+  /** A choice's or a list's values and labels. */
+  options?: [value: string, label: string][];
+  value?: boolean | string;
+  button?: string;
+  /** Why it can't be changed here: shown in its place, the row dimmed. */
+  disabled?: string;
+  /** It set (a toggle's on, a choice's value; an action: nothing): the host's error text if it could not. */
+  set?(v?: boolean | string): Promise<string | void> | string | void;
+}
+
+/** A group of the Settings dialog: its title and its rows. */
+export interface SettingsGroup {
+  title: string;
+  rows: SettingRow[];
+}
+
+/** The panel's own choices, kept by the host (PanelEvents.onPref, Panel.viewPrefs). */
+export interface ViewPrefs {
+  "dark-pdf": DarkPdf;
+  opening: OpeningLook;
+  underline: boolean;
 }
 
 export interface PanelEvents {
@@ -117,8 +148,15 @@ export interface PanelEvents {
   onTour?(): void;
   /** "What's new" (settings). */
   onNews?(): void;
-  /** Settings (the host's own dialog: the watch's, its user settings): absent, not offered. */
-  onSettings?(): void;
+  /** The host's rows of the Settings dialog, by group: after the panel's own in a group of the same title. */
+  settings?(): SettingsGroup[] | Promise<SettingsGroup[]>;
+  /**
+   * One of the panel's own choices (ViewPrefs) changed: the host keeps it
+   * where its other settings are (the watch: the user's phitex.toml), and
+   * says its error if it could not. The panel stores none; the host gives
+   * them back with viewPrefs().
+   */
+  onPref?<K extends keyof ViewPrefs>(key: K, value: ViewPrefs[K]): Promise<string | void> | string | void;
   /** The kinds of problem hidden (the problems' filters), every one: kept by the host (the watch: the user's phitex.toml). */
   onProblemsHidden?(kinds: string[]): void;
   /** A file's lines around `line` (`[number, text]`), for Copy for an AI assistant: absent, the problem's own line alone. */
@@ -434,13 +472,6 @@ export class Panel {
       ${item("x-find", "search", "Find", "Ctrl+F", "narrow")}
       ${item("x-compare", "compare", "Compare…", "", "narrow")}
       <hr>
-      <div class="mi"><span class="icon">dark</span>Dark PDF</div>
-      <div class="radios" id="darkpdf" role="group" aria-label="Dark PDF"><button type="button" data-dark="off">Off</button><button type="button" data-dark="on">On</button><button type="button" data-dark="theme">Match theme</button></div>
-      <div class="mi"><span class="icon">tips</span>Loading animation</div>
-      <div class="radios" id="openlook" role="group" aria-label="Loading animation"><button type="button" data-look="phitex">PhiTeX</button><button type="button" data-look="retro">Windows 98</button><button type="button" data-look="off">Off</button></div>
-      <button type="button" role="menuitemcheckbox" id="x-culprits" aria-checked="true"><span class="check">✓</span><span>Underline problems<span class="desc">A wavy line under what each error and warning is about</span></span></button>
-      <button type="button" role="menuitemcheckbox" id="dbg" aria-checked="false"><span class="check"></span><span>Debug check<span class="desc">Compare with a fresh build every 5 s</span></span></button>
-      <hr>
       ${item("x-settings", "tips", "Settings…")}
       ${item("x-tips", "tips", "What's new")}
       ${item("x-keys", "keyboard", "Keyboard shortcuts", "?")}
@@ -455,12 +486,7 @@ export class Panel {
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
-    <div class="menu sheet-pop" id="sheet" role="dialog" aria-label="PhiTeX settings" hidden>
-      <label>Main file <select id="main" title="The file PhiTeX typesets"></select></label>
-      <label id="dbglabel">Debug check <input type="checkbox" id="dbg2"></label>
-      <div class="links"><button type="button" id="reload">Reload the files</button><button type="button" id="tour">Take the tour</button><button type="button" id="news">What's new</button></div>
-      <pre class="details" id="details"></pre>
-    </div>
+    <div class="dialog settings" id="settings" role="dialog" aria-label="Settings" hidden></div>
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <div class="dialog keys" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
     <div class="dialog small about" id="about" role="dialog" aria-label="About the PhiTeX preview" hidden><header>About PhiTeX<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><div>${w.about}</div></div>
@@ -488,11 +514,6 @@ export class Panel {
     offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
     offer("#b-find, #x-find", !!ev.onFind);
-    offer("#dbg, #dbglabel", !!ev.onDebug);
-    offer("#x-culprits", !!ev.onBoxes);
-    offer("#tour", !!ev.onTour);
-    offer("#news", !!ev.onNews);
-    offer("#x-settings", !!ev.onSettings);
     // (the menus: one open at a time, closed by a click elsewhere or Esc)
     const menus: [string, string][] = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
     this.menus = menus;
@@ -519,7 +540,7 @@ export class Panel {
     // (What's new: the host's news where it has some (the watch: this version's
     // CHANGELOG entry), the new features' tips under it; else the tips)
     this.$("#x-tips").onclick = () => (this.menu(null), ev.onNews ? ev.onNews() : this.tips("fresh"));
-    this.$("#x-settings").onclick = () => (this.menu(null), ev.onSettings?.());
+    this.$("#x-settings").onclick = () => (this.menu(null), void this.settings(true));
     this.$("#x-keys").onclick = () => {
       this.menu(null);
       this.$("#keyhelp").hidden = false;
@@ -533,15 +554,6 @@ export class Panel {
       const z = (e.target as HTMLElement).closest<HTMLElement>("[data-zoom]")?.dataset.zoom;
       if (z) (this.menu(null), this.zoomTo(z));
     };
-    this.$("#darkpdf").onclick = (e) => {
-      const d = (e.target as HTMLElement).closest<HTMLElement>("[data-dark]")?.dataset.dark;
-      if (d) this.darkPdf(d as DarkPdf);
-    };
-    this.$("#openlook").onclick = (e) => {
-      const l = (e.target as HTMLElement).closest<HTMLElement>("[data-look]")?.dataset.look;
-      if (l) this.openingLook(l as OpeningLook);
-    };
-    this.openingLook(this.openingLook());
     this.$("#logsx").onclick = () => this.diagnostics(false);
     const pg = this.$<HTMLInputElement>("#pgin");
     pg.onfocus = () => pg.select();
@@ -552,29 +564,12 @@ export class Panel {
       pg.blur();
     };
     pg.onblur = () => this.nav();
-    this.$("#dbg").onclick = () => this.toggleDebug();
-    this.$("#x-culprits").onclick = () => this.culpritsShown(!this.culpritsOn);
-    try {
-      this.culpritsOn = localStorage.getItem("phitex.culprits") !== "0";
-    } catch {
-      /* (shown) */
-    }
-    this.culpritsShown(this.culpritsOn, false);
     this.$("#stage").addEventListener("pointermove", (e) => this.culpritAt(e), { passive: true });
     this.$("#stage").addEventListener("pointerleave", () => (this.$("#ctip").hidden = true));
-    this.$("#dbg2").onchange = () => this.toggleDebug();
-    this.$("#reload").onclick = () => (this.sheet(false), ev.onReload());
     const license = this.$("#license") as HTMLAnchorElement | null;
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
-    this.$("#news").onclick = () => {
-      this.sheet(false);
-      ev.onNews?.();
-    };
-    this.$("#tour").onclick = () => {
-      this.sheet(false);
-      ev.onTour?.();
-    };
-    this.$<HTMLSelectElement>("#main").onchange = (e) => ev.onMain((e.target as HTMLSelectElement).value);
+    this.$("#settings").onclick = (e) => void this.settingClicked(e);
+    this.$("#settings").onchange = (e) => void this.settingClicked(e);
     this.$("#min").onclick = () => this.collapse(!this.prefs.collapsed);
     this.$("#diags").onclick = (e) => {
       // (a problem's Copy for an AI assistant)
@@ -596,7 +591,7 @@ export class Panel {
     this.$("#stage").addEventListener("pointerdown", () => {
       this.menu(null);
       this.diagnostics(false);
-      this.sheet(false);
+      this.settings(false);
       this.$("#about").hidden = true;
     });
     this.root.addEventListener("keydown", (e) => {
@@ -632,7 +627,7 @@ export class Panel {
       link: ev.onLink ? (u) => ev.onLink!(u) : undefined,
     });
     this.extras(opts);
-    this.darkPdf(this.darkPref(), false);
+    this.darkPdf("off");
     // (keep it on screen when the window shrinks)
     window.addEventListener("resize", () => this.place());
     // (the stage's size as last laid out, for scale(): read when it changes,
@@ -1108,20 +1103,10 @@ export class Panel {
     });
   }
 
-  /** The underlines on or off (`keep`: remembered). */
-  private culpritsShown(on: boolean, keep = true): void {
+  /** The underlines on or off. */
+  private culpritsShown(on: boolean): void {
     this.culpritsOn = on;
-    const b = this.$("#x-culprits");
-    b.setAttribute("aria-checked", String(on));
-    b.querySelector(".check")!.textContent = on ? "✓" : "";
-    if (keep) {
-      try {
-        localStorage.setItem("phitex.culprits", on ? "1" : "0");
-      } catch {
-        /* (not remembered) */
-      }
-      void this.underline(this.culpritDiags);
-    }
+    void this.underline(this.culpritDiags);
   }
 
   /** The pages' origins came after the problems did: their underlines looked up again (the memo held an answer with no pages). */
@@ -1436,7 +1421,7 @@ export class Panel {
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
     this.fitSheet();
     const dark = this.win.classList.contains("dark-pdf") || (this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark"));
-    const sheet = el.querySelector<HTMLElement>(".sheet")!, look = this.openingLook();
+    const sheet = el.querySelector<HTMLElement>(".sheet")!, look = this.look;
     this.anim = look === "off" ? still() : look === "retro" ? retro(sheet) : opening(sheet, dark ? "#e4e6ea" : "#1d3e72", dark ? "#2c2e33" : "#ffffff");
     this.animSince = performance.now();
   }
@@ -1627,7 +1612,7 @@ export class Panel {
       chip: this.chip.text,
       chipTitle: this.chip.title,
       speed: this.speed,
-      sheet: !this.$("#sheet").hidden,
+      settings: !this.$("#settings").hidden,
       // (the badge counts what needs a look: info is listed, not counted)
       diagCount: this.lastStatus?.diagnostics?.filter((d) => d.severity !== "info").length ?? 0,
       diagWorst: this.lastStatus?.diagnostics?.[0]?.severity ?? "",
@@ -2080,9 +2065,6 @@ export class Panel {
 
   toggleDebug(): void {
     this.debugOn = !this.debugOn;
-    this.$("#dbg").setAttribute("aria-checked", String(this.debugOn));
-    this.$("#dbg").querySelector(".check")!.textContent = this.debugOn ? "✓" : "";
-    this.$<HTMLInputElement>("#dbg2").checked = this.debugOn;
     this.ev.onDebug?.(this.debugOn);
     this.msg(this.debugOn ? "Debug check on" : "Debug check off", false, true);
     this.emit();
@@ -2103,10 +2085,124 @@ export class Panel {
     this.menu("#m-time");
   }
 
-  /** The settings (docked under a host's toolbar: the main file, the debug check, reload, the latency's details). */
-  sheet(on = this.$("#sheet").hidden): void {
-    this.$("#sheet").hidden = !(on && !!this.docked);
+  // ---- Settings: the panel's own rows and the host's, one dialog in every host ----
+
+  /** The rows drawn (by data-id): what a click or a change sets. */
+  private settingRows = new Map<string, SettingRow>();
+
+  /** The Settings dialog shown (drawn anew: the host's values as they are now) or hidden. */
+  async settings(on = this.$("#settings").hidden): Promise<void> {
+    const el = this.$("#settings");
+    if (!on) {
+      if (!el.hidden) (el.hidden = true), this.emit();
+      return;
+    }
+    const groups: SettingsGroup[] = this.ownSettings();
+    for (const g of (await this.ev.settings?.()) ?? []) {
+      const same = groups.find((x) => x.title === g.title);
+      if (same) same.rows.push(...g.rows);
+      else groups.push({ title: g.title, rows: [...g.rows] });
+    }
+    this.settingRows.clear();
+    el.innerHTML = `<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><div class="sbody"></div>`;
+    const body = el.querySelector(".sbody")!;
+    for (const g of groups.filter((g) => g.rows.length)) {
+      const sec = document.createElement("section");
+      sec.innerHTML = `<h3></h3>`;
+      sec.querySelector("h3")!.textContent = g.title;
+      for (const r of g.rows) sec.append(this.settingRow(r));
+      body.append(sec);
+    }
+    el.hidden = false;
     this.emit();
+  }
+
+  /** One row: its label and help, its control, a line for the host's error. */
+  private settingRow(r: SettingRow): HTMLElement {
+    this.settingRows.set(r.id, r);
+    const row = document.createElement("div");
+    row.className = `srow ${r.kind}${r.disabled ? " off" : ""}`;
+    row.dataset.id = r.id;
+    row.innerHTML = `<div class="lab"><b></b><small></small></div><div class="ctl"></div><div class="err" hidden></div>`;
+    row.querySelector("b")!.textContent = r.label;
+    row.querySelector("small")!.textContent = r.disabled ?? r.help ?? "";
+    const ctl = row.querySelector(".ctl")!;
+    const dis = r.disabled || !r.set ? " disabled" : "";
+    if (r.kind === "toggle") ctl.innerHTML = `<button type="button" role="switch" class="switch" aria-checked="${r.value === true}" aria-label="${esc(r.label)}"${dis}><i></i></button>`;
+    else if (r.kind === "choice")
+      ctl.innerHTML = `<div class="radios" role="group" aria-label="${esc(r.label)}">${(r.options ?? []).map(([v, l]) => `<button type="button" data-v="${esc(v)}" aria-pressed="${r.value === v}"${dis}>${esc(l)}</button>`).join("")}</div>`;
+    else if (r.kind === "select") {
+      const s = document.createElement("select");
+      s.setAttribute("aria-label", r.label);
+      s.disabled = !!dis;
+      for (const [v, l] of r.options ?? []) s.append(new Option(l, v, v === r.value, v === r.value));
+      ctl.append(s);
+    } else if (r.kind === "action") ctl.innerHTML = `<button type="button" class="btn"${dis}>${esc(r.button ?? r.label)}</button>`;
+    else ctl.innerHTML = `<span class="val"></span>`, (ctl.querySelector(".val")!.textContent = String(r.value ?? ""));
+    return row;
+  }
+
+  /** A row's control used: its new value to the row's set, its error (if any) under it. */
+  private async settingClicked(e: Event): Promise<void> {
+    const t = e.target as HTMLElement;
+    const row = t.closest<HTMLElement>(".srow");
+    const r = row && this.settingRows.get(row.dataset.id!);
+    if (!row || !r?.set || r.disabled) return;
+    let v: boolean | string | undefined;
+    if (r.kind === "toggle" && e.type === "click" && t.closest(".switch")) v = r.value !== true;
+    else if (r.kind === "choice" && e.type === "click") v = t.closest<HTMLElement>("[data-v]")?.dataset.v;
+    else if (r.kind === "select" && e.type === "change") v = (t as HTMLSelectElement).value;
+    else if (r.kind === "action" && e.type === "click" && t.closest(".btn")) v = undefined;
+    else return;
+    if (r.kind !== "action" && (v === undefined || v === r.value)) return;
+    const err = row.querySelector<HTMLElement>(".err")!;
+    const why = await r.set(v);
+    err.hidden = !why;
+    err.textContent = why || "";
+    if (why) return;
+    r.value = v;
+    if (r.kind === "toggle") row.querySelector(".switch")!.setAttribute("aria-checked", String(v === true));
+    if (r.kind === "choice") row.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+  }
+
+  /** The panel's own rows: the pages' look, the main file, the debug check, the tips. */
+  private ownSettings(): SettingsGroup[] {
+    const ev = this.ev;
+    // (a choice of the panel's: applied here, kept by the host)
+    const pref = <K extends keyof ViewPrefs>(k: K, apply: (v: ViewPrefs[K]) => void) => async (v?: boolean | string) => {
+      const why = await ev.onPref?.(k, v as ViewPrefs[K]);
+      if (!why) apply(v as ViewPrefs[K]);
+      return why;
+    };
+    const keep = ev.onPref ? undefined : "This host doesn't keep it";
+    const preview: SettingRow[] = [];
+    if (this.mainFiles.names.length)
+      preview.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
+    preview.push(
+      { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
+      { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset", kind: "choice", options: [["phitex", "PhiTeX"], ["retro", "Windows 98"], ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => (this.look = l)) },
+    );
+    if (ev.onBoxes) preview.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
+    preview.push({ id: "problems", label: "Problems shown", help: "Which kinds: the filters at the top of the problems list", kind: "info", value: this.hiddenKinds.size ? `${this.hiddenKinds.size} kind${this.hiddenKinds.size === 1 ? "" : "s"} hidden` : "All" });
+    const build: SettingRow[] = [];
+    if (ev.onDebug) build.push({ id: "debug", label: "Debug check", help: "Compare with a fresh build every 5 s (this session only)", kind: "toggle", value: this.debugOn, set: () => this.toggleDebug() });
+    build.push({ id: "reload", label: "Reload the files", help: "Read the project's files again", kind: "action", button: "Reload", set: () => (this.settings(false), void ev.onReload()) });
+    const tips: SettingRow[] = [{ id: "tips", label: "Feature tips", help: "Shown again, from the start", kind: "action", button: "Show again", set: () => (this.tipsReset(), this.settings(false)) }];
+    if (ev.onTour) tips.push({ id: "tour", label: "The tour", kind: "action", button: "Take the tour", set: () => (this.settings(false), ev.onTour!()) });
+    if (ev.onNews) tips.push({ id: "news", label: "What's new", kind: "action", button: "Show", set: () => (this.settings(false), ev.onNews!()) });
+    return [
+      { title: "Preview", rows: preview },
+      { title: "Build", rows: build },
+      { title: "Packages", rows: [] },
+      { title: "Updates and tips", rows: tips },
+    ];
+  }
+
+  /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
+  viewPrefs(p: Partial<ViewPrefs>): void {
+    if (p["dark-pdf"]) this.darkPdf(p["dark-pdf"]);
+    if (p.opening) this.look = p.opening;
+    if (p.underline !== undefined && p.underline !== this.culpritsOn) this.culpritsShown(p.underline);
   }
 
   /** Repaints so far: the first is the first build's. */
@@ -2131,45 +2227,18 @@ export class Panel {
 
   // ---- Dark PDF: the user's choice, Off by default (a static filter: it inverts figures too) ----
 
-  private darkPref(): DarkPdf {
-    try {
-      const d = localStorage.getItem("phitex.darkpdf");
-      return d === "on" || d === "theme" ? d : "off";
-    } catch {
-      return "off";
-    }
-  }
-
   private dark: DarkPdf = "off";
   private darkQuery = matchMedia("(prefers-color-scheme: dark)");
 
-  /** Dark pages off, on, or as the host's theme is; remembered on this machine. */
-  darkPdf(d: DarkPdf, save = true): void {
+  /** Dark pages off, on, or as the host's theme is (the host keeps the choice: viewPrefs). */
+  darkPdf(d: DarkPdf): void {
     this.dark = d;
-    if (save)
-      try {
-        localStorage.setItem("phitex.darkpdf", d);
-      } catch {
-        /* (not kept) */
-      }
-    this.root.querySelectorAll<HTMLElement>("#darkpdf [data-dark]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.dark === d)));
     this.darkQuery.onchange = () => this.applyDark();
     this.applyDark();
   }
 
-  /** The loading animation chosen (`set`: chosen now, kept in this browser), as it is. */
-  private openingLook(set?: OpeningLook): OpeningLook {
-    let l: OpeningLook = "phitex";
-    try {
-      if (set) localStorage.setItem("phitex.opening", set);
-      const v = localStorage.getItem("phitex.opening");
-      if (v === "retro" || v === "off") l = v;
-    } catch {
-      l = set ?? "phitex";
-    }
-    this.root.querySelectorAll<HTMLElement>("#openlook [data-look]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.look === l)));
-    return l;
-  }
+  /** The loading animation (the host keeps the choice: viewPrefs). */
+  private look: OpeningLook = "phitex";
 
   /** The host page's own theme (theme()): undefined, never said. */
   private pageTheme: "dark" | "light" | null | undefined = undefined;
@@ -2424,7 +2493,6 @@ export class Panel {
 
   latency(summary: string, details?: string): void {
     this.lat = { summary, details: details ?? this.lat?.details };
-    this.$("#details").textContent = details ?? summary;
     if (!this.$("#m-time").hidden) this.timing();
   }
 
@@ -2552,11 +2620,12 @@ export class Panel {
     this.msg(`${names.length} file${names.length === 1 ? "" : "s"} · ${took} · all local`);
   }
 
+  /** The main files to pick from (Settings' Main file), and the one built. */
   mains(names: string[], main: string | null): void {
-    const s = this.$<HTMLSelectElement>("#main");
-    s.innerHTML = "";
-    for (const n of names) s.append(new Option(n, n, n === main, n === main));
+    this.mainFiles = { names, main };
+    if (!this.$("#settings").hidden) void this.settings(true);
   }
+  private mainFiles: { names: string[]; main: string | null } = { names: [], main: null };
 
   /** What's new (the host's news, `text` as plain lines), in a dialog over the pages, with the new features' tips a click away. */
   news(version: string, text: string): void {
@@ -2687,13 +2756,13 @@ export class Panel {
   }
 }
 
-type DarkPdf = "off" | "on" | "theme";
+export type DarkPdf = "off" | "on" | "theme";
 
 /** The packages a first build downloaded, said under its step ("" when all were kept on this machine: none to count). */
 const downloaded = (n: number, bytes?: number) => (n ? `${n} package${n === 1 ? "" : "s"} downloaded${mb(bytes)}` : "");
 
 /** The loading animation: PhiTeX's opening, a Windows 98 setup dialog, or none. */
-type OpeningLook = "phitex" | "retro" | "off";
+export type OpeningLook = "phitex" | "retro" | "off";
 
 /** A long detail (an engine's dump) folded under `label`, opened on a click. */
 function foldedDetail(text: string, label: string): HTMLElement {

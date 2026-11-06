@@ -421,16 +421,25 @@ test("the tab's title says the state; Settings writes the user's file; What's ne
   await t.click("#x-tips");
   await t.until(`!$("#logview").hidden && /What's new in/.test($("#logview").innerText) && $("#logtext").textContent.trim().length > 0`, "the news");
   await t.key("Escape", "Escape", 27);
-  // (Settings: a switch written to the user's phitex.toml)
+  // (Settings: the watch's switch, a choice and the panel's own, all written to the user's phitex.toml)
   await sleep(300);
   await t.click("#b-more");
   await t.click("#x-settings");
-  await t.until(`document.querySelector(".phx-settings input[data-k='watch-write']")`, "the settings");
-  await t.click(".phx-settings input[data-k='watch-write']");
+  await t.until(`document.querySelector("#settings [data-id='watch-write'] .switch")`, "the settings");
+  await t.click("#settings [data-id='watch-write'] .switch");
+  await t.click("#settings [data-id='follow'] [data-v='selection']");
+  await t.click("#settings [data-id='dark-pdf'] [data-v='on']");
   const end = Date.now() + 5000;
   const toml = join(fresh, ".config", "phitex", "phitex.toml");
-  while (!(existsSync(toml) && /watch-write = true/.test(readFileSync(toml, "utf8"))) && Date.now() < end) await sleep(50);
-  assert.match(readFileSync(toml, "utf8"), /watch-write = true/);
+  const all = (x) => /watch-write = true/.test(x) && /follow = "selection"/.test(x) && /dark-pdf = "on"/.test(x);
+  while (!(existsSync(toml) && all(readFileSync(toml, "utf8"))) && Date.now() < end) await sleep(50);
+  const written = readFileSync(toml, "utf8");
+  assert.match(written, /watch-write = true/);
+  assert.match(written, /follow = "selection"/);
+  assert.match(written, /dark-pdf = "on"/);
+  await t.until(`$(".win").classList.contains("dark-pdf")`, "the dark pages applied");
+  // (a project's setting is shown, never set from the page)
+  assert.equal(await t.js(`!!$("#settings [data-id='w-engine'] .val") && !$("#settings [data-id='w-engine'] button, #settings [data-id='w-engine'] select")`), true);
   await w.stop();
   assert.equal(await t.until(`/not connected|Not connected/i.test(document.title) && document.title`, "the title: not connected").then((x) => /not connected/i.test(x)), true);
 });

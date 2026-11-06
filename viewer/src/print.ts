@@ -510,13 +510,31 @@ header:active { cursor: grabbing; }
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .byline:hover { color: var(--ph-fg); }
 .win.docked:not(.own-header) .byline { display: block; }
-/* Overleaf's own settings, docked: the main file, the debug check, the latency's details */
-.sheet-pop { right: 8px; top: 6px; width: min(340px, calc(100% - 16px)); padding: 12px; display: grid; gap: 8px; }
-.sheet-pop label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.sheet-pop select { font: inherit; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 2px 4px; max-width: 180px; }
-.sheet-pop .links { display: flex; flex-wrap: wrap; gap: 12px; }
-.sheet-pop .links button { all: unset; cursor: pointer; color: var(--ph-link); }
-.details { margin: 0; font: 11px/1.4 ui-monospace, monospace; color: var(--ph-fg2); white-space: pre-wrap; }
+/* Settings: the panel's own rows and the host's, one dialog in every host */
+.settings { inset: 12px; max-width: 560px; margin: 0 auto; padding: 0; gap: 0; overflow: hidden; }
+.settings > header { padding: 12px 14px 10px; border-bottom: 1px solid var(--ph-border); }
+.settings .sbody { overflow: auto; padding: 4px 0 10px; }
+.settings h3 { margin: 12px 14px 4px; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ph-fg2); }
+.settings .srow { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 12px; padding: 7px 14px; }
+.settings .srow + .srow { border-top: 1px solid var(--ph-border); }
+.settings .srow .lab { display: grid; gap: 1px; min-width: 0; }
+.settings .srow .lab b { font-weight: 600; }
+.settings .srow .lab small { font-size: 12px; color: var(--ph-fg2); }
+.settings .srow.off .lab b, .settings .srow.off .ctl { opacity: .55; }
+.settings .srow .err { grid-column: 1 / -1; font-size: 12px; color: var(--ph-danger); }
+.settings .srow .val { color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
+.settings select { font: inherit; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 2px 4px; max-width: 220px; }
+.settings .radios { display: inline-flex; border: 1px solid var(--ph-border); border-radius: var(--ph-pill); overflow: hidden; }
+.settings .radios button { all: unset; cursor: pointer; padding: 2px 10px; font-size: 12px; }
+.settings .radios button + button { border-left: 1px solid var(--ph-border); }
+.settings .radios button[aria-pressed="true"] { background: var(--ph-accent); color: var(--ph-on-accent, #fff); }
+.settings .radios button:disabled { cursor: default; }
+.settings .switch { all: unset; cursor: pointer; position: relative; width: 30px; height: 18px; border-radius: 9px; background: var(--ph-border); transition: background .12s; }
+.settings .switch i { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 25%); transition: left .12s; }
+.settings .switch[aria-checked="true"] { background: var(--ph-accent); }
+.settings .switch[aria-checked="true"] i { left: 14px; }
+.settings .switch:disabled { cursor: default; }
+.settings .switch:focus-visible, .settings .radios button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
 
 /* docked: the panel fills the host's pane under its toolbar */
 .win.docked { position: relative; left: auto !important; top: auto !important; width: 100% !important; height: 100% !important; max-width: none; max-height: none;
