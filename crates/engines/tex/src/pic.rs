@@ -832,6 +832,16 @@ impl Run<'_, '_> {
             return Ok(false);
         }
         let since = usize::try_from(int_of(v, since)).unwrap_or(0);
+        if trace() {
+            eprintln!(
+                "pic: child {} looks before its list at {:?} cmd {} chr {}: takes the parent's {} items",
+                self.cx.node().raw(),
+                self.cur.tok,
+                self.cur.cmd,
+                self.cur.chr,
+                items.len()
+            );
+        }
         if let Some(l) = self.level_of(lid) {
             let mut all = crate::nest::of_values(items);
             all.append(&mut l.list);
