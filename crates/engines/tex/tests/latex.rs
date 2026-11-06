@@ -3103,3 +3103,71 @@ fn latex_examples_do_not_run_again_on_a_renamed_anchor() {
         }
     }
 }
+
+/// An alignment's cells that set a switch locally (`\@tempswafalse`,
+/// `\let\if@tempswa\iffalse`: xcolor in every tikz-cd matrix cell) do not
+/// run again when an edit before them leaves the switch the other way:
+/// the name `\let` defines is read for its class alone, all an
+/// alignment's `get_next` looks at (§342), not its meaning (tikz-cd's
+/// cite edit: 14 matrices ran again on `cs:if@tempswa`, 1.07 s of
+/// 1.7 s, accl 25714). Every edited PDF equals a cold build's.
+#[test]
+fn alignment_cells_setting_a_switch_do_not_read_it() {
+    use std::fmt::Write as _;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-align-switch");
+    let _ = std::fs::create_dir_all(&dir);
+    let doc = |on: bool| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\makeatletter\n\
+             \\newcommand\\setsw[1]{\\if#1y\\global\\@tempswatrue\\else\\global\\@tempswafalse\\fi}\n\
+             \\newcommand\\cellsw{\\@tempswafalse}\n\\makeatother\n\\begin{document}\n",
+        );
+        let _ = write!(
+            s,
+            "First paragraph, its switch \\setsw{{{}}} set.\n\n",
+            if on { "y" } else { "n" }
+        );
+        for k in 0..4 {
+            let _ = write!(
+                s,
+                "Text before table {k}.\n\n\\begin{{tabular}}{{ll}}\n\\cellsw a{k} & \\cellsw b{k}\\\\\n\\cellsw c{k} & d{k}\\\\\n\\end{{tabular}}\n\nText after table {k}.\n\n"
+            );
+        }
+        s.push_str("\\end{document}\n");
+        s
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("alignsw", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(false));
+        for on in [true, false] {
+            b.edit(&doc(on));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!(
+                    "  -j{threads} on {on}: rerun {}",
+                    x.chars().take(200).collect::<String>()
+                );
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(on));
+            let d = common::first_difference(&b.output().0, &cold.output().0);
+            assert!(
+                d.is_none(),
+                "-j{threads} on {on}: edit differs from cold: {d:?}"
+            );
+            let bad: Vec<&String> = r.iter().filter(|x| x.contains("if@tempswa")).collect();
+            assert!(
+                bad.is_empty(),
+                "-j{threads} on {on}: runs again on the switch the cells set: {bad:?}"
+            );
+        }
+    }
+}
