@@ -1,7 +1,7 @@
 #!/bin/bash
 # The formats a release publishes (release.py --formats), each taken by a
 # build on a fresh cache: for each format in release.json's `formats`, a
-# document of its engine (scripts/check.sh's, `% engine: X`) built by
+# document of its engine that scripts/check.sh built (`% engine: X`) built by
 # PhiTeX (BIN, the engine identity the formats were made by) with --shelf
 # from the release served on the loopback, its cache empty. The build
 # must take the published format, not make it: the format kept in the
@@ -24,7 +24,11 @@ fails=0 n=0
 names=$(python3 -c "import json,sys;print('\n'.join(json.load(open(sys.argv[1])).get('formats') or {}))" "$rel/$label/release.json")
 for name in $names; do
   engine=${name%%-*}
-  doc=$(cd "$w/docs" && for d in *.tex; do e=$(sed -n 's/^% engine: \([a-z]*\).*/\1/p' "$d" | head -1); [ "${e:-xelatex}" = "$engine" ] && { echo "$d"; break; }; done)
+  # (a document check.sh built, with a PDF: the one the format made made)
+  doc=$(cd "$w/docs" && for d in *.tex; do
+    e=$(sed -n 's/^% engine: \([a-z]*\).*/\1/p' "$d" | head -1)
+    [ "${e:-xelatex}" = "$engine" ] && [ -s "$w/runs/s-${d%.tex}/${d%.tex}.pdf" ] && { echo "$d"; break; }
+  done)
   if [ -z "$doc" ]; then
     echo "format $name: no document of $engine" | tee -a "$out/summary.txt"
     fails=$((fails + 1))
