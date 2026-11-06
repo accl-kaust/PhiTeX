@@ -9355,13 +9355,15 @@ fn job_env(
     // (the format's bindings the environment's base: each made when a
     // run first reads it, a value two bindings share made once; one no
     // run reads is never made, nor its name)
-    {
+    let base: EnvBase = {
         let (fmt, made) = (Arc::clone(env), Arc::clone(made));
         let base: EnvBase = Arc::new(move |v, f| fmt.get_field(v, f, &made));
         g.env_base = Some(Arc::clone(&base));
+        let b = Arc::clone(&base);
         g.eng
-            .set_env_provider(Box::new(move |v, f| base(v, f).map(Some)));
-    }
+            .set_env_provider(Box::new(move |v, f| b(v, f).map(Some)));
+        base
+    };
     let v = g.eng.values();
     let mut sets = vec![
         (v.field("jobname"), v.str(&opts.jobname)),
@@ -9373,6 +9375,19 @@ fn job_env(
             v.str(&phitex_pdf::pdf_date(opts.epoch.unwrap_or(0))),
         ),
     ];
+    // (TeX's `\parshape` starts empty, `par_shape_ptr = null` (§232), and
+    // `normal_paragraph` (§1070) empties it again, defining it inside the
+    // group a list set it in: its empty list is the job's start value
+    // too, not the format's absence of one. Unbound at the start, a
+    // reader the scopes moved between such a definition and the start
+    // saw another answer for the same shape and ran again: 560 000 of
+    // the 774 000 re-asks in the first 300 s of biblatex's manual at -j4
+    // were readers of `\parshape` moved between "unset" and "empty",
+    // mc 80695)
+    let shape = v.field("parshape");
+    if base(v, shape).is_none() {
+        sets.push((shape, v.list(Vec::new())));
+    }
     if let Some(t) = &opts.tcx
         && opts.xetex.is_none()
     {

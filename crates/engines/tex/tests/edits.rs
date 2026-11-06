@@ -1798,3 +1798,44 @@ fn a_second_pass_goes_on_from_the_first_pass_checkpoint() {
         b.stats.resumed_at_mark
     );
 }
+
+/// TeX's `\parshape` starts empty (§232) and a paragraph's end empties it
+/// again inside the group it was set in (§1070): the job starts with the
+/// empty list bound, so "empty" and "never set" are one value. An edit
+/// that sets it empty before 40 paragraphs (`\parshape=0`) gives none of
+/// them another `\parshape`, and none runs again (bound to nothing, each
+/// read "unset" against "empty" and ran again, as the readers a list's
+/// reset reaches or not as the scopes around them move: 560 000 of the
+/// 774 000 re-asks of biblatex's manual's first 300 s at -j4, mc 80695).
+/// The edited text equals a cold build of it.
+#[test]
+fn a_parshape_emptied_is_its_start_value() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("parshape-reset");
+    let _ = std::fs::create_dir_all(&dir);
+    let prelude = common::plain();
+    let mut doc = String::from("Shaped.\n\n");
+    for k in 0..40 {
+        doc += &["Paragraph ", &k.to_string(), ".\n\n"].concat();
+    }
+    doc.push_str("\\end\n");
+    let opts = || phitex_tex::Options {
+        threads: Some(1),
+        ..common::options("./main.tex", "main", "", &dir)
+    };
+    let mut b = common::build(opts(), Some(&prelude), &doc);
+    let text = doc.replacen("Shaped.", "\\parshape=0 Shaped.", 1);
+    b.edit(&text);
+    let (run, by_op) = (b.stats.nodes_run, b.stats.runs_by_op.clone());
+    eprintln!("parshape edit: {run} nodes run, by op {by_op:?}");
+    let cold = common::build(opts(), Some(&prelude), &text);
+    assert_eq!(b.output().0, cold.output().0, "edit differs from cold");
+    let text_runs: u64 = by_op
+        .iter()
+        .filter(|x| x.0 == "exec" || x.0 == "resume")
+        .map(|x| x.1)
+        .sum();
+    assert!(
+        text_runs < 5,
+        "{text_runs} text runs after the edit (40 paragraphs after it): {by_op:?}"
+    );
+}
