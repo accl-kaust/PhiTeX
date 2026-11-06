@@ -5,12 +5,13 @@ drop the packs no kept release needs.
 
     python3 release.py [LABEL] [--releases DIR] [--min-extension X.Y.Z]
                        [--notice TEXT]
+    python3 release.py [LABEL] [--releases DIR] --formats DIR
 
 From build/<LABEL>/ (build.py's: packs/, index.tsv, meta.json) into
 <DIR>/<LABEL>/ (default releases-v1/, git-ignored, kept between builds):
 
     <DIR>/<LABEL>/h/<pack>-<hash>.pack     every kept pack, named by its content
-    <DIR>/<LABEL>/index-<release>.tsv.gz   path <TAB> pack <TAB> deps... (released pack names)
+    <DIR>/<LABEL>/index-<release>.tsv.gz   path <TAB> pack <TAB> deps... <TAB> sum (released pack names)
     <DIR>/<LABEL>/packs-<release>.tsv.gz   pack <TAB> sha256 <TAB> bytes: every pack of the release
     <DIR>/<LABEL>/release-<release>.json   that release's release.json, kept
     <DIR>/<LABEL>/release.json             the current release, below
@@ -36,6 +37,16 @@ counted from 1 at PhiTeX's alpha (the development formats before it, 1 to
 4, were never released): the index by texmf path, a dependency column per
 engine named in `deps`, `search` the engines' search orders per kpathsea
 format (build.py's module doc), and the pack table, `pack_table`.
+`file_sums` ("sha256-48"): each index row ends, after the dependency
+columns, with the first 12 hex digits of the SHA-256 of the file's bytes:
+the file's content key, by which a format made on one release holds on
+the next unless a file it read changed (build.py's module doc).
+`formats` (added by --formats): the formats the release publishes, each a
+session's store name (`pdflatex-<engine identity>-<ini hash>`, as
+phitex-live names it) to the released pack holding it (one file,
+`format`: the engine's exported state, made on this release's files by
+`phitex build --shelf` in scripts/check.sh), so a client whose engine has
+that identity downloads the format instead of making it.
 `traced_by`: per column, the engine and commit whose trace made it (null:
 an empty column). The columns are hints: a client that fetches only what
 its build asks for is still right, so a column traced by another engine
@@ -57,7 +68,7 @@ counted: past WARN a loud warning, past LIMIT (Cloudflare Pages' free
 plan serves 20,000 a deployment, with the site's own few) no release.
 README's "Retention" has the numbers and the ways past the limit.
 """
-import gzip, hashlib, json, sys
+import gzip, hashlib, json, re, struct, sys
 from pathlib import Path
 
 SCHEMA = 1
@@ -69,21 +80,70 @@ def num(release: str) -> int:
     return int(release.rsplit(".", 1)[1])
 
 
-def named(index: Path) -> set[str]:
-    """The packs an index names: its files' packs and its dependency columns'."""
-    out: set[str] = set()
+def named(index: Path, meta: dict) -> set[str]:
+    """The packs a release names (its index, `meta` its release.json):
+    its files' packs, its dependency columns' and its formats'."""
+    out: set[str] = set((meta.get("formats") or {}).values())
+    deps = len(meta.get("deps") or [])
     for line in gzip.decompress(index.read_bytes()).decode().splitlines():
         cols = line.split("\t")
         out.add(cols[1])
-        for c in cols[2:]:
+        for c in cols[2 : 2 + deps]:
             out.update(filter(None, c.split(",")))
     return out
+
+
+def pack(files: list[tuple[str, bytes]]) -> bytes:
+    """A pack (build.py's): gzip of u32 n, (u32 len, path, u32 len, bytes) x n."""
+    b = struct.pack("<I", len(files))
+    for path, data in files:
+        p = path.encode()
+        b += struct.pack("<I", len(p)) + p + struct.pack("<I", len(data)) + data
+    return gzip.compress(b, 9, mtime=0)
+
+
+FORMAT_NAME = re.compile(r"^[a-z]+-[0-9a-f]{16}-[0-9a-f]{16}$")
+
+
+def formats(label: str, rel: Path, src: Path) -> None:
+    """The formats in `src` (a session store's formats/ directory, the
+    CLI's: NAME holding the engine's 32-byte key, then its state) published
+    with the current release: each in a pack of its own (`fmt-NAME-<hash>`,
+    its one file `format` the state), added to the pack table and to
+    release.json's `formats`. The release must be the one they were made
+    on (scripts/check.sh's builds, from this release served)."""
+    doc = json.loads((rel / "release.json").read_text())
+    release = doc["release"]
+    table = gzip.decompress((rel / doc["pack_table"]).read_bytes()).decode()
+    have = dict(doc.get("formats") or {})
+    for f in sorted(src.iterdir()):
+        if not f.is_file() or not FORMAT_NAME.match(f.name):
+            continue
+        state = f.read_bytes()[32:]
+        data = pack([("format", state)])
+        h = hashlib.sha256(data).hexdigest()
+        n = f"fmt-{f.name}-{h[:12]}"
+        (rel / "h" / f"{n}.pack").write_bytes(data)
+        if f"{n}\t" not in table:
+            table += f"{n}\t{h}\t{len(data)}\n"
+        have[f.name] = n
+        print(f"{release}: format {f.name}: {n} ({len(data) / 1e6:.1f} MB)")
+    if not have:
+        raise SystemExit(f"--formats {src}: no format there")
+    doc["formats"] = dict(sorted(have.items()))
+    doc["packs"] = sum(1 for line in table.splitlines() if line)
+    (rel / doc["pack_table"]).write_bytes(gzip.compress(table.encode(), 9, mtime=0))
+    text = json.dumps(doc, indent=1) + "\n"
+    (rel / f"release-{release}.json").write_text(text)
+    (rel / "release.json").write_text(text)
+    n_files = sum(1 for p in rel.parent.rglob("*") if p.is_file()) + site_files(Path(__file__).parent)
+    check(n_files, doc["packs"])
 
 
 def main() -> None:
     args = sys.argv[1:]
     opt = {}
-    for k in ("--min-extension", "--notice", "--releases"):
+    for k in ("--min-extension", "--notice", "--releases", "--formats"):
         if k in args:
             i = args.index(k)
             opt[k] = args[i + 1]
@@ -91,6 +151,9 @@ def main() -> None:
     label = args[0] if args else "tl2026"
     here = Path(__file__).parent
     build, rel = here / "build" / label, here / opt.get("--releases", "releases-v1") / label
+    if "--formats" in opt:
+        formats(label, rel, Path(opt["--formats"]))
+        return
     if not (build / "index.tsv").exists():
         print(f"{label}: no build in build/{label}: the current release stands")
         return
@@ -116,7 +179,9 @@ def main() -> None:
     rows = []
     for line in (build / "index.tsv").read_text().splitlines():
         cols = line.split("\t")
-        row = [cols[0], names[cols[1]]] + [",".join(names[d] for d in c.split(",") if d in names) for c in cols[2:]]
+        deps = len(meta["deps"])
+        row = [cols[0], names[cols[1]]] + [",".join(names[d] for d in c.split(",") if d in names) for c in cols[2 : 2 + deps]] \
+            + cols[2 + deps :]
         rows.append("\t".join(row))
     body = ("\n".join(rows) + "\n").encode()
     packs = "".join(f"{n}\t{t}\n" for n, t in sorted(table.items())).encode()
@@ -126,6 +191,7 @@ def main() -> None:
         "min_extension": opt.get("--min-extension", (old or {}).get("min_extension")),
         "notice": opt.get("--notice", (old or {}).get("notice")) or None,
         "deps": meta["deps"],
+        "file_sums": meta.get("file_sums"),
         "traced_by": {e: meta.get("traced_by", {}).get(e) for e in meta["deps"]},
         "search": meta["search"],
     }
@@ -146,7 +212,7 @@ def main() -> None:
         if (here / "MANIFEST.tsv").exists():
             (rel / f"manifest-{release}.tsv.gz").write_bytes(gzip.compress((here / "MANIFEST.tsv").read_bytes(), 9, mtime=0))
         doc = {"schema": SCHEMA, "release": release, "index": index, "pack_table": pack_table, "packs": len(names),
-               **{k: want[k] for k in ("min_extension", "notice", "deps", "traced_by", "search")}}
+               **{k: want[k] for k in ("min_extension", "notice", "deps", "file_sums", "traced_by", "search")}}
         text = json.dumps(doc, indent=1) + "\n"
         (rel / f"release-{release}.json").write_text(text)
         (rel / "release.json").write_text(text)
@@ -156,7 +222,9 @@ def main() -> None:
     indexes = sorted(rel.glob(f"index-{label}.*.tsv.gz"), key=lambda f: num(f.name.removesuffix(".tsv.gz")), reverse=True)
     live: set[str] = set()
     for f in indexes:
-        live |= named(f)
+        r = f.name.removeprefix("index-").removesuffix(".tsv.gz")
+        meta_of = rel / f"release-{r}.json"
+        live |= named(f, json.loads(meta_of.read_text()) if meta_of.exists() else {"deps": meta["deps"]})
     pinned = here / "keep-packs.txt"
     if pinned.exists():
         listed = {l.strip() for l in pinned.read_text().splitlines() if l.strip() and not l.startswith("#")}

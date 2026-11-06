@@ -472,14 +472,21 @@ impl Host for ShelfHost {
         }))
     }
 
-    /// The format's files keyed by their pack and path, none fetched: a
-    /// warm start checks the format against them without fetching them.
+    /// The format's files keyed by their content (the index's sums) and
+    /// path, none fetched: a warm start checks the format against them
+    /// without fetching them.
     fn content_key(&self) -> Option<phitex_tex::ContentKey> {
         let f = self.files.clone();
         Some(Arc::new(move |key: &str| {
             let (name, format) = lookup(key);
             f.key_in(name, format)
         }))
+    }
+
+    /// The release's own format of that name (made by the release for
+    /// this engine's identity), its pack fetched and kept with the rest.
+    fn published_format(&self, name: &str) -> Option<Vec<u8>> {
+        self.files.published_format(name)
     }
 
     /// BibTeX's and makeindex's files, the format's suffix added where the
