@@ -3720,8 +3720,9 @@ fn the_viewers_settings_are_the_users() {
 /// Text copied or searched in the viewer has its word spaces in every
 /// kind of font, and none inside words: XeLaTeX with a TrueType font of
 /// 2048 units to the em (`DejaVu` Serif) and with an OpenType CFF one
-/// (Latin Modern), pdfLaTeX with Type 1 fonts and with Type 3 (bitmap)
-/// ones (cmr10's map line taken out). Each line once with the font's own
+/// (Latin Modern), pdfLaTeX with Type 1 fonts (Type 3 ones: the
+/// renderer's `word_spaces_are_read_from_the_gaps`, a PK font not being
+/// made in the CI image). Each line once with the font's own
 /// spaces and once with spaces of .15em (a justified line's spaces
 /// shrink that far: Grail's Libertine lines, "Thesedependenciesobstruct",
 /// had none). The renderer's text layer
@@ -3731,7 +3732,7 @@ fn the_viewers_settings_are_the_users() {
 fn copied_text_has_its_word_spaces() {
     let _one = one();
     let body = "\\begin{document}\nalpha beta gamma delta\n\n{\\spaceskip=.15em\\relax tight words set close\\par}\n\\end{document}\n";
-    let docs: [(&str, &str, &str); 4] = [
+    let docs: [(&str, &str, &str); 3] = [
         (
             "xe-ttf",
             "xelatex",
@@ -3743,11 +3744,6 @@ fn copied_text_has_its_word_spaces() {
             "\\documentclass{article}\\usepackage{fontspec}",
         ),
         ("pdf-type1", "pdflatex", "\\documentclass{article}"),
-        (
-            "pdf-type3",
-            "pdflatex",
-            "\\pdfmapline{-cmr10}\\documentclass{article}",
-        ),
     ];
     let mut bad = Vec::new();
     for (name, engine, head) in docs {
