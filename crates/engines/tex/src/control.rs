@@ -92,7 +92,7 @@ impl Run<'_, '_> {
             if self.pic_on
                 && (cmd::CALL..=cmd::LONG_OUTER_CALL).contains(&self.cur.cmd)
                 && self.cur.tok == crate::pic::begin_tok()
-                && self.pic_begin()?
+                && self.pic_begin()
             {
                 return self.ck();
             }

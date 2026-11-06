@@ -818,16 +818,12 @@ pub(crate) struct Run<'c, 'a> {
     /// Per pulled sibling: whether a box of the run's own was open when
     /// it was pulled (a figure's float: one node, like a picture).
     pub pull_box: Vec<bool>,
-    /// A picture of this run placed as a child (`crate::pic`): the
-    /// trigger is armed (a document piece's run of an edit's
-    /// evaluation), the placement made and what it needs checked at the
-    /// run's end, the reads since it; `no_child`: a run made again
-    /// inline after a check failed. `pic_child`: this run is the child.
+    /// The pictures of this run are placed as children (`crate::pic`):
+    /// a document piece's run of an edit's evaluation. `pic_child`: this
+    /// run is the child.
     pub pic_on: bool,
-    pub pic_marks: Vec<crate::pic::PicMark>,
     /// The hashes of the pictures this run met, in order.
     pub pic_seen: Vec<u64>,
-    pub no_child: bool,
     pub pic_child: Option<crate::pic::PicChild>,
     /// The child's output, in place of the run's ([`Run::finish`]).
     pub pic_out: Option<ValueId>,
@@ -1392,9 +1388,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pull_orig: Vec::new(),
             pull_box: Vec::new(),
             pic_on: false,
-            pic_marks: Vec::new(),
             pic_seen: Vec::new(),
-            no_child: false,
             pic_child: None,
             pic_out: None,
             pic_void: false,
@@ -3375,6 +3369,13 @@ impl<'c, 'a> Run<'c, 'a> {
     /// ([`stream_bucket`], read by that file's node alone, `ops::Files`)
     /// and the file's name to the names written ([`WNAMES`]).
     pub(crate) fn contribute_stream(&mut self, e: ValueId) {
+        // (a picture child's: its parent's, made where the picture
+        // stands, `crate::pic`)
+        if let Some(p) = self.pic_child.as_mut() {
+            self.muts += 1;
+            p.streams.push(e);
+            return;
+        }
         let v = self.v;
         let op = self.cx.op();
         let (marker, tagged) = if op == self.ops.finish {
@@ -5882,6 +5883,37 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(k)
     }
 
+    /// [`Run::run_all`]'s end at a claim of the rest or a closed scope:
+    /// a scope closed inside a level of the run's own leaves the rest to
+    /// run outside it from a continuation.
+    fn end_at_close(&mut self) -> R<()> {
+        if self.closed_scope() && !self.claim_rest && !self.nest.is_empty() {
+            let (c, _) = self.cont_encode_as(true)?;
+            if crate::exec::obs_flag!("PHITEX_CLOSE_TRACE") {
+                eprintln!(
+                    "close-trace: node {} ends at the close, its rest a resume: {}",
+                    self.cx.node().raw(),
+                    self.v.render(c).chars().take(300).collect::<String>()
+                );
+            }
+            self.close_cont = Some(c);
+        }
+        Ok(())
+    }
+
+    /// Whether this run places its pictures as children (`crate::pic`):
+    /// a document piece's run of an edit's evaluation, never a cold
+    /// build's.
+    fn pic_armed(&self, op: phitex_defuse::OpId) -> bool {
+        self.doc
+            && (op == self.ops.exec || op == self.ops.resume)
+            && self
+                .ops
+                .edit_stall_ms
+                .load(std::sync::atomic::Ordering::Relaxed)
+                != 0
+    }
+
     /// Runs the node's input to its end (§1030's loop): every command of
     /// its text, of the files it reads inline and of the tokens the
     /// expansions leave. A format's or a package's node is its whole
@@ -5907,16 +5939,7 @@ impl<'c, 'a> Run<'c, 'a> {
         if (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc) {
             self.take_rtn_after()?;
         }
-        // (a document piece's run of an edit's evaluation places its
-        // pictures as children, `crate::pic`; never a cold build's run)
-        self.pic_on = self.doc
-            && !self.no_child
-            && (op == self.ops.exec || op == self.ops.resume)
-            && self
-                .ops
-                .edit_stall_ms
-                .load(std::sync::atomic::Ordering::Relaxed)
-                != 0;
+        self.pic_on = self.pic_armed(op);
         loop {
             while self.has_input() {
                 if self.give_back_peeked()? {
@@ -5935,24 +5958,10 @@ impl<'c, 'a> Run<'c, 'a> {
                     self.ck_maybe()?;
                 }
                 if self.claim_rest || self.closed_scope() {
-                    // (a scope closed inside a level of the run's own:
-                    // the rest runs outside it from a continuation)
-                    if self.closed_scope() && !self.claim_rest && !self.nest.is_empty() {
-                        let (c, _) = self.cont_encode_as(true)?;
-                        if crate::exec::obs_flag!("PHITEX_CLOSE_TRACE") {
-                            eprintln!(
-                                "close-trace: node {} ends at the close, its rest a resume: {}",
-                                self.cx.node().raw(),
-                                self.v.render(c).chars().take(300).collect::<String>()
-                            );
-                        }
-                        self.close_cont = Some(c);
-                    }
-                    return Ok(());
+                    return self.end_at_close();
                 }
             }
-            // (a picture child: its text ran to its end; its levels are
-            // its output's, `crate::pic`)
+            // (a picture child's text ran to its end, `crate::pic`)
             if self.pic_child.is_some() {
                 return Ok(());
             }
@@ -6107,7 +6116,8 @@ impl<'c, 'a> Run<'c, 'a> {
     /// it (what it ended taken off; none where it closed its scope, the
     /// rest carried to its first child, [`Run::leftover`]).
     fn publish_cond_stack(&mut self) {
-        if !self.cond_stop && !self.cond_loaded {
+        // (a picture child's conditionals are its parent's)
+        if (!self.cond_stop && !self.cond_loaded) || self.pic_child.is_some() {
             return;
         }
         let v = self.v;

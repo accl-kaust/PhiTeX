@@ -14,13 +14,22 @@
 //! its own text or what it itself read changes.
 //!
 //! The child stands after the figure's run in text order, but in TeX its
-//! commands ran in the middle of the figure's; its reads and definitions
-//! are checked against the figure's run's after the placement
-//! ([`Run::pic_conflict`]), and a conflict makes the figure's run again
-//! from its start, the picture inline, and that picture is never placed
-//! again in this process ([`refused_now`]). The table of environments
-//! ([`PICS`]) and the text match are hints: a wrong match costs one
-//! run of the figure, never the output.
+//! commands ran in the middle of the figure's. So it reads every
+//! definition before its parent (`Ctx::read_before_placer`), and what
+//! the parent had bound up to the picture from the parent itself (the
+//! `pic:` field, [`Run::pic_local_read`]): never what the parent defines
+//! after the picture. And it publishes and contributes nothing: its
+//! definitions (global and base-level local), its contributions (log
+//! lines, writes, font markers, file reads) and the document lines it
+//! began are in its output, and the parent makes them its own where the
+//! picture stands ([`Run::pic_apply`]), so what the parent reads or
+//! defines after the picture comes after them, as in TeX, and no reader
+//! of the engine sees them anywhere else. A child that would reach past
+//! its own text (an unbalanced group, a cut, a look at the list before
+//! it, children of its own) refuses: the parent runs the picture inline
+//! and never places it again in this process. The table of
+//! environments ([`PICS`]) and the text match are hints: a wrong match
+//! costs one run of the figure, never the output.
 //!
 //! A run's first pass over a figure runs the picture inline and places
 //! the child beside it; the next run takes the output. A cold build's
@@ -78,29 +87,6 @@ fn refuse(hash: u64) {
         .insert(hash);
 }
 
-/// A check at the run's end refused its picture child's output (`why`):
-/// the picture is never placed again; the run goes again inline.
-pub(crate) fn refused_now(r: &Run<'_, '_>, hash: u64, why: &str) {
-    refuse(hash);
-    if crate::exec::obs_flag!("PHITEX_PIC_TRACE") {
-        eprintln!(
-            "pic: node {} picture {hash:x} refused at the run's end, run again inline: {why}",
-            r.cx.node().raw()
-        );
-    }
-}
-
-/// What the figure's run keeps of its placement ([`Run::pic_begin`]).
-pub(crate) struct PicMark {
-    /// The state table's stamp once the child's output is in the run
-    /// (its definitions made): the run's definitions after the picture
-    /// have later stamps.
-    pub stamp: u64,
-    pub hash: u64,
-    /// The names the child read from outside its text.
-    pub reads: phitex_defuse::FxHashSet<ValueId>,
-}
-
 /// What the child's run keeps ([`Run::pic_run`]).
 pub(crate) struct PicChild {
     /// The parent's locals, a field read key by key
@@ -109,6 +95,13 @@ pub(crate) struct PicChild {
     view: Option<View>,
     /// The names read (from the locals or the engine), in order.
     read: Vec<ValueId>,
+    /// Its base level's list: a look at what lies before the picture on
+    /// it (its tail, empty here, is the parent's) refuses.
+    pub lid: i64,
+    pub peeked: bool,
+    /// Its `\write`s, `\openout`s and `\closeout`s as the parent makes
+    /// them ([`Run::contribute_stream`]).
+    pub streams: Vec<ValueId>,
 }
 
 /// How the parent's input skips the body once the child's output is taken.
@@ -256,12 +249,12 @@ impl Run<'_, '_> {
     /// (true), or the run goes on inline (false: no picture here, a
     /// first run, a picture refused before, or no output yet; the child
     /// placed where it was not before).
-    pub(crate) fn pic_begin(&mut self) -> R<bool> {
+    pub(crate) fn pic_begin(&mut self) -> bool {
         if self.interp.is_some() || self.in_skip || self.mode_zero || self.nest.is_empty() {
-            return Ok(false);
+            return false;
         }
         let Some(body) = self.pic_find() else {
-            return Ok(false);
+            return false;
         };
         let hash = body.hash;
         let node = self.cx.node().raw();
@@ -272,7 +265,7 @@ impl Run<'_, '_> {
                     body.name
                 );
             }
-            return Ok(false);
+            return false;
         }
         if !self.cx.ran_before() {
             if trace() {
@@ -281,14 +274,14 @@ impl Run<'_, '_> {
                     body.name
                 );
             }
-            return Ok(false);
+            return false;
         }
         let v = self.v;
         // (the field's name: the body's text and its place among this
         // run's pictures of that text, never the run's position)
         let k = self.pic_mark_k(hash);
         let field = v.field(&format!("pic:{hash:x}:{k}"));
-        let locals = self.pic_locals()?;
+        let locals = self.pic_locals();
         self.cx.define_with(field, locals, Locality::Global);
         let frames = self.pic_frames(&body);
         let params = self.pic_params();
@@ -310,7 +303,7 @@ impl Run<'_, '_> {
                     body.name
                 );
             }
-            return Ok(false);
+            return false;
         };
         let xs = list_of(v, x);
         if x == ValueId::UNIT || xs.first().is_none_or(|&t| int_of(v, t) != 0) {
@@ -322,17 +315,10 @@ impl Run<'_, '_> {
                     xs.get(1).map(|&w| v.render(w)).unwrap_or_default()
                 );
             }
-            return Ok(false);
+            return false;
         }
         let x = self.cx.placed_output_or(i, ValueId::UNIT);
         self.pic_apply(&body, x);
-        self.pic_marks.push(PicMark {
-            stamp: self.st.stamp(),
-            hash,
-            reads: list_of(v, list_of(v, x).get(12).copied().unwrap_or(ValueId::UNIT))
-                .into_iter()
-                .collect(),
-        });
         if trace() {
             eprintln!(
                 "pic: node {node} {} {hash:x}: the child's output taken ({} items)",
@@ -340,7 +326,7 @@ impl Run<'_, '_> {
                 xs.get(1).map_or(0, |&l| list_of(v, l).len())
             );
         }
-        Ok(true)
+        true
     }
 
     /// The ordinal of a picture of text `hash` among this run's.
@@ -495,24 +481,20 @@ impl Run<'_, '_> {
         v.list(frames)
     }
 
-    /// The bindings of the run's open groups, by name: what the child
-    /// reads first ([`Run::pic_local_read`]). Its base-level definitions
-    /// are published and the child reads them from the engine.
-    fn pic_locals(&mut self) -> R<ValueId> {
+    /// Every binding the run made so far, as it stands, by name: what
+    /// the child reads first ([`Run::pic_local_read`]). What the run only
+    /// read the child reads from the engine before the run, where the run
+    /// read it; what the run defines after the picture it never sees.
+    fn pic_locals(&mut self) -> ValueId {
         let v = self.v;
         self.flush_bulk_codes();
-        // (every binding the run made so far, as it stands: the child,
-        // placed after the run, must see the run's state at the picture,
-        // not what the run leaves at its end; what the run only read the
-        // child reads from the engine, and a definition the run makes of
-        // it after the picture refuses the split, `Run::pic_conflict`)
         let now = self.st.defined_now(v);
         let mut xs = Vec::with_capacity(now.len());
         for (loc, cur) in now {
             let f = self.loc_field(loc);
             xs.push(v.list(vec![f.0, opt(cur)]));
         }
-        Ok(v.list(xs))
+        v.list(xs)
     }
 
     /// The list the picture is appended to, as it stands: its mode and
@@ -564,6 +546,33 @@ impl Run<'_, '_> {
             t.clang = n(7);
             t.prev_graf = n(8);
             t.ag.extend(toks_of(v, Some(a(16))));
+        }
+        // (what the child contributed, the parent's where the picture
+        // stands: its log lines among the parent's, its font markers and
+        // writes before the parent's later ones; the lines it began)
+        for e in list_of(v, a(17)) {
+            if let [f, x] = list_of(v, e)[..] {
+                self.contribs.push((Field(f), x));
+            }
+        }
+        for e in list_of(v, a(18)) {
+            self.contribute_stream(e);
+        }
+        for e in list_of(v, a(19)) {
+            if let [n, h] = list_of(v, e)[..] {
+                let name = crate::val::str_of(v, n);
+                self.fread
+                    .push((name, crate::val::int_of(v, h).cast_unsigned()));
+            }
+        }
+        for e in list_of(v, a(20)) {
+            if let [n, k] = list_of(v, e)[..] {
+                let k = int_of(v, k);
+                match self.doc_lines.iter_mut().find(|(m, _)| *m == n) {
+                    Some((_, j)) => *j += k,
+                    None => self.doc_lines.push((n, k)),
+                }
+            }
         }
         for e in list_of(v, a(10)) {
             let [name, val] = list_of(v, e)[..] else {
@@ -656,32 +665,6 @@ impl Run<'_, '_> {
         }
     }
 
-    /// At the run's end, each child's output taken: what the run
-    /// defined for the engine after the picture against what the child
-    /// read (the child, placed after the run, saw the run's later value
-    /// where TeX's picture saw the earlier one); the first conflict: the
-    /// picture's hash and why. The child's own definitions are the run's,
-    /// made at the picture ([`Run::pic_apply`]), so what the run reads or
-    /// defines after them is TeX's order already.
-    pub(crate) fn pic_conflict(&mut self) -> Option<(u64, String)> {
-        let v = self.v;
-        for m in &self.pic_marks {
-            for loc in self.st.published_since(m.stamp) {
-                let f = self.loc_field_peek(loc);
-                if m.reads.contains(&f.0) {
-                    return Some((
-                        m.hash,
-                        format!(
-                            "the run defines {} after the picture, which read it",
-                            crate::val::field_name(v, f)
-                        ),
-                    ));
-                }
-            }
-        }
-        None
-    }
-
     // ------------------------------------------------------- the child
 
     /// A read of the child's that misses its table: the parent's locals
@@ -691,16 +674,15 @@ impl Run<'_, '_> {
         let Some(p) = self.pic_child.as_mut() else {
             return Ok(false);
         };
-        let view = match p.view {
-            Some(w) => w,
-            None => {
-                let w = self.cx.view_field(p.field)?;
-                p.view = Some(w);
-                w
-            }
+        let view = if let Some(w) = p.view {
+            w
+        } else {
+            let w = self.cx.view_field(p.field)?;
+            p.view = Some(w);
+            w
         };
         let Some(x) = self.cx.get(view, Step::Key(f.0)) else {
-            // (read from the engine, after the parent: the parent's check)
+            // (read from the engine, before the parent)
             if let Some(p) = self.pic_child.as_mut() {
                 p.read.push(f.0);
             }
@@ -727,6 +709,9 @@ impl Run<'_, '_> {
         let n = |i: usize| p.get(i).map_or(0, |&x| int_of(v, x));
         let extra = p.get(13).map(|&x| list_of(v, x)).unwrap_or_default();
         let mode = i32::try_from(n(0)).unwrap_or(1);
+        // (every read of the engine's before the parent: where TeX's
+        // picture read, inside the parent's text)
+        self.cx.read_before_placer();
         let lid = self.push_list(mode, 0, extra);
         if let Some(t) = self.top_mut() {
             t.fold = FoldState {
@@ -766,6 +751,9 @@ impl Run<'_, '_> {
             field: Field(a(1)),
             view: None,
             read: Vec::new(),
+            lid,
+            peeked: false,
+            streams: Vec::new(),
         });
         let conds0 = (self.conds.clone(), self.if_codes.clone());
         self.input.append_text(fs);
@@ -779,12 +767,10 @@ impl Run<'_, '_> {
             Err(Halt::Same) => Some("a cutoff".to_owned()),
             Ok(()) => self.pic_shape(lid, &conds0),
         };
-        match why {
-            Some(w) => self.pic_refuse(&w),
-            None => {
-                let out = self.pic_output()?;
-                self.pic_out = Some(out);
-            }
+        if let Some(w) = why {
+            self.pic_refuse(&w);
+        } else {
+            self.pic_out = Some(self.pic_output());
         }
         Ok(())
     }
@@ -829,9 +815,22 @@ impl Run<'_, '_> {
         if self.rt_made > 0 {
             return Some("read-time objects".to_owned());
         }
+        if self.pic_child.as_ref().is_some_and(|p| p.peeked) {
+            return Some("it looked at the list before it".to_owned());
+        }
+        // (an item for the main list other than a marker: the picture
+        // was not inside a box)
         let items = v.field("items");
-        if self.contribs.iter().any(|(f, _)| *f == items) {
-            return Some("items for a list of the engine's".to_owned());
+        for (f, x) in &self.contribs {
+            if *f == items
+                && v.seq_to_vec(*x).into_iter().any(|e| {
+                    list_of(v, e)
+                        .get(1)
+                        .is_none_or(|&n| !crate::build::is_marker(v, n))
+                })
+            {
+                return Some("items for a list of the engine's".to_owned());
+            }
         }
         if !self.leftover().is_empty() {
             return Some("input left".to_owned());
@@ -873,14 +872,36 @@ impl Run<'_, '_> {
         self.if_codes.clear();
         self.cond_stop = false;
         self.cond_loaded = false;
+        if let Some(p) = self.pic_child.as_mut() {
+            p.streams.clear();
+        }
         self.pic_out = Some(v.list(vec![v.int(1), v.str(why)]));
     }
 
     /// The child's output: `[0, items, sf, pd, since_bp, lang, packed,
     /// clang, prevgraf, pushed level, locals, global names, read names,
-    /// astate, aopen, ic_prev, aftergroup]`.
-    fn pic_output(&mut self) -> R<ValueId> {
+    /// astate, aopen, ic_prev, aftergroup, contributions, streams, file
+    /// reads, document lines begun]`; the run itself then contributes
+    /// nothing.
+    fn pic_output(&mut self) -> ValueId {
         let v = self.v;
+        let contribs: Vec<ValueId> = std::mem::take(&mut self.contribs)
+            .into_iter()
+            .map(|(f, x)| v.list(vec![f.0, x]))
+            .collect();
+        let streams = self
+            .pic_child
+            .as_mut()
+            .map(|p| std::mem::take(&mut p.streams))
+            .unwrap_or_default();
+        let fread: Vec<ValueId> = std::mem::take(&mut self.fread)
+            .into_iter()
+            .map(|(n, h)| v.list(vec![v.str(&n), crate::val::int_id(v, h.cast_signed())]))
+            .collect();
+        let lines: Vec<ValueId> = std::mem::take(&mut self.doc_lines)
+            .into_iter()
+            .map(|(n, k)| v.list(vec![n, v.int(k)]))
+            .collect();
         let mut locals = Vec::new();
         let mut gdefs = Vec::new();
         for (f, x, l) in self.published_values() {
@@ -925,7 +946,7 @@ impl Run<'_, '_> {
         });
         let ag = toks_value(v, &base.ag);
         let items = v.list(crate::nest::into_values(v, base.list));
-        Ok(v.list(vec![
+        v.list(vec![
             v.int(0),
             items,
             v.int(i64::from(base.fold.sf)),
@@ -943,7 +964,11 @@ impl Run<'_, '_> {
             v.int(self.aopen),
             v.int(i64::from(self.ic_prev)),
             ag,
-        ]))
+            v.list(contribs),
+            v.list(streams),
+            v.list(fread),
+            v.list(lines),
+        ])
     }
 }
 

@@ -75,6 +75,9 @@ pub struct Ctx<'a> {
     /// `PHITEX_RESUME_CHECK`: the reads of the run checked
     /// ([`Ctx::stash_reads`]).
     stashed: Vec<ReadRec>,
+    /// [`Ctx::read_before_placer`]: my reads of a field's reaching
+    /// definition are made before the node that placed me.
+    before_placer: Option<NodeId>,
 }
 
 /// The check ([`Ctx::tick`]) from which a run's reads are looked at
@@ -140,6 +143,34 @@ impl<'a> Ctx<'a> {
             wait_frontier: false,
             goes_on: false,
             ticks: 0,
+            before_placer: None,
+        }
+    }
+
+    /// From now on, every read of a field's definition reaching me
+    /// (`read`, `read_path`, `read_or_path`, `read_derived`, `def_site`,
+    /// `snapshot`, `read_item`) is made, answered and filed as a
+    /// read before the node that placed me (`At::Before(placer)`), not
+    /// at my position: none of my placer's definitions, nor those of the
+    /// children it placed before me, answer it, and a change of them
+    /// asks me nothing. For a child whose text stands in the middle of
+    /// its placer's (a picture of a figure's run): what the placer had
+    /// bound before the child's place it hands over itself, and what it
+    /// defines after it the child, as in the text, never sees. My views
+    /// (`view_field`, `view`) stay mine: a field the placer defines for
+    /// me is read there, and so is my scope depth (`depth`). A node with
+    /// no placer reads at its position.
+    pub fn read_before_placer(&mut self) {
+        self.before_placer = self.me.parent;
+    }
+
+    /// Where a read of a definition reaching me is made
+    /// ([`Ctx::read_before_placer`]): the node it is made before, and
+    /// the anchor it is filed with.
+    fn here(&self) -> (NodeId, Anchor) {
+        match self.before_placer {
+            Some(p) => (p, Anchor::Before(p)),
+            None => (self.me.id, Anchor::Me),
         }
     }
 
@@ -261,8 +292,9 @@ impl<'a> Ctx<'a> {
         fields.sort_unstable_by_key(|f| f.0.raw());
         fields.dedup();
         let mut pairs = Vec::with_capacity(fields.len());
+        let (at, _) = self.here();
         for f in fields {
-            let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+            let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
             self.note_source(r.by);
             if let Some(x) = r.value {
                 pairs.push(v.list(vec![f.0, x]));
@@ -286,7 +318,8 @@ impl<'a> Ctx<'a> {
         // (no change count: the value was loaded before now, so the
         // commit checks the read whatever its field's count says)
         self.ep = u64::MAX;
-        self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, seen);
+        let (_, anchor) = self.here();
+        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, seen);
         self.seen.insert(f, seen);
         Ok(())
     }
@@ -299,11 +332,12 @@ impl<'a> Ctx<'a> {
             return Ok(x);
         }
         self.before_read(f);
-        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         self.wait_for_settling(&r)?;
         self.hold_at_frontier(f)?;
-        self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
+        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
         let x = self.follow_aliases(r.value)?;
         self.seen.insert(f, x);
         Ok(x)
@@ -485,17 +519,18 @@ impl<'a> Ctx<'a> {
     pub fn read_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {
         self.check()?;
         self.before_read(f);
-        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         if let Some(x) = r.value
             && read::alias_of(self.values(), x).is_some()
         {
-            self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
+            self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
             let y = self.follow_aliases(r.value)?;
             return Ok(read::apply_path(self.eng, y, p));
         }
         let x = through(self.eng, r, p);
-        self.record(ReadKind::Field { f, at: Anchor::Me }, p, x);
+        self.record(ReadKind::Field { f, at: anchor }, p, x);
         Ok(x)
     }
 
@@ -527,14 +562,15 @@ impl<'a> Ctx<'a> {
         let p = self.eng.path(&steps);
         self.before_read(base);
         let ep_base = self.ep;
-        let rb = reaching_at(self.eng, base, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let rb = reaching_at(self.eng, base, at, false).ok_or_else(stop)?;
         self.note_source(rb.by);
         self.wait_for_settling(&rb)?;
         self.hold_at_frontier(base)?;
         let g = read::derived_name(v, spec, rb.value).ok_or_else(stop)?;
         self.before_read(g);
         let ep_g = self.ep;
-        let rg = reaching_at(self.eng, g, self.me.id, false).ok_or_else(stop)?;
+        let rg = reaching_at(self.eng, g, at, false).ok_or_else(stop)?;
         self.note_source(rg.by);
         self.wait_for_settling(&rg)?;
         self.hold_at_frontier(g)?;
@@ -545,18 +581,11 @@ impl<'a> Ctx<'a> {
             let x = self.read(g2)?;
             return Ok((read::apply_path(self.eng, x, then), g2));
         }
-        let x = read::through_at(self.eng, rg, p, self.me.id, false);
+        let x = read::through_at(self.eng, rg, p, at, false);
         self.ep = ep_base;
-        self.record(
-            ReadKind::Field {
-                f: base,
-                at: Anchor::Me,
-            },
-            p,
-            x,
-        );
+        self.record(ReadKind::Field { f: base, at: anchor }, p, x);
         self.ep = ep_g;
-        self.record(ReadKind::Field { f: g, at: Anchor::Me }, p, x);
+        self.record(ReadKind::Field { f: g, at: anchor }, p, x);
         Ok((x, g))
     }
 
@@ -578,7 +607,8 @@ impl<'a> Ctx<'a> {
             return Ok((x, false));
         }
         self.before_read(f);
-        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         self.wait_for_settling(&r)?;
         self.hold_at_frontier(f)?;
@@ -587,10 +617,10 @@ impl<'a> Ctx<'a> {
             && through_path(self.values(), x)
         {
             let y = read::apply_path(self.eng, Some(x), p);
-            self.record(ReadKind::Field { f, at: Anchor::Me }, p, y);
+            self.record(ReadKind::Field { f, at: anchor }, p, y);
             return Ok((Some(x), true));
         }
-        self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
+        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
         let x = self.follow_aliases(r.value)?;
         self.seen.insert(f, x);
         Ok((x, false))
@@ -600,10 +630,11 @@ impl<'a> Ctx<'a> {
     pub fn def_site(&mut self, f: Field) -> Result<Option<NodeId>, Stop> {
         self.check()?;
         self.before_read(f);
-        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         let seen = through(self.eng, r, SITE);
-        self.record(ReadKind::Field { f, at: Anchor::Me }, SITE, seen);
+        self.record(ReadKind::Field { f, at: anchor }, SITE, seen);
         Ok(r.by)
     }
 

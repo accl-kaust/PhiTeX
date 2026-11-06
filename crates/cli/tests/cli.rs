@@ -3599,10 +3599,13 @@ fn watch_open_starts_only_the_users_viewer() {
 /// The figures' pictures as child nodes of their figures' runs (an edit's
 /// evaluation only, `crate::pic` in phitex-tex): a picture inside
 /// `\resizebox`'s argument, one read from an `\input` file, two in one
-/// float, one that `\xdef`s a macro its caption reads (the split's check
-/// refuses it: the caption must see the picture's definition) and one
-/// that selects a font size first that its caption selects too. Edits
-/// that move the floats (a figure deleted and put back, a paragraph
+/// float, one that `\xdef`s a macro its caption reads, one that selects
+/// a font size first that its caption selects too, two that step a
+/// counter (`\global\advance`) their captions show, the first reading a
+/// macro its caption then `\xdef`s (TeX's picture sees the value before
+/// the caption's): the figure's run makes the picture's definitions its
+/// own where the picture stands, and the picture reads before the
+/// figure's run. Edits that move the floats (a figure deleted and put back, a paragraph
 /// before them deleted), a word before them and a picture's own text
 /// changed: each edit's PDF is `phitex build`'s of its text, byte for
 /// byte, at one thread and at four.
@@ -3620,11 +3623,13 @@ fn picture_children_exact(threads: &str) {
     let pic2 = "\\begin{tikzpicture}\n\\draw[thick] (0,0) -- (3,0) -- (3,2) -- cycle;\n\\node at (1.5,0.7) {input};\n\\end{tikzpicture}\n";
     let fig1 = "\\begin{figure}[t]\\centering\n\\resizebox{0.4\\linewidth}{!}{%\n\\begin{tikzpicture}\n\\draw (0,0) -- (2,1) node[right] {left};\n\\node[draw] (a) at (0,0) {A};\n\\end{tikzpicture}}\n\\caption{First figure}\\label{fig:a}\n\\end{figure}\n";
     let text = format!(
-        "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\begin{{document}}\n\\section{{One}}\nAlpha words come first in this paragraph of the start.\n\nBeta words stand in the second paragraph, before the figures.\n{fig1}\
+        "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\newcount\\picn \\def\\capword{{before}}\n\\begin{{document}}\n\\section{{One}}\nAlpha words come first in this paragraph of the start.\n\nBeta words stand in the second paragraph, before the figures.\n{fig1}\
 Gamma text between the floats, see Figure~\\ref{{fig:a}}.\n\n\\begin{{figure}}[b]\\centering\n\\input{{pic2}}\n\\caption{{Second, after \\ref{{fig:a}}}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\draw[red] (0,0) circle (1);\n\\end{{tikzpicture}}\n\\begin{{tikzpicture}}\n\\fill[blue] (0,0) rectangle (1,1);\n\\end{{tikzpicture}}\n\\caption{{Two pictures}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\node {{x}};\\xdef\\picnote{{seen in the picture}}\n\\end{{tikzpicture}}\n\\caption{{Note: \\picnote}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\node {{\\fontsize{{13}}{{15}}\\selectfont big}};\n\\end{{tikzpicture}}\n\\caption{{\\fontsize{{13}}{{15}}\\selectfont A caption in the picture's size}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped \\the\\picn\\xdef\\capword{{after}}}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped again \\the\\picn}}\n\\end{{figure}}\n\
 Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon words in the next section.\n\\end{{document}}\n"
     );
     let dir = scratch(&name);

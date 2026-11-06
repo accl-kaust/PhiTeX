@@ -598,8 +598,20 @@ impl Run<'_, '_> {
     /// gives, without copying a local list.
     pub(crate) fn list_last(&mut self, lid: i64) -> R<(Option<ValueId>, usize)> {
         let v = self.v;
+        let child_base = self.pic_child.as_ref().is_some_and(|p| p.lid == lid);
         if let Some(l) = self.level_of(lid) {
             let n = l.list.len();
+            // (a picture child's own list is empty where the parent's
+            // items before the picture stand: a look past it refuses,
+            // `crate::pic`)
+            if n == 0 && child_base {
+                self.muts += 1;
+                if let Some(p) = self.pic_child.as_mut() {
+                    p.peeked = true;
+                }
+                return Ok((None, 0));
+            }
+            let l = self.level_of(lid).expect("the level");
             return Ok((l.list.last_mut().map(|x| x.value(v)), n));
         }
         let (items, since) = self.list_items(lid)?;

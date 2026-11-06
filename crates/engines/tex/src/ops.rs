@@ -183,27 +183,6 @@ pub(crate) fn run_node(
         // (a second pass to a candidate takes no marks)
         res = pass(&mut r, &mut body);
     }
-    // (a picture child's output taken: what the run read and defined
-    // after it, against what the child read and defined; a conflict
-    // makes the run again from its start, the picture inline, and that
-    // picture is never placed again, `crate::pic`)
-    if matches!(res, Ok(()) | Err(Halt::Cut))
-        && let Some((hash, why)) = r.pic_conflict()
-    {
-        crate::pic::refused_now(&r, hash, &why);
-        let cx = r.cx;
-        cx.begin_again();
-        r = Run::new(cx, o);
-        r.no_child = true;
-        res = pass(&mut r, &mut body);
-        if let Err(Halt::Recut(k)) = res {
-            let cx = r.cx;
-            r = Run::new(cx, o);
-            r.no_child = true;
-            r.stop_at = Some(k);
-            res = pass(&mut r, &mut body);
-        }
-    }
     // the run's end on the page (`crate::pages`): its items folded into
     // the page state, a finisher placed where a page finishes; a page
     // finishing inside the piece is a cut: the run goes again from the

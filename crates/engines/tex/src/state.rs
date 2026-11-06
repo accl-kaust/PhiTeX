@@ -425,10 +425,6 @@ struct Meta {
     /// The group of the run the latest local definition was made in
     /// ([`State::open`]'s number; `None`: the base level, or unknown).
     ldef_gid: Option<u32>,
-    /// The stamp of the latest definition at the run's base level (the
-    /// one `publ` holds): what a picture child's check compares with the
-    /// placement's stamp (`crate::pic`).
-    publ_stamp: u64,
 }
 
 /// A value saved by a group, restored at its close.
@@ -1935,7 +1931,6 @@ impl State {
             ldef_stamp: 0,
             ldef_local: false,
             ldef_gid: None,
-            publ_stamp: 0,
         });
         i
     }
@@ -2076,10 +2071,8 @@ impl State {
         m.ldef_gid = if global { None } else { grp };
         if global {
             m.publ = Some((val, Locality::Global));
-            m.publ_stamp = st;
         } else if grp.is_none() {
             m.publ = Some((val, Locality::Local));
-            m.publ_stamp = st;
         }
         if is_page_param(loc) {
             self.pp_dirty = true;
@@ -2258,7 +2251,6 @@ impl State {
                 Locality::Local
             };
             m.publ = Some((val, l));
-            m.publ_stamp = st;
         }
     }
 
@@ -2335,9 +2327,7 @@ impl State {
             let mi = self.meta(loc);
             if self.metas[mi].ldef_local && self.metas[mi].ldef_stamp > open_stamp {
                 let val = self.slot(loc).e;
-                let m = self.meta_mut(mi);
-                m.publ = Some((val, Locality::Local));
-                m.publ_stamp = m.ldef_stamp;
+                self.meta_mut(mi).publ = Some((val, Locality::Local));
             }
         }
         self.save.truncate(save_base.min(self.save.len()));
@@ -2518,19 +2508,6 @@ impl State {
                     },
                 )
             })
-            .collect()
-    }
-
-    /// The locations whose binding at the run's base level (what the run
-    /// publishes) was made after stamp `since`: the definitions of the
-    /// run after a picture child's placement that reach the engine
-    /// (`crate::pic`); a local one in a group of the run, open or
-    /// closed, reaches nothing after the run and is not among them.
-    pub(crate) fn published_since(&self, since: u64) -> Vec<Loc> {
-        self.metas
-            .iter()
-            .filter(|m| m.publ.is_some() && m.publ_stamp > since)
-            .map(|m| m.loc)
             .collect()
     }
 
@@ -2726,9 +2703,7 @@ impl State {
                 }
                 None => {
                     let val = self.slot(loc).e;
-                    let m = self.meta_mut(mi);
-                    m.publ = Some((val, Locality::Scope));
-                    m.publ_stamp = m.ldef_stamp;
+                    self.meta_mut(mi).publ = Some((val, Locality::Scope));
                 }
             }
         }
@@ -3072,9 +3047,6 @@ pub(crate) struct ContState {
 }
 
 impl State {
-    /// `open`: the groups of the run open now (their ids, the nest's
-    /// group levels): a slot is a group's local only while its local
-    /// definition's group is one of them.
     /// Every location the run defined so far (locally or globally, in a
     /// group or not) with its binding now (`None`: absent): the run's
     /// state at this point where it is not the engine's (a picture
@@ -3088,7 +3060,9 @@ impl State {
                 .filter(|&m| m > 0)
                 .and_then(|m| self.metas.get(m - 1))
                 .is_some_and(|m| m.ldef_stamp > 0);
-            if !defined {
+            // (a binding a group's end took back to one the run never
+            // loaded: the engine's, which the child reads itself)
+            if !defined || s.e.flags & LOADED == 0 {
                 continue;
             }
             let cur = if s.e.flags & HAS_ID != 0 {
@@ -3101,6 +3075,9 @@ impl State {
         out
     }
 
+    /// `open`: the groups of the run open now (their ids, the nest's
+    /// group levels): a slot is a group's local only while its local
+    /// definition's group is one of them.
     pub(crate) fn cont(&self, v: &Values, open: &[u32]) -> ContState {
         let ent = |e: &Entry| -> (Option<ValueId>, bool) {
             let id = if e.flags & HAS_ID != 0 {
@@ -3200,7 +3177,6 @@ impl State {
                     ldef_stamp: stamp,
                     ldef_local: local,
                     ldef_gid: gid,
-                    publ_stamp: 0,
                 });
                 u32::try_from(st.metas.len()).unwrap_or(0)
             });
@@ -3566,7 +3542,6 @@ impl State {
                 ldef_stamp: m.ldef_stamp,
                 ldef_local: m.ldef_local,
                 ldef_gid: m.ldef_gid,
-                publ_stamp: m.ldef_stamp,
             });
             meta_of[i] = u32::try_from(self.metas.len()).unwrap_or(0);
         }
