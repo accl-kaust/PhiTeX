@@ -813,8 +813,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         p.contribs.clone_from(&r.contribs);
         p.output = r.output;
         p.effect = Some(r.effect);
-        p.claim = r.claim;
-        p.claim_all = r.claim_all;
+        // (but a run's own claim where it says so, `Ctx::unchanged_unclaimed`)
+        if !p.own_claim {
+            p.claim = r.claim;
+            p.claim_all = r.claim_all;
+        }
         p.placements.clear();
         if moved {
             p.ranks.clear();
@@ -6138,8 +6141,10 @@ mod tests {
     }
 
     /// `[f]`: claims the rest of the text where f is 1; where f is 2 claims
-    /// nothing and keeps what it published last (`Ctx::unchanged`: a
-    /// finisher whose page is stale); nothing otherwise. Not text.
+    /// nothing and keeps what it published last (`Ctx::unchanged`); where
+    /// f is 3 keeps what it published last but its claim
+    /// (`Ctx::unchanged_unclaimed`: a finisher whose page is stale);
+    /// nothing otherwise. Not text.
     struct RestOrKeep;
 
     impl Operation for RestOrKeep {
@@ -6155,6 +6160,9 @@ mod tests {
             } else {
                 if f == Some(2) {
                     cx.unchanged();
+                }
+                if f == Some(3) {
+                    cx.unchanged_unclaimed();
                 }
                 cx.claim(0);
             }
@@ -6207,6 +6215,39 @@ mod tests {
             assert_eq!(e.node_info(t).unwrap().claimer, Some(c), "kept: -j{threads}");
             let i = e.node_info(m).unwrap();
             assert_eq!((i.state, i.claimer), (NodeState::Done, None), "-j{threads}");
+            assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+            e.replace(d, def, vec![f.0, v.int(1)]);
+        }
+    }
+
+    #[test]
+    fn a_claim_of_the_rest_is_not_kept_by_a_run_that_keeps_all_but_its_claim() {
+        let _one = ONE_AT_A_TIME.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // C claims the rest of the text (f = 1): the piece T is inert. Run
+        // again with f = 3, C keeps what it published last but claims
+        // nothing (`Ctx::unchanged_unclaimed`: a page's finisher whose
+        // routine ended in a fatal error on values not settled, run again
+        // on a stale page): T is given back and runs. Kept, the claim held
+        // the text after the finisher inert, the page builder never folded
+        // it again and the page stayed stale: thumbs at -j8, the job ended
+        // at an overview page with its hundred errors (accl 25548).
+        let e = Engine::new();
+        let piece = e.register(Arc::new(Piece));
+        let keep = e.register(Arc::new(RestOrKeep));
+        let def = e.register(Arc::new(Def));
+        let v = e.values();
+        let f = v.field("f");
+        let u = e.new_unit();
+        let d = e.push(u, def, vec![f.0, v.int(1)]);
+        let c = e.push(u, keep, vec![f.0]);
+        let t = e.push(u, piece, vec![v.int(1)]);
+        for threads in [1, 4] {
+            e.evaluate(threads).unwrap();
+            assert_eq!(e.node_info(t).unwrap().claimer, Some(c), "-j{threads}");
+            e.replace(d, def, vec![f.0, v.int(3)]);
+            e.evaluate(threads).unwrap();
+            let i = e.node_info(t).unwrap();
+            assert_eq!((i.state, i.claimer), (NodeState::Done, None), "given back: -j{threads}");
             assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
             e.replace(d, def, vec![f.0, v.int(1)]);
         }
