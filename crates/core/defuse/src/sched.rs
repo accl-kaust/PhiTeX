@@ -2721,7 +2721,7 @@ pub(crate) fn frontier_restore(eng: &Engine, w: Option<&Worker>, n: &Node) {
     if by
         .checked_sub(1)
         .and_then(|b| eng.placed_node(NodeId::from_raw(b)))
-        .is_some_and(|x| again(&x))
+        .is_some_and(|x| again(x))
     {
         return;
     }
