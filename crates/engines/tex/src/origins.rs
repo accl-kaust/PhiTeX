@@ -1965,10 +1965,33 @@ impl crate::Build {
     /// was) now `delta` further, a page's offsets not in the list moved
     /// by them alone.
     pub fn origins_changed(&self) -> (Vec<usize>, Vec<(u32, u32, i64)>) {
+        let (_, changed, deltas) = self.origins_update();
+        (changed, deltas)
+    }
+
+    /// Every page's origins ([`Self::all_page_origins`]) with the pages
+    /// whose origins changed since the last call and the edits since then
+    /// ([`Self::origins_changed`]), made with one look at the sources: a
+    /// viewer told what changed and given the origins after a build (the
+    /// two asked apart made the pages' origins twice and read the sources
+    /// three times: Grail's 21 ms a keystroke in WebAssembly).
+    #[allow(clippy::type_complexity)]
+    pub fn origins_update(
+        &self,
+    ) -> (
+        Vec<Option<Arc<PageOrigins>>>,
+        Vec<usize>,
+        Vec<(u32, u32, i64)>,
+    ) {
         let st = self.origins_state();
-        let pages = self.all_page_origins();
+        let cx = st.ctx(self.origins_input());
+        let pdf: OnceLock<Arc<Vec<u8>>> = OnceLock::new();
+        let get = || pdf.get_or_init(|| self.origins_pdf()).clone();
+        let pages: Vec<Option<Arc<PageOrigins>>> = (0..cx.inp.shown.len())
+            .map(|k| answer(st, &cx, k, &get))
+            .collect();
         let cx_texts: Vec<(u32, Arc<[u8]>)> = {
-            let inp = self.origins_input();
+            let inp = &cx.inp;
             let mut ts: Vec<(u32, Arc<[u8]>)> = vec![(
                 st.file_index(&inp.doc_name),
                 file_bytes(inp.doc_raw.unwrap_or(inp.doc_text)),
@@ -2036,9 +2059,9 @@ impl crate::Build {
                 changed.push(k);
             }
         }
-        last.pages = pages;
+        last.pages.clone_from(&pages);
         last.texts = cx_texts.into_iter().collect();
-        (changed, deltas)
+        (pages, changed, deltas)
     }
 
     /// The glyph with a source nearest point (`x`, `y`) of page `k` (PDF

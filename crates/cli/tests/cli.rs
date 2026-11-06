@@ -3641,8 +3641,9 @@ fn watch_open_starts_only_the_users_viewer() {
 /// the caption's): the figure's run makes the picture's definitions its
 /// own where the picture stands, and the picture reads before the
 /// figure's run. Edits that move the floats (a figure deleted and put back, a paragraph
-/// before them deleted), a word before them and a picture's own text
-/// changed: each edit's PDF is `phitex build`'s of its text, byte for
+/// before them deleted), a word before them, a picture's own text and
+/// the text a picture follows in its float changed (the picture looks
+/// only at the item before it, `Run::pic_take_list`): each edit's PDF is `phitex build`'s of its text, byte for
 /// byte, at one thread and at four.
 #[test]
 #[ignore = "heavy: the pdflatex format and tikz; run on the cluster"]
@@ -3662,6 +3663,7 @@ Gamma text between the floats, see Figure~\\ref{{fig:a}}.\n\n\\begin{{figure}}[b
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\node {{\\fontsize{{13}}{{15}}\\selectfont big}};\n\\end{{tikzpicture}}\n\\caption{{\\fontsize{{13}}{{15}}\\selectfont A caption in the picture's size}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped \\the\\picn\\xdef\\capword{{after}}}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped again \\the\\picn}}\n\\end{{figure}}\n\
+\\begin{{figure}}[t]\\centering Inline words before \\unskip\\begin{{tikzpicture}}\\draw (0,0) -- (1,1);\\end{{tikzpicture}}\\hfil\\begin{{tikzpicture}}\\fill (0,0) circle (0.2);\\end{{tikzpicture}}\n\\caption{{Pictures after text}}\n\\end{{figure}}\n\
 Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon words in the next section.\n\\end{{document}}\n"
     )
 }
@@ -3714,6 +3716,7 @@ fn picture_children_exact(threads: &str) {
             )
         }),
         Box::new(|t| t.replacen("Gamma text", "Gamma words", 1)),
+        Box::new(|t| t.replacen("Inline words before", "Inline text set before", 1)),
     ];
     let mut now = text.clone();
     let mut texts = vec![(
@@ -3896,4 +3899,59 @@ fn the_viewers_settings_are_the_users() {
         said.contains("`threads` in a project's phitex.toml is ignored"),
         "a project's threads not said:\n{said}"
     );
+}
+
+/// Text copied or searched in the viewer has its word spaces in every
+/// kind of font, and none inside words: XeLaTeX with a TrueType font of
+/// 2048 units to the em (`DejaVu` Serif) and with an OpenType CFF one
+/// (Latin Modern), pdfLaTeX with Type 1 fonts (Type 3 ones: the
+/// renderer's `word_spaces_are_read_from_the_gaps`, a PK font not being
+/// made in the CI image). Each line once with the font's own
+/// spaces and once with spaces of .15em (a justified line's spaces
+/// shrink that far: Grail's Libertine lines, "Thesedependenciesobstruct",
+/// had none). The renderer's text layer
+/// (`phitex_render::Renderer::text`) of the PDF `phitex build` writes.
+#[test]
+#[ignore = "heavy: the xelatex and pdflatex formats; run on accl"]
+fn copied_text_has_its_word_spaces() {
+    let _one = one();
+    let body = "\\begin{document}\nalpha beta gamma delta\n\n{\\spaceskip=.15em\\relax tight words set close\\par}\n\\end{document}\n";
+    let docs: [(&str, &str, &str); 3] = [
+        (
+            "xe-ttf",
+            "xelatex",
+            "\\documentclass{article}\\usepackage{fontspec}\\setmainfont{DejaVuSerif.ttf}",
+        ),
+        (
+            "xe-otf",
+            "xelatex",
+            "\\documentclass{article}\\usepackage{fontspec}",
+        ),
+        ("pdf-type1", "pdflatex", "\\documentclass{article}"),
+    ];
+    let mut bad = Vec::new();
+    for (name, engine, head) in docs {
+        let dir = scratch(&format!("spaces-{name}"));
+        std::fs::write(dir.join("doc.tex"), format!("{head}\n{body}")).expect("the document");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(["build", "--engine", engine, "doc.tex"])
+            .output()
+            .expect("phitex runs");
+        assert!(
+            out.status.success(),
+            "{name}: build failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let pdf: std::sync::Arc<[u8]> = std::fs::read(dir.join("doc.pdf")).expect("the PDF").into();
+        let mut r = phitex_render::Renderer::new();
+        let lines = r.text(&pdf, 0).expect("page 1's text");
+        let all: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+        eprintln!("{name}: {all:?}");
+        for want in ["alpha beta gamma delta", "tight words set close"] {
+            if !all.iter().any(|l| l.trim() == want) {
+                bad.push(format!("{name}: {want:?} not in {all:?}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "text without its word spaces: {bad:?}");
 }

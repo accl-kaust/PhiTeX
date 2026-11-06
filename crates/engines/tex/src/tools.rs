@@ -488,6 +488,7 @@ fn look_up(cx: &mut Ctx<'_>, n: &Need, streams: bool) -> Result<Option<(String, 
             .into_iter()
             .find(|(m, _)| m == name)
         {
+            let t = crate::defer::resolve_marked_cx(cx, &t)?;
             return Ok(Some((format!("./{name}"), bytes(&t))));
         }
     }
@@ -1006,6 +1007,10 @@ impl Operation for ToolNode {
             .into_iter()
             .find(|(n, _)| *n == input)
             .map(|(_, t)| t);
+        let text = match text {
+            Some(t) => Some(crate::defer::resolve_marked_cx(cx, &t)?),
+            None => None,
+        };
         let mut a: Vec<ValueId> = args.iter().take(4).copied().collect();
         a.extend(text.map(|t| v.str(&t)));
         let made = cx.apply(ops(&self.0).tool, a)?;

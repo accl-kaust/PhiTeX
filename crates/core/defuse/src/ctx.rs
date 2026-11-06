@@ -398,7 +398,7 @@ impl<'a> Ctx<'a> {
         let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         self.wait_for_settling(&r)?;
-        self.hold_at_frontier(f)?;
+        self.hold_at_frontier(f, at)?;
         self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
         let x = self.follow_aliases(r.value)?;
         self.seen.insert(f, x);
@@ -443,14 +443,23 @@ impl<'a> Ctx<'a> {
     /// definition the read would meet (TeX's text after a page's break
     /// reads what that page's routine defined): read now, the answer is
     /// one the reader's run is thrown away for once that node comes.
-    fn hold_at_frontier(&mut self, f: Field) -> Result<(), Stop> {
+    fn hold_at_frontier(&mut self, f: Field, at: NodeId) -> Result<(), Stop> {
         use std::sync::atomic::Ordering::{Acquire, Relaxed};
         let eng = self.eng;
         let fr = eng.frontier.load(Acquire);
         if fr == 0 || !eng.settle_marked(f) || eng.op(self.me.op()).settles_at_quiet() {
             return Ok(());
         }
-        if !crate::sched::past_frontier(eng, self.me, fr) {
+        // (a read made before my placer, `Ctx::read_before_placer`, or
+        // before a node named, stands where that node does: the layer
+        // places nothing behind the frontier)
+        let past = if at == self.me.id {
+            crate::sched::past_frontier(eng, self.me, fr)
+        } else {
+            eng.placed_node(at)
+                .is_none_or(|x| crate::sched::past_frontier(eng, x, fr))
+        };
+        if !past {
             return Ok(());
         }
         eng.frontier_held.fetch_add(1, Relaxed);
@@ -479,12 +488,19 @@ impl<'a> Ctx<'a> {
     /// ([`Ctx::define_alias`]).
     fn follow_aliases(&mut self, mut x: Option<ValueId>) -> Result<Option<ValueId>, Stop> {
         for _ in 0..32 {
-            let Some((g, at)) = x.and_then(|y| read::alias_of(self.values(), y)) else {
+            let Some((g, at, c)) = x.and_then(|y| read::alias_parts(self.values(), y)) else {
                 return Ok(x);
             };
-            x = match self.read_at_raw(g, At::Before(at))? {
+            let y = match self.read_at_raw(g, At::Before(at))? {
                 FieldAt::Def(y, _) => Some(y),
                 FieldAt::Unset | FieldAt::Gone => None,
+            };
+            // (an alias plus an offset, a relation on an alias: the
+            // target's integer plus it; an alias of one, the offset carried)
+            let v = self.values();
+            x = match y.and_then(|z| read::alias_parts(v, z)) {
+                Some((h, hat, k)) => Some(read::alias_value_plus(v, h, hat, k.wrapping_add(c))),
+                None => read::alias_target_plus(v, y, c),
             };
         }
         Ok(x)
@@ -537,10 +553,15 @@ impl<'a> Ctx<'a> {
                 })),
             ),
         };
-        if let (Some(x), Anchor::Before(_) | Anchor::AfterOwn(_)) = (&r, &anchor) {
+        if let (Some(x), Anchor::Before(n) | Anchor::AfterOwn(n)) = (&r, &anchor) {
+            let n = if matches!(anchor, Anchor::Before(_)) {
+                *n
+            } else {
+                self.me.id
+            };
             self.note_source(x.by);
             self.wait_for_settling(x)?;
-            self.hold_at_frontier(f)?;
+            self.hold_at_frontier(f, n)?;
         }
         self.record(
             ReadKind::Field { f, at: anchor },
@@ -725,14 +746,14 @@ impl<'a> Ctx<'a> {
         let rb = reaching_at(self.eng, base, at, false).ok_or_else(stop)?;
         self.note_source(rb.by);
         self.wait_for_settling(&rb)?;
-        self.hold_at_frontier(base)?;
+        self.hold_at_frontier(base, at)?;
         let g = read::derived_name(v, spec, rb.value).ok_or_else(stop)?;
         self.before_read(g);
         let ep_g = self.ep;
         let rg = reaching_at(self.eng, g, at, false).ok_or_else(stop)?;
         self.note_source(rg.by);
         self.wait_for_settling(&rg)?;
-        self.hold_at_frontier(g)?;
+        self.hold_at_frontier(g, at)?;
         let aliased = |x: Option<ValueId>| x.is_some_and(|x| read::alias_of(v, x).is_some());
         if aliased(rb.value) || aliased(rg.value) {
             let b = self.read(base)?;
@@ -774,7 +795,7 @@ impl<'a> Ctx<'a> {
         let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         self.wait_for_settling(&r)?;
-        self.hold_at_frontier(f)?;
+        self.hold_at_frontier(f, at)?;
         if let Some(x) = r.value
             && read::alias_of(self.values(), x).is_none()
             && through_path(self.values(), x)
@@ -1750,11 +1771,30 @@ impl<'a> Ctx<'a> {
             .as_ref()
             .filter(|r| !r.provisional && (r.state.is_none() || self.me.parked_on.lock().is_none()))?;
         let mut memo = crate::read::FoldMemo::new();
-        if !r
+        if let Some(i) = r
             .reads
             .iter()
-            .all(|rd| crate::read::holds(self.eng, self.me, rd, &mut memo))
+            .position(|rd| !crate::read::holds(self.eng, self.me, rd, &mut memo))
         {
+            // (`PHITEX_STANDS_TRACE`, profile: the first read of the last
+            // run that moved, with what it saw and what it would see now)
+            if crate::obs::enabled() && std::env::var_os("PHITEX_STANDS_TRACE").is_some() {
+                let rd = &r.reads[i];
+                let v = &self.eng.values;
+                let now = crate::read::answer_in(self.eng, self.me, &rd.kind, rd.path, &mut memo);
+                let show =
+                    |x: Option<ValueId>| x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(200).collect());
+                eprintln!(
+                    "stands: node {} woken by {:?} runs: read {i} of {}: {} {:?} seen {} now {}",
+                    self.me.id.raw(),
+                    self.woke,
+                    r.reads.len(),
+                    rd.kind.field().map(|f| v.render(f.0)).unwrap_or_default(),
+                    rd.kind,
+                    show(rd.seen),
+                    show(now)
+                );
+            }
             return None;
         }
         let output = r.output;

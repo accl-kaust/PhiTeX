@@ -4,7 +4,7 @@ use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::api::{Brackets, NodeId, PathId, ProjId, Step};
+use crate::api::{Brackets, NodeId, PathId, ProjId, Rel, Step};
 use crate::engine::Engine;
 use crate::node::{Anchor, Node, ReadKind, State};
 use crate::order::{Pos, SegId};
@@ -1934,12 +1934,25 @@ pub(crate) const ALIAS: &str = "\u{10FFFF}alias";
 /// The field and node an alias definition's value names, if `x` is one.
 #[must_use]
 pub fn alias_of(v: &Values, x: ValueId) -> Option<(Field, NodeId)> {
+    alias_parts(v, x).map(|(g, at, _)| (g, at))
+}
+
+/// An alias definition's parts: the field, the node, and the integer
+/// added to that field's value there (`[ALIAS, g, at]` or, with an
+/// offset, `[ALIAS, g, at, c]`: a relation `f := input + c` whose input
+/// is an alias, [`rel_add`]).
+#[must_use]
+pub fn alias_parts(v: &Values, x: ValueId) -> Option<(Field, NodeId, i64)> {
     v.with_list(x, |xs| {
-        if xs.len() != 3 || !v.with_str(xs[0], |s| s == ALIAS).unwrap_or(false) {
+        if !(xs.len() == 3 || xs.len() == 4) || !v.with_str(xs[0], |s| s == ALIAS).unwrap_or(false) {
             return None;
         }
         let n = v.as_int(xs[2])?;
-        Some((Field(xs[1]), NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes()))))
+        let c = match xs.get(3) {
+            Some(&c) => v.as_int(c)?,
+            None => 0,
+        };
+        Some((Field(xs[1]), NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes())), c))
     })
     .flatten()
 }
@@ -1951,24 +1964,106 @@ pub fn alias_of(v: &Values, x: ValueId) -> Option<(Field, NodeId)> {
 /// [`alias_of`].
 #[must_use]
 pub fn alias_value(v: &Values, g: Field, at: NodeId) -> ValueId {
-    v.list(vec![
-        v.str(ALIAS),
-        g.0,
-        v.int(i64::from_ne_bytes(at.raw().to_ne_bytes())),
-    ])
+    alias_value_plus(v, g, at, 0)
 }
 
-/// `x` with its alias definitions followed (`Ctx::define_alias`), as a
-/// read before each alias's node gives them, unrecorded: what a relation
-/// on an aliased field adds to.
+/// [`alias_value`] plus `c`: "the value of `g` reaching `at`, plus `c`"
+/// (an integer's), the plain alias where `c` is 0.
+#[must_use]
+pub fn alias_value_plus(v: &Values, g: Field, at: NodeId, c: i64) -> ValueId {
+    let mut xs = vec![v.str(ALIAS), g.0, v.int(i64::from_ne_bytes(at.raw().to_ne_bytes()))];
+    if c != 0 {
+        xs.push(v.int(c));
+    }
+    v.list(xs)
+}
+
+/// An alias's target value `y` with its offset `c` added (`y` an integer,
+/// absent: 0, as a read of an integer gives it).
+#[must_use]
+pub fn alias_target_plus(v: &Values, y: Option<ValueId>, c: i64) -> Option<ValueId> {
+    if c == 0 {
+        return y;
+    }
+    Some(v.int(y.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c)))
+}
+
+/// The value of a relation `f := input + c` (`Ctx::define_rel`) where the
+/// input's definition holds `input`, nothing followed (under a segment's
+/// lock): an integer plus `c`; an alias plus `c` where the input is an
+/// alias, which is exact (its readers follow it) and which
+/// [`rel_value`] makes an integer again where the alias is one of `f`
+/// itself.
+pub(crate) fn rel_add(v: &Values, input: Option<ValueId>, c: i64) -> ValueId {
+    if let Some((g, at, k)) = input.and_then(|x| alias_parts(v, x)) {
+        return alias_value_plus(v, g, at, k.wrapping_add(c));
+    }
+    v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c))
+}
+
+/// The value of a relation `f := input + c` from `input`, an alias of
+/// `f` itself followed to the value it names (a counter set back to its
+/// own value as of an earlier node, then stepped: beamer's
+/// `\beamer@restorecounter`): the integer, which the walk of a change of
+/// `f` before that node puts right as it passes the alias's definition
+/// (`commit::reask_from`). An alias of another field stays one plus `c`
+/// ([`rel_add`]): no walk of `f` passes a change of that field, and its
+/// readers follow it to the target, read where it moves. An append
+/// (`Rel::Append`) is the client's append of the input with every alias
+/// followed ([`through_aliases`]).
+pub(crate) fn rel_value(eng: &Engine, f: Field, mut input: Option<ValueId>, c: Rel) -> ValueId {
+    let v = &eng.values;
+    let mut c = match c {
+        Rel::Add(c) => c,
+        Rel::Append(_) => return eng.rel_apply(c, through_aliases(eng, input)),
+    };
+    // (each step goes to a definition before the last: at most the
+    // field's definitions before the relation)
+    loop {
+        match input.and_then(|x| alias_parts(v, x)) {
+            Some((g, at, k)) if g == f => {
+                input = reaching_at(eng, f, at, false).and_then(|r| r.value);
+                c = c.wrapping_add(k);
+            }
+            _ => return rel_add(v, input, c),
+        }
+    }
+}
+
+/// The value of relation `c` where its input's definition holds `input`,
+/// nothing followed (under a segment's lock): [`rel_add`] for
+/// `Rel::Add`; for `Rel::Append` the client's append of `input` as it
+/// is, which [`rel_value`] puts right through the aliases it holds.
+pub(crate) fn rel_plain(eng: &Engine, c: Rel, input: Option<ValueId>) -> ValueId {
+    match c {
+        Rel::Add(k) => rel_add(&eng.values, input, k),
+        Rel::Append(_) => eng.rel_apply(c, input),
+    }
+}
+
+/// `x` with its alias definitions followed, as a read before each alias's
+/// node gives them, unrecorded, an alias's offset carried: what an append
+/// relation on an aliased field appends to ([`rel_value`]). An append's
+/// value cannot be an alias plus something, as an integer's is
+/// ([`rel_add`]), so it is computed through them.
 pub(crate) fn through_aliases(eng: &Engine, mut x: Option<ValueId>) -> Option<ValueId> {
+    let v = &eng.values;
     for _ in 0..32 {
-        let Some((g, at)) = x.and_then(|y| alias_of(&eng.values, y)) else {
+        let Some((g, at, c)) = x.and_then(|y| alias_parts(v, y)) else {
             return x;
         };
-        x = reaching_at(eng, g, at, false).and_then(|r| r.value);
+        let y = reaching_at(eng, g, at, false).and_then(|r| r.value);
+        x = match y.and_then(|z| alias_parts(v, z)) {
+            Some((h, hat, k)) => Some(alias_value_plus(v, h, hat, k.wrapping_add(c))),
+            None => alias_target_plus(v, y, c),
+        };
     }
     x
+}
+
+/// Whether `x` is an alias of field `f` itself ([`rel_value`]).
+pub(crate) fn alias_of_self(v: &Values, f: Field, x: ValueId) -> bool {
+    alias_parts(v, x).is_some_and(|(g, _, _)| g == f)
 }
 
 #[cfg(test)]

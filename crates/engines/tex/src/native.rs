@@ -665,7 +665,7 @@ impl Run<'_, '_> {
             if !self.has_input() {
                 break false;
             }
-            if self.next_ck()? {
+            if self.next_ck_x()? {
                 if !matches!(
                     self.cur.cmd,
                     cmd::LETTER | cmd::OTHER_CHAR | cmd::CHAR_GIVEN
