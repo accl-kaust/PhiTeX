@@ -2199,7 +2199,7 @@ fn hold_for(eng: &Engine, node: &Node) -> Option<NodeId> {
         return Some(x);
     }
     let r = node.run_record()?;
-    crate::read::open_definer_before(eng, node, &r)
+    crate::read::open_definer_before(eng, node, &r).or_else(|| crate::read::derived_target_open(eng, node, &r))
 }
 
 fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalError> {
