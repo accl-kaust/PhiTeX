@@ -91,6 +91,15 @@ impl Run<'_, '_> {
             if crate::exec::obs_flag!("PHITEX_CMD_TRACE") {
                 self.cmd_trace();
             }
+            // (`\begin{tikzpicture}`: the picture as a child node of this
+            // run, its output taken here, `crate::pic`)
+            if self.pic_on
+                && (cmd::CALL..=cmd::LONG_OUTER_CALL).contains(&self.cur.cmd)
+                && self.cur.tok == crate::pic::begin_tok()
+                && self.pic_begin()
+            {
+                return self.ck();
+            }
             if self.cur.cmd > cmd::MAX_COMMAND {
                 if self.cur.cmd >= cmd::END_TEMPLATE
                     && self.cur.cmd != cmd::DONT_EXPAND
@@ -1273,6 +1282,10 @@ impl Run<'_, '_> {
         }
         let e = ch >= 2;
         let p = self.get_r_token()?;
+        // (`\\xdef\\x{\\x...}`: an append, `Run::append_def`)
+        if e && global && a % 4 == 0 && !protected && self.append_def(p)? {
+            return Ok(());
+        }
         let was = e.then(|| self.lines_sink_begin(Sink::Def));
         let (params, body) = self.scan_toks(true, e);
         let hit = was.is_some_and(|w| self.lines_sink_end(w));

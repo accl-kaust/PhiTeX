@@ -4,7 +4,7 @@ use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::api::{Brackets, NodeId, PathId, ProjId, Step};
+use crate::api::{Brackets, NodeId, PathId, ProjId, Rel, Step};
 use crate::engine::Engine;
 use crate::node::{Anchor, Node, ReadKind, State};
 use crate::order::{Pos, SegId};
@@ -521,6 +521,11 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
             Some(proj(x, vals))
         }
         Step::Eq(k) => Some(vals.bool(v == Some(k))),
+        Step::Within(k) => {
+            let ks = vals.with_list(k, <[ValueId]>::to_vec)?;
+            vals.with_list(v?, |xs| xs.iter().all(|x| ks.contains(x)))
+                .map(|b| vals.bool(b))
+        }
         Step::Cmp(k) => {
             let a = vals.as_int(v?)?;
             let b = vals.as_int(k)?;
@@ -2003,9 +2008,15 @@ pub(crate) fn rel_add(v: &Values, input: Option<ValueId>, c: i64) -> ValueId {
 /// `f` before that node puts right as it passes the alias's definition
 /// (`commit::reask_from`). An alias of another field stays one plus `c`
 /// ([`rel_add`]): no walk of `f` passes a change of that field, and its
-/// readers follow it to the target, read where it moves.
-pub(crate) fn rel_value(eng: &Engine, f: Field, mut input: Option<ValueId>, mut c: i64) -> ValueId {
+/// readers follow it to the target, read where it moves. An append
+/// (`Rel::Append`) is the client's append of the input with every alias
+/// followed ([`through_aliases`]).
+pub(crate) fn rel_value(eng: &Engine, f: Field, mut input: Option<ValueId>, c: Rel) -> ValueId {
     let v = &eng.values;
+    let mut c = match c {
+        Rel::Add(c) => c,
+        Rel::Append(_) => return eng.rel_apply(c, through_aliases(eng, input)),
+    };
     // (each step goes to a definition before the last: at most the
     // field's definitions before the relation)
     loop {
@@ -2017,6 +2028,37 @@ pub(crate) fn rel_value(eng: &Engine, f: Field, mut input: Option<ValueId>, mut 
             _ => return rel_add(v, input, c),
         }
     }
+}
+
+/// The value of relation `c` where its input's definition holds `input`,
+/// nothing followed (under a segment's lock): [`rel_add`] for
+/// `Rel::Add`; for `Rel::Append` the client's append of `input` as it
+/// is, which [`rel_value`] puts right through the aliases it holds.
+pub(crate) fn rel_plain(eng: &Engine, c: Rel, input: Option<ValueId>) -> ValueId {
+    match c {
+        Rel::Add(k) => rel_add(&eng.values, input, k),
+        Rel::Append(_) => eng.rel_apply(c, input),
+    }
+}
+
+/// `x` with its alias definitions followed, as a read before each alias's
+/// node gives them, unrecorded, an alias's offset carried: what an append
+/// relation on an aliased field appends to ([`rel_value`]). An append's
+/// value cannot be an alias plus something, as an integer's is
+/// ([`rel_add`]), so it is computed through them.
+pub(crate) fn through_aliases(eng: &Engine, mut x: Option<ValueId>) -> Option<ValueId> {
+    let v = &eng.values;
+    for _ in 0..32 {
+        let Some((g, at, c)) = x.and_then(|y| alias_parts(v, y)) else {
+            return x;
+        };
+        let y = reaching_at(eng, g, at, false).and_then(|r| r.value);
+        x = match y.and_then(|z| alias_parts(v, z)) {
+            Some((h, hat, k)) => Some(alias_value_plus(v, h, hat, k.wrapping_add(c))),
+            None => alias_target_plus(v, y, c),
+        };
+    }
+    x
 }
 
 /// Whether `x` is an alias of field `f` itself ([`rel_value`]).

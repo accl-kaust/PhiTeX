@@ -98,7 +98,7 @@ impl Run<'_, '_> {
             vlid,
             group,
             sid: t.lid,
-            depth: base.depth + groups,
+            depth: base.depth + groups + self.depth_add,
             extra: t.extra.clone(),
             vm,
         })
@@ -598,8 +598,19 @@ impl Run<'_, '_> {
     /// gives, without copying a local list.
     pub(crate) fn list_last(&mut self, lid: i64) -> R<(Option<ValueId>, usize)> {
         let v = self.v;
+        let child_base = self.pic_child.as_ref().is_some_and(|p| p.lid == lid);
         if let Some(l) = self.level_of(lid) {
             let n = l.list.len();
+            // (a picture child's own list is empty where the parent's
+            // items before the picture stand: a look past it refuses,
+            // `crate::pic`)
+            // (a picture child's own list is empty where the parent's items
+            // before the picture stand: a look past its start takes them,
+            // `Run::pic_take_list`)
+            if n == 0 && child_base && self.pic_take_list()? {
+                return self.list_last(lid);
+            }
+            let l = self.level_of(lid).expect("the level");
             return Ok((l.list.last_mut().map(|x| x.value(v)), n));
         }
         let (items, since) = self.list_items(lid)?;
@@ -1193,22 +1204,40 @@ impl Run<'_, '_> {
             // and what those fonts are bound to now, `pdf_font_blink`:
             // another font's first ask since may have bound them to it,
             // [`crate::pdfprim::get_expand_font`])
-            let linked: Vec<i32> = self
-                .get(&format!("pdf:elink:{fi}"))?
-                .map(|x| {
-                    crate::val::list_of(self.v, x)
-                        .iter()
-                        .filter_map(|&y| i32::try_from(crate::val::int_of(self.v, y)).ok())
-                        .collect()
-                })
-                .unwrap_or_default();
+            // (which ratios, not in what order they were first asked:
+            // [`Run::val_set`])
+            let link =
+                self.ops
+                    .fields
+                    .get_at(self.v, self.cx.values_epoch(), &format!("pdf:elink:{fi}"));
+            // (looked at, not read: the paragraph depends on whether each
+            // ratio it asks is there, `Run::note_elink_asks`)
+            let (set, peeked) = self.val_set_peek(link)?;
+            if peeked {
+                view.elink_peeked.insert(f, link);
+            }
+            let mut linked: Vec<i32> = set
+                .into_iter()
+                .filter_map(|x| i32::try_from(crate::val::int_of(self.v, x)).ok())
+                .collect();
+            linked.sort_unstable();
             view.elink.insert(f, linked.clone());
             for &e in &linked {
                 let k = key(e);
                 if view.ex_base.contains_key(&k) {
                     continue;
                 }
-                let kinfo = self.font_get(k, crate::fields::FontCell::Info)?;
+                // (looked at where the list was: read only for a ratio
+                // the paragraph asks, `Run::note_elink_asks`)
+                let kinfo = if view.elink_peeked.contains_key(&f) {
+                    let (x, peek) = self.font_info_peek(k)?;
+                    if let Some(fld) = peek {
+                        view.info_peeked.insert((f, e), (fld, x));
+                    }
+                    x
+                } else {
+                    self.font_get(k, crate::fields::FontCell::Info)?
+                };
                 if let Some((b, ..)) = crate::fonts::info(self.v, kinfo).and_then(|j| j.ex) {
                     let b = u32::try_from(b).unwrap_or(0);
                     view.ex_base.insert(k, b);
@@ -1549,6 +1578,7 @@ impl Run<'_, '_> {
         let t0 = crate::prof::start();
         let para = phitex_typeset::linebreak::line_break(list, display, &params, &view, &mut hy);
         crate::prof::add(crate::prof::LB_TS, t0);
+        self.note_elink_asks(&view)?;
         // (the fonts its expansion made, in the order it asked for them:
         // pdfTeX's internal fonts, numbered as they are made)
         let made = std::mem::take(&mut *view.exp_log.locked());

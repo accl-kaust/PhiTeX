@@ -196,6 +196,15 @@ pub enum Step {
     Eq(ValueId),
     /// The order of an integer against `k`: -1, 0 or 1.
     Cmp(ValueId),
+    /// Whether every element of a list is an element of list `k` (none:
+    /// not a list). A reader that checked something of each element of
+    /// the list it saw, `k`, through this stands while the list loses
+    /// elements or keeps them, and is asked again only for an element it
+    /// never checked: a list grown by appends whose appender checks each
+    /// name in it (an `\xdef` appending to a macro of font names it reads
+    /// as not expanding) is not asked again when an earlier first use of
+    /// a name moves later.
+    Within(ValueId),
     /// A derived read (docs/spec-relative-counters.md §3), `spec` the
     /// list `[base, prefix, j, suffix]`: the value of the field named
     /// `prefix`, the decimal digits of `v + j`, `suffix`, where `v` is the
@@ -230,6 +239,31 @@ impl PathId {
         PathId(u32::from(p.0))
     }
 }
+
+/// A relation's operation on the value of its field reaching its node
+/// (`Ctx::define_rel`, `Ctx::define_append`): the engine recomputes the
+/// definition in place when that value moves, without running the node.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Rel {
+    /// The integer reaching it plus a constant.
+    Add(i64),
+    /// The value reaching it with the items of a list (a list value)
+    /// appended, by the client's append ([`Engine::set_append`]).
+    Append(ValueId),
+}
+
+impl std::fmt::Display for Rel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Rel::Add(c) => write!(f, "{c:+}"),
+            Rel::Append(x) => write!(f, "append {}", x.raw()),
+        }
+    }
+}
+
+/// The client's append for [`Rel::Append`]: the value reaching the
+/// relation (`None` where none does) and the items appended; pure.
+pub type AppendFn = Arc<dyn Fn(Option<ValueId>, ValueId, &Values) -> ValueId + Send + Sync>;
 
 /// A client projection: pure, from a value to a small value.
 pub type Projection = Arc<dyn Fn(ValueId, &Values) -> ValueId + Send + Sync>;

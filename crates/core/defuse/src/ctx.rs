@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{At, Cause, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Step, Stop};
+use crate::api::{At, Cause, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Rel, Step, Stop};
 use crate::engine::Engine;
 use crate::node::{Anchor, DefRec, Node, Placement, Product, ReadKind, ReadRec, RunRecord, State};
 use crate::order::Pos;
@@ -75,6 +75,12 @@ pub struct Ctx<'a> {
     /// `PHITEX_RESUME_CHECK`: the reads of the run checked
     /// ([`Ctx::stash_reads`]).
     stashed: Vec<ReadRec>,
+    /// [`Ctx::read_before_placer`]: my reads of a field's reaching
+    /// definition are made before the node that placed me.
+    before_placer: Option<NodeId>,
+    /// [`Ctx::read_before_placer_over`]: the field whose association
+    /// list answers my reads first.
+    overlay: Option<Field>,
 }
 
 /// The check ([`Ctx::tick`]) from which a run's reads are looked at
@@ -140,6 +146,89 @@ impl<'a> Ctx<'a> {
             wait_frontier: false,
             goes_on: false,
             ticks: 0,
+            before_placer: None,
+            overlay: None,
+        }
+    }
+
+    /// [`Ctx::read_before_placer`], with the association list field
+    /// `overlay` (`[[field, value]…]`, `[field]` for a binding to
+    /// nothing), read at my own position, answering first: a field it
+    /// has a key for is answered from there, through the same path a
+    /// read asks for (the read files that path on `overlay` under its
+    /// key, and the key's presence), else before my placer. For a child
+    /// whose placer hands it the bindings it holds where the child's text
+    /// stands (a picture child: `phitex-tex`'s `pic:` field).
+    pub fn read_before_placer_over(&mut self, overlay: Field) {
+        self.before_placer = self.me.parent;
+        self.overlay = Some(overlay);
+    }
+
+    /// The answer to a read of `f` through `p` from the overlay
+    /// ([`Ctx::read_before_placer_over`]): `None` where the overlay has no
+    /// key for `f` (a read of that presence recorded), else the value
+    /// through `p` (`Some(None)`: none), the read recorded on the overlay.
+    /// An alias value there is read whole and followed, `p` applied to
+    /// what it gives.
+    fn overlay_answer(&mut self, f: Field, p: PathId) -> Result<Option<Option<ValueId>>, Stop> {
+        let Some(o) = self.overlay else {
+            return Ok(None);
+        };
+        if f == o {
+            return Ok(None);
+        }
+        let bp = self.before_placer.take();
+        self.overlay = None;
+        let r = self.overlay_answer_(o, f, p);
+        self.before_placer = bp;
+        self.overlay = Some(o);
+        r
+    }
+
+    fn overlay_answer_(&mut self, o: Field, f: Field, p: PathId) -> Result<Option<Option<ValueId>>, Stop> {
+        let has = self.eng.path(&[Step::Has(f.0)]);
+        if self.read_path(o, has)? != Some(self.values().bool(true)) {
+            return Ok(None);
+        }
+        let key = self.eng.path(&[Step::Key(f.0)]);
+        let peek = self.peek_path(o, key)?;
+        if peek.is_some_and(|x| read::alias_of(self.values(), x).is_some()) {
+            let x = self.read_path(o, key)?;
+            let y = self.follow_aliases(x)?;
+            return Ok(Some(read::apply_path(self.eng, y, p)));
+        }
+        let mut steps = vec![Step::Key(f.0)];
+        if p != PathId::WHOLE {
+            steps.extend_from_slice(self.eng.path_steps(p).unwrap_or_default());
+        }
+        let q = self.eng.path(&steps);
+        Ok(Some(self.read_path(o, q)?))
+    }
+
+    /// From now on, every read of a field's definition reaching me
+    /// (`read`, `read_path`, `read_or_path`, `read_derived`, `def_site`,
+    /// `snapshot`, `read_item`) is made, answered and filed as a
+    /// read before the node that placed me (`At::Before(placer)`), not
+    /// at my position: none of my placer's definitions, nor those of the
+    /// children it placed before me, answer it, and a change of them
+    /// asks me nothing. For a child whose text stands in the middle of
+    /// its placer's (a picture of a figure's run): what the placer had
+    /// bound before the child's place it hands over itself, and what it
+    /// defines after it the child, as in the text, never sees. My views
+    /// (`view_field`, `view`) stay mine: a field the placer defines for
+    /// me is read there, and so is my scope depth (`depth`). A node with
+    /// no placer reads at its position.
+    pub fn read_before_placer(&mut self) {
+        self.before_placer = self.me.parent;
+    }
+
+    /// Where a read of a definition reaching me is made
+    /// ([`Ctx::read_before_placer`]): the node it is made before, and
+    /// the anchor it is filed with.
+    fn here(&self) -> (NodeId, Anchor) {
+        match self.before_placer {
+            Some(p) => (p, Anchor::Before(p)),
+            None => (self.me.id, Anchor::Me),
         }
     }
 
@@ -261,8 +350,9 @@ impl<'a> Ctx<'a> {
         fields.sort_unstable_by_key(|f| f.0.raw());
         fields.dedup();
         let mut pairs = Vec::with_capacity(fields.len());
+        let (at, _) = self.here();
         for f in fields {
-            let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+            let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
             self.note_source(r.by);
             if let Some(x) = r.value {
                 pairs.push(v.list(vec![f.0, x]));
@@ -286,7 +376,8 @@ impl<'a> Ctx<'a> {
         // (no change count: the value was loaded before now, so the
         // commit checks the read whatever its field's count says)
         self.ep = u64::MAX;
-        self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, seen);
+        let (_, anchor) = self.here();
+        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, seen);
         self.seen.insert(f, seen);
         Ok(())
     }
@@ -298,12 +389,17 @@ impl<'a> Ctx<'a> {
         if let Some(&x) = self.seen.get(&f) {
             return Ok(x);
         }
+        if let Some(x) = self.overlay_answer(f, PathId::WHOLE)? {
+            self.seen.insert(f, x);
+            return Ok(x);
+        }
         self.before_read(f);
-        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         self.wait_for_settling(&r)?;
         self.hold_at_frontier(f)?;
-        self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
+        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
         let x = self.follow_aliases(r.value)?;
         self.seen.insert(f, x);
         Ok(x)
@@ -487,22 +583,112 @@ impl<'a> Ctx<'a> {
         Ok(x)
     }
 
+    /// The answer `read_path` would give, with no read recorded: the run
+    /// depends on nothing of it. For a reader that looks first and then
+    /// records a narrower read covering what it used of the answer (each
+    /// element it checked: `Step::Within` of them), and goes by that
+    /// read's answer, never by this one alone.
+    pub fn peek_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {
+        self.check()?;
+        if let Some(q) = self.overlay_path(f, p) {
+            let o = self.overlay.unwrap_or(f);
+            return Ok(self.peek_at(o, q, self.me.id).flatten());
+        }
+        let (at, _) = self.here();
+        reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+        Ok(self.peek_at(f, p, at).flatten())
+    }
+
+    /// The value of `f` reaching me, with no read recorded (none where it
+    /// is an alias definition, which only a read follows): for a client
+    /// that looks first and records what it used with
+    /// [`Ctx::note_path`] (`PathId::WHOLE`).
+    pub fn peek_field(&mut self, f: Field) -> Result<Option<Option<ValueId>>, Stop> {
+        self.check()?;
+        if let Some(q) = self.overlay_path(f, PathId::WHOLE) {
+            let o = self.overlay.unwrap_or(f);
+            return Ok(self.peek_at(o, q, self.me.id));
+        }
+        let (at, _) = self.here();
+        reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+        Ok(self.peek_at(f, PathId::WHOLE, at))
+    }
+
+    /// `f` through `p` reaching node `at`, unrecorded: `None` where the
+    /// definition is an alias (only a read follows one) or none reaches
+    /// (a gone node); else the answer.
+    fn peek_at(&self, f: Field, p: PathId, at: NodeId) -> Option<Option<ValueId>> {
+        let r = reaching_at(self.eng, f, at, false)?;
+        if r.value.is_some_and(|x| read::alias_of(self.values(), x).is_some()) {
+            return None;
+        }
+        Some(read::through_at(self.eng, r, p, at, false))
+    }
+
+    /// Where the overlay ([`Ctx::read_before_placer_over`]) has a key for
+    /// `f` (looked at, unrecorded): the path on the overlay that answers
+    /// `f` through `p`.
+    fn overlay_path(&self, f: Field, p: PathId) -> Option<PathId> {
+        let o = self.overlay.filter(|&o| o != f)?;
+        let has = self.eng.path(&[Step::Has(f.0)]);
+        if self.peek_at(o, has, self.me.id).flatten() != Some(self.values().bool(true)) {
+            return None;
+        }
+        let mut steps = vec![Step::Key(f.0)];
+        if p != PathId::WHOLE {
+            steps.extend_from_slice(self.eng.path_steps(p).unwrap_or_default());
+        }
+        Some(self.eng.path(&steps))
+    }
+
+    /// Records a read of `f` through path `p` answered `seen`, as
+    /// `read_path` records one, without answering it: a client that
+    /// looked first ([`Ctx::peek_path`]) and used `seen` of the answer
+    /// files what it used here. A definition of `f` whose answer through
+    /// `p` differs from `seen` re-asks me, one already made before this
+    /// record as well (the commit checks the read whatever the field's
+    /// change count says). With an overlay, filed where the look was
+    /// answered, with the key's presence.
+    pub fn note_path(&mut self, f: Field, p: PathId, seen: Option<ValueId>) -> Result<(), Stop> {
+        self.check()?;
+        self.ep = u64::MAX;
+        if let Some(o) = self.overlay.filter(|&o| o != f) {
+            let q = self.overlay_path(f, p);
+            let has = self.eng.path(&[Step::Has(f.0)]);
+            let b = self.values().bool(q.is_some());
+            self.record(ReadKind::Field { f: o, at: Anchor::Me }, has, Some(b));
+            if let Some(q) = q {
+                self.ep = u64::MAX;
+                self.record(ReadKind::Field { f: o, at: Anchor::Me }, q, seen);
+                return Ok(());
+            }
+            self.ep = u64::MAX;
+        }
+        let (_, anchor) = self.here();
+        self.record(ReadKind::Field { f, at: anchor }, p, seen);
+        Ok(())
+    }
+
     /// `read` through a path: the run depends only on the path's answer
     /// (an alias definition: on all of it, followed).
     pub fn read_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {
         self.check()?;
+        if let Some(x) = self.overlay_answer(f, p)? {
+            return Ok(x);
+        }
         self.before_read(f);
-        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         if let Some(x) = r.value
             && read::alias_of(self.values(), x).is_some()
         {
-            self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
+            self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
             let y = self.follow_aliases(r.value)?;
             return Ok(read::apply_path(self.eng, y, p));
         }
         let x = through(self.eng, r, p);
-        self.record(ReadKind::Field { f, at: Anchor::Me }, p, x);
+        self.record(ReadKind::Field { f, at: anchor }, p, x);
         Ok(x)
     }
 
@@ -527,6 +713,14 @@ impl<'a> Ctx<'a> {
         self.check()?;
         let v = self.values();
         let spec = v.list(vec![base.0, v.str(prefix), v.int(j), v.str(suffix)]);
+        // (an overlay, `Ctx::read_before_placer_over`: the base and the
+        // named field read as reads are, the name made from the first)
+        if self.overlay.is_some() {
+            let b = self.read(base)?;
+            let g = read::derived_name(v, spec, b).ok_or_else(stop)?;
+            let x = self.read(g)?;
+            return Ok((read::apply_path(self.eng, x, then), g));
+        }
         let mut steps = vec![Step::Derived(spec)];
         if then != PathId::WHOLE {
             steps.extend_from_slice(self.eng.path_steps(then).unwrap_or_default());
@@ -534,14 +728,15 @@ impl<'a> Ctx<'a> {
         let p = self.eng.path(&steps);
         self.before_read(base);
         let ep_base = self.ep;
-        let rb = reaching_at(self.eng, base, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let rb = reaching_at(self.eng, base, at, false).ok_or_else(stop)?;
         self.note_source(rb.by);
         self.wait_for_settling(&rb)?;
         self.hold_at_frontier(base)?;
         let g = read::derived_name(v, spec, rb.value).ok_or_else(stop)?;
         self.before_read(g);
         let ep_g = self.ep;
-        let rg = reaching_at(self.eng, g, self.me.id, false).ok_or_else(stop)?;
+        let rg = reaching_at(self.eng, g, at, false).ok_or_else(stop)?;
         self.note_source(rg.by);
         self.wait_for_settling(&rg)?;
         self.hold_at_frontier(g)?;
@@ -552,18 +747,11 @@ impl<'a> Ctx<'a> {
             let x = self.read(g2)?;
             return Ok((read::apply_path(self.eng, x, then), g2));
         }
-        let x = read::through_at(self.eng, rg, p, self.me.id, false);
+        let x = read::through_at(self.eng, rg, p, at, false);
         self.ep = ep_base;
-        self.record(
-            ReadKind::Field {
-                f: base,
-                at: Anchor::Me,
-            },
-            p,
-            x,
-        );
+        self.record(ReadKind::Field { f: base, at: anchor }, p, x);
         self.ep = ep_g;
-        self.record(ReadKind::Field { f: g, at: Anchor::Me }, p, x);
+        self.record(ReadKind::Field { f: g, at: anchor }, p, x);
         Ok((x, g))
     }
 
@@ -584,8 +772,13 @@ impl<'a> Ctx<'a> {
         if let Some(&x) = self.seen.get(&f) {
             return Ok((x, false));
         }
+        if let Some(x) = self.overlay_answer(f, PathId::WHOLE)? {
+            self.seen.insert(f, x);
+            return Ok((x, false));
+        }
         self.before_read(f);
-        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         self.wait_for_settling(&r)?;
         self.hold_at_frontier(f)?;
@@ -594,10 +787,10 @@ impl<'a> Ctx<'a> {
             && through_path(self.values(), x)
         {
             let y = read::apply_path(self.eng, Some(x), p);
-            self.record(ReadKind::Field { f, at: Anchor::Me }, p, y);
+            self.record(ReadKind::Field { f, at: anchor }, p, y);
             return Ok((Some(x), true));
         }
-        self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
+        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
         let x = self.follow_aliases(r.value)?;
         self.seen.insert(f, x);
         Ok((x, false))
@@ -607,10 +800,11 @@ impl<'a> Ctx<'a> {
     pub fn def_site(&mut self, f: Field) -> Result<Option<NodeId>, Stop> {
         self.check()?;
         self.before_read(f);
-        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         let seen = through(self.eng, r, SITE);
-        self.record(ReadKind::Field { f, at: Anchor::Me }, SITE, seen);
+        self.record(ReadKind::Field { f, at: anchor }, SITE, seen);
         Ok(r.by)
     }
 
@@ -656,7 +850,22 @@ impl<'a> Ctx<'a> {
             f,
             loc,
             value: ValueId::UNIT,
-            rel: Some(c),
+            rel: Some(Rel::Add(c)),
+        });
+    }
+
+    /// `f` := the definition of `f` reaching me with the items of list
+    /// `items` appended by the client's append ([`Engine::set_append`]),
+    /// at a locality: a relation as [`Ctx::define_rel`]'s, recomputed in
+    /// place when the value reaching me moves (a list each node adds to,
+    /// microtype's `\\MT@font@list`, is not a chain of runs). The run need
+    /// not read `f`.
+    pub fn define_append_with(&mut self, f: Field, items: ValueId, loc: Locality) {
+        self.product.defs.push(DefRec {
+            f,
+            loc,
+            value: ValueId::UNIT,
+            rel: Some(Rel::Append(items)),
         });
     }
 
@@ -900,6 +1109,23 @@ impl<'a> Ctx<'a> {
     pub fn child(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
         self.product.placements.push(Placement::Child(op, args));
         self.product.placements.len() - 1
+    }
+
+    /// [`Ctx::child`], unless this run placed that very node already (a
+    /// second pass of a run over the same text): that placement's index.
+    pub fn child_once(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
+        let same = self
+            .product
+            .placements
+            .iter()
+            .position(|p| matches!(p, Placement::Child(o, a) if *o == op && a[..] == args[..]));
+        same.unwrap_or_else(|| self.child(op, args))
+    }
+
+    /// Whether this node ran before (its last record stands): a run of
+    /// an edit's evaluation on a node the build has, not a node's first.
+    pub fn ran_before(&self) -> bool {
+        self.last.is_some()
     }
 
     /// Places a node after me and my children.

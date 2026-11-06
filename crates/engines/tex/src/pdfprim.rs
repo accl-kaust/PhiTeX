@@ -950,7 +950,7 @@ fn page_obj(r: &mut Run<'_, '_>, n: i32) -> R<i64> {
     let o = alloc_obj(r)?;
     r.set(&f, v.int(o), true);
     if pdf_mode(r)? {
-        crate::pdfout::page_made_at_read_time(r, i64::from(n))?;
+        crate::pdfout::page_made_at_read_time(r, i64::from(n));
     }
     Ok(o)
 }
@@ -975,13 +975,13 @@ fn action_target(r: &mut Run<'_, '_>, act: ValueId) -> R<()> {
     } else if let Some(&id) = xs.get(3)
         && !list_of(v, id).is_empty()
     {
-        crate::pdfout::dest_first_named(r, id)?;
+        crate::pdfout::dest_first_named(r, id);
     }
     // (then its structure destination's, `/SD`)
     if let Some(&sid) = xs.get(5)
         && sid != ValueId::UNIT
     {
-        crate::pdfout::dest_first_named(r, sid)?;
+        crate::pdfout::dest_first_named(r, sid);
     }
     Ok(())
 }
@@ -2401,15 +2401,19 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
     // them before, still sets its margin kerns by the small-caps codes
     // (pdflatex's `y` 0.299 pt, 26 of the quad, where the bold font's own
     // code gives 37))
-    let link = format!("pdf:elink:{f}");
-    let linked: Vec<ValueId> = r.get(&link)?.map(|x| list_of(v, x)).unwrap_or_default();
-    let first = !linked.iter().any(|&y| int_of(v, y) == i64::from(e));
-    let note = |r: &mut Run<'_, '_>| {
+    // (a list grown by appends: whether `e` is in it read as that alone,
+    // and `e` appended without reading it, `Run::append_val`, so a first
+    // ask moving to another node leaves the asks after both standing)
+    let link = r
+        .ops
+        .fields
+        .get_at(v, r.cx.values_epoch(), &format!("pdf:elink:{f}"));
+    let first = !r.val_has(link, v.int(i64::from(e)))?;
+    let note = |r: &mut Run<'_, '_>| -> R<()> {
         if first {
-            let mut l = linked.clone();
-            l.push(v.int(i64::from(e)));
-            r.set(&link, v.list(l), true);
+            r.append_val(link, v.int(i64::from(e)))?;
         }
+        Ok(())
     };
     if held {
         if first && let Some(x) = held_info {
@@ -2420,7 +2424,7 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
             xs[6] = v.list(vec![v.int(f), v.int(i64::from(e)), v.int(i64::from(auto))]);
             r.font_set(k, FontCell::Info, v.list(xs), true);
         }
-        note(r);
+        note(r)?;
         return Ok(k);
     }
     let Some(file) = i.file else { return Ok(0) };
@@ -2446,7 +2450,7 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
         let x = i64::from(r.font_int(f, c)?);
         r.font_set(k, c, v.int(x), true);
     }
-    note(r);
+    note(r)?;
     Ok(k)
 }
 
@@ -3031,7 +3035,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 opened(r);
                 let _ = alloc_obj(r)?;
                 let names = box_font_names(r, b)?;
-                crate::pdfout::fonts_first_used(r, &names)?;
+                crate::pdfout::fonts_first_used(r, &names);
                 // (its resources' dictionary, written into an object
                 // stream where they compress)
                 crate::pdfout::os_write(r)?;
@@ -3054,7 +3058,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                         .get(&format!("pdf:xform:{n}"))?
                         .and_then(|x| list_of(v, x).first().copied());
                     let names = box_font_names(r, fb)?;
-                    crate::pdfout::fonts_first_used(r, &names)?;
+                    crate::pdfout::fonts_first_used(r, &names);
                     crate::pdfout::os_write(r)?;
                 }
             }

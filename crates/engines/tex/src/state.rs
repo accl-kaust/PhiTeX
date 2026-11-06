@@ -328,7 +328,7 @@ impl Entry {
 
     /// An entry holding engine value `x` as it is, an alias definition's
     /// value known as one ([`ALIAS`]).
-    fn raw_seen(v: &Values, x: Option<ValueId>) -> Entry {
+    pub(crate) fn raw_seen(v: &Values, x: Option<ValueId>) -> Entry {
         let mut e = Entry::raw(x);
         if x.is_some_and(|y| phitex_defuse::alias_of(v, y).is_some()) {
             e.flags |= ALIAS;
@@ -471,6 +471,9 @@ pub(crate) enum Pub {
     Value(ValueId),
     /// `+c` on the value reaching the run (rule 3).
     Rel(i64),
+    /// Items appended to the macro reaching the run, a list value of
+    /// token lists (`Run::appending`, `phitex_defuse::Rel::Append`).
+    Append(ValueId),
 }
 
 /// One publication: the location, what, where, and whether it is a
@@ -3121,6 +3124,34 @@ pub(crate) struct ContState {
 }
 
 impl State {
+    /// Every location the run defined so far (locally or globally, in a
+    /// group or not) with its binding now (`None`: absent): the run's
+    /// state at this point where it is not the engine's (a picture
+    /// child's view of its parent, `crate::pic`).
+    pub(crate) fn defined_now(&self, v: &Values) -> Vec<(Loc, Option<ValueId>)> {
+        let mut out = Vec::new();
+        for &l in &self.touched {
+            let Some(s) = self.slot_ref(l) else { continue };
+            let defined = usize::try_from(s.meta)
+                .ok()
+                .filter(|&m| m > 0)
+                .and_then(|m| self.metas.get(m - 1))
+                .is_some_and(|m| m.ldef_stamp > 0);
+            // (a binding a group's end took back to one the run never
+            // loaded: the engine's, which the child reads itself)
+            if !defined || s.e.flags & LOADED == 0 {
+                continue;
+            }
+            let cur = if s.e.flags & HAS_ID != 0 {
+                s.e.id
+            } else {
+                self.encode(&s.e, v)
+            };
+            out.push((l, cur));
+        }
+        out
+    }
+
     /// `open`: the groups of the run open now (their ids, the nest's
     /// group levels): a slot is a group's local only while its local
     /// definition's group is one of them.
