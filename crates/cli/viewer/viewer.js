@@ -1395,31 +1395,37 @@ header:active { cursor: grabbing; }
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .byline:hover { color: var(--ph-fg); }
 .win.docked:not(.own-header) .byline { display: block; }
-/* Settings: the panel's own rows and the host's, one dialog in every host */
-.settings { inset: 12px; max-width: 560px; margin: 0 auto; padding: 0; gap: 0; overflow: hidden; }
-.settings > header { padding: 12px 14px 10px; border-bottom: 1px solid var(--ph-border); }
-.settings .sbody { overflow: auto; padding: 4px 0 10px; }
-.settings h3 { margin: 12px 14px 4px; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--ph-fg2); }
-.settings .srow { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 2px 12px; padding: 7px 14px; }
+/* Settings: the panel's own rows and the host's, one dialog in every host, a tab per group */
+.settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; }
+.settings > header { padding: 12px 14px 0; }
+.settings .stabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); overflow-x: auto; scrollbar-width: none; }
+.settings .stabs button { all: unset; cursor: pointer; white-space: nowrap; padding: 6px 8px 7px; font-size: 13px; color: var(--ph-fg2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.settings .stabs button:hover { color: var(--ph-fg); }
+.settings .stabs button[aria-selected="true"] { color: var(--ph-fg); font-weight: 600; border-bottom-color: var(--ph-accent); }
+.settings .stabs button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
+.settings .sbody { overflow: auto; padding: 4px 0 8px; }
+.settings .srow { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "lab ctl" "help help" "err err"; align-items: center; column-gap: 16px; padding: 10px 16px; }
 .settings .srow + .srow { border-top: 1px solid var(--ph-border); }
-.settings .srow .lab { display: grid; gap: 1px; min-width: 0; }
-.settings .srow .lab b { font-weight: 600; }
-.settings .srow .lab small { font-size: 12px; color: var(--ph-fg2); }
-.settings .srow.off .lab b, .settings .srow.off .ctl { opacity: .55; }
-.settings .srow .err { grid-column: 1 / -1; font-size: 12px; color: var(--ph-danger); }
+.settings .srow .lab { grid-area: lab; font-weight: 600; min-width: 0; }
+.settings .srow .ctl { grid-area: ctl; justify-self: end; }
+.settings .srow .help { grid-area: help; margin-top: 2px; font-size: 12px; line-height: 1.4; color: var(--ph-fg2); }
+.settings .srow .help:empty { display: none; }
+.settings .srow.off .lab, .settings .srow.off .ctl { opacity: .55; }
+.settings .srow .err { grid-area: err; margin-top: 4px; font-size: 12px; color: var(--ph-danger); }
 .settings .srow .val { color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
-.settings select { font: inherit; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 2px 4px; max-width: 220px; }
-.settings .radios { display: inline-flex; border: 1px solid var(--ph-border); border-radius: var(--ph-pill); overflow: hidden; }
-.settings .radios button { all: unset; cursor: pointer; padding: 2px 10px; font-size: 12px; }
-.settings .radios button + button { border-left: 1px solid var(--ph-border); }
-.settings .radios button[aria-pressed="true"] { background: var(--ph-accent); color: var(--ph-on-accent, #fff); }
-.settings .radios button:disabled { cursor: default; }
+.settings select { font: inherit; font-size: 12px; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 3px 6px; max-width: 220px; }
+.settings .btn { padding: 3px 12px; font-size: 12px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.settings .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--ph-pill); background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.settings .seg button { all: unset; cursor: pointer; padding: 3px 11px; border-radius: var(--ph-pill); font-size: 12px; line-height: 1.4; white-space: nowrap; color: var(--ph-fg); }
+.settings .seg button:hover:not([aria-pressed="true"]):not(:disabled) { background: var(--ph-border); }
+.settings .seg button[aria-pressed="true"] { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.settings .seg button:disabled { cursor: default; }
 .settings .switch { all: unset; cursor: pointer; position: relative; width: 30px; height: 18px; border-radius: 9px; background: var(--ph-border); transition: background .12s; }
 .settings .switch i { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 25%); transition: left .12s; }
 .settings .switch[aria-checked="true"] { background: var(--ph-accent); }
 .settings .switch[aria-checked="true"] i { left: 14px; }
 .settings .switch:disabled { cursor: default; }
-.settings .switch:focus-visible, .settings .radios button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
+.settings .switch:focus-visible, .settings .seg button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
 
 /* docked: the panel fills the host's pane under its toolbar */
 .win.docked { position: relative; left: auto !important; top: auto !important; width: 100% !important; height: 100% !important; max-width: none; max-height: none;
@@ -3702,32 +3708,44 @@ var Panel = class {
       else groups.push({ title: g.title, rows: [...g.rows] });
     }
     this.settingRows.clear();
-    el.innerHTML = `<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><div class="sbody"></div>`;
+    const shown = groups.filter((g) => g.rows.length);
+    const at = Math.max(0, shown.findIndex((g) => g.title === this.settingsTab));
+    el.innerHTML = `<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><nav class="stabs" role="tablist">${shown.map((g, i) => `<button type="button" role="tab" data-tab="${i}" data-group="${esc3(g.title)}" aria-selected="${i === at}">${esc3(g.title)}</button>`).join("")}</nav><div class="sbody"></div>`;
     const body = el.querySelector(".sbody");
-    for (const g of groups.filter((g2) => g2.rows.length)) {
+    shown.forEach((g, i) => {
       const sec = document.createElement("section");
-      sec.innerHTML = `<h3></h3>`;
-      sec.querySelector("h3").textContent = g.title;
+      sec.setAttribute("role", "tabpanel");
+      sec.hidden = i !== at;
       for (const r of g.rows) sec.append(this.settingRow(r));
       body.append(sec);
-    }
+    });
+    el.querySelector(".stabs").onclick = (e) => {
+      const t = e.target.closest("[data-tab]");
+      if (!t) return;
+      const k = Number(t.dataset.tab);
+      this.settingsTab = shown[k].title;
+      el.querySelectorAll("[data-tab]").forEach((b) => b.setAttribute("aria-selected", String(b === t)));
+      body.querySelectorAll("section").forEach((s, i) => s.hidden = i !== k);
+    };
     el.hidden = false;
     this.emit();
   }
+  /** The Settings tab last shown (its group's title). */
+  settingsTab = "";
   /** One row: its label and help, its control, a line for the host's error. */
   settingRow(r) {
     this.settingRows.set(r.id, r);
     const row = document.createElement("div");
     row.className = `srow ${r.kind}${r.disabled ? " off" : ""}`;
     row.dataset.id = r.id;
-    row.innerHTML = `<div class="lab"><b></b><small></small></div><div class="ctl"></div><div class="err" hidden></div>`;
+    row.innerHTML = `<b class="lab"></b><div class="ctl"></div><small class="help"></small><div class="err" hidden></div>`;
     row.querySelector("b").textContent = r.label;
     row.querySelector("small").textContent = r.disabled ?? r.help ?? "";
     const ctl = row.querySelector(".ctl");
     const dis = r.disabled || !r.set ? " disabled" : "";
     if (r.kind === "toggle") ctl.innerHTML = `<button type="button" role="switch" class="switch" aria-checked="${r.value === true}" aria-label="${esc3(r.label)}"${dis}><i></i></button>`;
     else if (r.kind === "choice")
-      ctl.innerHTML = `<div class="radios" role="group" aria-label="${esc3(r.label)}">${(r.options ?? []).map(([v, l]) => `<button type="button" data-v="${esc3(v)}" aria-pressed="${r.value === v}"${dis}>${esc3(l)}</button>`).join("")}</div>`;
+      ctl.innerHTML = `<div class="seg" role="group" aria-label="${esc3(r.label)}">${(r.options ?? []).map(([v, l]) => `<button type="button" data-v="${esc3(v)}" aria-pressed="${r.value === v}"${dis}>${esc3(l)}</button>`).join("")}</div>`;
     else if (r.kind === "select") {
       const s = document.createElement("select");
       s.setAttribute("aria-label", r.label);
@@ -3760,7 +3778,7 @@ var Panel = class {
     if (r.kind === "toggle") row.querySelector(".switch").setAttribute("aria-checked", String(v === true));
     if (r.kind === "choice") row.querySelectorAll("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
   }
-  /** The panel's own rows: the pages' look, the main file, the debug check, the tips. */
+  /** The panel's own rows: the main file, the pages' look, the debug check, the tips. */
   ownSettings() {
     const ev = this.ev;
     const pref = (k, apply2) => async (v) => {
@@ -3772,11 +3790,12 @@ var Panel = class {
     const preview = [];
     if (this.mainFiles.names.length)
       preview.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
-    preview.push(
+    const look2 = [];
+    look2.push(
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
       { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset", kind: "choice", options: [["phitex", "PhiTeX"], ["retro", "Windows 98"], ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => this.look = l) }
     );
-    if (ev.onBoxes) preview.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
+    if (ev.onBoxes) look2.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     preview.push({ id: "problems", label: "Problems shown", help: "Which kinds: the filters at the top of the problems list", kind: "info", value: this.hiddenKinds.size ? `${this.hiddenKinds.size} kind${this.hiddenKinds.size === 1 ? "" : "s"} hidden` : "All" });
     const build = [];
     if (ev.onDebug) build.push({ id: "debug", label: "Debug check", help: "Compare with a fresh build every 5 s (this session only)", kind: "toggle", value: this.debugOn, set: () => this.toggleDebug() });
@@ -3786,6 +3805,7 @@ var Panel = class {
     if (ev.onNews) tips.push({ id: "news", label: "What's new", kind: "action", button: "Show", set: () => (this.settings(false), ev.onNews()) });
     return [
       { title: "Preview", rows: preview },
+      { title: "Appearance", rows: look2 },
       { title: "Build", rows: build },
       { title: "Packages", rows: [] },
       { title: "Updates and tips", rows: tips }
