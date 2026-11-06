@@ -11,8 +11,8 @@ name = "phitex-wasm"
 path = "src/main.rs"
 
 [dependencies]
-phitex-tex = { path = "../engines/tex" }
-phitex-kpse = { path = "../tools/kpse" }
+phitex-tex = { path = "../../engines/tex" }
+phitex-kpse = { path = "../../tools/kpse" }
 
 [lints]
 workspace = true

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The WebAssembly build with threads: phitex-wasm (crates/wasm) for
+# The WebAssembly build with threads: phitex-wasm (crates/wasm/cli) for
 # wasm32-wasip1-threads, run in Node by scripts/wasm-run.mjs (WASI for the
 # files, a Node worker per engine thread on the module's shared memory).
 #

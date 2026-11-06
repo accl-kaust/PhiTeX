@@ -57,7 +57,7 @@ impl Crew {
     fn submit(&'static self, job: Job) {
         // (a target without threads, WebAssembly without atomics: the job
         // run in place, on the caller's stack, its main stack as large as
-        // a worker's: `crates/wasm/build.rs`; only what needs no second
+        // a worker's: `crates/wasm/cli/build.rs`; only what needs no second
         // thread comes here, the pool at one worker)
         if !THREADED {
             job();

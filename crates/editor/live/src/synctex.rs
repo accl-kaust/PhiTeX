@@ -173,7 +173,7 @@ fn gzip(data: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&z[2..z.len() - 4]);
     out.extend_from_slice(&crc32(data).to_le_bytes());
     out.extend_from_slice(
-        &u32::try_from(data.len() & 0xFFFF_FFFF)
+        &u32::try_from(u64::try_from(data.len()).unwrap_or(0) & 0xFFFF_FFFF)
             .unwrap_or(0)
             .to_le_bytes(),
     );

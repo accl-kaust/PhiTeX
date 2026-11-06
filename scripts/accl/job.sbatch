@@ -12,7 +12,8 @@
 # The sandbox is the container: a read-only image, an empty home, no
 # network (`--network none`), and only the node-local workspace writable.
 # bubblewrap cannot nest inside Apptainer, so the checkout's
-# scripts/sandbox is replaced by a pass-through (in the workspace only).
+# scripts/sandbox (the frontends': tools/sandbox) is replaced by a
+# pass-through (in the workspace only).
 # The network is used only by `cargo fetch`, the upstream fetch and a
 # superproject's `npm ci` (phitex-frontends: run in it, `accl submit` snapshots
 # it and its phitex/ submodule; see the crates and node modules below), each
@@ -232,21 +233,27 @@ if [ -z "${ACCL_NO_CARGO:-}" ] && [ -n "$fixed" ] && [ -z "${ACCL_NO_SCCACHE:-}"
     sccenv=",PHITEX_SCCACHE=/opt/sccache/sccache,SCCACHE_DIR=/opt/sccache/cache,SCCACHE_CACHE_SIZE=60G,SCCACHE_IDLE_TIMEOUT=0"
   fi
 fi
-# the container is the sandbox
-cat > scripts/sandbox <<'EOF'
+# the container is the sandbox: PhiTeX's scripts/sandbox, or the
+# frontends' tools/sandbox when the snapshot is theirs
+for sb in scripts/sandbox tools/sandbox; do
+  [ -e "$sb" ] || continue
+  cat > "$sb" <<'EOF'
 #!/usr/bin/env bash
 # (cluster job: the Apptainer container is the sandbox; see job.sbatch)
 [ "${1:-}" = "--net" ] && shift
 exec "$@"
 EOF
-chmod +x scripts/sandbox
+  chmod +x "$sb"
+done
 # (and Slurm's allocation is the memory cap: scripts/heavy passes through)
-cat > scripts/heavy <<'EOF2'
+if [ -e scripts/heavy ]; then
+  cat > scripts/heavy <<'EOF2'
 #!/usr/bin/env bash
 # (cluster job: the allocation caps memory; see job.sbatch)
 exec "$@"
 EOF2
-chmod +x scripts/heavy
+  chmod +x scripts/heavy
+fi
 
 export -f box
 export w sif r root ubind sccbind sccenv
