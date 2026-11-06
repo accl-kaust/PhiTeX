@@ -2162,8 +2162,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             st.woken += 1;
         }
     }
-    for (f, r, by) in later {
-        reask_reader(eng, ww, f, &r, Some(by), &mut st);
+    {
+        let _memo = read::WalkMemo::new();
+        for (f, r, by) in later {
+            reask_reader(eng, ww, f, &r, Some(by), &mut st);
+        }
     }
     for (f, h) in walks {
         match h {
@@ -2911,8 +2914,13 @@ pub(crate) fn reask_from(
                 deeper.len()
             );
         }
-        for r in &readers {
-            reask_reader(eng, w, f, r, by, st);
+        {
+            // (the segment's readers asked on one reading of the line: their
+            // searches back share their answers, `read::WalkMemo`)
+            let _memo = read::WalkMemo::new();
+            for r in &readers {
+                reask_reader(eng, w, f, r, by, st);
+            }
         }
         if !deeper.is_empty() {
             passed = true;
@@ -4119,8 +4127,11 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     for f in changed_contribs {
         reask_ranges(eng, w, f, pos, node.id, &stops, &mut st);
     }
-    for (f, r) in &anchored {
-        reask_reader(eng, w, *f, r, Some(node.id), &mut st);
+    {
+        let _memo = read::WalkMemo::new();
+        for (f, r) in &anchored {
+            reask_reader(eng, w, *f, r, Some(node.id), &mut st);
+        }
     }
     reask_stops(eng, w, stops, node.id, &mut st);
     if was_hole && remove {
@@ -4963,8 +4974,11 @@ fn lifted_walks(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>, mut left: Left,
         }
     }
     (left.pos, left.seg) = (pos, seg);
-    for (f, r) in &left.readers {
-        reask_reader(eng, w, *f, r, Some(m.id), st);
+    {
+        let _memo = read::WalkMemo::new();
+        for (f, r) in &left.readers {
+            reask_reader(eng, w, *f, r, Some(m.id), st);
+        }
     }
     if let Some(old) = left.brackets {
         reask_after_effect_at(eng, w, m, left.pos, old, Brackets::default(), st);
