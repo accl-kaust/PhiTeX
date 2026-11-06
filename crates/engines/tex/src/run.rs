@@ -705,6 +705,11 @@ pub(crate) struct RbChild {
     /// The locations looked up in the child's output, or held before the
     /// read-back point.
     pub checked: phitex_defuse::FxHashSet<Loc>,
+    /// The locations the run defined from the child's output itself
+    /// ([`Run::rb_check`]): published as the run leaves them, so the
+    /// child, which defines only what its run did not, leaves them be
+    /// (`crate::state::State::publication_kept`).
+    pub answered: Vec<Loc>,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -1808,11 +1813,17 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let top =
             self.rec_load || (self.st.has_global_restore(self.v) && self.scope_kind()?.is_none());
-        let (pubs, restored) = self.st.publication(self.v, top);
+        let kept = self
+            .rb
+            .as_ref()
+            .map(|rb| rb.answered.clone())
+            .unwrap_or_default();
+        let (pubs, restored) = self.st.publication_kept(self.v, top, &kept);
         let mut out = Vec::with_capacity(pubs.len());
         for p in pubs {
             let f = self.loc_field(p.loc);
             if p.carried
+                && !kept.contains(&p.loc)
                 && let crate::state::Pub::Value(x) = p.what
                 && self.eng_read(f)? == Some(x)
             {
@@ -1840,7 +1851,12 @@ impl<'c, 'a> Run<'c, 'a> {
             return out.clone();
         }
         let top = self.rec_load || matches!(self.scope_kind_memo, Some(None));
-        let (pubs, _) = self.st.publication(self.v, top);
+        let kept = self
+            .rb
+            .as_ref()
+            .map(|rb| rb.answered.clone())
+            .unwrap_or_default();
+        let (pubs, _) = self.st.publication_kept(self.v, top, &kept);
         pubs.into_iter()
             .map(|p| (self.loc_field(p.loc), p.what, p.at))
             .collect()
@@ -3841,6 +3857,7 @@ impl<'c, 'a> Run<'c, 'a> {
             i,
             guess,
             checked: phitex_defuse::FxHashSet::default(),
+            answered: Vec::new(),
         });
         // (the local keys, made here as without the child: their list
         // read whole, the global ones one by one)
@@ -3940,6 +3957,9 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.read_back_pre(&key, &name, val)?;
         self.set(&name, val, true);
+        if let Some(rb) = &mut self.rb {
+            rb.answered.push(loc);
+        }
         Ok(())
     }
 
