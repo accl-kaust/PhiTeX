@@ -152,21 +152,6 @@ pub(crate) fn run_node(
     let t_new = t_new.elapsed();
     let t_body = std::time::Instant::now();
     let mut res = pass(&mut r, &mut body);
-    // (a read-back through its child that the run cannot keep, a name the
-    // file defines defined by the run after it, `Run::rb_def_check`: the
-    // run again from its start with the read-back inline, the child the
-    // first pass placed taken back with its reads)
-    if r.rb_refused && !matches!(res, Err(Halt::Stop(_))) {
-        if let Some(rb) = &r.rb {
-            let i = rb.i;
-            r.cx.unplace_from(i);
-        }
-        let cx = r.cx;
-        r = Run::new(cx, o);
-        r.no_rb = true;
-        res = pass(&mut r, &mut body);
-    }
-    let no_rb = r.no_rb;
     let t_first = t_body.elapsed();
     let recut = matches!(res, Err(Halt::Recut(_)));
     // (a second pass from the start, ending at the candidate the first
@@ -178,7 +163,6 @@ pub(crate) fn run_node(
         let cx = r.cx;
         r = Run::new(cx, o);
         r.stop_at = Some(k);
-        r.no_rb = no_rb;
         r.recut_cks = cks;
         // (a second pass to a candidate takes no marks)
         res = pass(&mut r, &mut body);

@@ -868,12 +868,6 @@ pub(crate) struct Run<'c, 'a> {
     /// point on, a name the run has not held is looked up in the child's
     /// output first ([`Run::rb_check`]).
     pub rb: Option<RbChild>,
-    /// This pass met what the read-back child cannot answer for (the run
-    /// defined a key after its read-back point, interpreted a line, ...):
-    /// it is made again with the read-back inline (`ops::run_node`).
-    pub rb_refused: bool,
-    /// The read-back inline, as before the child ([`Run::rb_refused`]).
-    pub no_rb: bool,
     /// Per integer register, its value as first read from the engine,
     /// before any map of this run: what a restore to the register's own
     /// symbol puts back ([`Run::reg_restore`]).
@@ -1370,8 +1364,6 @@ impl<'c, 'a> Run<'c, 'a> {
             defer_ok: false,
             defer_hit: None,
             rb: None,
-            rb_refused: false,
-            no_rb: false,
             reg_loaded_base: phitex_defuse::FxHashMap::default(),
             defer_regs: None,
             reg_first_def: phitex_defuse::FxHashMap::default(),
@@ -2156,8 +2148,13 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::obs_flag!("PHITEX_DEF_TRACE") {
             self.def_trace(loc, &val, global);
         }
+        // (a key of a file read back through its child, first touched by
+        // this definition: the read-back's definition made first, as
+        // inline, the value it replaces kept, [`Run::rb_check`])
         if self.rb.is_some() && self.interp.is_none() {
-            self.rb_def_check(loc);
+            if let Err(h) = self.rb_check(loc) {
+                self.raise(h);
+            }
         }
         if self.read_back_done && self.interp.is_none() {
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
@@ -3790,8 +3787,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// set. True where it was so read back; false: inline.
     fn rb_read_back(&mut self, key: &str, wk: Field) -> R<bool> {
         let op = self.cx.op();
-        if self.no_rb
-            || self.rb.is_some()
+        if self.rb.is_some()
             || self.interp.is_some()
             || self.rec_load
             || !self.doc
@@ -3934,40 +3930,6 @@ impl<'c, 'a> Run<'c, 'a> {
         self.read_back_pre(&key, &name, val)?;
         self.set(&name, val, true);
         Ok(())
-    }
-
-    /// The pass cannot keep the read-back through its child
-    /// ([`Run::rb_refused`]).
-    fn rb_refuse(&mut self, name: &str, why: &str) {
-        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
-            eprintln!(
-                "aux-trace: read-back child refused: node {} {name}: {why}",
-                self.cx.node().raw()
-            );
-        }
-        self.rb_refused = true;
-    }
-
-    /// Location `loc` about to be defined after the read-back point of a
-    /// file read back through its child: a name the file defines is one
-    /// the child cannot answer for (the run's definition is not the first
-    /// after the read-back; the value the read-back replaced is kept for
-    /// the lines written later from the read-back's, [`Run::note_pre`]),
-    /// so the run is made again with the read-back inline
-    /// ([`Run::rb_refused`]).
-    fn rb_def_check(&mut self, loc: Loc) {
-        let Some(rb) = &mut self.rb else {
-            return;
-        };
-        if !rb.checked.insert(loc) {
-            return;
-        }
-        let f = self.loc_field(loc);
-        if self.v.with_str(f.0, crate::ops::rb_answers) == Some(true) && self.rb_key(f.0).is_some()
-        {
-            let name = crate::val::field_name(self.v, f);
-            self.rb_refuse(&name, "defined after the point");
-        }
     }
 
     /// The value the read-back of `name` (`val`, from file `key`)
