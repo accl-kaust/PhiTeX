@@ -462,6 +462,7 @@ var Viewer = class {
       tag.className = "peer peer-tag";
       tag.style.setProperty("--hue", String(hue));
       tag.textContent = label;
+      tag.style.setProperty("--fs", String(boxes2[0][3] * 0.72 / w));
       at(tag, boxes2[0][0], boxes2[0][1]);
       s.el.append(tag);
     }
@@ -1156,7 +1157,7 @@ header:active { cursor: grabbing; }
 .win.reopening .viewer { visibility: hidden; }
 /* (the first page's sheet up: the stage holds still under it, its width kept, so nothing scrolls behind the sheet) */
 .win.sheet-up .stage, .win.docked.sheet-up .stage { overflow: hidden; scrollbar-gutter: stable; }
-.slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+.slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); container-type: inline-size; }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
@@ -1183,9 +1184,10 @@ header:active { cursor: grabbing; }
 .smarks i.error { background: var(--ph-danger, #d93025); }
 .smarks i.change { background: var(--ph-accent, #1d3e72); }
 .phx-card[data-key] { cursor: pointer; }
-/* (an overfull box's bar at its line's end, pdflatex's draft rule, drawn by the viewer only; an underfull's hollow) */
+/* (an overfull box's bar at its line's end, where pdflatex's draft rule goes, drawn by the viewer only, in the warning's
+   amber, as its tooltip and the underfull's outline: draft black read as a broken block, and vanished on a dark page; an underfull's hollow) */
 .slot .culprit.rule::after { display: none; }
-.slot .culprit.rule.overfull { background: #1b222c; }
+.slot .culprit.rule.overfull { background: rgb(199 119 0 / 85%); border-radius: 1px; }
 .slot .culprit.rule.underfull { box-shadow: inset 0 0 0 1.5px #c77700; }
 /* (a culprit hovered: its problem's message, a small tooltip under the line) */
 .ctip { position: absolute; z-index: 8; max-width: min(420px, calc(100% - 16px)); display: flex; gap: 6px; align-items: flex-start; padding: 5px 9px;
@@ -1197,8 +1199,9 @@ header:active { cursor: grabbing; }
 .slot .culprit::after { content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 3px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23d93025' stroke-width='1'/%3E%3C/svg%3E") repeat-x left bottom / 6px 3px; }
 .slot .culprit.warning::after { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23c77700' stroke-width='1'/%3E%3C/svg%3E"); }
 .slot .peer { position: absolute; pointer-events: none; border-radius: 2px; background: hsl(var(--hue) 70% 50% / 22%); box-shadow: inset 0 -1.5px 0 hsl(var(--hue) 70% 45%); }
-.slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 5px; border-radius: 3px 3px 3px 0; background: hsl(var(--hue) 70% 42%);
-  box-shadow: none; color: #fff; font: 600 11px/16px var(--ph-font); white-space: nowrap; z-index: 2; }
+/* (the name as large as the line it marks, so it zooms with the page; readable when far out, never a headline when close) */
+.slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 .4em; border-radius: .25em .25em .25em 0; background: hsl(var(--hue) 70% 42%);
+  box-shadow: none; color: #fff; font: 600 clamp(7px, calc(var(--fs, .012) * 100cqw), 22px)/1.35 var(--ph-font); white-space: nowrap; z-index: 2; }
 
 /* strips over the pages: plain, in the host's colours */
 .strip { position: sticky; top: 0; z-index: 2; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
@@ -1626,6 +1629,10 @@ var KEYS = [
   ["Esc", "close; forget a count"]
 ];
 var LINE = 60;
+function typing(e) {
+  const el = e.composedPath?.()[0] ?? e.target;
+  return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName ?? ""));
+}
 function bindKeys(on, t) {
   let count = "";
   let g = false;
@@ -1635,8 +1642,7 @@ function bindKeys(on, t) {
   const by = (dx, dy) => t.scroller.scrollBy({ left: dx, top: dy, behavior: "auto" });
   const handler = (ev) => {
     const e = ev;
-    const el = e.target;
-    if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
+    if (typing(e)) return;
     if (e.altKey || e.metaKey) return;
     const k = e.key;
     if (e.ctrlKey) {
@@ -2138,15 +2144,27 @@ var dur = (ms) => ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1e3 ? `${Math.round(ms)
 function framePart(json) {
   if (!json) return "";
   const f = JSON.parse(json);
-  const split = [["probe", f.probe], ["draw", f.draw], ["transfer", Math.max(0, f.request - f.watch)], ["decode", f.decode]];
-  return `<div class="row"><span class="k">Page ${f.page} drawn${f.inView ? " (in view)" : ""}</span><span class="v">${esc3(dur(f.request + f.decode))}</span><div class="tbar">${split.map(([, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${split.map(([n, ms], i) => `<span><i class="c${i}"></i>${n} ${esc3(dur(ms))}</span>`).join("")}</div><span class="note">${f.drawn} strip${f.drawn === 1 ? "" : "s"} drawn, ${f.kept} reused</span></div>`;
+  const split = [["finding what changed", f.probe], ["drawing", f.draw], ["waiting for the engine", Math.max(0, f.request - f.watch)], ["decoding", f.decode]];
+  return `<div class="row"><span class="k">Drawing page ${f.page}${f.inView ? " (in view)" : ""}</span><span class="v">${esc3(dur(f.request + f.decode))}</span><div class="tbar">${split.map(([, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${split.map(([n, ms], i) => `<span><i class="c${i}"></i>${n} ${esc3(dur(ms))}</span>`).join("")}</div><span class="note">${f.drawn} slice${f.drawn === 1 ? "" : "s"} of the page drawn, ${f.kept} kept from before</span></div>`;
 }
 var PART_NAMES = {
-  "first paint": "First page painted",
-  "fixed point": "All pages settled",
+  "first paint": "Typesetting this page",
+  "fixed point": "Typesetting every page",
   "keystroke\u2192page": "Keystroke to page",
-  rebuilt: "Rebuilt",
+  rebuilt: "Parts redone",
   batching: "Edits batched"
+};
+var PART_NOTES = {
+  "first paint": "in the engine",
+  "fixed point": "the whole document, references and contents included",
+  rebuilt: "",
+  batching: ""
+};
+var SPLIT_NAMES = {
+  queued: "waiting",
+  "round trip": "engine",
+  paint: "drawing",
+  "build and paint": "building and drawing"
 };
 function part2(key, raw) {
   const label = PART_NAMES[key] ?? key.charAt(0).toUpperCase() + key.slice(1);
@@ -2159,11 +2177,11 @@ function part2(key, raw) {
   rest = rest.slice(num[0].length).trim();
   let split;
   if (rest.startsWith("=")) {
-    split = [...rest.slice(1).matchAll(/([a-z][a-z ]*?)\s+([\d.]+)/gi)].map((m) => [m[1].trim(), Number(m[2])]);
+    split = [...rest.slice(1).matchAll(/([a-z][a-z ]*?)\s+([\d.]+)/gi)].map((m) => [SPLIT_NAMES[m[1].trim()] ?? m[1].trim(), Number(m[2])]);
     rest = "";
   }
   const extra = rest.replace(/^·\s*/, "");
-  return { key, label, value: dur(ms), ms, split, note: [note, extra].filter(Boolean).join(" \xB7 ") || void 0 };
+  return { key, label, value: dur(ms), ms, split, note: [key in PART_NOTES ? PART_NOTES[key] : note, extra].filter(Boolean).join(" \xB7 ") || void 0 };
 }
 var lines = (...w) => w.map((x) => `<i style="width:${x}%"></i>`).join("");
 var TIPS = [
@@ -2483,6 +2501,7 @@ var Panel = class {
     this.loadPct = 0;
     this.loadDone = -1;
     this.paints = 0;
+    this.walk = null;
     this.opened = false;
     this.sheetUp();
     this.win.classList.toggle("reopening", !!this.anim);
@@ -2668,7 +2687,7 @@ var Panel = class {
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet", err = !!errs;
     else if (this.reopen || !this.last && this.viewer.pages === 0) t = this.stepNow || "Opening\u2026";
     else if (errs) t = `Built with ${errs} error${errs === 1 ? "" : "s"}`, m = this.speed ? dur(this.speed.ms) : "", err = true;
-    else if (this.speed?.first) t = "First build", m = dur(this.speed.ms);
+    else if (this.speed?.first) t = "First page", m = dur(this.speed.ms);
     else t = "Built", m = this.speed ? dur(this.speed.ms) : "";
     text.textContent = t;
     more.textContent = m ? `\xB7 ${m}` : "";
@@ -3048,6 +3067,10 @@ var Panel = class {
   }
   packages(p) {
     const done = p.done?.length ?? 0;
+    const now = performance.now(), d = this.downloads;
+    if (p.loading.length && d.since === void 0) d.since = now;
+    else if (!p.loading.length && d.since !== void 0) d.ms += now - d.since, d.since = void 0;
+    d.n = done, d.bytes = p.bytes ?? 0;
     const total = done + p.loading.length;
     if (done !== this.loadDone) this.loadDone = done;
     const pct = this.loadPct = Math.max(this.loadPct, total ? Math.round(100 * done / total) : 100);
@@ -3116,6 +3139,7 @@ var Panel = class {
   }
   step(what, pct, detail = "") {
     if (!this.firstPending()) return;
+    this.walkTo(what);
     this.sheetUp();
     this.hints(true);
     const el = this.$("#opening");
@@ -3425,7 +3449,7 @@ var Panel = class {
     addEventListener(
       "keydown",
       (e) => {
-        if (e.ctrlKey || e.altKey || e.metaKey || e.target?.closest?.("input, textarea, select, [contenteditable=true]")) return;
+        if (e.ctrlKey || e.altKey || e.metaKey || typing(e)) return;
         if (e.key === "Escape" && (this.escapeProblems() || this.unmark())) {
         } else if (e.key === "e") this.diagnostics();
         else if (e.key === "t" && this.contents) this.side();
@@ -3681,7 +3705,7 @@ var Panel = class {
       (e) => {
         const ours = all || this.hover || this.root.activeElement != null;
         if (!ours || e.altKey || e.metaKey) return;
-        const typing = e.target?.closest?.("input, textarea, select, [contenteditable=true]") && e.composedPath()[0] !== q;
+        const typing2 = e.target?.closest?.("input, textarea, select, [contenteditable=true]") && e.composedPath()[0] !== q;
         if (e.ctrlKey) {
           const k = e.key;
           if (k === "f" && this.ev.onFind) this.find(true);
@@ -3689,7 +3713,7 @@ var Panel = class {
           else if (k === "-") this.zoomStep(-1);
           else if (k === "0") this.zoomTo("fit");
           else return;
-        } else if (typing || e.composedPath()[0] === q) return;
+        } else if (typing2 || e.composedPath()[0] === q) return;
         else if (e.key === "/" && this.ev.onFind) this.find(true);
         else if ((e.key === "n" || e.key === "N") && !this.$("#find").hidden && this.hits.length) this.findNext(e.key === "n" ? 1 : -1);
         else if (e.key === "Escape" && !this.$("#find").hidden) this.find(false);
@@ -3854,8 +3878,11 @@ var Panel = class {
   }
   /** A repaint reached the screen, `ms` after its keystroke: the status says how fast. */
   painted(ms) {
-    this.speed = { ms, at: performance.now(), first: this.paints++ === 0 };
-    this.$("#speedms").textContent = `\u26A1 ${this.speed.first ? "first build " : ""}${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
+    const first = this.paints++ === 0;
+    if (first) this.walkEnd();
+    if (first && this.walk?.ms !== void 0) ms = this.walk.ms;
+    this.speed = { ms, at: performance.now(), first };
+    this.$("#speedms").textContent = `\u26A1 ${this.speed.first ? "first page " : ""}${dur(ms)}`;
     this.renderStatus();
     if (!this.$("#m-time").hidden) this.timing();
     this.emit();
@@ -4086,6 +4113,57 @@ var Panel = class {
     this.lat = { summary, details: details ?? this.lat?.details };
     if (!this.$("#m-time").hidden) this.timing();
   }
+  /**
+   * This opening's steps as the sheet said them (the project read, the
+   * packages, the format, typesetting), each with the time it was up, from
+   * the first step to the first page on screen (`ms`, then closed): the
+   * first build's time as the writer waited for it, not the engine's part.
+   */
+  walk = null;
+  /** The opening's step is now `what` (a step of the sheet's). */
+  walkTo(what) {
+    const now = performance.now();
+    const w = this.walk ??= { since: now, parts: [], at: now };
+    if (w.ms !== void 0) return;
+    const step = what === this.words.steps[1] ? what : what === this.words.steps[2] ? this.making ? "Making the format" : what : this.words.steps[0];
+    if (step === w.now) return;
+    this.walkAdd(now);
+    w.now = step, w.at = now;
+  }
+  /** The step up until `now` counted (a step seen again adds to its first time). */
+  walkAdd(now) {
+    const w = this.walk;
+    if (!w.now) return;
+    const p = w.parts.find(([k]) => k === w.now);
+    if (p) p[1] += now - w.at;
+    else w.parts.push([w.now, now - w.at]);
+  }
+  /** The first page is on screen: the opening's time closed. */
+  walkEnd() {
+    const w = this.walk;
+    if (!w || w.ms !== void 0) return;
+    const now = performance.now();
+    this.walkAdd(now);
+    w.now = void 0;
+    w.ms = now - w.since;
+  }
+  /** The timing popover's first build: each step's time, as a bar, from opening to the first page. */
+  walkPart() {
+    const w = this.walk;
+    if (!w || w.ms === void 0 || !this.speed?.first) return "";
+    const parts = w.parts.filter(([, ms]) => ms >= 1);
+    return `<div class="row"><span class="k">From opening to the first page</span><span class="v">${esc3(dur(w.ms))}</span><div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div></div>`;
+  }
+  /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
+  downloads = { n: 0, bytes: 0, ms: 0 };
+  /** The timing popover's Downloads row: the packages' time, how many and their size; none fetched, none. */
+  downloadsPart() {
+    const d = this.downloads;
+    if (!d.n && d.since === void 0) return "";
+    const ms = d.ms + (d.since === void 0 ? 0 : performance.now() - d.since);
+    const size = d.bytes ? ` \xB7 ${d.bytes < 1e6 ? `${Math.max(1, Math.round(d.bytes / 1e3))} kB` : `${(d.bytes / 1e6).toFixed(1)} MB`}` : "";
+    return `<div class="row"><span class="k">Downloads</span><span class="v">${esc3(dur(ms))}</span><span class="note">${d.n} package${d.n === 1 ? "" : "s"}${size}${d.since === void 0 ? "" : ", more on the way"}</span></div>`;
+  }
   /** The first build's time and the edits' since (the watch's), for the popover's bars. */
   times = { edits: [] };
   /** A build's time: the first (cold) one's, or an edit's: drawn as bars beside each other in the timing popover. */
@@ -4122,14 +4200,14 @@ var Panel = class {
     const el = this.$("#m-time");
     const parts = this.timingParts().map(([k, v]) => part2(k, v));
     const e2e = parts.find((p) => p.key === "keystroke\u2192page")?.ms ?? this.speed?.ms;
-    const head = this.speed?.first ? ["First build", this.speed.ms] : e2e !== void 0 ? ["Keystroke to page", e2e] : null;
+    const head = this.speed?.first ? ["First page", this.speed.ms] : e2e !== void 0 ? ["Keystroke to page", e2e] : null;
     const rows = parts.map((p) => {
       const bar2 = p.split?.length ? `<div class="tbar">${p.split.map(([n, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${p.split.map(([n, ms], i) => `<span><i class="c${i}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div>` : "";
       return `<div class="row"><span class="k">${esc3(p.label)}</span><span class="v">${esc3(p.value)}</span>${bar2}${p.note ? `<span class="note">${esc3(p.note)}</span>` : ""}</div>`;
     }).join("");
     const strips2 = framePart(this.$("#stripsline").dataset.frame);
-    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.timeBars() + rows + strips2 + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
-    el.querySelector(".foot").textContent = parts.length ? "" : this.lat?.summary ?? "";
+    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.walkPart() + this.timeBars() + this.downloadsPart() + rows + strips2 + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
+    el.querySelector(".foot").textContent = parts.length || this.walk?.ms !== void 0 ? "" : this.lat?.summary ?? "";
     el.querySelector(".msg").textContent = this.msgText;
   }
   /** The last message (connected, files read, a debug check's result), shown in the timing popover. */
@@ -4175,7 +4253,7 @@ var Panel = class {
     else this.error(`\u2717 mismatch vs fresh build: ${r.mismatch}`);
   }
   files(names, _skipped, took) {
-    this.msg(`${names.length} file${names.length === 1 ? "" : "s"} \xB7 ${took} \xB7 all local`);
+    this.msg(`${names.length} file${names.length === 1 ? "" : "s"} read ${took} \xB7 they stay in this browser`);
   }
   /** The main files to pick from (Settings' Main file), and the one built. */
   mains(names, main) {
@@ -4281,6 +4359,7 @@ var Panel = class {
       return;
     }
     this.last = img;
+    this.walkEnd();
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
     this.$("#stage").classList.toggle("fit", (this.zoomNow ?? this.prefs.zoom) === "fit");

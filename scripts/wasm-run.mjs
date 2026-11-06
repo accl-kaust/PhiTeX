@@ -1,4 +1,4 @@
-// Run phitex-wasm (crates/wasm, built for wasm32-wasip1-threads by
+// Run phitex-wasm (crates/wasm/cli, built for wasm32-wasip1-threads by
 // scripts/wasm.sh) in Node: WASI preview 1 for files, the environment and
 // the clock (node:wasi: the directory it runs in and the system's TeX
 // directories, `preopens` below; run it through scripts/sandbox), and
@@ -18,7 +18,7 @@ import { accessSync, constants, readFileSync, writeSync } from "node:fs";
 import { WASI } from "node:wasi";
 import { Worker, isMainThread, workerData } from "node:worker_threads";
 
-// (the limits crates/wasm/build.rs links with: the maximum from the start,
+// (the limits crates/wasm/cli/build.rs links with: the maximum from the start,
 // 65535 pages, so the memory never grows)
 const PAGES_INITIAL = 65535;
 const PAGES_MAX = 65535;

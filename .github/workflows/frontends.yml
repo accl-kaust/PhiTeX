@@ -14,14 +14,19 @@
 #   extension drives it): the viewer announced, an unsaved edit changes
 #   the PDF, a clean stop.
 # browsers: the wasm core and the browser build made from this commit (the
-# frontends' phitex/ is this checkout), in Chrome:
+# frontends' phitex/ is this checkout), in Chrome; a shipped format a core
+# would not use (made again, or hyphen-* packs fetched) stops the build
+# (tools/build/check-formats.sh) before any scenario runs:
 #   Overleaf: the extension on the mock Overleaf (mock/server.mjs; never
 #   overleaf.com): the first page, typed words on it, no exception or
-#   console error (test/scenarios/ci.json); a figure replaced as Overleaf's
+#   console error, within its time and package budget (fresh: the first
+#   page within 20 s, at most 8 packs, none hyphen-*; each reload within
+#   15 s, no pack: test/scenarios/ci.json, ci-reload.json, so a Shelf
+#   release that leaves the shipped format stale goes red); a figure replaced as Overleaf's
 #   socket announces it changes the PDF (test/scenarios/ci-figure.json);
 #   the demo (demo.phitex.org's build, build/web, served here): a sample's
-#   first page from its PDF, typed words on it, no error (web/test/check.mjs);
-#   VS Code's built-in wasm engine (vscode/test/smoke.ts).
+#   first page from its PDF, typed words on it, no error (apps/web/test/check.mjs);
+#   VS Code's built-in wasm engine (apps/vscode/test/smoke.ts).
 # Not covered (a manual step before a tag, docs/ci.md): overleaf.com itself
 # (its live DOM and login, the main file it names), the VS Code UI.
 #
@@ -83,7 +88,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: npm ci --prefix fe/vscode
+      - run: npm ci --prefix fe/apps/vscode
       - name: Emacs, Neovim and VS Code's native engine against the binary
         run: fe/test/editors/run.sh bin/phitex emacs nvim vscode
       - name: the plugins' download, on a release signed here, and from their own channel on GitHub
@@ -121,56 +126,58 @@ jobs:
       - working-directory: fe
         run: |
           npm ci
-          npm ci --prefix vscode
-          npm i --no-save --no-package-lock --prefix web/test playwright-core@1.56.1
+          npm ci --prefix apps/vscode
+          npm i --no-save --no-package-lock --prefix apps/web/test playwright-core@1.56.1
       - working-directory: fe
-        run: rustup toolchain install
+        run: |
+          rustup toolchain install
+          (cd phitex && rustup target add wasm32-wasip1-threads wasm32-wasip1)
       # (minted's wheels, as the demo's deploy takes them)
       - working-directory: fe
         run: |
           pip download --no-deps --only-binary=:all: -d target/minted latexminted==0.7.1 latexrestricted==0.6.2 latex2pydata==0.5.0 pygments==2.19.1
-      - name: the wasm core, the extension, the web and VS Code builds
+      - name: the wasm core, the extension, the web and VS Code builds (the cores from phitex/scripts/wasm-live.sh)
         working-directory: fe
         run: |
-          MINTED_WHEELS=target/minted scripts/build/build.sh
-          scripts/build/build-web.sh
-          scripts/build/mock-editor.sh
-          scripts/build/build-vscode.sh
+          MINTED_WHEELS=target/minted tools/build/build.sh
+          tools/build/build-web.sh
+          tools/build/mock-editor.sh
+          tools/build/build-vscode.sh
       # (what the runner's Chrome allows the core, before the checks: a check
       # that fails on its memory says why here)
       - name: the runner's Chrome and memory
         working-directory: fe
         env:
           PHITEX_CHROME: /usr/bin/google-chrome
-        run: node web/test/chrome-probe.mjs
+        run: node apps/web/test/chrome-probe.mjs
       - name: Overleaf (the extension on the mock)
         working-directory: fe
         env:
           PHITEX_CHROME: google-chrome
         run: |
-          node scripts/dev/mock-run.mjs test/scenarios/ci.json
-          node scripts/dev/mock-run.mjs test/scenarios/ci-figure.json
+          node tools/dev/mock-run.mjs test/scenarios/ci.json
+          node tools/dev/mock-run.mjs test/scenarios/ci-figure.json
           # (the runner is a 16 GB machine, Chrome sandboxed: each renderer 8 GiB of
           # data, a core 4 GiB; a reload's core, and a second tab's, which says why)
-          node scripts/dev/mock-run.mjs test/scenarios/ci-reload.json
-          node scripts/dev/mock-run.mjs test/scenarios/ci-tabs.json
+          node tools/dev/mock-run.mjs test/scenarios/ci-reload.json
+          node tools/dev/mock-run.mjs test/scenarios/ci-tabs.json
           # (Overleaf's own main document, its Menu's, followed: the socket's join and change)
-          node scripts/dev/mock-run.mjs test/scenarios/ci-rootdoc.json
+          node tools/dev/mock-run.mjs test/scenarios/ci-rootdoc.json
       - name: the demo (build/web, served here)
         if: ${{ !cancelled() }}
         working-directory: fe
         env:
           PHITEX_CHROME: /usr/bin/google-chrome
-        run: node web/test/check.mjs
+        run: node apps/web/test/check.mjs
       - name: VS Code's built-in wasm engine
         if: ${{ !cancelled() }}
         working-directory: fe
-        run: node vscode/dist/smoke.mjs test/scenarios/ci main.tex
+        run: node build/vscode/dist/smoke.mjs test/scenarios/ci main.tex
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: frontends-shots
           path: |
             fe/target/mock-run/
-            fe/web/shots/
+            fe/apps/web/shots/
           retention-days: 7

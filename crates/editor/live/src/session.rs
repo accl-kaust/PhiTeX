@@ -905,6 +905,12 @@ impl Session {
                     prelude_jobname: self.job.engine.name.to_owned(),
                     program: self.job.engine.name.to_owned(),
                     prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
+                    // (the release's own format, when the store's is none
+                    // or stale: a download, not the format made here)
+                    prelude_fallback: prelude.as_deref().map(|t| {
+                        let (host, name) = (self.host.clone(), self.format_name(t));
+                        Arc::new(move || host.published_format(&name)) as phitex_tex::PreludeSource
+                    }),
                     threads: self.job.threads,
                     progress: Some(progress),
                     // (pdfTeX's `\pdfshellescape`: 1 with -shell-escape,

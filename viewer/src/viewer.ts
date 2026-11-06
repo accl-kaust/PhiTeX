@@ -288,6 +288,8 @@ export class Viewer {
       tag.className = "peer peer-tag";
       tag.style.setProperty("--hue", String(hue));
       tag.textContent = label;
+      // (its size the line's, as a part of the page's width: it zooms with the page, CSS's cqw on .slot)
+      tag.style.setProperty("--fs", String((boxes[0][3] * 0.72) / w));
       at(tag, boxes[0][0], boxes[0][1]);
       s.el.append(tag);
     }
