@@ -214,6 +214,21 @@ pub(crate) fn run_node(
             text.chars().take(60).collect::<String>()
         );
     }
+    // (`PHITEX_FILE_TRACE`, observe: each run of 10 ms or more)
+    if t_body.as_millis() >= 10 && crate::exec::obs_flag!("PHITEX_FILE_TRACE") {
+        eprintln!(
+            "file-trace: run node {} op {} {} commands in {t_body:?} ({})",
+            r.cx.node().raw(),
+            r.op_name(),
+            r.cmds,
+            match &res {
+                Ok(()) => "ok",
+                Err(Halt::Cut) => "cut",
+                Err(Halt::Stop(_)) => "stop",
+                _ => "other",
+            }
+        );
+    }
     let k = if r.cx.op() == o.exec {
         0
     } else if r.cx.op() == o.finish {

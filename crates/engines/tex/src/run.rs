@@ -3311,7 +3311,19 @@ impl<'c, 'a> Run<'c, 'a> {
             // (a TFM or PK file found nowhere: kpathsea's mktex,
             // [`Run::font_made`])
             match self.tool_output(key)? {
-                Some(x) => Some(x),
+                Some(x) => {
+                    if crate::exec::obs_flag!("PHITEX_FILE_TRACE") {
+                        eprintln!(
+                            "file-trace: tool-made {key} read by node {} op {} doc {} nest {} cmds {}",
+                            self.cx.node().raw(),
+                            self.op_name(),
+                            self.doc,
+                            self.nest.len(),
+                            self.cmds
+                        );
+                    }
+                    Some(x)
+                }
                 None => match self.cx.env(f)? {
                     Some(x) if !crate::val::list_of(v, x).is_empty() => Some(x),
                     _ => self.font_made(key)?,
@@ -6289,6 +6301,22 @@ impl<'c, 'a> Run<'c, 'a> {
             }
         };
         let file_left = |f: &FileRest, out: &mut Vec<Vec<ValueId>>| {
+            // (`PHITEX_FILE_TRACE`, observe: how a file's rest is left)
+            if crate::exec::obs_flag!("PHITEX_FILE_TRACE") {
+                eprintln!(
+                    "file-trace: left {} node {} op {} doc {} nest {} lines {} doc_file {} units {} cut {} off {}",
+                    str_of(v, f.name),
+                    self.cx.node().raw(),
+                    self.op_name(),
+                    self.doc,
+                    self.nest.len(),
+                    f.has_lines(),
+                    self.doc_file(f),
+                    f.units.as_ref().map_or(0, |u| u.len()),
+                    f.cut.is_some(),
+                    f.off
+                );
+            }
             if f.has_lines() && self.doc && self.doc_file(f) {
                 out.extend(self.doc_file_regions(f));
             } else if let Some(u) = units_frame(v, f) {
