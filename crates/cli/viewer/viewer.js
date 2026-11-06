@@ -1626,6 +1626,10 @@ var KEYS = [
   ["Esc", "close; forget a count"]
 ];
 var LINE = 60;
+function typing(e) {
+  const el = e.composedPath?.()[0] ?? e.target;
+  return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName ?? ""));
+}
 function bindKeys(on, t) {
   let count = "";
   let g = false;
@@ -1635,8 +1639,7 @@ function bindKeys(on, t) {
   const by = (dx, dy) => t.scroller.scrollBy({ left: dx, top: dy, behavior: "auto" });
   const handler = (ev) => {
     const e = ev;
-    const el = e.target;
-    if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
+    if (typing(e)) return;
     if (e.altKey || e.metaKey) return;
     const k = e.key;
     if (e.ctrlKey) {
@@ -2138,15 +2141,27 @@ var dur = (ms) => ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1e3 ? `${Math.round(ms)
 function framePart(json) {
   if (!json) return "";
   const f = JSON.parse(json);
-  const split = [["probe", f.probe], ["draw", f.draw], ["transfer", Math.max(0, f.request - f.watch)], ["decode", f.decode]];
-  return `<div class="row"><span class="k">Page ${f.page} drawn${f.inView ? " (in view)" : ""}</span><span class="v">${esc3(dur(f.request + f.decode))}</span><div class="tbar">${split.map(([, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${split.map(([n, ms], i) => `<span><i class="c${i}"></i>${n} ${esc3(dur(ms))}</span>`).join("")}</div><span class="note">${f.drawn} strip${f.drawn === 1 ? "" : "s"} drawn, ${f.kept} reused</span></div>`;
+  const split = [["finding what changed", f.probe], ["drawing", f.draw], ["waiting for the engine", Math.max(0, f.request - f.watch)], ["decoding", f.decode]];
+  return `<div class="row"><span class="k">Drawing page ${f.page}${f.inView ? " (in view)" : ""}</span><span class="v">${esc3(dur(f.request + f.decode))}</span><div class="tbar">${split.map(([, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${split.map(([n, ms], i) => `<span><i class="c${i}"></i>${n} ${esc3(dur(ms))}</span>`).join("")}</div><span class="note">${f.drawn} slice${f.drawn === 1 ? "" : "s"} of the page drawn, ${f.kept} kept from before</span></div>`;
 }
 var PART_NAMES = {
-  "first paint": "First page painted",
-  "fixed point": "All pages settled",
+  "first paint": "Typesetting this page",
+  "fixed point": "Typesetting every page",
   "keystroke\u2192page": "Keystroke to page",
-  rebuilt: "Rebuilt",
+  rebuilt: "Parts redone",
   batching: "Edits batched"
+};
+var PART_NOTES = {
+  "first paint": "in the engine",
+  "fixed point": "the whole document, references and contents included",
+  rebuilt: "",
+  batching: ""
+};
+var SPLIT_NAMES = {
+  queued: "waiting",
+  "round trip": "engine",
+  paint: "drawing",
+  "build and paint": "building and drawing"
 };
 function part2(key, raw) {
   const label = PART_NAMES[key] ?? key.charAt(0).toUpperCase() + key.slice(1);
@@ -2159,11 +2174,11 @@ function part2(key, raw) {
   rest = rest.slice(num[0].length).trim();
   let split;
   if (rest.startsWith("=")) {
-    split = [...rest.slice(1).matchAll(/([a-z][a-z ]*?)\s+([\d.]+)/gi)].map((m) => [m[1].trim(), Number(m[2])]);
+    split = [...rest.slice(1).matchAll(/([a-z][a-z ]*?)\s+([\d.]+)/gi)].map((m) => [SPLIT_NAMES[m[1].trim()] ?? m[1].trim(), Number(m[2])]);
     rest = "";
   }
   const extra = rest.replace(/^·\s*/, "");
-  return { key, label, value: dur(ms), ms, split, note: [note, extra].filter(Boolean).join(" \xB7 ") || void 0 };
+  return { key, label, value: dur(ms), ms, split, note: [key in PART_NOTES ? PART_NOTES[key] : note, extra].filter(Boolean).join(" \xB7 ") || void 0 };
 }
 var lines = (...w) => w.map((x) => `<i style="width:${x}%"></i>`).join("");
 var TIPS = [
@@ -2483,6 +2498,7 @@ var Panel = class {
     this.loadPct = 0;
     this.loadDone = -1;
     this.paints = 0;
+    this.walk = null;
     this.opened = false;
     this.sheetUp();
     this.win.classList.toggle("reopening", !!this.anim);
@@ -2668,7 +2684,7 @@ var Panel = class {
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet", err = !!errs;
     else if (this.reopen || !this.last && this.viewer.pages === 0) t = this.stepNow || "Opening\u2026";
     else if (errs) t = `Built with ${errs} error${errs === 1 ? "" : "s"}`, m = this.speed ? dur(this.speed.ms) : "", err = true;
-    else if (this.speed?.first) t = "First build", m = dur(this.speed.ms);
+    else if (this.speed?.first) t = "First page", m = dur(this.speed.ms);
     else t = "Built", m = this.speed ? dur(this.speed.ms) : "";
     text.textContent = t;
     more.textContent = m ? `\xB7 ${m}` : "";
@@ -3120,6 +3136,7 @@ var Panel = class {
   }
   step(what, pct, detail = "") {
     if (!this.firstPending()) return;
+    this.walkTo(what);
     this.sheetUp();
     this.hints(true);
     const el = this.$("#opening");
@@ -3429,7 +3446,7 @@ var Panel = class {
     addEventListener(
       "keydown",
       (e) => {
-        if (e.ctrlKey || e.altKey || e.metaKey || e.target?.closest?.("input, textarea, select, [contenteditable=true]")) return;
+        if (e.ctrlKey || e.altKey || e.metaKey || typing(e)) return;
         if (e.key === "Escape" && (this.escapeProblems() || this.unmark())) {
         } else if (e.key === "e") this.diagnostics();
         else if (e.key === "t" && this.contents) this.side();
@@ -3685,7 +3702,7 @@ var Panel = class {
       (e) => {
         const ours = all || this.hover || this.root.activeElement != null;
         if (!ours || e.altKey || e.metaKey) return;
-        const typing = e.target?.closest?.("input, textarea, select, [contenteditable=true]") && e.composedPath()[0] !== q;
+        const typing2 = e.target?.closest?.("input, textarea, select, [contenteditable=true]") && e.composedPath()[0] !== q;
         if (e.ctrlKey) {
           const k = e.key;
           if (k === "f" && this.ev.onFind) this.find(true);
@@ -3693,7 +3710,7 @@ var Panel = class {
           else if (k === "-") this.zoomStep(-1);
           else if (k === "0") this.zoomTo("fit");
           else return;
-        } else if (typing || e.composedPath()[0] === q) return;
+        } else if (typing2 || e.composedPath()[0] === q) return;
         else if (e.key === "/" && this.ev.onFind) this.find(true);
         else if ((e.key === "n" || e.key === "N") && !this.$("#find").hidden && this.hits.length) this.findNext(e.key === "n" ? 1 : -1);
         else if (e.key === "Escape" && !this.$("#find").hidden) this.find(false);
@@ -3858,8 +3875,11 @@ var Panel = class {
   }
   /** A repaint reached the screen, `ms` after its keystroke: the status says how fast. */
   painted(ms) {
-    this.speed = { ms, at: performance.now(), first: this.paints++ === 0 };
-    this.$("#speedms").textContent = `\u26A1 ${this.speed.first ? "first build " : ""}${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
+    const first = this.paints++ === 0;
+    if (first) this.walkEnd();
+    if (first && this.walk?.ms !== void 0) ms = this.walk.ms;
+    this.speed = { ms, at: performance.now(), first };
+    this.$("#speedms").textContent = `\u26A1 ${this.speed.first ? "first page " : ""}${dur(ms)}`;
     this.renderStatus();
     if (!this.$("#m-time").hidden) this.timing();
     this.emit();
@@ -4090,6 +4110,47 @@ var Panel = class {
     this.lat = { summary, details: details ?? this.lat?.details };
     if (!this.$("#m-time").hidden) this.timing();
   }
+  /**
+   * This opening's steps as the sheet said them (the project read, the
+   * packages, the format, typesetting), each with the time it was up, from
+   * the first step to the first page on screen (`ms`, then closed): the
+   * first build's time as the writer waited for it, not the engine's part.
+   */
+  walk = null;
+  /** The opening's step is now `what` (a step of the sheet's). */
+  walkTo(what) {
+    const now = performance.now();
+    const w = this.walk ??= { since: now, parts: [], at: now };
+    if (w.ms !== void 0) return;
+    const step = what === this.words.steps[1] ? what : what === this.words.steps[2] ? this.making ? "Making the format" : what : this.words.steps[0];
+    if (step === w.now) return;
+    this.walkAdd(now);
+    w.now = step, w.at = now;
+  }
+  /** The step up until `now` counted (a step seen again adds to its first time). */
+  walkAdd(now) {
+    const w = this.walk;
+    if (!w.now) return;
+    const p = w.parts.find(([k]) => k === w.now);
+    if (p) p[1] += now - w.at;
+    else w.parts.push([w.now, now - w.at]);
+  }
+  /** The first page is on screen: the opening's time closed. */
+  walkEnd() {
+    const w = this.walk;
+    if (!w || w.ms !== void 0) return;
+    const now = performance.now();
+    this.walkAdd(now);
+    w.now = void 0;
+    w.ms = now - w.since;
+  }
+  /** The timing popover's first build: each step's time, as a bar, from opening to the first page. */
+  walkPart() {
+    const w = this.walk;
+    if (!w || w.ms === void 0 || !this.speed?.first) return "";
+    const parts = w.parts.filter(([, ms]) => ms >= 1);
+    return `<div class="row"><span class="k">From opening to the first page</span><span class="v">${esc3(dur(w.ms))}</span><div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div></div>`;
+  }
   /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
   downloads = { n: 0, bytes: 0, ms: 0 };
   /** The timing popover's Downloads row: the packages' time, how many and their size; none fetched, none. */
@@ -4136,14 +4197,14 @@ var Panel = class {
     const el = this.$("#m-time");
     const parts = this.timingParts().map(([k, v]) => part2(k, v));
     const e2e = parts.find((p) => p.key === "keystroke\u2192page")?.ms ?? this.speed?.ms;
-    const head = this.speed?.first ? ["First build", this.speed.ms] : e2e !== void 0 ? ["Keystroke to page", e2e] : null;
+    const head = this.speed?.first ? ["First page", this.speed.ms] : e2e !== void 0 ? ["Keystroke to page", e2e] : null;
     const rows = parts.map((p) => {
       const bar2 = p.split?.length ? `<div class="tbar">${p.split.map(([n, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${p.split.map(([n, ms], i) => `<span><i class="c${i}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div>` : "";
       return `<div class="row"><span class="k">${esc3(p.label)}</span><span class="v">${esc3(p.value)}</span>${bar2}${p.note ? `<span class="note">${esc3(p.note)}</span>` : ""}</div>`;
     }).join("");
     const strips2 = framePart(this.$("#stripsline").dataset.frame);
-    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.timeBars() + this.downloadsPart() + rows + strips2 + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
-    el.querySelector(".foot").textContent = parts.length ? "" : this.lat?.summary ?? "";
+    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.walkPart() + this.timeBars() + this.downloadsPart() + rows + strips2 + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
+    el.querySelector(".foot").textContent = parts.length || this.walk?.ms !== void 0 ? "" : this.lat?.summary ?? "";
     el.querySelector(".msg").textContent = this.msgText;
   }
   /** The last message (connected, files read, a debug check's result), shown in the timing popover. */
@@ -4189,7 +4250,7 @@ var Panel = class {
     else this.error(`\u2717 mismatch vs fresh build: ${r.mismatch}`);
   }
   files(names, _skipped, took) {
-    this.msg(`${names.length} file${names.length === 1 ? "" : "s"} \xB7 ${took} \xB7 all local`);
+    this.msg(`${names.length} file${names.length === 1 ? "" : "s"} read ${took} \xB7 they stay in this browser`);
   }
   /** The main files to pick from (Settings' Main file), and the one built. */
   mains(names, main) {
@@ -4295,6 +4356,7 @@ var Panel = class {
       return;
     }
     this.last = img;
+    this.walkEnd();
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
     this.$("#stage").classList.toggle("fit", (this.zoomNow ?? this.prefs.zoom) === "fit");
