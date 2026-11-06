@@ -243,7 +243,7 @@ impl Run<'_, '_> {
     /// joined by `+`.
     fn ck_refusal(&self) -> String {
         let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
-        let checks: [(bool, &'static str); 25] = [
+        let checks: [(bool, &'static str); 26] = [
             (self.input.levels.is_empty(), "no input"),
             (
                 !self.input.levels.iter().skip(1).all(toks)
@@ -275,6 +275,10 @@ impl Run<'_, '_> {
             (!self.seeded.is_empty(), "seeded"),
             (self.defer_hit.is_some(), "defer"),
             (self.rb.is_some(), "read-back child"),
+            (
+                !self.appending.is_empty() || !self.appending_vals.is_empty(),
+                "append pending",
+            ),
             (self.mode_zero, "mode zero"),
             (
                 self.fin_box.is_some() || self.tool_cut.is_some(),
@@ -338,6 +342,8 @@ impl Run<'_, '_> {
             || !self.seeded.is_empty()
             || self.defer_hit.is_some()
             || self.rb.is_some()
+            || !self.appending.is_empty()
+            || !self.appending_vals.is_empty()
             || self.mode_zero
             || self.fin_box.is_some()
             || self.tool_cut.is_some()
@@ -1788,7 +1794,10 @@ impl Run<'_, '_> {
 }
 
 /// A nest level's `mode_line` as a value ([`line_mark_of`]).
-fn line_mark_value(v: &phitex_defuse::Values, m: Option<crate::run::LineMark>) -> ValueId {
+pub(crate) fn line_mark_value(
+    v: &phitex_defuse::Values,
+    m: Option<crate::run::LineMark>,
+) -> ValueId {
     let Some((n, mine, name, own)) = m else {
         return ValueId::UNIT;
     };
@@ -1807,7 +1816,7 @@ fn line_mark_value(v: &phitex_defuse::Values, m: Option<crate::run::LineMark>) -
 }
 
 /// [`line_mark_value`]'s mark.
-fn line_mark_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::LineMark> {
+pub(crate) fn line_mark_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::LineMark> {
     let [n, mine, name, own] = list_of(v, x)[..] else {
         return None;
     };
@@ -1827,7 +1836,7 @@ fn line_mark_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::Lin
 }
 
 /// A nest level's `mode_place` as a value ([`place_of`]).
-fn place_value(v: &phitex_defuse::Values, p: Option<&crate::run::DiagPlace>) -> ValueId {
+pub(crate) fn place_value(v: &phitex_defuse::Values, p: Option<&crate::run::DiagPlace>) -> ValueId {
     let Some((a, n, b, s, k)) = p else {
         return ValueId::UNIT;
     };
@@ -1841,7 +1850,7 @@ fn place_value(v: &phitex_defuse::Values, p: Option<&crate::run::DiagPlace>) -> 
 }
 
 /// [`place_value`]'s place.
-fn place_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::DiagPlace> {
+pub(crate) fn place_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::DiagPlace> {
     let [a, n, b, s, k] = list_of(v, x)[..] else {
         return None;
     };
