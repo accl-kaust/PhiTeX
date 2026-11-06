@@ -4152,7 +4152,10 @@ var Panel = class {
     const w = this.walk;
     if (!w || w.ms === void 0 || !this.speed?.first) return "";
     const parts = w.parts.filter(([, ms]) => ms >= 1);
-    return `<div class="row"><span class="k">From opening to the first page</span><span class="v">${esc3(dur(w.ms))}</span><div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div></div>`;
+    return (
+      // (its total is the head's, "First page · 124 s": said once)
+      `<div class="row"><span class="k">Where the time went</span><span class="v"></span><div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div></div>`
+    );
   }
   /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
   downloads = { n: 0, bytes: 0, ms: 0 };
