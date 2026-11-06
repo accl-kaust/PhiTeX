@@ -376,6 +376,24 @@ fn pdf_of(objs: &[String]) -> Arc<[u8]> {
     Arc::from(out)
 }
 
+/// A one-page PDF of `content` with Helvetica as /F1 and a Type 3 font
+/// as /F2 (glyphs a and b, 500 units wide, drawn 20 to 480).
+fn pdf_with_type3(content: &str) -> Arc<[u8]> {
+    let proc_a = "500 0 20 0 480 600 d1 20 0 460 600 re f";
+    let cmap = "/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CMapName /T3 def 1 begincodespacerange <00> <FF> endcodespacerange 2 beginbfchar <61> <0061> <62> <0062> endbfchar endcmap CMapName currentdict /CMap defineresource pop end end";
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> >> /Contents 4 0 R >>".to_owned(),
+        format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        "<< /Type /Font /Subtype /Type3 /FontMatrix [0.001 0 0 0.001 0 0] /FontBBox [0 0 500 600] /CharProcs << /a 7 0 R /b 7 0 R >> /Encoding << /Type /Encoding /Differences [97 /a /b] >> /FirstChar 97 /LastChar 98 /Widths [500 500] /ToUnicode 8 0 R /Resources << >> >>".to_owned(),
+        format!("<< /Length {} >>\nstream\n{proc_a}\nendstream", proc_a.len() + 1),
+        format!("<< /Length {} >>\nstream\n{cmap}\nendstream", cmap.len() + 1),
+    ];
+    pdf_of(&objs)
+}
+
 /// Links and outline entries to named destinations: the catalog's
 /// `/Dests`, and a `/Names` tree of two leaves under a root, its values
 /// an object, an array inside the leaf, a dictionary's `/D`; a name in
@@ -495,4 +513,25 @@ fn a_column_beside_a_figure_is_lines() {
         "{px} pixels drawn again of {}",
         f.pw * f.ph
     );
+}
+
+/// The text layer's word spaces: a gap of .15em between words (a
+/// justified line's shrunk space: Grail's Libertine lines ran their words
+/// together at the fifth of the em the layer took) is a space, a kern of
+/// .05em is not; and a Type 3 font's letters (pdfTeX's bitmap fonts)
+/// are no words apart, their words are.
+#[test]
+fn word_spaces_are_read_from_the_gaps() {
+    let content = "BT /F1 12 Tf 72 700 Td [(alpha) -150 (beta) 50 (gamma)] TJ ET\n\
+                   BT /F2 12 Tf 72 650 Td [(ab) -300 (ab)] TJ ET\n\
+                   BT /F2 12 Tf 72 600 Td [(ab) -150 (ba)] TJ ET\n";
+    let doc = pdf_with_type3(content);
+    let mut r = Renderer::new();
+    let lines: Vec<String> = r
+        .text(&doc, 0)
+        .expect("the page's text")
+        .into_iter()
+        .map(|l| l.text)
+        .collect();
+    assert_eq!(lines, ["alpha betagamma", "ab ab", "ab ba"]);
 }

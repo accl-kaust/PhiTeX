@@ -3617,12 +3617,9 @@ fn watch_picture_children_exact() {
     }
 }
 
-fn picture_children_exact(threads: &str) {
-    let _one = one();
-    let name = format!("pic-children-j{threads}");
-    let pic2 = "\\begin{tikzpicture}\n\\draw[thick] (0,0) -- (3,0) -- (3,2) -- cycle;\n\\node at (1.5,0.7) {input};\n\\end{tikzpicture}\n";
-    let fig1 = "\\begin{figure}[t]\\centering\n\\resizebox{0.4\\linewidth}{!}{%\n\\begin{tikzpicture}\n\\draw (0,0) -- (2,1) node[right] {left};\n\\node[draw] (a) at (0,0) {A};\n\\end{tikzpicture}}\n\\caption{First figure}\\label{fig:a}\n\\end{figure}\n";
-    let text = format!(
+/// The document of [`picture_children_exact`], its first figure `fig1`.
+fn picture_children_text(fig1: &str) -> String {
+    format!(
         "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\newcount\\picn \\def\\capword{{before}}\n\\begin{{document}}\n\\section{{One}}\nAlpha words come first in this paragraph of the start.\n\nBeta words stand in the second paragraph, before the figures.\n{fig1}\
 Gamma text between the floats, see Figure~\\ref{{fig:a}}.\n\n\\begin{{figure}}[b]\\centering\n\\input{{pic2}}\n\\caption{{Second, after \\ref{{fig:a}}}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\draw[red] (0,0) circle (1);\n\\end{{tikzpicture}}\n\\begin{{tikzpicture}}\n\\fill[blue] (0,0) rectangle (1,1);\n\\end{{tikzpicture}}\n\\caption{{Two pictures}}\n\\end{{figure}}\n\
@@ -3631,7 +3628,18 @@ Gamma text between the floats, see Figure~\\ref{{fig:a}}.\n\n\\begin{{figure}}[b
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped \\the\\picn\\xdef\\capword{{after}}}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped again \\the\\picn}}\n\\end{{figure}}\n\
 Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon words in the next section.\n\\end{{document}}\n"
-    );
+    )
+}
+
+/// One edit of [`picture_children_exact`]'s text.
+type Edit = Box<dyn Fn(&str) -> String>;
+
+fn picture_children_exact(threads: &str) {
+    let _one = one();
+    let name = format!("pic-children-j{threads}");
+    let pic2 = "\\begin{tikzpicture}\n\\draw[thick] (0,0) -- (3,0) -- (3,2) -- cycle;\n\\node at (1.5,0.7) {input};\n\\end{tikzpicture}\n";
+    let fig1 = "\\begin{figure}[t]\\centering\n\\resizebox{0.4\\linewidth}{!}{%\n\\begin{tikzpicture}\n\\draw (0,0) -- (2,1) node[right] {left};\n\\node[draw] (a) at (0,0) {A};\n\\end{tikzpicture}}\n\\caption{First figure}\\label{fig:a}\n\\end{figure}\n";
+    let text = picture_children_text(fig1);
     let dir = scratch(&name);
     std::fs::write(dir.join("pics.tex"), &text).expect("the document");
     std::fs::write(dir.join("pic2.tex"), pic2).expect("the input");
@@ -3659,7 +3667,7 @@ Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon wor
     let cold = until(&mut lines, "build", &1.into(), &mut seen);
     assert_eq!(cold["ok"], true, "{cold}");
     let fig1 = fig1.to_owned();
-    let edits: Vec<Box<dyn Fn(&str) -> String>> = vec![
+    let edits: Vec<Edit> = vec![
         Box::new(move |t| t.replacen(&fig1, "", 1)),
         Box::new(|t| t.replacen("Alpha words", "Alpha letters", 1)),
         Box::new(|t| t.replacen("circle (1)", "circle (0.8)", 1)),
@@ -3853,4 +3861,59 @@ fn the_viewers_settings_are_the_users() {
         said.contains("`threads` in a project's phitex.toml is ignored"),
         "a project's threads not said:\n{said}"
     );
+}
+
+/// Text copied or searched in the viewer has its word spaces in every
+/// kind of font, and none inside words: XeLaTeX with a TrueType font of
+/// 2048 units to the em (`DejaVu` Serif) and with an OpenType CFF one
+/// (Latin Modern), pdfLaTeX with Type 1 fonts (Type 3 ones: the
+/// renderer's `word_spaces_are_read_from_the_gaps`, a PK font not being
+/// made in the CI image). Each line once with the font's own
+/// spaces and once with spaces of .15em (a justified line's spaces
+/// shrink that far: Grail's Libertine lines, "Thesedependenciesobstruct",
+/// had none). The renderer's text layer
+/// (`phitex_render::Renderer::text`) of the PDF `phitex build` writes.
+#[test]
+#[ignore = "heavy: the xelatex and pdflatex formats; run on accl"]
+fn copied_text_has_its_word_spaces() {
+    let _one = one();
+    let body = "\\begin{document}\nalpha beta gamma delta\n\n{\\spaceskip=.15em\\relax tight words set close\\par}\n\\end{document}\n";
+    let docs: [(&str, &str, &str); 3] = [
+        (
+            "xe-ttf",
+            "xelatex",
+            "\\documentclass{article}\\usepackage{fontspec}\\setmainfont{DejaVuSerif.ttf}",
+        ),
+        (
+            "xe-otf",
+            "xelatex",
+            "\\documentclass{article}\\usepackage{fontspec}",
+        ),
+        ("pdf-type1", "pdflatex", "\\documentclass{article}"),
+    ];
+    let mut bad = Vec::new();
+    for (name, engine, head) in docs {
+        let dir = scratch(&format!("spaces-{name}"));
+        std::fs::write(dir.join("doc.tex"), format!("{head}\n{body}")).expect("the document");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(["build", "--engine", engine, "doc.tex"])
+            .output()
+            .expect("phitex runs");
+        assert!(
+            out.status.success(),
+            "{name}: build failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let pdf: std::sync::Arc<[u8]> = std::fs::read(dir.join("doc.pdf")).expect("the PDF").into();
+        let mut r = phitex_render::Renderer::new();
+        let lines = r.text(&pdf, 0).expect("page 1's text");
+        let all: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+        eprintln!("{name}: {all:?}");
+        for want in ["alpha beta gamma delta", "tight words set close"] {
+            if !all.iter().any(|l| l.trim() == want) {
+                bad.push(format!("{name}: {want:?} not in {all:?}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "text without its word spaces: {bad:?}");
 }

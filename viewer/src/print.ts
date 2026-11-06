@@ -187,6 +187,7 @@ header:active { cursor: grabbing; }
 .timing .c0 { background: var(--ph-progress); } .timing .c1 { background: var(--ph-accent); } .timing .c2 { background: var(--ph-fg2); } .timing .c3 { background: var(--ph-border); }
 .timing .foot { margin-top: 8px; color: var(--ph-fg2); font-size: 12px; overflow-wrap: anywhere; }
 .timing .foot.err { color: var(--ph-danger); }
+.timing .copydbg { margin: 8px 0 0; font-size: 12px; }
 
 /* problems: Overleaf's log entries, in a popover under the bar */
 /* (the problems' filters: a kind a pill, on or off) */
