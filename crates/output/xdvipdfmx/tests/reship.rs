@@ -106,15 +106,14 @@ fn a_page_written_again_makes_its_forms_again() {
     let post = s.snapshot();
     base.extend(s.finish().unwrap());
     let size = s.next_label();
-    eprintln!("{}", String::from_utf8_lossy(&base));
-    let forms = objects_with(&base, b"/Subtype /Form");
+    let forms = objects_with(&base, b"/Subtype/Form");
     assert_eq!(forms.len(), 2, "the file's forms");
 
     // (page 1 written again in the second colour, into that file)
     let mut again = post.snapshot();
     let now = pages("0 0 1");
     let written = again.reship(0, &now[0], size).unwrap().pdf;
-    let made = objects_with(&written, b"/Subtype /Form");
+    let made = objects_with(&written, b"/Subtype/Form");
     let numbers = |x: &[(u32, Vec<u8>)]| x.iter().map(|f| f.0).collect::<Vec<_>>();
     assert_eq!(
         numbers(&made),
@@ -130,7 +129,7 @@ fn a_page_written_again_makes_its_forms_again() {
         whole.extend(exact.page_ops(p).unwrap().pdf);
     }
     whole.extend(exact.finish().unwrap());
-    let want = objects_with(&whole, b"/Subtype /Form");
+    let want = objects_with(&whole, b"/Subtype/Form");
     let bodies = |x: &[(u32, Vec<u8>)]| x.iter().map(|f| f.1.clone()).collect::<Vec<_>>();
     assert_eq!(bodies(&made), bodies(&want), "the forms' bodies");
     assert!(
@@ -144,7 +143,7 @@ fn a_page_written_again_makes_its_forms_again() {
         objects_with(pdf, b" Do")
             .into_iter()
             .map(|x| x.1)
-            .filter(|b| find(b, b"/Subtype /Form").is_none())
+            .filter(|b| find(b, b"/Subtype/Form").is_none())
             .collect::<Vec<_>>()
     };
     let (a, b) = (page(&written), page(&base));
