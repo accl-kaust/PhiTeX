@@ -1556,6 +1556,19 @@ impl State {
         self.slot(loc).sym = true;
     }
 
+    /// The locations the run defined, from its `from`th on, and how many
+    /// it defined (a checkpoint's undo may have taken some back since a
+    /// caller looked: then fewer), with the bindings a continuation
+    /// brought where `from` is 0 ([`crate::defer::binds_like`]).
+    pub(crate) fn defined_locs_from(&self, from: usize) -> (Vec<Loc>, usize) {
+        let n = self.metas.len();
+        let mut ls: Vec<Loc> = self.metas[from.min(n)..].iter().map(|m| m.loc).collect();
+        if from == 0 {
+            ls.extend_from_slice(&self.cont_locs);
+        }
+        (ls, n)
+    }
+
     /// The steps the run holds of register `loc`, unread: what a symbol
     /// made now adds to the value reaching the run.
     pub(crate) fn steps_of(&self, loc: Loc) -> i32 {

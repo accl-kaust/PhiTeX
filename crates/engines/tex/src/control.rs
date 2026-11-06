@@ -76,7 +76,11 @@ impl Run<'_, '_> {
             }
             self.no_pull = true;
             self.cmd_fetch = true;
+            // (a derived name's symbol is expanded through its name,
+            // [`Run::d_ok`])
+            self.d_ok = true;
             let got = self.get_next();
+            self.d_ok = false;
             self.cmd_fetch = false;
             self.no_pull = false;
             // (the command loop's one check of the token path's halt)

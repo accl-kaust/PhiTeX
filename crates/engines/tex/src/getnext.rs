@@ -52,6 +52,17 @@ impl Run<'_, '_> {
         Ok(b)
     }
 
+    /// [`Run::next_ck`] for a fetch whose token is expanded at once where
+    /// it expands (a character run's lookahead, §1038, then `x_token`): a
+    /// derived name's symbol kept for its expansion ([`Run::d_ok`]).
+    pub(crate) fn next_ck_x(&mut self) -> R<bool> {
+        self.d_ok = true;
+        let b = self.get_next();
+        self.d_ok = false;
+        self.ck()?;
+        Ok(b)
+    }
+
     /// `get_next` without a `Result`: a halt is raised ([`Run::raise`]).
     #[allow(clippy::inline_always)]
     #[inline(always)]
@@ -577,13 +588,19 @@ impl Run<'_, '_> {
     #[cold]
     #[inline(never)]
     fn size_stop_here(&self) -> bool {
-        self.size_stop == Some(self.expand_depth) && crate::defer::is_size(self.cur.tok)
+        (self.size_stop == Some(self.expand_depth) && crate::defer::is_size(self.cur.tok))
+            || (self.reg_stop == Some(self.expand_depth)
+                && crate::defer::sym_of(self.cur.tok).is_some())
     }
 
     /// `get_x_token` (§380): a halt is raised, never returned.
     pub(crate) fn get_x_token(&mut self) {
         loop {
+            // (a derived name's symbol is expanded through its name,
+            // [`Run::d_ok`])
+            self.d_ok = true;
             self.next_or_end();
+            self.d_ok = false;
             if self.cur.cmd <= cmd::MAX_COMMAND || self.halt.is_some() {
                 return;
             }
@@ -607,7 +624,10 @@ impl Run<'_, '_> {
             }
             // (a file size's symbol as `\if`'s operand, kept:
             // [`Run::size_stop`])
-            if self.cur.cmd == cmd::SYM && self.size_stop.is_some() && self.size_stop_here() {
+            if self.cur.cmd == cmd::SYM
+                && (self.size_stop.is_some() || self.reg_stop.is_some())
+                && self.size_stop_here()
+            {
                 return;
             }
             let nr = std::mem::replace(&mut self.num_reads, false);
@@ -625,7 +645,9 @@ impl Run<'_, '_> {
     /// is inserted, its braces counted in the entry's `align_state`).
     pub(crate) fn get_x_or_protected(&mut self) -> R<()> {
         loop {
+            self.d_ok = true;
             self.next_or_end();
+            self.d_ok = false;
             if self.cur.cmd <= cmd::MAX_COMMAND || self.halt.is_some() {
                 return Ok(());
             }
@@ -698,7 +720,9 @@ impl Run<'_, '_> {
             if self.halt.is_some() {
                 return;
             }
+            self.d_ok = true;
             self.next_or_end();
+            self.d_ok = false;
         }
     }
 

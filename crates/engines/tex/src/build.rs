@@ -3649,7 +3649,7 @@ impl Run<'_, '_> {
                         }
                     } else if !self.has_input() && !self.read_on_in_word()? {
                         input_done = true;
-                    } else if self.next_ck()? {
+                    } else if self.next_ck_x()? {
                         // (§1038: the characters so far are on the list, the
                         // last one its tail, the space factor after it:
                         // what an expansion here reads, [`Run::chars_live`])
