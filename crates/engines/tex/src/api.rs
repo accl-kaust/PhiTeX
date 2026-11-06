@@ -4522,8 +4522,23 @@ pub(crate) fn text_mark(v: &Values) -> ValueId {
 pub(crate) const PARAM_LOOK: &str = "\u{1}#";
 
 pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<String> {
+    let (mut out, folds) = written_kinds(v, streams);
+    out.extend(folds);
+    out
+}
+
+/// The job-written files not read back per line's definitions, in two
+/// kinds: those a line of which did more than define (read back as
+/// their text), and the FOLDS: files each line of which only defines,
+/// some line reading what a line before it defines (biblatex's
+/// `\abx@aux@cite` adding a key to the list the lines before it built,
+/// `\blx@pagesum@old` taking a digit per `\abx@aux@page`), whose lines
+/// define, read one after another from the read-back point, what their
+/// whole text read at once defines ([`crate::ops::fold_node`]).
+pub(crate) fn written_kinds(v: &Values, streams: Option<ValueId>) -> (Vec<String>, Vec<String>) {
     let streams = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
+    let mut folds: Vec<String> = Vec::new();
     // (per file, the fields its lines so far define, in the order TeX
     // writes them: a line that reads one depends on the lines before it,
     // which TeX reads first and its read-back by fields, each line on its
@@ -4573,18 +4588,19 @@ pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<Strin
                 .unwrap_or(false)
             })
         {
-            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && !folds.contains(&name) {
                 eprintln!(
-                    "aux-trace: {name} read back as text: line {:?} reads {}, which a line before it defines",
+                    "aux-trace: {name} read back as a fold: line {:?} reads {}, which a line before it defines",
                     xs.get(1)
                         .map(|&l| str_of(v, l).chars().take(70).collect::<String>()),
                     str_of(v, r)
                 );
             }
-            if !out.contains(&name) {
-                out.push(name);
+            // (its definitions still counted: a later line that does more
+            // than define makes the file one read back as its text)
+            if !folds.contains(&name) {
+                folds.push(name.clone());
             }
-            continue;
         }
         for d in list_of(v, made) {
             if let [f, x, _] = list_of(v, d).as_slice() {
@@ -4606,7 +4622,8 @@ pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<Strin
             }
         }
     }
-    out
+    folds.retain(|n| !out.contains(n));
+    (out, folds)
 }
 
 /// The hint of a format's node (`hints::Hint` encoded): unbounded.

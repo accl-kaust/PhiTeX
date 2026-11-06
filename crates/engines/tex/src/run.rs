@@ -4030,39 +4030,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(false);
         };
         let text = str_of(v, t);
-        // (the whole text at once, as a run reads it: a line reads what
-        // the lines before it defined, hyperref's `\calc@bm@number`
-        // counting a bookmark's children line by line; one that does more
-        // than define makes the file one read back as its text)
-        let mut ds: Vec<(String, ValueId)> = Vec::new();
-        let mut as_text = false;
-        let mut open = String::new();
-        match self.interpret_line(&text)? {
-            None => open.clone_from(&text),
-            Some(m) if self.interp_plain => crate::api::merge_defs(v, &mut ds, m),
-            Some(_) => as_text = true,
-        }
-        // (a text left open at the file's end: read to its end as the
-        // stream's close reads it, its errors given at each read-back)
-        if !as_text && !open.is_empty() {
-            self.interp_eof = true;
-            self.interp_errs.clear();
-            let made = self.interpret_line(&open);
-            self.interp_eof = false;
-            let errs = std::mem::take(&mut self.interp_errs);
-            match made? {
-                Some(m) => crate::api::merge_defs(v, &mut ds, m),
-                None => as_text = true,
-            }
-            if !errs.is_empty() {
-                let e = v.list(vec![
-                    v.str(&format!("rberr:{key}")),
-                    v.list(errs.iter().map(|e| v.str(e)).collect()),
-                    v.int(1),
-                ]);
-                crate::api::merge_defs(v, &mut ds, v.list(vec![e]));
-            }
-        }
+        let (mut ds, as_text) = self.interpret_text(key, &text)?;
         // (what this read back: its file's node declares its loop-backs
         // with it, `crate::ops::file_node`, from the runs that hold, a
         // run refuted or run again leaving nothing of it)
@@ -4095,6 +4063,75 @@ impl<'c, 'a> Run<'c, 'a> {
             text: t,
         });
         Ok(true)
+    }
+
+    /// A read-back file's whole text `text` interpreted at once, as a
+    /// run reads it: a line reads what the lines before it defined
+    /// (hyperref's `\calc@bm@number` counting a bookmark's children line
+    /// by line, biblatex's `\abx@aux@cite` adding to the list the lines
+    /// before it built); one that does more than define makes the file
+    /// one read back as its text. Its definitions, each field once (where
+    /// first defined, with its last value, [`crate::api::merge_defs`]),
+    /// and whether it is read back as its text. A text left open at the
+    /// file's end is read to its end as the stream's close reads it, its
+    /// errors given at each read-back (`rberr:<key>`).
+    pub(crate) fn interpret_text(
+        &mut self,
+        key: &str,
+        text: &str,
+    ) -> R<(Vec<(String, ValueId)>, bool)> {
+        let v = self.v;
+        let mut ds: Vec<(String, ValueId)> = Vec::new();
+        let mut as_text = false;
+        let mut open = String::new();
+        match self.interpret_line(text)? {
+            None => open.push_str(text),
+            Some(m) if self.interp_plain => crate::api::merge_defs(v, &mut ds, m),
+            Some(_) => as_text = true,
+        }
+        if !as_text && !open.is_empty() {
+            self.interp_eof = true;
+            self.interp_errs.clear();
+            let made = self.interpret_line(&open);
+            self.interp_eof = false;
+            let errs = std::mem::take(&mut self.interp_errs);
+            match made? {
+                Some(m) => crate::api::merge_defs(v, &mut ds, m),
+                None => as_text = true,
+            }
+            if !errs.is_empty() {
+                let e = v.list(vec![
+                    v.str(&format!("rberr:{key}")),
+                    v.list(errs.iter().map(|e| v.str(e)).collect()),
+                    v.int(1),
+                ]);
+                crate::api::merge_defs(v, &mut ds, v.list(vec![e]));
+            }
+        }
+        Ok((ds, as_text))
+    }
+
+    /// A written file read back as a fold ([`crate::api::written_kinds`]):
+    /// its whole text, as the job wrote it, read at once from its
+    /// read-back point ([`Run::interpret_text`]), every field's first read
+    /// in it the value there ([`Run::pre_value`]), as each line's own
+    /// interpretation reads it where it is written.
+    pub(crate) fn interpret_fold(
+        &mut self,
+        key: &str,
+        text: &str,
+    ) -> R<(Vec<(String, ValueId)>, bool)> {
+        self.interp_point = self.read_point_of(key)?;
+        let text = if self.xe {
+            crate::xetex::reread(text)
+        } else if let Some(t) = self.tcx()? {
+            t.reread(text)
+        } else {
+            text.to_owned()
+        };
+        let r = self.interpret_text(key, &text);
+        self.interp_point = None;
+        r
     }
 
     /// Whether file `key`, read back from the client's text per field
