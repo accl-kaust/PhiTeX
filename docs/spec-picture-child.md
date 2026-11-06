@@ -1,6 +1,9 @@
 # A picture as a child node (the opaque environment of the paragraph-node design)
 
-Status: design, 2026-11-04 (matrix4). Nothing of it is built. It fills
+Status: built (matrix5 2026-11-04, deep2 2026-11-06). §2.6 as first
+written (a check that refuses the split) is replaced by §7: the child
+reads before its parent and the parent makes all of the child's effects
+its own, so no split is wrong and none is refused for it. It fills
 §4 of the paragraph-node design ("opaque environments: one slice
 begin..end, one node") on today's engine, with the engine's own child
 placements (`Ctx::child`, `Ctx::placed_output_or`). The measurements are
@@ -122,37 +125,16 @@ and runs the child beside it; from the next re-run on the figure takes
 the child's output. (Placing the child on the first run too would run
 every picture twice on a cold build: Grail has about 20 of ~1 s.)
 
-### 2.6 Exactness: what makes the split wrong, and the check
+### 2.6 Exactness
 
-The child stands after the figure's run in text order, but in TeX its
-commands ran in the middle of the figure's. Two things can differ:
-
-- (a) the child reads a field the figure's run defines globally after the
-  picture (the engine shows the child the later value): `\c@figure` if
-  the picture read it, a font the caption loads first and the picture
-  used, `MT@font@list` when the caption appends to it and the picture
-  read it;
-- (b) the figure's run reads, after the picture, a field the child
-  defines globally (the run reads the value before the picture): a font
-  the picture loaded first that the caption uses, `MT@font@list` when the
-  picture appended to it and the caption reads it, a pgf node name
-  (`\pgf@sh@ns@…`) used by text after the picture.
-
-The figure's run keeps, from the placement on, the fields it read
-(`State::note_read`'s `touched`, locals included: a global definition in
-the child overrides a local binding too) and the fields it defined
-globally (its base-level definitions, `defined_since_in_order`). At its
-end, with the child's output (its defined and read names): if reads-after
-∩ child-defined ≠ ∅ or defs-after ∩ child-read ≠ ∅, the run's product is
-wrong. It is thrown away and the run is made again from its start with
-`no_child` set (the `run_node` closure loops once), and the body's text
-hash goes into `Ops::pic_refused` so the figure never tries again in this
-build. The same for `[refused]`. A wrong entry in the table costs one
-re-run of the figure; it never changes output.
-
-`PHITEX_PIC_CHECK=1` (observe): the first run with a child also runs the
-body inline and compares the two item lists and the state changes; a
-difference is a bug in this spec, not a hint violation.
+Replaced by §7 (deep2). What follows is the first design, kept for the
+record of why it failed: a check at the run's end that refused the split
+when the parent read or defined, after the picture, what the child
+defined or read. Built (matrix5), it refused most of Grail's pictures
+(`\glb@currsize`, which every caption's `\normalsize` defines after a
+picture read it) and its children read their parent's publication of
+their own definitions (the counters pgf steps), so a child ran again on
+its own result for ever (accl 24786: 80 861 runs of one child).
 
 ### 2.7 What stays with the figure's run
 
@@ -286,3 +268,58 @@ said against the spec as written:
   middle; the PDF bar is untouched, the log is not identical.
 - Not built: `PHITEX_PIC_CHECK` (§2.6's inline comparison), the tests
   of §4, any measurement.
+
+## 7. Exactness by construction (deep2, 2026-11-06)
+
+The child stands after its parent in the engine's order; TeX ran its
+commands in the middle of the parent's. Instead of checking for the
+cases where that differs, the child is made to see exactly what TeX's
+picture saw, and the parent to make exactly what TeX's run made:
+
+1. **The child reads before its parent.** `Ctx::read_before_placer`
+   (defuse): every read of a field's reaching definition (`read`,
+   `read_path`, `read_or_path`, `read_derived`, `def_site`, `snapshot`,
+   `read_item`) is made, answered and filed at `At::Before(placer)`, so
+   neither the parent's definitions (made before or after the picture)
+   nor those of the parent's earlier children answer it, and a change of
+   them asks the child nothing. Its views (`view_field`, the `pic:`
+   field below) and its scope depth stay at its own position. Test
+   `defuse/tests/before_placer.rs`: a child stepping a counter its
+   placer then defines runs once, and once more when a definition before
+   the placer moves.
+2. **What the parent bound before the picture, the parent hands over.**
+   The `pic:<hash>:<k>` field is every binding the parent holds at the
+   picture (`State::defined_now`: defined in the run, at any group
+   level, loaded), read by the child key by key (`Step::Key`): the child
+   depends on the bindings it uses, not on the table. A binding a group's
+   end took back to one the run never loaded is left out: the child
+   reads the engine's before the parent, as the parent would have. A
+   look-up that reads the engine through a projection (definedness,
+   class, `\ifnum` numbers, comma-list membership, the append base)
+   first loads the parent's binding where it has one (`Run::pic_touch`
+   in `Run::touch`), so it never answers from the engine a name the
+   parent bound.
+3. **The child publishes and contributes nothing.** Its global
+   definitions, its base-level locals, its contributions (log lines,
+   font markers `T_FONT_AT`, `\write`s through `Run::contribute_stream`,
+   file reads), the document lines it began and its pending appends
+   (`Run::appending`, the relation `\xdef\x{\x…}` makes) are its
+   output. The parent makes them its own where the picture stands
+   (`Run::pic_apply`): globals defined, locals in its innermost group,
+   contributions in its list at that place (so the picture's log lines
+   come where pdflatex writes them), streams through its own
+   `contribute_stream` (its candidate marks), lines added to its count,
+   appends taken as its own pending ones. A list the parent had pending
+   appends for goes to the child as pending (the `pic:` field's
+   `\u{1}appending` key) and comes back with the child's added.
+   So what the parent reads or defines after the picture comes after the
+   picture's definitions, as in TeX, and no reader anywhere else in the
+   document sees the child.
+4. **What still refuses** (the parent runs that picture inline, and
+   never places it again in this process): the child's text reaching
+   past itself (a group or conditional left open or closed, input left,
+   a cut, a fatal error, children of its own, read-time objects, a scope
+   effect, a relation other than an append), an item for the main list
+   that is not a marker (the picture was not in a box), and a look at the
+   list before it (`\lastskip`, `\unskip`, `\lastbox`… on its empty
+   base level, whose real tail is the parent's: `Run::list_last`).
