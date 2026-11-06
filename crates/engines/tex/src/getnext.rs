@@ -508,13 +508,20 @@ impl Run<'_, '_> {
     }
 
     /// The token `get_r_token` reads (§1215): a control sequence's
-    /// meaning is not looked up unless an alignment of this run watches
-    /// for `&` and `\cr` (§342); `\outer` is not checked here (§336
-    /// at `normal`).
+    /// meaning is not looked up, and where an alignment of this run
+    /// watches for `&` and `\cr` (§342) only its class is
+    /// ([`crate::val::step_projection`]: `\@tempswafalse` in a tikz-cd
+    /// matrix, `\let\if@tempswa\iffalse`, read the switch whole, and
+    /// every such cell's run ran again where an edit left it the other
+    /// way); `\outer` is not checked here (§336 at `normal`).
     pub(crate) fn get_name_token(&mut self) -> R<()> {
-        self.bare = self.aopen <= 0;
-        self.get_token();
-        self.bare = false;
+        if self.aopen <= 0 {
+            self.bare = true;
+            self.get_token();
+            self.bare = false;
+        } else {
+            self.get_token_stored();
+        }
         self.ck()
     }
 

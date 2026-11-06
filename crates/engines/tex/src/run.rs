@@ -705,6 +705,11 @@ pub(crate) struct RbChild {
     /// The locations looked up in the child's output, or held before the
     /// read-back point.
     pub checked: phitex_defuse::FxHashSet<Loc>,
+    /// The locations the run defined from the child's output itself
+    /// ([`Run::rb_check`]): published as the run leaves them, so the
+    /// child, which defines only what its run did not, leaves them be
+    /// (`crate::state::State::publication_kept`).
+    pub answered: Vec<Loc>,
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -894,12 +899,6 @@ pub(crate) struct Run<'c, 'a> {
     /// point on, a name the run has not held is looked up in the child's
     /// output first ([`Run::rb_check`]).
     pub rb: Option<RbChild>,
-    /// This pass met what the read-back child cannot answer for (the run
-    /// defined a key after its read-back point, interpreted a line, ...):
-    /// it is made again with the read-back inline (`ops::run_node`).
-    pub rb_refused: bool,
-    /// The read-back inline, as before the child ([`Run::rb_refused`]).
-    pub no_rb: bool,
     /// Per integer register, its value as first read from the engine,
     /// before any map of this run: what a restore to the register's own
     /// symbol puts back ([`Run::reg_restore`]).
@@ -1402,8 +1401,6 @@ impl<'c, 'a> Run<'c, 'a> {
             defer_ok: false,
             defer_hit: None,
             rb: None,
-            rb_refused: false,
-            no_rb: false,
             reg_loaded_base: phitex_defuse::FxHashMap::default(),
             defer_regs: None,
             reg_first_def: phitex_defuse::FxHashMap::default(),
@@ -1854,11 +1851,17 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let top =
             self.rec_load || (self.st.has_global_restore(self.v) && self.scope_kind()?.is_none());
-        let (pubs, restored) = self.st.publication(self.v, top);
+        let kept = self
+            .rb
+            .as_ref()
+            .map(|rb| rb.answered.clone())
+            .unwrap_or_default();
+        let (pubs, restored) = self.st.publication_kept(self.v, top, &kept);
         let mut out = Vec::with_capacity(pubs.len());
         for p in pubs {
             let f = self.loc_field(p.loc);
             if p.carried
+                && !kept.contains(&p.loc)
                 && let crate::state::Pub::Value(x) = p.what
                 && self.eng_read(f)? == Some(x)
             {
@@ -1886,7 +1889,12 @@ impl<'c, 'a> Run<'c, 'a> {
             return out.clone();
         }
         let top = self.rec_load || matches!(self.scope_kind_memo, Some(None));
-        let (pubs, _) = self.st.publication(self.v, top);
+        let kept = self
+            .rb
+            .as_ref()
+            .map(|rb| rb.answered.clone())
+            .unwrap_or_default();
+        let (pubs, _) = self.st.publication_kept(self.v, top, &kept);
         pubs.into_iter()
             .map(|p| (self.loc_field(p.loc), p.what, p.at))
             .collect()
@@ -2194,8 +2202,14 @@ impl<'c, 'a> Run<'c, 'a> {
         if crate::exec::obs_flag!("PHITEX_DEF_TRACE") {
             self.def_trace(loc, &val, global);
         }
-        if self.rb.is_some() && self.interp.is_none() {
-            self.rb_def_check(loc);
+        // (a key of a file read back through its child, first touched by
+        // this definition: the read-back's definition made first, as
+        // inline, the value it replaces kept, [`Run::rb_check`])
+        if self.rb.is_some()
+            && self.interp.is_none()
+            && let Err(h) = self.rb_check(loc)
+        {
+            self.raise(h);
         }
         if self.read_back_done && self.interp.is_none() {
             if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
@@ -3688,6 +3702,16 @@ impl<'c, 'a> Run<'c, 'a> {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn read_back(&mut self, key: &str) -> R<bool> {
         let v = self.v;
+        // (a file the job has opened for writing before here: its text so
+        // far is read as TeX reads it, `Run::read_file`, `\\enddocument`'s
+        // `.aux`, each line once. The last round's definitions made first
+        // as well, a line that reads what the file defines ran on them:
+        // nicematrix's `\\let` of `\\pgfutil@check@rerun` to its own name
+        // before redefining it took the redefinition, and whatsnote's
+        // `\\pgfsyspdfmark` lines looped)
+        if self.get(&format!("wopen:{key}"))?.is_some() {
+            return Ok(false);
+        }
         let wk = self.keyed(crate::fields::Fam::Wkeys, key);
         // (read back from the client's text in this run, its fields not
         // defined yet or the file written as given)
@@ -3829,8 +3853,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// set. True where it was so read back; false: inline.
     fn rb_read_back(&mut self, key: &str, wk: Field) -> R<bool> {
         let op = self.cx.op();
-        if self.no_rb
-            || self.rb.is_some()
+        if self.rb.is_some()
             || self.interp.is_some()
             || self.rec_load
             || !self.doc
@@ -3873,6 +3896,7 @@ impl<'c, 'a> Run<'c, 'a> {
             i,
             guess,
             checked: phitex_defuse::FxHashSet::default(),
+            answered: Vec::new(),
         });
         // (the local keys, made here as without the child: their list
         // read whole, the global ones one by one)
@@ -3972,41 +3996,10 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         self.read_back_pre(&key, &name, val)?;
         self.set(&name, val, true);
+        if let Some(rb) = &mut self.rb {
+            rb.answered.push(loc);
+        }
         Ok(())
-    }
-
-    /// The pass cannot keep the read-back through its child
-    /// ([`Run::rb_refused`]).
-    fn rb_refuse(&mut self, name: &str, why: &str) {
-        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
-            eprintln!(
-                "aux-trace: read-back child refused: node {} {name}: {why}",
-                self.cx.node().raw()
-            );
-        }
-        self.rb_refused = true;
-    }
-
-    /// Location `loc` about to be defined after the read-back point of a
-    /// file read back through its child: a name the file defines is one
-    /// the child cannot answer for (the run's definition is not the first
-    /// after the read-back; the value the read-back replaced is kept for
-    /// the lines written later from the read-back's, [`Run::note_pre`]),
-    /// so the run is made again with the read-back inline
-    /// ([`Run::rb_refused`]).
-    fn rb_def_check(&mut self, loc: Loc) {
-        let Some(rb) = &mut self.rb else {
-            return;
-        };
-        if !rb.checked.insert(loc) {
-            return;
-        }
-        let f = self.loc_field(loc);
-        if self.v.with_str(f.0, crate::ops::rb_answers) == Some(true) && self.rb_key(f.0).is_some()
-        {
-            let name = crate::val::field_name(self.v, f);
-            self.rb_refuse(&name, "defined after the point");
-        }
     }
 
     /// The value the read-back of `name` (`val`, from file `key`)
@@ -4069,39 +4062,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(false);
         };
         let text = str_of(v, t);
-        // (the whole text at once, as a run reads it: a line reads what
-        // the lines before it defined, hyperref's `\calc@bm@number`
-        // counting a bookmark's children line by line; one that does more
-        // than define makes the file one read back as its text)
-        let mut ds: Vec<(String, ValueId)> = Vec::new();
-        let mut as_text = false;
-        let mut open = String::new();
-        match self.interpret_line(&text)? {
-            None => open.clone_from(&text),
-            Some(m) if self.interp_plain => crate::api::merge_defs(v, &mut ds, m),
-            Some(_) => as_text = true,
-        }
-        // (a text left open at the file's end: read to its end as the
-        // stream's close reads it, its errors given at each read-back)
-        if !as_text && !open.is_empty() {
-            self.interp_eof = true;
-            self.interp_errs.clear();
-            let made = self.interpret_line(&open);
-            self.interp_eof = false;
-            let errs = std::mem::take(&mut self.interp_errs);
-            match made? {
-                Some(m) => crate::api::merge_defs(v, &mut ds, m),
-                None => as_text = true,
-            }
-            if !errs.is_empty() {
-                let e = v.list(vec![
-                    v.str(&format!("rberr:{key}")),
-                    v.list(errs.iter().map(|e| v.str(e)).collect()),
-                    v.int(1),
-                ]);
-                crate::api::merge_defs(v, &mut ds, v.list(vec![e]));
-            }
-        }
+        let (mut ds, as_text) = self.interpret_text(key, &text)?;
         // (what this read back: its file's node declares its loop-backs
         // with it, `crate::ops::file_node`, from the runs that hold, a
         // run refuted or run again leaving nothing of it)
@@ -4134,6 +4095,75 @@ impl<'c, 'a> Run<'c, 'a> {
             text: t,
         });
         Ok(true)
+    }
+
+    /// A read-back file's whole text `text` interpreted at once, as a
+    /// run reads it: a line reads what the lines before it defined
+    /// (hyperref's `\calc@bm@number` counting a bookmark's children line
+    /// by line, biblatex's `\abx@aux@cite` adding to the list the lines
+    /// before it built); one that does more than define makes the file
+    /// one read back as its text. Its definitions, each field once (where
+    /// first defined, with its last value, [`crate::api::merge_defs`]),
+    /// and whether it is read back as its text. A text left open at the
+    /// file's end is read to its end as the stream's close reads it, its
+    /// errors given at each read-back (`rberr:<key>`).
+    pub(crate) fn interpret_text(
+        &mut self,
+        key: &str,
+        text: &str,
+    ) -> R<(Vec<(String, ValueId)>, bool)> {
+        let v = self.v;
+        let mut ds: Vec<(String, ValueId)> = Vec::new();
+        let mut as_text = false;
+        let mut open = String::new();
+        match self.interpret_line(text)? {
+            None => open.push_str(text),
+            Some(m) if self.interp_plain => crate::api::merge_defs(v, &mut ds, m),
+            Some(_) => as_text = true,
+        }
+        if !as_text && !open.is_empty() {
+            self.interp_eof = true;
+            self.interp_errs.clear();
+            let made = self.interpret_line(&open);
+            self.interp_eof = false;
+            let errs = std::mem::take(&mut self.interp_errs);
+            match made? {
+                Some(m) => crate::api::merge_defs(v, &mut ds, m),
+                None => as_text = true,
+            }
+            if !errs.is_empty() {
+                let e = v.list(vec![
+                    v.str(&format!("rberr:{key}")),
+                    v.list(errs.iter().map(|e| v.str(e)).collect()),
+                    v.int(1),
+                ]);
+                crate::api::merge_defs(v, &mut ds, v.list(vec![e]));
+            }
+        }
+        Ok((ds, as_text))
+    }
+
+    /// A written file read back as a fold ([`crate::api::written_kinds`]):
+    /// its whole text, as the job wrote it, read at once from its
+    /// read-back point ([`Run::interpret_text`]), every field's first read
+    /// in it the value there ([`Run::pre_value`]), as each line's own
+    /// interpretation reads it where it is written.
+    pub(crate) fn interpret_fold(
+        &mut self,
+        key: &str,
+        text: &str,
+    ) -> R<(Vec<(String, ValueId)>, bool)> {
+        self.interp_point = self.read_point_of(key)?;
+        let text = if self.xe {
+            crate::xetex::reread(text)
+        } else if let Some(t) = self.tcx()? {
+            t.reread(text)
+        } else {
+            text.to_owned()
+        };
+        let r = self.interpret_text(key, &text);
+        self.interp_point = None;
+        r
     }
 
     /// Whether file `key`, read back from the client's text per field
