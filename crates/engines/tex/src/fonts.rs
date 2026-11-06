@@ -341,6 +341,11 @@ pub(crate) struct View {
     /// The fonts whose [`View::elink`] list was looked at, not read: the
     /// field each, its membership of the ratios asked then recorded.
     pub elink_peeked: FxHashMap<FontId, phitex_defuse::Field>,
+    /// The expanded fonts' info looked at, not read, by the asking font
+    /// and ratio: the field and the value seen, recorded for the ratios
+    /// the paragraph asks (`Run::note_elink_asks`).
+    pub info_peeked:
+        FxHashMap<(FontId, i32), (phitex_defuse::Field, Option<phitex_defuse::ValueId>)>,
     /// The fonts expanded here: their base and the slot of their metrics.
     exp_index: Mutex<FxHashMap<FontId, (FontId, usize)>>,
     /// `get_expand_font`'s requests, in order (the first of each font's

@@ -4310,6 +4310,23 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(self.cx.read_path(f, p)? == Some(v.bool(true)))
     }
 
+    /// Expanded font `k`'s info as [`Run::font_get`] gives it, looked at
+    /// rather than read where the run would read it from the engine: the
+    /// field then, to record the read where the paragraph asks for `k`
+    /// ([`Run::note_elink_asks`]).
+    pub(crate) fn font_info_peek(&mut self, k: u32) -> R<(Option<ValueId>, Option<Field>)> {
+        let loc = self.font_loc(i64::from(k), crate::fields::FontCell::Info);
+        self.pic_touch(loc)?;
+        if self.st.load_state(loc) != 0 || self.lazy_pre(loc) || self.interp.is_some() {
+            return Ok((self.get_loc(loc)?, None));
+        }
+        let f = self.loc_field(loc);
+        match self.cx.peek_field(f)? {
+            Some(x) => Ok((x, Some(f))),
+            None => Ok((self.get_loc(loc)?, None)),
+        }
+    }
+
     /// A paragraph's asks of its fonts' expanded ratios, recorded as what
     /// it used of the lists it looked at ([`Run::val_set_peek`]): whether
     /// each ratio asked was there. A ratio another node asks first, or no
@@ -4326,6 +4343,9 @@ impl<'c, 'a> Run<'c, 'a> {
             let Some(&f) = view.elink_peeked.get(&font) else {
                 continue;
             };
+            if let Some(&(g, x)) = view.info_peeked.get(&(font, e)) {
+                self.cx.note_path(g, phitex_defuse::PathId::WHOLE, x)?;
+            }
             let had = view.elink.get(&font).is_some_and(|l| l.contains(&e));
             let p = self.cx.path(&[
                 phitex_defuse::Step::Proj(self.ops.set_proj),
