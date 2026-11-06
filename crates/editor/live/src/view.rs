@@ -849,11 +849,17 @@ impl Viewer {
 
 /// Lines of a page's text as the viewer takes them (`viewer/src/text.ts`'
 /// `TextLine`).
+/// The pages' text lines as the viewer takes them, every place to a
+/// hundredth of a point (a twelfth of a pixel at 800%): written whole, a
+/// place was 17 digits, and a Grail page's frame 215 KB of them, each
+/// keystroke's made, sent and parsed.
 fn lines_json(lines: &[phitex_render::TextLine]) -> Value {
+    let r = |x: f64| (x * 100.0).round() / 100.0;
+    let all = |xs: &[f64]| xs.iter().map(|&x| r(x)).collect::<Vec<f64>>();
     Value::Array(
         lines
             .iter()
-            .map(|l| json!({"x": l.x, "y": l.y, "w": l.w, "size": l.size, "text": l.text, "xs": l.xs, "rs": l.rs}))
+            .map(|l| json!({"x": r(l.x), "y": r(l.y), "w": r(l.w), "size": r(l.size), "text": l.text, "xs": all(&l.xs), "rs": all(&l.rs)}))
             .collect(),
     )
 }
@@ -1390,5 +1396,25 @@ mod tests {
     fn page_ranges() {
         assert_eq!(ranges(&[1, 3, 4, 5, 7, 8]), "1, 3–5, 7–8");
         assert_eq!(ranges(&[]), "");
+    }
+
+    /// A text line's places go to the viewer to a hundredth of a point.
+    #[test]
+    fn text_places_to_a_hundredth() {
+        let l = phitex_render::TextLine {
+            x: 72.123_456_789,
+            y: 100.0 / 3.0,
+            w: 10.005_1,
+            size: 9.962_59,
+            text: "ab".into(),
+            xs: vec![72.123_456_789, 77.777_777],
+            rs: vec![77.777_777, 82.004_999],
+        };
+        let j = lines_json(&[l]);
+        assert_eq!(
+            j,
+            json!([{"x": 72.12, "y": 33.33, "w": 10.01, "size": 9.96, "text": "ab",
+                    "xs": [72.12, 77.78], "rs": [77.78, 82.0]}])
+        );
     }
 }
