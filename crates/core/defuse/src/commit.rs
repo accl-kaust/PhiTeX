@@ -4157,6 +4157,9 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
 /// remove, not a frame each: a continuation chain is as deep as it is long.
 pub(crate) fn unfile(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>) {
     let mut todo = retract_products(eng, w, node, true);
+    // (gone, it commits no more: the runs waiting for its commit go on,
+    // `sched::release_waiting`)
+    crate::sched::release_waiting(eng, w, node.id);
     todo.reverse();
     while let Some(c) = todo.pop() {
         // (one not on the line yet: its placer's commit removes it once
@@ -4165,6 +4168,7 @@ pub(crate) fn unfile(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>) {
             continue;
         };
         let mut more = retract_products(eng, w, cn, true);
+        crate::sched::release_waiting(eng, w, c);
         more.reverse();
         todo.append(&mut more);
     }
@@ -4316,6 +4320,7 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     // (those of `releases` made `Dirty`, for the queue)
     let mut freed: Vec<Arc<Node>> = Vec::new();
     let mut taken_holes: Vec<Arc<Node>> = Vec::new();
+    let mut taken_now: Vec<NodeId> = Vec::new();
     let mut stops: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
     // (what it held before, up to there; what it holds now, to here)
     let old_end = me
@@ -4401,6 +4406,7 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
                         s.claimer.store(me.id.raw() + 1, Ordering::Release);
                     } else if s.take() {
                         s.claimer.store(me.id.raw() + 1, Ordering::Release);
+                        taken_now.push(s.id);
                         // (one that has not run yet: what it was predicted
                         // to define is withdrawn as a run's would be)
                         if s.committed() || s.record().is_some() {
@@ -4449,6 +4455,16 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     tests::paused_after(me.id);
     for s in retracts {
         retract(eng, w, &s);
+    }
+    // (taken, a node commits nothing until it is given back: the runs
+    // parked waiting for its commit (`sched::park_waiting`) go on, as for
+    // a commit. Left parked, they were dirty between the frontier and the
+    // runs held there, the frontier never moved past them, and the runs
+    // past it went on for ever on what the held ones were to change:
+    // csquotes at -j8 3 builds in 320, mhchem at -j4 5 in 60, a run on
+    // without end, 340 parked on 337 taken, accl 25662, mc 80815)
+    for n in taken_now {
+        crate::sched::release_waiting(eng, w, n);
     }
     // (a claimer removed or taken while its run went on claims nothing:
     // what it took after its removal gave back what it held goes back
