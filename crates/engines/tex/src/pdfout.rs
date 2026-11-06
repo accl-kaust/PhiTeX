@@ -2965,7 +2965,7 @@ pub(crate) fn page_allocs(
 ) -> R<()> {
     let v = r.v;
     // (its object unless a reference or a link's action made it first:
-    // the fold knows the page's number, [`RT_PAGES`])
+    // the fold knows the page's number, [`RT_PAGE`])
     let fixed = 3;
     // (the real fonts its characters are written in, an object each
     // where none of its name was made before: its fonts that are not
@@ -3083,23 +3083,20 @@ pub(crate) fn page_allocs(
     } else {
         -1
     };
-    // (the read-time lists as the sets they hold: [`Run::val_set`])
-    let rt_fonts = v.list(r.val_set_named(RT_FONTS)?);
-    let dests_loaded = crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") && {
-        let f = r.ops.fields.get_at(v, r.cx.values_epoch(), RT_DESTS);
-        let l = r.loc_of(f);
-        r.st.is_loaded(l)
-    };
-    let rt_dests = v.list(r.val_set_named(RT_DESTS)?);
+    // (what read-time commands named first is in the allocations
+    // themselves, where they named it, [`rt_named`]: the page reads none
+    // of it)
+    let rt_fonts = v.list(Vec::new());
+    let rt_dests = v.list(Vec::new());
     let rt_os = r.get(RT_OS)?.unwrap_or_else(|| v.int(0));
-    let rt_pages = v.list(r.val_set_named(RT_PAGES)?);
+    let rt_pages = v.list(Vec::new());
     // (the forms the page names, written with it where nothing wrote
     // them before, and those read-time writes wrote: [`forms_named`])
     let forms: Vec<ValueId> = forms_named(r, side_whats)?
         .into_iter()
         .map(|n| v.int(n))
         .collect();
-    let rt_forms = v.list(r.val_set_named(RT_FORMS)?);
+    let rt_forms = v.list(Vec::new());
     // (an image here that needs the document's transparency group: has a
     // read-time write written it?)
     let rt_group = group_wanted && r.get(RT_PNG_GROUP)?.is_some();
@@ -3135,10 +3132,6 @@ pub(crate) fn page_allocs(
     ]);
     if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
         eprintln!("alloc: page (node {}): {}", r.cx.node().raw(), v.render(e));
-        eprintln!(
-            "alloc-src: node {} dests loaded before {dests_loaded}",
-            r.cx.node().raw()
-        );
     }
     r.contribute(ALLOCS, v.seq_unit(e));
     Ok(())
@@ -3309,22 +3302,14 @@ pub(crate) fn read_object_key(r: &mut Run<'_, '_>, f: i64) -> R<String> {
 /// an object made for each name no page shipped before and no read-time
 /// write before used (`pdf:rtfonts`, which the pages' allocations carry,
 /// [`ALLOCS`]).
-pub(crate) fn fonts_first_used(r: &mut Run<'_, '_>, names: &[String]) -> R<()> {
+pub(crate) fn fonts_first_used(r: &mut Run<'_, '_>, names: &[String]) {
     let v = r.v;
     // (named, not counted: whether a page made the font's object first
     // is the pages' fold's to say, where a read needs the count,
     // [`page_offset`]; the write itself only reaches PDF bytes)
-    // (a set grown by appends: [`Run::val_set`], [`Run::append_val`])
-    let f = r.ops.fields.get_at(v, r.cx.values_epoch(), RT_FONTS);
-    let mut added: Vec<ValueId> = Vec::new();
     for n in names {
-        let x = v.str(n);
-        if !added.contains(&x) && !r.val_has(f, x)? {
-            added.push(x);
-            r.append_val_named(RT_FONTS, x)?;
-        }
+        rt_named(r, RT_FONT, v.str(n));
     }
-    Ok(())
 }
 
 /// The allocations before this node ([`ALLOCS`]); `PHITEX_ALLOCS_TRACE`
@@ -3340,21 +3325,51 @@ fn allocs_range(r: &mut Run<'_, '_>, why: &str) -> R<ValueId> {
     Ok(r.cx.fold(v.field(ALLOCS), None, None)?)
 }
 
-/// The fonts read-time writes used ([`fonts_first_used`]).
-const RT_FONTS: &str = "pdf:rtfonts";
+/// An entry of [`ALLOCS`] a read-time command makes where it names a
+/// font, a destination, a form or a page first ([`rt_named`]): `[tag,
+/// kind, name]`.
+const RT_TAG: &str = "rt";
+const RT_FONT: i64 = 0;
+const RT_DEST: i64 = 1;
+const RT_FORM: i64 = 2;
+const RT_PAGE: i64 = 3;
 
-/// The destinations read-time commands made ([`dest_first_named`]).
-const RT_DESTS: &str = "pdf:rtdests";
+/// A read-time command named `x` (kind [`RT_FONT`] …): an entry of
+/// [`ALLOCS`] where it stands, which the pages' fold counts where none
+/// was made before ([`fold_allocs`]). Not a read: the pages after it
+/// read nothing of it, only the fold of the allocations sees it in its
+/// place.
+fn rt_named(r: &mut Run<'_, '_>, kind: i64, x: ValueId) {
+    let v = r.v;
+    let e = v.list(vec![v.str(RT_TAG), v.int(kind), x]);
+    r.contribute(ALLOCS, v.seq_unit(e));
+}
+
+/// The names of kind `kind` this run's read-time commands named so far
+/// ([`rt_named`]): not in the range before it.
+fn rt_mine(r: &Run<'_, '_>, kind: i64) -> Vec<ValueId> {
+    let v = r.v;
+    let f = v.field(ALLOCS);
+    let mut out = Vec::new();
+    for (g, x) in &r.contribs {
+        if *g != f {
+            continue;
+        }
+        for e in v.seq_to_vec(*x) {
+            if let [tag, k, n] = list_of(v, e)[..]
+                && v.with_str(tag, |s| s == RT_TAG) == Some(true)
+                && int_of(v, k) == kind
+                && !out.contains(&n)
+            {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
 
 /// The objects read-time writes put into object streams ([`os_write`]).
 const RT_OS: &str = "pdf:rtos";
-
-/// The pages whose objects read-time commands made before they shipped
-/// (`\\pdfpageref`, an action's `goto page`: [`page_made_at_read_time`]).
-const RT_PAGES: &str = "pdf:rtpages";
-
-/// The forms read-time writes wrote ([`forms_first_written`]).
-const RT_FORMS: &str = "pdf:rtforms";
 
 /// Whether a read-time write wrote the document's transparency group
 /// ([`png_group_write`]).
@@ -3435,7 +3450,7 @@ fn images_shown(r: &mut Run<'_, '_>, whats: &[ValueId]) -> R<u64> {
 /// Of forms `forms`, those no page before this run and no read-time
 /// write before wrote: an `\\immediate\\pdfxform` writes them (and
 /// itself), each a read-time object for its resources; all of them noted
-/// written ([`RT_FORMS`]), so a page after does not count them.
+/// written ([`rt_named`]), so a page after does not count them.
 pub(crate) fn forms_first_written(r: &mut Run<'_, '_>, forms: &[i64]) -> R<Vec<i64>> {
     if forms.is_empty() {
         return Ok(Vec::new());
@@ -3443,13 +3458,13 @@ pub(crate) fn forms_first_written(r: &mut Run<'_, '_>, forms: &[i64]) -> R<Vec<i
     let v = r.v;
     let range = allocs_range(r, "forms_first_written")?;
     let f = fold_allocs(v, range);
-    let rt = r.ops.fields.get_at(v, r.cx.values_epoch(), RT_FORMS);
+    let mine = rt_mine(r, RT_FORM);
     let mut new = Vec::new();
     for &n in forms {
         let x = v.int(n);
-        if !f.forms.contains(&x) && !new.contains(&n) && !r.val_has(rt, x)? {
+        if !f.forms.contains(&x) && !new.contains(&n) && !mine.contains(&x) {
             new.push(n);
-            r.append_val_named(RT_FORMS, x)?;
+            rt_named(r, RT_FORM, x);
         }
     }
     Ok(new)
@@ -3457,21 +3472,17 @@ pub(crate) fn forms_first_written(r: &mut Run<'_, '_>, forms: &[i64]) -> R<Vec<i
 
 /// Page `n`'s object made by a read-time command before the page
 /// shipped: the page then makes no object of its own ([`ALLOCS`]).
-pub(crate) fn page_made_at_read_time(r: &mut Run<'_, '_>, n: i64) -> R<()> {
+pub(crate) fn page_made_at_read_time(r: &mut Run<'_, '_>, n: i64) {
     let v = r.v;
-    r.append_val_named(RT_PAGES, v.int(n))
+    rt_named(r, RT_PAGE, v.int(n));
 }
 
 /// A destination a read-time command names (an outline's `goto`):
 /// its object made where no page shipped before and no read-time command
 /// before made it (`pdf_get_obj`).
-pub(crate) fn dest_first_named(r: &mut Run<'_, '_>, id: ValueId) -> R<()> {
+pub(crate) fn dest_first_named(r: &mut Run<'_, '_>, id: ValueId) {
     // (named, not counted, as [`fonts_first_used`])
-    let f = r.ops.fields.get_at(r.v, r.cx.values_epoch(), RT_DESTS);
-    if r.val_has(f, id)? {
-        return Ok(());
-    }
-    r.append_val_named(RT_DESTS, id)
+    rt_named(r, RT_DEST, id);
 }
 
 /// An object a read-time command writes now: with
@@ -3737,8 +3748,37 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     let mut seen_raw: BTreeSet<i64> = BTreeSet::new();
     let mut png_group = false;
     let mut ms = MarkState::default();
-    for (pages, e) in v.seq_to_vec(range).into_iter().enumerate() {
+    let mut pages = 0usize;
+    for e in v.seq_to_vec(range) {
         let xs = list_of(v, e);
+        // (a name a read-time command used first, [`rt_named`]: an
+        // object where none was made before, or a page made, a form
+        // written)
+        if let [tag, kind, x] = xs[..]
+            && v.with_str(tag, |s| s == RT_TAG) == Some(true)
+        {
+            match int_of(v, kind) {
+                RT_FONT => {
+                    if seen.insert(x) {
+                        out.objects += 1;
+                    }
+                }
+                RT_DEST => {
+                    if seen_dest.insert(x) {
+                        out.objects += 1;
+                    }
+                }
+                RT_FORM => {
+                    seen_forms.insert(x);
+                }
+                _ => {
+                    ms.premade.insert(v.as_int(x).unwrap_or(0));
+                }
+            }
+            continue;
+        }
+        pages += 1;
+        let pages = pages - 1;
         let i = |k: usize| xs.get(k).and_then(|&x| v.as_int(x)).unwrap_or(0);
         let l = |k: usize| xs.get(k).map(|&x| list_of(v, x)).unwrap_or_default();
         let pno = i64::try_from(pages).unwrap_or(i64::MAX - 1) + 1;
@@ -3768,7 +3808,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         page_objs.push((i(5), i(10), if fixed >= 3 { out.objects + 2 } else { 0 }));
         out.objects += fixed;
         // (a pages-tree node every `pages_tree_kids_max` pages)
-        if pages % 6 == 0 {
+        if pages.is_multiple_of(6) {
             out.objects += 1;
         }
         // (the forms the page names that nothing wrote before: written
@@ -3868,9 +3908,10 @@ pub(crate) fn page_offset(r: &mut Run<'_, '_>) -> R<i64> {
     let v = r.v;
     let range = allocs_range(r, "page_offset")?;
     let f = fold_allocs(v, range);
+    // (this run's own, not in the range before it)
     let (fonts, dests) = (
-        Some(v.list(r.val_set_named(RT_FONTS)?)),
-        Some(v.list(r.val_set_named(RT_DESTS)?)),
+        Some(v.list(rt_mine(r, RT_FONT))),
+        Some(v.list(rt_mine(r, RT_DEST))),
     );
     if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
         eprintln!(
@@ -3885,7 +3926,7 @@ pub(crate) fn page_offset(r: &mut Run<'_, '_>) -> R<i64> {
 }
 
 /// The objects read-time writes made for fonts and destinations they
-/// named (`fonts`, `dests`: [`RT_FONTS`], [`RT_DESTS`] where the read
+/// named (`fonts`, `dests`: those of the run's own, [`rt_mine`], where the read
 /// is) after the pages of fold `f`: those no page and no read-time
 /// write before made.
 fn rt_new(v: &Values, f: &AllocFold, fonts: Option<ValueId>, dests: Option<ValueId>) -> i64 {
@@ -3925,20 +3966,8 @@ pub(crate) fn page_offset_at(r: &mut Run<'_, '_>, at: u64, c: i64) -> R<i64> {
             range = v.seq_concat(range, v.seq_unit(u));
         }
     }
-    let f = fold_allocs(v, range);
-    let mut there = |name: &str| -> R<Option<ValueId>> {
-        Ok(
-            match r
-                .cx
-                .read_at(v.field(name), phitex_defuse::At::AfterOwn(to))?
-            {
-                phitex_defuse::FieldAt::Def(x, _) => Some(x),
-                _ => None,
-            },
-        )
-    };
-    let (fonts, dests) = (there(RT_FONTS)?, there(RT_DESTS)?);
-    Ok(f.objects + rt_new(v, &f, fonts, dests))
+    // (what `at` named at read time is in the range through it)
+    Ok(fold_allocs(v, range).objects)
 }
 
 /// Font `f`'s name number as pdfTeX gives it (`\\pdffontname`): its
