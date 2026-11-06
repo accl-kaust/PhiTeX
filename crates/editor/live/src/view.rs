@@ -745,6 +745,18 @@ impl Viewer {
 
     /// The file on disk is exact already (nothing to write when idle):
     /// the browsers told, as when it is written.
+    /// A build's stats, as the watch's `s` shows them (one object, the
+    /// same fields every build): `{"event":"stats", ...}`, for a timing
+    /// popover's "Copy debug info". Sent for every build, after `settled`.
+    pub fn stats(&self, stats: &Value) {
+        let mut e = serde_json::Map::new();
+        e.insert("event".into(), json!("stats"));
+        if let Value::Object(m) = stats {
+            e.extend(m.clone());
+        }
+        self.emit(&Value::Object(e).to_string());
+    }
+
     pub fn written_exact(&self) {
         self.emit(&json!({"event": "written", "exact": true}).to_string());
     }
