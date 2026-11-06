@@ -1203,6 +1203,41 @@ pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     None
 }
 
+/// The nearest node before `me` in its unit that is a piece of the text
+/// (`Operation::text`) with a run to come or under way: not committed
+/// yet, or asked again since its commit (dirty, running). What a run that
+/// would end the job's text at `me` (a fatal error's claim of every node
+/// after it, `Ctx::wait_text_before`) waits for: made while such a piece
+/// is to run, it rests on a guess of that piece's text. The page layer's
+/// nodes, which wait on text after `me`, are not looked at.
+pub(crate) fn text_to_run_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let from = unit_start(eng, me);
+    let mut cur = eng.seg_for_pos(to).map(|s| s.id);
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))).rev() {
+                let n = eng.node(*id);
+                if *id != me.id
+                    && n.unit == me.unit
+                    && eng.op(n.op()).text()
+                    && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
+                    && !n.held_panic.load(Ordering::Acquire)
+                {
+                    return Some(*id);
+                }
+            }
+        }
+        if seg.lo <= from {
+            return None;
+        }
+        cur = eng.order.prev(sid, seg.lo);
+    }
+    None
+}
+
 /// A node of `me`'s unit between position `from` (excluded) and `me` that
 /// is to run again: dirty (queued, or parked), or running and asked again
 /// meanwhile. For the frontier's release (`sched::Pool::release_past_only`): a
