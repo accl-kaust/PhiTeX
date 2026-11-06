@@ -398,7 +398,7 @@ impl<'a> Ctx<'a> {
         let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         self.wait_for_settling(&r)?;
-        self.hold_at_frontier(f)?;
+        self.hold_at_frontier(f, at)?;
         self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
         let x = self.follow_aliases(r.value)?;
         self.seen.insert(f, x);
@@ -443,14 +443,23 @@ impl<'a> Ctx<'a> {
     /// definition the read would meet (TeX's text after a page's break
     /// reads what that page's routine defined): read now, the answer is
     /// one the reader's run is thrown away for once that node comes.
-    fn hold_at_frontier(&mut self, f: Field) -> Result<(), Stop> {
+    fn hold_at_frontier(&mut self, f: Field, at: NodeId) -> Result<(), Stop> {
         use std::sync::atomic::Ordering::{Acquire, Relaxed};
         let eng = self.eng;
         let fr = eng.frontier.load(Acquire);
         if fr == 0 || !eng.settle_marked(f) || eng.op(self.me.op()).settles_at_quiet() {
             return Ok(());
         }
-        if !crate::sched::past_frontier(eng, self.me, fr) {
+        // (a read made before my placer, `Ctx::read_before_placer`, or
+        // before a node named, stands where that node does: the layer
+        // places nothing behind the frontier)
+        let past = if at == self.me.id {
+            crate::sched::past_frontier(eng, self.me, fr)
+        } else {
+            eng.placed_node(at)
+                .is_none_or(|x| crate::sched::past_frontier(eng, x, fr))
+        };
+        if !past {
             return Ok(());
         }
         eng.frontier_held.fetch_add(1, Relaxed);
@@ -544,10 +553,15 @@ impl<'a> Ctx<'a> {
                 })),
             ),
         };
-        if let (Some(x), Anchor::Before(_) | Anchor::AfterOwn(_)) = (&r, &anchor) {
+        if let (Some(x), Anchor::Before(n) | Anchor::AfterOwn(n)) = (&r, &anchor) {
+            let n = if matches!(anchor, Anchor::Before(_)) {
+                *n
+            } else {
+                self.me.id
+            };
             self.note_source(x.by);
             self.wait_for_settling(x)?;
-            self.hold_at_frontier(f)?;
+            self.hold_at_frontier(f, n)?;
         }
         self.record(
             ReadKind::Field { f, at: anchor },
@@ -732,14 +746,14 @@ impl<'a> Ctx<'a> {
         let rb = reaching_at(self.eng, base, at, false).ok_or_else(stop)?;
         self.note_source(rb.by);
         self.wait_for_settling(&rb)?;
-        self.hold_at_frontier(base)?;
+        self.hold_at_frontier(base, at)?;
         let g = read::derived_name(v, spec, rb.value).ok_or_else(stop)?;
         self.before_read(g);
         let ep_g = self.ep;
         let rg = reaching_at(self.eng, g, at, false).ok_or_else(stop)?;
         self.note_source(rg.by);
         self.wait_for_settling(&rg)?;
-        self.hold_at_frontier(g)?;
+        self.hold_at_frontier(g, at)?;
         let aliased = |x: Option<ValueId>| x.is_some_and(|x| read::alias_of(v, x).is_some());
         if aliased(rb.value) || aliased(rg.value) {
             let b = self.read(base)?;
@@ -781,7 +795,7 @@ impl<'a> Ctx<'a> {
         let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         self.wait_for_settling(&r)?;
-        self.hold_at_frontier(f)?;
+        self.hold_at_frontier(f, at)?;
         if let Some(x) = r.value
             && read::alias_of(self.values(), x).is_none()
             && through_path(self.values(), x)

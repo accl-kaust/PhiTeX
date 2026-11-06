@@ -53,3 +53,7 @@ rustix = { version = "=1.1.5", features = ["termios", "param"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# (the viewer's text layer read back from the PDFs the tests write)
+phitex-render = { path = "../output/render" }

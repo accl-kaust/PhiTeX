@@ -126,6 +126,31 @@ function timing(s: Settled): [string, string] {
   ];
 }
 
+/** The watch's `stats` event, after each build's `settled` (a failed build sends none): the CLI's `s` stats. */
+type Stats = {
+  build?: number; why?: string; version?: string; engine?: string; files?: "texlive" | "shelf"; files_release?: string | null;
+  wall_ms?: number; phases_ms?: Record<string, number>; nodes?: { ran?: number; kept?: number; live?: number }; runs?: number; rounds?: number;
+  pages?: number; pages_changed?: number; threads?: number; cores_busy?: number | null; busy_ms?: number; engine_ms?: number; wasted_ms?: number;
+  resident_kb?: number; values_bytes?: number; hints?: Record<string, number>; ok?: boolean;
+};
+
+/** The last build's stats, for the timing popover's "Copy debug info". */
+let lastStats: Stats | undefined;
+
+/** `stats` as lines of plain text, the CLI's `s` stats' words. */
+function statsLines(s: Stats): string[] {
+  const n = s.nodes ?? {};
+  const gb = (b: number) => `${(b / 1e9).toFixed(1)} GB`;
+  return [
+    `PhiTeX ${s.version ?? "?"} · ${s.engine ?? "?"} · files from ${s.files === "shelf" ? `Shelf ${s.files_release ?? "?"}` : s.files === "texlive" ? "TeX Live" : "?"}`,
+    `build ${s.build ?? "?"} (${s.why ?? "?"}) ${s.ok === false ? "failed" : "ok"} in ${dur(s.wall_ms ?? 0)}: ${Object.entries(s.phases_ms ?? {}).map(([k, ms]) => `${k} ${dur(ms)}`).join(" · ")}`,
+    `nodes ${n.ran ?? "?"} ran, ${n.kept ?? "?"} kept of ${n.live ?? "?"} · ${s.runs ?? "?"} runs, ${s.rounds ?? "?"} rounds · pages ${s.pages_changed ?? "?"} of ${s.pages ?? "?"} changed`,
+    `parallel ${s.cores_busy == null ? "—" : s.cores_busy.toFixed(1)} of ${s.threads ?? "?"} threads busy · busy ${dur(s.busy_ms ?? 0)}, engine ${dur(s.engine_ms ?? 0)}, wasted ${dur(s.wasted_ms ?? 0)}`,
+    `memory ${s.resident_kb === undefined ? "?" : gb(s.resident_kb * 1024)} resident, values ${s.values_bytes === undefined ? "?" : gb(s.values_bytes)}`,
+    `hints ${Object.entries(s.hints ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "—"}`,
+  ];
+}
+
 class Pages implements CoreTransport {
   private sock: Socket;
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
@@ -136,6 +161,7 @@ class Pages implements CoreTransport {
   constructor(sock: Socket) {
     this.sock = sock;
     sock.onEvent((e) => {
+      if ((e.event as string) === "stats") return void (lastStats = e as unknown as Stats);
       if (e.event !== "settled") return;
       this.texts = null;
       const s = e as Settled;
@@ -284,6 +310,12 @@ const panel = new Panel(
         if (r.ok) panel.news(String(r.json?.version ?? ""), String(r.json?.text ?? ""));
         else panel.msg("No news for this version", false, true);
       }),
+    // (the timing popover's "Copy debug info": the last build's stats, the CLI's `s` stats; before any, the version, the news op's)
+    onDebugInfo: async () => {
+      if (lastStats) return ["phitex watch", ...statsLines(lastStats)];
+      const r = await sock.request({ op: "info", what: "news" });
+      return [`PhiTeX ${r.ok ? String(r.json?.version ?? "?") : "?"} · phitex watch`];
+    },
     // (the tips seen: the user's phitex.toml through the watch, the same on every port and browser)
     onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } }),
     // (the problems' filters: kept the same way)

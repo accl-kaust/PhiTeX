@@ -169,9 +169,12 @@ export class Viewer {
       }
       this.goToPlace(to, hit[5] ?? null);
     });
+    // (over a link, the hand: a class on its page, which print.ts makes win
+    // over the text layer's own text cursor; a link is nearly always text,
+    // so a cursor set on the page alone never showed)
     root.addEventListener("mousemove", (e) => {
       const el = (e.target as Element).closest<HTMLElement>(".slot");
-      if (el) el.style.cursor = this.linkAt(e) ? "pointer" : "";
+      if (el) el.classList.toggle("on-link", !!this.linkAt(e));
     });
   }
 

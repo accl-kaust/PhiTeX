@@ -309,7 +309,9 @@ fn run(mut doc: Document, wake: &Wake, output: &Output) {
     loop {
         step(&mut doc, output);
         let mut s = lock(&wake.state);
-        while !s.0 && !s.1 {
+        // (work nobody waits for, the build's origins: the next step's,
+        // unless something was asked first)
+        while !s.0 && !s.1 && !doc.pending() {
             s = wake.cv.wait(s).unwrap_or_else(PoisonError::into_inner);
         }
         if s.1 {
@@ -339,8 +341,12 @@ static STEPPED: Mutex<Option<Document>> = Mutex::new(None);
 
 /// Without threads (wasm32-wasip1), the host's turn of the session thread:
 /// the open document stepped once if something was asked since (its first
-/// step the cold build), its events told. 1: stepped (step again until
-/// 0); 0: nothing asked, or no document; with threads, always 0 (the
+/// step the cold build) or work nobody waits for is left (the build's
+/// origins, a step of their own after the build's), its events told.
+/// 1: stepped, step again soon (until 0); 2: stepped, and only work
+/// nobody waits for is left: step again once the requests that came are
+/// answered (the pages asked after a build drawn before its origins are
+/// made); 0: nothing asked, or no document; with threads, always 0 (the
 /// session thread steps it).
 pub(crate) fn step_once() -> i32 {
     let Some((wake, output)) = lock(&OPEN)
@@ -349,9 +355,10 @@ pub(crate) fn step_once() -> i32 {
     else {
         return 0;
     };
+    let pending = lock(&STEPPED).as_ref().is_some_and(Document::pending);
     {
         let mut s = lock(&wake.state);
-        if !s.0 || s.1 {
+        if s.1 || (!s.0 && !pending) {
             return 0;
         }
         s.0 = false;
@@ -361,8 +368,9 @@ pub(crate) fn step_once() -> i32 {
         return 0;
     };
     step(&mut doc, &output);
+    let later = doc.pending() && !lock(&wake.state).0;
     *lock(&STEPPED) = Some(doc);
-    1
+    if later { 2 } else { 1 }
 }
 
 /// The open document closed: its session thread ends after the step it
