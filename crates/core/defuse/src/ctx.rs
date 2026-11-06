@@ -1764,11 +1764,30 @@ impl<'a> Ctx<'a> {
             .as_ref()
             .filter(|r| !r.provisional && (r.state.is_none() || self.me.parked_on.lock().is_none()))?;
         let mut memo = crate::read::FoldMemo::new();
-        if !r
+        if let Some(i) = r
             .reads
             .iter()
-            .all(|rd| crate::read::holds(self.eng, self.me, rd, &mut memo))
+            .position(|rd| !crate::read::holds(self.eng, self.me, rd, &mut memo))
         {
+            // (`PHITEX_STANDS_TRACE`, profile: the first read of the last
+            // run that moved, with what it saw and what it would see now)
+            if crate::obs::enabled() && std::env::var_os("PHITEX_STANDS_TRACE").is_some() {
+                let rd = &r.reads[i];
+                let v = &self.eng.values;
+                let now = crate::read::answer_in(self.eng, self.me, &rd.kind, rd.path, &mut memo);
+                let show =
+                    |x: Option<ValueId>| x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(200).collect());
+                eprintln!(
+                    "stands: node {} woken by {:?} runs: read {i} of {}: {} {:?} seen {} now {}",
+                    self.me.id.raw(),
+                    self.woke,
+                    r.reads.len(),
+                    rd.kind.field().map(|f| v.render(f.0)).unwrap_or_default(),
+                    rd.kind,
+                    show(rd.seen),
+                    show(now)
+                );
+            }
             return None;
         }
         let output = r.output;
