@@ -2931,9 +2931,129 @@ fn a_new_label_leaves_the_read_back_run_standing() {
     }
 }
 
-/// A long `\begin{document}` run whose read-back through its child is
-/// refused (it defines a name the `.aux` defines, after the read-back
-/// point: uspace's and `ClassicThesis`'s `\@gtempa`), in a round whose
+/// `\begin{document}`'s hooks define a name the `.aux` defines too, after
+/// the read-back point (biblatex's own names at its `\begin{document}`):
+/// the read-back's definition is made there from the child's output, then
+/// the hook's, as the inline read-back leaves them. The pass was refused
+/// and made again inline, which read the key set whole: every new
+/// `\label` ran `\begin{document}` again (biblatex's example, label 119 ms
+/// to 178 ms with the `.aux` read per field, mc 80723). It stands, the
+/// name's value is the hook's, and every edited PDF equals a cold build's.
+#[test]
+fn a_name_defined_after_the_read_back_point_keeps_the_child() {
+    use std::fmt::Write as _;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rb-defafter");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let filler: String = (0..40).fold(String::new(), |mut s, i| {
+        let _ = write!(
+            s,
+            "Paragraph {i} of filler, long enough to make a line or two when set in the \
+             article class's ten point roman, and a few words more.\n\n"
+        );
+        s
+    });
+    let doc = |extra: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\
+             \\AtBeginDocument{{\\gdef\\rbkey{{hook}}\\global\\let\\rbwas\\rbkeyprev}}\n\
+             \\AtEndDocument{{\\immediate\\write\\@auxout{{\\gdef\\string\\rbkey{{aux}}\\gdef\\string\\rbkeyprev{{prev}}}}}}\n\
+             \\makeatother\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{sec:intro}}\nKey \\rbkey, was \\ifdefined\\rbwas\\rbwas\\else none\\fi.\n\n\
+             \\section{{Middle}}\nText of the second section.{extra}\n\n{filler}\
+             \\section{{Last}}\\label{{sec:last}}\nThe end, see \\ref{{sec:intro}}.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("rbdefafter", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(""));
+        for extra in ["\\label{new}", "", "\\label{newer}"] {
+            b.edit(&doc(extra));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {extra:?}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(extra));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {extra:?}"
+            );
+            let mut on_keys: Vec<&str> = r
+                .iter()
+                .filter(|x| {
+                    !x.starts_with("readback") && !x.starts_with("files") && x.contains("wkeys:")
+                })
+                .filter_map(|x| x.rsplit_once(" [").map(|(_, n)| n))
+                .collect();
+            on_keys.sort_unstable();
+            on_keys.dedup();
+            assert!(
+                on_keys.len() <= 1,
+                "-j{threads} {extra:?}: the document's start read the key set again: {r:?}"
+            );
+        }
+    }
+}
+
+/// The `.aux` sets a switch globally (KOMA-Script's
+/// `\global\csname @altsecnumformattrue\endcsname`, written where an
+/// appendix's numbers are letters) and a `\begin{document}` hook sets it
+/// back locally (KOMA's `numbers=noenddot` hook, `\@altsecnumformatfalse`),
+/// in the document's group: the hook's value stands, as with no such
+/// line. The run's local value equals the one it read before the
+/// read-back, so it published nothing, and the read-back child defined
+/// the `.aux`'s value globally after it: every section number in the
+/// biblatex manual's contents got KOMA's end dot, its `.aux` widths 2.4pt
+/// more (accl 25680).
+#[test]
+fn a_hook_setting_back_what_the_aux_set_keeps_its_value() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rb-setback");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |line: bool| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\\newif\\if@tswitch\n\
+             \\AtBeginDocument{{\\@tswitchfalse}}\n{}\
+             \\makeatother\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{sec:intro}}\nText of the first section.\n\n\
+             \\makeatletter Switch \\if@tswitch on\\else off\\fi.\\makeatother\n\n\
+             \\section{{Last}}\nThe end, see \\ref{{sec:intro}}.\n\\end{{document}}\n",
+            if line {
+                "\\AtEndDocument{\\immediate\\write\\@auxout{\\global\\string\\csname\\space @tswitchtrue\\string\\endcsname}}\n"
+            } else {
+                ""
+            }
+        )
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("rbsetback", &dir)
+        };
+        let with = common::build(opts(), Some(&prelude(true)), &doc(true));
+        let without = common::build(opts(), Some(&prelude(true)), &doc(false));
+        assert_eq!(
+            common::first_difference(&with.output().0, &without.output().0),
+            None,
+            "-j{threads}: the .aux's switch outlived the hook's"
+        );
+    }
+}
+
+/// A long `\begin{document}` run that defines a name the `.aux` defines,
+/// after the read-back point (uspace's and `ClassicThesis`'s `\@gtempa`;
+/// such a pass was once refused and made again inline), in a round whose
 /// `.aux` changed: the run's own checks while it runs read the output of
 /// its read-back child by the placement's key, not the last run's
 /// placement at the same index (a page's node there after a pass that
@@ -3043,6 +3163,231 @@ fn latex_examples_do_not_run_again_on_a_renamed_anchor() {
             assert!(
                 bad.is_empty(),
                 "-j{threads} added {added}: runs again on the anchor a \\let replaces: {bad:?}"
+            );
+        }
+    }
+}
+
+/// An alignment's cells that set a switch locally (`\@tempswafalse`,
+/// `\let\if@tempswa\iffalse`: xcolor in every tikz-cd matrix cell) do not
+/// run again when an edit before them leaves the switch the other way:
+/// the name `\let` defines is read for its class alone, all an
+/// alignment's `get_next` looks at (§342), not its meaning (tikz-cd's
+/// cite edit: 14 matrices ran again on `cs:if@tempswa`, 1.07 s of
+/// 1.7 s, accl 25714). Every edited PDF equals a cold build's.
+#[test]
+fn alignment_cells_setting_a_switch_do_not_read_it() {
+    use std::fmt::Write as _;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-align-switch");
+    let _ = std::fs::create_dir_all(&dir);
+    let doc = |on: bool| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\makeatletter\n\
+             \\newcommand\\setsw[1]{\\if#1y\\global\\@tempswatrue\\else\\global\\@tempswafalse\\fi}\n\
+             \\newcommand\\cellsw{\\@tempswafalse}\n\\makeatother\n\\begin{document}\n",
+        );
+        let _ = write!(
+            s,
+            "First paragraph, its switch \\setsw{{{}}} set.\n\n",
+            if on { "y" } else { "n" }
+        );
+        for k in 0..4 {
+            let _ = write!(
+                s,
+                "Text before table {k}.\n\n\\begin{{tabular}}{{ll}}\n\\cellsw a{k} & \\cellsw b{k}\\\\\n\\cellsw c{k} & d{k}\\\\\n\\end{{tabular}}\n\nText after table {k}.\n\n"
+            );
+        }
+        s.push_str("\\end{document}\n");
+        s
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("alignsw", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(false));
+        for on in [true, false] {
+            b.edit(&doc(on));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!(
+                    "  -j{threads} on {on}: rerun {}",
+                    x.chars().take(200).collect::<String>()
+                );
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(on));
+            let d = common::first_difference(&b.output().0, &cold.output().0);
+            assert!(
+                d.is_none(),
+                "-j{threads} on {on}: edit differs from cold: {d:?}"
+            );
+            let bad: Vec<&String> = r.iter().filter(|x| x.contains("if@tempswa")).collect();
+            assert!(
+                bad.is_empty(),
+                "-j{threads} on {on}: runs again on the switch the cells set: {bad:?}"
+            );
+        }
+    }
+}
+
+/// microtype's list of the fonts it has set up (`\MT@font@list`), which
+/// the first use of each font adds to (`\xdef\MT@font@list{\MT@font@list
+/// \MT@font,}`): a paragraph that first used a font deleted, the list
+/// before every later first use moves, yet each later appender adds its
+/// font to whatever list reaches it: an append relation the engine
+/// recomputes (`Run::append_def`), not a run. Only the paragraph that now
+/// first uses the deleted paragraph's font runs again on the list (Grail's
+/// `TikZ` figures each ran again, a second each). A name in the list
+/// redefined to expand reads in full where an append meets it. Every
+/// edited PDF equals a cold build's, at one and eight threads.
+#[test]
+fn a_font_list_append_does_not_run_again_when_the_list_moves() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/mt-append");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |first: bool| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\usepackage{microtype}\n\\makeatletter\n\
+             \\def\\L{}\\font\\fa=cmr10 \\font\\fb=cmr12\n\\makeatother\n\\begin{document}\n",
+        );
+        if first {
+            s.push_str("A paragraph that first uses \\texttt{a typewriter font}.\n\n");
+        }
+        for p in [
+            "The \\texttt{typewriter} again, and \\xdef\\L{\\L\\fa,}a name.",
+            "Now \\textbf{bold} type.",
+            "Then \\textit{italic} type, \\xdef\\L{\\L\\fb,}and another.",
+            "And \\textsc{small capitals}.",
+            "With {\\large a larger size} \\def\\fa{x}too.",
+            "Some \\textsf{sans serif}.",
+            "A {\\small smaller size} \\xdef\\L{\\L y,}and the list: \\meaning\\L.",
+            "Last, {\\Large a large one}.",
+        ] {
+            s.push_str(p);
+            s.push_str("\n\n");
+        }
+        s.push_str("\\end{document}\n");
+        s
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("mtappend", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(true));
+        for first in [false, true] {
+            b.edit(&doc(first));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} first {first}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(first));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} first {first}"
+            );
+            let mut on_list: Vec<&str> = r
+                .iter()
+                .filter(|x| x.contains("MT@font@list"))
+                .filter_map(|x| x.rsplit_once(" [").map(|(_, n)| n))
+                .collect();
+            on_list.sort_unstable();
+            on_list.dedup();
+            assert!(
+                on_list.len() <= 1,
+                "-j{threads} first {first}: appenders ran again on the font list: {r:?}"
+            );
+        }
+    }
+}
+
+/// pdfTeX's ratios a font has asked for (`pdf_font_elink`, the engine's
+/// `pdf:elink:<f>`) grow by each paragraph whose lines first ask for one
+/// (microtype's font expansion). A reader cares which ratios are there,
+/// not in what order they were first asked: deleting the paragraph that
+/// asked first moves the first asks to the paragraphs after it, and only
+/// those that now ask first run again on the list, never every paragraph
+/// set in the font after them. Every edited PDF equals a cold build's,
+/// at one and eight threads.
+#[test]
+fn a_fonts_expansion_list_reader_does_not_run_again_when_a_first_ask_moves() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/elink-set");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let words = "expansion stretches and shrinks the glyphs of a line a little, so that \
+                 the spaces between the words stay even where a justified paragraph is set";
+    let doc = |first: bool| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\usepackage[expansion=true,protrusion=true]{microtype}\n\
+             \\begin{document}\n",
+        );
+        if first {
+            s += "A first paragraph that asks for the ratios first: ";
+            s += words;
+            s += ".\n\n";
+        }
+        for k in 0..10 {
+            let w = if k % 2 == 0 { "\\itshape " } else { "" };
+            s += "{";
+            s += w;
+            s += "Paragraph ";
+            s += &k.to_string();
+            s += ": ";
+            s += words;
+            s += "; and again ";
+            s += words;
+            s += ".}\n\n";
+        }
+        s.push_str("\\end{document}\n");
+        s
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("elinkset", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(true));
+        for first in [false, true] {
+            b.edit(&doc(first));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} first {first}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(first));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} first {first}"
+            );
+            let mut on_list: Vec<&str> = r
+                .iter()
+                .filter(|x| x.contains("pdf:elink"))
+                .filter_map(|x| x.rsplit_once(" [").map(|(_, n)| n))
+                .collect();
+            on_list.sort_unstable();
+            on_list.dedup();
+            assert!(
+                on_list.len() <= 2,
+                "-j{threads} first {first}: paragraphs ran again on a font's expansion list: {r:?}"
             );
         }
     }

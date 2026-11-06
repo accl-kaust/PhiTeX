@@ -1080,6 +1080,7 @@ impl Run<'_, '_> {
                             || (y == Some(None) && x == ValueId::UNIT && transient(v, f))
                     }
                     crate::state::Pub::Rel(c) => c == 0,
+                    crate::state::Pub::Append(_) => false,
                 };
             if !same {
                 moved.push(f.0);

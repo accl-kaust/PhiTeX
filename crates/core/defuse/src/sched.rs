@@ -1784,7 +1784,21 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
             .placed_node(by)
             .is_some_and(|b| eng.op(b.op()).settles_now(field, eng.values()))
     {
-        return false;
+        // (at once, but not a definition withdrawn with none left on the
+        // line: one the layer has yet to make again, the same as a rule,
+        // by another of its nodes. A page that fires in a piece, numbered
+        // anew by an edit before it, is fired by another finisher: the old
+        // one's run stopped defining the piece's fire conflict and the new
+        // one's defined it again as it was, and in between the piece ran
+        // whole on no conflict, and once more on the same one, twice per
+        // such piece, ~0.5 s each in circuitikz's examples, accl 25667.
+        // Held, the quiet point reads it again: run once if it is gone,
+        // not at all if it came back)
+        return !eng.op(n.op()).settles_at_quiet()
+            && eng
+                .defs
+                .between(field, crate::order::Pos(0), crate::order::Pos(u64::MAX))
+                .is_empty();
     }
     settles_edge(eng, by, n)
 }
