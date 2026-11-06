@@ -259,7 +259,13 @@ impl Run<'_, '_> {
     /// first run, a picture refused before, or no output yet; the child
     /// placed where it was not before).
     pub(crate) fn pic_begin(&mut self) -> bool {
-        if self.interp.is_some() || self.in_skip || self.mode_zero || self.nest.is_empty() {
+        // (a list of the run's own to put the picture's items on: on the
+        // engine's main list they are contributions, `Run::pic_shape`)
+        if self.interp.is_some()
+            || self.in_skip
+            || self.mode_zero
+            || !self.nest.iter().any(|l| l.owns)
+        {
             return false;
         }
         let Some(body) = self.pic_find() else {
@@ -529,7 +535,14 @@ impl Run<'_, '_> {
     /// inter-character class, the groups open, the level's extra.
     fn pic_params(&self) -> ValueId {
         let v = self.v;
-        let t = self.nest.last().expect("a level");
+        // (the level whose list it is: a group's level shares the list
+        // of the level below it)
+        let t = self
+            .nest
+            .iter()
+            .rev()
+            .find(|l| l.owns)
+            .expect("a list of the run's");
         let (lang, packed) = t.par.map_or((ValueId::UNIT, ValueId::UNIT), |(a, b)| {
             (v.int(a), v.int(b))
         });
@@ -562,7 +575,7 @@ impl Run<'_, '_> {
         let xs = list_of(v, x);
         let a = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
         let n = |i: usize| int_of(v, a(i));
-        if let Some(t) = self.nest.last_mut() {
+        if let Some(t) = self.nest.iter_mut().rev().find(|l| l.owns) {
             t.list.extend(list_of(v, a(1)).into_iter().map(Item::V));
             t.fold.sf = i32::try_from(n(2)).unwrap_or(1000);
             t.fold.pd = i32::try_from(n(3)).unwrap_or(t.fold.pd);
