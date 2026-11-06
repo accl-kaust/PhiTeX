@@ -4151,7 +4151,7 @@ impl<'c, 'a> Run<'c, 'a> {
             let names = seen.map(|x| list_of(v, x)).unwrap_or_default();
             for &n in &names {
                 for t in crate::val::toks_of(v, Some(n)) {
-                    if self.class_lookup(t)?.is_none() {
+                    if !self.does_not_expand(t)? {
                         return Ok(None);
                     }
                 }
@@ -4166,6 +4166,25 @@ impl<'c, 'a> Run<'c, 'a> {
             seen = self.cx.read_path(f, names_p)?;
         }
         Ok(None)
+    }
+
+    /// Whether `tok`'s meaning does not expand: from the run's own
+    /// binding where it holds one (a font identifier the run looked up,
+    /// `\\ifx\\csname…`, or loaded), else read as its class alone
+    /// ([`Run::class_lookup`]).
+    fn does_not_expand(&mut self, tok: Tok) -> R<bool> {
+        let v = self.v;
+        if let Some(l) = self.mean_loc(tok)
+            && self.st.is_loaded(l)
+        {
+            let x = self.st.id_of(l, v);
+            return Ok(int_of(
+                v,
+                crate::val::class_projection(x.unwrap_or(ValueId::UNIT), v),
+            ) >= 0
+                && x.is_some());
+        }
+        Ok(self.class_lookup(tok)?.is_some())
     }
 
     /// The next token, its meaning not read (`get_r_token`'s way).
