@@ -4432,18 +4432,6 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(())
     }
 
-    /// [`Run::val_set`] of the field named `name`.
-    pub(crate) fn val_set_named(&mut self, name: &str) -> R<Vec<ValueId>> {
-        let f = self.ops.fields.get_at(self.v, self.cx.values_epoch(), name);
-        self.val_set(f)
-    }
-
-    /// [`Run::append_val`] to the field named `name`.
-    pub(crate) fn append_val_named(&mut self, name: &str, x: ValueId) -> R<()> {
-        let f = self.ops.fields.get_at(self.v, self.cx.values_epoch(), name);
-        self.append_val(f, x)
-    }
-
     /// Value `x` appended to the list field `f` holds, globally, without
     /// reading it where the run has not ([`Run::appending_vals`]).
     pub(crate) fn append_val(&mut self, f: Field, x: ValueId) -> R<()> {

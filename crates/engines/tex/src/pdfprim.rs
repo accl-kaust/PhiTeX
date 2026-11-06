@@ -950,7 +950,7 @@ fn page_obj(r: &mut Run<'_, '_>, n: i32) -> R<i64> {
     let o = alloc_obj(r)?;
     r.set(&f, v.int(o), true);
     if pdf_mode(r)? {
-        crate::pdfout::page_made_at_read_time(r, i64::from(n))?;
+        crate::pdfout::page_made_at_read_time(r, i64::from(n));
     }
     Ok(o)
 }
@@ -975,13 +975,13 @@ fn action_target(r: &mut Run<'_, '_>, act: ValueId) -> R<()> {
     } else if let Some(&id) = xs.get(3)
         && !list_of(v, id).is_empty()
     {
-        crate::pdfout::dest_first_named(r, id)?;
+        crate::pdfout::dest_first_named(r, id);
     }
     // (then its structure destination's, `/SD`)
     if let Some(&sid) = xs.get(5)
         && sid != ValueId::UNIT
     {
-        crate::pdfout::dest_first_named(r, sid)?;
+        crate::pdfout::dest_first_named(r, sid);
     }
     Ok(())
 }
@@ -3035,7 +3035,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 opened(r);
                 let _ = alloc_obj(r)?;
                 let names = box_font_names(r, b)?;
-                crate::pdfout::fonts_first_used(r, &names)?;
+                crate::pdfout::fonts_first_used(r, &names);
                 // (its resources' dictionary, written into an object
                 // stream where they compress)
                 crate::pdfout::os_write(r)?;
@@ -3058,7 +3058,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                         .get(&format!("pdf:xform:{n}"))?
                         .and_then(|x| list_of(v, x).first().copied());
                     let names = box_font_names(r, fb)?;
-                    crate::pdfout::fonts_first_used(r, &names)?;
+                    crate::pdfout::fonts_first_used(r, &names);
                     crate::pdfout::os_write(r)?;
                 }
             }
