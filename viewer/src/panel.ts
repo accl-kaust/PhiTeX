@@ -1348,6 +1348,11 @@ export class Panel {
 
   packages(p: PackageState): void {
     const done = p.done?.length ?? 0;
+    // (the time any package was on its way, and what came: the timing popover's Downloads)
+    const now = performance.now(), d = this.downloads;
+    if (p.loading.length && d.since === undefined) d.since = now;
+    else if (!p.loading.length && d.since !== undefined) (d.ms += now - d.since), (d.since = undefined);
+    (d.n = done), (d.bytes = p.bytes ?? 0);
     const total = done + p.loading.length;
     if (done !== this.loadDone) this.loadDone = done;
     // (never backwards: a build asking for more grows the total)
@@ -2547,6 +2552,18 @@ export class Panel {
     if (!this.$("#m-time").hidden) this.timing();
   }
 
+  /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
+  private downloads: { n: number; bytes: number; ms: number; since?: number } = { n: 0, bytes: 0, ms: 0 };
+
+  /** The timing popover's Downloads row: the packages' time, how many and their size; none fetched, none. */
+  private downloadsPart(): string {
+    const d = this.downloads;
+    if (!d.n && d.since === undefined) return "";
+    const ms = d.ms + (d.since === undefined ? 0 : performance.now() - d.since);
+    const size = d.bytes ? ` · ${d.bytes < 1e6 ? `${Math.max(1, Math.round(d.bytes / 1e3))} kB` : `${(d.bytes / 1e6).toFixed(1)} MB`}` : "";
+    return `<div class="row"><span class="k">Downloads</span><span class="v">${esc(dur(ms))}</span><span class="note">${d.n} package${d.n === 1 ? "" : "s"}${size}${d.since === undefined ? "" : ", more on the way"}</span></div>`;
+  }
+
   /** The first build's time and the edits' since (the watch's), for the popover's bars. */
   private times: { first?: number; edits: number[] } = { edits: [] };
 
@@ -2611,6 +2628,7 @@ export class Panel {
     el.innerHTML =
       (head ? `<div class="head"><span>${esc(String(head[0]))}</span><b>${esc(dur(head[1] as number))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) +
       this.timeBars() +
+      this.downloadsPart() +
       rows +
       strips +
       `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
