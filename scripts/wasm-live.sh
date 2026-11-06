@@ -13,6 +13,11 @@
 #
 #   scripts/wasm-live.sh [OUT_DIR]   # default build/wasm-live
 #
+# Needs the pinned toolchain's wasm32-wasip1-threads and wasm32-wasip1
+# targets (rust-toolchain.toml lists only wasm32-unknown-unknown, so the
+# cluster's read-only images need no sync): `rustup target add
+# wasm32-wasip1-threads wasm32-wasip1 --toolchain nightly-2026-08-08` once.
+#
 # Release builds with thin LTO and parallel codegen (the engine's speed
 # without fat LTO's long link), panic=abort; the core a reactor
 # (`_initialize` run once by the host), SIMD on: every browser and Node has
@@ -20,18 +25,20 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 out=${1:-build/wasm-live}
+# (cargo's target directory: CARGO_TARGET_DIR when set, as a sandbox sets it)
+tdir=${CARGO_TARGET_DIR:-target}
 mkdir -p "$out"
 fast=(--config 'profile.release.lto="thin"' --config 'profile.release.codegen-units=16' --config 'profile.release.debug=false' --config 'profile.release.panic="abort"')
 reactor="-Zwasi-exec-model=reactor -C target-feature=+simd128"
 CARGO_TARGET_WASM32_WASIP1_THREADS_RUSTFLAGS="$reactor" \
   cargo build --release "${fast[@]}" -p phitex-wasm-live --target wasm32-wasip1-threads
-cp target/wasm32-wasip1-threads/release/core.wasm "$out/core.wasm"
+cp "$tdir/wasm32-wasip1-threads/release/core.wasm" "$out/core.wasm"
 CARGO_TARGET_WASM32_WASIP1_RUSTFLAGS="$reactor" \
   cargo build --release "${fast[@]}" -p phitex-wasm-live --target wasm32-wasip1
-cp target/wasm32-wasip1/release/core.wasm "$out/core1.wasm"
+cp "$tdir/wasm32-wasip1/release/core.wasm" "$out/core1.wasm"
 # (small: size over speed, one codegen unit)
 cargo build --release --config 'profile.release.opt-level="s"' --config 'profile.release.lto=true' \
   --config 'profile.release.codegen-units=1' --config 'profile.release.debug=false' --config 'profile.release.panic="abort"' \
   --config 'profile.release.strip=true' -p phitex-wasm-diff --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/phitex_wasm_diff.wasm "$out/diff.wasm"
+cp "$tdir/wasm32-unknown-unknown/release/phitex_wasm_diff.wasm" "$out/diff.wasm"
 ls -la "$out"
