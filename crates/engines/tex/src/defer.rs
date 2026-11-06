@@ -338,8 +338,35 @@ fn symbolic(r: &mut Run<'_, '_>, loc: Loc, s: Sym, global: bool) -> bool {
     if Sym::at(r, loc, node) == Some(s) {
         return restore_reaching(r, loc, global);
     }
-    // (a value plus steps is neither: the digits are read)
+    // (this piece's own symbol of the register with its steps: the value
+    // reaching the piece plus them, a step of it again)
+    if s.j != 0 && Sym::at(r, loc, node).is_some_and(|o| o.reg == s.reg && o.node == s.node) {
+        return restore_plus(r, loc, s.j, global);
+    }
+    // (another register's or piece's value plus steps is neither: the
+    // digits are read)
     s.j == 0 && alias(r, loc, s, global)
+}
+
+/// Integer register `loc` set to this piece's own symbol of it with steps
+/// `j` (docs/spec-relative-counters.md §3.3): the value reaching the
+/// piece plus `j`, which is a step of that value, so the run's map of the
+/// register becomes `+j` whatever it held, neither a read nor a
+/// definition (beamer's `\beamer@restorecounter`: a counter saved as
+/// `\the\c@figure` after the frame stepped it, set back at each overlay).
+/// Only where a step could be a relation ([`Run::map_ok`]) and the run
+/// made no definition of it; false elsewhere (the caller forces the
+/// digits and assigns as TeX does).
+fn restore_plus(r: &mut Run<'_, '_>, loc: Loc, j: i32, global: bool) -> bool {
+    if !r.map_ok(loc, global) || r.st.defined_after(loc, 0) {
+        return false;
+    }
+    let v = r.v;
+    if !r.st.restore_plus(v, loc, j, global) {
+        return false;
+    }
+    r.muts += 1;
+    true
 }
 
 /// Integer register `loc` set to symbol `s` of another register (or of

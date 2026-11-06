@@ -410,6 +410,65 @@ fn a_counter_only_stepped_and_carried_is_no_read() {
     }
 }
 
+/// A counter saved after a piece stepped it and set back to that saved
+/// value later in the piece (beamer's `\beamer@savecounter` and
+/// `\beamer@restorecounter` at every overlay of a frame: `\xdef\saved
+/// {\the\c@figure}`, then `\global\c@figure=\saved`) is the value
+/// reaching the piece plus its steps, a step again: no paragraph reads the
+/// counter, and a step added before them all asks none of them again.
+/// Without it each paragraph's set defined the counter by value, which the
+/// next one read: a chain through the document (beamer's delete-section
+/// edit, 14 frames one after another).
+#[test]
+fn a_counter_set_back_to_its_value_after_steps_is_a_step() {
+    let src = |extra: &str| {
+        let mut s = String::from("\\openout1=\\jobname.out\n\\count200=5\n");
+        s.push_str(extra);
+        for i in 0..80 {
+            let _ = write!(
+                s,
+                "\\global\\advance\\count200 1 \\xdef\\saved{{\\the\\count200}}\\global\\advance\\count200 7 \\global\\count200=\\saved\\relax \
+                 \\edef\\w{{\\write1{{n{i}=\\the\\count200.}}}}\\w \
+                 Paragraph {i} of the document, long enough to make a line or two when set in the \
+                 plain format's ten point roman.\n\n"
+            );
+        }
+        s.push_str("\\closeout1\n\\bye\n");
+        s
+    };
+    for threads in [1, 8] {
+        let dir = common::scratch(&format!("defer-restore-plus-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let first = src("");
+        let mut b = common::build(opts, Some(&common::plain()), &first);
+        let (want, out) = cold("restore-plus", &first, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: cold");
+        assert!(out.contains("n0=6.") && out.contains("n79=85."), "{out:?}");
+        let edited = src("\\global\\advance\\count200 1\n");
+        common::rebuild(&mut b, &edited);
+        let (want, out) = cold("restore-plus-edited", &edited, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: edited equals cold");
+        assert!(out.contains("n0=7.") && out.contains("n79=86."), "{out:?}");
+        let got: String = b
+            .writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(got, out, "-j{threads}: the file follows");
+        assert_eq!(
+            b.stats.refuted_by_op("exec", "count:200")
+                + b.stats.refuted_by_op("resume", "count:200"),
+            0,
+            "-j{threads}: no paragraph reads the counter: {:?}",
+            b.stats.refuted_by_field
+        );
+    }
+}
+
 /// Steps of a counter after candidates of a run that cannot be cut (a
 /// group open over paragraphs): published as a relation, each page's routine,
 /// which reads the counter at its candidate, reads what the steps before it

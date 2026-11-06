@@ -2156,6 +2156,25 @@ impl State {
         self.muts += 1;
     }
 
+    /// A set of `loc` to its own symbol plus `j` (`crate::defer::try_symbolic`,
+    /// docs/spec-relative-counters.md §3.3): the run's map of the register
+    /// made `+j` whatever it held, nothing read and nothing published; a
+    /// register the run loaded holds the value it loaded plus `j`. False,
+    /// nothing changed, where [`State::add`] would refuse a step.
+    pub(crate) fn restore_plus(&mut self, v: &Values, loc: Loc, j: i32, global: bool) -> bool {
+        let g = if global { MAP_GLOBAL } else { MAP_LOCAL };
+        if self.slot_ref(loc).is_some_and(|s| {
+            s.e.flags & PRELOADED != 0
+                || s.meta != 0
+                || s.lazy.is_some()
+                || (s.mapped != MAP_NONE && s.mapped != g)
+        }) {
+            return false;
+        }
+        self.restore(loc);
+        self.add(v, loc, j, global)
+    }
+
     /// The integer registers whose steps the run publishes beneath a
     /// scope's value of its own ([`State::steps_under_scope`]) and has not
     /// read: the run reads them ([`State::set_step_base`]) before it
