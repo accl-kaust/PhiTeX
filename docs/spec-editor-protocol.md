@@ -361,7 +361,12 @@ pub trait PackSource: Send + Sync {
   `.resolve(name, format, engine)`, `.packs(path, engine)`,
   `.check(id, raw)`; `Files::new(index, source, engine)`, `.find(name)`
   / `.locate(name)` (fetching), `.read(path)`, `.key(name)` (a content
-  key, nothing fetched), `.on_fetch(hook)` (`Fetch::Asked`, `Arrived`,
+  key, nothing fetched: the file's own content sum, the index's
+  `file_sums` column, so a format holds across releases that leave its
+  files as they were), `.published_format(name)` (the release's own
+  format of that store name, its pack fetched; a host gives it as
+  `phitex_live::host::Host::published_format`, taken when the store's
+  format is none or stale), `.on_fetch(hook)` (`Fetch::Asked`, `Arrived`,
   `Failed`); `PackSource::pack(id)`, `.packs(ids)` (a source that fetches
   at once overrides it); `gunzip`, `unpack`, `engine`, `format_of`.
 - **The rule** (the frontends' `resolve.ts` and `core/src/shelf.rs`

@@ -83,6 +83,16 @@ pub trait Host: Send + Sync {
         None
     }
 
+    /// The format the files' release publishes as `name` (the
+    /// session's store name: [`crate::session`]'s, the engine, its
+    /// identity, its text's hash), its exported state: what a cold build
+    /// takes when the store has no format of that name, or one whose
+    /// files changed (Shelf's: `phitex_shelf::Files::published_format`).
+    /// Asked only then; none: there is none (the format is made).
+    fn published_format(&self, _name: &str) -> Option<Vec<u8>> {
+        None
+    }
+
     /// The tools' support files (bibliography styles and databases, index
     /// styles).
     fn tool_finder(&self) -> Option<ToolFinder> {

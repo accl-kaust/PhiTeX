@@ -2557,17 +2557,40 @@ impl State {
     /// package's record). `top`: the run stands outside every scope of
     /// the document.
     pub(crate) fn publication(&self, v: &Values, top: bool) -> (Vec<Published>, Vec<Loc>) {
+        self.publication_kept(v, top, &[])
+    }
+
+    /// [`State::publication`], the items of `kept` published as they
+    /// stand wherever the run wrote them, restores and transients too:
+    /// those a read-back the run made itself defined after its read-back
+    /// point (`Run::rb_check`), whose binding is the run's own, not what
+    /// the run read (a read-back child defines what its run did not).
+    pub(crate) fn publication_kept(
+        &self,
+        v: &Values,
+        top: bool,
+        kept: &[Loc],
+    ) -> (Vec<Published>, Vec<Loc>) {
         let mut out = Vec::with_capacity(self.metas.len());
         let mut restored = Vec::new();
         for m in &self.metas {
-            if let Some((val, _)) = &m.publ
+            let keep = kept.contains(&m.loc);
+            if !keep
+                && let Some((val, _)) = &m.publ
                 && m.eng
                     .is_some_and(|e| e.is_some() && self.encode(val, v) == e)
                 && !self.has_map(m.loc)
             {
                 restored.push(m.loc);
             }
-            if let Some((x, l)) = self.base_value(m, v, top) {
+            let made = if keep {
+                m.publ
+                    .as_ref()
+                    .and_then(|(val, l)| Some((self.encode(val, v)?, *l)))
+            } else {
+                self.base_value(m, v, top)
+            };
+            if let Some((x, l)) = made {
                 let carried = l == Locality::Local && self.cont_locs.contains(&m.loc);
                 out.push(Published {
                     loc: m.loc,

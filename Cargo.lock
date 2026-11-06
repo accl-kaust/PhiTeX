@@ -2115,6 +2115,7 @@ dependencies = [
  "phitex-otf",
  "phitex-pdf",
  "phitex-render",
+ "phitex-shelf",
  "phitex-tex",
  "phitex-xdvipdfmx",
  "serde_json",

@@ -58,6 +58,10 @@ pub fn font_name(key: &str) -> Option<&str> {
 /// hashed).
 pub type ContentKey = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 
+/// A prelude's exported state, asked when needed
+/// ([`Options::prelude_fallback`]).
+pub type PreludeSource = Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>;
+
 /// The searches a tool's support files are found by ([`Options::tool_finder`]):
 /// kpathsea's formats for them, as `bibtex`, `biber` and `makeindex` ask.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -190,6 +194,12 @@ pub struct Options {
     /// instead of evaluating the prelude when its key matches (the same
     /// prelude text, every file it read unchanged).
     pub prelude_bytes: Option<Vec<u8>>,
+    /// The format to take when [`Options::prelude_bytes`] is none, is
+    /// another prelude's, or is stale (a file it read changed): asked
+    /// then, once (the format the files' release publishes for this
+    /// engine, Shelf's); none, or one that does not hold either, and the
+    /// prelude is evaluated.
+    pub prelude_fallback: Option<PreludeSource>,
     /// The wall time one evaluation (the prelude, a build, an edit) may
     /// take; past it the build ends with the engine's deadline error,
     /// naming what waits, in the log. `None`: no limit.
@@ -978,6 +988,7 @@ impl Default for Options {
             prelude_jobname: "texput".to_owned(),
             program: "pdftex".to_owned(),
             prelude_bytes: None,
+            prelude_fallback: None,
             // (`PHITEX_TIME_LIMIT_SECS`: another bound, 0 for none; a
             // measurement's cold build or reference must never be cut
             // short, a truncated reference compares as a wrong edit)
@@ -4529,8 +4540,23 @@ pub(crate) fn text_mark(v: &Values) -> ValueId {
 pub(crate) const PARAM_LOOK: &str = "\u{1}#";
 
 pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<String> {
+    let (mut out, folds) = written_kinds(v, streams);
+    out.extend(folds);
+    out
+}
+
+/// The job-written files not read back per line's definitions, in two
+/// kinds: those a line of which did more than define (read back as
+/// their text), and the FOLDS: files each line of which only defines,
+/// some line reading what a line before it defines (biblatex's
+/// `\abx@aux@cite` adding a key to the list the lines before it built,
+/// `\blx@pagesum@old` taking a digit per `\abx@aux@page`), whose lines
+/// define, read one after another from the read-back point, what their
+/// whole text read at once defines ([`crate::ops::fold_node`]).
+pub(crate) fn written_kinds(v: &Values, streams: Option<ValueId>) -> (Vec<String>, Vec<String>) {
     let streams = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
+    let mut folds: Vec<String> = Vec::new();
     // (per file, the fields its lines so far define, in the order TeX
     // writes them: a line that reads one depends on the lines before it,
     // which TeX reads first and its read-back by fields, each line on its
@@ -4580,18 +4606,19 @@ pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<Strin
                 .unwrap_or(false)
             })
         {
-            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && !folds.contains(&name) {
                 eprintln!(
-                    "aux-trace: {name} read back as text: line {:?} reads {}, which a line before it defines",
+                    "aux-trace: {name} read back as a fold: line {:?} reads {}, which a line before it defines",
                     xs.get(1)
                         .map(|&l| str_of(v, l).chars().take(70).collect::<String>()),
                     str_of(v, r)
                 );
             }
-            if !out.contains(&name) {
-                out.push(name);
+            // (its definitions still counted: a later line that does more
+            // than define makes the file one read back as its text)
+            if !folds.contains(&name) {
+                folds.push(name.clone());
             }
-            continue;
         }
         for d in list_of(v, made) {
             if let [f, x, _] = list_of(v, d).as_slice() {
@@ -4613,7 +4640,8 @@ pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<Strin
             }
         }
     }
-    out
+    folds.retain(|n| !out.contains(n));
+    (out, folds)
 }
 
 /// The hint of a format's node (`hints::Hint` encoded): unbounded.
@@ -5190,6 +5218,38 @@ fn trailing_cs(s: &str) -> usize {
 }
 
 #[cfg(test)]
+mod key_set_tests {
+    use super::*;
+
+    /// The same definitions in another order give the same key set: a
+    /// fold's run puts its fields in the order of their last definitions,
+    /// which moves from one run to the next on the same text (biblatex's
+    /// `.aux`, `\blx@prelim@lastcites@0` 14th of 104 keys in one run and
+    /// 93rd in the next, and `\begin{document}` ran again on the key set
+    /// at every edit, accl 25569). Two keys of one field, a file's errors,
+    /// keep their order.
+    #[test]
+    fn a_key_set_is_in_the_order_of_its_fields() {
+        let v = Values::new();
+        let d = |f: &str, x: i64| (f.to_owned(), v.int(x));
+        let a = [d("cs:b", 1), d("cs:a", 2), d("cs:c", 3)];
+        let b = [d("cs:c", 3), d("cs:b", 1), d("cs:a", 2)];
+        assert_eq!(key_set(&v, "f.aux", &a), key_set(&v, "f.aux", &b));
+        let names =
+            |x: ValueId| -> Vec<String> { list_of(&v, x).iter().map(|&k| str_of(&v, k)).collect() };
+        assert_eq!(
+            names(key_set(&v, "f.aux", &a)),
+            [WRITTEN_KEY, "cs:a", "cs:b", "cs:c"]
+        );
+        let e = [d("rberr:2", 1), d("cs:a", 2), d("rberr:1", 3)];
+        assert_eq!(
+            names(key_set(&v, "f.aux", &e)),
+            [WRITTEN_KEY, "cs:a", "rberr:2", "rberr:1"]
+        );
+    }
+}
+
+#[cfg(test)]
 mod culprit_tests {
     use super::*;
 
@@ -5662,20 +5722,28 @@ impl Options {
     }
 }
 
-/// The check of a format read from the cache ([`cached_prelude`]),
-/// running.
-static FORMAT_CHECK: Mutex<Option<crate::exec::Beside<bool>>> = Mutex::new(None);
-
-/// Whether the format read from the cache, if one was, still has every
-/// file it read as the finder gives it now.
-fn format_holds() -> bool {
-    FORMAT_CHECK
-        .locked()
-        .take()
-        .is_none_or(|h| h.join().unwrap_or(false))
+/// The check of a format given as bytes ([`cached_prelude`]), running
+/// beside the build's start, and whether that format was the fallback
+/// ([`Options::prelude_fallback`]). The build's own: two builds in one
+/// process never take each other's.
+struct FormatCheck {
+    holds: crate::exec::Beside<bool>,
+    fallback: bool,
 }
 
-fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cached>, Vec<String>> {
+impl FormatCheck {
+    /// Whether the format still has every file it read as the finder
+    /// gives it now.
+    fn holds(self) -> bool {
+        self.holds.join().unwrap_or(false)
+    }
+}
+
+fn cached_prelude(
+    key: u64,
+    digest: &[u8; 32],
+    opts: &Options,
+) -> Result<(Arc<Cached>, Option<FormatCheck>), Vec<String>> {
     let finder = opts.prelude_finder();
     let candidates: Vec<Arc<Cached>> = env_cache()
         .locked()
@@ -5688,12 +5756,19 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
         })
         .unwrap_or_default();
     let t0 = std::time::Instant::now();
-    let given = opts
-        .prelude_bytes
-        .as_deref()
-        .and_then(deserialise)
-        .filter(|c| c.text_key == key && c.text_digest == *digest)
-        .map(Arc::new);
+    let take = |b: &[u8]| {
+        deserialise(b)
+            .filter(|c| c.text_key == key && c.text_digest == *digest)
+            .map(Arc::new)
+    };
+    // (the given format, else the fallback, asked now: a format that is
+    // another prelude's, or none, is as good as stale)
+    let mut fallback = false;
+    let given = opts.prelude_bytes.as_deref().and_then(take).or_else(|| {
+        let f = opts.prelude_fallback.as_ref()?;
+        fallback = true;
+        f().as_deref().and_then(take)
+    });
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") && opts.prelude_bytes.is_some() {
         eprintln!(
             "format deserialise: {:?} ({} bytes, {})",
@@ -5727,8 +5802,7 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
             }
             fresh
         });
-        *FORMAT_CHECK.locked() = Some(h);
-        return Ok(c);
+        return Ok((c, Some(FormatCheck { holds: h, fallback })));
     }
     let mut known: Vec<String> = Vec::new();
     for c in candidates {
@@ -5750,7 +5824,7 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
             );
         }
         if fresh {
-            return Ok(c);
+            return Ok((c, None));
         }
         // (a stale cache entry still names the files the prelude reads)
         for (n, _, _, _) in &c.reads {
@@ -5767,7 +5841,7 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
 /// while every file it read is what the finder gives now.
 // (its phases timed and measured inline, PHITEX_TEX_TIME)
 #[allow(clippy::too_many_lines)]
-fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
+fn prelude_env(prelude: Option<&str>, opts: &Options) -> (Arc<Cached>, Option<FormatCheck>) {
     // (a XeTeX format is another format: its INITEX is XeTeX's)
     let tag: u64 = if opts.xetex.is_some() {
         0x58_6554_6558
@@ -5934,7 +6008,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     if c.errors.is_empty() {
         env_cache().locked().entry(key).or_default().push(c.clone());
     }
-    c
+    (c, None)
 }
 
 /// The name a diagnostic in the prelude's own text carries (its
@@ -6236,7 +6310,7 @@ impl Build {
         let crs = crate::expand::cr_lines(document);
         let document = crs.as_deref().unwrap_or(document);
         let t0 = std::time::Instant::now();
-        let cached = prelude_env(prelude, &opts);
+        let (cached, check) = prelude_env(prelude, &opts);
         if let Some(p) = &opts.progress {
             p.note_format(true);
         }
@@ -6415,17 +6489,26 @@ impl Build {
         let _ = files;
         let end = steps;
         crate::timeline::lap("engine: the link, end and files nodes");
-        // (a format whose files changed since it was cached: built again)
-        if !format_holds() {
-            crate::timeline::lap("engine: the cached format stale");
-            return Build::with(
-                Options {
-                    prelude_bytes: None,
-                    ..opts
-                },
-                prelude,
-                document,
-            );
+        // (a format whose files changed since it was cached: the
+        // fallback taken, else the prelude built again)
+        if let Some(c) = check {
+            let fallback = c.fallback;
+            if !c.holds() {
+                crate::timeline::lap("engine: the cached format stale");
+                return Build::with(
+                    Options {
+                        prelude_bytes: if fallback {
+                            None
+                        } else {
+                            opts.prelude_fallback.as_ref().and_then(|f| f())
+                        },
+                        prelude_fallback: None,
+                        ..opts
+                    },
+                    prelude,
+                    document,
+                );
+            }
         }
         crate::timeline::lap("engine: the format's check taken");
         let edits = opts.edits.clone().unwrap_or_default();
