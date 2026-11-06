@@ -2271,8 +2271,18 @@ fn build_stats(
         "version": env!("CARGO_PKG_VERSION"),
         "engine": s.job.engine.name,
         "files": if t.files == crate::tex::Files::Shelf { "shelf" } else { "texlive" },
+        // (the Shelf release the files are from; none: TeX Live's)
+        "files_release": (t.files == crate::tex::Files::Shelf).then(crate::shelf::release),
         "wall_ms": r.wall.as_secs_f64() * 1e3,
         "phases_ms": phase_ms,
+        "hints": x.map(|x| json!({
+            "bounded": x.hints[0],
+            "any": x.hints[1],
+            "violations": x.hints[2],
+            "undeclared": x.hints[3],
+            "stops": x.hints[4],
+            "pending_waits": x.hints[5],
+        })),
         "nodes": {"ran": nodes, "kept": live.saturating_sub(nodes), "live": live},
         "runs": x.map_or(0, |x| x.runs),
         "rounds": x.map_or(0, |x| x.rounds),
