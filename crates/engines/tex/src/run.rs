@@ -2610,6 +2610,43 @@ impl<'c, 'a> Run<'c, 'a> {
         self.get_loc(l)
     }
 
+    /// (observe) Where a run is, for a trace: the token lists it is
+    /// reading, innermost first, and the engine's frames.
+    pub(crate) fn trace_context(&self) -> String {
+        let v = self.v;
+        let mut ctx = Vec::new();
+        for l in self.input.levels.iter().rev().take(6) {
+            if l.kind == crate::input::kind::TOKS {
+                let toks: Vec<String> = self
+                    .input
+                    .arena
+                    .get(l.rest())
+                    .iter()
+                    .take(8)
+                    .map(|t| v.render(t.encode(v)))
+                    .collect();
+                ctx.push(format!("t{}:{}", l.ty, toks.join(" ")));
+            } else {
+                ctx.push(format!("k{}", l.kind));
+            }
+        }
+        let bt = std::backtrace::Backtrace::force_capture().to_string();
+        let frames: Vec<&str> = bt
+            .lines()
+            .map(str::trim)
+            .filter(|l| {
+                l.starts_with("at ")
+                    || l.split(':')
+                        .next()
+                        .is_some_and(|n| n.parse::<u32>().is_ok())
+            })
+            .map(|l| if l.len() > 90 { &l[..90] } else { l })
+            .skip(2)
+            .take(30)
+            .collect();
+        format!("{} | bt {}", ctx.join(" | "), frames.join(" < "))
+    }
+
     /// `PHITEX_READS`: a read under a head a paragraph region declares
     /// (where a following region's walk may park), or any read that
     /// parked, with the node and its operation.
@@ -2630,43 +2667,13 @@ impl<'c, 'a> Run<'c, 'a> {
             && want == name
         {
             let v = self.v;
-            let mut ctx = Vec::new();
-            for l in self.input.levels.iter().rev().take(6) {
-                if l.kind == crate::input::kind::TOKS {
-                    let toks: Vec<String> = self
-                        .input
-                        .arena
-                        .get(l.rest())
-                        .iter()
-                        .take(8)
-                        .map(|t| v.render(t.encode(v)))
-                        .collect();
-                    ctx.push(format!("t{}:{}", l.ty, toks.join(" ")));
-                } else {
-                    ctx.push(format!("k{}", l.kind));
-                }
-            }
-            let bt = std::backtrace::Backtrace::force_capture().to_string();
-            let frames: Vec<&str> = bt
-                .lines()
-                .map(str::trim)
-                .filter(|l| {
-                    l.starts_with("at ")
-                        || l.split(':')
-                            .next()
-                            .is_some_and(|n| n.parse::<u32>().is_ok())
-                })
-                .map(|l| if l.len() > 90 { &l[..90] } else { l })
-                .skip(2)
-                .take(30)
-                .collect();
+            let ctx = self.trace_context();
             eprintln!(
-                "reads: node {} {name} at {} (pulled {}) | {} | bt {}",
+                "reads: node {} {name} at {} (pulled {}) | {}",
                 self.cx.node().raw(),
                 v.render(self.cur.tok.encode(v)),
                 self.pulled,
-                ctx.join(" | "),
-                frames.join(" < ")
+                ctx
             );
         }
         if parked || HEADS.iter().any(|h| name.starts_with(h)) {
