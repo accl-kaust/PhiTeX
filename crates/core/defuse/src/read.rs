@@ -9,7 +9,7 @@ use crate::engine::Engine;
 use crate::node::{Anchor, Node, ReadKind, State};
 use crate::order::{Pos, SegId};
 use crate::segment::{Def, GLOBAL, Inner, RangeReader, Reader, Segment, reduce};
-use crate::values::{Field, FxHashSet, Value, ValueId, Values};
+use crate::values::{Field, FxHashMap, FxHashSet, Value, ValueId, Values};
 
 /// A path that is no path: the defining node's id as an integer
 /// (`Ctx::def_site`).
@@ -1203,6 +1203,48 @@ pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     None
 }
 
+/// The nearest node before `me` in its unit that is a piece of the text
+/// (`Operation::text`) asked again since it committed: dirty or running.
+/// What a run that would end the job's text at `me` (a fatal error's
+/// claim of every node after it, `Ctx::wait_text_before`) waits for:
+/// made while such a piece is to run again, it rests on that piece's
+/// last answer, which its run is about to replace. A piece not committed
+/// yet (a hole) is not waited for: a read-on, the way a piece meets the
+/// input's end, waits for those already (`Ctx::hole_before`), and a
+/// fatal error met otherwise ends the job at once, no piece after it
+/// begun (`fatal::a_fatal_error_ends_the_job_before_an_included_file`:
+/// waiting for the first piece's first run, eight threads ran the
+/// included file's). The page layer's nodes, which wait on text after
+/// `me`, are not looked at.
+pub(crate) fn text_to_run_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let from = unit_start(eng, me);
+    let mut cur = eng.seg_for_pos(to).map(|s| s.id);
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))).rev() {
+                let n = eng.node(*id);
+                if *id != me.id
+                    && n.unit == me.unit
+                    && eng.op(n.op()).text()
+                    && n.committed()
+                    && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
+                    && !n.held_panic.load(Ordering::Acquire)
+                {
+                    return Some(*id);
+                }
+            }
+        }
+        if seg.lo <= from {
+            return None;
+        }
+        cur = eng.order.prev(sid, seg.lo);
+    }
+    None
+}
+
 /// A node of `me`'s unit between position `from` (excluded) and `me` that
 /// is to run again: dirty (queued, or parked), or running and asked again
 /// meanwhile. For the frontier's release (`sched::Pool::release_past_only`): a
@@ -1283,6 +1325,45 @@ pub(crate) fn open_definer_before(eng: &Engine, me: &Node, r: &crate::node::RunR
                     let op = eng.op(x.op());
                     !op.works_at_frontier() && !op.final_only()
                 }
+        })
+    })
+}
+
+/// The definer of the field a derived read of `r`, `me`'s last run, names
+/// now (`Step::Derived`), when it is to run (dirty or at work): an edit
+/// in the same evaluation may have changed what it defines. It is no
+/// source of the record where the name moved (the last run read the
+/// field the old name gave), and it moved nothing before it committed,
+/// so [`open_definer_before`] does not hold for it: re-asked by the move
+/// of the name's base, the reader ran on that field's old value and again
+/// once the edited definer committed (`derived.rs`,
+/// `a_moved_name_holding_the_old_value_leaves_the_reader_standing` at four
+/// threads, about 8 in 300).
+pub(crate) fn derived_target_open(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
+    on_one_layout(eng, || {
+        r.reads.iter().find_map(|rd| {
+            let ReadKind::Field { at, .. } = &rd.kind else {
+                return None;
+            };
+            let spec = derived_spec(eng, rd.path)?;
+            let (anchor, incl) = match *at {
+                Anchor::Me => (me.id, false),
+                Anchor::Before(n) => (n, false),
+                Anchor::AfterOwn(n) => (n, true),
+                _ => return None,
+            };
+            let g = derived_field_at(eng, spec, anchor, incl)?;
+            let by = reaching_at(eng, g, anchor, incl)?.by?;
+            let x = eng.placed_node(by)?;
+            (by != me.id
+                && matches!(x.state(), State::Dirty | State::Running | State::RunningDirty)
+                && x.unit == me.unit
+                && !x.held_panic.load(Ordering::Acquire)
+                && {
+                    let op = eng.op(x.op());
+                    !op.works_at_frontier() && !op.final_only()
+                })
+            .then_some(by)
         })
     })
 }
@@ -1626,18 +1707,133 @@ fn last_visible(ls: &[(Pos, Def, (usize, u64))], target: &[u64]) -> Option<Def> 
 /// field index, the last one visible to `target`; else the environment.
 fn visible_before(eng: &Engine, f: Field, target: &[u64], lo: Pos) -> Reaching {
     let mut lo = lo;
-    while let Some(s) = last_def_before(eng, f, lo) {
+    // (in a walk, `WalkMemo`: the answers found for this field and these
+    // scopes from the segments passed over, each of which answers what
+    // the search found further back)
+    let t = WALK_MEMO.with_borrow_mut(|m| {
+        m.as_mut().map(|m| {
+            let k = u32::try_from(m.targets.len()).unwrap_or(u32::MAX);
+            *m.targets.entry(target.to_vec()).or_insert(k)
+        })
+    });
+    let mut passed: Vec<Pos> = Vec::new();
+    let found = loop {
+        if let Some(t) = t
+            && let Some(r) = WALK_MEMO.with_borrow(|m| m.as_ref().and_then(|m| m.answers.get(&(f, lo, t)).copied()))
+        {
+            break r;
+        }
+        let Some(s) = last_def_before(eng, f, lo) else {
+            break env_reaching(eng, f);
+        };
+        if t.is_some() {
+            passed.push(lo);
+        }
         let seg = eng.seg(s);
         let start = chain_start(eng, seg);
         {
             let inner = seg.inner.read();
-            if let Some(d) = last_visible(&levels(&eng.values, &inner, f, &start, None, false), target) {
-                return Reaching::of(&d);
+            let ls = survivors(eng, seg, &inner, f, &start);
+            if let Some(d) = ls.iter().rev().find(|x| visible(target, x.1)).map(|x| x.0) {
+                break Reaching::of(&d);
             }
         }
         lo = seg.lo;
+    };
+    if let Some(t) = t
+        && !passed.is_empty()
+    {
+        WALK_MEMO.with_borrow_mut(|m| {
+            if let Some(m) = m.as_mut() {
+                for p in passed {
+                    m.answers.insert((f, p, t), found);
+                }
+            }
+        });
     }
-    env_reaching(eng, f)
+    found
+}
+
+/// A walk's searches back (`WalkMemo`): the scopes open at the readers,
+/// numbered, and the answers by field, a segment's start and those
+/// scopes.
+#[derive(Default)]
+struct Searches {
+    targets: FxHashMap<Vec<u64>, u32>,
+    answers: FxHashMap<(Field, Pos, u32), Reaching>,
+}
+
+thread_local! {
+    static WALK_MEMO: std::cell::RefCell<Option<Searches>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While it lives, the searches of this thread for the definition a
+/// reader sees before a segment's start keep their answers, by field, the
+/// segment's start and the scopes open at the reader, and a search that
+/// comes to a start one has passed takes its answer: a walk asking many
+/// readers of a field again, at the same nesting, searches back over the
+/// same segments once, not once per reader (biblatex at -j4, a bracket
+/// walk's 30 to 60 k readers each looked back ~100 segments, 3 M
+/// segments a walk, ~3 s, mc 80645). For a walk under no other's: the
+/// line is read as it stands when each answer is first found, as the
+/// readers it answers would read it then.
+pub(crate) struct WalkMemo(bool);
+
+impl WalkMemo {
+    pub(crate) fn new() -> WalkMemo {
+        let outer = WALK_MEMO.with_borrow(Option::is_some);
+        if !outer {
+            WALK_MEMO.with_borrow_mut(|m| *m = Some(Searches::default()));
+        }
+        WalkMemo(!outer)
+    }
+}
+
+impl Drop for WalkMemo {
+    fn drop(&mut self) {
+        if self.0 {
+            WALK_MEMO.with_borrow_mut(|m| *m = None);
+        }
+    }
+}
+
+/// The definitions of `f` in segment `seg` (`inner` its guard, `start`
+/// the scopes open at its start) that a reader after its end can see,
+/// with their scopes, in order: those whose scope is still open at its
+/// end (a scope open at a later reader was open all the way there). The
+/// last of them a reader sees is the last of all it sees, so a reader
+/// looking back past the segment looks at these alone; kept with the
+/// segment while neither it nor the scopes at its start change. Looked
+/// at whole each time, a segment's every definition of the field and its
+/// every bracket were gone over by each reader passing it: biblatex at
+/// -j4, readers going back 170 segments each, 10 M segments and 47 M
+/// brackets for one walk's 59 k readers, 10 s (mc 80642).
+fn survivors(
+    eng: &Engine,
+    seg: &Segment,
+    inner: &Inner,
+    f: Field,
+    start: &Arc<[u64]>,
+) -> Arc<[(Def, (usize, u64))]> {
+    let w = seg.inner.writes();
+    if let Some(e) = seg.surv.lock().get(&f)
+        && e.0 == w
+        && *e.1 == **start
+    {
+        return e.2.clone();
+    }
+    let mut end = start.to_vec();
+    for (_, (n, b)) in inner.brackets.iter() {
+        close(&mut end, b);
+        open(&mut end, *n, b);
+    }
+    let ls: Arc<[(Def, (usize, u64))]> = levels(&eng.values, inner, f, start, None, false)
+        .into_iter()
+        .filter(|x| visible(&end, x.2))
+        .map(|x| (x.1, x.2))
+        .collect();
+    seg.surv.lock().insert(f, (w, start.clone(), ls.clone()));
+    ls
 }
 
 /// The scope depth at `p`: scopes open just before the node there, its

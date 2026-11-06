@@ -3456,6 +3456,21 @@ impl Graph {
                 return Some(Some(x));
             }
             let field = v.as_str(f.0)?;
+            // (a box register no run has set is void at level 0, the value
+            // a `\global` void assignment gives it, `Run::set_box_reg`:
+            // read as unset, a reader whose last answer was that void
+            // value saw its answer move when the run that made it went,
+            // though TeX's box is the same. Grail, a figure deleted: tikz's
+            // `\pgf@layerbox@background`, voided globally by each picture's
+            // end, unset again before the next one, which ran again, five
+            // pictures at 0.2-1.3 s each, mc 80606)
+            if field
+                .strip_prefix("box:")
+                .or_else(|| field.strip_prefix("tbox:"))
+                .is_some_and(|n| n.parse::<i64>().is_ok())
+            {
+                return Some(Some(v.list(vec![v.int(0), ValueId::UNIT])));
+            }
             // (a cut file's size, `\pdffilesize`'s answer without its
             // text)
             if let Some(name) = field.strip_prefix("fsize:") {

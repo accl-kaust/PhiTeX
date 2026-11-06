@@ -953,6 +953,51 @@ fn a_line_inserted_at_the_top_reruns_no_weak_reader_of_the_line_number() {
     assert_eq!(weak, 0, "no weak reader of the line runs again");
 }
 
+/// A box register voided globally by a paragraph (from another, void, register:
+/// a restore of the value it read would publish nothing), then deleted with it:
+/// the register is unset again, which TeX reads as the same void box, so
+/// the paragraph after it that reads the register does not run again
+/// (tikz's `\pgf@layerbox@background`, voided by every picture's end:
+/// a figure deleted re-ran every later picture, Grail, mc 80606).
+#[test]
+fn a_box_voided_globally_and_deleted_reruns_no_reader_of_it() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from("\\vsize=200pt \\hsize=150pt \\parindent=0pt\n");
+    src.push_str("Paragraph zero has a few words.\n\n");
+    src.push_str("\\global\\setbox7=\\box6 Paragraph one voids a box.\n\n");
+    for k in 2..6 {
+        let _ = writeln!(
+            src,
+            "\\setbox0=\\hbox{{\\copy7}}Paragraph {k} reads the box.\n"
+        );
+    }
+    src.push_str("Last words.\n\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./vb.tex", "vb", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replace("\\global\\setbox7=\\box6 ", "");
+    assert_ne!(text, src);
+    b.edit(&text);
+    for (n, op, why) in &b.stats.reruns {
+        eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
+    }
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let (out, _) = b.output();
+    let (cold_out, _) = cold.output();
+    assert!(
+        common::first_difference(&out, &cold_out).is_none(),
+        "the output is a cold build's"
+    );
+    let readers = b
+        .stats
+        .reruns
+        .iter()
+        .filter(|(_, op, why)| *op == "exec" && why.contains("box:7"))
+        .count();
+    assert_eq!(readers, 0, "no reader of the box runs again");
+}
+
 /// A long paragraph edited near its end: the first edit's run (from the
 /// start) takes checkpoints, the next ones go on from one; an edit at its
 /// start runs from the start (taking them again); each output is the

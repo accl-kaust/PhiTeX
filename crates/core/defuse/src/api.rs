@@ -572,6 +572,11 @@ pub struct Report {
     /// through, up to the next definition): a walk's work, which grows
     /// with the readers between two definitions, never with the line.
     pub walked: u64,
+    /// The readers the walks after a change of brackets asked again:
+    /// those in the region where the scopes on its two sides differ that
+    /// read a field whose definitions there or before it the change can
+    /// hide or show.
+    pub scope_asked: u64,
     /// The nodes the line's searches stepped over (a `next` contribution
     /// past the nodes not yet run, the claimed siblings followed), this
     /// evaluation's and the edits' before it: a search that goes on from
