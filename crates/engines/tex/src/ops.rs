@@ -1288,8 +1288,9 @@ fn define_fields(cx: &mut Ctx<'_>, name: &str, ds: &[(String, ValueId)], text: O
     }
     if trace {
         eprintln!(
-            "aux-trace: define {name}: {} keys, text {} bytes:\n{}",
+            "aux-trace: define {name}: {} keys {:?}, text {} bytes:\n{}",
             list_of(v, keys).len(),
+            list_of(v, keys).iter().map(|&x| str_of(v, x)).collect::<Vec<_>>(),
             text.map_or(0, str::len),
             text.unwrap_or("")
         );
