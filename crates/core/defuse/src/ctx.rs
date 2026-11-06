@@ -529,6 +529,20 @@ impl<'a> Ctx<'a> {
         Ok(read::through_at(self.eng, r, p, at, false))
     }
 
+    /// The value of `f` reaching me, with no read recorded (none where it
+    /// is an alias definition, which only a read follows): for a client
+    /// that looks first and records what it used with
+    /// [`Ctx::note_path`] (`PathId::WHOLE`).
+    pub fn peek_field(&mut self, f: Field) -> Result<Option<Option<ValueId>>, Stop> {
+        self.check()?;
+        let (at, _) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+        if r.value.is_some_and(|x| read::alias_of(self.values(), x).is_some()) {
+            return Ok(None);
+        }
+        Ok(Some(r.value))
+    }
+
     /// Records a read of `f` through path `p` answered `seen`, as
     /// `read_path` records one, without answering it: a client that
     /// looked first ([`Ctx::peek_path`]) and used `seen` of the answer

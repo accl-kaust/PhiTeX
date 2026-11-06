@@ -4029,6 +4029,23 @@ impl<'c, 'a> Run<'c, 'a> {
     /// deleted at the start moved every later appender, Grail's `TikZ`
     /// figures a second each). Whether it did so; false with the input as
     /// it was.
+    /// (observe, `PHITEX_APPEND_TRACE`) Why an `\\xdef` to `p` is no append
+    /// ([`Run::append_def`]): the exit's number.
+    fn append_trace(&mut self, p: Tok, why: &str) {
+        if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") {
+            let l = self.mean_loc(p);
+            eprintln!(
+                "append-trace: node {} op {:?} {:?} not an append: exit {why} (loaded {}, interp {}, rb {})",
+                self.cx.node().raw(),
+                self.cx.op(),
+                p,
+                l.is_some_and(|l| self.st.load_state(l) != 0),
+                self.interp.is_some(),
+                self.rb.is_some()
+            );
+        }
+    }
+
     pub(crate) fn append_def(&mut self, p: Tok) -> R<bool> {
         // (a document piece's run: a page routine's publication is the
         // page loop's, `crate::pages`)
@@ -4039,22 +4056,17 @@ impl<'c, 'a> Run<'c, 'a> {
             || self.lt.sink.is_some()
             || !(op == self.ops.exec || op == self.ops.resume)
         {
-            return Ok(false);
-        }
-        // (a node recorded as a load replays its values, not relations)
-        if op == self.ops.exec
-            && self.ops.node_rec.load(std::sync::atomic::Ordering::Relaxed)
-            && !crate::pkgrec::is_load(self.v, self.cx.args())
-            && crate::pkgrec::is_recorded(&self.ops.hints, self.v, self.cx.args())
-        {
+            self.append_trace(p, "1");
             return Ok(false);
         }
         let Some(l) = self.mean_loc(p) else {
+            self.append_trace(p, "3");
             return Ok(false);
         };
         self.pic_touch(l)?;
         let pending = self.appending.iter().any(|x| x.0 == l);
         if !pending && (self.st.load_state(l) != 0 || self.lazy_pre(l)) {
+            self.append_trace(p, "4");
             return Ok(false);
         }
         // (the next tokens unexpanded, their meanings not read, as a name
@@ -4062,12 +4074,14 @@ impl<'c, 'a> Run<'c, 'a> {
         let open = self.bare_token()?;
         if open.cat() != Some(1) {
             self.back_input(open);
+            self.append_trace(p, "5");
             return Ok(false);
         }
         let second = self.bare_token()?;
         if second != p {
             self.back_input(second);
             self.back_input(open);
+            self.append_trace(p, "6");
             return Ok(false);
         }
         if !pending {
@@ -4075,6 +4089,7 @@ impl<'c, 'a> Run<'c, 'a> {
             if !ok {
                 self.back_input(second);
                 self.back_input(open);
+                self.append_trace(p, "7");
                 return Ok(false);
             }
         }
@@ -4124,6 +4139,26 @@ impl<'c, 'a> Run<'c, 'a> {
         let proj = Step::Proj(self.ops.append_proj);
         let tail_p = self.cx.path(&[proj, Step::Index(0)]);
         let Some(tail) = self.cx.read_path(f, tail_p)? else {
+            if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") {
+                let x = self.cx.peek_field(f)?;
+                let shown = x.map_or_else(
+                    || "an alias".to_owned(),
+                    |x| {
+                        x.map_or_else(
+                            || "none".to_owned(),
+                            |y| self.v.render(y).chars().take(300).collect(),
+                        )
+                    },
+                );
+                let pj = x
+                    .flatten()
+                    .map(|y| self.v.render(crate::val::append_projection(y, self.v)));
+                eprintln!(
+                    "append-base: node {} op {:?} no tail (not a list of names): {shown} projection {pj:?}",
+                    self.cx.node().raw(),
+                    self.cx.op()
+                );
+            }
             return Ok(None);
         };
         // (the names, each checked not to expand; the run then depends on
@@ -4136,7 +4171,16 @@ impl<'c, 'a> Run<'c, 'a> {
             let names = seen.map(|x| list_of(v, x)).unwrap_or_default();
             for &n in &names {
                 for t in crate::val::toks_of(v, Some(n)) {
-                    if self.class_lookup(t)?.is_none() {
+                    if !self.does_not_expand(t)? {
+                        if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") {
+                            let tl = self.mean_loc(t);
+                            eprintln!(
+                                "append-base: node {} name {t:?} may expand (loaded {}, lazy {})",
+                                self.cx.node().raw(),
+                                tl.is_some_and(|x| self.st.is_loaded(x)),
+                                tl.is_some_and(|x| self.lazy_pre(x)),
+                            );
+                        }
                         return Ok(None);
                     }
                 }
@@ -4148,9 +4192,34 @@ impl<'c, 'a> Run<'c, 'a> {
                 return Ok(Some(int_of(v, tail)));
             }
             // (a name came since the look: the whole list read)
+            if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") {
+                eprintln!(
+                    "append-base: node {} names not within",
+                    self.cx.node().raw()
+                );
+            }
             seen = self.cx.read_path(f, names_p)?;
         }
         Ok(None)
+    }
+
+    /// Whether `tok`'s meaning does not expand: from the run's own
+    /// binding where it holds one (a font identifier the run looked up,
+    /// `\\ifx\\csname…`, or loaded), else read as its class alone
+    /// ([`Run::class_lookup`]).
+    fn does_not_expand(&mut self, tok: Tok) -> R<bool> {
+        let v = self.v;
+        if let Some(l) = self.mean_loc(tok)
+            && self.st.is_loaded(l)
+        {
+            let x = self.st.id_of(l, v);
+            return Ok(int_of(
+                v,
+                crate::val::class_projection(x.unwrap_or(ValueId::UNIT), v),
+            ) >= 0
+                && x.is_some());
+        }
+        Ok(self.class_lookup(tok)?.is_some())
     }
 
     /// The next token, its meaning not read (`get_r_token`'s way).
@@ -4172,6 +4241,16 @@ impl<'c, 'a> Run<'c, 'a> {
         };
         let (_, rest) = self.appending.swap_remove(i);
         self.muts += 1;
+        if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") {
+            let f = self.loc_field(loc);
+            eprintln!(
+                "append-force: node {} {} at {:?}: {}",
+                self.cx.node().raw(),
+                crate::val::field_name(self.v, f),
+                self.cur.tok,
+                self.trace_context().chars().take(600).collect::<String>()
+            );
+        }
         self.load_slow(loc)?;
         let mut body: Vec<Tok> = match self.st.mean_of(loc, self.v) {
             crate::val::Mean::Macro(m) => m.body.to_vec(),
@@ -4295,6 +4374,23 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(self.cx.read_path(f, p)? == Some(v.bool(true)))
     }
 
+    /// Expanded font `k`'s info as [`Run::font_get`] gives it, looked at
+    /// rather than read where the run would read it from the engine: the
+    /// field then, to record the read where the paragraph asks for `k`
+    /// ([`Run::note_elink_asks`]).
+    pub(crate) fn font_info_peek(&mut self, k: u32) -> R<(Option<ValueId>, Option<Field>)> {
+        let loc = self.font_loc(i64::from(k), crate::fields::FontCell::Info);
+        self.pic_touch(loc)?;
+        if self.st.load_state(loc) != 0 || self.lazy_pre(loc) || self.interp.is_some() {
+            return Ok((self.get_loc(loc)?, None));
+        }
+        let f = self.loc_field(loc);
+        match self.cx.peek_field(f)? {
+            Some(x) => Ok((x, Some(f))),
+            None => Ok((self.get_loc(loc)?, None)),
+        }
+    }
+
     /// A paragraph's asks of its fonts' expanded ratios, recorded as what
     /// it used of the lists it looked at ([`Run::val_set_peek`]): whether
     /// each ratio asked was there. A ratio another node asks first, or no
@@ -4311,6 +4407,9 @@ impl<'c, 'a> Run<'c, 'a> {
             let Some(&f) = view.elink_peeked.get(&font) else {
                 continue;
             };
+            if let Some(&(g, x)) = view.info_peeked.get(&(font, e)) {
+                self.cx.note_path(g, phitex_defuse::PathId::WHOLE, x)?;
+            }
             let had = view.elink.get(&font).is_some_and(|l| l.contains(&e));
             let p = self.cx.path(&[
                 phitex_defuse::Step::Proj(self.ops.set_proj),
@@ -5920,7 +6019,14 @@ impl<'c, 'a> Run<'c, 'a> {
                 return Ok(Some(true));
             }
             let f = self.loc_field(l);
-            if self.append_base(l)? == Some(1) {
+            let base = self.append_base(l)?;
+            if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") && base != Some(1) {
+                eprintln!(
+                    "append-clist: node {} membership falls to the whole list (base {base:?})",
+                    self.cx.node().raw()
+                );
+            }
+            if base == Some(1) {
                 let not = self.cx.path(&[
                     phitex_defuse::Step::Proj(self.ops.clist_proj),
                     phitex_defuse::Step::Has(v.str(crate::val::CLIST_NOT)),
@@ -7233,10 +7339,21 @@ impl<'c, 'a> Run<'c, 'a> {
             }
         }
         files.dedup();
-        let writes: Vec<String> = published
+        // (with the lists it appended to without reading them, relations
+        // whose values a later build does not predict, `Run::append_def`)
+        let mut writes: Vec<String> = published
             .iter()
             .map(|&(f, _, _)| crate::val::field_name(v, f))
             .collect();
+        let appended: Vec<Loc> = self
+            .appending
+            .iter()
+            .map(|x| x.0)
+            .chain(self.appending_vals.iter().map(|x| x.0))
+            .collect();
+        for l in appended {
+            writes.push(crate::val::field_name(v, self.loc_field(l)));
+        }
         // (a field the load put back as it found it is no read of its
         // predecessor's either: only the net effect is recorded)
         let restored: Vec<Loc> = self

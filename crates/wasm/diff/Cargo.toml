@@ -1,0 +1,17 @@
+[package]
+name = "phitex-wasm-diff"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "phitex-diff (PhiTeX's latexdiff) as a small WebAssembly module of its own (wasm32-unknown-unknown) for the frontends' Compare: two versions' files in, the marked-up .tex and the changes out; apart from the live core, which a compare need not load; scripts/wasm-live.sh builds it"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+phitex-diff = { path = "../../editor/diff" }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[lints]
+workspace = true

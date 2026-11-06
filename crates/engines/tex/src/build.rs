@@ -1227,7 +1227,17 @@ impl Run<'_, '_> {
                 if view.ex_base.contains_key(&k) {
                     continue;
                 }
-                let kinfo = self.font_get(k, crate::fields::FontCell::Info)?;
+                // (looked at where the list was: read only for a ratio
+                // the paragraph asks, `Run::note_elink_asks`)
+                let kinfo = if view.elink_peeked.contains_key(&f) {
+                    let (x, peek) = self.font_info_peek(k)?;
+                    if let Some(fld) = peek {
+                        view.info_peeked.insert((f, e), (fld, x));
+                    }
+                    x
+                } else {
+                    self.font_get(k, crate::fields::FontCell::Info)?
+                };
                 if let Some((b, ..)) = crate::fonts::info(self.v, kinfo).and_then(|j| j.ex) {
                     let b = u32::try_from(b).unwrap_or(0);
                     view.ex_base.insert(k, b);
