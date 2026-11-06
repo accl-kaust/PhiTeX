@@ -761,9 +761,12 @@ fn a_claim_on_a_guess_of_the_text_before_waits_for_it() {
     let piece = e.register(Arc::new(Piece));
     let f = v.field("f").0;
     let u = e.new_unit();
-    // (44 nodes, four blocks of 11: S and ten pieces; C and ten; 11; 11)
+    // (44 nodes, four blocks of 11: a piece, S and nine pieces; C and
+    // ten; 11; 11. The first node runs before the other workers start,
+    // `Pool::run`: S is not it)
+    e.push(u, o.text, vec![v.int(999)]);
     e.push(u, slow, vec![f, v.int(300)]);
-    for i in 0..10 {
+    for i in 0..9 {
         e.push(u, o.text, vec![v.int(1000 + i)]);
     }
     let c = e.push(u, guess, vec![f, v.int(100), v.int(2), v.int(30)]);
