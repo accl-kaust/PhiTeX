@@ -21,7 +21,7 @@ import { VIEWER_CSS } from "./css.ts";
 import { PRINT_CSS } from "./print.ts";
 import { PROBLEMS_CSS, problemHtml } from "./problems.ts";
 import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
-import { KEYS, bindKeys } from "./keys.ts";
+import { KEYS, bindKeys, typing } from "./keys.ts";
 import { REPORT_TO } from "./report.ts";
 import { opening, retro, still, type Opening } from "./opening.ts";
 import { hintsFor } from "./hints.ts";
@@ -319,22 +319,38 @@ const dur = (ms: number) => (ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1000 ? `${Ma
 function framePart(json: string | undefined): string {
   if (!json) return "";
   const f = JSON.parse(json) as { page: number; inView: boolean; drawn: number; kept: number; probe: number; draw: number; watch: number; request: number; decode: number };
-  const split: [string, number][] = [["probe", f.probe], ["draw", f.draw], ["transfer", Math.max(0, f.request - f.watch)], ["decode", f.decode]];
+  const split: [string, number][] = [["finding what changed", f.probe], ["drawing", f.draw], ["waiting for the engine", Math.max(0, f.request - f.watch)], ["decoding", f.decode]];
   return (
-    `<div class="row"><span class="k">Page ${f.page} drawn${f.inView ? " (in view)" : ""}</span><span class="v">${esc(dur(f.request + f.decode))}</span>` +
+    `<div class="row"><span class="k">Drawing page ${f.page}${f.inView ? " (in view)" : ""}</span><span class="v">${esc(dur(f.request + f.decode))}</span>` +
     `<div class="tbar">${split.map(([, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
     `<div class="legend">${split.map(([n, ms], i) => `<span><i class="c${i}"></i>${n} ${esc(dur(ms))}</span>`).join("")}</div>` +
-    `<span class="note">${f.drawn} strip${f.drawn === 1 ? "" : "s"} drawn, ${f.kept} reused</span></div>`
+    `<span class="note">${f.drawn} slice${f.drawn === 1 ? "" : "s"} of the page drawn, ${f.kept} kept from before</span></div>`
   );
 }
 
 /** The session's names for a build's parts, as the popover says them. */
 const PART_NAMES: Record<string, string> = {
-  "first paint": "First page painted",
-  "fixed point": "All pages settled",
+  "first paint": "Typesetting this page",
+  "fixed point": "Typesetting every page",
   "keystroke→page": "Keystroke to page",
-  rebuilt: "Rebuilt",
+  rebuilt: "Parts redone",
   batching: "Edits batched",
+};
+
+/** What each of those says, for a writer (the session's own parenthesis is for PhiTeX's developers: the debug report has it). */
+const PART_NOTES: Record<string, string> = {
+  "first paint": "in the engine",
+  "fixed point": "the whole document, references and contents included",
+  rebuilt: "",
+  batching: "",
+};
+
+/** The session's names for a sum's parts ("queued 1.4 + round trip 1.0 + paint 0.7"), as the popover says them. */
+const SPLIT_NAMES: Record<string, string> = {
+  queued: "waiting",
+  "round trip": "engine",
+  paint: "drawing",
+  "build and paint": "building and drawing",
 };
 
 /**
@@ -353,11 +369,11 @@ function part(key: string, raw: string): { key: string; label: string; value: st
   rest = rest.slice(num[0].length).trim();
   let split: [string, number][] | undefined;
   if (rest.startsWith("=")) {
-    split = [...rest.slice(1).matchAll(/([a-z][a-z ]*?)\s+([\d.]+)/gi)].map((m): [string, number] => [m[1].trim(), Number(m[2])]);
+    split = [...rest.slice(1).matchAll(/([a-z][a-z ]*?)\s+([\d.]+)/gi)].map((m): [string, number] => [SPLIT_NAMES[m[1].trim()] ?? m[1].trim(), Number(m[2])]);
     rest = "";
   }
   const extra = rest.replace(/^·\s*/, "");
-  return { key, label, value: dur(ms), ms, split, note: [note, extra].filter(Boolean).join(" · ") || undefined };
+  return { key, label, value: dur(ms), ms, split, note: [key in PART_NOTES ? PART_NOTES[key] : note, extra].filter(Boolean).join(" · ") || undefined };
 }
 
 const lines = (...w: number[]) => w.map((x) => `<i style="width:${x}%"></i>`).join("");
@@ -696,6 +712,7 @@ export class Panel {
     this.loadDone = -1;
     // (its first page is a first build's, "First build · 5.4 s", not a keystroke's)
     this.paints = 0;
+    this.walk = null;
     this.opened = false;
     this.sheetUp();
     // (the last build's pages hidden under it until the dive: the new page shows through the hole)
@@ -914,7 +931,7 @@ export class Panel {
     else if (this.reopen || (!this.last && this.viewer.pages === 0)) t = this.stepNow || "Opening…";
     // (the time, errors or not: "Built with 2 errors · 42 ms")
     else if (errs) (t = `Built with ${errs} error${errs === 1 ? "" : "s"}`), (m = this.speed ? dur(this.speed.ms) : ""), (err = true);
-    else if (this.speed?.first) (t = "First build"), (m = dur(this.speed.ms));
+    else if (this.speed?.first) (t = "First page"), (m = dur(this.speed.ms));
     else (t = "Built"), (m = this.speed ? dur(this.speed.ms) : "");
     text.textContent = t;
     more.textContent = m ? `· ${m}` : "";
@@ -1436,6 +1453,7 @@ export class Panel {
 
   private step(what: string, pct: number | undefined, detail = ""): void {
     if (!this.firstPending()) return;
+    this.walkTo(what);
     this.sheetUp();
     this.hints(true);
     const el = this.$("#opening");
@@ -1791,7 +1809,7 @@ export class Panel {
     addEventListener(
       "keydown",
       (e) => {
-        if (e.ctrlKey || e.altKey || e.metaKey || (e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable=true]")) return;
+        if (e.ctrlKey || e.altKey || e.metaKey || typing(e)) return;
         if (e.key === "Escape" && (this.escapeProblems() || this.unmark())) {
           /* (the list closed, else the highlights cleared) */
         } else if (e.key === "e") this.diagnostics();
@@ -2272,10 +2290,14 @@ export class Panel {
   /** A repaint reached the screen, `ms` after its keystroke: the status says how fast. */
   painted(ms: number): void {
     // (the first paint is the first build's: downloads, the format, the whole document; the status says so, not "Built · 14906 ms")
-    this.speed = { ms, at: performance.now(), first: this.paints++ === 0 };
+    const first = this.paints++ === 0;
+    // (the first: the time the writer waited, opening to page (the walk), not the engine's last part)
+    if (first) this.walkEnd();
+    if (first && this.walk?.ms !== undefined) ms = this.walk.ms;
+    this.speed = { ms, at: performance.now(), first };
     // (each repaint's time is the status's, "Built · 14 ms", and its popover's
     // with the build's parts and the strips' numbers: nothing over the pages, the user's)
-    this.$("#speedms").textContent = `⚡ ${this.speed.first ? "first build " : ""}${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
+    this.$("#speedms").textContent = `⚡ ${this.speed.first ? "first page " : ""}${dur(ms)}`;
     this.renderStatus();
     if (!this.$("#m-time").hidden) this.timing();
     this.emit();
@@ -2552,6 +2574,56 @@ export class Panel {
     if (!this.$("#m-time").hidden) this.timing();
   }
 
+  /**
+   * This opening's steps as the sheet said them (the project read, the
+   * packages, the format, typesetting), each with the time it was up, from
+   * the first step to the first page on screen (`ms`, then closed): the
+   * first build's time as the writer waited for it, not the engine's part.
+   */
+  private walk: { since: number; parts: [string, number][]; now?: string; at: number; ms?: number } | null = null;
+
+  /** The opening's step is now `what` (a step of the sheet's). */
+  private walkTo(what: string): void {
+    const now = performance.now();
+    const w = (this.walk ??= { since: now, parts: [], at: now });
+    if (w.ms !== undefined) return;
+    const step = what === this.words.steps[1] ? what : what === this.words.steps[2] ? (this.making ? "Making the format" : what) : this.words.steps[0];
+    if (step === w.now) return;
+    this.walkAdd(now);
+    (w.now = step), (w.at = now);
+  }
+
+  /** The step up until `now` counted (a step seen again adds to its first time). */
+  private walkAdd(now: number): void {
+    const w = this.walk!;
+    if (!w.now) return;
+    const p = w.parts.find(([k]) => k === w.now);
+    if (p) p[1] += now - w.at;
+    else w.parts.push([w.now, now - w.at]);
+  }
+
+  /** The first page is on screen: the opening's time closed. */
+  private walkEnd(): void {
+    const w = this.walk;
+    if (!w || w.ms !== undefined) return;
+    const now = performance.now();
+    this.walkAdd(now);
+    w.now = undefined;
+    w.ms = now - w.since;
+  }
+
+  /** The timing popover's first build: each step's time, as a bar, from opening to the first page. */
+  private walkPart(): string {
+    const w = this.walk;
+    if (!w || w.ms === undefined || !this.speed?.first) return "";
+    const parts = w.parts.filter(([, ms]) => ms >= 1);
+    return (
+      `<div class="row"><span class="k">From opening to the first page</span><span class="v">${esc(dur(w.ms))}</span>` +
+      `<div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
+      `<div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc(n)} ${esc(dur(ms))}</span>`).join("")}</div></div>`
+    );
+  }
+
   /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
   private downloads: { n: number; bytes: number; ms: number; since?: number } = { n: 0, bytes: 0, ms: 0 };
 
@@ -2613,7 +2685,7 @@ export class Panel {
     const parts = this.timingParts().map(([k, v]) => part(k, v));
     // (the headline: a first build's time, else keystroke to page as the session measured it, else the host's paint)
     const e2e = parts.find((p) => p.key === "keystroke→page")?.ms ?? this.speed?.ms;
-    const head = this.speed?.first ? ["First build", this.speed.ms] : e2e !== undefined ? ["Keystroke to page", e2e] : null;
+    const head = this.speed?.first ? ["First page", this.speed.ms] : e2e !== undefined ? ["Keystroke to page", e2e] : null;
     const rows = parts
       .map((p) => {
         const bar = p.split?.length
@@ -2627,13 +2699,14 @@ export class Panel {
     const strips = framePart(this.$("#stripsline").dataset.frame);
     el.innerHTML =
       (head ? `<div class="head"><span>${esc(String(head[0]))}</span><b>${esc(dur(head[1] as number))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) +
+      this.walkPart() +
       this.timeBars() +
       this.downloadsPart() +
       rows +
       strips +
       `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
     // (the summary line only when there are no parts to say it)
-    el.querySelector(".foot")!.textContent = parts.length ? "" : (this.lat?.summary ?? "");
+    el.querySelector(".foot")!.textContent = parts.length || this.walk?.ms !== undefined ? "" : (this.lat?.summary ?? "");
     el.querySelector(".msg")!.textContent = this.msgText;
   }
 
@@ -2686,7 +2759,7 @@ export class Panel {
   }
 
   files(names: string[], _skipped: string[], took: string): void {
-    this.msg(`${names.length} file${names.length === 1 ? "" : "s"} · ${took} · all local`);
+    this.msg(`${names.length} file${names.length === 1 ? "" : "s"} read ${took} · they stay in this browser`);
   }
 
   /** The main files to pick from (Settings' Main file), and the one built. */
@@ -2813,6 +2886,7 @@ export class Panel {
       return;
     }
     this.last = img;
+    this.walkEnd();
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
     this.$("#stage").classList.toggle("fit", (this.zoomNow ?? this.prefs.zoom) === "fit");
