@@ -2130,7 +2130,7 @@ var PATHS = {
   bolt: "M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z",
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"
 };
-var copyBtn = (i) => `<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem, its source lines and the log's end, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
+var copyBtn = (i) => `<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
 var icon = (name, size = 18) => `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
 var ZOOMS = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
 var mb = (b) => b ? ` \xB7 ${b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`}` : "";
@@ -2966,20 +2966,49 @@ var Panel = class {
   }
   /** The problems listed (by the rows' data-i). */
   listed = [];
-  /** Copy for an AI assistant: one problem, its place, message, help and the source lines around it, and for an error the log's end; on the clipboard, nothing sent. */
+  /**
+   * Copy for an AI assistant: one problem with what an assistant needs to
+   * explain it: its place, message, TeX's notes, help and suggestions, the
+   * macros it was in, the files that included its file, its source lines
+   * around it, the main file's preamble (the packages and definitions), the
+   * other problems listed, and the log where it was met (and its end, for
+   * an error). On the clipboard, nothing sent.
+   */
   async copyForAi(d) {
     if (!d) return;
     const p = d.problem;
     const file = p?.file ?? d.file, line = p?.line ?? d.line;
-    const parts = [`I'm building a LaTeX document and get this ${d.severity}. What is wrong, and how do I fix it?`, ""];
-    parts.push(`${d.severity}: ${d.message}${file ? ` (${file}${line ? `:${line}` : ""})` : ""}`);
-    if (p?.help.length) parts.push(p.help.join(" "));
-    const lines2 = file && line ? await this.ev.onLines?.(file, line).catch(() => null) : null;
-    if (lines2?.length) parts.push("```latex", ...lines2.map(([n, t]) => `${String(n).padStart(4)}${n === line ? ">" : " "} ${t}`), "```");
-    else if (p?.excerpt) parts.push("```latex", p.excerpt.text, "```");
-    parts.push("");
-    const log2 = d.severity === "error" ? await this.ev.onLog?.().catch(() => null) : null;
-    if (log2) parts.push("The end of the log:", "```", ...log2.split("\n").slice(-40), "```");
+    const main = this.lastStatus?.main ?? this.mainFiles.main;
+    const source2 = async (f) => (await this.ev.onSource(f).catch(() => null))?.split("\n") ?? null;
+    const numbered = (lines3, from2, to, at) => lines3.slice(from2 - 1, to).map((t, i) => `${String(from2 + i).padStart(4)}${from2 + i === at ? ">" : " "} ${t}`);
+    const parts = [
+      `I'm writing a LaTeX document (typeset by PhiTeX, a pdfLaTeX/XeLaTeX-compatible engine) and the build reports this ${d.severity}. What is wrong, and how do I fix it in my source?`,
+      "",
+      `## The ${d.severity}`,
+      `${d.message}${file ? ` (${file}${line ? `, line ${line}${p?.col ? `, column ${p.col}` : ""}` : ""})` : ""}${p?.code ? ` [${p.code}]` : ""}`
+    ];
+    if (p?.notes.length) parts.push(...p.notes.map((n) => `- ${n}`));
+    if (p?.context.length) parts.push(`TeX was inside: ${p.context.map((m) => `\\${m.name.replace(/^\\/, "")} (${m.before}\u2038${m.after})`).join(" \u2190 ")}`);
+    if (p?.included.length) parts.push(`Its file was included from: ${p.included.map((i) => `${i.file}:${i.line}`).join(" \u2190 ")}`);
+    if (p?.help.length || p?.suggestions.length) parts.push(`PhiTeX's hint: ${[...p?.help ?? [], ...p?.suggestions ?? []].join(" ")}`);
+    const lines2 = file ? await source2(file) : null;
+    if (lines2 && line) parts.push("", `## ${file}, lines around ${line}`, "```latex", ...numbered(lines2, Math.max(1, line - 15), Math.min(lines2.length, line + 15), line), "```");
+    else if (p?.excerpt) parts.push("", "## The source line", "```latex", p.excerpt.text, "```");
+    const mainLines = main ? main === file ? lines2 : await source2(main) : null;
+    if (main && mainLines) {
+      const end = mainLines.findIndex((l) => /\\begin\s*\{document\}/.test(l));
+      const upto = Math.min(end >= 0 ? end + 1 : 60, 120);
+      if (!(main === file && line && line <= upto + 15)) parts.push("", `## The preamble of ${main}`, "```latex", ...numbered(mainLines, 1, upto), "```");
+    }
+    const others = this.listed.filter((x) => x !== d && (x.severity === "error" || x.severity === "warning")).slice(0, 10);
+    if (others.length) parts.push("", "## Other problems in the same build", ...others.map((x) => `- ${x.severity}: ${x.message}${x.file ? ` (${x.file}${x.line ? `:${x.line}` : ""})` : ""}`));
+    const log2 = (await this.ev.onLog?.().catch(() => null))?.split("\n") ?? null;
+    if (log2) {
+      const key = d.message.replace(/^.*?:\s*/, "").slice(0, 40);
+      const at = key ? log2.findIndex((l) => l.includes(key)) : -1;
+      if (at >= 0) parts.push("", "## The log where it was met", "```", ...log2.slice(Math.max(0, at - 10), at + 15), "```");
+      if (d.severity === "error" && (at < 0 || at + 15 < log2.length - 40)) parts.push("", "## The end of the log", "```", ...log2.slice(-40), "```");
+    }
     const text = parts.join("\n");
     try {
       await navigator.clipboard.writeText(text);
@@ -6429,10 +6458,10 @@ var panel = new Panel(
       const r = await sock.request({ op: "prefs", set: { [key]: value } });
       return r.ok ? void 0 : `Not saved: ${r.error ?? "the watch did not answer"}`;
     },
-    // (a problem's source lines, for Copy for an AI assistant)
-    onLines: async (file, line) => {
-      const r = await sock.request({ op: "info", what: "lines", file, line });
-      return r.ok ? r.json?.lines ?? [] : null;
+    // (a project file's text, for Copy for an AI assistant)
+    onSource: async (file) => {
+      const r = await sock.request({ op: "info", what: "source", file });
+      return r.ok ? String(r.json?.text ?? "") : null;
     },
     // (What's new: this version's CHANGELOG entry, from the binary)
     onNews: () => void sock.request({ op: "info", what: "news" }).then((r) => {

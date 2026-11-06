@@ -813,25 +813,19 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     "news" => {
                         crate::news::latest().map(|(v, text)| json!({"version": v, "text": text}))
                     }
-                    // (a problem's lines, five each side, for Copy for an AI
-                    // assistant: a project file only, by its name from here)
-                    "lines" => {
+                    // (a project file's text, for Copy for an AI assistant: a
+                    // project file only, by its name from here, at most 2 MB)
+                    "source" => {
                         let file = req["file"].as_str()?;
-                        let line = usize::try_from(req["line"].as_u64()?).ok()?.max(1);
                         if file.starts_with('/') || file.split('/').any(|c| c == "..") {
                             return None;
                         }
-                        let text = std::fs::read(here.join(file)).ok()?;
-                        let text = String::from_utf8_lossy(&text);
-                        let from = line.saturating_sub(6);
-                        let lines: Vec<Value> = text
-                            .lines()
-                            .enumerate()
-                            .skip(from)
-                            .take(11)
-                            .map(|(k, l)| json!([k + 1, l]))
-                            .collect();
-                        Some(json!({"lines": lines}))
+                        let p = here.join(file);
+                        if std::fs::metadata(&p).ok()?.len() > 2 << 20 {
+                            return None;
+                        }
+                        let text = std::fs::read(p).ok()?;
+                        Some(json!({"text": String::from_utf8_lossy(&text)}))
                     }
                     _ => None,
                 }));
