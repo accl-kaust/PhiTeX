@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
-use crate::api::{Brackets, Cause, Effect, Locality, NodeId, OpId, PathId, UnitId};
+use crate::api::{Brackets, Cause, Effect, Locality, NodeId, OpId, PathId, Rel, UnitId};
 use crate::index::RangeKey;
 use crate::lock::{Lock, Mx};
 use crate::order::{Pos, SegId};
@@ -525,9 +525,9 @@ pub(crate) struct DefRec {
     pub(crate) f: Field,
     pub(crate) loc: Locality,
     /// For a relation (`Ctx::define_rel`): the value computed from the
-    /// reaching input at commit time; `rel` is the constant.
+    /// reaching input at commit time; `rel` is the relation.
     pub(crate) value: ValueId,
-    pub(crate) rel: Option<i64>,
+    pub(crate) rel: Option<Rel>,
 }
 
 /// Where a read looks, relative to the reader.

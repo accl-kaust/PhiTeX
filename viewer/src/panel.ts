@@ -2618,7 +2618,8 @@ export class Panel {
     if (!w || w.ms === undefined || !this.speed?.first) return "";
     const parts = w.parts.filter(([, ms]) => ms >= 1);
     return (
-      `<div class="row"><span class="k">From opening to the first page</span><span class="v">${esc(dur(w.ms))}</span>` +
+      // (its total is the head's, "First page · 124 s": said once)
+      `<div class="row"><span class="k">Where the time went</span><span class="v"></span>` +
       `<div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
       `<div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc(n)} ${esc(dur(ms))}</span>`).join("")}</div></div>`
     );

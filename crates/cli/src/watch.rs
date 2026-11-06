@@ -68,6 +68,8 @@ struct Kept {
     view: Option<View>,
     view_made: bool,
     building: Arc<AtomicBool>,
+    /// The watch's loop waits for an event ([`Here::waiting`]).
+    waiting: Arc<AtomicBool>,
     told: Arc<AtomicBool>,
     /// The way out asks whether to write the PDF ([`Here::asking`]).
     asking: Arc<AtomicBool>,
@@ -330,6 +332,11 @@ struct Here {
     /// on the output: the watch's own loop opens that).
     url: Option<String>,
     building: Arc<AtomicBool>,
+    /// The watch's loop waits for an event: a key it would answer now.
+    /// Not waiting, it is at work (a build, a diff's, the history read,
+    /// a file written), and the keys that need nothing of that work are
+    /// answered here: q and Ctrl-C quit whatever the loop is doing.
+    waiting: Arc<AtomicBool>,
     /// The wait for the build said already (this build).
     told: Arc<AtomicBool>,
     /// For the cache's line on the way out.
@@ -344,14 +351,37 @@ fn help(ui: &Ui) {
     }
 }
 
+/// A build runs, or the watch's loop is at other work: not waiting for
+/// keys.
+fn busy(building: &AtomicBool, waiting: &AtomicBool) -> bool {
+    building.load(Ordering::Relaxed) || !waiting.load(Ordering::Relaxed)
+}
+
+/// The next event, `wait` at most, the loop marked waiting meanwhile
+/// ([`Here::waiting`]): the only time keys go to it.
+fn wait_for(
+    rx: &mpsc::Receiver<(Instant, Event)>,
+    wait: Duration,
+    waiting: &AtomicBool,
+) -> Result<(Instant, Event), mpsc::RecvTimeoutError> {
+    waiting.store(true, Ordering::Relaxed);
+    let e = rx.recv_timeout(wait);
+    waiting.store(false, Ordering::Relaxed);
+    e
+}
+
 impl Here {
+    fn busy(&self) -> bool {
+        busy(&self.building, &self.waiting)
+    }
+
     /// Key `k` answered here (true), or for the watch's loop.
     fn answer(&self, k: Key) -> bool {
         if self.asking.load(Ordering::Relaxed) {
             return false;
         }
         let ui = &self.ui;
-        let busy = self.building.load(Ordering::Relaxed);
+        let busy = self.busy();
         match k {
             Key::Help => help(ui),
             Key::Clear => ui.clear(),
@@ -364,11 +394,11 @@ impl Here {
                     ui.warning(&format!("could not start a browser: open {url}"));
                 }
             }
-            // (q or Ctrl-C while a build runs: out now, the build dropped)
+            // (q or Ctrl-C while the loop works: out now, the work dropped)
             Key::Quit if busy => {
                 ui.finish();
                 keys::restore();
-                ui.line(&ui.st.dim("stopped during a build"));
+                ui.line(&ui.st.dim("stopped while working"));
                 modern::cache_summary(&self.target, ui);
                 std::process::exit(0);
             }
@@ -377,7 +407,7 @@ impl Here {
                 if !self.told.swap(true, Ordering::Relaxed) {
                     ui.line(
                         &ui.st
-                            .dim("phitex watch: a build is running; this comes after it"),
+                            .dim("phitex watch: still working; this comes after it"),
                     );
                 }
                 return false;
@@ -595,6 +625,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         view: None,
         view_made: false,
         building: Arc::default(),
+        waiting: Arc::default(),
         told: Arc::default(),
         asking: Arc::default(),
         reading: false,
@@ -967,6 +998,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     });
     let raw = lsp.is_none() && !ui.json && keys::raw();
     let building = kept.building.clone();
+    let at_wait = kept.waiting.clone();
     let told = kept.told.clone();
     // (standard input read by the first session's thread, for them all)
     if !std::mem::replace(&mut kept.reading, true) {
@@ -978,6 +1010,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 .filter(|_| t.viewer.is_none())
                 .map(|v| v.url().to_owned()),
             building: building.clone(),
+            waiting: at_wait.clone(),
             told: told.clone(),
             target: t.clone(),
             asking: kept.asking.clone(),
@@ -1743,7 +1776,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         });
         let first = match held.pop_front() {
             Some(e) => e,
-            None => match rx.recv_timeout(wait) {
+            None => match wait_for(&rx, wait, &at_wait) {
                 Ok(e) => e,
                 Err(mpsc::RecvTimeoutError::Timeout) if idle_since.take().is_some() => {
                     // (idle: the exact PDF file written on a thread of
@@ -2265,6 +2298,17 @@ mod tests {
         assert_eq!(line_key(" q "), Key::Quit);
         assert_eq!(line_key("quit"), Key::Quit);
         assert_eq!(line_key("xyz"), Key::Other('x'));
+    }
+
+    #[test]
+    fn keys_are_answered_where_read_while_the_loop_works() {
+        let (building, waiting) = (AtomicBool::new(false), AtomicBool::new(false));
+        // (no build, but the loop at other work: a diff's build, say)
+        assert!(busy(&building, &waiting));
+        waiting.store(true, Ordering::Relaxed);
+        assert!(!busy(&building, &waiting));
+        building.store(true, Ordering::Relaxed);
+        assert!(busy(&building, &waiting));
     }
 
     #[test]

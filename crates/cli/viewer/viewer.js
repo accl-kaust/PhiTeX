@@ -1184,9 +1184,10 @@ header:active { cursor: grabbing; }
 .smarks i.error { background: var(--ph-danger, #d93025); }
 .smarks i.change { background: var(--ph-accent, #1d3e72); }
 .phx-card[data-key] { cursor: pointer; }
-/* (an overfull box's bar at its line's end, pdflatex's draft rule, drawn by the viewer only; an underfull's hollow) */
+/* (an overfull box's bar at its line's end, where pdflatex's draft rule goes, drawn by the viewer only, in the warning's
+   amber, as its tooltip and the underfull's outline: draft black read as a broken block, and vanished on a dark page; an underfull's hollow) */
 .slot .culprit.rule::after { display: none; }
-.slot .culprit.rule.overfull { background: #1b222c; }
+.slot .culprit.rule.overfull { background: rgb(199 119 0 / 85%); border-radius: 1px; }
 .slot .culprit.rule.underfull { box-shadow: inset 0 0 0 1.5px #c77700; }
 /* (a culprit hovered: its problem's message, a small tooltip under the line) */
 .ctip { position: absolute; z-index: 8; max-width: min(420px, calc(100% - 16px)); display: flex; gap: 6px; align-items: flex-start; padding: 5px 9px;
@@ -4151,7 +4152,10 @@ var Panel = class {
     const w = this.walk;
     if (!w || w.ms === void 0 || !this.speed?.first) return "";
     const parts = w.parts.filter(([, ms]) => ms >= 1);
-    return `<div class="row"><span class="k">From opening to the first page</span><span class="v">${esc3(dur(w.ms))}</span><div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div></div>`;
+    return (
+      // (its total is the head's, "First page · 124 s": said once)
+      `<div class="row"><span class="k">Where the time went</span><span class="v"></span><div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div></div>`
+    );
   }
   /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
   downloads = { n: 0, bytes: 0, ms: 0 };

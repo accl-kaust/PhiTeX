@@ -3260,6 +3260,7 @@ impl Graph {
         let origins_on: Arc<std::sync::atomic::AtomicBool> = Arc::default();
         let pdfpage = eng.register(Arc::new(crate::pdfout::PdfPage(origins_on.clone())));
         let readback = eng.register(Arc::new(crate::ops::ReadBack(shared.clone())));
+        let pic = eng.register(Arc::new(crate::pic::Pic(shared.clone())));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
         let class_proj = eng.register_projection(Arc::new(crate::val::class_projection));
         let box_shape_proj = eng.register_projection(Arc::new(crate::val::box_shape_projection));
@@ -3271,6 +3272,9 @@ impl Graph {
         let forced_proj = eng.register_projection(Arc::new(crate::val::forced_projection));
         let num_proj = eng.register_projection(Arc::new(crate::val::num_projection));
         let clist_proj = eng.register_projection(Arc::new(crate::val::clist_projection));
+        let append_proj = eng.register_projection(Arc::new(crate::val::append_projection));
+        let set_proj = eng.register_projection(Arc::new(crate::val::set_projection));
+        eng.set_append(Arc::new(crate::val::append_items));
         let skel_proj = eng.register_projection(Arc::new(crate::val::skeleton_projection));
         let ops = Ops {
             exec,
@@ -3284,6 +3288,7 @@ impl Graph {
             toolnode,
             pdfpage,
             readback,
+            pic,
             tool_opts: Arc::default(),
             fields,
             defs: Arc::new(Mutex::new(crate::hints::no_defs().clone())),
@@ -3325,6 +3330,8 @@ impl Graph {
             forced_proj,
             num_proj,
             clist_proj,
+            append_proj,
+            set_proj,
             skel_proj,
         };
         let _ = shared.set(ops.clone());
@@ -3599,6 +3606,7 @@ impl Graph {
             .lock()
             .map(|mut l| std::mem::take(&mut *l))
             .unwrap_or_default();
+        let mut added = Vec::new();
         for (name, f, val, hash) in got {
             if self.files.iter().any(|(g, _)| *g == f)
                 || self.absent.contains(&f)
@@ -3618,9 +3626,17 @@ impl Graph {
                 self.reads.push((name, hash));
             }
             match val {
-                Some(x) => self.files.push((f, x)),
+                Some(x) => {
+                    self.files.push((f, x));
+                    added.push((f, x));
+                }
                 None => self.absent.push(f),
             }
+        }
+        // (the engine holds what its provider answered: pushed already, so
+        // the next push's changes are the edits', not every file read)
+        if !self.env_pushed.is_empty() && !added.is_empty() {
+            self.env_pushed = merge_by_field(&self.env_pushed, &by_field(added));
         }
     }
 
@@ -3746,11 +3762,18 @@ impl Graph {
         absent.dedup();
         crate::timeline::lap("env: merged with the job's");
         if env != self.env_pushed {
-            // (a few fields changed, an edit's file: those alone, not
-            // the whole environment again)
-            match env_changes(&self.env_pushed, &env) {
-                Some(cs) if !self.env_pushed.is_empty() => self.eng.update_environment(&cs),
-                _ => self.eng.set_environment(env.iter().copied()),
+            // (the fields changed, an edit's file: those alone, their
+            // readers re-asked; the whole environment set only the first
+            // time. Past 64 changes it was set whole, which re-asks no
+            // reader: the first push after a cold build differs from the
+            // last pushed by every file the provider answered, so an
+            // edit's file then went unread, the bayesnet example's first
+            // edit of an `\input` file ran no node, accl 25876)
+            if self.env_pushed.is_empty() {
+                self.eng.set_environment(env.iter().copied());
+            } else {
+                self.eng
+                    .update_environment(&env_changes(&self.env_pushed, &env));
             }
             crate::timeline::lap("env: set in the engine");
             self.env_calls += 1;
@@ -4554,8 +4577,23 @@ pub(crate) fn text_mark(v: &Values) -> ValueId {
 pub(crate) const PARAM_LOOK: &str = "\u{1}#";
 
 pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<String> {
+    let (mut out, folds) = written_kinds(v, streams);
+    out.extend(folds);
+    out
+}
+
+/// The job-written files not read back per line's definitions, in two
+/// kinds: those a line of which did more than define (read back as
+/// their text), and the FOLDS: files each line of which only defines,
+/// some line reading what a line before it defines (biblatex's
+/// `\abx@aux@cite` adding a key to the list the lines before it built,
+/// `\blx@pagesum@old` taking a digit per `\abx@aux@page`), whose lines
+/// define, read one after another from the read-back point, what their
+/// whole text read at once defines ([`crate::ops::fold_node`]).
+pub(crate) fn written_kinds(v: &Values, streams: Option<ValueId>) -> (Vec<String>, Vec<String>) {
     let streams = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
+    let mut folds: Vec<String> = Vec::new();
     // (per file, the fields its lines so far define, in the order TeX
     // writes them: a line that reads one depends on the lines before it,
     // which TeX reads first and its read-back by fields, each line on its
@@ -4605,18 +4643,19 @@ pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<Strin
                 .unwrap_or(false)
             })
         {
-            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && !folds.contains(&name) {
                 eprintln!(
-                    "aux-trace: {name} read back as text: line {:?} reads {}, which a line before it defines",
+                    "aux-trace: {name} read back as a fold: line {:?} reads {}, which a line before it defines",
                     xs.get(1)
                         .map(|&l| str_of(v, l).chars().take(70).collect::<String>()),
                     str_of(v, r)
                 );
             }
-            if !out.contains(&name) {
-                out.push(name);
+            // (its definitions still counted: a later line that does more
+            // than define makes the file one read back as its text)
+            if !folds.contains(&name) {
+                folds.push(name.clone());
             }
-            continue;
         }
         for d in list_of(v, made) {
             if let [f, x, _] = list_of(v, d).as_slice() {
@@ -4638,7 +4677,8 @@ pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<Strin
             }
         }
     }
-    out
+    folds.retain(|n| !out.contains(n));
+    (out, folds)
 }
 
 /// The hint of a format's node (`hints::Hint` encoded): unbounded.
@@ -5212,6 +5252,38 @@ fn trailing_cs(s: &str) -> usize {
         return 2;
     }
     0
+}
+
+#[cfg(test)]
+mod key_set_tests {
+    use super::*;
+
+    /// The same definitions in another order give the same key set: a
+    /// fold's run puts its fields in the order of their last definitions,
+    /// which moves from one run to the next on the same text (biblatex's
+    /// `.aux`, `\blx@prelim@lastcites@0` 14th of 104 keys in one run and
+    /// 93rd in the next, and `\begin{document}` ran again on the key set
+    /// at every edit, accl 25569). Two keys of one field, a file's errors,
+    /// keep their order.
+    #[test]
+    fn a_key_set_is_in_the_order_of_its_fields() {
+        let v = Values::new();
+        let d = |f: &str, x: i64| (f.to_owned(), v.int(x));
+        let a = [d("cs:b", 1), d("cs:a", 2), d("cs:c", 3)];
+        let b = [d("cs:c", 3), d("cs:b", 1), d("cs:a", 2)];
+        assert_eq!(key_set(&v, "f.aux", &a), key_set(&v, "f.aux", &b));
+        let names =
+            |x: ValueId| -> Vec<String> { list_of(&v, x).iter().map(|&k| str_of(&v, k)).collect() };
+        assert_eq!(
+            names(key_set(&v, "f.aux", &a)),
+            [WRITTEN_KEY, "cs:a", "cs:b", "cs:c"]
+        );
+        let e = [d("rberr:2", 1), d("cs:a", 2), d("rberr:1", 3)];
+        assert_eq!(
+            names(key_set(&v, "f.aux", &e)),
+            [WRITTEN_KEY, "cs:a", "rberr:2", "rberr:1"]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6882,11 +6954,8 @@ impl Build {
     #[allow(clippy::too_many_lines)]
     pub fn stage_file(&mut self, name: &str, text: Option<&[u8]>) {
         // (what the provider answered in the last evaluation joins the
-        // supplied files first: a file its last round read was found in
-        // none of them, so its edit staged nothing, and the provider's
-        // old answer, joined after it, was pushed again: the first edit of
-        // an `\input` file after a cold build ran no node, the bayesnet
-        // example's `model_citation_influence.tex`)
+        // supplied files first, as `push_staged` joins it: the file is
+        // looked up among all the build holds)
         self.g.absorb_provided();
         let tools = self.stage_tool_file(name, text);
         let v = self.g.eng.values();
@@ -9617,11 +9686,11 @@ fn by_field(mut xs: Vec<(Field, ValueId)>) -> Vec<(Field, ValueId)> {
 
 /// The fields that differ between environments `old` and `new` (both
 /// by field, [`merge_by_field`]), each with its new value (`None`: no
-/// longer given); `None` where more than [`ENV_CHANGES`] do.
+/// longer given).
 fn env_changes(
     old: &[(Field, ValueId)],
     new: &[(Field, ValueId)],
-) -> Option<Vec<(Field, Option<ValueId>)>> {
+) -> Vec<(Field, Option<ValueId>)> {
     let mut out = Vec::new();
     let (mut i, mut j) = (0, 0);
     loop {
@@ -9646,16 +9715,9 @@ fn env_changes(
             }
             (None, None) => break,
         }
-        if out.len() > ENV_CHANGES {
-            return None;
-        }
     }
-    Some(out)
+    out
 }
-
-/// The most fields [`env_changes`] lists: past them the environment is
-/// set whole.
-const ENV_CHANGES: usize = 64;
 
 /// The graph's accumulators and loop-backs (their round-one values).
 fn declare_fields(eng: &Engine) {

@@ -152,21 +152,6 @@ pub(crate) fn run_node(
     let t_new = t_new.elapsed();
     let t_body = std::time::Instant::now();
     let mut res = pass(&mut r, &mut body);
-    // (a read-back through its child that the run cannot keep, a name the
-    // file defines defined by the run after it, `Run::rb_def_check`: the
-    // run again from its start with the read-back inline, the child the
-    // first pass placed taken back with its reads)
-    if r.rb_refused && !matches!(res, Err(Halt::Stop(_))) {
-        if let Some(rb) = &r.rb {
-            let i = rb.i;
-            r.cx.unplace_from(i);
-        }
-        let cx = r.cx;
-        r = Run::new(cx, o);
-        r.no_rb = true;
-        res = pass(&mut r, &mut body);
-    }
-    let no_rb = r.no_rb;
     let t_first = t_body.elapsed();
     let recut = matches!(res, Err(Halt::Recut(_)));
     // (a second pass from the start, ending at the candidate the first
@@ -178,7 +163,6 @@ pub(crate) fn run_node(
         let cx = r.cx;
         r = Run::new(cx, o);
         r.stop_at = Some(k);
-        r.no_rb = no_rb;
         r.recut_cks = cks;
         // (a second pass to a candidate takes no marks)
         res = pass(&mut r, &mut body);
@@ -1039,9 +1023,13 @@ impl Operation for Files {
         // (the written text is complete once every page's finisher is
         // placed: where the pages end, defined by the page builder)
         cx.read(v.field(crate::pages::PAGES_END))?;
-        match cx.args().first() {
-            None => files_root(cx, listed),
-            Some(&n) => {
+        match cx.args() {
+            [] => files_root(cx, listed),
+            &[n, _] => {
+                let name = str_of(v, n);
+                fold_node(cx, ops(&self.0), &name)
+            }
+            &[n, ..] => {
                 let name = str_of(v, n);
                 let shared = ops(&self.0);
                 let t0 = std::time::Instant::now();
@@ -1145,7 +1133,7 @@ fn files_root(cx: &mut Ctx<'_>, listed: Vec<String>) -> Result<ValueId, Stop> {
 fn stream_of(
     cx: &mut Ctx<'_>,
     name: &str,
-) -> Result<(Option<String>, Option<WrittenDefs>, bool), Stop> {
+) -> Result<(Option<String>, Option<WrittenDefs>, ReadKind), Stop> {
     let v = cx.values();
     let acc = cx.fold(crate::run::stream_bucket(v, name), None, None)?;
     if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
@@ -1165,10 +1153,27 @@ fn stream_of(
         .into_iter()
         .find(|(n, _)| n == name)
         .map(|(_, d)| d);
-    let as_text = crate::api::written_as_text(v, Some(acc))
-        .iter()
-        .any(|n| n == name);
-    Ok((text, defs, as_text))
+    let (texts, folds) = crate::api::written_kinds(v, Some(acc));
+    let kind = if texts.iter().any(|n| n == name) {
+        ReadKind::Text
+    } else if folds.iter().any(|n| n == name) {
+        ReadKind::Fold
+    } else {
+        ReadKind::Fields
+    };
+    Ok((text, defs, kind))
+}
+
+/// How a written file is read back ([`crate::api::written_kinds`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadKind {
+    /// Per field, each line's definitions as it was written.
+    Fields,
+    /// Per field, its definitions those of its whole text read at once
+    /// ([`fold_node`]).
+    Fold,
+    /// As its text.
+    Text,
 }
 
 /// A written file's read-back definitions: `(field, value)` each.
@@ -1186,15 +1191,16 @@ fn file_node(
     defs_lock: &std::sync::Mutex<crate::hints::Defs>,
 ) -> Result<Option<ValueId>, Stop> {
     let v = cx.values();
-    let k = v.field(&format!("wkeys:{name}"));
     let wt = crate::tools::text_field(v, name);
     let t0 = std::time::Instant::now();
-    let (text, ds, as_text) = stream_of(cx, name)?;
+    let (text, ds, kind) = stream_of(cx, name)?;
+    let as_text = kind == ReadKind::Text;
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
-            "files-node: {name}: the stream read in {:?}, {} bytes, as text {as_text}",
+            "files-node: {name}: the stream read in {:?}, {} bytes, as text {as_text}, a fold {}",
             t0.elapsed(),
-            text.as_ref().map_or(0, String::len)
+            text.as_ref().map_or(0, String::len),
+            kind == ReadKind::Fold
         );
     }
     // (a file not opened for writing now stays as it was left: TeX's next
@@ -1216,62 +1222,96 @@ fn file_node(
         crate::tools::size_field(v, name),
         crate::tools::size_value(v, tv),
     );
+    // (a fold: its read-back's definitions those its whole text makes,
+    // read at once by a child of this node, `fold_node`, which defines
+    // them, or marks the file read back as its text)
+    // (the text not an argument: the child stays the same node as the
+    // text changes, its definitions compared one by one)
+    if kind == ReadKind::Fold && text.is_some() {
+        let op = cx.op();
+        cx.child(op, vec![v.str(name), v.int(1)]);
+        return Ok(Some(tv));
+    }
     // (read back per field while every line written to it only defines;
     // as its text once one does more, `wkeys:` then marked so)
     if as_text {
-        define_traced(cx, k, crate::api::text_mark(v));
-        // (its lines, each read by a `\\read` of it alone,
-        // [`crate::tools::lines_field`])
-        let lines = text.as_deref().map_or(ValueId::UNIT, |t| {
-            v.list(
-                crate::expand::split_lines(t)
-                    .iter()
-                    .map(|l| v.str(l))
-                    .collect(),
-            )
-        });
-        define_traced(cx, crate::tools::lines_field(v, name), lines);
+        define_as_text(cx, name, text, defs_lock);
     } else {
-        let ds = ds.as_deref().unwrap_or_default();
-        // (the file exists, whatever its lines define; a nested file's
-        // key names that file)
-        let keys = crate::api::key_set(v, name, ds);
-        let trace = crate::exec::obs_flag!("PHITEX_AUX_TRACE");
-        for (f, val) in ds {
-            // (a key whose value another file's lines define)
-            if *val == ValueId::UNIT {
-                continue;
-            }
-            let id = crate::api::wdef_id(name, f);
-            define_traced(cx, v.field(&format!("wdef:{id}")), *val);
-            if trace {
-                let xs = list_of(v, *val);
-                let shown = xs
-                    .first()
-                    .map(|&x| crate::val::show_def(v, x))
-                    .unwrap_or_default();
-                eprintln!(
-                    "aux-trace: define {name} {f} = {shown} (id {:?})",
-                    val.raw()
-                );
-            }
+        define_fields(cx, name, ds.as_deref().unwrap_or_default(), text.as_deref());
+    }
+    Ok(Some(tv))
+}
+
+/// A written file read back per field: its key set (`wkeys:`) and each
+/// key's definition (`wdef:`) from its definitions `ds`.
+fn define_fields(cx: &mut Ctx<'_>, name: &str, ds: &[(String, ValueId)], text: Option<&str>) {
+    let v = cx.values();
+    let k = v.field(&format!("wkeys:{name}"));
+    // (the file exists, whatever its lines define; a nested file's
+    // key names that file)
+    let keys = crate::api::key_set(v, name, ds);
+    let trace = crate::exec::obs_flag!("PHITEX_AUX_TRACE");
+    for (f, val) in ds {
+        // (a key whose value another file's lines define)
+        if *val == ValueId::UNIT {
+            continue;
         }
+        let id = crate::api::wdef_id(name, f);
+        define_traced(cx, v.field(&format!("wdef:{id}")), *val);
         if trace {
+            let xs = list_of(v, *val);
+            let shown = xs
+                .first()
+                .map(|&x| crate::val::show_def(v, x))
+                .unwrap_or_default();
             eprintln!(
-                "aux-trace: define {name}: {} keys, text {} bytes:\n{}",
-                list_of(v, keys).len(),
-                text.as_deref().map_or(0, str::len),
-                text.as_deref().unwrap_or("")
+                "aux-trace: define {name} {f} = {shown} (id {:?})",
+                val.raw()
             );
         }
-        define_traced(cx, k, keys);
-        return Ok(Some(tv));
     }
+    if trace {
+        eprintln!(
+            "aux-trace: define {name}: {} keys {:?}, text {} bytes:\n{}",
+            list_of(v, keys).len(),
+            list_of(v, keys)
+                .iter()
+                .map(|&x| str_of(v, x))
+                .collect::<Vec<_>>(),
+            text.map_or(0, str::len),
+            text.unwrap_or("")
+        );
+    }
+    define_traced(cx, k, keys);
+}
+
+/// A written file read back as its text: `wkeys:` the text mark, its
+/// lines (`\\read`), its units and their order (`wfile:`, `wunit:`).
+fn define_as_text(
+    cx: &mut Ctx<'_>,
+    name: &str,
+    text: Option<String>,
+    defs_lock: &std::sync::Mutex<crate::hints::Defs>,
+) {
+    let v = cx.values();
+    let k = v.field(&format!("wkeys:{name}"));
+    define_traced(cx, k, crate::api::text_mark(v));
+    // (its lines, each read by a `\\read` of it alone,
+    // [`crate::tools::lines_field`])
+    let lines = text.as_deref().map_or(ValueId::UNIT, |t| {
+        v.list(
+            crate::expand::split_lines(t)
+                .iter()
+                .map(|l| v.str(l))
+                .collect(),
+        )
+    });
+    define_traced(cx, crate::tools::lines_field(v, name), lines);
     let f = v.field(&format!("wfile:{name}"));
     // a file the job did not write is absent
     let Some(t) = text else {
         define_traced(cx, f, v.list(Vec::new()));
-        return Ok(Some(tv));
+        return;
     };
     if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
         eprintln!("aux-trace: define wfile {name}: {} bytes:\n{t}", t.len());
@@ -1283,7 +1323,56 @@ fn file_node(
         eprintln!("files-node: {name}: its units in {:?}", t0.elapsed());
     }
     define_traced(cx, f, order);
-    Ok(Some(tv))
+}
+
+/// A written file read back as a fold ([`crate::api::written_kinds`]),
+/// a child of its file's node (args: the name, 1): its whole text read at
+/// once from its read-back point by a run of its own
+/// ([`crate::run::Run::interpret_fold`]), which reads each field there
+/// as a line's own interpretation does, and the definitions that makes
+/// defined per field ([`define_fields`]); or the file read back as its
+/// text, where the text does more than define or the reading cannot end
+/// here. A line that adds to what an earlier line defined (biblatex's
+/// lists of citations, its page checksum) so defines the field's value
+/// after all of them: a reader of one field depends on that field's
+/// value alone, not on the file's text.
+pub(crate) fn fold_node(cx: &mut Ctx<'_>, o: &Ops, name: &str) -> Result<ValueId, Stop> {
+    let _nt = crate::exec::NodeTimer::new("fold", cx.node().raw());
+    let v = cx.values();
+    let text = cx
+        .read(crate::tools::text_field(v, name))?
+        .filter(|&x| x != ValueId::UNIT)
+        .map(|x| str_of(v, x));
+    let Some(text) = text else {
+        define_as_text(cx, name, None, &o.defs);
+        return Ok(ValueId::UNIT);
+    };
+    let made = {
+        let mut r = crate::run::Run::new(cx, o);
+        r.interpret_fold(name, &text)
+    };
+    let ok = match made {
+        Ok((ds, false)) => Some(ds),
+        Err(Halt::Stop(s)) => return Err(s),
+        // (a text that does more than define, or a reading that cannot
+        // end here: read back by the run itself)
+        Ok((_, true)) | Err(_) => None,
+    };
+    if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+        eprintln!(
+            "aux-trace: fold of {name} at node {}: {}",
+            cx.node().raw(),
+            ok.as_ref().map_or_else(
+                || "as its text".to_owned(),
+                |ds| format!("{} definitions", ds.len())
+            )
+        );
+    }
+    match ok {
+        Some(ds) => define_fields(cx, name, &ds, Some(&text)),
+        None => define_as_text(cx, name, Some(text), &o.defs),
+    }
+    Ok(ValueId::UNIT)
 }
 
 /// The text the client gave for file `name`, one the job writes, as the
