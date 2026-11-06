@@ -655,6 +655,28 @@ fn a_line_adding_to_an_earlier_line_s_list_reads_back_per_field() {
 Middle{extra}.
 
 List: \lst.
+/// Two lines of a file read back per field written in the other order:
+/// the same fields with the same values, so the run reading the file back
+/// stands. Its key set is a set: in the order of the definitions it moved
+/// at the edit, and the reader ran again on it (biblatex's `.aux` read
+/// back as a fold, `\begin{document}` at every edit, accl 25569).
+#[test]
+fn lines_written_in_another_order_leave_the_reader_standing() {
+    let doc = |swap: bool| {
+        let (a, b) = (
+            r"\immediate\write1{\noexpand\gdef\noexpand\x{one}}",
+            r"\immediate\write1{\noexpand\gdef\noexpand\y{two}}",
+        );
+        let (p, q) = if swap { (b, a) } else { (a, b) };
+        format!(
+            r"\def\x{{}}\def\y{{}}
+
+\openin15=\jobname.aux \ifeof15 \else\closein15 \input\jobname.aux \fi X: \x, Y: \y.
+
+\immediate\openout1=\jobname.aux
+{p}{q}
+
+Middle.
 \bye
 "
         )
@@ -677,6 +699,11 @@ List: \lst.
         );
         for extra in ["", more, " and more", ""] {
             b.edit(&doc(extra));
+            ..common::options("./order.tex", "order", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&common::plain()), &doc(false));
+        for swap in [true, false, true] {
+            b.edit(&doc(swap));
             let r: Vec<String> = b
                 .stats
                 .reruns
@@ -692,6 +719,12 @@ List: \lst.
             assert!(
                 !r.iter().any(|x| x.starts_with("exec") && x.contains("openin")),
                 "-j{threads} {extra:?}: the run reading the file back ran again: {r:?}"
+            let cold = common::build(opts(), Some(&common::plain()), &doc(swap));
+            let d = common::first_difference(&b.output().0, &cold.output().0);
+            assert!(d.is_none(), "-j{threads} swap {swap}: edit differs from cold: {d:?}");
+            assert!(
+                !r.iter().any(|x| x.starts_with("exec") && x.contains("openin")),
+                "-j{threads} swap {swap}: the run reading the file back ran again: {r:?}"
             );
         }
     }
