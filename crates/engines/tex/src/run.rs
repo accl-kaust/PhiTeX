@@ -2492,9 +2492,10 @@ impl<'c, 'a> Run<'c, 'a> {
         // interpreted, nor a finisher's read in its scope, a page-layer
         // register held or any integer register, whose loads have their
         // own answers, nor with code-table entries waiting to be written)
+        // (a definition of the run's own that a group's end took back
+        // leaves the binding unloaded: the one reaching the node again)
         let unseen = !self.st.is_loaded(loc)
             && !self.st.has_map(loc)
-            && !self.st.defined_after(loc, 0)
             && self.st.lazy(loc).is_none()
             && self.interp.is_none()
             && self.fin_scope_closer.is_none()
