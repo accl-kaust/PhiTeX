@@ -290,15 +290,19 @@ picture saw, and the parent to make exactly what TeX's run made:
 2. **What the parent bound before the picture, the parent hands over.**
    The `pic:<hash>:<k>` field is every binding the parent holds at the
    picture (`State::defined_now`: defined in the run, at any group
-   level, loaded), read by the child key by key (`Step::Key`): the child
-   depends on the bindings it uses, not on the table. A binding a group's
-   end took back to one the run never loaded is left out: the child
-   reads the engine's before the parent, as the parent would have. A
-   look-up that reads the engine through a projection (definedness,
-   class, `\ifnum` numbers, comma-list membership, the append base)
-   first loads the parent's binding where it has one (`Run::pic_touch`
-   in `Run::touch`), so it never answers from the engine a name the
-   parent bound.
+   level, loaded), an association list. The child's reads go through it
+   first (`Ctx::read_before_placer_over`, defuse): a field it has a key
+   for is answered from there through the same path the read asks for
+   (a whole value, or a projection: definedness, class, `\ifnum`
+   number, comma-list membership, the append base), the read filed on
+   the `pic:` field under that key, with the key's presence; any other
+   field before the parent. So the child depends on what it uses of the
+   parent's bindings, as it would of the engine's (a scratch macro the
+   parent redefined that the picture only steps over asks it nothing).
+   A binding a group's end took back to one the run never loaded is
+   left out: the child reads the engine's before the parent, as the
+   parent would have. Test `defuse/tests/before_placer.rs`
+   (`an_overlay_answers_a_child_before_its_placer`).
 3. **The child publishes and contributes nothing.** Its global
    definitions, its base-level locals, its contributions (log lines,
    font markers `T_FONT_AT`, `\write`s through `Run::contribute_stream`,

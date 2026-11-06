@@ -46,7 +46,7 @@ use crate::input::{Input, MID_LINE, Seg, kind};
 use crate::nest::{Item, Level};
 use crate::ops::{Shared, ops, run_node};
 use crate::run::{FileLine, Halt, R, Run};
-use crate::state::{Entry, Loc};
+use crate::state::Entry;
 use crate::val::{Tok, int_of, list_of, toks_of, toks_value};
 
 /// The box environments a run places as children: their names, as
@@ -103,13 +103,9 @@ fn refuse(hash: u64) {
 /// What the child's run keeps ([`Run::pic_run`]).
 pub(crate) struct PicChild {
     /// The parent's locals, a field read key by key
-    /// ([`Run::pic_local_read`]).
+    /// (`Ctx::read_before_placer_over`).
     field: Field,
     view: Option<View>,
-    /// The names read (from the locals or the engine), in order.
-    read: Vec<ValueId>,
-    /// The locations looked up in the parent's bindings already.
-    checked: phitex_defuse::FxHashSet<Loc>,
     /// Its base level's list, and whether it holds the parent's items
     /// before the picture: a look past the start of its own takes them
     /// ([`Run::pic_take_list`]), and its output's list is then the whole.
@@ -499,7 +495,7 @@ impl Run<'_, '_> {
     }
 
     /// Every binding the run made so far, as it stands, by name: what
-    /// the child reads first ([`Run::pic_local_read`]). What the run only
+    /// the child reads first (`Ctx::read_before_placer_over`). What the run only
     /// read the child reads from the engine before the run, where the run
     /// read it; what the run defines after the picture it never sees.
     fn pic_locals(&mut self) -> ValueId {
@@ -704,6 +700,22 @@ impl Run<'_, '_> {
                 }
             }
         }
+        // (a list the parent holds itself: the appends made on it now, no
+        // relation beside the parent's own value)
+        let held: Vec<crate::state::Loc> = self
+            .appending
+            .iter()
+            .map(|x| x.0)
+            .chain(self.appending_vals.iter().map(|x| x.0))
+            .filter(|&l| self.st.load_state(l) != 0)
+            .collect();
+        for l in held {
+            let r = self.append_force(l).and_then(|()| self.vals_force(l));
+            if let Err(h) = r {
+                self.raise(h);
+                return;
+            }
+        }
     }
 
     /// The child's steps of registers it never read ([`Run::pic_output`]):
@@ -781,41 +793,6 @@ impl Run<'_, '_> {
 
     // ------------------------------------------------------- the child
 
-    /// A read of the child's that misses its table: the parent's locals
-    /// first, by name (a read of that key alone); true when found. Every
-    /// name read is noted for the parent's check.
-    pub(crate) fn pic_local_read(&mut self, loc: Loc, f: Field) -> R<bool> {
-        let Some(p) = self.pic_child.as_mut() else {
-            return Ok(false);
-        };
-        if !p.checked.insert(loc) {
-            return Ok(false);
-        }
-        let view = self.pic_view()?;
-        let Some(x) = self.cx.get(view, Step::Key(f.0)) else {
-            // (read from the engine, before the parent)
-            if let Some(p) = self.pic_child.as_mut() {
-                p.read.push(f.0);
-            }
-            return Ok(false);
-        };
-        if trace() {
-            eprintln!(
-                "pic: child {} reads its parent's {} = {}",
-                self.cx.node().raw(),
-                crate::val::field_name(self.v, f),
-                self.v.render(x).chars().take(120).collect::<String>()
-            );
-        }
-        let x = some(x);
-        self.st.load_read(self.v, loc, x);
-        if self.st.load_state(loc) == 2 {
-            self.unalias(loc)?;
-        }
-        self.note_loaded_base(loc, x);
-        Ok(true)
-    }
-
     /// The view on the parent's bindings ([`Run::pic_locals`]).
     fn pic_view(&mut self) -> R<View> {
         let Some(p) = self.pic_child.as_mut() else {
@@ -883,19 +860,6 @@ impl Run<'_, '_> {
         Ok(true)
     }
 
-    /// A picture child's first touch of `loc` by a look-up that reads the
-    /// engine through a projection (`Run::touch`): the parent's binding
-    /// loaded where it has one, so the look-up reads it in full; else the
-    /// projection is read before the parent, where the parent read it.
-    pub(crate) fn pic_touch(&mut self, loc: Loc) -> R<()> {
-        if self.pic_child.is_none() || self.st.load_state(loc) != 0 {
-            return Ok(());
-        }
-        let f = self.loc_field(loc);
-        self.pic_local_read(loc, f)?;
-        Ok(())
-    }
-
     /// The child's run: the body on a level of its own in the parent's
     /// mode, its locals from the field; at the end, the output
     /// ([`Run::pic_output`]) or a refusal ([`Run::pic_refuse`]).
@@ -910,7 +874,7 @@ impl Run<'_, '_> {
         let mode = i32::try_from(n(0)).unwrap_or(1);
         // (every read of the engine's before the parent: where TeX's
         // picture read, inside the parent's text)
-        self.cx.read_before_placer();
+        self.cx.read_before_placer_over(Field(a(1)));
         let lid = self.push_list(mode, 0, extra);
         if let Some(t) = self.top_mut() {
             t.fold = FoldState {
@@ -949,8 +913,6 @@ impl Run<'_, '_> {
         self.pic_child = Some(PicChild {
             field: Field(a(1)),
             view: None,
-            read: Vec::new(),
-            checked: phitex_defuse::FxHashSet::default(),
             lid,
             took_list: false,
             streams: Vec::new(),
@@ -1150,13 +1112,8 @@ impl Run<'_, '_> {
                 _ => gdefs.push(v.list(vec![f.0, x])),
             }
         }
-        let mut reads: Vec<ValueId> = self
-            .pic_child
-            .as_ref()
-            .map(|p| p.read.clone())
-            .unwrap_or_default();
-        reads.sort_unstable_by_key(|x| x.raw());
-        reads.dedup();
+        // (the names read: the engine's record has them)
+        let reads: Vec<ValueId> = Vec::new();
         let mut nest = std::mem::take(&mut self.nest);
         let pushed = (nest.len() > 1).then(|| nest.pop()).flatten();
         let base = nest.remove(0);

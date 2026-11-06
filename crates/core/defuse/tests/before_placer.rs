@@ -126,3 +126,107 @@ fn a_child_reading_before_its_placer_sees_what_reaches_the_placer() {
         assert!(e.check_invariants().is_empty());
     }
 }
+
+/// `[f, g]`: reads f and g, its placer's overlay first
+/// (`Ctx::read_before_placer_over`, the overlay field `ov`), outputs
+/// f * 1000 + g.
+struct Over {
+    ov: Field,
+    runs: AtomicU64,
+}
+
+impl Operation for Over {
+    fn name(&self) -> &'static str {
+        "over"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        let v = cx.values();
+        cx.read_before_placer_over(self.ov);
+        let f = cx.read(Field(cx.args()[0]))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+        let g = cx.read(Field(cx.args()[1]))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+        Ok(v.int(f * 1000 + g))
+    }
+}
+
+/// `[f, g, x]`: binds g := x in its overlay `ov` (an association list
+/// field, global), places an over child on f and g, then defines f := 7
+/// itself (after the child's place: the child never sees it); outputs
+/// the child's.
+struct OverPlacer {
+    ov: Field,
+    over: std::sync::OnceLock<OpId>,
+}
+
+impl Operation for OverPlacer {
+    fn name(&self) -> &'static str {
+        "overplacer"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let (f, g, x) = (cx.args()[0], cx.args()[1], cx.args()[2]);
+        cx.define_with(self.ov, v.list(vec![v.list(vec![g, x])]), Locality::Global);
+        let i = cx.child(*self.over.get().unwrap(), vec![f, g]);
+        let y = cx.placed_output_or(i, ValueId::UNIT);
+        cx.define_with(Field(f), v.int(7), Locality::Global);
+        Ok(y)
+    }
+}
+
+#[test]
+fn an_overlay_answers_a_child_before_its_placer() {
+    for threads in [1, 4] {
+        let e = Engine::new();
+        let v = e.values();
+        let ov = v.field("pic:ov");
+        let def = e.register(Arc::new(Def));
+        let o = Arc::new(Over {
+            ov,
+            runs: AtomicU64::new(0),
+        });
+        let over = e.register(o.clone());
+        let p = Arc::new(OverPlacer {
+            ov,
+            over: std::sync::OnceLock::new(),
+        });
+        p.over.set(over).unwrap();
+        let placer = e.register(p);
+        let (f, g) = (v.field("count:1"), v.field("count:2"));
+        let u = e.new_unit();
+        let d = e.push(u, def, vec![f.0, v.int(3)]);
+        let dg = e.push(u, def, vec![g.0, v.int(99)]);
+        let n = e.push(u, placer, vec![f.0, g.0, v.int(5)]);
+        let rep = e.evaluate(threads).unwrap();
+        // (f before the placer, g from its overlay; neither the placer's
+        // own later f nor the g before it)
+        assert_eq!(
+            e.output(n).and_then(|x| v.as_int(x)),
+            Some(3005),
+            "-j{threads}: {rep:?}"
+        );
+        let r0 = o.runs.load(Ordering::SeqCst);
+        // (g before the placer moves: the overlay answers, nothing asked)
+        e.replace(dg, def, vec![g.0, v.int(98)]);
+        let rep = e.evaluate(threads).unwrap();
+        assert_eq!(o.runs.load(Ordering::SeqCst), r0, "-j{threads}: {rep:?}");
+        // (f before the placer moves: asked again)
+        e.replace(d, def, vec![f.0, v.int(4)]);
+        let rep = e.evaluate(threads).unwrap();
+        assert_eq!(
+            e.output(n).and_then(|x| v.as_int(x)),
+            Some(4005),
+            "-j{threads}: {rep:?}"
+        );
+        // (the overlay's g moves: asked again)
+        e.replace(n, placer, vec![f.0, g.0, v.int(6)]);
+        let rep = e.evaluate(threads).unwrap();
+        assert_eq!(
+            e.output(n).and_then(|x| v.as_int(x)),
+            Some(4006),
+            "-j{threads}: {rep:?}"
+        );
+        assert!(e.check_invariants().is_empty());
+    }
+}

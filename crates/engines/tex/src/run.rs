@@ -2007,10 +2007,6 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.fin_scope_closer.is_some() && self.fin_read_in_scope(loc, f)? {
             return Ok(());
         }
-        // (a picture child: its parent's locals first, by name, `crate::pic`)
-        if self.pic_child.is_some() && self.pic_local_read(loc, f)? {
-            return Ok(());
-        }
         let r = self.st.get(self.cx, self.v, loc, f);
         if r.is_err() {
             note_stop(self.op_name(), f);
@@ -4023,7 +4019,6 @@ impl<'c, 'a> Run<'c, 'a> {
     /// pending append made ([`Run::append_force`]), a read-back key
     /// defined ([`Run::rb_check`]).
     fn touch(&mut self, loc: Loc) -> R<()> {
-        self.pic_touch(loc)?;
         if !self.appending.is_empty() {
             self.append_force(loc)?;
         }
@@ -4075,7 +4070,6 @@ impl<'c, 'a> Run<'c, 'a> {
             self.append_trace(p, "3");
             return Ok(false);
         };
-        self.pic_touch(l)?;
         let pending = self.appending.iter().any(|x| x.0 == l);
         if !pending && (self.st.load_state(l) != 0 || self.lazy_pre(l)) {
             self.append_trace(p, "4");
@@ -4308,7 +4302,6 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn val_set(&mut self, f: Field) -> R<Vec<ValueId>> {
         let v = self.v;
         let loc = self.loc_of(f);
-        self.pic_touch(loc)?;
         let pending = self
             .appending_vals
             .iter()
@@ -4342,7 +4335,6 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn val_set_peek(&mut self, f: Field) -> R<(Vec<ValueId>, bool)> {
         let v = self.v;
         let loc = self.loc_of(f);
-        self.pic_touch(loc)?;
         if self.st.load_state(loc) != 0
             || self.lazy_pre(loc)
             || self.appending_vals.iter().any(|x| x.0 == loc)
@@ -4368,7 +4360,6 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn val_has(&mut self, f: Field, x: ValueId) -> R<bool> {
         let v = self.v;
         let loc = self.loc_of(f);
-        self.pic_touch(loc)?;
         if self.st.load_state(loc) != 0 || self.lazy_pre(loc) {
             return Ok(self.val_set(f)?.contains(&x));
         }
@@ -4392,7 +4383,6 @@ impl<'c, 'a> Run<'c, 'a> {
     /// ([`Run::note_elink_asks`]).
     pub(crate) fn font_info_peek(&mut self, k: u32) -> R<(Option<ValueId>, Option<Field>)> {
         let loc = self.font_loc(i64::from(k), crate::fields::FontCell::Info);
-        self.pic_touch(loc)?;
         if self.st.load_state(loc) != 0 || self.lazy_pre(loc) || self.interp.is_some() {
             return Ok((self.get_loc(loc)?, None));
         }
@@ -4438,7 +4428,6 @@ impl<'c, 'a> Run<'c, 'a> {
         let v = self.v;
         let loc = self.loc_of(f);
         self.muts += 1;
-        self.pic_touch(loc)?;
         let op = self.cx.op();
         if self.st.load_state(loc) != 0
             || self.lazy_pre(loc)
@@ -6002,7 +5991,6 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        self.pic_touch(l)?;
         // (a list the run appended to without reading it: the item in what
         // it appended, else in the list reaching the run, where that ends
         // with a comma, [`crate::val::append_projection`]; the run then
