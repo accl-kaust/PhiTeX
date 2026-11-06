@@ -205,6 +205,41 @@ number ends at the symbol (`defer::try_symbolic`, `control::assign_int`):
   `\ifnum\numexpr\c@x-1>100` stay relative. Any multiplication,
   division, a sum of two symbols, an offset of 2^16 or more: forced.
 
+### 2.7 Lines written now (`\immediate\write` to a file)
+
+A piece's `\immediate\write` to an open file (`Run::write_out`, exec or
+resume, not the log, not `\write18`, not inside a read-back) keeps each
+relative symbol of an integer register in the line as a *mark*
+(`defer::wsym_mark`: `\u{10FFFE}wsym\u{2}<reg>\u{2}<node>\u{2}<j>\u{3}`),
+neither forced nor read. The mark goes into the line after its
+characters are made the file's (`\newlinechar`, XeTeX's UTF-8 and `^^`
+forms, a TCX), so no printing touches it, and it is resolved wherever
+the file's text is read: the files node (`ops::stream_of`, its text,
+size, units), a tool's input (`tools::look_up`, the makeindex input), a
+run reading back a file the job writes (`\openin` of a written file,
+`\write18`'s hook), the build's written files and stream lines
+(`Build::files`, `Build::writes`). Resolving is the finisher's: the
+register's definition reaching the piece plus `j`
+(`defer::resolve_marked_cx`, `Engine::value_reaching` after the
+evaluation), so the text is the one TeX wrote.
+
+The line's read-back decides how far it can stay symbolic. It is first
+read back with every mark as the digit 0 (`Run::interpret_written`):
+
+- a line that does more than define (typesets, as an XML line of the
+  `.bcf` does) makes the file one read back as its text whatever its
+  digits: it keeps its marks;
+- a line whose read-back only defines, or that needs the next line, has
+  its symbols forced (an ordinary read) and is read back again with the
+  digits, which its definitions then hold, as before.
+
+biblatex's `\blx@bibreq` writes `<bcf:citekey order="N">` with
+`\the\csname blx@sectionciteorder@0\endcsname` after stepping it: the
+citation pieces after an added citation stand, the files node writes the
+shifted numbers and biber runs on them, as it must (its input changed).
+Test `tests/defer.rs`
+`an_immediate_write_of_a_stepped_counter_is_resolved_where_the_file_is_read`.
+
 ## 3. Engine support needed
 
 `Step::Derived(f, j)` is a read path whose answer is the value of the
@@ -267,10 +302,9 @@ TeX makes, so the piece runs again when it moves:
 
 - the digits typeset (a caption's or a heading's number), `\message`,
   `\special`, `\string`, `\meaning`, `\detokenize`;
-- `\immediate\write` to a file: its text is in the file now, and a tool
-  reads it (biblatex's `.bcf` citation order). Deferring it would put a
-  symbol in a files node and a tool's input; the line's digits do change
-  under a shift, so the tool runs again anyway;
+- `\immediate\write` of a line whose read-back defines (§2.7): the
+  definitions hold the digits. A line that does not is deferred (§2.7);
+  `\immediate\write` to the log or the terminal, and `\write18`, force;
 - a name the run binds itself among those of the same shape
   (`defer::binds_like`), digits next to the symbol in a name or a number,
   a minus before it;
