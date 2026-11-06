@@ -7775,7 +7775,12 @@ impl Build {
         {
             return fs.to_vec();
         }
-        let fs = Arc::new(written_texts(v, streams));
+        let fs = Arc::new(
+            written_texts(v, streams)
+                .into_iter()
+                .map(|(n, t)| (n, crate::defer::resolve_marked_eng(&self.g.eng, &t)))
+                .collect::<Vec<_>>(),
+        );
         m.files = Some((streams, fs.clone()));
         fs.to_vec()
     }
@@ -9236,7 +9241,11 @@ impl Build {
                         let xs = list_of(v, e);
                         (
                             xs.first().map_or(0, |&k| int_of(v, k)),
-                            xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default(),
+                            xs.get(1)
+                                .map(|&t| {
+                                    crate::defer::resolve_marked_eng(&self.g.eng, &str_of(v, t))
+                                })
+                                .unwrap_or_default(),
                         )
                     })
                     .collect()

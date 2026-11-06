@@ -493,7 +493,7 @@ impl Run<'_, '_> {
         let v = self.v;
         let entries = self.fold_with_own(crate::run::stream_bucket(v, name))?;
         if let Some(t) = closed_text(v, &entries, name) {
-            return Ok(Some(t));
+            return crate::defer::resolve_marked_run(self, &t).map(Some);
         }
         let made = self.get(&crate::tools::out_name(name))?;
         Ok(made

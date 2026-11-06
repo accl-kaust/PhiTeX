@@ -174,6 +174,15 @@ pub(crate) fn digits_of(r: &mut Run<'_, '_>, toks: &[Tok]) -> crate::run::R<Opti
     Ok(Some(out))
 }
 
+/// The symbol `t` is when it is an integer register's (not a file
+/// size's).
+pub(crate) fn reg_sym(t: Tok) -> Option<Sym> {
+    if !is_sym(t) || size_of(t).is_some() {
+        return None;
+    }
+    sym_of(t)
+}
+
 /// Whether `t` is a symbol: an internal name past [`SYM_PREFIX`].
 #[inline]
 pub(crate) fn is_sym(t: Tok) -> bool {
@@ -835,4 +844,119 @@ pub(crate) fn expand_dname(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<()> {
     let g = dname_concrete(r, t)?;
     r.back_input(g);
     Ok(())
+}
+
+// ------------------------------------------- symbols in written lines
+
+/// The start of a register symbol's mark in a line `\immediate\write`
+/// sent to a file (docs/spec-relative-counters.md §2.7): `<WSYM><register>
+/// \u{2}<node raw>\u{2}<j>\u{3}`, put in after the line's characters were
+/// made the file's ([`Run::file_line`]), so no printing of characters
+/// touches it, and replaced by the digits wherever the file's text is
+/// read ([`resolve_marked`]).
+pub(crate) const WSYM: &str = "\u{10FFFE}wsym\u{2}";
+
+/// Symbol `s`'s mark in a written line ([`WSYM`]).
+pub(crate) fn wsym_mark(s: Sym) -> String {
+    format!("{WSYM}{}\u{2}{}\u{2}{}\u{3}", s.reg, s.node.raw(), s.j)
+}
+
+/// Whether `text` holds a symbol's mark ([`WSYM`]).
+pub(crate) fn has_marks(text: &str) -> bool {
+    text.contains(WSYM)
+}
+
+/// `text` with each symbol's mark ([`WSYM`]) replaced by its digits,
+/// `value` giving each symbol's value; `text` itself where it holds none.
+pub(crate) fn resolve_marked<E>(
+    text: &str,
+    mut value: impl FnMut(Sym) -> Result<i32, E>,
+) -> Result<String, E> {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(WSYM) {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + WSYM.len()..];
+        let Some(e) = tail.find('\u{3}') else {
+            out.push_str(&rest[i..]);
+            return Ok(out);
+        };
+        if let Some(s) = parse_mark(&tail[..e]) {
+            crate::print::print_int(&mut out, i64::from(value(s)?));
+        } else {
+            let end = i + WSYM.len() + e + 1;
+            out.push_str(&rest[i..end]);
+        }
+        rest = &tail[e + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// A mark's body (`<register>\u{2}<node raw>\u{2}<j>`) parsed.
+fn parse_mark(body: &str) -> Option<Sym> {
+    let (reg, rest) = body.split_once('\u{2}')?;
+    let (node, j) = rest.split_once('\u{2}')?;
+    Some(Sym {
+        reg: reg.parse().ok()?,
+        node: NodeId::from_raw(node.parse().ok()?),
+        j: j.parse().ok()?,
+    })
+}
+
+/// The field of integer register `reg` (`count:<reg>`), by its name: a
+/// symbol's register where no run is (a files node, a tool, the build's
+/// written files).
+pub(crate) fn reg_field(v: &phitex_defuse::Values, reg: i32) -> phitex_defuse::Field {
+    v.field(&format!("count:{reg}"))
+}
+
+/// A written text's marks resolved by a node that is no run (a files node,
+/// a tool): each symbol the register's definition reaching its piece plus
+/// its steps, read at `At::Before(piece)` as a finisher resolves one
+/// ([`resolve`]).
+pub(crate) fn resolve_marked_cx(
+    cx: &mut phitex_defuse::Ctx<'_>,
+    text: &str,
+) -> Result<String, phitex_defuse::Stop> {
+    if !has_marks(text) {
+        return Ok(text.to_owned());
+    }
+    let v = cx.values();
+    resolve_marked(text, |s| {
+        let x = match cx.read_at(reg_field(v, s.reg), At::Before(s.node))? {
+            FieldAt::Def(x, _) => int_of(v, x).unwrap_or(0),
+            FieldAt::Unset | FieldAt::Gone => 0,
+        };
+        Ok(x.wrapping_add(s.j))
+    })
+}
+
+/// A written text's marks resolved by a run (one that reads back a file
+/// the job writes): its own symbols forced, another piece's resolved
+/// ([`force`]).
+pub(crate) fn resolve_marked_run(r: &mut Run<'_, '_>, text: &str) -> crate::run::R<String> {
+    if !has_marks(text) {
+        return Ok(text.to_owned());
+    }
+    resolve_marked(text, |s| force(r, s))
+}
+
+/// A written text's marks resolved after an evaluation (the build's
+/// written files, its `\\write` lines): the register's value reaching
+/// each symbol's piece plus its steps, nothing recorded
+/// (`Engine::value_reaching`).
+pub(crate) fn resolve_marked_eng(eng: &phitex_defuse::Engine, text: &str) -> String {
+    if !has_marks(text) {
+        return text.to_owned();
+    }
+    let v = eng.values();
+    resolve_marked(text, |s| {
+        let x = eng
+            .value_reaching(s.node, reg_field(v, s.reg))
+            .and_then(|x| int_of(v, x))
+            .unwrap_or(0);
+        Ok::<i32, std::convert::Infallible>(x.wrapping_add(s.j))
+    })
+    .unwrap_or_else(|e| match e {})
 }

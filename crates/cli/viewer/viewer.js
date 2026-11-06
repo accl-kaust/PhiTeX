@@ -4796,6 +4796,8 @@ var PreviewSession = class {
   constructor(host2, core, sink, opts = {}) {
     this.host = host2;
     core.onEvent?.((e) => {
+      const ev = e.event ?? "";
+      if (this.ended.length && (ev === "settled" || ev === "failed" || ev === "trapped")) for (const f of this.ended.splice(0)) f(e);
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
       if (this.o.remote && e.event === "origins") return void (this.originsSeen++, this.glyphsAsked.clear(), this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
@@ -5683,6 +5685,8 @@ var PreviewSession = class {
   }
   /** A send loop is running (it takes what is queued when each build ends). */
   busy = false;
+  /** Waiting for a queued edit's build to end (`send`): its `settled`, else `failed` or `trapped`. */
+  ended = [];
   /** Edits the host gave, and builds they took (the batching's effect). */
   keystrokes = 0;
   builds = 0;
@@ -5876,18 +5880,25 @@ var PreviewSession = class {
     for (const [i, e] of edits.entries()) {
       const last = i === edits.length - 1;
       this.builds++;
+      let done;
+      const ended = last ? new Promise((res) => (done = res, this.ended.push(res))) : null;
+      const unheard = () => this.ended = this.ended.filter((f) => f !== done);
       const r = await this.core.request({ op: "edit", file, ...e, page: last ? this.page : -1, dpi: this.dpi() });
       if (!r.ok) {
+        unheard();
         this.sink.error((typeof r.json?.error === "string" ? r.json.error : void 0) ?? r.error ?? "edit failed");
         if (r.error?.includes("trapped")) await this.reopen();
         return false;
       }
       if (!last) continue;
+      if (!r.json?.queued) unheard();
       const tBack = this.now();
       const j = r.json;
       if (j.queued) {
         this.queued = { t0, tSend, tBack };
         this.setPages(j.pages);
+        const end = await ended;
+        if (end.event === "settled") await this.layout(), this.queuedLatency(end);
         continue;
       }
       this.setPages(j.pages);
