@@ -469,6 +469,87 @@ fn a_counter_set_back_to_its_value_after_steps_is_a_step() {
     }
 }
 
+/// A piece's `\immediate\write` of a counter it only steps (biblatex's
+/// citation order in the `.bcf`, `\blx@bibreq`) neither forces nor reads
+/// it: the line keeps the symbol, resolved where the file's text is read
+/// (the files node, the file read back at the next pass, the build's
+/// written files), docs/spec-relative-counters.md §2.7. A step added
+/// before them leaves the paragraphs standing, and the file, the text
+/// read back from it and the PDF are those of a cold build. A line whose
+/// read-back defines (`\def\v<i>{<n>}`) keeps its digits forced.
+#[test]
+fn an_immediate_write_of_a_stepped_counter_is_resolved_where_the_file_is_read() {
+    let src = |extra: &str| {
+        let mut s = String::from(
+            "\\count200=5\n\\openin2=d.out \\ifeof2 \\closein2 \\else\\closein2 Read back: \\input d.out \\par\\fi\n\
+             \\immediate\\openout1=d.out\n",
+        );
+        s.push_str(extra);
+        for i in 0..40 {
+            let def = if i % 10 == 3 {
+                format!("\\immediate\\write1{{\\string\\def\\string\\v{i}{{\\the\\count200}}}}")
+            } else {
+                String::new()
+            };
+            let _ = write!(
+                s,
+                "\\global\\advance\\count200 1 \\immediate\\write1{{n{i}=\\the\\count200.}}{def} \
+                 Paragraph {i} of the document, long enough to make a line or two when set in the \
+                 plain format's ten point roman.\n\n"
+            );
+        }
+        s.push_str("\\immediate\\closeout1\n\\bye\n");
+        s
+    };
+    for threads in [1, 8] {
+        let dir = common::scratch(&format!("defer-immediate-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let first = src("");
+        let mut b = common::build(opts, Some(&common::plain()), &first);
+        let (want, out) = cold("immediate", &first, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: cold");
+        assert!(
+            out.contains("n0=6.") && out.contains("n39=45.") && out.contains("\\def\\v13{19}"),
+            "{out:?}"
+        );
+        let edited = src("\\global\\advance\\count200 1\n");
+        common::rebuild(&mut b, &edited);
+        let (want, out) = cold("immediate-edited", &edited, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: edited equals cold");
+        assert!(
+            out.contains("n0=7.") && out.contains("n39=46.") && out.contains("\\def\\v13{20}"),
+            "{out:?}"
+        );
+        let got: String = b
+            .writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(got, out, "-j{threads}: the stream's lines");
+        let file = b
+            .files()
+            .into_iter()
+            .find(|(n, _)| n == "d.out")
+            .map(|(_, t)| t);
+        assert_eq!(
+            file.as_deref(),
+            Some(out.as_str()),
+            "-j{threads}: the written file"
+        );
+        let forced = b.stats.refuted_by_op("exec", "count:200")
+            + b.stats.refuted_by_op("resume", "count:200");
+        assert!(
+            forced <= 4,
+            "-j{threads}: only the four paragraphs whose line defines read the counter: {:?}",
+            b.stats.refuted_by_field
+        );
+    }
+}
+
 /// Steps of a counter after candidates of a run that cannot be cut (a
 /// group open over paragraphs): published as a relation, each page's routine,
 /// which reads the counter at its candidate, reads what the steps before it

@@ -1141,6 +1141,14 @@ impl Engine {
         reaching_at(self, f, n, false)?.by
     }
 
+    /// The value of `f` reaching `n` (None: none, the environment's),
+    /// its alias definitions followed as a read before each alias's node
+    /// gives them; nothing recorded (a client's question after an
+    /// evaluation: the value a symbol of `f` as of `n` stands for).
+    pub fn value_reaching(&self, n: NodeId, f: Field) -> Option<ValueId> {
+        read::through_aliases(self, reaching_at(self, f, n, false)?.value)
+    }
+
     /// `n`'s own definition of `f`.
     pub fn def_value(&self, n: NodeId, f: Field) -> Option<ValueId> {
         let node = self.node(n);
