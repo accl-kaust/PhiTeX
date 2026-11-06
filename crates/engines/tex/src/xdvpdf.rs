@@ -797,6 +797,11 @@ struct Docs {
     outline: Vec<DocSpecial>,
     /// One that can't be done again ([`Again::Never`]): its start.
     never: Option<String>,
+    /// The names of the forms the page makes (`pdf:bxobj @name`): a page
+    /// written again makes its forms again under the names the file has
+    /// them by, which is the document's file where each name is made
+    /// once and the file's names are among the document's ([`live`]).
+    forms: Vec<Vec<u8>>,
 }
 
 impl Docs {
@@ -815,6 +820,11 @@ impl Docs {
             .iter()
             .any(|k| x.windows(k.len()).any(|w| w == *k))
             .then_some(page);
+            if (x.windows(4).any(|w| w == b"xobj" || w == b"form"))
+                && let Ok(Some(f)) = s.form_defined(x)
+            {
+                d.forms.push(f);
+            }
             match s.again(x) {
                 Ok(Again::Do) => {}
                 Ok(Again::Skip) => d.skip.push((bound, x.clone())),
@@ -913,6 +923,25 @@ fn live(
     };
     if seq(&docs, |d| &d.skip) != seq(&b.docs, |d| &d.skip) {
         return Err("the document's specials on the document changed".to_owned());
+    }
+    // (each form made once by name, and every name the file has made
+    // again or kept: the file's form objects then the document's,
+    // written again where a page makes one again)
+    fn forms(ds: &[Arc<Docs>]) -> Option<std::collections::BTreeSet<&[u8]>> {
+        let mut all = std::collections::BTreeSet::new();
+        ds.iter()
+            .flat_map(|d| d.forms.iter())
+            .all(|f| all.insert(f.as_slice()))
+            .then_some(all)
+    }
+    match (forms(&docs), forms(&b.docs)) {
+        (Some(now), Some(was)) if was.is_subset(&now) => {}
+        _ => {
+            return Err(
+                "a form made twice under one name, or a name the file has no longer made"
+                    .to_owned(),
+            );
+        }
     }
     let (outline, old_outline) = (seq(&docs, |d| &d.outline), seq(&b.docs, |d| &d.outline));
     let outline_again = outline != old_outline;

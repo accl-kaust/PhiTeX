@@ -765,6 +765,37 @@ impl Dpx {
     }
 }
 
+impl Dpx {
+    /// The name of the form special `buffer` begins (`pdf:bxobj @name
+    /// ...`, `bform`, `beginxobj`), if it begins one: a page written
+    /// again makes the form again under the name the file has it by
+    /// ([`Again`]).
+    ///
+    /// # Errors
+    /// The specials' parsers' fatal errors.
+    pub fn spc_form_defined(&mut self, buffer: &[u8]) -> Result<Option<Vec<u8>>> {
+        if !buffer.starts_with(b"pdf:") {
+            return Ok(None);
+        }
+        let (mut special, mut spe, mut args) = init_special(self, buffer, 0.0, 0.0, 1.0);
+        for ks in &KNOWN_SPECIALS {
+            if (ks.check_func)(buffer) {
+                let e = (ks.setup_func)(self, &mut special, &mut spe, &mut args)?;
+                if e != 0
+                    || ks.key != b"pdf:"
+                    || !matches!(args.command, Some(b"bform" | b"beginxobj" | b"bxobj"))
+                {
+                    return Ok(None);
+                }
+                args.skip_white();
+                let (s, p) = args.parts();
+                return Ok(crate::parse::parse_opt_ident(s, p).map(|x| cstr(&x).to_vec()));
+            }
+        }
+        Ok(None)
+    }
+}
+
 /// [`Again`] for the special of `key` (`pdf:`, `x:`, ...) and `command`,
 /// `rest` its arguments.
 fn again(key: &[u8], command: Option<&[u8]>, rest: &[u8]) -> Again {
@@ -792,8 +823,15 @@ fn again(key: &[u8], command: Option<&[u8]>, rest: &[u8]) -> Again {
             // on other pages; a named annotation is done again, the name's
             // object given the new value)
             b"image" | b"img" | b"epdf" if named => Again::Never,
-            b"article" | b"art" | b"bead" | b"thread" | b"bform" | b"beginxobj" | b"bxobj"
-            | b"eform" | b"endxobj" | b"exobj" | b"bop" | b"eop" | b"pageresources" => Again::Never,
+            // (a form: made again, its object given the new value, the
+            // name's object the pages that draw it refer to,
+            // [`Dpx::pdf_ximage_defineresource`]; whether the document's
+            // forms are the file's by name is the caller's to check,
+            // [`Dpx::spc_form_defined`])
+            b"bform" | b"beginxobj" | b"bxobj" | b"eform" | b"endxobj" | b"exobj" => Again::Do,
+            b"article" | b"art" | b"bead" | b"thread" | b"bop" | b"eop" | b"pageresources" => {
+                Again::Never
+            }
             _ => Again::Do,
         },
         b"x:" => match c {

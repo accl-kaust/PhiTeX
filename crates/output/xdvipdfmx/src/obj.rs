@@ -707,6 +707,20 @@ impl PdfOut {
         self.slot_mut(a).data = db;
     }
 
+    /// `o` (not labelled yet) given the label of the object indirect
+    /// `r` refers to: written, it is that object again (a page written
+    /// again making a form the file has, [`crate::api::Session::reship`]).
+    pub fn label_as(&mut self, o: Obj, r: Obj) {
+        let Data::Indirect(i) = self.data(r) else {
+            return;
+        };
+        let (label, generation) = (i.label, i.generation);
+        debug_assert_eq!(self.slot(o).label, 0, "label_as: labelled already");
+        let s = self.slot_mut(o);
+        s.label = label;
+        s.generation = generation;
+    }
+
     /// The label the next object would take.
     #[must_use]
     pub fn next_label(&self) -> u32 {

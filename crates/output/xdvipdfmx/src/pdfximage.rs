@@ -803,6 +803,13 @@ impl Dpx {
         info: &XformInfo,
         resource: Obj,
     ) -> Result<()> {
+        self.ximage_form_bbox(xobj_id, info);
+        self.ximage_set_reference(xobj_id, resource)?;
+        Ok(())
+    }
+    /// The form's subtype and box set from `info` (C's code of
+    /// `pdf_ximage_set_form` before the reference is made).
+    fn ximage_form_bbox(&mut self, xobj_id: i32, info: &XformInfo) {
         self.ximage.ximages[xobj_id as usize].subtype = PDF_XOBJECT_TYPE_FORM;
 
         /* Image's attribute "bbox" here is affected by /Rotate entry of included
@@ -835,9 +842,6 @@ impl Dpx {
         bbox.lly = min4(p1.y, p2.y, p3.y, p4.y);
         bbox.urx = max4(p1.x, p2.x, p3.x, p4.x);
         bbox.ury = max4(p1.y, p2.y, p3.y, p4.y);
-
-        self.ximage_set_reference(xobj_id, resource)?;
-        Ok(())
     }
     /// `pdf_ximage_get_page`.
     pub fn pdf_ximage_get_page(&mut self, xobj_id: i32) -> i32 {
@@ -880,6 +884,28 @@ impl Dpx {
                     break;
                 }
             }
+        }
+
+        // (a page written again making a form the file has by its name:
+        // the file's form object takes the new value, under its label,
+        // so that every page drawing the form, written again or not,
+        // draws the new; the name and its resource name stay)
+        if !reserved
+            && self.doc.reship
+            && let (Some(ident), XobjInfo::Form(info)) = (ident, cdata)
+            && let Some(i) = self.ximage.ximages.iter().position(|x| {
+                x.ident.as_deref() == Some(ident)
+                    && x.subtype == PDF_XOBJECT_TYPE_FORM
+                    && x.reference.is_some()
+            })
+        {
+            let id = i as i32;
+            self.ximage_form_bbox(id, info);
+            let r = self.ximage.ximages[i].reference.expect("reference");
+            self.o.label_as(resource, r);
+            self.o.release(resource)?;
+            self.ximage.ximages[i].resource = None;
+            return Ok(id);
         }
 
         if !reserved {

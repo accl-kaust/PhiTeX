@@ -374,6 +374,16 @@ impl Session {
         self.dpx.spc_again(special)
     }
 
+    /// The name of the form `special` begins, if it begins one
+    /// ([`crate::specials::Again`]: a page written again makes the form
+    /// again under that name).
+    ///
+    /// # Errors
+    /// The specials' parsers'.
+    pub fn form_defined(&mut self, special: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.dpx.spc_form_defined(special)
+    }
+
     /// The streams written from now on compressed fast (level 1), if
     /// they are compressed (the file's level, `-z`, is not 0).
     pub fn compress_fast(&mut self) {
