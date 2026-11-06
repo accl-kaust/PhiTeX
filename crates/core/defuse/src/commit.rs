@@ -5362,6 +5362,102 @@ fn through_segment(d: i64, net: i64, min: i64) -> (i64, i64) {
     ((d + min).max(0), (d + net).max(net - min))
 }
 
+/// Whether a definition's reach can move with the brackets around it: a
+/// local one (its scope may close earlier or later), one in several
+/// scopes, or a relation (its input's may).
+fn scoped_def(d: &Def) -> bool {
+    d.depth != GLOBAL || d.multi || d.rel.is_some()
+}
+
+/// The fields whose readers a change of brackets at `at` can give another
+/// answer, as a walk from `at` goes on. A reader whose answer moved reads
+/// a field one of whose definitions its scopes now hide and did not, or
+/// the reverse: a definition reaching every later position (`GLOBAL`)
+/// is seen alike on both sides; a local one is seen alike where the two
+/// sides share the scope it lives in. The sides share every scope open
+/// at `at` up to the `p`-th, `p` the fewest scopes both sides have had
+/// open between `at` and the reader. So: the fields with a local
+/// definition between `at` and the reader (`fields`, added as the walk
+/// meets them), and those with one before `at` in a scope open at `at`
+/// above the `p`-th (`below`: since that scope's opener). Besides, a
+/// reader of the depth itself and one by a derived path (whose field is
+/// found from other fields at its place) are always asked.
+struct ScopeReach {
+    /// The scopes open at `at`, its own closes not applied: each one's
+    /// opener and which of its opens (`read::opener`).
+    open: Vec<u64>,
+    /// The scopes open at `at` from the `covered`-th up have had their
+    /// definitions before `at` taken into `fields`.
+    covered: usize,
+    /// Where those definitions start (the `covered`-th scope's opener),
+    /// `at` while none is covered.
+    from: Pos,
+    fields: FxHashSet<Field>,
+    /// An opener not found on the line: every reader is asked.
+    all: bool,
+}
+
+impl ScopeReach {
+    fn new(eng: &Engine, at: Pos) -> ScopeReach {
+        let open = loop {
+            let Some(seg) = eng.seg_for_pos(at) else {
+                break Vec::new();
+            };
+            let start = read::chain_start(eng, seg);
+            let inner = seg.inner.read();
+            if at < seg.lo || (at >= inner.hi && eng.order.at_or_after(at) != Some(seg.id)) {
+                continue;
+            }
+            break read::chain_at(&inner, &start, at, false, false);
+        };
+        ScopeReach {
+            covered: open.len(),
+            open,
+            from: at,
+            fields: FxHashSet::default(),
+            all: false,
+        }
+    }
+
+    /// The definitions before `at` in the scopes open there from the
+    /// `p`-th up (0: the outermost), taken into `fields`.
+    fn below(&mut self, eng: &Engine, p: i64) {
+        let p = usize::try_from(p.max(0)).unwrap_or(0);
+        if self.all || p >= self.covered {
+            return;
+        }
+        let opener = NodeId::from_raw(self.open[p] >> 8);
+        let Some(lo) = read::pos_of(eng, opener) else {
+            self.all = true;
+            return;
+        };
+        let hi = self.from;
+        let mut cur = eng.seg_for_pos(lo).map(|s| s.id);
+        while let Some(sid) = cur {
+            let seg = eng.seg(sid);
+            if seg.lo > hi {
+                break;
+            }
+            let inner = seg.inner.read();
+            for (f, m) in &inner.defs {
+                if !self.fields.contains(f) && m.range(lo..hi).any(|(_, d)| scoped_def(d)) {
+                    self.fields.insert(*f);
+                }
+            }
+            let next_lo = seg.lo;
+            drop(inner);
+            cur = eng.order.next(sid, next_lo);
+        }
+        self.covered = p;
+        self.from = lo;
+    }
+
+    /// Whether reader `r` of `f` in the region can see another answer.
+    fn asks(&self, eng: &Engine, f: Field, r: &Reader) -> bool {
+        self.all || f == eng.depth_field || self.fields.contains(&f) || read::derived_spec(eng, r.path).is_some()
+    }
+}
+
 /// Re-asks the readers anchored at and after `at` (all fields) whose
 /// answer moved, after `by`'s brackets changed from `old` to `new`: up to
 /// where the scopes open on both sides are the same again (whole segments
@@ -5458,6 +5554,13 @@ fn reask_after_effect_with(
     let mut end: Option<(SegId, Pos)> = None;
     let mut cur = eng.seg_for_pos(at).map(|s| s.id);
     let mut first = true;
+    // (which readers in the region can see another answer: those of a
+    // field with a definition whose scope the change can end or extend,
+    // `ScopeReach`; the others' answers are those of definitions both
+    // sides see. Every reader there was asked, 3 to 4 M per walk to the
+    // line's end in biblatex's -j4 build, ~15 s each, of which 2 to 5 %
+    // read such a field, accl 25435)
+    let mut reach = ScopeReach::new(eng, at);
     while let Some(sid) = cur {
         let seg = eng.seg(sid);
         let inner = seg.inner.read();
@@ -5487,10 +5590,18 @@ fn reask_after_effect_with(
             }
         }
         let inside = |q: Pos| (!first || q >= at) && stop.is_none_or(|s| q <= s);
+        // (the definitions here first: a reader after one in this segment
+        // is asked whatever its place in it, as is one before, needlessly)
+        for (f, m) in &inner.defs {
+            if m.iter().any(|(q, d)| inside(*q) && scoped_def(d)) {
+                reach.fields.insert(*f);
+            }
+        }
+        let mut here: Vec<(Field, Reader)> = Vec::new();
         for (f, rs) in &inner.readers {
             for r in rs {
                 if inside(eng.node(r.anchor).pos_hint()) && live(eng, r.node, r.serial) {
-                    readers.push((*f, r.clone()));
+                    here.push((*f, r.clone()));
                 }
             }
         }
@@ -5501,6 +5612,12 @@ fn reask_after_effect_with(
         }
         let lo = seg.lo;
         drop(inner);
+        // (the scopes both sides share as few as they get in this segment:
+        // those above, open at `at`, may end on one side only, and the
+        // definitions in them before `at` with them; looked up under no
+        // segment's lock)
+        reach.below(eng, p);
+        readers.extend(here.into_iter().filter(|(f, r)| reach.asks(eng, *f, r)));
         if let Some(q) = stop {
             end = Some((sid, q));
             break;
