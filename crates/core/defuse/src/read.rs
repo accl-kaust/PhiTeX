@@ -1984,15 +1984,44 @@ pub fn alias_target_plus(v: &Values, y: Option<ValueId>, c: i64) -> Option<Value
 }
 
 /// The value of a relation `f := input + c` (`Ctx::define_rel`) where the
-/// input's definition holds `input`: an integer plus `c`; an alias plus
-/// `c` where the input is an alias (the relation stays symbolic, so a
-/// move of the alias's target reaches its readers through their read of
-/// the target, never through a value the relation computed once).
+/// input's definition holds `input`, nothing followed (under a segment's
+/// lock): an integer plus `c`; an alias plus `c` where the input is an
+/// alias, which is exact (its readers follow it) and which
+/// [`rel_value`] makes an integer again where the alias is one of `f`
+/// itself.
 pub(crate) fn rel_add(v: &Values, input: Option<ValueId>, c: i64) -> ValueId {
     if let Some((g, at, k)) = input.and_then(|x| alias_parts(v, x)) {
         return alias_value_plus(v, g, at, k.wrapping_add(c));
     }
     v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c))
+}
+
+/// The value of a relation `f := input + c` from `input`, an alias of
+/// `f` itself followed to the value it names (a counter set back to its
+/// own value as of an earlier node, then stepped: beamer's
+/// `\beamer@restorecounter`): the integer, which the walk of a change of
+/// `f` before that node puts right as it passes the alias's definition
+/// (`commit::reask_from`). An alias of another field stays one plus `c`
+/// ([`rel_add`]): no walk of `f` passes a change of that field, and its
+/// readers follow it to the target, read where it moves.
+pub(crate) fn rel_value(eng: &Engine, f: Field, mut input: Option<ValueId>, mut c: i64) -> ValueId {
+    let v = &eng.values;
+    // (each step goes to a definition before the last: at most the
+    // field's definitions before the relation)
+    loop {
+        match input.and_then(|x| alias_parts(v, x)) {
+            Some((g, at, k)) if g == f => {
+                input = reaching_at(eng, f, at, false).and_then(|r| r.value);
+                c = c.wrapping_add(k);
+            }
+            _ => return rel_add(v, input, c),
+        }
+    }
+}
+
+/// Whether `x` is an alias of field `f` itself ([`rel_value`]).
+pub(crate) fn alias_of_self(v: &Values, f: Field, x: ValueId) -> bool {
+    alias_parts(v, x).is_some_and(|(g, _, _)| g == f)
 }
 
 #[cfg(test)]

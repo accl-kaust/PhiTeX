@@ -5101,6 +5101,21 @@ impl<'c, 'a> Run<'c, 'a> {
         self.set_cur_cs_rest(tok)
     }
 
+    /// A derived name's symbol fetched ([`Self::set_cur_cs_rest`]): kept
+    /// where it may stay one ([`Run::d_ok`]), else its concrete name.
+    fn set_cur_dname(&mut self, tok: Tok) -> R<()> {
+        if self.d_ok && !self.bare {
+            self.cur = Cur {
+                tok,
+                cmd: cmd::SYM,
+                chr: 0,
+            };
+            return Ok(());
+        }
+        let g = crate::defer::dname_concrete(self, tok)?;
+        self.set_cur_cs(g)
+    }
+
     /// [`Self::set_cur_cs`] past its common case.
     #[inline(never)]
     fn set_cur_cs_rest(&mut self, tok: Tok) -> R<()> {
@@ -5108,16 +5123,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // [`Run::d_ok`]: its concrete name, the register forced; never a
         // name about to be defined)
         if crate::defer::is_dname(tok) {
-            if self.d_ok && !self.bare {
-                self.cur = Cur {
-                    tok,
-                    cmd: cmd::SYM,
-                    chr: 0,
-                };
-                return Ok(());
-            }
-            let g = crate::defer::dname_concrete(self, tok)?;
-            return self.set_cur_cs(g);
+            return self.set_cur_dname(tok);
         }
         if self.bare {
             // (a name about to be defined: its present meaning is never

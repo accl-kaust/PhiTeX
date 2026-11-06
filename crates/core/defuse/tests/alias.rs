@@ -187,3 +187,37 @@ fn a_relation_on_an_alias_follows_its_target() {
         assert_eq!(e.check_invariants(), Vec::<String>::new());
     }
 }
+
+/// A relation stacked on an alias of another field is that alias plus its
+/// constant: its readers follow it to the other field, read where the
+/// alias names it, so a change there reaches them.
+#[test]
+fn a_relation_on_an_alias_of_another_field_follows_it() {
+    for threads in [1, 4] {
+        let e = Engine::new();
+        let v = e.values();
+        let def = e.register(Arc::new(Def));
+        let step = e.register(Arc::new(Step));
+        let copier = e.register(Arc::new(Copier {
+            runs: AtomicU64::new(0),
+        }));
+        let rd = Arc::new(Reader {
+            runs: AtomicU64::new(0),
+        });
+        let reader = e.register(rd.clone());
+        let (f, g) = (v.field("count:0"), v.field("count:9"));
+        let u = e.new_unit();
+        let d = e.push(u, def, vec![f.0, v.int(3)]);
+        e.push(u, copier, vec![g.0, f.0]);
+        e.push(u, step, vec![g.0, v.int(2)]);
+        e.push(u, step, vec![g.0, v.int(5)]);
+        let r = e.push(u, reader, vec![g.0]);
+        let rep = e.evaluate(threads).unwrap();
+        let out = || e.output(r).and_then(|y| v.as_int(y));
+        assert_eq!(out(), Some(10), "-j{threads}: {rep:?}");
+        e.replace(d, def, vec![f.0, v.int(30)]);
+        let rep = e.evaluate(threads).unwrap();
+        assert_eq!(out(), Some(37), "-j{threads}: {rep:?}");
+        assert_eq!(e.check_invariants(), Vec::<String>::new());
+    }
+}

@@ -2617,13 +2617,21 @@ fn walk_here(
             return Here::On(by);
         };
         let Some(c) = d.rel else {
+            // (an alias of the field itself: the relations after it add to
+            // the value it names, which may be the one that moved; walked
+            // after the lock, `reask_from`)
+            if read::alias_of_self(v, f, d.value) {
+                return Here::From(d.by);
+            }
             return Here::Done;
         };
         let Some((_, i)) = Segment::reaching(inner, f, p, false) else {
             return Here::From(by);
         };
-        // (an alias input gives an alias plus `c`, `read::rel_add`: nothing
-        // followed, under the lock or after it)
+        // (an alias's input is followed after the lock, `read::rel_value`)
+        if read::alias_of_self(v, f, i.value) {
+            return Here::From(by);
+        }
         let nv = read::rel_add(v, Some(i.value), c);
         if nv == d.value {
             return Here::Done;
@@ -2946,6 +2954,16 @@ pub(crate) fn reask_from(
         match next {
             Some((_, d, k)) => {
                 let Some(c) = d.rel else {
+                    // (an alias of the field itself names a value before it,
+                    // which this walk may have moved: the relations after it
+                    // add to that, `read::rel_value`; walked on, each
+                    // stopping it where it stays)
+                    if read::alias_of_self(&eng.values, f, d.value) {
+                        by = Some(d.by);
+                        level = k;
+                        passed = false;
+                        continue;
+                    }
                     return;
                 };
                 if !settle_rel(eng, f, d.by, c) {
@@ -5302,7 +5320,7 @@ pub(crate) fn match_placements(eng: &Engine, last: &[NodeId], new: &[Placement])
 
 /// `rel_value` at a node's label, read under its segment's lock.
 pub(crate) fn rel_value_at(eng: &Engine, f: Field, at: NodeId, c: i64) -> ValueId {
-    read::rel_add(eng.values(), reaching_at(eng, f, at, false).and_then(|r| r.value), c)
+    read::rel_value(eng, f, reaching_at(eng, f, at, false).and_then(|r| r.value), c)
 }
 
 /// The brackets a commit files for its node: what its run set, else its
