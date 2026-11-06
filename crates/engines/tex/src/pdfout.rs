@@ -3088,7 +3088,9 @@ pub(crate) fn page_allocs(
     // of it)
     let rt_fonts = v.list(Vec::new());
     let rt_dests = v.list(Vec::new());
-    let rt_os = r.get(RT_OS)?.unwrap_or_else(|| v.int(0));
+    // (the read-time writes into object streams before it: entries of
+    // the allocations, [`os_write`])
+    let rt_os = v.int(0);
     let rt_pages = v.list(Vec::new());
     // (the forms the page names, written with it where nothing wrote
     // them before, and those read-time writes wrote: [`forms_named`])
@@ -3333,6 +3335,8 @@ const RT_FONT: i64 = 0;
 const RT_DEST: i64 = 1;
 const RT_FORM: i64 = 2;
 const RT_PAGE: i64 = 3;
+/// A read-time write into an object stream ([`os_write`]).
+const RT_OS: i64 = 4;
 
 /// A read-time command named `x` (kind [`RT_FONT`] …): an entry of
 /// [`ALLOCS`] where it stands, which the pages' fold counts where none
@@ -3343,6 +3347,27 @@ fn rt_named(r: &mut Run<'_, '_>, kind: i64, x: ValueId) {
     let v = r.v;
     let e = v.list(vec![v.str(RT_TAG), v.int(kind), x]);
     r.contribute(ALLOCS, v.seq_unit(e));
+}
+
+/// How many entries of kind `kind` this run made ([`rt_named`]).
+fn rt_count(r: &Run<'_, '_>, kind: i64) -> i64 {
+    let v = r.v;
+    let f = v.field(ALLOCS);
+    let mut n = 0;
+    for (g, x) in &r.contribs {
+        if *g != f {
+            continue;
+        }
+        for e in v.seq_to_vec(*x) {
+            if let [tag, k, _] = list_of(v, e)[..]
+                && v.with_str(tag, |s| s == RT_TAG) == Some(true)
+                && int_of(v, k) == kind
+            {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// The names of kind `kind` this run's read-time commands named so far
@@ -3367,9 +3392,6 @@ fn rt_mine(r: &Run<'_, '_>, kind: i64) -> Vec<ValueId> {
     }
     out
 }
-
-/// The objects read-time writes put into object streams ([`os_write`]).
-const RT_OS: &str = "pdf:rtos";
 
 /// Whether a read-time write wrote the document's transparency group
 /// ([`png_group_write`]).
@@ -3495,12 +3517,14 @@ pub(crate) fn os_write(r: &mut Run<'_, '_>) -> R<()> {
     }
     let v = r.v;
     let range = allocs_range(r, "os_write")?;
-    let pages = fold_allocs(v, range).os_written;
-    let rt = r.get(RT_OS)?.and_then(|x| v.as_int(x)).unwrap_or(0);
-    if (pages + rt) % 100 == 0 {
+    let f = fold_allocs(v, range);
+    // (the writes before it, the pages' and the read-time ones, its own
+    // run's among them: entries of the allocations, [`rt_named`])
+    let mine = rt_count(r, RT_OS);
+    if (f.os_written + f.rt_os + mine) % 100 == 0 {
         bump_cell(r)?;
     }
-    r.set(RT_OS, v.int(rt + 1), true);
+    rt_named(r, RT_OS, ValueId::UNIT);
     Ok(())
 }
 
@@ -3574,6 +3598,8 @@ struct AllocFold {
     forms: Arc<BTreeSet<ValueId>>,
     /// The objects the pages wrote into object streams.
     os_written: i64,
+    /// The read-time writes into object streams ([`os_write`]).
+    rt_os: i64,
     /// Whether the document's transparency group is written.
     png_group: bool,
 }
@@ -3749,6 +3775,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     let mut png_group = false;
     let mut ms = MarkState::default();
     let mut pages = 0usize;
+    let mut rt_os = 0i64;
     for e in v.seq_to_vec(range) {
         let xs = list_of(v, e);
         // (a name a read-time command used first, [`rt_named`]: an
@@ -3770,6 +3797,9 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
                 }
                 RT_FORM => {
                     seen_forms.insert(x);
+                }
+                RT_OS => {
+                    rt_os += 1;
                 }
                 _ => {
                     ms.premade.insert(v.as_int(x).unwrap_or(0));
@@ -3875,12 +3905,12 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
                 "alloc-fold: page {pno}: os {os} (page {}, marks {}, dests {dests_written}, forms {forms_written}, images {images_os}, raw {raw_written}), written before {written}, read-time os {}, objects {}",
                 i(4),
                 made.compressible,
-                i(8),
+                rt_os,
                 out.objects
             );
         }
         for _ in 0..os {
-            if (written + i(8)) % 100 == 0 {
+            if (written + rt_os) % 100 == 0 {
                 out.objects += 1;
             }
             written += 1;
@@ -3891,6 +3921,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     out.dests = Arc::new(seen_dest);
     out.forms = Arc::new(seen_forms);
     out.os_written = written;
+    out.rt_os = rt_os;
     out.png_group = png_group;
     let mut g = m.locked();
     if g.len() > 1 << 12 {
