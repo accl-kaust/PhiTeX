@@ -2991,7 +2991,7 @@ fn latex_examples_do_not_run_again_on_a_renamed_anchor() {
 /// font to whatever list reaches it: an append relation the engine
 /// recomputes (`Run::append_def`), not a run. Only the paragraph that now
 /// first uses the deleted paragraph's font runs again on the list (Grail's
-/// TikZ figures each ran again, a second each). A name in the list
+/// `TikZ` figures each ran again, a second each). A name in the list
 /// redefined to expand reads in full where an append meets it. Every
 /// edited PDF equals a cold build's, at one and eight threads.
 #[test]

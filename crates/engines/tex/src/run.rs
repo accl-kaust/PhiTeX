@@ -4000,7 +4000,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// appends it without reading `\\x`: a relation the engine recomputes
     /// from the value reaching the run (microtype's `\\MT@font@list`,
     /// which every node that first uses a font adds to: a paragraph
-    /// deleted at the start moved every later appender, Grail's TikZ
+    /// deleted at the start moved every later appender, Grail's `TikZ`
     /// figures a second each). Whether it did so; false with the input as
     /// it was.
     pub(crate) fn append_def(&mut self, p: Tok) -> R<bool> {
