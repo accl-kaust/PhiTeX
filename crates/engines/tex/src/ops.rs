@@ -1366,10 +1366,10 @@ pub(crate) fn fold_node(cx: &mut Ctx<'_>, o: &Ops, name: &str) -> Result<ValueId
     };
     let ok = match made {
         Ok((ds, false)) => Some(ds),
-        Ok((_, true)) => None,
         Err(Halt::Stop(s)) => return Err(s),
-        // (a reading that cannot end here: read back by the run itself)
-        Err(_) => None,
+        // (a text that does more than define, or a reading that cannot
+        // end here: read back by the run itself)
+        Ok((_, true)) | Err(_) => None,
     };
     if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
         eprintln!(
