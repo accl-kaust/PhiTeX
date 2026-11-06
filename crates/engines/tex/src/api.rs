@@ -6882,11 +6882,8 @@ impl Build {
     #[allow(clippy::too_many_lines)]
     pub fn stage_file(&mut self, name: &str, text: Option<&[u8]>) {
         // (what the provider answered in the last evaluation joins the
-        // supplied files first: a file its last round read was found in
-        // none of them, so its edit staged nothing, and the provider's
-        // old answer, joined after it, was pushed again: the first edit of
-        // an `\input` file after a cold build ran no node, the bayesnet
-        // example's `model_citation_influence.tex`)
+        // supplied files first, as `push_staged` joins it: the file is
+        // looked up among all the build holds)
         self.g.absorb_provided();
         let tools = self.stage_tool_file(name, text);
         let v = self.g.eng.values();
