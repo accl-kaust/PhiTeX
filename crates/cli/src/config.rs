@@ -295,7 +295,10 @@ fn with_key(text: &str, key: &str, value: &str) -> Result<String, String> {
             None => format!("no setting '{key}' (phitex --help-all lists them)"),
         });
     }
+    // (a choice's names are names, `off` too: never a boolean)
+    let choice = CHOICES.iter().any(|(c, _)| *c == key);
     let v = match value {
+        _ if choice => toml::Value::String(value.to_owned()).to_string(),
         "on" | "true" => "true".to_owned(),
         "off" | "false" => "false".to_owned(),
         _ if value.parse::<i64>().is_ok() => value.to_owned(),
@@ -389,9 +392,9 @@ pub fn prefs(
                         toml::Value::String(t.clone()).to_string()
                     }
                     _ => {
-                        return Err(format!(
-                            "cache-limit: a size (\"500MB\", \"4GB\") or 0: no cache"
-                        ));
+                        return Err(
+                            "cache-limit: a size (\"500MB\", \"4GB\") or 0: no cache".to_owned()
+                        );
                     }
                 };
                 text = with_line(&text, k, &t)?;
