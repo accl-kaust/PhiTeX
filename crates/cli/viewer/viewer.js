@@ -3048,6 +3048,10 @@ var Panel = class {
   }
   packages(p) {
     const done = p.done?.length ?? 0;
+    const now = performance.now(), d = this.downloads;
+    if (p.loading.length && d.since === void 0) d.since = now;
+    else if (!p.loading.length && d.since !== void 0) d.ms += now - d.since, d.since = void 0;
+    d.n = done, d.bytes = p.bytes ?? 0;
     const total = done + p.loading.length;
     if (done !== this.loadDone) this.loadDone = done;
     const pct = this.loadPct = Math.max(this.loadPct, total ? Math.round(100 * done / total) : 100);
@@ -4086,6 +4090,16 @@ var Panel = class {
     this.lat = { summary, details: details ?? this.lat?.details };
     if (!this.$("#m-time").hidden) this.timing();
   }
+  /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
+  downloads = { n: 0, bytes: 0, ms: 0 };
+  /** The timing popover's Downloads row: the packages' time, how many and their size; none fetched, none. */
+  downloadsPart() {
+    const d = this.downloads;
+    if (!d.n && d.since === void 0) return "";
+    const ms = d.ms + (d.since === void 0 ? 0 : performance.now() - d.since);
+    const size = d.bytes ? ` \xB7 ${d.bytes < 1e6 ? `${Math.max(1, Math.round(d.bytes / 1e3))} kB` : `${(d.bytes / 1e6).toFixed(1)} MB`}` : "";
+    return `<div class="row"><span class="k">Downloads</span><span class="v">${esc3(dur(ms))}</span><span class="note">${d.n} package${d.n === 1 ? "" : "s"}${size}${d.since === void 0 ? "" : ", more on the way"}</span></div>`;
+  }
   /** The first build's time and the edits' since (the watch's), for the popover's bars. */
   times = { edits: [] };
   /** A build's time: the first (cold) one's, or an edit's: drawn as bars beside each other in the timing popover. */
@@ -4128,7 +4142,7 @@ var Panel = class {
       return `<div class="row"><span class="k">${esc3(p.label)}</span><span class="v">${esc3(p.value)}</span>${bar2}${p.note ? `<span class="note">${esc3(p.note)}</span>` : ""}</div>`;
     }).join("");
     const strips2 = framePart(this.$("#stripsline").dataset.frame);
-    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.timeBars() + rows + strips2 + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
+    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.timeBars() + this.downloadsPart() + rows + strips2 + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
     el.querySelector(".foot").textContent = parts.length ? "" : this.lat?.summary ?? "";
     el.querySelector(".msg").textContent = this.msgText;
   }
