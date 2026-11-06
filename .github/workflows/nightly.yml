@@ -130,8 +130,8 @@ jobs:
         env:
           PHITEX_CHROME: /usr/bin/google-chrome
         run: |
-          npm i --no-save --no-package-lock --prefix web/test playwright-core@1.56.1
-          node web/test/check.mjs https://demo.phitex.org/
+          npm i --no-save --no-package-lock --prefix apps/web/test playwright-core@1.56.1
+          node apps/web/test/check.mjs https://demo.phitex.org/
   publish:
     needs: [which, build]
     runs-on: ubuntu-24.04

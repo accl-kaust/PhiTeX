@@ -637,6 +637,204 @@ mod tests {
         assert_eq!(two.get(Key::Doc("wkeys")), None);
     }
 
+    /// Shelf's files as a host gives them (the frontends' wasm core, the
+    /// CLI's `--shelf`): found through the release's index, their packs
+    /// from memory, each pack asked recorded (by its name, the id without
+    /// its hash).
+    struct ShelfFiles {
+        files: Arc<phitex_shelf::Files>,
+        asked: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct Served(HashMap<String, Vec<u8>>, Arc<Mutex<Vec<String>>>);
+
+    impl phitex_shelf::PackSource for Served {
+        fn pack(&self, id: &str) -> Result<Vec<u8>, String> {
+            let stem = id.rsplit_once('-').map_or(id, |(s, _)| s);
+            lock(&self.1).push(stem.to_owned());
+            self.0
+                .get(id)
+                .cloned()
+                .ok_or_else(|| format!("no pack {id}"))
+        }
+    }
+
+    impl ShelfFiles {
+        fn new(release: (phitex_shelf::Index, HashMap<String, Vec<u8>>)) -> ShelfFiles {
+            let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+            let src = Arc::new(Served(release.1, asked.clone()));
+            ShelfFiles {
+                files: Arc::new(phitex_shelf::Files::new(Arc::new(release.0), src, "pdftex")),
+                asked,
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            let mut a = lock(&self.asked).clone();
+            a.sort();
+            a
+        }
+    }
+
+    impl Host for ShelfFiles {
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            self.files.locate(name).map(PathBuf::from)
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            self.files.read(&path.to_string_lossy()).map(|b| b.to_vec())
+        }
+        fn content_key(&self) -> Option<phitex_tex::ContentKey> {
+            let f = self.files.clone();
+            Some(Arc::new(move |name: &str| f.key(name)))
+        }
+        fn published_format(&self, name: &str) -> Option<Vec<u8>> {
+            self.files.published_format(name)
+        }
+    }
+
+    /// A store in memory that keeps formats, counting their puts.
+    #[derive(Default)]
+    struct Formats(Mutex<HashMap<String, ([u8; 32], Vec<u8>)>>, Mutex<usize>);
+
+    impl crate::host::Store for Formats {
+        fn get(&self, _key: crate::host::Key<'_>) -> Option<Vec<u8>> {
+            None
+        }
+        fn put(&self, _key: crate::host::Key<'_>, _bytes: &[u8]) {}
+        fn format(&self, name: &str) -> Option<([u8; 32], Vec<u8>)> {
+            lock(&self.0).get(name).cloned()
+        }
+        fn put_format(&self, name: &str, key: &[u8; 32], bytes: &[u8]) {
+            *lock(&self.1) += 1;
+            lock(&self.0).insert(name.to_owned(), (*key, bytes.to_vec()));
+        }
+    }
+
+    impl Formats {
+        fn only(&self) -> (String, [u8; 32], Vec<u8>) {
+            let f = lock(&self.0);
+            assert_eq!(f.len(), 1, "one format stored");
+            let (n, (k, b)) = f.iter().next().expect("a format");
+            (n.clone(), *k, b.clone())
+        }
+        fn puts(&self) -> usize {
+            *lock(&self.1)
+        }
+    }
+
+    /// A format is good while the files it read are: one made on a Shelf
+    /// release stays good on a later release that changed other files
+    /// and gave every pack another id, nothing fetched to say so (a
+    /// format keyed by pack ids was found stale and made again in the
+    /// browser, every hyphenation pack fetched); one whose file changed
+    /// is not, and is made again. A release's own format is taken when
+    /// the store has none, or a stale one: a download, not a build.
+    #[test]
+    fn a_format_holds_while_the_files_it_read_do() {
+        let ini: &[u8] = b"\\catcode`\\{=1 \\catcode`\\}=2 \\input hyph-de.tex \\dump\n";
+        let de = "tex/generic/hyph-utf8/patterns/hyph-de.tex";
+        let fr = "tex/generic/hyph-utf8/patterns/hyph-fr.tex";
+        let job = || Job {
+            engine: crate::tex::engine("tex").unwrap(),
+            ini: false,
+            etex: false,
+            ..job()
+        };
+        let text = "\\shipout\\hbox{\\pat}\\end\n";
+        let build = |host: &Arc<ShelfFiles>, store: &Arc<Formats>| {
+            let s = Session::new(
+                job(),
+                Arc::from(text),
+                host.clone(),
+                Some(store.clone() as Arc<dyn crate::host::Store>),
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            );
+            let mut d = Document::new(s, "doc.tex");
+            let ev = d.step();
+            let b = ev.iter().find(|e| e["event"] == "build").expect("a build");
+            assert_eq!(b["ok"], true, "{ev:?}");
+        };
+        let a: &[(&str, &[phitex_shelf::PackFile<'_>])] = &[
+            ("tex-ini", &[("tex/plain/config/tex.ini", ini)]),
+            (
+                "hyphen-german",
+                &[(de, b"\\def\\pat{1}"), (fr, b"\\def\\x{1}")],
+            ),
+        ];
+        let store = Arc::new(Formats::default());
+        let on_a = Arc::new(ShelfFiles::new(phitex_shelf::release("tl-test.1", a, &[])));
+        build(&on_a, &store);
+        assert_eq!(on_a.asked(), ["hyphen-german", "tex-ini"]);
+        let (_, made_a, _) = store.only();
+        // (B: another file of the pack changed, the ini's pack renamed:
+        // every pack id another, the format's files as they were)
+        let b: &[(&str, &[phitex_shelf::PackFile<'_>])] = &[
+            ("ini", &[("tex/plain/config/tex.ini", ini)]),
+            (
+                "hyphen-german",
+                &[(de, b"\\def\\pat{1}"), (fr, b"\\def\\x{2}")],
+            ),
+        ];
+        let on_b = Arc::new(ShelfFiles::new(phitex_shelf::release("tl-test.2", b, &[])));
+        build(&on_b, &store);
+        assert_eq!(
+            on_b.asked(),
+            Vec::<String>::new(),
+            "the format checked by fetching packs"
+        );
+        assert_eq!(store.puts(), 1, "the format made again");
+        // (C: the file the format read changed: made again, on it)
+        let c: &[(&str, &[phitex_shelf::PackFile<'_>])] = &[
+            ("ini", &[("tex/plain/config/tex.ini", ini)]),
+            (
+                "hyphen-german",
+                &[(de, b"\\def\\pat{3}"), (fr, b"\\def\\x{2}")],
+            ),
+        ];
+        let on_c = Arc::new(ShelfFiles::new(phitex_shelf::release("tl-test.3", c, &[])));
+        build(&on_c, &store);
+        let (name, made_c, _) = store.only();
+        assert_ne!(made_c, made_a, "a stale format kept");
+        assert_eq!(on_c.asked(), ["hyphen-german", "ini"]);
+        // (D: changed again, its format published: a fresh store and a
+        // stale one take it, neither making it nor reading its files)
+        let d: &[(&str, &[phitex_shelf::PackFile<'_>])] = &[
+            ("ini", &[("tex/plain/config/tex.ini", ini)]),
+            (
+                "hyphen-german",
+                &[(de, b"\\def\\pat{4}"), (fr, b"\\def\\x{2}")],
+            ),
+        ];
+        let made = Arc::new(Formats::default());
+        build(
+            &Arc::new(ShelfFiles::new(phitex_shelf::release("tl-test.4", d, &[]))),
+            &made,
+        );
+        let (made_name, made_d, state) = made.only();
+        assert_eq!(made_name, name);
+        let published =
+            || phitex_shelf::release("tl-test.4", d, &[(name.as_str(), state.as_slice())]);
+        let fresh = Arc::new(Formats::default());
+        let on_d = Arc::new(ShelfFiles::new(published()));
+        build(&on_d, &fresh);
+        assert_eq!(
+            on_d.asked(),
+            [format!("fmt-{name}")],
+            "the format made, not taken"
+        );
+        assert_eq!(fresh.only().1, made_d, "the published format kept");
+        let on_d = Arc::new(ShelfFiles::new(published()));
+        build(&on_d, &store);
+        // (the stale format's changed file fetched by its check, the ini's
+        // not: no build)
+        assert_eq!(
+            on_d.asked(),
+            [format!("fmt-{name}"), "hyphen-german".to_owned()]
+        );
+        assert_eq!(store.only().1, made_d);
+    }
+
     /// `n` pages, each fired by the page builder (the progress counts
     /// the pages its finishers reach, `phitex_tex::Progress::on_page`).
     fn pages(n: usize) -> String {

@@ -58,6 +58,10 @@ pub fn font_name(key: &str) -> Option<&str> {
 /// hashed).
 pub type ContentKey = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 
+/// A prelude's exported state, asked when needed
+/// ([`Options::prelude_fallback`]).
+pub type PreludeSource = Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>;
+
 /// The searches a tool's support files are found by ([`Options::tool_finder`]):
 /// kpathsea's formats for them, as `bibtex`, `biber` and `makeindex` ask.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -190,6 +194,12 @@ pub struct Options {
     /// instead of evaluating the prelude when its key matches (the same
     /// prelude text, every file it read unchanged).
     pub prelude_bytes: Option<Vec<u8>>,
+    /// The format to take when [`Options::prelude_bytes`] is none, is
+    /// another prelude's, or is stale (a file it read changed): asked
+    /// then, once (the format the files' release publishes for this
+    /// engine, Shelf's); none, or one that does not hold either, and the
+    /// prelude is evaluated.
+    pub prelude_fallback: Option<PreludeSource>,
     /// The wall time one evaluation (the prelude, a build, an edit) may
     /// take; past it the build ends with the engine's deadline error,
     /// naming what waits, in the log. `None`: no limit.
@@ -978,6 +988,7 @@ impl Default for Options {
             prelude_jobname: "texput".to_owned(),
             program: "pdftex".to_owned(),
             prelude_bytes: None,
+            prelude_fallback: None,
             // (`PHITEX_TIME_LIMIT_SECS`: another bound, 0 for none; a
             // measurement's cold build or reference must never be cut
             // short, a truncated reference compares as a wrong edit)
@@ -5655,20 +5666,28 @@ impl Options {
     }
 }
 
-/// The check of a format read from the cache ([`cached_prelude`]),
-/// running.
-static FORMAT_CHECK: Mutex<Option<crate::exec::Beside<bool>>> = Mutex::new(None);
-
-/// Whether the format read from the cache, if one was, still has every
-/// file it read as the finder gives it now.
-fn format_holds() -> bool {
-    FORMAT_CHECK
-        .locked()
-        .take()
-        .is_none_or(|h| h.join().unwrap_or(false))
+/// The check of a format given as bytes ([`cached_prelude`]), running
+/// beside the build's start, and whether that format was the fallback
+/// ([`Options::prelude_fallback`]). The build's own: two builds in one
+/// process never take each other's.
+struct FormatCheck {
+    holds: crate::exec::Beside<bool>,
+    fallback: bool,
 }
 
-fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cached>, Vec<String>> {
+impl FormatCheck {
+    /// Whether the format still has every file it read as the finder
+    /// gives it now.
+    fn holds(self) -> bool {
+        self.holds.join().unwrap_or(false)
+    }
+}
+
+fn cached_prelude(
+    key: u64,
+    digest: &[u8; 32],
+    opts: &Options,
+) -> Result<(Arc<Cached>, Option<FormatCheck>), Vec<String>> {
     let finder = opts.prelude_finder();
     let candidates: Vec<Arc<Cached>> = env_cache()
         .locked()
@@ -5681,12 +5700,19 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
         })
         .unwrap_or_default();
     let t0 = std::time::Instant::now();
-    let given = opts
-        .prelude_bytes
-        .as_deref()
-        .and_then(deserialise)
-        .filter(|c| c.text_key == key && c.text_digest == *digest)
-        .map(Arc::new);
+    let take = |b: &[u8]| {
+        deserialise(b)
+            .filter(|c| c.text_key == key && c.text_digest == *digest)
+            .map(Arc::new)
+    };
+    // (the given format, else the fallback, asked now: a format that is
+    // another prelude's, or none, is as good as stale)
+    let mut fallback = false;
+    let given = opts.prelude_bytes.as_deref().and_then(take).or_else(|| {
+        let f = opts.prelude_fallback.as_ref()?;
+        fallback = true;
+        f().as_deref().and_then(take)
+    });
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") && opts.prelude_bytes.is_some() {
         eprintln!(
             "format deserialise: {:?} ({} bytes, {})",
@@ -5720,8 +5746,7 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
             }
             fresh
         });
-        *FORMAT_CHECK.locked() = Some(h);
-        return Ok(c);
+        return Ok((c, Some(FormatCheck { holds: h, fallback })));
     }
     let mut known: Vec<String> = Vec::new();
     for c in candidates {
@@ -5743,7 +5768,7 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
             );
         }
         if fresh {
-            return Ok(c);
+            return Ok((c, None));
         }
         // (a stale cache entry still names the files the prelude reads)
         for (n, _, _, _) in &c.reads {
@@ -5760,7 +5785,7 @@ fn cached_prelude(key: u64, digest: &[u8; 32], opts: &Options) -> Result<Arc<Cac
 /// while every file it read is what the finder gives now.
 // (its phases timed and measured inline, PHITEX_TEX_TIME)
 #[allow(clippy::too_many_lines)]
-fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
+fn prelude_env(prelude: Option<&str>, opts: &Options) -> (Arc<Cached>, Option<FormatCheck>) {
     // (a XeTeX format is another format: its INITEX is XeTeX's)
     let tag: u64 = if opts.xetex.is_some() {
         0x58_6554_6558
@@ -5927,7 +5952,7 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> Arc<Cached> {
     if c.errors.is_empty() {
         env_cache().locked().entry(key).or_default().push(c.clone());
     }
-    c
+    (c, None)
 }
 
 /// The name a diagnostic in the prelude's own text carries (its
@@ -6229,7 +6254,7 @@ impl Build {
         let crs = crate::expand::cr_lines(document);
         let document = crs.as_deref().unwrap_or(document);
         let t0 = std::time::Instant::now();
-        let cached = prelude_env(prelude, &opts);
+        let (cached, check) = prelude_env(prelude, &opts);
         if let Some(p) = &opts.progress {
             p.note_format(true);
         }
@@ -6408,17 +6433,26 @@ impl Build {
         let _ = files;
         let end = steps;
         crate::timeline::lap("engine: the link, end and files nodes");
-        // (a format whose files changed since it was cached: built again)
-        if !format_holds() {
-            crate::timeline::lap("engine: the cached format stale");
-            return Build::with(
-                Options {
-                    prelude_bytes: None,
-                    ..opts
-                },
-                prelude,
-                document,
-            );
+        // (a format whose files changed since it was cached: the
+        // fallback taken, else the prelude built again)
+        if let Some(c) = check {
+            let fallback = c.fallback;
+            if !c.holds() {
+                crate::timeline::lap("engine: the cached format stale");
+                return Build::with(
+                    Options {
+                        prelude_bytes: if fallback {
+                            None
+                        } else {
+                            opts.prelude_fallback.as_ref().and_then(|f| f())
+                        },
+                        prelude_fallback: None,
+                        ..opts
+                    },
+                    prelude,
+                    document,
+                );
+            }
         }
         crate::timeline::lap("engine: the format's check taken");
         let edits = opts.edits.clone().unwrap_or_default();

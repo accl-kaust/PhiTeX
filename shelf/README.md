@@ -9,7 +9,7 @@ what a document uses without a TeX installation or a server process.
                                             table, the engines' search orders, the dependency
                                             columns and what traced them
     GET /tl2026/release-<release>.json      every release's release.json, kept
-    GET /tl2026/index-<release>.tsv.gz      path <TAB> pack <TAB> deps_pdftex <TAB> deps_xetex
+    GET /tl2026/index-<release>.tsv.gz      path <TAB> pack <TAB> deps_pdftex <TAB> deps_xetex <TAB> sum
     GET /tl2026/packs-<release>.tsv.gz      pack <TAB> sha256 <TAB> bytes
     GET /tl2026/h/<pack>-<hash>.pack        packs, named by content, never changed
 
@@ -23,6 +23,19 @@ what a document uses without a TeX installation or a server process.
 - **Checked**: the pack table has every pack's full SHA-256 (of the
   `.pack` file as served, its gzip bytes) and size; a client checks each
   pack it fetches against it and refuses one that differs.
+- **Each file's own content sum** (the index's last column, release.json's
+  `file_sums`: 12 hex digits of the SHA-256 of its bytes) is its content
+  key: a format records the keys of the files it read and stays good on a
+  later release unless one of those files changed. A pack id changes with
+  any file of the pack and with how files are grouped, so it is never a
+  format's key.
+- **Formats**: a release publishes the formats PhiTeX made on its files
+  (`scripts/check.sh`'s builds, `release.py --formats`), each in a pack
+  of its own named in release.json's `formats` by the session's store
+  name (the engine, its identity, its ini's hash); a client of that
+  engine identity with no format, or a stale one, downloads it instead of
+  making it (`scripts/check-formats.sh` checks each is taken, no hyphen-*
+  pack fetched).
 - **Dependency columns are hints**: per engine, the packs loading a .sty or
   .cls reads (traced on PhiTeX; `traced_by` names the engine's commit), so
   a client fetches them in one round. A client that ignores them, or a
