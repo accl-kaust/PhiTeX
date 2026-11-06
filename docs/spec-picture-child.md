@@ -319,7 +319,12 @@ picture saw, and the parent to make exactly what TeX's run made:
    never places it again in this process): the child's text reaching
    past itself (a group or conditional left open or closed, input left,
    a cut, a fatal error, children of its own, read-time objects, a scope
-   effect, a relation other than an append), an item for the main list
-   that is not a marker (the picture was not in a box), and a look at the
-   list before it (`\lastskip`, `\unskip`, `\lastbox`… on its empty
-   base level, whose real tail is the parent's: `Run::list_last`).
+   effect, a relation other than an append), and an item for the main
+   list that is not a marker (the picture was not in a box).
+5. **A look before the picture's start.** The child's list starts empty;
+   TeX's picture is appended to the parent's list. Where the child looks
+   past its start (`\lastskip`, `\unskip`, `\lastbox`… on its empty
+   base level, `Run::list_last`), it takes the parent's items before the
+   picture (the `pic:` field's `\u{1}list` key, read only then) in front
+   of its own, and its output's list is then the parent's whole list,
+   which the parent puts in place of its own (`Run::pic_take_list`).
