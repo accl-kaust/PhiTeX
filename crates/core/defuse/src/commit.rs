@@ -5686,8 +5686,11 @@ fn reask_after_effect_with(
         }
     }
     st.scope_asked += readers.len() as u64;
-    for (f, r) in &readers {
-        reask_reader(eng, w, *f, r, Some(by.id), st);
+    {
+        let _memo = read::WalkMemo::new();
+        for (f, r) in &readers {
+            reask_reader(eng, w, *f, r, Some(by.id), st);
+        }
     }
     // (the relations, end readers and finals likewise: of those fields;
     // all of them were put right or asked to the line's end at each walk

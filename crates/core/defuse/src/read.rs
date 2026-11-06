@@ -9,7 +9,7 @@ use crate::engine::Engine;
 use crate::node::{Anchor, Node, ReadKind, State};
 use crate::order::{Pos, SegId};
 use crate::segment::{Def, GLOBAL, Inner, RangeReader, Reader, Segment, reduce};
-use crate::values::{Field, FxHashSet, Value, ValueId, Values};
+use crate::values::{Field, FxHashMap, FxHashSet, Value, ValueId, Values};
 
 /// A path that is no path: the defining node's id as an integer
 /// (`Ctx::def_site`).
@@ -1668,19 +1668,94 @@ fn last_visible(ls: &[(Pos, Def, (usize, u64))], target: &[u64]) -> Option<Def> 
 /// field index, the last one visible to `target`; else the environment.
 fn visible_before(eng: &Engine, f: Field, target: &[u64], lo: Pos) -> Reaching {
     let mut lo = lo;
-    while let Some(s) = last_def_before(eng, f, lo) {
+    // (in a walk, `WalkMemo`: the answers found for this field and these
+    // scopes from the segments passed over, each of which answers what
+    // the search found further back)
+    let t = WALK_MEMO.with_borrow_mut(|m| {
+        m.as_mut().map(|m| {
+            let k = u32::try_from(m.targets.len()).unwrap_or(u32::MAX);
+            *m.targets.entry(target.to_vec()).or_insert(k)
+        })
+    });
+    let mut passed: Vec<Pos> = Vec::new();
+    let found = loop {
+        if let Some(t) = t
+            && let Some(r) = WALK_MEMO.with_borrow(|m| m.as_ref().and_then(|m| m.answers.get(&(f, lo, t)).copied()))
+        {
+            break r;
+        }
+        let Some(s) = last_def_before(eng, f, lo) else {
+            break env_reaching(eng, f);
+        };
+        if t.is_some() {
+            passed.push(lo);
+        }
         let seg = eng.seg(s);
         let start = chain_start(eng, seg);
         {
             let inner = seg.inner.read();
             let ls = survivors(eng, seg, &inner, f, &start);
             if let Some(d) = ls.iter().rev().find(|x| visible(target, x.1)).map(|x| x.0) {
-                return Reaching::of(&d);
+                break Reaching::of(&d);
             }
         }
         lo = seg.lo;
+    };
+    if let Some(t) = t
+        && !passed.is_empty()
+    {
+        WALK_MEMO.with_borrow_mut(|m| {
+            if let Some(m) = m.as_mut() {
+                for p in passed {
+                    m.answers.insert((f, p, t), found);
+                }
+            }
+        });
     }
-    env_reaching(eng, f)
+    found
+}
+
+/// A walk's searches back (`WalkMemo`): the scopes open at the readers,
+/// numbered, and the answers by field, a segment's start and those
+/// scopes.
+#[derive(Default)]
+struct Searches {
+    targets: FxHashMap<Vec<u64>, u32>,
+    answers: FxHashMap<(Field, Pos, u32), Reaching>,
+}
+
+thread_local! {
+    static WALK_MEMO: std::cell::RefCell<Option<Searches>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While it lives, the searches of this thread for the definition a
+/// reader sees before a segment's start keep their answers, by field, the
+/// segment's start and the scopes open at the reader, and a search that
+/// comes to a start one has passed takes its answer: a walk asking many
+/// readers of a field again, at the same nesting, searches back over the
+/// same segments once, not once per reader (biblatex at -j4, a bracket
+/// walk's 30 to 60 k readers each looked back ~100 segments, 3 M
+/// segments a walk, ~3 s, mc 80645). For a walk under no other's: the
+/// line is read as it stands when each answer is first found, as the
+/// readers it answers would read it then.
+pub(crate) struct WalkMemo(bool);
+
+impl WalkMemo {
+    pub(crate) fn new() -> WalkMemo {
+        let outer = WALK_MEMO.with_borrow(Option::is_some);
+        if !outer {
+            WALK_MEMO.with_borrow_mut(|m| *m = Some(Searches::default()));
+        }
+        WalkMemo(!outer)
+    }
+}
+
+impl Drop for WalkMemo {
+    fn drop(&mut self) {
+        if self.0 {
+            WALK_MEMO.with_borrow_mut(|m| *m = None);
+        }
+    }
 }
 
 /// The definitions of `f` in segment `seg` (`inner` its guard, `start`
