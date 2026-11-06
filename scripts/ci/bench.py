@@ -136,7 +136,8 @@ def cmd_cold(args):
     work = Path(os.environ.get("CI_WORK", "/w"))
     items = manuals.load_list(args.list)
     if args.ids:
-        want = set(args.ids.split(","))
+        # (',' or ':': sbatch's --export values cannot hold commas)
+        want = set(args.ids.replace(":", ",").split(","))
         items = [c for c in items if c["id"] in want]
     # (the longest first, so the long tail does not end the run)
     items = sorted(items, key=lambda c: (-(c.get("oracle_wall_s") or 0), c["id"]))

@@ -47,7 +47,7 @@ box() {
   taskset -c "$cores" apptainer exec --containall --cleanenv --no-home --net --network none \
     --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w:/w" --bind "$R/harness:/h:ro" \
     --bind "$R/out:/r" --bind "$w/b:/b:ro" ${grail:+--bind "$R/grail:/g:ro"} --pwd /w \
-    --env TEXMFVAR=/w/texmf-var,PHITEX_SANDBOX=1,CI_WORK=/w,HOME=/w/home \
+    --env TEXMFVAR=/w/texmf-var,PHITEX_SANDBOX=1,CI_WORK=/w \
     "$sif" "$@"
 }
 grail=; [ -d "$R/grail" ] && grail=1
