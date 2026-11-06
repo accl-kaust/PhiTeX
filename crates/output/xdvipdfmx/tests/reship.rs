@@ -1,5 +1,5 @@
 //! A page written again ([`Session::reship`]) into a file whose objects
-//! are written: its forms (`pdf:bxobj @name ... pdf:exobj`, TikZ's
+//! are written: its forms (`pdf:bxobj @name ... pdf:exobj`, pgf's
 //! transparency groups and shadings) made again under the labels the
 //! file has them by, so that every page drawing a form, written again or
 //! not, draws the new one, and the form's object is the one a file made
