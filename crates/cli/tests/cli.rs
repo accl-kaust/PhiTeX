@@ -3606,8 +3606,9 @@ fn watch_open_starts_only_the_users_viewer() {
 /// the caption's): the figure's run makes the picture's definitions its
 /// own where the picture stands, and the picture reads before the
 /// figure's run. Edits that move the floats (a figure deleted and put back, a paragraph
-/// before them deleted), a word before them and a picture's own text
-/// changed: each edit's PDF is `phitex build`'s of its text, byte for
+/// before them deleted), a word before them, a picture's own text and
+/// the text a picture follows in its float changed (the picture looks
+/// only at the item before it, `Run::pic_take_list`): each edit's PDF is `phitex build`'s of its text, byte for
 /// byte, at one thread and at four.
 #[test]
 #[ignore = "heavy: the pdflatex format and tikz; run on the cluster"]
@@ -3627,6 +3628,7 @@ Gamma text between the floats, see Figure~\\ref{{fig:a}}.\n\n\\begin{{figure}}[b
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\node {{\\fontsize{{13}}{{15}}\\selectfont big}};\n\\end{{tikzpicture}}\n\\caption{{\\fontsize{{13}}{{15}}\\selectfont A caption in the picture's size}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped \\the\\picn\\xdef\\capword{{after}}}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped again \\the\\picn}}\n\\end{{figure}}\n\
+\\begin{{figure}}[t]\\centering Inline words before \\unskip\\begin{{tikzpicture}}\\draw (0,0) -- (1,1);\\end{{tikzpicture}}\\hfil\\begin{{tikzpicture}}\\fill (0,0) circle (0.2);\\end{{tikzpicture}}\n\\caption{{Pictures after text}}\n\\end{{figure}}\n\
 Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon words in the next section.\n\\end{{document}}\n"
     )
 }
@@ -3679,6 +3681,7 @@ fn picture_children_exact(threads: &str) {
             )
         }),
         Box::new(|t| t.replacen("Gamma text", "Gamma words", 1)),
+        Box::new(|t| t.replacen("Inline words before", "Inline text set before", 1)),
     ];
     let mut now = text.clone();
     let mut texts = vec![(
