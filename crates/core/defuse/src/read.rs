@@ -1204,12 +1204,18 @@ pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
 }
 
 /// The nearest node before `me` in its unit that is a piece of the text
-/// (`Operation::text`) with a run to come or under way: not committed
-/// yet, or asked again since its commit (dirty, running). What a run that
-/// would end the job's text at `me` (a fatal error's claim of every node
-/// after it, `Ctx::wait_text_before`) waits for: made while such a piece
-/// is to run, it rests on a guess of that piece's text. The page layer's
-/// nodes, which wait on text after `me`, are not looked at.
+/// (`Operation::text`) asked again since it committed: dirty or running.
+/// What a run that would end the job's text at `me` (a fatal error's
+/// claim of every node after it, `Ctx::wait_text_before`) waits for:
+/// made while such a piece is to run again, it rests on that piece's
+/// last answer, which its run is about to replace. A piece not committed
+/// yet (a hole) is not waited for: a read-on, the way a piece meets the
+/// input's end, waits for those already (`Ctx::hole_before`), and a
+/// fatal error met otherwise ends the job at once, no piece after it
+/// begun (`fatal::a_fatal_error_ends_the_job_before_an_included_file`:
+/// waiting for the first piece's first run, eight threads ran the
+/// included file's). The page layer's nodes, which wait on text after
+/// `me`, are not looked at.
 pub(crate) fn text_to_run_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     let to = pos_of(eng, me.id)?;
     let from = unit_start(eng, me);
@@ -1223,6 +1229,7 @@ pub(crate) fn text_to_run_before(eng: &Engine, me: &Node) -> Option<NodeId> {
                 if *id != me.id
                     && n.unit == me.unit
                     && eng.op(n.op()).text()
+                    && n.committed()
                     && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
                     && !n.held_panic.load(Ordering::Acquire)
                 {

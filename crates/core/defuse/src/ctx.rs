@@ -1192,8 +1192,8 @@ impl<'a> Ctx<'a> {
         true
     }
 
-    /// Stops the run until the nearest piece of the text before me with a
-    /// run to come or under way ([`read::text_to_run_before`]) commits,
+    /// Stops the run until the nearest piece of the text before me asked
+    /// again since it committed ([`read::text_to_run_before`]) commits,
     /// when there is one: nothing is filed, my last run's products stand,
     /// and I run again at that commit or at the quiet point. For a run
     /// that would end the job's text at me (a fatal error, which claims
@@ -1203,8 +1203,9 @@ impl<'a> Ctx<'a> {
     /// to be undone once the text ran (biblatex at -j4, an example piece
     /// cut from its \end reading on to the input's end: one run of 71 s,
     /// 49 s of it the claim's re-asks, mc 80568, 80574). The page layer is
-    /// not waited for: a fatal error on a prefix every piece of which ran
-    /// ends the job at once, no piece after it begun.
+    /// not waited for, nor a piece's first run: a fatal error on a prefix
+    /// every piece of which stands ends the job at once, no piece after
+    /// it begun.
     pub fn wait_text_before(&mut self) -> Result<(), Stop> {
         self.check()?;
         if let Some(x) = read::on_one_layout(self.eng, || read::text_to_run_before(self.eng, self.me)) {
