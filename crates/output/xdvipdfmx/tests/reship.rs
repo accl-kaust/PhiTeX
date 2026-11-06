@@ -130,7 +130,17 @@ fn a_page_written_again_makes_its_forms_again() {
     }
     whole.extend(exact.finish().unwrap());
     let want = objects_with(&whole, b"/Subtype/Form");
-    let bodies = |x: &[(u32, Vec<u8>)]| x.iter().map(|f| f.1.clone()).collect::<Vec<_>>();
+    // (but for the number of the form's resources, a new object)
+    let bodies = |x: &[(u32, Vec<u8>)]| {
+        x.iter()
+            .map(|f| {
+                let b = &f.1;
+                let r = find(b, b"/Resources").unwrap() + b"/Resources".len();
+                let e = r + find(&b[r..], b" R").unwrap();
+                [&b[..r], &b[e..]].concat()
+            })
+            .collect::<Vec<_>>()
+    };
     assert_eq!(bodies(&made), bodies(&want), "the forms' bodies");
     assert!(
         made.iter().all(|f| find(&f.1, b"0 0 1").is_some()),
