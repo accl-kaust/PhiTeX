@@ -514,6 +514,21 @@ impl<'a> Ctx<'a> {
         Ok(x)
     }
 
+    /// The answer `read_path` would give, with no read recorded: the run
+    /// depends on nothing of it. For a reader that looks first and then
+    /// records a narrower read covering what it used of the answer (each
+    /// element it checked: `Step::Within` of them), and goes by that
+    /// read's answer, never by this one alone.
+    pub fn peek_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {
+        self.check()?;
+        let (at, _) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+        if r.value.is_some_and(|x| read::alias_of(self.values(), x).is_some()) {
+            return Ok(None);
+        }
+        Ok(read::through_at(self.eng, r, p, at, false))
+    }
+
     /// `read` through a path: the run depends only on the path's answer
     /// (an alias definition: on all of it, followed).
     pub fn read_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {

@@ -4118,22 +4118,39 @@ impl<'c, 'a> Run<'c, 'a> {
     /// holds (none expands: its expansion is its body): its tail (1 ending
     /// with a comma or empty, 2 otherwise), or None.
     fn append_base(&mut self, l: Loc) -> R<Option<i64>> {
+        use phitex_defuse::Step;
         let v = self.v;
         let f = self.loc_field(l);
-        let path = phitex_defuse::PathId::of_proj(self.ops.append_proj);
-        let Some(x) = self.cx.read_path(f, path)? else {
+        let proj = Step::Proj(self.ops.append_proj);
+        let tail_p = self.cx.path(&[proj, Step::Index(0)]);
+        let Some(tail) = self.cx.read_path(f, tail_p)? else {
             return Ok(None);
         };
-        let Some((tail, names)) = v.with_list(x, |xs| (xs.first().copied(), xs.get(1).copied()))
-        else {
-            return Ok(None);
-        };
-        for t in crate::val::toks_of(v, names) {
-            if self.class_lookup(t)?.is_none() {
-                return Ok(None);
+        // (the names, each checked not to expand; the run then depends on
+        // the list holding none it did not check, `Step::Within`, not on
+        // which: a name's first append moving later, or going, leaves it
+        // standing)
+        let names_p = self.cx.path(&[proj, Step::Index(1)]);
+        let mut seen = self.cx.peek_path(f, names_p)?;
+        for _ in 0..2 {
+            let names = seen.map(|x| list_of(v, x)).unwrap_or_default();
+            for &n in &names {
+                for t in crate::val::toks_of(v, Some(n)) {
+                    if self.class_lookup(t)?.is_none() {
+                        return Ok(None);
+                    }
+                }
             }
+            let within = self
+                .cx
+                .path(&[proj, Step::Index(1), Step::Within(v.list(names))]);
+            if self.cx.read_path(f, within)? == Some(v.bool(true)) {
+                return Ok(Some(int_of(v, tail)));
+            }
+            // (a name came since the look: the whole list read)
+            seen = self.cx.read_path(f, names_p)?;
         }
-        Ok(tail.map(|t| int_of(v, t)))
+        Ok(None)
     }
 
     /// The next token, its meaning not read (`get_r_token`'s way).

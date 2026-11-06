@@ -1767,6 +1767,7 @@ impl Engine {
             | Step::Has(x)
             | Step::Eq(x)
             | Step::Cmp(x)
+            | Step::Within(x)
             | Step::Derived(x)
             | Step::Indices(x)
             | Step::Keys(x)

@@ -196,6 +196,15 @@ pub enum Step {
     Eq(ValueId),
     /// The order of an integer against `k`: -1, 0 or 1.
     Cmp(ValueId),
+    /// Whether every element of a list is an element of list `k` (none:
+    /// not a list). A reader that checked something of each element of
+    /// the list it saw, `k`, through this stands while the list loses
+    /// elements or keeps them, and is asked again only for an element it
+    /// never checked: a list grown by appends whose appender checks each
+    /// name in it (an `\xdef` appending to a macro of font names it reads
+    /// as not expanding) is not asked again when an earlier first use of
+    /// a name moves later.
+    Within(ValueId),
     /// A derived read (docs/note-relative-counters.md §3), `spec` the
     /// list `[base, prefix, j, suffix]`: the value of the field named
     /// `prefix`, the decimal digits of `v + j`, `suffix`, where `v` is the

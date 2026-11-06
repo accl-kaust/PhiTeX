@@ -1043,7 +1043,8 @@ pub(crate) fn clist_projection(x: ValueId, v: &Values) -> ValueId {
 /// `[tail, names]`: `tail` 1 where the body is empty or ends with a comma
 /// (its comma-list items are those before plus the appended ones), 2
 /// otherwise; `names` the control sequences the body holds, each once in
-/// a fixed order, whose meanings decide whether its expansion is itself
+/// a fixed order (a list of one-token lists), whose meanings decide
+/// whether its expansion is itself
 /// (microtype's list of fonts: font identifiers, which do not expand). A
 /// pure projection for the engine: a list grown by appends of names it
 /// holds keeps its answer, and its appenders stand.
@@ -1069,7 +1070,8 @@ pub(crate) fn append_projection(x: ValueId, v: &Values) -> ValueId {
         Some(t) if t.cat() == Some(12) && t.chr() == u32::from(b',') => 1,
         Some(_) => 2,
     };
-    v.list(vec![v.int(tail), toks_value(v, &names)])
+    let names = names.iter().map(|t| toks_value(v, &[*t])).collect();
+    v.list(vec![v.int(tail), v.list(names)])
 }
 
 /// The engine's append (`phitex_defuse::Rel::Append`): the macro reaching

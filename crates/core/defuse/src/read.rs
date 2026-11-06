@@ -521,6 +521,11 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
             Some(proj(x, vals))
         }
         Step::Eq(k) => Some(vals.bool(v == Some(k))),
+        Step::Within(k) => {
+            let ks = vals.with_list(k, <[ValueId]>::to_vec)?;
+            vals.with_list(v?, |xs| xs.iter().all(|x| ks.contains(x)))
+                .map(|b| vals.bool(b))
+        }
         Step::Cmp(k) => {
             let a = vals.as_int(v?)?;
             let b = vals.as_int(k)?;
