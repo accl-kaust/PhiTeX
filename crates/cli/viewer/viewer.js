@@ -6465,6 +6465,19 @@ function timing(s) {
     parts.filter((p) => p[1] !== null).map(([k, v]) => `${k.padEnd(17)}  ${v}`).join("\n")
   ];
 }
+var lastStats;
+function statsLines(s) {
+  const n = s.nodes ?? {};
+  const gb = (b) => `${(b / 1e9).toFixed(1)} GB`;
+  return [
+    `PhiTeX ${s.version ?? "?"} \xB7 ${s.engine ?? "?"} \xB7 files from ${s.files === "shelf" ? `Shelf ${s.files_release ?? "?"}` : s.files === "texlive" ? "TeX Live" : "?"}`,
+    `build ${s.build ?? "?"} (${s.why ?? "?"}) ${s.ok === false ? "failed" : "ok"} in ${dur2(s.wall_ms ?? 0)}: ${Object.entries(s.phases_ms ?? {}).map(([k, ms]) => `${k} ${dur2(ms)}`).join(" \xB7 ")}`,
+    `nodes ${n.ran ?? "?"} ran, ${n.kept ?? "?"} kept of ${n.live ?? "?"} \xB7 ${s.runs ?? "?"} runs, ${s.rounds ?? "?"} rounds \xB7 pages ${s.pages_changed ?? "?"} of ${s.pages ?? "?"} changed`,
+    `parallel ${s.cores_busy == null ? "\u2014" : s.cores_busy.toFixed(1)} of ${s.threads ?? "?"} threads busy \xB7 busy ${dur2(s.busy_ms ?? 0)}, engine ${dur2(s.engine_ms ?? 0)}, wasted ${dur2(s.wasted_ms ?? 0)}`,
+    `memory ${s.resident_kb === void 0 ? "?" : gb(s.resident_kb * 1024)} resident, values ${s.values_bytes === void 0 ? "?" : gb(s.values_bytes)}`,
+    `hints ${Object.entries(s.hints ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "\u2014"}`
+  ];
+}
 var Pages = class {
   sock;
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
@@ -6474,6 +6487,7 @@ var Pages = class {
   constructor(sock2) {
     this.sock = sock2;
     sock2.onEvent((e) => {
+      if (e.event === "stats") return void (lastStats = e);
       if (e.event !== "settled") return;
       this.texts = null;
       const s = e;
@@ -6597,9 +6611,9 @@ var panel = new Panel(
       if (r.ok) panel.news(String(r.json?.version ?? ""), String(r.json?.text ?? ""));
       else panel.msg("No news for this version", false, true);
     }),
-    // (the timing popover's "Copy debug info": the version (the news op's), the host; the
-    // watch's `s` stats' phases, cores busy and memory are not in its events yet)
+    // (the timing popover's "Copy debug info": the last build's stats, the CLI's `s` stats; before any, the version, the news op's)
     onDebugInfo: async () => {
+      if (lastStats) return ["phitex watch", ...statsLines(lastStats)];
       const r = await sock.request({ op: "info", what: "news" });
       return [`PhiTeX ${r.ok ? String(r.json?.version ?? "?") : "?"} \xB7 phitex watch`];
     },
