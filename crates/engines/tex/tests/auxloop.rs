@@ -655,6 +655,48 @@ fn a_line_adding_to_an_earlier_line_s_list_reads_back_per_field() {
 Middle{extra}.
 
 List: \lst.
+\bye
+"
+        )
+    };
+    let more = "\\immediate\\write1{\\noexpand\\addto{b}}";
+    let dir = common::fixtures().join("plain");
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..common::options("./fold.tex", "fold", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&common::plain()), &doc(more));
+        let (dvi, _) = b.output();
+        let has = |d: &[u8], w: &[u8]| d.windows(w.len()).any(|x| x == w);
+        assert!(
+            has(&dvi, b"a,b,") && has(&dvi, b"xyz"),
+            "-j{threads}: the list after the read-back: {}",
+            String::from_utf8_lossy(&dvi)
+        );
+        for extra in ["", more, " and more", ""] {
+            b.edit(&doc(extra));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {extra:?}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&common::plain()), &doc(extra));
+            let d = common::first_difference(&b.output().0, &cold.output().0);
+            assert!(d.is_none(), "-j{threads} {extra:?}: edit differs from cold: {d:?}");
+            assert!(
+                !r.iter().any(|x| x.starts_with("exec") && x.contains("openin")),
+                "-j{threads} {extra:?}: the run reading the file back ran again: {r:?}"
+            );
+        }
+    }
+}
+
 /// Two lines of a file read back per field written in the other order:
 /// the same fields with the same values, so the run reading the file back
 /// stands. Its key set is a set: in the order of the definitions it moved
@@ -681,24 +723,11 @@ Middle.
 "
         )
     };
-    let more = "\\immediate\\write1{\\noexpand\\addto{b}}";
     let dir = common::fixtures().join("plain");
     for threads in [1, 4] {
         let opts = || Options {
             fixpoint: true,
             threads: Some(threads),
-            ..common::options("./fold.tex", "fold", "", &dir)
-        };
-        let mut b = common::build(opts(), Some(&common::plain()), &doc(more));
-        let (dvi, _) = b.output();
-        let has = |d: &[u8], w: &[u8]| d.windows(w.len()).any(|x| x == w);
-        assert!(
-            has(&dvi, b"a,b,") && has(&dvi, b"xyz"),
-            "-j{threads}: the list after the read-back: {}",
-            String::from_utf8_lossy(&dvi)
-        );
-        for extra in ["", more, " and more", ""] {
-            b.edit(&doc(extra));
             ..common::options("./order.tex", "order", "", &dir)
         };
         let mut b = common::build(opts(), Some(&common::plain()), &doc(false));
@@ -710,15 +739,6 @@ Middle.
                 .iter()
                 .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
                 .collect();
-            for x in &r {
-                eprintln!("  -j{threads} {extra:?}: rerun {x}");
-            }
-            let cold = common::build(opts(), Some(&common::plain()), &doc(extra));
-            let d = common::first_difference(&b.output().0, &cold.output().0);
-            assert!(d.is_none(), "-j{threads} {extra:?}: edit differs from cold: {d:?}");
-            assert!(
-                !r.iter().any(|x| x.starts_with("exec") && x.contains("openin")),
-                "-j{threads} {extra:?}: the run reading the file back ran again: {r:?}"
             let cold = common::build(opts(), Some(&common::plain()), &doc(swap));
             let d = common::first_difference(&b.output().0, &cold.output().0);
             assert!(d.is_none(), "-j{threads} swap {swap}: edit differs from cold: {d:?}");
