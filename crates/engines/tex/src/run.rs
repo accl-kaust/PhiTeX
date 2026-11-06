@@ -4059,15 +4059,6 @@ impl<'c, 'a> Run<'c, 'a> {
             self.append_trace(p, "1");
             return Ok(false);
         }
-        // (a node recorded as a load replays its values, not relations)
-        if op == self.ops.exec
-            && self.ops.node_rec.load(std::sync::atomic::Ordering::Relaxed)
-            && !crate::pkgrec::is_load(self.v, self.cx.args())
-            && crate::pkgrec::is_recorded(&self.ops.hints, self.v, self.cx.args())
-        {
-            self.append_trace(p, "2");
-            return Ok(false);
-        }
         let Some(l) = self.mean_loc(p) else {
             self.append_trace(p, "3");
             return Ok(false);
@@ -7264,10 +7255,21 @@ impl<'c, 'a> Run<'c, 'a> {
             }
         }
         files.dedup();
-        let writes: Vec<String> = published
+        // (with the lists it appended to without reading them, relations
+        // whose values a later build does not predict, `Run::append_def`)
+        let mut writes: Vec<String> = published
             .iter()
             .map(|&(f, _, _)| crate::val::field_name(v, f))
             .collect();
+        let appended: Vec<Loc> = self
+            .appending
+            .iter()
+            .map(|x| x.0)
+            .chain(self.appending_vals.iter().map(|x| x.0))
+            .collect();
+        for l in appended {
+            writes.push(crate::val::field_name(v, self.loc_field(l)));
+        }
         // (a field the load put back as it found it is no read of its
         // predecessor's either: only the net effect is recorded)
         let restored: Vec<Loc> = self
