@@ -418,8 +418,7 @@ pub(crate) fn run_node(
             // (a claim that moves what the line after it holds, made on a
             // guess of the text before it, waits for that text: `\end`
             // takes every sibling after it, a read-on those it read)
-            r.cx
-                .wait_claim_settled(if r.claim_rest { usize::MAX } else { r.pulled }, false)?;
+            r.cx.wait_claim_settled(if r.claim_rest { usize::MAX } else { r.pulled }, false)?;
             let t = std::time::Instant::now();
             let tf = pp.and_then(|_| crate::prof::start());
             let x = r.finish();

@@ -799,7 +799,9 @@ pub(crate) fn lex_from(
                 let name = &text[i + 1..end];
                 // (the command as the regime reads it: a verbatim one only
                 // where its name ends there, not `\url@` or `\verb_x:n`)
-                if verb.is_none() && (name == "begin" || crate::syntax::VERBATIM_COMMANDS.contains(&name)) {
+                if verb.is_none()
+                    && (name == "begin" || crate::syntax::VERBATIM_COMMANDS.contains(&name))
+                {
                     verb = verbatim_run(text, i);
                 }
                 let n = bodies(text, name, end);
