@@ -7065,17 +7065,30 @@ impl Build {
         if !whole || !cut {
             return whole;
         }
+        let d = v.field(&format!("dfile:{name}"));
         let doc = self.g.ops.docs.locked().get(name).cloned();
         match (doc, found) {
             (Some(df), Some((path, bytes))) => {
                 let df = df.locked();
                 df.path == *path && latin1_is(&df.text, bytes)
             }
-            (None, None) => {
-                let d = v.field(&format!("dfile:{name}"));
-                self.g.absent.contains(&d)
+            // (read whole, not a document's text, `[path, 0]`
+            // ([`cut_doc_file`]): its text the `file:` field compared
+            // above, so not a document's text still)
+            (None, Some((path, _))) => {
+                held.is_some()
+                    && self.g.files.iter().any(|&(g, x)| {
+                        g == d
+                            && match list_of(v, x)[..] {
+                                [p, k] => {
+                                    int_of(v, k) == 0 && v.with_str(p, |s| s == path) == Some(true)
+                                }
+                                _ => false,
+                            }
+                    })
             }
-            _ => false,
+            (None, None) => self.g.absent.contains(&d),
+            (Some(_), None) => false,
         }
     }
 

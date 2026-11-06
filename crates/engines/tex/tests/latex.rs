@@ -1141,12 +1141,16 @@ fn latex_same_bytes_restage_runs_nothing() {
         "chap1 not among the files read: {names:?}"
     );
     // (every file read, as `r` stages them: the cut one included)
+    let mut staged = Vec::new();
     for n in &names {
         b.stage_file(n, None);
+        if b.absorb_pending() {
+            staged.push((n.clone(), b.stats.nodes_run));
+        }
     }
     assert!(
-        !b.absorb_pending(),
-        "a same-bytes restage of {} files staged a change",
+        staged.is_empty(),
+        "a same-bytes restage of {} files staged a change: {staged:?} (file, nodes run)",
         names.len()
     );
     b.edit(&src);
