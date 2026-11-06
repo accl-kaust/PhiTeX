@@ -5223,6 +5223,31 @@ fn trailing_cs(s: &str) -> usize {
 }
 
 #[cfg(test)]
+mod key_set_tests {
+    use super::*;
+
+    /// The same definitions in another order give the same key set: a
+    /// fold's run puts its fields in the order of their last definitions,
+    /// which moves from one run to the next on the same text (biblatex's
+    /// `.aux`, `\blx@prelim@lastcites@0` 14th of 104 keys in one run and
+    /// 93rd in the next, and `\begin{document}` ran again on the key set
+    /// at every edit, accl 25569). Two keys of one field, a file's errors,
+    /// keep their order.
+    #[test]
+    fn a_key_set_is_in_the_order_of_its_fields() {
+        let v = Values::new();
+        let d = |f: &str, x: i64| (f.to_owned(), v.int(x));
+        let a = [d("cs:b", 1), d("cs:a", 2), d("cs:c", 3)];
+        let b = [d("cs:c", 3), d("cs:b", 1), d("cs:a", 2)];
+        assert_eq!(key_set(&v, "f.aux", &a), key_set(&v, "f.aux", &b));
+        let names = |x: ValueId| -> Vec<String> { list_of(&v, x).iter().map(|&k| str_of(&v, k)).collect() };
+        assert_eq!(names(key_set(&v, "f.aux", &a)), [WRITTEN_KEY, "cs:a", "cs:b", "cs:c"]);
+        let e = [d("rberr:2", 1), d("cs:a", 2), d("rberr:1", 3)];
+        assert_eq!(names(key_set(&v, "f.aux", &e)), [WRITTEN_KEY, "cs:a", "rberr:2", "rberr:1"]);
+    }
+}
+
+#[cfg(test)]
 mod culprit_tests {
     use super::*;
 
