@@ -2114,9 +2114,12 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn map_ok(&self, loc: Loc, global: bool) -> bool {
         let op = self.cx.op();
         let routine = op == self.ops.finish && global;
+        // (a picture's or a loop's child: its steps handed back to its
+        // parent as steps, `crate::pic`'s `pic_steps`)
+        let child = op == self.ops.pic;
         self.count_reg(loc).is_some()
-            && (op == self.ops.exec || op == self.ops.resume || routine)
-            && (self.doc || routine)
+            && (op == self.ops.exec || op == self.ops.resume || routine || child)
+            && (self.doc || routine || child)
             && !self.rec_load
             && self.interp.is_none()
             && !self.read_back_done
@@ -2136,8 +2139,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let op = self.cx.op();
         self.count_reg(loc).is_some()
-            && (op == self.ops.exec || op == self.ops.resume)
-            && self.doc
+            && ((op == self.ops.exec || op == self.ops.resume) && self.doc || op == self.ops.pic)
             && !self.rec_load
             && self.interp.is_none()
             && !self.read_back_done
