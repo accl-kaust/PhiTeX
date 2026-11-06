@@ -925,3 +925,69 @@ fn a_cut_pieces_rest_is_filed_with_the_close_its_piece_predicted() {
         }
     }
 }
+
+/// `[open]`: with `open` 1, opens one scope (its brackets known only by
+/// running) and defines `g` = 1 inside it, as TeX's piece leaving a
+/// group open defines its scope kind there; with 0, neither.
+struct SwitchOpen(Field);
+
+impl Operation for SwitchOpen {
+    fn name(&self) -> &'static str {
+        "switch_open"
+    }
+
+    fn effect(&self, _: &[ValueId], _: &Values) -> Effect {
+        Effect::Pending
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        if cx.values().as_int(cx.args()[0]) == Some(1) {
+            cx.set_effect(Effect::Open);
+            let one = cx.values().int(1);
+            cx.define_with(self.0, one, Locality::Scope);
+        } else {
+            cx.set_effect(Effect::None);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A node that comes to open a scope its close after it already closes,
+/// defining inside it a field it did not define before: that definition
+/// dies at the close, so the readers of the field after the close are
+/// not asked again (an opener's scope kind: every reader of it to the
+/// end of the line was asked at each opener's first commit, 1 040 s of
+/// biblatex's -j4 build, mc 80580); a reader inside the scope sees the
+/// definition, those after it none, as before.
+#[test]
+fn a_definition_inside_a_scope_a_node_comes_to_open_asks_no_reader_after_its_close() {
+    let (e, o) = engine();
+    let v = e.values();
+    let g = v.field("g");
+    let open = e.register(Arc::new(SwitchOpen(g)));
+    let u = e.new_unit();
+    let n = e.push(u, open, vec![v.int(0)]);
+    let inside = e.push(u, o.get, vec![g.0]);
+    e.push(u, o.close, vec![]);
+    // (another opener's definition in its own scope: the walk of `n`'s
+    // definition itself stops there, as a later opener's scope kind
+    // stops it)
+    e.push(u, open, vec![v.int(1)]);
+    e.push(u, o.close, vec![]);
+    let after: Vec<NodeId> = (0..500).map(|_| e.push(u, o.get, vec![g.0])).collect();
+    e.evaluate(1).unwrap();
+    assert_eq!(e.output(inside), Some(ValueId::UNIT));
+    e.replace(n, open, vec![v.int(1)]);
+    let rep = e.evaluate(1).unwrap();
+    assert_eq!(e.output(inside), Some(v.int(1)), "the reader inside the scope sees it");
+    assert!(
+        after.iter().all(|&r| e.output(r) == Some(ValueId::UNIT)),
+        "the readers after the close see none"
+    );
+    assert!(
+        rep.walked < 100,
+        "{} readers walked for a definition no reader after the close sees",
+        rep.walked
+    );
+    assert!(e.check_invariants().is_empty());
+}
