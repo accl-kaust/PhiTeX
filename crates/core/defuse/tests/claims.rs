@@ -666,17 +666,17 @@ fn a_taken_placement_remade_re_asks_its_claimer() {
     }
 }
 
-/// `[x, y, t]`: defines the fields `x`, `y` and `t` as given.
-struct Def3;
+/// `[x, y, t, z]`: defines the fields `x`, `y`, `t` and `z` as given.
+struct Def4;
 
-impl Operation for Def3 {
+impl Operation for Def4 {
     fn name(&self) -> &'static str {
-        "def3"
+        "def4"
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
-        for (i, name) in ["x", "y", "t"].into_iter().enumerate() {
+        for (i, name) in ["x", "y", "t", "z"].into_iter().enumerate() {
             cx.define(v.field(name), cx.args()[i]);
         }
         Ok(ValueId::UNIT)
@@ -743,8 +743,9 @@ impl Operation for QuietSettler {
 }
 
 /// `[]`: reads `y` and `s` (a read of the settling node's prediction
-/// waits for its commit, `Ctx::read`), then defines `z` = `y`.
-struct ReadsSettler;
+/// waits for its commit, `Ctx::read`), then defines `z` = `y`; counts
+/// the runs that stopped to wait.
+struct ReadsSettler(Arc<AtomicU64>);
 
 impl Operation for ReadsSettler {
     fn name(&self) -> &'static str {
@@ -754,7 +755,10 @@ impl Operation for ReadsSettler {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
         let y = cx.read(v.field("y"))?.unwrap_or(ValueId::UNIT);
-        let _ = cx.read(v.field("s"))?;
+        if let Err(stop) = cx.read(v.field("s")) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            return Err(stop);
+        }
         cx.define(v.field("z"), y);
         Ok(y)
     }
@@ -789,34 +793,37 @@ impl Operation for UntilEqual {
 /// A run parked waiting for a node's commit goes on when a claim takes
 /// that node, which then commits nothing. W reads the prediction of P, a
 /// settling node that runs only at a quiet point, and waits for P's
-/// commit; C claims P; R runs on until W's definition of `z` reaches it.
-/// Left parked until a quiet point that R keeps away, W never ran again
-/// and R ran for ever (csquotes -j8, mhchem -j4: a run went on without
-/// end, accl 25662, mc 80815).
+/// commit; C, slow, claims P; R runs on until W's definition of `z`
+/// reaches it. Left parked until a quiet point that R keeps away, W
+/// never ran again and R ran for ever (csquotes -j8, mhchem -j4: a run
+/// went on without end, accl 25662, mc 80815). The texts between C and
+/// P put C alone at the head of the workers' first blocks.
 #[test]
 fn a_run_waiting_for_a_node_a_claim_takes_goes_on() {
     let e = Engine::new();
     let v = e.values();
-    let def3 = e.register(Arc::new(Def3));
+    let def4 = e.register(Arc::new(Def4));
     let claim = e.register(Arc::new(ClaimIfLate));
+    let text = e.register(Arc::new(Text));
     let p_op = e.register(Arc::new(QuietSettler));
-    let w_op = e.register(Arc::new(ReadsSettler));
+    let waits = Arc::new(AtomicU64::new(0));
+    let w_op = e.register(Arc::new(ReadsSettler(waits.clone())));
     let r_op = e.register(Arc::new(UntilEqual));
-    let u = e.new_unit();
-    let d = e.push(u, def3, vec![v.int(0), v.int(0), v.int(0)]);
-    let c = e.push(u, claim, vec![]);
-    let p = e.push(u, p_op, vec![v.int(0)]);
-    let w = e.push(u, w_op, vec![]);
-    e.push(u, r_op, vec![]);
-    e.evaluate(4).unwrap();
-    assert_eq!(e.output(w), Some(v.int(0)));
-    e.replace(d, def3, vec![v.int(1), v.int(1), v.int(1)]);
-    e.replace(p, p_op, vec![v.int(1)]);
     e.set_limits(phitex_defuse::Limits {
         time: Some(Duration::from_secs(20)),
         ..Default::default()
     });
+    let u = e.new_unit();
+    e.push(u, def4, vec![v.int(1), v.int(1), v.int(1), v.int(0)]);
+    let c = e.push(u, claim, vec![]);
+    let p = e.push(u, p_op, vec![v.int(0)]);
+    for _ in 0..3 {
+        e.push(u, text, vec![v.int(0)]);
+    }
+    let w = e.push(u, w_op, vec![]);
+    e.push(u, r_op, vec![]);
     let r = e.evaluate(4);
+    assert!(waits.load(Ordering::Relaxed) > 0, "W never waited for P: {r:?}");
     assert!(r.is_ok(), "W left waiting for P, which the claim took: {r:?}");
     assert_eq!(e.claimed(c), vec![p]);
     assert_eq!(e.output(w), Some(v.int(1)), "W ran on y = 1");
