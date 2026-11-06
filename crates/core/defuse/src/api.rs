@@ -231,6 +231,31 @@ impl PathId {
     }
 }
 
+/// A relation's operation on the value of its field reaching its node
+/// (`Ctx::define_rel`, `Ctx::define_append`): the engine recomputes the
+/// definition in place when that value moves, without running the node.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Rel {
+    /// The integer reaching it plus a constant.
+    Add(i64),
+    /// The value reaching it with the items of a list (a list value)
+    /// appended, by the client's append ([`Engine::set_append`]).
+    Append(ValueId),
+}
+
+impl std::fmt::Display for Rel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Rel::Add(c) => write!(f, "{c:+}"),
+            Rel::Append(x) => write!(f, "append {}", x.raw()),
+        }
+    }
+}
+
+/// The client's append for [`Rel::Append`]: the value reaching the
+/// relation (`None` where none does) and the items appended; pure.
+pub type AppendFn = Arc<dyn Fn(Option<ValueId>, ValueId, &Values) -> ValueId + Send + Sync>;
+
 /// A client projection: pure, from a value to a small value.
 pub type Projection = Arc<dyn Fn(ValueId, &Values) -> ValueId + Send + Sync>;
 

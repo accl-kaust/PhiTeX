@@ -77,8 +77,8 @@ mod table;
 mod values;
 
 pub use api::{
-    At, Brackets, Cause, EditSource, Effect, EnvProvider, EvalError, FieldAt, Limits, Locality, MayDefine, Monoid,
-    NoEdits, NodeId, NodeInfo, NodeState, OpId, Operation, PathId, ProjId, Projection, Report, SeqMonoid, Settled,
+    AppendFn, At, Brackets, Cause, EditSource, Effect, EnvProvider, EvalError, FieldAt, Limits, Locality, MayDefine, Monoid,
+    NoEdits, NodeId, NodeInfo, NodeState, OpId, Operation, PathId, ProjId, Projection, Rel, Report, SeqMonoid, Settled,
     Step, Stop, SumMonoid, Times, UnitId,
 };
 pub use ctx::{Ctx, View};

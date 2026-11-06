@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{At, Cause, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Step, Stop};
+use crate::api::{At, Cause, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Rel, Step, Stop};
 use crate::engine::Engine;
 use crate::node::{Anchor, DefRec, Node, Placement, Product, ReadKind, ReadRec, RunRecord, State};
 use crate::order::Pos;
@@ -680,7 +680,22 @@ impl<'a> Ctx<'a> {
             f,
             loc,
             value: ValueId::UNIT,
-            rel: Some(c),
+            rel: Some(Rel::Add(c)),
+        });
+    }
+
+    /// `f` := the definition of `f` reaching me with the items of list
+    /// `items` appended by the client's append ([`Engine::set_append`]),
+    /// at a locality: a relation as [`Ctx::define_rel`]'s, recomputed in
+    /// place when the value reaching me moves (a list each node adds to,
+    /// microtype's `\\MT@font@list`, is not a chain of runs). The run need
+    /// not read `f`.
+    pub fn define_append_with(&mut self, f: Field, items: ValueId, loc: Locality) {
+        self.product.defs.push(DefRec {
+            f,
+            loc,
+            value: ValueId::UNIT,
+            rel: Some(Rel::Append(items)),
         });
     }
 

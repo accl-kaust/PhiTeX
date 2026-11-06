@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::api::{
-    Cause, EditSource, EnvProvider, EvalError, Limits, Monoid, NodeId, NodeInfo, NodeState, OpId, Operation, PathId,
-    ProjId, Projection, Report, SeqMonoid, Settled, Step, UnitId,
+    AppendFn, Cause, EditSource, EnvProvider, EvalError, Limits, Monoid, NodeId, NodeInfo, NodeState, OpId, Operation, PathId,
+    ProjId, Projection, Rel, Report, SeqMonoid, Settled, Step, UnitId,
 };
 use crate::commit::{self, CommitStats, Predicted, own_write, place_after, settle_predictions, unfile};
 use crate::index::{FieldIndex, RangeIndex};
@@ -106,6 +106,8 @@ pub struct Engine {
     pub(crate) env: Env,
     pub(crate) paths: Paths,
     pub(crate) projections: Table<Projection>,
+    /// The client's append for [`Rel::Append`] ([`Engine::set_append`]).
+    append: std::sync::OnceLock<AppendFn>,
     /// Relations each operation has made: (op, field) -> c (`commit::learn_shape`).
     pub(crate) shapes: Lock<FxHashMap<(OpId, Field), i64>>,
     pub(crate) shapes_n: AtomicUsize,
@@ -361,6 +363,7 @@ impl Engine {
             },
             paths,
             projections,
+            append: std::sync::OnceLock::new(),
             shapes: Lock::new(FxHashMap::default()),
             shapes_n: AtomicUsize::new(0),
             memo: Lock::new(FxHashMap::default()),
@@ -565,6 +568,27 @@ impl Engine {
 
     pub fn register(&self, op: Arc<dyn Operation>) -> OpId {
         OpId(u32::try_from(self.ops.push(op)).expect("operation ids"))
+    }
+
+    /// The client's append, for its relations [`Rel::Append`]
+    /// (`Ctx::define_append_with`); set once, before any is made.
+    pub fn set_append(&self, f: AppendFn) {
+        let _ = self.append.set(f);
+    }
+
+    /// Relation `c`'s value on `input`, the value reaching it.
+    ///
+    /// # Panics
+    ///
+    /// On an append relation with no append set ([`Engine::set_append`]).
+    pub(crate) fn rel_apply(&self, c: Rel, input: Option<ValueId>) -> ValueId {
+        let v = self.values();
+        match c {
+            Rel::Add(c) => v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c)),
+            Rel::Append(items) => (self.append.get().expect("an append relation needs the client's append"))(
+                input, items, v,
+            ),
+        }
     }
 
     pub fn register_projection(&self, p: Projection) -> ProjId {
@@ -2093,7 +2117,7 @@ impl Engine {
                     "  def {} = {}{} {:?}\n",
                     v.render(d.f.0),
                     v.render(self.def_value(n, d.f).unwrap_or(d.value)),
-                    d.rel.map(|c| format!(" (rel {c:+})")).unwrap_or_default(),
+                    d.rel.map(|c| format!(" (rel {c})")).unwrap_or_default(),
                     d.loc
                 ));
             }
@@ -2419,7 +2443,7 @@ impl Engine {
                     let have = self.def_value(n, d.f);
                     if have != Some(want) {
                         out.push(format!(
-                            "node {} relation {} {c:+}: holds {} but the input gives {}",
+                            "node {} relation {} {c}: holds {} but the input gives {}",
                             n.raw(),
                             v.render(d.f.0),
                             have.map_or("none".to_owned(), |x| v.render(x)),
