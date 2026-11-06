@@ -112,6 +112,7 @@ impl<'a> Ctx<'a> {
                 place_effects: Vec::new(),
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
                 unchanged: false,
+                own_claim: false,
                 state: None,
                 resumed: std::cell::Cell::new(false),
                 kept_reads: std::cell::Cell::new(None),
@@ -1295,6 +1296,21 @@ impl<'a> Ctx<'a> {
     /// is nothing to keep (a prediction stands as made).
     pub fn unchanged(&mut self) {
         self.product.unchanged = true;
+    }
+
+    /// [`Ctx::unchanged`], but this run's own claim stands (none, unless
+    /// it claims), not the last run's: what the last run claimed it
+    /// decided on what this run could not get. A finisher whose page is
+    /// stale keeps what its routine defined on the page before, but not
+    /// the claim of the rest a fatal error of that routine made there:
+    /// kept, it held the text after the finisher inert, so the page
+    /// builder never folded that text again and the page stayed stale
+    /// for good, the job ended at that finisher with its hundred errors
+    /// in the log (thumbs at -j8: an overview page's routine run on
+    /// values not settled yet).
+    pub fn unchanged_unclaimed(&mut self) {
+        self.product.unchanged = true;
+        self.product.own_claim = true;
     }
 
     /// What this run defines is no decision of its settling layer

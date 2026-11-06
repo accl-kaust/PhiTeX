@@ -657,6 +657,9 @@ pub(crate) struct Product {
     /// record's definitions, contributions, placements and output stand,
     /// with this run's reads.
     pub(crate) unchanged: bool,
+    /// With `unchanged`, the run's own claim stands, not the last
+    /// record's (`Ctx::unchanged_unclaimed`).
+    pub(crate) own_claim: bool,
     /// `Ctx::park`: the state the next run resumes from.
     pub(crate) state: Option<ValueId>,
     /// `Ctx::parked_on`: the field whose answer the run stopped for.
