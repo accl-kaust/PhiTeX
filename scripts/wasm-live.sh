@@ -18,8 +18,10 @@
 # cluster's read-only images need no sync): `rustup target add
 # wasm32-wasip1-threads wasm32-wasip1 --toolchain nightly-2026-08-08` once.
 #
-# Release builds with thin LTO and parallel codegen (the engine's speed
-# without fat LTO's long link), panic=abort; the core a reactor
+# Release builds with fat LTO and one codegen unit (a keystroke's build
+# 3-7% faster than thin LTO with 16 units: Grail in core1.wasm on Node,
+# 46.4/44.6 ms against 43.1/43.6; the cores build in 2.3 min instead of
+# 0.6), panic=abort; the core a reactor
 # (`_initialize` run once by the host), SIMD on: every browser and Node has
 # wasm SIMD, and hayro, vello_cpu and zlib are scalar without it.
 set -euo pipefail
@@ -28,7 +30,7 @@ out=${1:-build/wasm-live}
 # (cargo's target directory: CARGO_TARGET_DIR when set, as a sandbox sets it)
 tdir=${CARGO_TARGET_DIR:-target}
 mkdir -p "$out"
-fast=(--config 'profile.release.lto="thin"' --config 'profile.release.codegen-units=16' --config 'profile.release.debug=false' --config 'profile.release.panic="abort"')
+fast=(--config 'profile.release.lto="fat"' --config 'profile.release.codegen-units=1' --config 'profile.release.debug=false' --config 'profile.release.panic="abort"')
 reactor="-Zwasi-exec-model=reactor -C target-feature=+simd128"
 CARGO_TARGET_WASM32_WASIP1_THREADS_RUSTFLAGS="$reactor" \
   cargo build --release "${fast[@]}" -p phitex-wasm-live --target wasm32-wasip1-threads
