@@ -993,9 +993,7 @@ fn a_box_voided_globally_and_deleted_reruns_no_reader_of_it() {
         .stats
         .reruns
         .iter()
-        .filter(|(n, op, why)| {
-            *op == "exec" && !why.contains("Edited") && b.describe_node(*n).contains("copy7")
-        })
+        .filter(|(_, op, why)| *op == "exec" && why.contains("box:7"))
         .count();
     assert_eq!(readers, 0, "no reader of the box runs again");
 }
