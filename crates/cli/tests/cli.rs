@@ -3716,3 +3716,66 @@ fn the_viewers_settings_are_the_users() {
         "a project's threads not said:\n{said}"
     );
 }
+
+/// Text copied or searched in the viewer has its word spaces in every
+/// kind of font: XeLaTeX with a TrueType font of 2048 units to the em
+/// (`DejaVu` Serif) and with an OpenType CFF one (Latin Modern), pdfLaTeX
+/// with Type 1 fonts and with a Type 3 (bitmap) one. The renderer's text
+/// layer (`phitex_render::Renderer::text`) of the PDF `phitex build`
+/// writes holds "alpha beta gamma" with its spaces; Grail's (XeLaTeX)
+/// copied text had none.
+#[test]
+#[ignore = "heavy: the xelatex and pdflatex formats; run on accl"]
+fn copied_text_has_its_word_spaces() {
+    let _one = one();
+    let docs: [(&str, &str, &str); 4] = [
+        (
+            "xe-ttf",
+            "xelatex",
+            "\\documentclass{article}\\usepackage{fontspec}\\setmainfont{DejaVuSerif.ttf}\\begin{document}\nalpha beta gamma delta\n\\end{document}\n",
+        ),
+        (
+            "xe-otf",
+            "xelatex",
+            "\\documentclass{article}\\usepackage{fontspec}\\begin{document}\nalpha beta gamma delta\n\\end{document}\n",
+        ),
+        (
+            "pdf-type1",
+            "pdflatex",
+            "\\documentclass{article}\\begin{document}\nalpha beta gamma delta\n\\end{document}\n",
+        ),
+        (
+            "pdf-type3",
+            "pdflatex",
+            "\\documentclass{article}\\begin{document}\n\\font\\lg=logo10 \\lg ALPHA BETA GAMMA DELTA\n\\end{document}\n",
+        ),
+    ];
+    let mut bad = Vec::new();
+    for (name, engine, text) in docs {
+        let dir = scratch(&format!("spaces-{name}"));
+        std::fs::write(dir.join("doc.tex"), text).expect("the document");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(["build", "--engine", engine, "doc.tex"])
+            .output()
+            .expect("phitex runs");
+        assert!(
+            out.status.success(),
+            "{name}: build failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let pdf: std::sync::Arc<[u8]> = std::fs::read(dir.join("doc.pdf")).expect("the PDF").into();
+        let mut r = phitex_render::Renderer::new();
+        let lines = r.text(&pdf, 0).expect("page 1's text");
+        let all: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+        eprintln!("{name}: {all:?}");
+        let want = if name == "pdf-type3" {
+            "ALPHA BETA GAMMA"
+        } else {
+            "alpha beta gamma"
+        };
+        if !all.iter().any(|l| l.contains(want)) {
+            bad.push(format!("{name}: {all:?}"));
+        }
+    }
+    assert!(bad.is_empty(), "text without its word spaces: {bad:?}");
+}
