@@ -228,11 +228,17 @@ pub fn diagnostics(s: &Session, r: &Report, log: &str) -> Vec<Value> {
 
 fn items(s: &Session, r: &Report, log: &str) -> Vec<Value> {
     if r.internal.is_none() && !r.diagnostics.is_empty() {
+        // (each file's text read once, not once a diagnostic: the main
+        // file's made again for each of Grail's warnings, 3 ms of every
+        // keystroke in the browser's core)
+        let mut sources: std::collections::HashMap<&str, Option<Vec<u8>>> =
+            std::collections::HashMap::new();
         return r
             .diagnostics
             .iter()
             .map(|d| {
-                let p = crate::problems::from_diagnostic(d, s.source(&d.file).as_deref(), false);
+                let src = sources.entry(d.file.as_str()).or_insert_with(|| s.source(&d.file));
+                let p = crate::problems::from_diagnostic(d, src.as_deref(), false);
                 let chars = |b: usize| p.text.get(..b.min(p.text.len())).map_or(0, |t| t.chars().count());
                 let error = d.severity == phitex_tex::Severity::Error;
                 let engine = d.severity == phitex_tex::Severity::Diagnostic;
