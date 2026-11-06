@@ -193,4 +193,96 @@ does.
 | what was read / defined since | `State::note_read` (state.rs:1036), `touched`; `State::defined_since_in_order` (state.rs:2426); `Run::published_values` (run.rs:1743) |
 | tests | `crates/cli/tests/corpus_repros.rs` (append): a figure with two pictures, one labelled, edit a paragraph before it, PDFs identical at -j1/-j4; a picture that `\xdef`s a macro the caption reads (the check refuses); a picture that loads a font first that the caption uses (refuses); `PHITEX_PIC_CHECK=1` over the tikz manuals sample |
 
-## 5. Measured facts (accl 24657, Grail, -j1, refute log) — filled in below
+## 5. Measured facts (mc 80032 on 1a700a200, Grail, -j1, refute log)
+
+Delete the figure near the start (`figures/mrrg-alu-alternatives.tex`):
+2636 runs, 17.6 s busy (exec 356 runs 12.7 s, finish 601 runs 3.7 s,
+pages 1525 runs 0.1 s, resume 144 runs 0.9 s). Six figure nodes are 9.3 s
+of the exec time, each run several times:
+
+| node | runs | ms a run | first moved read, its index among the run's reads | then |
+|---|---|---|---|---|
+| 680 | 4 | 710 | `box:92` at 2206/29778 | `cs:TU/LinLibertine(0)/m/n/8.5` at 10611/29778, three times |
+| 643 | 3 | 820 | `box:92` at 2292/55381 | that font at 2887, `LibertinusMath…/8.5` at 2888 |
+| 853 | 3 | 700 | `box:92` at 3122/20674 | that font at 3852 |
+| 876 | 6 | 150 | `box:92` at 2858/9495 | that font at 3531; `\@freelist` five times |
+| 824 | 3 | 185 | `box:92` at 2912/9919 | that font at 5625 |
+| 839 | 4 | 115 | `box:92` at 2972/13597 | that font at 13108 |
+
+So the float's own reads (`box:92`, `\@freelist`, `\@currlist`) come at
+a tenth of the run, before the picture, as §1 says: a child would stand.
+The font control sequence `\TU/LinLibertine(0)/m/n/8.5` moved because the
+deleted figure was its first definer (`\define@newfont`'s global `\font`),
+and moved again as the next definer settled: a picture that reads it (a
+real input: the font's number is in the XDV) re-runs on it with or
+without the child, once per move. Which of the six read it inside the
+picture and which in the caption is not in the log (the refute log gives
+the read's index, not its place in the text).
+
+Delete the paragraph near the start: 1460 runs, 8.4 s busy (exec 807 runs
+6.5 s). The figures 643 (1246 ms), 853 (1071), 680 (956), 567 (752) each
+run once more on `cs:MT@font@list` read at 1331-1872 of their reads:
+`\begin{figure}`'s `\normalcolor`/`\selectfont`, before the picture. Node
+680 also on `mathcurf` at 4632/29754. What the pictures themselves read
+of the list is not in the log.
+
+What this says about §3: the child takes the float's part (box, free
+list, current list, the list read at `\begin{figure}`) off the picture's
+cost; it leaves (i) the pictures' own re-runs on a font whose first
+definer moved, one per move, and (ii) the 601 finisher runs (3.7 s, the
+finisher waves chain4 owns) and the 144 resumes. Expected delete-figure
+after the child alone: about 11 s busy at -j1 from 17.6, not 100 ms. The
+font moves need a definer-independent font identity (the font's number
+by its name and size, not by load order) or a first-definer relation; not
+in this spec.
+
+## 6. What building it found (matrix5, 2026-11-04, branch matrix5: code written, type-checked, NOT run)
+
+The branch holds a first build of §2–§4 (`crates/engines/tex/src/pic.rs`,
+hooks in run.rs, control.rs, ops.rs, state.rs, build.rs, pages/piece.rs,
+api.rs, defuse ctx.rs). It passed `cargo check` on phitex-tex and
+phitex-defuse only: no test, no document was run on it. What the engine
+said against the spec as written:
+
+- §2.2's trigger ("read from a line of the run's text") reaches none of
+  Grail's figures. The six hand-written ones (`figures/*.tex`) put
+  `\begin{tikzpicture}` inside `\resizebox{..}{!}{%`, so the body reaches
+  the command loop as a macro argument's token list; evaluation.tex's
+  generated ones come as lines of a file `\input` inside the float (a
+  `FILE` level under the current line). The build matches `{name}` at
+  the top level's rest in three forms: the token list (`\end{name}`
+  sought in the same list), the current line with the end on it, and
+  the current line followed by the file below it or by the run's own
+  text segments (no pulling of siblings: no trigger when the end is not
+  in what the run already holds).
+- §2.6 needs a third check: the run defining, after the picture, a name
+  the child defines globally too (TeX's final value is the run's, the
+  split's would be the child's). And `State::defined_since_in_order`
+  cannot serve any of the checks: a meta keeps only the latest
+  definition, so a later group-local one (the caption's `\normalsize`
+  in its group) hides a global one made after the picture, and the
+  group-locals themselves (which never reach the engine, open or
+  closed) would refuse every captioned figure. The build stamps the
+  base-level binding (`Meta::publ_stamp`, `State::published_since`).
+- The child's local definitions at its base level (`\end`'s
+  `\@doendpe` sets `\par` and `\everypar` locally outside the
+  environment's group) must come back to the figure's run as locals of
+  its innermost group, never be published: placed after the run, they
+  would outlive the float's group. The build filters them out of the
+  child's publication (`Run::finish`) and carries them in the output.
+- `Ctx::last.is_some()` is not "a re-run after an edit": a cold build
+  re-runs nodes (Grail: 3624 runs of 1457 nodes), so §2.5 as written
+  would run every re-run figure's picture twice on the cold build. The
+  build arms the trigger only when `Ops::edit_stall_ms` is set (the
+  watch sets it after the cold build, `Build::set_stuck_after`).
+- The child must never act as a page piece: `at_outer` (candidates,
+  cuts) is off for it; a fatal error inside it must not claim the rest
+  of the unit (`run_node`'s Fatal arm is bypassed by the child's own
+  refusal); it ends `run_all` before the "group left open" path.
+- `\begin` is LaTeX's robust command: the trigger takes any macro call
+  (`cmd::CALL..=LONG_OUTER_CALL`) whose token is `\begin`.
+- Known difference left: the picture's log lines (overfull boxes) come
+  after the figure's whole log, where pdflatex writes them in the
+  middle; the PDF bar is untouched, the log is not identical.
+- Not built: `PHITEX_PIC_CHECK` (§2.6's inline comparison), the tests
+  of §4, any measurement.
