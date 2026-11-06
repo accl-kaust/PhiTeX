@@ -529,6 +529,21 @@ impl<'a> Ctx<'a> {
         Ok(read::through_at(self.eng, r, p, at, false))
     }
 
+    /// Records a read of `f` through path `p` answered `seen`, as
+    /// `read_path` records one, without answering it: a client that
+    /// looked first ([`Ctx::peek_path`]) and used `seen` of the answer
+    /// files what it used here. A definition of `f` whose answer through
+    /// `p` differs from `seen` re-asks me, one already made before this
+    /// record as well (the commit checks the read whatever the field's
+    /// change count says).
+    pub fn note_path(&mut self, f: Field, p: PathId, seen: Option<ValueId>) -> Result<(), Stop> {
+        self.check()?;
+        self.ep = u64::MAX;
+        let (_, anchor) = self.here();
+        self.record(ReadKind::Field { f, at: anchor }, p, seen);
+        Ok(())
+    }
+
     /// `read` through a path: the run depends only on the path's answer
     /// (an alias definition: on all of it, followed).
     pub fn read_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {

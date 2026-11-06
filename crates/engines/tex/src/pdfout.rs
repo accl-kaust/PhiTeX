@@ -3315,11 +3315,11 @@ pub(crate) fn fonts_first_used(r: &mut Run<'_, '_>, names: &[String]) -> R<()> {
     // is the pages' fold's to say, where a read needs the count,
     // [`page_offset`]; the write itself only reaches PDF bytes)
     // (a set grown by appends: [`Run::val_set`], [`Run::append_val`])
-    let rt = r.val_set_named(RT_FONTS)?;
+    let f = r.ops.fields.get_at(v, r.cx.values_epoch(), RT_FONTS);
     let mut added: Vec<ValueId> = Vec::new();
     for n in names {
         let x = v.str(n);
-        if !rt.contains(&x) && !added.contains(&x) {
+        if !added.contains(&x) && !r.val_has(f, x)? {
             added.push(x);
             r.append_val_named(RT_FONTS, x)?;
         }
@@ -3443,11 +3443,11 @@ pub(crate) fn forms_first_written(r: &mut Run<'_, '_>, forms: &[i64]) -> R<Vec<i
     let v = r.v;
     let range = allocs_range(r, "forms_first_written")?;
     let f = fold_allocs(v, range);
-    let rt = r.val_set_named(RT_FORMS)?;
+    let rt = r.ops.fields.get_at(v, r.cx.values_epoch(), RT_FORMS);
     let mut new = Vec::new();
     for &n in forms {
         let x = v.int(n);
-        if !f.forms.contains(&x) && !rt.contains(&x) && !new.contains(&n) {
+        if !f.forms.contains(&x) && !new.contains(&n) && !r.val_has(rt, x)? {
             new.push(n);
             r.append_val_named(RT_FORMS, x)?;
         }
@@ -3467,7 +3467,8 @@ pub(crate) fn page_made_at_read_time(r: &mut Run<'_, '_>, n: i64) -> R<()> {
 /// before made it (`pdf_get_obj`).
 pub(crate) fn dest_first_named(r: &mut Run<'_, '_>, id: ValueId) -> R<()> {
     // (named, not counted, as [`fonts_first_used`])
-    if r.val_set_named(RT_DESTS)?.contains(&id) {
+    let f = r.ops.fields.get_at(r.v, r.cx.values_epoch(), RT_DESTS);
+    if r.val_has(f, id)? {
         return Ok(());
     }
     r.append_val_named(RT_DESTS, id)

@@ -4245,12 +4245,80 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(es)
     }
 
-    /// [`Run::val_set`] of a list of integers, in increasing order.
-    pub(crate) fn int_set(&mut self, f: Field) -> R<Vec<i64>> {
+    /// [`Run::val_set`], looked at rather than read where the run would
+    /// read it through the projection (true: nothing recorded, the
+    /// caller records what it uses of it, [`Run::note_elink_asks`]).
+    pub(crate) fn val_set_peek(&mut self, f: Field) -> R<(Vec<ValueId>, bool)> {
         let v = self.v;
-        let mut es: Vec<i64> = self.val_set(f)?.into_iter().map(|x| int_of(v, x)).collect();
-        es.sort_unstable();
-        Ok(es)
+        let loc = self.loc_of(f);
+        self.pic_touch(loc)?;
+        if self.st.load_state(loc) != 0
+            || self.lazy_pre(loc)
+            || self.appending_vals.iter().any(|x| x.0 == loc)
+        {
+            return Ok((self.val_set(f)?, false));
+        }
+        let p = phitex_defuse::PathId::of_proj(self.ops.set_proj);
+        let es = self
+            .cx
+            .peek_path(f, p)?
+            .map(|x| {
+                list_of(v, x)
+                    .iter()
+                    .filter_map(|&e| list_of(v, e).first().copied())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok((es, true))
+    }
+
+    /// Whether `x` is in the list field `f` holds where the run is, read
+    /// as that alone where the run has not bound it ([`Run::val_set`]).
+    pub(crate) fn val_has(&mut self, f: Field, x: ValueId) -> R<bool> {
+        let v = self.v;
+        let loc = self.loc_of(f);
+        self.pic_touch(loc)?;
+        if self.st.load_state(loc) != 0 || self.lazy_pre(loc) {
+            return Ok(self.val_set(f)?.contains(&x));
+        }
+        if self
+            .appending_vals
+            .iter()
+            .any(|e| e.0 == loc && e.1.contains(&x))
+        {
+            return Ok(true);
+        }
+        let p = self.cx.path(&[
+            phitex_defuse::Step::Proj(self.ops.set_proj),
+            phitex_defuse::Step::Has(x),
+        ]);
+        Ok(self.cx.read_path(f, p)? == Some(v.bool(true)))
+    }
+
+    /// A paragraph's asks of its fonts' expanded ratios, recorded as what
+    /// it used of the lists it looked at ([`Run::val_set_peek`]): whether
+    /// each ratio asked was there. A ratio another node asks first, or no
+    /// longer asks, that this paragraph does not ask leaves it standing.
+    pub(crate) fn note_elink_asks(&mut self, view: &crate::fonts::View) -> R<()> {
+        if view.elink_peeked.is_empty() {
+            return Ok(());
+        }
+        let v = self.v;
+        let mut asked: Vec<(phitex_typeset::fonts::FontId, i32)> =
+            view.asked.locked().iter().copied().collect();
+        asked.sort_unstable();
+        for (font, e) in asked {
+            let Some(&f) = view.elink_peeked.get(&font) else {
+                continue;
+            };
+            let had = view.elink.get(&font).is_some_and(|l| l.contains(&e));
+            let p = self.cx.path(&[
+                phitex_defuse::Step::Proj(self.ops.set_proj),
+                phitex_defuse::Step::Has(v.int(i64::from(e))),
+            ]);
+            self.cx.note_path(f, p, Some(v.bool(had)))?;
+        }
+        Ok(())
     }
 
     /// [`Run::val_set`] of the field named `name`.

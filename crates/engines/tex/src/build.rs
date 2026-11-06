@@ -1206,16 +1206,22 @@ impl Run<'_, '_> {
             // another font's first ask since may have bound them to it,
             // [`crate::pdfprim::get_expand_font`])
             // (which ratios, not in what order they were first asked:
-            // [`Run::int_set`])
+            // [`Run::val_set`])
             let link =
                 self.ops
                     .fields
                     .get_at(self.v, self.cx.values_epoch(), &format!("pdf:elink:{fi}"));
-            let linked: Vec<i32> = self
-                .int_set(link)?
+            // (looked at, not read: the paragraph depends on whether each
+            // ratio it asks is there, `Run::note_elink_asks`)
+            let (set, peeked) = self.val_set_peek(link)?;
+            if peeked {
+                view.elink_peeked.insert(f, link);
+            }
+            let mut linked: Vec<i32> = set
                 .into_iter()
-                .filter_map(|e| i32::try_from(e).ok())
+                .filter_map(|x| i32::try_from(crate::val::int_of(self.v, x)).ok())
                 .collect();
+            linked.sort_unstable();
             view.elink.insert(f, linked.clone());
             for &e in &linked {
                 let k = key(e);
@@ -1563,6 +1569,7 @@ impl Run<'_, '_> {
         let t0 = crate::prof::start();
         let para = phitex_typeset::linebreak::line_break(list, display, &params, &view, &mut hy);
         crate::prof::add(crate::prof::LB_TS, t0);
+        self.note_elink_asks(&view)?;
         // (the fonts its expansion made, in the order it asked for them:
         // pdfTeX's internal fonts, numbered as they are made)
         let made = std::mem::take(&mut *view.exp_log.locked());

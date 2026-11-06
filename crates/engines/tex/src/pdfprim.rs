@@ -2408,7 +2408,7 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
         .ops
         .fields
         .get_at(v, r.cx.values_epoch(), &format!("pdf:elink:{f}"));
-    let first = !r.int_set(link)?.contains(&i64::from(e));
+    let first = !r.val_has(link, v.int(i64::from(e)))?;
     let note = |r: &mut Run<'_, '_>| -> R<()> {
         if first {
             r.append_val(link, v.int(i64::from(e)))?;
