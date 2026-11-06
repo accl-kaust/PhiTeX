@@ -4029,6 +4029,23 @@ impl<'c, 'a> Run<'c, 'a> {
     /// deleted at the start moved every later appender, Grail's `TikZ`
     /// figures a second each). Whether it did so; false with the input as
     /// it was.
+    /// (observe, `PHITEX_APPEND_TRACE`) Why an `\\xdef` to `p` is no append
+    /// ([`Run::append_def`]): the exit's number.
+    fn append_trace(&mut self, p: Tok, why: &str) {
+        if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") {
+            let l = self.mean_loc(p);
+            eprintln!(
+                "append-trace: node {} op {:?} {:?} not an append: exit {why} (loaded {}, interp {}, rb {})",
+                self.cx.node().raw(),
+                self.cx.op(),
+                p,
+                l.is_some_and(|l| self.st.load_state(l) != 0),
+                self.interp.is_some(),
+                self.rb.is_some()
+            );
+        }
+    }
+
     pub(crate) fn append_def(&mut self, p: Tok) -> R<bool> {
         // (a document piece's run: a page routine's publication is the
         // page loop's, `crate::pages`)
@@ -4039,6 +4056,7 @@ impl<'c, 'a> Run<'c, 'a> {
             || self.lt.sink.is_some()
             || !(op == self.ops.exec || op == self.ops.resume)
         {
+            self.append_trace(p, "1");
             return Ok(false);
         }
         // (a node recorded as a load replays its values, not relations)
@@ -4047,14 +4065,17 @@ impl<'c, 'a> Run<'c, 'a> {
             && !crate::pkgrec::is_load(self.v, self.cx.args())
             && crate::pkgrec::is_recorded(&self.ops.hints, self.v, self.cx.args())
         {
+            self.append_trace(p, "2");
             return Ok(false);
         }
         let Some(l) = self.mean_loc(p) else {
+            self.append_trace(p, "3");
             return Ok(false);
         };
         self.pic_touch(l)?;
         let pending = self.appending.iter().any(|x| x.0 == l);
         if !pending && (self.st.load_state(l) != 0 || self.lazy_pre(l)) {
+            self.append_trace(p, "4");
             return Ok(false);
         }
         // (the next tokens unexpanded, their meanings not read, as a name
@@ -4062,12 +4083,14 @@ impl<'c, 'a> Run<'c, 'a> {
         let open = self.bare_token()?;
         if open.cat() != Some(1) {
             self.back_input(open);
+            self.append_trace(p, "5");
             return Ok(false);
         }
         let second = self.bare_token()?;
         if second != p {
             self.back_input(second);
             self.back_input(open);
+            self.append_trace(p, "6");
             return Ok(false);
         }
         if !pending {
@@ -4075,6 +4098,7 @@ impl<'c, 'a> Run<'c, 'a> {
             if !ok {
                 self.back_input(second);
                 self.back_input(open);
+                self.append_trace(p, "7");
                 return Ok(false);
             }
         }
