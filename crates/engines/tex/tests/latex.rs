@@ -1116,7 +1116,7 @@ fn latex_input_include() {
     edit_check("inputs", &b, &cold, &before);
 }
 
-/// An `\input` file read inside a TikZ picture (the bayesnet example's
+/// An `\input` file read inside a `TikZ` picture (the bayesnet example's
 /// figures), edited first thing after the cold build: the PDF is a cold
 /// build's of the edited file. The first push of the environment after
 /// the cold build differed from the last pushed by every file the
