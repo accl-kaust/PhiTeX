@@ -899,20 +899,6 @@ impl<'a> Ctx<'a> {
         self.product.placements.len() - 1
     }
 
-    /// Takes back my placements of this run from the `n`-th on, and my
-    /// reads of their outputs: a pass that a run throws away and makes
-    /// again leaves none of what it placed (its other reads stay, as a
-    /// second pass's do).
-    pub fn unplace_from(&mut self, n: usize) {
-        let p = &mut self.product;
-        p.placements.truncate(n);
-        p.ranks.truncate(n);
-        p.waits.retain(|&j| j < n);
-        p.reads
-            .retain(|rd| !matches!(rd.kind, ReadKind::Placed { i, .. } if i >= n));
-        self.placed_keys = None;
-    }
-
     /// Places a node after me and my children.
     pub fn follow(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
         self.product.placements.push(Placement::Follow(op, args));

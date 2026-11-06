@@ -1,7 +1,7 @@
 # A per-field read-back as a child node (design and exactness, 2026-11-04)
 
 Status: built on branch xref9 (`crate::ops::ReadBack`, `Run::rb_read_back`,
-`Run::rb_check`, `Run::rb_def_check`). It answers the tikz-cd label edit:
+`Run::rb_check`). It answers the tikz-cd label edit:
 `\begin{document}`'s run (~130 ms) ran again on every new `\label`
 because it read the `.aux` key set whole (`wkeys:<job>.aux`).
 
@@ -69,11 +69,13 @@ held, and in who defines the keys it never uses.
    point, at any group level. The value it replaces is the location's
    value at the point (untouched since), so `wpre:<name>` is the same.
 3. A key the run first touches by a definition after the point
-   (`Run::rb_def_check`): the inline read-back would have defined it
-   first and kept the value it replaced; the child cannot. The pass is
-   refused (`Run::rb_refused`) and the run made again with the read-back
-   inline (`ops::run_node`, `no_rb`); the first pass's child placement
-   and its reads are taken back (`Ctx::unplace_from`).
+   (`Run::set_loc` calls `Run::rb_check` before defining): the
+   read-back's definition is made first, globally, with the value it
+   replaces kept (`wpre:`, the location's value at the point, untouched
+   since), then the run's own definition, as inline. (Until 2026-11-06
+   the pass was refused and the run made again inline: biblatex's
+   `\begin{document}` then read the `.aux` key set whole in the second
+   pass, and ran again on every new key of the file.)
 4. A key the run never uses: the child defines it globally at its
    position, right after the run, before its continuation and next
    sibling, so every node after the run sees it, as it sees the run's
