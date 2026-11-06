@@ -4139,6 +4139,12 @@ impl<'c, 'a> Run<'c, 'a> {
         let proj = Step::Proj(self.ops.append_proj);
         let tail_p = self.cx.path(&[proj, Step::Index(0)]);
         let Some(tail) = self.cx.read_path(f, tail_p)? else {
+            if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") {
+                eprintln!(
+                    "append-base: node {} no tail (not a list of names)",
+                    self.cx.node().raw()
+                );
+            }
             return Ok(None);
         };
         // (the names, each checked not to expand; the run then depends on
@@ -4152,6 +4158,15 @@ impl<'c, 'a> Run<'c, 'a> {
             for &n in &names {
                 for t in crate::val::toks_of(v, Some(n)) {
                     if !self.does_not_expand(t)? {
+                        if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") {
+                            let tl = self.mean_loc(t);
+                            eprintln!(
+                                "append-base: node {} name {t:?} may expand (loaded {}, lazy {})",
+                                self.cx.node().raw(),
+                                tl.is_some_and(|x| self.st.is_loaded(x)),
+                                tl.is_some_and(|x| self.lazy_pre(x)),
+                            );
+                        }
                         return Ok(None);
                     }
                 }
@@ -4163,6 +4178,12 @@ impl<'c, 'a> Run<'c, 'a> {
                 return Ok(Some(int_of(v, tail)));
             }
             // (a name came since the look: the whole list read)
+            if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") {
+                eprintln!(
+                    "append-base: node {} names not within",
+                    self.cx.node().raw()
+                );
+            }
             seen = self.cx.read_path(f, names_p)?;
         }
         Ok(None)
@@ -5974,7 +5995,14 @@ impl<'c, 'a> Run<'c, 'a> {
                 return Ok(Some(true));
             }
             let f = self.loc_field(l);
-            if self.append_base(l)? == Some(1) {
+            let base = self.append_base(l)?;
+            if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") && base != Some(1) {
+                eprintln!(
+                    "append-clist: node {} membership falls to the whole list (base {base:?})",
+                    self.cx.node().raw()
+                );
+            }
+            if base == Some(1) {
                 let not = self.cx.path(&[
                     phitex_defuse::Step::Proj(self.ops.clist_proj),
                     phitex_defuse::Step::Has(v.str(crate::val::CLIST_NOT)),
