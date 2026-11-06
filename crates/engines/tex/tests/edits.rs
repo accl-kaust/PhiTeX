@@ -1757,32 +1757,37 @@ fn a_second_pass_goes_on_from_the_first_pass_checkpoint() {
 /// TeX's `\parshape` starts empty (§232) and a paragraph's end empties it
 /// again inside the group it was set in (§1070): the job starts with the
 /// empty list bound, so "empty" and "never set" are one value. An edit
-/// that leaves the paragraphs after a group inside it (its `\endgroup`
-/// deleted), the group's last definition being that reset, gives none of
-/// them another `\parshape`, and none runs again (bound to nothing, each
-/// read "unset" against "empty" and ran again: 560 000 of the 774 000
-/// re-asks of biblatex's manual's first 300 s at -j4, mc 80695). The
-/// edited text equals a cold build of it.
+/// that moves 40 paragraphs from one group into another, the one before
+/// them, whose last definition is that reset, gives none of them another
+/// `\parshape`, and none runs again (bound to nothing, each read "unset"
+/// against "empty" and ran again: 560 000 of the 774 000 re-asks of
+/// biblatex's manual's first 300 s at -j4, mc 80695). The edited text
+/// equals a cold build of it.
 #[test]
 fn a_parshape_emptied_in_a_group_is_its_start_value() {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("parshape-reset");
     let _ = std::fs::create_dir_all(&dir);
     let prelude = common::plain();
-    let mut doc = String::from("\\begingroup\\parshape=1 10pt 80pt Shaped.\\par\\endgroup\n\n");
+    let mut doc = String::from(
+        "\\begingroup\\parshape=1 10pt 80pt Shaped.\\par\\endgroup\n\n\\begingroup\n\n",
+    );
     for k in 0..40 {
         doc += &["Paragraph ", &k.to_string(), ".\n\n"].concat();
     }
-    doc.push_str("\\end\n");
+    doc.push_str("\\endgroup\n\n\\end\n");
     let opts = || phitex_tex::Options {
         threads: Some(1),
         ..common::options("./main.tex", "main", "", &dir)
     };
     let mut b = common::build(opts(), Some(&prelude), &doc);
-    let text = doc.replacen("\\endgroup", "\\relax", 1);
+    let text = doc.replacen("\\endgroup\n\n\\begingroup\n\n", "\n\n", 1);
     b.edit(&text);
     let (run, by_op) = (b.stats.nodes_run, b.stats.runs_by_op.clone());
     eprintln!("parshape edit: {run} nodes run, by op {by_op:?}");
     let cold = common::build(opts(), Some(&prelude), &text);
     assert_eq!(b.output().0, cold.output().0, "edit differs from cold");
-    assert!(run < 20, "{run} nodes run after the edit (40 paragraphs after the group): {by_op:?}");
+    assert!(
+        run < 20,
+        "{run} nodes run after the edit (40 paragraphs moved): {by_op:?}"
+    );
 }
