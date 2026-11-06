@@ -65,6 +65,9 @@ pub struct Ctx<'a> {
     pub(crate) wait_frontier: bool,
     /// `Ctx::goes_on`: the run goes on from where its last run stopped.
     pub(crate) goes_on: bool,
+    /// A quiet point let the run go (`sched::work`): what it waited for
+    /// will not come first, and it waits no more.
+    pub(crate) let_go: bool,
     /// Its checks so far ([`Ctx::tick`]).
     ticks: u64,
     /// The reads `unread` took out, each by its index in the reads as
@@ -139,6 +142,7 @@ impl<'a> Ctx<'a> {
             wait_on: None,
             wait_frontier: false,
             goes_on: false,
+            let_go: false,
             ticks: 0,
         }
     }
@@ -895,20 +899,6 @@ impl<'a> Ctx<'a> {
         self.product.placements.len() - 1
     }
 
-    /// Takes back my placements of this run from the `n`-th on, and my
-    /// reads of their outputs: a pass that a run throws away and makes
-    /// again leaves none of what it placed (its other reads stay, as a
-    /// second pass's do).
-    pub fn unplace_from(&mut self, n: usize) {
-        let p = &mut self.product;
-        p.placements.truncate(n);
-        p.ranks.truncate(n);
-        p.waits.retain(|&j| j < n);
-        p.reads
-            .retain(|rd| !matches!(rd.kind, ReadKind::Placed { i, .. } if i >= n));
-        self.placed_keys = None;
-    }
-
     /// Places a node after me and my children.
     pub fn follow(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
         self.product.placements.push(Placement::Follow(op, args));
@@ -1099,6 +1089,7 @@ impl<'a> Ctx<'a> {
     /// Takes my next `n` siblings: they become inert and `following` gives
     /// their (op, args). Pushed siblings only, not placements.
     pub fn claim(&mut self, n: usize) {
+        self.me.claim_waits.store(false, std::sync::atomic::Ordering::Release);
         self.me.claim_all.store(false, std::sync::atomic::Ordering::Release);
         self.product.claim = n;
         self.product.claim_all = false;
@@ -1114,6 +1105,7 @@ impl<'a> Ctx<'a> {
     /// pushed sibling and left the 11000 pieces of the included files to
     /// run on, 65 times each at ten threads.
     pub fn claim_rest(&mut self) {
+        self.me.claim_waits.store(false, std::sync::atomic::Ordering::Release);
         self.me.claim_all.store(true, std::sync::atomic::Ordering::Release);
         self.product.claim = usize::MAX;
         self.product.claim_all = true;
@@ -1210,6 +1202,39 @@ impl<'a> Ctx<'a> {
     pub fn wait_text_before(&mut self) -> Result<(), Stop> {
         self.check()?;
         if let Some(x) = read::on_one_layout(self.eng, || read::text_to_run_before(self.eng, self.me)) {
+            self.wait_on = Some(x);
+            return Err(stop());
+        }
+        Ok(())
+    }
+
+    /// Stops the run before a claim of `want` siblings (`all`: every text
+    /// node after me, `Ctx::claim_rest`; `usize::MAX`: as many as follow)
+    /// that would move what the line after me holds (`commit::claim_moves`:
+    /// take back the products of siblings that have run, or give back
+    /// siblings I hold) while a piece of the text before me is still to
+    /// run ([`read::text_open_before`]): I run again once it has
+    /// committed, and my next run waits for the text before me first
+    /// (`Node::claim_waits`, `sched::work`). On a guess of that text a
+    /// claim is a guess too, and a claim's walks are the costliest a run
+    /// makes: an example's body cut into pieces of its own and run as text
+    /// on more threads before the piece that reads it verbatim, an
+    /// `\end{document}` in it ended the job there and took back the
+    /// products of the 98 000 pieces after it, one run of 291 s, and its
+    /// claimer took and gave back the body's pieces as its guesses changed
+    /// (biblatex at -j4, mc 80752). One thread runs the text in order, a
+    /// claimer before what it claims; nor does a run a quiet point let go
+    /// wait.
+    pub fn wait_claim_settled(&mut self, want: usize, all: bool) -> Result<(), Stop> {
+        self.check()?;
+        if self.let_go || !self.has_other_threads() {
+            return Ok(());
+        }
+        if !crate::commit::claim_moves(self.eng, self.me, want, all) {
+            return Ok(());
+        }
+        if let Some(x) = read::on_one_layout(self.eng, || read::text_open_before(self.eng, self.me)) {
+            self.me.claim_waits.store(true, std::sync::atomic::Ordering::Release);
             self.wait_on = Some(x);
             return Err(stop());
         }
