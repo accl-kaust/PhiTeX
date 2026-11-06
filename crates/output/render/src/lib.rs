@@ -438,8 +438,11 @@ fn lines_of(chars: &[Ch], scale: f64) -> Vec<TextLine> {
                 ..TextLine::default()
             });
         } else if let Some(l) = cur.as_mut() {
-            // (a word space TeX leaves as a gap: a space, as the PDF's text has it)
-            if x - last_r > size * 0.2 && !l.text.ends_with(' ') {
+            // (a word space TeX leaves as a gap: a space, as the PDF's text
+            // has it. A tenth of the em, as poppler's `pdftotext` takes
+            // it: a justified line's spaces shrink below a fifth, Grail's
+            // Libertine lines lost theirs, while kerns stay below a tenth)
+            if x - last_r > size * 0.1 && !l.text.ends_with(' ') {
                 l.text.push(' ');
                 l.xs.push(last_r);
                 l.rs.push(x);
