@@ -84,6 +84,11 @@ pub(crate) struct Inner {
     /// Its nodes that have not committed (about: a walk skips the search
     /// for one when there are none, `commit::first_hole`).
     pub(crate) holes: usize,
+    /// The scope count (`Engine::scope_gen`) of the last change of its
+    /// brackets, or of their moving into it: a bracket walk that passed
+    /// it checks no bracket changed in its region after its own
+    /// (`commit::reask_after_effect`).
+    pub(crate) brk_gen: u64,
 }
 
 /// A field's definitions or contributions in one segment, by label. Most
@@ -1123,6 +1128,7 @@ impl Segment {
                 stops: Vec::new(),
                 by_op: FxHashMap::default(),
                 holes: 0,
+                brk_gen: 0,
             }),
         }
     }
@@ -1484,6 +1490,7 @@ impl Segment {
                 stops,
                 by_op,
                 holes: up_holes,
+                brk_gen: inner.brk_gen,
             }),
         });
         let moved: Vec<Field> = {

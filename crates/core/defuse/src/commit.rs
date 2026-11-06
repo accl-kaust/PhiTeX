@@ -5310,7 +5310,9 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
         node.has_brackets.store(false, Ordering::Release);
     }
     inner.sum_depth();
-    node.bracket_gen.store(eng.scope_changed(), Ordering::Release);
+    let g = eng.scope_changed();
+    inner.brk_gen = g;
+    node.bracket_gen.store(g, Ordering::Release);
     eng.bump(eng.depth_field);
     Some(old.unwrap_or_default())
 }
@@ -5394,6 +5396,35 @@ fn scopes_through(inner: &Inner, first: bool, at: Pos, a: i64, b: i64, p: i64) -
 
 fn through_segment(d: i64, net: i64, min: i64) -> (i64, i64) {
     ((d + min).max(0), (d + net).max(net - min))
+}
+
+/// Whether a bracket changed, or moved, after scope count `g` in the
+/// segments from the one at `at` to `last`: the region of a walk that
+/// stopped in `last`. A change elsewhere has its own walk: one before
+/// `at` walks on past it, one after the stop starts where this walk's
+/// changes no longer reach. (Any change anywhere since counted as such a
+/// race: at -j4 nearly every walk, whose region was a node wide, asked
+/// every reader to the line's end, 4 to 5 M, biblatex, mc 80647.)
+fn brackets_changed_since(eng: &Engine, at: Pos, last: SegId, g: u64) -> bool {
+    if eng.scope_gen.load(Ordering::Acquire) == g {
+        return false;
+    }
+    let mut cur = eng.seg_for_pos(at).map(|s| s.id);
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        let inner = seg.inner.read();
+        if inner.brk_gen > g {
+            return true;
+        }
+        let lo = seg.lo;
+        drop(inner);
+        if sid == last {
+            return false;
+        }
+        cur = eng.order.next(sid, lo);
+    }
+    // (the stop's segment no longer after `at`: moved meanwhile)
+    true
 }
 
 /// Whether a definition's reach can move with the brackets around it: a
@@ -5663,7 +5694,7 @@ fn reask_after_effect_with(
     // change on after a race)
     let mut rest = (at, end.map(|(_, q)| q));
     if let Some((sid, q)) = end
-        && eng.scope_gen.load(Ordering::Acquire) != by.bracket_gen.load(Ordering::Acquire)
+        && brackets_changed_since(eng, at, sid, by.bracket_gen.load(Ordering::Acquire))
     {
         end = None;
         rest = (at, None);
