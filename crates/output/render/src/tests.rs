@@ -142,8 +142,8 @@ fn lines_are_bands_and_compose_to_the_page() {
 
 /// A window's frame (a zoomed-in viewer's): only the bands it crosses,
 /// each cut to it, composed the same pixels as that part of the whole
-/// page's frame; its strips within the window, kept apart from the
-/// whole page's.
+/// page's frame; its strips within the window, those of the bands it
+/// cuts its own, those of the bands inside it the whole page's.
 #[test]
 #[allow(
     clippy::cast_possible_wrap,
@@ -155,15 +155,19 @@ fn a_window_is_that_part_of_the_page() {
     let mut r = Renderer::new();
     let f = r.frame(&doc, 0, 2.0).unwrap();
     let full = compose(&r, &f);
-    // (from the middle of the first line's band to below the rule, the
-    // left half less a bit)
-    let win = [0.1, 0.12, 0.45, 0.4];
+    // (from the middle of the first line's band to below the rule, from
+    // left of the lines to the middle of the second and the rule)
+    let win = [0.1, 0.12, 0.2, 0.4];
     let g = r.frame_in(&doc, 0, 2.0, Some(win)).unwrap();
     let [wx, wy, ww, wh] = g.win;
     assert_eq!((g.pw, g.ph), (f.pw, f.ph));
     assert!(ww < f.pw && wh < f.ph && wx > 0 && wy > 0, "{:?}", g.win);
     assert!(!g.bands.is_empty() && g.bands.len() <= f.bands.len());
-    assert_eq!(g.drawn, g.bands.len(), "a window's strips are its own");
+    // (a band the window cuts is a strip of its own; one inside it is the
+    // whole page's)
+    let cut = g.bands.iter().filter(|b| !f.bands.contains(b)).count();
+    assert!(cut > 0, "{:?} of {:?}", g.bands, f.bands);
+    assert_eq!(g.drawn, cut, "a cut band's strip is its own");
     let (ww, wh) = (ww as usize, wh as usize);
     let mut part = vec![255u8; ww * wh * 3];
     for b in &g.bands {
