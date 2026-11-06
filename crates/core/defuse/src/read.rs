@@ -1673,13 +1673,53 @@ fn visible_before(eng: &Engine, f: Field, target: &[u64], lo: Pos) -> Reaching {
         let start = chain_start(eng, seg);
         {
             let inner = seg.inner.read();
-            if let Some(d) = last_visible(&levels(&eng.values, &inner, f, &start, None, false), target) {
+            let ls = survivors(eng, seg, &inner, f, &start);
+            if let Some(d) = ls.iter().rev().find(|x| visible(target, x.1)).map(|x| x.0) {
                 return Reaching::of(&d);
             }
         }
         lo = seg.lo;
     }
     env_reaching(eng, f)
+}
+
+/// The definitions of `f` in segment `seg` (`inner` its guard, `start`
+/// the scopes open at its start) that a reader after its end can see,
+/// with their scopes, in order: those whose scope is still open at its
+/// end (a scope open at a later reader was open all the way there). The
+/// last of them a reader sees is the last of all it sees, so a reader
+/// looking back past the segment looks at these alone; kept with the
+/// segment while neither it nor the scopes at its start change. Looked
+/// at whole each time, a segment's every definition of the field and its
+/// every bracket were gone over by each reader passing it: biblatex at
+/// -j4, readers going back 170 segments each, 10 M segments and 47 M
+/// brackets for one walk's 59 k readers, 10 s (mc 80642).
+fn survivors(
+    eng: &Engine,
+    seg: &Segment,
+    inner: &Inner,
+    f: Field,
+    start: &Arc<[u64]>,
+) -> Arc<[(Def, (usize, u64))]> {
+    let w = seg.inner.writes();
+    if let Some(e) = seg.surv.lock().get(&f)
+        && e.0 == w
+        && *e.1 == **start
+    {
+        return e.2.clone();
+    }
+    let mut end = start.to_vec();
+    for (_, (n, b)) in inner.brackets.iter() {
+        close(&mut end, b);
+        open(&mut end, *n, b);
+    }
+    let ls: Arc<[(Def, (usize, u64))]> = levels(&eng.values, inner, f, start, None, false)
+        .into_iter()
+        .filter(|x| visible(&end, x.2))
+        .map(|x| (x.1, x.2))
+        .collect();
+    seg.surv.lock().insert(f, (w, start.clone(), ls.clone()));
+    ls
 }
 
 /// The scope depth at `p`: scopes open just before the node there, its

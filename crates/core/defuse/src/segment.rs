@@ -27,6 +27,12 @@ pub(crate) struct Segment {
     /// and the scope count they were found at (`Engine::scope_gen`): apart
     /// from `inner`, so a read of them never waits for a commit.
     pub(crate) chain: crate::lock::Mx<Option<(u64, Arc<[u64]>)>>,
+    /// By field, the definitions in it that a reader after its end can
+    /// see (`read::survivors`): those whose scope is still open at its
+    /// end, with their scopes, kept with the count of its exclusive
+    /// guards (`Lock::writes`) and the scopes open at its start they were
+    /// found from.
+    pub(crate) surv: crate::lock::Mx<crate::values::FxHashMap<Field, Survivors>>,
     /// Counts its moves of labels, bumped as each begins and ends
     /// ([`Segment::moving`]: a relabel, a split, a rebalance through it),
     /// under its write lock: a read that met it checks it did not move
@@ -927,6 +933,11 @@ impl Inner {
     }
 }
 
+/// A segment's definitions of a field a reader after it can see, each
+/// with its scope (`read::levels`), in order, as found under its guard's
+/// count of writes and the scopes open at its start (`Segment::surv`).
+pub(crate) type Survivors = (u64, Arc<[u64]>, Arc<[(Def, (usize, u64))]>);
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Def {
     pub(crate) value: ValueId,
@@ -1096,6 +1107,7 @@ impl Segment {
             unit,
             lo,
             chain: crate::lock::Mx::new(None),
+            surv: crate::lock::Mx::new(crate::values::FxHashMap::default()),
             moved: AtomicU64::new(0),
             inner: Lock::new(Inner {
                 brackets: PosMap::Zero,
@@ -1456,6 +1468,7 @@ impl Segment {
             unit: self.unit,
             lo: at,
             chain: crate::lock::Mx::new(None),
+            surv: crate::lock::Mx::new(crate::values::FxHashMap::default()),
             moved: AtomicU64::new(0),
             inner: Lock::new(Inner {
                 brackets,
