@@ -6060,7 +6060,12 @@ impl Movable {
     fn learn(&mut self, eng: &Engine, seg: &Segment) {
         let fs: Vec<Field> = {
             let inner = seg.inner.read();
-            inner.readers.keys().filter(|f| !self.0.contains_key(f)).copied().collect()
+            inner
+                .readers
+                .keys()
+                .filter(|f| !self.0.contains_key(f))
+                .copied()
+                .collect()
         };
         for f in fs {
             let m = f == eng.depth_field

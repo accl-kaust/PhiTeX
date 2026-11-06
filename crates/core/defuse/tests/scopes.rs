@@ -1023,8 +1023,16 @@ fn a_change_of_brackets_asks_only_the_readers_whose_scopes_can_move() {
     assert_eq!(e.output(after), Some(ValueId::UNIT), "the outer scope closed");
     e.replace(n, open, vec![v.int(1)]);
     let rep = e.evaluate(1).unwrap();
-    assert_eq!(e.output(inside), Some(v.int(1)), "the reader inside the new scope sees it");
-    assert_eq!(int(&e, after), 5, "the close ends the new scope, the outer one stays open");
+    assert_eq!(
+        e.output(inside),
+        Some(v.int(1)),
+        "the reader inside the new scope sees it"
+    );
+    assert_eq!(
+        int(&e, after),
+        5,
+        "the close ends the new scope, the outer one stays open"
+    );
     assert!(globals.iter().chain(&more).all(|&r| int(&e, r) == 1));
     assert!(
         rep.scope_asked < 100,
