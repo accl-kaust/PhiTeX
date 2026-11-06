@@ -3069,11 +3069,11 @@ fn latex_examples_do_not_run_again_on_a_renamed_anchor() {
 /// as a fold).
 #[test]
 fn a_line_renaming_a_macro_it_redefines_runs_once_at_the_end() {
-    let doc = "\\documentclass{article}\n\\makeatletter\n\\def\\rbcmd#1{#1}\n\
+    let doc = "\\documentclass{article}\n\\makeatletter\n\\def\\rbcmd#1{\\gdef\\rbres{#1}}\n\
                \\AtBeginDocument{\\immediate\\write\\@auxout{\\let\\string\\rbold\\string\\rbcmd\
-               \\def\\string\\rbcmd\\string##1{(\\string\\rbold{\\string##1})}}\
-               \\immediate\\write\\@auxout{\\xdef\\string\\rbres{\\string\\rbcmd{x}}}}\n\
-               \\makeatother\n\\begin{document}\nText.\n\\end{document}\n";
+               \\def\\string\\rbcmd\\string##1{\\string\\rbold{\\string##1}}}\
+               \\immediate\\write\\@auxout{\\string\\rbcmd{x}}}\n\
+               \\makeatother\n\\begin{document}\nText \\ifdefined\\rbres\\rbres\\fi.\n\\end{document}\n";
     for threads in [1, 4] {
         let dir =
             PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("latexmk/rb-rename-{threads}"));
