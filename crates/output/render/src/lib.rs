@@ -350,12 +350,27 @@ impl<'a> Device<'a> for Probe<'_> {
                 }
                 Glyph::Type3(t) => {
                     let text = t.as_unicode().map(|b| bf(&b)).unwrap_or_default();
-                    (
-                        t.cache_key(),
-                        Rect::new(0.0, -300.0, 1000.0, 1000.0),
-                        text,
-                        0.0,
-                    )
+                    // (what its procedure draws, in the font's 1000 units
+                    // to the em, once per glyph: its box, and its right
+                    // edge as its advance, the font's widths being out of
+                    // reach. As an advance of none, every letter of a
+                    // Type 3 font, pdfTeX's bitmap ones, was a word apart)
+                    let key = t.cache_key();
+                    let (local, _) = *self.boxes.entry(key).or_insert_with(|| {
+                        let mut inner = HashMap::new();
+                        let mut sub = Probe {
+                            items: Vec::new(),
+                            around: 0,
+                            saved: Vec::new(),
+                            boxes: &mut inner,
+                            chars: Vec::new(),
+                        };
+                        t.interpret(&mut sub, Affine::IDENTITY, Affine::IDENTITY, &props.paint);
+                        let ink = sub.items.iter().map(|i| i.bbox).reduce(|a, b| a.union(b));
+                        (ink.unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0)), 0)
+                    });
+                    let adv = local.x1.max(0.0);
+                    (key, local, text, adv)
                 }
             };
             let gb = full.transform_rect_bbox(local);
@@ -438,8 +453,11 @@ fn lines_of(chars: &[Ch], scale: f64) -> Vec<TextLine> {
                 ..TextLine::default()
             });
         } else if let Some(l) = cur.as_mut() {
-            // (a word space TeX leaves as a gap: a space, as the PDF's text has it)
-            if x - last_r > size * 0.2 && !l.text.ends_with(' ') {
+            // (a word space TeX leaves as a gap: a space, as the PDF's text
+            // has it. A tenth of the em, as poppler's `pdftotext` takes
+            // it: a justified line's spaces shrink below a fifth, Grail's
+            // Libertine lines lost theirs, while kerns stay below a tenth)
+            if x - last_r > size * 0.1 && !l.text.ends_with(' ') {
                 l.text.push(' ');
                 l.xs.push(last_r);
                 l.rs.push(x);

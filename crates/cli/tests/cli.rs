@@ -3862,3 +3862,58 @@ fn the_viewers_settings_are_the_users() {
         "a project's threads not said:\n{said}"
     );
 }
+
+/// Text copied or searched in the viewer has its word spaces in every
+/// kind of font, and none inside words: XeLaTeX with a TrueType font of
+/// 2048 units to the em (`DejaVu` Serif) and with an OpenType CFF one
+/// (Latin Modern), pdfLaTeX with Type 1 fonts (Type 3 ones: the
+/// renderer's `word_spaces_are_read_from_the_gaps`, a PK font not being
+/// made in the CI image). Each line once with the font's own
+/// spaces and once with spaces of .15em (a justified line's spaces
+/// shrink that far: Grail's Libertine lines, "Thesedependenciesobstruct",
+/// had none). The renderer's text layer
+/// (`phitex_render::Renderer::text`) of the PDF `phitex build` writes.
+#[test]
+#[ignore = "heavy: the xelatex and pdflatex formats; run on accl"]
+fn copied_text_has_its_word_spaces() {
+    let _one = one();
+    let body = "\\begin{document}\nalpha beta gamma delta\n\n{\\spaceskip=.15em\\relax tight words set close\\par}\n\\end{document}\n";
+    let docs: [(&str, &str, &str); 3] = [
+        (
+            "xe-ttf",
+            "xelatex",
+            "\\documentclass{article}\\usepackage{fontspec}\\setmainfont{DejaVuSerif.ttf}",
+        ),
+        (
+            "xe-otf",
+            "xelatex",
+            "\\documentclass{article}\\usepackage{fontspec}",
+        ),
+        ("pdf-type1", "pdflatex", "\\documentclass{article}"),
+    ];
+    let mut bad = Vec::new();
+    for (name, engine, head) in docs {
+        let dir = scratch(&format!("spaces-{name}"));
+        std::fs::write(dir.join("doc.tex"), format!("{head}\n{body}")).expect("the document");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(["build", "--engine", engine, "doc.tex"])
+            .output()
+            .expect("phitex runs");
+        assert!(
+            out.status.success(),
+            "{name}: build failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let pdf: std::sync::Arc<[u8]> = std::fs::read(dir.join("doc.pdf")).expect("the PDF").into();
+        let mut r = phitex_render::Renderer::new();
+        let lines = r.text(&pdf, 0).expect("page 1's text");
+        let all: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+        eprintln!("{name}: {all:?}");
+        for want in ["alpha beta gamma delta", "tight words set close"] {
+            if !all.iter().any(|l| l.trim() == want) {
+                bad.push(format!("{name}: {want:?} not in {all:?}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "text without its word spaces: {bad:?}");
+}
