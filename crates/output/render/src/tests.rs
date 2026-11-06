@@ -338,3 +338,89 @@ fn outline_and_text_are_read() {
     );
     assert_eq!(t[0].xs.len(), "Hello outline".encode_utf16().count());
 }
+
+/// `objs` as a PDF's objects 1, 2, ... (1 the catalog), with its xref.
+fn pdf_of(objs: &[String]) -> Arc<[u8]> {
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut at = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        at.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for a in at {
+        out.extend_from_slice(format!("{a:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objs.len() + 1
+        )
+        .as_bytes(),
+    );
+    Arc::from(out)
+}
+
+/// Links and outline entries to named destinations: the catalog's
+/// `/Dests`, and a `/Names` tree of two leaves under a root, its values
+/// an object, an array inside the leaf, a dictionary's `/D`; a name in
+/// neither is no link. Each name's place found once a document (the
+/// tree read once), as a search of the tree for every link found it.
+#[test]
+fn named_destinations_are_found() {
+    let content = "BT /F1 12 Tf 72 700 Td (Links) Tj ET\n";
+    let link = |y: u32, dest: &str| {
+        format!(
+            "<< /Type /Annot /Subtype /Link /Rect [72 {y} 100 {}] {dest} >>",
+            y + 10
+        )
+    };
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R /Names << /Dests 9 0 R >> /Dests << /old [3 0 R /XYZ 0 100 null] >> /Outlines 14 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R /Annots [6 0 R 7 0 R 8 0 R 15 0 R 16 0 R] >>".to_owned(),
+        format!("<< /Length {} >>\nstream\n{content}endstream", content.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        link(700, "/Dest (a)"),
+        link(680, "/A << /S /GoTo /D (b) >>"),
+        link(660, "/Dest /c"),
+        "<< /Kids [10 0 R 11 0 R] >>".to_owned(),
+        "<< /Limits [(a) (b)] /Names [(a) 12 0 R (b) [3 0 R /XYZ 0 400 null]] >>".to_owned(),
+        "<< /Limits [(c) (d)] /Names [(c) 13 0 R] >>".to_owned(),
+        "[3 0 R /XYZ 0 500 null]".to_owned(),
+        "<< /D [3 0 R /FitH 300] >>".to_owned(),
+        "<< /Type /Outlines /First 17 0 R /Last 17 0 R /Count 1 >>".to_owned(),
+        link(640, "/Dest (old)"),
+        link(620, "/Dest (zz)"),
+        "<< /Title (To b) /Parent 14 0 R /Dest (b) >>".to_owned(),
+    ];
+    let doc = pdf_of(&objs);
+    let mut r = Renderer::new();
+    let f = r.frame(&doc, 0, 1.0).unwrap();
+    let tops: Vec<(f64, usize, Option<f64>)> = f
+        .links
+        .iter()
+        .map(|l| match l.target {
+            Target::Page(p, y) => (l.rect[1], p, y),
+            Target::Uri(_) => panic!("{l:?}"),
+        })
+        .collect();
+    // (pages' tops: 792 less the destination's y)
+    assert_eq!(
+        tops,
+        [
+            (82.0, 0, Some(292.0)),
+            (102.0, 0, Some(392.0)),
+            (122.0, 0, Some(492.0)),
+            (142.0, 0, Some(692.0)),
+        ],
+        "{:?}",
+        f.links
+    );
+    let o = r.outline(&doc);
+    assert_eq!(
+        (o[0].title.as_str(), o[0].page, o[0].y),
+        ("To b", Some(0), Some(392.0))
+    );
+}

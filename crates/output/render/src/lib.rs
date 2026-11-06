@@ -154,6 +154,8 @@ struct Doc {
     texts: HashMap<usize, Vec<TextLine>>,
     /// The outline, read once a PDF.
     outline: Option<Vec<Entry>>,
+    /// Its named destinations, each found once.
+    names: Names,
 }
 
 /// The strips of a viewer's pages, across builds.
@@ -498,58 +500,119 @@ fn dest_of(pages: &[Page<'_>], arr: &Array<'_>) -> Option<(usize, Option<f64>)> 
     Some((page, top.map(|t| h - (t - y0))))
 }
 
-/// A named destination, from the catalog's `/Dests` dictionary or its
-/// `/Names` `/Dests` tree.
-fn named<'a>(pdf: &'a Pdf, name: &[u8]) -> Option<Array<'a>> {
-    let xref = pdf.xref();
-    let root: Dict<'_> = xref.get(xref.root_id())?;
-    let as_dest = |o: Object<'a>| -> Option<Array<'a>> {
-        match o {
-            Object::Array(a) => Some(a),
-            Object::Dict(d) => d.get::<Array<'_>>(b"D"),
-            _ => None,
-        }
-    };
-    if let Some(d) = root.get::<Dict<'_>>(b"Dests")
-        && let Some(o) = d.get::<Object<'_>>(name)
-    {
-        return as_dest(o);
+/// A destination's value (an array, or a dictionary with one under `/D`).
+fn as_dest<'a>(o: Object<'a>) -> Option<Array<'a>> {
+    match o {
+        Object::Array(a) => Some(a),
+        Object::Dict(d) => d.get::<Array<'_>>(b"D"),
+        _ => None,
     }
-    let tree = root.get::<Dict<'_>>(b"Names")?.get::<Dict<'_>>(b"Dests")?;
+}
+
+/// A name of the `/Names` `/Dests` tree: its value's object, or its place
+/// (a value written inside its node).
+enum NameVal {
+    Ref(ObjectIdentifier),
+    At(Option<(usize, Option<f64>)>),
+}
+
+/// A document's named destinations (the catalog's `/Dests` dictionary,
+/// its `/Names` `/Dests` tree), each name's place found once: the tree's
+/// nodes read once a document and a name's value only when it is asked.
+/// (A search of the tree for every link read every value of each leaf it
+/// passed, each in an object stream whose offsets hayro reads again for
+/// every object: two thirds of a frame of a page with citations and
+/// references, Grail's 6.7 ms of 23 in WebAssembly.)
+#[derive(Default)]
+struct Names {
+    /// The tree's names (none: not read yet).
+    tree: Option<HashMap<Vec<u8>, NameVal>>,
+    /// Each name asked, and its place.
+    asked: HashMap<Vec<u8>, Option<(usize, Option<f64>)>>,
+}
+
+impl Names {
+    /// Named destination `name`'s page and top.
+    fn place(
+        &mut self,
+        pdf: &Pdf,
+        pages: &[Page<'_>],
+        name: &[u8],
+    ) -> Option<(usize, Option<f64>)> {
+        if let Some(p) = self.asked.get(name) {
+            return *p;
+        }
+        let p = self.find(pdf, pages, name);
+        self.asked.insert(name.to_vec(), p);
+        p
+    }
+
+    fn find(&mut self, pdf: &Pdf, pages: &[Page<'_>], name: &[u8]) -> Option<(usize, Option<f64>)> {
+        let xref = pdf.xref();
+        let root: Dict<'_> = xref.get(xref.root_id())?;
+        if let Some(d) = root.get::<Dict<'_>>(b"Dests")
+            && let Some(o) = d.get::<Object<'_>>(name)
+        {
+            return as_dest(o).and_then(|a| dest_of(pages, &a));
+        }
+        let tree = self.tree.get_or_insert_with(|| names_of(pdf, &root, pages));
+        match tree.get(name)? {
+            NameVal::At(p) => *p,
+            NameVal::Ref(id) => xref
+                .get::<Object<'_>>(*id)
+                .and_then(as_dest)
+                .and_then(|a| dest_of(pages, &a)),
+        }
+    }
+}
+
+/// The `/Names` `/Dests` tree's names, every node read once (its values
+/// not: a reference kept, resolved when asked), the first of a name kept.
+fn names_of(pdf: &Pdf, root: &Dict<'_>, pages: &[Page<'_>]) -> HashMap<Vec<u8>, NameVal> {
+    let mut out = HashMap::new();
+    let Some(tree) = root
+        .get::<Dict<'_>>(b"Names")
+        .and_then(|n| n.get::<Dict<'_>>(b"Dests"))
+    else {
+        return out;
+    };
+    let xref = pdf.xref();
     let mut stack = vec![tree];
+    // (at most this many nodes: a cycle of /Kids ends there)
+    let mut budget = 100_000usize;
     while let Some(node) = stack.pop() {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
         if let Some(names) = node.get::<Array<'_>>(b"Names") {
-            let mut it = names.iter::<Object<'_>>();
+            let mut it = names.raw_iter();
             while let (Some(k), Some(v)) = (it.next(), it.next()) {
-                if let Object::String(s) = k
-                    && s.as_bytes() == name
-                {
-                    return as_dest(v);
-                }
+                let key = match k {
+                    MaybeRef::NotRef(Object::String(s)) => s.as_bytes().to_vec(),
+                    MaybeRef::Ref(r) => match xref.get::<Object<'_>>(r.into()) {
+                        Some(Object::String(s)) => s.as_bytes().to_vec(),
+                        _ => continue,
+                    },
+                    MaybeRef::NotRef(_) => continue,
+                };
+                out.entry(key).or_insert_with(|| match v {
+                    MaybeRef::Ref(r) => NameVal::Ref(r.into()),
+                    MaybeRef::NotRef(o) => NameVal::At(as_dest(o).and_then(|a| dest_of(pages, &a))),
+                });
             }
         }
         if let Some(kids) = node.get::<Array<'_>>(b"Kids") {
-            for k in kids.iter::<Dict<'_>>() {
-                let inside = k.get::<Array<'_>>(b"Limits").is_none_or(|l| {
-                    let mut li = l.iter::<Object<'_>>();
-                    match (li.next(), li.next()) {
-                        (Some(Object::String(a)), Some(Object::String(b))) => {
-                            a.as_bytes() <= name && name <= b.as_bytes()
-                        }
-                        _ => true,
-                    }
-                });
-                if inside {
-                    stack.push(k);
-                }
-            }
+            // (in reverse: the first kid's names read first)
+            let kids: Vec<Dict<'_>> = kids.iter::<Dict<'_>>().collect();
+            stack.extend(kids.into_iter().rev());
         }
     }
-    None
+    out
 }
 
 /// A page's links (points from its top left).
-fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>) -> Vec<Link> {
+fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>, names: &mut Names) -> Vec<Link> {
     let mut out = Vec::new();
     let Some(annots) = page.raw().get::<Array<'_>>(b"Annots") else {
         return out;
@@ -576,14 +639,14 @@ fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>) -> Vec<Link> {
             v[0].max(v[2]) - mb.x0,
             h - (v[1].min(v[3]) - mb.y0),
         ];
-        let dest = |o: Object<'_>| -> Option<Target> {
-            let arr = match o {
-                Object::Array(a) => Some(a),
-                Object::String(s) => named(pdf, s.as_bytes()),
-                Object::Name(n) => named(pdf, n.as_str().as_bytes()),
+        let mut dest = |o: Object<'_>| -> Option<Target> {
+            match o {
+                Object::Array(a) => dest_of(pages, &a),
+                Object::String(s) => names.place(pdf, pages, s.as_bytes()),
+                Object::Name(n) => names.place(pdf, pages, n.as_str().as_bytes()),
                 _ => None,
-            }?;
-            dest_of(pages, &arr).map(|(p, y)| Target::Page(p, y))
+            }
+            .map(|(p, y)| Target::Page(p, y))
         };
         let target = if let Some(act) = a.get::<Dict<'_>>(b"A") {
             match act
@@ -596,11 +659,11 @@ fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>) -> Vec<Link> {
                     .get::<Object<'_>>(b"URI")
                     .and_then(Object::into_string)
                     .map(|s| Target::Uri(String::from_utf8_lossy(s.as_bytes()).into_owned())),
-                Some("GoTo") => act.get::<Object<'_>>(b"D").and_then(dest),
+                Some("GoTo") => act.get::<Object<'_>>(b"D").and_then(&mut dest),
                 _ => None,
             }
         } else {
-            a.get::<Object<'_>>(b"Dest").and_then(dest)
+            a.get::<Object<'_>>(b"Dest").and_then(&mut dest)
         };
         if let Some(target) = target {
             out.push(Link { rect, target });
@@ -692,8 +755,14 @@ fn text_string(b: &[u8]) -> String {
 
 /// The catalog's `/Outlines`: each entry's title and destination, its
 /// `/First` its entries, `/Next` the one after it.
-fn outline_of(pdf: &Pdf) -> Vec<Entry> {
-    fn level(pdf: &Pdf, pages: &[Page<'_>], first: Dict<'_>, budget: &mut usize) -> Vec<Entry> {
+fn outline_of(pdf: &Pdf, names: &mut Names) -> Vec<Entry> {
+    fn level(
+        pdf: &Pdf,
+        pages: &[Page<'_>],
+        first: Dict<'_>,
+        budget: &mut usize,
+        names: &mut Names,
+    ) -> Vec<Entry> {
         let mut out = Vec::new();
         let mut cur = Some(first);
         while let Some(d) = cur {
@@ -706,22 +775,21 @@ fn outline_of(pdf: &Pdf) -> Vec<Entry> {
                 .and_then(Object::into_string)
                 .map(|s| text_string(s.as_bytes()))
                 .unwrap_or_default();
-            let dest = |o: Object<'_>| -> Option<(usize, Option<f64>)> {
-                let arr = match o {
-                    Object::Array(a) => Some(a),
-                    Object::String(s) => named(pdf, s.as_bytes()),
-                    Object::Name(n) => named(pdf, n.as_str().as_bytes()),
+            let mut dest = |o: Object<'_>| -> Option<(usize, Option<f64>)> {
+                match o {
+                    Object::Array(a) => dest_of(pages, &a),
+                    Object::String(s) => names.place(pdf, pages, s.as_bytes()),
+                    Object::Name(n) => names.place(pdf, pages, n.as_str().as_bytes()),
                     _ => None,
-                }?;
-                dest_of(pages, &arr)
+                }
             };
             let place = match d.get::<Dict<'_>>(b"A") {
-                Some(a) => a.get::<Object<'_>>(b"D").and_then(dest),
-                None => d.get::<Object<'_>>(b"Dest").and_then(dest),
+                Some(a) => a.get::<Object<'_>>(b"D").and_then(&mut dest),
+                None => d.get::<Object<'_>>(b"Dest").and_then(&mut dest),
             };
             let kids = d
                 .get::<Dict<'_>>(b"First")
-                .map(|f| level(pdf, pages, f, budget))
+                .map(|f| level(pdf, pages, f, budget, names))
                 .unwrap_or_default();
             out.push(Entry {
                 title,
@@ -746,7 +814,7 @@ fn outline_of(pdf: &Pdf) -> Vec<Entry> {
     };
     // (at most this many entries: a cycle of /Next ends there)
     let mut budget = 100_000usize;
-    level(pdf, pages, first, &mut budget)
+    level(pdf, pages, first, &mut budget, names)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -822,6 +890,7 @@ impl Renderer {
                 pdf: Pdf::new(Arc::new(Bytes(pdf.clone()))).ok()?,
                 texts: HashMap::new(),
                 outline: None,
+                names: Names::default(),
             }),
         }
     }
@@ -859,7 +928,7 @@ impl Renderer {
         };
         let out = doc
             .outline
-            .get_or_insert_with(|| outline_of(&doc.pdf))
+            .get_or_insert_with(|| outline_of(&doc.pdf, &mut doc.names))
             .clone();
         self.doc = Some(doc);
         out
@@ -903,7 +972,7 @@ impl Renderer {
         let (items, chars) = probe(page, base, f64::from(pw), f64::from(ph), &mut self.boxes);
         let text = lines_of(&chars, s);
         doc.texts.insert(k, text.clone());
-        let links = links_of(pdf, pages, page);
+        let links = links_of(pdf, pages, page, &mut doc.names);
 
         // (the bands: drawings' extents merged where they come within GAP)
         let mut by_top: Vec<usize> = (0..items.len()).collect();
