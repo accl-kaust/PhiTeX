@@ -106,6 +106,7 @@ fn a_page_written_again_makes_its_forms_again() {
     let post = s.snapshot();
     base.extend(s.finish().unwrap());
     let size = s.next_label();
+    eprintln!("{}", String::from_utf8_lossy(&base));
     let forms = objects_with(&base, b"/Subtype /Form");
     assert_eq!(forms.len(), 2, "the file's forms");
 
