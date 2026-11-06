@@ -10,7 +10,7 @@
 //! The files, the store and the outputs are the host's ([`crate::host`]):
 //! the session decides what is read, kept and written, the host does it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -490,6 +490,11 @@ pub struct Session {
     /// the host found for it, looked up once, when the name came (or
     /// when it was first found): an edit compares names, not lookups.
     inputs: Vec<(String, bool, Option<PathBuf>)>,
+    /// The host's key of each file the finder read from disk
+    /// ([`Host::stamp`]), taken before the read: the bytes the build holds
+    /// are at most that new. Empty: read twice under two keys (changed
+    /// while a build read it), unknown.
+    stamps: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
     /// Whether the package loads' and the document nodes' records
     /// changed since last stored ([`Session::flush_records`], called when
     /// a build settles: a no-op unless a load changed them).
@@ -625,6 +630,7 @@ impl Session {
             buffers: Arc::default(),
             changed: Vec::new(),
             inputs: Vec::new(),
+            stamps: Arc::default(),
             records_dirty: false,
             absorb: Absorb::default(),
             absorbed_at: None,
@@ -679,6 +685,10 @@ impl Session {
     /// in the store), every file read again (`phitex.rebuild`).
     pub fn forget_build(&mut self) {
         self.reread_all();
+        self.stamps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         self.build = None;
         self.built_text = None;
     }
@@ -686,8 +696,27 @@ impl Session {
     /// Every file the builds read is to be read again from disk at the
     /// next build (`r` in watch: a change made outside, unseen).
     pub fn reread_all(&mut self) {
-        self.changed
-            .extend(self.inputs.iter().map(|(n, ..)| plain_name(n)));
+        // (a file found whose key is the one it had when the build read
+        // it: unchanged, not read again; one not found is looked up again,
+        // one read from an editor's buffer or with no key is read again.
+        // Every file read and turned into a value of its whole text, the
+        // XeTeX job's fonts and pictures too, made `r` cost what all of
+        // them cost, not what changed)
+        let stamps = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
+        let stale: Vec<String> = self
+            .inputs
+            .iter()
+            .filter(|(_, found, p)| match (found, p) {
+                (true, Some(p)) => match (stamps.get(p), self.host.stamp(p)) {
+                    (Some(a), Some(b)) => a.is_empty() || *a != b,
+                    _ => true,
+                },
+                _ => true,
+            })
+            .map(|(n, ..)| plain_name(n))
+            .collect();
+        drop(stamps);
+        self.changed.extend(stale);
     }
 
     /// A handle to send the main text to a build while it runs, from
@@ -790,6 +819,17 @@ impl Session {
                 self.status.set("typesetting");
                 // (evaluated with the text, one evaluation: its stats
                 // count the nodes the files' change ran)
+                // (their keys taken again as they are read now)
+                {
+                    let mut m = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
+                    for (n, _, p) in &self.inputs {
+                        if let Some(p) = p
+                            && reread.contains(n)
+                        {
+                            m.remove(p);
+                        }
+                    }
+                }
                 for name in &reread {
                     b.stage_file(name, None);
                 }
@@ -1736,8 +1776,7 @@ impl Session {
         // (each input by the names a change of it comes as: its name, with
         // `.tex`, the file found; looked up, not compared with every input
         // for every change, `r` changing every input: 10 ms for Grail's)
-        let mut by_name: std::collections::HashMap<String, Vec<usize>> =
-            std::collections::HashMap::new();
+        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, (n, ..)) in self.inputs.iter().enumerate() {
             let n = plain_name(n);
             let mut keys = vec![format!("{n}.tex"), n];
@@ -1814,6 +1853,7 @@ impl Session {
     fn finder(&self) -> Finder {
         let host = self.host.clone();
         let buffers = self.buffers.clone();
+        let stamps = self.stamps.clone();
         Arc::new(move |name: &str| {
             let p = host.locate_key(name)?;
             let shown = p.to_string_lossy().into_owned();
@@ -1826,8 +1866,29 @@ impl Session {
                 .find(|(n, _)| *n == key || host.same_file(n, &key))
                 .and_then(|(_, t)| t.clone());
             let bytes = match buffered {
-                Some(t) => tex::bytes(&t),
-                None => host.read(&p)?,
+                Some(t) => {
+                    // (an editor's text: no key of the disk's holds for it)
+                    stamps
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&p);
+                    tex::bytes(&t)
+                }
+                None => {
+                    let k = host.stamp(&p);
+                    let b = host.read(&p)?;
+                    if let Some(k) = k {
+                        let mut m = stamps.lock().unwrap_or_else(PoisonError::into_inner);
+                        match m.get_mut(&p) {
+                            Some(old) if *old != k => old.clear(),
+                            Some(_) => {}
+                            None => {
+                                m.insert(p.clone(), k);
+                            }
+                        }
+                    }
+                    b
+                }
             };
             Some((shown, bytes))
         })

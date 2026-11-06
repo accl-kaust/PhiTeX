@@ -172,6 +172,12 @@ impl Host for Machine {
         std::fs::read(path).ok()
     }
 
+    /// Its size, modification time and inode.
+    fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+        let k = phitex_tex::file_stat_key(&path.to_string_lossy());
+        (!k.is_empty()).then_some(k)
+    }
+
     /// Whether two names are one file on disk.
     fn same_file(&self, a: &str, b: &str) -> bool {
         match (Path::new(a).canonicalize(), Path::new(b).canonicalize()) {
