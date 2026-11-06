@@ -681,6 +681,7 @@ impl Run<'_, '_> {
             self.appending_vals.retain(|x| x.0 != loc);
         }
         self.pic_take_appends(a(21), a(22));
+        self.pic_take_steps(a(24));
     }
 
     /// The appends pending after the picture ([`Run::pic_apply`]): the
@@ -706,6 +707,33 @@ impl Run<'_, '_> {
                     None => self.appending_vals.push((loc, xs)),
                 }
             }
+        }
+    }
+
+    /// The child's steps of registers it never read ([`Run::pic_output`]):
+    /// the parent's own steps, unread where it never read the register
+    /// (`State::add`), else added to its value.
+    fn pic_take_steps(&mut self, steps: ValueId) {
+        let v = self.v;
+        for e in list_of(v, steps) {
+            let [f, c, g] = list_of(v, e)[..] else {
+                continue;
+            };
+            let loc = self.loc_of(Field(f));
+            let c = i32::try_from(int_of(v, c)).unwrap_or(0);
+            let global = int_of(v, g) != 0;
+            self.muts += 1;
+            if self.st.add(v, loc, c, global) {
+                continue;
+            }
+            let x = match self.get_loc(loc) {
+                Ok(x) => crate::val::i32_of(v, x),
+                Err(h) => {
+                    self.raise(h);
+                    return;
+                }
+            };
+            self.set_loc(loc, Entry::int(x.wrapping_add(c)), global);
         }
     }
 
@@ -1017,10 +1045,7 @@ impl Run<'_, '_> {
         if !self.leftover().is_empty() {
             return Some("input left".to_owned());
         }
-        for (_, w, l) in self.publication() {
-            if matches!(w, crate::state::Pub::Rel(_)) {
-                return Some("a relation defined".to_owned());
-            }
+        for (_, _, l) in self.publication() {
             if !matches!(l, Locality::Local | Locality::Global) {
                 return Some("a scope's definition".to_owned());
             }
@@ -1060,16 +1085,34 @@ impl Run<'_, '_> {
         self.pic_out = Some(v.list(vec![v.int(1), v.str(why)]));
     }
 
+    /// The child's steps of registers it never read, as its output
+    /// carries them: `[field, c, global]` each.
+    fn pic_steps(&mut self) -> Vec<ValueId> {
+        let v = self.v;
+        // (its steps of registers it never read: the parent's, made as
+        // steps there, `State::add`)
+        self.publication()
+            .into_iter()
+            .filter_map(|(f, w, l)| match w {
+                crate::state::Pub::Rel(c) => {
+                    Some(v.list(vec![f.0, v.int(c), v.int(i64::from(l == Locality::Global))]))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The child's output: `[0, items, sf, pd, since_bp, lang, packed,
     /// clang, prevgraf, pushed level, locals, global names, read names,
     /// astate, aopen, ic_prev, aftergroup, contributions, streams, file
     /// reads, document lines begun, appends pending, values appended
-    /// pending, whether its list holds the parent's before it]`; the run
-    /// itself
+    /// pending, whether its list holds the parent's before it, register
+    /// steps]`; the run itself
     /// then contributes nothing.
     fn pic_output(&mut self) -> ValueId {
         let v = self.v;
         let took = self.pic_child.as_ref().is_some_and(|p| p.took_list);
+        let steps = self.pic_steps();
         let contribs: Vec<ValueId> = std::mem::take(&mut self.contribs)
             .into_iter()
             .map(|(f, x)| v.list(vec![f.0, x]))
@@ -1164,6 +1207,7 @@ impl Run<'_, '_> {
             v.list(appends),
             v.list(appends_vals),
             v.int(i64::from(took)),
+            v.list(steps),
         ])
     }
 }
