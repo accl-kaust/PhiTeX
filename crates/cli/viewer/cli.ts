@@ -284,6 +284,12 @@ const panel = new Panel(
         if (r.ok) panel.news(String(r.json?.version ?? ""), String(r.json?.text ?? ""));
         else panel.msg("No news for this version", false, true);
       }),
+    // (the timing popover's "Copy debug info": the version (the news op's), the host; the
+    // watch's `s` stats' phases, cores busy and memory are not in its events yet)
+    onDebugInfo: async () => {
+      const r = await sock.request({ op: "info", what: "news" });
+      return [`PhiTeX ${r.ok ? String(r.json?.version ?? "?") : "?"} · phitex watch`];
+    },
     // (the tips seen: the user's phitex.toml through the watch, the same on every port and browser)
     onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } }),
     // (the problems' filters: kept the same way)
