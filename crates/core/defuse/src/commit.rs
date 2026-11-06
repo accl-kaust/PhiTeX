@@ -5740,17 +5740,31 @@ fn reask_after_effect_with(
         // changed: what this walk passed over as no field of a scope it
         // moves was found on one reading of the brackets, the other's
         // walk on another, and together they may move what neither
-        // walk's fields name: asked whatever their field, as before the
-        // fields were looked at)
+        // walk's fields name: asked whatever the scopes this walk found,
+        // as before the fields were looked at; but only those of a field
+        // with a definition whose reach scopes can move anywhere on the
+        // line (`scoped_def`): no change of brackets, this one or any
+        // other, moves a read of a field defined only at the global
+        // level, or not on the line at all. Every reader of the region
+        // was asked: 195 such walks in the first 300 s of biblatex's
+        // manual at -j4, 4.2 M readers each, 361 of its 473 thread-s of
+        // bracket walks, mc 80695)
+        let mut movable = Movable::default();
         if !reach.all {
             let mut cur = Some(from);
             while let Some(sid) = cur {
                 let seg = eng.seg(sid);
+                movable.learn(eng, seg);
                 let inner = seg.inner.read();
                 for (f, rs) in &inner.readers {
+                    let m = movable.of(eng, *f);
                     for r in rs {
                         let ap = eng.node(r.anchor).pos_hint();
-                        if ap >= at && end.is_none_or(|(_, q)| ap <= q) && live(eng, r.node, r.serial) {
+                        if (m || read::derived_spec(eng, r.path).is_some())
+                            && ap >= at
+                            && end.is_none_or(|(_, q)| ap <= q)
+                            && live(eng, r.node, r.serial)
+                        {
                             readers.push((*f, r.clone()));
                         }
                     }
@@ -5771,10 +5785,15 @@ fn reask_after_effect_with(
             let mut first = true;
             while let Some(sid) = cur {
                 let seg = eng.seg(sid);
+                movable.learn(eng, seg);
                 let inner = seg.inner.read();
                 for (f, rs) in &inner.readers {
+                    let m = movable.of(eng, *f);
                     for r in rs {
-                        if (!first || eng.node(r.anchor).pos_hint() > q) && live(eng, r.node, r.serial) {
+                        if (m || read::derived_spec(eng, r.path).is_some())
+                            && (!first || eng.node(r.anchor).pos_hint() > q)
+                            && live(eng, r.node, r.serial)
+                        {
                             readers.push((*f, r.clone()));
                         }
                     }
@@ -5810,6 +5829,37 @@ fn reask_after_effect_with(
         for f in fields {
             reask_from(eng, w, f, q, sid, None, None, 0, st);
         }
+    }
+}
+
+/// Per field, whether a change of brackets can move a read of it: it has
+/// a definition on the line whose reach scopes can end or extend
+/// (`scoped_def`), or it is the depth itself. Found once per field for a
+/// walk, under no segment's lock but the defining segment's own.
+#[derive(Default)]
+struct Movable(FxHashMap<Field, bool>);
+
+impl Movable {
+    /// The fields `seg`'s readers read, looked up before its readers are
+    /// (each defining segment read under its own lock alone).
+    fn learn(&mut self, eng: &Engine, seg: &Segment) {
+        let fs: Vec<Field> = {
+            let inner = seg.inner.read();
+            inner.readers.keys().filter(|f| !self.0.contains_key(f)).copied().collect()
+        };
+        for f in fs {
+            let m = f == eng.depth_field
+                || eng.defs.between(f, Pos(0), Pos(u64::MAX)).into_iter().any(|s| {
+                    let inner = eng.seg(s).inner.read();
+                    inner.defs.get(&f).is_some_and(|m| m.iter().any(|(_, d)| scoped_def(d)))
+                });
+            self.0.insert(f, m);
+        }
+    }
+
+    /// One `learn` gave (a field filed since: movable, as found nowhere).
+    fn of(&self, eng: &Engine, f: Field) -> bool {
+        f == eng.depth_field || self.0.get(&f).copied().unwrap_or(true)
     }
 }
 
