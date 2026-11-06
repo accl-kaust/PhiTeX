@@ -3057,3 +3057,47 @@ fn latex_examples_do_not_run_again_on_a_renamed_anchor() {
         }
     }
 }
+
+/// A `.aux` read back per field, one line of which takes a macro's
+/// meaning under another name before redefining it in terms of that
+/// name (nicematrix's `\pgfutil@check@rerun`, written at
+/// `\begin{document}`), a later line using it: `\enddocument` reads the
+/// file's text, each line once, as TeX does. The last round's
+/// definitions made there as well, the line took the redefinition under
+/// the other name and the macro called itself for ever (whatsnote-demo,
+/// "made no progress" at its `.aux:7`, -j1 and -j4, with the `.aux` read
+/// as a fold).
+#[test]
+fn a_line_renaming_a_macro_it_redefines_runs_once_at_the_end() {
+    let doc = "\\documentclass{article}\n\\makeatletter\n\\def\\rbcmd#1{#1}\n\
+               \\AtBeginDocument{\\immediate\\write\\@auxout{\\let\\string\\rbold\\string\\rbcmd\
+               \\def\\string\\rbcmd\\string##1{(\\string\\rbold{\\string##1})}}\
+               \\immediate\\write\\@auxout{\\xdef\\string\\rbres{\\string\\rbcmd{x}}}}\n\
+               \\makeatother\n\\begin{document}\nText.\n\\end{document}\n";
+    for threads in [1, 4] {
+        let dir =
+            PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("latexmk/rb-rename-{threads}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let b = common::build(
+            Options {
+                fixpoint: true,
+                threads: Some(threads),
+                ..pdf_opts("rbrename", &dir)
+            },
+            Some(&prelude(true)),
+            doc,
+        );
+        let (pdf, log) = b.output();
+        assert!(
+            !pdf.is_empty(),
+            "-j{threads}: a PDF: {}",
+            common::log_excerpt(&log)
+        );
+        assert!(
+            !log.contains("no progress"),
+            "-j{threads}: {}",
+            common::log_excerpt(&log)
+        );
+    }
+}

@@ -3647,6 +3647,16 @@ impl<'c, 'a> Run<'c, 'a> {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn read_back(&mut self, key: &str) -> R<bool> {
         let v = self.v;
+        // (a file the job has opened for writing before here: its text so
+        // far is read as TeX reads it, `Run::read_file`, `\\enddocument`'s
+        // `.aux`, each line once. The last round's definitions made first
+        // as well, a line that reads what the file defines ran on them:
+        // nicematrix's `\\let` of `\\pgfutil@check@rerun` to its own name
+        // before redefining it took the redefinition, and whatsnote's
+        // `\\pgfsyspdfmark` lines looped)
+        if self.get(&format!("wopen:{key}"))?.is_some() {
+            return Ok(false);
+        }
         let wk = self.keyed(crate::fields::Fam::Wkeys, key);
         // (read back from the client's text in this run, its fields not
         // defined yet or the file written as given)
