@@ -1756,7 +1756,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         // (the viewers told which pages' origins changed and how
                         // far an edit moved the rest: a page no build drew again
                         // keeps its origins, shifted, not those of the old text)
-                        v.set_origins(s.origins(), s.origins_changed());
+                        match s.origins_update() {
+                            Some((o, changed)) => v.set_origins(Some(o), Some(changed)),
+                            None => v.set_origins(None, None),
+                        }
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => break,
