@@ -708,7 +708,7 @@ impl Operation for ClaimIfLate {
 }
 
 /// `[k]`: a node of the settling layer that runs only at a quiet point
-/// (`final_only`): predicted to define `s` = 7 before it runs, defines it
+/// (`final_only`, `read_back`): predicted to define `s` = 7 before it runs, defines it
 /// so when it does.
 struct QuietSettler;
 
@@ -718,6 +718,12 @@ impl Operation for QuietSettler {
     }
 
     fn final_only(&self) -> bool {
+        true
+    }
+
+    // (a writer read back: let go at the quiet point with the runs
+    // waiting for it, not after the last pass)
+    fn read_back(&self) -> bool {
         true
     }
 
