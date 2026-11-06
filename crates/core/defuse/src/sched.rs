@@ -349,8 +349,14 @@ impl Worker {
     /// [`Worker::offer`] as it takes `node`: what it leaves queued goes to
     /// another worker at once if `node`'s run will be long, as its last
     /// was, or it has none (a first evaluation's nodes, a new or edited
-    /// one), whether or not the run checks in.
-    fn offer_for(&self, node: &Node) {
+    /// one), whether or not the run checks in. Not where the node queued
+    /// next ran longer last than `node` did: it waits less for `node` than
+    /// it would lose run cold on another core (a page's short fold taken
+    /// before the page's finisher, the finisher handed to another worker at
+    /// once: the finishers of a chain went from worker to worker, each run
+    /// on caches its last run did not leave, Grail's last finisher 16 ms at
+    /// -j1, 24 and 32 ms at -j8, mc 80710).
+    fn offer_for(&self, eng: &Engine, node: &Node) {
         let sh = &self.shared;
         if sh.n == 1 {
             return;
@@ -362,7 +368,13 @@ impl Worker {
                 .lock()
                 .as_ref()
                 .is_some_and(|w| matches!(w.cause, Cause::Edited | Cause::Created { .. }));
-        if self.ready().len() > 0 && (unknown || node.run_ns.load(Ordering::Relaxed) >= offer_ns()) {
+        let run = node.run_ns.load(Ordering::Relaxed);
+        let longer_next = || {
+            self.ready()
+                .first(eng)
+                .is_some_and(|x| eng.node(x).run_ns.load(Ordering::Relaxed) > run)
+        };
+        if self.ready().len() > 0 && (unknown || (run >= offer_ns() && !longer_next())) {
             self.ready().since.store(0, Ordering::Relaxed);
             sh.wake_one();
             return;
@@ -878,7 +890,7 @@ impl Pool {
     fn find_work(&self, eng: &Engine, w: &Worker) -> Option<NodeId> {
         let n = self.take_work(eng, w);
         if let Some(n) = n {
-            w.offer_for(eng.node(n));
+            w.offer_for(eng, eng.node(n));
         }
         n
     }
@@ -2721,7 +2733,7 @@ pub(crate) fn frontier_restore(eng: &Engine, w: Option<&Worker>, n: &Node) {
     if by
         .checked_sub(1)
         .and_then(|b| eng.placed_node(NodeId::from_raw(b)))
-        .is_some_and(|x| again(&x))
+        .is_some_and(|x| again(x))
     {
         return;
     }
