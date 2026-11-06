@@ -1116,6 +1116,31 @@ fn latex_input_include() {
     edit_check("inputs", &b, &cold, &before);
 }
 
+/// An `\input` file read inside a TikZ picture (the bayesnet example's
+/// figures), edited first thing after the cold build: the PDF is a cold
+/// build's of the edited file. The first push of the environment after
+/// the cold build differed from the last pushed by every file the
+/// provider had answered, more than 64, and was set whole, which re-asks
+/// no reader: the edit ran no node (accl 25876).
+#[test]
+fn latex_input_in_picture_first_edit() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-input-pic");
+    let _ = std::fs::create_dir_all(&dir);
+    let main = "\\documentclass{article}\n\\usepackage{tikz}\n\\begin{document}\nA figure.\n\n\\begin{tikzpicture}\n\\input{drawing}\n\\end{tikzpicture}\n\nAfter it.\n\\end{document}\n";
+    let drawing = "% the drawing\n\\node[draw] (a) {first words};\n\\node[draw] (b) at (3,0) {second words};\n\\draw (a) -- (b);\n";
+    std::fs::write(dir.join("inpic.tex"), main).expect("write");
+    std::fs::write(dir.join("drawing.tex"), drawing).expect("write");
+    let mut b = common::build(pdf_opts("inpic", &dir), Some(&prelude(true)), main);
+    let before = b.pages();
+    let new = drawing.replace("first words", "first changed words");
+    b.edit_file("drawing.tex", Some(new.as_bytes()));
+    assert!(b.stats.nodes_run > 0, "the edit of drawing.tex ran no node");
+    std::fs::write(dir.join("drawing.tex"), &new).expect("write");
+    let cold = common::build(pdf_opts("inpic", &dir), Some(&prelude(true)), main);
+    let _ = std::fs::write(dir.join("drawing.tex"), drawing);
+    edit_check("inpic", &b, &cold, &before);
+}
+
 /// Unchanged bytes change nothing (`r` in a watch: every file the build
 /// read staged again from disk, the main text sent again; an editor
 /// saving a file unchanged): with `pdfdocs/inputs.tex`, its cut

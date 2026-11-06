@@ -3606,6 +3606,7 @@ impl Graph {
             .lock()
             .map(|mut l| std::mem::take(&mut *l))
             .unwrap_or_default();
+        let mut added = Vec::new();
         for (name, f, val, hash) in got {
             if self.files.iter().any(|(g, _)| *g == f)
                 || self.absent.contains(&f)
@@ -3625,9 +3626,17 @@ impl Graph {
                 self.reads.push((name, hash));
             }
             match val {
-                Some(x) => self.files.push((f, x)),
+                Some(x) => {
+                    self.files.push((f, x));
+                    added.push((f, x));
+                }
                 None => self.absent.push(f),
             }
+        }
+        // (the engine holds what its provider answered: pushed already, so
+        // the next push's changes are the edits', not every file read)
+        if !self.env_pushed.is_empty() && !added.is_empty() {
+            self.env_pushed = merge_by_field(&self.env_pushed, &by_field(added));
         }
     }
 
@@ -3753,11 +3762,18 @@ impl Graph {
         absent.dedup();
         crate::timeline::lap("env: merged with the job's");
         if env != self.env_pushed {
-            // (a few fields changed, an edit's file: those alone, not
-            // the whole environment again)
-            match env_changes(&self.env_pushed, &env) {
-                Some(cs) if !self.env_pushed.is_empty() => self.eng.update_environment(&cs),
-                _ => self.eng.set_environment(env.iter().copied()),
+            // (the fields changed, an edit's file: those alone, their
+            // readers re-asked; the whole environment set only the first
+            // time. Past 64 changes it was set whole, which re-asks no
+            // reader: the first push after a cold build differs from the
+            // last pushed by every file the provider answered, so an
+            // edit's file then went unread, the bayesnet example's first
+            // edit of an `\input` file ran no node, accl 25876)
+            if self.env_pushed.is_empty() {
+                self.eng.set_environment(env.iter().copied());
+            } else {
+                self.eng
+                    .update_environment(&env_changes(&self.env_pushed, &env));
             }
             crate::timeline::lap("env: set in the engine");
             self.env_calls += 1;
@@ -9670,11 +9686,11 @@ fn by_field(mut xs: Vec<(Field, ValueId)>) -> Vec<(Field, ValueId)> {
 
 /// The fields that differ between environments `old` and `new` (both
 /// by field, [`merge_by_field`]), each with its new value (`None`: no
-/// longer given); `None` where more than [`ENV_CHANGES`] do.
+/// longer given).
 fn env_changes(
     old: &[(Field, ValueId)],
     new: &[(Field, ValueId)],
-) -> Option<Vec<(Field, Option<ValueId>)>> {
+) -> Vec<(Field, Option<ValueId>)> {
     let mut out = Vec::new();
     let (mut i, mut j) = (0, 0);
     loop {
@@ -9699,16 +9715,9 @@ fn env_changes(
             }
             (None, None) => break,
         }
-        if out.len() > ENV_CHANGES {
-            return None;
-        }
     }
-    Some(out)
+    out
 }
-
-/// The most fields [`env_changes`] lists: past them the environment is
-/// set whole.
-const ENV_CHANGES: usize = 64;
 
 /// The graph's accumulators and loop-backs (their round-one values).
 fn declare_fields(eng: &Engine) {
