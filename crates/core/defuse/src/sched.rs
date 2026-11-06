@@ -1738,11 +1738,18 @@ fn asked_before(eng: &Engine, n: &Node, wake: &Wake) -> bool {
         return false;
     };
     let key = (by, b.serial.load(Ordering::Acquire), *field);
-    let mut last = n.last_ask.lock();
-    if *last == Some(key) {
+    let mut asks = n.asks.lock();
+    if asks.contains(&key) {
         return true;
     }
-    *last = Some(key);
+    // (kept while their commits go on: another node's re-ask between two
+    // of one commit's, the routine's of the page after, left only its own
+    // and the commit's second re-ask went through, 1 build in 160)
+    asks.retain(|&(m, ser, _)| {
+        eng.placed_node(m)
+            .is_some_and(|x| x.committing.load(Ordering::Acquire) && x.serial.load(Ordering::Acquire) == ser)
+    });
+    asks.push(key);
     false
 }
 

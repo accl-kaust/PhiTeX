@@ -152,10 +152,10 @@ pub(crate) struct Node {
     /// back when nothing has set the frontier since and the layer is not
     /// to run again (`sched::frontier_restore`).
     pub(crate) back_frontier: Mx<Option<(u64, u64, u64)>>,
-    /// The last re-ask of it for a field a commit changed: the committing
-    /// node, that commit's run serial and the field
+    /// Its re-asks for fields changed by commits still going on: the
+    /// committing node, that commit's run serial and the field
     /// (`sched::asked_before`).
-    pub(crate) last_ask: Mx<Option<(NodeId, u32, Field)>>,
+    pub(crate) asks: Mx<Vec<(NodeId, u32, Field)>>,
     /// Placed as its placer's continuation (`Ctx::follow`,
     /// `Ctx::follow_after`), not as its child: a node placed after the
     /// placer and its children goes before it.
@@ -269,7 +269,7 @@ impl Node {
             claim_mx: Mx::new(false),
             held_frontier: AtomicBool::new(false),
             back_frontier: Mx::new(None),
-            last_ask: Mx::new(None),
+            asks: Mx::new(Vec::new()),
             follows: AtomicBool::new(false),
             anchor: AtomicU64::new(0),
             state_stale: AtomicBool::new(false),
