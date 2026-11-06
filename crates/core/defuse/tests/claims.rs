@@ -707,42 +707,48 @@ impl Operation for ClaimIfLate {
     }
 }
 
-/// `[]`: runs only at a quiet point (`final_only`); reads `x` and places
-/// a `WaitPlacer` child.
-struct QuietPlacer(std::sync::OnceLock<OpId>);
+/// `[k]`: a node of the settling layer that runs only at a quiet point
+/// (`final_only`): predicted to define `s` = 7 before it runs, defines it
+/// so when it does.
+struct QuietSettler;
 
-impl Operation for QuietPlacer {
+impl Operation for QuietSettler {
     fn name(&self) -> &'static str {
-        "quiet_placer"
+        "quiet_settler"
     }
 
     fn final_only(&self) -> bool {
         true
     }
 
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+
+    fn predicted_defs(&self, _args: &[ValueId], values: &phitex_defuse::Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(vec![(values.field("s"), values.int(7))])
+    }
+
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
-        let _ = cx.read(v.field("x"))?;
-        cx.child(*self.0.get().expect("registered"), vec![]);
+        cx.define(v.field("s"), v.int(7));
         Ok(ValueId::UNIT)
     }
 }
 
-/// `[]`: reads `y`; waits for its placer while that has a run to come
-/// (`Ctx::wait_for_placer`), then defines `z` = `y`.
-struct WaitPlacer;
+/// `[]`: reads `y` and `s` (a read of the settling node's prediction
+/// waits for its commit, `Ctx::read`), then defines `z` = `y`.
+struct ReadsSettler;
 
-impl Operation for WaitPlacer {
+impl Operation for ReadsSettler {
     fn name(&self) -> &'static str {
-        "wait_placer"
+        "reads_settler"
     }
 
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let v = cx.values();
         let y = cx.read(v.field("y"))?.unwrap_or(ValueId::UNIT);
-        if !cx.placer_settled() {
-            return Err(cx.wait_for_placer());
-        }
+        let _ = cx.read(v.field("s"))?;
         cx.define(v.field("z"), y);
         Ok(y)
     }
@@ -774,32 +780,32 @@ impl Operation for UntilEqual {
     }
 }
 
-/// A run parked waiting for its placer's commit (W on P) goes on when a
-/// claim takes the placer, which then commits nothing: C claims P, which
-/// waits for the quiet point, while W waits for P and R runs on until
-/// W's definition reaches it. Left parked until a quiet point that R
-/// keeps away, W never ran and R ran for ever (csquotes -j8, mhchem -j4:
-/// a run went on without end, accl 25662, mc 80815).
+/// A run parked waiting for a node's commit goes on when a claim takes
+/// that node, which then commits nothing. W reads the prediction of P, a
+/// settling node that runs only at a quiet point, and waits for P's
+/// commit; C claims P; R runs on until W's definition of `z` reaches it.
+/// Left parked until a quiet point that R keeps away, W never ran again
+/// and R ran for ever (csquotes -j8, mhchem -j4: a run went on without
+/// end, accl 25662, mc 80815).
 #[test]
 fn a_run_waiting_for_a_node_a_claim_takes_goes_on() {
     let e = Engine::new();
     let v = e.values();
     let def3 = e.register(Arc::new(Def3));
     let claim = e.register(Arc::new(ClaimIfLate));
-    let placer = Arc::new(QuietPlacer(std::sync::OnceLock::new()));
-    let p_op = e.register(placer.clone());
-    let w_op = e.register(Arc::new(WaitPlacer));
-    let _ = placer.0.set(w_op);
+    let p_op = e.register(Arc::new(QuietSettler));
+    let w_op = e.register(Arc::new(ReadsSettler));
     let r_op = e.register(Arc::new(UntilEqual));
     let u = e.new_unit();
     let d = e.push(u, def3, vec![v.int(0), v.int(0), v.int(0)]);
     let c = e.push(u, claim, vec![]);
-    let p = e.push(u, p_op, vec![]);
+    let p = e.push(u, p_op, vec![v.int(0)]);
+    let w = e.push(u, w_op, vec![]);
     e.push(u, r_op, vec![]);
     e.evaluate(4).unwrap();
-    let w = op_nodes(&e, u, "wait_placer")[0];
     assert_eq!(e.output(w), Some(v.int(0)));
     e.replace(d, def3, vec![v.int(1), v.int(1), v.int(1)]);
+    e.replace(p, p_op, vec![v.int(1)]);
     e.set_limits(phitex_defuse::Limits {
         time: Some(Duration::from_secs(20)),
         ..Default::default()
