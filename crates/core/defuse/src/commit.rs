@@ -3064,7 +3064,9 @@ pub(crate) fn publish_finals(eng: &Engine, w: &Worker) -> (usize, bool) {
     for f in eng.ranges.pending(false) {
         let last = read::final_reaching(eng, f);
         for r in eng.ranges.finals(f, |r| live(eng, r.node, r.serial)) {
-            if through(eng, last, r.path) != r.seen && eng.node(r.node).state() == State::Clean {
+            let now = through(eng, last, r.path);
+            if now != r.seen && eng.node(r.node).state() == State::Clean {
+                note_refute(eng, f, r.node, last.by, r.seen, now);
                 asks.push((f, last, r));
             }
         }
