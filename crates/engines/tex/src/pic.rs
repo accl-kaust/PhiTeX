@@ -57,6 +57,11 @@ const PICS: &[&str] = &["tikzpicture", "pgfpicture"];
 /// appends pending at the picture (`Run::appending`).
 const APPENDING: &str = "\u{1}appending";
 
+/// The same for the list the picture is appended to, as it stands
+/// (`[items, since_bp]`): what a look past the start of the child's own
+/// list sees ([`Run::pic_take_list`]).
+const PARENT_LIST: &str = "\u{1}list";
+
 /// The same for its values appended to lists (`Run::appending_vals`).
 const APPENDING_VALS: &str = "\u{1}appending values";
 
@@ -105,10 +110,11 @@ pub(crate) struct PicChild {
     read: Vec<ValueId>,
     /// The locations looked up in the parent's bindings already.
     checked: phitex_defuse::FxHashSet<Loc>,
-    /// Its base level's list: a look at what lies before the picture on
-    /// it (its tail, empty here, is the parent's) refuses.
+    /// Its base level's list, and whether it holds the parent's items
+    /// before the picture: a look past the start of its own takes them
+    /// ([`Run::pic_take_list`]), and its output's list is then the whole.
     pub lid: i64,
-    pub peeked: bool,
+    pub took_list: bool,
     /// Its `\write`s, `\openout`s and `\closeout`s as the parent makes
     /// them ([`Run::contribute_stream`]).
     pub streams: Vec<ValueId>,
@@ -514,6 +520,11 @@ impl Run<'_, '_> {
                 .collect();
             xs.push(v.list(vec![v.str(APPENDING), v.list(pending)]));
         }
+        if let Some(t) = self.nest.iter().rev().find(|l| l.owns) {
+            let items = crate::nest::into_values(v, t.list.clone());
+            let since = v.int(i64::try_from(t.fold.since_bp).unwrap_or(0));
+            xs.push(v.list(vec![v.str(PARENT_LIST), v.list(vec![v.list(items), since])]));
+        }
         if !self.appending_vals.is_empty() {
             let pending: Vec<ValueId> = self
                 .appending_vals
@@ -572,10 +583,18 @@ impl Run<'_, '_> {
         let a = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
         let n = |i: usize| int_of(v, a(i));
         if let Some(t) = self.nest.iter_mut().rev().find(|l| l.owns) {
-            t.list.extend(list_of(v, a(1)).into_iter().map(Item::V));
+            // (the child's list the whole where it took the parent's,
+            // `Run::pic_take_list`)
+            let since = usize::try_from(n(4)).unwrap_or(0);
+            if n(23) != 0 {
+                t.list = list_of(v, a(1)).into_iter().map(Item::V).collect();
+                t.fold.since_bp = since;
+            } else {
+                t.list.extend(list_of(v, a(1)).into_iter().map(Item::V));
+                t.fold.since_bp += since;
+            }
             t.fold.sf = i32::try_from(n(2)).unwrap_or(1000);
             t.fold.pd = i32::try_from(n(3)).unwrap_or(t.fold.pd);
-            t.fold.since_bp += usize::try_from(n(4)).unwrap_or(0);
             if a(5) != ValueId::UNIT {
                 t.par = Some((n(5), n(6)));
             }
@@ -777,6 +796,57 @@ impl Run<'_, '_> {
         Ok(w)
     }
 
+    /// A picture child's base level, its own list empty, looked past its
+    /// start (its last item, `\\unskip`, `\\lastbox`…): the parent's
+    /// items before the picture put in front of it, as they stand at the
+    /// picture (read as that key alone), so the look sees what TeX's
+    /// picture saw; the child's output's list is then the parent's whole.
+    /// Whether any were taken.
+    pub(crate) fn pic_take_list(&mut self) -> R<bool> {
+        let v = self.v;
+        let Some(p) = self.pic_child.as_ref() else {
+            return Ok(false);
+        };
+        if p.took_list {
+            return Ok(false);
+        }
+        let lid = p.lid;
+        let view = self.pic_view()?;
+        let got = self.cx.get(view, Step::Key(v.str(PARENT_LIST)));
+        if let Some(p) = self.pic_child.as_mut() {
+            p.took_list = true;
+        }
+        self.muts += 1;
+        let Some([items, since]) = got
+            .map(|x| list_of(v, x))
+            .and_then(|xs| <[ValueId; 2]>::try_from(xs).ok())
+        else {
+            return Ok(false);
+        };
+        let items = list_of(v, items);
+        if items.is_empty() {
+            return Ok(false);
+        }
+        let since = usize::try_from(int_of(v, since)).unwrap_or(0);
+        if trace() {
+            eprintln!(
+                "pic: child {} looks before its list at {:?} cmd {} chr {}: takes the parent's {} items",
+                self.cx.node().raw(),
+                self.cur.tok,
+                self.cur.cmd,
+                self.cur.chr,
+                items.len()
+            );
+        }
+        if let Some(l) = self.level_of(lid) {
+            let mut all = crate::nest::of_values(items);
+            all.append(&mut l.list);
+            l.list = all;
+            l.fold.since_bp += since;
+        }
+        Ok(true)
+    }
+
     /// A picture child's first touch of `loc` by a look-up that reads the
     /// engine through a projection (`Run::touch`): the parent's binding
     /// loaded where it has one, so the look-up reads it in full; else the
@@ -846,7 +916,7 @@ impl Run<'_, '_> {
             read: Vec::new(),
             checked: phitex_defuse::FxHashSet::default(),
             lid,
-            peeked: false,
+            took_list: false,
             streams: Vec::new(),
         });
         // (the parent's appends to lists it never read, pending at the
@@ -926,9 +996,6 @@ impl Run<'_, '_> {
         if self.rt_made > 0 {
             return Some("read-time objects".to_owned());
         }
-        if self.pic_child.as_ref().is_some_and(|p| p.peeked) {
-            return Some("it looked at the list before it".to_owned());
-        }
         // (an item for the main list other than a marker: the picture
         // was not inside a box)
         let items = v.field("items");
@@ -993,10 +1060,12 @@ impl Run<'_, '_> {
     /// clang, prevgraf, pushed level, locals, global names, read names,
     /// astate, aopen, ic_prev, aftergroup, contributions, streams, file
     /// reads, document lines begun, appends pending, values appended
-    /// pending]`; the run itself
+    /// pending, whether its list holds the parent's before it]`; the run
+    /// itself
     /// then contributes nothing.
     fn pic_output(&mut self) -> ValueId {
         let v = self.v;
+        let took = self.pic_child.as_ref().is_some_and(|p| p.took_list);
         let contribs: Vec<ValueId> = std::mem::take(&mut self.contribs)
             .into_iter()
             .map(|(f, x)| v.list(vec![f.0, x]))
@@ -1090,6 +1159,7 @@ impl Run<'_, '_> {
             v.list(lines),
             v.list(appends),
             v.list(appends_vals),
+            v.int(i64::from(took)),
         ])
     }
 }

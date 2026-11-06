@@ -604,12 +604,11 @@ impl Run<'_, '_> {
             // (a picture child's own list is empty where the parent's
             // items before the picture stand: a look past it refuses,
             // `crate::pic`)
-            if n == 0 && child_base {
-                self.muts += 1;
-                if let Some(p) = self.pic_child.as_mut() {
-                    p.peeked = true;
-                }
-                return Ok((None, 0));
+            // (a picture child's own list is empty where the parent's items
+            // before the picture stand: a look past its start takes them,
+            // `Run::pic_take_list`)
+            if n == 0 && child_base && self.pic_take_list()? {
+                return self.list_last(lid);
             }
             let l = self.level_of(lid).expect("the level");
             return Ok((l.list.last_mut().map(|x| x.value(v)), n));
