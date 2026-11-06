@@ -2401,15 +2401,19 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
     // them before, still sets its margin kerns by the small-caps codes
     // (pdflatex's `y` 0.299 pt, 26 of the quad, where the bold font's own
     // code gives 37))
-    let link = format!("pdf:elink:{f}");
-    let linked: Vec<ValueId> = r.get(&link)?.map(|x| list_of(v, x)).unwrap_or_default();
-    let first = !linked.iter().any(|&y| int_of(v, y) == i64::from(e));
-    let note = |r: &mut Run<'_, '_>| {
+    // (a list grown by appends: whether `e` is in it read as that alone,
+    // and `e` appended without reading it, `Run::append_val`, so a first
+    // ask moving to another node leaves the asks after both standing)
+    let link = r
+        .ops
+        .fields
+        .get_at(v, r.cx.values_epoch(), &format!("pdf:elink:{f}"));
+    let first = !r.int_set(link)?.contains(&i64::from(e));
+    let note = |r: &mut Run<'_, '_>| -> R<()> {
         if first {
-            let mut l = linked.clone();
-            l.push(v.int(i64::from(e)));
-            r.set(&link, v.list(l), true);
+            r.append_val(link, v.int(i64::from(e)))?;
         }
+        Ok(())
     };
     if held {
         if first && let Some(x) = held_info {
@@ -2420,7 +2424,7 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
             xs[6] = v.list(vec![v.int(f), v.int(i64::from(e)), v.int(i64::from(auto))]);
             r.font_set(k, FontCell::Info, v.list(xs), true);
         }
-        note(r);
+        note(r)?;
         return Ok(k);
     }
     let Some(file) = i.file else { return Ok(0) };
@@ -2446,7 +2450,7 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
         let x = i64::from(r.font_int(f, c)?);
         r.font_set(k, c, v.int(x), true);
     }
-    note(r);
+    note(r)?;
     Ok(k)
 }
 

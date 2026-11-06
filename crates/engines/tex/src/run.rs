@@ -269,6 +269,10 @@ pub(crate) struct Ops {
     /// a membership test of a list macro reads whether the item is in it
     /// ([`Run::clist_has`]).
     pub clist_proj: phitex_defuse::ProjId,
+    /// The set projection of integer lists
+    /// ([`crate::val::int_set_projection`]): a reader of the ratios a
+    /// font has asked for reads which ([`Run::int_set`]).
+    pub int_set_proj: phitex_defuse::ProjId,
     /// Whether a meaning can be appended to without being read
     /// ([`crate::val::append_projection`], [`Run::append_def`]).
     pub append_proj: phitex_defuse::ProjId,
@@ -919,6 +923,11 @@ pub(crate) struct Run<'c, 'a> {
     /// ([`Run::append_def`]). The run's first other touch of the location
     /// reads that value and makes the definition ([`Run::append_force`]).
     pub appending: Vec<(Loc, Vec<Tok>)>,
+    /// Global appends of values to lists whose value before the run it
+    /// has not read (pdfTeX's ratios a font has asked for), published as
+    /// a relation ([`crate::val::VALS_APPEND`]); a full read of the
+    /// location makes the definition ([`Run::vals_force`]).
+    pub appending_vals: Vec<(Loc, Vec<ValueId>)>,
     /// This pass met what the read-back child cannot answer for (the run
     /// defined a key after its read-back point, interpreted a line, ...):
     /// it is made again with the read-back inline (`ops::run_node`).
@@ -1428,6 +1437,7 @@ impl<'c, 'a> Run<'c, 'a> {
             defer_hit: None,
             rb: None,
             appending: Vec::new(),
+            appending_vals: Vec::new(),
             rb_refused: false,
             no_rb: false,
             reg_loaded_base: phitex_defuse::FxHashMap::default(),
@@ -1917,6 +1927,15 @@ impl<'c, 'a> Run<'c, 'a> {
                 Locality::Global,
             ));
         }
+        let v = self.v;
+        for (l, vals) in self.appending_vals.clone() {
+            let items = v.list(vec![v.str(crate::val::VALS_APPEND), v.list(vals)]);
+            out.push((
+                self.loc_field(l),
+                crate::state::Pub::Append(items),
+                Locality::Global,
+            ));
+        }
         out
     }
 
@@ -1947,6 +1966,12 @@ impl<'c, 'a> Run<'c, 'a> {
 
     #[inline(never)]
     pub(crate) fn load_slow(&mut self, loc: Loc) -> R<()> {
+        if !self.appending_vals.is_empty() {
+            self.vals_force(loc)?;
+            if self.st.load_state(loc) != 0 {
+                return Ok(());
+            }
+        }
         if !self.appending.is_empty() {
             self.append_force(loc)?;
             if self.st.load_state(loc) != 0 {
@@ -4143,6 +4168,91 @@ impl<'c, 'a> Run<'c, 'a> {
         )));
         let e = self.st.mean_entry(m);
         self.set_loc(loc, e, true);
+        Ok(())
+    }
+
+    /// Location `loc` read in full while values appended to it are
+    /// pending ([`Run::appending_vals`]): the list reaching the run read,
+    /// and the definition the appends make of it made now.
+    pub(crate) fn vals_force(&mut self, loc: Loc) -> R<()> {
+        let Some(i) = self.appending_vals.iter().position(|x| x.0 == loc) else {
+            return Ok(());
+        };
+        let (_, vals) = self.appending_vals.swap_remove(i);
+        self.muts += 1;
+        self.load_slow(loc)?;
+        let v = self.v;
+        let mut out = self
+            .get_loc(loc)?
+            .map(|x| list_of(v, x))
+            .unwrap_or_default();
+        out.extend(vals);
+        self.set_loc(loc, Entry::raw(Some(v.list(out))), true);
+        Ok(())
+    }
+
+    /// The distinct integers of the list field `f` holds where the run
+    /// is, in increasing order: from the run's own binding where it has
+    /// one, else read through the set projection
+    /// ([`crate::val::int_set_projection`]), with the values the run
+    /// appended without reading it. The run depends on the set alone.
+    pub(crate) fn int_set(&mut self, f: Field) -> R<Vec<i64>> {
+        let v = self.v;
+        let loc = self.loc_of(f);
+        self.pic_touch(loc)?;
+        let pending = self
+            .appending_vals
+            .iter()
+            .find(|x| x.0 == loc)
+            .map(|x| x.1.clone());
+        let mut es: Vec<i64> = if self.st.load_state(loc) != 0 || self.lazy_pre(loc) {
+            self.get_loc(loc)?
+                .map(|x| list_of(v, x).iter().map(|&y| int_of(v, y)).collect())
+                .unwrap_or_default()
+        } else {
+            let p = phitex_defuse::PathId::of_proj(self.ops.int_set_proj);
+            self.cx
+                .read_path(f, p)?
+                .map(|x| {
+                    list_of(v, x)
+                        .iter()
+                        .map(|&e| list_of(v, e).first().map_or(0, |&y| int_of(v, y)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        es.extend(pending.unwrap_or_default().iter().map(|&y| int_of(v, y)));
+        es.sort_unstable();
+        es.dedup();
+        Ok(es)
+    }
+
+    /// Value `x` appended to the list field `f` holds, globally, without
+    /// reading it where the run has not ([`Run::appending_vals`]).
+    pub(crate) fn append_val(&mut self, f: Field, x: ValueId) -> R<()> {
+        let v = self.v;
+        let loc = self.loc_of(f);
+        self.muts += 1;
+        self.pic_touch(loc)?;
+        let op = self.cx.op();
+        if self.st.load_state(loc) != 0
+            || self.lazy_pre(loc)
+            || self.interp.is_some()
+            || self.rec_load
+            || !(op == self.ops.exec || op == self.ops.resume || op == self.ops.pic)
+        {
+            let mut out = self
+                .get_loc(loc)?
+                .map(|y| list_of(v, y))
+                .unwrap_or_default();
+            out.push(x);
+            self.set_loc(loc, Entry::raw(Some(v.list(out))), true);
+            return Ok(());
+        }
+        match self.appending_vals.iter_mut().find(|e| e.0 == loc) {
+            Some(e) => e.1.push(x),
+            None => self.appending_vals.push((loc, vec![x])),
+        }
         Ok(())
     }
 

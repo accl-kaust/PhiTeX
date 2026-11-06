@@ -1079,6 +1079,18 @@ pub(crate) fn append_projection(x: ValueId, v: &Values) -> ValueId {
 /// no such macro (the appender, which read the projection, runs again on
 /// it): the items alone.
 pub(crate) fn append_items(input: Option<ValueId>, items: ValueId, v: &Values) -> ValueId {
+    // (a list of values grown by appends, `Run::appending_vals`)
+    if let Some(vals) = v
+        .with_list(items, |xs| match xs {
+            [m, vals] if v.with_str(*m, |s| s == VALS_APPEND) == Some(true) => Some(*vals),
+            _ => None,
+        })
+        .flatten()
+    {
+        let mut out = input.map(|x| list_of(v, x)).unwrap_or_default();
+        out.extend(list_of(v, vals));
+        return v.list(out);
+    }
     let mut body: Vec<Tok> = match Mean::decode(v, input) {
         Mean::Macro(m) if m.params.is_empty() => m.body.to_vec(),
         _ => Vec::new(),
@@ -1087,6 +1099,26 @@ pub(crate) fn append_items(input: Option<ValueId>, items: ValueId, v: &Values) -
         body.extend(toks_of(v, Some(x)));
     }
     Mean::Macro(Rc::new(Macro::new(0, Vec::new(), Rc::from(body)))).encode(v)
+}
+
+/// The head of an append relation's items that appends values to a
+/// list ([`append_items`], `Run::appending_vals`), not tokens to a macro.
+pub(crate) const VALS_APPEND: &str = "\u{1}values";
+
+/// A list of integers as the set it holds: its distinct elements in
+/// increasing order, each as a one-element list (`[[e]…]`, so that
+/// `Step::Has(e)` asks for one); anything else as none. For a list grown
+/// by appends whose readers care which elements it holds, not in what
+/// order they came (pdfTeX's ratios a font has asked for,
+/// `pdf_font_elink`): a first ask moving from one node to another leaves
+/// every reader past both standing.
+pub(crate) fn int_set_projection(x: ValueId, v: &Values) -> ValueId {
+    let mut es: Vec<i64> = v
+        .with_list(x, |xs| xs.iter().filter_map(|&y| v.as_int(y)).collect())
+        .unwrap_or_default();
+    es.sort_unstable();
+    es.dedup();
+    v.list(es.into_iter().map(|e| v.list(vec![v.int(e)])).collect())
 }
 
 /// [`clist_projection`]'s answer, made.

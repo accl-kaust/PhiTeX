@@ -275,7 +275,10 @@ impl Run<'_, '_> {
             (!self.seeded.is_empty(), "seeded"),
             (self.defer_hit.is_some(), "defer"),
             (self.rb.is_some(), "read-back child"),
-            (!self.appending.is_empty(), "append pending"),
+            (
+                !self.appending.is_empty() || !self.appending_vals.is_empty(),
+                "append pending",
+            ),
             (self.mode_zero, "mode zero"),
             (
                 self.fin_box.is_some() || self.tool_cut.is_some(),
@@ -340,6 +343,7 @@ impl Run<'_, '_> {
             || self.defer_hit.is_some()
             || self.rb.is_some()
             || !self.appending.is_empty()
+            || !self.appending_vals.is_empty()
             || self.mode_zero
             || self.fin_box.is_some()
             || self.tool_cut.is_some()

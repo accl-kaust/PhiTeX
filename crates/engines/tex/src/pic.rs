@@ -56,6 +56,9 @@ const PICS: &[&str] = &["tikzpicture", "pgfpicture"];
 /// appends pending at the picture (`Run::appending`).
 const APPENDING: &str = "\u{1}appending";
 
+/// The same for its values appended to lists (`Run::appending_vals`).
+const APPENDING_VALS: &str = "\u{1}appending values";
+
 /// How many lines ahead a scan for the end looks, at most.
 const SCAN_LINES: usize = 20_000;
 
@@ -509,6 +512,15 @@ impl Run<'_, '_> {
                 .collect();
             xs.push(v.list(vec![v.str(APPENDING), v.list(pending)]));
         }
+        if !self.appending_vals.is_empty() {
+            let pending: Vec<ValueId> = self
+                .appending_vals
+                .clone()
+                .into_iter()
+                .map(|(l, xs)| v.list(vec![self.loc_field(l).0, v.list(xs)]))
+                .collect();
+            xs.push(v.list(vec![v.str(APPENDING_VALS), v.list(pending)]));
+        }
         v.list(xs)
     }
 
@@ -634,16 +646,32 @@ impl Run<'_, '_> {
             // (a list the child made whole: what the parent had pending
             // for it is in its value)
             self.appending.retain(|x| x.0 != loc);
+            self.appending_vals.retain(|x| x.0 != loc);
         }
-        // (the appends pending after the picture: the parent's before it
-        // and the child's, which went on from them)
-        for e in list_of(v, a(21)) {
+        self.pic_take_appends(a(21), a(22));
+    }
+
+    /// The appends pending after the picture ([`Run::pic_apply`]): the
+    /// parent's before it and the child's, which went on from them.
+    fn pic_take_appends(&mut self, toks: ValueId, vals: ValueId) {
+        let v = self.v;
+        for e in list_of(v, toks) {
             if let [f, t] = list_of(v, e)[..] {
                 let loc = self.loc_of(Field(f));
                 let toks = toks_of(v, Some(t));
                 match self.appending.iter_mut().find(|x| x.0 == loc) {
                     Some(x) => x.1 = toks,
                     None => self.appending.push((loc, toks)),
+                }
+            }
+        }
+        for e in list_of(v, vals) {
+            if let [f, xs] = list_of(v, e)[..] {
+                let loc = self.loc_of(Field(f));
+                let xs = list_of(v, xs);
+                match self.appending_vals.iter_mut().find(|x| x.0 == loc) {
+                    Some(x) => x.1 = xs,
+                    None => self.appending_vals.push((loc, xs)),
                 }
             }
         }
@@ -822,6 +850,13 @@ impl Run<'_, '_> {
                 self.appending.push((loc, toks_of(v, Some(t))));
             }
         }
+        let pending = self.cx.get(view, Step::Key(v.str(APPENDING_VALS)));
+        for e in pending.map(|x| list_of(v, x)).unwrap_or_default() {
+            if let [f, xs] = list_of(v, e)[..] {
+                let loc = self.loc_of(Field(f));
+                self.appending_vals.push((loc, list_of(v, xs)));
+            }
+        }
         let conds0 = (self.conds.clone(), self.if_codes.clone());
         self.input.append_text(fs);
         let res = self.run_all();
@@ -948,7 +983,8 @@ impl Run<'_, '_> {
     /// The child's output: `[0, items, sf, pd, since_bp, lang, packed,
     /// clang, prevgraf, pushed level, locals, global names, read names,
     /// astate, aopen, ic_prev, aftergroup, contributions, streams, file
-    /// reads, document lines begun, appends pending]`; the run itself
+    /// reads, document lines begun, appends pending, values appended
+    /// pending]`; the run itself
     /// then contributes nothing.
     fn pic_output(&mut self) -> ValueId {
         let v = self.v;
@@ -972,6 +1008,10 @@ impl Run<'_, '_> {
         let appends: Vec<ValueId> = std::mem::take(&mut self.appending)
             .into_iter()
             .map(|(l, t)| v.list(vec![self.loc_field(l).0, toks_value(v, &t)]))
+            .collect();
+        let appends_vals: Vec<ValueId> = std::mem::take(&mut self.appending_vals)
+            .into_iter()
+            .map(|(l, xs)| v.list(vec![self.loc_field(l).0, v.list(xs)]))
             .collect();
         let mut locals = Vec::new();
         let mut gdefs = Vec::new();
@@ -1040,6 +1080,7 @@ impl Run<'_, '_> {
             v.list(fread),
             v.list(lines),
             v.list(appends),
+            v.list(appends_vals),
         ])
     }
 }

@@ -1205,15 +1205,17 @@ impl Run<'_, '_> {
             // and what those fonts are bound to now, `pdf_font_blink`:
             // another font's first ask since may have bound them to it,
             // [`crate::pdfprim::get_expand_font`])
+            // (which ratios, not in what order they were first asked:
+            // [`Run::int_set`])
+            let link =
+                self.ops
+                    .fields
+                    .get_at(self.v, self.cx.values_epoch(), &format!("pdf:elink:{fi}"));
             let linked: Vec<i32> = self
-                .get(&format!("pdf:elink:{fi}"))?
-                .map(|x| {
-                    crate::val::list_of(self.v, x)
-                        .iter()
-                        .filter_map(|&y| i32::try_from(crate::val::int_of(self.v, y)).ok())
-                        .collect()
-                })
-                .unwrap_or_default();
+                .int_set(link)?
+                .into_iter()
+                .filter_map(|e| i32::try_from(e).ok())
+                .collect();
             view.elink.insert(f, linked.clone());
             for &e in &linked {
                 let k = key(e);
