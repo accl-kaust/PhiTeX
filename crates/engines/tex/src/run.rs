@@ -4140,9 +4140,23 @@ impl<'c, 'a> Run<'c, 'a> {
         let tail_p = self.cx.path(&[proj, Step::Index(0)]);
         let Some(tail) = self.cx.read_path(f, tail_p)? else {
             if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") {
+                let x = self.cx.peek_field(f)?;
+                let shown = x.map_or_else(
+                    || "an alias".to_owned(),
+                    |x| {
+                        x.map_or_else(
+                            || "none".to_owned(),
+                            |y| self.v.render(y).chars().take(300).collect(),
+                        )
+                    },
+                );
+                let pj = x
+                    .flatten()
+                    .map(|y| self.v.render(crate::val::append_projection(y, self.v)));
                 eprintln!(
-                    "append-base: node {} no tail (not a list of names)",
-                    self.cx.node().raw()
+                    "append-base: node {} op {:?} no tail (not a list of names): {shown} projection {pj:?}",
+                    self.cx.node().raw(),
+                    self.cx.op()
                 );
             }
             return Ok(None);
