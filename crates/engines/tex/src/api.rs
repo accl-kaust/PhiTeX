@@ -4522,23 +4522,8 @@ pub(crate) fn text_mark(v: &Values) -> ValueId {
 pub(crate) const PARAM_LOOK: &str = "\u{1}#";
 
 pub(crate) fn written_as_text(v: &Values, streams: Option<ValueId>) -> Vec<String> {
-    let (mut out, folds) = written_kinds(v, streams);
-    out.extend(folds);
-    out
-}
-
-/// The job-written files not read back per line's definitions, in two
-/// kinds: those a line of which did more than define (read back as
-/// their text), and the FOLDS: files each line of which only defines,
-/// some line reading what a line before it defines (biblatex's
-/// `\abx@aux@cite` adding a key to the list the lines before it built,
-/// `\blx@pagesum@old` taking a digit per `\abx@aux@page`), whose lines
-/// define, read one after another from the read-back point, what their
-/// whole text read at once defines ([`crate::ops::fold_node`]).
-pub(crate) fn written_kinds(v: &Values, streams: Option<ValueId>) -> (Vec<String>, Vec<String>) {
     let streams = streams.map(|s| v.seq_to_vec(s)).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
-    let mut folds: Vec<String> = Vec::new();
     // (per file, the fields its lines so far define, in the order TeX
     // writes them: a line that reads one depends on the lines before it,
     // which TeX reads first and its read-back by fields, each line on its
@@ -4588,19 +4573,18 @@ pub(crate) fn written_kinds(v: &Values, streams: Option<ValueId>) -> (Vec<String
                 .unwrap_or(false)
             })
         {
-            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && !folds.contains(&name) {
+            if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                 eprintln!(
-                    "aux-trace: {name} read back as a fold: line {:?} reads {}, which a line before it defines",
+                    "aux-trace: {name} read back as text: line {:?} reads {}, which a line before it defines",
                     xs.get(1)
                         .map(|&l| str_of(v, l).chars().take(70).collect::<String>()),
                     str_of(v, r)
                 );
             }
-            // (its definitions still counted: a later line that does more
-            // than define makes the file one read back as its text)
-            if !folds.contains(&name) {
-                folds.push(name.clone());
+            if !out.contains(&name) {
+                out.push(name);
             }
+            continue;
         }
         for d in list_of(v, made) {
             if let [f, x, _] = list_of(v, d).as_slice() {
@@ -4622,8 +4606,7 @@ pub(crate) fn written_kinds(v: &Values, streams: Option<ValueId>) -> (Vec<String
             }
         }
     }
-    folds.retain(|n| !out.contains(n));
-    (out, folds)
+    out
 }
 
 /// The hint of a format's node (`hints::Hint` encoded): unbounded.
@@ -5197,38 +5180,6 @@ fn trailing_cs(s: &str) -> usize {
         return 2;
     }
     0
-}
-
-#[cfg(test)]
-mod key_set_tests {
-    use super::*;
-
-    /// The same definitions in another order give the same key set: a
-    /// fold's run puts its fields in the order of their last definitions,
-    /// which moves from one run to the next on the same text (biblatex's
-    /// `.aux`, `\blx@prelim@lastcites@0` 14th of 104 keys in one run and
-    /// 93rd in the next, and `\begin{document}` ran again on the key set
-    /// at every edit, accl 25569). Two keys of one field, a file's errors,
-    /// keep their order.
-    #[test]
-    fn a_key_set_is_in_the_order_of_its_fields() {
-        let v = Values::new();
-        let d = |f: &str, x: i64| (f.to_owned(), v.int(x));
-        let a = [d("cs:b", 1), d("cs:a", 2), d("cs:c", 3)];
-        let b = [d("cs:c", 3), d("cs:b", 1), d("cs:a", 2)];
-        assert_eq!(key_set(&v, "f.aux", &a), key_set(&v, "f.aux", &b));
-        let names =
-            |x: ValueId| -> Vec<String> { list_of(&v, x).iter().map(|&k| str_of(&v, k)).collect() };
-        assert_eq!(
-            names(key_set(&v, "f.aux", &a)),
-            [WRITTEN_KEY, "cs:a", "cs:b", "cs:c"]
-        );
-        let e = [d("rberr:2", 1), d("cs:a", 2), d("rberr:1", 3)];
-        assert_eq!(
-            names(key_set(&v, "f.aux", &e)),
-            [WRITTEN_KEY, "cs:a", "rberr:2", "rberr:1"]
-        );
-    }
 }
 
 #[cfg(test)]

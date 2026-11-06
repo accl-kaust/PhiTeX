@@ -2867,83 +2867,9 @@ fn a_new_label_leaves_the_read_back_run_standing() {
     }
 }
 
-/// `\begin{document}`'s hooks define a name the `.aux` defines too, after
-/// the read-back point (biblatex's own names at its `\begin{document}`):
-/// the read-back's definition is made there from the child's output, then
-/// the hook's, as the inline read-back leaves them. The pass was refused
-/// and made again inline, which read the key set whole: every new
-/// `\label` ran `\begin{document}` again (biblatex's example, label 119 ms
-/// to 178 ms with the `.aux` read per field, mc 80723). It stands, the
-/// name's value is the hook's, and every edited PDF equals a cold build's.
-#[test]
-fn a_name_defined_after_the_read_back_point_keeps_the_child() {
-    use std::fmt::Write as _;
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rb-defafter");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("a scratch directory");
-    let filler: String = (0..40).fold(String::new(), |mut s, i| {
-        let _ = write!(
-            s,
-            "Paragraph {i} of filler, long enough to make a line or two when set in the \
-             article class's ten point roman, and a few words more.\n\n"
-        );
-        s
-    });
-    let doc = |extra: &str| {
-        format!(
-            "\\documentclass{{article}}\n\\makeatletter\n\
-             \\AtBeginDocument{{\\gdef\\rbkey{{hook}}\\global\\let\\rbwas\\rbkeyprev}}\n\
-             \\AtEndDocument{{\\immediate\\write\\@auxout{{\\gdef\\string\\rbkey{{aux}}\\gdef\\string\\rbkeyprev{{prev}}}}}}\n\
-             \\makeatother\n\\begin{{document}}\n\
-             \\section{{Intro}}\\label{{sec:intro}}\nKey \\rbkey, was \\ifdefined\\rbwas\\rbwas\\else none\\fi.\n\n\
-             \\section{{Middle}}\nText of the second section.{extra}\n\n{filler}\
-             \\section{{Last}}\\label{{sec:last}}\nThe end, see \\ref{{sec:intro}}.\n\\end{{document}}\n"
-        )
-    };
-    for threads in [1, 8] {
-        let opts = || Options {
-            fixpoint: true,
-            threads: Some(threads),
-            ..pdf_opts("rbdefafter", &dir)
-        };
-        let mut b = common::build(opts(), Some(&prelude(true)), &doc(""));
-        for extra in ["\\label{new}", "", "\\label{newer}"] {
-            b.edit(&doc(extra));
-            let r: Vec<String> = b
-                .stats
-                .reruns
-                .iter()
-                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
-                .collect();
-            for x in &r {
-                eprintln!("  -j{threads} {extra:?}: rerun {x}");
-            }
-            let cold = common::build(opts(), Some(&prelude(true)), &doc(extra));
-            assert_eq!(
-                common::first_difference(&b.output().0, &cold.output().0),
-                None,
-                "-j{threads} {extra:?}"
-            );
-            let mut on_keys: Vec<&str> = r
-                .iter()
-                .filter(|x| {
-                    !x.starts_with("readback") && !x.starts_with("files") && x.contains("wkeys:")
-                })
-                .filter_map(|x| x.rsplit_once(" [").map(|(_, n)| n))
-                .collect();
-            on_keys.sort_unstable();
-            on_keys.dedup();
-            assert!(
-                on_keys.len() <= 1,
-                "-j{threads} {extra:?}: the document's start read the key set again: {r:?}"
-            );
-        }
-    }
-}
-
-/// A long `\begin{document}` run that defines a name the `.aux` defines,
-/// after the read-back point (uspace's and `ClassicThesis`'s `\@gtempa`;
-/// such a pass was once refused and made again inline), in a round whose
+/// A long `\begin{document}` run whose read-back through its child is
+/// refused (it defines a name the `.aux` defines, after the read-back
+/// point: uspace's and `ClassicThesis`'s `\@gtempa`), in a round whose
 /// `.aux` changed: the run's own checks while it runs read the output of
 /// its read-back child by the placement's key, not the last run's
 /// placement at the same index (a page's node there after a pass that
