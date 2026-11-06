@@ -121,6 +121,8 @@ def formats(label: str, rel: Path, src: Path) -> None:
             continue
         state = f.read_bytes()[32:]
         data = pack([("format", state)])
+        if len(data) > 20_000_000:
+            raise SystemExit(f"format {f.name}: {len(data) / 1e6:.1f} MB packed, over 20 MB (Cloudflare takes 25 MiB a file)")
         h = hashlib.sha256(data).hexdigest()
         n = f"fmt-{f.name}-{h[:12]}"
         (rel / "h" / f"{n}.pack").write_bytes(data)
