@@ -5361,6 +5361,37 @@ pub(crate) fn file_effect(
 
 /// The clamped walk of a depth through a segment of summary `(net, min)`:
 /// the lowest depth reached, and the depth at its end.
+/// A bracket walk through one segment from depths `a` (the old side), `b`
+/// (the new one) and `p` (the fewest both have shared), from `at` in the
+/// first segment, else whole by the segment's summary: the depths after
+/// it (or at the stop), and where the two sides agree again, if they do.
+fn scopes_through(inner: &Inner, first: bool, at: Pos, a: i64, b: i64, p: i64) -> (i64, i64, i64, Option<Pos>) {
+    let (mut a, mut b, mut p) = (a, b, p);
+    if a == b && b == p {
+        return (a, b, p, Some(at));
+    }
+    if first {
+        for (q, (_, x)) in inner.brackets.range((Excluded(at), Unbounded)) {
+            a = (a - i64::from(x.closes)).max(0);
+            b = (b - i64::from(x.closes)).max(0);
+            p = p.min(a).min(b);
+            a += i64::from(x.opens);
+            b += i64::from(x.opens);
+            if a == b && b == p {
+                return (a, b, p, Some(*q));
+            }
+        }
+        return (a, b, p, None);
+    }
+    let (net, min) = (i64::from(inner.depth_net), i64::from(inner.depth_min));
+    let (la, ea) = through_segment(a, net, min);
+    let (lb, eb) = through_segment(b, net, min);
+    p = p.min(la).min(lb);
+    (a, b) = (ea, eb);
+    let stop = (a == b && b == p).then(|| Pos(inner.hi.0.saturating_sub(1)));
+    (a, b, p, stop)
+}
+
 fn through_segment(d: i64, net: i64, min: i64) -> (i64, i64) {
     ((d + min).max(0), (d + net).max(net - min))
 }
@@ -5453,11 +5484,6 @@ impl ScopeReach {
         }
         self.covered = p;
         self.from = lo;
-    }
-
-    /// Whether reader `r` of `f` in the region can see another answer.
-    fn asks(&self, eng: &Engine, f: Field, r: &Reader) -> bool {
-        self.all || f == eng.depth_field || self.fields.contains(&f) || read::derived_spec(eng, r.path).is_some()
     }
 }
 
@@ -5566,45 +5592,46 @@ fn reask_after_effect_with(
     let mut reach = ScopeReach::new(eng, at);
     while let Some(sid) = cur {
         let seg = eng.seg(sid);
-        let inner = seg.inner.read();
-        let mut stop: Option<Pos> = (a == b && b == p).then_some(at);
-        if stop.is_none() {
-            if first {
-                for (q, (_, x)) in inner.brackets.range((Excluded(at), Unbounded)) {
-                    a = (a - i64::from(x.closes)).max(0);
-                    b = (b - i64::from(x.closes)).max(0);
-                    p = p.min(a).min(b);
-                    a += i64::from(x.opens);
-                    b += i64::from(x.opens);
-                    if a == b && b == p {
-                        stop = Some(*q);
-                        break;
-                    }
+        let mut inner = seg.inner.read();
+        // (where the walk stops in this segment, if it does, and the
+        // fewest scopes both sides share up to there)
+        let (na, nb, np, stop) = scopes_through(&inner, first, at, a, b, p);
+        // (the definitions before `at` in the scopes open there above
+        // those, looked up under no segment's lock: then this segment is
+        // read again, and any bracket filed in it meanwhile counted)
+        let (na, nb, np, stop) = if usize::try_from(np.max(0)).unwrap_or(0) < reach.covered && !reach.all {
+            drop(inner);
+            let mut q = np;
+            loop {
+                reach.below(eng, q);
+                inner = seg.inner.read();
+                let x = scopes_through(&inner, first, at, a, b, p);
+                if reach.all || usize::try_from(x.2.max(0)).unwrap_or(0) >= reach.covered {
+                    break x;
                 }
-            } else {
-                let (net, min) = (i64::from(inner.depth_net), i64::from(inner.depth_min));
-                let (la, ea) = through_segment(a, net, min);
-                let (lb, eb) = through_segment(b, net, min);
-                p = p.min(la).min(lb);
-                (a, b) = (ea, eb);
-                if a == b && b == p {
-                    stop = Some(Pos(inner.hi.0.saturating_sub(1)));
-                }
+                q = x.2;
+                drop(inner);
             }
-        }
+        } else {
+            (na, nb, np, stop)
+        };
+        (a, b, p) = (na, nb, np);
         let inside = |q: Pos| (!first || q >= at) && stop.is_none_or(|s| q <= s);
         // (the definitions here first: a reader after one in this segment
         // is asked whatever its place in it, as is one before, needlessly)
         for (f, m) in &inner.defs {
-            if m.iter().any(|(q, d)| inside(*q) && scoped_def(d)) {
+            if !reach.fields.contains(f) && m.iter().any(|(q, d)| inside(*q) && scoped_def(d)) {
                 reach.fields.insert(*f);
             }
         }
-        let mut here: Vec<(Field, Reader)> = Vec::new();
         for (f, rs) in &inner.readers {
+            let all = reach.all || *f == eng.depth_field || reach.fields.contains(f);
             for r in rs {
-                if inside(eng.node(r.anchor).pos_hint()) && live(eng, r.node, r.serial) {
-                    here.push((*f, r.clone()));
+                if (all || read::derived_spec(eng, r.path).is_some())
+                    && inside(eng.node(r.anchor).pos_hint())
+                    && live(eng, r.node, r.serial)
+                {
+                    readers.push((*f, r.clone()));
                 }
             }
         }
@@ -5615,12 +5642,6 @@ fn reask_after_effect_with(
         }
         let lo = seg.lo;
         drop(inner);
-        // (the scopes both sides share as few as they get in this segment:
-        // those above, open at `at`, may end on one side only, and the
-        // definitions in them before `at` with them; looked up under no
-        // segment's lock)
-        reach.below(eng, p);
-        readers.extend(here.into_iter().filter(|(f, r)| reach.asks(eng, *f, r)));
         if let Some(q) = stop {
             end = Some((sid, q));
             break;
@@ -5668,7 +5689,15 @@ fn reask_after_effect_with(
     for (f, r) in &readers {
         reask_reader(eng, w, *f, r, Some(by.id), st);
     }
-    reask_rest(eng, w, by, rest.0, rest.1, None, st);
+    // (the relations, end readers and finals likewise: of those fields;
+    // all of them were put right or asked to the line's end at each walk
+    // that found no stop, every definition on the way looked at)
+    let only = (!reach.all).then(|| {
+        let mut o = reach.fields.clone();
+        o.insert(eng.depth_field);
+        o
+    });
+    reask_rest(eng, w, by, rest.0, rest.1, only.as_ref(), st);
     // (past the region only the readers of what is defined in it can see
     // another answer)
     if let Some((sid, q)) = end {
