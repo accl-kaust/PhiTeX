@@ -225,7 +225,12 @@ impl Files {
         }
     }
 
-    /// `name`'s content key without fetching it (Shelf's: its pack and
+    /// The release's own format `name` (Shelf's pack of it fetched), none: there is none.
+    pub fn published_format(self: &Arc<Self>, name: &str, engine: &'static str) -> Option<Vec<u8>> {
+        self.shelf(engine)?.published_format(name)
+    }
+
+    /// `name`'s content key without fetching it (Shelf's: its content sum and
     /// path), for a warm start's check; none: the host's.
     pub fn key(self: &Arc<Self>, name: &str, engine: &'static str) -> Option<(String, Vec<u8>)> {
         let s = self.lock();

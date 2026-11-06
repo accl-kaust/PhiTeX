@@ -120,12 +120,32 @@ impl Host for Shelf {
         self.files.read(&path.to_string_lossy()).map(|b| b.to_vec())
     }
 
-    /// Shelf's files keyed by their pack and path, none read: a warm start
-    /// checks the format against them without fetching them
-    /// ([`Files::key`]).
+    /// Shelf's files keyed by their own content (the index's sums) and
+    /// path, none read: a warm start checks the format against them
+    /// without fetching them ([`Files::key`]).
     fn content_key(&self) -> Option<phitex_tex::ContentKey> {
         let (f, e) = (self.files.clone(), self.engine);
         Some(Arc::new(move |name: &str| f.key(name, e)))
+    }
+
+    /// The format's files: Shelf's only, as the CLI's `--shelf` builds a format
+    /// (not the bundled kernel's, named otherwise): a format the release
+    /// publishes, made by `phitex build --shelf`, read the same files.
+    fn format_finder(&self) -> Option<phitex_tex::Finder> {
+        let (f, e) = (self.files.clone(), self.engine);
+        Some(Arc::new(move |key: &str| {
+            let (name, format) = match phitex_tex::font_name(key) {
+                Some(n) => (n, phitex_shelf::format_of(n)),
+                None => (key, "tex"),
+            };
+            f.shelf_find(name, Some(format), e)
+                .map(|(p, b)| (p, b.to_vec()))
+        }))
+    }
+
+    /// The release's own format of that name, when the store's is none or stale.
+    fn published_format(&self, name: &str) -> Option<Vec<u8>> {
+        self.files.published_format(name, self.engine)
     }
 
     /// BibTeX's and makeindex's files, as kpathsea finds them in their

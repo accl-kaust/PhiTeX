@@ -4,8 +4,9 @@
 # (scripts/fetch-live.py), TeX Live's archives (build.py FETCH_ONLY, the
 # fonts' tree), PhiTeX, the tracer and the font index built from this
 # checkout, build.py with the dependency traces, release.py after the
-# served releases, the check against TeX Live (scripts/check.sh), and the
-# site to deploy (public/ with the releases, as deploy.sh makes it).
+# served releases, the check against TeX Live (scripts/check.sh), the
+# formats made there published with the release and checked to be taken
+# (release.py --formats, scripts/check-formats.sh), and the site to deploy (public/ with the releases, as deploy.sh makes it).
 # Writes out/shelf-results/ (summary.txt, release.txt: the release made,
 # or nothing new) and leaves the site in shelf/public/.
 #
@@ -65,6 +66,13 @@ fi
 # (6) the check against TeX Live
 ROOT="$root" REL="$s/releases-v1" LABEL="$label" NEW="$new" BIN="$root/target/fastdev/phitex" \
   FTREE="$w/ftree" W="$w/check" OUT="$out" TLPDB="$s/cache/texlive.tlpdb.xz" bash scripts/check.sh
+
+# (6b) the formats the check's builds made on the release (this PhiTeX's
+# engine identity) published with it, and each taken by a build on a
+# fresh cache, not made (scripts/check-formats.sh)
+python3 release.py "$label" --releases releases-v1 --formats "$w/check/c-shelf/formats" | tee -a "$out/summary.txt"
+ROOT="$root" REL="$s/releases-v1" LABEL="$label" NEW="$new" BIN="$root/target/fastdev/phitex" \
+  W="$w/check" OUT="$out" bash scripts/check-formats.sh
 
 # (7) the site, as deploy.sh makes it
 rm -rf "public/$label"
