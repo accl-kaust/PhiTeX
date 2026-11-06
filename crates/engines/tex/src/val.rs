@@ -1036,6 +1036,59 @@ pub(crate) fn clist_projection(x: ValueId, v: &Values) -> ValueId {
     r
 }
 
+/// What an `\\xdef` appending to a meaning without reading it needs of
+/// it (`\\xdef\\x{\\x...}`, [`crate::run::Run::append_def`]): `0` where it
+/// cannot (not a macro; one with parameters, `\\outer` or `\\protected`; a
+/// body holding a brace, a parameter or an active character), else
+/// `[tail, names]`: `tail` 1 where the body is empty or ends with a comma
+/// (its comma-list items are those before plus the appended ones), 2
+/// otherwise; `names` the control sequences the body holds, each once in
+/// a fixed order, whose meanings decide whether its expansion is itself
+/// (microtype's list of fonts: font identifiers, which do not expand). A
+/// pure projection for the engine: a list grown by appends of names it
+/// holds keeps its answer, and its appenders stand.
+pub(crate) fn append_projection(x: ValueId, v: &Values) -> ValueId {
+    let Mean::Macro(m) = Mean::decode(v, Some(x)) else {
+        return v.int(0);
+    };
+    if !m.params.is_empty() || m.flags & !1 != 0 {
+        return v.int(0);
+    }
+    let mut names: Vec<Tok> = Vec::new();
+    for &t in m.body.iter() {
+        if t.is_cs() {
+            names.push(t);
+        } else if !matches!(t.cat(), Some(3 | 4 | 7 | 8 | 10..=12)) {
+            return v.int(0);
+        }
+    }
+    names.sort_unstable_by_key(|t| t.raw());
+    names.dedup();
+    let tail = match m.body.last() {
+        None => 1,
+        Some(t) if t.cat() == Some(12) && t.chr() == u32::from(b',') => 1,
+        Some(_) => 2,
+    };
+    v.list(vec![v.int(tail), toks_value(v, &names)])
+}
+
+/// The engine's append (`phitex_defuse::Rel::Append`): the macro reaching
+/// an append relation, its body followed by the items' tokens (each a
+/// token list value), as `\\xdef\\x{\\x...}` defines it (no prefix,
+/// [`append_projection`]'s macro expanding to its body). A meaning that is
+/// no such macro (the appender, which read the projection, runs again on
+/// it): the items alone.
+pub(crate) fn append_items(input: Option<ValueId>, items: ValueId, v: &Values) -> ValueId {
+    let mut body: Vec<Tok> = match Mean::decode(v, input) {
+        Mean::Macro(m) if m.params.is_empty() => m.body.to_vec(),
+        _ => Vec::new(),
+    };
+    for x in v.with_list(items, <[ValueId]>::to_vec).unwrap_or_default() {
+        body.extend(toks_of(v, Some(x)));
+    }
+    Mean::Macro(Rc::new(Macro::new(0, Vec::new(), Rc::from(body)))).encode(v)
+}
+
 /// [`clist_projection`]'s answer, made.
 fn clist_items(x: ValueId, v: &Values) -> ValueId {
     let not = || v.list(vec![v.list(vec![v.str(CLIST_NOT)])]);

@@ -3249,6 +3249,8 @@ impl Graph {
         let forced_proj = eng.register_projection(Arc::new(crate::val::forced_projection));
         let num_proj = eng.register_projection(Arc::new(crate::val::num_projection));
         let clist_proj = eng.register_projection(Arc::new(crate::val::clist_projection));
+        let append_proj = eng.register_projection(Arc::new(crate::val::append_projection));
+        eng.set_append(Arc::new(crate::val::append_items));
         let skel_proj = eng.register_projection(Arc::new(crate::val::skeleton_projection));
         let ops = Ops {
             exec,
@@ -3304,6 +3306,7 @@ impl Graph {
             forced_proj,
             num_proj,
             clist_proj,
+            append_proj,
             skel_proj,
         };
         let _ = shared.set(ops.clone());

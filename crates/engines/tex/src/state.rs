@@ -458,6 +458,9 @@ pub(crate) enum Pub {
     Value(ValueId),
     /// `+c` on the value reaching the run (rule 3).
     Rel(i64),
+    /// Items appended to the macro reaching the run, a list value of
+    /// token lists (`Run::appending`, `phitex_defuse::Rel::Append`).
+    Append(ValueId),
 }
 
 /// One publication: the location, what, where, and whether it is a

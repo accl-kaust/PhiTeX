@@ -1278,6 +1278,10 @@ impl Run<'_, '_> {
         }
         let e = ch >= 2;
         let p = self.get_r_token()?;
+        // (`\\xdef\\x{\\x...}`: an append, `Run::append_def`)
+        if e && global && a % 4 == 0 && !protected && self.append_def(p)? {
+            return Ok(());
+        }
         let was = e.then(|| self.lines_sink_begin(Sink::Def));
         let (params, body) = self.scan_toks(true, e);
         let hit = was.is_some_and(|w| self.lines_sink_end(w));

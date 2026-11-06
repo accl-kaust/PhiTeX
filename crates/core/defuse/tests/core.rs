@@ -1581,7 +1581,9 @@ fn an_append_chain_is_recomputed_in_place() {
     for threads in [1, 4] {
         let e = Engine::new();
         e.set_append(Arc::new(|input: Option<ValueId>, items: ValueId, v: &Values| {
-            let mut xs = input.and_then(|x| v.with_list(x, <[ValueId]>::to_vec)).unwrap_or_default();
+            let mut xs = input
+                .and_then(|x| v.with_list(x, <[ValueId]>::to_vec))
+                .unwrap_or_default();
             xs.extend(v.with_list(items, <[ValueId]>::to_vec).unwrap_or_default());
             v.list(xs)
         }));

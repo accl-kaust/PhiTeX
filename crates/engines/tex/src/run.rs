@@ -269,6 +269,9 @@ pub(crate) struct Ops {
     /// a membership test of a list macro reads whether the item is in it
     /// ([`Run::clist_has`]).
     pub clist_proj: phitex_defuse::ProjId,
+    /// Whether a meaning can be appended to without being read
+    /// ([`crate::val::append_projection`], [`Run::append_def`]).
+    pub append_proj: phitex_defuse::ProjId,
     /// The gobbled-call projection of meanings
     /// ([`crate::val::skeleton_projection`]): a macro the command loop
     /// expands whose body's head gobbles every group after it reads only
@@ -908,6 +911,14 @@ pub(crate) struct Run<'c, 'a> {
     /// point on, a name the run has not held is looked up in the child's
     /// output first ([`Run::rb_check`]).
     pub rb: Option<RbChild>,
+    /// Global appends to parameterless macros of characters whose value
+    /// before the run it has not read: `\\xdef\\x{\\x...}`
+    /// (microtype's `\\MT@font@list`), each the location and the tokens
+    /// appended, published as a relation (`phitex_defuse::Rel::Append`)
+    /// that the engine recomputes when the value reaching the run moves
+    /// ([`Run::append_def`]). The run's first other touch of the location
+    /// reads that value and makes the definition ([`Run::append_force`]).
+    pub appending: Vec<(Loc, Vec<Tok>)>,
     /// This pass met what the read-back child cannot answer for (the run
     /// defined a key after its read-back point, interpreted a line, ...):
     /// it is made again with the read-back inline (`ops::run_node`).
@@ -1416,6 +1427,7 @@ impl<'c, 'a> Run<'c, 'a> {
             defer_ok: false,
             defer_hit: None,
             rb: None,
+            appending: Vec::new(),
             rb_refused: false,
             no_rb: false,
             reg_loaded_base: phitex_defuse::FxHashMap::default(),
@@ -1890,6 +1902,26 @@ impl<'c, 'a> Run<'c, 'a> {
     /// no read: a global restore published where the run's scope is not
     /// known, a carried binding published as it is.
     pub(crate) fn publication(&mut self) -> Vec<(Field, crate::state::Pub, Locality)> {
+        let mut out = self.state_publication();
+        // (the appends whose base the run never read: relations,
+        // [`Run::append_def`])
+        let appending: Vec<(Loc, ValueId)> = self
+            .appending
+            .iter()
+            .map(|(l, toks)| (*l, self.v.list(vec![crate::val::toks_value(self.v, toks)])))
+            .collect();
+        for (l, items) in appending {
+            out.push((
+                self.loc_field(l),
+                crate::state::Pub::Append(items),
+                Locality::Global,
+            ));
+        }
+        out
+    }
+
+    /// [`Run::publication`]'s part from the run's state.
+    fn state_publication(&mut self) -> Vec<(Field, crate::state::Pub, Locality)> {
         if let Some((k, out, _)) = &self.pubs
             && *k == self.pub_key()
         {
@@ -1908,13 +1940,19 @@ impl<'c, 'a> Run<'c, 'a> {
             .into_iter()
             .filter_map(|(f, w, l)| match w {
                 crate::state::Pub::Value(x) => Some((f, x, l)),
-                crate::state::Pub::Rel(_) => None,
+                crate::state::Pub::Rel(_) | crate::state::Pub::Append(_) => None,
             })
             .collect()
     }
 
     #[inline(never)]
     pub(crate) fn load_slow(&mut self, loc: Loc) -> R<()> {
+        if !self.appending.is_empty() {
+            self.append_force(loc)?;
+            if self.st.load_state(loc) != 0 {
+                return Ok(());
+            }
+        }
         if self.rb.is_some() {
             self.rb_check(loc)?;
             if self.st.load_state(loc) != 0 {
@@ -2207,6 +2245,11 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         if crate::exec::obs_flag!("PHITEX_DEF_TRACE") {
             self.def_trace(loc, &val, global);
+        }
+        if !self.appending.is_empty()
+            && let Err(h) = self.append_force(loc)
+        {
+            self.raise(h);
         }
         if self.rb.is_some() && self.interp.is_none() {
             self.rb_def_check(loc);
@@ -3939,6 +3982,160 @@ impl<'c, 'a> Run<'c, 'a> {
         Ok(true)
     }
 
+    /// A meaning look-up's first touch of location `loc` in the run: a
+    /// pending append made ([`Run::append_force`]), a read-back key
+    /// defined ([`Run::rb_check`]).
+    fn touch(&mut self, loc: Loc) -> R<()> {
+        if !self.appending.is_empty() {
+            self.append_force(loc)?;
+        }
+        self.rb_check(loc)
+    }
+
+    /// `\\xdef\\x{\\x...}` of `p` with no prefix, its `{` and `\\x`
+    /// next: where the run has not touched `\\x` and `\\x`'s meaning
+    /// reaching the run is a macro whose expansion is its body
+    /// ([`crate::val::append_projection`], read as that alone), the rest
+    /// of the body is scanned and expanded as TeX does, and the run
+    /// appends it without reading `\\x`: a relation the engine recomputes
+    /// from the value reaching the run (microtype's `\\MT@font@list`,
+    /// which every node that first uses a font adds to: a paragraph
+    /// deleted at the start moved every later appender, Grail's TikZ
+    /// figures a second each). Whether it did so; false with the input as
+    /// it was.
+    pub(crate) fn append_def(&mut self, p: Tok) -> R<bool> {
+        // (a document piece's run: a page routine's publication is the
+        // page loop's, `crate::pages`)
+        let op = self.cx.op();
+        if self.interp.is_some()
+            || self.rec_load
+            || self.rb.is_some()
+            || self.lt.sink.is_some()
+            || !(op == self.ops.exec || op == self.ops.resume)
+        {
+            return Ok(false);
+        }
+        let Some(l) = self.mean_loc(p) else {
+            return Ok(false);
+        };
+        let pending = self.appending.iter().any(|x| x.0 == l);
+        if !pending && (self.st.load_state(l) != 0 || self.lazy_pre(l)) {
+            return Ok(false);
+        }
+        // (the next tokens unexpanded, their meanings not read, as a name
+        // to define is taken: `{` then `\\x`)
+        let open = self.bare_token()?;
+        if open.cat() != Some(1) {
+            self.back_input(open);
+            return Ok(false);
+        }
+        let second = self.bare_token()?;
+        if second != p {
+            self.back_input(second);
+            self.back_input(open);
+            return Ok(false);
+        }
+        if !pending {
+            let ok = self.append_base(l)?.is_some();
+            if !ok {
+                self.back_input(second);
+                self.back_input(open);
+                return Ok(false);
+            }
+        }
+        self.back_input(open);
+        let (params, rest) = self.scan_toks(true, true);
+        self.ck()?;
+        // (the rest touched `\\x` (an append pending made then) or set
+        // it: the base read, as an ordinary `\\xdef` reads it)
+        let still = self.appending.iter().any(|x| x.0 == l);
+        let touched = if pending {
+            !still
+        } else {
+            self.st.load_state(l) != 0
+        };
+        if !params.is_empty() || touched {
+            if still {
+                self.append_force(l)?;
+            }
+            self.load_slow(l)?;
+            let mut body: Vec<Tok> = match self.st.mean_of(l, self.v) {
+                crate::val::Mean::Macro(m) => m.body.to_vec(),
+                _ => Vec::new(),
+            };
+            body.extend_from_slice(&rest);
+            let m =
+                crate::val::Mean::Macro(Rc::new(crate::val::Macro::new(0, params, Rc::from(body))));
+            self.define_cs_owned(p, m, true);
+            return Ok(true);
+        }
+        match self.appending.iter_mut().find(|x| x.0 == l) {
+            Some(x) => x.1.extend_from_slice(&rest),
+            None => self.appending.push((l, rest)),
+        }
+        self.muts += 1;
+        Ok(true)
+    }
+
+    /// Whether the meaning of `l` reaching the run is a macro an
+    /// `\\xdef` can append to without reading it, read as that alone
+    /// ([`crate::val::append_projection`]) and the classes of the names it
+    /// holds (none expands: its expansion is its body): its tail (1 ending
+    /// with a comma or empty, 2 otherwise), or None.
+    fn append_base(&mut self, l: Loc) -> R<Option<i64>> {
+        let v = self.v;
+        let f = self.loc_field(l);
+        let path = phitex_defuse::PathId::of_proj(self.ops.append_proj);
+        let Some(x) = self.cx.read_path(f, path)? else {
+            return Ok(None);
+        };
+        let Some((tail, names)) = v.with_list(x, |xs| (xs.first().copied(), xs.get(1).copied()))
+        else {
+            return Ok(None);
+        };
+        for t in crate::val::toks_of(v, names) {
+            if self.class_lookup(t)?.is_none() {
+                return Ok(None);
+            }
+        }
+        Ok(tail.map(|t| int_of(v, t)))
+    }
+
+    /// The next token, its meaning not read (`get_r_token`'s way).
+    fn bare_token(&mut self) -> R<Tok> {
+        let was = std::mem::replace(&mut self.defining, true);
+        let r = self.get_name_token();
+        self.defining = was;
+        r?;
+        Ok(self.cur.tok)
+    }
+
+    /// Location `loc` touched by the run while an append to it is pending
+    /// ([`Run::append_def`]): the value reaching the run read, and the
+    /// definition the appends make of it made now, as `\\xdef` made it
+    /// (the run depends on that value from here on, as TeX's run did).
+    pub(crate) fn append_force(&mut self, loc: Loc) -> R<()> {
+        let Some(i) = self.appending.iter().position(|x| x.0 == loc) else {
+            return Ok(());
+        };
+        let (_, rest) = self.appending.swap_remove(i);
+        self.muts += 1;
+        self.load_slow(loc)?;
+        let mut body: Vec<Tok> = match self.st.mean_of(loc, self.v) {
+            crate::val::Mean::Macro(m) => m.body.to_vec(),
+            _ => Vec::new(),
+        };
+        body.extend_from_slice(&rest);
+        let m = crate::val::Mean::Macro(Rc::new(crate::val::Macro::new(
+            0,
+            Vec::new(),
+            Rc::from(body),
+        )));
+        let e = self.st.mean_entry(m);
+        self.set_loc(loc, e, true);
+        Ok(())
+    }
+
     /// The definition the read-back child's output gives name `name`, read
     /// as that key alone ([`crate::ops::ReadBack`]): None where the file
     /// defines no such key.
@@ -5270,7 +5467,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        self.rb_check(l)?;
+        self.touch(l)?;
         if self.st.is_loaded(l) || self.st.lazy(l).is_some() || self.lazy_pre(l) {
             return Ok(None);
         }
@@ -5308,7 +5505,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        self.rb_check(l)?;
+        self.touch(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
@@ -5343,7 +5540,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        self.rb_check(l)?;
+        self.touch(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
@@ -5374,7 +5571,7 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn box_shape(&mut self, n: i32) -> R<Option<(bool, i32)>> {
         let v = self.v;
         let l = self.box_loc(i64::from(n));
-        self.rb_check(l)?;
+        self.touch(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             let b = self.box_reg(n)?;
             return Ok(b.map(|b| {
@@ -5416,7 +5613,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(false);
         };
-        self.rb_check(l)?;
+        self.touch(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(false);
         }
@@ -5475,7 +5672,43 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        self.rb_check(l)?;
+        // (a list the run appended to without reading it: the item in what
+        // it appended, else in the list reaching the run, where that ends
+        // with a comma, [`crate::val::append_projection`]; the run then
+        // depends on that alone)
+        let plain = |t: &Tok| match t.as_cs() {
+            Some(c) => !matches!(c.name(), "@empty" | "@nnil"),
+            None => !matches!(t.cat(), Some(1 | 2)),
+        };
+        let appended = self
+            .appending
+            .iter()
+            .find(|x| x.0 == l && x.1.iter().all(plain))
+            .map(|x| {
+                x.1.split(|t| t.cat() == Some(12) && t.chr() == u32::from(b','))
+                    .any(|i| i == item)
+            });
+        if let Some(found) = appended {
+            if found {
+                return Ok(Some(true));
+            }
+            let f = self.loc_field(l);
+            if self.append_base(l)? == Some(1) {
+                let not = self.cx.path(&[
+                    phitex_defuse::Step::Proj(self.ops.clist_proj),
+                    phitex_defuse::Step::Has(v.str(crate::val::CLIST_NOT)),
+                ]);
+                if self.cx.read_path(f, not)? == Some(v.bool(false)) {
+                    let key = crate::val::toks_value(v, item);
+                    let has = self.cx.path(&[
+                        phitex_defuse::Step::Proj(self.ops.clist_proj),
+                        phitex_defuse::Step::Has(key),
+                    ]);
+                    return Ok(self.cx.read_path(f, has)?.map(|x| x == v.bool(true)));
+                }
+            }
+        }
+        self.touch(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) || self.interp.is_some() || self.rec_load {
             return Ok(None);
         }
@@ -5508,7 +5741,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        self.rb_check(l)?;
+        self.touch(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) || self.interp.is_some() || self.rec_load {
             return Ok(None);
         }
@@ -5537,7 +5770,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
-        self.rb_check(l)?;
+        self.touch(l)?;
         if self.st.is_loaded(l) || self.lazy_pre(l) {
             return Ok(None);
         }
@@ -6183,7 +6416,7 @@ impl<'c, 'a> Run<'c, 'a> {
             .iter()
             .filter_map(|&(f, w, l)| match w {
                 crate::state::Pub::Value(x) => Some((f, x, l)),
-                crate::state::Pub::Rel(_) => None,
+                crate::state::Pub::Rel(_) | crate::state::Pub::Append(_) => None,
             })
             .collect();
         self.audit(&publication);
@@ -6298,6 +6531,7 @@ impl<'c, 'a> Run<'c, 'a> {
                         None => self.cx.define_with(f, x, l),
                     },
                     crate::state::Pub::Rel(c) => self.cx.define_rel_with(f, c, l),
+                    crate::state::Pub::Append(x) => self.cx.define_append_with(f, x, l),
                 }
             }
             if n >= 10_000 && crate::exec::prof_flag!("PHITEX_TEX_TIME") {
@@ -6686,7 +6920,12 @@ impl<'c, 'a> Run<'c, 'a> {
             op: self.op_name(),
             defs: publication
                 .iter()
-                .map(|&(f, w, _)| (f, matches!(w, crate::state::Pub::Rel(_))))
+                .map(|&(f, w, _)| {
+                    (
+                        f,
+                        matches!(w, crate::state::Pub::Rel(_) | crate::state::Pub::Append(_)),
+                    )
+                })
                 .collect(),
             ..NodeAudit::default()
         };

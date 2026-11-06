@@ -2983,3 +2983,81 @@ fn latex_examples_do_not_run_again_on_a_renamed_anchor() {
         }
     }
 }
+
+/// microtype's list of the fonts it has set up (`\MT@font@list`), which
+/// the first use of each font adds to (`\xdef\MT@font@list{\MT@font@list
+/// \MT@font,}`): a paragraph that first used a font deleted, the list
+/// before every later first use moves, yet each later appender adds its
+/// font to whatever list reaches it: an append relation the engine
+/// recomputes (`Run::append_def`), not a run. Only the paragraph that now
+/// first uses the deleted paragraph's font runs again on the list (Grail's
+/// TikZ figures each ran again, a second each). A name in the list
+/// redefined to expand reads in full where an append meets it. Every
+/// edited PDF equals a cold build's, at one and eight threads.
+#[test]
+fn a_font_list_append_does_not_run_again_when_the_list_moves() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/mt-append");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |first: bool| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\usepackage{microtype}\n\\makeatletter\n\
+             \\def\\L{}\\font\\fa=cmr10 \\font\\fb=cmr12\n\\makeatother\n\\begin{document}\n",
+        );
+        if first {
+            s.push_str("A paragraph that first uses \\texttt{a typewriter font}.\n\n");
+        }
+        for p in [
+            "The \\texttt{typewriter} again, and \\xdef\\L{\\L\\fa,}a name.",
+            "Now \\textbf{bold} type.",
+            "Then \\textit{italic} type, \\xdef\\L{\\L\\fb,}and another.",
+            "And \\textsc{small capitals}.",
+            "With {\\large a larger size} \\def\\fa{x}too.",
+            "Some \\textsf{sans serif}.",
+            "A {\\small smaller size} \\xdef\\L{\\L y,}and the list: \\meaning\\L.",
+            "Last, {\\Large a large one}.",
+        ] {
+            s.push_str(p);
+            s.push_str("\n\n");
+        }
+        s.push_str("\\end{document}\n");
+        s
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("mtappend", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(true));
+        for first in [false, true] {
+            b.edit(&doc(first));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} first {first}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(first));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} first {first}"
+            );
+            let mut on_list: Vec<&str> = r
+                .iter()
+                .filter(|x| x.contains("MT@font@list"))
+                .filter_map(|x| x.rsplit_once(" [").map(|(_, n)| n))
+                .collect();
+            on_list.sort_unstable();
+            on_list.dedup();
+            assert!(
+                on_list.len() <= 1,
+                "-j{threads} first {first}: appenders ran again on the font list: {r:?}"
+            );
+        }
+    }
+}

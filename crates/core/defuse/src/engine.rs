@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::api::{
-    AppendFn, Cause, EditSource, EnvProvider, EvalError, Limits, Monoid, NodeId, NodeInfo, NodeState, OpId, Operation, PathId,
-    ProjId, Projection, Rel, Report, SeqMonoid, Settled, Step, UnitId,
+    AppendFn, Cause, EditSource, EnvProvider, EvalError, Limits, Monoid, NodeId, NodeInfo, NodeState, OpId, Operation,
+    PathId, ProjId, Projection, Rel, Report, SeqMonoid, Settled, Step, UnitId,
 };
 use crate::commit::{self, CommitStats, Predicted, own_write, place_after, settle_predictions, unfile};
 use crate::index::{FieldIndex, RangeIndex};
@@ -585,9 +585,9 @@ impl Engine {
         let v = self.values();
         match c {
             Rel::Add(c) => v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c)),
-            Rel::Append(items) => (self.append.get().expect("an append relation needs the client's append"))(
-                input, items, v,
-            ),
+            Rel::Append(items) => {
+                (self.append.get().expect("an append relation needs the client's append"))(input, items, v)
+            }
         }
     }
 
