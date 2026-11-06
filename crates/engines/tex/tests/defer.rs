@@ -789,6 +789,55 @@ fn an_outer_macro_an_edit_makes_stops_a_later_scan() {
     }
 }
 
+/// The text of [`a_name_built_from_a_stepped_counter_reads_through_the_name`]
+/// (`lit`: each name's number written out, the oracle; the counter's
+/// value reaching paragraph i is 5 + shift + i).
+fn dname_text(extra: &str, lit: Option<i32>) -> String {
+    let mut s = String::from("\\openout1=\\jobname.out\n\\count200=5\n\\countdef\\cn=200\n");
+    // (pg@1 to pg@329 the same, pg@330 to pg@340 another, none past 350)
+    for n in 1..=350 {
+        let body = if (330..=340).contains(&n) {
+            "other"
+        } else {
+            "same"
+        };
+        let _ = writeln!(s, "\\expandafter\\def\\csname pg@{n}\\endcsname{{{body}}}%");
+    }
+    s.push_str(extra);
+    for i in 0..60 {
+        let (num, less) = match lit {
+            Some(sh) => {
+                let v = 5 + sh + i + 1;
+                (v.to_string(), (v - 1).to_string())
+            }
+            None => (
+                "\\number\\cn".to_owned(),
+                "\\number\\numexpr\\cn-1".to_owned(),
+            ),
+        };
+        let cmp = match lit {
+            Some(sh) => (5 + sh + i).to_string(),
+            None => "\\numexpr\\cn-1".to_owned(),
+        };
+        let own = if i == 30 {
+            format!("\\expandafter\\def\\csname pg@{num}\\endcsname{{own}}")
+        } else {
+            String::new()
+        };
+        let _ = write!(
+            s,
+            "\\global\\advance\\cn 1 \\edef\\w{{\\write1{{n{i}=\\the\\count200.}}}}\\w{{}}{own}\
+             Paragraph {i} \\ifcsname pg@{num}\\endcsname has\\else lacks\\fi{{}} \
+             \\expandafter\\ifx\\csname pg@{less}\\endcsname\\relax relax\\else set\\fi{{}} \
+             [\\csname pg@{num}\\endcsname] \
+             \\ifnum{cmp}>100 late\\else early\\fi{{}}, long enough to make a line \
+             or two when set in the plain format's ten point roman.\n\n"
+        );
+    }
+    s.push_str("\\closeout1\n\\bye\n");
+    s
+}
+
 /// A name built from a counter a piece only steps is a relative name
 /// (docs/spec-relative-counters.md §2.2): `\ifcsname`, `\ifx` of the
 /// `\csname`, the `\csname` expanded, `\numexpr` of the counter plus a
@@ -801,53 +850,7 @@ fn an_outer_macro_an_edit_makes_stops_a_later_scan() {
 /// `\csname` makes `\relax` included.
 #[test]
 fn a_name_built_from_a_stepped_counter_reads_through_the_name() {
-    // (`lit`: the same text with each name's number written out, the
-    // oracle; the counter's value reaching paragraph i is 5 + shift + i)
-    let text = |extra: &str, lit: Option<i32>| {
-        let mut s = String::from("\\openout1=\\jobname.out\n\\count200=5\n\\countdef\\cn=200\n");
-        // (pg@1 to pg@329 the same, pg@330 to pg@340 another, none past 350)
-        for n in 1..=350 {
-            let body = if (330..=340).contains(&n) {
-                "other"
-            } else {
-                "same"
-            };
-            let _ = writeln!(s, "\\expandafter\\def\\csname pg@{n}\\endcsname{{{body}}}%");
-        }
-        s.push_str(extra);
-        for i in 0..60 {
-            let (num, less) = match lit {
-                Some(sh) => {
-                    let v = 5 + sh + i + 1;
-                    (v.to_string(), (v - 1).to_string())
-                }
-                None => (
-                    "\\number\\cn".to_owned(),
-                    "\\number\\numexpr\\cn-1".to_owned(),
-                ),
-            };
-            let cmp = match lit {
-                Some(sh) => (5 + sh + i).to_string(),
-                None => "\\numexpr\\cn-1".to_owned(),
-            };
-            let own = if i == 30 {
-                format!("\\expandafter\\def\\csname pg@{num}\\endcsname{{own}}")
-            } else {
-                String::new()
-            };
-            let _ = write!(
-                s,
-                "\\global\\advance\\cn 1 \\edef\\w{{\\write1{{n{i}=\\the\\count200.}}}}\\w{{}}{own}\
-                 Paragraph {i} \\ifcsname pg@{num}\\endcsname has\\else lacks\\fi{{}} \
-                 \\expandafter\\ifx\\csname pg@{less}\\endcsname\\relax relax\\else set\\fi{{}} \
-                 [\\csname pg@{num}\\endcsname] \
-                 \\ifnum{cmp}>100 late\\else early\\fi{{}}, long enough to make a line \
-                 or two when set in the plain format's ten point roman.\n\n"
-            );
-        }
-        s.push_str("\\closeout1\n\\bye\n");
-        s
-    };
+    let text = dname_text;
     let src = |extra: &str| text(extra, None);
     let oracle = |name: &str, extra: &str, sh: i32| {
         let (want, _) = cold(name, &text(extra, Some(sh)), 1);
@@ -890,11 +893,7 @@ fn a_name_built_from_a_stepped_counter_reads_through_the_name() {
             oracle("dname-near-lit", "\\global\\advance\\count200 1\n", 1),
             "one on: cold equals the names written out"
         );
-        // (paragraph 30 defines a name of that shape itself: it reads the
-        // counter's digits, and the two after it, whose names read its
-        // definitions, are asked once and stand, every read as it was
-        // (`Ctx::last_run_stands`, no run): counted as asked, as every
-        // wake is)
+        // (p30 defines a name of that shape: its digits read; p31, p32 asked once and stand, no run)
         assert!(
             asked(&b) <= r0 + 3,
             "-j{threads}: no paragraph asked again on the counter when no name's meaning moved: {:?}",
