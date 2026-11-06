@@ -3311,19 +3311,7 @@ impl<'c, 'a> Run<'c, 'a> {
             // (a TFM or PK file found nowhere: kpathsea's mktex,
             // [`Run::font_made`])
             match self.tool_output(key)? {
-                Some(x) => {
-                    if crate::exec::obs_flag!("PHITEX_FILE_TRACE") {
-                        eprintln!(
-                            "file-trace: tool-made {key} read by node {} op {} doc {} nest {} cmds {}",
-                            self.cx.node().raw(),
-                            self.op_name(),
-                            self.doc,
-                            self.nest.len(),
-                            self.cmds
-                        );
-                    }
-                    Some(x)
-                }
+                Some(x) => Some(x),
                 None => match self.cx.env(f)? {
                     Some(x) if !crate::val::list_of(v, x).is_empty() => Some(x),
                     _ => self.font_made(key)?,
@@ -3386,6 +3374,17 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(self.tool_failed(x).or((x != ValueId::UNIT).then_some(x)));
         }
         let x = self.lb(crate::tools::made_field(self.v, key))?;
+        // (`PHITEX_FILE_TRACE`, observe: who reads a tool's output)
+        if x.is_some_and(|x| x != ValueId::UNIT) && crate::exec::obs_flag!("PHITEX_FILE_TRACE") {
+            eprintln!(
+                "file-trace: tool-made {key} read by node {} op {} doc {} nest {} cmds {}",
+                self.cx.node().raw(),
+                self.op_name(),
+                self.doc,
+                self.nest.len(),
+                self.cmds
+            );
+        }
         Ok(x.filter(|&x| x != ValueId::UNIT)
             .map(|x| self.tool_failed(x).unwrap_or(x)))
     }

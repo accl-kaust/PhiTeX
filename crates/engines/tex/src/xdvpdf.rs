@@ -840,6 +840,16 @@ impl Docs {
     }
 }
 
+/// The names of the forms the pages of `ds` make ([`Docs::forms`]), none
+/// if one is made twice.
+fn forms(ds: &[Arc<Docs>]) -> Option<std::collections::BTreeSet<&[u8]>> {
+    let mut all = std::collections::BTreeSet::new();
+    ds.iter()
+        .flat_map(|d| d.forms.iter())
+        .all(|f| all.insert(f.as_slice()))
+        .then_some(all)
+}
+
 /// The live file of `walks` from base `b` ([`phitex_pdf::Layout::live`]):
 /// the pages whose operations differ from the base's, and the pages past
 /// its last, written again after its last page ([`Session::reship`]),
@@ -927,13 +937,6 @@ fn live(
     // (each form made once by name, and every name the file has made
     // again or kept: the file's form objects then the document's,
     // written again where a page makes one again)
-    fn forms(ds: &[Arc<Docs>]) -> Option<std::collections::BTreeSet<&[u8]>> {
-        let mut all = std::collections::BTreeSet::new();
-        ds.iter()
-            .flat_map(|d| d.forms.iter())
-            .all(|f| all.insert(f.as_slice()))
-            .then_some(all)
-    }
     match (forms(&docs), forms(&b.docs)) {
         (Some(now), Some(was)) if was.is_subset(&now) => {}
         _ => {
