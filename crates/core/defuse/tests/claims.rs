@@ -766,8 +766,9 @@ impl Operation for ReadsSettler {
 
 /// `[]`: reads `z` and `t`; while both are set and differ, goes on
 /// checking whether a read moved (`Ctx::tick`): a run on a value that
-/// only a re-ask ends, as a TeX loop on a stale counter.
-struct UntilEqual;
+/// only a re-ask ends, as a TeX loop on a stale counter. Gives up after
+/// 10 s, and says so.
+struct UntilEqual(Arc<std::sync::atomic::AtomicBool>);
 
 impl Operation for UntilEqual {
     fn name(&self) -> &'static str {
@@ -781,8 +782,13 @@ impl Operation for UntilEqual {
         if let (Some(z), Some(t)) = (z, t)
             && z != t
         {
+            let t0 = Instant::now();
             loop {
                 cx.tick(1)?;
+                if t0.elapsed() > Duration::from_secs(10) {
+                    self.0.store(true, Ordering::Release);
+                    break;
+                }
                 std::hint::spin_loop();
             }
         }
@@ -808,11 +814,8 @@ fn a_run_waiting_for_a_node_a_claim_takes_goes_on() {
     let p_op = e.register(Arc::new(QuietSettler));
     let waits = Arc::new(AtomicU64::new(0));
     let w_op = e.register(Arc::new(ReadsSettler(waits.clone())));
-    let r_op = e.register(Arc::new(UntilEqual));
-    e.set_limits(phitex_defuse::Limits {
-        time: Some(Duration::from_secs(20)),
-        ..Default::default()
-    });
+    let gave_up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let r_op = e.register(Arc::new(UntilEqual(gave_up.clone())));
     let u = e.new_unit();
     e.push(u, def4, vec![v.int(1), v.int(1), v.int(1), v.int(0)]);
     let c = e.push(u, claim, vec![]);
@@ -824,7 +827,11 @@ fn a_run_waiting_for_a_node_a_claim_takes_goes_on() {
     e.push(u, r_op, vec![]);
     let r = e.evaluate(4);
     assert!(waits.load(Ordering::Relaxed) > 0, "W never waited for P: {r:?}");
-    assert!(r.is_ok(), "W left waiting for P, which the claim took: {r:?}");
+    assert!(r.is_ok(), "{r:?}");
+    assert!(
+        !gave_up.load(Ordering::Acquire),
+        "W left waiting for P, which the claim took, and R ran on"
+    );
     assert_eq!(e.claimed(c), vec![p]);
     assert_eq!(e.output(w), Some(v.int(1)), "W ran on y = 1");
     assert!(e.check_invariants().is_empty());
