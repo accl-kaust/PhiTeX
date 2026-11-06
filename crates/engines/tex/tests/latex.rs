@@ -1116,6 +1116,66 @@ fn latex_input_include() {
     edit_check("inputs", &b, &cold, &before);
 }
 
+/// Unchanged bytes change nothing (`r` in a watch: every file the build
+/// read staged again from disk, the main text sent again; an editor
+/// saving a file unchanged): with `pdfdocs/inputs.tex`, its cut
+/// `chap1.tex` and its other files staged again with the bytes they
+/// have, nothing is staged, the main text sent again runs no node and
+/// the PDF is the one before; the cut file given as an editor's buffer
+/// with its bytes too. A real edit of `chap1.tex` after them still
+/// equals a cold build.
+#[test]
+fn latex_same_bytes_restage_runs_nothing() {
+    let src_dir = common::fixtures().join("latex/pdfdocs");
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-same-bytes");
+    let _ = std::fs::create_dir_all(&dir);
+    for f in ["inputs.tex", "chap1.tex", "chap2.tex"] {
+        std::fs::copy(src_dir.join(f), dir.join(f)).expect("copy");
+    }
+    let src = common::read(&dir.join("inputs.tex"));
+    let (mut b, _) = cold_nodes("inputs", &dir, &src);
+    let pdf = b.output().0;
+    let names: Vec<String> = b.reads().into_iter().map(|(n, _)| n).collect();
+    assert!(
+        names.iter().any(|n| n.starts_with("chap1")),
+        "chap1 not among the files read: {names:?}"
+    );
+    // (every file read, as `r` stages them: the cut one included)
+    for n in &names {
+        b.stage_file(n, None);
+    }
+    assert!(
+        !b.absorb_pending(),
+        "a same-bytes restage of {} files staged a change",
+        names.len()
+    );
+    b.edit(&src);
+    assert_eq!(
+        b.stats.nodes_run, 0,
+        "{} nodes run after a same-bytes restage and the same main text",
+        b.stats.nodes_run
+    );
+    assert!(b.output().0 == pdf, "the PDF changed with nothing changed");
+    // (the cut file as an editor's buffer, its bytes; then the main text)
+    let chap1 = common::read(&dir.join("chap1.tex"));
+    b.stage_file("chap1.tex", Some(chap1.as_bytes()));
+    assert!(
+        !b.absorb_pending(),
+        "chap1.tex's same bytes staged a change"
+    );
+    b.edit(&src);
+    assert_eq!(b.stats.nodes_run, 0, "{} nodes run", b.stats.nodes_run);
+    // (a real edit after them: as a cold build)
+    let new = quack(&chap1, "Paragraph 5 of chapter one: the quick ");
+    let before = b.pages();
+    b.edit_file("chap1.tex", Some(new.as_bytes()));
+    assert!(b.stats.nodes_run > 0, "the edit of chap1.tex ran nothing");
+    std::fs::write(dir.join("chap1.tex"), &new).expect("write");
+    let cold = common::build(pdf_opts("inputs", &dir), Some(&prelude(true)), &src);
+    let _ = std::fs::write(dir.join("chap1.tex"), &chap1);
+    edit_check("inputs", &b, &cold, &before);
+}
+
 /// An article with one paragraph between blank lines (the ladder's
 /// red-02): LaTeX's paragraph hook resets `\everypar` to its regime
 /// guess, no definition; byte-identical, the `.aux` too, no undeclared

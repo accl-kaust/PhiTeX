@@ -424,6 +424,18 @@ impl EditSender {
         let v = p.version;
         p.text.take().map(|(t, h)| (t, h, v))
     }
+
+    /// The text waiting taken, when `same` says it is the one the build
+    /// has: its version; none (and the text left waiting) else.
+    fn take_if_same(&self, same: impl FnOnce(&str) -> bool) -> Option<u64> {
+        let mut p = self.0.locked();
+        if p.text.as_ref().is_some_and(|(t, _)| same(t)) {
+            p.text = None;
+            Some(p.version)
+        } else {
+            None
+        }
+    }
 }
 
 /// The engine's source of edits during an evaluation: the latest text
@@ -4480,6 +4492,15 @@ impl Graph {
     }
 }
 
+/// Whether `s` is [`latin1`] of `bytes`, compared without making it.
+fn latin1_is(s: &str, bytes: &[u8]) -> bool {
+    if s.is_ascii() {
+        s.as_bytes() == bytes
+    } else {
+        s.chars().eq(bytes.iter().map(|&b| char::from(b)))
+    }
+}
+
 /// A file's bytes as TeX's characters, one each (Latin-1): ASCII bytes
 /// are their characters' UTF-8 already, copied at once.
 pub(crate) fn latin1(bytes: &[u8]) -> String {
@@ -6666,7 +6687,46 @@ impl Build {
         }
     }
 
+    /// Whether an evaluation now has nothing to do, after one that ended
+    /// without an evaluation error: no file staged, and the text waiting,
+    /// if one does, the text the nodes hold. Its version taken, the
+    /// result the last one's, no node run, no output made again: `r` in
+    /// a watch with nothing changed, an editor saving files unchanged
+    /// ([`Build::stage_file`] stages none of them). The stats say so.
+    fn nothing_to_settle(&mut self) -> bool {
+        if self.staged || !self.evaluated || !self.g.eval_errors.is_empty() {
+            return false;
+        }
+        let v = if self.edits.pending() {
+            let (raw, text, canon) = (self.raw.as_deref(), self.text.as_str(), self.canon);
+            let same = |t: &str| match raw {
+                Some(r) => r == t,
+                None => !canon && text == t,
+            };
+            match self.edits.take_if_same(same) {
+                Some(v) => v,
+                None => return false,
+            }
+        } else {
+            self.stats.version
+        };
+        let last = std::mem::take(&mut self.stats);
+        self.stats = Stats {
+            version: last.version.max(v),
+            live: last.live,
+            threads: last.threads,
+            relations: last.relations,
+            ..Stats::default()
+        };
+        self.loads_ran = false;
+        crate::timeline::lap("engine: nothing changed, no evaluation");
+        true
+    }
+
     fn settle(&mut self) {
+        if self.nothing_to_settle() {
+            return;
+        }
         self.staged = false;
         let t_all = std::time::Instant::now();
         self.progress_offsets();
@@ -6827,22 +6887,17 @@ impl Build {
         // (a file the job writes is never cut, [`Graph::drop_cut`])
         let cut = (cut_path.is_some() || self.g.absent.contains(&d))
             && !self.g.written.iter().any(|w| w == name);
-        let k = if let Some(k) = self.g.files.iter().position(|(g, _)| *g == f) {
-            Some(k)
-        } else if self.g.absent.contains(&f) {
-            self.g.absent.retain(|g| *g != f);
-            self.g.files.push((f, v.list(Vec::new())));
-            Some(self.g.files.len() - 1)
-        } else {
-            None
-        };
-        if k.is_none() && !cut {
+        let held = self.g.files.iter().position(|(g, _)| *g == f);
+        let f_absent = held.is_none() && self.g.absent.contains(&f);
+        if held.is_none() && !f_absent && !cut {
             if tools {
                 self.push_staged();
             }
             return;
         }
-        let old = k.map(|k| list_of(v, self.g.files[k].1)).unwrap_or_default();
+        let old = held
+            .map(|k| list_of(v, self.g.files[k].1))
+            .unwrap_or_default();
         let found = match text {
             Some(t) => Some((
                 old.first()
@@ -6853,6 +6908,27 @@ impl Build {
             )),
             None => (self.opts.finder)(name),
         };
+        // (the same bytes at the same path, or still no file: no field, no
+        // record and no node changes, a cut file's included. `r` in a
+        // watch stages every file the build read, and an editor may save
+        // a file unchanged: each cut file's package-load records were
+        // dropped and the nodes whose loads list it ran again, its value
+        // made anew first, Grail's `r` 7 s)
+        if self.restage_unchanged(name, held, f_absent, cut, found.as_ref()) {
+            if tools {
+                self.push_staged();
+            }
+            return;
+        }
+        let k = if held.is_some() {
+            held
+        } else if f_absent {
+            self.g.absent.retain(|g| *g != f);
+            self.g.files.push((f, v.list(Vec::new())));
+            Some(self.g.files.len() - 1)
+        } else {
+            None
+        };
         if let Some(k) = k {
             let val = match &found {
                 Some((path, bytes)) => {
@@ -6861,16 +6937,6 @@ impl Build {
                 }
                 None => v.list(Vec::new()),
             };
-            // (the same bytes at the same path, a file no one cut: nothing
-            // changed, nothing to stage. `r` in a watch stages every file
-            // the build read; each one's package-load record was dropped,
-            // so the preamble's loads ran again in full: 4 nodes, 2.5 s)
-            if found.is_some() && !cut && self.g.files[k].1 == val {
-                if tools {
-                    self.push_staged();
-                }
-                return;
-            }
             if found.is_none() {
                 self.g.files.remove(k);
                 self.g.absent.push(f);
@@ -6970,6 +7036,49 @@ impl Build {
         self.push_staged();
     }
 
+    /// Whether file `name`, found now as `found` (its path and bytes; none:
+    /// no file), is what the build holds already: its `file:` field
+    /// (`held`: its place among the supplied files; `f_absent`: absent)
+    /// the same path and text, or absent still; and, a `cut` file
+    /// ([`DocFile`]), its cut text and path the same, or still no file.
+    /// Compared in place, no value made ([`Build::stage_file`]).
+    fn restage_unchanged(
+        &self,
+        name: &str,
+        held: Option<usize>,
+        f_absent: bool,
+        cut: bool,
+        found: Option<&(String, Vec<u8>)>,
+    ) -> bool {
+        let v = self.g.eng.values();
+        let whole = match (held, found) {
+            (Some(k), Some((path, bytes))) => match list_of(v, self.g.files[k].1)[..] {
+                [p, t] => {
+                    v.with_str(p, |s| s == path) == Some(true)
+                        && v.with_str(t, |s| latin1_is(s, bytes)) == Some(true)
+                }
+                _ => false,
+            },
+            (Some(_), None) => false,
+            (None, found) => !f_absent || found.is_none(),
+        };
+        if !whole || !cut {
+            return whole;
+        }
+        let doc = self.g.ops.docs.locked().get(name).cloned();
+        match (doc, found) {
+            (Some(df), Some((path, bytes))) => {
+                let df = df.locked();
+                df.path == *path && latin1_is(&df.text, bytes)
+            }
+            (None, None) => {
+                let d = v.field(&format!("dfile:{name}"));
+                self.g.absent.contains(&d)
+            }
+            _ => false,
+        }
+    }
+
     /// The environment pushed after a file was staged ([`Build::stage_file`]).
     fn push_staged(&mut self) {
         self.g.absorb_provided();
@@ -7012,6 +7121,14 @@ impl Build {
                     continue;
                 }
                 if let Some(b) = read(self) {
+                    // (the same text: compared in place, no value made)
+                    let same = match list_of(v, self.g.files[k].1)[..] {
+                        [_, t] => v.with_str(t, |s| latin1_is(s, &b)) == Some(true),
+                        _ => false,
+                    };
+                    if same {
+                        continue;
+                    }
                     let x = v.list(vec![v.str(&path), v.str(&latin1(&b))]);
                     if self.g.files[k].1 != x {
                         self.g.files[k].1 = x;
