@@ -844,12 +844,12 @@ pub(crate) struct Run<'c, 'a> {
     pub(crate) expand_depth: u32,
     /// `\if`/`\ifcat` fetching an operand at this expansion depth
     /// ([`Run::expand_depth`]): `get_x_token` stops at a file size's
-    /// symbol there instead of forcing it (docs/note-relative-counters.md
+    /// symbol there instead of forcing it (docs/spec-relative-counters.md
     /// §2.4, `Run::if_operand`). Deeper expansions force as anywhere.
     pub(crate) size_stop: Option<u32>,
     /// A control sequence name or a number being scanned at this
     /// expansion depth: `get_x_token` stops at a register's symbol there
-    /// instead of forcing it (docs/note-relative-counters.md §2.2: a
+    /// instead of forcing it (docs/spec-relative-counters.md §2.2: a
     /// relative name, a comparison, an expression's first factor;
     /// [`crate::defer::name_chars`]). Deeper expansions force as anywhere.
     pub(crate) reg_stop: Option<u32>,
@@ -2088,7 +2088,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         // (a page-layer register a piece stepped is concrete, as the
         // restores of §2 of the spec expect; any other is relative,
-        // docs/note-relative-counters.md §2.1, its steps in the symbol)
+        // docs/spec-relative-counters.md §2.1, its steps in the symbol)
         if self.count_reg(loc).is_none()
             || (self.st.has_map(loc) && crate::defer::deferrable(self, loc))
         {

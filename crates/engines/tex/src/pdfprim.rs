@@ -715,7 +715,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
         cv::FILE_SIZE => {
             let name = ext_string(r)?;
             // (a written file's size as a symbol, read for presence
-            // alone: docs/note-relative-counters.md §2.4)
+            // alone: docs/spec-relative-counters.md §2.4)
             let key = r.tex_key(&name)?;
             if let Some(t) = crate::defer::size_symbol(r, &key)? {
                 r.push_toks([t]);

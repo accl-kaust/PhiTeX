@@ -196,7 +196,7 @@ pub enum Step {
     Eq(ValueId),
     /// The order of an integer against `k`: -1, 0 or 1.
     Cmp(ValueId),
-    /// A derived read (docs/note-relative-counters.md §3), `spec` the
+    /// A derived read (docs/spec-relative-counters.md §3), `spec` the
     /// list `[base, prefix, j, suffix]`: the value of the field named
     /// `prefix`, the decimal digits of `v + j`, `suffix`, where `v` is the
     /// integer value of field `base` (0 where it has none); both read at

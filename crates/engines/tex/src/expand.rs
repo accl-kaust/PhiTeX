@@ -143,7 +143,7 @@ impl Run<'_, '_> {
                 cmd::SYM => {
                     // (a deferred read's symbol where its digits are
                     // needed: docs/spec-deferred-reads.md §2; a file
-                    // size's, docs/note-relative-counters.md §2.4)
+                    // size's, docs/spec-relative-counters.md §2.4)
                     let t = self.cur.tok;
                     crate::defer::expand_any(self, t)?;
                 }
@@ -218,7 +218,7 @@ impl Run<'_, '_> {
                 return Err(e);
             }
         };
-        // (a relative name, docs/note-relative-counters.md §2.2: where the
+        // (a relative name, docs/spec-relative-counters.md §2.2: where the
         // derived read says it is defined, its symbol; undefined, TeX
         // defines it, so its name is made concrete)
         if let Some((at, s)) = kept {
@@ -637,7 +637,7 @@ impl Run<'_, '_> {
                 // its digits one by one, docs/spec-deferred-reads.md §2)
                 // (a file size's symbol taken whole as an undelimited
                 // argument: TeX took its first digit and left the rest,
-                // docs/note-relative-counters.md §2.4, so the argument
+                // docs/spec-relative-counters.md §2.4, so the argument
                 // is the first digit's symbol and the rest's goes back;
                 // the first digit's symbol alone is one digit)
                 let mut tok = tok;
@@ -813,7 +813,7 @@ impl Run<'_, '_> {
 
     /// A symbol met outside braces while a macro's arguments are matched
     /// ([`Run::macro_args`]): the token to take (an undelimited
-    /// argument's file size digit, docs/note-relative-counters.md §2.4:
+    /// argument's file size digit, docs/spec-relative-counters.md §2.4:
     /// the first digit's symbol, the rest's put back), or its digits put
     /// on the input to be matched one by one (`Some(None)`); None: a halt.
     #[cold]
@@ -960,7 +960,7 @@ impl Run<'_, '_> {
     }
 
     /// One operand of `\if` or `\ifcat` (§506), where a file size's
-    /// symbol is kept (docs/note-relative-counters.md §2.4): all its
+    /// symbol is kept (docs/spec-relative-counters.md §2.4): all its
     /// digits taken there are the first digit's symbol taken and the
     /// rest's left on the input, as TeX takes one digit.
     fn if_operand(&mut self) -> R<IfOp> {
@@ -993,7 +993,7 @@ impl Run<'_, '_> {
     }
 
     /// `\if` (`cat` false) or `\ifcat` (§506). An operand that is a file
-    /// size's digit (docs/note-relative-counters.md §2.4: a non-empty
+    /// size's digit (docs/spec-relative-counters.md §2.4: a non-empty
     /// digit string's first) is not read where the answer is the same
     /// for every digit: `\ifcat` against any token, `\if` against one
     /// whose character code is not a digit's (expl3's `\if:w

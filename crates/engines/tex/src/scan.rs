@@ -89,7 +89,7 @@ pub(crate) enum Num {
     Macro(Tok, bool),
     /// An integer register's value reaching the piece plus `j`: the
     /// register alone unread in a piece, its symbol, or an expression of
-    /// one plus a constant (docs/note-relative-counters.md §2.2), which a
+    /// one plus a constant (docs/spec-relative-counters.md §2.2), which a
     /// comparison with a constant reads as its outcome alone
     /// (`Run::reg_order`).
     Reg(crate::state::Loc, i32),

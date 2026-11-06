@@ -2157,7 +2157,7 @@ impl State {
     }
 
     /// A set of `loc` to its own symbol plus `j` (`crate::defer::try_symbolic`,
-    /// docs/spec-relative-counters.md §3.3): the run's map of the register
+    /// docs/spec-relative-counters.md §2.5): the run's map of the register
     /// made `+j` whatever it held, nothing read and nothing published; a
     /// register the run loaded holds the value it loaded plus `j`. False,
     /// nothing changed, where [`State::add`] would refuse a step.

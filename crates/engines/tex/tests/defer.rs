@@ -355,7 +355,7 @@ fn a_symbol_read_by_another_run_is_of_the_same_register() {
     }
 }
 
-/// A counter that only counts (docs/note-relative-counters.md §2.1): each
+/// A counter that only counts (docs/spec-relative-counters.md §2.1): each
 /// paragraph steps it and carries its value, plus the steps it made, into
 /// a macro and a deferred `\write` without reading it; a step added before
 /// them moves the values in the file and in the last paragraph, which
@@ -790,7 +790,7 @@ fn an_outer_macro_an_edit_makes_stops_a_later_scan() {
 }
 
 /// A name built from a counter a piece only steps is a relative name
-/// (docs/note-relative-counters.md §2.2): `\ifcsname`, `\ifx` of the
+/// (docs/spec-relative-counters.md §2.2): `\ifcsname`, `\ifx` of the
 /// `\csname`, the `\csname` expanded, `\numexpr` of the counter plus a
 /// constant inside the name and `\ifnum` of that against a constant read
 /// through the derived name and the comparison, not the counter's digits

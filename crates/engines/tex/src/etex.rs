@@ -389,7 +389,7 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
                     return Err(e);
                 }
             };
-            // (a relative name, docs/note-relative-counters.md §2.2: of
+            // (a relative name, docs/spec-relative-counters.md §2.2: of
             // the meaning only whether it is defined, through the derived
             // read; where that cannot stand, the name made concrete)
             let (t, derived) = if let Some((at, s)) = kept {
@@ -834,7 +834,7 @@ fn scan_expr(run: &mut Run<'_, '_>, l0: u8) -> R<IVal> {
     let (mut any_op, mut factor_own) = (false, false);
     // (a deferring scan's integer expression, [`Run::expr_defer`]: its
     // first factor may be a register's symbol, kept while only constants
-    // are added to it, docs/note-relative-counters.md §2.2; `at` says
+    // are added to it, docs/spec-relative-counters.md §2.2; `at` says
     // which of f, t, e holds it, 1-3, those holding its offset; any other
     // operation forces it there first, [`fold_sym`])
     let mut first = std::mem::take(&mut run.expr_defer) && l0 == 0;
@@ -1099,7 +1099,7 @@ pub(crate) fn the_toks(r: &mut Run<'_, '_>) -> R<Vec<Tok>> {
     }
     // (a file size's symbol stands for digits, which `\detokenize`
     // makes into the same digits: it is kept, its stretches between
-    // shown as they are, docs/note-relative-counters.md §2.4; a control
+    // shown as they are, docs/spec-relative-counters.md §2.4; a control
     // word's space after its name does not depend on what follows)
     if body.iter().any(|&t| crate::defer::is_size(t)) {
         let mut out = Vec::with_capacity(body.len());

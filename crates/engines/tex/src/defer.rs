@@ -25,7 +25,7 @@ pub(crate) struct Sym {
     pub reg: i32,
     pub node: NodeId,
     /// The steps the piece made of the register before the read
-    /// (docs/note-relative-counters.md §2.1): the value is the one reaching
+    /// (docs/spec-relative-counters.md §2.1): the value is the one reaching
     /// the piece plus these.
     pub j: i32,
 }
@@ -349,7 +349,7 @@ fn symbolic(r: &mut Run<'_, '_>, loc: Loc, s: Sym, global: bool) -> bool {
 }
 
 /// Integer register `loc` set to this piece's own symbol of it with steps
-/// `j` (docs/spec-relative-counters.md §3.3): the value reaching the
+/// `j` (docs/spec-relative-counters.md §2.5): the value reaching the
 /// piece plus `j`, which is a step of that value, so the run's map of the
 /// register becomes `+j` whatever it held, neither a read nor a
 /// definition (beamer's `\beamer@restorecounter`: a counter saved as
@@ -448,7 +448,7 @@ pub(crate) fn int_of(v: &phitex_defuse::Values, x: ValueId) -> Option<i32> {
 const SIZE_TAG: &str = "fsz\u{2}";
 
 /// Which digits of a file's size a size symbol stands for
-/// (docs/note-relative-counters.md §2.4): all of them (`\pdffilesize`'s
+/// (docs/spec-relative-counters.md §2.4): all of them (`\pdffilesize`'s
 /// expansion, a non-empty digit string), the first (an undelimited
 /// argument TeX took of them, one digit), or the rest after the first
 /// (what TeX left on the input, possibly none).
@@ -608,7 +608,7 @@ pub(crate) fn expand_any(r: &mut Run<'_, '_>, t: Tok) -> crate::run::R<()> {
 /// `<SYM_PREFIX>dn\u{2}<register>\u{2}<node raw>\u{2}<j>\u{2}<prefix>\u{2}<suffix>`.
 const DNAME_TAG: &str = "dn\u{2}";
 
-/// A relative name (docs/note-relative-counters.md §2.2): the control
+/// A relative name (docs/spec-relative-counters.md §2.2): the control
 /// sequence named `prefix`, the digits of symbol `s`, `suffix`, a
 /// `\csname` made with the symbol inside. As a token ([`dname_tok`]) it
 /// is what `\csname` gives where the name is defined: expanded or
