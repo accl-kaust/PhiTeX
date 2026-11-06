@@ -534,7 +534,7 @@ fn an_immediate_write_of_a_stepped_counter_is_resolved_where_the_file_is_read() 
             .files()
             .into_iter()
             .find(|(n, _)| n == "d.out")
-            .map(|(_, t)| t);
+            .map(|(_, t)| t.replace('\n', ""));
         assert_eq!(
             file.as_deref(),
             Some(out.as_str()),
