@@ -52,6 +52,10 @@ use crate::val::{Tok, int_of, list_of, toks_of, toks_value};
 /// `\begin{name}` names them. Pictures do not nest.
 const PICS: &[&str] = &["tikzpicture", "pgfpicture"];
 
+/// The key of the parent's bindings ([`Run::pic_locals`]) holding its
+/// appends pending at the picture (`Run::appending`).
+const APPENDING: &str = "\u{1}appending";
+
 /// How many lines ahead a scan for the end looks, at most.
 const SCAN_LINES: usize = 20_000;
 
@@ -95,6 +99,8 @@ pub(crate) struct PicChild {
     view: Option<View>,
     /// The names read (from the locals or the engine), in order.
     read: Vec<ValueId>,
+    /// The locations looked up in the parent's bindings already.
+    checked: phitex_defuse::FxHashSet<Loc>,
     /// Its base level's list: a look at what lies before the picture on
     /// it (its tail, empty here, is the parent's) refuses.
     pub lid: i64,
@@ -489,10 +495,19 @@ impl Run<'_, '_> {
         let v = self.v;
         self.flush_bulk_codes();
         let now = self.st.defined_now(v);
-        let mut xs = Vec::with_capacity(now.len());
+        let mut xs = Vec::with_capacity(now.len() + 1);
         for (loc, cur) in now {
             let f = self.loc_field(loc);
             xs.push(v.list(vec![f.0, opt(cur)]));
+        }
+        if !self.appending.is_empty() {
+            let pending: Vec<ValueId> = self
+                .appending
+                .clone()
+                .into_iter()
+                .map(|(l, t)| v.list(vec![self.loc_field(l).0, toks_value(v, &t)]))
+                .collect();
+            xs.push(v.list(vec![v.str(APPENDING), v.list(pending)]));
         }
         v.list(xs)
     }
@@ -616,6 +631,21 @@ impl Run<'_, '_> {
             let loc = self.loc_of(Field(name));
             let grp = self.innermost_group();
             self.st.set(loc, Entry::raw_seen(v, some(val)), true, grp);
+            // (a list the child made whole: what the parent had pending
+            // for it is in its value)
+            self.appending.retain(|x| x.0 != loc);
+        }
+        // (the appends pending after the picture: the parent's before it
+        // and the child's, which went on from them)
+        for e in list_of(v, a(21)) {
+            if let [f, t] = list_of(v, e)[..] {
+                let loc = self.loc_of(Field(f));
+                let toks = toks_of(v, Some(t));
+                match self.appending.iter_mut().find(|x| x.0 == loc) {
+                    Some(x) => x.1 = toks,
+                    None => self.appending.push((loc, toks)),
+                }
+            }
         }
     }
 
@@ -674,13 +704,10 @@ impl Run<'_, '_> {
         let Some(p) = self.pic_child.as_mut() else {
             return Ok(false);
         };
-        let view = if let Some(w) = p.view {
-            w
-        } else {
-            let w = self.cx.view_field(p.field)?;
-            p.view = Some(w);
-            w
-        };
+        if !p.checked.insert(loc) {
+            return Ok(false);
+        }
+        let view = self.pic_view()?;
         let Some(x) = self.cx.get(view, Step::Key(f.0)) else {
             // (read from the engine, before the parent)
             if let Some(p) = self.pic_child.as_mut() {
@@ -695,6 +722,35 @@ impl Run<'_, '_> {
         }
         self.note_loaded_base(loc, x);
         Ok(true)
+    }
+
+    /// The view on the parent's bindings ([`Run::pic_locals`]).
+    fn pic_view(&mut self) -> R<View> {
+        let Some(p) = self.pic_child.as_mut() else {
+            return Err(Halt::Starve);
+        };
+        if let Some(w) = p.view {
+            return Ok(w);
+        }
+        let field = p.field;
+        let w = self.cx.view_field(field)?;
+        if let Some(p) = self.pic_child.as_mut() {
+            p.view = Some(w);
+        }
+        Ok(w)
+    }
+
+    /// A picture child's first touch of `loc` by a look-up that reads the
+    /// engine through a projection (`Run::touch`): the parent's binding
+    /// loaded where it has one, so the look-up reads it in full; else the
+    /// projection is read before the parent, where the parent read it.
+    pub(crate) fn pic_touch(&mut self, loc: Loc) -> R<()> {
+        if self.pic_child.is_none() || self.st.load_state(loc) != 0 {
+            return Ok(());
+        }
+        let f = self.loc_field(loc);
+        self.pic_local_read(loc, f)?;
+        Ok(())
     }
 
     /// The child's run: the body on a level of its own in the parent's
@@ -751,10 +807,21 @@ impl Run<'_, '_> {
             field: Field(a(1)),
             view: None,
             read: Vec::new(),
+            checked: phitex_defuse::FxHashSet::default(),
             lid,
             peeked: false,
             streams: Vec::new(),
         });
+        // (the parent's appends to lists it never read, pending at the
+        // picture: the child's to make or go on with, `Run::append_def`)
+        let view = self.pic_view()?;
+        let pending = self.cx.get(view, Step::Key(v.str(APPENDING)));
+        for e in pending.map(|x| list_of(v, x)).unwrap_or_default() {
+            if let [f, t] = list_of(v, e)[..] {
+                let loc = self.loc_of(Field(f));
+                self.appending.push((loc, toks_of(v, Some(t))));
+            }
+        }
         let conds0 = (self.conds.clone(), self.if_codes.clone());
         self.input.append_text(fs);
         let res = self.run_all();
@@ -881,8 +948,8 @@ impl Run<'_, '_> {
     /// The child's output: `[0, items, sf, pd, since_bp, lang, packed,
     /// clang, prevgraf, pushed level, locals, global names, read names,
     /// astate, aopen, ic_prev, aftergroup, contributions, streams, file
-    /// reads, document lines begun]`; the run itself then contributes
-    /// nothing.
+    /// reads, document lines begun, appends pending]`; the run itself
+    /// then contributes nothing.
     fn pic_output(&mut self) -> ValueId {
         let v = self.v;
         let contribs: Vec<ValueId> = std::mem::take(&mut self.contribs)
@@ -901,6 +968,10 @@ impl Run<'_, '_> {
         let lines: Vec<ValueId> = std::mem::take(&mut self.doc_lines)
             .into_iter()
             .map(|(n, k)| v.list(vec![n, v.int(k)]))
+            .collect();
+        let appends: Vec<ValueId> = std::mem::take(&mut self.appending)
+            .into_iter()
+            .map(|(l, t)| v.list(vec![self.loc_field(l).0, toks_value(v, &t)]))
             .collect();
         let mut locals = Vec::new();
         let mut gdefs = Vec::new();
@@ -968,6 +1039,7 @@ impl Run<'_, '_> {
             v.list(streams),
             v.list(fread),
             v.list(lines),
+            v.list(appends),
         ])
     }
 }

@@ -3986,6 +3986,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// pending append made ([`Run::append_force`]), a read-back key
     /// defined ([`Run::rb_check`]).
     fn touch(&mut self, loc: Loc) -> R<()> {
+        self.pic_touch(loc)?;
         if !self.appending.is_empty() {
             self.append_force(loc)?;
         }
@@ -4026,6 +4027,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(p) else {
             return Ok(false);
         };
+        self.pic_touch(l)?;
         let pending = self.appending.iter().any(|x| x.0 == l);
         if !pending && (self.st.load_state(l) != 0 || self.lazy_pre(l)) {
             return Ok(false);
@@ -5680,6 +5682,7 @@ impl<'c, 'a> Run<'c, 'a> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
+        self.pic_touch(l)?;
         // (a list the run appended to without reading it: the item in what
         // it appended, else in the list reaching the run, where that ends
         // with a comma, [`crate::val::append_projection`]; the run then
