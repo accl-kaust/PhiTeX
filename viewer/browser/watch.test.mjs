@@ -403,13 +403,13 @@ test("the tab's title says the state; Settings writes the user's file; What's ne
   await t.click("#st");
   await t.until(`!!$("#m-time .tbars")`, "the times as bars");
   await t.key("Escape", "Escape", 27);
-  // (an error: the title; Copy for an AI, its source line and nothing sent)
+  // (an error: the title; its own Copy for an AI, its source line and nothing sent)
   await t.js(`(() => { window.__copied = null; Object.defineProperty(navigator, "clipboard", { value: { writeText: async (s) => void (window.__copied = s) }, configurable: true }); return 1; })()`);
   w.write("main.tex", bad);
   await waitBuild(w, 3);
   await t.until(`/1 error/.test(document.title)`, "the title: an error");
   await problems(t);
-  await t.click("#copyai");
+  await t.click("#diags .error .copyai, #diags .phx-error .copyai");
   const copied = await t.until(`window.__copied`, "copied");
   assert.match(copied, /Undefined control sequence/);
   assert.match(copied, /Hello \\nosuch/, "the source line");

@@ -251,6 +251,7 @@ const PATHS: Record<string, string> = {
   more_horiz: "M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z",
   search: "M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z",
   compare: "M9.01 14H2v2h7.01v3L13 15l-3.99-4v3zm5.98-1v-3H22V8h-7.01V5L11 9l3.99 4z",
+  copy: "M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z",
   close: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
   log: "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z",
   toc: "M3 9h14V7H3v2zm0 4h14v-2H3v2zm0 4h14v-2H3v2zm16 0h2v-2h-2v2zm0-10v2h2V7h-2zm0 6h2v-2h-2v2z",
@@ -259,6 +260,10 @@ const PATHS: Record<string, string> = {
   bolt: "M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z",
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z",
 };
+/** A problem's Copy for an AI assistant button (`i`: its row's place in the list). */
+const copyBtn = (i: number) =>
+  `<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem, its source lines and the log's end, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
+
 const icon = (name: string, size = 18) =>
   `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
 
@@ -271,6 +276,19 @@ const mb = (b?: number) => (b ? ` · ${b < 1048576 ? `${Math.max(1, Math.round(b
 
 /** A duration as it reads best: 0.7 ms, 42 ms, 2.6 s, 14 s. */
 const dur = (ms: number) => (ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
+
+/** The timing popover's row for the last page drawn as strips (Strips' `data-frame`): its time, split, and its strips drawn and reused. */
+function framePart(json: string | undefined): string {
+  if (!json) return "";
+  const f = JSON.parse(json) as { page: number; inView: boolean; drawn: number; kept: number; probe: number; draw: number; watch: number; request: number; decode: number };
+  const split: [string, number][] = [["probe", f.probe], ["draw", f.draw], ["transfer", Math.max(0, f.request - f.watch)], ["decode", f.decode]];
+  return (
+    `<div class="row"><span class="k">Page ${f.page} drawn${f.inView ? " (in view)" : ""}</span><span class="v">${esc(dur(f.request + f.decode))}</span>` +
+    `<div class="tbar">${split.map(([, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
+    `<div class="legend">${split.map(([n, ms], i) => `<span><i class="c${i}"></i>${n} ${esc(dur(ms))}</span>`).join("")}</div>` +
+    `<span class="note">${f.drawn} strip${f.drawn === 1 ? "" : "s"} drawn, ${f.kept} reused</span></div>`
+  );
+}
 
 /** The session's names for a build's parts, as the popover says them. */
 const PART_NAMES: Record<string, string> = {
@@ -559,6 +577,9 @@ export class Panel {
     this.$<HTMLSelectElement>("#main").onchange = (e) => ev.onMain((e.target as HTMLSelectElement).value);
     this.$("#min").onclick = () => this.collapse(!this.prefs.collapsed);
     this.$("#diags").onclick = (e) => {
+      // (a problem's Copy for an AI assistant)
+      const copy = (e.target as HTMLElement).closest<HTMLElement>(".copyai");
+      if (copy) return void this.copyForAi(this.listed[Number(copy.dataset.i)]);
       // (a problem card's place)
       const at = (e.target as HTMLElement).closest<HTMLElement>(".phx-place[data-file]");
       if (at) {
@@ -1173,13 +1194,17 @@ export class Panel {
       }
       list.append(f);
     }
-    for (const d of diags.filter((d) => !this.hiddenKinds.has(kindOf(d))).slice(0, 50)) {
+    this.listed = diags.filter((d) => !this.hiddenKinds.has(kindOf(d))).slice(0, 50);
+    for (const [i, d] of this.listed.entries()) {
+      // (each error and warning: its own Copy for an AI assistant)
+      const copy = d.severity === "error" || d.severity === "warning" ? copyBtn(i) : "";
       // (a problem the build told whole: its card, its places links)
       if (d.problem) {
         const card = document.createElement("ol");
         card.className = "phx-card phx-inline";
         card.setAttribute("role", "listitem");
         card.innerHTML = problemHtml(d.problem);
+        card.firstElementChild!.insertAdjacentHTML("afterbegin", copy);
         // (a click on the card: its place on the pages; its file:line link: the editor)
         if (d.problem.file && d.problem.range) {
           card.dataset.key = `${d.problem.file}\0${d.problem.range[0]}`;
@@ -1196,7 +1221,7 @@ export class Panel {
         row.dataset.line = String(d.line);
         row.title = `Go to ${d.file}:${d.line}`;
       }
-      row.innerHTML = `<span class="where"></span><div class="text"></div>`;
+      row.innerHTML = `${copy}<span class="where"></span><div class="text"></div>`;
       row.querySelector(".text")!.textContent = d.message;
       if (d.detail && d.code === "engine") row.append(foldedDetail(d.detail, "Engine details"));
       else if (d.detail) {
@@ -1213,15 +1238,6 @@ export class Panel {
       more.className = "diag info";
       more.textContent = `… and ${diags.length - 50} more`;
       list.append(more);
-    }
-    if (diags.some((d) => d.severity === "error" || d.severity === "warning")) {
-      const b = document.createElement("button");
-      b.className = "reportbtn";
-      b.id = "copyai";
-      b.textContent = "Copy for an AI assistant";
-      b.title = "The errors, the source lines around them and the end of the log, to paste into the assistant you use: nothing is sent anywhere";
-      b.onclick = (e) => (e.stopPropagation(), void this.copyForAi(diags));
-      list.append(b);
     }
     if (this.ev.onReport) {
       const b = document.createElement("button");
@@ -1253,21 +1269,23 @@ export class Panel {
     queueMicrotask(() => this.emit());
   }
 
-  /** Copy for an AI assistant: the first problems (errors first), each with its place, message, help and source lines around it, and the log's end; on the clipboard, nothing sent. */
-  private async copyForAi(diags: Diagnostic[]): Promise<void> {
-    const pick = [...diags].sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1)).slice(0, 5);
-    const parts: string[] = ["I'm building a LaTeX document and get these problems. What is wrong, and how do I fix it?", ""];
-    for (const d of pick) {
-      const p = d.problem;
-      const file = p?.file ?? d.file, line = p?.line ?? d.line;
-      parts.push(`${d.severity}: ${d.message}${file ? ` (${file}${line ? `:${line}` : ""})` : ""}`);
-      if (p?.help.length) parts.push(p.help.join(" "));
-      const lines = file && line ? await this.ev.onLines?.(file, line).catch(() => null) : null;
-      if (lines?.length) parts.push("```latex", ...lines.map(([n, t]) => `${String(n).padStart(4)}${n === line ? ">" : " "} ${t}`), "```");
-      else if (p?.excerpt) parts.push("```latex", p.excerpt.text, "```");
-      parts.push("");
-    }
-    const log = await this.ev.onLog?.().catch(() => null);
+  /** The problems listed (by the rows' data-i). */
+  private listed: Diagnostic[] = [];
+
+  /** Copy for an AI assistant: one problem, its place, message, help and the source lines around it, and for an error the log's end; on the clipboard, nothing sent. */
+  private async copyForAi(d: Diagnostic | undefined): Promise<void> {
+    if (!d) return;
+    const p = d.problem;
+    const file = p?.file ?? d.file, line = p?.line ?? d.line;
+    const parts: string[] = [`I'm building a LaTeX document and get this ${d.severity}. What is wrong, and how do I fix it?`, ""];
+    parts.push(`${d.severity}: ${d.message}${file ? ` (${file}${line ? `:${line}` : ""})` : ""}`);
+    if (p?.help.length) parts.push(p.help.join(" "));
+    const lines = file && line ? await this.ev.onLines?.(file, line).catch(() => null) : null;
+    if (lines?.length) parts.push("```latex", ...lines.map(([n, t]) => `${String(n).padStart(4)}${n === line ? ">" : " "} ${t}`), "```");
+    else if (p?.excerpt) parts.push("```latex", p.excerpt.text, "```");
+    parts.push("");
+    // (the log's end: where TeX stopped, an error's; a warning's is elsewhere)
+    const log = d.severity === "error" ? await this.ev.onLog?.().catch(() => null) : null;
     if (log) parts.push("The end of the log:", "```", ...log.split("\n").slice(-40), "```");
     const text = parts.join("\n");
     try {
@@ -2469,13 +2487,13 @@ export class Panel {
         return `<div class="row"><span class="k">${esc(p.label)}</span><span class="v">${esc(p.value)}</span>${bar}${p.note ? `<span class="note">${esc(p.note)}</span>` : ""}</div>`;
       })
       .join("");
-    // (the last page drawn: its strips drawn and kept, the core's watch, fetch and compose)
-    const strips = this.$("#stripsline").textContent;
+    // (the last page drawn: its time as a bar like the build's parts, the watch's probe and draw, the transfer, the decode)
+    const strips = framePart(this.$("#stripsline").dataset.frame);
     el.innerHTML =
       (head ? `<div class="head"><span>${esc(String(head[0]))}</span><b>${esc(dur(head[1] as number))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) +
       this.timeBars() +
       rows +
-      (strips ? `<div class="row"><span class="k">Page drawn</span><span class="v">${esc(strips)}</span></div>` : "") +
+      strips +
       `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
     // (the summary line only when there are no parts to say it)
     el.querySelector(".foot")!.textContent = parts.length ? "" : (this.lat?.summary ?? "");

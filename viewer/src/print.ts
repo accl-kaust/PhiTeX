@@ -208,6 +208,12 @@ header:active { cursor: grabbing; }
 .folded { margin-top: 6px; font-size: 12px; font-weight: 400; }
 .folded summary { cursor: pointer; color: var(--ph-fg2); }
 .diags .phx-inline { margin: 0; padding: 0; list-style: none; }
+/* a problem's Copy for an AI assistant: its row's top right corner, clear when the row is pointed at or focused */
+.diag, .diags .phx-inline > li { position: relative; padding-right: 40px; }
+.copyai { all: unset; position: absolute; top: 6px; right: 8px; display: inline-flex; padding: 4px; border-radius: var(--ph-radius, 4px); color: var(--ph-fg2); opacity: .45; cursor: pointer; }
+.diag:hover .copyai, .phx-inline > li:hover .copyai, .copyai:focus-visible { opacity: 1; }
+.copyai:hover { background: var(--ph-hover); color: var(--ph-fg); }
+.copyai:focus-visible { outline: 2px solid var(--ph-link); }
 .reportbtn { all: unset; margin: 8px 14px; color: var(--ph-link); cursor: pointer; }
 .reportbtn:hover { text-decoration: underline; }
 
