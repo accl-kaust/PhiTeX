@@ -665,3 +665,120 @@ fn a_taken_placement_remade_re_asks_its_claimer() {
         assert!(e.check_invariants().is_empty());
     }
 }
+
+/// `[f, ms]`: a piece of the text that spins `ms` milliseconds, then
+/// defines f = 1.
+struct SlowPiece;
+
+impl Operation for SlowPiece {
+    fn name(&self) -> &'static str {
+        "slow_piece"
+    }
+
+    fn text(&self) -> bool {
+        true
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let ms = cx.values().as_int(cx.args()[1]).unwrap() as u64;
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(ms) {
+            std::hint::spin_loop();
+        }
+        let one = cx.values().int(1);
+        cx.define(Field(cx.args()[0]), one);
+        Ok(one)
+    }
+}
+
+/// `[f, ms, yes, no]`: a piece of the text that spins `ms` milliseconds,
+/// reads f, and reads on into its next `yes` siblings where f is 1, its
+/// next `no` where it is not, claiming them as a client does
+/// (`Ctx::wait_claim_settled` first).
+struct GuessClaimer;
+
+impl Operation for GuessClaimer {
+    fn name(&self) -> &'static str {
+        "guess_claimer"
+    }
+
+    fn text(&self) -> bool {
+        true
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args().to_vec();
+        let ms = v.as_int(a[1]).unwrap() as u64;
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(ms) {
+            std::hint::spin_loop();
+        }
+        let set = cx.read(Field(a[0]))? == Some(v.int(1));
+        let n = v.as_int(if set { a[2] } else { a[3] }).unwrap() as usize;
+        for i in 0..n {
+            let _ = cx.following(i);
+        }
+        cx.wait_claim_settled(n, false)?;
+        cx.claim(n);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[x]`: a piece of the text; counts its runs by `x`.
+struct CountedPiece(Arc<std::sync::Mutex<std::collections::HashMap<ValueId, u64>>>);
+
+impl Operation for CountedPiece {
+    fn name(&self) -> &'static str {
+        "counted_piece"
+    }
+
+    fn text(&self) -> bool {
+        true
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let x = cx.args()[0];
+        *self.0.lock().unwrap().entry(x).or_default() += 1;
+        Ok(x)
+    }
+}
+
+#[test]
+fn a_claim_on_a_guess_of_the_text_before_waits_for_it() {
+    // S, slow, defines f; C, the first of the second worker's block, reads
+    // f before S has committed and, on that guess, would read on into its
+    // next 30 siblings, the third and fourth workers' among them, run
+    // already; on S's f it reads on into 2. Its claim on the guess waits
+    // for the text before it: the siblings it would have taken back and
+    // then given back run once each, as at one thread. Before, the claim
+    // took back the products of the 20 that had run, gave them back once
+    // C ran again on S's f, and they ran a second time (biblatex at -j4:
+    // a piece run on a guess took back the 98 000 after it, mc 80752).
+    let (e, o) = engine();
+    let v = e.values();
+    let counts = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let slow = e.register(Arc::new(SlowPiece));
+    let guess = e.register(Arc::new(GuessClaimer));
+    let piece = e.register(Arc::new(CountedPiece(counts.clone())));
+    let f = v.field("f").0;
+    let u = e.new_unit();
+    // (44 nodes, four blocks of 11: S and ten pieces; C and ten; 11; 11)
+    e.push(u, slow, vec![f, v.int(300)]);
+    for i in 0..10 {
+        e.push(u, o.text, vec![v.int(1000 + i)]);
+    }
+    let c = e.push(u, guess, vec![f, v.int(100), v.int(2), v.int(30)]);
+    let ts: Vec<NodeId> = (0..32).map(|i| e.push(u, piece, vec![v.int(i)])).collect();
+    e.evaluate(4).unwrap();
+    assert_eq!(e.claimed(c), vec![ts[0], ts[1]]);
+    let counts = counts.lock().unwrap();
+    let twice: Vec<i64> = (0..32)
+        .filter(|&i| counts.get(&v.int(i)).copied().unwrap_or(0) > 1)
+        .collect();
+    assert!(twice.is_empty(), "pieces run twice: {twice:?}");
+    for t in &ts[2..] {
+        assert_eq!(e.node_info(*t).unwrap().state, NodeState::Done);
+    }
+    assert!(e.check_invariants().is_empty());
+}
