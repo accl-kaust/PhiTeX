@@ -426,12 +426,12 @@ impl EditSender {
     }
 
     /// The text waiting taken, when `same` says it is the one the build
-    /// has: its version; none (and the text left waiting) else.
-    fn take_if_same(&self, same: impl FnOnce(&str) -> bool) -> Option<u64> {
+    /// has: it and its version; none (and the text left waiting) else.
+    fn take_if_same(&self, same: impl FnOnce(&str) -> bool) -> Option<(Arc<str>, u64)> {
         let mut p = self.0.locked();
         if p.text.as_ref().is_some_and(|(t, _)| same(t)) {
-            p.text = None;
-            Some(p.version)
+            let v = p.version;
+            p.text.take().map(|(t, _)| (t, v))
         } else {
             None
         }
@@ -6704,7 +6704,14 @@ impl Build {
                 None => !canon && text == t,
             };
             match self.edits.take_if_same(same) {
-                Some(v) => v,
+                Some((t, v)) => {
+                    // (the sender's next hint is against this text: kept
+                    // as the one the canonical text is of)
+                    if self.raw.is_some() {
+                        self.raw = Some(t);
+                    }
+                    v
+                }
                 None => return false,
             }
         } else {
@@ -6874,6 +6881,13 @@ impl Build {
     /// sent, as one.
     #[allow(clippy::too_many_lines)]
     pub fn stage_file(&mut self, name: &str, text: Option<&[u8]>) {
+        // (what the provider answered in the last evaluation joins the
+        // supplied files first: a file its last round read was found in
+        // none of them, so its edit staged nothing, and the provider's
+        // old answer, joined after it, was pushed again: the first edit of
+        // an `\input` file after a cold build ran no node, the bayesnet
+        // example's `model_citation_influence.tex`)
+        self.g.absorb_provided();
         let tools = self.stage_tool_file(name, text);
         let v = self.g.eng.values();
         let f = v.field(&format!("file:{name}"));
@@ -6888,6 +6902,7 @@ impl Build {
         let cut = (cut_path.is_some() || self.g.absent.contains(&d))
             && !self.g.written.iter().any(|w| w == name);
         let held = self.g.files.iter().position(|(g, _)| *g == f);
+        let has_dfile = cut_path.is_some();
         let f_absent = held.is_none() && self.g.absent.contains(&f);
         if held.is_none() && !f_absent && !cut {
             if tools {
@@ -6914,7 +6929,28 @@ impl Build {
         // a file unchanged: each cut file's package-load records were
         // dropped and the nodes whose loads list it ran again, its value
         // made anew first, Grail's `r` 7 s)
-        if self.restage_unchanged(name, held, f_absent, cut, found.as_ref()) {
+        let unchanged = self.restage_unchanged(name, held, f_absent, cut, found.as_ref());
+        // (`PHITEX_STAGE_TRACE`, observe: each file staged, what the build
+        // held of it and whether it changed)
+        if crate::exec::obs_flag!("PHITEX_STAGE_TRACE") {
+            eprintln!(
+                "stage: {name}: file: {}, cut {cut} (dfile {}, doc {}), found {}, unchanged {unchanged}",
+                if held.is_some() {
+                    "held"
+                } else if f_absent {
+                    "absent"
+                } else {
+                    "none"
+                },
+                has_dfile,
+                self.g.ops.docs.locked().contains_key(name),
+                found.as_ref().map_or_else(
+                    || "none".to_owned(),
+                    |(p, b)| format!("{p} ({} bytes)", b.len())
+                ),
+            );
+        }
+        if unchanged {
             if tools {
                 self.push_staged();
             }

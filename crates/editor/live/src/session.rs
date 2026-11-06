@@ -1733,18 +1733,30 @@ impl Session {
             .map(|(_, _, p)| p.as_ref().map(|p| plain_name(&p.to_string_lossy())))
             .collect();
         let mut hit = vec![false; self.inputs.len()];
+        // (each input by the names a change of it comes as: its name, with
+        // `.tex`, the file found; looked up, not compared with every input
+        // for every change, `r` changing every input: 10 ms for Grail's)
+        let mut by_name: std::collections::HashMap<String, Vec<usize>> =
+            std::collections::HashMap::new();
+        for (i, (n, ..)) in self.inputs.iter().enumerate() {
+            let n = plain_name(n);
+            let mut keys = vec![format!("{n}.tex"), n];
+            keys.extend(found[i].clone());
+            keys.sort();
+            keys.dedup();
+            for k in keys {
+                by_name.entry(k).or_default().push(i);
+            }
+        }
         // (a changed file TeX did not read: staged too, for a tool that
         // read it, BibTeX's `.bib`, a `.bst`, makeindex's `.ist`; the
         // engine stages only what one of its runs read, else nothing)
         let mut tools: Vec<String> = Vec::new();
         for c in changed {
             let mut any = false;
-            for (i, (n, ..)) in self.inputs.iter().enumerate() {
-                let n = plain_name(n);
-                if *c == n || *c == format!("{n}.tex") || found[i].as_ref() == Some(c) {
-                    hit[i] = true;
-                    any = true;
-                }
+            for &i in by_name.get(c).into_iter().flatten() {
+                hit[i] = true;
+                any = true;
             }
             if any {
                 continue;
