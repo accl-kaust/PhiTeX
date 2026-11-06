@@ -1626,11 +1626,16 @@ impl<'c, 'a> Run<'c, 'a> {
     #[cold]
     #[inline(never)]
     fn unalias(&mut self, loc: Loc) -> R<()> {
-        let Some((g, node)) = self.st.alias_at(loc, self.v) else {
+        let Some((g, node, off)) = self.st.alias_at(loc, self.v) else {
             return Ok(());
         };
         let gl = self.loc_of(g);
-        let Some(s) = crate::defer::Sym::at(self, gl, node) else {
+        // (an offset: the value there plus it, a symbol's steps)
+        let sym = crate::defer::Sym::at(self, gl, node).map(|s| crate::defer::Sym {
+            j: s.j.wrapping_add(i32::try_from(off).unwrap_or(0)),
+            ..s
+        });
+        let Some(s) = sym.filter(|_| i32::try_from(off).is_ok()) else {
             // (any other field's alias, a value kept unseen
             // ([`Run::note_pre`]): the value of `g` reaching `node`, read
             // now; the binding published stays the alias)
@@ -1642,6 +1647,7 @@ impl<'c, 'a> Run<'c, 'a> {
                     return Err(e.into());
                 }
             };
+            let x = phitex_defuse::alias_target_plus(self.v, x, off);
             self.st.preload(self.v, loc, x);
             return Ok(());
         };
@@ -2444,9 +2450,10 @@ impl<'c, 'a> Run<'c, 'a> {
             );
         }
         let grp = self.innermost_group();
-        let e = match phitex_defuse::alias_of(v, old) {
-            Some((g, at)) => Entry::alias(v, g, at),
-            None => Entry::raw(Some(old)),
+        let e = if phitex_defuse::alias_of(v, old).is_some() {
+            Entry::alias_raw(old)
+        } else {
+            Entry::raw(Some(old))
         };
         self.st.set(pl, e, true, grp);
     }
@@ -6273,9 +6280,9 @@ impl<'c, 'a> Run<'c, 'a> {
                 match w {
                     // (a symbol written to the item: the alias it is,
                     // `crate::defer::try_symbolic`)
-                    crate::state::Pub::Value(x) => match phitex_defuse::alias_of(self.v, x) {
-                        Some((g, at)) => self.cx.define_alias(f, g, at, l),
-                        None => self.cx.define_with(f, x, l),
+                    crate::state::Pub::Value(x) => match phitex_defuse::alias_parts(self.v, x) {
+                        Some((g, at, 0)) => self.cx.define_alias(f, g, at, l),
+                        _ => self.cx.define_with(f, x, l),
                     },
                     crate::state::Pub::Rel(c) => self.cx.define_rel_with(f, c, l),
                 }

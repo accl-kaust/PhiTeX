@@ -2622,9 +2622,9 @@ fn walk_here(
         let Some((_, i)) = Segment::reaching(inner, f, p, false) else {
             return Here::From(by);
         };
-        // (an alias's input, `read::through_aliases`, is not followed under
-        // the lock: the relation's own settle puts it right, `settle_rel`)
-        let nv = v.int(v.as_int(i.value).unwrap_or(0).wrapping_add(c));
+        // (an alias input gives an alias plus `c`, `read::rel_add`: nothing
+        // followed, under the lock or after it)
+        let nv = read::rel_add(v, Some(i.value), c);
         if nv == d.value {
             return Here::Done;
         }
@@ -3721,7 +3721,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
         eng.shapes_n.fetch_add(1, Ordering::Release);
     }
     let v = eng.values();
-    let plus = |carried: Option<ValueId>, c: i64| v.int(carried.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c));
+    let plus = |carried: Option<ValueId>, c: i64| read::rel_add(v, carried, c);
     let mut carried: Option<ValueId> = read::env_value(eng, f);
     let mut to_walk: Vec<(SegId, NodeId)> = Vec::new();
     for sid in eng.order.all() {
@@ -3976,7 +3976,7 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
         let input = Segment::reaching(inner, d.f, pos, false)
             .map(|(_, d)| d.value)
             .or_else(|| read::env_value(eng, d.f));
-        d.value = v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c));
+        d.value = read::rel_add(v, input, c);
     }
     for d in &rec.defs {
         let m = inner.defs.entry(d.f).or_default();
@@ -5302,9 +5302,7 @@ pub(crate) fn match_placements(eng: &Engine, last: &[NodeId], new: &[Placement])
 
 /// `rel_value` at a node's label, read under its segment's lock.
 pub(crate) fn rel_value_at(eng: &Engine, f: Field, at: NodeId, c: i64) -> ValueId {
-    let v = eng.values();
-    let input = read::through_aliases(eng, reaching_at(eng, f, at, false).and_then(|r| r.value));
-    v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c))
+    read::rel_add(eng.values(), reaching_at(eng, f, at, false).and_then(|r| r.value), c)
 }
 
 /// The brackets a commit files for its node: what its run set, else its

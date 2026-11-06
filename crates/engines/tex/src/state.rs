@@ -313,6 +313,19 @@ impl Entry {
         }
     }
 
+    /// An alias definition's value as it is (an offset with it kept),
+    /// known as one ([`ALIAS`]).
+    pub(crate) fn alias_raw(x: ValueId) -> Entry {
+        Entry {
+            kind: K_RAW,
+            flags: HAS_ID | ALIAS,
+            cmd: 0,
+            chr: 0,
+            payload: 0,
+            id: Some(x),
+        }
+    }
+
     /// An entry holding engine value `x` as it is, an alias definition's
     /// value known as one ([`ALIAS`]).
     fn raw_seen(v: &Values, x: Option<ValueId>) -> Entry {
@@ -1393,12 +1406,18 @@ impl State {
 
     /// The field and piece of the alias definition `loc` holds, if it
     /// holds one unresolved ([`Entry::alias`]).
-    pub(crate) fn alias_at(&self, loc: Loc, v: &Values) -> Option<(Field, phitex_defuse::NodeId)> {
+    /// With the integer the alias adds to that value (a relation the
+    /// engine stacked on an alias, `phitex_defuse::alias_parts`).
+    pub(crate) fn alias_at(
+        &self,
+        loc: Loc,
+        v: &Values,
+    ) -> Option<(Field, phitex_defuse::NodeId, i64)> {
         let s = self.slot_ref(loc)?;
         if s.e.flags & ALIAS == 0 {
             return None;
         }
-        phitex_defuse::alias_of(v, s.e.id?)
+        phitex_defuse::alias_parts(v, s.e.id?)
     }
 
     /// `loc`'s alias definition resolved to `x` where the run uses it

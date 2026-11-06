@@ -286,9 +286,11 @@ pub(crate) fn try_symbolic(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate
         // as it is, §413's internal integer, nothing scanned after it)
         if c == cmd::ASSIGN_INT {
             let l = r.quantity_loc(cmd::ASSIGN_INT, r.cur.chr);
-            if let Some((g, node)) = r.st.alias_at(l, r.v) {
+            if let Some((g, node, off)) = r.st.alias_at(l, r.v)
+                && let Ok(off) = i32::try_from(off)
+            {
                 let gl = r.loc_of(g);
-                if let Some(s) = Sym::at(r, gl, node)
+                if let Some(s) = Sym::at(r, gl, node).map(|s| Sym { j: off, ..s })
                     && symbolic(r, loc, s, global)
                 {
                     return Ok(true);

@@ -1929,12 +1929,25 @@ pub(crate) const ALIAS: &str = "\u{10FFFF}alias";
 /// The field and node an alias definition's value names, if `x` is one.
 #[must_use]
 pub fn alias_of(v: &Values, x: ValueId) -> Option<(Field, NodeId)> {
+    alias_parts(v, x).map(|(g, at, _)| (g, at))
+}
+
+/// An alias definition's parts: the field, the node, and the integer
+/// added to that field's value there (`[ALIAS, g, at]` or, with an
+/// offset, `[ALIAS, g, at, c]`: a relation `f := input + c` whose input
+/// is an alias, [`rel_add`]).
+#[must_use]
+pub fn alias_parts(v: &Values, x: ValueId) -> Option<(Field, NodeId, i64)> {
     v.with_list(x, |xs| {
-        if xs.len() != 3 || !v.with_str(xs[0], |s| s == ALIAS).unwrap_or(false) {
+        if !(xs.len() == 3 || xs.len() == 4) || !v.with_str(xs[0], |s| s == ALIAS).unwrap_or(false) {
             return None;
         }
         let n = v.as_int(xs[2])?;
-        Some((Field(xs[1]), NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes()))))
+        let c = match xs.get(3) {
+            Some(&c) => v.as_int(c)?,
+            None => 0,
+        };
+        Some((Field(xs[1]), NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes())), c))
     })
     .flatten()
 }
@@ -1946,24 +1959,40 @@ pub fn alias_of(v: &Values, x: ValueId) -> Option<(Field, NodeId)> {
 /// [`alias_of`].
 #[must_use]
 pub fn alias_value(v: &Values, g: Field, at: NodeId) -> ValueId {
-    v.list(vec![
-        v.str(ALIAS),
-        g.0,
-        v.int(i64::from_ne_bytes(at.raw().to_ne_bytes())),
-    ])
+    alias_value_plus(v, g, at, 0)
 }
 
-/// `x` with its alias definitions followed (`Ctx::define_alias`), as a
-/// read before each alias's node gives them, unrecorded: what a relation
-/// on an aliased field adds to.
-pub(crate) fn through_aliases(eng: &Engine, mut x: Option<ValueId>) -> Option<ValueId> {
-    for _ in 0..32 {
-        let Some((g, at)) = x.and_then(|y| alias_of(&eng.values, y)) else {
-            return x;
-        };
-        x = reaching_at(eng, g, at, false).and_then(|r| r.value);
+/// [`alias_value`] plus `c`: "the value of `g` reaching `at`, plus `c`"
+/// (an integer's), the plain alias where `c` is 0.
+#[must_use]
+pub fn alias_value_plus(v: &Values, g: Field, at: NodeId, c: i64) -> ValueId {
+    let mut xs = vec![v.str(ALIAS), g.0, v.int(i64::from_ne_bytes(at.raw().to_ne_bytes()))];
+    if c != 0 {
+        xs.push(v.int(c));
     }
-    x
+    v.list(xs)
+}
+
+/// An alias's target value `y` with its offset `c` added (`y` an integer,
+/// absent: 0, as a read of an integer gives it).
+#[must_use]
+pub fn alias_target_plus(v: &Values, y: Option<ValueId>, c: i64) -> Option<ValueId> {
+    if c == 0 {
+        return y;
+    }
+    Some(v.int(y.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c)))
+}
+
+/// The value of a relation `f := input + c` (`Ctx::define_rel`) where the
+/// input's definition holds `input`: an integer plus `c`; an alias plus
+/// `c` where the input is an alias (the relation stays symbolic, so a
+/// move of the alias's target reaches its readers through their read of
+/// the target, never through a value the relation computed once).
+pub(crate) fn rel_add(v: &Values, input: Option<ValueId>, c: i64) -> ValueId {
+    if let Some((g, at, k)) = input.and_then(|x| alias_parts(v, x)) {
+        return alias_value_plus(v, g, at, k.wrapping_add(c));
+    }
+    v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c))
 }
 
 #[cfg(test)]
