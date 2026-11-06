@@ -2138,7 +2138,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     // a changed bracket: the readers after it whose answer moved
     if let Some(old) = bracket_change {
-        reask_after_effect(eng, ww, node, seg_pos, old, brackets, &mut st);
+        reask_after_own_effect(eng, ww, node, seg_pos, old, brackets, &old_fields, &mut st);
     }
     // 3. the walks: readers the lock found changed, then on past the segment
     for (n, by, f) in wake {
@@ -5380,6 +5380,24 @@ pub(crate) fn reask_after_effect(
     reask_after_effect_at(eng, w, by, at, old, new, st);
 }
 
+/// [`reask_after_effect`] for a commit's own change of `by`'s brackets,
+/// `own_old` the fields its record before defined
+/// ([`reask_after_effect_with`]).
+#[allow(clippy::too_many_arguments)]
+fn reask_after_own_effect(
+    eng: &Engine,
+    w: Option<&Worker>,
+    by: &Node,
+    at: Pos,
+    old: Brackets,
+    new: Brackets,
+    own_old: &[Field],
+    st: &mut CommitStats,
+) {
+    let at = read::pos_of(eng, by.id).unwrap_or(at);
+    reask_after_effect_with(eng, w, by, at, old, new, Some(own_old), st);
+}
+
 /// `reask_after_effect` from label `at` whatever `by`'s label is now
 /// (its old one, `relocate`).
 fn reask_after_effect_at(
@@ -5391,6 +5409,40 @@ fn reask_after_effect_at(
     new: Brackets,
     st: &mut CommitStats,
 ) {
+    reask_after_effect_with(eng, w, by, at, old, new, None, st);
+}
+
+/// `reask_after_effect_at`; with `own_old`, the fields `by`'s record
+/// before this change defined: a definition of `by`'s in one of the
+/// scopes it opens now and did not before is in a scope closed where the
+/// walk stops, seen by no reader after the stop, and where `by` did not
+/// define its field before, a reader there sees what it saw. Its field
+/// is not walked past the stop for it (an opener's scope kind, defined
+/// inside the scope it opens: every reader of the scope kind to the end
+/// of the line was asked again at each opener's first commit, ~1.5 s
+/// each, 1 040 s of biblatex's -j4 build, mc 80580).
+#[allow(clippy::too_many_arguments)]
+fn reask_after_effect_with(
+    eng: &Engine,
+    w: Option<&Worker>,
+    by: &Node,
+    at: Pos,
+    old: Brackets,
+    new: Brackets,
+    own_old: Option<&[Field]>,
+    st: &mut CommitStats,
+) {
+    // (a definition of `by`'s, of a field it did not define before, in a
+    // scope it opens now and did not before)
+    let inside_new_open = |f: &Field, d: &Def| {
+        own_old.is_some_and(|o| {
+            d.by == by.id
+                && d.depth != GLOBAL
+                && d.depth > u16::from(old.opens)
+                && d.depth <= u16::from(new.opens)
+                && !o.contains(f)
+        })
+    };
     let d0 = i64::from(read::depth_at(eng, at));
     let (co, cn) = ((d0 - i64::from(old.closes)).max(0), (d0 - i64::from(new.closes)).max(0));
     let (mut a, mut b) = (co + i64::from(old.opens), cn + i64::from(new.opens));
@@ -5443,7 +5495,7 @@ fn reask_after_effect_at(
             }
         }
         for (f, m) in &inner.defs {
-            if m.iter().any(|(q, _)| inside(*q)) {
+            if m.iter().any(|(q, d)| inside(*q) && !inside_new_open(f, d)) {
                 fields.push(*f);
             }
         }
