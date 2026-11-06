@@ -1138,7 +1138,10 @@ fn latex_input_in_picture_first_edit() {
     std::fs::write(dir.join("drawing.tex"), &new).expect("write");
     let cold = common::build(pdf_opts("inpic", &dir), Some(&prelude(true)), main);
     let _ = std::fs::write(dir.join("drawing.tex"), drawing);
-    edit_check("inpic", &b, &cold, &before);
+    assert_eq!(b.pages().len(), before.len(), "the page count moved");
+    if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+        panic!("the edit differs from a cold build: {d}");
+    }
 }
 
 /// Unchanged bytes change nothing (`r` in a watch: every file the build
