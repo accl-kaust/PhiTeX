@@ -1050,7 +1050,7 @@ header:active { cursor: grabbing; }
 .timing .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 8px; }
 .timing .head span { color: var(--ph-fg2); }
 /* (Did you know: under the opening's step, quiet) */
-.opening .steps .hint { margin-top: 10px; color: var(--ph-fg2); font-size: 12px; line-height: 1.4; max-width: 420px; }
+.opening .steps .hint { margin: 10px auto 0; color: var(--ph-fg2); font-size: 12px; line-height: 1.4; max-width: 420px; }
 /* (the first build beside the edits: bars as long as their times) */
 .timing .tbars { padding: 4px 12px 8px; display: grid; gap: 4px; }
 .timing .tb { display: grid; grid-template-columns: 88px 1fr auto; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
