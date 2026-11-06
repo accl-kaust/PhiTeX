@@ -766,7 +766,7 @@ fn fold_sym(run: &mut Run<'_, '_>, sym: &mut Option<crate::defer::Sym>) -> R<Opt
 /// that is one, kept in `sym` with 0 for the factor; any other factor
 /// as `scan_int` scans it.
 fn sym_factor(run: &mut Run<'_, '_>, sym: &mut Option<crate::defer::Sym>) -> R<i32> {
-    let me = run.cx.node();
+    let me = run.sym_node();
     if run.cur.cmd == cmd::SYM
         && let Some(s) = crate::defer::sym_of(run.cur.tok)
         && s.node == me

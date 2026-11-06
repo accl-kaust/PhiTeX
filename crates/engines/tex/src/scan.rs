@@ -242,7 +242,7 @@ impl Run<'_, '_> {
             self.ck()?;
             let u = self.cur.tok;
             let digit = !u.is_cs_or_active() && u.cat() == Some(12) && (48..=57).contains(&u.chr());
-            if !negative && !digit && s.node == self.cx.node() {
+            if !negative && !digit && s.node == self.sym_node() {
                 if self.cur.cmd != cmd::SPACER {
                     self.back_input(u);
                 }
@@ -320,7 +320,7 @@ impl Run<'_, '_> {
                 if neg { -x } else { x }
             }
             Num::Reg(loc, j) => {
-                let node = self.cx.node();
+                let node = self.sym_node();
                 let reg = self.count_reg(loc).unwrap_or(0);
                 crate::defer::force(self, crate::defer::Sym { reg, node, j })?
             }

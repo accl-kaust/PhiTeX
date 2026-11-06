@@ -65,6 +65,13 @@ const PARENT_LIST: &str = "\u{1}list";
 /// The same for its values appended to lists (`Run::appending_vals`).
 const APPENDING_VALS: &str = "\u{1}appending values";
 
+/// The same for the registers it stepped without reading them
+/// (`State::mapped_now`): `[field, steps, global]` each. The child starts
+/// from those steps, so a symbol it makes of one (the register reaching
+/// the parent plus steps, `Run::sym_node`) counts them, and its output
+/// carries only its own ([`Run::pic_steps`]).
+const PARENT_STEPS: &str = "\u{1}steps";
+
 /// How many lines ahead a scan for the end looks, at most.
 const SCAN_LINES: usize = 20_000;
 
@@ -114,6 +121,8 @@ pub(crate) struct PicChild {
     /// Its `\write`s, `\openout`s and `\closeout`s as the parent makes
     /// them ([`Run::contribute_stream`]).
     pub streams: Vec<ValueId>,
+    /// The parent's steps it started from ([`PARENT_STEPS`]).
+    base_steps: Vec<(crate::state::Loc, i32)>,
 }
 
 /// How the parent's input skips the body once the child's output is taken.
@@ -521,6 +530,20 @@ impl Run<'_, '_> {
             let since = v.int(i64::try_from(t.fold.since_bp).unwrap_or(0));
             xs.push(v.list(vec![v.str(PARENT_LIST), v.list(vec![v.list(items), since])]));
         }
+        let mapped = self.st.mapped_now();
+        if !mapped.is_empty() {
+            let steps: Vec<ValueId> = mapped
+                .into_iter()
+                .map(|(l, c, g)| {
+                    v.list(vec![
+                        self.loc_field(l).0,
+                        v.int(i64::from(c)),
+                        v.int(i64::from(g)),
+                    ])
+                })
+                .collect();
+            xs.push(v.list(vec![v.str(PARENT_STEPS), v.list(steps)]));
+        }
         if !self.appending_vals.is_empty() {
             let pending: Vec<ValueId> = self
                 .appending_vals
@@ -793,6 +816,16 @@ impl Run<'_, '_> {
 
     // ------------------------------------------------------- the child
 
+    /// Whether the parent handed this child a binding of field `f`
+    /// ([`Run::pic_locals`]), read as that key's presence alone: a
+    /// register the parent defined or read is the parent's value, never a
+    /// symbol of the register reaching the parent (`Run::defer_at`).
+    pub(crate) fn pic_overlay_has(&mut self, f: Field) -> R<bool> {
+        let view = self.pic_view()?;
+        let v = self.v;
+        Ok(self.cx.get(view, Step::Has(f.0)) == Some(v.bool(true)))
+    }
+
     /// The view on the parent's bindings ([`Run::pic_locals`]).
     fn pic_view(&mut self) -> R<View> {
         let Some(p) = self.pic_child.as_mut() else {
@@ -916,6 +949,7 @@ impl Run<'_, '_> {
             lid,
             took_list: false,
             streams: Vec::new(),
+            base_steps: Vec::new(),
         });
         // (the parent's appends to lists it never read, pending at the
         // picture: the child's to make or go on with, `Run::append_def`)
@@ -925,6 +959,18 @@ impl Run<'_, '_> {
             if let [f, t] = list_of(v, e)[..] {
                 let loc = self.loc_of(Field(f));
                 self.appending.push((loc, toks_of(v, Some(t))));
+            }
+        }
+        let base = self.cx.get(view, Step::Key(v.str(PARENT_STEPS)));
+        for e in base.map(|x| list_of(v, x)).unwrap_or_default() {
+            if let [f, c, g] = list_of(v, e)[..] {
+                let loc = self.loc_of(Field(f));
+                let c = i32::try_from(int_of(v, c)).unwrap_or(0);
+                if self.st.add(v, loc, c, int_of(v, g) != 0)
+                    && let Some(p) = self.pic_child.as_mut()
+                {
+                    p.base_steps.push((loc, c));
+                }
             }
         }
         let pending = self.cx.get(view, Step::Key(v.str(APPENDING_VALS)));
@@ -1057,11 +1103,23 @@ impl Run<'_, '_> {
         let v = self.v;
         // (its steps of registers it never read: the parent's, made as
         // steps there, `State::add`)
+        let base: Vec<(Field, i64)> = self
+            .pic_child
+            .as_ref()
+            .map(|p| p.base_steps.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(l, c)| (self.loc_field(l), i64::from(c)))
+            .collect();
         self.publication()
             .into_iter()
             .filter_map(|(f, w, l)| match w {
                 crate::state::Pub::Rel(c) => {
-                    Some(v.list(vec![f.0, v.int(c), v.int(i64::from(l == Locality::Global))]))
+                    // (the parent's steps it started from are the parent's)
+                    let c = c - base.iter().find(|b| b.0 == f).map_or(0, |b| b.1);
+                    (c != 0).then(|| {
+                        v.list(vec![f.0, v.int(c), v.int(i64::from(l == Locality::Global))])
+                    })
                 }
                 _ => None,
             })

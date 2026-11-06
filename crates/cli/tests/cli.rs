@@ -3605,7 +3605,11 @@ fn watch_open_starts_only_the_users_viewer() {
 /// macro its caption then `\xdef`s (TeX's picture sees the value before
 /// the caption's): the figure's run makes the picture's definitions its
 /// own where the picture stands, and the picture reads before the
-/// figure's run. Edits that move the floats (a figure deleted and put back, a paragraph
+/// figure's run. The two pictures of one float show pgf's picture
+/// serial: a picture child's symbol of a register stands for the value
+/// reaching its figure plus the steps the figure made before it (the
+/// first picture's) and its own, so deleting a figure before them shifts
+/// the serial with no read of it. Edits that move the floats (a figure deleted and put back, a paragraph
 /// before them deleted), a word before them and a picture's own text
 /// changed: each edit's PDF is `phitex build`'s of its text, byte for
 /// byte, at one thread and at four.
@@ -3622,7 +3626,7 @@ fn picture_children_text(fig1: &str) -> String {
     format!(
         "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\newcount\\picn \\def\\capword{{before}}\n\\begin{{document}}\n\\section{{One}}\nAlpha words come first in this paragraph of the start.\n\nBeta words stand in the second paragraph, before the figures.\n{fig1}\
 Gamma text between the floats, see Figure~\\ref{{fig:a}}.\n\n\\begin{{figure}}[b]\\centering\n\\input{{pic2}}\n\\caption{{Second, after \\ref{{fig:a}}}}\n\\end{{figure}}\n\
-\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\draw[red] (0,0) circle (1);\n\\end{{tikzpicture}}\n\\begin{{tikzpicture}}\n\\fill[blue] (0,0) rectangle (1,1);\n\\end{{tikzpicture}}\n\\caption{{Two pictures}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\draw[red] (0,0) circle (1);\\node {{\\expandafter\\the\\csname pgf@picture@serial@count\\endcsname}};\n\\end{{tikzpicture}}\n\\begin{{tikzpicture}}\n\\fill[blue] (0,0) rectangle (1,1);\\node {{\\expandafter\\the\\csname pgf@picture@serial@count\\endcsname}};\n\\end{{tikzpicture}}\n\\caption{{Two pictures}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\node {{x}};\\xdef\\picnote{{seen in the picture}}\n\\end{{tikzpicture}}\n\\caption{{Note: \\picnote}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\node {{\\fontsize{{13}}{{15}}\\selectfont big}};\n\\end{{tikzpicture}}\n\\caption{{\\fontsize{{13}}{{15}}\\selectfont A caption in the picture's size}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped \\the\\picn\\xdef\\capword{{after}}}}\n\\end{{figure}}\n\
