@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The frontends' engine (crates/wasm/live) and their latexdiff
 # (crates/wasm/diff) built for the browser into one directory, as the
-# frontends take them (PhiTeX-frontends' scripts/build/build.sh, or its
+# frontends take them (PhiTeX-frontends' tools/build/build.sh, or its
 # PHITEX_WASM_DIR):
 #   core.wasm   the live core, wasm32-wasip1-threads (its threads the host's
 #               workers on one shared memory)
