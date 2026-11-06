@@ -58,6 +58,8 @@ pub(crate) struct CommitStats {
     /// `reask_from`: each segment's readers of the field, those it passed
     /// by included).
     pub(crate) walked: u64,
+    /// The readers a change of brackets asked again (`ScopeReach`).
+    pub(crate) scope_asked: u64,
     pub(crate) relative_resolved: u64,
     pub(crate) predictions_confirmed: u64,
     pub(crate) shaped: u64,
@@ -75,6 +77,7 @@ impl CommitStats {
     pub(crate) fn add(&mut self, o: &CommitStats) {
         self.woken += o.woken;
         self.walked += o.walked;
+        self.scope_asked += o.scope_asked;
         self.relative_resolved += o.relative_resolved;
         self.predictions_confirmed += o.predictions_confirmed;
         self.shaped += o.shaped;
@@ -817,7 +820,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             p.ranks.clear();
             p.placements = replay_placements(eng, node.id, &r.placed, &mut p.ranks);
         }
-        if p.state.is_none() {
+        if p.state.is_none() && !p.at_hole {
             p.state = r.state;
         }
     }
@@ -2160,8 +2163,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             st.woken += 1;
         }
     }
-    for (f, r, by) in later {
-        reask_reader(eng, ww, f, &r, Some(by), &mut st);
+    {
+        let _memo = read::WalkMemo::new();
+        for (f, r, by) in later {
+            reask_reader(eng, ww, f, &r, Some(by), &mut st);
+        }
     }
     for (f, h) in walks {
         match h {
@@ -2909,8 +2915,13 @@ pub(crate) fn reask_from(
                 deeper.len()
             );
         }
-        for r in &readers {
-            reask_reader(eng, w, f, r, by, st);
+        {
+            // (the segment's readers asked on one reading of the line: their
+            // searches back share their answers, `read::WalkMemo`)
+            let _memo = read::WalkMemo::new();
+            for r in &readers {
+                reask_reader(eng, w, f, r, by, st);
+            }
         }
         if !deeper.is_empty() {
             passed = true;
@@ -4118,8 +4129,11 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     for f in changed_contribs {
         reask_ranges(eng, w, f, pos, node.id, &stops, &mut st);
     }
-    for (f, r) in &anchored {
-        reask_reader(eng, w, *f, r, Some(node.id), &mut st);
+    {
+        let _memo = read::WalkMemo::new();
+        for (f, r) in &anchored {
+            reask_reader(eng, w, *f, r, Some(node.id), &mut st);
+        }
     }
     reask_stops(eng, w, stops, node.id, &mut st);
     if was_hole && remove {
@@ -4979,8 +4993,11 @@ fn lifted_walks(eng: &Engine, w: Option<&Worker>, m: &Arc<Node>, mut left: Left,
         }
     }
     (left.pos, left.seg) = (pos, seg);
-    for (f, r) in &left.readers {
-        reask_reader(eng, w, *f, r, Some(m.id), st);
+    {
+        let _memo = read::WalkMemo::new();
+        for (f, r) in &left.readers {
+            reask_reader(eng, w, *f, r, Some(m.id), st);
+        }
     }
     if let Some(old) = left.brackets {
         reask_after_effect_at(eng, w, m, left.pos, old, Brackets::default(), st);
@@ -5326,7 +5343,9 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
         node.has_brackets.store(false, Ordering::Release);
     }
     inner.sum_depth();
-    node.bracket_gen.store(eng.scope_changed(), Ordering::Release);
+    let g = eng.scope_changed();
+    inner.brk_gen = g;
+    node.bracket_gen.store(g, Ordering::Release);
     eng.bump(eng.depth_field);
     Some(old.unwrap_or_default())
 }
@@ -5377,8 +5396,160 @@ pub(crate) fn file_effect(
 
 /// The clamped walk of a depth through a segment of summary `(net, min)`:
 /// the lowest depth reached, and the depth at its end.
+/// A bracket walk through one segment from depths `a` (the old side), `b`
+/// (the new one) and `p` (the fewest both have shared), from `at` in the
+/// first segment, else whole by the segment's summary: the depths after
+/// it (or at the stop), and where the two sides agree again, if they do.
+fn scopes_through(inner: &Inner, first: bool, at: Pos, a: i64, b: i64, p: i64) -> (i64, i64, i64, Option<Pos>) {
+    let (mut a, mut b, mut p) = (a, b, p);
+    if a == b && b == p {
+        return (a, b, p, Some(at));
+    }
+    if first {
+        for (q, (_, x)) in inner.brackets.range((Excluded(at), Unbounded)) {
+            a = (a - i64::from(x.closes)).max(0);
+            b = (b - i64::from(x.closes)).max(0);
+            p = p.min(a).min(b);
+            a += i64::from(x.opens);
+            b += i64::from(x.opens);
+            if a == b && b == p {
+                return (a, b, p, Some(*q));
+            }
+        }
+        return (a, b, p, None);
+    }
+    let (net, min) = (i64::from(inner.depth_net), i64::from(inner.depth_min));
+    let (la, ea) = through_segment(a, net, min);
+    let (lb, eb) = through_segment(b, net, min);
+    p = p.min(la).min(lb);
+    (a, b) = (ea, eb);
+    let stop = (a == b && b == p).then(|| Pos(inner.hi.0.saturating_sub(1)));
+    (a, b, p, stop)
+}
+
 fn through_segment(d: i64, net: i64, min: i64) -> (i64, i64) {
     ((d + min).max(0), (d + net).max(net - min))
+}
+
+/// The first segment from the one at `at` (to `last` where given, else
+/// to the line's end) in which a bracket changed, or moved in, after
+/// scope count `g`: the region of a walk that one filed later may share.
+/// A change before `at` has its own walk, which passes `at` and finds
+/// this one in its own region. (Any change anywhere since counted as
+/// such a race: at -j4 nearly every walk, whose region was a node wide,
+/// asked every reader to the line's end, 4 to 5 M, biblatex, mc 80647.)
+fn first_bracket_change_since(eng: &Engine, at: Pos, last: Option<SegId>, g: u64) -> Option<SegId> {
+    if eng.scope_gen.load(Ordering::Acquire) == g {
+        return None;
+    }
+    let first = eng.seg_for_pos(at).map(|s| s.id);
+    let mut cur = first;
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        let inner = seg.inner.read();
+        if inner.brk_gen > g {
+            return Some(sid);
+        }
+        let lo = seg.lo;
+        drop(inner);
+        if last == Some(sid) {
+            return None;
+        }
+        cur = eng.order.next(sid, lo);
+    }
+    // (the stop's segment no longer after `at`: moved meanwhile)
+    if last.is_some() { first } else { None }
+}
+
+/// Whether a definition's reach can move with the brackets around it: a
+/// local one (its scope may close earlier or later), one in several
+/// scopes, or a relation (its input's may).
+fn scoped_def(d: &Def) -> bool {
+    d.depth != GLOBAL || d.multi || d.rel.is_some()
+}
+
+/// The fields whose readers a change of brackets at `at` can give another
+/// answer, as a walk from `at` goes on. A reader whose answer moved reads
+/// a field one of whose definitions its scopes now hide and did not, or
+/// the reverse: a definition reaching every later position (`GLOBAL`)
+/// is seen alike on both sides; a local one is seen alike where the two
+/// sides share the scope it lives in. The sides share every scope open
+/// at `at` up to the `p`-th, `p` the fewest scopes both sides have had
+/// open between `at` and the reader. So: the fields with a local
+/// definition between `at` and the reader (`fields`, added as the walk
+/// meets them), and those with one before `at` in a scope open at `at`
+/// above the `p`-th (`below`: since that scope's opener). Besides, a
+/// reader of the depth itself and one by a derived path (whose field is
+/// found from other fields at its place) are always asked.
+struct ScopeReach {
+    /// The scopes open at `at`, its own closes not applied: each one's
+    /// opener and which of its opens (`read::opener`).
+    open: Vec<u64>,
+    /// The scopes open at `at` from the `covered`-th up have had their
+    /// definitions before `at` taken into `fields`.
+    covered: usize,
+    /// Where those definitions start (the `covered`-th scope's opener),
+    /// `at` while none is covered.
+    from: Pos,
+    fields: FxHashSet<Field>,
+    /// An opener not found on the line: every reader is asked.
+    all: bool,
+}
+
+impl ScopeReach {
+    fn new(eng: &Engine, at: Pos) -> ScopeReach {
+        let open = loop {
+            let Some(seg) = eng.seg_for_pos(at) else {
+                break Vec::new();
+            };
+            let start = read::chain_start(eng, seg);
+            let inner = seg.inner.read();
+            if at < seg.lo || (at >= inner.hi && eng.order.at_or_after(at) != Some(seg.id)) {
+                continue;
+            }
+            break read::chain_at(&inner, &start, at, false, false);
+        };
+        ScopeReach {
+            covered: open.len(),
+            open,
+            from: at,
+            fields: FxHashSet::default(),
+            all: false,
+        }
+    }
+
+    /// The definitions before `at` in the scopes open there from the
+    /// `p`-th up (0: the outermost), taken into `fields`.
+    fn below(&mut self, eng: &Engine, p: i64) {
+        let p = usize::try_from(p.max(0)).unwrap_or(0);
+        if self.all || p >= self.covered {
+            return;
+        }
+        let opener = NodeId::from_raw(self.open[p] >> 8);
+        let Some(lo) = read::pos_of(eng, opener) else {
+            self.all = true;
+            return;
+        };
+        let hi = self.from;
+        let mut cur = eng.seg_for_pos(lo).map(|s| s.id);
+        while let Some(sid) = cur {
+            let seg = eng.seg(sid);
+            if seg.lo > hi {
+                break;
+            }
+            let inner = seg.inner.read();
+            for (f, m) in &inner.defs {
+                if !self.fields.contains(f) && m.range(lo..hi).any(|(_, d)| scoped_def(d)) {
+                    self.fields.insert(*f);
+                }
+            }
+            let next_lo = seg.lo;
+            drop(inner);
+            cur = eng.order.next(sid, next_lo);
+        }
+        self.covered = p;
+        self.from = lo;
+    }
 }
 
 /// Re-asks the readers anchored at and after `at` (all fields) whose
@@ -5477,38 +5648,54 @@ fn reask_after_effect_with(
     let mut end: Option<(SegId, Pos)> = None;
     let mut cur = eng.seg_for_pos(at).map(|s| s.id);
     let mut first = true;
+    // (which readers in the region can see another answer: those of a
+    // field with a definition whose scope the change can end or extend,
+    // `ScopeReach`; the others' answers are those of definitions both
+    // sides see. Every reader there was asked, 3 to 4 M per walk to the
+    // line's end in biblatex's -j4 build, ~15 s each, of which 2 to 5 %
+    // read such a field, accl 25435)
+    let mut reach = ScopeReach::new(eng, at);
     while let Some(sid) = cur {
         let seg = eng.seg(sid);
-        let inner = seg.inner.read();
-        let mut stop: Option<Pos> = (a == b && b == p).then_some(at);
-        if stop.is_none() {
-            if first {
-                for (q, (_, x)) in inner.brackets.range((Excluded(at), Unbounded)) {
-                    a = (a - i64::from(x.closes)).max(0);
-                    b = (b - i64::from(x.closes)).max(0);
-                    p = p.min(a).min(b);
-                    a += i64::from(x.opens);
-                    b += i64::from(x.opens);
-                    if a == b && b == p {
-                        stop = Some(*q);
-                        break;
-                    }
+        let mut inner = seg.inner.read();
+        // (where the walk stops in this segment, if it does, and the
+        // fewest scopes both sides share up to there)
+        let (na, nb, np, stop) = scopes_through(&inner, first, at, a, b, p);
+        // (the definitions before `at` in the scopes open there above
+        // those, looked up under no segment's lock: then this segment is
+        // read again, and any bracket filed in it meanwhile counted)
+        let (na, nb, np, stop) = if usize::try_from(np.max(0)).unwrap_or(0) < reach.covered && !reach.all {
+            drop(inner);
+            let mut q = np;
+            loop {
+                reach.below(eng, q);
+                inner = seg.inner.read();
+                let x = scopes_through(&inner, first, at, a, b, p);
+                if reach.all || usize::try_from(x.2.max(0)).unwrap_or(0) >= reach.covered {
+                    break x;
                 }
-            } else {
-                let (net, min) = (i64::from(inner.depth_net), i64::from(inner.depth_min));
-                let (la, ea) = through_segment(a, net, min);
-                let (lb, eb) = through_segment(b, net, min);
-                p = p.min(la).min(lb);
-                (a, b) = (ea, eb);
-                if a == b && b == p {
-                    stop = Some(Pos(inner.hi.0.saturating_sub(1)));
-                }
+                q = x.2;
+                drop(inner);
+            }
+        } else {
+            (na, nb, np, stop)
+        };
+        (a, b, p) = (na, nb, np);
+        let inside = |q: Pos| (!first || q >= at) && stop.is_none_or(|s| q <= s);
+        // (the definitions here first: a reader after one in this segment
+        // is asked whatever its place in it, as is one before, needlessly)
+        for (f, m) in &inner.defs {
+            if !reach.fields.contains(f) && m.iter().any(|(q, d)| inside(*q) && scoped_def(d)) {
+                reach.fields.insert(*f);
             }
         }
-        let inside = |q: Pos| (!first || q >= at) && stop.is_none_or(|s| q <= s);
         for (f, rs) in &inner.readers {
+            let all = reach.all || *f == eng.depth_field || reach.fields.contains(f);
             for r in rs {
-                if inside(eng.node(r.anchor).pos_hint()) && live(eng, r.node, r.serial) {
+                if (all || read::derived_spec(eng, r.path).is_some())
+                    && inside(eng.node(r.anchor).pos_hint())
+                    && live(eng, r.node, r.serial)
+                {
                     readers.push((*f, r.clone()));
                 }
             }
@@ -5540,33 +5727,83 @@ fn reask_after_effect_with(
     // to the end of the line, the finals: in the region, or from the
     // change on after a race)
     let mut rest = (at, end.map(|(_, q)| q));
-    if let Some((sid, q)) = end
-        && eng.scope_gen.load(Ordering::Acquire) != by.bracket_gen.load(Ordering::Acquire)
-    {
-        end = None;
-        rest = (at, None);
-        let mut cur = Some(sid);
-        let mut first = true;
-        while let Some(sid) = cur {
-            let seg = eng.seg(sid);
-            let inner = seg.inner.read();
-            for (f, rs) in &inner.readers {
-                for r in rs {
-                    if (!first || eng.node(r.anchor).pos_hint() > q) && live(eng, r.node, r.serial) {
-                        readers.push((*f, r.clone()));
+    // (none where the region is empty, the two sides alike from `at` on:
+    // a close at the bottom level, which closes nothing, whatever filed
+    // around it. A change that moves the depth at `at` walks on past it
+    // itself, and found here the depth it made)
+    let g = by.bracket_gen.load(Ordering::Acquire);
+    let raced = if end.is_some_and(|(_, q)| q == at) {
+        None
+    } else {
+        first_bracket_change_since(eng, at, end.map(|(sid, _)| sid), g)
+    };
+    if let Some(from) = raced {
+        // (the readers of the region from the first segment where one
+        // changed: what this walk passed over as no field of a scope it
+        // moves was found on one reading of the brackets, the other's
+        // walk on another, and together they may move what neither
+        // walk's fields name: asked whatever their field, as before the
+        // fields were looked at)
+        if !reach.all {
+            let mut cur = Some(from);
+            while let Some(sid) = cur {
+                let seg = eng.seg(sid);
+                let inner = seg.inner.read();
+                for (f, rs) in &inner.readers {
+                    for r in rs {
+                        let ap = eng.node(r.anchor).pos_hint();
+                        if ap >= at && end.is_none_or(|(_, q)| ap <= q) && live(eng, r.node, r.serial) {
+                            readers.push((*f, r.clone()));
+                        }
                     }
                 }
+                let lo = seg.lo;
+                drop(inner);
+                if end.is_some_and(|(last, _)| last == sid) {
+                    break;
+                }
+                cur = eng.order.next(sid, lo);
             }
-            let lo = seg.lo;
-            drop(inner);
-            first = false;
-            cur = eng.order.next(sid, lo);
+        }
+        // (and every reader past the stop, each by its answer)
+        if let Some((sid, q)) = end {
+            end = None;
+            rest = (at, None);
+            let mut cur = Some(sid);
+            let mut first = true;
+            while let Some(sid) = cur {
+                let seg = eng.seg(sid);
+                let inner = seg.inner.read();
+                for (f, rs) in &inner.readers {
+                    for r in rs {
+                        if (!first || eng.node(r.anchor).pos_hint() > q) && live(eng, r.node, r.serial) {
+                            readers.push((*f, r.clone()));
+                        }
+                    }
+                }
+                let lo = seg.lo;
+                drop(inner);
+                first = false;
+                cur = eng.order.next(sid, lo);
+            }
         }
     }
-    for (f, r) in &readers {
-        reask_reader(eng, w, *f, r, Some(by.id), st);
+    st.scope_asked += readers.len() as u64;
+    {
+        let _memo = read::WalkMemo::new();
+        for (f, r) in &readers {
+            reask_reader(eng, w, *f, r, Some(by.id), st);
+        }
     }
-    reask_rest(eng, w, by, rest.0, rest.1, None, st);
+    // (the relations, end readers and finals likewise: of those fields;
+    // all of them were put right or asked to the line's end at each walk
+    // that found no stop, every definition on the way looked at)
+    let only = (!reach.all && raced.is_none()).then(|| {
+        let mut o = reach.fields.clone();
+        o.insert(eng.depth_field);
+        o
+    });
+    reask_rest(eng, w, by, rest.0, rest.1, only.as_ref(), st);
     // (past the region only the readers of what is defined in it can see
     // another answer)
     if let Some((sid, q)) = end {

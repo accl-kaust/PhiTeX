@@ -445,12 +445,19 @@ pub(crate) fn run_node(
             Ok(r.stall("starve", u))
         }
         // (a read-on waits for the text before it to have run: the run
-        // ends as a starved one does, nothing defined, and the node
-        // before it it met runs it again when it commits)
-        Err(Halt::Hole) => Ok(r.stall("hole", ValueId::UNIT)),
+        // ends with nothing new said, what its last run made standing
+        // (`Ctx::keep_last_at_hole`), and the node before it it met runs
+        // it again when it commits)
+        Err(Halt::Hole) => {
+            r.cx.keep_last_at_hole();
+            Ok(r.stall("hole", ValueId::UNIT))
+        }
         // (§1335: the job ends there, its log written up to the error,
         // as pdfTeX's close_files_and_terminate leaves it)
         Err(Halt::Fatal) => {
+            // (only on a prefix every piece of which has run: on a guess
+            // of it, the run waits, `Ctx::wait_text_before`)
+            r.cx.wait_text_before()?;
             if !r.fatal_logged {
                 let m = "*** (job aborted, no legal \\end found)";
                 let _ = r.log_help("error", m, &[m]);

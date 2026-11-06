@@ -1524,6 +1524,7 @@ impl Engine {
             rep.predictions_confirmed += load(&w.predictions_confirmed);
             rep.relative_resolved += load(&w.relative_resolved);
             rep.walked += load(&w.walked);
+            rep.scope_asked += load(&w.scope_asked);
             rep.shaped += load(&w.shaped);
             rep.commits += load(&w.commits);
             rep.final_reruns = rep

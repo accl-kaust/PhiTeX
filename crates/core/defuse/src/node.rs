@@ -669,6 +669,10 @@ pub(crate) struct Product {
     /// record's definitions, contributions, placements and output stand,
     /// with this run's reads.
     pub(crate) unchanged: bool,
+    /// The run stopped at a hole with nothing to say (`Ctx::keep_last_at_hole`):
+    /// its last run's products stand, but not that run's state, whose
+    /// checkpoints count reads of that run, not of this one's record.
+    pub(crate) at_hole: bool,
     /// `Ctx::park`: the state the next run resumes from.
     pub(crate) state: Option<ValueId>,
     /// `Ctx::parked_on`: the field whose answer the run stopped for.

@@ -112,6 +112,7 @@ impl<'a> Ctx<'a> {
                 place_effects: Vec::new(),
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
                 unchanged: false,
+                at_hole: false,
                 state: None,
                 resumed: std::cell::Cell::new(false),
                 kept_reads: std::cell::Cell::new(None),
@@ -1167,6 +1168,51 @@ impl<'a> Ctx<'a> {
             self.record(ReadKind::Hole, PathId::WHOLE, read::hole_value(self.eng, h));
         }
         Ok(h)
+    }
+
+    /// The run stopped at a hole before it ([`Ctx::hole_before`]) with
+    /// nothing to say yet: what my last run made stands as this run's
+    /// ([`Ctx::unchanged`]), filed with this run's reads (the hole among
+    /// them), where I have run before; true then. Taken back instead, its
+    /// brackets and definitions left the line until the hole filled and
+    /// came back with the next run: each such stop a change of every
+    /// reader after me (biblatex at -j4: example pieces flipping between
+    /// four scopes open and none, each flip a walk of 3.4 M readers, mc
+    /// 80562). Not my last run's state: its checkpoints count that run's
+    /// reads, which this record does not hold (a run going on from one,
+    /// or cut off at one, rested on reads it never checked: csquotes at
+    /// -j8, an example environment's body typeset as text, accl 25423).
+    /// False on a first run: nothing to keep.
+    pub fn keep_last_at_hole(&mut self) -> bool {
+        if self.last.is_none() {
+            return false;
+        }
+        self.product.unchanged = true;
+        self.product.at_hole = true;
+        true
+    }
+
+    /// Stops the run until the nearest piece of the text before me asked
+    /// again since it committed ([`read::text_to_run_before`]) commits,
+    /// when there is one: nothing is filed, my last run's products stand,
+    /// and I run again at that commit or at the quiet point. For a run
+    /// that would end the job's text at me (a fatal error, which claims
+    /// every node after me): made while the text before me is still to
+    /// run, the end rests on a guess of that text, and its claim of the
+    /// rest took back every node after me and asked their readers again,
+    /// to be undone once the text ran (biblatex at -j4, an example piece
+    /// cut from its \end reading on to the input's end: one run of 71 s,
+    /// 49 s of it the claim's re-asks, mc 80568, 80574). The page layer is
+    /// not waited for, nor a piece's first run: a fatal error on a prefix
+    /// every piece of which stands ends the job at once, no piece after
+    /// it begun.
+    pub fn wait_text_before(&mut self) -> Result<(), Stop> {
+        self.check()?;
+        if let Some(x) = read::on_one_layout(self.eng, || read::text_to_run_before(self.eng, self.me)) {
+            self.wait_on = Some(x);
+            return Err(stop());
+        }
+        Ok(())
     }
 
     /// [`Ctx::hole_before`] where the text before me can change what I

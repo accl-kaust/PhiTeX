@@ -42,7 +42,8 @@ pub(crate) enum Halt {
     Recut(u32),
     /// The run would read on into the text after it (`Run::pull`) while
     /// a node before it has not run yet: it waits for that node
-    /// (`Ctx::hole_before`), ending as a starved run does.
+    /// (`Ctx::hole_before`), ending with nothing new said: its last
+    /// run's products stand (`Ctx::keep_last_at_hole`).
     Hole,
     /// The run reached a checkpoint of its last run in the state that
     /// run had there, that run's reads after it holding: what that run
