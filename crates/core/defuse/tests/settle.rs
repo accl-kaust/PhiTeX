@@ -605,3 +605,62 @@ fn runs_held_at_the_frontier_are_let_go_the_earliest_first() {
         assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
     }
 }
+
+/// `[f]`: reads f before its placer (`Ctx::read_before_placer`).
+struct BeforeReader;
+
+impl Operation for BeforeReader {
+    fn name(&self) -> &'static str {
+        "before-reader"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.read_before_placer();
+        Ok(cx.read(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// `[f]`: places a before-reader child on f, outputs its output.
+struct BeforePlacer(OpId);
+
+impl Operation for BeforePlacer {
+    fn name(&self) -> &'static str {
+        "before-placer"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let i = cx.child(self.0, vec![cx.args()[0]]);
+        Ok(cx.placed_output_or(i, ValueId::UNIT))
+    }
+}
+
+/// A child reading before its placer (a picture in a figure's run) where
+/// the layer's frontier stands at the placer is not held there: its read
+/// is made where the placer stands, before which the layer places
+/// nothing more. Held by its own position, after the placer's, its run
+/// was thrown away and made again (Grail's added figure: a 1.8 s TikZ
+/// child run twice, accl 25835). Line: F (frontier), P (page: pn := 1),
+/// Q (placer of C, reading pn). F stands the frontier at Q, P edited.
+#[test]
+fn a_child_reading_before_its_placer_is_not_held_at_its_placers_frontier() {
+    let o = setup();
+    let (e, v) = (&o.e, o.e.values());
+    let front = e.register(Arc::new(Front));
+    let child = e.register(Arc::new(BeforeReader));
+    let placer = e.register(Arc::new(BeforePlacer(child)));
+    let u = e.new_unit();
+    let pn = v.field("pn");
+    let f = e.push(u, front, vec![v.int(-1), v.int(0)]);
+    let p = e.push(u, o.page_op, vec![pn.0, v.int(1), ValueId::UNIT]);
+    let q = e.push(u, placer, vec![pn.0]);
+    e.evaluate(1).unwrap();
+    assert_eq!(int(e, q), Some(1));
+    let at = i64::try_from(q.raw()).expect("q id");
+    e.replace(f, front, vec![v.int(at), v.int(1)]);
+    e.replace(p, o.page_op, vec![pn.0, v.int(2), ValueId::UNIT]);
+    let held = e.frontier_held();
+    let rep = e.evaluate(1).unwrap();
+    assert_eq!(int(e, q), Some(2), "{rep:?}");
+    assert_eq!(e.frontier_held(), held, "the child is not held: {rep:?}");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
