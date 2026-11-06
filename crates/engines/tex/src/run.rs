@@ -6362,16 +6362,9 @@ impl<'c, 'a> Run<'c, 'a> {
     }
 
     /// Whether this run places its pictures as children (`crate::pic`):
-    /// a document piece's run of an edit's evaluation, never a cold
-    /// build's.
+    /// a document piece's run.
     fn pic_armed(&self, op: phitex_defuse::OpId) -> bool {
-        self.doc
-            && (op == self.ops.exec || op == self.ops.resume)
-            && self
-                .ops
-                .edit_stall_ms
-                .load(std::sync::atomic::Ordering::Relaxed)
-                != 0
+        self.doc && (op == self.ops.exec || op == self.ops.resume)
     }
 
     /// Runs the node's input to its end (§1030's loop): every command of

@@ -31,10 +31,11 @@
 //! environments ([`PICS`]) and the text match are hints: a wrong match
 //! costs one run of the figure, never the output.
 //!
-//! A run's first pass over a figure runs the picture inline and places
-//! the child beside it; the next run takes the output. A cold build's
-//! runs place nothing ([`Run::run_all`] arms the trigger only in an
-//! edit's evaluation).
+//! A run's first pass over a figure places the child and goes on as if
+//! the picture were empty; the child's commit asks it again, and that
+//! run takes the output. So every picture runs once, as a node of its
+//! own, in a cold build too, beside the other nodes at more than one
+//! thread.
 
 use std::hash::{Hash as _, Hasher as _};
 
@@ -282,15 +283,6 @@ impl Run<'_, '_> {
             }
             return false;
         }
-        if !self.cx.ran_before() {
-            if trace() {
-                eprintln!(
-                    "pic: node {node} {} {hash:x}: the node's first run, inline",
-                    body.name
-                );
-            }
-            return false;
-        }
         let v = self.v;
         // (the field's name: the body's text and its place among this
         // run's pictures of that text, never the run's position)
@@ -309,16 +301,20 @@ impl Run<'_, '_> {
         let i = self.cx.child_once(self.ops.pic, args);
         self.muts += 1;
         let Some(x) = self.cx.placed_output_peek(i) else {
-            // (no output yet: this run runs the picture inline, and the
-            // child's commit asks it again)
+            // (no output yet: the run goes on as if the picture were
+            // empty, and the child's commit asks it again; its picture
+            // runs once, in the child, on another thread where one is
+            // free)
             self.cx.placed_output_or(i, ValueId::UNIT);
+            self.pic_skip(&body.skip);
+            self.muts += 1;
             if trace() {
                 eprintln!(
-                    "pic: node {node} {} {hash:x}: placed, no output yet, inline",
+                    "pic: node {node} {} {hash:x}: placed, no output yet, empty",
                     body.name
                 );
             }
-            return false;
+            return true;
         };
         let xs = list_of(v, x);
         if x == ValueId::UNIT || xs.first().is_none_or(|&t| int_of(v, t) != 0) {
