@@ -275,7 +275,19 @@ fn para_end(s: &[u8], start: usize) -> (usize, bool) {
 
 /// The environments whose body LaTeX reads verbatim, up to the first
 /// `\end{name}` (the kernel's, `verbatim.sty`'s, `comment.sty`'s, `fancyvrb`'s,
-/// `listings`'s, `minted`'s and `filecontents`).
+/// `listings`'s, `minted`'s and `filecontents`), and the example
+/// environments of the documentation packages that manuals load, each a
+/// listing whose body is also typeset: `ltxdockit`'s `ltxexample` and
+/// `ltxcode` (`\lstnewenvironment`: biblatex's, csquotes's, etoolbox's
+/// manuals), `showexpl`'s `LTXexample` (`\lstnewenvironment`: circuitikz's)
+/// and the pgf manual's `codeexample` (read to `\end{codeexample}` with
+/// `\` made other: zx-calculus's). Lexed as text, such a body was cut
+/// into pieces of its own, each run as TeX on more threads before the
+/// piece whose run reads it verbatim and claims it: its groups and
+/// `\begin`s moved the guessed nesting of everything after it, and an
+/// `\end{document}` in one ended the job there (biblatex at -j4 and -j8
+/// past 900 s, identical in 150 s with them read as verbatim; circuitikz
+/// at -j8, 551 s for 321 s at -j1, mc 80751).
 pub const VERBATIM_ENVIRONMENTS: &[&str] = &[
     "verbatim",
     "verbatim*",
@@ -290,6 +302,10 @@ pub const VERBATIM_ENVIRONMENTS: &[&str] = &[
     "filecontents*",
     "VerbatimOut",
     "SaveVerbatim",
+    "ltxexample",
+    "ltxcode",
+    "LTXexample",
+    "codeexample",
 ];
 
 /// The commands whose argument LaTeX reads verbatim.
@@ -308,7 +324,8 @@ pub const VERBATIM_COMMANDS: &[&str] = &[
 fn verbatim_env_args(name: &[u8]) -> Option<(bool, usize)> {
     Some(match name {
         b"verbatim" | b"verbatim*" | b"comment" => (false, 0),
-        b"Verbatim" | b"Verbatim*" | b"BVerbatim" | b"LVerbatim" | b"lstlisting" => (true, 0),
+        b"Verbatim" | b"Verbatim*" | b"BVerbatim" | b"LVerbatim" | b"lstlisting"
+        | b"ltxexample" | b"ltxcode" | b"LTXexample" | b"codeexample" => (true, 0),
         b"minted" | b"filecontents" | b"filecontents*" | b"SaveVerbatim" => (true, 1),
         b"VerbatimOut" => (false, 1),
         _ => return None,

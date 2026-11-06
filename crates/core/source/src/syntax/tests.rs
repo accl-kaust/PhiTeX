@@ -139,6 +139,20 @@ fn verbatim_environments() {
         texts(&Tree::parse(src)),
         ["a\n\n", "\\begin{comment}\n\nb\n\nc\n"]
     );
+    // (a documentation package's example environment, a listing: its
+    // body's blank lines, groups and `\end{document}` are characters)
+    let src = "a\n\\begin{ltxexample}[x]\n\\begin{document}\n\n{\n\\end{document}\n\\end{ltxexample}\nb\n\nc\n";
+    assert_eq!(
+        texts(&Tree::parse(src)),
+        [
+            "a\n\\begin{ltxexample}[x]\n\\begin{document}\n\n{\n\\end{document}\n\\end{ltxexample}\nb\n\n",
+            "c\n"
+        ]
+    );
+    for e in ["ltxcode", "LTXexample", "codeexample"] {
+        let src = format!("\\begin{{{e}}}\n\n\\end{{{e}}}\n\nz\n");
+        assert_eq!(texts(&Tree::parse(&src)).len(), 2, "{e}");
+    }
     // (`\begin{verbatim}` in a comment is a comment)
     let src = "% \\begin{verbatim}\n\nb\n";
     assert_eq!(texts(&Tree::parse(src)), ["% \\begin{verbatim}\n\n", "b\n"]);
