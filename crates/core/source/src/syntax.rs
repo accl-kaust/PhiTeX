@@ -385,6 +385,17 @@ fn verbatim_at(s: &[u8], i: usize) -> Option<Verb> {
         n1 += 1;
     }
     let name = &s[n0..n1];
+    // (a name followed by `@` goes on where `\makeatletter` holds, as in
+    // the definitions of a preamble or a package: `\url@{#1}` is the
+    // command `\url@`, no `\url` delimited by `@`. Read as one, the rest
+    // of its line was characters, the braces it opened never closed, and
+    // no paragraph after it ended: biblatex's manual from its
+    // `\newcommand\fnurl@[1]{\footnote{\url@{#1}}}` on was one piece once
+    // its examples' bodies were verbatim, whose stray braces had closed
+    // them by chance)
+    if s.get(n1) == Some(&b'@') {
+        return None;
+    }
     if name == b"begin" {
         return verbatim_env(s, n1);
     }

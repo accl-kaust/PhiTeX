@@ -88,6 +88,11 @@ fn verb() {
     );
     // (a control word that only begins like one is not)
     assert_eq!(tokens("\\verbatim{x}")[0], (Cs, "\\verbatim"));
+    // (nor one whose name goes on with `@`, as where `\makeatletter`
+    // holds: its braces are the definition's)
+    assert!(tokens("\\url@{#1}}").iter().all(|t| t.0 != Verbatim));
+    let src = "\\makeatletter\n\\newcommand\\fnurl@[1]{\\footnote{\\url@{#1}}}\n\\makeatother\n\nA\n\nB\n";
+    assert_eq!(texts(&Tree::parse(src)).len(), 3);
 }
 
 /// A verbatim environment's body is one run: its blank lines do not
