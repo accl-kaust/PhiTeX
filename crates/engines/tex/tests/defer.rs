@@ -891,9 +891,12 @@ fn a_name_built_from_a_stepped_counter_reads_through_the_name() {
             "one on: cold equals the names written out"
         );
         // (paragraph 30 defines a name of that shape itself: it reads the
-        // counter's digits)
+        // counter's digits, and the two after it, whose names read its
+        // definitions, are asked once and stand, every read as it was
+        // (`Ctx::last_run_stands`, no run): counted as asked, as every
+        // wake is)
         assert!(
-            asked(&b) <= r0 + 1,
+            asked(&b) <= r0 + 3,
             "-j{threads}: no paragraph asked again on the counter when no name's meaning moved: {:?}",
             b.stats.refuted_by_field
         );
