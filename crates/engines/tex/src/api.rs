@@ -6324,6 +6324,13 @@ pub struct Build {
     /// the entries it made or moved (a viewer asks after each edit; a
     /// document of thousands of LaTeX errors placed them all again).
     diag_memo: Mutex<FxHashMap<u64, Diagnostic>>,
+    /// The diagnostics last made ([`Build::diagnostics`]) and the
+    /// evaluations settled ([`Build::settles`]) and text version they
+    /// were made at: a build that settled nothing since (`r` with nothing
+    /// changed) gives them again, not made anew (Grail: 279, 1.7 ms).
+    diags_last: Mutex<Option<((u64, u64, usize), Vec<Diagnostic>)>>,
+    /// Evaluations settled (`Build::settle` past its nothing-to-settle).
+    settles: u64,
     /// The document's units and their analyses ([`Incr`]).
     incr: Incr,
     /// Whether a package load ran in the last evaluation: only then do
@@ -6588,6 +6595,8 @@ impl Build {
             memo: Mutex::default(),
             lines: Mutex::default(),
             diag_memo: Mutex::default(),
+            diags_last: Mutex::default(),
+            settles: 0,
             loads_ran: false,
             staged: false,
             evaluated: false,
@@ -6825,6 +6834,7 @@ impl Build {
         if self.nothing_to_settle() {
             return;
         }
+        self.settles += 1;
         self.staged = false;
         let t_all = std::time::Instant::now();
         self.progress_offsets();
@@ -8372,6 +8382,19 @@ impl Build {
     /// and the engine's evaluation errors; by file, then byte.
     #[must_use]
     pub fn diagnostics(&self) -> Vec<Diagnostic> {
+        let key = (self.settles, self.stats.version, self.text.len());
+        if let Some((k, d)) = self.diags_last.locked().as_ref()
+            && *k == key
+        {
+            return d.clone();
+        }
+        let d = self.diagnostics_made();
+        *self.diags_last.locked() = Some((key, d.clone()));
+        d
+    }
+
+    /// [`Build::diagnostics`], made.
+    fn diagnostics_made(&self) -> Vec<Diagnostic> {
         let t_spans = std::time::Instant::now();
         let v = self.g.eng.values();
         // the document's text and its nodes' spans: the text itself where
