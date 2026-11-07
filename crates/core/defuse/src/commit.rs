@@ -1199,6 +1199,13 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let mut room: Option<Made> = None;
     let mut next_answers: FxHashMap<usize, Option<ValueId>> = FxHashMap::default();
     let parks = rec.state.is_some();
+    // (the readers filed, each once: a run asks one thing many times, a
+    // `TikZ` picture whether microtype's font list holds a font at each
+    // node's text, 20 592 reads of the list by 76 paths; filed each, every
+    // change of the list walked them all, 0.4 s of Grail's paragraph
+    // delete in its walks. Two records of one node, serial, place, path
+    // and answer are one reader: a walk asks them alike)
+    let mut filed_once: FxHashMap<(Field, u32, NodeId, bool, PathId, Option<ValueId>), ()> = FxHashMap::default();
     for (ri, r) in rec.reads.iter().enumerate() {
         if r.filed && !file_all {
             continue;
@@ -1227,6 +1234,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     path: r.path,
                     seen: r.seen,
                 };
+                if filed_once
+                    .insert((*f, serial, anchor, inclusive, r.path, r.seen), ())
+                    .is_some()
+                {
+                    continue;
+                }
                 // (a derived read's witness, kept from an earlier run (one
                 // that stood, a state resumed from): filed on the field its
                 // name gives now as well, before the lock, so a change of
