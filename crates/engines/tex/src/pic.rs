@@ -1090,6 +1090,12 @@ impl Run<'_, '_> {
         self.muts += 1;
         self.st = crate::state::State::new();
         self.pubs = None;
+        // (its appends pending too: kept, they named locations of the
+        // table dropped, which the empty one does not have, and their
+        // publication asked the build's fields for a spill location's
+        // field: `Fields::field_of`)
+        self.appending.clear();
+        self.appending_vals.clear();
         self.contribs.clear();
         self.kids.clear();
         self.fread.clear();
