@@ -207,7 +207,8 @@ const DISTRIBUTION_VARS: [&str; 8] = [
 
 impl Tree {
     /// The folders of the distribution's trees ([`DISTRIBUTION_VARS`]),
-    /// canonical, and the cache's (the fonts the engine made).
+    /// as named and canonical, and the cache's (the fonts the engine
+    /// made).
     pub fn distribution(&self) -> Vec<PathBuf> {
         let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
         let mut out: Vec<PathBuf> = vec![cache_dir()];
@@ -220,10 +221,10 @@ impl Tree {
                 }
             }
         }
-        let mut out: Vec<PathBuf> = out
-            .into_iter()
-            .map(|d| d.canonicalize().unwrap_or(d))
-            .collect();
+        // (each as named and canonical: a path kpathsea found is under the
+        // first, one a link led to under the second)
+        let canon: Vec<PathBuf> = out.iter().filter_map(|d| d.canonicalize().ok()).collect();
+        out.extend(canon);
         out.sort();
         out.dedup();
         out

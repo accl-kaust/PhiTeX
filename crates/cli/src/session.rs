@@ -197,11 +197,12 @@ impl Host for Machine {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
-    /// Under one of TeX Live's trees, or the cache's fonts.
+    /// Under one of TeX Live's trees, or the cache's fonts: as found (no
+    /// call to the system), else canonical.
     fn distribution(&self, path: &Path) -> bool {
         let dirs = self.distribution.get_or_init(|| self.tree.distribution());
-        let p = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        dirs.iter().any(|d| p.starts_with(d))
+        let under = |p: &Path| dirs.iter().any(|d| p.starts_with(d));
+        under(path) || (path.is_absolute() && std::fs::canonicalize(path).is_ok_and(|p| under(&p)))
     }
 
     fn has_format_file(&self, name: &str) -> bool {
