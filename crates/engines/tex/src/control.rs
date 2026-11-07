@@ -3099,7 +3099,11 @@ impl Run<'_, '_> {
             let frames: Vec<&str> = bt
                 .lines()
                 .map(str::trim)
-                .filter(|l| l.split(':').next().is_some_and(|n| n.parse::<u32>().is_ok()))
+                .filter(|l| {
+                    l.split(':')
+                        .next()
+                        .is_some_and(|n| n.parse::<u32>().is_ok())
+                })
                 .skip(1)
                 .take(14)
                 .collect();
