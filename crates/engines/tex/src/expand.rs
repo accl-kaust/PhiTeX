@@ -643,7 +643,8 @@ impl Run<'_, '_> {
                 let mut tok = tok;
                 if crate::defer::is_sym(tok) {
                     let undelimited = s == Some(r) && (r >= len || is_match(&p[r]));
-                    match self.sym_arg(tok, undelimited) {
+                    let delim = (r < len && !is_match(&p[r])).then(|| p[r]);
+                    match self.sym_arg(tok, undelimited, delim) {
                         Some(Some(t)) => tok = t,
                         Some(None) => continue 'cont,
                         None => return false,
@@ -816,11 +817,26 @@ impl Run<'_, '_> {
     /// argument's file size digit, docs/spec-relative-counters.md §2.4:
     /// the first digit's symbol, the rest's put back), or its digits put
     /// on the input to be matched one by one (`Some(None)`); None: a halt.
+    /// A derived name ([`crate::defer::DName`]) is one control sequence,
+    /// as the `\csname` that made it gave TeX: taken whole, never
+    /// expanded (`\expandafter\label@@hyperref\csname r@x\endcsname`,
+    /// hyperref's `\hyperref[x]`, had the argument be `\r@x`'s body: at
+    /// -j4 edichokey's links went to labels named by their page numbers),
+    /// its concrete name where the delimiter `delim` it is matched
+    /// against is a control sequence.
     #[cold]
     #[inline(never)]
     #[allow(clippy::option_option)]
-    fn sym_arg(&mut self, tok: Tok, undelimited: bool) -> Option<Option<Tok>> {
+    fn sym_arg(&mut self, tok: Tok, undelimited: bool, delim: Option<Tok>) -> Option<Option<Tok>> {
         use crate::defer::{Part, size_of, size_tok};
+        if crate::defer::is_dname(tok) {
+            if delim.is_some_and(Tok::is_cs) {
+                return self
+                    .lift(|r| crate::defer::dname_concrete(r, tok))
+                    .map(Some);
+            }
+            return Some(Some(tok));
+        }
         match size_of(tok) {
             Some((Part::Head, _)) if undelimited => Some(Some(tok)),
             Some((Part::All, key)) if undelimited => {
