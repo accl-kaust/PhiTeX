@@ -485,16 +485,17 @@ fn filed_defs(v: &Values, defs: &[DefRec], b: &Brackets) -> Vec<Filed> {
         .collect()
 }
 
+/// The most reads at one anchor a commit files under one hold of that
+/// anchor's segment's lock (`commit`'s step 2).
+const ANCHOR_BATCH: usize = 4096;
+
 /// Files a reader record in a segment it is anchored in; true for the
 /// segment's first reader of `f` (the caller adds it to the index once the
 /// lock is released). `spare` is a list made before the lock, used for a
 /// field's first.
 fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, spare: &mut Vec<Reader>) -> bool {
     if r.anchor != r.node {
-        let mut a = eng.node(r.anchor).anchored.lock();
-        if !a.contains(&f) {
-            a.push(f);
-        }
+        eng.node(r.anchor).anchored.lock().insert(f);
     }
     let v = inner.readers.entry(f).or_insert_with(|| std::mem::take(spare));
     let first = v.is_empty();
@@ -1993,7 +1994,13 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // (a node read at that is gone by now: a read that found a value there
     // finds none, and no removal will ask it again)
     let mut anchor_gone: Vec<(Field, NodeId)> = gone_kept;
-    for (f, r, at) in other_reads {
+    // (the reads at one anchor, in a row, filed under one hold of its
+    // segment's lock, at most `ANCHOR_BATCH` a hold: a picture's run reads
+    // everything before its parent, 144 000 reads at one node, a lock
+    // taken each)
+    let mut other_reads = other_reads.into_iter().peekable();
+    let mut firsts: Vec<Field> = Vec::new();
+    while let Some((f, r, at)) = other_reads.next() {
         // (a read at a unit's end: filed with the field, not at the node
         // that was last when it committed. A node placed after that one,
         // or a split of the last segment under way while the last node
@@ -2007,16 +2014,39 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             eng.ranges.add_end(f, u, r, |x| live(eng, x.node, x.serial));
             continue;
         }
-        let a = eng.node(r.anchor);
+        let anchor = r.anchor;
+        let a = eng.node(anchor);
         let mut spare: Vec<Reader> = Vec::with_capacity(4);
         if let Some((seg, mut inner)) = own_write(eng, a) {
-            let first = file_reader(eng, &mut inner, f, r, &mut spare);
-            drop(inner);
-            if first {
-                eng.readers.add(f, seg.lo, seg.id);
+            firsts.clear();
+            if file_reader(eng, &mut inner, f, r, &mut spare) {
+                firsts.push(f);
             }
-        } else if r.seen.is_some() {
-            anchor_gone.push((f, r.anchor));
+            let mut n = 1;
+            while n < ANCHOR_BATCH
+                && let Some((g, r2, _)) =
+                    other_reads.next_if(|(_, x, at)| x.anchor == anchor && !matches!(at, Anchor::End(_)))
+            {
+                if file_reader(eng, &mut inner, g, r2, &mut spare) {
+                    firsts.push(g);
+                }
+                n += 1;
+            }
+            drop(inner);
+            for &g in &firsts {
+                eng.readers.add(g, seg.lo, seg.id);
+            }
+        } else {
+            if r.seen.is_some() {
+                anchor_gone.push((f, anchor));
+            }
+            while let Some((g, r2, _)) =
+                other_reads.next_if(|(_, x, at)| x.anchor == anchor && !matches!(at, Anchor::End(_)))
+            {
+                if r2.seen.is_some() {
+                    anchor_gone.push((g, anchor));
+                }
+            }
         }
     }
     file_ranges(eng, ww, range_reads, node.id, &mut st);
@@ -5256,7 +5286,7 @@ fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
     let pos = m.pos_hint();
     let hole = m.is_hole();
     let rec = m.record();
-    let mut fs: Vec<Field> = m.anchored.lock().clone();
+    let mut fs: Vec<Field> = m.anchored.lock().iter().copied().collect();
     if let Some(r) = &rec {
         fs.extend(r.reads.iter().filter_map(|x| match x.kind {
             ReadKind::Field { f, at: Anchor::Me } => Some(f),
