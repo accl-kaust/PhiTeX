@@ -120,6 +120,7 @@ impl<'a> Ctx<'a> {
                 effect: None,
                 place_effects: Vec::new(),
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
+                moves_gen: eng.moves_gen.load(std::sync::atomic::Ordering::Acquire),
                 unchanged: false,
                 own_claim: false,
                 at_hole: false,
@@ -2176,10 +2177,11 @@ impl<'a> Ctx<'a> {
     /// run that went on from a checkpoint (`PHITEX_RESUME_CHECK`), so the
     /// whole run's product is what is committed.
     pub fn begin_again(&mut self) {
-        let scope_gen = self.product.scope_gen;
+        let (scope_gen, moves_gen) = (self.product.scope_gen, self.product.moves_gen);
         let fresh = Ctx::new(self.eng, self.worker, self.me);
         self.product = fresh.product;
         self.product.scope_gen = scope_gen;
+        self.product.moves_gen = moves_gen;
         self.views.clear();
         self.follow_at = None;
         self.seen.clear();

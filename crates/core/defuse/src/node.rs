@@ -516,15 +516,16 @@ pub(crate) struct RunRecord {
     /// stands, a read of a field whose change count is the one it read
     /// at gives what it gave ([`RunRecord::read_holds`]).
     pub(crate) scope_gen: u64,
+    /// The same for the relocations counted (`Engine::moves_gen`).
+    pub(crate) moves_gen: u64,
 }
 
 impl RunRecord {
     /// Whether its read `rd` still gives what it gave: unchecked where
-    /// nothing of its field changed since it read (the field's change
-    /// count as it was, no scope moved, not a contribution's search,
-    /// which a commit with none moves uncounted), as a commit's check
-    /// takes its reads (`commit::commit`'s refutation); else asked
-    /// (`read::holds`). A picture's child holds up to 144 000 reads:
+    /// nothing of its field changed since it read (a read at a place
+    /// that stands, its field's change count as it was, no scope moved),
+    /// as a commit's check takes its reads (`commit::commit`'s
+    /// refutation); else asked (`read::holds`). A picture's child holds up to 144 000 reads:
     /// asked one by one, a check that found them all standing cost
     /// 70-140 ms (Grail, a deleted paragraph: 0.46 s of it).
     pub(crate) fn read_holds(
@@ -535,12 +536,28 @@ impl RunRecord {
         scope_moved: bool,
         memo: &mut crate::read::FoldMemo,
     ) -> bool {
-        if !scope_moved
+        // (a read at a place: at the reader, or before or after a node
+        // still there and not moved, whose answer only a change of its
+        // field's definitions moves; not a final read, which reads what
+        // was published at a quiet point, nor a fold or a search, whose
+        // bounds may go with no change of the field: a read before a
+        // node removed since answers none)
+        let at_place = |n: NodeId| {
+            let a = eng.node(n);
+            a.state() != State::Gone && !a.moved.load(Ordering::Acquire)
+        };
+        let placed = match &rd.kind {
+            ReadKind::Field { at: Anchor::Me, .. } => at_place(me.id),
+            ReadKind::Field {
+                at: Anchor::Before(n) | Anchor::AfterOwn(n),
+                ..
+            } => at_place(me.id) && at_place(*n),
+            ReadKind::Env { .. } => true,
+            _ => false,
+        };
+        if placed
+            && !scope_moved
             && rd.epoch != u64::MAX
-            && !matches!(
-                rd.kind,
-                ReadKind::Next { .. } | ReadKind::Placed { .. } | ReadKind::Hole
-            )
             && rd.kind.field().is_some_and(|f| eng.field_epoch(f) == rd.epoch)
         {
             return true;
@@ -548,10 +565,11 @@ impl RunRecord {
         crate::read::holds(eng, me, rd, memo)
     }
 
-    /// Whether the scope generation moved since its reads were made
-    /// ([`RunRecord::read_holds`]'s `scope_moved`).
+    /// Whether the scope generation moved since its reads were made, or a
+    /// node was relocated ([`RunRecord::read_holds`]'s `scope_moved`).
     pub(crate) fn scope_moved(&self, eng: &crate::Engine) -> bool {
-        crate::read::scoped(eng) && eng.scope_gen.load(std::sync::atomic::Ordering::Acquire) != self.scope_gen
+        (crate::read::scoped(eng) && eng.scope_gen.load(Ordering::Acquire) != self.scope_gen)
+            || eng.moves_gen.load(Ordering::Acquire) != self.moves_gen
     }
 
     pub(crate) fn provisional(defs: Vec<DefRec>) -> RunRecord {
@@ -570,6 +588,7 @@ impl RunRecord {
             provisional: true,
             waits: Box::default(),
             scope_gen: 0,
+            moves_gen: 0,
         }
     }
 }
@@ -719,6 +738,8 @@ pub(crate) struct Product {
     /// The scope epoch when the run began (`Engine::scope_gen`): a
     /// bracket changed since may have moved any of its reads.
     pub(crate) scope_gen: u64,
+    /// The relocations counted when it began (`Engine::moves_gen`).
+    pub(crate) moves_gen: u64,
     /// The run published nothing new (`Ctx::unchanged`): the last
     /// record's definitions, contributions, placements and output stand,
     /// with this run's reads.

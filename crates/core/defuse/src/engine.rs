@@ -158,6 +158,10 @@ pub struct Engine {
     /// cached at an older count is stale (`read::chain_start`), and a run
     /// that began before one checks every read at its commit.
     pub(crate) scope_gen: AtomicU64,
+    /// Counts the nodes relocated (`commit::relocate`): a read anchored
+    /// at a node made before one may answer otherwise with no change of
+    /// its field counted ([`crate::node::RunRecord::read_holds`]).
+    pub(crate) moves_gen: AtomicU64,
     /// Nodes with brackets filed: none, and no scope is walked.
     pub(crate) bracket_nodes: AtomicUsize,
     /// The field a read of the scope depth is recorded under
@@ -329,6 +333,7 @@ impl Engine {
             pred_pending: Mx::new(Vec::new()),
             swept_left: AtomicU64::new(0),
             scope_gen: AtomicU64::new(1),
+            moves_gen: AtomicU64::new(1),
             bracket_nodes: AtomicUsize::new(0),
             depth_field,
             has_finals: std::sync::atomic::AtomicBool::new(false),

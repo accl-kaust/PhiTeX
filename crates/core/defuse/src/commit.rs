@@ -1135,6 +1135,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             Some(r) if p.unchanged || p.resumed.get() => p.scope_gen.min(r.scope_gen),
             _ => p.scope_gen,
         },
+        moves_gen: match node.record() {
+            Some(r) if p.unchanged || p.resumed.get() => p.moves_gen.min(r.moves_gen),
+            _ => p.moves_gen,
+        },
     });
     let mut spare_readers: Vec<Reader> = Vec::with_capacity(4);
     let fields_of = |r: &Option<Arc<RunRecord>>| -> (Vec<Field>, Vec<Field>) {
@@ -4818,6 +4822,7 @@ pub(crate) fn edit_placed(eng: &Engine, placer: NodeId, f: impl FnOnce(&mut Vec<
         state: r.state,
         waits: r.waits.clone(),
         scope_gen: r.scope_gen,
+        moves_gen: r.moves_gen,
     }));
 }
 
@@ -5168,6 +5173,7 @@ pub(crate) fn relocate(
         .widen_over(Pos(lo.0.saturating_sub(1)), Pos(hi.0.saturating_add(1)));
     // each runs again where it stands, in their order (the ready heap
     // takes the first queued first among equal keys, `sched::Ready`)
+    eng.moves_gen.fetch_add(1, Ordering::AcqRel);
     for m in &landed {
         m.moved.store(true, Ordering::Release);
         // (a parked state rests on reads at the old place)
