@@ -271,6 +271,14 @@ impl Run<'_, '_> {
     /// (true), or the run goes on inline (false: no picture here, a
     /// first run, a picture refused before, or no output yet; the child
     /// placed where it was not before).
+    /// Whether `cur` is a picture's `\begin` this run places as a child
+    /// ([`Run::pic_begin`] says whether it does).
+    pub(crate) fn pic_here(&self) -> bool {
+        self.pic_on
+            && (crate::val::cmd::CALL..=crate::val::cmd::LONG_OUTER_CALL).contains(&self.cur.cmd)
+            && self.cur.tok == begin_tok()
+    }
+
     pub(crate) fn pic_begin(&mut self) -> bool {
         // (a list of the run's own to put the picture's items on: on the
         // engine's main list they are contributions, `Run::pic_shape`)
