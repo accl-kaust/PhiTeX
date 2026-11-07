@@ -470,14 +470,15 @@ pub struct Session {
     /// Where the outputs go.
     sink: Arc<dyn Sink>,
     builds: usize,
-    /// The written keys, the package records, the written files' names
-    /// and the document nodes' records last stored in the cache
-    /// ([`Session::store_wkeys`], [`Session::store_pkgrec`],
-    /// [`Session::store_wnames`], [`Session::store_noderec`]).
+    /// The written keys, the package records (each load's bytes' hash,
+    /// by its key), the written files' names and the document nodes'
+    /// records last stored in the cache ([`Session::store_wkeys`],
+    /// [`Session::store_pkgrec`], [`Session::store_wnames`],
+    /// [`Session::store_noderec`]).
     #[allow(clippy::type_complexity)]
     stored: Mutex<(
         Option<Vec<u8>>,
-        Option<Vec<u8>>,
+        std::collections::HashMap<String, u64>,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
     )>,
@@ -639,7 +640,7 @@ impl Session {
             store: store.map(Records::new),
             sink,
             builds: 0,
-            stored: Mutex::new((None, None, None, None)),
+            stored: Mutex::new((None, std::collections::HashMap::new(), None, None)),
             made_stored: Mutex::new(None),
             wkeys_from: Mutex::new(None),
             status,
@@ -992,11 +993,14 @@ impl Session {
                     written_init: self.written_init(),
                     made_init: self.made_init(),
                     // (the package loads' records: machine-wide, beside the
-                    // format, from every document built with it)
-                    pkgrec: self
-                        .pkgrec_key()
-                        .and_then(|n| self.store.as_ref()?.get(Key::Format(&n, "pkgrec")))
-                        .unwrap_or_default(),
+                    // format, from every document built with it; each
+                    // load's asked as the build meets it, never all)
+                    pkgrec_source: self.pkgrec_key().and_then(|n| {
+                        let store = self.store.clone()?;
+                        Some(Arc::new(move |key: &str| {
+                            store.get(Key::Format(&n, &pkgrec_name(key)))
+                        }) as phitex_tex::PkgrecSource)
+                    }),
                     // (the document nodes' records: the document's own)
                     noderec: self
                         .noderec_kept()
@@ -1733,20 +1737,20 @@ impl Session {
         }
     }
 
+    /// The package loads' records the build changed, each stored by its
+    /// key ([`pkgrec_name`]) unless stored so already.
     fn store_pkgrec(&self, b: &Build) {
         let (Some(c), Some(n)) = (&self.store, self.pkgrec_key()) else {
             return;
         };
-        let recs = b.export_pkgrec();
         let mut last = self.stored.lock().unwrap_or_else(PoisonError::into_inner);
-        if last.1.as_deref() == Some(recs.as_slice()) {
-            return;
+        for (k, recs) in b.changed_pkgrecs() {
+            let h = tex::Fnv::new().add(&recs).0;
+            if last.1.get(&k) != Some(&h) {
+                c.put(Key::Format(&n, &pkgrec_name(&k)), &recs);
+                last.1.insert(k, h);
+            }
         }
-        if !recs.is_empty() && c.get(Key::Format(&n, "pkgrec")).as_deref() != Some(recs.as_slice())
-        {
-            c.put(Key::Format(&n, "pkgrec"), &recs);
-        }
-        last.1 = Some(recs);
     }
 
     fn store_noderec(&self, b: &Build) {
@@ -2260,6 +2264,13 @@ fn wnames_of(b: &[u8]) -> Vec<String> {
         .lines()
         .map(str::to_owned)
         .collect()
+}
+
+/// The store's name of the package load record under load key `key`
+/// (beside the format: one per load, so a build reads and writes its
+/// own loads' records only).
+fn pkgrec_name(key: &str) -> String {
+    format!("pkgrecs/{:016x}", tex::Fnv::new().add(key.as_bytes()).0)
 }
 
 /// `the main file byte N` in `s`, the engine's place in the main text
