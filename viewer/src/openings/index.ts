@@ -15,6 +15,7 @@ import { tetris } from "./tetris.ts";
 import { plane } from "./plane.ts";
 import { glyphs } from "./glyphs.ts";
 import { kaust } from "./kaust.ts";
+import { badapple } from "./badapple.ts";
 
 export interface Look {
   id: string;
@@ -35,6 +36,7 @@ export const LOOKS: Look[] = [
   { id: "tetris", name: "Tetris", make: (s, dark) => tetris(s, dark) },
   { id: "glyphs", name: "Glyph rain", make: (s, dark) => glyphs(s, dark) },
   { id: "kaust", name: "ACCL | KAUST", make: (s, dark) => kaust(s, dark) },
+  { id: "badapple", name: "Bad Apple!!", make: (s, dark) => badapple(s, dark) },
 ];
 
 /** The choice: one of LOOKS, at random, or none. */

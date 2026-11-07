@@ -137,6 +137,7 @@ pub const CHOICES: &[(&str, &[&str])] = &[
             "tetris",
             "glyphs",
             "kaust",
+            "badapple",
             "off",
             "retro",
         ],
