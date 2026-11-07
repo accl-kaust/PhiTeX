@@ -724,7 +724,17 @@ def oracle(edl):
         ist = {k for k in base if k.endswith(".ist")}
         log = []
         envd = manuals.side_env(eng if eng in ("pdflatex", "xelatex") else ENG)
-        r = manuals.loop(Path(d), manuals.oracle_cmd(eng, MAIN), manuals.Tools(), envd, job, base, ist, log)
+        # (settled when the files the next pass reads stop changing, as
+        # latexmk decides: the PDF left out of that test. A document whose
+        # PDF carries the time its .log was written (hyperxmp under XeTeX:
+        # Grail) changes its PDF every pass and never settles otherwise,
+        # running MAX_PASSES passes no user waits for)
+        keep = common.NOT_COMPARED
+        common.NOT_COMPARED = keep + (".pdf",)
+        try:
+            r = manuals.loop(Path(d), manuals.oracle_cmd(eng, MAIN), manuals.Tools(), envd, job, base, ist, log)
+        finally:
+            common.NOT_COMPARED = keep
         pdf = os.path.join(d, job + ".pdf")
         rec = dict(wall_s=r["wall_s"], passes=r["passes"], tools=r["tools"], status=r["status"],
                    settled=r.get("settled"), pdf=md5(pdf) if os.path.exists(pdf) else "none",
