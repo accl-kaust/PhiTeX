@@ -689,6 +689,30 @@ impl Run<'_, '_> {
         let v = self.v;
         let a = list_of(v, ck);
         let Some(&at) = a.get(5) else { return Ok(()) };
+        // (`PHITEX_CK_MATCH_TRACE`, observe: a run asked again, at each of
+        // its checkpoints, against its last run's checkpoint at the same
+        // place in its input (whatever its command count): where they
+        // differ)
+        if crate::exec::obs_flag!("PHITEX_CK_MATCH_TRACE") && a.len() > 19 {
+            let same_place = last
+                .iter()
+                .map(|&x| list_of(v, x))
+                .filter(|b| b.len() == a.len() && b[19] == a[19] && b[..5] == a[..5])
+                .min_by_key(|b| (0..a.len()).filter(|&i| a[i] != b[i]).count());
+            eprintln!(
+                "ck-match: node {} at command {}: {}",
+                self.cx.node().raw(),
+                self.cmds,
+                same_place.map_or_else(
+                    || "no checkpoint of the last run at this place".to_owned(),
+                    |b| format!(
+                        "the last run's at command {}: {}",
+                        int_of(v, b[5]),
+                        ck_diff(v, &a, &b)
+                    )
+                )
+            );
+        }
         let Some((j, b)) = last
             .iter()
             .enumerate()
@@ -1787,6 +1811,14 @@ impl Run<'_, '_> {
                 .collect();
             return format!("no checkpoint of the whole run at command {at:?} (its: {cmds:?})");
         };
+        ck_diff(v, &a, &b)
+    }
+}
+
+/// Where checkpoints `a` and `b` differ, by path (a base slot by its
+/// field), as one line ([`Run::ck_compare`], `PHITEX_CK_MATCH_TRACE`).
+fn ck_diff(v: &phitex_defuse::Values, a: &[ValueId], b: &[ValueId]) -> String {
+    {
         if a.len() != b.len() {
             return format!("lengths {} {}", a.len(), b.len());
         }
