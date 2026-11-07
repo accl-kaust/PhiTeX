@@ -2,13 +2,13 @@
 \usepackage{tikz}
 \usepackage[expansion=true,protrusion=true]{microtype}
 \begin{document}
-% (a picture child that refuses, its read-time object, after a paragraph
+% (a picture child in a box that refuses, its read-time object, after a paragraph
 % of the same piece broken with font expansion: the child starts with the
 % piece's appends pending to the fonts' expansion lists, and drops them
 % with its table)
 \parbox{4cm}{A paragraph set in a narrow box, so that its lines are
 stretched and shrunk with the font's expansion, more than once each.}
-\begin{tikzpicture}\node{\immediate\pdfobj{<< /Refused true >>}x};\end{tikzpicture}
+\mbox{\begin{tikzpicture}\node{\immediate\pdfobj{<< /Refused true >>}x};\end{tikzpicture}}
 
 % (the empty name made \relax here, as TeX does, and seen so after)
 \csname\endcsname A paragraph that makes the empty control sequence.
