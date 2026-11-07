@@ -710,9 +710,31 @@ fn member_now(eng: &Engine, me: &Node, at: Anchor, spec: ValueId) -> bool {
     if alias_of(vals, x).is_some() {
         return true;
     }
-    apply_path(eng, Some(x), names)
-        .and_then(|l| vals.with_list(l, |xs| xs.contains(&elem)))
+    // (the names of the list's value, made once for the reads checked
+    // one after another: a run's guarded reads are of one list, each
+    // name of it one read, and the names a projection of its body)
+    let epoch = vals.epoch();
+    let l = MEMBER_NAMES.with_borrow_mut(|m| match *m {
+        Some((e, y, p, l)) if e == epoch && y == x && p == names => l,
+        _ => {
+            let l = apply_path(eng, Some(x), names);
+            *m = Some((epoch, x, names, l));
+            l
+        }
+    });
+    l.and_then(|l| vals.with_list(l, |xs| xs.contains(&elem)))
         .unwrap_or(true)
+}
+
+/// The store's epoch, a list's value, a names path, and the names.
+type MemberNames = (u64, ValueId, PathId, Option<ValueId>);
+
+thread_local! {
+    /// [`member_now`]'s last list value, names path and names, with the
+    /// store's epoch they were made at (`Values::epoch`: a collection
+    /// since may have taken them).
+    static MEMBER_NAMES: std::cell::RefCell<Option<MemberNames>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The field a derived read's spec names where `base` has value `v`:
