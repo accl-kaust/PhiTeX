@@ -54,8 +54,11 @@ pub type FetchHook = Arc<dyn Fn(&Fetch<'_>) + Send + Sync>;
 #[derive(Default)]
 struct State {
     by_name: HashMap<String, Entry>,
-    /// The host's files by the path it gave (the project's, as `./name`).
-    by_given_path: HashMap<String, Arc<Vec<u8>>>,
+    /// The host's files by the path it gave (the project's, as `./name`),
+    /// each with the number of its giving ([`Files::stamp`]).
+    by_given_path: HashMap<String, (u64, Arc<Vec<u8>>)>,
+    /// The files the host has given so far: each giving's number.
+    givings: u64,
     index: Option<Arc<Index>>,
     /// The extension's bundled texmf/: these names the host's, not Shelf's.
     bundled: HashSet<String>,
@@ -157,13 +160,30 @@ impl Files {
         }
         let s = self.lock();
         let plain = path.strip_prefix("./").unwrap_or(path);
-        if let Some(b) = s.by_given_path.get(plain) {
+        if let Some((_, b)) = s.by_given_path.get(plain) {
             return Some(b.clone());
         }
         match s.by_name.get(plain) {
             Some(Entry::Given(Some((_, b)))) => Some(b.clone()),
             _ => None,
         }
+    }
+
+    /// A key of the file at `path` that changes when its bytes may have,
+    /// none read ([`phitex_live::host::Host::stamp`]: a Rebuild, `r` in
+    /// the watch, reads again only the files whose key moved): Shelf's,
+    /// the release's, the same for the session (as the CLI's `--shelf`);
+    /// the host's, the number of its last giving, a file given again (a
+    /// figure replaced in Overleaf) a new one; none: not here.
+    pub fn stamp(&self, path: &str) -> Option<Vec<u8>> {
+        if path.starts_with(shelf::TL) {
+            return self.read(path).is_some().then(|| b"shelf".to_vec());
+        }
+        let s = self.lock();
+        let plain = path.strip_prefix("./").unwrap_or(path);
+        s.by_given_path
+            .get(plain)
+            .map(|(n, _)| n.to_le_bytes().to_vec())
     }
 
     /// Whether `name` is the host's (given, or bundled outside an engine's
@@ -269,9 +289,19 @@ impl Files {
     pub fn provide(&self, name: &str, file: Option<Found>) {
         let file = file.map(|(p, b)| (p, Arc::new(b)));
         let mut s = self.lock();
+        // (a file the host had given, now given as absent: its path no
+        // longer the host's, so a Rebuild's stamp sees it gone)
+        if file.is_none()
+            && let Some(Entry::Given(Some((p, _)))) = s.by_name.get(name)
+        {
+            let p = p.strip_prefix("./").unwrap_or(p).to_owned();
+            s.by_given_path.remove(&p);
+        }
         if let Some((p, b)) = &file {
+            s.givings += 1;
+            let n = s.givings;
             s.by_given_path
-                .insert(p.strip_prefix("./").unwrap_or(p).to_owned(), b.clone());
+                .insert(p.strip_prefix("./").unwrap_or(p).to_owned(), (n, b.clone()));
         }
         s.by_name.insert(name.to_owned(), Entry::Given(file));
         drop(s);
@@ -334,5 +364,30 @@ impl PackSource for HostPacks {
                     .unwrap_or_else(|| Err(format!("the pack {id} could not be had")))
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file the host gives keeps its stamp until it is given again (a
+    /// new one: a Rebuild reads it again) or given as absent (none: looked
+    /// up again, gone); one never given has none.
+    #[test]
+    fn a_given_files_stamp_moves_only_when_it_is_given_again() {
+        let f = Files::default();
+        assert_eq!(f.stamp("./a.png"), None);
+        f.provide("a.png", Some(("./a.png".to_owned(), b"one".to_vec())));
+        f.provide("b.tex", Some(("./b.tex".to_owned(), b"b".to_vec())));
+        let a = f.stamp("./a.png").expect("given");
+        assert_eq!(f.stamp("a.png").as_ref(), Some(&a));
+        let b = f.stamp("./b.tex");
+        f.provide("a.png", Some(("./a.png".to_owned(), b"two".to_vec())));
+        assert_ne!(f.stamp("./a.png").as_ref(), Some(&a));
+        assert_eq!(f.stamp("./b.tex"), b);
+        f.provide("a.png", None);
+        assert_eq!(f.stamp("./a.png"), None);
+        assert_eq!(f.read("./a.png"), None);
     }
 }
