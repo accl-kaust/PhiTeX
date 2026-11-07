@@ -1178,6 +1178,43 @@ fn latex_a_rerun_costs_no_more_than_its_first_run() {
     );
 }
 
+/// Pictures in a paragraph are children of its run, after characters
+/// and after a display too (the frontends' document: its picture ran
+/// again at every word edit of its paragraph): a word edit before them
+/// runs no picture again, and the PDF is a cold build's.
+#[test]
+fn latex_pictures_in_a_paragraph_are_children() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-par-pics");
+    let _ = std::fs::create_dir_all(&dir);
+    let src = "\\documentclass{article}\n\\usepackage{amsmath}\n\\usepackage{tikz}\n\\begin{document}\nSome words before it. \\begin{tikzpicture}\\draw (0,0) circle (1);\\end{tikzpicture} and after it.\n\nA paragraph with a display, most edits change one paragraph.\n\\begin{equation} t_{edit} = t_{par} + t_{page} \\end{equation}\n\\begin{tikzpicture}\\foreach \\i in {1,...,5}{\\draw (\\i*0.3,0) circle (0.05);}\\end{tikzpicture}\nAnd words after the picture.\n\\end{document}\n";
+    std::fs::write(dir.join("parpics.tex"), src).expect("write");
+    let mut b = common::build(pdf_opts("parpics", &dir), Some(&prelude(true)), src);
+    let before = b.pages();
+    let cold_pics = common::runs_of(&b, "pic");
+    for (k, (a, z)) in [
+        ("Some words", "Some other words"),
+        ("most edits", "many edits"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let new = src.replace(a, z);
+        b.edit(&new);
+        let pics = common::runs_of(&b, "pic");
+        let cold = common::build(pdf_opts("parpics", &dir), Some(&prelude(true)), &new);
+        assert!(
+            cold_pics >= 2,
+            "the cold build placed {cold_pics} pictures as children"
+        );
+        assert_eq!(pics, 0, "edit {k}: {pics} pictures ran again");
+        assert_eq!(b.pages().len(), before.len());
+        if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+            panic!("edit {k} differs from a cold build: {d}");
+        }
+        b.edit(src);
+    }
+}
+
 /// Unchanged bytes change nothing (`r` in a watch: every file the build
 /// read staged again from disk, the main text sent again; an editor
 /// saving a file unchanged): with `pdfdocs/inputs.tex`, its cut
