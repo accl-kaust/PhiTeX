@@ -368,13 +368,16 @@ impl Rc {
                         ),
                     }),
                 },
-                Exact::MaxRepeat(v) => match v.trim().parse::<u32>() {
-                    Ok(n) if n > 0 => a.max_repeat = Some(n),
-                    _ => a.notes.push(Note {
-                        at: at.clone(),
-                        why: format!("$max_repeat = {v} not applied: not a positive number"),
-                    }),
-                },
+                // (phitex's limit is latexmk's default)
+                Exact::MaxRepeat(v) if v.trim() == "5" => {}
+                Exact::MaxRepeat(v) => a.notes.push(Note {
+                    at: at.clone(),
+                    why: format!(
+                        "$max_repeat = {} not applied: phitex runs LaTeX at most 5 times, \
+                         latexmk's default",
+                        v.trim()
+                    ),
+                }),
                 _ => {}
             }
         }
@@ -405,8 +408,6 @@ pub struct Applied {
     pub shell_escape: Option<(bool, Place)>,
     /// `-synctex=N` in the command: on unless 0.
     pub synctex: Option<bool>,
-    /// `$max_repeat`.
-    pub max_repeat: Option<u32>,
     /// What it cannot apply.
     pub notes: Vec<Note>,
 }

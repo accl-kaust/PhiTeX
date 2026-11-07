@@ -53,6 +53,61 @@ LaTeX until its files settle. For example:
 warning: .latexmkrc:3: $pdf_mode not applied (phitex chooses the engine itself)
 ```
 
+## Two modes: find (the default) and exact
+
+`find` applies only the settings above. `exact` applies latexmk's other
+settings that PhiTeX has a counterpart for:
+
+| Setting | With `exact` |
+|---|---|
+| `$pdf_mode` | 1: pdflatex, 5: xelatex. 4 (lualatex) is said and not applied: LuaLaTeX is not supported in PhiTeX 1.0. 0, 2 and 3 (DVI, PostScript) are said and not applied. |
+| `$pdflatex`, `$xelatex` | the program it runs (`$pdflatex = 'xelatex %O %S'` builds with xelatex); `-synctex=N` (SyncTeX on unless 0); `-shell-escape` (see below); `-interaction`, `-file-line-error`, `-halt-on-error` accepted, as phitex already works that way; any other option said and not applied. `set_tex_cmds('...')` too. |
+| `$out_dir` | the output folder (relative to the working folder) |
+| `$aux_dir` | applied only when it is `$out_dir`: phitex writes the auxiliary files beside the PDF |
+| `$bibtex_use` | 1, 1.5, 2: what phitex does already; 0 is said and not applied |
+| `$max_repeat` | 5 is phitex's limit, latexmk's default; another value is said and not applied |
+
+Turn it on for one run with `--exact-latexmk`, or for good with
+`phitex config latexmk exact` (or `latexmk = "exact"` in a project's
+`phitex.toml`). The command line's own options stay over the rc files'
+(`--engine`, `--output-dir`, `--synctex`).
+
+`-shell-escape` from a `.latexmkrc` applies only with `--exact-latexmk`
+typed on the command line: a project folder may be anyone's, and the
+setting in `phitex.toml` (which a project can carry) never lets it run
+commands. An `$out_dir` outside the working folder likewise needs the
+flag. In the browser (the extension, Overleaf) `-shell-escape` from a
+`.latexmkrc` never applies.
+
+## phitex.toml's `inputs`
+
+PhiTeX's own way to say where TeX looks first, without a `.latexmkrc`:
+
+```toml
+inputs = ["../common/tex//"]   # or one folder: inputs = "../common/tex//"
+```
+
+Each entry is a folder in kpathsea's syntax (a trailing `//`: its
+subfolders too), relative to that `phitex.toml`'s folder. The entries go
+before `TEXINPUTS` from the environment, which goes before TeX Live's own
+search. A project's `inputs` are over yours (`~/.config/phitex/phitex.toml`,
+relative to that file's folder).
+
+## Which wins
+
+Command-line options, then the `.latexmkrc` files, then `phitex.toml`, then
+PhiTeX's defaults. A `.latexmkrc` sees `phitex.toml`'s `inputs` at the start
+of `$ENV{TEXINPUTS}`: one that appends to `$ENV{TEXINPUTS}` keeps them,
+one that sets it outright replaces them.
+
+Why the `.latexmkrc` is over `phitex.toml`: it is the file every other tool
+builds the project with (latexmk, Overleaf, editors that run latexmk), so its
+result is the PDF people compare with; `phitex.toml` fills in what no
+`.latexmkrc` says. One exception: `main` in `phitex.toml` names the main file
+as the command line does, so `@default_files` applies only when neither
+names one (a `@default_files` in your own `~/.latexmkrc` must not pick a
+different file in a project that names its own).
+
 ## The Perl PhiTeX reads
 
 - Assignments of strings, numbers and other variables, joined with `.`:
@@ -94,6 +149,12 @@ Anything else (subroutines, `if`, loops, `system`, `add_cus_dep`, other
 modules) is not run, and its line is said with why.
 
 ## Where it applies
+
+- The browser hosts (the extension, Overleaf through it): the project's
+  `latexmkrc` or `.latexmkrc` at its root, as Overleaf reads it (no system
+  or user file there). Its `TEXINPUTS` folders inside the project are
+  searched; folders outside it are said and not searched. `BIBINPUTS` and
+  `BSTINPUTS` are said and not applied there.
 
 - `phitex build` and `phitex watch`, with TeX Live and with Shelf
   (`--shelf`): the search paths are kpathsea's in a TeX Live build, and

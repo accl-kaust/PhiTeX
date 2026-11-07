@@ -64,10 +64,65 @@ struct State {
     bundled: HashSet<String>,
     /// Shelf's files, one an engine (made at its first use).
     shelves: HashMap<&'static str, Arc<shelf::Files>>,
+    /// A `.latexmkrc`'s TEXINPUTS (`crate::session`'s open): where names
+    /// are looked for, the project's folders before the default search.
+    search: Option<Arc<Search>>,
     /// Packs asked of the host and not taken yet.
     asked: HashSet<String>,
     /// The host's answers, waiting to be taken: the bytes as served, or why not.
     arrived: HashMap<String, Result<Vec<u8>, String>>,
+}
+
+/// TEXINPUTS as the browser searches it: its elements, folders relative
+/// to the project's root, and the project's files (`projectFiles`: a
+/// `//` element's subfolders come from them; none given, a folder is
+/// asked for by name, its subfolders not searched).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Search {
+    pub elements: Vec<phitex_live::latexmkrc::Element>,
+    pub project: Option<Vec<String>>,
+}
+
+impl Search {
+    /// The project paths `name` may be in folder `dir` (relative to the
+    /// root, `""` the root), in kpathsea's order: the folder, then (`sub`)
+    /// its subfolders depth first, each by name.
+    pub fn candidates(&self, dir: &str, sub: bool, name: &str) -> Vec<String> {
+        let at = |d: &str| {
+            if d.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{d}/{name}")
+            }
+        };
+        let Some(list) = &self.project else {
+            return vec![at(dir)];
+        };
+        let mut found: Vec<(Vec<&str>, &String)> = list
+            .iter()
+            .filter_map(|p| {
+                let rest = p.strip_suffix(name)?;
+                let p_dir = if rest.is_empty() {
+                    ""
+                } else {
+                    rest.strip_suffix('/')?
+                };
+                let below = if dir.is_empty() {
+                    Some(p_dir)
+                } else {
+                    p_dir.strip_prefix(dir).and_then(|r| r.strip_prefix('/'))
+                };
+                let inside = p_dir == dir
+                    || (sub
+                        && below.is_some_and(|b| {
+                            !b.is_empty() && !b.split('/').any(|c| c.starts_with('.'))
+                        }));
+                inside.then(|| (p_dir.split('/').collect(), p))
+            })
+            .collect();
+        found.sort();
+        found.into_iter().map(|(_, p)| p.clone()).collect()
+    }
 }
 
 #[derive(Default)]
@@ -203,7 +258,41 @@ impl Files {
         !name.contains('/') && s.bundled.contains(name) && !engine_tree
     }
 
+    /// TEXINPUTS's search from now on (none: the default alone).
+    pub fn set_search(&self, search: Option<Search>) {
+        self.lock().search = search.map(Arc::new);
+    }
+
     fn find(self: &Arc<Self>, name: &str, engine: &'static str) -> Option<Kept> {
+        let search = self.lock().search.clone();
+        // (an absolute name, or one from ./ or ../, is not searched:
+        // kpathsea's rule)
+        let searched =
+            !(name.starts_with('/') || name.starts_with("./") || name.starts_with("../"));
+        let Some(search) = search.filter(|_| searched) else {
+            return self.find_default(name, engine);
+        };
+        for e in &search.elements {
+            match e {
+                phitex_live::latexmkrc::Element::Default => {
+                    if let Some(f) = self.find_default(name, engine) {
+                        return Some(f);
+                    }
+                }
+                phitex_live::latexmkrc::Element::Dir { path, sub } => {
+                    for c in search.candidates(path, *sub, name) {
+                        let s = self.lock();
+                        if let Some(f) = self.by_name(s, &c) {
+                            return Some(f);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn find_default(self: &Arc<Self>, name: &str, engine: &'static str) -> Option<Kept> {
         let s = self.lock();
         if let Some(Entry::Given(f)) = s.by_name.get(name) {
             return f.clone();
@@ -389,5 +478,93 @@ mod tests {
         f.provide("a.png", None);
         assert_eq!(f.stamp("./a.png"), None);
         assert_eq!(f.read("./a.png"), None);
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use std::sync::Arc;
+
+    use super::{Files, Search};
+    use phitex_live::latexmkrc::Element;
+
+    #[test]
+    fn texinputs_candidates_in_kpathseas_order() {
+        let s = Search {
+            elements: Vec::new(),
+            project: Some(
+                [
+                    "main.tex",
+                    "x.sty",
+                    "common/tex/zz/x.sty",
+                    "common/tex/x.sty",
+                    "common/tex/a/x.sty",
+                    "common/tex/.git/x.sty",
+                    "common/texx/x.sty",
+                    "other/x.sty",
+                    "common/tex/a/b/sub/x.sty",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+            ),
+        };
+        assert_eq!(
+            s.candidates("common/tex", true, "x.sty"),
+            vec![
+                "common/tex/x.sty",
+                "common/tex/a/x.sty",
+                "common/tex/a/b/sub/x.sty",
+                "common/tex/zz/x.sty"
+            ]
+        );
+        assert_eq!(
+            s.candidates("common/tex", false, "x.sty"),
+            vec!["common/tex/x.sty"]
+        );
+        assert_eq!(s.candidates("", false, "x.sty"), vec!["x.sty"]);
+        // (a name with a folder: searched under each folder)
+        assert_eq!(
+            s.candidates("common/tex", true, "sub/x.sty"),
+            vec!["common/tex/a/b/sub/x.sty"]
+        );
+        let none = Search {
+            elements: Vec::new(),
+            project: None,
+        };
+        assert_eq!(
+            none.candidates("common/tex", true, "x.sty"),
+            vec!["common/tex/x.sty"]
+        );
+    }
+
+    /// A name found in a TEXINPUTS folder the host gave, before the
+    /// project's root (the folder first in the path).
+    #[test]
+    fn a_name_found_along_texinputs() {
+        let f = Arc::new(Files::default());
+        f.provide("x.sty", Some(("./x.sty".to_owned(), b"root".to_vec())));
+        f.provide(
+            "common/tex/x.sty",
+            Some(("./common/tex/x.sty".to_owned(), b"shared".to_vec())),
+        );
+        assert_eq!(f.locate("x.sty", "pdflatex").as_deref(), Some("./x.sty"));
+        f.set_search(Some(Search {
+            elements: vec![
+                Element::Dir {
+                    path: "common/tex".into(),
+                    sub: true,
+                },
+                Element::Default,
+            ],
+            project: Some(vec!["x.sty".into(), "common/tex/x.sty".into()]),
+        }));
+        assert_eq!(
+            f.locate("x.sty", "pdflatex").as_deref(),
+            Some("./common/tex/x.sty")
+        );
+        // (./ names are not searched)
+        assert_eq!(f.locate("./x.sty", "pdflatex"), None);
+        f.set_search(None);
+        assert_eq!(f.locate("x.sty", "pdflatex").as_deref(), Some("./x.sty"));
     }
 }

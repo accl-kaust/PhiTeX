@@ -4162,3 +4162,71 @@ fn latexmkrc_shared_style_folder() {
     );
     same_as_latexmk(&paper.join("paper.pdf"), "shared");
 }
+
+/// The shared-style paper with a fuller `.latexmkrc` (`$out_dir`,
+/// `$pdflatex` with `-synctex=1` and `-shell-escape`): by default only its
+/// search path applies and each other setting is said once; with
+/// `--exact-latexmk` the PDF goes to `$out_dir` with its `.synctex.gz`,
+/// the same PDF as latexmk's.
+#[test]
+fn latexmkrc_exact_mode() {
+    let _one = one();
+    let (root, home) = latexmkrc_project("shared", "latexmkrc-exact");
+    let paper = root.join("paper");
+    std::fs::write(
+        paper.join(".latexmkrc"),
+        "$ENV{'TEXINPUTS'}='../common/tex//:' . $ENV{'TEXINPUTS'};\n\
+         $pdf_mode = 1;\n\
+         $out_dir = 'build';\n\
+         $pdflatex = 'pdflatex -shell-escape -synctex=1 -interaction=nonstopmode %O %S';\n",
+    )
+    .expect("written");
+    let (ok, errs) = build_with_rc(&paper, &home, &["paper.tex"]);
+    assert!(ok, "{errs}");
+    for s in ["$pdf_mode", "$out_dir", "$pdflatex"] {
+        assert_eq!(
+            errs.matches(&format!("{s} not applied")).count(),
+            1,
+            "{s}:\n{errs}"
+        );
+    }
+    assert!(errs.contains("--exact-latexmk applies it"), "{errs}");
+    same_as_latexmk(&paper.join("paper.pdf"), "shared");
+    let (ok, errs) = build_with_rc(&paper, &home, &["--exact-latexmk", "paper.tex"]);
+    assert!(ok, "{errs}");
+    assert!(!errs.contains("not applied"), "{errs}");
+    same_as_latexmk(&paper.join("build/paper.pdf"), "shared");
+    assert!(paper.join("build/paper.synctex.gz").is_file(), "{errs}");
+    // (`latexmk = "exact"` in phitex.toml applies the rest, but never
+    // -shell-escape: a .latexmkrc may be anyone's)
+    std::fs::remove_dir_all(paper.join("build")).expect("removed");
+    std::fs::write(paper.join("phitex.toml"), "latexmk = \"exact\"\n").expect("written");
+    let (ok, errs) = build_with_rc(&paper, &home, &["paper.tex"]);
+    assert!(ok, "{errs}");
+    assert_eq!(
+        errs.matches("-shell-escape not applied").count(),
+        1,
+        "{errs}"
+    );
+    same_as_latexmk(&paper.join("build/paper.pdf"), "shared");
+}
+
+/// phitex.toml's `inputs` without a `.latexmkrc`: the shared style found
+/// as the rc file would find it, the same PDF.
+#[test]
+fn phitex_toml_inputs() {
+    let _one = one();
+    let (root, home) = latexmkrc_project("shared", "latexmkrc-toml-inputs");
+    let paper = root.join("paper");
+    std::fs::remove_file(paper.join(".latexmkrc")).expect("removed");
+    let (ok, errs) = build_with_rc(&paper, &home, &["paper.tex"]);
+    assert!(!ok, "built without a search path:\n{errs}");
+    std::fs::write(
+        paper.join("phitex.toml"),
+        "main = \"paper.tex\"\ninputs = [\"../common/tex//\"]\n",
+    )
+    .expect("written");
+    let (ok, errs) = build_with_rc(&paper, &home, &[]);
+    assert!(ok, "{errs}");
+    same_as_latexmk(&paper.join("paper.pdf"), "shared");
+}
