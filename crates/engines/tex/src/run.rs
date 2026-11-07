@@ -958,6 +958,10 @@ pub(crate) struct Run<'c, 'a> {
     /// ([`Run::append_def`]). The run's first other touch of the location
     /// reads that value and makes the definition ([`Run::append_force`]).
     pub appending: Vec<(Loc, Vec<Tok>)>,
+    /// The classes this run read guarded by a list's names
+    /// ([`Run::class_lookup`] with a member): by location and list field,
+    /// for its later guarded lookups of the same list only.
+    pub class_member: crate::FxHashMap<(Loc, Field), u8>,
     /// Global appends of values to lists whose value before the run it
     /// has not read (pdfTeX's ratios a font has asked for), published as
     /// a relation ([`crate::val::VALS_APPEND`]); a full read of the
@@ -1476,6 +1480,7 @@ impl<'c, 'a> Run<'c, 'a> {
             defer_hit: None,
             rb: None,
             appending: Vec::new(),
+            class_member: crate::FxHashMap::default(),
             appending_vals: Vec::new(),
             reg_loaded_base: phitex_defuse::FxHashMap::default(),
             defer_regs: None,
@@ -5996,6 +6001,11 @@ impl<'c, 'a> Run<'c, 'a> {
         if m.has & crate::state::M_CLASS != 0 {
             return Ok(Some(m.class));
         }
+        if let Some((list, _, _)) = member
+            && let Some(&c) = self.class_member.get(&(l, list))
+        {
+            return Ok(Some(c));
+        }
         let f = self.loc_field(l);
         let p = phitex_defuse::PathId::of_proj(self.ops.class_proj);
         let x = match member {
@@ -6010,7 +6020,8 @@ impl<'c, 'a> Run<'c, 'a> {
         let Ok(c) = u8::try_from(int_of(self.v, x)) else {
             return Ok(None);
         };
-        if member.is_some() {
+        if let Some((list, _, _)) = member {
+            self.class_member.insert((l, list), c);
             return Ok(Some(c));
         }
         let e = self.memos.entry(l);
