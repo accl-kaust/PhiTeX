@@ -2653,8 +2653,8 @@ export class Panel {
     this.emit();
   }
 
-  /** The last build the host said (buildTime), painted or not. */
-  private built?: { ms: number; at: number; first: boolean };
+  /** The last build the host said (buildTime), painted or not; `joined`: the one before this tab joined (joinedLate). */
+  private built?: { ms: number; at: number; first: boolean; joined?: boolean };
 
   /**
    * What the status and the timing popover's head say: the newest of the
@@ -2663,15 +2663,25 @@ export class Panel {
    */
   private latest(): { label: string; ms: number; first: boolean } | undefined {
     const s = this.speed, b = this.built;
-    if (b && (!s || b.at > s.at)) return { label: b.first ? "First build" : "Built, no page changed", ms: b.ms, first: b.first };
+    if (b && (!s || b.at > s.at)) return { label: b.first ? "First build" : b.joined ? "Last build" : "Built, no page changed", ms: b.ms, first: b.first };
     if (s) return { label: s.first ? "First page" : "Built", ms: s.ms, first: !!s.first };
     return undefined;
   }
 
-  /** This tab joined `builds` builds in: `first` the first build's time for the bars; the first build's paint was not this tab's, so its next is not called one. */
-  joinedLate(first: number | undefined, builds: number): void {
+  /**
+   * This tab joined `builds` builds in: `first` the first build's time for
+   * the bars; the first build's paint was not this tab's, so its next is not
+   * called one; `last` the last build's time, for the status and the popover's
+   * head ("Last build", or "First build" if it was the only one).
+   */
+  joinedLate(first: number | undefined, builds: number, last?: { ms: number; cold: boolean }): void {
     if (first !== undefined && this.times.first === undefined) this.times.first = first;
     if (builds >= 1) this.paints = Math.max(this.paints, 1);
+    if (last && !this.built) {
+      this.built = { ms: last.ms, at: performance.now(), first: last.cold, joined: true };
+      this.renderStatus();
+      if (!this.$("#m-time").hidden) this.timing();
+    }
   }
 
   /** The bars: the first build, the last edit, the edits' median, each as long as its time (the longest the full width; a short one at least a sliver). */

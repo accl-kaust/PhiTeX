@@ -1463,7 +1463,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             out.push_str(&tail.join("  "));
         }
         ui.line(out.trim_end());
-        // (for `s`: the build's phases, its reuse, its parallelism)
+        // (for `s`: the build's phases, its reuse, its parallelism; the
+        // phases kept for the viewer's stats too)
+        let phases = status.take();
         {
             let mut rows = Vec::new();
             if builds > 1 && live > 0 {
@@ -1475,8 +1477,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             } else {
                 rows.push(("nodes".to_owned(), format!("{nodes} run")));
             }
-            for (name, d) in status.take() {
-                rows.push((name, ms(d)));
+            for (name, d) in &phases {
+                rows.push((name.clone(), ms(*d)));
             }
             if let Some(x) = r.runs.last() {
                 // (how parallel the build was, in three facts: the cores
@@ -1574,6 +1576,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             );
             last.borrow_mut().summary = tree(st, head, &rows);
         }
+        // (what `s` shows, as one object, for every build, a build that
+        // changed no page too: the viewer's "Copy debug info")
+        let build_info = build_stats(t, s, &r, builds, why, &phases);
+        if let Some(v) = &view {
+            v.stats(&build_info);
+        }
         // (the panels `s` and `w` pinned: shown after every build, so the
         // keys need not be pressed again)
         {
@@ -1630,6 +1638,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 },
             })),
             "wall_ms": r.wall.as_secs_f64() * 1e3,
+            "stats": build_info,
             "errors": r.out.errors,
             "diagnostics": r.engine_diagnostics(),
         }));
@@ -2241,6 +2250,57 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     quit(ui, &mut s, None)
 }
 
+/// Build `builds`'s stats, as `s` shows them, for the viewer's "Copy debug
+/// info" and the `build` event: one object, the same fields every build
+/// (none of them left out when nothing ran or no page changed).
+fn build_stats(
+    t: &Target,
+    s: &session::Session,
+    r: &session::Report,
+    builds: usize,
+    why: &str,
+    phases: &[(String, Duration)],
+) -> serde_json::Value {
+    let x = r.runs.last();
+    let nodes = x.map_or(0, |x| x.commands_run);
+    let live = x.map_or(0, |x| x.live as u64);
+    let phase_ms: serde_json::Map<String, serde_json::Value> = phases
+        .iter()
+        .map(|(n, d)| (n.clone(), json!(d.as_secs_f64() * 1e3)))
+        .collect();
+    json!({
+        "build": builds,
+        "why": why,
+        "version": env!("CARGO_PKG_VERSION"),
+        "engine": s.job.engine.name,
+        "files": if t.files == crate::tex::Files::Shelf { "shelf" } else { "texlive" },
+        // (the Shelf release the files are from; none: TeX Live's)
+        "files_release": (t.files == crate::tex::Files::Shelf).then(crate::shelf::release),
+        "wall_ms": r.wall.as_secs_f64() * 1e3,
+        "phases_ms": phase_ms,
+        "hints": x.map(|x| json!({
+            "bounded": x.hints[0],
+            "any": x.hints[1],
+            "violations": x.hints[2],
+            "undeclared": x.hints[3],
+            "stops": x.hints[4],
+            "pending_waits": x.hints[5],
+        })),
+        "nodes": {"ran": nodes, "kept": live.saturating_sub(nodes), "live": live},
+        "runs": x.map_or(0, |x| x.runs),
+        "rounds": x.map_or(0, |x| x.rounds),
+        "pages": r.pages(),
+        "pages_changed": r.out.pages_changed,
+        "threads": x.map_or(0, |x| x.threads),
+        "cores_busy": x.and_then(session::RunInfo::speedup),
+        "busy_ms": x.map_or(0.0, |x| x.busy.as_secs_f64() * 1e3),
+        "engine_ms": x.map_or(0.0, |x| x.engine_wall.as_secs_f64() * 1e3),
+        "wasted_ms": x.map_or(0.0, |x| x.wasted.as_secs_f64() * 1e3),
+        "resident_kb": x.map_or(0, |x| x.rss_kb),
+        "values_bytes": x.map_or(0, |x| x.values_bytes),
+        "ok": r.out.errors.is_empty(),
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;

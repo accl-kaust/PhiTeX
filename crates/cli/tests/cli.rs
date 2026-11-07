@@ -1972,6 +1972,39 @@ fn exit_statuses() {
     assert_eq!(status(&["build", "--engine", "tex", "bad.tex"]), Some(1));
 }
 
+/// Builds' `stats` (the `build` events'): the fields the viewer's debug
+/// info reads, the same set in each (the first a cold build of `tex`).
+fn stats_alike(evs: &[&serde_json::Value]) {
+    let cold = evs[0];
+    let keys = |e: &serde_json::Value| -> Vec<String> {
+        e["stats"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    for k in [
+        "nodes",
+        "runs",
+        "phases_ms",
+        "threads",
+        "cores_busy",
+        "resident_kb",
+        "engine",
+        "files",
+        "files_release",
+        "version",
+        "wall_ms",
+        "hints",
+    ] {
+        assert!(keys(cold).iter().any(|x| x == k), "no stats.{k}: {cold}");
+    }
+    assert_eq!(cold["stats"]["engine"], "tex", "{cold}");
+    assert!(cold["stats"]["phases_ms"].is_object(), "{cold}");
+    for e in &evs[1..] {
+        assert_eq!(keys(cold), keys(e), "{cold} {e}");
+    }
+}
+
 /// `phitex watch --json` on a plain document (`tex`): a word edited on
 /// disk is build 2, an edit of the line it is on, fewer nodes run than
 /// cold, and its DVI file is a cold build's of the edited text; an edit
@@ -2020,8 +2053,10 @@ fn watch_plain_edit() {
     let broken = edited.replacen(" thy ", " \\undefinedcs ", 1);
     std::thread::sleep(Duration::from_millis(50));
     std::fs::write(dir.join("story.tex"), &broken).expect("the broken edit");
+    let edit = ev;
     let ev = until(&mut lines, "build", &3.into(), &mut seen);
     assert_eq!(ev["ok"], false, "{ev}");
+    stats_alike(&[&cold, &edit, &ev]);
     let failed = std::fs::read(dir.join("story.dvi")).expect("the failed build's DVI");
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
