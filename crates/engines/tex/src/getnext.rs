@@ -602,6 +602,9 @@ impl Run<'_, '_> {
 
     /// `get_x_token` (§380): a halt is raised, never returned.
     pub(crate) fn get_x_token(&mut self) {
+        // (this call's alone: a test or `\expandafter` it expands reads
+        // its own tokens through `get_x_token` as TeX does)
+        let pic_stop = std::mem::replace(&mut self.pic_stop, false);
         loop {
             // (a derived name's symbol is expanded through its name,
             // [`Run::d_ok`])
@@ -609,6 +612,11 @@ impl Run<'_, '_> {
             self.next_or_end();
             self.d_ok = false;
             if self.cur.cmd <= cmd::MAX_COMMAND || self.halt.is_some() {
+                return;
+            }
+            // (a picture's `\begin` where the caller places pictures:
+            // left unexpanded, `Run::pic_stop`)
+            if pic_stop && self.pic_here() {
                 return;
             }
             // (a macro: its body goes on top here, no expansion level)

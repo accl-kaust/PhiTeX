@@ -1387,8 +1387,11 @@ impl Run<'_, '_> {
             l.par = Some((lang, packed));
             l.clang = lang;
         }
-        // §443: an optional space
+        // §443: an optional space (a picture's `\begin` put back
+        // unexpanded: the command loop places it as a child, `crate::pic`)
+        self.pic_stop = true;
         self.get_x_token();
+        self.pic_stop = false;
         self.ck()?;
         if self.cur.cmd != cmd::SPACER {
             self.back_cur();
