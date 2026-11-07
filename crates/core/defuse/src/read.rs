@@ -504,8 +504,18 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
             })
             .flatten()
         }
+        // (nothing holds no key: false, as `Present` answers on nothing.
+        // A client that looks at a list and notes what it used of it
+        // (`Ctx::note_path`) says false for a key the list lacks, the list
+        // undefined there too; answered none, the commit's check saw the
+        // read move every time, and the run, asked again by it with no
+        // site, ran for ever: pinlabdoc at -j1, a paragraph's ask of an
+        // expanded font's ratio before any page had asked for one,
+        // `Run::note_elink_asks`)
         Step::Has(k) => {
-            let x = v?;
+            let Some(x) = v else {
+                return Some(vals.bool(false));
+            };
             if let Some(ix) = assoc_index(vals, x) {
                 return Some(vals.bool(ix.contains_key(&k)));
             }
@@ -639,7 +649,7 @@ pub(crate) fn apply_path(eng: &Engine, v: Option<ValueId>, p: PathId) -> Option<
     let steps = eng.path_steps(p)?;
     let mut cur = v;
     // (a step that does not apply gives none, and the steps after it
-    // apply to none: `Present` and `Eq` answer false there, as a view's
+    // apply to none: `Present`, `Eq` and `Has` answer false there, as a view's
     // step that found nothing recorded it, `Ctx::at`)
     for s in steps {
         cur = step(eng, cur, *s);
@@ -2194,6 +2204,26 @@ mod tests {
     use crate::engine::Engine;
     use crate::node::ReadKind;
     use crate::values::{Field, ValueId};
+
+    /// Nothing holds no key: `Has` on no value is false, as `Present`, so
+    /// a client that noted a key missing from a list it looked at (`Ctx::
+    /// note_path`, false) and the commit's check of that read (the field
+    /// undefined there) agree. Answered none, the read moved at every
+    /// check and its run ran again for ever (pinlabdoc at -j1).
+    #[test]
+    fn nothing_has_no_key() {
+        use crate::api::Step;
+        let eng = Engine::new();
+        let v = eng.values();
+        let k = v.int(20);
+        assert_eq!(super::step(&eng, None, Step::Has(k)), Some(v.bool(false)));
+        assert_eq!(
+            super::step(&eng, Some(v.list(vec![])), Step::Has(k)),
+            Some(v.bool(false))
+        );
+        let p = eng.path(&[Step::Has(k)]);
+        assert_eq!(super::apply_path(&eng, None, p), Some(v.bool(false)));
+    }
 
     /// A long association list answers `Key` and `Has` through its index
     /// as passing over it answers: the first entry a key heads, an entry
