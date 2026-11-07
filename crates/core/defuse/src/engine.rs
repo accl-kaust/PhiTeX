@@ -1065,7 +1065,13 @@ impl Engine {
         let n = self.node(node);
         let was_inert = n.taken();
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
+        let (at, unit) = (n.pos_hint(), n.unit);
         unfile(self, None, n);
+        // (the first node after it to run again runs first on what it
+        // left: those after it wait for that one, `sched::mark_front`)
+        if self.epoch.load(Ordering::Acquire) > 0 {
+            crate::sched::mark_front(self, at, unit);
+        }
         if was_inert {
             self.wake_claimer(n);
         }

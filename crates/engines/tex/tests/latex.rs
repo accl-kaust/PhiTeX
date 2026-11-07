@@ -3345,10 +3345,43 @@ fn alignment_cells_setting_a_switch_do_not_read_it() {
 /// first uses the deleted paragraph's font runs again on the list (Grail's
 /// `TikZ` figures each ran again, a second each). A name in the list
 /// redefined to expand reads in full where an append meets it. Every
-/// edited PDF equals a cold build's, at one and eight threads.
+/// edited PDF equals a cold build's, at one and eight threads. At eight,
+/// the paragraphs after the deleted one wait for the first of them to run
+/// again (`sched::mark_front` in the engine): run beside it, they ran on
+/// the deleted paragraph's font gone and none in its place, then again on
+/// the list (3 builds in 40 on dev, accl 26125; 8 in 30 on acclnode11).
 #[test]
 fn a_font_list_append_does_not_run_again_when_the_list_moves() {
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/mt-append");
+    font_list_append("mt-append", |first| {
+        if first {
+            "A paragraph that first uses \\texttt{a typewriter font}.\n\n"
+        } else {
+            ""
+        }
+    });
+}
+
+/// [`a_font_list_append_does_not_run_again_when_the_list_moves`] with the
+/// first use edited away, its paragraph kept: its commit withdraws the
+/// font's definitions, and the paragraphs after it wait for the first of
+/// them to run again, as after a deletion (8 builds in 30 ran the appenders
+/// again on acclnode11 before).
+#[test]
+fn a_font_list_append_does_not_run_again_when_a_first_use_is_edited_away() {
+    font_list_append("mt-append-edit", |first| {
+        if first {
+            "A paragraph that first uses \\texttt{a typewriter font}.\n\n"
+        } else {
+            "A paragraph that first uses a typewriter font.\n\n"
+        }
+    });
+}
+
+/// The two font list tests: `head(first)` the document's first paragraph.
+fn font_list_append(name: &str, head: fn(bool) -> &'static str) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("latexmk")
+        .join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let doc = |first: bool| {
@@ -3356,9 +3389,7 @@ fn a_font_list_append_does_not_run_again_when_the_list_moves() {
             "\\documentclass{article}\n\\usepackage{microtype}\n\\makeatletter\n\
              \\def\\L{}\\font\\fa=cmr10 \\font\\fb=cmr12\n\\makeatother\n\\begin{document}\n",
         );
-        if first {
-            s.push_str("A paragraph that first uses \\texttt{a typewriter font}.\n\n");
-        }
+        s.push_str(head(first));
         for p in [
             "The \\texttt{typewriter} again, and \\xdef\\L{\\L\\fa,}a name.",
             "Now \\textbf{bold} type.",

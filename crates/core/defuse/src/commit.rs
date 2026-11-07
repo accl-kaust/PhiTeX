@@ -802,6 +802,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // moved as a run's are, `relocate`)
     let moved = node.moved.swap(false, Ordering::AcqRel);
     let keep_placed = p.unchanged && node.record().is_some() && !moved;
+    // (a removed node's front has run: what it defines is known now)
+    crate::sched::clear_front(eng, node);
     // (whether its definitions reach readers outside its settling layer
     // at once: before any walk of this commit asks, `sched::settles_edge`)
     if !p.unchanged {
@@ -1133,6 +1135,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         })
     };
     let (mut old_fields, mut old_contribs) = fields_of(&last);
+    // (a definition its last run made and this one does not: `withdraws`)
+    let mut withdrew = false;
     let nd = rec.defs.len() + old_fields.len();
     let nc = rec.contribs.len() + old_contribs.len();
     let mut changed_defs: Vec<Field> = Vec::with_capacity(nd);
@@ -1487,6 +1491,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 && m.get(&pos).is_some_and(|e| e.by == node.id)
             {
                 m.remove(&pos);
+                withdrew = true;
                 changed_defs.push(f);
                 if m.is_empty() {
                     // (its run freed after the lock)
@@ -2131,6 +2136,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         node.claim_all.store(p.claim_all, Ordering::Release);
         apply_claim(eng, ww, node, p.claim);
     }
+    // (a definition withdrawn: the readers it re-asks wait for this node
+    // until its walks are done and the first node after it they woke is
+    // known, then for that one, `withdraws`)
+    let withdraws = withdrew && withdraws(eng, node);
     // (the frontier this run moved, before any reader is asked again: one
     // woken by this commit past it reads what the layer defines and waits
     // there (`Ctx::hold_at_frontier`). Set after the re-asks, the woken
@@ -2226,6 +2235,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             reask_parent(eng, ww, parent, node.id, &mut st);
         }
         wake_waiting(eng, ww, parent, node.id, &mut st);
+    }
+    if withdraws {
+        let end = subtree_end(eng, node.id);
+        crate::sched::mark_front(eng, eng.node(end).pos_hint(), node.unit);
+        crate::sched::clear_front(eng, node);
     }
     // (the runs that stopped for this node's commit, `Ctx::read`)
     crate::sched::release_waiting(eng, ww, node.id);
@@ -2516,6 +2530,32 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
 /// A filed reader's serial: it stands from its node's `filed_floor` to
 /// the node's serial ([`crate::segment::live`]), not at its own alone.
 pub(crate) const FILED: u32 = 1 << 31;
+
+/// A commit of `node` in an edit that withdraws a definition its last run
+/// made (the first use of a font edited away): the readers after it fall
+/// back to a definition before it, or to none, and the first node after it
+/// that the commit asks again may define it anew (the next paragraph that
+/// uses the font loads it), as after a removal (`sched::mark_front`). The
+/// readers its walks wake wait for `node`, still at work, while the walks
+/// go on (`sched::hold_for`), then for that first node, the front, which
+/// the commit marks once its walks are done. Woken with it, they ran on
+/// the definition withdrawn and none in its place, and again once the
+/// front had committed
+/// (`a_font_list_append_does_not_run_again_when_a_first_use_is_edited_away`,
+/// about 1 edit in 4 at -j8). Whether `node` was made such a mover.
+fn withdraws(eng: &Engine, node: &Node) -> bool {
+    if !eng.holds_on.load(Ordering::Acquire) {
+        return false;
+    }
+    let op = eng.op(node.op());
+    if op.chains() || op.works_at_frontier() || op.final_only() {
+        return false;
+    }
+    if !node.front.swap(true, Ordering::AcqRel) && eng.movers.lock().insert(node.id) {
+        eng.movers_n.fetch_add(1, Ordering::Release);
+    }
+    true
+}
 
 /// Whether a read's reader stays filed across the commits of runs going
 /// on from it ([`crate::node::ReadRec::filed`]): not a search that met a
@@ -4069,6 +4109,9 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
             }
         }
         node.set_state(State::Gone);
+        // (gone, it commits no more: none waits for it)
+        crate::sched::clear_front(eng, node);
+        crate::sched::clear_move(eng, node);
         if let Some(o) = node.last.lock().as_ref() {
             eng.stale_reads.fetch_add(o.reads.len() as u64, Ordering::Relaxed);
         }
