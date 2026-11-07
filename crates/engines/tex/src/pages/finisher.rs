@@ -284,17 +284,6 @@ impl Run<'_, '_> {
             None => None,
         };
         let nth = page.as_ref().map_or(0, |p| i64::from(p.nth));
-        // (the progress shown: the page the build has reached)
-        if let Some(p) = page.as_ref().filter(|p| p.normal > 0)
-            && let Some(w) = self
-                .ops
-                .watch
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-        {
-            w.progress.note_page(u64::try_from(p.normal).unwrap_or(0));
-        }
         if crate::exec::obs_flag!("PHITEX_FIN_TRACE") {
             eprintln!(
                 "fin-trace: node {} page {nth} of its piece spec {} page {}",
@@ -397,7 +386,21 @@ impl Run<'_, '_> {
             );
         }
         self.fire_page(a(1))?;
+        self.shipped = 0;
         self.run_all()?;
+        // (the progress shown: the pages shipped up to this page's
+        // firing, as a reader counts them; not the firings)
+        if let Some(p) = self.fin.as_ref().and_then(|c| c.page.as_ref())
+            && let Some(w) = self
+                .ops
+                .watch
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+        {
+            w.progress
+                .note_ships(self.cx.node().raw(), (p.normal, p.special), self.shipped);
+        }
         self.publish_page()
     }
 

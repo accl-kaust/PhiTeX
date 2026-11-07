@@ -635,6 +635,7 @@ impl Run<'_, '_> {
         }
         let su = v.seq_unit(page);
         self.contribute("pages", su);
+        self.shipped += 1;
         if let Some(shown) = shown {
             let h = v.seq_unit(v.int(i64::from_ne_bytes(shown.to_ne_bytes())));
             self.contribute("pagehash", h);
