@@ -310,6 +310,18 @@ def pct(xs, q):
     return xs[lo] + (xs[hi] - xs[lo]) * (k - lo)
 
 
+def first_error(r):
+    """': ' and the first error line PhiTeX printed in a failed run, or ''."""
+    for x in r.get("phitex_runs", []):
+        if "This is a bug in PhiTeX" in (x.get("term_tail") or ""):
+            return ": an internal error (a PhiTeX bug)"
+        for line in (x.get("term_tail") or "").splitlines():
+            line = line.strip()
+            if line.startswith("error:") and "report" not in line:
+                return ": " + line[len("error:"):].strip()[:160]
+    return ""
+
+
 def cmd_json(args):
     args.binaries = dict(x.split("=", 1) for x in args.binary_name)
     repo = Path(args.repo)
@@ -361,8 +373,9 @@ def cmd_json(args):
                                     "link": bugs[c["id"]][1], "note": DEST_NOTE if bugs[c["id"]][2] == "dest-under-matrix" else None})
             else:
                 e["by_class"]["not-examined"] += 1
-                why = ("timed out after {} s".format(r["limit_s"]) if r.get("timeout") else
-                       "PhiTeX made no PDF" if not r["phitex_md5"] else
+                why = ("PhiTeX did not finish in {:.0f} minutes (TeX Live: {:.1f} s)".format(r["limit_s"] / 60, r["oracle_s"] or 0)
+                       if r.get("timeout") else
+                       "PhiTeX stopped with an error" + first_error(r) if not r["phitex_md5"] else
                        "TeX Live made no PDF" if not r["oracle_md5"] else
                        "PhiTeX's PDF differs between runs" if len(r["phitex_md5"]) > 1 else
                        "the PDF differs from TeX Live's (md5)")
