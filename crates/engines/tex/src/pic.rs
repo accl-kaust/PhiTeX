@@ -318,51 +318,7 @@ impl Run<'_, '_> {
         }
         let Some(body) = found else {
             if trace() {
-                let top = self.input.levels.last().map(|l| l.kind);
-                let here: String = self
-                    .input
-                    .levels
-                    .last()
-                    .filter(|l| l.kind == kind::LINE)
-                    .map(|&l| {
-                        let ln = self.input.line(l);
-                        ln.buf
-                            .iter()
-                            .skip(ln.loc)
-                            .take(30)
-                            .filter_map(|&c| char::from_u32(c))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let segs: Vec<String> = self
-                    .input
-                    .text
-                    .iter()
-                    .skip(self.input.text_at)
-                    .take(4)
-                    .map(|s| match s {
-                        Seg::Line(l) => format!(
-                            "line {:?}",
-                            l.buf
-                                .iter()
-                                .take(24)
-                                .filter_map(|&c| char::from_u32(c))
-                                .collect::<String>()
-                        ),
-                        Seg::Toks(t) => format!("toks {}", t.len()),
-                        Seg::File(_) => "file".to_owned(),
-                    })
-                    .collect();
-                eprintln!(
-                    "pic: node {} at \\begin: no picture body found (input top {top:?}, levels {}, next {here:?}, text after {segs:?}, pulled {}, rescanned {})",
-                    self.cx.node().raw(),
-                    self.input.levels.len(),
-                    self.pulled,
-                    self.input
-                        .levels
-                        .last()
-                        .is_some_and(|&l| l.kind == kind::LINE && self.input.line(l).rescanned)
-                );
+                self.pic_no_body_trace();
             }
             return Ok(false);
         };
@@ -432,6 +388,55 @@ impl Run<'_, '_> {
             );
         }
         Ok(true)
+    }
+
+    /// `PHITEX_PIC_TRACE`: why a `\\begin` found no picture body here.
+    fn pic_no_body_trace(&self) {
+        let top = self.input.levels.last().map(|l| l.kind);
+        let here: String = self
+            .input
+            .levels
+            .last()
+            .filter(|l| l.kind == kind::LINE)
+            .map(|&l| {
+                let ln = self.input.line(l);
+                ln.buf
+                    .iter()
+                    .skip(ln.loc)
+                    .take(30)
+                    .filter_map(|&c| char::from_u32(c))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let segs: Vec<String> = self
+            .input
+            .text
+            .iter()
+            .skip(self.input.text_at)
+            .take(4)
+            .map(|s| match s {
+                Seg::Line(l) => format!(
+                    "line {:?}",
+                    l.buf
+                        .iter()
+                        .take(24)
+                        .filter_map(|&c| char::from_u32(c))
+                        .collect::<String>()
+                ),
+                Seg::Toks(t) => format!("toks {}", t.len()),
+                Seg::File(_) => "file".to_owned(),
+            })
+            .collect();
+        eprintln!(
+            "pic: node {} at \\begin: no picture body found (input top {top:?}, levels {}, next {here:?}, text after {segs:?}, pulled {}, rescanned {})",
+            self.cx.node().raw(),
+            self.input.levels.len(),
+            self.pulled,
+            self.input
+                .levels
+                .last()
+                .is_some_and(|&l| l.kind == kind::LINE && self.input.line(l).rescanned)
+        );
     }
 
     /// Whether the picture's `\begin{name}` may have its body in the
