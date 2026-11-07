@@ -45,6 +45,10 @@ and XeLaTeX, built by graph reduction, with exact output.
   set by `$ENV{...}` or `ensure_path`, with `dirname(abs_path(__FILE__))`
   and `do "../.latexmkrc"`), and `@default_files` when nothing names the
   file; any other line is said once with why (`docs/latexmkrc.md`).
+  `--exact-latexmk` (or `phitex config latexmk exact`) applies its
+  engine, output folder and options too. `inputs = ["../common/tex//"]`
+  in `phitex.toml` is PhiTeX's own way to name such folders. In the
+  browser, the project's root `latexmkrc` is read as Overleaf reads it.
 - **BibTeX, biber and makeindex in process.** A tool runs when the
   document reads the file it makes, on what the job wrote, and again
   only when that input changes. It runs as a memoised step of the build,
