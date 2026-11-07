@@ -602,10 +602,15 @@ impl Run<'_, '_> {
                     // (a picture's `\begin`: a child of this run, else
                     // expanded and the blanks after it skipped, as
                     // `get_x_token` would)
-                    self.pic_stop = true;
-                    let r = self.skip_blanks_x();
-                    self.pic_stop = false;
-                    r?;
+                    loop {
+                        self.pic_stop = true;
+                        self.get_x_token();
+                        self.pic_stop = false;
+                        self.ck()?;
+                        if self.cur.cmd != cmd::SPACER {
+                            break;
+                        }
+                    }
                     if self.pic_here() {
                         if self.pic_begin() {
                             return self.ck();
