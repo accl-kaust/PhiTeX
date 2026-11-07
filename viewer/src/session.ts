@@ -692,7 +692,9 @@ export class PreviewSession {
     this.noteError(r.json);
     this.status(r.json.pending, r.json.undefined_names);
     this.fetchPackages(r.json.missing);
-    this.sink.latency(`opened in ${r.json.build_ms.toFixed(1)} ms (round trip ${(this.now() - t).toFixed(1)} ms)`);
+    // (the open's answer: how long the engine took to answer it, and its own build's time when it built then)
+    const rt = this.now() - t, said = (ms: number) => (ms < 1000 ? `${ms.toFixed(0)} ms` : `${(ms / 1000).toFixed(1)} s`);
+    this.sink.latency(`opened: the engine answered in ${said(rt)}${r.json.build_ms >= 1 ? `, its build ${said(r.json.build_ms)}` : ""}`);
     await (this.sink.layout ? this.layout(Array.isArray(r.json.hashes) ? r.json.hashes : undefined) : this.showPage());
     // (the first build is in: nothing is building for the packages now)
     this.pkg.building = false;

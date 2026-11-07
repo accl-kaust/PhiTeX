@@ -137,6 +137,21 @@ type Stats = {
 /** The last build's stats, for the timing popover's "Copy debug info". */
 let lastStats: Stats | undefined;
 
+/**
+ * A build's stats in: kept for Copy debug info, and its parts for the timing
+ * popover's "Where the last build's time went" (typesetting, the PDF, the
+ * files: one after another, the build's time; the viewer's pages drawn
+ * alongside them, said apart).
+ */
+function statsIn(s: Stats): void {
+  lastStats = s;
+  const ph = s.phases_ms ?? {};
+  const names: [string, string][] = [["typesetting", "Typesetting"], ["output", "Writing the PDF"], ["writing files", "Writing files"]];
+  const known = new Set([...names.map(([k]) => k), "viewer"]);
+  const parts: [string, number][] = [...names.filter(([k]) => typeof ph[k] === "number").map(([k, n]): [string, number] => [n, ph[k]]), ...Object.entries(ph).filter(([k]) => !known.has(k))];
+  panel.buildParts(parts, typeof ph.viewer === "number" ? [["pages for the viewer", ph.viewer]] : []);
+}
+
 /** `stats` as lines of plain text, the CLI's `s` stats' words. */
 function statsLines(s: Stats): string[] {
   const n = s.nodes ?? {};
@@ -164,7 +179,7 @@ class Pages implements CoreTransport {
   constructor(sock: Socket) {
     this.sock = sock;
     sock.onEvent((e) => {
-      if ((e.event as string) === "stats") return void (lastStats = e as unknown as Stats);
+      if ((e.event as string) === "stats") return void statsIn(e as unknown as Stats);
       if (e.event !== "settled") return;
       this.texts = null;
       const s = e as Settled;
@@ -531,7 +546,7 @@ sock.onOpen = () => {
     const st = r.json?.stats, se = r.json?.settled as Settled | null | undefined;
     const last = se && typeof se.ms === "number" ? { ms: se.ms, cold: !!se.cold } : undefined;
     panel.joinedLate(typeof r.json?.first_ms === "number" ? r.json.first_ms : undefined, Number(r.json.builds), last);
-    if (st && typeof st === "object" && !lastStats) lastStats = st as Stats;
+    if (st && typeof st === "object" && !lastStats) statsIn(st as Stats);
     if (se && typeof se.ms === "number") panel.latency(...timing(se));
   });
   void session.start();

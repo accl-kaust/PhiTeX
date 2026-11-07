@@ -2150,6 +2150,10 @@ function framePart(json) {
   const split = [["finding what changed", f.probe], ["drawing", f.draw], ["waiting for the engine", Math.max(0, f.request - f.watch)], ["decoding", f.decode]];
   return `<div class="row"><span class="k">Drawing page ${f.page}${f.inView ? " (in view)" : ""}</span><span class="v">${esc3(dur(f.request + f.decode))}</span><div class="tbar">${split.map(([, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${split.map(([n, ms], i) => `<span><i class="c${i}"></i>${n} ${esc3(dur(ms))}</span>`).join("")}</div><span class="note">${f.drawn} slice${f.drawn === 1 ? "" : "s"} of the page drawn, ${f.kept} kept from before</span></div>`;
 }
+function frameText(json) {
+  const f = JSON.parse(json);
+  return `page ${f.page}${f.inView ? " (in view)" : ""} in ${dur(f.request + f.decode)}: finding what changed ${dur(f.probe)}, drawing ${dur(f.draw)}, waiting for the engine ${dur(Math.max(0, f.request - f.watch))}, decoding ${dur(f.decode)}; ${f.drawn} slices drawn, ${f.kept} kept`;
+}
 var PART_NAMES = {
   "first paint": "Typesetting this page",
   "fixed point": "Typesetting every page",
@@ -4160,6 +4164,22 @@ var Panel = class {
       `<div class="row"><span class="k">Where the time went</span><span class="v"></span><div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div></div>`
     );
   }
+  /** The last build's parts as its host measured them (the watch's stats), in order, and work done alongside them (not in the build's time): [name, ms]. */
+  phases = null;
+  /** The last build's parts (`parts` add up to its time; `beside`: done at the same time, said under the bar). */
+  buildParts(parts, beside = []) {
+    this.phases = { parts, beside };
+    if (!this.$("#m-time").hidden) this.timing();
+  }
+  /** The timing popover's "Where the last build's time went": its parts as a bar, like the opening's. */
+  phasesPart() {
+    const p = this.phases;
+    if (!p) return "";
+    const parts = p.parts.filter(([, ms]) => ms >= 1);
+    if (!parts.length) return "";
+    const beside = p.beside.filter(([, ms]) => ms >= 1).map(([n, ms]) => `${n} ${dur(ms)}`).join(", ");
+    return `<div class="row"><span class="k">Where the last build's time went</span><span class="v"></span><div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div>` + (beside ? `<span class="note">${esc3(`Alongside: ${beside}`)}</span>` : "") + `</div>`;
+  }
   /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
   downloads = { n: 0, bytes: 0, ms: 0 };
   /** The timing popover's Downloads row: the packages' time, how many and their size; none fetched, none. */
@@ -4239,7 +4259,7 @@ var Panel = class {
       return `<div class="row"><span class="k">${esc3(p.label)}</span><span class="v">${esc3(p.value)}</span>${bar2}${p.note ? `<span class="note">${esc3(p.note)}</span>` : ""}</div>`;
     }).join("");
     const strips2 = framePart(this.$("#stripsline").dataset.frame);
-    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.walkPart() + this.timeBars() + this.downloadsPart() + rows + strips2 + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div><button type="button" class="reportbtn copydbg">Copy debug info</button>`;
+    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.walkPart() + this.phasesPart() + this.timeBars() + this.downloadsPart() + rows + strips2 + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div><button type="button" class="reportbtn copydbg">Copy debug info</button>`;
     el.querySelector(".copydbg").onclick = (e) => {
       e.stopPropagation();
       const b = e.currentTarget;
@@ -4267,7 +4287,7 @@ var Panel = class {
     const t = this.times;
     if (t.first !== void 0) out.push(`first build ${dur(t.first)}${t.edits.length ? `; edits ${t.edits.length}, last ${dur(t.edits[t.edits.length - 1])}, median ${dur([...t.edits].sort((a, b) => a - b)[t.edits.length >> 1])}` : ""}`);
     const f = this.$("#stripsline").dataset.frame;
-    if (f) out.push(`last page drawn: ${f}`);
+    if (f) out.push(`last page drawn: ${frameText(f)}`);
     const nav = navigator;
     out.push(`machine: ${nav.hardwareConcurrency ?? "?"} cores, ${nav.userAgentData?.platform || nav.platform || "?"}; ${nav.userAgent}`);
     return out.join("\n") + "\n";
@@ -5028,7 +5048,8 @@ var PreviewSession = class {
     this.noteError(r.json);
     this.status(r.json.pending, r.json.undefined_names);
     this.fetchPackages(r.json.missing);
-    this.sink.latency(`opened in ${r.json.build_ms.toFixed(1)} ms (round trip ${(this.now() - t).toFixed(1)} ms)`);
+    const rt = this.now() - t, said2 = (ms) => ms < 1e3 ? `${ms.toFixed(0)} ms` : `${(ms / 1e3).toFixed(1)} s`;
+    this.sink.latency(`opened: the engine answered in ${said2(rt)}${r.json.build_ms >= 1 ? `, its build ${said2(r.json.build_ms)}` : ""}`);
     await (this.sink.layout ? this.layout(Array.isArray(r.json.hashes) ? r.json.hashes : void 0) : this.showPage());
     this.pkg.building = false;
     this.tellPackages();
@@ -6489,6 +6510,14 @@ function timing(s) {
   ];
 }
 var lastStats;
+function statsIn(s) {
+  lastStats = s;
+  const ph = s.phases_ms ?? {};
+  const names = [["typesetting", "Typesetting"], ["output", "Writing the PDF"], ["writing files", "Writing files"]];
+  const known2 = /* @__PURE__ */ new Set([...names.map(([k]) => k), "viewer"]);
+  const parts = [...names.filter(([k]) => typeof ph[k] === "number").map(([k, n]) => [n, ph[k]]), ...Object.entries(ph).filter(([k]) => !known2.has(k))];
+  panel.buildParts(parts, typeof ph.viewer === "number" ? [["pages for the viewer", ph.viewer]] : []);
+}
 function statsLines(s) {
   const n = s.nodes ?? {};
   const size = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
@@ -6512,7 +6541,7 @@ var Pages = class {
   constructor(sock2) {
     this.sock = sock2;
     sock2.onEvent((e) => {
-      if (e.event === "stats") return void (lastStats = e);
+      if (e.event === "stats") return void statsIn(e);
       if (e.event !== "settled") return;
       this.texts = null;
       const s = e;
@@ -6820,7 +6849,7 @@ sock.onOpen = () => {
     const st = r.json?.stats, se = r.json?.settled;
     const last = se && typeof se.ms === "number" ? { ms: se.ms, cold: !!se.cold } : void 0;
     panel.joinedLate(typeof r.json?.first_ms === "number" ? r.json.first_ms : void 0, Number(r.json.builds), last);
-    if (st && typeof st === "object" && !lastStats) lastStats = st;
+    if (st && typeof st === "object" && !lastStats) statsIn(st);
     if (se && typeof se.ms === "number") panel.latency(...timing(se));
   });
   void session.start();
