@@ -576,3 +576,69 @@ fn an_error_in_a_file_the_job_wrote_is_at_its_line() {
     assert_eq!(d.line, 2, "{d:?}");
     assert_eq!(d.range, (18, 33), "{d:?}");
 }
+
+/// An error in an `\input` file stays at its line through edits of the
+/// file that move it, with bytes past 127 before it ("≤", "é"): each
+/// edit's diagnostic is a cold build's of the same text. A line's place
+/// was its character count when read whole and a byte count of the
+/// one-character-per-byte text in a piece an edit cut, with the edits'
+/// moves in bytes: the Overleaf extension's errors three lines off after
+/// a paste with a "≤" in it, until a refresh.
+#[test]
+fn an_input_files_error_stays_at_its_line_through_edits_with_wide_bytes() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("diag-wide-edits");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = "\\input sub\n\\bye\n";
+    let para = |w: &str| format!("A paragraph of text with {w} in it, long enough to break.\n\n");
+    let sub = |head: &str| {
+        format!(
+            "{head}{}{}{}Here \\undefinedmacro is the error.\n\n{}",
+            para("caf\u{e9}"),
+            para("a \u{2264} b"),
+            para("plain words"),
+            para("after")
+        )
+    };
+    let place = |b: &phitex_tex::Build, text: &str| {
+        let ds = b.diagnostics();
+        let d = ds
+            .iter()
+            .find(|d| d.message == "Undefined control sequence")
+            .unwrap_or_else(|| panic!("the error: {ds:#?}"))
+            .clone();
+        assert!(d.file.ends_with("sub.tex"), "{d:?}");
+        let want = text[..text.find("\\undefinedmacro").expect("the error's text")]
+            .matches('\n')
+            .count()
+            + 1;
+        (d.line, want, d.range)
+    };
+    let opts = || common::options("./doc.tex", "doc", "", &dir);
+    let first = sub("");
+    std::fs::write(dir.join("sub.tex"), &first).expect("the input file");
+    let mut b = common::build(opts(), Some(&common::plain()), doc);
+    let (line, want, _) = place(&b, &first);
+    assert_eq!(line, want, "cold");
+    for (k, text) in [
+        sub(&para("\u{2264}\u{2264} new \u{e9}")),
+        sub(&format!("{}{}", para("x"), para("\u{2014} two \u{d7}"))),
+        sub(""),
+        sub(&para("\u{1F600}")),
+    ]
+    .iter()
+    .enumerate()
+    {
+        b.edit_file("sub.tex", Some(text.as_bytes()));
+        std::fs::write(dir.join("sub.tex"), text).expect("the input file");
+        let cold = common::build(opts(), Some(&common::plain()), doc);
+        let (line, want, range) = place(&b, text);
+        let (cline, _, crange) = place(&cold, text);
+        assert_eq!(
+            (line, range),
+            (cline, crange),
+            "edit {k}: the edit's place, the cold build's"
+        );
+        assert_eq!(line, want, "edit {k}");
+    }
+}

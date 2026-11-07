@@ -574,7 +574,15 @@ impl FileRest {
         pos: usize,
         line_count: u32,
     ) -> (Line, usize, usize, u32) {
-        let at = pos;
+        // (the line's place: its byte in the text, one character per byte
+        // of the file, as a document file's pieces have theirs
+        // (`slice_args_in_file`: the byte of the piece in its cut text)
+        // and the edits' moves count (`DocFile::shifts`). Its character
+        // count differs from it past a byte above 127, and a line read
+        // so before an edit was placed elsewhere than the same line read
+        // from a piece after it: the Overleaf extension's errors a few
+        // lines off after a paste with a "≤" in it, until a refresh)
+        let at = off;
         let s = self.str();
         let rest = &s[off.min(s.len())..];
         let n = rest.find('\n').map_or(rest.len(), |k| k + 1);

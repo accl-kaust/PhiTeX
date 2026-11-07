@@ -6121,8 +6121,13 @@ fn prelude_diagnostics(g: &Graph, unit: UnitId, text: &str, finder: &Finder) -> 
                 let bytes = finder(n.trim_start_matches("./"))
                     .map(|(_, b)| b)
                     .unwrap_or_default();
-                let at = usize::try_from(int(3)).unwrap_or(0) + loc;
-                (n, bytes.iter().map(|&b| char::from(b)).collect(), at)
+                // (the line's place a byte of the text one character per
+                // byte of the file makes, [`crate::run::FileRest::line_at`]:
+                // its characters before it counted)
+                let t = latin1(&bytes);
+                let b = usize::try_from(int(3)).unwrap_or(0);
+                let at = t.get(..b.min(t.len())).map_or(0, |h| h.chars().count()) + loc;
+                (n, t.chars().collect(), at)
             }
             _ => {
                 let chars: Vec<char> = text.chars().collect();
@@ -8693,11 +8698,18 @@ impl Build {
                         {
                             return t.into();
                         }
-                        let given = || self.g.file_text(&name).or_else(|| self.g.file_text(bare));
-                        match (self.opts.finder)(bare) {
-                            Some((_, bytes)) => latin1(&bytes).into(),
-                            None => given().unwrap_or_default(),
+                        // (else the text the build holds, its `file:` value or
+                        // a cut file's text, as an edit left it: where the
+                        // places are; the finder's, a file on disk an
+                        // editor's buffer or an edit has changed since, is
+                        // the last resort)
+                        if let Some(t) = self.g.file_text(&name).or_else(|| self.g.file_text(bare))
+                        {
+                            return t;
                         }
+                        (self.opts.finder)(bare)
+                            .map(|(_, bytes)| latin1(&bytes).into())
+                            .unwrap_or_default()
                     })
                     .clone();
                 // (a cut file's line: the place its piece was made at,
@@ -8706,7 +8718,10 @@ impl Build {
                 let node =
                     phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int(4).to_ne_bytes()));
                 let shift = piece_shift(&self.g.eng, &doc_shifts, node);
-                let at = usize::try_from(int(3) + shift).unwrap_or(0) + loc;
+                // (the line's place a byte of the file's text, one
+                // character per byte of the file: the column's characters
+                // as many of its bytes, [`crate::run::FileRest::line_at`])
+                let at = usize::try_from(int(3) + shift).unwrap_or(0) + before.len();
                 (name, &*file_text, at)
             } else {
                 let node = u64::from_ne_bytes(int(4).to_ne_bytes());
@@ -8719,19 +8734,12 @@ impl Build {
                 let at = if self.nodes.is_empty() { 0 } else { at };
                 (docname.clone(), doc, at)
             };
-            // the line around `at`, as characters; `at` in the file's
-            // bytes (the document's text is UTF-8, a file's characters
-            // are its bytes)
-            // (in the text's bytes: a line break is one byte; a file's
-            // characters are its bytes, `at` their count)
-            let b = if file == docname {
-                if text.is_char_boundary(at.min(text.len())) {
-                    at.min(text.len())
-                } else {
-                    0
-                }
+            // the line around `at`, a byte of the text (the document's,
+            // or a file's: one character per byte of the file)
+            let b = if text.is_char_boundary(at.min(text.len())) {
+                at.min(text.len())
             } else {
-                text.char_indices().nth(at).map_or(text.len(), |(k, _)| k)
+                0
             };
             let head = &text[..b];
             // (placed by the last call: the same entry at the same place

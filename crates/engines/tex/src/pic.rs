@@ -268,7 +268,14 @@ fn pic_base(body: &Body) -> Option<(ValueId, i64)> {
         Seg::Line(l) => l.origin.map(|(n, at, _)| (n, at, l)),
         _ => None,
     })?;
-    let at = i64::try_from(at + l.loc.min(l.buf.len())).ok()?;
+    // (`at` a byte of the text, one character per byte of the file, each
+    // past 127 two bytes of it: the line's characters before `loc` as
+    // many)
+    let col: usize = l.buf[..l.loc.min(l.buf.len())]
+        .iter()
+        .map(|&c| char::from_u32(c).map_or(1, char::len_utf8))
+        .sum();
+    let at = i64::try_from(at + col).ok()?;
     (at > 0).then_some((name, at))
 }
 
