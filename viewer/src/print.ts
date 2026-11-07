@@ -201,6 +201,8 @@ header:active { cursor: grabbing; }
   background: var(--ph-menu); border-bottom: 1px solid var(--ph-border); font-weight: 600; }
 .diag { display: block; padding: 9px 14px 10px; border-left: 3px solid var(--sev, var(--ph-fg2)); border-bottom: 1px solid var(--ph-border); }
 .diag[data-line] { cursor: pointer; } .diag[data-line]:hover { background: var(--ph-hover); }
+.diag.more { display: flex; gap: 8px; }
+.diag.more button { font: inherit; color: var(--ph-accent, inherit); background: none; border: 1px solid var(--ph-border); border-radius: 5px; padding: 2px 8px; cursor: pointer; }
 .diag.error { --sev: var(--ph-danger); } .diag.warning { --sev: var(--ph-warning); } .diag.info { --sev: var(--ph-info); }
 .diag .where { float: right; margin-left: 10px; color: var(--ph-link); font-size: 12px; }
 .diag .text { font-weight: 600; overflow-wrap: anywhere; }

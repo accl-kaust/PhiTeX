@@ -1087,6 +1087,8 @@ header:active { cursor: grabbing; }
   background: var(--ph-menu); border-bottom: 1px solid var(--ph-border); font-weight: 600; }
 .diag { display: block; padding: 9px 14px 10px; border-left: 3px solid var(--sev, var(--ph-fg2)); border-bottom: 1px solid var(--ph-border); }
 .diag[data-line] { cursor: pointer; } .diag[data-line]:hover { background: var(--ph-hover); }
+.diag.more { display: flex; gap: 8px; }
+.diag.more button { font: inherit; color: var(--ph-accent, inherit); background: none; border: 1px solid var(--ph-border); border-radius: 5px; padding: 2px 8px; cursor: pointer; }
 .diag.error { --sev: var(--ph-danger); } .diag.warning { --sev: var(--ph-warning); } .diag.info { --sev: var(--ph-info); }
 .diag .where { float: right; margin-left: 10px; color: var(--ph-link); font-size: 12px; }
 .diag .text { font-weight: 600; overflow-wrap: anywhere; }
@@ -2921,7 +2923,8 @@ var Panel = class {
       }
       list.append(f);
     }
-    this.listed = diags.filter((d) => !this.hiddenKinds.has(kindOf(d))).slice(0, 50);
+    const shown = diags.filter((d) => !this.hiddenKinds.has(kindOf(d)));
+    this.listed = shown.slice(0, this.listedMax);
     for (const [i, d] of this.listed.entries()) {
       const copy = d.severity === "error" || d.severity === "warning" ? copyBtn(i) : "";
       if (d.problem) {
@@ -2957,10 +2960,22 @@ var Panel = class {
       row.querySelector(".where").textContent = d.file ? `${d.file}${d.line ? `, line ${d.line}` : ""}` : "";
       list.append(row);
     }
-    if (diags.length > 50) {
+    if (shown.length > this.listed.length) {
+      const left = shown.length - this.listed.length;
       const more = document.createElement("div");
-      more.className = "diag info";
-      more.textContent = `\u2026 and ${diags.length - 50} more`;
+      more.className = "diag info more";
+      const next = document.createElement("button");
+      next.type = "button";
+      next.textContent = left > 50 ? `Show 50 more (${left} left)` : `Show the other ${left}`;
+      next.onclick = (e) => (e.stopPropagation(), this.listMore(50));
+      more.append(next);
+      if (left > 50) {
+        const all = document.createElement("button");
+        all.type = "button";
+        all.textContent = "Show all";
+        all.onclick = (e) => (e.stopPropagation(), this.listMore(Infinity));
+        more.append(all);
+      }
       list.append(more);
     }
     if (this.ev.onReport) {
@@ -2992,6 +3007,13 @@ var Panel = class {
   }
   /** The problems listed (by the rows' data-i). */
   listed = [];
+  /** How many problems the list shows (50, then more as asked: "Show 50 more", "Show all"). */
+  listedMax = 50;
+  /** `n` more problems listed (Infinity: all), the list drawn again where it is. */
+  listMore(n) {
+    this.listedMax += n;
+    if (this.lastStatus) this.status(this.lastStatus);
+  }
   /**
    * Copy for an AI assistant: one problem with what an assistant needs to
    * explain it: its place, message, TeX's notes, help and suggestions, the

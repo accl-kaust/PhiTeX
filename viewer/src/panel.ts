@@ -1207,7 +1207,9 @@ export class Panel {
       }
       list.append(f);
     }
-    this.listed = diags.filter((d) => !this.hiddenKinds.has(kindOf(d))).slice(0, 50);
+    // (the first `listedMax`; the rest a click away, 50 at a time or all)
+    const shown = diags.filter((d) => !this.hiddenKinds.has(kindOf(d)));
+    this.listed = shown.slice(0, this.listedMax);
     for (const [i, d] of this.listed.entries()) {
       // (each error and warning: its own Copy for an AI assistant)
       const copy = d.severity === "error" || d.severity === "warning" ? copyBtn(i) : "";
@@ -1246,10 +1248,22 @@ export class Panel {
       row.querySelector(".where")!.textContent = d.file ? `${d.file}${d.line ? `, line ${d.line}` : ""}` : "";
       list.append(row);
     }
-    if (diags.length > 50) {
+    if (shown.length > this.listed.length) {
+      const left = shown.length - this.listed.length;
       const more = document.createElement("div");
-      more.className = "diag info";
-      more.textContent = `… and ${diags.length - 50} more`;
+      more.className = "diag info more";
+      const next = document.createElement("button");
+      next.type = "button";
+      next.textContent = left > 50 ? `Show 50 more (${left} left)` : `Show the other ${left}`;
+      next.onclick = (e) => (e.stopPropagation(), this.listMore(50));
+      more.append(next);
+      if (left > 50) {
+        const all = document.createElement("button");
+        all.type = "button";
+        all.textContent = "Show all";
+        all.onclick = (e) => (e.stopPropagation(), this.listMore(Infinity));
+        more.append(all);
+      }
       list.append(more);
     }
     if (this.ev.onReport) {
@@ -1284,6 +1298,14 @@ export class Panel {
 
   /** The problems listed (by the rows' data-i). */
   private listed: Diagnostic[] = [];
+  /** How many problems the list shows (50, then more as asked: "Show 50 more", "Show all"). */
+  private listedMax = 50;
+
+  /** `n` more problems listed (Infinity: all), the list drawn again where it is. */
+  private listMore(n: number): void {
+    this.listedMax += n;
+    if (this.lastStatus) this.status(this.lastStatus);
+  }
 
   /**
    * Copy for an AI assistant: one problem with what an assistant needs to
