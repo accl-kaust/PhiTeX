@@ -239,6 +239,10 @@ pub struct Viewer {
     /// The first build's time and the builds so far: what a tab that joins
     /// later was not told.
     built_times: Mutex<(Option<f64>, u64)>,
+    /// The last build's `settled` and `stats` events, as sent: a tab that
+    /// joins after it is given them ([`Viewer::answer`]'s `info` `built`),
+    /// not "no build yet" until the next edit.
+    last_built: Mutex<(Value, Value)>,
     asks: Mutex<Vec<Ask>>,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
     building: AtomicBool,
@@ -285,6 +289,7 @@ impl Default for Viewer {
             pages: Mutex::new(Pages::default()),
             diagnostics: Mutex::new(json!([])),
             built_times: Mutex::new((None, 0)),
+            last_built: Mutex::new((Value::Null, Value::Null)),
             asks: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
             building: AtomicBool::new(false),
@@ -755,7 +760,9 @@ impl Viewer {
         if let Value::Object(m) = stats {
             e.extend(m.clone());
         }
-        self.emit(&Value::Object(e).to_string());
+        let stats = Value::Object(e);
+        self.emit(&stats.to_string());
+        lock(&self.last_built).1 = stats;
     }
 
     pub fn written_exact(&self) {
@@ -814,7 +821,9 @@ impl Viewer {
         e.insert("ms".into(), json!(b.ms));
         e.insert("history".into(), json!(b.history));
         e.extend(b.parts.clone());
-        self.emit(&Value::Object(e).to_string());
+        let settled = Value::Object(e);
+        self.emit(&settled.to_string());
+        lock(&self.last_built).0 = settled;
         (changed, n)
     }
 }
@@ -1056,7 +1065,8 @@ impl Viewer {
             }
             "info" if text("what").as_deref() == Some("built") => {
                 let t = lock(&s.built_times);
-                ok(json!({"first_ms": t.0, "builds": t.1}))
+                let last = lock(&s.last_built);
+                ok(json!({"first_ms": t.0, "builds": t.1, "settled": last.0, "stats": last.1}))
             }
             "info" => {
                 let what = text("what").unwrap_or_default();
@@ -1242,6 +1252,22 @@ mod tests {
     /// backlog answered while a build ends, its live "busy" clear made
     /// meanwhile on another thread, reaches the browser after the reply
     /// (it went first, and the replayed backlog left the tab "Building…").
+    /// A tab that joins after a build is given that build's stats (and
+    /// its `settled`) in `info` `built`, not nothing until the next one.
+    #[test]
+    fn a_tab_that_joins_late_is_given_the_last_builds_stats() {
+        let v = Viewer::default();
+        let built = |v: &Viewer| -> Value {
+            serde_json::from_str(&v.answer(&json!({"id": 1, "op": "info", "what": "built"})))
+                .unwrap()
+        };
+        assert_eq!(built(&v)["json"]["stats"], Value::Null);
+        v.stats(&json!({"build": 3, "wall_ms": 7.0}));
+        let j = built(&v);
+        assert_eq!(j["json"]["stats"]["event"], "stats");
+        assert_eq!(j["json"]["stats"]["build"], 3);
+    }
+
     #[test]
     fn a_reply_goes_before_the_events_made_after_it() {
         use std::sync::mpsc;
