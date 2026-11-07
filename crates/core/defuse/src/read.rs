@@ -537,6 +537,8 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
         }
         // (answered at a position only, `through_at`)
         Step::Derived(_) => None,
+        // (a guard, checked by `holds`: the value itself)
+        Step::Member(_) => v,
         Step::Each(_) | Step::Indices(_) | Step::Keys(_) | Step::Rank(_) | Step::Ranks(_) | Step::Distinct => {
             unimplemented!("path step: next run")
         }
@@ -654,9 +656,10 @@ pub(crate) fn apply_path(eng: &Engine, v: Option<ValueId>, p: PathId) -> Option<
 pub(crate) fn client_path(eng: &Engine, p: PathId) -> bool {
     p != PathId::WHOLE
         && p != SITE
-        && eng
-            .path_steps(p)
-            .is_some_and(|s| s.iter().any(|x| matches!(x, Step::Proj(_) | Step::Derived(_))))
+        && eng.path_steps(p).is_some_and(|s| {
+            s.iter()
+                .any(|x| matches!(x, Step::Proj(_) | Step::Derived(_) | Step::Member(_)))
+        })
 }
 
 /// The spec of a derived path's first step (`Step::Derived`), if it has one.
@@ -668,6 +671,82 @@ pub(crate) fn derived_spec(eng: &Engine, p: PathId) -> Option<ValueId> {
         Step::Derived(s) => Some(*s),
         _ => None,
     }
+}
+
+/// The spec of a guarded path's first step (`Step::Member`), if it has one.
+pub(crate) fn member_spec(eng: &Engine, p: PathId) -> Option<ValueId> {
+    if p == PathId::WHOLE || p == SITE {
+        return None;
+    }
+    match eng.path_steps(p)?.first()? {
+        Step::Member(s) => Some(*s),
+        _ => None,
+    }
+}
+
+/// Whether a guarded read (`Step::Member`) at `at` of reader `me` still
+/// matters: its element is in its list where the reader reads, or that
+/// cannot be told (the anchor gone, the list an alias or none, an anchor
+/// not at a node), which checks the read as any other.
+fn member_now(eng: &Engine, me: &Node, at: Anchor, spec: ValueId) -> bool {
+    match at {
+        Anchor::Me => member_at(eng, me.id, false, spec),
+        Anchor::Before(n) => member_at(eng, n, false, spec),
+        Anchor::AfterOwn(n) => member_at(eng, n, true, spec),
+        Anchor::End(_) | Anchor::Final => true,
+    }
+}
+
+/// Whether reader record `r`, a guarded read's (`Step::Member`), still
+/// matters where it reads ([`member_now`]); true for any other.
+pub(crate) fn member_reader(eng: &Engine, r: &Reader) -> bool {
+    member_spec(eng, r.path).is_none_or(|spec| on_one_layout(eng, || member_at(eng, r.anchor, r.inclusive, spec)))
+}
+
+/// [`member_now`] at node `at` (with its own definitions: `inclusive`).
+fn member_at(eng: &Engine, at: NodeId, inclusive: bool, spec: ValueId) -> bool {
+    let vals = eng.values();
+    let Some(parts) = vals.with_list(spec, <[ValueId]>::to_vec) else {
+        return true;
+    };
+    let [list, names, elem] = parts[..] else {
+        return true;
+    };
+    let Some(names) = vals.as_int(names).and_then(|n| u32::try_from(n).ok()).map(PathId) else {
+        return true;
+    };
+    let r = reaching_at(eng, Field(list), at, inclusive);
+    let Some(x) = r.and_then(|r| r.value) else {
+        return true;
+    };
+    if alias_of(vals, x).is_some() {
+        return true;
+    }
+    // (the names of the list's value, made once for the reads checked
+    // one after another: a run's guarded reads are of one list, each
+    // name of it one read, and the names a projection of its body)
+    let epoch = vals.epoch();
+    let l = MEMBER_NAMES.with_borrow_mut(|m| match *m {
+        Some((e, y, p, l)) if e == epoch && y == x && p == names => l,
+        _ => {
+            let l = apply_path(eng, Some(x), names);
+            *m = Some((epoch, x, names, l));
+            l
+        }
+    });
+    l.and_then(|l| vals.with_list(l, |xs| xs.contains(&elem)))
+        .unwrap_or(true)
+}
+
+/// The store's epoch, a list's value, a names path, and the names.
+type MemberNames = (u64, ValueId, PathId, Option<ValueId>);
+
+thread_local! {
+    /// [`member_now`]'s last list value, names path and names, with the
+    /// store's epoch they were made at (`Values::epoch`: a collection
+    /// since may have taken them).
+    static MEMBER_NAMES: std::cell::RefCell<Option<MemberNames>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The field a derived read's spec names where `base` has value `v`:
@@ -950,6 +1029,12 @@ pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut Fol
 /// (no placement of a run before stands for it: a run again is answered
 /// the guess again).
 pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &mut FoldMemo) -> bool {
+    if let ReadKind::Field { at, .. } = rd.kind
+        && let Some(spec) = member_spec(eng, rd.path)
+        && !member_now(eng, me, at, spec)
+    {
+        return true;
+    }
     if let ReadKind::Placed { i, guess: true } = rd.kind {
         let Some(r) = me.run_record() else {
             return true;

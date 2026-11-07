@@ -110,6 +110,11 @@ pub struct Engine {
     append: std::sync::OnceLock<AppendFn>,
     /// Relations each operation has made: (op, field) -> c (`commit::learn_shape`).
     pub(crate) shapes: Lock<FxHashMap<(OpId, Field), i64>>,
+    /// A guarded read's path by its list, names path, element and inner
+    /// path (`Ctx::read_path_member`): made once, its spec a value and its
+    /// steps a path, each interned (an appender to a font list reads the
+    /// meaning of every name on it at each run).
+    pub(crate) member_paths: Lock<FxHashMap<(Field, PathId, ValueId, PathId), PathId>>,
     pub(crate) shapes_n: AtomicUsize,
     /// `Ctx::apply`'s memo.
     pub(crate) memo: Lock<Memo>,
@@ -365,6 +370,7 @@ impl Engine {
             projections,
             append: std::sync::OnceLock::new(),
             shapes: Lock::new(FxHashMap::default()),
+            member_paths: Lock::new(FxHashMap::default()),
             shapes_n: AtomicUsize::new(0),
             memo: Lock::new(FxHashMap::default()),
             marked: Lock::new(FxHashSet::default()),
@@ -1609,6 +1615,7 @@ impl Engine {
                 e.1 += k;
             }
             rep.rerun_causes.append(&mut log.causes);
+            rep.stood.append(&mut log.stood);
             rep.capped.append(&mut log.capped);
             for (f, k) in log.refuted_by_field.drain() {
                 *rbf.entry(f).or_default() += k;
@@ -1783,6 +1790,7 @@ impl Engine {
             | Step::Cmp(x)
             | Step::Within(x)
             | Step::Derived(x)
+            | Step::Member(x)
             | Step::Indices(x)
             | Step::Keys(x)
             | Step::Rank(x)

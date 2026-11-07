@@ -129,6 +129,7 @@ impl<'a> Ctx<'a> {
                 waits: Vec::new(),
                 frontier: None,
                 parked_on: None,
+                stood: None,
             },
             views: Vec::new(),
             ep: u64::MAX,
@@ -713,6 +714,73 @@ impl<'a> Ctx<'a> {
         Ok(x)
     }
 
+    /// `read_path` of `f` through `p` by a run that looks at it only
+    /// because `elem` is an element of what path `names` gives of field
+    /// `list` reaching me (read by the run itself): a guarded read
+    /// (`Step::Member`), which holds, checked again, once `elem` has left
+    /// that list there, whatever it would answer. Where my placer's
+    /// overlay holds `f` or `list` (or either is an alias), a plain read.
+    pub fn read_path_member(
+        &mut self,
+        f: Field,
+        p: PathId,
+        list: Field,
+        names: PathId,
+        elem: ValueId,
+    ) -> Result<Option<ValueId>, Stop> {
+        self.check()?;
+        if let Some(o) = self.overlay {
+            let mut held = f == o || list == o;
+            for g in [f, list] {
+                if !held {
+                    let has = self.eng.path(&[Step::Has(g.0)]);
+                    held = self.read_path(o, has)? == Some(self.values().bool(true));
+                }
+            }
+            if held {
+                return self.read_path(f, p);
+            }
+        }
+        self.read_path_member_(f, p, list, names, elem)
+    }
+
+    fn read_path_member_(
+        &mut self,
+        f: Field,
+        p: PathId,
+        list: Field,
+        names: PathId,
+        elem: ValueId,
+    ) -> Result<Option<ValueId>, Stop> {
+        self.before_read(f);
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+        self.note_source(r.by);
+        if let Some(x) = r.value
+            && read::alias_of(self.values(), x).is_some()
+        {
+            self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
+            let y = self.follow_aliases(r.value)?;
+            return Ok(read::apply_path(self.eng, y, p));
+        }
+        let x = through(self.eng, r, p);
+        let key = (list, names, elem, p);
+        let known = self.eng.member_paths.read().get(&key).copied();
+        let q = known.unwrap_or_else(|| {
+            let v = self.values();
+            let spec = v.list(vec![list.0, v.int(i64::from(names.0)), elem]);
+            let mut steps = vec![Step::Member(spec)];
+            if p != PathId::WHOLE {
+                steps.extend_from_slice(self.eng.path_steps(p).unwrap_or_default());
+            }
+            let q = self.eng.path(&steps);
+            self.eng.member_paths.write().insert(key, q);
+            q
+        });
+        self.record(ReadKind::Field { f, at: anchor }, q, x);
+        Ok(x)
+    }
+
     /// A derived read (`Step::Derived`): the field named `prefix`, the
     /// digits of `v + j`, `suffix`, where `v` is the integer value of
     /// `base` (0 where none) reaching me, read where it reaches me and
@@ -1274,6 +1342,20 @@ impl<'a> Ctx<'a> {
         read::final_read(self.eng, f).value
     }
 
+    /// The output of my last run's `i`-th placement, if it was a node of
+    /// operation `op` that has run: a guess for this run's `i`-th
+    /// placement, of `op` too, whose own node has not run (an edited
+    /// picture's child, placed anew, `Ctx::placed_output_or`). Not
+    /// recorded, a peek.
+    #[must_use]
+    pub fn last_placed_output(&self, i: usize, op: OpId) -> Option<ValueId> {
+        let c = *self.last.as_ref()?.placed.get(i)?;
+        let n = self.eng.node(c);
+        (n.op() == op && n.state() != State::Gone)
+            .then(|| n.run_record().map(|r| r.output))
+            .flatten()
+    }
+
     /// The output of the node my `i`-th placement of this run stands for
     /// (`Ctx::placed_output_or`'s), if it has run: not recorded, a peek.
     /// A run that stops for a placement's output reads it with
@@ -1805,7 +1887,9 @@ impl<'a> Ctx<'a> {
             return None;
         }
         let output = r.output;
-        self.product.reads.extend(r.reads.iter().cloned());
+        // (its reads are the record's, filed as its readers: the commit
+        // keeps them where they are, `commit::commit_stood`)
+        self.product.stood = Some(r.clone());
         self.product.unchanged = true;
         Some(output)
     }
