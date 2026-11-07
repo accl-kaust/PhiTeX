@@ -2924,7 +2924,10 @@ impl Run<'_, '_> {
         // Grail's first page's routine, 3.8 s of hyperxmp, ran again for
         // each line deleted above it, accl 23788)
         let op = self.cx.op();
-        let piece = op == self.ops.exec || op == self.ops.resume || op == self.ops.finish;
+        let piece = op == self.ops.exec
+            || op == self.ops.resume
+            || op == self.ops.finish
+            || op == self.ops.pic;
         // (a number read into the log stands: the log is the run's
         // output, and a number taken back there is the one a run read
         // before the lines ahead of it were in, `D=1` for line 6 at -j8)
@@ -3125,6 +3128,19 @@ impl Run<'_, '_> {
         m: crate::run::LineMark,
         marks: &mut Vec<i64>,
     ) -> R<String> {
+        // (a written line read back as its reader would, `Run::interpret_line`:
+        // an error's text there goes nowhere, and its line is read by no one;
+        // read, every page's finisher that wrote an `\indexentry` line ran
+        // again for each line inserted above its page, circuitikz)
+        if self.interp.is_some() {
+            return Ok("0".to_owned());
+        }
+        // (no file on the input stack: TeX's `line`, a finisher's the line its
+        // page fired at, `Run::fire_line`, marked as a piece's line is)
+        let m = match (m, self.fire_line) {
+            ((Some(0), 0, None, None), Some(fire)) if self.file_line_here().is_none() => fire,
+            _ => m,
+        };
         if let (None, _, Some(_), Some(own)) = m {
             let f = crate::run::dline_field(self.v, own.0);
             let given = self.cx.env(f)?.is_some();

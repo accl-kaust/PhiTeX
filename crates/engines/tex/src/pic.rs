@@ -1184,6 +1184,11 @@ impl Run<'_, '_> {
             self.pic_refuse(&w);
         } else {
             self.pic_out = Some(self.pic_output());
+            // (the lines read into bodies nothing looked at and nothing
+            // after it sees, `\begin`'s `\@currenvline` closed by its
+            // `\end`: taken back, as a piece's are; read, every picture
+            // ran again for each line inserted above it)
+            self.settle_lines();
         }
         Ok(())
     }
