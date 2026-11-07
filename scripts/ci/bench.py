@@ -399,11 +399,15 @@ def cmd_json(args):
         measured_all = False
         covers.append("edits: not measured yet")
     machine = json.load(open(args.machine)) if args.machine else None
+    if machine is not None:
+        # (the nodes the included measurements ran on)
+        machine["nodes"] = sorted({r["node"] for k in args.corpora.split(",") for r in res[k].values()}
+                                  | {Path(d).name for d in args.edits or [] if any(Path(d).glob("*.jsonl"))})
     out = {
         # (every point is a measurement; what is not measured yet is left
         # out and named in covers)
         "schema": 1, "sample": False, "complete": measured_all and not missing,
-        "covers": "; ".join(covers),
+        "covers": args.covers or "; ".join(covers),
         "commit": args.commit, "date": datetime.date.today().isoformat(),
         "texlive": mj["texlive"], "machine": machine,
         "corpora": corpora,
@@ -446,6 +450,7 @@ def main():
     p.add_argument("--machine")
     p.add_argument("--note")
     p.add_argument("--corpora", default="manuals,research")
+    p.add_argument("--covers")
     args = ap.parse_args()
     {"cold": cmd_cold, "edits": cmd_edits, "json": cmd_json}[args.cmd](args)
 
