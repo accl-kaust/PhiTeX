@@ -336,7 +336,7 @@ header:active { cursor: grabbing; }
 /* before any page: the first page's sheet, the opening playing on it, the step under it */
 .opening { position: absolute; z-index: 3; pointer-events: none; left: 0; top: 0; width: 0; height: 0;
   transition: left .3s ease, top .3s ease, width .3s ease, height .3s ease; }
-.opening .sheet { position: absolute; inset: 0; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+.opening .sheet { position: absolute; inset: 0; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); container-type: inline-size; }
 .opening.in .sheet { background: none; box-shadow: none; }
 .win.dark-pdf .opening .sheet, .win.docked.pdf-dark .opening .sheet { background: ${DARK_PAGE}; }
 .win.dark-pdf .opening.in .sheet, .win.docked.pdf-dark .opening.in .sheet { background: none; }
@@ -353,6 +353,8 @@ header:active { cursor: grabbing; }
 .win.dark-pdf .steps .what, .win.docked.pdf-dark .steps .what { color: #e4e6ea; }
 .win.dark-pdf .steps .track, .win.docked.pdf-dark .steps .track { background: #3d4047; }
 .opening.in .steps { opacity: 0; }
+/* (an opening that says the steps itself, the animation's own part) */
+.opening.owns .steps { display: none; }
 /* a card in place of the pages (a build that stopped, an engine to choose): plain */
 .empty { padding: 40px 16px; color: var(--ph-fg2); }
 .card { max-width: 420px; margin: 0 auto; padding: 16px 18px; text-align: left; background: var(--ph-menu); color: var(--ph-fg);

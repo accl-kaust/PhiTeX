@@ -658,6 +658,8 @@ const showTitle = () => {
           ? ["Built", "#2e9d63"]
           : ["Loading…", "#8a93a3"];
   document.title = connected && file !== "phitex watch" ? `${file} · ${what}` : `${what} · phitex watch`;
+  // (the openings that show it: a prompt's, a title bar's)
+  if (/\.(tex|ltx)$/.test(file)) panel.docName(file);
   favicon(colour);
 };
 
