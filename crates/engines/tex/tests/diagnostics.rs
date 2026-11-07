@@ -552,3 +552,27 @@ fn an_error_has_its_context_and_help_in_the_log() {
         }
     }
 }
+
+/// An error in a file the job writes and reads back (a `.bbl`, an
+/// `.aux`): placed at its line in the text the build read. The finder
+/// has no such file (or a stale copy on disk), and every error in one was
+/// placed at its first line: the Overleaf extension's
+/// "TeX capacity exceeded ... at paper.bbl:1" for an error on line 16.
+#[test]
+fn an_error_in_a_file_the_job_wrote_is_at_its_line() {
+    let doc = "\\immediate\\openout1=gen.tex\n\
+               \\immediate\\write1{first line}\n\
+               \\immediate\\write1{second \\noexpand\\undefinedmacro\\space here}\n\
+               \\immediate\\closeout1\n\
+               \\input gen\n\\bye\n";
+    let b = build(doc, |o| o);
+    let ds = b.diagnostics();
+    show(&ds);
+    let d = ds
+        .iter()
+        .find(|d| d.message == "Undefined control sequence")
+        .expect("the error");
+    assert!(d.file.ends_with("gen.tex"), "{}", d.file);
+    assert_eq!(d.line, 2, "{d:?}");
+    assert_eq!(d.range, (18, 33), "{d:?}");
+}

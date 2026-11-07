@@ -8639,17 +8639,24 @@ impl Build {
             {
                 // a line of an `\input` file: its characters are bytes
                 let name = str_of(v, n);
+                // (a file the job writes and reads back, a `.bbl`, `.aux` or
+                // `.toc`: the text the build read, its `file:` value
+                // (latin1 of its bytes); the finder has none, or a stale
+                // copy on disk, and every error in it was placed at its
+                // first line, "paper.bbl:1")
                 file_text = files
                     .entry(name.clone())
                     .or_insert_with(|| {
-                        let bytes = (self.opts.finder)(name.trim_start_matches("./"))
-                            .map(|(_, b)| b)
-                            .unwrap_or_default();
-                        bytes
-                            .iter()
-                            .map(|&b| char::from(b))
-                            .collect::<String>()
-                            .into()
+                        let back = || self.g.file_text(&name);
+                        if self.g.written.contains(&name)
+                            && let Some(t) = back()
+                        {
+                            return t;
+                        }
+                        match (self.opts.finder)(name.trim_start_matches("./")) {
+                            Some((_, bytes)) => latin1(&bytes).into(),
+                            None => back().unwrap_or_default(),
+                        }
                     })
                     .clone();
                 // (a cut file's line: the place its piece was made at,
