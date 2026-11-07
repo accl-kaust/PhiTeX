@@ -78,7 +78,9 @@ pub struct Config {
     pub follow: Option<String>,
     /// The viewer's dark pages (yours only): `off`, `on`, `theme`.
     pub dark_pdf: Option<String>,
-    /// The viewer's loading animation (yours only): `phitex`, `retro`, `off`.
+    /// The viewer's loading animation (yours only): `random` (PhiTeX's the
+    /// first time, then another each time), one of them by name, or `off`.
+    /// `retro` (the first Windows 98's, retired) is read as `win98`.
     pub opening: Option<String>,
     /// Whether the viewer underlines what each problem is about (yours only).
     pub underline: Option<bool>,
@@ -120,7 +122,26 @@ const KEYS: &[&str] = &[
 pub const CHOICES: &[(&str, &[&str])] = &[
     ("follow", &["cursor", "selection", "dblclick"]),
     ("dark-pdf", &["off", "on", "theme"]),
-    ("opening", &["phitex", "retro", "off"]),
+    (
+        "opening",
+        &[
+            "random",
+            "phitex",
+            "terminal",
+            "win98",
+            "mac9",
+            "dos",
+            "typewriter",
+            "plane",
+            "ink",
+            "tetris",
+            "glyphs",
+            "kaust",
+            "badapple",
+            "off",
+            "retro",
+        ],
+    ),
 ];
 
 /// `copy-pdf`'s value.
@@ -433,7 +454,7 @@ pub fn prefs(
         "underline": c.underline.unwrap_or(true),
         "follow": c.follow.unwrap_or_else(|| "cursor".to_owned()),
         "dark-pdf": c.dark_pdf.unwrap_or_else(|| "off".to_owned()),
-        "opening": c.opening.unwrap_or_else(|| "phitex".to_owned()),
+        "opening": c.opening.unwrap_or_else(|| "random".to_owned()),
         "threads": c.threads.unwrap_or(0),
         "cores": std::thread::available_parallelism().map_or(1, usize::from),
         "cache-limit": c.cache_limit,

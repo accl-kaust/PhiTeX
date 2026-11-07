@@ -23,7 +23,8 @@ import { PROBLEMS_CSS, problemHtml } from "./problems.ts";
 import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys, typing } from "./keys.ts";
 import { REPORT_TO } from "./report.ts";
-import { opening, retro, still, type Opening } from "./opening.ts";
+import type { Opening } from "./opening.ts";
+import { LOOKS, lookOf, play, type OpeningLook } from "./openings/index.ts";
 import { hintsFor } from "./hints.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
@@ -1477,8 +1478,10 @@ export class Panel {
     if (this.hintTimer) return;
     const list = hintsFor(this.kind);
     const show = () => {
-      el.textContent = `Did you know? ${list[this.hintAt++ % list.length]}`;
-      el.hidden = false;
+      const text = list[this.hintAt++ % list.length];
+      // (an opening that says the steps itself says this too)
+      if (this.anim?.hint) this.anim.hint(text);
+      else (el.textContent = `Did you know? ${text}`), (el.hidden = false);
       this.hintTimer = setTimeout(show, 7000);
     };
     this.hintTimer = setTimeout(show, 2000);
@@ -1496,6 +1499,7 @@ export class Panel {
     const track = el.querySelector<HTMLElement>(".track")!;
     track.classList.toggle("unknown", pct === undefined);
     track.querySelector("i")!.style.width = pct === undefined ? "" : `${pct}%`;
+    this.anim?.step?.(what, pct, detail);
     this.renderStatus();
   }
 
@@ -1510,8 +1514,17 @@ export class Panel {
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
     this.fitSheet();
     const dark = this.win.classList.contains("dark-pdf") || (this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark"));
-    const sheet = el.querySelector<HTMLElement>(".sheet")!, look = this.look;
-    this.anim = look === "off" ? still() : look === "retro" ? retro(sheet) : opening(sheet, dark ? "#e4e6ea" : "#1d3e72", dark ? "#2c2e33" : "#ffffff");
+    const sheet = el.querySelector<HTMLElement>(".sheet")!;
+    // (the first opening ever is PhiTeX's: kept with the tips seen, the host's too)
+    const first = !this.seenIds.has("opening");
+    const { id, anim } = play(this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!);
+    this.anim = anim;
+    this.lastLook = id;
+    if (id !== "off") this.seen(["opening"]);
+    // (one that says the steps itself: the sheet's own not shown)
+    el.classList.toggle("owns", !!anim.step);
+    // (and the step the sheet says now, a rebuild's first: the watch says no other)
+    if (anim.step) anim.step(this.stepNow || this.words.steps[0], undefined, "");
     this.animSince = performance.now();
   }
 
@@ -1555,13 +1568,14 @@ export class Panel {
       follow();
       el.classList.add("in");
     });
-    // (the dive at once, whatever the opening's act; gone 650 ms on, and at most 900 ms on
-    // even where frames stall, a tab in the background: never left over the pages)
+    // (the dive at once, whatever the opening's act; gone 650 ms on (the longest, a window
+    // maximized, 1.3 s), and at most 1.6 s on even where frames stall, a tab in the
+    // background: never left over the pages)
     // (each its own sheet's: a later opening's sheet, up meanwhile, is never closed by this one's)
     const a = this.anim;
     const stop = () => this.anim === a && this.stopSheet();
     void a.done().then(stop);
-    setTimeout(stop, 900);
+    setTimeout(stop, 1600);
   }
 
   /** The sheet gone (played out, or a card in its place). */
@@ -2286,7 +2300,7 @@ export class Panel {
     const look: SettingRow[] = [];
     look.push(
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
-      { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset", kind: "choice", options: [["phitex", "PhiTeX"], ["retro", "Windows 98"], ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => (this.look = l)) },
+      { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset. Random: a different one each time", kind: "select", options: [["random", "Random"], ...LOOKS.map((l): [string, string] => [l.id, l.name]), ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => (this.look = lookOf(l))) },
     );
     if (ev.onBoxes) look.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     preview.push({ id: "problems", label: "Problems shown", help: "Which kinds: the filters at the top of the problems list", kind: "info", value: this.hiddenKinds.size ? `${this.hiddenKinds.size} kind${this.hiddenKinds.size === 1 ? "" : "s"} hidden` : "All" });
@@ -2308,7 +2322,7 @@ export class Panel {
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
   viewPrefs(p: Partial<ViewPrefs>): void {
     if (p["dark-pdf"]) this.darkPdf(p["dark-pdf"]);
-    if (p.opening) this.look = p.opening;
+    if (p.opening) this.look = lookOf(p.opening);
     if (p.underline !== undefined && p.underline !== this.culpritsOn) this.culpritsShown(p.underline);
   }
 
@@ -2349,7 +2363,9 @@ export class Panel {
   }
 
   /** The loading animation (the host keeps the choice: viewPrefs). */
-  private look: OpeningLook = "phitex";
+  private look: OpeningLook = "random";
+  /** The last one played (random plays another). */
+  private lastLook: string | null = null;
 
   /** The host page's own theme (theme()): undefined, never said. */
   private pageTheme: "dark" | "light" | null | undefined = undefined;
@@ -2892,6 +2908,12 @@ export class Panel {
   }
   private mainFiles: { names: string[]; main: string | null } = { names: [], main: null };
 
+  /** The document's main file as the host names it, where it has no Main file to pick (the watch): the openings that show it (a prompt's, a title bar's). */
+  docName(name: string): void {
+    this.doc = name;
+  }
+  private doc: string | null = null;
+
   /** What's new (the host's news, `text` as plain lines), in a dialog over the pages, with the new features' tips a click away. */
   news(version: string, text: string): void {
     const box = this.$("#logview"), pre = this.$("#logtext");
@@ -3028,7 +3050,7 @@ export type DarkPdf = "off" | "on" | "theme";
 const downloaded = (n: number, bytes?: number) => (n ? `${n} package${n === 1 ? "" : "s"} downloaded${mb(bytes)}` : "");
 
 /** The loading animation: PhiTeX's opening, a Windows 98 setup dialog, or none. */
-export type OpeningLook = "phitex" | "retro" | "off";
+export type { OpeningLook } from "./openings/index.ts";
 
 /** A long detail (an engine's dump) folded under `label`, opened on a click. */
 function foldedDetail(text: string, label: string): HTMLElement {

@@ -17,6 +17,7 @@ export const HINTS: Hint[] = [
   { text: "Compare shows what changed since an earlier version, marked as latexdiff marks it.", hosts: ["watch", "vscode"] },
   { text: "Put \\label after \\caption: \\ref then gives the figure's number, not the section's." },
   { text: "A ~ is a space the line never breaks at: Figure~\\ref{fig:plot}." },
+  { text: "You can pick your favourite loading animation, or turn them off, in Settings › Appearance." },
   { text: "Donald Knuth began TeX in 1977; its version number gets one more digit of π at each release (3.141592653)." },
 ];
 
