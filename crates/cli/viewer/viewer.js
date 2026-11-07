@@ -1003,8 +1003,10 @@ header:active { cursor: grabbing; }
 .probs.error { color: var(--ph-danger); } .probs.warning { color: var(--ph-warning); }
 .progress { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; opacity: 0; transition: opacity .2s; pointer-events: none; }
 .progress.on { opacity: 1; }
-.progress::after { content: ""; position: absolute; top: 0; bottom: 0; width: 30%; background: var(--ph-progress); animation: phx-carriage 1.2s ease-in-out infinite; }
-@keyframes phx-carriage { from { left: -30%; } to { left: 100%; } }
+/* (the carriage runs only while the line shows, and by transform: a hidden one moving by left laid the page out every frame, scrolling included) */
+.progress::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 30%; background: var(--ph-progress); transform: translateX(-100%); }
+.progress.on::after { animation: phx-carriage 1.2s ease-in-out infinite; }
+@keyframes phx-carriage { from { transform: translateX(-100%); } to { transform: translateX(333.4%); } }
 .find { display: inline-flex; align-items: center; gap: 6px; }
 .find input { width: 170px; height: 24px; padding: 0 8px; font: inherit; color: var(--ph-fg); background: var(--ph-menu);
   border: 1px solid var(--ph-border); border-radius: var(--ph-radius); outline: none; }
@@ -1234,7 +1236,7 @@ header:active { cursor: grabbing; }
 .steps .track { position: relative; height: 3px; width: min(100%, 280px); margin: 8px auto; border-radius: 2px; overflow: hidden; background: #e7e9ee; }
 .steps .track i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: #f58f2d; transition: width .3s; }
 .steps .track.unknown i { width: 30% !important; animation: phx-slide 1.2s ease-in-out infinite; }
-@keyframes phx-slide { from { left: -30%; } to { left: 100%; } }
+@keyframes phx-slide { from { transform: translateX(-100%); } to { transform: translateX(333.4%); } }
 .win.dark-pdf .steps, .win.docked.pdf-dark .steps { color: #a3a9b4; }
 .win.dark-pdf .steps .what, .win.docked.pdf-dark .steps .what { color: #e4e6ea; }
 .win.dark-pdf .steps .track, .win.docked.pdf-dark .steps .track { background: #3d4047; }
