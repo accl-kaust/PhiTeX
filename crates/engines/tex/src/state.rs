@@ -3124,10 +3124,6 @@ pub(crate) struct ContState {
 }
 
 impl State {
-    /// Every location the run defined so far (locally or globally, in a
-    /// group or not) with its binding now (`None`: absent): the run's
-    /// state at this point where it is not the engine's (a picture
-    /// child's view of its parent, `crate::pic`).
     /// The registers the run has stepped without reading or defining
     /// them (a map that adds, `State::add`): `(loc, steps, global)` each,
     /// in the order touched. A child reading before the run
@@ -3150,6 +3146,11 @@ impl State {
         out
     }
 
+    /// Every location the run defined so far (locally or globally, in a
+    /// group or not), and every integer register it loaded and stepped,
+    /// with its binding now (`None`: absent): the run's state at this
+    /// point where it is not the engine's (a picture child's view of its
+    /// parent, `crate::pic`).
     pub(crate) fn defined_now(&self, v: &Values) -> Vec<(Loc, Option<ValueId>)> {
         let mut out = Vec::new();
         for &l in &self.touched {
@@ -3159,9 +3160,14 @@ impl State {
                 .filter(|&m| m > 0)
                 .and_then(|m| self.metas.get(m - 1))
                 .is_some_and(|m| m.ldef_stamp > 0);
+            // (an integer register the run loaded and stepped, read then
+            // `\advance`d or stepped then read: its value is the run's,
+            // not the engine's, though nothing defined it; `mapped_now`
+            // has only the steps of a register never loaded)
+            let stepped = s.mapped != MAP_NONE;
             // (a binding a group's end took back to one the run never
             // loaded: the engine's, which the child reads itself)
-            if !defined || s.e.flags & LOADED == 0 {
+            if !(defined || stepped) || s.e.flags & LOADED == 0 {
                 continue;
             }
             let cur = if s.e.flags & HAS_ID != 0 {
