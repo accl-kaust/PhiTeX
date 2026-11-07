@@ -313,9 +313,9 @@ sub makeglossaries {
         "the xelatex command has no -shell-escape"
     );
     assert_eq!(a.out_dir.as_ref().map(|d| d.0.as_str()), Some("build"));
-    assert_eq!(a.max_repeat, Some(7));
-    assert_eq!(a.notes.len(), 1, "{:#?}", a.notes);
-    assert!(a.notes[0].why.contains("-8bit"));
+    assert_eq!(a.notes.len(), 2, "{:#?}", a.notes);
+    assert!(a.notes[0].why.contains("-8bit"), "{:#?}", a.notes);
+    assert!(a.notes[1].why.contains("$max_repeat = 7"), "{:#?}", a.notes);
 }
 
 #[test]
