@@ -5,6 +5,7 @@
 // printed, then the monitor switches off, the picture folding to a line and a
 // point over the page.
 
+import { html, type Slot } from "../html.ts";
 import { layer, ending, crt, crtOff, type Opening } from "./kit.ts";
 
 const SPIN = "|/-\\";
@@ -21,25 +22,24 @@ export function terminal(box: HTMLElement, doc = "document.tex"): Opening {
 .phx-term .dim { color: #6f8f7c; }
 .phx-term .cur { display: inline-block; width: .6em; height: 1.1em; vertical-align: -.2em; background: #7dffa0; animation: phx-term-blink 1s steps(1) infinite; }
 @keyframes phx-term-blink { 50% { opacity: 0; } }`,
-    `<div class="scr"><div class="txt"></div><div class="band"></div></div><div class="led"></div><div class="brand">PHITEX</div>`,
+    html`<div class="scr"><div class="txt"></div><div class="band"></div></div><div class="led"></div><div class="brand">PHITEX</div>`,
   );
   const txt = el.querySelector<HTMLElement>(".txt")!;
   const cursor = document.createElement("span");
   cursor.className = "cur";
   const t0 = performance.now();
-  const line = (html: string, cls = "") => {
+  const line = (content: Slot, cls = "") => {
     const l = document.createElement("div");
     l.className = `l ${cls}`;
-    l.innerHTML = html;
+    l.replaceChildren(html`${content}`);
     txt.append(l);
     l.append(cursor);
     // (the oldest lines scroll off the top)
     while (txt.scrollHeight > txt.clientHeight + 2 && txt.children.length > 1) txt.firstElementChild!.remove();
     return l;
   };
-  const esc = (s: string) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!);
   // (the command typed at the prompt first, a key at a time)
-  const cmd = `phitex watch ${doc}`, prompt = line(`<span class="p">$ </span>`);
+  const cmd = `phitex watch ${doc}`, prompt = line(html`<span class="p">$ </span>`);
   let typed = 0, timer = 0;
   const key = () => {
     prompt.insertBefore(document.createTextNode(cmd[typed++]), cursor);
@@ -51,7 +51,7 @@ export function terminal(box: HTMLElement, doc = "document.tex"): Opening {
   let queue: (() => void)[] = [];
   const later = (f: () => void) => (timer || typed < cmd.length ? queue.push(f) : f());
   const flush = () => {
-    line(`<span class="d">PhiTeX</span>`);
+    line(html`<span class="d">PhiTeX</span>`);
     queue.forEach((f) => f());
     queue = [];
   };
@@ -60,7 +60,7 @@ export function terminal(box: HTMLElement, doc = "document.tex"): Opening {
     later(() => {
       if (cur?.what !== what) {
         // (the step before it done: said so)
-        if (cur) cur.el.innerHTML = `<span class="ok">✓</span> ${esc(cur.what.toLowerCase())}`;
+        if (cur) cur.el.replaceChildren(html`<span class="ok">✓</span> ${cur.what.toLowerCase()}`);
         cur = { what, el: line(""), seen: new Set() };
       }
       const name = what.toLowerCase();
@@ -72,8 +72,8 @@ export function terminal(box: HTMLElement, doc = "document.tex"): Opening {
           cur.el.before(Object.assign(document.createElement("div"), { className: "l dim", textContent: `  + ${pkg}` }));
         }
         const n = Math.round((pct / 100) * BAR);
-        cur.el.innerHTML = `<span class="f">${name}</span> [${"█".repeat(n)}${"░".repeat(BAR - n)}] ${esc(detail.split(" · ").slice(1).join("  "))}`;
-      } else cur.el.innerHTML = `<span class="f">${SPIN[spin % SPIN.length]}</span> ${name}  <span class="dim">${esc(detail)}</span>`;
+        cur.el.replaceChildren(html`<span class="f">${name}</span> [${"█".repeat(n)}${"░".repeat(BAR - n)}] ${detail.split(" · ").slice(1).join("  ")}`);
+      } else cur.el.replaceChildren(html`<span class="f">${SPIN[spin % SPIN.length]}</span> ${name}  <span class="dim">${detail}</span>`);
       cur.el.append(cursor);
       clearInterval(spinner);
       if (pct === undefined)
@@ -88,8 +88,8 @@ export function terminal(box: HTMLElement, doc = "document.tex"): Opening {
     el,
     () => {
       cleanup();
-      if (cur) cur.el.innerHTML = `<span class="ok">✓</span> ${esc(cur.what.toLowerCase())}`;
-      line(`<span class="ok">✓ page 1 in ${((performance.now() - t0) / 1000).toFixed(1)} s</span>`);
+      if (cur) cur.el.replaceChildren(html`<span class="ok">✓</span> ${cur.what.toLowerCase()}`);
+      line(html`<span class="ok">✓ page 1 in ${((performance.now() - t0) / 1000).toFixed(1)} s</span>`);
       // (a beat to read it, then off)
       setTimeout(() => crtOff(el), 180);
       return 700;

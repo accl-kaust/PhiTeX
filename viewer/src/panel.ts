@@ -19,7 +19,8 @@ import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
 import { Viewer } from "./viewer.ts";
 import { VIEWER_CSS } from "./css.ts";
 import { PRINT_CSS } from "./print.ts";
-import { PROBLEMS_CSS, problemHtml } from "./problems.ts";
+import { PROBLEMS_CSS, problemNode } from "./problems.ts";
+import { html, rich } from "./html.ts";
 import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys, typing } from "./keys.ts";
 import { REPORT_TO } from "./report.ts";
@@ -176,8 +177,9 @@ export interface PanelEvents {
 
 /**
  * What the panel says that depends on where it runs (the defaults:
- * Overleaf's; VS Code's webview gives its own). `about` and `reading` are
- * markup, the rest text.
+ * Overleaf's; VS Code's webview gives its own). Text, but `about`: text with
+ * <b> and <code> in it (html.ts's rich), or the host's own nodes (html``),
+ * a link to the licence (#license) among them.
  */
 export interface PanelWords {
   /** The header's badge, and its tooltip. */
@@ -185,7 +187,7 @@ export interface PanelWords {
   badgeTitle: string;
   /** The line under the page, and what it opens. */
   byline: string;
-  about: string;
+  about: string | Node;
   /** The strip while the first build runs past 400 ms (`{s}`: the seconds so far); empty: no strip for builds at all (the host shows them). */
   preparing: string;
   /** Where the full license is. */
@@ -206,12 +208,15 @@ const OVERLEAF_WORDS: PanelWords = {
   badge: "Unofficial · experimental",
   badgeTitle: "An unofficial extension, not part of Overleaf. PhiTeX runs LaTeX (pdfTeX) in your browser; Overleaf's PDF is the real one.",
   byline: "Unofficial PhiTeX extension · experimental",
-  about: `<b>⚡ Instant is not part of Overleaf.</b> It is added by the <b>unofficial PhiTeX</b> browser extension, not made,
+  // (made when a panel reads it, not when this module loads: nothing of the DOM before a page)
+  get about() {
+    return html`<b>⚡ Instant is not part of Overleaf.</b> It is added by the <b>unofficial PhiTeX</b> browser extension, not made,
       endorsed or supported by Overleaf: an experimental incremental TeX engine that runs entirely in your browser. Nothing is
       sent anywhere; Overleaf's own PDF is on the <b>PDF</b> tab.
       <div class="about-foot">LaTeX, with TeX Live's packages fetched as needed. Free software (AGPL-3.0-only,
       <a id="license" target="_blank" rel="noopener">full license</a>), provided as is, without any warranty.
-      To turn it off: <code>chrome://extensions</code>.</div>`,
+      To turn it off: <code>chrome://extensions</code>.</div>`;
+  },
   preparing: "Getting ready for instant edits… {s} s (pages still scroll)",
   license: "LICENSE.txt",
   realPdf: "Overleaf's PDF is the real one.",
@@ -271,7 +276,6 @@ export function pageBox(d: { w: number; h: number }, cssWidth: number, dpr = glo
   return [snap(cssWidth), snap((d.h * cssWidth) / d.w)];
 }
 
-const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 
 /** Material icons (Apache-2.0), inline: no dependency on the page's icon font. */
 const PATHS: Record<string, string> = {
@@ -303,10 +307,11 @@ const PATHS: Record<string, string> = {
 };
 /** A problem's Copy for an AI assistant button (`i`: its row's place in the list). */
 const copyBtn = (i: number) =>
-  `<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
+  html`<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
 
+/** An icon by name (PATHS), as an <svg>. */
 const icon = (name: string, size = 18) =>
-  `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
+  html`<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`.firstElementChild!;
 
 /** The zooms the menu offers: fit the width, the whole page, then percentages. */
 const ZOOMS: [string, string][] = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
@@ -318,17 +323,16 @@ const mb = (b?: number) => (b ? ` · ${b < 1048576 ? `${Math.max(1, Math.round(b
 /** A duration as it reads best: 0.7 ms, 42 ms, 2.6 s, 14 s. */
 const dur = (ms: number) => (ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
 
+/** A time's parts as the popover draws them: a bar of them, and their names and times under it (`cycle`: colours used again past it). */
+const bars = (parts: [string, number][], cycle = Infinity) =>
+  html`<div class="tbar">${parts.map(([, ms], i) => html`<i class="c${i % cycle}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`)}</div><div class="legend">${parts.map(([n, ms], i) => html`<span><i class="c${i % cycle}"></i>${n} ${dur(ms)}</span>`)}</div>`;
+
 /** The timing popover's row for the last page drawn as strips (Strips' `data-frame`): its time, split, and its strips drawn and reused. */
-function framePart(json: string | undefined): string {
+function framePart(json: string | undefined): DocumentFragment | "" {
   if (!json) return "";
   const f = JSON.parse(json) as { page: number; inView: boolean; drawn: number; kept: number; probe: number; draw: number; watch: number; request: number; decode: number };
   const split: [string, number][] = [["finding what changed", f.probe], ["drawing", f.draw], ["waiting for the engine", Math.max(0, f.request - f.watch)], ["decoding", f.decode]];
-  return (
-    `<div class="row"><span class="k">Drawing page ${f.page}${f.inView ? " (in view)" : ""}</span><span class="v">${esc(dur(f.request + f.decode))}</span>` +
-    `<div class="tbar">${split.map(([, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
-    `<div class="legend">${split.map(([n, ms], i) => `<span><i class="c${i}"></i>${n} ${esc(dur(ms))}</span>`).join("")}</div>` +
-    `<span class="note">${f.drawn} slice${f.drawn === 1 ? "" : "s"} of the page drawn, ${f.kept} kept from before</span></div>`
-  );
+  return html`<div class="row"><span class="k">Drawing page ${f.page}${f.inView ? " (in view)" : ""}</span><span class="v">${dur(f.request + f.decode)}</span>${bars(split)}<span class="note">${f.drawn} slice${f.drawn === 1 ? "" : "s"} of the page drawn, ${f.kept} kept from before</span></div>`;
 }
 
 /** The last page drawn (Strips' `data-frame`) in words, for Copy debug info: framePart's numbers as a line. */
@@ -388,45 +392,45 @@ function part(key: string, raw: string): { key: string; label: string; value: st
   return { key, label, value: dur(ms), ms, split, note: [key in PART_NOTES ? PART_NOTES[key] : note, extra].filter(Boolean).join(" · ") || undefined };
 }
 
-const lines = (...w: number[]) => w.map((x) => `<i style="width:${x}%"></i>`).join("");
+const lines = (...w: number[]) => w.map((x) => html`<i style="width:${x}%"></i>`);
 
 /**
  * Feature tips, each shown once (own-bar hosts): the control it points at,
  * its words, new or not, and a small looping demo of it (CSS only: .tip .demo
  * in print.ts; still, at its end state, with reduced motion).
  */
-const TIPS: { id: string; at: string; title: string; text: string; demo: string; fresh?: boolean }[] = [
+const TIPS: { id: string; at: string; title: string; text: string; demo: () => DocumentFragment; fresh?: boolean }[] = [
   {
     id: "live", at: "#st", title: "Typeset as you type",
     text: "No compile button: change the source and only what you touched is typeset again. The page follows in milliseconds.",
     // (a heading typed in the editor, the page's heading following it letter by letter, the time it took)
-    demo: `<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon("bolt", 11)}12 ms</span></div>`,
+    demo: () => html`<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon("bolt", 11)}12 ms</span></div>`,
   },
   {
     id: "compare", at: "#b-compare", title: "Compare versions", fresh: true,
     text: "See what changed since an earlier version, marked as latexdiff marks it: additions in blue, deletions struck out.",
     // (a sentence changes, then the change marked, then the navigator; Overleaf's compare tip had it first)
-    demo: `<div class="demo cmp" aria-hidden="true">The results are <span class="del">good</span><span class="add">&nbsp;excellent</span>.<span class="ver"><i class="v0">Submitted v1</i><i class="v1">Now vs Submitted v1</i></span><span class="tag">‹ 1 / 1 ›</span></div>`,
+    demo: () => html`<div class="demo cmp" aria-hidden="true">The results are <span class="del">good</span><span class="add">&nbsp;excellent</span>.<span class="ver"><i class="v0">Submitted v1</i><i class="v1">Now vs Submitted v1</i></span><span class="tag">‹ 1 / 1 ›</span></div>`,
   },
   {
     id: "timing", at: "#st", title: "How long it took",
     text: "Click the status for the last build's times and how long a keystroke takes to reach the page.",
-    demo: `<div class="demo tim" aria-hidden="true"><div class="mbar"><span class="mst">Built · 42 ms</span></div><div class="mpop"><b>Keystroke to page</b><p><span>edit</span><i style="--w:30%"></i><em>11 ms</em></p><p><span>typeset</span><i style="--w:55%"></i><em>25 ms</em></p><p><span>paint</span><i style="--w:18%"></i><em>6 ms</em></p></div></div>`,
+    demo: () => html`<div class="demo tim" aria-hidden="true"><div class="mbar"><span class="mst">Built · 42 ms</span></div><div class="mpop"><b>Keystroke to page</b><p><span>edit</span><i style="--w:30%"></i><em>11 ms</em></p><p><span>typeset</span><i style="--w:55%"></i><em>25 ms</em></p><p><span>paint</span><i style="--w:18%"></i><em>6 ms</em></p></div></div>`,
   },
   {
     id: "rebuild", at: "#b-rec", title: "Clean rebuild",
     text: "Builds run by themselves as you type. Start over from a clean slate here, or clear what PhiTeX keeps.",
-    demo: `<div class="demo reb" aria-hidden="true"><div class="mbar"><span class="msplit"><span class="go">${icon("refresh", 12)}Rebuild</span><span class="dd">${icon("expand_more", 12)}</span></span></div><div class="mmenu"><span>Rebuild</span><span class="pick">Clean rebuild</span></div><div class="pg">${lines(60, 95, 90, 70, 92, 50)}</div></div>`,
+    demo: () => html`<div class="demo reb" aria-hidden="true"><div class="mbar"><span class="msplit"><span class="go">${icon("refresh", 12)}Rebuild</span><span class="dd">${icon("expand_more", 12)}</span></span></div><div class="mmenu"><span>Rebuild</span><span class="pick">Clean rebuild</span></div><div class="pg">${lines(60, 95, 90, 70, 92, 50)}</div></div>`,
   },
   {
     id: "more", at: "#b-more", title: "Dark PDF and more",
     text: "The pages in dark mode, the log, the contents and the keys are in this menu.",
-    demo: `<div class="demo drk" aria-hidden="true"><div class="mbar"><span class="dots">${icon("more_horiz", 14)}</span></div><div class="mmenu"><span class="pick">${icon("dark", 11)}Dark PDF<b>✓</b></span><span>View log</span></div><div class="pg">${lines(55, 95, 88, 92, 60, 85)}</div></div>`,
+    demo: () => html`<div class="demo drk" aria-hidden="true"><div class="mbar"><span class="dots">${icon("more_horiz", 14)}</span></div><div class="mmenu"><span class="pick">${icon("dark", 11)}Dark PDF<b>✓</b></span><span>View log</span></div><div class="pg">${lines(55, 95, 88, 92, 60, 85)}</div></div>`,
   },
   {
     id: "contents", at: "#b-side", title: "Contents", fresh: true,
     text: "The document's sections beside the pages: click one to go there. This button (or t) shows or hides them.",
-    demo: `<div class="demo toc" aria-hidden="true"><div class="col"><span>1 Introduction</span><span>2 Method</span><span>3 Results</span><i class="at"></i></div><div class="pg"><div class="roll">${lines(45, 95, 90, 70)}<s></s>${lines(40, 92, 85, 60)}<s></s>${lines(42, 90, 94, 75)}</div></div></div>`,
+    demo: () => html`<div class="demo toc" aria-hidden="true"><div class="col"><span>1 Introduction</span><span>2 Method</span><span>3 Results</span><i class="at"></i></div><div class="pg"><div class="roll">${lines(45, 95, 90, 70)}<s></s>${lines(40, 92, 85, 60)}<s></s>${lines(42, 90, 94, 75)}</div></div></div>`,
   },
 ];
 
@@ -439,6 +443,12 @@ export class Panel {
   private store?: Prefs;
   private at = 0;
   private last: PageImage | null = null;
+  /** A page drawn in this page's life: the engine is up, a rebuild's opening starts past loading it. */
+  private drewOnce = false;
+  /** The step an opening says first: the one now, else loading the engine (or, once it ran here, the packages). */
+  private firstStep(): string {
+    return this.stepNow || this.words.steps[this.drewOnce ? 1 : 0];
+  }
   private url: string | null = null;
   private lastStatus: Status | null = null;
   private listeners: ((s: ViewState) => void)[] = [];
@@ -465,9 +475,10 @@ export class Panel {
     const host = document.createElement("phitex-preview");
     this.root = host.attachShadow({ mode: "open" });
     const item = (id: string, name: string, label: string, sub = "", cls = "") =>
-      `<button type="button" role="menuitem" id="${id}"${cls ? ` class="${cls}"` : ""}>${name ? `<span class="icon">${name}</span>` : '<span class="check"></span>'}<span>${label}</span>${sub ? `<span class="sub">${sub}</span>` : ""}</button>`;
-    this.root.innerHTML = (`<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${PRINT_CSS}</style>
-<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
+      html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
+    const style = document.createElement("style");
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS;
+    const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
     <button type="button" class="ib" id="b-side" title="Contents (t)" aria-label="Contents" aria-pressed="false"><span class="icon">toc</span></button>
@@ -491,7 +502,7 @@ export class Panel {
     </div>
     <div class="menu timing" id="m-time" role="dialog" aria-label="Timing" hidden style="left:6px;top:calc(100% + 4px)"></div>
     <div class="menu" id="m-zoom" role="menu" hidden style="right:60px;top:calc(100% + 4px);min-width:170px">
-      ${ZOOMS.map(([z, t], i) => `${i === 2 ? "<hr>" : ""}<button type="button" role="menuitemradio" data-zoom="${z}"><span class="check"></span>${t}</button>`).join("")}
+      ${ZOOMS.map(([z, t], i) => [i === 2 ? html`<hr>` : "", html`<button type="button" role="menuitemradio" data-zoom="${z}"><span class="check"></span>${t}</button>`])}
     </div>
     <div class="menu" id="m-more" role="menu" hidden style="right:6px;top:calc(100% + 4px);min-width:250px">
       ${item("x-pdf", "download", "Download PDF")}
@@ -517,7 +528,7 @@ export class Panel {
     <div class="dialog settings" id="settings" role="dialog" aria-label="Settings" hidden></div>
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <div class="dialog keys" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
-    <div class="dialog small about" id="about" role="dialog" aria-label="About the PhiTeX preview" hidden><header>About PhiTeX<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><div>${w.about}</div></div>
+    <div class="dialog small about" id="about" role="dialog" aria-label="About the PhiTeX preview" hidden><header>About PhiTeX<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><div>${typeof w.about === "string" ? rich(w.about) : w.about.cloneNode(true)}</div></div>
     <div class="dialog" id="logview" role="dialog" aria-label="The build's log" hidden><header>The last build's log<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><pre id="logtext"></pre></div>
     <div class="dialog" id="report" role="dialog" aria-label="Debug report" hidden>
       <header>Debug report</header>
@@ -528,7 +539,11 @@ export class Panel {
     <div class="offpill" id="offpill">Disconnected</div>
     <button type="button" class="byline" id="byline" title="About this preview">${w.byline}</button>
   </div>
-</div>`).replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g, (_, n) => icon(n, n === "expand_more" || n === "refresh" ? 16 : 18));
+</div>`;
+    // (the icons by name, <span class="icon">refresh</span>: inline SVG, no dependency on the page's icon font)
+    for (const ic of skeleton.querySelectorAll<HTMLElement>("span.icon"))
+      if (ic.className === "icon" && /^\w+$/.test(ic.textContent ?? "")) ic.replaceWith(icon(ic.textContent!, ic.textContent === "expand_more" || ic.textContent === "refresh" ? 16 : 18));
+    this.root.replaceChildren(style, skeleton);
     this.host = host;
     // (hidden until the host docks it, or decides it floats: no flash of a window on load)
     host.style.display = "none";
@@ -812,7 +827,7 @@ export class Panel {
     this.host.style.display = display;
     if (on && !was) this.redraw();
     // (shown with no page yet: the first page's sheet, the opening on it)
-    if (on && !this.last) this.step(this.stepNow || this.words.steps[0], undefined, "");
+    if (on && !this.last) this.step(this.firstStep(), undefined, "");
   }
   private wasShown?: boolean;
 
@@ -838,7 +853,7 @@ export class Panel {
     this.win.classList.toggle("collapsed", on);
     const b = this.$("#min");
     b.title = on ? "Expand (Alt+Shift+P)" : "Collapse (Alt+Shift+P)";
-    b.innerHTML = icon(on ? "open_in_full" : "close_fullscreen");
+    b.replaceChildren(icon(on ? "open_in_full" : "close_fullscreen"));
     this.win.style.width = on ? "" : `${this.prefs.w}px`;
     this.win.style.height = on ? "" : `${this.prefs.h}px`;
     if (!on) this.redraw();
@@ -1158,7 +1173,7 @@ export class Panel {
     if (tip.hidden || tip.dataset.i !== hit.dataset.i) {
       tip.dataset.i = hit.dataset.i;
       tip.className = `ctip ${p.severity}`;
-      tip.innerHTML = `${icon(p.severity, 14)}<span></span>`;
+      tip.replaceChildren(icon(p.severity, 14), document.createElement("span"));
       tip.querySelector("span")!.textContent = p.message;
       tip.hidden = false;
     }
@@ -1213,14 +1228,14 @@ export class Panel {
     this.listed = shown.slice(0, this.listedMax);
     for (const [i, d] of this.listed.entries()) {
       // (each error and warning: its own Copy for an AI assistant)
-      const copy = d.severity === "error" || d.severity === "warning" ? copyBtn(i) : "";
+      const copy = d.severity === "error" || d.severity === "warning" ? copyBtn(i) : null;
       // (a problem the build told whole: its card, its places links)
       if (d.problem) {
         const card = document.createElement("ol");
         card.className = "phx-card phx-inline";
         card.setAttribute("role", "listitem");
-        card.innerHTML = problemHtml(d.problem);
-        card.firstElementChild!.insertAdjacentHTML("afterbegin", copy);
+        card.replaceChildren(problemNode(d.problem));
+        if (copy) card.firstElementChild!.prepend(copy);
         // (a click on the card: its place on the pages; its file:line link: the editor)
         if (d.problem.file && d.problem.range) {
           card.dataset.key = `${d.problem.file}\0${d.problem.range[0]}`;
@@ -1237,7 +1252,7 @@ export class Panel {
         row.dataset.line = String(d.line);
         row.title = `Go to ${d.file}:${d.line}`;
       }
-      row.innerHTML = `${copy}<span class="where"></span><div class="text"></div>`;
+      row.replaceChildren(html`${copy}<span class="where"></span><div class="text"></div>`);
       row.querySelector(".text")!.textContent = d.message;
       if (d.detail && d.code === "engine") row.append(foldedDetail(d.detail, "Engine details"));
       else if (d.detail) {
@@ -1281,7 +1296,7 @@ export class Panel {
     pb.hidden = !errors && !warnings;
     pb.className = `ib probs ${errors ? "error" : "warning"}`;
     pb.title = `${errors} error${errors === 1 ? "" : "s"}, ${warnings} warning${warnings === 1 ? "" : "s"}`;
-    this.$("#psev").innerHTML = icon(errors ? "error" : "warning", 16);
+    this.$("#psev").replaceChildren(icon(errors ? "error" : "warning", 16));
     this.$("#pcount").textContent = String(errors || warnings);
     this.$("#logshead").textContent = diags.length ? [errors && `${errors} error${errors === 1 ? "" : "s"}`, warnings && `${warnings} warning${warnings === 1 ? "" : "s"}`].filter(Boolean).join(", ") || "Notes" : "No problems";
     // (the list opened by itself only when there are no pages for it to cover; problems that changed close it again)
@@ -1524,7 +1539,7 @@ export class Panel {
     // (one that says the steps itself: the sheet's own not shown)
     el.classList.toggle("owns", !!anim.step);
     // (and the step the sheet says now, a rebuild's first: the watch says no other)
-    if (anim.step) anim.step(this.stepNow || this.words.steps[0], undefined, "");
+    if (anim.step) anim.step(this.firstStep(), undefined, "");
     this.animSince = performance.now();
   }
 
@@ -1624,7 +1639,7 @@ export class Panel {
     this.toastKind = kind;
     el.className = `toast ${kind}${t.err ? " err" : ""}`;
     el.hidden = false;
-    el.innerHTML = `<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>` + (t.pct === null ? "" : `<div class="track"><i style="width:${t.pct}%"></i></div>`);
+    el.replaceChildren(html`<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
     el.querySelector(".t span")!.textContent = t.title;
     el.querySelector(".d")!.textContent = t.detail ?? "";
     if (t.ms) this.toastTimer = setTimeout(() => this.toast(kind, null), t.ms);
@@ -1851,7 +1866,7 @@ export class Panel {
     if (!opts.keys) return;
     const help = this.$("#keyhelp");
     const extra: [string, string][] = [["e", "the build's errors and warnings"], ...(opts.outline ? ([["t", "the contents beside the pages"]] as [string, string][]) : [])];
-    help.innerHTML = `<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => `<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`).join("")}</table>`;
+    help.replaceChildren(html`<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => html`<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`)}</table>`);
     // (the problems' and the contents' keys first: Esc closes the list before anything else)
     addEventListener(
       "keydown",
@@ -2210,9 +2225,7 @@ export class Panel {
     // (one group at a time, by its tab: the last one shown, else the first)
     const shown = groups.filter((g) => g.rows.length);
     const at = Math.max(0, shown.findIndex((g) => g.title === this.settingsTab));
-    el.innerHTML =
-      `<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header>` +
-      `<nav class="stabs" role="tablist">${shown.map((g, i) => `<button type="button" role="tab" data-tab="${i}" data-group="${esc(g.title)}" aria-selected="${i === at}">${esc(g.title)}</button>`).join("")}</nav><div class="sbody"></div>`;
+    el.replaceChildren(html`<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><nav class="stabs" role="tablist">${shown.map((g, i) => html`<button type="button" role="tab" data-tab="${i}" data-group="${g.title}" aria-selected="${i === at}">${g.title}</button>`)}</nav><div class="sbody"></div>`);
     const body = el.querySelector(".sbody")!;
     shown.forEach((g, i) => {
       const sec = document.createElement("section");
@@ -2246,17 +2259,17 @@ export class Panel {
     row.querySelector("b")!.textContent = r.label;
     row.querySelector("small")!.textContent = r.disabled ?? r.help ?? "";
     const ctl = row.querySelector(".ctl")!;
-    const dis = r.disabled || !r.set ? " disabled" : "";
-    if (r.kind === "toggle") ctl.innerHTML = `<button type="button" role="switch" class="switch" aria-checked="${r.value === true}" aria-label="${esc(r.label)}"${dis}><i></i></button>`;
+    const off = !!(r.disabled || !r.set);
+    if (r.kind === "toggle") ctl.replaceChildren(html`<button type="button" role="switch" class="switch" aria-checked="${r.value === true}" aria-label="${r.label}" disabled="${off}"><i></i></button>`);
     else if (r.kind === "choice")
-      ctl.innerHTML = `<div class="seg" role="group" aria-label="${esc(r.label)}">${(r.options ?? []).map(([v, l]) => `<button type="button" data-v="${esc(v)}" aria-pressed="${r.value === v}"${dis}>${esc(l)}</button>`).join("")}</div>`;
+      ctl.replaceChildren(html`<div class="seg" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}">${l}</button>`)}</div>`);
     else if (r.kind === "select") {
       const s = document.createElement("select");
       s.setAttribute("aria-label", r.label);
-      s.disabled = !!dis;
+      s.disabled = off;
       for (const [v, l] of r.options ?? []) s.append(new Option(l, v, v === r.value, v === r.value));
       ctl.append(s);
-    } else if (r.kind === "action") ctl.innerHTML = `<button type="button" class="btn"${dis}>${esc(r.button ?? r.label)}</button>`;
+    } else if (r.kind === "action") ctl.replaceChildren(html`<button type="button" class="btn" disabled="${off}">${r.button ?? r.label}</button>`);
     else ctl.innerHTML = `<span class="val"></span>`, (ctl.querySelector(".val")!.textContent = String(r.value ?? ""));
     return row;
   }
@@ -2473,9 +2486,7 @@ export class Panel {
     // (a control hidden at this width: the menu that holds it)
     if (!target || !target.offsetParent) target = this.$("#b-more");
     target.classList.add("ringed");
-    el.innerHTML =
-      `<h4>${t.fresh ? '<span class="new">New</span>' : ""}${esc(t.title)}</h4>${t.demo}<p>${esc(t.text)}</p>` +
-      `<div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`;
+    el.replaceChildren(html`<h4>${t.fresh ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`);
     el.hidden = false;
     const bar = this.$(".bar").getBoundingClientRect(), r = target.getBoundingClientRect(), w = el.offsetWidth;
     const cx = r.left + r.width / 2 - bar.left, left = Math.max(8, Math.min(bar.width - w - 8, cx - w / 2));
@@ -2502,19 +2513,11 @@ export class Panel {
       el.innerHTML = "";
       return;
     }
-    const esc = (t: string) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
-    const n = d.busy ? `<span class="n busy">${esc(d.busy)}</span>` : `<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
-    el.innerHTML =
-      `<span class="what" title="${esc(d.title)} against the current version">${esc(d.title)} vs current <small>${esc(d.when)}</small></span>` +
-      `<button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>‹</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>›</button>` +
-      // (which pages are shown, said by a switch of two, the one shown pressed;
-      // the diff's style a click away on its own half: D switches)
-      `<span class="sep"></span><span class="seg" role="group" aria-label="Pages shown (D)">` +
-      `<button data-a="${d.showing === "diff" ? "settings" : "toggle"}" class="on-diff" aria-pressed="${d.showing === "diff"}" title="${d.showing === "diff" ? "The diff is shown: its style (colors, markup, change bars)" : "Show the diff (D)"}">Diff${d.showing === "diff" ? ` <span class="chev" aria-label="Diff style">▾</span>` : ""}</button>` +
-      `<button data-a="${d.showing === "current" ? "" : "toggle"}" class="on-current" aria-pressed="${d.showing === "current"}" title="${d.showing === "current" ? "The current version is shown" : "Show the current version (D)"}">Current</button></span>` +
-      `<button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>⬇ PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>⬇ .tex</button>` +
-      `<button data-a="settings" title="Diff style: colors, markup, change bars" aria-label="Diff style">⚙</button>` +
-      `<button data-a="close" title="Stop comparing" aria-label="Stop comparing">✕</button>`;
+    const n = d.busy ? html`<span class="n busy">${d.busy}</span>` : html`<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
+    const stuck = !!d.busy || !d.changes;
+    // (which pages are shown, said by a switch of two, the one shown pressed;
+    // the diff's style a click away on its own half: D switches)
+    el.replaceChildren(html`<span class="what" title="${d.title} against the current version">${d.title} vs current <small>${d.when}</small></span><button data-a="prev" title="Previous change (Shift+N)" disabled="${stuck}">‹</button>${n}<button data-a="next" title="Next change (N)" disabled="${stuck}">›</button><span class="sep"></span><span class="seg" role="group" aria-label="Pages shown (D)"><button data-a="${d.showing === "diff" ? "settings" : "toggle"}" class="on-diff" aria-pressed="${d.showing === "diff"}" title="${d.showing === "diff" ? "The diff is shown: its style (colors, markup, change bars)" : "Show the diff (D)"}">Diff${d.showing === "diff" ? html` <span class="chev" aria-label="Diff style">▾</span>` : ""}</button><button data-a="${d.showing === "current" ? "" : "toggle"}" class="on-current" aria-pressed="${d.showing === "current"}" title="${d.showing === "current" ? "The current version is shown" : "Show the current version (D)"}">Current</button></span><button data-a="pdf" title="Download the diff PDF" disabled="${!!d.busy}">⬇ PDF</button><button data-a="tex" title="Download diff.tex" disabled="${!!d.busy}">⬇ .tex</button><button data-a="settings" title="Diff style: colors, markup, change bars" aria-label="Diff style">⚙</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">✕</button>`);
     el.className = "diffbar on";
     el.onclick = (e) => {
       const a = (e.target as HTMLElement).closest<HTMLElement>("button[data-a]")?.dataset.a as keyof DiffBarActions | undefined;
@@ -2550,7 +2553,7 @@ export class Panel {
       ["#0000ff", "#ff0000", "Blue / red"], ["#15803d", "#b91c1c", "Green / red"], ["#0072b2", "#d55e00", "Colorblind-safe"], ["#7e22ce", "#6b7280", "Purple / gray"],
     ];
     const seg = (key: "markup" | "subtype", opts: [string, string][]) =>
-      `<div class="opts">${opts.map(([v, t]) => `<button data-k="${key}" data-v="${v}" aria-pressed="${(key === "markup" ? base : look[key]) === v}">${t}</button>`).join("")}</div>`;
+      html`<div class="opts">${opts.map(([v, t]) => html`<button data-k="${key}" data-v="${v}" aria-pressed="${(key === "markup" ? base : look[key]) === v}">${t}</button>`)}</div>`;
     const canBars = base in WITH_BARS;
     const deco = (add: boolean) => {
       const c = add ? look.add_color : look.del_color;
@@ -2559,14 +2562,7 @@ export class Panel {
       const line = add && /^(underline|culinechbar)$/.test(look.markup) ? `text-decoration: underline wavy ${c}; text-underline-offset: 3px;` : "";
       return `color:${c};${strike ? `text-decoration: line-through ${c};` : ""}${line}${look.markup === "bold" && add ? "font-weight:700;" : ""}`;
     };
-    el.innerHTML =
-      `<h4>Style</h4>${seg("markup", MARKUP)}` +
-      `<div class="row bars"><span>Change bars in the margin</span><button data-bars="1" role="switch" aria-checked="${bars}" aria-pressed="${bars}" ${canBars ? "" : 'disabled title="Not with this style"'}>${bars ? "On" : "Off"}</button></div>` +
-      `<h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => `<button class="pair" data-pair="${a},${d}" aria-pressed="${look.add_color === a && look.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`).join("")}</div>` +
-      `<div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look.del_color}"></div>` +
-      `<h4>Mode</h4>${seg("subtype", SUB)}` +
-      `<div class="sample"${bars ? ` style="box-shadow: inset 3px 0 0 ${look.add_color}; padding-left: 12px"` : ""}>The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div>` +
-      `<div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`;
+    el.replaceChildren(html`<h4>Style</h4>${seg("markup", MARKUP)}<div class="row bars"><span>Change bars in the margin</span><button data-bars="1" role="switch" aria-checked="${bars}" aria-pressed="${bars}" disabled="${!canBars}" title="${canBars ? null : "Not with this style"}">${bars ? "On" : "Off"}</button></div><h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => html`<button class="pair" data-pair="${a},${d}" aria-pressed="${look.add_color === a && look.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`)}</div><div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look.del_color}"></div><h4>Mode</h4>${seg("subtype", SUB)}<div class="sample" style="${bars ? `box-shadow: inset 3px 0 0 ${look.add_color}; padding-left: 12px` : null}">The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div><div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`);
     el.className = "menu diffset on";
     const set = (l: Partial<DiffLook>) => {
       const next = { ...look, ...l };
@@ -2662,16 +2658,12 @@ export class Panel {
   }
 
   /** The timing popover's first build: each step's time, as a bar, from opening to the first page. */
-  private walkPart(): string {
+  private walkPart(): DocumentFragment | "" {
     const w = this.walk;
     if (!w || w.ms === undefined || !this.speed?.first) return "";
     const parts = w.parts.filter(([, ms]) => ms >= 1);
-    return (
-      // (its total is the head's, "First page · 124 s": said once)
-      `<div class="row"><span class="k">Where the time went</span><span class="v"></span>` +
-      `<div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
-      `<div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc(n)} ${esc(dur(ms))}</span>`).join("")}</div></div>`
-    );
+    // (its total is the head's, "First page · 124 s": said once)
+    return html`<div class="row"><span class="k">Where the time went</span><span class="v"></span>${bars(parts, 4)}</div>`;
   }
 
   /** The last build's parts as its host measured them (the watch's stats), in order, and work done alongside them (not in the build's time): [name, ms]. */
@@ -2684,31 +2676,25 @@ export class Panel {
   }
 
   /** The timing popover's "Where the last build's time went": its parts as a bar, like the opening's. */
-  private phasesPart(): string {
+  private phasesPart(): DocumentFragment | "" {
     const p = this.phases;
     if (!p) return "";
     const parts = p.parts.filter(([, ms]) => ms >= 1);
     if (!parts.length) return "";
     const beside = p.beside.filter(([, ms]) => ms >= 1).map(([n, ms]) => `${n} ${dur(ms)}`).join(", ");
-    return (
-      `<div class="row"><span class="k">Where the last build's time went</span><span class="v"></span>` +
-      `<div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
-      `<div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc(n)} ${esc(dur(ms))}</span>`).join("")}</div>` +
-      (beside ? `<span class="note">${esc(`Alongside: ${beside}`)}</span>` : "") +
-      `</div>`
-    );
+    return html`<div class="row"><span class="k">Where the last build's time went</span><span class="v"></span>${bars(parts, 4)}${beside ? html`<span class="note">Alongside: ${beside}</span>` : ""}</div>`;
   }
 
   /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
   private downloads: { n: number; bytes: number; ms: number; since?: number } = { n: 0, bytes: 0, ms: 0 };
 
   /** The timing popover's Downloads row: the packages' time, how many and their size; none fetched, none. */
-  private downloadsPart(): string {
+  private downloadsPart(): DocumentFragment | "" {
     const d = this.downloads;
     if (!d.n && d.since === undefined) return "";
     const ms = d.ms + (d.since === undefined ? 0 : performance.now() - d.since);
     const size = d.bytes ? ` · ${d.bytes < 1e6 ? `${Math.max(1, Math.round(d.bytes / 1e3))} kB` : `${(d.bytes / 1e6).toFixed(1)} MB`}` : "";
-    return `<div class="row"><span class="k">Downloads</span><span class="v">${esc(dur(ms))}</span><span class="note">${d.n} package${d.n === 1 ? "" : "s"}${size}${d.since === undefined ? "" : ", more on the way"}</span></div>`;
+    return html`<div class="row"><span class="k">Downloads</span><span class="v">${dur(ms)}</span><span class="note">${d.n} package${d.n === 1 ? "" : "s"}${size}${d.since === undefined ? "" : ", more on the way"}</span></div>`;
   }
 
   /** The first build's time and the edits' since (the watch's), for the popover's bars. */
@@ -2757,7 +2743,7 @@ export class Panel {
   }
 
   /** The bars: the first build, the last edit, the edits' median, each as long as its time (the longest the full width; a short one at least a sliver). */
-  private timeBars(): string {
+  private timeBars(): DocumentFragment | "" {
     const t = this.times;
     if (t.first === undefined || !t.edits.length) return "";
     const sorted = [...t.edits].sort((a, b) => a - b);
@@ -2768,10 +2754,7 @@ export class Panel {
     ];
     const max = Math.max(...rows.map((r) => r[1]), 1e-3);
     const x = t.first / Math.max(t.edits[t.edits.length - 1], 1e-3);
-    return `<div class="tbars" role="img" aria-label="First build ${esc(dur(t.first))}, this edit ${esc(dur(t.edits[t.edits.length - 1]))}">` +
-      rows.map(([k, ms, c]) => `<div class="tb"><span class="k">${k}</span><span class="track"><i class="${c}" style="width:${Math.max(0.6, (100 * ms) / max).toFixed(2)}%"></i></span><span class="v">${esc(dur(ms))}</span></div>`).join("") +
-      (x >= 1.5 ? `<div class="tb x">${x < 10 ? x.toFixed(1) : Math.round(x)}× faster than the first build</div>` : "") +
-      `</div>`;
+    return html`<div class="tbars" role="img" aria-label="First build ${dur(t.first)}, this edit ${dur(t.edits[t.edits.length - 1])}">${rows.map(([k, ms, c]) => html`<div class="tb"><span class="k">${k}</span><span class="track"><i class="${c}" style="width:${Math.max(0.6, (100 * ms) / max).toFixed(2)}%"></i></span><span class="v">${dur(ms)}</span></div>`)}${x >= 1.5 ? html`<div class="tb x">${x < 10 ? x.toFixed(1) : Math.round(x)}× faster than the first build</div>` : ""}</div>`;
   }
 
   /** The last build's parts as the session lists them: [what, how long]. */
@@ -2791,27 +2774,10 @@ export class Panel {
     const l = this.latest();
     const e2e = parts.find((p) => p.key === "keystroke→page")?.ms ?? l?.ms;
     const head = !l ? (e2e !== undefined ? ["Keystroke to page", e2e] : null) : l.first || l.label !== "Built" ? [l.label, l.ms] : ["Keystroke to page", e2e ?? l.ms];
-    const rows = parts
-      .map((p) => {
-        const bar = p.split?.length
-          ? `<div class="tbar">${p.split.map(([n, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
-            `<div class="legend">${p.split.map(([n, ms], i) => `<span><i class="c${i}"></i>${esc(n)} ${esc(dur(ms))}</span>`).join("")}</div>`
-          : "";
-        return `<div class="row"><span class="k">${esc(p.label)}</span><span class="v">${esc(p.value)}</span>${bar}${p.note ? `<span class="note">${esc(p.note)}</span>` : ""}</div>`;
-      })
-      .join("");
+    const rows = parts.map((p) => html`<div class="row"><span class="k">${p.label}</span><span class="v">${p.value}</span>${p.split?.length ? bars(p.split) : ""}${p.note ? html`<span class="note">${p.note}</span>` : ""}</div>`);
     // (the last page drawn: its time as a bar like the build's parts, the watch's probe and draw, the transfer, the decode)
     const strips = framePart(this.$("#stripsline").dataset.frame);
-    el.innerHTML =
-      (head ? `<div class="head"><span>${esc(String(head[0]))}</span><b>${esc(dur(head[1] as number))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) +
-      this.walkPart() +
-      this.phasesPart() +
-      this.timeBars() +
-      this.downloadsPart() +
-      rows +
-      strips +
-      `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>` +
-      `<button type="button" class="reportbtn copydbg">Copy debug info</button>`;
+    el.replaceChildren(html`${head ? html`<div class="head"><span>${String(head[0])}</span><b>${dur(head[1] as number)}</b></div>` : html`<div class="head"><span>No build yet</span></div>`}${this.walkPart()}${this.phasesPart()}${this.timeBars()}${this.downloadsPart()}${rows}${strips}<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div><button type="button" class="reportbtn copydbg">Copy debug info</button>`);
     el.querySelector<HTMLButtonElement>(".copydbg")!.onclick = (e) => {
       e.stopPropagation();
       const b = e.currentTarget as HTMLButtonElement;
@@ -3031,6 +2997,7 @@ export class Panel {
       return;
     }
     this.last = img;
+    this.drewOnce = true;
     this.walkEnd();
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");

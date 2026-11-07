@@ -5,6 +5,8 @@
 // items (the core's `outline`: the PDF's /Outlines, crates/output/render)
 // and the viewer.
 
+import { html } from "./html.ts";
+
 /** An outline item: its title, its page (from 0) and top in points (null: none), its children. */
 export interface Entry {
   t: string;
@@ -18,7 +20,6 @@ export interface Place {
   goToPlace(k: number, top: number | null): void;
 }
 
-const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 
 export class Outline {
   private el: HTMLElement;
@@ -64,18 +65,16 @@ export class Outline {
       this.el.innerHTML = `<p class="phx-none">No contents: the PDF has no outline (hyperref makes one from the sections).</p>`;
       return;
     }
-    const list = (es: Entry[], path: string, depth: number): string =>
-      `<ul>${es
-        .map((e) => {
-          const i = this.flat.length;
-          this.flat.push({ e, row: null as unknown as HTMLElement });
-          const p = `${path}/${e.t}`;
-          const kids = e.k.length ? list(e.k, p, depth + 1) : "";
-          const cls = [e.k.length ? "parent" : "", this.folded.has(p) ? "folded" : ""].filter(Boolean).join(" ");
-          return `<li data-i="${i}" data-path="${esc(p)}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? `<span class="phx-fold" aria-hidden="true"></span>` : `<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${esc(e.t)}">${esc(e.t)}</a>${e.p != null ? `<span class="phx-p">${Number(e.p) + 1}</span>` : ""}</div>${kids}</li>`;
-        })
-        .join("")}</ul>`;
-    this.el.innerHTML = list(items, "", 0);
+    const list = (es: Entry[], path: string, depth: number): DocumentFragment =>
+      html`<ul>${es.map((e) => {
+        const i = this.flat.length;
+        this.flat.push({ e, row: null as unknown as HTMLElement });
+        const p = `${path}/${e.t}`;
+        const kids = e.k.length ? list(e.k, p, depth + 1) : "";
+        const cls = [e.k.length ? "parent" : "", this.folded.has(p) ? "folded" : ""].filter(Boolean).join(" ");
+        return html`<li data-i="${i}" data-path="${p}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? html`<span class="phx-fold" aria-hidden="true"></span>` : html`<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${e.t}">${e.t}</a>${e.p != null ? html`<span class="phx-p">${Number(e.p) + 1}</span>` : ""}</div>${kids}</li>`;
+      })}</ul>`;
+    this.el.replaceChildren(list(items, "", 0));
     for (const li of this.el.querySelectorAll<HTMLElement>("li")) {
       const f = this.flat[Number(li.dataset.i)];
       if (f) f.row = li.querySelector(":scope > .phx-row")!;

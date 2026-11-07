@@ -7,13 +7,12 @@
 // where the document's are not seen).
 
 import type { Opening } from "../opening.ts";
+import { html } from "../html.ts";
 
 export type { Opening };
 
 export const INK = { light: "#1d3e72", dark: "#e4e6ea" };
 export const PAPER = { light: "#ffffff", dark: "#2c2e33" };
-/** Text for markup. */
-export const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 /** The logo's ribbon (ACCL's stripes). */
 export const RIBBON = ["#00a8a4", "#d3c72a", "#f0b225", "#f58f2d"];
 export const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -47,13 +46,15 @@ const SHARED = `
  * styles never reach its parts (.bar, .menu, .tip are the panel's names too)
  * and its own never leave it. Removed with gone().
  */
-export function layer(box: HTMLElement, cls: string, css: string, html: string): HTMLElement {
+export function layer(box: HTMLElement, cls: string, css: string, markup: DocumentFragment): HTMLElement {
   register();
   const host = document.createElement("div");
   host.style.cssText = "position: absolute; inset: 0; pointer-events: none;";
   host.setAttribute("aria-hidden", "true");
   const root = host.attachShadow({ mode: "open" });
-  root.innerHTML = `<style>${SHARED}${css}</style><div class="phx-o ${cls}">${html}</div>`;
+  const style = document.createElement("style");
+  style.textContent = SHARED + css;
+  root.replaceChildren(style, html`<div class="phx-o ${cls}">${markup}</div>`);
   box.append(host);
   return root.lastElementChild as HTMLElement;
 }

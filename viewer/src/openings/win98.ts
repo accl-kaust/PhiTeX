@@ -8,13 +8,14 @@
 // Maximize button is pressed and it fills the sheet, its frame and the
 // taskbar going off the edges, the page alone left.
 
-import { layer, ending, esc, type Opening } from "./kit.ts";
+import { html } from "../html.ts";
+import { layer, ending, type Opening } from "./kit.ts";
 
 /** The PDF's window before it is maximized, in percent of the sheet: its page area (the frame and bars around it). */
 const RESTORED = { left: 9, top: 15, width: 82, height: 66 };
 
 export function win98(box: HTMLElement, doc = "document.tex"): Opening {
-  const pdf = esc(doc.replace(/\.tex$/i, "") + ".pdf");
+  const pdf = doc.replace(/\.tex$/i, "") + ".pdf";
   const el = layer(
     box,
     "phx-w98",
@@ -59,7 +60,7 @@ export function win98(box: HTMLElement, doc = "document.tex"): Opening {
 .phx-w98.desk .pdfw { display: block; }
 .phx-w98.max .pdfw { left: 0; top: 0; width: 100%; height: 100%; }
 .phx-w98.max .task { transform: translateY(110%); }`,
-    `<div class="w bev"><div class="t"><span>PhiTeX Setup</span><i>_</i><i>□</i><i>×</i></div><div class="b"><div class="fl"><div class="fold f1"></div><div class="pg"></div><div class="fold f2"></div></div>
+    html`<div class="w bev"><div class="t"><span>PhiTeX Setup</span><i>_</i><i>□</i><i>×</i></div><div class="b"><div class="fl"><div class="fold f1"></div><div class="pg"></div><div class="fold f2"></div></div>
        <p class="msg">Starting…</p><p class="det"></p><div class="bar march"><span></span></div></div></div>
      <div class="pdfw"><div class="chrome"><div class="t"><span>${pdf} - PhiTeX</span><i>_</i><i class="mx">□</i><i>×</i></div><div class="menu"><span><u>F</u>ile</span><span><u>E</u>dit</span><span><u>V</u>iew</span><span><u>W</u>indow</span><span><u>H</u>elp</span></div></div></div>
      <div class="task"><div class="start">⊞ Start</div><div class="btn on">PhiTeX Setup</div><div class="clock"></div></div>

@@ -7,13 +7,14 @@
 // page in it; its zoom box is clicked and it fills the sheet, the menu bar
 // and frame going off the edges.
 
-import { layer, ending, esc, type Opening } from "./kit.ts";
+import { html } from "../html.ts";
+import { layer, ending, type Opening } from "./kit.ts";
 
 const RESTORED = { left: 8, top: 17, width: 84, height: 66 };
 const DESK = "#6a6fb3";
 
 export function mac9(box: HTMLElement, doc = "document.tex"): Opening {
-  const pdf = esc(doc.replace(/\.tex$/i, "") + ".pdf");
+  const pdf = doc.replace(/\.tex$/i, "") + ".pdf";
   const el = layer(
     box,
     "phx-m9",
@@ -56,7 +57,7 @@ export function mac9(box: HTMLElement, doc = "document.tex"): Opening {
 .phx-m9.max .mb { transform: translateY(-110%); }
 /* (the window is the page seen through it: the icon behind would show through as it grows) */
 .phx-m9.max .ic { opacity: 0; transition: opacity .12s; }`,
-    `<div class="mb"><span class="ap"></span><span>File</span><span>Edit</span><span>View</span><span>Special</span><span>Help</span><span class="ck"></span></div>
+    html`<div class="mb"><span class="ap"></span><span>File</span><span>Edit</span><span>View</span><span>Special</span><span>Help</span><span class="ck"></span></div>
      <div class="ic"><i></i><span>${pdf}</span></div>
      <div class="w"><div class="t"><i class="cl"></i><b>Typesetting</b><i class="zm"></i><i class="co"></i></div><div class="b"><div class="doc"></div><div class="msg">Starting…</div><div class="det"></div><div class="bar pole"><span></span></div></div></div>
      <div class="bal"><b>Did you know?</b><span></span></div>
