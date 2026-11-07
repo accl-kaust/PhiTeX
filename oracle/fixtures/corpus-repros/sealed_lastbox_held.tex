@@ -1,0 +1,21 @@
+% One line of a routine's page (\lastbox) kept in a box register and placed by the next
+% piece of the document: a sealed line itself carried out of its finisher.
+% (PDF: pdftex, the oracle made in the CI image)
+\pdfoutput=1 \vsize=200pt \maxdepth=2pt \hsize=200pt \newbox\held
+\output={\ifnum\outputpenalty=-10004 \setbox0=\vbox{\unvbox255 \global\setbox\held=\lastbox}\else\shipout\box255 \fi}
+Paragraph 0 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 1 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 2 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 3 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 4 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 5 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 6 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 7 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 8 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 9 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 10 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 11 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 12 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 13 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+Paragraph 14 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \box\held
+\bye

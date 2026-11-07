@@ -757,7 +757,14 @@ impl Biber<'_> {
                 shifted: true,
                 normalize: true,
             };
-            let h = md5_hex(c.view_sort_key(&self.table, si).as_bytes());
+            // (the sortinit collator: the sorting template's locale,
+            // `Unicode::Collate::Locale->new(locale => ..., level => 1)`)
+            let acc = crate::collate::accepted_locale(if truthy(&dl.sortingtemplate.locale) {
+                &dl.sortingtemplate.locale
+            } else {
+                ""
+            });
+            let h = md5_hex(c.view_sort_key(self.table_of(&acc), si).as_bytes());
             sub(
                 &mut s,
                 "SORTINITHASH",
@@ -780,13 +787,38 @@ impl Biber<'_> {
     }
 
     /// Output::bbl `output`.
-    pub fn bbl_text(&self) -> String {
+    pub fn bbl_text(&mut self) -> String {
+        // (`output_safechars`: every entry's characters past ASCII as
+        // macros; else, writing in an encoding without all of an entry's
+        // characters, that entry's, with a warning)
+        let outenc = crate::recode::Encoding::of(&self.cfg.opt("output_encoding"))
+            .unwrap_or(crate::recode::Encoding::Utf8);
+        let safe = self.cfg.opt_true("output_safechars");
+        let encoder = (safe || outenc != crate::recode::Encoding::Utf8)
+            .then(|| crate::recode::Encoder::new(&self.cfg.opt("output_safecharsset")));
+        let recode = |s: String, warn: Option<&str>, warnings: &mut Vec<String>| -> String {
+            let Some(e) = &encoder else {
+                return s;
+            };
+            if safe {
+                return e.encode(&s);
+            }
+            if nfc(&s).chars().all(|c| outenc.has(c)) {
+                return s;
+            }
+            if let Some(k) = warn {
+                warnings.push(alloc::format!(
+                    "The entry '{k}' has characters which cannot be encoded in '{}'. Recoding problematic characters into macros.",
+                    self.cfg.opt("output_encoding")
+                ));
+            }
+            e.encode(&s)
+        };
+        let mut warnings = Vec::new();
         let mut o = String::from(HEAD);
         if !self.preamble.is_empty() {
-            o.push_str(&alloc::format!(
-                "\\preamble{{%\n{}%\n}}\n\n",
-                self.preamble.join("%\n")
-            ));
+            let pa = recode(self.preamble.join("%\n"), None, &mut warnings);
+            o.push_str(&alloc::format!("\\preamble{{%\n{pa}%\n}}\n\n"));
         }
         let gss = self.cfg.blx_s(None, "sortingtemplatename", None, None);
         for (secnum, ents) in &self.bbl.entries {
@@ -812,7 +844,8 @@ impl Biber<'_> {
                     if e.is_empty() {
                         continue;
                     }
-                    o.push_str(&self.instantiate_entry(l, &e, k));
+                    let s = self.instantiate_entry(l, &e, k);
+                    o.push_str(&recode(s, Some(k), &mut warnings));
                 }
                 o.push_str("  \\enddatalist\n");
             }
@@ -837,7 +870,8 @@ impl Biber<'_> {
             o.push_str("\\endrefsection\n");
         }
         o.push_str(&self.bbl.tail);
-        nfc(&o)
+        self.warnings.extend(warnings);
+        outenc.write(&nfc(&o))
     }
 }
 

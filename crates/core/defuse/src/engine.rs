@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::api::{
-    Cause, EditSource, EnvProvider, EvalError, Limits, Monoid, NodeId, NodeInfo, NodeState, OpId, Operation, PathId,
-    ProjId, Projection, Report, SeqMonoid, Settled, Step, UnitId,
+    AppendFn, Cause, EditSource, EnvProvider, EvalError, Limits, Monoid, NodeId, NodeInfo, NodeState, OpId, Operation,
+    PathId, ProjId, Projection, Rel, Report, SeqMonoid, Settled, Step, UnitId,
 };
 use crate::commit::{self, CommitStats, Predicted, own_write, place_after, settle_predictions, unfile};
 use crate::index::{FieldIndex, RangeIndex};
@@ -106,8 +106,15 @@ pub struct Engine {
     pub(crate) env: Env,
     pub(crate) paths: Paths,
     pub(crate) projections: Table<Projection>,
+    /// The client's append for [`Rel::Append`] ([`Engine::set_append`]).
+    append: std::sync::OnceLock<AppendFn>,
     /// Relations each operation has made: (op, field) -> c (`commit::learn_shape`).
     pub(crate) shapes: Lock<FxHashMap<(OpId, Field), i64>>,
+    /// A guarded read's path by its list, names path, element and inner
+    /// path (`Ctx::read_path_member`): made once, its spec a value and its
+    /// steps a path, each interned (an appender to a font list reads the
+    /// meaning of every name on it at each run).
+    pub(crate) member_paths: Lock<FxHashMap<(Field, PathId, ValueId, PathId), PathId>>,
     pub(crate) shapes_n: AtomicUsize,
     /// `Ctx::apply`'s memo.
     pub(crate) memo: Lock<Memo>,
@@ -177,9 +184,23 @@ pub struct Engine {
     /// of the node past which it may yet place nodes, plus one; 0, none
     /// (no reader waits).
     pub(crate) frontier: AtomicU64,
+    /// The nodes whose last commit moved a later node's read of their
+    /// chain (`Node::moves`), and how many. A hint for the order of runs.
+    pub(crate) movers: crate::lock::Mx<crate::values::FxHashSet<NodeId>>,
+    pub(crate) movers_n: AtomicU64,
+    /// An evaluation has ended: there is a last run's graph to order the
+    /// next one's runs by (`sched::work`).
+    pub(crate) holds_on: std::sync::atomic::AtomicBool,
+    /// The payload past which the store is next collected, as the last
+    /// collection left it (twice what stood after it): an evaluation goes
+    /// on from it, or each would collect again what the last one kept.
+    pub(crate) collect_mark: AtomicU64,
     /// The node that set the frontier, its raw id plus one: a stop of its
     /// that moves on moves the frontier with it (`commit::reask_range`).
     pub(crate) frontier_by: AtomicU64,
+    /// Counts the frontier's moves other than a wake's move back and its
+    /// undoing (`sched::frontier_back`, `sched::frontier_restore`).
+    pub(crate) frontier_gen: AtomicU64,
     /// (`PHITEX_TEX_TIME`) Reads by readers outside the settling layer of
     /// a field it defines held past its frontier (`Ctx::set_frontier`).
     pub(crate) frontier_held: AtomicU64,
@@ -270,6 +291,12 @@ impl Engine {
 
     /// A bracket changed: a new scope count.
     /// A new scope epoch: the epoch it begins.
+    /// How many times a node's brackets changed so far.
+    #[must_use]
+    pub fn scope_changes(&self) -> u64 {
+        self.scope_gen.load(Ordering::Acquire)
+    }
+
     pub(crate) fn scope_changed(&self) -> u64 {
         self.scope_gen.fetch_add(1, Ordering::AcqRel) + 1
     }
@@ -309,7 +336,12 @@ impl Engine {
             settle_marks: (0..SETTLE_MARK_WORDS).map(|_| AtomicU64::new(0)).collect(),
             settle_exact: Lock::new(crate::FxHashSet::default()),
             frontier: AtomicU64::new(0),
+            movers: crate::lock::Mx::new(crate::values::FxHashSet::default()),
+            movers_n: AtomicU64::new(0),
+            holds_on: std::sync::atomic::AtomicBool::new(false),
+            collect_mark: AtomicU64::new(0),
             frontier_by: AtomicU64::new(0),
+            frontier_gen: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
@@ -336,7 +368,9 @@ impl Engine {
             },
             paths,
             projections,
+            append: std::sync::OnceLock::new(),
             shapes: Lock::new(FxHashMap::default()),
+            member_paths: Lock::new(FxHashMap::default()),
             shapes_n: AtomicUsize::new(0),
             memo: Lock::new(FxHashMap::default()),
             marked: Lock::new(FxHashSet::default()),
@@ -540,6 +574,27 @@ impl Engine {
 
     pub fn register(&self, op: Arc<dyn Operation>) -> OpId {
         OpId(u32::try_from(self.ops.push(op)).expect("operation ids"))
+    }
+
+    /// The client's append, for its relations [`Rel::Append`]
+    /// (`Ctx::define_append_with`); set once, before any is made.
+    pub fn set_append(&self, f: AppendFn) {
+        let _ = self.append.set(f);
+    }
+
+    /// Relation `c`'s value on `input`, the value reaching it.
+    ///
+    /// # Panics
+    ///
+    /// On an append relation with no append set ([`Engine::set_append`]).
+    pub(crate) fn rel_apply(&self, c: Rel, input: Option<ValueId>) -> ValueId {
+        let v = self.values();
+        match c {
+            Rel::Add(c) => v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c)),
+            Rel::Append(items) => {
+                (self.append.get().expect("an append relation needs the client's append"))(input, items, v)
+            }
+        }
     }
 
     pub fn register_projection(&self, p: Projection) -> ProjId {
@@ -979,7 +1034,14 @@ impl Engine {
             inner.by_op.entry(op).or_default().push(node);
             n.op.store(op.0, Ordering::Release);
         }
-        let effect = self.op(op).effect(&args, &self.values);
+        let mut effect = self.op(op).effect(&args, &self.values);
+        if matches!(effect, crate::api::Effect::Scope(_))
+            && old_op == op
+            && n.record().is_some()
+            && self.op(op).same_effect(&n.args(), &args, &self.values)
+        {
+            effect = crate::api::Effect::Pending;
+        }
         *n.text.write() = args.into();
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
         n.effect.store(crate::node::pack_effect(effect), Ordering::Release);
@@ -1009,7 +1071,13 @@ impl Engine {
         let n = self.node(node);
         let was_inert = n.taken();
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
+        let (at, unit) = (n.pos_hint(), n.unit);
         unfile(self, None, n);
+        // (the first node after it to run again runs first on what it
+        // left: those after it wait for that one, `sched::mark_front`)
+        if self.epoch.load(Ordering::Acquire) > 0 {
+            crate::sched::mark_front(self, at, unit);
+        }
         if was_inert {
             self.wake_claimer(n);
         }
@@ -1083,6 +1151,14 @@ impl Engine {
     /// The node whose definition of `f` reaches `n` (None: the environment).
     pub fn reaching_def(&self, n: NodeId, f: Field) -> Option<NodeId> {
         reaching_at(self, f, n, false)?.by
+    }
+
+    /// The value of `f` reaching `n` (None: none, the environment's),
+    /// its alias definitions followed as a read before each alias's node
+    /// gives them; nothing recorded (a client's question after an
+    /// evaluation: the value a symbol of `f` as of `n` stands for).
+    pub fn value_reaching(&self, n: NodeId, f: Field) -> Option<ValueId> {
+        read::through_aliases(self, reaching_at(self, f, n, false)?.value)
     }
 
     /// `n`'s own definition of `f`.
@@ -1227,7 +1303,10 @@ impl Engine {
     }
 
     pub fn set_limits(&self, l: Limits) {
-        self.values.count_payload(l.collect_at_bytes.is_some());
+        // (counted where it collects, and where a memory limit is
+        // measured against it: `Limits::memory_bytes`)
+        self.values
+            .count_payload(l.collect_at_bytes.is_some() || l.memory_bytes.is_some());
         *self.limits.write() = l;
     }
 
@@ -1377,18 +1456,33 @@ impl Engine {
         }
         loop {
             let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            self.holds_on.store(epoch > 1, Ordering::Release);
             self.final_gen.fetch_add(1, Ordering::AcqRel);
-            let (pool, workers) = Pool::new(n, epoch, self.limits());
+            let (pool, workers) = Pool::new(n, epoch, self.limits(), self.collect_mark.load(Ordering::SeqCst));
             let mut seed = self.take_pending(&workers[0]);
             // (a node that runs only when the line is quiet waits for it)
             seed.retain(|&n| !pool.defer(self, n));
             // (in position order, as the blocks run: a node inserted before
             // others runs with them, not after every node pushed)
             commit::sort_by_label(self, &mut seed);
-            if !seed.is_empty() {
+            // (an edit's few nodes: on the first worker's queue, the others
+            // woken only if they wait there, as for any node a commit queues.
+            // Dealt out, an edit's two nodes began on two threads wherever
+            // they read one another. A first evaluation's pieces are dealt
+            // out in blocks in TeX's order, each block run in order by one
+            // worker: on one queue each idle worker took the next piece while
+            // the one before it ran, so every piece ran first on a state
+            // without its predecessor's definitions, and a piece that read
+            // on into its siblings did so on a prefix whose nodes had all
+            // run once on such states (a paragraph met `\open` new and
+            // `\close` old and read on through 21 siblings, 63 of them run
+            // again; the pieces after a fatal error ran on 7 workers)
+            if n > 1 && epoch > 1 && seed.len() < crate::sched::BLOCK_MIN {
+                workers[0].ready_all(self, &seed);
+            } else if !seed.is_empty() {
                 let per = seed.len().div_ceil(n);
                 for (i, chunk) in seed.chunks(per).enumerate() {
-                    workers[i].seed(chunk);
+                    workers[i].seed(self, chunk);
                 }
             }
             // (the trait object's lifetime shortened for the reborrow, which
@@ -1401,6 +1495,14 @@ impl Engine {
                 .iter()
                 .flat_map(|w| std::mem::take(&mut w.log.lock().panicked))
                 .collect();
+            if crate::sched::run_log() && !panicked.is_empty() {
+                let commits: u64 = workers.iter().map(|w| w.commits.load(Ordering::Relaxed)).sum();
+                eprintln!(
+                    "defuse: a pass ended with {} panicked runs (nodes {:?}) and {commits} commits",
+                    panicked.len(),
+                    panicked.iter().map(|p| p.0.raw()).collect::<Vec<_>>()
+                );
+            }
             all.extend(workers);
             if panicked.is_empty() {
                 break;
@@ -1437,6 +1539,7 @@ impl Engine {
         let mut rep = Report {
             readers_swept: swept,
             scanned: self.scanned.swap(0, Ordering::Relaxed),
+            range_stepped: self.ranges.stepped.swap(0, Ordering::Relaxed),
             commits_at_once: self.commit_peak.swap(0, Ordering::Relaxed),
             collections: workers
                 .iter()
@@ -1465,6 +1568,7 @@ impl Engine {
             rep.predictions_confirmed += load(&w.predictions_confirmed);
             rep.relative_resolved += load(&w.relative_resolved);
             rep.walked += load(&w.walked);
+            rep.scope_asked += load(&w.scope_asked);
             rep.shaped += load(&w.shaped);
             rep.commits += load(&w.commits);
             rep.final_reruns = rep
@@ -1511,6 +1615,7 @@ impl Engine {
                 e.1 += k;
             }
             rep.rerun_causes.append(&mut log.causes);
+            rep.stood.append(&mut log.stood);
             rep.capped.append(&mut log.capped);
             for (f, k) in log.refuted_by_field.drain() {
                 *rbf.entry(f).or_default() += k;
@@ -1683,6 +1788,9 @@ impl Engine {
             | Step::Has(x)
             | Step::Eq(x)
             | Step::Cmp(x)
+            | Step::Within(x)
+            | Step::Derived(x)
+            | Step::Member(x)
             | Step::Indices(x)
             | Step::Keys(x)
             | Step::Rank(x)
@@ -1699,6 +1807,11 @@ impl Engine {
                 for d in &r.defs {
                     keep(d.f.0);
                     keep(d.value);
+                    // (an append's items: what the value is made from
+                    // where the list it grows moves)
+                    if let Some(crate::Rel::Append(x)) = d.rel {
+                        keep(x);
+                    }
                 }
                 for &(f, x) in &r.contribs {
                     keep(f.0);
@@ -1724,7 +1837,12 @@ impl Engine {
             let inner = self.seg(sid).inner.read();
             for (f, m) in &inner.defs {
                 keep(f.0);
-                m.values().for_each(|d| keep(d.value));
+                m.values().for_each(|d| {
+                    keep(d.value);
+                    if let Some(crate::Rel::Append(x)) = d.rel {
+                        keep(x);
+                    }
+                });
             }
             for (f, rs) in &inner.readers {
                 keep(f.0);
@@ -2032,7 +2150,7 @@ impl Engine {
                     "  def {} = {}{} {:?}\n",
                     v.render(d.f.0),
                     v.render(self.def_value(n, d.f).unwrap_or(d.value)),
-                    d.rel.map(|c| format!(" (rel {c:+})")).unwrap_or_default(),
+                    d.rel.map(|c| format!(" (rel {c})")).unwrap_or_default(),
                     d.loc
                 ));
             }
@@ -2069,6 +2187,13 @@ impl Engine {
                 continue;
             };
             let op = self.op(node.op()).clone();
+            // (`PHITEX_RERUN_CHECK=<op>`: only that operation's nodes)
+            if let Ok(only) = std::env::var("PHITEX_RERUN_CHECK")
+                && only != "1"
+                && op.name() != only
+            {
+                continue;
+            }
             let mut cx = crate::ctx::Ctx::new(self, None, node);
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.run(&mut cx)));
             let name = op.name();
@@ -2144,6 +2269,68 @@ impl Engine {
                 why.push(format!("claims {} was {}", p.claim, rec.claim));
             }
             if !why.is_empty() {
+                // (where the run again first read otherwise than the run
+                // recorded: the read it took, the value, against the record's)
+                let show = |r: Option<&crate::node::ReadRec>| {
+                    r.map_or_else(
+                        || "none".to_owned(),
+                        |r| {
+                            let f = r.kind.field().map_or(String::new(), |f| v.render(f.0));
+                            let s = r
+                                .seen
+                                .map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(120).collect::<String>());
+                            format!("{f} {:?} seen {s}", r.kind)
+                        },
+                    )
+                };
+                let k = (0..p.reads.len().max(rec.reads.len())).find(|&k| match (p.reads.get(k), rec.reads.get(k)) {
+                    (Some(a), Some(b)) => a.seen != b.seen || format!("{:?}", a.kind) != format!("{:?}", b.kind),
+                    _ => true,
+                });
+                if let Some(k) = k {
+                    why.push(format!(
+                        "reads {} recorded {}: first apart at {k}: now {} | recorded {}",
+                        p.reads.len(),
+                        rec.reads.len(),
+                        show(p.reads.get(k)),
+                        show(rec.reads.get(k))
+                    ));
+                }
+                // (as sets by kind: what only one of them read, or read
+                // otherwise)
+                let key = |r: &crate::node::ReadRec| format!("{:?}", r.kind);
+                let recd: FxHashMap<String, Option<ValueId>> = rec.reads.iter().map(|r| (key(r), r.seen)).collect();
+                let recr: FxHashMap<String, &crate::node::ReadRec> = rec.reads.iter().map(|r| (key(r), r)).collect();
+                let nowd: FxHashMap<String, Option<ValueId>> = p.reads.iter().map(|r| (key(r), r.seen)).collect();
+                for r in &p.reads {
+                    match recd.get(&key(r)) {
+                        None => why.push(format!("only now: {}", show(Some(r)))),
+                        Some(s) if *s != r.seen => why.push(format!(
+                            "read otherwise: {} | answer {} filed {} epoch {} now-epoch {} | recorded {}",
+                            show(Some(r)),
+                            recr.get(&key(r)).map_or("?", |x| {
+                                let a = crate::read::answer(self, node, &x.kind, x.path);
+                                if a == r.seen {
+                                    "as now"
+                                } else if a == x.seen {
+                                    "as recorded"
+                                } else {
+                                    "neither"
+                                }
+                            }),
+                            recr.get(&key(r)).is_some_and(|x| x.filed),
+                            recr.get(&key(r)).map_or(0, |x| x.epoch),
+                            r.kind.field().map_or(0, |f| self.field_epoch(f)),
+                            s.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(120).collect())
+                        )),
+                        _ => {}
+                    }
+                }
+                for r in &rec.reads {
+                    if !nowd.contains_key(&key(r)) {
+                        why.push(format!("only recorded: {}", show(Some(r))));
+                    }
+                }
                 out.push(format!("node {} ({name}): {}", node.id.raw(), why.join("; ")));
             }
         }
@@ -2241,18 +2428,36 @@ impl Engine {
                             .and_then(|r| r.by)
                             .map_or(String::new(), |b| {
                                 let bn = self.node(b);
+                                let head = |x: NodeId| {
+                                    self.debug_node(x).lines().next().unwrap_or("").chars().take(300).collect::<String>()
+                                };
                                 format!(
-                                    " (by {} at {} seg {} serial {}; reader at {} seg {} serial {})",
+                                    " (by {} at {} seg {} serial {}; reader at {} seg {} serial {}; field {}; reader: {}; definer: {})",
                                     b.raw(),
                                     bn.pos_hint().0,
                                     bn.seg_hint().0,
                                     bn.serial.load(std::sync::atomic::Ordering::Relaxed),
                                     node.pos_hint().0,
                                     node.seg_hint().0,
-                                    node.serial.load(std::sync::atomic::Ordering::Relaxed)
+                                    node.serial.load(std::sync::atomic::Ordering::Relaxed),
+                                    v.render(f.0),
+                                    head(n),
+                                    head(b)
                                 )
                             }),
-                        _ => String::new(),
+                        crate::node::ReadKind::Fold { f, from, to, .. } => {
+                            let head = |x: NodeId| {
+                                self.debug_node(x).lines().next().unwrap_or("").chars().take(300).collect::<String>()
+                            };
+                            format!(
+                                " (field {}; reader: {}; from: {}; to: {})",
+                                v.render(f.0),
+                                head(n),
+                                from.map_or("-".to_owned(), head),
+                                to.map_or("-".to_owned(), head)
+                            )
+                        }
+                        _ => rd.kind.field().map_or(String::new(), |f| format!(" (field {})", v.render(f.0))),
                     };
                     out.push(format!(
                         "node {} ({}) read {:?} path {} saw {} but now {}{site}",
@@ -2271,7 +2476,7 @@ impl Engine {
                     let have = self.def_value(n, d.f);
                     if have != Some(want) {
                         out.push(format!(
-                            "node {} relation {} {c:+}: holds {} but the input gives {}",
+                            "node {} relation {} {c}: holds {} but the input gives {}",
                             n.raw(),
                             v.render(d.f.0),
                             have.map_or("none".to_owned(), |x| v.render(x)),

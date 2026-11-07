@@ -115,7 +115,7 @@ pub struct PdfSetting {
 }
 
 /// `pdf_form`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfForm {
     pub ident: Vec<u8>,
     pub matrix: PdfTmatrix,
@@ -125,14 +125,14 @@ pub struct PdfForm {
 }
 
 /// `struct form_list_node` (`prev` is the order in [`PdfDoc::pending_forms`]).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct FormListNode {
     pub q_depth: i32,
     pub form: PdfForm,
 }
 
 /// `pdf_page`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfPage {
     pub page_obj: Option<Obj>,
     pub page_ref: Option<Obj>,
@@ -152,7 +152,7 @@ pub struct PdfPage {
 
 /// `pdf_olitem`: `first`, `parent`, `next` are indices into
 /// [`Outlines::items`].
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfOlitem {
     pub dict: Option<Obj>,
     pub is_open: i32,
@@ -162,7 +162,7 @@ pub struct PdfOlitem {
 }
 
 /// `pdf_bead`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfBead {
     pub id: Option<Vec<u8>>,
     pub page_no: i32,
@@ -170,7 +170,7 @@ pub struct PdfBead {
 }
 
 /// `pdf_article` (`num_beads`/`max_beads` are `beads.len()`).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfArticle {
     pub id: Vec<u8>,
     pub info: Option<Obj>,
@@ -178,14 +178,14 @@ pub struct PdfArticle {
 }
 
 /// `struct name_dict`.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct NameDict {
     pub category: &'static [u8],
     pub data: Option<NameTree>,
 }
 
 /// `pdf_doc.root`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct DocRoot {
     pub dict: Option<Obj>,
     pub viewerpref: Option<Obj>,
@@ -198,7 +198,7 @@ pub struct DocRoot {
 /// `pdf_doc.pages`: `entries` has `max_entries` (allocated, default)
 /// pages, of which the first `num_entries` are begun; page `n` (1-based)
 /// is `entries[n - 1]`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct DocPages {
     pub mediabox: PdfRect,
     pub bop: Option<Obj>,
@@ -210,7 +210,7 @@ pub struct DocPages {
 }
 
 /// `pdf_doc.outlines`: the items in an arena.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct Outlines {
     pub items: Vec<PdfOlitem>,
     pub first: Option<usize>,
@@ -219,7 +219,7 @@ pub struct Outlines {
 }
 
 /// `pdf_doc.options`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct DocOptions {
     pub outline_open_depth: i32,
     /// `annot_grow.x`, `.y`.
@@ -228,7 +228,7 @@ pub struct DocOptions {
 }
 
 /// `pdf_doc`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfDoc {
     pub root: DocRoot,
     pub info: Option<Obj>,
@@ -249,7 +249,7 @@ pub struct PdfDoc {
 }
 
 /// The `breaking_state` static.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct BreakingState {
     pub dirty: i32,
     pub broken: i32,
@@ -271,7 +271,7 @@ pub struct PdfBoxes {
 }
 
 /// pdfdoc.c's statics and globals.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `pdoc`.
     pub pdoc: PdfDoc,
@@ -1647,7 +1647,11 @@ impl Dpx {
                 *done = true;
                 lap("fonts, colours and resources replayed", &mut out);
             }
-            EndMode::Record(rec) => {
+            EndMode::Again(rec, _) if rec.key == self.end_key() => {
+                self.o.replay(&rec.written)?;
+                lap("fonts, colours and resources replayed", &mut out);
+            }
+            EndMode::Record(rec) | EndMode::Again(_, rec) => {
                 let key = self.end_key();
                 self.o.record_begin();
                 self.pdf_close_fonts()?;
@@ -1667,6 +1671,9 @@ impl Dpx {
                 lap("resources", &mut out);
             }
         }
+        // (the files read for their objects, freed: what they held
+        // written, as `pdf_files_close` does before the file's end)
+        self.o.pdf_files_close()?;
         self.o.flush()?;
         lap("flush", &mut out);
         Ok(out)
@@ -2484,4 +2491,6 @@ pub enum EndMode<'a> {
     Plain,
     Record(&'a mut Option<EndRec>),
     Replay(&'a EndRec, &'a mut bool),
+    /// Replayed if its key is the session's, else recorded anew.
+    Again(&'a EndRec, &'a mut Option<EndRec>),
 }

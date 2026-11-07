@@ -29,7 +29,9 @@ mod api;
 mod assemble;
 mod build;
 mod collect;
+mod context;
 mod control;
+mod countloop;
 mod defer;
 mod etex;
 mod exec;
@@ -53,6 +55,7 @@ mod pages;
 mod parbreak;
 mod pdfout;
 mod pdfprim;
+mod pic;
 mod pkgrec;
 mod prims;
 mod print;
@@ -63,6 +66,7 @@ mod scan;
 mod shell;
 mod showbox;
 mod state;
+mod tcx;
 pub mod timeline;
 mod tools;
 mod val;
@@ -73,9 +77,9 @@ mod xetex;
 mod xpic;
 
 pub use api::{
-    AnalysisStore, Build, ContentKey, Diagnostic, EditSender, FAIL_END, Finder, Hint, Mktex,
-    Options, PageSettled, RunReport as Report, Severity, Speculation, Stats, ToolFinder,
-    ToolSearch, byte_ends, engine_id, file_stat_key,
+    AnalysisStore, Build, ContentKey, Diagnostic, EditSender, FAIL_END, FONT_KEY, Finder, Hint,
+    Mktex, Options, PageSettled, PkgrecSource, PreludeSource, RunReport as Report, Severity,
+    Speculation, Stats, ToolFinder, ToolSearch, byte_ends, engine_id, file_stat_key, font_name,
 };
 pub use exec::{Progress, SpawnWorker, cpus as exec_cpus, set_spawn_worker};
 pub use native::NativeFonts;
@@ -83,6 +87,7 @@ pub use origins::{OriginsSnapshot, PageOrigins};
 pub use phitex_otf::index::FontIndex;
 pub use phitex_otf::{FontSource, KpseFormat};
 pub use shell::{ShellHook, ShellRan, TEXLIVE_COMMANDS, texlive_commands};
+pub use tcx::translate_file;
 pub use xdvpdf::XdvPdf;
 pub use xetex::{FontFiles, XeTeX};
 
@@ -97,6 +102,6 @@ pub const OBSERVE: bool = cfg!(feature = "observe");
 pub fn tex_time() -> bool {
     exec::prof_flag!("PHITEX_TEX_TIME")
 }
-pub use hints::{paragraph_units, set_hints_enabled};
+pub use hints::{HintsMode, paragraph_units, set_hints_enabled, set_hints_mode};
 pub(crate) use phitex_defuse::FxHashMap;
 pub use pkgrec::summary as pkgrec_summary;

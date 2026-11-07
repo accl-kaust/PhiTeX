@@ -555,6 +555,7 @@ fn watch_word_edit() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--ini",
@@ -611,6 +612,56 @@ fn watch_word_edit() {
             "a word edit's update took {ms:.2} ms, over the brief's 50 ms"
         );
     }
+}
+
+/// `PHITEX_TIME_LIMIT_SECS=0` is no limit for the watch's builds, as it is
+/// for `phitex build`: the scoreboard's cold builds and reference rebuilds
+/// run under it so that none is cut short. The watch's session read it as
+/// a limit of zero seconds, so every such build ended at once with the
+/// engine's deadline ("ran past its time limit" after 88 ms: mc 80017,
+/// circuitikz at every thread count, no PDF, every edit failed).
+#[test]
+fn watch_cold_build_under_no_time_limit_finishes() {
+    let _one = one();
+    let body = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("a body");
+    let text = "\\pdfoutput=1\n".to_string() + &plain() + &body;
+    let dir = scratch("watch-no-limit");
+    std::fs::write(dir.join("story.tex"), &text).expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "2",
+            "story.tex",
+        ])
+        .env("PHITEX_TIME_LIMIT_SECS", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    // (a failure is an event with the build's number too)
+    let first = until(&mut lines, "build", &1.into(), &mut seen);
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    assert!(
+        first["event"] != "failed" && first["ok"] == true,
+        "the cold build under PHITEX_TIME_LIMIT_SECS=0 did not finish: {first}"
+    );
+    assert!(
+        dir.join("story.pdf").is_file(),
+        "the cold build under PHITEX_TIME_LIMIT_SECS=0 wrote no PDF"
+    );
 }
 
 /// Two copies of the binary (other paths, other times) share the format
@@ -729,7 +780,16 @@ fn watch_editor_buffer() {
     let dir = scratch("watch-editor");
     std::fs::write(dir.join("story.tex"), &text).expect("the document");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["watch", "--json", "--ini", "--etex", "-j", "8", "story.tex"])
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--ini",
+            "--etex",
+            "-j",
+            "8",
+            "story.tex",
+        ])
         .env("XDG_RUNTIME_DIR", &dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -963,7 +1023,9 @@ fn watch_lsp() {
     let root = dir.canonicalize().expect("the directory");
     let uri = format!("file://{}/doc.tex", root.display());
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["watch", "--lsp", "--ini", "--etex", "-j", "4", "doc.tex"])
+        .args([
+            "watch", "--write", "--lsp", "--ini", "--etex", "-j", "4", "doc.tex",
+        ])
         .env("XDG_RUNTIME_DIR", &dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1122,8 +1184,14 @@ fn watch_lsp() {
         json!({"event": "select", "file": "doc.tex", "from": start + 5, "to": start + 12}),
         "{select}"
     );
-    // (the last build's origins, made at the watch's first idle point
-    // after it, before it took the cursor)
+    // (the pages' origins, made at the watch's first idle point after a
+    // build: asked once its `origins` event said so, as a browser asks;
+    // the cursor may come before that idle point, and the follow is made
+    // from the page text then. Asked at once, the request met "not made
+    // yet" when the cursor was taken first, accl 24974)
+    if !viewer.events.iter().any(|e| e["event"] == "origins") {
+        viewer.until(|v| v["event"] == "origins");
+    }
     let o = viewer.ask(&json!({"id": 4, "op": "origins", "page": 1}));
     assert!(
         o["json"]["files"]
@@ -1170,6 +1238,7 @@ fn watch_lsp_progress() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--lsp",
             "--no-view",
             "--ini",
@@ -1275,7 +1344,9 @@ fn watch_lsp_commands() {
     .expect("a file not built");
     let root = dir.canonicalize().expect("the directory");
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["watch", "--lsp", "--ini", "--etex", "-j", "4", "doc.tex"])
+        .args([
+            "watch", "--write", "--lsp", "--ini", "--etex", "-j", "4", "doc.tex",
+        ])
         .env("XDG_RUNTIME_DIR", &dir)
         .env("PHITEX_CACHE_DIR", dir.join("cache"))
         .stdin(Stdio::piped())
@@ -1450,7 +1521,7 @@ fn watch_lsp_main_from_open() {
     let root = repo.canonicalize().expect("the directory");
     let uri = format!("file://{}/paper/doc.tex", root.display());
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &repo)
-        .args(["watch", "--lsp", "--ini", "--etex", "-j", "4"])
+        .args(["watch", "--write", "--lsp", "--ini", "--etex", "-j", "4"])
         .env("XDG_RUNTIME_DIR", &repo)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1901,6 +1972,39 @@ fn exit_statuses() {
     assert_eq!(status(&["build", "--engine", "tex", "bad.tex"]), Some(1));
 }
 
+/// Builds' `stats` (the `build` events'): the fields the viewer's debug
+/// info reads, the same set in each (the first a cold build of `tex`).
+fn stats_alike(evs: &[&serde_json::Value]) {
+    let cold = evs[0];
+    let keys = |e: &serde_json::Value| -> Vec<String> {
+        e["stats"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    for k in [
+        "nodes",
+        "runs",
+        "phases_ms",
+        "threads",
+        "cores_busy",
+        "resident_kb",
+        "engine",
+        "files",
+        "files_release",
+        "version",
+        "wall_ms",
+        "hints",
+    ] {
+        assert!(keys(cold).iter().any(|x| x == k), "no stats.{k}: {cold}");
+    }
+    assert_eq!(cold["stats"]["engine"], "tex", "{cold}");
+    assert!(cold["stats"]["phases_ms"].is_object(), "{cold}");
+    for e in &evs[1..] {
+        assert_eq!(keys(cold), keys(e), "{cold} {e}");
+    }
+}
+
 /// `phitex watch --json` on a plain document (`tex`): a word edited on
 /// disk is build 2, an edit of the line it is on, fewer nodes run than
 /// cold, and its DVI file is a cold build's of the edited text; an edit
@@ -1916,6 +2020,7 @@ fn watch_plain_edit() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--engine",
@@ -1948,8 +2053,10 @@ fn watch_plain_edit() {
     let broken = edited.replacen(" thy ", " \\undefinedcs ", 1);
     std::thread::sleep(Duration::from_millis(50));
     std::fs::write(dir.join("story.tex"), &broken).expect("the broken edit");
+    let edit = ev;
     let ev = until(&mut lines, "build", &3.into(), &mut seen);
     assert_eq!(ev["ok"], false, "{ev}");
+    stats_alike(&[&cold, &edit, &ev]);
     let failed = std::fs::read(dir.join("story.dvi")).expect("the failed build's DVI");
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
@@ -2001,6 +2108,7 @@ fn watch_save_by_rename_builds_the_new_text() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--engine",
@@ -2223,6 +2331,7 @@ fn help_is_sectioned() {
         "Examples:",
         "build",
         "watch",
+        "--write",
         "clean",
         "--json",
         "--no-view",
@@ -2255,6 +2364,7 @@ fn watch_tables_bounded() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--ini",
@@ -2324,7 +2434,7 @@ fn watch_gc_series(name: &str, file: &str, text: &str, args: &[&str], word: usiz
     let _one = one();
     let dir = scratch(name);
     std::fs::write(dir.join(file), text).expect("the document");
-    let mut a = vec!["watch", "--json", "--no-view"];
+    let mut a = vec!["watch", "--write", "--json", "--no-view"];
     a.extend_from_slice(args);
     a.push(file);
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
@@ -2470,6 +2580,7 @@ fn watch_absorbs_an_edit_during_the_cold_build() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--engine",
@@ -2481,36 +2592,32 @@ fn watch_absorbs_an_edit_during_the_cold_build() {
         .stderr(Stdio::inherit())
         .spawn()
         .expect("phitex watch runs");
-    // (the edited text written again and again until the build ends: the
-    // writes that come while the engine evaluates are taken by it; the
-    // build cannot be told apart from outside, so no single moment is
-    // guessed)
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let writer = {
-        let (stop, path, edited) = (stop.clone(), dir.join("slow.tex"), edited.clone());
-        std::thread::spawn(move || {
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(300));
-                // (written whole, then renamed: a watcher never reads it
-                // half written)
-                let tmp = path.with_extension("tmp");
-                std::fs::write(&tmp, &edited).expect("the edit");
-                std::fs::rename(&tmp, &path).expect("the edit in place");
-            }
-        })
-    };
+    // (the edited text written once the cold build says it started, its
+    // text read and its evaluation begun: a write timed from the watch's
+    // start missed a cold build that ended sooner, 0.27 s at 16 threads)
     let stdout = child.stdout.take().expect("its output");
     let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
     let mut seen = Vec::new();
+    until(&mut lines, "event", &"started".into(), &mut seen);
+    // (written whole, then renamed: a watcher never reads it half written)
+    let path = dir.join("slow.tex");
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, &edited).expect("the edit");
+    std::fs::rename(&tmp, &path).expect("the edit in place");
     let first = until(&mut lines, "build", &1.into(), &mut seen);
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    writer.join().expect("the writer");
     eprintln!("{first}");
     assert!(
         first["absorbed"].as_u64().unwrap_or(0) >= 1,
         "the cold build did not take the edit: {first}"
     );
-    std::thread::sleep(Duration::from_millis(500));
+    // (the session idle: every event the save made taken, its temporary
+    // file's among them, which came while every file was wanted; the
+    // exact file written is the cold build's, no build after it)
+    let written = until(&mut lines, "event", &"written".into(), &mut seen);
+    assert_eq!(
+        written["build"], 1,
+        "the exact file is a later build's: {seen:?}"
+    );
     let watched = std::fs::read(dir.join("slow.dvi")).expect("the watch's DVI");
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
@@ -2674,6 +2781,100 @@ fn xelatex_fontspec() {
     );
 }
 
+/// `r` in `phitex watch` reads again only the files whose key on disk
+/// moved (`Host::stamp`: size, modification and change times, inode): with
+/// nothing changed it runs no node; a file written again with the same
+/// bytes runs none either; a file rewritten to the same size with its
+/// modification time set back is read again (its change time moved), and
+/// the DVI is then a cold build's of the new text.
+#[test]
+fn watch_r_rereads_only_files_that_moved() {
+    let _one = one();
+    let dir = scratch("watch-r");
+    let chap = "Hello world, a first sentence of the chapter.\n";
+    std::fs::write(dir.join("main.tex"), "\\input chap\n\\bye\n").expect("main");
+    std::fs::write(dir.join("chap.tex"), chap).expect("chap");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--engine",
+            "tex",
+            "main.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut stdin = child.stdin.take().expect("its input");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let mut r = |k: u64, what: &str| {
+        stdin.write_all(b"r\n").expect("r");
+        stdin.flush().expect("r");
+        let ev = until(&mut lines, "build", &k.into(), &mut seen);
+        assert_eq!(ev["ok"], true, "{what}: {ev}");
+        ev["nodes_run"].as_u64().unwrap_or(u64::MAX)
+    };
+    assert_eq!(
+        r(2, "nothing changed"),
+        0,
+        "r with nothing changed ran nodes"
+    );
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(dir.join("chap.tex"), chap).expect("the same bytes");
+    assert_eq!(
+        r(3, "the same bytes"),
+        0,
+        "r after the same bytes ran nodes"
+    );
+    let path = dir.join("chap.tex");
+    let mtime = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .expect("its time");
+    let new = chap.replacen("first", "other", 1);
+    assert_eq!(new.len(), chap.len());
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&path, &new).expect("same size");
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .and_then(|f| f.set_modified(mtime))
+        .expect("the time set back");
+    assert!(
+        r(4, "same size and time") > 0,
+        "the rewritten file was not read again"
+    );
+    let watched = std::fs::read(dir.join("main.dvi")).expect("the watch's DVI");
+    let _ = stdin.write_all(b"q\n");
+    drop(stdin);
+    let _ = child.wait();
+    let cold_dir = scratch("watch-r-cold");
+    std::fs::write(cold_dir.join("main.tex"), "\\input chap\n\\bye\n").expect("main");
+    std::fs::write(cold_dir.join("chap.tex"), &new).expect("chap");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
+        .args(["build", "--no-synctex", "--engine", "tex", "main.tex"])
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cold_dvi = std::fs::read(cold_dir.join("main.dvi")).expect("the cold DVI");
+    assert!(
+        masked(&watched) == masked(&cold_dvi),
+        "the watch's DVI is not the cold build's: {}",
+        first_difference(&watched, &cold_dvi)
+    );
+}
+
 /// `phitex watch --engine xelatex`, headless, on the fontspec document
 /// over a series of edits (words that change the glyphs the fonts embed,
 /// a page added and taken away again), each written as an update section
@@ -2691,6 +2892,7 @@ fn xelatex_watch_compacts_a_series() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--idle",
@@ -2775,6 +2977,117 @@ fn xelatex_watch_compacts_a_series() {
     );
 }
 
+/// `phitex watch --exact-pdf --engine xelatex`, headless, on the fontspec
+/// document over a series of edits (words that change the glyphs the
+/// fonts embed and drop some again, a page added and taken away): each
+/// edit's file is the exact one, `phitex build --engine xelatex`'s of its
+/// text, byte for byte. The link keeps the base's pages from where its
+/// state comes back to the base's ([`phitex_xdvipdfmx`]'s
+/// `Session::converged`), so this is the check that what it keeps and
+/// grafts is what writing every page again gives.
+#[test]
+#[ignore = "heavy: the xelatex format; run on accl"]
+fn xelatex_watch_exact_edits() {
+    xelatex_exact_edits("xelatex-exact", None);
+}
+
+/// The same edits with the value store collected at every chance
+/// (`PHITEX_COLLECT_MB`, a real session passes 1 GB on a large document):
+/// what the output keeps between edits by a value's id must not outlive
+/// the value. The filled pages' memo did: on the 306-page circuitikz
+/// manual every edit after a collection stopped the page writer (in an
+/// observe build, "used after its collection") or gave a PDF that was not
+/// the cold build's.
+#[test]
+#[ignore = "heavy: the xelatex format; run on accl"]
+fn xelatex_watch_edits_across_collections() {
+    xelatex_exact_edits("xelatex-collect", Some("1"));
+}
+
+fn xelatex_exact_edits(name: &str, collect_mb: Option<&str>) {
+    let _one = one();
+    let text = std::fs::read_to_string(xetex_docs().join("fontspec.tex")).expect("the document");
+    let dir = scratch(name);
+    std::fs::write(dir.join("fontspec.tex"), &text).expect("the document");
+    let mut watch = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir);
+    if let Some(mb) = collect_mb {
+        watch.env("PHITEX_COLLECT_MB", mb);
+    }
+    let mut child = watch
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--exact-pdf",
+            "--engine",
+            "xelatex",
+            "-j",
+            "4",
+            "fontspec.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let pages = "\\newpage A page of its own, in Pagella: quick brown foxes jump.\n";
+    let edits: [&dyn Fn(&str) -> String; 7] = [
+        &|t| t.replacen("Pagella text", "Palatino words", 1),
+        &|t| t.replacen("\\end{document}", &format!("{pages}\\end{{document}}"), 1),
+        &|t| t.replacen("First item", "Erste Ítem", 1),
+        &|t| t.replacen("quick brown foxes", "lazy dogs sleep", 1),
+        &|t| {
+            t.replacen(pages, "", 1)
+                .replacen("lazy dogs sleep", "quick brown foxes", 1)
+        },
+        &|t| t.replacen("Second", "Zweite", 1),
+        &|t| t.replacen("Palatino words", "Pagella text", 1),
+    ];
+    let mut now = text.clone();
+    let mut texts = Vec::new();
+    for (k, e) in edits.iter().enumerate() {
+        let next = e(&now);
+        assert_ne!(next, now, "edit {k} changed nothing");
+        now = next;
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(dir.join("fontspec.tex"), &now).expect("the edit");
+        let line = until(&mut lines, "build", &(k as u64 + 2).into(), &mut seen);
+        assert_eq!(line["ok"], true, "edit {k}: {line}");
+        std::thread::sleep(Duration::from_millis(300));
+        let pdf = std::fs::read(dir.join("fontspec.pdf")).expect("the watch's PDF");
+        texts.push((now.clone(), pdf));
+    }
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    for (k, (t, watched)) in texts.iter().enumerate() {
+        let cold_dir = scratch(&format!("{name}-cold-{k}"));
+        std::fs::write(cold_dir.join("fontspec.tex"), t).expect("the edited document");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
+            .args(["build", "--engine", "xelatex", "-j", "4", "fontspec.tex"])
+            .output()
+            .expect("phitex build runs");
+        assert!(
+            out.status.success(),
+            "edit {k}: the cold build failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let cold_pdf = std::fs::read(cold_dir.join("fontspec.pdf")).expect("the cold PDF");
+        assert!(
+            *watched == cold_pdf,
+            "edit {k}: the watch's exact PDF is not the cold build's: {}",
+            first_difference(watched, &cold_pdf)
+        );
+    }
+}
+
 /// `phitex watch --engine xelatex`, headless, on the fontspec document:
 /// the cold build writes a PDF; a word edited in the file is built as an
 /// edit, and the PDF it writes when idle is `phitex build --engine
@@ -2789,6 +3102,7 @@ fn xelatex_watch_edit() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--engine",
@@ -2877,6 +3191,11 @@ fn plain_tfms(text: &str) -> Vec<(String, Vec<u8>)> {
     }
     files
 }
+
+/// The release the test Shelf serves, named to each build
+/// (`PHITEX_SHELF_RELEASE`): the tests stand apart from the release this
+/// binary is pinned to, which moves with every Shelf release.
+const SHELF_RELEASE: &str = "tl2026.7";
 
 /// A Shelf release of `files` (texmf path, bytes) in one pack, its table
 /// and `release-tl2026.7.json` of schema 1, served over HTTP on 127.0.0.1
@@ -2983,6 +3302,7 @@ fn build_from_shelf() {
             .args(args)
             .arg("doc.tex")
             .env("PHITEX_CACHE_DIR", dir.join("cache"))
+            .env("PHITEX_SHELF_RELEASE", SHELF_RELEASE)
             .env_remove("PHITEX_SHELF_URL");
         if let Some(p) = url {
             c.env("PHITEX_SHELF_URL", format!("http://127.0.0.1:{p}/tl2026"));
@@ -3082,6 +3402,7 @@ fn xetex_from_shelf() {
                 "doc.tex",
             ])
             .env("PHITEX_CACHE_DIR", dir.join("cache"))
+            .env("PHITEX_SHELF_RELEASE", SHELF_RELEASE)
             .env(
                 "PHITEX_SHELF_URL",
                 format!("http://127.0.0.1:{port}/tl2026/"),
@@ -3137,6 +3458,7 @@ fn watch_says_the_file_is_exact_with_nothing_to_compact() {
     let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
         .args([
             "watch",
+            "--write",
             "--json",
             "--no-view",
             "--idle",
@@ -3168,4 +3490,566 @@ fn watch_says_the_file_is_exact_with_nothing_to_compact() {
         let _ = i.write_all(b"q\n");
     }
     let _ = child.wait();
+}
+
+/// `phitex watch` writes nothing into the folder unless asked (the pages
+/// are in the viewer): no DVI, no log, no aux file after a build and an
+/// edit, its build event naming no output, and none on the way out of a
+/// pipe (no one to ask); `--write` writes the file as before.
+#[test]
+fn watch_writes_nothing_unless_asked() {
+    let _one = one();
+    let text = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("story.tex");
+    for write in [false, true] {
+        let dir = scratch(if write {
+            "watch-writes"
+        } else {
+            "watch-writes-not"
+        });
+        std::fs::write(dir.join("story.tex"), &text).expect("the document");
+        let mut args = vec!["watch", "--json", "--engine", "tex", "story.tex"];
+        if write {
+            args.insert(1, "--write");
+        }
+        let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("phitex watch runs");
+        let stdout = child.stdout.take().expect("its output");
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        let mut seen = Vec::new();
+        let cold = until(&mut lines, "build", &1.into(), &mut seen);
+        assert_eq!(cold["ok"], true, "{cold}");
+        assert_eq!(cold["output"].is_null(), !write, "{cold}");
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(dir.join("story.tex"), text.replacen(" the ", " thy ", 1))
+            .expect("the edit");
+        let ev = until(&mut lines, "build", &2.into(), &mut seen);
+        assert_eq!(ev["ok"], true, "{ev}");
+        if let Some(mut i) = child.stdin.take() {
+            let _ = i.write_all(b"q\n");
+        }
+        let _ = child.wait();
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the folder")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        if write {
+            assert!(names.iter().any(|n| n == "story.dvi"), "{names:?}");
+        } else {
+            assert_eq!(names, ["story.tex"], "written while watching");
+        }
+    }
+}
+
+/// A tool's support file edited during a watch is read again: BibTeX's
+/// style (`.bst`, through its search, not TeX's own reads) changed on disk
+/// is build 2, its page drawn again; the database (`.bib`) too. Both were
+/// read as they were at the first build (the watch said "unchanged").
+#[test]
+fn watch_reads_a_changed_bst_and_bib() {
+    let _one = one();
+    let dir = scratch("watch-bst");
+    let bst = |pre: &str| {
+        format!(
+            "ENTRY {{ title }} {{}} {{}}\n\
+             FUNCTION {{book}} {{ \"\\bibitem{{\" cite$ * \"}}\" * write$ newline$ \"{pre} \" title * write$ newline$ }}\n\
+             READ\n\
+             FUNCTION {{begin.bib}} {{ \"\\begin{{thebibliography}}{{1}}\" write$ newline$ }}\n\
+             EXECUTE {{begin.bib}}\n\
+             ITERATE {{call.type$}}\n\
+             FUNCTION {{end.bib}} {{ \"\\end{{thebibliography}}\" write$ newline$ }}\n\
+             EXECUTE {{end.bib}}\n"
+        )
+    };
+    std::fs::write(dir.join("mine.bst"), bst("Before")).expect("the style");
+    std::fs::write(dir.join("refs.bib"), "@book{x, title = {Tea}}\n").expect("the database");
+    std::fs::write(
+        dir.join("doc.tex"),
+        "\\documentclass{article}\n\\begin{document}\nSee \\cite{x}.\n\\bibliographystyle{mine}\n\\bibliography{refs}\n\\end{document}\n",
+    )
+    .expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--json", "--no-view", "doc.tex"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("mine.bst"), bst("After")).expect("the edit");
+    let ev = until(&mut lines, "build", &2.into(), &mut seen);
+    assert_eq!(
+        ev["pages_changed"],
+        serde_json::json!([1]),
+        "the .bst edit: {ev}"
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("refs.bib"), "@book{x, title = {Coffee}}\n").expect("the edit");
+    let ev = until(&mut lines, "build", &3.into(), &mut seen);
+    assert_eq!(
+        ev["pages_changed"],
+        serde_json::json!([1]),
+        "the .bib edit: {ev}"
+    );
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+}
+
+/// A project's `phitex.toml` runs nothing, whatever it names: `\\write18`'s
+/// any command only with `--shell-escape` or the user's own setting; the
+/// viewer `--open` starts only the user's; each key ignored is said.
+#[test]
+fn a_projects_settings_run_nothing() {
+    let _one = one();
+    let doc = "\\immediate\\write18{echo made > made.tex}\n\\openin1=made.tex\n\
+               \\ifeof1 \\message{NOTMADE}\\else \\message{MADE}\\fi\n\\bye\n";
+    let build = |name: &str, toml: Option<&str>, user: Option<&str>, args: &[&str]| {
+        let dir = scratch(name);
+        std::fs::write(dir.join("d.tex"), doc).expect("the document");
+        // (the program a setting names: leaves a mark if it is ever run)
+        let script = dir.join("mark.sh");
+        std::fs::write(&script, "#!/bin/sh\ntouch \"$(dirname \"$0\")/ran\"\n")
+            .expect("the program");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("runnable");
+        let fill = |t: &str| t.replace("MARK", &script.display().to_string());
+        if let Some(t) = toml {
+            std::fs::write(dir.join("phitex.toml"), fill(t)).expect("the project's settings");
+        }
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join("phitex")).expect("a home");
+        if let Some(u) = user {
+            std::fs::write(home.join("phitex/phitex.toml"), fill(u)).expect("the user's settings");
+        }
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .env("XDG_CONFIG_HOME", &home)
+            .args(args)
+            .args(["--engine", "pdftex", "d.tex"])
+            .output()
+            .expect("phitex runs");
+        let log = std::fs::read_to_string(dir.join("d.log")).unwrap_or_default();
+        (
+            log,
+            String::from_utf8_lossy(&out.stderr).into_owned()
+                + &String::from_utf8_lossy(&out.stdout),
+            dir.join("ran").exists(),
+        )
+    };
+    let all = "shell-escape = true\nviewer = \"MARK\"\neditor = \"MARK {file}\"\n\
+               output-dir = \"/tmp/phitex-not-here\"\ncopy-pdf = \"../not-here\"\n";
+    let (log, said, ran) = build("run-project", Some(all), None, &["build"]);
+    assert!(
+        log.contains("NOTMADE"),
+        "a project allowed itself \\write18:\n{log}"
+    );
+    assert!(!ran, "a project's setting ran:\n{said}");
+    for key in ["shell-escape", "viewer", "editor", "output-dir", "copy-pdf"] {
+        assert!(
+            said.contains(&format!("`{key}` in a project's phitex.toml is ignored")),
+            "{key} not said:\n{said}"
+        );
+    }
+    assert!(!Path::new("/tmp/phitex-not-here").exists());
+    let (log, ..) = build("run-flag", None, None, &["build", "--shell-escape"]);
+    assert!(
+        log.contains("MADE") && !log.contains("NOTMADE"),
+        "--shell-escape:\n{log}"
+    );
+    let (log, ..) = build("run-user", None, Some("shell-escape = true\n"), &["build"]);
+    assert!(
+        log.contains("MADE") && !log.contains("NOTMADE"),
+        "the user's:\n{log}"
+    );
+    watch_open_starts_only_the_users_viewer();
+}
+
+/// `phitex watch --open` starts the viewer the user's phitex.toml names, never a project's.
+fn watch_open_starts_only_the_users_viewer() {
+    for (name, toml, user, runs) in [
+        (
+            "run-watch-project",
+            Some("viewer = \"MARK\"\n"),
+            None,
+            false,
+        ),
+        ("run-watch-user", None, Some("viewer = \"MARK\"\n"), true),
+    ] {
+        let dir = scratch(name);
+        std::fs::write(dir.join("d.tex"), "Hello.\n\\bye\n").expect("the document");
+        let script = dir.join("mark.sh");
+        std::fs::write(&script, "#!/bin/sh\ntouch \"$(dirname \"$0\")/ran\"\n")
+            .expect("the program");
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .expect("runnable");
+        let fill = |t: &str| t.replace("MARK", &script.display().to_string());
+        if let Some(t) = toml {
+            std::fs::write(dir.join("phitex.toml"), fill(t)).expect("the project's settings");
+        }
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join("phitex")).expect("a home");
+        if let Some(u) = user {
+            std::fs::write(home.join("phitex/phitex.toml"), fill(u)).expect("the user's settings");
+        }
+        let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .env("XDG_CONFIG_HOME", &home)
+            .args([
+                "watch", "--write", "--open", "--json", "--engine", "tex", "d.tex",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("phitex watch runs");
+        let stdout = child.stdout.take().expect("its output");
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        let mut seen = Vec::new();
+        let _ = until(&mut lines, "build", &1.into(), &mut seen);
+        // (a viewer started is not waited for)
+        std::thread::sleep(Duration::from_millis(500));
+        drop(child.stdin.take());
+        let _ = child.wait();
+        assert_eq!(dir.join("ran").exists(), runs, "{name}");
+    }
+}
+
+/// The figures' pictures as child nodes of their figures' runs (an edit's
+/// evaluation only, `crate::pic` in phitex-tex): a picture inside
+/// `\resizebox`'s argument, one read from an `\input` file, two in one
+/// float, one that `\xdef`s a macro its caption reads, one that selects
+/// a font size first that its caption selects too, two that step a
+/// counter (`\global\advance`) their captions show, the first reading a
+/// macro its caption then `\xdef`s (TeX's picture sees the value before
+/// the caption's): the figure's run makes the picture's definitions its
+/// own where the picture stands, and the picture reads before the
+/// figure's run. The two pictures of one float show pgf's picture
+/// serial: a picture child's symbol of a register stands for the value
+/// reaching its figure plus the steps the figure made before it (the
+/// first picture's) and its own, so deleting a figure before them shifts
+/// the serial with no read of it. Edits that move the floats (a figure deleted and put back, a paragraph
+/// before them deleted), a word before them, a picture's own text and
+/// the text a picture follows in its float changed (the picture looks
+/// only at the item before it, `Run::pic_take_list`): each edit's PDF is `phitex build`'s of its text, byte for
+/// byte, at one thread and at four.
+#[test]
+#[ignore = "heavy: the pdflatex format and tikz; run on the cluster"]
+fn watch_picture_children_exact() {
+    for j in ["1", "4"] {
+        picture_children_exact(j);
+    }
+}
+
+/// The document of [`picture_children_exact`], its first figure `fig1`.
+fn picture_children_text(fig1: &str) -> String {
+    format!(
+        "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\newcount\\picn \\def\\capword{{before}}\n\\begin{{document}}\n\\section{{One}}\nAlpha words come first in this paragraph of the start.\n\nBeta words stand in the second paragraph, before the figures.\n{fig1}\
+Gamma text between the floats, see Figure~\\ref{{fig:a}}.\n\n\\begin{{figure}}[b]\\centering\n\\input{{pic2}}\n\\caption{{Second, after \\ref{{fig:a}}}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\draw[red] (0,0) circle (1);\\node {{\\expandafter\\the\\csname pgf@picture@serial@count\\endcsname}};\n\\end{{tikzpicture}}\n\\begin{{tikzpicture}}\n\\fill[blue] (0,0) rectangle (1,1);\\node {{\\expandafter\\the\\csname pgf@picture@serial@count\\endcsname}};\n\\end{{tikzpicture}}\n\\caption{{Two pictures}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\node {{x}};\\xdef\\picnote{{seen in the picture}}\n\\end{{tikzpicture}}\n\\caption{{Note: \\picnote}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\node {{\\fontsize{{13}}{{15}}\\selectfont big}};\n\\end{{tikzpicture}}\n\\caption{{\\fontsize{{13}}{{15}}\\selectfont A caption in the picture's size}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped \\the\\picn\\xdef\\capword{{after}}}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped again \\the\\picn}}\n\\end{{figure}}\n\
+\\begin{{figure}}[t]\\centering Inline words before \\unskip\\begin{{tikzpicture}}\\draw (0,0) -- (1,1);\\end{{tikzpicture}}\\hfil\\begin{{tikzpicture}}\\fill (0,0) circle (0.2);\\end{{tikzpicture}}\n\\caption{{Pictures after text}}\n\\end{{figure}}\n\
+Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon words in the next section.\n\\end{{document}}\n"
+    )
+}
+
+/// One edit of [`picture_children_exact`]'s text.
+type Edit = Box<dyn Fn(&str) -> String>;
+
+fn picture_children_exact(threads: &str) {
+    let _one = one();
+    let name = format!("pic-children-j{threads}");
+    let pic2 = "\\begin{tikzpicture}\n\\draw[thick] (0,0) -- (3,0) -- (3,2) -- cycle;\n\\node at (1.5,0.7) {input};\n\\end{tikzpicture}\n";
+    let fig1 = "\\begin{figure}[t]\\centering\n\\resizebox{0.4\\linewidth}{!}{%\n\\begin{tikzpicture}\n\\draw (0,0) -- (2,1) node[right] {left};\n\\node[draw] (a) at (0,0) {A};\n\\end{tikzpicture}}\n\\caption{First figure}\\label{fig:a}\n\\end{figure}\n";
+    let text = picture_children_text(fig1);
+    let dir = scratch(&name);
+    std::fs::write(dir.join("pics.tex"), &text).expect("the document");
+    std::fs::write(dir.join("pic2.tex"), pic2).expect("the input");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--exact-pdf",
+            "--engine",
+            "pdflatex",
+            "-j",
+            threads,
+            "pics.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let fig1 = fig1.to_owned();
+    let edits: Vec<Edit> = vec![
+        Box::new(move |t| t.replacen(&fig1, "", 1)),
+        Box::new(|t| t.replacen("Alpha words", "Alpha letters", 1)),
+        Box::new(|t| t.replacen("circle (1)", "circle (0.8)", 1)),
+        Box::new(|t| {
+            t.replacen(
+                "Beta words stand in the second paragraph, before the figures.\n",
+                "",
+                1,
+            )
+        }),
+        Box::new(|t| t.replacen("Gamma text", "Gamma words", 1)),
+        Box::new(|t| t.replacen("Inline words before", "Inline text set before", 1)),
+    ];
+    let mut now = text.clone();
+    let mut texts = vec![(
+        now.clone(),
+        std::fs::read(dir.join("pics.pdf")).expect("the cold PDF"),
+    )];
+    // (each edit, then all of them taken back one by one: the reverts
+    // must give the cold build's file again)
+    let mut steps: Vec<String> = Vec::new();
+    for e in &edits {
+        let next = e(&now);
+        assert_ne!(next, now, "an edit changed nothing");
+        now = next;
+        steps.push(now.clone());
+    }
+    steps.extend(texts_back(&text, &steps));
+    for (k, t) in steps.iter().enumerate() {
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(dir.join("pics.tex"), t).expect("the edit");
+        let line = until(&mut lines, "build", &(k as u64 + 2).into(), &mut seen);
+        assert_eq!(line["ok"], true, "j{threads} edit {k}: {line}");
+        std::thread::sleep(Duration::from_millis(300));
+        let pdf = std::fs::read(dir.join("pics.pdf")).expect("the watch's PDF");
+        texts.push((t.clone(), pdf));
+    }
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    assert!(
+        texts.last().map(|x| &x.1) == texts.first().map(|x| &x.1),
+        "j{threads}: the last revert's PDF is not the cold build's"
+    );
+    for (k, (t, watched)) in texts.iter().enumerate().skip(1) {
+        let cold_dir = scratch(&format!("{name}-cold-{k}"));
+        std::fs::write(cold_dir.join("pics.tex"), t).expect("the edited document");
+        std::fs::write(cold_dir.join("pic2.tex"), pic2).expect("the input");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
+            .args(["build", "--engine", "pdflatex", "-j", threads, "pics.tex"])
+            .output()
+            .expect("phitex build runs");
+        assert!(
+            out.status.success(),
+            "j{threads} step {k}: the cold build failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let cold_pdf = std::fs::read(cold_dir.join("pics.pdf")).expect("the cold PDF");
+        assert!(
+            *watched == cold_pdf,
+            "j{threads} step {k}: the watch's exact PDF is not the cold build's: {}",
+            first_difference(watched, &cold_pdf)
+        );
+    }
+}
+
+/// The texts after each of `steps` is taken back, the last first: the
+/// steps before it, then the start `text`.
+fn texts_back(text: &str, steps: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = steps.iter().rev().skip(1).cloned().collect();
+    out.push(text.to_owned());
+    out
+}
+
+/// `phitex watch` writing a file a `\write18` command made in a folder of
+/// its own (minted's `_minted/`) makes that folder: the folder's own event
+/// is the watch's write, not a source changed (though the build looked
+/// for that name before it was there, as minted looks for its folder),
+/// so the cold build is not
+/// followed by a second one and the exact file said written is the cold
+/// build's (Grail: every cold build was followed by a build "why
+/// _minted", and the bench waiting for build 1's written event never
+/// saw it).
+#[test]
+fn watch_a_folder_it_makes_is_no_change() {
+    let _one = one();
+    let dir = scratch("watch-own-folder");
+    std::fs::write(
+        dir.join("doc.tex"),
+        plain()
+            + "\\openin1=made \\closein1 \\immediate\\write18{mkdir -p made && echo hello > made/note.txt}Alpha.\\bye\n",
+    )
+    .expect("the document");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--shell-escape",
+            "--idle",
+            "1000",
+            "--ini",
+            "--etex",
+            "doc.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let written = until(&mut lines, "event", &"written".into(), &mut seen);
+    assert!(
+        dir.join("made").join("note.txt").is_file(),
+        "the command's file was not written in its folder:\n{}",
+        seen.join("\n")
+    );
+    assert_eq!(written["build"], 1, "{}", seen.join("\n"));
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    assert!(
+        !seen.iter().any(|l| l.contains("\"builds\":2")),
+        "a second build after the cold one:\n{}",
+        seen.join("\n")
+    );
+}
+
+/// The viewer's settings in the user's file (`phitex config`, as the
+/// Settings dialog's `prefs`): a choice only one of its names, `threads`
+/// read by the build, and a project's `threads` ignored, said.
+#[test]
+fn the_viewers_settings_are_the_users() {
+    let _one = one();
+    let dir = scratch("viewer-settings");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).expect("a home");
+    std::fs::write(dir.join("d.tex"), "Hello.\\bye\n").expect("the document");
+    let phitex = |args: &[&str]| {
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .env("XDG_CONFIG_HOME", &home)
+            .args(args)
+            .output()
+            .expect("phitex runs");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned()
+                + &String::from_utf8_lossy(&out.stdout),
+        )
+    };
+    let user = || std::fs::read_to_string(home.join("phitex/phitex.toml")).unwrap_or_default();
+    for (key, value) in [
+        ("follow", "selection"),
+        ("dark-pdf", "theme"),
+        ("opening", "off"),
+        ("underline", "off"),
+        ("threads", "2"),
+    ] {
+        let (ok, said) = phitex(&["config", key, value]);
+        assert!(ok, "phitex config {key} {value}:\n{said}");
+    }
+    let written = user();
+    for line in [
+        "follow = \"selection\"",
+        "dark-pdf = \"theme\"",
+        "opening = \"off\"",
+        "underline = false",
+        "threads = 2",
+    ] {
+        assert!(written.contains(line), "{line} not written:\n{written}");
+    }
+    // (a name a choice doesn't have: refused, the file as it was)
+    let (ok, said) = phitex(&["config", "follow", "always"]);
+    assert!(
+        !ok && said.contains("cursor, selection, dblclick"),
+        "{said}"
+    );
+    assert_eq!(user(), written);
+    // (the user's threads build; a project's are said and ignored)
+    std::fs::write(dir.join("phitex.toml"), "main = \"d.tex\"\nthreads = 64\n")
+        .expect("the project's settings");
+    let (ok, said) = phitex(&["build", "--engine", "pdftex"]);
+    assert!(ok, "the build:\n{said}");
+    assert!(
+        said.contains("`threads` in a project's phitex.toml is ignored"),
+        "a project's threads not said:\n{said}"
+    );
+}
+
+/// Text copied or searched in the viewer has its word spaces in every
+/// kind of font, and none inside words: XeLaTeX with a TrueType font of
+/// 2048 units to the em (`DejaVu` Serif) and with an OpenType CFF one
+/// (Latin Modern), pdfLaTeX with Type 1 fonts (Type 3 ones: the
+/// renderer's `word_spaces_are_read_from_the_gaps`, a PK font not being
+/// made in the CI image). Each line once with the font's own
+/// spaces and once with spaces of .15em (a justified line's spaces
+/// shrink that far: Grail's Libertine lines, "Thesedependenciesobstruct",
+/// had none). The renderer's text layer
+/// (`phitex_render::Renderer::text`) of the PDF `phitex build` writes.
+#[test]
+#[ignore = "heavy: the xelatex and pdflatex formats; run on accl"]
+fn copied_text_has_its_word_spaces() {
+    let _one = one();
+    let body = "\\begin{document}\nalpha beta gamma delta\n\n{\\spaceskip=.15em\\relax tight words set close\\par}\n\\end{document}\n";
+    let docs: [(&str, &str, &str); 3] = [
+        (
+            "xe-ttf",
+            "xelatex",
+            "\\documentclass{article}\\usepackage{fontspec}\\setmainfont{DejaVuSerif.ttf}",
+        ),
+        (
+            "xe-otf",
+            "xelatex",
+            "\\documentclass{article}\\usepackage{fontspec}",
+        ),
+        ("pdf-type1", "pdflatex", "\\documentclass{article}"),
+    ];
+    let mut bad = Vec::new();
+    for (name, engine, head) in docs {
+        let dir = scratch(&format!("spaces-{name}"));
+        std::fs::write(dir.join("doc.tex"), format!("{head}\n{body}")).expect("the document");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(["build", "--engine", engine, "doc.tex"])
+            .output()
+            .expect("phitex runs");
+        assert!(
+            out.status.success(),
+            "{name}: build failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let pdf: std::sync::Arc<[u8]> = std::fs::read(dir.join("doc.pdf")).expect("the PDF").into();
+        let mut r = phitex_render::Renderer::new();
+        let lines = r.text(&pdf, 0).expect("page 1's text");
+        let all: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+        eprintln!("{name}: {all:?}");
+        for want in ["alpha beta gamma delta", "tight words set close"] {
+            if !all.iter().any(|l| l.trim() == want) {
+                bad.push(format!("{name}: {want:?} not in {all:?}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "text without its word spaces: {bad:?}");
 }

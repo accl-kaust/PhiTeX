@@ -117,8 +117,10 @@ header:active { cursor: grabbing; }
 .probs.error { color: var(--ph-danger); } .probs.warning { color: var(--ph-warning); }
 .progress { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; opacity: 0; transition: opacity .2s; pointer-events: none; }
 .progress.on { opacity: 1; }
-.progress::after { content: ""; position: absolute; top: 0; bottom: 0; width: 30%; background: var(--ph-progress); animation: phx-carriage 1.2s ease-in-out infinite; }
-@keyframes phx-carriage { from { left: -30%; } to { left: 100%; } }
+/* (the carriage runs only while the line shows, and by transform: a hidden one moving by left laid the page out every frame, scrolling included) */
+.progress::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 30%; background: var(--ph-progress); transform: translateX(-100%); }
+.progress.on::after { animation: phx-carriage 1.2s ease-in-out infinite; }
+@keyframes phx-carriage { from { transform: translateX(-100%); } to { transform: translateX(333.4%); } }
 .find { display: inline-flex; align-items: center; gap: 6px; }
 .find input { width: 170px; height: 24px; padding: 0 8px; font: inherit; color: var(--ph-fg); background: var(--ph-menu);
   border: 1px solid var(--ph-border); border-radius: var(--ph-radius); outline: none; }
@@ -146,8 +148,10 @@ header:active { cursor: grabbing; }
 @container (max-width: 360px) { .find input { width: 72px; } .bar { padding: 0 4px; } }
 @container (min-width: 561px) { .narrow { display: none !important; } }
 
-/* menus and popovers: plain lists in the host's menu colour */
-.menu { position: absolute; z-index: 20; min-width: 230px; max-width: calc(100% - 12px); padding: 4px 0; text-align: left;
+/* menus and popovers: plain lists in the host's menu colour; above a
+   feature tip (30): a menu is what the user just opened, and the welcome
+   tip's card covered the record menu's Clean rebuild */
+.menu { position: absolute; z-index: 31; min-width: 230px; max-width: calc(100% - 12px); padding: 4px 0; text-align: left;
   background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 4px 16px rgb(0 0 0 / 22%); }
 .menu > button, .menu .mi { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 14px; cursor: pointer; }
 .menu > button:hover, .menu > button:focus-visible { background: var(--ph-hover); }
@@ -162,6 +166,16 @@ header:active { cursor: grabbing; }
 .timing { width: 340px; padding: 12px 14px; font-variant-numeric: tabular-nums; }
 .timing .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 8px; }
 .timing .head span { color: var(--ph-fg2); }
+/* (Did you know: under the opening's step, quiet) */
+.opening .steps .hint { margin: 10px auto 0; color: var(--ph-fg2); font-size: 12px; line-height: 1.4; max-width: 420px; }
+/* (the first build beside the edits: bars as long as their times) */
+.timing .tbars { padding: 4px 12px 8px; display: grid; gap: 4px; }
+.timing .tb { display: grid; grid-template-columns: 88px 1fr auto; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+.timing .tb .k { color: var(--ph-fg2); }
+.timing .tb .track { height: 8px; border-radius: 4px; background: var(--ph-hover, rgb(0 0 0 / 6%)); overflow: hidden; }
+.timing .tb .track i { display: block; height: 100%; border-radius: 4px; background: var(--ph-fg2); }
+.timing .tb .track i.edit, .timing .tb .track i.median { background: var(--ph-progress, #f58f2d); }
+.timing .tb.x { display: block; color: var(--ph-fg2); font-size: 11px; }
 .timing .head b { font-size: 20px; font-weight: 600; }
 .timing .row { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; padding: 7px 0; border-top: 1px solid var(--ph-border); }
 .timing .row .k { color: var(--ph-fg2); }
@@ -175,13 +189,22 @@ header:active { cursor: grabbing; }
 .timing .c0 { background: var(--ph-progress); } .timing .c1 { background: var(--ph-accent); } .timing .c2 { background: var(--ph-fg2); } .timing .c3 { background: var(--ph-border); }
 .timing .foot { margin-top: 8px; color: var(--ph-fg2); font-size: 12px; overflow-wrap: anywhere; }
 .timing .foot.err { color: var(--ph-danger); }
+.timing .copydbg { margin: 8px 0 0; font-size: 12px; }
 
 /* problems: Overleaf's log entries, in a popover under the bar */
+/* (the problems' filters: a kind a pill, on or off) */
+.logs .kinds { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 12px 8px; border-bottom: 1px solid var(--ph-border); }
+.logs .kinds button { all: unset; cursor: pointer; padding: 2px 9px; border: 1px solid var(--ph-border); border-radius: var(--ph-pill); font-size: 12px; font-variant-numeric: tabular-nums; }
+.logs .kinds button[aria-pressed=true] { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.logs .kinds button:hover { background: var(--ph-hover); }
+.logs .kinds button[aria-pressed=true]:hover { background: var(--ph-accent); }
 .logs { right: 6px; top: 4px; width: min(460px, calc(100% - 12px)); max-height: calc(100% - 8px); overflow: auto; padding: 0; }
 .logs > header { all: unset; display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 14px; position: sticky; top: 0; z-index: 1;
   background: var(--ph-menu); border-bottom: 1px solid var(--ph-border); font-weight: 600; }
 .diag { display: block; padding: 9px 14px 10px; border-left: 3px solid var(--sev, var(--ph-fg2)); border-bottom: 1px solid var(--ph-border); }
 .diag[data-line] { cursor: pointer; } .diag[data-line]:hover { background: var(--ph-hover); }
+.diag.more { display: flex; gap: 8px; }
+.diag.more button { font: inherit; color: var(--ph-accent, inherit); background: none; border: 1px solid var(--ph-border); border-radius: 5px; padding: 2px 8px; cursor: pointer; }
 .diag.error { --sev: var(--ph-danger); } .diag.warning { --sev: var(--ph-warning); } .diag.info { --sev: var(--ph-info); }
 .diag .where { float: right; margin-left: 10px; color: var(--ph-link); font-size: 12px; }
 .diag .text { font-weight: 600; overflow-wrap: anywhere; }
@@ -190,6 +213,12 @@ header:active { cursor: grabbing; }
 .folded { margin-top: 6px; font-size: 12px; font-weight: 400; }
 .folded summary { cursor: pointer; color: var(--ph-fg2); }
 .diags .phx-inline { margin: 0; padding: 0; list-style: none; }
+/* a problem's Copy for an AI assistant: its row's top right corner, clear when the row is pointed at or focused */
+.diag, .diags .phx-inline > li { position: relative; padding-right: 40px; }
+.copyai { all: unset; position: absolute; top: 6px; right: 8px; display: inline-flex; padding: 4px; border-radius: var(--ph-radius, 4px); color: var(--ph-fg2); opacity: .45; cursor: pointer; }
+.diag:hover .copyai, .phx-inline > li:hover .copyai, .copyai:focus-visible { opacity: 1; }
+.copyai:hover { background: var(--ph-hover); color: var(--ph-fg); }
+.copyai:focus-visible { outline: 2px solid var(--ph-link); }
 .reportbtn { all: unset; margin: 8px 14px; color: var(--ph-link); cursor: pointer; }
 .reportbtn:hover { text-decoration: underline; }
 
@@ -206,9 +235,18 @@ header:active { cursor: grabbing; }
 .diffbar button { all: unset; cursor: pointer; padding: 2px 8px; border-radius: var(--ph-radius); color: var(--ph-fg2); white-space: nowrap; }
 .diffbar button:hover:not(:disabled) { background: var(--ph-hover); color: var(--ph-fg); }
 .diffbar button:disabled { opacity: .4; cursor: default; }
+/* (Diff | Current: which pages are shown, the one shown filled; the diff's style on its half) */
+.diffbar .seg { display: inline-flex; border: 1px solid var(--ph-accent); border-radius: var(--ph-pill); overflow: hidden; }
+.diffbar .seg button { border-radius: 0; padding: 2px 10px; color: var(--ph-accent); font-weight: 600; }
+.diffbar .seg button[aria-pressed=true] { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.diffbar .seg button[aria-pressed=true]:hover:not(:disabled) { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.diffbar .seg .chev { font-weight: 400; margin-left: 2px; }
+.diffset .row.bars button { padding: 1px 10px; }
+.diffset .row.bars button[aria-checked=true] { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg); }
+.diffset .row.bars button:disabled { opacity: .45; cursor: default; }
 .diffbar button.cur { background: var(--ph-hover); color: var(--ph-fg); }
 .diffbar .sep { width: 1px; align-self: stretch; margin: 2px; background: var(--ph-border); }
-.diffset { display: none; left: 50%; transform: translateX(-50%); top: 4px; width: 320px; padding: 12px; font-size: 12px; }
+.diffset { display: none; left: 50%; transform: translateX(-50%); top: 4px; width: 320px; max-height: calc(100% - 12px); overflow: auto; padding: 12px; font-size: 12px; }
 .diffset.on { display: block; }
 .diffset h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--ph-fg2); }
 .diffset h4:not(:first-child) { margin-top: 12px; }
@@ -238,7 +276,7 @@ header:active { cursor: grabbing; }
 .win.reopening .viewer { visibility: hidden; }
 /* (the first page's sheet up: the stage holds still under it, its width kept, so nothing scrolls behind the sheet) */
 .win.sheet-up .stage, .win.docked.sheet-up .stage { overflow: hidden; scrollbar-gutter: stable; }
-.slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+.slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); container-type: inline-size; }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
@@ -246,16 +284,32 @@ header:active { cursor: grabbing; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
-.phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: rgb(0 100 255 / 25%); }
+/* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
+.slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
+.phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
 .slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: rgb(255 214 0 / 45%); mix-blend-mode: multiply;
   box-shadow: 0 0 0 1px rgb(232 172 0 / 80%); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
+/* (the text selected on the pages, one block a line: viewer.ts drawSelection) */
+.slot .mark.seltext { background: rgb(0 100 255 / 25%); mix-blend-mode: normal; border-radius: 0; }
 .slot .mark.fade { opacity: 0; transition: opacity 1.2s; }
 .slot .mark.sel { transition: none; }
 .slot .mark.fnd { background: rgb(255 214 0 / 40%); box-shadow: none; transition: none; }
 .slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); box-shadow: 0 0 0 1px rgb(150 100 0 / 90%); }
 .slot .culprit { position: absolute; pointer-events: none; }
+/* (the marks along the pages' scrollbar: the problems' places and the diff's changes) */
+.smarks { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
+.smarks[hidden] { display: none; }
+.smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); }
+.smarks i.error { background: var(--ph-danger, #d93025); }
+.smarks i.change { background: var(--ph-accent, #1d3e72); }
+.phx-card[data-key] { cursor: pointer; }
+/* (an overfull box's bar at its line's end, where pdflatex's draft rule goes, drawn by the viewer only, in the warning's
+   amber, as its tooltip and the underfull's outline: draft black read as a broken block, and vanished on a dark page; an underfull's hollow) */
+.slot .culprit.rule::after { display: none; }
+.slot .culprit.rule.overfull { background: rgb(199 119 0 / 85%); border-radius: 1px; }
+.slot .culprit.rule.underfull { box-shadow: inset 0 0 0 1.5px #c77700; }
 /* (a culprit hovered: its problem's message, a small tooltip under the line) */
 .ctip { position: absolute; z-index: 8; max-width: min(420px, calc(100% - 16px)); display: flex; gap: 6px; align-items: flex-start; padding: 5px 9px;
   background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius);
@@ -266,8 +320,9 @@ header:active { cursor: grabbing; }
 .slot .culprit::after { content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 3px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23d93025' stroke-width='1'/%3E%3C/svg%3E") repeat-x left bottom / 6px 3px; }
 .slot .culprit.warning::after { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23c77700' stroke-width='1'/%3E%3C/svg%3E"); }
 .slot .peer { position: absolute; pointer-events: none; border-radius: 2px; background: hsl(var(--hue) 70% 50% / 22%); box-shadow: inset 0 -1.5px 0 hsl(var(--hue) 70% 45%); }
-.slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 5px; border-radius: 3px 3px 3px 0; background: hsl(var(--hue) 70% 42%);
-  box-shadow: none; color: #fff; font: 600 11px/16px var(--ph-font); white-space: nowrap; z-index: 2; }
+/* (the name as large as the line it marks, so it zooms with the page; readable when far out, never a headline when close) */
+.slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 .4em; border-radius: .25em .25em .25em 0; background: hsl(var(--hue) 70% 42%);
+  box-shadow: none; color: #fff; font: 600 clamp(7px, calc(var(--fs, .012) * 100cqw), 22px)/1.35 var(--ph-font); white-space: nowrap; z-index: 2; }
 
 /* strips over the pages: plain, in the host's colours */
 .strip { position: sticky; top: 0; z-index: 2; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
@@ -283,7 +338,7 @@ header:active { cursor: grabbing; }
 /* before any page: the first page's sheet, the opening playing on it, the step under it */
 .opening { position: absolute; z-index: 3; pointer-events: none; left: 0; top: 0; width: 0; height: 0;
   transition: left .3s ease, top .3s ease, width .3s ease, height .3s ease; }
-.opening .sheet { position: absolute; inset: 0; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+.opening .sheet { position: absolute; inset: 0; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); container-type: inline-size; }
 .opening.in .sheet { background: none; box-shadow: none; }
 .win.dark-pdf .opening .sheet, .win.docked.pdf-dark .opening .sheet { background: ${DARK_PAGE}; }
 .win.dark-pdf .opening.in .sheet, .win.docked.pdf-dark .opening.in .sheet { background: none; }
@@ -295,11 +350,13 @@ header:active { cursor: grabbing; }
 .steps .track { position: relative; height: 3px; width: min(100%, 280px); margin: 8px auto; border-radius: 2px; overflow: hidden; background: #e7e9ee; }
 .steps .track i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: #f58f2d; transition: width .3s; }
 .steps .track.unknown i { width: 30% !important; animation: phx-slide 1.2s ease-in-out infinite; }
-@keyframes phx-slide { from { left: -30%; } to { left: 100%; } }
+@keyframes phx-slide { from { transform: translateX(-100%); } to { transform: translateX(333.4%); } }
 .win.dark-pdf .steps, .win.docked.pdf-dark .steps { color: #a3a9b4; }
 .win.dark-pdf .steps .what, .win.docked.pdf-dark .steps .what { color: #e4e6ea; }
 .win.dark-pdf .steps .track, .win.docked.pdf-dark .steps .track { background: #3d4047; }
 .opening.in .steps { opacity: 0; }
+/* (an opening that says the steps itself, the animation's own part) */
+.opening.owns .steps { display: none; }
 /* a card in place of the pages (a build that stopped, an engine to choose): plain */
 .empty { padding: 40px 16px; color: var(--ph-fg2); }
 .card { max-width: 420px; margin: 0 auto; padding: 16px 18px; text-align: left; background: var(--ph-menu); color: var(--ph-fg);
@@ -351,18 +408,6 @@ header:active { cursor: grabbing; }
   background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 3px 10px rgb(0 0 0 / 25%); }
 .tip .demo .mmenu span { display: flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 2px; white-space: nowrap; }
 .tip .demo .mmenu b { margin-left: auto; padding-left: 6px; }
-
-/* the ⚡ chip: each repaint's keystroke-to-screen time over the pages' corner, the strips' numbers under it */
-.speedchip { position: absolute; right: 12px; bottom: 12px; z-index: 3; pointer-events: none; display: flex; flex-direction: column; align-items: flex-end;
-  gap: 2px; max-width: calc(100% - 24px); padding: 4px 9px; border-radius: 8px; color: #fff; background: rgb(20 24 32 / 82%);
-  box-shadow: 0 4px 12px rgb(0 0 0 / 25%); font: 700 12px/1.3 var(--ph-font); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.speedchip[hidden], .win.nospeed .speedchip { display: none; }
-.speedchip.slow b { color: #ffb366; }
-.speedchip span { overflow: hidden; text-overflow: ellipsis; max-width: 100%; font: 400 11px/1.3 ui-monospace, monospace; opacity: .85; }
-.speedchip span:empty { display: none; }
-.speedchip.flash { animation: phx-chipflash .5s ease-out; }
-@keyframes phx-chipflash { 0% { filter: brightness(1.6); } 100% { filter: none; } }
-@media (prefers-reduced-motion: reduce) { .speedchip.flash { animation: none; } }
 
 /* compare: "good" struck out, "excellent" added, then the navigator */
 .tip .demo.cmp { height: auto; padding: 10px 12px 30px; background: #fff; color: #1b222c; font: 13px/1.5 "Noto Serif", Georgia, serif; }
@@ -476,13 +521,37 @@ header:active { cursor: grabbing; }
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .byline:hover { color: var(--ph-fg); }
 .win.docked:not(.own-header) .byline { display: block; }
-/* Overleaf's own settings, docked: the main file, the debug check, the latency's details */
-.sheet-pop { right: 8px; top: 6px; width: min(340px, calc(100% - 16px)); padding: 12px; display: grid; gap: 8px; }
-.sheet-pop label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.sheet-pop select { font: inherit; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 2px 4px; max-width: 180px; }
-.sheet-pop .links { display: flex; flex-wrap: wrap; gap: 12px; }
-.sheet-pop .links button { all: unset; cursor: pointer; color: var(--ph-link); }
-.details { margin: 0; font: 11px/1.4 ui-monospace, monospace; color: var(--ph-fg2); white-space: pre-wrap; }
+/* Settings: the panel's own rows and the host's, one dialog in every host, a tab per group */
+.settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; }
+.settings > header { padding: 12px 14px 0; }
+.settings .stabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); overflow-x: auto; scrollbar-width: none; }
+.settings .stabs button { all: unset; cursor: pointer; white-space: nowrap; padding: 6px 8px 7px; font-size: 13px; color: var(--ph-fg2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.settings .stabs button:hover { color: var(--ph-fg); }
+.settings .stabs button[aria-selected="true"] { color: var(--ph-fg); font-weight: 600; border-bottom-color: var(--ph-accent); }
+.settings .stabs button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
+.settings .sbody { overflow: auto; padding: 4px 0 8px; }
+.settings .srow { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "lab ctl" "help help" "err err"; align-items: center; column-gap: 16px; padding: 10px 16px; }
+.settings .srow + .srow { border-top: 1px solid var(--ph-border); }
+.settings .srow .lab { grid-area: lab; font-weight: 600; min-width: 0; }
+.settings .srow .ctl { grid-area: ctl; justify-self: end; }
+.settings .srow .help { grid-area: help; margin-top: 2px; font-size: 12px; line-height: 1.4; color: var(--ph-fg2); }
+.settings .srow .help:empty { display: none; }
+.settings .srow.off .lab, .settings .srow.off .ctl { opacity: .55; }
+.settings .srow .err { grid-area: err; margin-top: 4px; font-size: 12px; color: var(--ph-danger); }
+.settings .srow .val { color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
+.settings select { font: inherit; font-size: 12px; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 3px 6px; max-width: 220px; }
+.settings .btn { padding: 3px 12px; font-size: 12px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.settings .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--ph-pill); background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.settings .seg button { all: unset; cursor: pointer; padding: 3px 11px; border-radius: var(--ph-pill); font-size: 12px; line-height: 1.4; white-space: nowrap; color: var(--ph-fg); }
+.settings .seg button:hover:not([aria-pressed="true"]):not(:disabled) { background: var(--ph-border); }
+.settings .seg button[aria-pressed="true"] { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.settings .seg button:disabled { cursor: default; }
+.settings .switch { all: unset; cursor: pointer; position: relative; width: 30px; height: 18px; border-radius: 9px; background: var(--ph-border); transition: background .12s; }
+.settings .switch i { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 25%); transition: left .12s; }
+.settings .switch[aria-checked="true"] { background: var(--ph-accent); }
+.settings .switch[aria-checked="true"] i { left: 14px; }
+.settings .switch:disabled { cursor: default; }
+.settings .switch:focus-visible, .settings .seg button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
 
 /* docked: the panel fills the host's pane under its toolbar */
 .win.docked { position: relative; left: auto !important; top: auto !important; width: 100% !important; height: 100% !important; max-width: none; max-height: none;

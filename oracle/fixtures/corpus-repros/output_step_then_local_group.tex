@@ -1,0 +1,10 @@
+% The output routine steps \c@page globally, then a hook steps it back
+% locally in a group (mparhack's \mph@outputpage@hook): the group's close
+% restores the stepped value; the pages are numbered 1, 2, 3.
+\documentclass{article}
+\makeatletter
+\g@addto@macro{\@outputpage}{\bgroup\advance\c@page\m@ne\egroup}
+\makeatother
+\begin{document}
+A [\thepage]\newpage B [\thepage]\newpage C [\thepage]
+\end{document}

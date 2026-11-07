@@ -1,0 +1,11 @@
+% !TEX program = xelatex
+% TeX Live manual showexpl-test (xelatex): an included PDF's form whose
+% /Length is an indirect object. xdvipdfmx imports that object with the
+% form and writes it when the file it was read from is let go
+% (pdf_files_close, after the fonts); it was never written, and its
+% number was left empty.
+\documentclass{article}
+\usepackage{graphicx}
+\begin{document}
+Text \includegraphics{square.pdf}
+\end{document}

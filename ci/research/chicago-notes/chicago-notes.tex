@@ -1,0 +1,32 @@
+% The research corpus (ci/research.json): a history paper in the Chicago
+% notes and bibliography style (biblatex-chicago through biber), on
+% biblatex-chicago's own test database (notes-test.bib, from TeX Live).
+% TeX Live's cms-notes-sample.tex needs Gentium Plus, which TeX Live
+% does not ship.
+\documentclass[12pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[american]{babel}
+\usepackage[autostyle]{csquotes}
+\usepackage[notes,backend=biber,strict,compresspages]{biblatex-chicago}
+\addbibresource{notes-test.bib}
+\title{Trade, Letters and Empire}
+\author{M. Historian}
+\date{January 1, 2026}
+\begin{document}
+\maketitle
+\section{Introduction}
+Historians of the Atlantic world have read its letters closely.\autocite{centinel:letters}
+The cotton trade shaped it,\autocite[45--47]{cotton:manufacture} as did
+the courts of China\autocite{boxer:china} and Peru.\autocite{babb:peru}
+\section{Sources}
+Aristotle is cited in Greek\autocite{aristotle:metaphy:gr} and in
+translation;\autocite{aristotle:metaphy:trans} Chaucer's life records
+too.\autocite{chaucer:liferecords} A second citation of a work is
+shortened.\autocite{boxer:china} The style's own manual
+says so.\autocite[14.23]{chicago:manual}
+\section{Conclusion}
+\textcite{dunn:revolutions} and \textcite{davenport:attention} close the
+argument.
+\printbibliography
+\end{document}

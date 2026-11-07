@@ -12,8 +12,8 @@ by name). The build writes build/<LABEL>/ (git-ignored); release.py makes
 a release of it (content-named packs under h/, an index, release.json):
 
     build/<LABEL>/packs/<pack>.pack   gzip of  u32 n, (u32 len, path, u32 len, bytes) x n
-    build/<LABEL>/index.tsv           path <TAB> pack <TAB> deps_pdftex <TAB> deps_xetex
-    build/<LABEL>/meta.json           {"deps": ["pdftex", "xetex"], "search": {...}}
+    build/<LABEL>/index.tsv           path <TAB> pack <TAB> deps_pdftex <TAB> deps_xetex <TAB> sum
+    build/<LABEL>/meta.json           {"deps": ["pdftex", "xetex"], "file_sums": "sha256-48", "search": {...}}
     MANIFEST.tsv                      path, package, revision, sha256
 
 Every file is keyed by its texmf path (tex/latex/fontspec/fontspec.sty,
@@ -55,6 +55,13 @@ gzipped is cut by use: its hot packs hold the files some package's load
 read (the pdfTeX trace's counts, most read first, cut at BIN), the rest go
 in cold packs by directory and font family. No pack over 20 MB (Cloudflare
 takes 25 MiB a file).
+
+Sums, the last column (meta.json's `file_sums`, "sha256-48"): the first 12
+hex digits of the SHA-256 of the file's own bytes, its content key
+(phitex-shelf's `Files::key`). A format records the keys of the files it
+read and holds while they are the same: a pack's id changes with any file
+of the pack and with how files are grouped into packs, a file's sum only
+with the file.
 
 Dependencies, a column per engine (meta.json's `deps`): for each .sty and
 .cls, the packs loading it reads on PhiTeX, less what a bare article reads
@@ -151,6 +158,7 @@ FORMATS = {
 GS_FONTS = "ghostscript/Resource/Font"
 GS_VERSION = "10.08.0"
 DEPS = ["pdftex", "xetex"]  # (the index's dependency columns, in order)
+FILE_SUMS = "sha256-48"  # (the index's last column: each file's content sum)
 
 
 def get(url: str) -> bytes:
@@ -586,10 +594,22 @@ def safe(s: str) -> str:
 
 
 def main() -> None:
+    global MIRROR
     t0 = time.time()
     CACHE.mkdir(exist_ok=True)
     # (the database used kept beside the archives: TLPDB=it repeats the build)
-    raw = Path(os.environ["TLPDB"]).read_bytes() if os.environ.get("TLPDB") else get(f"{MIRROR}/tlpkg/texlive.tlpdb.xz")
+    if os.environ.get("TLPDB"):
+        raw = Path(os.environ["TLPDB"]).read_bytes()
+    else:
+        with urllib.request.urlopen(f"{MIRROR}/tlpkg/texlive.tlpdb.xz", timeout=300) as r:
+            raw = r.read()
+            # (the archives from the mirror that served the database: the
+            # redirector picks a mirror per request, so 4500 archives went
+            # to as many mirrors, each maybe at another revision than the
+            # database, and one unreachable stopped the release, release
+            # run 41294066307)
+            MIRROR = r.geturl().removesuffix("/tlpkg/texlive.tlpdb.xz").rstrip("/")
+        print(f"mirror {MIRROR}", file=sys.stderr)
     if not (CACHE / "texlive.tlpdb.xz").exists() or (CACHE / "texlive.tlpdb.xz").read_bytes() != raw:
         (CACHE / "texlive.tlpdb.xz").write_bytes(raw)
     db = lzma.decompress(raw).decode()
@@ -710,10 +730,11 @@ def main() -> None:
         base = {pack_of[f] for f in r.get(flats[engine].get("article.cls", ""), set()) if f in pack_of}
         deps[engine] = {path: sorted({pack_of[f] for f in fs if f in pack_of} - base - {pack_of.get(path)}) for path, fs in r.items()}
     index = "".join(
-        f"{path}\t{pack_of[path]}\t" + "\t".join(",".join(deps[e].get(path, [])) for e in DEPS) + "\n" for path in sorted(pack_of)
+        f"{path}\t{pack_of[path]}\t" + "\t".join(",".join(deps[e].get(path, [])) for e in DEPS)
+        + f"\t{hashlib.sha256(files[path][1]).hexdigest()[:12]}\n" for path in sorted(pack_of)
     )
     (out / "index.tsv").write_text(index)
-    (out / "meta.json").write_text(json.dumps({"deps": DEPS, "traced_by": traced_by, "search": order}, indent=1) + "\n")
+    (out / "meta.json").write_text(json.dumps({"deps": DEPS, "file_sums": FILE_SUMS, "traced_by": traced_by, "search": order}, indent=1) + "\n")
     Path("MANIFEST.tsv").write_text(f"# {LABEL} from {MIRROR}: path, package, revision, sha256\n" + "\n".join(sorted(rows)) + "\n")
 
     for engine in DEPS:

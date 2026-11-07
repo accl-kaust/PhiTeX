@@ -99,6 +99,10 @@ pub fn respond(w: &mut impl Write, status: &str, ctype: &str, body: &[u8]) -> io
 /// How long a read waits before the socket is let go for a send.
 pub const POLL: Duration = Duration::from_millis(20);
 
+/// How long a read under the socket's lock waits for more of what is
+/// arriving, once bytes are there (`crate::view`'s reader).
+pub const DRAIN: Duration = Duration::from_millis(1);
+
 /// The upgrade answered (RFC 6455 §4.2.2); the socket as one WebSocket,
 /// its reads waiting at most [`POLL`]: its reader and its senders share
 /// it under one lock, so a pong never lands inside a frame being sent.

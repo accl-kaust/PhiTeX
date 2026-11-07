@@ -26,6 +26,7 @@
 
 use crate::exec::LockWait as _;
 use phitex_defuse::{Ctx, Field, Locality, Operation, Stop, ValueId, Values};
+use std::sync::Arc;
 
 use crate::api::ToolSearch;
 use crate::ops::{Shared, ops};
@@ -55,14 +56,19 @@ pub(crate) fn made_field(v: &Values, name: &str) -> Field {
 /// writes, each with its run's arguments: an output whose first claiming
 /// tool with a written input reads `input` (BibTeX's `.bbl` from the
 /// `.aux`, biber's from the `.bcf`, makeindex's `.ind` from the `.idx`).
+/// `written`: the caller, `input`'s own node, defined its size (the job
+/// writes it): not read back, which would read the definition before
+/// the caller's.
 pub(crate) fn made_from(
     cx: &mut Ctx<'_>,
     input: &str,
+    written: bool,
 ) -> Result<Vec<(String, Vec<ValueId>)>, Stop> {
     let v = cx.values();
     let mut out = Vec::new();
+    let own = written.then_some(input);
     for o in made_names(input) {
-        if let Some(args) = run_args(cx, &o)?
+        if let Some(args) = run_args(cx, &o, own)?
             && args.get(2).is_some_and(|&i| str_of(v, i) == input)
         {
             out.push((o, args));
@@ -75,10 +81,15 @@ pub(crate) fn made_from(
 /// writes ([`made_from`] without the job's arguments).
 pub(crate) fn made_names(input: &str) -> Vec<String> {
     let base = input.rsplit_once('.').map_or(input, |(b, _)| b);
-    [format!("{base}.bbl"), format!("{base}.ind")]
-        .into_iter()
-        .filter(|o| claims(o).iter().any(|(_, i)| i == input))
-        .collect()
+    [
+        format!("{base}.bbl"),
+        format!("{base}.ind"),
+        format!("{base}.gls"),
+        format!("{base}.acr"),
+    ]
+    .into_iter()
+    .filter(|o| claims(o).iter().any(|(_, i)| i == input))
+    .collect()
 }
 
 /// The loop-back of a file the job writes, its whole text as the job
@@ -281,7 +292,7 @@ fn memory_cache() -> std::sync::Arc<dyn phitex_mf::mktex::Cache> {
 /// (`NAME.tfm`, `NAME.DPIpk@BDPI:MODE`), none where METAFONT made none
 /// (as kpathsea's mktex scripts fail: the font not found).
 fn mktex_run(output: &str, opts: &ToolOptions, served: &mut Served) -> Option<Vec<u8>> {
-    let req = phitex_mf::mktex::Request::of(output)?;
+    let req = phitex_mf::mktex::Request::of(crate::api::font_name(output).unwrap_or(output))?;
     let (cache, settings) = opts.mktex.as_ref().map_or_else(
         || (memory_cache(), phitex_mf::mktex::Settings::default()),
         |m| (m.cache.clone(), m.settings.clone()),
@@ -296,10 +307,33 @@ fn mktex_run(output: &str, opts: &ToolOptions, served: &mut Served) -> Option<Ve
 
 /// The tools that may make `output` by default, each with its input.
 pub(crate) fn claims(output: &str) -> Vec<(Tool, String)> {
-    Tool::ALL
+    let mut out: Vec<(Tool, String)> = Tool::ALL
         .into_iter()
         .filter_map(|t| t.default_input(output).map(|i| (t, i)))
-        .collect()
+        .collect();
+    if let Some((input, _, _)) = glossary(output) {
+        out.push((Tool::Makeindex, input));
+    }
+    out
+}
+
+/// The glossaries package's lists (`makeglossaries`, as the loop runs
+/// makeindex on them): output `STEM.gls` from `STEM.glo` with its
+/// transcript `STEM.glg`, `STEM.acr` from `STEM.acn` with `STEM.alg`,
+/// each in the style `STEM.ist` the package writes: `(input, transcript,
+/// style)`.
+fn glossary(output: &str) -> Option<(String, String, String)> {
+    let (stem, ext) = output.rsplit_once('.')?;
+    let (input, log) = match ext {
+        "gls" => ("glo", "glg"),
+        "acr" => ("acn", "alg"),
+        _ => return None,
+    };
+    Some((
+        format!("{stem}.{input}"),
+        format!("{stem}.{log}"),
+        format!("{stem}.ist"),
+    ))
 }
 
 /// The tools' settings the client gives ([`crate::Options::bibtex`]).
@@ -417,8 +451,10 @@ impl phitex_makeindex::Files for Served {
         self.file(name).is_some()
     }
     fn style(&mut self, name: &[u8]) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+        // (kpathsea's `ist` path starts with the current directory: a
+        // style the job wrote, glossaries' `STEM.ist`, is found there)
         let n = chars(name);
-        self.get(Need::Support(ToolSearch::IndexStyle, n))
+        self.get(Need::Data(ToolSearch::IndexStyle, n))
             .map(|(p, b)| (bytes(&p), Some(b)))
     }
     fn out_name_ok(&mut self, _name: &[u8]) -> Result<(), Vec<u8>> {
@@ -438,8 +474,24 @@ pub(crate) fn support_field(v: &Values, s: ToolSearch, name: &str) -> Field {
 
 /// Looks up what a run asked for: a file the job writes, by its text
 /// the round before; else through the job's or the tool's lookup.
-fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop> {
+/// `streams`: a run of a files' node (`crate::ops::Files`), after the
+/// pass's text: a file the job writes in this pass is read from its
+/// stream as the pass wrote it ([`crate::run::stream_bucket`]), as
+/// latexmk's tool reads the files the TeX run before it left, not from
+/// its node's definition, which may not be this pass's yet (a database
+/// the job writes, revtex4-2's Notes.bib).
+fn look_up(cx: &mut Ctx<'_>, n: &Need, streams: bool) -> Result<Option<(String, Vec<u8>)>, Stop> {
     let v = cx.values();
+    if streams && let Need::File(name) | Need::Data(_, name) = n {
+        let acc = cx.fold(crate::run::stream_bucket(v, name), None, None)?;
+        if let Some((_, t)) = crate::api::written_texts(v, Some(acc))
+            .into_iter()
+            .find(|(m, _)| m == name)
+        {
+            let t = crate::defer::resolve_marked_cx(cx, &t)?;
+            return Ok(Some((format!("./{name}"), bytes(&t))));
+        }
+    }
     let file = |x: Option<ValueId>| {
         x.and_then(|x| {
             let xs = list_of(v, x);
@@ -476,7 +528,9 @@ fn look_up(cx: &mut Ctx<'_>, n: &Need) -> Result<Option<(String, Vec<u8>)>, Stop
 
 /// A tool's run on the files the job wrote the round before
 /// (`Ctx::apply`): `[tool, output, input, [args...]]` (and the input's
-/// text where a `\write18`'s node read it, [`ToolNode`]), its output
+/// text where a `\write18`'s node read it, [`ToolNode`], or where the
+/// input's own files' node made it, followed by 1 there: the other files
+/// it reads read from their streams, [`look_up`]), its output
 /// `[path, text]` (TeX's characters), or `UNIT` where the tool makes
 /// none (its input not written, a bibliography asked for by none, a
 /// failed run). The output is `[path, text, 0]`: read inline where it is
@@ -502,6 +556,9 @@ impl Operation for ToolRun {
             .map(|&l| list_of(v, l).iter().map(|&a| str_of(v, a)).collect())
             .unwrap_or_default();
         let opts = ops(&self.0).tool_opts.locked().clone();
+        // (a files' node's run: the files the job writes as this pass
+        // wrote them, [`look_up`])
+        let streams = args.get(5).is_some_and(|&x| crate::val::int_of(v, x) != 0);
         let mut served = Served::default();
         // (the input first: as a `\write18`'s node read it, else as the
         // round before wrote it; none written, no run)
@@ -512,13 +569,13 @@ impl Operation for ToolRun {
         // without one, mktexmf writing one where it can)
         if tool == Tool::Mktex {
             let need = mf_need(&input);
-            let found = look_up(cx, &need)?;
+            let found = look_up(cx, &need, streams)?;
             served.got.insert(need, found);
         }
         let Some((_, text)) = (match given {
             Some(x) => Some(x),
             None if tool == Tool::Mktex => Some((String::new(), Vec::new())),
-            None => look_up(cx, &Need::File(input.clone()))?,
+            None => look_up(cx, &Need::File(input.clone()), streams)?,
         }) else {
             return Ok(ValueId::UNIT);
         };
@@ -534,6 +591,45 @@ impl Operation for ToolRun {
                 Need::File(input.clone()),
                 Some((format!("./{input}"), text.clone())),
             );
+        }
+        // (a run on the same contents of the same files: its outcome
+        // again, each file it read looked up again, [`Outcomes`])
+        let key = outcome_key(tool, &output, &input, &targs, &opts, epoch);
+        if let Some(k) = key {
+            let input_key = content_key(
+                tool,
+                &Need::File(input.clone()),
+                Some(&(format!("./{input}"), text.clone())),
+            );
+            let entries: Vec<Arc<Outcome>> =
+                outcomes().locked().get(&k).cloned().unwrap_or_default();
+            'entries: for e in entries {
+                if e.input != input_key {
+                    continue;
+                }
+                for (n, h) in &e.read {
+                    let x = look_up(cx, n, streams)?;
+                    if content_key(tool, n, x.as_ref()) != *h {
+                        continue 'entries;
+                    }
+                }
+                if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+                    eprintln!("tool {} for {output}: the kept run's outcome", tool.name());
+                }
+                return Ok(outcome_value(v, tool, &output, &e.out));
+            }
+            if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+                eprintln!(
+                    "tool {} for {output}: runs ({} kept runs of its key; its input read {})",
+                    tool.name(),
+                    outcomes().locked().get(&k).map_or(0, Vec::len),
+                    if tool == Tool::Bibtex && bibtex_lines(&text).is_none() {
+                        "whole"
+                    } else {
+                        "by its lines"
+                    }
+                );
+            }
         }
         // (run, then the files it asked for and had not looked up, and
         // again until it asks for none new)
@@ -556,7 +652,7 @@ impl Operation for ToolRun {
                     let said = (o.errors.iter().map(|e| (true, e.clone())))
                         .chain(o.warnings.iter().map(|w| (false, w.clone())))
                         .collect();
-                    (o.bbl.map(String::into_bytes), said)
+                    (o.bbl_bytes(), said)
                 }
                 Tool::Repstopdf => {
                     // (epstopdf.pl's rewrite of the header, then gs reading
@@ -582,14 +678,24 @@ impl Operation for ToolRun {
             }
             fail = None;
             for n in missing {
-                let x = look_up(cx, &n)?;
+                let x = look_up(cx, &n, streams)?;
                 served.got.insert(n, x);
             }
         };
-        if let Some(m) = fail {
-            return Ok(v.list(vec![v.str(&m)]));
+        // (a tool that made nothing and said why: its errors where its
+        // output is read, as a failed run's are, not an absent file alone,
+        // biber's refusal of what it does not support)
+        if made.is_none() && fail.is_none() {
+            let errs: Vec<&str> = said.iter().filter(|s| s.0).map(|s| s.1.as_str()).collect();
+            if !errs.is_empty() {
+                fail = Some(format!(
+                    "{}: {output} not made: {}",
+                    tool.name(),
+                    errs.join("; ")
+                ));
+            }
         }
-        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
+        if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && fail.is_none() {
             eprintln!(
                 "tool {} for {output}: read {:?}, made {:?} bytes",
                 tool.name(),
@@ -597,27 +703,182 @@ impl Operation for ToolRun {
                 made.as_ref().map(Vec::len)
             );
         }
-        // (`[path, text, 0, said]`: a whole text, read inline where it is
-        // opened, `Run::start_input`, which reports what the tool said
-        // there: `[error, message]` each, in the tool's order)
-        Ok(made.map_or(ValueId::UNIT, |b| {
+        let out = match fail {
+            Some(m) => Err(m),
+            None => Ok((made, said)),
+        };
+        if let Some(k) = key {
+            let input = Need::File(input);
+            let input_key = content_key(
+                tool,
+                &input,
+                served.got.get(&input).and_then(Option::as_ref),
+            );
+            let mut read: Vec<(Need, u64)> = served
+                .got
+                .iter()
+                .filter(|(n, _)| **n != input)
+                .map(|(n, x)| (n.clone(), content_key(tool, n, x.as_ref())))
+                .collect();
+            read.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
+            let e = Arc::new(Outcome {
+                input: input_key,
+                read,
+                out: out.clone(),
+            });
+            let mut m = outcomes().locked();
+            if m.len() > 256 {
+                m.clear();
+            }
+            let es = m.entry(k).or_default();
+            es.retain(|x| x.input != e.input || x.read != e.read);
+            es.insert(0, e);
+            es.truncate(OUTCOMES_KEPT);
+        }
+        Ok(outcome_value(v, tool, &output, &out))
+    }
+}
+
+/// A tool run's outcome: what it made and what it said, or why it failed
+/// (`Err`).
+type Made = Result<(Option<Vec<u8>>, Vec<(bool, String)>), String>;
+
+/// A tool run kept ([`outcomes`]): its input's content ([`content_key`]),
+/// each other file it read and its content, and its outcome.
+struct Outcome {
+    input: u64,
+    read: Vec<(Need, u64)>,
+    out: Made,
+}
+
+/// The runs kept per key: a watch's edit and its revert.
+const OUTCOMES_KEPT: usize = 2;
+
+/// The tools' runs kept, by [`outcome_key`]: a tool is a function of the
+/// files it reads, so a run whose input and every file the kept run read
+/// have the same contents makes what that run made, and says what it
+/// said. The `.aux` file's writer runs BibTeX on each pass's text, and
+/// every edit that moves a label wrote a new one (Grail's heading edit:
+/// 10 ms a pass, accl 22839).
+fn outcomes() -> &'static std::sync::Mutex<crate::FxHashMap<u64, Vec<Arc<Outcome>>>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<crate::FxHashMap<u64, Vec<Arc<Outcome>>>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// What a run of `tool` depends on beyond the files it reads: the tool,
+/// its output, input and arguments, its settings and the date; `None`
+/// for a tool whose runs are not kept (one that runs other programs,
+/// METAFONT's whose runs the client keeps).
+fn outcome_key(
+    tool: Tool,
+    output: &str,
+    input: &str,
+    targs: &[String],
+    opts: &ToolOptions,
+    epoch: i64,
+) -> Option<u64> {
+    let settings = match tool {
+        Tool::Bibtex => format!("{:?}", opts.bibtex),
+        Tool::Makeindex => String::from_utf8_lossy(MAKEINDEX_VERSION).into_owned(),
+        Tool::Biber => String::new(),
+        Tool::Repstopdf | Tool::Mktex => return None,
+    };
+    let text = format!(
+        "{}\0{output}\0{input}\0{targs:?}\0{settings}\0{epoch}",
+        tool.name()
+    );
+    Some(phitex_defuse::hash_bytes(
+        0x746f_6f6c_7275_6e00,
+        text.as_bytes(),
+    ))
+}
+
+/// What of file `x` (looked up as `n`; none: absent) a run of `tool`
+/// depends on, hashed: its name and contents; for BibTeX's `.aux` files,
+/// the lines it reads ([`bibtex_lines`]).
+fn content_key(tool: Tool, n: &Need, x: Option<&(String, Vec<u8>)>) -> u64 {
+    let Some((path, b)) = x else {
+        return 0;
+    };
+    let h = phitex_defuse::hash_bytes(0x6669_6c65_7061_7468, path.as_bytes());
+    // (as BibTeX tells an `.aux` file's name: by its last four bytes)
+    let aux = matches!(n, Need::File(f) if f.as_bytes().ends_with(b".aux"));
+    match (tool == Tool::Bibtex && aux)
+        .then(|| bibtex_lines(b))
+        .flatten()
+    {
+        Some(lines) => phitex_defuse::hash_bytes(h ^ 1, &lines),
+        None => phitex_defuse::hash_bytes(h, b),
+    }
+}
+
+/// The lines of an `.aux` file BibTeX reads (§116): those whose text
+/// before their first `{` is `\citation`, `\bibdata`, `\bibstyle` or
+/// `\@input`, the others emptied (BibTeX skips them; their count stays,
+/// for its messages' line numbers). `None` where one of those lines does
+/// not end in `}` (white space after it aside): BibTeX's scan of such a
+/// line looks past its end, at what a longer line before it left in its
+/// buffer, so the lines emptied would change what it reads.
+fn bibtex_lines(aux: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(aux.len() / 4);
+    let mut start = 0;
+    loop {
+        let end = aux[start..]
+            .iter()
+            .position(|&c| c == b'\n' || c == b'\r')
+            .map_or(aux.len(), |i| start + i);
+        let line = &aux[start..end];
+        let cmd = line.iter().position(|&c| c == b'{').map(|i| &line[..i]);
+        if matches!(
+            cmd,
+            Some(b"\\citation" | b"\\bibdata" | b"\\bibstyle" | b"\\@input")
+        ) {
+            let kept = line
+                .iter()
+                .rposition(|&c| !matches!(c, b' ' | b'\t'))
+                .map_or(&line[..0], |i| &line[..=i]);
+            if kept.last() != Some(&b'}') {
+                return None;
+            }
+            out.extend_from_slice(line);
+        }
+        let Some(&sep) = aux.get(end) else {
+            break;
+        };
+        // (the line's end as it was: BibTeX ends a line at either)
+        out.push(sep);
+        start = end + 1;
+    }
+    Some(out)
+}
+
+/// [`ToolRun`]'s value for outcome `out`: `[message]` for a failure;
+/// `[path, text, 0, said]` for a file made, a whole text read inline where
+/// it is opened (`Run::start_input`, which reports what the tool said
+/// there: `[error, message]` each, in the tool's order); `UNIT` for none.
+fn outcome_value(v: &Values, tool: Tool, output: &str, out: &Made) -> ValueId {
+    match out {
+        Err(m) => v.list(vec![v.str(m)]),
+        Ok((None, _)) => ValueId::UNIT,
+        Ok((Some(b), said)) => {
             let said = said
-                .into_iter()
+                .iter()
                 .map(|(e, m)| {
-                    let what = if e { "error" } else { "warning" };
+                    let what = if *e { "error" } else { "warning" };
                     v.list(vec![
-                        v.int(i64::from(e)),
+                        v.int(i64::from(*e)),
                         v.str(&format!("{} {what}: {m}", tool.name())),
                     ])
                 })
                 .collect();
             v.list(vec![
                 v.str(&format!("./{output}")),
-                v.str(&chars(&b)),
+                v.str(&chars(b)),
                 v.int(0),
                 v.list(said),
             ])
-        }))
+        }
     }
 }
 
@@ -663,13 +924,29 @@ fn makeindex_said(ilg: &[u8]) -> Vec<(bool, String)> {
 /// The arguments of the tool run that makes `output` by default, if one
 /// does: the first tool claiming it by name whose input the job writes
 /// (its size defined, `crate::ops::Files`). `None`: no tool makes it.
-pub(crate) fn run_args(cx: &mut Ctx<'_>, output: &str) -> Result<Option<Vec<ValueId>>, Stop> {
+/// `written`: a file the caller knows the job writes (its own node's).
+pub(crate) fn run_args(
+    cx: &mut Ctx<'_>,
+    output: &str,
+    written: Option<&str>,
+) -> Result<Option<Vec<ValueId>>, Stop> {
     let v = cx.values();
     for (t, input) in claims(output) {
         // (a job that writes the input defines its size, the files'
         // node; read either way, so this runs again once it does)
-        if crate::ops::lb_read(cx, size_field(v, &input))?.is_none() {
+        if written != Some(input.as_str())
+            && crate::ops::lb_read(cx, size_field(v, &input))?.is_none()
+        {
             continue;
+        }
+        // (a glossary: run only where its style is there, the job's
+        // `\makeglossaries` wrote it or the document's directory has it)
+        if let Some((glo, log, ist)) = glossary(output).filter(|g| g.0 == input) {
+            if look_up(cx, &Need::File(ist.clone()), false)?.is_none() {
+                return Ok(None);
+            }
+            let args = ["-s", &ist, "-t", &log, "-o", output, &glo].map(str::to_owned);
+            return Ok(Some(command_args(v, t, output, &input, &args)));
         }
         return Ok(Some(command_args(
             v,
@@ -719,11 +996,21 @@ impl Operation for ToolNode {
             return Ok(ValueId::UNIT);
         };
         let (out, input) = (str_of(v, out), str_of(v, input));
+        // (at the committed frontier only, as a shell command: the input's
+        // stream before here is then the pass's, not a guess. Run on each
+        // guess, amsldoc's makeindex node ran again at every page's
+        // finisher that wrote `\index` entries before it, 20 runs and
+        // 162 ms for a paragraph added at -j8)
+        cx.wait_settled()?;
         let acc = cx.fold(crate::run::stream_bucket(v, &input), None, None)?;
         let text = crate::api::written_texts(v, Some(acc))
             .into_iter()
             .find(|(n, _)| *n == input)
             .map(|(_, t)| t);
+        let text = match text {
+            Some(t) => Some(crate::defer::resolve_marked_cx(cx, &t)?),
+            None => None,
+        };
         let mut a: Vec<ValueId> = args.iter().take(4).copied().collect();
         a.extend(text.map(|t| v.str(&t)));
         let made = cx.apply(ops(&self.0).tool, a)?;
@@ -740,5 +1027,76 @@ impl Operation for ToolNode {
         }
         cx.define_with(out_field(v, &out), made, Locality::Global);
         Ok(ValueId::UNIT)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bibtex_lines;
+
+    struct Mem(Vec<(&'static [u8], Vec<u8>)>);
+
+    impl phitex_bibtex::Files for Mem {
+        fn aux(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+            self.0.iter().find(|e| e.0 == name).map(|e| e.1.clone())
+        }
+        fn bst(&mut self, _: &[u8]) -> Option<Vec<u8>> {
+            Some(
+                b"ENTRY { title } {} { label }\n\
+                  FUNCTION {article} { \"\\bibitem{\" cite$ * \"}\" * write$ newline$ title write$ newline$ }\n\
+                  FUNCTION {default.type} { article }\n\
+                  READ\nITERATE {call.type$}\n"
+                    .to_vec(),
+            )
+        }
+        fn bib(&mut self, _: &[u8]) -> Option<Vec<u8>> {
+            Some(b"@article{a, title={Alpha}}\n@article{b, title={Beta}}\n@article{c, title={Gamma}}\n".to_vec())
+        }
+    }
+
+    /// BibTeX on an `.aux` file and on the lines of it it reads
+    /// ([`bibtex_lines`]): the same `.bbl` and `.blg`, its messages' line
+    /// numbers among them (a second `\\bibstyle`, an error, and a
+    /// citation in a nested file, read through `\\@input`), whatever the
+    /// other lines are (long ones, CR LF ends); and a line of the four it
+    /// reads that does not end in `}` keeps the whole file.
+    #[test]
+    fn bibtex_reads_the_same_from_its_lines() {
+        let long = format!(
+            "\\@writefile{{toc}}{{\\contentsline {{section}}{{{}}}}}",
+            "x".repeat(300)
+        );
+        let main = format!(
+            "\\relax\n{long}\n\\citation{{a}}\r\n\\newlabel{{s}}{{{{1}}{{2}}}}\n\\@input{{sub.aux}}\n\\bibstyle{{plain}}\n{long}\n\\bibstyle{{plain}}\n\\bibdata{{refs}}\n  \n"
+        );
+        let sub = "\\newlabel{t}{{3}{4}}\n\\citation{c,b}  \n".to_owned();
+        let run = |m: &[u8], s: &[u8]| {
+            let mut f = Mem(vec![(b"t.aux", m.to_vec()), (b"sub.aux", s.to_vec())]);
+            let o = phitex_bibtex::run(b"t.aux", &phitex_bibtex::Options::default(), &mut f);
+            (o.bbl.map(|f| f.contents), o.blg.map(|f| f.contents), o.term)
+        };
+        let lines = bibtex_lines(main.as_bytes()).expect("its commands end in }");
+        let sub_lines = bibtex_lines(sub.as_bytes()).expect("its commands end in }");
+        assert!(lines.len() < main.len() / 2, "the other lines emptied");
+        assert_eq!(
+            lines.iter().filter(|&&c| c == b'\n' || c == b'\r').count(),
+            main.bytes().filter(|&c| c == b'\n' || c == b'\r').count(),
+            "the lines kept, the line ends with them"
+        );
+        let whole = run(main.as_bytes(), sub.as_bytes());
+        let blg = String::from_utf8_lossy(whole.1.as_deref().unwrap_or_default()).into_owned();
+        assert!(
+            blg.contains("Illegal, another \\bibstyle command---line "),
+            "an error at its line: {blg}"
+        );
+        assert!(whole.0.as_ref().is_some_and(|b| !b.is_empty()));
+        assert_eq!(run(&lines, &sub_lines), whole);
+        // (a command line not ended: BibTeX looks past it)
+        assert_eq!(bibtex_lines(b"\\relax\n\\citation{a\n"), None);
+        assert_eq!(bibtex_lines(b"\\bibdata{refs} x\n"), None);
+        assert!(
+            bibtex_lines(b"\\citation {a\n\\cite{x\n").is_some(),
+            "not BibTeX's commands"
+        );
     }
 }

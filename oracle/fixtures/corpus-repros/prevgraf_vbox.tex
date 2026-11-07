@@ -1,0 +1,10 @@
+% \prevgraf inside a \vbox: the lines of the paragraph that just ended
+% there (read), and an assignment to it there.
+\documentclass{article}
+\begin{document}
+\setbox0\vbox{\hsize=3in
+This example manuscript is intended to serve as a tutorial and template for authors to use when writing their own AAS Journal articles. The manuscript includes a history.
+\par\xdef\a{\the\prevgraf}\prevgraf=7 \xdef\b{\the\prevgraf}}
+\unvbox0
+In the box: \a, then \b; here \the\prevgraf.
+\end{document}

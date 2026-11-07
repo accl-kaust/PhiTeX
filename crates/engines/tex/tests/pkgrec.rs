@@ -562,3 +562,69 @@ fn base_definition_outlives_a_group_left_open() {
         assert!(errs.is_empty(), "{errs:?}");
     }
 }
+
+/// The records kept one per load ([`Options::pkgrec_source`], as the
+/// CLI's cache keeps them): a build asks only the loads it meets, once
+/// each, never a record of another load; the records it is given are
+/// the whole-set ones' (the same hints, the same output); a build that
+/// learns nothing new changes none, and one whose load defines more
+/// changes that load's alone.
+#[test]
+fn records_kept_one_per_load_are_asked_per_load() {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    let d = dir(
+        "perload",
+        &[("pa.sty", "\\def\\aa{A}\n"), ("pb.sty", "\\def\\bb{B}\n")],
+    );
+    let doc = format!("{DEF}\\usepackage{{pa}}\n\\usepackage{{pb}}\n\\aa\\bb\n\\bye\n");
+    let want = sequential(&d, &doc);
+    let first = build(&d, &doc, Speculation::Off, Vec::new());
+    let made = first.changed_pkgrecs();
+    let keys: Vec<&str> = made.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["\\usepackage{pa}", "\\usepackage{pb}"]);
+    // (kept one per load, beside a record no load of this document has)
+    let mut kept: HashMap<String, Vec<u8>> = made.into_iter().collect();
+    kept.insert(
+        "\\usepackage{other}".to_owned(),
+        kept["\\usepackage{pa}"].clone(),
+    );
+    let kept = Arc::new(Mutex::new(kept));
+    let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+    let source = |kept: &Arc<Mutex<HashMap<String, Vec<u8>>>>| {
+        let (kept, asked) = (kept.clone(), asked.clone());
+        Arc::new(move |k: &str| {
+            asked.lock().unwrap().push(k.to_owned());
+            kept.lock().unwrap().get(k).cloned()
+        }) as phitex_tex::PkgrecSource
+    };
+    let o = Options {
+        pkgrec_source: Some(source(&kept)),
+        ..opts(&d, Speculation::Off, Vec::new())
+    };
+    let second = common::build(o, Some(&common::plain()), &doc);
+    same("second", &second.output().0, &want);
+    assert_eq!(second.stats.pkg_recorded, 2, "each load given its record");
+    let mut a = asked.lock().unwrap().clone();
+    a.sort();
+    assert_eq!(
+        a,
+        ["\\usepackage{pa}", "\\usepackage{pb}"],
+        "each load asked once"
+    );
+    assert!(second.changed_pkgrecs().is_empty(), "nothing new learned");
+    assert!(same_writes(&second.export_pkgrec(), &first.export_pkgrec()));
+    // (pb now defines more: its record alone changes)
+    std::fs::write(d.join("pb.sty"), "\\def\\bb{B}\\def\\bc{C}\n").unwrap();
+    asked.lock().unwrap().clear();
+    let o = Options {
+        pkgrec_source: Some(source(&kept)),
+        ..opts(&d, Speculation::Off, Vec::new())
+    };
+    let third = common::build(o, Some(&common::plain()), &doc);
+    same("third", &third.output().0, &sequential(&d, &doc));
+    let changed = third.changed_pkgrecs();
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].0, "\\usepackage{pb}");
+    assert!(writes(&changed[0].1, "\\usepackage{pb}", "cs:bc"));
+}

@@ -106,14 +106,16 @@ def first_page(qa, qb):
     return None, len(pa), len(pb)
 
 
-def diff(a, b):
+def diff(a, b, tmp=None):
+    """Where A and B first differ; their QDF forms written under `tmp`
+    (a directory with room: a container's /tmp may be small)."""
     a, b = Path(a), Path(b)
     da, db = a.read_bytes(), b.read_bytes()
     if da == db:
         return {"same": True}
     res = {"same": False, "sizes": [len(da), len(db)]}
     res["byte"] = next((i for i, (x, y) in enumerate(zip(da, db)) if x != y), min(len(da), len(db)))
-    with tempfile.TemporaryDirectory() as t:
+    with tempfile.TemporaryDirectory(dir=tmp) as t:
         try:
             qa, qb = qdf(a, Path(t) / "a.qdf"), qdf(b, Path(t) / "b.qdf")
         except (RuntimeError, OSError, subprocess.TimeoutExpired) as e:
@@ -147,5 +149,78 @@ def diff(a, b):
     return res
 
 
+# The documented differences (docs/differences.md, "Where PhiTeX's PDF
+# differs from pdfTeX's on purpose"), by the name a row of
+# ci/manuals-pdftex-bugs.tsv gives: what of a listed object may differ,
+# masked on both sides. Anything else in the object, and every object
+# not listed, must be identical.
+MASKS = {
+    # (a destination's point under \pdfsetmatrix: x and y of /XYZ, the
+    # one coordinate of /FitH, /FitBH, /FitV, /FitBV; the zoom kept)
+    "dest-under-matrix": (
+        re.compile(rb"/XYZ\s+-?[0-9.]+\s+-?[0-9.]+(?=\s)|/(FitB?[HV])\s+-?[0-9.]+(?=\s)"),
+        lambda m: b"/" + (m.group(1) or b"XYZ") + b" <masked>",
+    ),
+}
+
+
+def xref_layout(pdf):
+    """Each object's place as the cross-reference stream gives it, byte
+    offsets left out: (number, in an object stream or not, that stream,
+    the index in it)."""
+    r = subprocess.run(["qpdf", "--show-xref", str(pdf)], capture_output=True, timeout=600)
+    if r.returncode not in (0, 3):
+        raise RuntimeError(r.stderr.decode(errors="replace")[:300])
+    return [re.sub(rb"offset = \d+", b"offset", l) for l in r.stdout.splitlines()]
+
+
+def documented(a, b, mask, objs, tmp=None):
+    """Whether PDF B differs from the oracle A only as a documented
+    difference lets it: the same objects in the same places (object
+    streams and their indexes, the trailer), every object identical but
+    those whose oracle numbers are in `objs`, and those identical once
+    MASKS[mask] is applied to both. Streams are compared as written
+    (not decoded): their compression is part of the file. Returns
+    (ok, why, the listed objects that differed)."""
+    rx, sub = MASKS[mask]
+    # (objs None: any object, to find the ones a new row lists)
+    objs = None if objs is None else set(objs)
+    if xref_layout(a) != xref_layout(b):
+        return False, "the objects' places (qpdf --show-xref, offsets aside) differ", []
+    with tempfile.TemporaryDirectory(dir=tmp) as t:
+        qa, qb = [ID.sub(rb"\1/ID []", _qdf_raw(p, Path(t) / f"{k}.qdf")) for k, p in (("a", a), ("b", b))]
+    oa, ob = objects(qa), objects(qb)
+    if len(oa) != len(ob):
+        return False, f"object count differs: {len(oa)} vs {len(ob)}", []
+    used = []
+    for (ha, ba), (hb, bb) in zip(oa, ob):
+        if ha + ba == hb + bb:
+            continue
+        d = describe(ha, ba)
+        if ha == hb and (objs is None or d["obj"] in objs) and rx.sub(sub, ba) == rx.sub(sub, bb):
+            used.append(d["obj"])
+            continue
+        line, xa, xb = first_line_diff(ha + ba, hb + bb)
+        return False, (f"obj {d['obj']} ({d['type'] or 'untyped'}) line {line}: oracle {xa!r}, phitex {xb!r}"
+                       + ("" if objs is None or d["obj"] not in objs else f" (listed, but more than {mask} differs)")), used
+    return True, f"{len(used)} objects differ as {mask} allows", used
+
+
+def _qdf_raw(pdf, out):
+    r = subprocess.run(
+        ["qpdf", "--qdf", "--object-streams=disable", "--compress-streams=n",
+         "--decode-level=none", str(pdf), str(out)],
+        capture_output=True, timeout=600,
+    )
+    if r.returncode not in (0, 3):
+        raise RuntimeError(r.stderr.decode(errors="replace")[:300])
+    return Path(out).read_bytes()
+
+
 if __name__ == "__main__":
-    print(json.dumps(diff(sys.argv[1], sys.argv[2]), indent=1))
+    if len(sys.argv) > 3:
+        # (pdfdiff.py ORACLE PHITEX MASK: the objects that differ only as
+        # MASK allows, for a row of ci/manuals-pdftex-bugs.tsv)
+        print(json.dumps(documented(sys.argv[1], sys.argv[2], sys.argv[3], None), indent=1))
+    else:
+        print(json.dumps(diff(sys.argv[1], sys.argv[2]), indent=1))

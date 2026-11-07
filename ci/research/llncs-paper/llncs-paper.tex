@@ -1,0 +1,62 @@
+% The research corpus (ci/research.json): a Springer LNCS paper, as
+% Springer's samplepaper.tex (not in TeX Live) shapes one: llncs with
+% splncs04.bst through BibTeX.
+\documentclass[runningheads]{llncs}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\begin{document}
+\title{Incremental Typesetting by Graph Reduction}
+\titlerunning{Incremental Typesetting}
+\author{First Author\inst{1}\orcidID{0000-1111-2222-3333} \and
+Second Author\inst{2} \and Third Author\inst{1}}
+\authorrunning{F. Author et al.}
+\institute{University of Examples, City, Country\\
+\email{first@example.org} \and
+Institute of Samples, City, Country}
+\maketitle
+\begin{abstract}
+We describe how a document can be rebuilt after an edit in time
+proportional to the edit. The result is byte-identical to a full build.
+\keywords{Typesetting \and Incremental computation \and Parallelism.}
+\end{abstract}
+\section{Introduction}
+Document preparation systems~\cite{knuth1984,lamport1994} rebuild the
+whole document after every change. We do not; see
+Section~\ref{sec:method} and Table~\ref{tab:res}.
+\section{Method}\label{sec:method}
+\begin{definition}
+A \emph{node} is a unit of work whose inputs and outputs are recorded.
+\end{definition}
+\begin{theorem}
+Rerunning exactly the nodes whose inputs changed yields the output of a
+full build.
+\end{theorem}
+\begin{proof}
+By induction on the topological order of the nodes.\qed
+\end{proof}
+\begin{equation}
+  T_{\text{edit}} = \sum_{v \in \Delta} t_v \ll \sum_{v \in V} t_v .
+\end{equation}
+\section{Evaluation}
+\begin{table}
+\caption{Rebuild times after a one-word edit.}\label{tab:res}
+\centering
+\begin{tabular}{lrr}
+\toprule
+Document & Full (s) & Edit (ms) \\
+\midrule
+Paper & 1.2 & 30 \\
+Thesis & 9.8 & 45 \\
+\bottomrule
+\end{tabular}
+\end{table}
+\begin{credits}
+\subsubsection{\ackname} We thank the reviewers.
+\subsubsection{\discintname} The authors have no competing interests.
+\end{credits}
+\bibliographystyle{splncs04}
+\bibliography{refs}
+\end{document}

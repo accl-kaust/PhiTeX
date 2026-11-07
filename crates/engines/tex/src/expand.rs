@@ -142,10 +142,10 @@ impl Run<'_, '_> {
                 cmd::CONVERT => self.conv_toks()?,
                 cmd::SYM => {
                     // (a deferred read's symbol where its digits are
-                    // needed: docs/spec-deferred-reads.md §2)
-                    if let Some(s) = crate::defer::sym_of(self.cur.tok) {
-                        crate::defer::expand_sym(self, s)?;
-                    }
+                    // needed: docs/spec-deferred-reads.md §2; a file
+                    // size's, docs/spec-relative-counters.md §2.4)
+                    let t = self.cur.tok;
+                    crate::defer::expand_any(self, t)?;
                 }
                 cmd::THE => {
                     let toks = self.the_toks();
@@ -188,7 +188,8 @@ impl Run<'_, '_> {
                             self.page_nth()
                         );
                     }
-                    self.log("error", "Undefined control sequence")?;
+                    // §370
+                    self.log_help("error", "Undefined control sequence", &UNDEFINED_HELP)?;
                 }
             }
         }
@@ -209,15 +210,55 @@ impl Run<'_, '_> {
         let _in_csname = crate::etex::InCsname::enter();
         let mut name = NAME.with(std::cell::Cell::take);
         name.clear();
-        let r = self.cs_name_chars(&mut name);
+        let r = crate::defer::name_chars(self, &mut name);
+        let kept = match r {
+            Ok(k) => k,
+            Err(e) => {
+                NAME.with(|c| c.set(name));
+                return Err(e);
+            }
+        };
+        // (a relative name, docs/spec-relative-counters.md §2.2: where the
+        // derived read says it is defined, its symbol; undefined, TeX
+        // defines it, so its name is made concrete)
+        if let Some((at, s)) = kept {
+            let (pre, suf) = (name[..at].to_owned(), name[at..].to_owned());
+            NAME.with(|c| c.set(name));
+            if self.cur.cmd != cmd::END_CS_NAME {
+                let t = self.cur.tok;
+                self.back_input(t);
+            }
+            let p = phitex_defuse::PathId::of_proj(self.ops.defined_proj);
+            let d = crate::defer::DName {
+                s,
+                prefix: pre,
+                suffix: suf,
+            };
+            if let Some(tok) = crate::defer::dname_tok(&d)
+                && let Some(crate::defer::Answer(x)) =
+                    crate::defer::derived_read(self, s, &d.prefix, &d.suffix, p)?
+                && x.is_some_and(|x| int_of(self.v, x) != 0)
+            {
+                self.back_input(tok);
+                return Ok(());
+            }
+            let n = crate::defer::forced_name(self, s, &d.prefix, &d.suffix)?;
+            let t = Tok::cs(&n);
+            return self.cs_name_end(t);
+        }
         let t = Tok::cs(&name);
         NAME.with(|c| c.set(name));
-        r?;
         if self.cur.cmd != cmd::END_CS_NAME {
             // §373: back_error
             let t = self.cur.tok;
             self.back_input(t);
         }
+        self.cs_name_end(t)
+    }
+
+    /// §372's end: control sequence `t` made `\relax` where undefined,
+    /// and put back.
+    fn cs_name_end(&mut self, t: Tok) -> R<()> {
         // (§372: of the name's meaning only whether it is defined)
         let undefined = match self.defined_lookup(t)? {
             Some(d) => !d,
@@ -234,13 +275,33 @@ impl Run<'_, '_> {
 
     /// `macro_call` (§389–§400).
     /// §396: "Paragraph ended before \\x was complete".
-    fn runaway(&mut self, name: Tok) -> R<()> {
+    /// The list so far (`toks`, the argument) shown first (§306), and the
+    /// `\par` backed up before the error (`back_error`), as its context
+    /// shows it.
+    fn runaway(&mut self, name: Tok, toks: &[Tok], par: Tok) -> R<()> {
         let mut s = String::from("Paragraph ended before ");
-        let mut cs = String::new();
-        self.show_toks_into(&mut cs, std::slice::from_ref(&name))?;
-        s.push_str(cs.trim_end());
+        // (`sprint_cs(warning_index)`, as §338's)
+        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
+        crate::print::sprint_cs(&mut s, name, esc);
         s.push_str(" was complete");
-        self.log("error", &s)
+        self.log_runaway("argument", toks)?;
+        self.back_input(par);
+        self.log_help(
+            "error",
+            &s,
+            &[
+                "I suspect you've forgotten a `}', causing me to apply this",
+                "control sequence to too much text. How can we recover?",
+                "My plan is to forget the whole thing and hope for the best.",
+            ],
+        )
+    }
+
+    /// The argument matched so far since `start` (the call's scratch).
+    fn arg_so_far(&self, base: crate::input::Scratch, start: usize) -> Vec<Tok> {
+        (start..self.input.arena.scratch_len(base))
+            .map(|i| self.input.arena.scratch_at(base, i))
+            .collect()
     }
 
     /// `overflow` (§94): TeX's capacity `what` (`n`) exceeded; the job
@@ -294,18 +355,14 @@ impl Run<'_, '_> {
         }
     }
 
-    /// §372: the characters of a `\\csname` into `name`.
-    fn cs_name_chars(&mut self, name: &mut String) -> R<()> {
-        loop {
-            self.get_x_token();
-            self.ck()?;
-            if self.cur.is_cs() {
-                return Ok(());
-            }
-            // (XeTeX's names take every Unicode character)
-            let c = self.cur.tok.chr();
-            print::push_code(name, if self.xe { c } else { c & 0xFF });
+    /// A macro without parameters expanded: its body read in place
+    /// (§390), as [`Run::macro_call`] reads one.
+    pub(crate) fn push_macro_body(&mut self, m: &Macro) {
+        let r = self.body_range(&m.body);
+        if self.aopen != 0 {
+            self.end_spent_lists();
         }
+        self.push_range(r, crate::input::ty::MACRO);
     }
 
     /// `macro_call` (§389–§400) over the arena (spec-final §2.3): the
@@ -315,6 +372,7 @@ impl Run<'_, '_> {
     /// pushed as the macro's level. No list per argument, no buffer of
     /// the run's own. A halt is raised, never returned.
     pub(crate) fn macro_call(&mut self) {
+        let command = std::mem::take(&mut self.command_call);
         // (the engine bounds a run on a guess by its work: an expansion
         // that never ends, as `\edef` of a macro calling itself, makes
         // no command)
@@ -337,10 +395,30 @@ impl Run<'_, '_> {
         if let Some(p) = self.mprof.as_mut() {
             *p.entry(name).or_default() += 1;
         }
+        if let Some((tok, l, head, k)) = self.skel.take()
+            && tok == name
+        {
+            if command && !self.st.is_loaded(l) && self.skeleton_call(head, k) {
+                return;
+            }
+            // (read whole after all: the macro runs as written)
+            if !self.st.is_loaded(l)
+                && let Err(h) = self.load_slow(l)
+            {
+                return self.raise(h);
+            }
+        }
         let Some(m) = self.cur_macro() else {
             return;
         };
         if m.params.is_empty() {
+            // (the passes of a loop that are plain arithmetic)
+            if command
+                && crate::countloop::has_loop_tail(&m.body, name)
+                && let Err(h) = self.counted_loop(name, &m.body)
+            {
+                return self.raise(h);
+            }
             // no arguments: the body is read in place (§390); a body
             // already in the arena is pushed by its range
             let r = self.body_range(&m.body);
@@ -376,6 +454,42 @@ impl Run<'_, '_> {
             self.push_range(range, crate::input::ty::MACRO);
         }
         self.input.arena.scratch_end(base);
+    }
+
+    /// The command loop's macro read through the gobbled-call
+    /// projection ([`Run::skeleton_lookup`]): its body is `head` followed
+    /// by `k` groups of characters. Where `head`'s meaning is a macro of
+    /// `k` undelimited parameters, not `\\outer`, whose body uses none of
+    /// them, the call is the two expansions at once: the macro's body
+    /// pushed, then `head` reading the groups as its arguments, §391-§399
+    /// (the characters only scanned for braces), and its body put in
+    /// their place, §400. True where done; false, nothing done, for any
+    /// other head.
+    fn skeleton_call(&mut self, head: Tok, k: u8) -> bool {
+        let m = match self.mean_of(head) {
+            Ok(Mean::Macro(m)) => m,
+            Ok(_) => return false,
+            Err(h) => {
+                self.raise(h);
+                return true;
+            }
+        };
+        let is_match = |t: &Tok| t.raw() >> 21 == u32::from(MATCH_CAT);
+        if m.flags & 2 != 0
+            || m.params.len() != usize::from(k)
+            || !m.params.iter().all(is_match)
+            || m.segs.iter().any(|s| s.param != 0)
+        {
+            return false;
+        }
+        self.exps += 1;
+        if self.aopen != 0 {
+            self.end_spent_lists();
+        }
+        self.input.pop_spent();
+        let r = self.body_range(&m.body);
+        self.push_range(r, crate::input::ty::MACRO);
+        true
     }
 
     /// microtype's `\\MT@in@clist{x}\\list` (whether `x` is an item of the
@@ -521,14 +635,18 @@ impl Run<'_, '_> {
                 }
                 // (a deferred read's symbol outside braces: TeX matched
                 // its digits one by one, docs/spec-deferred-reads.md §2)
-                if crate::defer::is_sym(tok)
-                    && let Some(sy) = crate::defer::sym_of(tok)
-                {
-                    match self.lift(|r| crate::defer::value(r, sy)) {
-                        Some(x) => {
-                            self.push_number(x);
-                            continue 'cont;
-                        }
+                // (a file size's symbol taken whole as an undelimited
+                // argument: TeX took its first digit and left the rest,
+                // docs/spec-relative-counters.md §2.4, so the argument
+                // is the first digit's symbol and the rest's goes back;
+                // the first digit's symbol alone is one digit)
+                let mut tok = tok;
+                if crate::defer::is_sym(tok) {
+                    let undelimited = s == Some(r) && (r >= len || is_match(&p[r]));
+                    let delim = (r < len && !is_match(&p[r])).then(|| p[r]);
+                    match self.sym_arg(tok, undelimited, delim) {
+                        Some(Some(t)) => tok = t,
+                        Some(None) => continue 'cont,
                         None => return false,
                     }
                 }
@@ -602,12 +720,16 @@ impl Run<'_, '_> {
                 }
                 if tok == par && (!long_state || self.outer_call) {
                     // §392: the `\par` §338 inserted ends the call quietly
+                    // (§338's error logged now, its runaway list this
+                    // argument so far)
                     if std::mem::take(&mut self.outer_call) {
+                        let so_far = self.arg_so_far(base, start);
+                        self.lift(|r| r.take_runaway(Some(&so_far)));
                         return false;
                     }
                     // §396: a runaway argument; the \par is read again
-                    self.lift(|r| r.runaway(name));
-                    self.back_input(tok);
+                    let so_far = self.arg_so_far(base, start);
+                    self.lift(|r| r.runaway(name, &so_far, tok));
                     return false;
                 }
                 match tok {
@@ -621,11 +743,12 @@ impl Run<'_, '_> {
                                 return false;
                             }
                             if t2 == par && (!long_state || self.outer_call) {
+                                let so_far = self.arg_so_far(base, start);
                                 if std::mem::take(&mut self.outer_call) {
+                                    self.lift(|r| r.take_runaway(Some(&so_far)));
                                     return false;
                                 }
-                                self.lift(|r| r.runaway(name));
-                                self.back_input(t2);
+                                self.lift(|r| r.runaway(name, &so_far, t2));
                                 return false;
                             }
                             if let Some(y) = t2.as_char() {
@@ -687,6 +810,43 @@ impl Run<'_, '_> {
             }
         }
         true
+    }
+
+    /// A symbol met outside braces while a macro's arguments are matched
+    /// ([`Run::macro_args`]): the token to take (an undelimited
+    /// argument's file size digit, docs/spec-relative-counters.md §2.4:
+    /// the first digit's symbol, the rest's put back), or its digits put
+    /// on the input to be matched one by one (`Some(None)`); None: a halt.
+    /// A derived name ([`crate::defer::DName`]) is one control sequence,
+    /// as the `\csname` that made it gave TeX: taken whole, never
+    /// expanded (`\expandafter\label@@hyperref\csname r@x\endcsname`,
+    /// hyperref's `\hyperref[x]`, had the argument be `\r@x`'s body: at
+    /// -j4 edichokey's links went to labels named by their page numbers),
+    /// its concrete name where the delimiter `delim` it is matched
+    /// against is a control sequence.
+    #[cold]
+    #[inline(never)]
+    #[allow(clippy::option_option)]
+    fn sym_arg(&mut self, tok: Tok, undelimited: bool, delim: Option<Tok>) -> Option<Option<Tok>> {
+        use crate::defer::{Part, size_of, size_tok};
+        if crate::defer::is_dname(tok) {
+            if delim.is_some_and(Tok::is_cs) {
+                return self
+                    .lift(|r| crate::defer::dname_concrete(r, tok))
+                    .map(Some);
+            }
+            return Some(Some(tok));
+        }
+        match size_of(tok) {
+            Some((Part::Head, _)) if undelimited => Some(Some(tok)),
+            Some((Part::All, key)) if undelimited => {
+                self.back_input(size_tok(Part::Tail, &key));
+                Some(Some(size_tok(Part::Head, &key)))
+            }
+            _ => self
+                .lift(|r| crate::defer::expand_any(r, tok))
+                .map(|()| None),
+        }
     }
 
     /// A step that may stop, on the token path: its halt raised
@@ -771,7 +931,7 @@ impl Run<'_, '_> {
             return self.raise(crate::run::Halt::Fatal);
         }
         *ended = true;
-        if let Err(h) = self.incomplete_if() {
+        if let Err(h) = self.incomplete_if(true) {
             self.raise(h);
         }
     }
@@ -786,6 +946,11 @@ impl Run<'_, '_> {
     fn x_char_or_active(&mut self) -> R<(u8, i32)> {
         self.get_x_token();
         self.ck()?;
+        Ok(self.char_or_active())
+    }
+
+    /// The current token as `\if` and `\ifcat` compare it (§506).
+    fn char_or_active(&self) -> (u8, i32) {
         // (XeTeX: every Unicode character, `too_big_usv` past them)
         let big = if self.xe { 0x10_FFFF } else { 255 };
         let (mut c, mut h) = (self.cur.cmd, self.cur.chr);
@@ -805,20 +970,175 @@ impl Run<'_, '_> {
             && matches!(c, cmd::RELAX | cmd::TAB_MARK | cmd::CAR_RET | cmd::PAR_END)
             && (256..=258).contains(&h);
         if c > cmd::ACTIVE_CHAR || h > big || special {
-            return Ok((cmd::RELAX, big + 1));
+            return (cmd::RELAX, big + 1);
         }
-        Ok((c, h))
+        (c, h)
+    }
+
+    /// One operand of `\if` or `\ifcat` (§506), where a file size's
+    /// symbol is kept (docs/spec-relative-counters.md §2.4): all its
+    /// digits taken there are the first digit's symbol taken and the
+    /// rest's left on the input, as TeX takes one digit.
+    fn if_operand(&mut self) -> R<IfOp> {
+        use crate::defer::{Part, size_of, size_tok};
+        let was = self.size_stop.replace(self.expand_depth);
+        let got = self.x_char_or_active();
+        self.size_stop = was;
+        let (c, h) = got?;
+        let t = self.cur.tok;
+        if self.cur.cmd == cmd::SYM
+            && let Some((part, key)) = size_of(t)
+        {
+            return Ok(match part {
+                Part::All => {
+                    self.back_input(size_tok(Part::Tail, &key));
+                    IfOp::Digit(key)
+                }
+                Part::Head => IfOp::Digit(key),
+                Part::Tail => IfOp::Tail(key),
+            });
+        }
+        Ok(IfOp::Known(c, h))
+    }
+
+    /// A file size's first digit, read now (forced).
+    fn size_head(&mut self, key: &str) -> R<(u8, i32)> {
+        let d = crate::defer::size_digits(self, crate::defer::Part::Head, key)?;
+        let c = d.chars().next().map_or(48, u32::from);
+        Ok((cmd::OTHER_CHAR, i32::try_from(c).unwrap_or(48)))
+    }
+
+    /// `\if` (`cat` false) or `\ifcat` (§506). An operand that is a file
+    /// size's digit (docs/spec-relative-counters.md §2.4: a non-empty
+    /// digit string's first) is not read where the answer is the same
+    /// for every digit: `\ifcat` against any token, `\if` against one
+    /// whose character code is not a digit's (expl3's `\if:w
+    /// \scan_stop: #1 \scan_stop:` on `\pdffilesize`). Elsewhere it is
+    /// forced, an ordinary read of the size.
+    fn if_char_cat(&mut self, cat: bool) -> R<bool> {
+        let a = self.if_operand()?;
+        if let IfOp::Known(m, n) = a {
+            let b = self.if_operand()?;
+            if let IfOp::Known(c, h) = b {
+                return Ok(if cat { m == c } else { n == h });
+            }
+            return self.if_char_cat_sym(cat, a, Some(b));
+        }
+        self.if_char_cat_sym(cat, a, None)
+    }
+
+    /// [`Run::if_char_cat`] where an operand is a file size's digits:
+    /// `a` the first operand, `b` the second where it was taken.
+    #[cold]
+    #[inline(never)]
+    fn if_char_cat_sym(&mut self, cat: bool, a: IfOp, b: Option<IfOp>) -> R<bool> {
+        let digit = |n: i32| (48..=57).contains(&n);
+        let mut a = Some(a);
+        let mut b = b;
+        let a = loop {
+            let x = match a.take() {
+                Some(x) => x,
+                None => self.if_operand()?,
+            };
+            match x {
+                IfOp::Tail(key) => self.force_size(crate::defer::Part::Tail, &key)?,
+                x => break x,
+            }
+        };
+        let b = loop {
+            let x = match b.take() {
+                Some(x) => x,
+                None => self.if_operand()?,
+            };
+            match x {
+                IfOp::Tail(key) => {
+                    if let IfOp::Known(m, n) = a
+                        && self.tail_is_false(cat, m, n)?
+                    {
+                        return Ok(false);
+                    }
+                    self.force_size(crate::defer::Part::Tail, &key)?;
+                }
+                x => break x,
+            }
+        };
+        let ((m, n), (c, h)) = match (a, b) {
+            (IfOp::Known(m, n), IfOp::Known(c, h)) => ((m, n), (c, h)),
+            (IfOp::Known(m, n), IfOp::Digit(key)) => {
+                if cat {
+                    return Ok(m == cmd::OTHER_CHAR);
+                }
+                if !digit(n) {
+                    return Ok(false);
+                }
+                ((m, n), self.size_head(&key)?)
+            }
+            (IfOp::Digit(key), IfOp::Known(c, h)) => {
+                if cat {
+                    return Ok(c == cmd::OTHER_CHAR);
+                }
+                if !digit(h) {
+                    return Ok(false);
+                }
+                (self.size_head(&key)?, (c, h))
+            }
+            (IfOp::Digit(k1), IfOp::Digit(k2)) => (self.size_head(&k1)?, self.size_head(&k2)?),
+            (IfOp::Tail(_), _) | (_, IfOp::Tail(_)) => unreachable!("tails forced above"),
+        };
+        Ok(if cat { m == c } else { n == h })
+    }
+
+    /// A size symbol's digits forced onto the input, where TeX had them.
+    fn force_size(&mut self, part: crate::defer::Part, key: &str) -> R<()> {
+        let d = crate::defer::size_digits(self, part, key)?;
+        self.push_toks(str_toks(&d));
+        Ok(())
+    }
+
+    /// `\if`/`\ifcat`'s second operand the rest of a file size's digits
+    /// (`Part::Tail`, possibly none) against a first operand (`m`, `n`):
+    /// false, and that rest and the token after it taken, where it is
+    /// false both ways: against the rest's first digit, and against the
+    /// token after it (unexpandable, taken as it is), which TeX's
+    /// operand is where the rest is empty. A false `\if` skips to its
+    /// `\else` or `\fi`, and neither the digits nor an unexpandable
+    /// token is one, so both ways skip the same. Else nothing taken.
+    fn tail_is_false(&mut self, cat: bool, m: u8, n: i32) -> R<bool> {
+        let on_digit = if cat {
+            m == cmd::OTHER_CHAR
+        } else if (48..=57).contains(&n) {
+            return Ok(false);
+        } else {
+            false
+        };
+        if on_digit {
+            return Ok(false);
+        }
+        self.get_token();
+        self.ck()?;
+        let t = self.cur.tok;
+        if self.cur.cmd > cmd::MAX_COMMAND {
+            self.back_input(t);
+            return Ok(false);
+        }
+        let (c, h) = self.char_or_active();
+        let same = if cat { m == c } else { n == h };
+        if same {
+            self.back_input(t);
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// §507: `\ifx`'s two tokens compared.
     fn if_x(&mut self) -> R<bool> {
-        if !self.next_ck()? {
+        if !self.ifx_next()? {
             return Ok(false);
         }
         // (a deferred read's symbol: TeX compared its first digit)
         self.unsym_cur()?;
         let (p, h1, m1) = self.ifx_side()?;
-        if !self.next_ck()? {
+        if !self.ifx_next()? {
             return Ok(false);
         }
         self.unsym_cur()?;
@@ -870,7 +1190,26 @@ impl Run<'_, '_> {
     /// One side of `\ifx` (§507): the current token's command code, its
     /// modifier (0 for a macro), and its macro if it is one: a decoded
     /// meaning of the run's table by its location, read in place.
+    /// `\\ifx`'s operand fetched: a derived name's symbol kept
+    /// ([`Run::d_ok`]), its meaning read through the derived read.
+    fn ifx_next(&mut self) -> R<bool> {
+        self.d_ok = true;
+        let b = self.get_next();
+        self.d_ok = false;
+        self.ck()?;
+        Ok(b)
+    }
+
     fn ifx_side(&mut self) -> R<(u8, i32, IfxMacro)> {
+        if self.cur.cmd == cmd::SYM && crate::defer::is_dname(self.cur.tok) {
+            let t = self.cur.tok;
+            let m = crate::defer::dname_meaning(self, t)?;
+            let (c, h) = m.cmd_chr();
+            return Ok(match m {
+                Mean::Macro(x) => (c, 0, IfxMacro::Rc(x)),
+                _ => (c, h, IfxMacro::No),
+            });
+        }
         let (c, h) = (self.cur.cmd, self.cur.chr);
         if self.interp.is_none()
             && !(c == cmd::RELAX && h == crate::val::NO_EXPAND_FLAG)
@@ -945,11 +1284,7 @@ impl Run<'_, '_> {
         let negate = self.cur.chr >= crate::etex::UNLESS_CODE;
         let this_if = self.cur.chr % crate::etex::UNLESS_CODE;
         let b = match this_if {
-            0 | 1 => {
-                let (m, n) = self.x_char_or_active()?;
-                let (c, h) = self.x_char_or_active()?;
-                if this_if == 0 { n == h } else { m == c }
-            }
+            0 | 1 => self.if_char_cat(this_if == 1)?,
             2 => {
                 // (`\ifnum`: an operand that is a macro's number is read as
                 // the comparison's outcome alone, `crate::scan::Num`)
@@ -987,6 +1322,8 @@ impl Run<'_, '_> {
                             -self.num_order(t, i64::from(n))?
                         }
                     }
+                    (Num::Reg(l, j), Num::Int(x)) => self.reg_order(l, j, x)?,
+                    (Num::Int(n), Num::Reg(l, j)) => -self.reg_order(l, j, n)?,
                     (a, b) => {
                         let (n, x) = (self.num_int(a)?, self.num_int(b)?);
                         order(n, x)
@@ -1022,7 +1359,8 @@ impl Run<'_, '_> {
             }
             4 => self.scan_int()? % 2 != 0,
             5..=8 => {
-                let m = self.mode()?.m;
+                // (§1370: `mode:=0` while a `\write` is expanded, no test true)
+                let m = if self.mode_zero { 0 } else { self.mode()?.m };
                 match this_if {
                     5 => m.abs() == 1,
                     6 => m.abs() == 102,
@@ -1153,14 +1491,32 @@ impl Run<'_, '_> {
         if self.cur.cmd == cmd::THE && self.cur.chr != 0 {
             return crate::etex::the_toks(self);
         }
+        let in_text = std::mem::take(&mut self.the_in_text);
         self.get_x_token();
         self.ck()?;
+        // (`\inputlineno` into the text of a line for the log: its number
+        // made when the log is laid out, [`crate::log::LINE_MARK`])
+        if in_text && self.cur.cmd == cmd::LAST_ITEM && self.cur.chr == 3 {
+            let m = self.line_mark();
+            let mut marks = self.log_marks.take().unwrap_or_default();
+            let s = self.line_for_log(m, &mut marks);
+            self.log_marks = Some(marks);
+            let s = s?;
+            return Ok(if s == crate::log::LINE_MARK.to_string() {
+                vec![Tok::ch(12, u32::from(crate::log::LINE_MARK))]
+            } else {
+                str_toks(&s)
+            });
+        }
         // (a page-layer register alone, unread, in a piece: its symbol,
         // docs/spec-deferred-reads.md §2)
         self.defer_ok = self.defer_allowed();
         let val = self.scan_something_internal(5, false);
         self.defer_ok = false;
         let val = val?;
+        if let Some((loc, j)) = self.defer_sym.take() {
+            return Ok(vec![crate::defer::symbol_with(self, loc, j)]);
+        }
         if let Some(loc) = self.defer_hit.take() {
             return Ok(vec![crate::defer::symbol_for(self, loc)]);
         }
@@ -1190,6 +1546,11 @@ impl Run<'_, '_> {
             // a page-layer register alone, unread, in a piece: its symbol,
             // docs/spec-deferred-reads.md §2)
             let n = self.scan_int_deferring()?;
+            if let Some((loc, j)) = self.defer_sym.take() {
+                let t = crate::defer::symbol_with(self, loc, j);
+                self.push_toks([t]);
+                return Ok(());
+            }
             if let Some(loc) = self.defer_hit.take() {
                 let t = crate::defer::symbol_for(self, loc);
                 self.push_toks([t]);
@@ -1263,11 +1624,11 @@ impl Run<'_, '_> {
     /// taken instead.
     pub(crate) fn unsym_cur(&mut self) -> R<()> {
         while self.cur.cmd == cmd::SYM {
-            let Some(s) = crate::defer::sym_of(self.cur.tok) else {
+            let t = self.cur.tok;
+            let Some(d) = crate::defer::digits_str(self, t)? else {
                 break;
             };
-            let x = crate::defer::value(self, s)?;
-            self.push_number(x);
+            self.push_toks(str_toks(&d));
             self.get_token();
             self.ck()?;
         }
@@ -1438,11 +1799,25 @@ impl Run<'_, '_> {
     /// prints its `)` when it ends.
     fn start_input(&mut self) -> R<()> {
         let name = self.scan_file_name()?;
-        let key = if name.contains('.') {
-            name.clone()
-        } else {
-            format!("{name}.tex")
-        };
+        // (a pipe, with shell escape on: the command's output read as the
+        // file, its name the whole `|cmd`, tex.ch's `open_in_or_pipe`)
+        if let Some(cmd) = name.strip_prefix('|')
+            && self.int32("shellescape")? != 0
+        {
+            let Some(text) = self.pipe_text(cmd)? else {
+                self.log_bare("I can't find file")?;
+                return self.fatal("*** (job aborted, file error in nonstop mode)");
+            };
+            self.log("open", &name)?;
+            self.push_toks([Tok::cs("\u{10FFFE}eof")]);
+            let f = crate::run::FileRest::new(self.v, self.v.str(&text), 0, self.v.str(&name));
+            self.input.push_file(f);
+            return Ok(());
+        }
+        // (kpathsea's `tex` format: `name.tex` first unless the name has
+        // one of its suffixes, then `name`, [`Run::tex_key`]: the name
+        // found is the key its read-back and its cut are read by)
+        let key = self.tex_key(&name)?;
         // (a file the job writes whose text the client gave, not read
         // back yet: read back from that text here, its read-back point,
         // `Run::seed_written`)
@@ -1451,6 +1826,37 @@ impl Run<'_, '_> {
         // read, `Run::read_cut`; else its text)
         let cut = if self.doc { self.read_cut(&key)? } else { None };
         if let Some(x) = cut {
+            // (a document's `\input` of a file the client cut places the
+            // file's text as the nodes after this one, so the name it was
+            // given decides which nodes those are. Where a node before this
+            // one has not run yet and may define what this run read (its
+            // name's macros among it), the name may be a guess that text
+            // changes: the run waits for it, as a read-on waits for the
+            // text before it (`Run::pull`), and that node's commit runs it
+            // again. ltnews's `\input{ltnews\theissue}` run while
+            // `\theissue` was not yet defined opened `ltnews.tex` itself, 82
+            // times at -j4, its 101 pieces placed, run and removed each
+            // time, accl 24936; a wait for every node before (csquotes)
+            // never ended, accl 24991.)
+            let read: Vec<phitex_defuse::Field> = {
+                let mut fs: Vec<phitex_defuse::Field> =
+                    self.cx.fields_read_since(0).map(|(_, f)| f).collect();
+                fs.sort_unstable_by_key(|f| f.0.raw());
+                fs.dedup();
+                fs
+            };
+            let h = self.cx.hole_before_defining(&read)?;
+            if crate::exec::obs_flag!("PHITEX_INPUT_TRACE") {
+                eprintln!(
+                    "input-wait: node {} file {key} read {} hole {:?}",
+                    self.cx.node().raw(),
+                    read.len(),
+                    h.map(phitex_defuse::NodeId::raw)
+                );
+            }
+            if h.is_some() {
+                return Err(crate::run::Halt::Hole);
+            }
             let path = crate::val::list_of(self.v, x)[0];
             self.log("open", &str_of(self.v, path))?;
             self.push_toks([Tok::cs("\u{10FFFE}eof")]);
@@ -1458,26 +1864,15 @@ impl Run<'_, '_> {
             self.input.push_file(f);
             return Ok(());
         }
-        let x = self.read_file_lazy(&key)?;
-        let x = match x {
-            Some(x) => Some(x),
-            None => {
-                if key == name {
-                    None
-                } else {
-                    self.read_file_lazy(&name)?
-                }
-            }
-        };
-        let Some(x) = x else {
+        let Some(x) = self.read_file_lazy(&key)? else {
             // §530: in the nonstop modes (a build's, [`Run::fatal`]) the
             // job ends
-            self.log("error", "I can't find file")?;
+            self.log_bare("I can't find file")?;
             return self.fatal("*** (job aborted, file error in nonstop mode)");
         };
         let xs = crate::val::list_of(self.v, x);
         if xs.len() < 2 {
-            self.log("error", "I can't find file")?;
+            self.log_bare("I can't find file")?;
             return self.fatal("*** (job aborted, file error in nonstop mode)");
         }
         // (a job-written file whose read-back only defines: its
@@ -1606,11 +2001,29 @@ impl Run<'_, '_> {
 
 /// The lines of a file's text, each with its end of line.
 pub(crate) fn split_lines(text: &str) -> Vec<String> {
+    let crs = cr_lines(text);
+    let text = crs.as_deref().unwrap_or(text);
     let mut out: Vec<String> = text.split_inclusive('\n').map(str::to_owned).collect();
     if out.last().is_some_and(std::string::String::is_empty) {
         out.pop();
     }
     out
+}
+
+/// `text` with each carriage return that no line feed follows made a
+/// line feed, `None` if it has none: web2c's `input_line` ends a line at
+/// either (a CR LF is one end, its CR trimmed with the line's trailing
+/// blanks). The same length, so places in it stay.
+pub(crate) fn cr_lines(text: &str) -> Option<String> {
+    let b = text.as_bytes();
+    let lone = |i: usize| b[i] == b'\r' && b.get(i + 1) != Some(&b'\n');
+    if !b.contains(&b'\r') || !(0..b.len()).any(lone) {
+        return None;
+    }
+    let out: Vec<u8> = (0..b.len())
+        .map(|i| if lone(i) { b'\n' } else { b[i] })
+        .collect();
+    String::from_utf8(out).ok()
 }
 
 /// `str_toks` (§464).
@@ -1634,5 +2047,37 @@ fn order(a: i32, b: i32) -> i64 {
         std::cmp::Ordering::Less => -1,
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
+    }
+}
+
+/// One operand of `\if` or `\ifcat` ([`Run::if_operand`]).
+enum IfOp {
+    /// A token's (command, character) pair, §506.
+    Known(u8, i32),
+    /// The first digit of file `key`'s size, not read.
+    Digit(String),
+    /// The rest of file `key`'s size after its first digit, possibly
+    /// none, not read.
+    Tail(String),
+}
+
+/// §370's help.
+const UNDEFINED_HELP: [&str; 5] = [
+    "The control sequence at the end of the top line",
+    "of your error message was never \\def'ed. If you have",
+    "misspelled it (e.g., `\\hobx'), type `I' and the correct",
+    "spelling (e.g., `I\\hbox'). Otherwise just continue,",
+    "and I'll forget about whatever was undefined.",
+];
+
+#[cfg(test)]
+mod tests {
+    /// A line ends at LF, CR or CR LF, as web2c's `input_line` reads.
+    #[test]
+    fn a_carriage_return_alone_ends_a_line() {
+        assert_eq!(super::cr_lines("a\nb\r\nc"), None);
+        assert_eq!(super::cr_lines("%a\r\\x\r").as_deref(), Some("%a\n\\x\n"));
+        assert_eq!(super::cr_lines("x\r\r\ny").as_deref(), Some("x\n\r\ny"));
+        assert_eq!(super::split_lines("%a\r\\x"), ["%a\n", "\\x"]);
     }
 }

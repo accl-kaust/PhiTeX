@@ -130,6 +130,13 @@ and XeLaTeX, built by graph reduction, with exact output.
 ### Known not to work
 
 - **LuaLaTeX** (`luatex`, `lualatex`): rejected with an error.
+- **biber sorting in some locales:** the built-in biber sorts in every
+  locale whose Unicode::Collate::Locale tailoring is a plain entry list
+  (Czech, Hungarian, Polish, Swedish and 69 more) or that has none
+  (English, German, French, ...). Danish, Canadian French, Maltese,
+  Church Slavic, Macedonian, Serbian, Thai, Japanese, Korean and the
+  Chinese orders stop biber with an error naming the locale, and no
+  `.bbl` is made.
 - **XeLaTeX's edit speed** (the user's decision of 2026-10-30: recorded,
   not gated, for 1.61): on a two-column paper with line numbers (the
   user's, 18 pages, 16 threads, release build, medians of 20) a space
@@ -140,13 +147,10 @@ and XeLaTeX, built by graph reduction, with exact output.
   build takes 41 s at 16 threads against latexmk -xelatex's 37 s.
 - **Tests recorded red for 1.61** (the user's decision of 2026-10-31):
   tests that ran in no CI until the alpha's gate ran every test binary,
-  red before the alpha's work as well (mc 77044). The engine core's
-  review harness ends in a runaway node in two tests
-  (`next_readers_follow_their_stops_across_splits`,
-  `a_next_past_many_holes_goes_on_from_each`); four count runs, the
+  red before the alpha's work as well (mc 77044): four count runs, the
   speed that is recorded, not gated (`chain::chains`,
-  `chain::census_plain`, `cuts`'s moved fire, `fatal`'s read-on); two need a font the CI image lacks
-  (`xetex::ini_features`, `ini_bidi`). `scripts/accl/gate-known-reds.txt`
+  `chain::census_plain`, `cuts`'s moved fire, `fatal`'s read-on).
+  `scripts/accl/gate-known-reds.txt`
   names each with its cause.
 - **XeLaTeX's first build in the browser** makes the format there (a
   minute or more) until the web build ships it prebuilt, as it does

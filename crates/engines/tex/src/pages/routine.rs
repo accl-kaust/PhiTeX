@@ -13,8 +13,9 @@
 //! finisher's (`finisher.rs`).
 
 use super::{
-    BEFORE_PIECE, Field, GDEFS, List, Locality, Mode, Node, PITEMS, PackParams, Page, Par, R, Run,
-    Side, Spec, ValueId, Values, group, int_of, list_of, nodes, some, str_of, toks_of,
+    BEFORE_PIECE, Field, GDEFS, List, Locality, Mode, Node, PAGE_FIELDS, PITEMS, PackParams, Page,
+    Par, R, Run, Side, Spec, ValueId, Values, fire_conflict_field, fire_left_field,
+    fire_used_field, group, int_of, list_of, nodes, some, str_of, toks_of,
 };
 
 /// A routine's give-back as [`RTN`] holds it: `[markers, list]`, and
@@ -45,6 +46,19 @@ pub(crate) fn rtn_as_guess(v: &Values, x: ValueId) -> ValueId {
 /// next page on its guess of it ([`Run::guess_give_back`]) until the
 /// finisher's output, this value ([`PAGE_OUT`]), says otherwise.
 pub(crate) const RTN: &str = "rtn";
+
+/// The output group's `\aftergroup` tokens (§1100: its `unsave` puts
+/// them back, then `pop_nest` and `build_page`), read in the main
+/// vertical mode before the text's next ones: thuthesis's
+/// `\@addtocurcol` leaves `\vskip\intextsep\nointerlineskip` after a
+/// float placed here. The finisher defines them at its place; the first
+/// piece after it reads them first and defines nothing again
+/// ([`Run::take_rtn_after`]). No operation declares it (a finisher's
+/// `FIN_OWN`, a piece's `PAGE_FIELDS`, no prefix of
+/// theirs): every piece reads it, and a declaration would make each read
+/// wait on every finisher and piece before it; the rare run that defines
+/// it re-asks only its readers.
+pub(crate) const RTN_AFTER: &str = "outafter";
 
 /// A finisher's page: its index and what the routine leaves for the
 /// next page (§1026: the held-over insertions, then its list; the page
@@ -323,6 +337,10 @@ impl Run<'_, '_> {
             self.set_cell(l, v.list(vec![v.int(0), b]), true);
         }
         self.set("param:outputpenalty", v.int(output_penalty), true);
+        // (e-TeX: `\pagediscards` gives them while the routine runs)
+        if !list_of(v, a(5)).is_empty() {
+            self.set(crate::etex::PAGE_DISCARDS, a(5), true);
+        }
         let output = self.par(Par::output)?;
         let mut toks = toks_of(v, output);
         // (`\deadcycles` where the page fired, as the page builder had it:
@@ -380,7 +398,32 @@ impl Run<'_, '_> {
         let v = self.v;
         let (items, _) = self.list_items(md.lid)?;
         let mut left = md.extra.first().map(|&x| list_of(v, x)).unwrap_or_default();
+        // (its `\aftergroup` tokens are the text's after the page, not
+        // the finisher's: [`RTN_AFTER`])
+        let after = match self.nest.last_mut() {
+            Some(l) if l.group == group::OUTPUT && !l.ag.is_empty() => std::mem::take(&mut l.ag),
+            _ => Vec::new(),
+        };
+        self.muts += 1;
         self.close_group(md)?;
+        // (§1026, e-TeX: the discards the routine did not take are flushed)
+        if self
+            .get(crate::etex::PAGE_DISCARDS)?
+            .is_some_and(|x| !list_of(v, x).is_empty())
+        {
+            self.set(crate::etex::PAGE_DISCARDS, v.list(Vec::new()), true);
+        }
+        if !after.is_empty() {
+            let toks = crate::val::toks_value(v, &after);
+            if self.fire_passed()? {
+                // (the piece went on past the candidate: they go to it,
+                // read there, [`Run::define_fire_conflict`])
+                self.fin_rtn_after = Some(toks);
+            } else {
+                self.cx
+                    .define_with(v.field(RTN_AFTER), toks, Locality::Global);
+            }
+        }
         if self.st.take_page_params() {
             self.put_page_params()?;
         }
@@ -398,6 +441,22 @@ impl Run<'_, '_> {
         if let Some(c) = self.fin.as_mut() {
             c.pending = left;
         }
+        Ok(())
+    }
+
+    /// A piece's start: the tokens the output routine of a page fired
+    /// before it left after its group ([`RTN_AFTER`]), read first, as
+    /// TeX reads them after the routine (§1100), and taken: the pieces
+    /// after it read none.
+    pub(crate) fn take_rtn_after(&mut self) -> R<()> {
+        let v = self.v;
+        let f = v.field(RTN_AFTER);
+        let toks = toks_of(v, self.eng_read(f)?);
+        if toks.is_empty() {
+            return Ok(());
+        }
+        self.cx.define_with(f, ValueId::UNIT, Locality::Global);
+        self.back_toks(toks);
         Ok(())
     }
 
@@ -473,7 +532,15 @@ impl Run<'_, '_> {
         // what the PDF writer makes of the page's pdfTeX whatsits
         let mut pdf_data = Vec::new();
         // §1366: the whatsits in the order `hlist_out`/`vlist_out` meet them
+        // (those it meets: not a discretionary's pre-break or post-break
+        // text, which a line keeps where it did not break there, nor an
+        // insertion's or `\vadjust`'s material, §622, §631)
+        let mut shipped = vec![false; side.whats.len()];
+        shipped_whats(&bx.list, &side, &mut shipped);
         for (wi, w) in side.whats.clone().into_iter().enumerate() {
+            if !shipped.get(wi).copied().unwrap_or(true) {
+                continue;
+            }
             let xs = list_of(v, w);
             let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
             match kind.as_str() {
@@ -530,10 +597,11 @@ impl Run<'_, '_> {
         // are, for the end node that fills them in,
         // [`crate::assemble::fill_sealed_pages`]; a PDF page's writer
         // has them from this run)
-        if !pos.pdf
-            && side.lazy.iter().any(|&l| nodes::is_sealed(v, l))
-            && let Some((after, to, at)) = self.sealed.places()
-        {
+        // (a run with no window of its own, its page's sealed lines all
+        // given back or carried in a register from other finishers:
+        // `[-1, -1]`, each line's unit read by its piece there)
+        if !pos.pdf && side.lazy.iter().any(|&l| nodes::is_sealed(v, l)) {
+            let (after, to, at) = self.sealed.places().unwrap_or((None, -1, Vec::new()));
             let mut w = vec![v.int(after.unwrap_or(-1)), v.int(to)];
             for (p, i) in at {
                 w.extend([v.int(p), v.int(i64::from(i))]);
@@ -567,6 +635,7 @@ impl Run<'_, '_> {
         }
         let su = v.seq_unit(page);
         self.contribute("pages", su);
+        self.shipped += 1;
         if let Some(shown) = shown {
             let h = v.seq_unit(v.int(i64::from_ne_bytes(shown.to_ne_bytes())));
             self.contribute("pagehash", h);
@@ -612,7 +681,44 @@ impl Run<'_, '_> {
             xs.push(v.str(&s));
         }
         xs.push(v.int(i64::from(self.param("pdfpkresolution")?)));
+        // (`\pdfomitprocset`: read as the page's resources are written)
+        xs.push(v.int(i64::from(self.param("pdfomitprocset")?)));
         Ok(v.list(xs))
+    }
+}
+
+/// The whatsits of `list` that shipping meets (`hlist_out`, `vlist_out`,
+/// §619–§640), marked in `out` by their handles: a box's, a leader's
+/// box, a discretionary's text present when it did not break (its
+/// `replace`), a sealed line's skeleton's ([`nodes::Side::skel`]); not
+/// its pre-break and post-break text, an insertion's or
+/// a `\vadjust`'s.
+pub(crate) fn shipped_whats(list: &List, side: &Side, out: &mut [bool]) {
+    for n in list {
+        match n {
+            Node::Whatsit(i, _) => {
+                if let Some(x) = out.get_mut(*i as usize) {
+                    *x = true;
+                } else if let Some(sk) = side
+                    .skel
+                    .iter()
+                    .find(|sk| Some(sk.k) == i.checked_sub(nodes::LAZY))
+                {
+                    // (a sealed line's whatsits, on its skeleton)
+                    shipped_whats(&sk.list, side, out);
+                }
+            }
+            Node::Box(b) => shipped_whats(&b.list, side, out),
+            Node::Disc(d) => shipped_whats(&d.replace, side, out),
+            Node::Glue(g) => {
+                if let Some(l) = &g.leader
+                    && let Node::Box(b) = &**l
+                {
+                    shipped_whats(&b.list, side, out);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -698,6 +804,7 @@ impl Run<'_, '_> {
     /// candidate as it was there, where the piece had it (its ninth): the
     /// routine runs at the candidate, before those definitions. One the
     /// piece had not read stays as it reaches here.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn preload_candidate(&mut self, args: &[ValueId]) -> R<()> {
         let v = self.v;
         let a = |i: usize| args.get(i).copied().unwrap_or(ValueId::UNIT);
@@ -756,17 +863,68 @@ impl Run<'_, '_> {
         }
         let piece =
             phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int_of(v, a(5)).to_ne_bytes()));
-        let before = v.str(BEFORE_PIECE);
-        for e in list_of(v, a(8)) {
+        // (a routine of a page before this one, in this piece at a candidate
+        // the piece's binding was made before: what it defined globally is
+        // what this one begins with (§279), not the piece's value there,
+        // which the piece put in force only if it read it after)
+        let names = list_of(v, a(8));
+        let gdefs = match self
+            .fin_page()
+            .map(|p| i64::from_ne_bytes(p.at.raw().to_ne_bytes()))
+        {
+            Some(at)
+                if names
+                    .iter()
+                    .any(|&e| list_of(v, e).get(2) != Some(&ValueId::UNIT)) =>
+            {
+                self.gdefs_after(at)?.into_iter().map(|g| (at, g)).collect()
+            }
+            _ => Vec::new(),
+        };
+        for e in names {
             let ys = list_of(v, e);
             let [f, _, kv] = ys[..] else { continue };
             if kv == ValueId::UNIT {
                 continue;
             }
-            let x = if kv == before {
+            if gdefs
+                .iter()
+                .any(|(_, g): &(i64, GDef)| g.names.contains(&f))
+            {
+                let made = if let Some((_, after)) = super::reaching_plus(v, kv) {
+                    after
+                } else if self.is_lazy(kv) {
+                    let y = self.fin_lazy_value(kv)?;
+                    list_of(v, y).first().map_or(-1, |&x| int_of(v, x))
+                } else {
+                    list_of(v, kv).first().map_or(-1, |&x| int_of(v, x))
+                };
+                if gdefs
+                    .iter()
+                    .any(|(at, g)| g.names.contains(&f) && (g.pid != *at || made < g.k))
+                {
+                    // (what the routine before it left, where the piece's
+                    // later definition stood over it there)
+                    let left = self.fin_page().map(|p| fire_left_field(v, p.at, Field(f)));
+                    let left = match left {
+                        Some(l) => self.cx.read(l)?,
+                        None => None,
+                    };
+                    if let Some(l) = left {
+                        let x = list_of(v, l).first().copied();
+                        let loc = self.loc_of(Field(f));
+                        self.st.preload(v, loc, x);
+                        self.fin_replaced.push((f, Some(x)));
+                    } else {
+                        self.fin_replaced.push((f, None));
+                    }
+                    continue;
+                }
+            }
+            let x = if let Some((c, _)) = super::reaching_plus(v, kv) {
                 match self.field_at(Field(f), piece, true)? {
-                    phitex_defuse::FieldAt::Def(x, _) => Some(x),
-                    phitex_defuse::FieldAt::Unset => None,
+                    phitex_defuse::FieldAt::Def(x, _) => plus_steps(v, Some(x), c),
+                    phitex_defuse::FieldAt::Unset => plus_steps(v, None, c),
                     phitex_defuse::FieldAt::Gone => continue,
                 }
             } else if self.is_lazy(kv) {
@@ -774,7 +932,7 @@ impl Run<'_, '_> {
                 self.st.set_lazy(loc, Some(kv));
                 continue;
             } else {
-                list_of(v, kv).first().copied()
+                list_of(v, kv).get(1).copied()
             };
             let loc = self.loc_of(Field(f));
             self.st.preload(v, loc, x);
@@ -792,6 +950,9 @@ impl Run<'_, '_> {
             .into_iter()
             .filter(|d| d.2 == Locality::Global)
             .map(|d| d.0.0)
+            // (a text's box binding the routine used up replaces that
+            // binding as a global replaces a local, [`Run::cont_load`])
+            .chain(self.fin_boxes.iter().map(|b| b.0.0))
             .collect();
         // (none given as nothing, as the declared guess says it,
         // [`Finish::static_contribs`])
@@ -822,6 +983,278 @@ impl Run<'_, '_> {
         x
     }
 }
+
+impl Run<'_, '_> {
+    /// [`FIRE_CONFLICT`] of the finisher's page, where it fired at a
+    /// candidate of a piece's own items: the first field the routine
+    /// changed globally that the piece used ([`FIRE_USED`], defined where
+    /// the piece went on past a candidate of its own). Changed: defined
+    /// globally (`names`, [`Run::contribute_global_defs`]) to a value
+    /// other than the one the routine began with, or bound locally in the
+    /// piece's groups open at the candidate (`args`' fourth: TeX's global
+    /// definition replaces the value at every level, §279, which the
+    /// piece restores at their ends); the page layer's own aside (the
+    /// page state a piece folds, `pages:*`, the main list's `\prevgraf`:
+    /// the routine runs in a list of its own, §1025, and a `\par` in it
+    /// sets that list's, §1244).
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn define_fire_conflict(&mut self, args: &[ValueId]) -> R<()> {
+        let v = self.v;
+        let Some((at, k)) = self
+            .fin_page()
+            .filter(|p| !p.in_material)
+            .map(|p| (p.at, p.k))
+        else {
+            return Ok(());
+        };
+        let publication = self.publication();
+        let changes: Vec<_> = publication
+            .into_iter()
+            .filter(|d| d.2 == Locality::Global)
+            .collect();
+        let rtn_after = self.fin_rtn_after.take();
+        let boxes = self.fin_boxes.clone();
+        if changes.is_empty() && rtn_after.is_none() && boxes.is_empty() {
+            return Ok(());
+        }
+        let Some(used) = self.cx.read(fire_used_field(v, at))? else {
+            return Ok(());
+        };
+        let buckets = list_of(v, list_of(v, used)[0]);
+        // (the run read `f` across this candidate)
+        let used_here = |f: ValueId| {
+            let k = i64::from(k);
+            list_of(v, buckets[super::fire_used_bucket(f)])
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .any(|&[g, a, b]| g == f && int_of(v, a) <= k && k <= int_of(v, b))
+        };
+        let changes: Vec<_> = changes
+            .into_iter()
+            .filter(|d| {
+                v.with_str(d.0.0, |s| {
+                    s.starts_with("pages:") || PAGE_FIELDS.contains(&s) || s == MAIN_PREVGRAF
+                }) == Some(false)
+                    && used_here(d.0.0)
+            })
+            .collect();
+        let boxes: Vec<_> = boxes.into_iter().filter(|b| used_here(b.0.0)).collect();
+        // (what the run did not read across the candidate is not looked
+        // at, nor the finisher's run made to depend on what reaches it, nor
+        // the run asked again when it moves. Read on another way the
+        // routine's value took, a field comes here on the next pass)
+        if rtn_after.is_none() && boxes.is_empty() && changes.is_empty() {
+            return Ok(());
+        }
+        let locals: Vec<ValueId> = args
+            .get(3)
+            .map(|&x| list_of(v, x))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| list_of(v, e).first().copied())
+            .collect();
+        let mut moved = Vec::new();
+        for (f, what, _) in changes {
+            let same = !locals.contains(&f.0)
+                && match what {
+                    crate::state::Pub::Value(x) => {
+                        let y = self.fire_start_value(args, f)?;
+                        if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") && y != Some(Some(x)) {
+                            let r = |z: Option<ValueId>| {
+                                z.map_or_else(
+                                    || "-".to_owned(),
+                                    |z| v.render(z).chars().take(80).collect(),
+                                )
+                            };
+                            eprintln!(
+                                "fire-change: finisher {} {}: began {} left {}",
+                                self.cx.node().raw(),
+                                crate::val::field_name(v, f),
+                                y.map_or_else(|| "?".to_owned(), r),
+                                r(Some(x))
+                            );
+                        }
+                        // (no `\\afterassignment` token pending, read as
+                        // nothing or left as nothing, §1269: the same)
+                        y == Some(Some(x))
+                            || (y == Some(None) && x == ValueId::UNIT && transient(v, f))
+                    }
+                    crate::state::Pub::Rel(c) => c == 0,
+                    crate::state::Pub::Append(_) => false,
+                };
+            if !same {
+                moved.push(f.0);
+            }
+        }
+        if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+            eprintln!(
+                "fire-conflict: finisher {} piece {} candidate {k}: boxes {} changed [{}] of them used [{}]",
+                self.cx.node().raw(),
+                at.raw(),
+                boxes
+                    .iter()
+                    .map(|b| crate::val::field_name(v, b.0))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                moved
+                    .iter()
+                    .map(|&f| crate::val::field_name(v, Field(f)))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                moved
+                    .iter()
+                    .filter(|&&f| used_here(f))
+                    .map(|&f| crate::val::field_name(v, Field(f)))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        if rtn_after.is_some() || !moved.is_empty() || !boxes.is_empty() {
+            // (each with the value it left: the piece puts them in force at
+            // the candidate, as TeX's text after the routine has them)
+            let mut pairs = Vec::with_capacity(moved.len());
+            for f in moved {
+                let loc = self.loc_of(Field(f));
+                pairs.push(match self.st.id_of(loc, v) {
+                    Some(x) => v.list(vec![f, x]),
+                    None => v.list(vec![f]),
+                });
+            }
+            for (f, x) in boxes {
+                pairs.push(v.list(vec![f.0, x]));
+            }
+            if let Some(toks) = rtn_after {
+                pairs.push(v.list(vec![v.field(RTN_AFTER).0, toks]));
+            }
+            self.cx.define_with(
+                fire_conflict_field(v, at, k),
+                v.list(pairs),
+                Locality::Global,
+            );
+        }
+        Ok(())
+    }
+}
+
+impl Run<'_, '_> {
+    /// A finisher reading field `f` where its piece closes the engine scope
+    /// it ran in, after every candidate of its own. The routine ran inside
+    /// that scope (§1012), and the finisher stands after the piece, out of
+    /// its sight: a binding of the scope's, made by a piece before this one,
+    /// is the value at the candidate, which no list of the piece holds (it
+    /// lists its own definitions, [`Run::check_data`]). A definition after
+    /// that binding, global (the piece's before the candidate, the routine
+    /// of a page before this one), stands over it. kotex-utf's
+    /// `\\interhchar` in a quote whose last paragraph a page ends. True:
+    /// loaded here.
+    pub(crate) fn fin_read_in_scope(&mut self, loc: crate::state::Loc, f: Field) -> R<bool> {
+        let Some(piece) = self.fin_scope_closer else {
+            return Ok(false);
+        };
+        let phitex_defuse::FieldAt::Def(x, Some(by)) = self.field_at(f, piece, true)? else {
+            return Ok(false);
+        };
+        let me = self.cx.node();
+        let there = match self.field_at(f, me, true)? {
+            phitex_defuse::FieldAt::Def(_, later) => later,
+            _ => None,
+        };
+        if there == Some(by) || there.is_some_and(|n| self.cx.before(by, n)) {
+            return Ok(false);
+        }
+        self.st.preload(self.v, loc, Some(x));
+        Ok(true)
+    }
+
+    /// Whether the finisher's page fired at a candidate its piece went
+    /// on past ([`FIRE_USED`]'s second list), where the piece's next
+    /// pass can read the routine's `\\aftergroup` tokens.
+    fn fire_passed(&mut self) -> R<bool> {
+        let v = self.v;
+        let Some((at, k)) = self
+            .fin_page()
+            .filter(|p| !p.in_material)
+            .map(|p| (p.at, p.k))
+        else {
+            return Ok(false);
+        };
+        let used = self.cx.read(fire_used_field(v, at))?;
+        let passed =
+            used.is_some_and(|u| list_of(v, list_of(v, u)[1]).contains(&v.int(i64::from(k))));
+        if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+            eprintln!(
+                "fire-after: finisher {} piece {} candidate {k}: used {} passed {passed}",
+                self.cx.node().raw(),
+                at.raw(),
+                used.map_or_else(|| "-".to_owned(), |u| v.render(list_of(v, u)[1])),
+            );
+        }
+        Ok(passed)
+    }
+
+    /// The value field `f` had where the finisher's page fired, as the
+    /// piece held it there and the routine began with it: what the piece
+    /// defined after the candidate as it was there (`args`' ninth,
+    /// [`Run::preload_candidate`]), else the value reaching the finisher
+    /// (read: the routine's own definitions are not before it). `None`:
+    /// not known here (the piece's page gone).
+    #[allow(clippy::option_option)]
+    fn fire_start_value(&mut self, args: &[ValueId], f: Field) -> R<Option<Option<ValueId>>> {
+        let v = self.v;
+        let replaced = self.fin_replaced.iter().find(|r| r.0 == f.0).map(|r| r.1);
+        if let Some(Some(x)) = replaced {
+            return Ok(Some(x));
+        }
+        if let Some(&after) = args.get(8)
+            && replaced.is_none()
+        {
+            for e in list_of(v, after) {
+                let ys = list_of(v, e);
+                let [g, _, kv] = ys[..] else { continue };
+                if g != f.0 || kv == ValueId::UNIT {
+                    continue;
+                }
+                if let Some((c, _)) = super::reaching_plus(v, kv) {
+                    let piece = phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(
+                        int_of(v, args.get(5).copied().unwrap_or(ValueId::UNIT)).to_ne_bytes(),
+                    ));
+                    return Ok(match self.field_at(f, piece, true)? {
+                        phitex_defuse::FieldAt::Def(x, _) => Some(plus_steps(v, Some(x), c)),
+                        phitex_defuse::FieldAt::Unset => Some(plus_steps(v, None, c)),
+                        phitex_defuse::FieldAt::Gone => None,
+                    });
+                }
+                if self.is_lazy(kv) {
+                    return Ok(Some(self.fin_lazy_preload(kv)?));
+                }
+                return Ok(Some(list_of(v, kv).get(1).copied()));
+            }
+        }
+        Ok(Some(self.cx.read(f)?))
+    }
+}
+
+/// An integer register's value `x` stepped by `c` as `\advance` does
+/// (wrapping at 32 bits): what a piece's unread steps make of the value
+/// that reached it ([`super::before_plus`]); `x` itself for no steps.
+fn plus_steps(v: &Values, x: Option<ValueId>, c: i32) -> Option<ValueId> {
+    if c == 0 {
+        return x;
+    }
+    let y = crate::val::i32_of(v, x).wrapping_add(c);
+    Some(crate::val::int_id(v, i64::from(y)))
+}
+
+/// The register of a box register's field (`box:<n>`).
+pub(crate) fn box_reg_of(v: &Values, f: Field) -> Option<i32> {
+    v.with_str(f.0, |s| s.strip_prefix("box:")?.parse().ok())
+        .flatten()
+}
+
+/// The main vertical list's `\prevgraf` (`crate::build`'s `pg:<list>`,
+/// the main list's id 0).
+const MAIN_PREVGRAF: &str = "pg:0";
 
 /// Whether field `f` is a command's transient state (§1266's
 /// `after_token`): what a routine leaves there depends on what reached it
@@ -910,12 +1343,22 @@ impl Run<'_, '_> {
         let index = self.cx.get(d, Step::Index(2)).unwrap_or(ValueId::UNIT);
         let tag = v.str(LAZY);
         let before = v.str(BEFORE_PIECE);
+        let stretches = self.cx.at(d, Step::Index(0));
         let names = super::piece::names_index_at(v, index, k)
             .into_iter()
             .map(|(f, g, kind, i)| {
                 let kv = match kind {
                     0 => ValueId::UNIT,
                     1 => before,
+                    // (what reached the piece plus its steps: read now,
+                    // the finisher resolves it where it begins,
+                    // [`super::reaching_plus`])
+                    3 => stretches
+                        .and_then(|s| {
+                            self.cx
+                                .get(s, Step::Index(u32::try_from(i * 5 + 2).unwrap_or(0)))
+                        })
+                        .unwrap_or(ValueId::UNIT),
                     _ => v.list(vec![
                         tag,
                         v.int(i64::from(ui)),
@@ -930,7 +1373,7 @@ impl Run<'_, '_> {
     }
 
     /// The value a lazily preloaded field takes ([`Run::preload_candidate`]):
-    /// a local's value as it is, a name's `[value]` or `[]`.
+    /// a local's value as it is, a name's `[made after, value]` or `[made after]`.
     pub(crate) fn fin_lazy_preload(&mut self, x: ValueId) -> R<Option<ValueId>> {
         let v = self.v;
         let part = list_of(v, x).get(2).map_or(0, |&p| int_of(v, p));
@@ -938,7 +1381,7 @@ impl Run<'_, '_> {
         Ok(if part == 5 {
             some(y)
         } else {
-            list_of(v, y).first().copied()
+            list_of(v, y).get(1).copied()
         })
     }
 

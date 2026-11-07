@@ -123,6 +123,11 @@ impl Files for Shared {
             .unwrap_or_else(PoisonError::into_inner)
             .read(path)
     }
+
+    fn gs_font(&self, name: &[u8]) -> Option<Arc<[u8]>> {
+        let p = crate::tex::gs_font(std::str::from_utf8(name).ok()?)?;
+        std::fs::read(p).ok().map(Arc::from)
+    }
 }
 
 /// The PDF dvipdfmx makes of `dvi` (named `pdf_name`), or why not.
@@ -174,6 +179,19 @@ impl Files for XdvFiles {
     fn gs_font(&self, name: &[u8]) -> Option<Arc<[u8]>> {
         let p = crate::tex::gs_font(std::str::from_utf8(name).ok()?)?;
         std::fs::read(p).ok().map(Arc::from)
+    }
+
+    /// The document's own files' stamps ([`crate::session::disk_stamp`]),
+    /// as they are read again each time; the tree's are read once a
+    /// process and need none.
+    fn stamp(&self, path: &[u8]) -> Option<Vec<u8>> {
+        let p = std::path::Path::new(
+            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path),
+        );
+        if p.is_relative() || p.starts_with(&self.dir) {
+            return crate::session::disk_stamp(&self.dir.join(p));
+        }
+        None
     }
 }
 

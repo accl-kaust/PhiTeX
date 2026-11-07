@@ -1,0 +1,14 @@
+% biblatex with backend=bibtex8 and a refsection (classicthesis's
+% setup: its second BibTeX run is on <job>1-blx.aux), the second
+% suspect for classicthesis's missing PDF and its undefined citations.
+\documentclass{report}
+\usepackage[backend=bibtex8,bibencoding=auto]{biblatex}
+\addbibresource{refs.bib}
+\begin{document}
+Cite \cite{a}.
+\begin{refsection}
+\nocite{*}
+\printbibliography[heading=none]
+\end{refsection}
+\printbibliography
+\end{document}

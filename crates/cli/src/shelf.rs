@@ -52,7 +52,7 @@ pub const FONT_INDEX: &str = "fonts/misc/partex/fontindex.pxfi";
 
 /// The Shelf release this PhiTeX builds from (its index and packs): two
 /// machines with the same PhiTeX build a document from the same files.
-pub const RELEASE: &str = "tl2026.7";
+pub const RELEASE: &str = "tl2026.9";
 
 /// The release built from: [`RELEASE`], or `PHITEX_SHELF_RELEASE` (a
 /// release being made, checked before it is this binary's).
@@ -132,7 +132,9 @@ fn base_urls() -> Vec<String> {
     }
 }
 
-/// The first of [`base_urls`] not known to be unreachable this process.
+/// The host of [`base_urls`] asked first: the last one that answered
+/// (one a request could not reach hands it to the next, round to the
+/// first after the last).
 static HOST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 pub(crate) fn agent() -> &'static ureq::Agent {
@@ -147,31 +149,36 @@ pub(crate) fn agent() -> &'static ureq::Agent {
     })
 }
 
-/// `name` of the release's directory on the server: its bytes. A host
-/// that cannot be reached (no connection, TLS refused) is passed over
-/// for the next for the rest of the process; one that answers, with
-/// anything, is the answer.
+/// `name` of the release's directory on the server: its bytes. Each
+/// host is asked once, from [`HOST`] on; one that cannot be reached (no
+/// connection, TLS refused, the connection dropped) is passed over for
+/// the next, here and for the requests after; one that answers, with
+/// anything, is the answer. A failure is this request's only: the next
+/// asks the hosts again (one dropped connection had made every later
+/// fetch of the process fail, the Shelf release's check, run 41296048903).
 fn get(name: &str) -> Result<Vec<u8>, String> {
     use std::sync::atomic::Ordering;
     let bases = base_urls();
     let mut failed = Vec::new();
-    let (mut r, url) = loop {
-        let k = HOST.load(Ordering::Relaxed);
-        let Some(base) = bases.get(k) else {
-            return Err(format!(
-                "{name}: no Shelf host reached: {}",
-                failed.join("; ")
-            ));
-        };
-        let url = format!("{base}{name}");
-        match agent().get(&url).call() {
-            Ok(r) => break (r, url),
-            Err(e @ ureq::Error::StatusCode(_)) => return Err(format!("{url}: {e}")),
-            Err(e) => {
-                failed.push(format!("{url}: {e}"));
-                let _ = HOST.compare_exchange(k, k + 1, Ordering::Relaxed, Ordering::Relaxed);
+    let first = HOST.load(Ordering::Relaxed) % bases.len();
+    let (mut r, url) = 'hosts: {
+        for i in 0..bases.len() {
+            let k = (first + i) % bases.len();
+            let url = format!("{}{name}", bases[k]);
+            match agent().get(&url).call() {
+                Ok(r) => break 'hosts (r, url),
+                Err(e @ ureq::Error::StatusCode(_)) => return Err(format!("{url}: {e}")),
+                Err(e) => {
+                    failed.push(format!("{url}: {e}"));
+                    let next = (k + 1) % bases.len();
+                    let _ = HOST.compare_exchange(k, next, Ordering::Relaxed, Ordering::Relaxed);
+                }
             }
         }
+        return Err(format!(
+            "{name}: no Shelf host reached: {}",
+            failed.join("; ")
+        ));
     };
     r.body_mut()
         .with_config()
@@ -398,6 +405,16 @@ fn font_suffix(format: phitex_tex::KpseFormat) -> &'static str {
     }
 }
 
+/// The name and the kpathsea format of a finder's key
+/// ([`phitex_tex::Finder`]): the font side's in the format its extension
+/// names, TeX's own (`\\input`, `\\openin`) in the `tex` format.
+fn lookup(key: &str) -> (&str, &'static str) {
+    match phitex_tex::font_name(key) {
+        Some(name) => (name, phitex_shelf::format_of(name)),
+        None => (key, "tex"),
+    }
+}
+
 impl ShelfHost {
     fn find(&self, name: &str) -> Option<(String, Vec<u8>)> {
         if let Some(p) = project(name) {
@@ -410,6 +427,14 @@ impl ShelfHost {
 
 impl Host for ShelfHost {
     fn locate(&self, name: &str) -> Option<PathBuf> {
+        project(name).or_else(|| {
+            self.files
+                .find_in(name, "tex")
+                .map(|(p, _)| PathBuf::from(p))
+        })
+    }
+
+    fn locate_font(&self, name: &str) -> Option<PathBuf> {
         project(name).or_else(|| self.files.locate(name).map(PathBuf::from))
     }
 
@@ -420,6 +445,16 @@ impl Host for ShelfHost {
             None if s.starts_with(phitex_shelf::TL) => None,
             None => std::fs::read(path).ok(),
         }
+    }
+
+    /// A pack's file: its release's, the same for the session; the
+    /// project's: as on disk ([`crate::session::disk_stamp`]).
+    fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+        let s = path.to_string_lossy();
+        if s.starts_with(phitex_shelf::TL) {
+            return self.files.read(&s).is_some().then(|| b"shelf".to_vec());
+        }
+        crate::session::disk_stamp(path)
     }
 
     fn same_file(&self, a: &str, b: &str) -> bool {
@@ -441,16 +476,27 @@ impl Host for ShelfHost {
     /// files, not the project's, as fmtutil builds it elsewhere).
     fn format_finder(&self) -> Option<Finder> {
         let f = self.files.clone();
-        Some(Arc::new(move |name: &str| {
-            f.find(name).map(|(p, b)| (p, b.to_vec()))
+        Some(Arc::new(move |key: &str| {
+            let (name, format) = lookup(key);
+            f.find_in(name, format).map(|(p, b)| (p, b.to_vec()))
         }))
     }
 
-    /// The format's files keyed by their pack and path, none fetched: a
-    /// warm start checks the format against them without fetching them.
+    /// The format's files keyed by their content (the index's sums) and
+    /// path, none fetched: a warm start checks the format against them
+    /// without fetching them.
     fn content_key(&self) -> Option<phitex_tex::ContentKey> {
         let f = self.files.clone();
-        Some(Arc::new(move |name: &str| f.key(name)))
+        Some(Arc::new(move |key: &str| {
+            let (name, format) = lookup(key);
+            f.key_in(name, format)
+        }))
+    }
+
+    /// The release's own format of that name (made by the release for
+    /// this engine's identity), its pack fetched and kept with the rest.
+    fn published_format(&self, name: &str) -> Option<Vec<u8>> {
+        self.files.published_format(name)
     }
 
     /// BibTeX's and makeindex's files, the format's suffix added where the
@@ -551,6 +597,13 @@ impl Host for ShelfHost {
                     ShelfHost { files: f3.clone() }
                         .find(&p)
                         .map(|(_, b)| Arc::from(b.as_slice()))
+                })
+            })
+            .with_stamp({
+                let f4 = self.files.clone();
+                Box::new(move |path| {
+                    let p = std::str::from_utf8(path).ok()?;
+                    ShelfHost { files: f4.clone() }.stamp(Path::new(p))
                 })
             }),
         ))

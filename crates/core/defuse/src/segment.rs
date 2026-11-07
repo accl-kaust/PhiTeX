@@ -9,13 +9,13 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::api::{Brackets, NodeId, OpId, PathId, UnitId};
+use crate::api::{Brackets, NodeId, OpId, PathId, Rel, UnitId};
 use crate::engine::Engine;
 use crate::index::RangeKey;
 use crate::lock::Lock;
 use crate::node::State;
 use crate::order::{Pos, SEG_CAP, SegId};
-use crate::values::{Field, FxHashMap, ValueId};
+use crate::values::{Field, FxHashMap, FxHashSet, ValueId};
 
 pub(crate) struct Segment {
     pub(crate) id: SegId,
@@ -27,6 +27,12 @@ pub(crate) struct Segment {
     /// and the scope count they were found at (`Engine::scope_gen`): apart
     /// from `inner`, so a read of them never waits for a commit.
     pub(crate) chain: crate::lock::Mx<Option<(u64, Arc<[u64]>)>>,
+    /// By field, the definitions in it that a reader after its end can
+    /// see (`read::survivors`): those whose scope is still open at its
+    /// end, with their scopes, kept with the count of its exclusive
+    /// guards (`Lock::writes`) and the scopes open at its start they were
+    /// found from.
+    pub(crate) surv: crate::lock::Mx<crate::values::FxHashMap<Field, Survivors>>,
     /// Counts its moves of labels, bumped as each begins and ends
     /// ([`Segment::moving`]: a relabel, a split, a rebalance through it),
     /// under its write lock: a read that met it checks it did not move
@@ -78,6 +84,11 @@ pub(crate) struct Inner {
     /// Its nodes that have not committed (about: a walk skips the search
     /// for one when there are none, `commit::first_hole`).
     pub(crate) holes: usize,
+    /// The scope count (`Engine::scope_gen`) of the last change of its
+    /// brackets, or of their moving into it: a bracket walk that passed
+    /// it checks no bracket changed in its region after its own
+    /// (`commit::reask_after_effect`).
+    pub(crate) brk_gen: u64,
 }
 
 /// A field's definitions or contributions in one segment, by label. Most
@@ -492,7 +503,7 @@ pub(crate) struct Made {
     ix_rooms: [Vec<crate::index::MadeRoom>; 3],
     by_op: Option<FxHashMap<OpId, Vec<NodeId>>>,
     op_lists: Vec<(OpId, Vec<NodeId>)>,
-    anchored: Vec<(NodeId, Vec<Field>)>,
+    anchored: Vec<(NodeId, FxHashSet<Field>)>,
     brackets: Vec<(Pos, (NodeId, Brackets))>,
     nodes: Vec<(Pos, NodeId)>,
     defs: Option<FxHashMap<Field, PosMap<Def>>>,
@@ -625,7 +636,11 @@ impl Grow {
                 m
             }),
             op_lists: self.op_lists.iter().map(|&(o, n)| (o, Vec::with_capacity(n))).collect(),
-            anchored: self.anchored.iter().map(|&(a, n)| (a, Vec::with_capacity(n))).collect(),
+            anchored: self
+                .anchored
+                .iter()
+                .map(|&(a, n)| (a, FxHashSet::with_capacity_and_hasher(n, Default::default())))
+                .collect(),
             defs: (self.defs > 0).then(|| touched_map(self.defs)),
             contribs: (self.contribs > 0).then(|| touched_map(self.contribs)),
             readers: (self.readers > 0).then(|| touched_map(self.readers)),
@@ -669,7 +684,7 @@ impl Made {
         for (a, list) in &mut self.anchored {
             let mut v = eng.node(*a).anchored.lock();
             if list.capacity() > v.len() {
-                list.append(&mut v);
+                list.extend(v.drain());
                 std::mem::swap(&mut *v, list);
             }
         }
@@ -927,12 +942,17 @@ impl Inner {
     }
 }
 
+/// A segment's definitions of a field a reader after it can see, each
+/// with its scope (`read::levels`), in order, as found under its guard's
+/// count of writes and the scopes open at its start (`Segment::surv`).
+pub(crate) type Survivors = (u64, Arc<[u64]>, Arc<[(Def, (usize, u64))]>);
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Def {
     pub(crate) value: ValueId,
     pub(crate) by: NodeId,
     /// `Some(c)`: value = the definition reaching `by` + c.
-    pub(crate) rel: Option<i64>,
+    pub(crate) rel: Option<Rel>,
     /// Filed before its node ran (a prediction, a learned shape): the run
     /// replaces it.
     pub(crate) provisional: bool,
@@ -1029,7 +1049,14 @@ pub(crate) struct RangeReader {
 /// Whether a reader record still stands for its node.
 pub(crate) fn live(eng: &Engine, node: NodeId, serial: u32) -> bool {
     let n = eng.node(node);
-    n.serial.load(Ordering::Acquire) == serial && n.state() != State::Gone
+    let now = n.serial.load(Ordering::Acquire);
+    let stands = if serial & crate::commit::FILED == 0 {
+        now == serial
+    } else {
+        let s = serial & !crate::commit::FILED;
+        s <= now && s >= n.filed_floor.load(Ordering::Acquire)
+    };
+    stands && n.state() != State::Gone
 }
 
 /// Pushes a record, pruning the stale ones when the list is about to grow.
@@ -1089,6 +1116,7 @@ impl Segment {
             unit,
             lo,
             chain: crate::lock::Mx::new(None),
+            surv: crate::lock::Mx::new(crate::values::FxHashMap::default()),
             moved: AtomicU64::new(0),
             inner: Lock::new(Inner {
                 brackets: PosMap::Zero,
@@ -1104,6 +1132,7 @@ impl Segment {
                 stops: Vec::new(),
                 by_op: FxHashMap::default(),
                 holes: 0,
+                brk_gen: 0,
             }),
         }
     }
@@ -1449,6 +1478,7 @@ impl Segment {
             unit: self.unit,
             lo: at,
             chain: crate::lock::Mx::new(None),
+            surv: crate::lock::Mx::new(crate::values::FxHashMap::default()),
             moved: AtomicU64::new(0),
             inner: Lock::new(Inner {
                 brackets,
@@ -1464,6 +1494,7 @@ impl Segment {
                 stops,
                 by_op,
                 holes: up_holes,
+                brk_gen: inner.brk_gen,
             }),
         });
         let moved: Vec<Field> = {

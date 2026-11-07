@@ -3,11 +3,14 @@
 //! §729–§746) with the whatsits (pdfTeX §1612–§1620), and the objects a
 //! page or form writes after its contents.
 
+use std::collections::VecDeque;
+
 use phitex_typeset::arith::Scaled;
 use phitex_typeset::fonts::FontId;
 use phitex_typeset::glue::{GlueSign, Order};
-use phitex_typeset::node::{BoxKind, BoxNode, GlueKind, GlueNode, Node, RUNNING};
+use phitex_typeset::node::{BoxKind, BoxNode, GlueKind, GlueNode, KernKind, Node, RUNNING};
 
+use crate::lr::{Lr, LrWidths, flatten_into};
 use crate::num::{ONE_BP, ONE_HUNDRED_BP, TEN_POW, divide_scaled, round_xn_over_d};
 use crate::{
     BILLION, ColorStackCmd, FontSource, FontState, FontType, LiteralMode, MAX_DIMEN, OBJ_TYPE_FONT,
@@ -64,6 +67,31 @@ impl Frame {
         }
         size += self.cur_g;
         size
+    }
+}
+
+/// The widths [`crate::lr::reverse`] asks for, as the output has them.
+struct OutWidths<'a> {
+    st: &'a mut PdfState,
+    fr: &'a mut Frame,
+    src: &'a dyn FontSource,
+}
+
+impl LrWidths for OutWidths<'_> {
+    fn char_wd(&mut self, f: FontId, c: u16) -> Scaled {
+        self.st.char_wd(f, c, self.src)
+    }
+
+    fn glue(&mut self, g: &GlueNode) -> Scaled {
+        self.fr.glue(g)
+    }
+
+    fn glue_sets(&self, g: &GlueNode) -> bool {
+        match self.fr.g_sign {
+            GlueSign::Stretching => g.spec.stretch_order == self.fr.g_order,
+            GlueSign::Shrinking => g.spec.shrink_order == self.fr.g_order,
+            GlueSign::Normal => false,
+        }
     }
 }
 
@@ -758,6 +786,17 @@ impl PdfState {
             ColorStackCmd::Pop => self.stacks.pop(stack),
             ColorStackCmd::Current => self.stacks.current(stack),
         };
+        // (`PHITEX_COLOR_TRACE` (observe): each color stack command, the
+        // value it writes and the page stacks' depths it leaves)
+        if cfg!(feature = "observe") && std::env::var_os("PHITEX_COLOR_TRACE").is_some() {
+            eprintln!(
+                "color: stack {stack} {cmd:?} page_mode {} form {} -> {:?} depths {:?}",
+                self.stacks.page_mode,
+                self.cur_form,
+                String::from_utf8_lossy(&s),
+                self.stacks.page_depths()
+            );
+        }
         if !s.is_empty() {
             self.literal(&s, mode);
         }
@@ -1009,8 +1048,117 @@ impl PdfState {
                 self.append_link(&fr, fr.left_edge, fr.base, i);
             }
         }
-        self.hlist_nodes(&b.list, &mut fr, src, wh);
+        // (e-TeX: a list without text direction nodes, outside
+        // right-to-left text, comes out as TeX's)
+        if self.cur_dir == 0
+            && !b
+                .list
+                .iter()
+                .any(|n| matches!(n, Node::Math(k, _) if k.is_lr()))
+        {
+            self.hlist_nodes(&b.list, &mut fr, src, wh);
+        } else {
+            self.hlist_lr(&b.list, &mut fr, src, wh);
+        }
         self.cur_s -= 1;
+    }
+
+    /// `pdf_hlist_out` for mixed direction text (e-TeX's TeX--XeT,
+    /// pdfTeX §1409ff, as the DVI writer does it): right-to-left segments
+    /// reversed as the output reaches them, between edges.
+    fn hlist_lr(
+        &mut self,
+        list: &[Node],
+        fr: &mut Frame,
+        src: &dyn FontSource,
+        wh: &mut WhatsitSource<'_>,
+    ) {
+        let mut q: VecDeque<Lr> = VecDeque::new();
+        flatten_into(list, &mut q);
+        // "Initialize the LR stack": `before`, never matched
+        let mut lr: Vec<u8> = vec![0];
+        if self.cur_dir == 1 {
+            // "Reverse the complete hlist"
+            let save_h = self.cur_h;
+            self.cur_h = 0;
+            let mut rev = self.reverse(fr, &mut q, None, &mut lr, src);
+            rev.push_front(Lr::N(Node::Kern(-self.cur_h, KernKind::Explicit)));
+            q = rev;
+            self.cur_h = save_h;
+        }
+        fr.left_edge = self.cur_h;
+        while let Some(it) = q.pop_front() {
+            match it {
+                Lr::Edge { dir, width, dist } => {
+                    self.cur_h += width;
+                    fr.left_edge = self.cur_h + dist;
+                    self.cur_dir = dir;
+                }
+                Lr::Fixed(g) => {
+                    let w = g.spec.width;
+                    if let Some(rule) = self.hglue_wd(&g, w, fr, src, wh) {
+                        self.hrule(rule, fr);
+                    }
+                }
+                Lr::N(Node::Math(k, w)) => {
+                    // "Adjust the LR stack for the `hlist_out` routine"
+                    if k.is_end() {
+                        if lr.last() == Some(&k.end_type()) {
+                            lr.pop();
+                        }
+                    } else {
+                        lr.push(k.end_type());
+                        if k.dir() != self.cur_dir {
+                            // "Reverse an hlist segment"
+                            let save_h = self.cur_h;
+                            self.cur_dir = 1 - self.cur_dir;
+                            let dir = self.cur_dir;
+                            self.cur_h = self.cur_h - fr.left_edge + w;
+                            let tail = Lr::Edge {
+                                dir: 1 - dir,
+                                width: 0,
+                                dist: 0,
+                            };
+                            let mut rev = self.reverse(fr, &mut q, Some(tail), &mut lr, src);
+                            let dist = self.cur_h;
+                            self.cur_dir = 1 - self.cur_dir;
+                            self.cur_h = save_h;
+                            rev.append(&mut q);
+                            rev.push_front(Lr::Edge {
+                                dir,
+                                width: w,
+                                dist,
+                            });
+                            q = rev;
+                            continue;
+                        }
+                    }
+                    self.cur_h += w;
+                }
+                Lr::N(n) => self.hlist_nodes(std::slice::from_ref(&n), fr, src, wh),
+            }
+        }
+    }
+
+    /// The width of character `c` of font `f` as the output moves past it.
+    fn char_wd(&mut self, f: FontId, c: u16, src: &dyn FontSource) -> Scaled {
+        self.load_font(f, src);
+        self.font(f).width(c)
+    }
+
+    /// [`crate::lr::reverse`] at `cur_h`, the widths the output's.
+    fn reverse(
+        &mut self,
+        fr: &mut Frame,
+        q: &mut VecDeque<Lr>,
+        t: Option<Lr>,
+        lr: &mut Vec<u8>,
+        src: &dyn FontSource,
+    ) -> VecDeque<Lr> {
+        let (mut h, dir) = (self.cur_h, self.cur_dir);
+        let rev = crate::lr::reverse(&mut OutWidths { st: self, fr, src }, &mut h, dir, q, t, lr);
+        self.cur_h = h;
+        rev
     }
 
     /// The nodes of an hlist (pdfTeX §731–§737); a discretionary's
@@ -1056,6 +1204,9 @@ impl PdfState {
                     } else {
                         self.cur_v = fr.base + bx.shift;
                         let edge = self.cur_h + bx.width;
+                        if self.cur_dir == 1 {
+                            self.cur_h = edge;
+                        }
                         self.box_out(bx, src, wh);
                         self.cur_h = edge;
                         self.cur_v = fr.base;
@@ -1092,23 +1243,27 @@ impl PdfState {
                 // (XeTeX's, never in a pdfTeX list)
                 | Node::Native(_) => None,
             };
-            if let Some((mut rule_ht, mut rule_dp, rule_wd)) = rule {
-                // §734
-                if rule_ht == RUNNING {
-                    rule_ht = fr.height;
-                }
-                if rule_dp == RUNNING {
-                    rule_dp = fr.depth;
-                }
-                rule_ht += rule_dp;
-                if rule_ht > 0 && rule_wd > 0 {
-                    self.cur_v = fr.base + rule_dp;
-                    self.set_rule(self.cur_h, self.cur_v, rule_wd, rule_ht);
-                    self.cur_v = fr.base;
-                }
-                self.cur_h += rule_wd;
+            if let Some(rule) = rule {
+                self.hrule(rule, fr);
             }
         }
+    }
+
+    /// A rule in an hlist (pdfTeX §734), then past it.
+    fn hrule(&mut self, (mut rule_ht, mut rule_dp, rule_wd): (Scaled, Scaled, Scaled), fr: &Frame) {
+        if rule_ht == RUNNING {
+            rule_ht = fr.height;
+        }
+        if rule_dp == RUNNING {
+            rule_dp = fr.depth;
+        }
+        rule_ht += rule_dp;
+        if rule_ht > 0 && rule_wd > 0 {
+            self.cur_v = fr.base + rule_dp;
+            self.set_rule(self.cur_h, self.cur_v, rule_wd, rule_ht);
+            self.cur_v = fr.base;
+        }
+        self.cur_h += rule_wd;
     }
 
     /// Glue in an hlist (pdfTeX §735–§737): the rule to output, or `None`
@@ -1120,7 +1275,20 @@ impl PdfState {
         src: &dyn FontSource,
         wh: &mut WhatsitSource<'_>,
     ) -> Option<(Scaled, Scaled, Scaled)> {
-        let mut rule_wd = fr.glue(g);
+        let rule_wd = fr.glue(g);
+        self.hglue_wd(g, rule_wd, fr, src, wh)
+    }
+
+    /// Glue in an hlist set to `rule_wd` (pdfTeX §736–§737, with e-TeX's
+    /// right-to-left leaders).
+    fn hglue_wd(
+        &mut self,
+        g: &GlueNode,
+        mut rule_wd: Scaled,
+        fr: &mut Frame,
+        src: &dyn FontSource,
+        wh: &mut WhatsitSource<'_>,
+    ) -> Option<(Scaled, Scaled, Scaled)> {
         if matches!(
             g.kind,
             GlueKind::ALeaders | GlueKind::CLeaders | GlueKind::XLeaders
@@ -1131,6 +1299,9 @@ impl PdfState {
                     let leader_wd = lb.width;
                     if leader_wd > 0 && rule_wd > 0 {
                         rule_wd += 10;
+                        if self.cur_dir == 1 {
+                            self.cur_h -= 10;
+                        }
                         let edge = self.cur_h + rule_wd;
                         let mut lx = 0;
                         if g.kind == GlueKind::ALeaders {
@@ -1154,6 +1325,9 @@ impl PdfState {
                             // §737
                             self.cur_v = fr.base + lb.shift;
                             let save_h = self.cur_h;
+                            if self.cur_dir == 1 {
+                                self.cur_h += leader_wd;
+                            }
                             let outer = self.doing_leaders;
                             self.doing_leaders = true;
                             self.box_out(lb, src, wh);
@@ -1161,7 +1335,7 @@ impl PdfState {
                             self.cur_v = fr.base;
                             self.cur_h = save_h + leader_wd + lx;
                         }
-                        self.cur_h = edge - 10;
+                        self.cur_h = if self.cur_dir == 1 { edge } else { edge - 10 };
                         return None;
                     }
                 }
@@ -1198,7 +1372,11 @@ impl PdfState {
                     } else {
                         self.cur_v += bx.height;
                         let save_v = self.cur_v;
-                        self.cur_h = left_edge + bx.shift;
+                        self.cur_h = if self.cur_dir == 1 {
+                            left_edge - bx.shift
+                        } else {
+                            left_edge + bx.shift
+                        };
                         self.box_out(bx, src, wh);
                         self.cur_v = save_v + bx.depth;
                         self.cur_h = left_edge;
@@ -1617,6 +1795,19 @@ impl PdfState {
             self.print_ln(b" 0 0 cm");
         }
         self.stacks.ship_begin(shipping_page);
+        if cfg!(feature = "observe") && std::env::var_os("PHITEX_COLOR_TRACE").is_some() {
+            eprintln!(
+                "color: ship {} {} total {} stacks {:?}",
+                if shipping_page { "page" } else { "form" },
+                if shipping_page {
+                    self.total_pages + 1
+                } else {
+                    i64::try_from(self.cur_form).unwrap_or(-1)
+                },
+                self.total_pages,
+                self.stacks
+            );
+        }
         if shipping_page {
             self.out_colorstack_startpage();
         }
@@ -1648,11 +1839,22 @@ impl PdfState {
                 self.cur_page_height,
             );
         }
-        self.end_stream();
+        // (a recorded page's content is not compressed here: the link
+        // compresses it where it places it, its font numbers as there,
+        // [`PdfState::replay_page`]; the bytes here are no one's)
+        let defer = shipping_page
+            && self.zip.is_some()
+            && self.rec.as_ref().is_some_and(|r| r.blob.is_some());
+        if defer {
+            self.end_stream_with(|_, _| Vec::new());
+        } else {
+            self.end_stream();
+        }
         if shipping_page && let Some(r) = &mut self.rec {
             if let Some(b) = &mut r.blob {
                 b.1 = self.out.len();
             }
+            r.deferred = defer;
             r.walk = false;
             r.font_list.clone_from(&self.font_list);
             r.other = !self.xform_list.is_empty()

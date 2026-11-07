@@ -164,8 +164,18 @@ impl Host for Machine {
         self.tree.input(name)
     }
 
+    fn locate_font(&self, name: &str) -> Option<PathBuf> {
+        self.tree.font(name)
+    }
+
     fn read(&self, path: &Path) -> Option<Vec<u8>> {
         std::fs::read(path).ok()
+    }
+
+    /// Its size, modification and change times and inode
+    /// ([`disk_stamp`]).
+    fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+        disk_stamp(path)
     }
 
     /// Whether two names are one file on disk.
@@ -188,7 +198,7 @@ impl Host for Machine {
     fn format_finder(&self) -> Option<Finder> {
         let tree = self.format_tree.clone();
         Some(Arc::new(move |name: &str| {
-            let p = tree.input(name)?;
+            let p = tree.find(name)?;
             let bytes = std::fs::read(&p).ok()?;
             Some((p.to_string_lossy().into_owned(), bytes))
         }))
@@ -200,7 +210,7 @@ impl Host for Machine {
     fn content_key(&self) -> Option<phitex_tex::ContentKey> {
         let tree = self.format_tree.clone();
         Some(Arc::new(move |name: &str| {
-            let p = tree.input(name)?.to_string_lossy().into_owned();
+            let p = tree.find(name)?.to_string_lossy().into_owned();
             let k = phitex_tex::file_stat_key(&p);
             (!k.is_empty()).then_some((p, k))
         }))
@@ -537,6 +547,35 @@ impl UpdateFile {
 ///
 /// # Errors
 /// The file system's.
+/// A file's key on disk for `r` in a watch ([`phitex_live::host::Host::stamp`]):
+/// its size, modification time and inode ([`phitex_tex::file_stat_key`]),
+/// and its change time. The change time moves at every write and no
+/// program sets it back: a file rewritten to the same size with its
+/// modification time restored (`touch -d`, an archive extracted, a
+/// checkout) keeps its other fields, not this one. None where there is
+/// no metadata.
+pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
+    use std::os::unix::fs::MetadataExt;
+    // (one stat; a file's: a folder or nothing at the name has none, and
+    // is told by reading it)
+    let m = std::fs::metadata(path).ok()?;
+    if !m.is_file() {
+        return None;
+    }
+    // ([`phitex_tex::file_stat_key`]'s fields, then the change time)
+    let ns = u64::try_from(m.mtime())
+        .unwrap_or(0)
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(u64::try_from(m.mtime_nsec()).unwrap_or(0));
+    let mut k: Vec<u8> = [m.len(), ns, m.ino()]
+        .iter()
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    k.extend(m.ctime().to_le_bytes());
+    k.extend(m.ctime_nsec().to_le_bytes());
+    Some(k)
+}
+
 pub fn compact(f: &Mutex<UpdateFile>) -> Result<bool, String> {
     let (p, layout, writes) = {
         let g = f.lock().unwrap_or_else(PoisonError::into_inner);

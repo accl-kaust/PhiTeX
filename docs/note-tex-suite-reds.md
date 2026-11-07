@@ -27,10 +27,10 @@ Status: a list, as the coordinator asked. These are the 16 tests that
 | `defining_outside_the_record_is_refuted` (pkgrec) | 0 against 2 | Same cause. | real |
 | `prediction_is_right_when_nothing_changed` (pkgrec) | predicted 0, want 2 | Same cause (the predictions come from the records). | real |
 | `prediction_is_wrong_when_an_earlier_load_changed` (pkgrec) | 0 against 1 | Same cause. | real |
-| `latex_aux_on_disk_outside_a_fixpoint` (latex) | "stuck: node 2 (resume): the process holds 4.2 GB, past the limit of 4.0 GB", at expl3-code.tex:35568, 1.58M commands | The memory limit is the whole test process's, and the binary runs its tests in parallel. Whether this build alone passes 4 GB is not known yet: run it alone to decide. | to decide |
+| `latex_aux_on_disk_outside_a_fixpoint` (latex) | "stuck: node 2 (resume): the process holds 4.2 GB, past the limit of 4.0 GB", at expl3-code.tex:35568, 1.58M commands | The memory limit was the whole test process's, and the binary runs its tests in parallel; this build alone peaks at 1.3 GB (accl 22771). The limit is now the build's own values (55d72c570): 0 failures in 3 runs of the whole suite in a 32 GB job, against 6 reds in the first run before (accl 22747, 22746). | fixed |
 | `engine_failures_stay_errors` (tikzman_repros) | wants an error; gets "Label(s) may have changed: … still changed after 11 rounds" | The read-back of main.aux does not converge (`wdef:main.aux cs:ref`, `wstreams:61`), so the build ends at the round cap with a warning. | real |
-| `ini_bidi` (xetex) | "! Font not loadable", 1424 bytes against 1900 | The fonts the test's xetex ini format loads are not on the mc nodes. | environment |
-| `ini_features` (xetex) | 732 bytes against 4304 | Same cause. | environment |
+| `ini_bidi` (xetex) | "! Font not loadable", 1424 bytes against 1900 | The run had no font index (`PHITEX_FONT_INDEX`), so no font was found by name. The fonts are in TeX Live; with the index made from `scripts/xetex/fonts.conf` both pass (accl 22985). The gate's tests shard now makes it. | fixed |
+| `ini_features` (xetex) | 732 bytes against 4304 | Same cause. | fixed |
 
 Intermittent, outside this list:
 

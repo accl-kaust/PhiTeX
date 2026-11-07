@@ -1036,6 +1036,92 @@ pub(crate) fn clist_projection(x: ValueId, v: &Values) -> ValueId {
     r
 }
 
+/// What an `\\xdef` appending to a meaning without reading it needs of
+/// it (`\\xdef\\x{\\x...}`, [`crate::run::Run::append_def`]): `0` where it
+/// cannot (not a macro; one with parameters, `\\outer` or `\\protected`; a
+/// body holding a brace, a parameter or an active character), else
+/// `[tail, names]`: `tail` 1 where the body is empty or ends with a comma
+/// (its comma-list items are those before plus the appended ones), 2
+/// otherwise; `names` the control sequences the body holds, each once in
+/// a fixed order (a list of one-token lists), whose meanings decide
+/// whether its expansion is itself
+/// (microtype's list of fonts: font identifiers, which do not expand). A
+/// pure projection for the engine: a list grown by appends of names it
+/// holds keeps its answer, and its appenders stand.
+pub(crate) fn append_projection(x: ValueId, v: &Values) -> ValueId {
+    let Mean::Macro(m) = Mean::decode(v, Some(x)) else {
+        return v.int(0);
+    };
+    if !m.params.is_empty() || m.flags & !1 != 0 {
+        return v.int(0);
+    }
+    let mut names: Vec<Tok> = Vec::new();
+    for &t in m.body.iter() {
+        if t.is_cs() {
+            names.push(t);
+        } else if !matches!(t.cat(), Some(3 | 4 | 7 | 8 | 10..=12)) {
+            return v.int(0);
+        }
+    }
+    names.sort_unstable_by_key(|t| t.raw());
+    names.dedup();
+    let tail = match m.body.last() {
+        None => 1,
+        Some(t) if t.cat() == Some(12) && t.chr() == u32::from(b',') => 1,
+        Some(_) => 2,
+    };
+    let names = names.iter().map(|t| toks_value(v, &[*t])).collect();
+    v.list(vec![v.int(tail), v.list(names)])
+}
+
+/// The engine's append (`phitex_defuse::Rel::Append`): the macro reaching
+/// an append relation, its body followed by the items' tokens (each a
+/// token list value), as `\\xdef\\x{\\x...}` defines it (no prefix,
+/// [`append_projection`]'s macro expanding to its body). A meaning that is
+/// no such macro (the appender, which read the projection, runs again on
+/// it): the items alone.
+pub(crate) fn append_items(input: Option<ValueId>, items: ValueId, v: &Values) -> ValueId {
+    // (a list of values grown by appends, `Run::appending_vals`)
+    if let Some(vals) = v
+        .with_list(items, |xs| match xs {
+            [m, vals] if v.with_str(*m, |s| s == VALS_APPEND) == Some(true) => Some(*vals),
+            _ => None,
+        })
+        .flatten()
+    {
+        let mut out = input.map(|x| list_of(v, x)).unwrap_or_default();
+        out.extend(list_of(v, vals));
+        return v.list(out);
+    }
+    let mut body: Vec<Tok> = match Mean::decode(v, input) {
+        Mean::Macro(m) if m.params.is_empty() => m.body.to_vec(),
+        _ => Vec::new(),
+    };
+    for x in v.with_list(items, <[ValueId]>::to_vec).unwrap_or_default() {
+        body.extend(toks_of(v, Some(x)));
+    }
+    Mean::Macro(Rc::new(Macro::new(0, Vec::new(), Rc::from(body)))).encode(v)
+}
+
+/// The head of an append relation's items that appends values to a
+/// list ([`append_items`], `Run::appending_vals`), not tokens to a macro.
+pub(crate) const VALS_APPEND: &str = "\u{1}values";
+
+/// A list as the set it holds: its distinct elements in the order of
+/// their ids, each as a one-element list (`[[e]…]`, so that
+/// `Step::Has(e)` asks for one); anything else as the empty set. For a
+/// list grown by appends whose readers care which elements it holds, not
+/// in what order they came (pdfTeX's ratios a font has asked for,
+/// `pdf_font_elink`; the fonts, destinations, forms and pages read-time
+/// commands made objects for first): a first use moving from one node to
+/// another leaves every reader past both standing.
+pub(crate) fn set_projection(x: ValueId, v: &Values) -> ValueId {
+    let mut es: Vec<ValueId> = v.with_list(x, <[ValueId]>::to_vec).unwrap_or_default();
+    es.sort_unstable_by_key(|e| e.raw());
+    es.dedup();
+    v.list(es.into_iter().map(|e| v.list(vec![e])).collect())
+}
+
 /// [`clist_projection`]'s answer, made.
 fn clist_items(x: ValueId, v: &Values) -> ValueId {
     let not = || v.list(vec![v.list(vec![v.str(CLIST_NOT)])]);
@@ -1111,6 +1197,13 @@ pub(crate) fn class_projection(x: ValueId, v: &Values) -> ValueId {
     v.int(c)
 }
 
+/// Defined, once and globally, by the first definition of an `\outer` macro
+/// ([`Run::set_mean`]): while it does not reach a run, no token anywhere is
+/// `\outer`, so a scan needs no token's meaning for §357's check
+/// (`Run::get_token_tok`). A format or a document that makes one reads it and
+/// scans token by token, each token's class read.
+pub(crate) const OUTER_MADE: &str = "outer:made";
+
 /// Whether a meaning is an `\outer` macro (§336), as a lookup that only
 /// steps over its token needs it (`\expandafter`'s first, §368): `get_next`
 /// checks an outer one's validity, nothing else of it is used. A pure
@@ -1119,6 +1212,63 @@ pub(crate) fn class_projection(x: ValueId, v: &Values) -> ValueId {
 pub(crate) fn outer_projection(x: ValueId, v: &Values) -> ValueId {
     let outer = matches!(Mean::decode(v, Some(x)), Mean::Macro(m) if m.flags & 2 != 0);
     v.int(i64::from(outer))
+}
+
+/// The head of a gobbled call ([`skeleton_projection`]).
+const SKELETON: &str = "\u{10FFFE}skeleton";
+
+/// A macro with no parameters, plain (not `\long`, `\outer` or
+/// `\protected`), whose body is a control sequence followed by braced
+/// groups and nothing else, the groups holding characters only (no
+/// control sequence or active character at any depth): its head and the
+/// groups' count, 1 to 9 (a `.nav` file's `\sectionentry{1}{Title}{3}…`).
+pub(crate) fn skeleton_of(m: &Macro) -> Option<(Tok, u8)> {
+    if m.flags != 0 || !m.params.is_empty() {
+        return None;
+    }
+    let (&head, rest) = m.body.split_first()?;
+    if !head.is_cs() || head.is_internal_cs() {
+        return None;
+    }
+    let (mut depth, mut k) = (0u32, 0u8);
+    for t in rest {
+        match t.cat()? {
+            1 => {
+                if depth == 0 {
+                    k = k.checked_add(1)?;
+                }
+                depth += 1;
+            }
+            2 if depth > 0 => depth -= 1,
+            13 => return None,
+            _ if depth == 0 => return None,
+            _ => {}
+        }
+    }
+    (depth == 0 && (1..=9).contains(&k)).then_some((head, k))
+}
+
+/// What a call of a macro the command loop expands needs of its meaning
+/// where its body's head gobbles every group after it ([`skeleton_of`],
+/// `Run::skeleton_call`): the head and the groups' count; any other
+/// meaning whole. The head's arguments are thrown away unread (its body
+/// uses none of them, §400): the characters they hold are scanned only
+/// for their braces, never a `\par` or an `\outer` token (§392). A pure
+/// projection for the engine: a redefinition that changes only those
+/// characters (a section's title in its navigation entry) leaves such a
+/// reader standing.
+pub(crate) fn skeleton_projection(x: ValueId, v: &Values) -> ValueId {
+    match Mean::decode(v, Some(x)) {
+        Mean::Macro(m) => match skeleton_of(&m) {
+            Some((head, k)) => v.list(vec![
+                str_id(v, SKELETON),
+                tok_value(v, head),
+                v.int(i64::from(k)),
+            ]),
+            None => x,
+        },
+        _ => x,
+    }
 }
 
 /// What a token stepped over or stored without expansion reads of its
@@ -1186,6 +1336,19 @@ pub(crate) fn num_projection(x: ValueId, v: &Values) -> ValueId {
 /// redefinition of a defined name leaves the reading run standing.
 pub(crate) fn defined_projection(x: ValueId, v: &Values) -> ValueId {
     v.int(i64::from(Mean::decode(v, Some(x)) != Mean::Undefined))
+}
+
+/// A meaning's class as a hint's check reads it ([`crate::hints::verify`]):
+/// `0` a primitive, `2` undefined, `1` anything else. A pure projection
+/// for the engine: a redefinition that keeps the class leaves a run whose
+/// hint named the name standing, and its read where it uses the name is
+/// where it rests on the meaning.
+pub(crate) fn mean_class_projection(x: ValueId, v: &Values) -> ValueId {
+    v.int(match Mean::decode(v, Some(x)) {
+        Mean::Prim(..) => 0,
+        Mean::Undefined => 2,
+        _ => 1,
+    })
 }
 
 /// What a reader of the main list's last item by its kind needs of it

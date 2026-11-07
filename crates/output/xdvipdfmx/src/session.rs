@@ -199,14 +199,14 @@ pub fn paperinfo(ppformat: &[u8]) -> Option<Paper> {
 }
 
 /// `struct page_range`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct PageRange {
     pub first: i32,
     pub last: i32,
 }
 
 /// dvipdfmx.c's statics and globals.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct State {
     /// `my_name` (`xdvipdfmx` for us).
     pub my_name: Vec<u8>,

@@ -24,7 +24,7 @@ pub const FW2PT: f64 = TEXPT2PT / FIX_WORD_BASE;
 pub const CHAR_INDEX_MIN: i32 = 0x40000;
 
 /// `struct font_def`: a font the VF uses.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct FontDef {
     /// The id used inside the VF file.
     pub font_id: i32,
@@ -40,7 +40,7 @@ pub struct FontDef {
 }
 
 /// `struct vf`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct Vf {
     pub tex_name: Vec<u8>,
     pub ptsize: Spt,
@@ -59,7 +59,7 @@ pub struct Vf {
 }
 
 /// vf.c's globals.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `vf_fonts` (`num_vf_fonts` = `len()`).
     pub vf_fonts: Vec<Vf>,

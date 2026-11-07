@@ -22,8 +22,12 @@ from pathlib import Path
 
 
 def get(url: str) -> bytes | None:
+    # (a user agent of its own: Cloudflare answers urllib's default,
+    # "Python-urllib/3.x", with 403 Forbidden, and the release stopped
+    # before it began, GitHub run 41293613277)
+    req = urllib.request.Request(url, headers={"User-Agent": "phitex-shelf-release"})
     try:
-        with urllib.request.urlopen(url, timeout=300) as r:
+        with urllib.request.urlopen(req, timeout=300) as r:
             return r.read()
     except urllib.error.HTTPError as e:
         if e.code == 404:

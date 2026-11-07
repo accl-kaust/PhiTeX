@@ -230,7 +230,12 @@ fn handles_survive_evaluations() {
 const PART: &str = "\\def\\@#1{A}\\def\\@x{B}\n\\@x\n";
 
 fn read_as_file(file: bool) -> Build {
-    let d = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("hints-regime");
+    // (a directory of this process's own: the gate runs each test in a
+    // process of its own, two at a time, and `lock` holds only within one;
+    // a shared `part.tex` rewritten by the other test while this one read
+    // it was read empty, and the run then had no `\@` to check)
+    let d = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("hints-regime-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&d);
     std::fs::write(d.join("part.tex"), PART).unwrap();
     let doc = if file {

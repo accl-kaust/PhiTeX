@@ -7,16 +7,21 @@
 // keeps. The host gives the two calls (`StripSource`): the CLI's over
 // HTTP from the watch, the frontends' cores over their wasm calls.
 
-import { composeLine, type TextLine } from "./text.ts";
+import { composeLine, type TextLine, LAYER_LINES } from "./text.ts";
 import type { Link } from "./types.ts";
 
-/** A page as the core gives it (Viewer::frame): sizes, bands `[key, top, height]`, text, links, what drawing it took. */
+/**
+ * A page as the core gives it (Viewer::frame): sizes, bands `[key, top,
+ * height, left, width]` (a line, or its part in one column: a core before
+ * columns gave `[key, top, height]`, its strip the window's width from its
+ * left), text, links, what drawing it took.
+ */
 export type Frame = {
   pw: number;
   ph: number;
   w: number;
   h: number;
-  bands: [string, number, number][];
+  bands: [string, number, number, number?, number?][];
   text: TextLine[];
   links: Link[];
   drawn: number;
@@ -150,6 +155,9 @@ export class Strips {
     const want = [...new Set(f.bands.map((b) => b[0]).filter((key) => !this.kept.has(key)))];
     if (want.length) await this.fetch(want);
     const t2 = performance.now();
+    // (the same numbers as data, for the timing popover's bar)
+    if (this.chip)
+      this.chip.dataset.frame = JSON.stringify({ page: k + 1, inView: !!win, drawn: f.drawn, kept: f.kept, probe: f.us.probe / 1000, draw: f.us.draw / 1000, watch: f.us.all / 1000, request: t1 - t0, decode: t2 - t1 });
     if (this.chip)
       this.chip.textContent =
       `p${k + 1}${win ? " (in view)" : ""}: ${f.drawn} drawn, ${f.kept} kept · watch ${(f.us.all / 1000).toFixed(1)} ms ` +
@@ -160,16 +168,16 @@ export class Strips {
 
   /** `f` composed: a canvas of its window (the page, but for a window's frame), white under its strips. */
   private canvas(f: Frame): HTMLCanvasElement {
-    const [, y, w, h] = f.win ?? [0, 0, f.pw, f.ph];
+    const [x, y, w, h] = f.win ?? [0, 0, f.pw, f.ph];
     const c = document.createElement("canvas");
     c.width = w;
     c.height = h;
     const g = c.getContext("2d")!;
     g.fillStyle = "#fff";
     g.fillRect(0, 0, w, h);
-    for (const [key, top] of f.bands) {
+    for (const [key, top, , left] of f.bands) {
       const b = this.kept.get(key);
-      if (b) g.drawImage(b, 0, top - y);
+      if (b) g.drawImage(b, (left ?? x) - x, top - y);
     }
     return c;
   }
@@ -189,7 +197,10 @@ export class Strips {
       const w = dv.getUint32(at, true), h = dv.getUint32(at + 4, true);
       at += 8;
       if (w && h) {
-        const px = new Uint8ClampedArray(buf, at, w * h * 4);
+        // (in a Firefox content script the pixels are copied to the page's
+        // side first, cloneInto: an ImageData over this script's own array
+        // is refused there, "failed to extract Uint8ClampedArray")
+        const px = pagewise(new Uint8ClampedArray(buf, at, w * h * 4));
         made.push(
           createImageBitmap(new ImageData(px, w, h)).then((b) => {
             this.kept.set(key, b);
@@ -207,6 +218,12 @@ export class Strips {
   }
 }
 
+/** `px` where the page's own objects are (Firefox's content scripts' cloneInto; elsewhere as it is). */
+function pagewise(px: Uint8ClampedArray<ArrayBuffer>): Uint8ClampedArray<ArrayBuffer> {
+  const clone = (globalThis as { cloneInto?: <T>(v: T, scope: object) => T }).cloneInto;
+  return clone ? clone(px, window) : px;
+}
+
 const SVG = "http://www.w3.org/2000/svg";
 
 /** The page's text over its canvas, transparent, for selecting and copying. */
@@ -221,6 +238,7 @@ export function textLayer(lines: TextLine[], w: number, h: number): SVGElement {
     t.setAttribute("y", String(l.y));
     t.setAttribute("font-size", String(l.size));
     t.textContent = l.text;
+    LAYER_LINES.set(t, l);
     svg.append(t);
   }
   return svg;

@@ -50,6 +50,12 @@ thread_local! {
     static ARENAS: std::cell::RefCell<Vec<Vec<Tok>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// A new arena identity ([`Input::arena_id`]): unique in the process.
+fn next_arena_id() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The largest token vector [`ARENAS`] keeps (64 MB).
 const ARENA_KEEP: usize = 1 << 24;
 
@@ -268,6 +274,10 @@ pub(crate) struct Level {
     pub a: u32,
     pub b: u32,
     pub c: u32,
+    /// The macro that read a job-written file back ([`crate::run::Run::read_back_at`]):
+    /// while this level is on the stack, the run's definitions keep their
+    /// value at the read-back (a checkpoint's input carries it).
+    pub rb: bool,
 }
 
 impl Level {
@@ -279,6 +289,7 @@ impl Level {
             a: r.start,
             b: r.end,
             c: r.start,
+            rb: false,
         }
     }
 
@@ -290,6 +301,7 @@ impl Level {
             a: u32::try_from(i).unwrap_or(u32::MAX),
             b: 0,
             c: 0,
+            rb: false,
         }
     }
 
@@ -301,6 +313,7 @@ impl Level {
             a: u32::try_from(i).unwrap_or(u32::MAX),
             b: 0,
             c: 0,
+            rb: false,
         }
     }
 
@@ -323,6 +336,9 @@ pub(crate) mod ty {
     /// XeTeX's `inter_char_text`.
     pub const INTER_CHAR: u8 = 18;
     pub const MACRO: u8 = 5;
+    /// §307's `inserted`: what §339 inserts to end a runaway list
+    /// (`ins_list`), shown as "<inserted text>" (`crate::context`).
+    pub const INSERTED: u8 = 19;
     /// A list no diagnostic names (`\the`, `\csname`, conversions).
     pub const OTHER: u8 = 17;
 }
@@ -377,6 +393,83 @@ pub(crate) const SKIP_BLANKS: u8 = 1;
 pub(crate) const NEW_LINE: u8 = 2;
 
 impl Line {
+    /// The line exactly, as a value ([`Line::of_value`]): a checkpoint's
+    /// input levels and text (`crate::resume`).
+    pub(crate) fn to_value(&self, v: &phitex_defuse::Values) -> phitex_defuse::ValueId {
+        let int = |x: i64| v.int(x);
+        // (a buffer of characters as a string; one holding a code no
+        // character has, as its codes)
+        let buf = match self
+            .buf
+            .iter()
+            .map(|&c| char::from_u32(c))
+            .collect::<Option<String>>()
+        {
+            Some(s) => v.str(&s),
+            None => v.list(self.buf.iter().map(|&c| int(i64::from(c))).collect()),
+        };
+        let usz = |x: usize| int(i64::try_from(x).unwrap_or(i64::MAX));
+        v.list(vec![
+            buf,
+            usz(self.loc),
+            int(i64::from(self.state)),
+            int(self.endch),
+            int(i64::from(self.starts)
+                | i64::from(self.ends) << 1
+                | i64::from(self.rescanned) << 2
+                | i64::from(self.chars) << 3),
+            v.list(
+                self.origin
+                    .map(|(n, at, u)| vec![n, usz(at), u])
+                    .unwrap_or_default(),
+            ),
+            int(i64::from(self.lineno)),
+            v.list(
+                self.owner
+                    .map(|(n, k)| vec![int(i64::from_ne_bytes(n.to_ne_bytes())), int(i64::from(k))])
+                    .unwrap_or_default(),
+            ),
+        ])
+    }
+
+    /// [`Line::to_value`]'s line.
+    pub(crate) fn of_value(v: &phitex_defuse::Values, x: phitex_defuse::ValueId) -> Option<Line> {
+        use crate::val::{int_of, list_of};
+        let [buf, loc, state, endch, flags, origin, lineno, owner] = list_of(v, x)[..] else {
+            return None;
+        };
+        let buf: Vec<u32> = match &*v.get(buf) {
+            phitex_defuse::Value::Str(s) => s.chars().map(u32::from).collect(),
+            _ => list_of(v, buf)
+                .iter()
+                .map(|&c| u32::try_from(int_of(v, c)).unwrap_or(0))
+                .collect(),
+        };
+        let f = int_of(v, flags);
+        Some(Line {
+            buf,
+            loc: usize::try_from(int_of(v, loc)).ok()?,
+            state: u8::try_from(int_of(v, state)).ok()?,
+            endch: int_of(v, endch),
+            starts: f & 1 != 0,
+            ends: f & 2 != 0,
+            rescanned: f & 4 != 0,
+            chars: f & 8 != 0,
+            origin: match list_of(v, origin)[..] {
+                [n, at, u] => Some((n, usize::try_from(int_of(v, at)).ok()?, u)),
+                _ => None,
+            },
+            lineno: u32::try_from(int_of(v, lineno)).ok()?,
+            owner: match list_of(v, owner)[..] {
+                [n, k] => Some((
+                    u64::from_ne_bytes(int_of(v, n).to_ne_bytes()),
+                    u32::try_from(int_of(v, k)).ok()?,
+                )),
+                _ => None,
+            },
+        })
+    }
+
     /// Whether characters are left, or the line's end is still to come.
     #[inline]
     pub(crate) fn has_more(&self) -> bool {
@@ -384,14 +477,12 @@ impl Line {
     }
 
     /// A line from `text` (one line of a file, as web2c's `input_line`
-    /// reads it: trailing blanks removed), its `\endlinechar` applied.
+    /// reads it: its trailing spaces and line ends removed, tabs kept),
+    /// its `\endlinechar` applied.
     pub(crate) fn of_str(line: &str, endlinechar: i64, rescanned: bool) -> Line {
         let bytes = line.as_bytes();
         let mut end = bytes.len();
-        while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
-            end -= 1;
-        }
-        while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
+        while end > 0 && matches!(bytes[end - 1], b' ' | b'\n' | b'\r') {
             end -= 1;
         }
         let mut buf: Vec<u32> = line[..end].chars().map(u32::from).collect();
@@ -495,6 +586,11 @@ pub(crate) struct Input {
     /// between commands ([`Input::compact`]): four times what survived
     /// the last compaction, at least [`ARENA_COMPACT`].
     pub compact_at: usize,
+    /// The arena's identity: a token list level's range names the same
+    /// tokens while it stays (the arena only grows until it is replaced,
+    /// by a compaction or another input); a checkpoint's encoding of it
+    /// is kept by this and the range (`crate::resume`).
+    pub arena_id: u64,
     /// The levels as the command in progress found them, saved as they
     /// come on top ([`Input::snapshot`]).
     snap: Option<Snap>,
@@ -535,6 +631,13 @@ pub(crate) const ARENA_MAX: usize = 1 << 27;
 pub(crate) const ARENA_COMPACT: usize = 1 << 22;
 
 impl Input {
+    /// Token `i` of the arena replaced in place: the arena's ranges no
+    /// longer name what they named ([`Input::arena_id`]).
+    pub(crate) fn set_tok(&mut self, i: u32, t: Tok) {
+        self.arena.set(i, t);
+        self.arena_id = next_arena_id();
+    }
+
     pub(crate) fn new() -> Input {
         Input {
             arena: Arena::with_capacity(1 << 14),
@@ -549,6 +652,7 @@ impl Input {
             text: Vec::new(),
             text_at: 0,
             compact_at: ARENA_COMPACT,
+            arena_id: next_arena_id(),
             snap: None,
         }
     }
@@ -655,6 +759,16 @@ impl Input {
             return true;
         }
         false
+    }
+
+    /// Pushes a token list as a checkpoint holds it (`crate::resume`):
+    /// all its tokens, `read` of them read, even when read to its end
+    /// (a level's place in the stack is kept).
+    pub(crate) fn push_toks_at(&mut self, toks: &[Tok], read: usize, ty: u8) {
+        let r = self.arena.alloc(toks);
+        let mut l = Level::toks(r, ty);
+        l.a = l.c + u32::try_from(read.min(toks.len())).unwrap_or(0);
+        self.levels.push(l);
     }
 
     /// Pushes a line on top.
@@ -885,7 +999,9 @@ impl Input {
                 continue;
             }
             if l.a >= l.b {
+                let rb = l.rb;
                 *l = Level::toks(Range { start: 0, end: 0 }, l.ty);
+                l.rb = rb;
                 continue;
             }
             let r = fresh.alloc(&self.arena.toks[l.c as usize..l.b as usize]);
@@ -896,6 +1012,7 @@ impl Input {
         }
         self.compact_at = (fresh.len() * 4).max(ARENA_COMPACT);
         self.arena = fresh;
+        self.arena_id = next_arena_id();
     }
 }
 

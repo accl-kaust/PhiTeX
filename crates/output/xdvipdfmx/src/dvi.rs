@@ -158,7 +158,7 @@ pub fn utf32_to_utf16_ls(x: u32) -> u32 {
 }
 
 /// `struct dvi_header`.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct DviHeader {
     pub unit_num: u32,
     pub unit_den: u32,
@@ -185,7 +185,7 @@ impl Default for DviHeader {
 }
 
 /// `struct dvi_lr`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct DviLr {
     pub state: i32,
     pub font: i32,
@@ -193,7 +193,7 @@ pub struct DviLr {
 }
 
 /// `struct gm`: glyph metrics.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct Gm {
     pub advance: Spt,
     pub ascent: Spt,
@@ -201,7 +201,7 @@ pub struct Gm {
 }
 
 /// `struct loaded_font`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct LoadedFont {
     /// `PHYSICAL`, `VIRTUAL`, `SUBFONT`, `NATIVE`.
     pub type_: i32,
@@ -217,7 +217,8 @@ pub struct LoadedFont {
     /// Transparency ExtGState.
     pub xgs_id: i32,
     /// XeTeX's glyph metrics (`gm`, `num_glyphs` entries).
-    pub gm: Vec<Gm>,
+    /// (read only once the font is loaded: shared by the session's snapshots)
+    pub gm: alloc::sync::Arc<[Gm]>,
     pub shift_gid: i32,
     pub num_glyphs: u16,
     pub layout_dir: i32,
@@ -233,7 +234,7 @@ pub struct LoadedFont {
 }
 
 /// `struct font_def`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct FontDef {
     pub tex_id: i32,
     pub point_size: Spt,
@@ -255,7 +256,7 @@ pub struct FontDef {
 }
 
 /// `struct dvi_registers`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct DviRegisters {
     pub h: i32,
     pub v: i32,
@@ -267,7 +268,7 @@ pub struct DviRegisters {
 }
 
 /// `struct spt_coord`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct SptCoord {
     pub x: Spt,
     pub y: Spt,
@@ -304,7 +305,7 @@ pub struct ScanSpecialsExt {
 }
 
 /// dvi.c's statics.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct State {
     /// The DVI/XDV file.
     pub dvi_file: Option<MemFile>,
@@ -1219,7 +1220,7 @@ impl Dpx {
             let lf = &mut self.dvi.loaded_fonts[cur_id];
             lf.shift_gid = shift;
             lf.num_glyphs = num_glyphs;
-            lf.gm = gm;
+            lf.gm = gm.into();
         } else {
             let Some(data) = self.files.read(&path) else {
                 crate::fatal!("Cannot proceed without the font");
@@ -1273,7 +1274,7 @@ impl Dpx {
             }
             let lf = &mut self.dvi.loaded_fonts[cur_id];
             lf.num_glyphs = num_glyphs;
-            lf.gm = gm;
+            lf.gm = gm.into();
         }
         let lf = &mut self.dvi.loaded_fonts[cur_id];
         lf.layout_dir = layout_dir;

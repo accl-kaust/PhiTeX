@@ -47,6 +47,16 @@ export const KEYS: [string, string][] = [
 const LINE = 60;
 
 /** Listen for the keys on `on` (the page's window or the viewer's root). */
+/**
+ * A key typed into a field (an input, a text area, an editor): the field's,
+ * no shortcut. The field itself, not `target`: from a shadow root (the
+ * panel's search box) the target out here is the root's host element.
+ */
+export function typing(e: Event): boolean {
+  const el = (e.composedPath?.()[0] ?? e.target) as HTMLElement | null;
+  return !!el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName ?? ""));
+}
+
 export function bindKeys(on: Window | HTMLElement, t: KeyTarget): () => void {
   let count = "";
   let g = false;
@@ -57,8 +67,7 @@ export function bindKeys(on: Window | HTMLElement, t: KeyTarget): () => void {
   const handler = (ev: Event) => {
     const e = ev as KeyboardEvent;
     // (typing in a field, or a key with Alt or Meta: not ours)
-    const el = e.target as HTMLElement | null;
-    if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
+    if (typing(e)) return;
     if (e.altKey || e.metaKey) return;
     const k = e.key;
     if (e.ctrlKey) {

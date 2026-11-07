@@ -10,7 +10,7 @@
 //! The files, the store and the outputs are the host's ([`crate::host`]):
 //! the session decides what is read, kept and written, the host does it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -299,6 +299,11 @@ pub struct Output {
     /// The PDF file's layout, where the session writes update sections
     /// ([`Session::updates`]; `pdf` is then empty).
     pub layout: Option<phitex_pdf::Layout>,
+    /// No page, and a PDF file of no bytes all the same: pdfTeX opened
+    /// it at read time (hyperref's open action, an `\immediate\pdfobj`,
+    /// `\pdfximage`) and never flushed its header
+    /// ([`phitex_tex::Build::empty_pdf`]).
+    pub empty_pdf: bool,
 }
 
 /// What a build made.
@@ -321,6 +326,16 @@ pub struct Report {
     /// The format could not be had (its ini file not found): the one
     /// error says why.
     pub format_failed: bool,
+    /// The engine's build and how many evaluations it settled
+    /// ([`phitex_tex::Build::settled_key`]): two reports with the same
+    /// key are of the same evaluation (`r` with nothing changed), their
+    /// diagnostics the same. None: a failed build.
+    pub settled: Option<(u64, u64)>,
+    /// An edit's diagnostics at their places are made after the build,
+    /// when the editing pauses ([`Session::diagnostics_now`]): the build
+    /// reports the engine's own at no place and its errors (TeX's at
+    /// their places, `diagnostics`) at once, its warnings then.
+    pub diagnostics_pending: bool,
 }
 
 /// Whether `e`, one of a build's errors ([`Output::errors`]), is a line of
@@ -373,6 +388,8 @@ impl Report {
             Some(("pdf", self.out.pdf.as_slice()))
         } else if !self.out.dvi.is_empty() {
             Some(("dvi", self.out.dvi.as_slice()))
+        } else if self.out.empty_pdf {
+            Some(("pdf", &[]))
         } else {
             None
         }
@@ -414,6 +431,17 @@ impl Report {
     }
 }
 
+/// What the builds read ([`Session::watched`]).
+#[derive(Clone, Debug, Default)]
+pub struct Watched {
+    /// The names asked for, as TeX gave them (`./` dropped).
+    pub names: Vec<String>,
+    /// Where those found were found.
+    pub paths: Vec<PathBuf>,
+    /// Whether a build is there (before one: nothing is known yet).
+    pub built: bool,
+}
+
 /// What was written.
 #[derive(Default)]
 pub struct Written {
@@ -442,14 +470,15 @@ pub struct Session {
     /// Where the outputs go.
     sink: Arc<dyn Sink>,
     builds: usize,
-    /// The written keys, the package records, the written files' names
-    /// and the document nodes' records last stored in the cache
-    /// ([`Session::store_wkeys`], [`Session::store_pkgrec`],
-    /// [`Session::store_wnames`], [`Session::store_noderec`]).
+    /// The written keys, the package records (each load's bytes' hash,
+    /// by its key), the written files' names and the document nodes'
+    /// records last stored in the cache ([`Session::store_wkeys`],
+    /// [`Session::store_pkgrec`], [`Session::store_wnames`],
+    /// [`Session::store_noderec`]).
     #[allow(clippy::type_complexity)]
     stored: Mutex<(
         Option<Vec<u8>>,
-        Option<Vec<u8>>,
+        std::collections::HashMap<String, u64>,
         Option<Vec<u8>>,
         Option<Vec<u8>>,
     )>,
@@ -472,6 +501,11 @@ pub struct Session {
     /// the host found for it, looked up once, when the name came (or
     /// when it was first found): an edit compares names, not lookups.
     inputs: Vec<(String, bool, Option<PathBuf>)>,
+    /// The host's key of each file the finder read from disk
+    /// ([`Host::stamp`]), taken before the read: the bytes the build holds
+    /// are at most that new. Empty: read twice under two keys (changed
+    /// while a build read it), unknown.
+    stamps: Arc<Mutex<HashMap<PathBuf, Vec<u8>>>>,
     /// Whether the package loads' and the document nodes' records
     /// changed since last stored ([`Session::flush_records`], called when
     /// a build settles: a no-op unless a load changed them).
@@ -483,6 +517,12 @@ pub struct Session {
     /// A watch's session: no log laid out after a build (`--log`: with
     /// the exact file when idle, [`Session::write_log`]).
     pub watching: bool,
+    /// The build gives its PDF as the link's layout, written live
+    /// (XeTeX's pages that changed written again after the base's, not
+    /// folded again), for a viewer that keeps it as update sections in
+    /// memory ([`crate::watch::ViewFile`]) where the sink writes none (a
+    /// watch writing no files); the exact file is made when idle.
+    pub view_layout: bool,
     /// `JOB.synctex.gz`'s members made last (`-synctex`).
     synctex: Mutex<crate::synctex::Writer>,
     /// The main text's lines counted by block ([`LineMarks`]).
@@ -600,17 +640,19 @@ impl Session {
             store: store.map(Records::new),
             sink,
             builds: 0,
-            stored: Mutex::new((None, None, None, None)),
+            stored: Mutex::new((None, std::collections::HashMap::new(), None, None)),
             made_stored: Mutex::new(None),
             wkeys_from: Mutex::new(None),
             status,
             buffers: Arc::default(),
             changed: Vec::new(),
             inputs: Vec::new(),
+            stamps: Arc::default(),
             records_dirty: false,
             absorb: Absorb::default(),
             absorbed_at: None,
             watching: false,
+            view_layout: false,
             synctex: Mutex::default(),
             lines: LineMarks::default(),
         }
@@ -661,6 +703,10 @@ impl Session {
     /// in the store), every file read again (`phitex.rebuild`).
     pub fn forget_build(&mut self) {
         self.reread_all();
+        self.stamps
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         self.build = None;
         self.built_text = None;
     }
@@ -668,8 +714,27 @@ impl Session {
     /// Every file the builds read is to be read again from disk at the
     /// next build (`r` in watch: a change made outside, unseen).
     pub fn reread_all(&mut self) {
-        self.changed
-            .extend(self.inputs.iter().map(|(n, ..)| plain_name(n)));
+        // (a file found whose key is the one it had when the build read
+        // it: unchanged, not read again; one not found is looked up again,
+        // one read from an editor's buffer or with no key is read again.
+        // Every file read and turned into a value of its whole text, the
+        // XeTeX job's fonts and pictures too, made `r` cost what all of
+        // them cost, not what changed)
+        let stamps = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
+        let stale: Vec<String> = self
+            .inputs
+            .iter()
+            .filter(|(_, found, p)| match (found, p) {
+                (true, Some(p)) => match (stamps.get(p), self.host.stamp(p)) {
+                    (Some(a), Some(b)) => a.is_empty() || *a != b,
+                    _ => true,
+                },
+                _ => true,
+            })
+            .map(|(n, ..)| plain_name(n))
+            .collect();
+        drop(stamps);
+        self.changed.extend(stale);
     }
 
     /// A handle to send the main text to a build while it runs, from
@@ -725,6 +790,8 @@ impl Session {
             internal,
             diagnostics: Vec::new(),
             format_failed: false,
+            settled: None,
+            diagnostics_pending: false,
         };
         let mut text = self.text_now();
         phitex_tex::timeline::lap("session: the text now (copied)");
@@ -772,6 +839,17 @@ impl Session {
                 self.status.set("typesetting");
                 // (evaluated with the text, one evaluation: its stats
                 // count the nodes the files' change ran)
+                // (their keys taken again as they are read now)
+                {
+                    let mut m = self.stamps.lock().unwrap_or_else(PoisonError::into_inner);
+                    for (n, _, p) in &self.inputs {
+                        if let Some(p) = p
+                            && reread.contains(n)
+                        {
+                            m.remove(p);
+                        }
+                    }
+                }
                 for name in &reread {
                     b.stage_file(name, None);
                 }
@@ -848,6 +926,18 @@ impl Session {
                     self.host.bibtex(),
                 );
                 phitex_tex::timeline::lap("session: the content key, tools, bibtex");
+                // (pdfTeX's TCX: the one a `%&` first line names, web2c's
+                // `parse_first_line`, which TeX Live's texmf.cnf turns off
+                // for `tex` only; found as kpathsea's `web2c files`)
+                let tcx = if xe || self.job.engine.name == "tex" {
+                    None
+                } else {
+                    text.lines()
+                        .next()
+                        .and_then(phitex_tex::translate_file)
+                        .and_then(|n| tool_finder.as_ref()?(phitex_tex::ToolSearch::Web2c, &n))
+                        .map(|(_, b)| b)
+                };
                 let shell_hook = self.host.shell_hook(&self.job);
                 phitex_tex::timeline::lap("session: the shell hook");
                 let opts = Options {
@@ -862,6 +952,7 @@ impl Session {
                     // name; its PDF written from the pages, as xelatex has
                     // xdvipdfmx make it, unless the XDV is the output)
                     xetex,
+                    tcx,
                     finder,
                     prelude_finder,
                     content_key,
@@ -874,11 +965,21 @@ impl Session {
                     prelude_jobname: self.job.engine.name.to_owned(),
                     program: self.job.engine.name.to_owned(),
                     prelude_bytes: cached.as_ref().map(|(_, b)| b.clone()),
+                    // (the release's own format, when the store's is none
+                    // or stale: a download, not the format made here)
+                    prelude_fallback: prelude.as_deref().map(|t| {
+                        let (host, name) = (self.host.clone(), self.format_name(t));
+                        Arc::new(move || host.published_format(&name)) as phitex_tex::PreludeSource
+                    }),
                     threads: self.job.threads,
                     progress: Some(progress),
                     // (pdfTeX's `\pdfshellescape`: 1 with -shell-escape,
                     // else TeX Live's restricted default)
-                    shell_escape: if self.job.shell_escape { 1 } else { 2 },
+                    shell_escape: if self.job.shell_escape {
+                        1
+                    } else {
+                        shell_escape_default()
+                    },
                     // (the commands neither in process nor refused: run as
                     // processes, each in a scratch directory of its own)
                     shell_hook,
@@ -892,11 +993,14 @@ impl Session {
                     written_init: self.written_init(),
                     made_init: self.made_init(),
                     // (the package loads' records: machine-wide, beside the
-                    // format, from every document built with it)
-                    pkgrec: self
-                        .pkgrec_key()
-                        .and_then(|n| self.store.as_ref()?.get(Key::Format(&n, "pkgrec")))
-                        .unwrap_or_default(),
+                    // format, from every document built with it; each
+                    // load's asked as the build meets it, never all)
+                    pkgrec_source: self.pkgrec_key().and_then(|n| {
+                        let store = self.store.clone()?;
+                        Some(Arc::new(move |key: &str| {
+                            store.get(Key::Format(&n, &pkgrec_name(key)))
+                        }) as phitex_tex::PkgrecSource)
+                    }),
                     // (the document nodes' records: the document's own)
                     noderec: self
                         .noderec_kept()
@@ -913,15 +1017,13 @@ impl Session {
                 let opts = Options {
                     edits: Some(self.absorb.tx.clone()),
                     // (`PHITEX_TIME_LIMIT_SECS`: a longer limit for a
-                    // measurement of a document the kernel is still slow on)
-                    time_limit: match std::env::var("PHITEX_TIME_LIMIT_SECS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                    {
-                        Some(secs) => Some(Duration::from_secs(secs)),
-                        None if first => Some(Duration::from_mins(30)),
-                        None => opts.time_limit,
-                    },
+                    // measurement of a document the kernel is still slow on,
+                    // 0 for none, as `phitex_tex::Options::default` reads it)
+                    time_limit: time_limit_of(
+                        std::env::var("PHITEX_TIME_LIMIT_SECS").ok().as_deref(),
+                        first,
+                        opts.time_limit,
+                    ),
                     ..opts
                 };
                 phitex_tex::timeline::lap("session: the options (records read)");
@@ -966,11 +1068,11 @@ impl Session {
             for (n, found) in b.reads() {
                 if let Some(e) = self.inputs.iter_mut().find(|(m, ..)| *m == n) {
                     if found && e.2.is_none() {
-                        e.2 = self.host.locate(&n);
+                        e.2 = self.host.locate_key(&n);
                     }
                     e.1 = found;
                 } else {
-                    let p = found.then(|| self.host.locate(&n)).flatten();
+                    let p = found.then(|| self.host.locate_key(&n)).flatten();
                     self.inputs.push((n, found, p));
                 }
             }
@@ -1068,7 +1170,9 @@ impl Session {
         let b = self.build.as_ref().expect("built above");
         // (a watch lays no log out; a file written as update sections
         // takes the link's layout, not the exact bytes)
-        let layout = self.sink.updates().then(|| b.pdf_layout()).flatten();
+        let layout = (self.sink.updates() || self.view_layout)
+            .then(|| b.pdf_layout())
+            .flatten();
         let (bytes, log) = if layout.is_some() {
             (Arc::default(), String::new())
         } else if self.watching {
@@ -1079,7 +1183,10 @@ impl Session {
         lap(&mut phases, "output");
         let pdf = layout.is_some() || b.is_pdf();
         let s = &b.stats;
-        let diagnostics = if why == "edit" && !self.job.edit_diagnostics {
+        // (an edit's at no place only: those at their places are low
+        // priority, made off the typing path when it pauses,
+        // `Session::diagnostics_now`, unless the build has errors)
+        let mut diagnostics = if why == "edit" {
             b.unplaced_diagnostics()
         } else {
             b.diagnostics()
@@ -1154,6 +1261,12 @@ impl Session {
                     .collect()
             })
             .collect();
+        // (an edit's errors at their places at once, the errors'
+        // underlines with them; its warnings placed when asked)
+        let diagnostics_pending = why == "edit" && self.job.edit_diagnostics && internal.is_none();
+        if diagnostics_pending && !errors.is_empty() {
+            diagnostics = b.error_diagnostics();
+        }
         // (a PDF file's pages: not known until the engine reports them;
         // the viewer counts the PDF's itself and draws each page again)
         lap(&mut phases, "errors");
@@ -1203,6 +1316,7 @@ impl Session {
             let shown: Vec<String> = phases.iter().map(|(n, d)| format!("{n} {d:?}")).collect();
             eprintln!("session phases ({why}): {}", shown.join(", "));
         }
+        let empty_pdf = pages == 0 && b.empty_pdf();
         let mut report = Report {
             out: Output {
                 pdf: pdf_bytes,
@@ -1216,6 +1330,7 @@ impl Session {
                 history_error,
                 log,
                 layout,
+                empty_pdf,
             },
             edit_line,
             runs: vec![RunInfo {
@@ -1263,6 +1378,8 @@ impl Session {
             diagnostics,
             warnings,
             format_failed: false,
+            settled: Some(b.settled_key()),
+            diagnostics_pending,
             notes: std::iter::once(format!(
                 "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds (runs by pass {:?}), realised cp {} nodes; guesses refuted: {} claims, {} effects, {} claim siblings, {} definitions; {} nodes placed, {} freed",
                 s.nodes_run,
@@ -1300,19 +1417,7 @@ impl Session {
             // text, said as its line)
             if let Some(text) = &self.built_text {
                 let file = self.job.file.clone();
-                let at_line = |s: &str| -> String {
-                    let key = "the main file byte ";
-                    let Some(k) = s.find(key) else {
-                        return s.to_owned();
-                    };
-                    let rest = &s[k + key.len()..];
-                    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-                    let Ok(pos) = digits.parse::<usize>() else {
-                        return s.to_owned();
-                    };
-                    let lineno = text[..pos.min(text.len())].matches('\n').count() + 1;
-                    format!("{}{file}:{lineno}{}", &s[..k], &rest[digits.len()..])
-                };
+                let at_line = |s: &str| main_byte_as_line(s, text, &file);
                 report.out.errors = report.out.errors.iter().map(|e| at_line(e)).collect();
                 report.internal = Some(at_line(&internal));
             }
@@ -1356,22 +1461,42 @@ impl Session {
         })
     }
 
-    /// The pages whose origins changed since the last ask and the edits
-    /// since then, `(file, at, delta)` in [`crate::view::Origins`]'
-    /// file indices ([`phitex_tex::Build::origins_changed`]: a viewer
-    /// that keeps the pages' origins shifts its offsets by the deltas and
-    /// asks again for those pages only); none where the build keeps no
+    /// The pages' origins ([`Session::origins`]) with the pages whose
+    /// origins changed since the last ask and the edits since then,
+    /// `(file, at, delta)` in [`crate::view::Origins`]' file indices
+    /// ([`phitex_tex::Build::origins_update`]: a viewer that keeps the
+    /// pages' origins shifts its offsets by the deltas and asks again for
+    /// those pages only), made at once; none where the build keeps no
     /// origins.
-    pub fn origins_changed(&self) -> Option<crate::view::OriginsChanged> {
+    pub fn origins_update(&self) -> Option<(crate::view::Origins, crate::view::OriginsChanged)> {
         let b = self
             .build
             .as_ref()
             .filter(|_| self.job.origins || self.job.synctex)?;
-        let (pages, edits) = b.origins_changed();
-        Some(crate::view::OriginsChanged { pages, edits })
+        let (pages, changed, edits) = b.origins_update();
+        Some((
+            crate::view::Origins {
+                pages,
+                files: b.origin_files(),
+            },
+            crate::view::OriginsChanged {
+                pages: changed,
+                edits,
+            },
+        ))
     }
 
     /// The main text with the editor's buffer for it, if there is one.
+    /// The last build's diagnostics at their places (TeX's errors and
+    /// warnings, the engine's), made now: an edit's report leaves them
+    /// for when the editing pauses ([`Report::diagnostics_pending`]).
+    pub fn diagnostics_now(&self) -> Vec<phitex_tex::Diagnostic> {
+        self.build
+            .as_ref()
+            .map(phitex_tex::Build::diagnostics)
+            .unwrap_or_default()
+    }
+
     fn text_now(&self) -> Arc<str> {
         let name = plain_name(&self.job.path.to_string_lossy());
         self.buffers
@@ -1405,7 +1530,7 @@ impl Session {
                 self.host.clone(),
                 dir.clone(),
             ),
-            live: self.sink.updates(),
+            live: self.sink.updates() || self.view_layout,
         })
     }
 
@@ -1612,20 +1737,20 @@ impl Session {
         }
     }
 
+    /// The package loads' records the build changed, each stored by its
+    /// key ([`pkgrec_name`]) unless stored so already.
     fn store_pkgrec(&self, b: &Build) {
         let (Some(c), Some(n)) = (&self.store, self.pkgrec_key()) else {
             return;
         };
-        let recs = b.export_pkgrec();
         let mut last = self.stored.lock().unwrap_or_else(PoisonError::into_inner);
-        if last.1.as_deref() == Some(recs.as_slice()) {
-            return;
+        for (k, recs) in b.changed_pkgrecs() {
+            let h = tex::Fnv::new().add(&recs).0;
+            if last.1.get(&k) != Some(&h) {
+                c.put(Key::Format(&n, &pkgrec_name(&k)), &recs);
+                last.1.insert(k, h);
+            }
         }
-        if !recs.is_empty() && c.get(Key::Format(&n, "pkgrec")).as_deref() != Some(recs.as_slice())
-        {
-            c.put(Key::Format(&n, "pkgrec"), &recs);
-        }
-        last.1 = Some(recs);
     }
 
     fn store_noderec(&self, b: &Build) {
@@ -1667,6 +1792,29 @@ impl Session {
         }
     }
 
+    /// What the builds read, for a watch's file events ([`Watched`]):
+    /// every name TeX asked the finder for (found or not: a file that
+    /// appears is a change too) with the paths of those found, and the
+    /// names the tools' searches asked for. Empty before a build.
+    pub fn watched(&self) -> Watched {
+        let mut w = Watched::default();
+        // (the main file: never asked of the finder, it is what the build begins with)
+        w.names.push(plain_name(&self.job.path.to_string_lossy()));
+        w.paths.push(self.job.path.clone());
+        for (n, _, p) in &self.inputs {
+            w.names.push(plain_name(n));
+            if let Some(p) = p {
+                w.paths.push(p.clone());
+            }
+        }
+        if let Some(b) = &self.build {
+            w.names
+                .extend(b.tool_reads().into_iter().map(|(n, _)| plain_name(&n)));
+        }
+        w.built = self.build.is_some();
+        w
+    }
+
     /// The names the builds asked the finder for (`inputs`)
     /// that stand for one of `changed` (as found, or as named): by the
     /// names and the files kept, no lookup; a changed name equal to
@@ -1681,14 +1829,29 @@ impl Session {
             .map(|(_, _, p)| p.as_ref().map(|p| plain_name(&p.to_string_lossy())))
             .collect();
         let mut hit = vec![false; self.inputs.len()];
+        // (each input by the names a change of it comes as: its name, with
+        // `.tex`, the file found; looked up, not compared with every input
+        // for every change, `r` changing every input: 10 ms for Grail's)
+        let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, (n, ..)) in self.inputs.iter().enumerate() {
+            let n = plain_name(n);
+            let mut keys = vec![format!("{n}.tex"), n];
+            keys.extend(found[i].clone());
+            keys.sort();
+            keys.dedup();
+            for k in keys {
+                by_name.entry(k).or_default().push(i);
+            }
+        }
+        // (a changed file TeX did not read: staged too, for a tool that
+        // read it, BibTeX's `.bib`, a `.bst`, makeindex's `.ist`; the
+        // engine stages only what one of its runs read, else nothing)
+        let mut tools: Vec<String> = Vec::new();
         for c in changed {
             let mut any = false;
-            for (i, (n, ..)) in self.inputs.iter().enumerate() {
-                let n = plain_name(n);
-                if *c == n || *c == format!("{n}.tex") || found[i].as_ref() == Some(c) {
-                    hit[i] = true;
-                    any = true;
-                }
+            for &i in by_name.get(c).into_iter().flatten() {
+                hit[i] = true;
+                any = true;
             }
             if any {
                 continue;
@@ -1700,15 +1863,22 @@ impl Session {
                     && self.host.same_file(f, c)
                 {
                     hit[i] = true;
+                    any = true;
                 }
             }
+            if !any && !tools.contains(c) {
+                tools.push(c.clone());
+            }
         }
-        self.inputs
+        let mut out: Vec<String> = self
+            .inputs
             .iter()
             .zip(hit)
             .filter(|(_, h)| *h)
             .map(|((n, ..), _)| n.clone())
-            .collect()
+            .collect();
+        out.extend(tools);
+        out
     }
 
     /// The main file's name as TeX prints it (`./story.tex`).
@@ -1728,7 +1898,7 @@ impl Session {
         }
         let host = self.host.clone();
         Arc::new(move |name: &str| {
-            let p = host.locate(name)?;
+            let p = host.locate_key(name)?;
             let bytes = host.read(&p)?;
             Some((p.to_string_lossy().into_owned(), bytes))
         })
@@ -1739,8 +1909,9 @@ impl Session {
     fn finder(&self) -> Finder {
         let host = self.host.clone();
         let buffers = self.buffers.clone();
+        let stamps = self.stamps.clone();
         Arc::new(move |name: &str| {
-            let p = host.locate(name)?;
+            let p = host.locate_key(name)?;
             let shown = p.to_string_lossy().into_owned();
             let key = plain_name(&shown);
             let buffered = buffers
@@ -1750,9 +1921,27 @@ impl Session {
                 .rev()
                 .find(|(n, _)| *n == key || host.same_file(n, &key))
                 .and_then(|(_, t)| t.clone());
-            let bytes = match buffered {
-                Some(t) => tex::bytes(&t),
-                None => host.read(&p)?,
+            let bytes = if let Some(t) = buffered {
+                // (an editor's text: no key of the disk's holds for it)
+                stamps
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&p);
+                tex::bytes(&t)
+            } else {
+                let k = host.stamp(&p);
+                let b = host.read(&p)?;
+                if let Some(k) = k {
+                    let mut m = stamps.lock().unwrap_or_else(PoisonError::into_inner);
+                    match m.get_mut(&p) {
+                        Some(old) if *old != k => old.clear(),
+                        Some(_) => {}
+                        None => {
+                            m.insert(p.clone(), k);
+                        }
+                    }
+                }
+                b
             };
             Some((shown, bytes))
         })
@@ -1928,6 +2117,19 @@ pub fn waiting_notes(_job: &Job) -> Vec<String> {
 /// needs one run, not two.
 const LATEXMK_AUX: &str = "\\relax \n\\gdef \\@abspage@last{1}\n";
 
+/// The build's time limit from `PHITEX_TIME_LIMIT_SECS` (`var`): that
+/// many seconds, none for 0 (a measurement's cold build is never cut
+/// short); unset or unreadable, 30 minutes for the session's first build
+/// (`first`), else the options' own (`fallback`).
+fn time_limit_of(var: Option<&str>, first: bool, fallback: Option<Duration>) -> Option<Duration> {
+    match var.and_then(|v| v.trim().parse::<u64>().ok()) {
+        Some(0) => None,
+        Some(secs) => Some(Duration::from_secs(secs)),
+        None if first => Some(Duration::from_mins(30)),
+        None => fallback,
+    }
+}
+
 /// Whether a file the document writes may be written under `name`
 /// (kpathsea's `kpse_out_name_ok` in its paranoid mode, TeX Live's
 /// default `openout_any = p`): a relative name, no `..` component, no
@@ -2064,8 +2266,75 @@ fn wnames_of(b: &[u8]) -> Vec<String> {
         .collect()
 }
 
+/// The store's name of the package load record under load key `key`
+/// (beside the format: one per load, so a build reads and writes its
+/// own loads' records only).
+fn pkgrec_name(key: &str) -> String {
+    format!("pkgrecs/{:016x}", tex::Fnv::new().add(key.as_bytes()).0)
+}
+
+/// `the main file byte N` in `s`, the engine's place in the main text
+/// `text`, said as `file:line`; `s` as it is where it names none.
+fn main_byte_as_line(s: &str, text: &str, file: &str) -> String {
+    let key = "the main file byte ";
+    let Some(k) = s.find(key) else {
+        return s.to_owned();
+    };
+    let rest = &s[k + key.len()..];
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let Ok(pos) = digits.parse::<usize>() else {
+        return s.to_owned();
+    };
+    // (a byte inside a character, the engine's place in a line of UTF-8
+    // text: the character's line; slicing there panicked over the
+    // failure it reports, circularglyphs-doc's `©`, gate 41484960160)
+    let lineno = text[..text.floor_char_boundary(pos.min(text.len()))]
+        .matches('\n')
+        .count()
+        + 1;
+    format!("{}{file}:{lineno}{}", &s[..k], &rest[digits.len()..])
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    /// `PHITEX_TIME_LIMIT_SECS=0` is no limit, as the engine's options
+    /// read it: the scoreboard's cold builds set it so, and the watch
+    /// read it as a limit of zero seconds, so every build ended at once
+    /// with the engine's deadline (mc 80017: circuitikz "ran past its time
+    /// limit" after 88 ms at every thread count).
+    #[test]
+    fn a_time_limit_of_zero_is_none() {
+        let fb = Some(Duration::from_secs(600));
+        assert_eq!(super::time_limit_of(Some("0"), true, fb), None);
+        assert_eq!(super::time_limit_of(Some(" 0\n"), false, fb), None);
+        assert_eq!(
+            super::time_limit_of(Some("90"), true, fb),
+            Some(Duration::from_secs(90))
+        );
+        assert_eq!(
+            super::time_limit_of(None, true, fb),
+            Some(Duration::from_mins(30))
+        );
+        assert_eq!(super::time_limit_of(None, false, fb), fb);
+        assert_eq!(super::time_limit_of(Some("x"), false, fb), fb);
+    }
+
+    #[test]
+    fn a_main_file_byte_inside_a_character_is_its_line() {
+        let text = "a\n\u{a9} b\nc";
+        // (byte 3 is inside `©`, bytes 2..4)
+        assert_eq!(
+            super::main_byte_as_line("stuck at the main file byte 3 here", text, "m.tex"),
+            "stuck at m.tex:2 here"
+        );
+        assert_eq!(
+            super::main_byte_as_line("stuck at the main file byte 99", text, "m.tex"),
+            "stuck at m.tex:3"
+        );
+    }
+
     use super::*;
 
     /// The document's records' encodings as [`crate::host::RECORDS_VERSION`]
@@ -2100,6 +2369,17 @@ mod tests {
     fn comment() {
         assert_eq!(dvi_comment(0), " TeX output 1970.01.01:0000");
         assert_eq!(dvi_comment(1_791_810_000), " TeX output 2026.10.12:1300");
+    }
+}
+
+/// `\pdfshellescape` where the job does not ask for it: TeX Live's
+/// `shell_escape` as kpathsea reads it, the environment over texmf.cnf's `p`
+/// (`f` or `0` off, `t` or `1` on, else restricted).
+fn shell_escape_default() -> i32 {
+    match std::env::var("shell_escape").as_deref() {
+        Ok("f" | "F" | "0") => 0,
+        Ok("t" | "T" | "y" | "Y" | "1") => 1,
+        _ => 2,
     }
 }
 

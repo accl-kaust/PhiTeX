@@ -1,0 +1,19 @@
+% Pages fire at candidates inside the group a list opens: at a paragraph's
+% end, after a display, before a \vskip, not only at a paragraph's start. The
+% text after each reads the page counter, and the next page's routine steps
+% what the one before left. ijmsample's headers stopped counting: page 20
+% printed 6.
+\documentclass{article}
+\newcount\n
+\def\t{Some words to fill the lines of a paragraph, and more of them. }
+\def\tt{\t\t\t\t\t\t\t\t}
+\begin{document}
+\begin{itemize}
+\loop \advance\n1
+\item Item \the\n, on page \thepage. \tt
+\[ a + b = \thepage \]
+\tt\par\vskip 3pt \noindent Then \thepage. \tt
+\ifnum\n<70 \repeat
+\end{itemize}
+Last page: \thepage.
+\end{document}

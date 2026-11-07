@@ -77,14 +77,14 @@ mod table;
 mod values;
 
 pub use api::{
-    At, Brackets, Cause, EditSource, Effect, EnvProvider, EvalError, FieldAt, Limits, Locality, MayDefine, Monoid,
-    NoEdits, NodeId, NodeInfo, NodeState, OpId, Operation, PathId, ProjId, Projection, Report, SeqMonoid, Settled,
-    Step, Stop, SumMonoid, Times, UnitId,
+    AppendFn, At, Brackets, Cause, EditSource, Effect, EnvProvider, EvalError, FieldAt, Limits, Locality, MayDefine,
+    Monoid, NoEdits, NodeId, NodeInfo, NodeState, OpId, Operation, PathId, ProjId, Projection, Rel, Report, SeqMonoid,
+    Settled, Step, Stop, SumMonoid, Times, UnitId,
 };
 pub use ctx::{Ctx, View};
 pub use engine::Engine;
 pub use lock::held as locks_held;
-pub use read::{alias_of, alias_value};
+pub use read::{alias_of, alias_parts, alias_target_plus, alias_value, alias_value_plus};
 
 /// The stack of every thread a run is made on (the evaluation's own and
 /// the pool's): runs nest as deep as their client allows, and TeX allows

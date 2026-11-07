@@ -4,12 +4,12 @@ use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use crate::api::{Brackets, NodeId, PathId, ProjId, Step};
+use crate::api::{Brackets, NodeId, PathId, ProjId, Rel, Step};
 use crate::engine::Engine;
 use crate::node::{Anchor, Node, ReadKind, State};
 use crate::order::{Pos, SegId};
 use crate::segment::{Def, GLOBAL, Inner, RangeReader, Reader, Segment, reduce};
-use crate::values::{Field, FxHashSet, Value, ValueId, Values};
+use crate::values::{Field, FxHashMap, FxHashSet, Value, ValueId, Values};
 
 /// A path that is no path: the defining node's id as an integer
 /// (`Ctx::def_site`).
@@ -185,8 +185,8 @@ fn stands(eng: &Engine, m: &Met) -> bool {
     }
 }
 
-/// (tests) The reads on one layout computed again on this thread so far.
-#[cfg(test)]
+/// The reads on one layout computed again on this thread so far (tests,
+/// and `PHITEX_RUN_LOG`'s count per run).
 pub(crate) fn retries() -> u64 {
     RETRIES.get()
 }
@@ -491,6 +491,9 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
         }
         Step::Key(k) => {
             let x = v?;
+            if let Some(ix) = assoc_index(vals, x) {
+                return ix.get(&k).copied().flatten();
+            }
             vals.with_list(x, |xs| {
                 xs.iter()
                     .find_map(|&e| {
@@ -503,6 +506,9 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
         }
         Step::Has(k) => {
             let x = v?;
+            if let Some(ix) = assoc_index(vals, x) {
+                return Some(vals.bool(ix.contains_key(&k)));
+            }
             vals.with_list(x, |xs| {
                 xs.iter()
                     .any(|&e| vals.with_list(e, |kv| kv.first() == Some(&k)).unwrap_or(false))
@@ -515,6 +521,11 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
             Some(proj(x, vals))
         }
         Step::Eq(k) => Some(vals.bool(v == Some(k))),
+        Step::Within(k) => {
+            let ks = vals.with_list(k, <[ValueId]>::to_vec)?;
+            vals.with_list(v?, |xs| xs.iter().all(|x| ks.contains(x)))
+                .map(|b| vals.bool(b))
+        }
         Step::Cmp(k) => {
             let a = vals.as_int(v?)?;
             let b = vals.as_int(k)?;
@@ -524,10 +535,83 @@ pub(crate) fn step(eng: &Engine, v: Option<ValueId>, s: Step) -> Option<ValueId>
                 std::cmp::Ordering::Greater => 1,
             }))
         }
+        // (answered at a position only, `through_at`)
+        Step::Derived(_) => None,
+        // (a guard, checked by `holds`: the value itself)
+        Step::Member(_) => v,
         Step::Each(_) | Step::Indices(_) | Step::Keys(_) | Step::Rank(_) | Step::Ranks(_) | Step::Distinct => {
             unimplemented!("path step: next run")
         }
     }
+}
+
+/// An association list's keys at least this many: looked up through an
+/// index ([`assoc_index`]), not passed over.
+const ASSOC_INDEXED: usize = 32;
+
+/// The index of association list `x` (a list of lists `[k, v, ..]`):
+/// each key to the value of the first entry it heads (`None` for an entry
+/// of the key alone), as [`Step::Key`] and [`Step::Has`] answer by
+/// passing over it. Only for a list of [`ASSOC_INDEXED`] entries or more;
+/// made once a list and values epoch (a value never changes, and an id
+/// never names another value: a collected list's slot stays empty),
+/// shared by the threads. A read-back child's output holds every key of
+/// a document's `.aux` (tikz-cd: 397), and its parent looks up each name
+/// it uses there, again when the child commits (`reask_parent`): passed
+/// over, 6 000 reads of a 400-entry list cost 7 ms a commit (mc 80248).
+fn assoc_index(vals: &Values, x: ValueId) -> Option<Arc<crate::values::FxHashMap<ValueId, Option<ValueId>>>> {
+    type Ix = Arc<crate::values::FxHashMap<ValueId, Option<ValueId>>>;
+    struct Shard {
+        epoch: u64,
+        map: crate::values::FxHashMap<ValueId, Ix>,
+    }
+    const SHARDS: usize = 16;
+    // (entries kept per shard before it is emptied: a bound)
+    const MAX: usize = 256;
+    static S: std::sync::OnceLock<Box<[std::sync::Mutex<Shard>]>> = std::sync::OnceLock::new();
+    if vals.with_list(x, <[ValueId]>::len)? < ASSOC_INDEXED {
+        return None;
+    }
+    let s = S.get_or_init(|| {
+        (0..SHARDS)
+            .map(|_| {
+                std::sync::Mutex::new(Shard {
+                    epoch: u64::MAX,
+                    map: crate::values::FxHashMap::default(),
+                })
+            })
+            .collect()
+    });
+    let raw = x.raw();
+    #[allow(clippy::cast_possible_truncation)]
+    let sh = &s[(raw ^ (raw >> 29)) as usize % SHARDS];
+    let e = vals.epoch();
+    {
+        let g = sh.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if g.epoch == e
+            && let Some(ix) = g.map.get(&x)
+        {
+            return Some(ix.clone());
+        }
+    }
+    let mut m = crate::values::FxHashMap::default();
+    vals.with_list(x, |xs| {
+        for &el in xs {
+            vals.with_list(el, |kv| {
+                if let Some(&k) = kv.first() {
+                    m.entry(k).or_insert_with(|| kv.get(1).copied());
+                }
+            });
+        }
+    });
+    let ix: Ix = Arc::new(m);
+    let mut g = sh.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if g.epoch != e || g.map.len() >= MAX {
+        g.epoch = e;
+        g.map.clear();
+    }
+    g.map.insert(x, ix.clone());
+    Some(ix)
 }
 
 /// `true` for an empty, zero, nil or unit value, `false` otherwise
@@ -567,12 +651,144 @@ pub(crate) fn apply_path(eng: &Engine, v: Option<ValueId>, p: PathId) -> Option<
 /// commit applies it after its segment's lock, never under it, where a
 /// projection's allocations would take the allocator's lock while the
 /// other threads wait for the segment.
+/// A derived read's path (`Step::Derived`) too: its answer reads two
+/// fields where its reader stands, which takes their segments' locks.
 pub(crate) fn client_path(eng: &Engine, p: PathId) -> bool {
     p != PathId::WHOLE
         && p != SITE
-        && eng
-            .path_steps(p)
-            .is_some_and(|s| s.iter().any(|x| matches!(x, Step::Proj(_))))
+        && eng.path_steps(p).is_some_and(|s| {
+            s.iter()
+                .any(|x| matches!(x, Step::Proj(_) | Step::Derived(_) | Step::Member(_)))
+        })
+}
+
+/// The spec of a derived path's first step (`Step::Derived`), if it has one.
+pub(crate) fn derived_spec(eng: &Engine, p: PathId) -> Option<ValueId> {
+    if p == PathId::WHOLE || p == SITE {
+        return None;
+    }
+    match eng.path_steps(p)?.first()? {
+        Step::Derived(s) => Some(*s),
+        _ => None,
+    }
+}
+
+/// The spec of a guarded path's first step (`Step::Member`), if it has one.
+pub(crate) fn member_spec(eng: &Engine, p: PathId) -> Option<ValueId> {
+    if p == PathId::WHOLE || p == SITE {
+        return None;
+    }
+    match eng.path_steps(p)?.first()? {
+        Step::Member(s) => Some(*s),
+        _ => None,
+    }
+}
+
+/// Whether a guarded read (`Step::Member`) at `at` of reader `me` still
+/// matters: its element is in its list where the reader reads, or that
+/// cannot be told (the anchor gone, the list an alias or none, an anchor
+/// not at a node), which checks the read as any other.
+fn member_now(eng: &Engine, me: &Node, at: Anchor, spec: ValueId) -> bool {
+    match at {
+        Anchor::Me => member_at(eng, me.id, false, spec),
+        Anchor::Before(n) => member_at(eng, n, false, spec),
+        Anchor::AfterOwn(n) => member_at(eng, n, true, spec),
+        Anchor::End(_) | Anchor::Final => true,
+    }
+}
+
+/// Whether reader record `r`, a guarded read's (`Step::Member`), still
+/// matters where it reads ([`member_now`]); true for any other.
+pub(crate) fn member_reader(eng: &Engine, r: &Reader) -> bool {
+    member_spec(eng, r.path).is_none_or(|spec| on_one_layout(eng, || member_at(eng, r.anchor, r.inclusive, spec)))
+}
+
+/// [`member_now`] at node `at` (with its own definitions: `inclusive`).
+fn member_at(eng: &Engine, at: NodeId, inclusive: bool, spec: ValueId) -> bool {
+    let vals = eng.values();
+    let Some(parts) = vals.with_list(spec, <[ValueId]>::to_vec) else {
+        return true;
+    };
+    let [list, names, elem] = parts[..] else {
+        return true;
+    };
+    let Some(names) = vals.as_int(names).and_then(|n| u32::try_from(n).ok()).map(PathId) else {
+        return true;
+    };
+    let r = reaching_at(eng, Field(list), at, inclusive);
+    let Some(x) = r.and_then(|r| r.value) else {
+        return true;
+    };
+    if alias_of(vals, x).is_some() {
+        return true;
+    }
+    // (the names of the list's value, made once for the reads checked
+    // one after another: a run's guarded reads are of one list, each
+    // name of it one read, and the names a projection of its body)
+    let epoch = vals.epoch();
+    let l = MEMBER_NAMES.with_borrow_mut(|m| match *m {
+        Some((e, y, p, l)) if e == epoch && y == x && p == names => l,
+        _ => {
+            let l = apply_path(eng, Some(x), names);
+            *m = Some((epoch, x, names, l));
+            l
+        }
+    });
+    l.and_then(|l| vals.with_list(l, |xs| xs.contains(&elem)))
+        .unwrap_or(true)
+}
+
+/// The store's epoch, a list's value, a names path, and the names.
+type MemberNames = (u64, ValueId, PathId, Option<ValueId>);
+
+thread_local! {
+    /// [`member_now`]'s last list value, names path and names, with the
+    /// store's epoch they were made at (`Values::epoch`: a collection
+    /// since may have taken them).
+    static MEMBER_NAMES: std::cell::RefCell<Option<MemberNames>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The field a derived read's spec names where `base` has value `v`:
+/// `prefix`, the digits of `v + j`, `suffix`.
+pub(crate) fn derived_name(vals: &Values, spec: ValueId, v: Option<ValueId>) -> Option<Field> {
+    let parts = vals.with_list(spec, <[ValueId]>::to_vec)?;
+    let [_, prefix, j, suffix] = parts[..] else {
+        return None;
+    };
+    let v = v.and_then(|x| vals.as_int(x)).unwrap_or(0);
+    let n = v.checked_add(vals.as_int(j)?)?;
+    let name = format!("{}{n}{}", vals.as_str(prefix)?, vals.as_str(suffix)?);
+    Some(Field(vals.str(&name)))
+}
+
+/// The base field of a derived read's spec.
+pub(crate) fn derived_base(vals: &Values, spec: ValueId) -> Option<Field> {
+    vals.with_list(spec, |xs| xs.first().copied()).flatten().map(Field)
+}
+
+/// The field a derived read at `anchor` names now (None: the anchor gone).
+pub(crate) fn derived_field_at(eng: &Engine, spec: ValueId, anchor: NodeId, inclusive: bool) -> Option<Field> {
+    let base = derived_base(eng.values(), spec)?;
+    let v = reaching_at(eng, base, anchor, inclusive)?;
+    derived_name(eng.values(), spec, v.value)
+}
+
+/// A read through path `p` at `anchor` (`At::Before`/`AfterOwn`, the
+/// reader's own position as `Before` itself) of the definition `r`: a
+/// derived path answers its composed look-up there, any other `through`.
+pub(crate) fn through_at(eng: &Engine, r: Reaching, p: PathId, anchor: NodeId, inclusive: bool) -> Option<ValueId> {
+    let Some(spec) = derived_spec(eng, p) else {
+        return through(eng, r, p);
+    };
+    let g = derived_field_at(eng, spec, anchor, inclusive)?;
+    let x = reaching_at(eng, g, anchor, inclusive)?.value;
+    let steps = eng.path_steps(p)?;
+    let mut cur = x;
+    for s in &steps[1..] {
+        cur = step(eng, cur, *s);
+    }
+    cur
 }
 
 /// `Reaching` through a path, `SITE` giving the defining node.
@@ -767,7 +983,32 @@ pub(crate) type FoldMemo = Vec<((Field, Pos, Pos), ValueId, Box<[Met]>)>;
 /// moved since; what that met is met again by the read asking.
 pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut FoldMemo) -> ValueId {
     if WATCHING.get() == 0 {
-        return fold(eng, f, Some(from), Some(to));
+        // (readers of one field from one start, asked in order of their
+        // ends (`reask_ranges_in`): each goes on from the last one's fold,
+        // `fold(from, to)` = `fold(from, b)` + `fold(b - 1, to)` for
+        // `from < b <= to`, so asking them all folds the field once, not
+        // once a reader: openmoji's `lines` readers, one a piece, asked at
+        // each sibling a run claimed, each folding every segment from the
+        // document's start, accl 23214, 23227)
+        let prev = memo.iter().position(|e| e.0.0 == f && e.0.1 == from && e.2.is_empty());
+        if let Some(i) = prev {
+            let ((_, _, b), x, _) = memo[i];
+            if b == to {
+                return x;
+            }
+            if b > from && b < to {
+                let mono = eng.monoid(f);
+                let y = mono.combine(eng.values(), x, fold(eng, f, Some(Pos(b.0 - 1)), Some(to)));
+                memo[i] = ((f, from, to), y, Box::default());
+                return y;
+            }
+        }
+        let x = fold(eng, f, Some(from), Some(to));
+        match prev {
+            Some(i) => memo[i] = ((f, from, to), x, Box::default()),
+            None => memo.push(((f, from, to), x, Box::default())),
+        }
+        return x;
     }
     let key = (f, from, to);
     if let Some(e) = memo.iter().find(|e| e.0 == key && e.2.iter().all(|m| stands(eng, m))) {
@@ -784,15 +1025,26 @@ pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut Fol
 
 /// Whether recorded read `rd` of `me` still holds: its answer is what it
 /// saw, or it read a guess of a placement's output that has not run yet
-/// (`Ctx::placed_output_or`).
+/// (`Ctx::placed_output_or`), or one of a node that has never committed
+/// (no placement of a run before stands for it: a run again is answered
+/// the guess again).
 pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &mut FoldMemo) -> bool {
-    if let ReadKind::Placed { i, guess: true } = rd.kind
-        && let Some(r) = me.run_record()
-        && let Some(&c) = r.placed.get(i)
-        && eng.node(c).state() != State::Gone
-        && eng.node(c).run_record().is_none()
+    if let ReadKind::Field { at, .. } = rd.kind
+        && let Some(spec) = member_spec(eng, rd.path)
+        && !member_now(eng, me, at, spec)
     {
         return true;
+    }
+    if let ReadKind::Placed { i, guess: true } = rd.kind {
+        let Some(r) = me.run_record() else {
+            return true;
+        };
+        if let Some(&c) = r.placed.get(i)
+            && eng.node(c).state() != State::Gone
+            && eng.node(c).run_record().is_none()
+        {
+            return true;
+        }
     }
     answer_in(eng, me, &rd.kind, rd.path, memo) == rd.seen
 }
@@ -815,14 +1067,17 @@ fn answer_on_layout(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, memo
                 let d = depth_of(eng, me.id)?;
                 return apply_path(eng, Some(eng.values().int(i64::from(d))), path);
             }
-            let r = match *at {
-                Anchor::Me => reaching_at(eng, *f, me.id, false)?,
-                Anchor::Before(n) => reaching_at(eng, *f, n, false)?,
-                Anchor::AfterOwn(n) => reaching_at(eng, *f, n, true)?,
-                Anchor::End(u) => reaching_visible(eng, *f, Pos(eng.unit(u).end.0 - 1), true),
-                Anchor::Final => final_reaching(eng, *f),
+            let (r, pos) = match *at {
+                Anchor::Me => (reaching_at(eng, *f, me.id, false)?, Some((me.id, false))),
+                Anchor::Before(n) => (reaching_at(eng, *f, n, false)?, Some((n, false))),
+                Anchor::AfterOwn(n) => (reaching_at(eng, *f, n, true)?, Some((n, true))),
+                Anchor::End(u) => (reaching_visible(eng, *f, Pos(eng.unit(u).end.0 - 1), true), None),
+                Anchor::Final => (final_reaching(eng, *f), None),
             };
-            through(eng, r, path)
+            match pos {
+                Some((n, incl)) => through_at(eng, r, path, n, incl),
+                None => through(eng, r, path),
+            }
         }
         ReadKind::Env { f } => apply_path(eng, env_value(eng, *f), path),
         ReadKind::Fold { f, from, to, incl } => {
@@ -902,9 +1157,72 @@ pub(crate) fn hole_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     None
 }
 
+/// The first node before `me` in its unit that has not committed (as
+/// [`hole_before`]) whose operation says it may define one of `fields`
+/// (`Operation::may_define`), with the first hole of all: a run that
+/// waits for the text before it only where that text can change what it
+/// read.
+pub(crate) fn hole_before_defining(eng: &Engine, me: &Node, fields: &[Field]) -> (Option<NodeId>, Option<NodeId>) {
+    let Some(to) = pos_of(eng, me.id) else {
+        return (None, None);
+    };
+    let from = unit_start(eng, me);
+    let v = eng.values();
+    let names: Vec<String> = fields.iter().filter_map(|f| v.as_str(f.0)).collect();
+    let mut first: Option<NodeId> = None;
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            break;
+        }
+        if seg.unit == me.unit {
+            let holes: Vec<NodeId> = {
+                let inner = seg.inner.read();
+                if inner.holes == 0 {
+                    Vec::new()
+                } else {
+                    inner
+                        .nodes
+                        .range((Excluded(from), Excluded(to)))
+                        .map(|(_, id)| *id)
+                        .filter(|id| {
+                            let n = eng.node(*id);
+                            *id != me.id && n.unit == me.unit && n.is_hole() && eng.op(n.op()).text()
+                        })
+                        .collect()
+                }
+            };
+            for id in holes {
+                first = first.or(Some(id));
+                let n = eng.node(id);
+                let may = match eng.op(n.op()).may_define(&n.args(), v) {
+                    crate::api::MayDefine::Nothing => false,
+                    crate::api::MayDefine::Any => true,
+                    crate::api::MayDefine::Names(ns) => ns.iter().any(|f| fields.contains(f)),
+                    crate::api::MayDefine::Prefixes(ps) => {
+                        names.iter().any(|f| ps.iter().any(|p| f.starts_with(p.as_str())))
+                    }
+                };
+                if may {
+                    return (Some(id), first);
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    (None, first)
+}
+
 /// The first node before `me` in its unit that is to run, again or for
-/// the first time (`Node::is_open`): while one is, what `me` read before
-/// it may be a guess its run will change.
+/// the first time (`Node::is_open`), and that a run of this pass can bring
+/// a commit of: while one is, what `me` read before it may be a guess its
+/// run will change. Not one of an operation that runs only once the line
+/// is quiet (`Operation::final_only`) or one whose run panicked on inputs
+/// that hold (`Node::held_panic`), as for [`unsettled_before`]: a stuck
+/// run went on waiting for such a node, `park_waiting` found it settled
+/// and queued the run again, and the build ran it for ever and never said
+/// it was stuck (`latex_starray_starray` on a branch of relative registers).
 pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     let to = pos_of(eng, me.id)?;
     let from = unit_start(eng, me);
@@ -918,7 +1236,12 @@ pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
             let inner = seg.inner.read();
             for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
                 let n = eng.node(*id);
-                if *id != me.id && n.unit == me.unit && n.is_open() {
+                if *id != me.id
+                    && n.unit == me.unit
+                    && n.is_open()
+                    && !eng.op(n.op()).final_only()
+                    && !n.held_panic.load(Ordering::Acquire)
+                {
                     return Some(*id);
                 }
             }
@@ -926,6 +1249,245 @@ pub(crate) fn open_before(eng: &Engine, me: &Node) -> Option<NodeId> {
         cur = eng.order.next(sid, seg.lo);
     }
     None
+}
+
+/// The first node before `me` in its unit that has something left to
+/// commit in this pass: to run, again or for the first time, or running,
+/// its commit's walks still going (`Ctx::wait_settled`). A node taken by
+/// a claim, its run ending (`RunningInert`), is not: its claimer holds its
+/// text, and it commits nothing. Nor is a node of an operation that runs
+/// only once the line is quiet (`Operation::final_only`: the output's
+/// writers, a page's PDF side), which nothing an evaluation needs may
+/// wait on, nor one whose run panicked on inputs that hold
+/// (`Node::held_panic`), whose commit no run of this pool brings: waited
+/// for, each was dirty until the line was quiet, the waiting run was let
+/// go there, parked on it again and the quiet point let it go again, for
+/// ever (a minted listing's `\write18` after a page shipped as PDF: its
+/// page's PDF side stands before it; the gate's latexmk_minted at -j1
+/// and -j8 past 300 s, lectures and handin-doc at -j1 "ran N times").
+pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let from = unit_start(eng, me);
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            return None;
+        }
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
+                let n = eng.node(*id);
+                if *id != me.id
+                    && n.unit == me.unit
+                    && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
+                    && !eng.op(n.op()).final_only()
+                    && !n.held_panic.load(Ordering::Acquire)
+                {
+                    return Some(*id);
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    None
+}
+
+/// The first node after position `at` in unit `u` that is to run again
+/// (dirty or at work) and that those after it may wait for
+/// (`sched::hold_for`: not the page loop's nor a quiet point's, and not
+/// one of a chain, which waits by its own moves): the front of a node an
+/// edit removed at `at` (`sched::mark_front`).
+pub(crate) fn to_run_after(eng: &Engine, at: Pos, u: crate::api::UnitId) -> Option<NodeId> {
+    let end = eng.unit(u).end;
+    let mut cur = eng.seg_for_pos(at).map(|s| s.id);
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= end {
+            return None;
+        }
+        if seg.unit == u {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((Excluded(at), Unbounded)) {
+                let n = eng.node(*id);
+                if n.unit != u || !matches!(n.state(), State::Dirty | State::Running | State::RunningDirty) {
+                    continue;
+                }
+                let op = eng.op(n.op());
+                if !op.chains() && !op.works_at_frontier() && !op.final_only() && !n.held_panic.load(Ordering::Acquire)
+                {
+                    return Some(*id);
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    None
+}
+
+/// The nearest node before `me` in its unit that is a piece of the text
+/// (`Operation::text`) asked again since it committed: dirty or running.
+/// What a run that would end the job's text at `me` (a fatal error's
+/// claim of every node after it, `Ctx::wait_text_before`) waits for:
+/// made while such a piece is to run again, it rests on that piece's
+/// last answer, which its run is about to replace. A piece not committed
+/// yet (a hole) is not waited for: a read-on, the way a piece meets the
+/// input's end, waits for those already (`Ctx::hole_before`), and a
+/// fatal error met otherwise ends the job at once, no piece after it
+/// begun (`fatal::a_fatal_error_ends_the_job_before_an_included_file`:
+/// waiting for the first piece's first run, eight threads ran the
+/// included file's). The page layer's nodes, which wait on text after
+/// `me`, are not looked at.
+pub(crate) fn text_to_run_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let from = unit_start(eng, me);
+    let mut cur = eng.seg_for_pos(to).map(|s| s.id);
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))).rev() {
+                let n = eng.node(*id);
+                if *id != me.id
+                    && n.unit == me.unit
+                    && eng.op(n.op()).text()
+                    && n.committed()
+                    && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
+                    && !n.held_panic.load(Ordering::Acquire)
+                {
+                    return Some(*id);
+                }
+            }
+        }
+        if seg.lo <= from {
+            return None;
+        }
+        cur = eng.order.prev(sid, seg.lo);
+    }
+    None
+}
+
+/// A node of `me`'s unit between position `from` (excluded) and `me` that
+/// is to run again: dirty (queued, or parked), or running and asked again
+/// meanwhile. For the frontier's release (`sched::Pool::release_past_only`): a
+/// run let go past such a node read what that node had yet to define. One
+/// running for the first time does not count: what it defines is guessed
+/// at, as everywhere (counted, every held run waited for the runs between
+/// the frontier and it, and the page loop, which waits for the held run's
+/// text, with them: beamer cold -j8 5.4 s to 6.2 s, a label typed at -j8
+/// 379 ms to 543 ms, accl 24653).
+pub(crate) fn dirty_between(eng: &Engine, from: Pos, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            return None;
+        }
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
+                let n = eng.node(*id);
+                if *id != me.id
+                    && n.unit == me.unit
+                    && matches!(n.state(), State::Dirty | State::RunningDirty)
+                    && !eng.op(n.op()).final_only()
+                    && !n.held_panic.load(Ordering::Acquire)
+                {
+                    return Some(*id);
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    None
+}
+
+/// The last node before `me` in its unit whose last commit moved a read of
+/// their chain (`sched::note_move`) and that is yet to commit again; none
+/// where every such node has settled.
+pub(crate) fn mover_before(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let open: Vec<NodeId> = eng
+        .movers
+        .lock()
+        .iter()
+        .copied()
+        .filter(|&x| {
+            x != me.id
+                && eng.placed_node(x).is_some_and(|n| {
+                    n.unit == me.unit
+                        && matches!(n.state(), State::Dirty | State::Running | State::RunningDirty)
+                        && !n.held_panic.load(Ordering::Acquire)
+                })
+        })
+        .collect();
+    if open.is_empty() {
+        return None;
+    }
+    on_one_layout(eng, || {
+        let to = pos_of(eng, me.id)?;
+        open.iter()
+            .filter_map(|&x| pos_of(eng, x).filter(|&p| p < to).map(|p| (p, x)))
+            .max_by_key(|&(p, _)| p)
+            .map(|(_, x)| x)
+    })
+}
+
+/// An unsettled node among those whose definitions `r`, `me`'s last run,
+/// read, that moved a reader at its last commit (`Node::moves`): it may
+/// move them again. The page loop's rests do not count.
+pub(crate) fn open_definer_before(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
+    r.sources.iter().copied().find(|&by| {
+        eng.placed_node(by).is_some_and(|x| {
+            x.moves.load(Ordering::Acquire)
+                && matches!(x.state(), State::Dirty | State::Running | State::RunningDirty)
+                && x.unit == me.unit
+                && !x.held_panic.load(Ordering::Acquire)
+                && {
+                    let op = eng.op(x.op());
+                    !op.works_at_frontier() && !op.final_only()
+                }
+        })
+    })
+}
+
+/// The definer of the field a derived read of `r`, `me`'s last run, names
+/// now (`Step::Derived`), when it is to run (dirty or at work): an edit
+/// in the same evaluation may have changed what it defines. It is no
+/// source of the record where the name moved (the last run read the
+/// field the old name gave), and it moved nothing before it committed,
+/// so [`open_definer_before`] does not hold for it: re-asked by the move
+/// of the name's base, the reader ran on that field's old value and again
+/// once the edited definer committed (`derived.rs`,
+/// `a_moved_name_holding_the_old_value_leaves_the_reader_standing` at four
+/// threads, about 8 in 300).
+pub(crate) fn derived_target_open(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
+    on_one_layout(eng, || {
+        r.reads.iter().find_map(|rd| {
+            let ReadKind::Field { at, .. } = &rd.kind else {
+                return None;
+            };
+            let spec = derived_spec(eng, rd.path)?;
+            let (anchor, incl) = match *at {
+                Anchor::Me => (me.id, false),
+                Anchor::Before(n) => (n, false),
+                Anchor::AfterOwn(n) => (n, true),
+                _ => return None,
+            };
+            let g = derived_field_at(eng, spec, anchor, incl)?;
+            let by = reaching_at(eng, g, anchor, incl)?.by?;
+            let x = eng.placed_node(by)?;
+            (by != me.id
+                && matches!(x.state(), State::Dirty | State::Running | State::RunningDirty)
+                && x.unit == me.unit
+                && !x.held_panic.load(Ordering::Acquire)
+                && {
+                    let op = eng.op(x.op());
+                    !op.works_at_frontier() && !op.final_only()
+                })
+            .then_some(by)
+        })
+    })
 }
 
 /// [`hole_before`]'s answer as a read's value: the node's id.
@@ -941,7 +1503,7 @@ pub(crate) fn reader_answer(eng: &Engine, f: Field, r: &Reader) -> Option<ValueI
             return apply_path(eng, Some(eng.values().int(i64::from(d))), r.path);
         }
         let rc = reaching_at(eng, f, r.anchor, r.inclusive)?;
-        through(eng, rc, r.path)
+        through_at(eng, rc, r.path, r.anchor, r.inclusive)
     })
 }
 
@@ -1267,18 +1829,127 @@ fn last_visible(ls: &[(Pos, Def, (usize, u64))], target: &[u64]) -> Option<Def> 
 /// field index, the last one visible to `target`; else the environment.
 fn visible_before(eng: &Engine, f: Field, target: &[u64], lo: Pos) -> Reaching {
     let mut lo = lo;
-    while let Some(s) = last_def_before(eng, f, lo) {
+    // (in a walk, `WalkMemo`: the answers found for this field and these
+    // scopes from the segments passed over, each of which answers what
+    // the search found further back)
+    let t = WALK_MEMO.with_borrow_mut(|m| {
+        m.as_mut().map(|m| {
+            let k = u32::try_from(m.targets.len()).unwrap_or(u32::MAX);
+            *m.targets.entry(target.to_vec()).or_insert(k)
+        })
+    });
+    let mut passed: Vec<Pos> = Vec::new();
+    let found = loop {
+        if let Some(t) = t
+            && let Some(r) = WALK_MEMO.with_borrow(|m| m.as_ref().and_then(|m| m.answers.get(&(f, lo, t)).copied()))
+        {
+            break r;
+        }
+        let Some(s) = last_def_before(eng, f, lo) else {
+            break env_reaching(eng, f);
+        };
+        if t.is_some() {
+            passed.push(lo);
+        }
         let seg = eng.seg(s);
         let start = chain_start(eng, seg);
         {
             let inner = seg.inner.read();
-            if let Some(d) = last_visible(&levels(&eng.values, &inner, f, &start, None, false), target) {
-                return Reaching::of(&d);
+            let ls = survivors(eng, seg, &inner, f, &start);
+            if let Some(d) = ls.iter().rev().find(|x| visible(target, x.1)).map(|x| x.0) {
+                break Reaching::of(&d);
             }
         }
         lo = seg.lo;
+    };
+    if let Some(t) = t
+        && !passed.is_empty()
+    {
+        WALK_MEMO.with_borrow_mut(|m| {
+            if let Some(m) = m.as_mut() {
+                for p in passed {
+                    m.answers.insert((f, p, t), found);
+                }
+            }
+        });
     }
-    env_reaching(eng, f)
+    found
+}
+
+/// A walk's searches back (`WalkMemo`): the scopes open at the readers,
+/// numbered, and the answers by field, a segment's start and those
+/// scopes.
+#[derive(Default)]
+struct Searches {
+    targets: FxHashMap<Vec<u64>, u32>,
+    answers: FxHashMap<(Field, Pos, u32), Reaching>,
+}
+
+thread_local! {
+    static WALK_MEMO: std::cell::RefCell<Option<Searches>> = const { std::cell::RefCell::new(None) };
+}
+
+/// While it lives, the searches of this thread for the definition a
+/// reader sees before a segment's start keep their answers, by field, the
+/// segment's start and the scopes open at the reader, and a search that
+/// comes to a start one has passed takes its answer: a walk asking many
+/// readers of a field again, at the same nesting, searches back over the
+/// same segments once, not once per reader (biblatex at -j4, a bracket
+/// walk's 30 to 60 k readers each looked back ~100 segments, 3 M
+/// segments a walk, ~3 s, mc 80645). For a walk under no other's: the
+/// line is read as it stands when each answer is first found, as the
+/// readers it answers would read it then.
+pub(crate) struct WalkMemo(bool);
+
+impl WalkMemo {
+    pub(crate) fn new() -> WalkMemo {
+        let outer = WALK_MEMO.with_borrow(Option::is_some);
+        if !outer {
+            WALK_MEMO.with_borrow_mut(|m| *m = Some(Searches::default()));
+        }
+        WalkMemo(!outer)
+    }
+}
+
+impl Drop for WalkMemo {
+    fn drop(&mut self) {
+        if self.0 {
+            WALK_MEMO.with_borrow_mut(|m| *m = None);
+        }
+    }
+}
+
+/// The definitions of `f` in segment `seg` (`inner` its guard, `start`
+/// the scopes open at its start) that a reader after its end can see,
+/// with their scopes, in order: those whose scope is still open at its
+/// end (a scope open at a later reader was open all the way there). The
+/// last of them a reader sees is the last of all it sees, so a reader
+/// looking back past the segment looks at these alone; kept with the
+/// segment while neither it nor the scopes at its start change. Looked
+/// at whole each time, a segment's every definition of the field and its
+/// every bracket were gone over by each reader passing it: biblatex at
+/// -j4, readers going back 170 segments each, 10 M segments and 47 M
+/// brackets for one walk's 59 k readers, 10 s (mc 80642).
+fn survivors(eng: &Engine, seg: &Segment, inner: &Inner, f: Field, start: &Arc<[u64]>) -> Arc<[(Def, (usize, u64))]> {
+    let w = seg.inner.writes();
+    if let Some(e) = seg.surv.lock().get(&f)
+        && e.0 == w
+        && *e.1 == **start
+    {
+        return e.2.clone();
+    }
+    let mut end = start.to_vec();
+    for (_, (n, b)) in inner.brackets.iter() {
+        close(&mut end, b);
+        open(&mut end, *n, b);
+    }
+    let ls: Arc<[(Def, (usize, u64))]> = levels(&eng.values, inner, f, start, None, false)
+        .into_iter()
+        .filter(|x| visible(&end, x.2))
+        .map(|x| (x.1, x.2))
+        .collect();
+    seg.surv.lock().insert(f, (w, start.clone(), ls.clone()));
+    ls
 }
 
 /// The scope depth at `p`: scopes open just before the node there, its
@@ -1380,12 +2051,25 @@ pub(crate) const ALIAS: &str = "\u{10FFFF}alias";
 /// The field and node an alias definition's value names, if `x` is one.
 #[must_use]
 pub fn alias_of(v: &Values, x: ValueId) -> Option<(Field, NodeId)> {
+    alias_parts(v, x).map(|(g, at, _)| (g, at))
+}
+
+/// An alias definition's parts: the field, the node, and the integer
+/// added to that field's value there (`[ALIAS, g, at]` or, with an
+/// offset, `[ALIAS, g, at, c]`: a relation `f := input + c` whose input
+/// is an alias, [`rel_add`]).
+#[must_use]
+pub fn alias_parts(v: &Values, x: ValueId) -> Option<(Field, NodeId, i64)> {
     v.with_list(x, |xs| {
-        if xs.len() != 3 || !v.with_str(xs[0], |s| s == ALIAS).unwrap_or(false) {
+        if !(xs.len() == 3 || xs.len() == 4) || !v.with_str(xs[0], |s| s == ALIAS).unwrap_or(false) {
             return None;
         }
         let n = v.as_int(xs[2])?;
-        Some((Field(xs[1]), NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes()))))
+        let c = match xs.get(3) {
+            Some(&c) => v.as_int(c)?,
+            None => 0,
+        };
+        Some((Field(xs[1]), NodeId::from_raw(u64::from_ne_bytes(n.to_ne_bytes())), c))
     })
     .flatten()
 }
@@ -1397,24 +2081,106 @@ pub fn alias_of(v: &Values, x: ValueId) -> Option<(Field, NodeId)> {
 /// [`alias_of`].
 #[must_use]
 pub fn alias_value(v: &Values, g: Field, at: NodeId) -> ValueId {
-    v.list(vec![
-        v.str(ALIAS),
-        g.0,
-        v.int(i64::from_ne_bytes(at.raw().to_ne_bytes())),
-    ])
+    alias_value_plus(v, g, at, 0)
 }
 
-/// `x` with its alias definitions followed (`Ctx::define_alias`), as a
-/// read before each alias's node gives them, unrecorded: what a relation
-/// on an aliased field adds to.
+/// [`alias_value`] plus `c`: "the value of `g` reaching `at`, plus `c`"
+/// (an integer's), the plain alias where `c` is 0.
+#[must_use]
+pub fn alias_value_plus(v: &Values, g: Field, at: NodeId, c: i64) -> ValueId {
+    let mut xs = vec![v.str(ALIAS), g.0, v.int(i64::from_ne_bytes(at.raw().to_ne_bytes()))];
+    if c != 0 {
+        xs.push(v.int(c));
+    }
+    v.list(xs)
+}
+
+/// An alias's target value `y` with its offset `c` added (`y` an integer,
+/// absent: 0, as a read of an integer gives it).
+#[must_use]
+pub fn alias_target_plus(v: &Values, y: Option<ValueId>, c: i64) -> Option<ValueId> {
+    if c == 0 {
+        return y;
+    }
+    Some(v.int(y.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c)))
+}
+
+/// The value of a relation `f := input + c` (`Ctx::define_rel`) where the
+/// input's definition holds `input`, nothing followed (under a segment's
+/// lock): an integer plus `c`; an alias plus `c` where the input is an
+/// alias, which is exact (its readers follow it) and which
+/// [`rel_value`] makes an integer again where the alias is one of `f`
+/// itself.
+pub(crate) fn rel_add(v: &Values, input: Option<ValueId>, c: i64) -> ValueId {
+    if let Some((g, at, k)) = input.and_then(|x| alias_parts(v, x)) {
+        return alias_value_plus(v, g, at, k.wrapping_add(c));
+    }
+    v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c))
+}
+
+/// The value of a relation `f := input + c` from `input`, an alias of
+/// `f` itself followed to the value it names (a counter set back to its
+/// own value as of an earlier node, then stepped: beamer's
+/// `\beamer@restorecounter`): the integer, which the walk of a change of
+/// `f` before that node puts right as it passes the alias's definition
+/// (`commit::reask_from`). An alias of another field stays one plus `c`
+/// ([`rel_add`]): no walk of `f` passes a change of that field, and its
+/// readers follow it to the target, read where it moves. An append
+/// (`Rel::Append`) is the client's append of the input with every alias
+/// followed ([`through_aliases`]).
+pub(crate) fn rel_value(eng: &Engine, f: Field, mut input: Option<ValueId>, c: Rel) -> ValueId {
+    let v = &eng.values;
+    let mut c = match c {
+        Rel::Add(c) => c,
+        Rel::Append(_) => return eng.rel_apply(c, through_aliases(eng, input)),
+    };
+    // (each step goes to a definition before the last: at most the
+    // field's definitions before the relation)
+    loop {
+        match input.and_then(|x| alias_parts(v, x)) {
+            Some((g, at, k)) if g == f => {
+                input = reaching_at(eng, f, at, false).and_then(|r| r.value);
+                c = c.wrapping_add(k);
+            }
+            _ => return rel_add(v, input, c),
+        }
+    }
+}
+
+/// The value of relation `c` where its input's definition holds `input`,
+/// nothing followed (under a segment's lock): [`rel_add`] for
+/// `Rel::Add`; for `Rel::Append` the client's append of `input` as it
+/// is, which [`rel_value`] puts right through the aliases it holds.
+pub(crate) fn rel_plain(eng: &Engine, c: Rel, input: Option<ValueId>) -> ValueId {
+    match c {
+        Rel::Add(k) => rel_add(&eng.values, input, k),
+        Rel::Append(_) => eng.rel_apply(c, input),
+    }
+}
+
+/// `x` with its alias definitions followed, as a read before each alias's
+/// node gives them, unrecorded, an alias's offset carried: what an append
+/// relation on an aliased field appends to ([`rel_value`]). An append's
+/// value cannot be an alias plus something, as an integer's is
+/// ([`rel_add`]), so it is computed through them.
 pub(crate) fn through_aliases(eng: &Engine, mut x: Option<ValueId>) -> Option<ValueId> {
+    let v = &eng.values;
     for _ in 0..32 {
-        let Some((g, at)) = x.and_then(|y| alias_of(&eng.values, y)) else {
+        let Some((g, at, c)) = x.and_then(|y| alias_parts(v, y)) else {
             return x;
         };
-        x = reaching_at(eng, g, at, false).and_then(|r| r.value);
+        let y = reaching_at(eng, g, at, false).and_then(|r| r.value);
+        x = match y.and_then(|z| alias_parts(v, z)) {
+            Some((h, hat, k)) => Some(alias_value_plus(v, h, hat, k.wrapping_add(c))),
+            None => alias_target_plus(v, y, c),
+        };
     }
     x
+}
+
+/// Whether `x` is an alias of field `f` itself ([`rel_value`]).
+pub(crate) fn alias_of_self(v: &Values, f: Field, x: ValueId) -> bool {
+    alias_parts(v, x).is_some_and(|(g, _, _)| g == f)
 }
 
 #[cfg(test)]
@@ -1428,6 +2194,53 @@ mod tests {
     use crate::engine::Engine;
     use crate::node::ReadKind;
     use crate::values::{Field, ValueId};
+
+    /// A long association list answers `Key` and `Has` through its index
+    /// as passing over it answers: the first entry a key heads, an entry
+    /// of the key alone (no value), entries that are no lists or empty.
+    #[test]
+    fn an_indexed_association_list_answers_as_passed_over() {
+        use crate::api::Step;
+        let eng = Engine::new();
+        let v = eng.values();
+        let mut xs = Vec::new();
+        for i in 0..100 {
+            let k = v.str(&format!("k{}", i % 70));
+            xs.push(v.list(vec![k, v.int(i)]));
+            if i % 13 == 0 {
+                xs.push(v.int(i));
+                xs.push(v.list(vec![]));
+                xs.push(v.list(vec![v.str(&format!("alone{i}"))]));
+            }
+        }
+        let x = v.list(xs.clone());
+        for name in (0..80)
+            .map(|i| format!("k{i}"))
+            .chain((0..100).map(|i| format!("alone{i}")))
+        {
+            let k = v.str(&name);
+            let scan_key = v
+                .with_list(x, |es| {
+                    es.iter()
+                        .find_map(|&e| {
+                            v.with_list(e, |kv| (kv.first() == Some(&k)).then(|| kv.get(1).copied()))
+                                .flatten()
+                        })
+                        .flatten()
+                })
+                .flatten();
+            let scan_has = v.with_list(x, |es| {
+                es.iter()
+                    .any(|&e| v.with_list(e, |kv| kv.first() == Some(&k)).unwrap_or(false))
+            });
+            assert_eq!(super::step(&eng, Some(x), Step::Key(k)), scan_key, "{name}");
+            assert_eq!(
+                super::step(&eng, Some(x), Step::Has(k)),
+                scan_has.map(|b| v.bool(b)),
+                "{name}"
+            );
+        }
+    }
 
     /// `[x]`: contributes x to the field `acc`.
     struct Contrib(Field);
@@ -1561,5 +2374,49 @@ mod tests {
             retries, 0,
             "{retries} of {reads} fold reads computed again for {moves} moves elsewhere"
         );
+    }
+
+    /// `[f]`: a text node that may define `f` only; defines it.
+    struct MayDef;
+
+    impl Operation for MayDef {
+        fn name(&self) -> &'static str {
+            "may_def"
+        }
+
+        fn text(&self) -> bool {
+            true
+        }
+
+        fn may_define(&self, args: &[ValueId], _: &crate::values::Values) -> crate::api::MayDefine {
+            crate::api::MayDefine::Names(vec![Field(args[0])])
+        }
+
+        fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            let f = Field(cx.args()[0]);
+            cx.define(f, ValueId::UNIT);
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// The holes before a node that may define what it read: the first
+    /// whose operation says it may define one of the fields, past those
+    /// that may not, with the first hole of all; none once all have run.
+    #[test]
+    fn a_hole_before_that_may_define_a_field_is_found_past_those_that_may_not() {
+        let e = Engine::new();
+        let op = e.register(Arc::new(MayDef));
+        let v = e.values();
+        let (x, y, z) = (v.field("x"), v.field("y"), v.field("z"));
+        let u = e.new_unit();
+        let h1 = e.push(u, op, vec![y.0]);
+        let h2 = e.push(u, op, vec![x.0]);
+        let w = e.push(u, op, vec![z.0]);
+        let me = e.node(w).clone();
+        assert_eq!(super::hole_before_defining(&e, &me, &[x]), (Some(h2), Some(h1)));
+        assert_eq!(super::hole_before_defining(&e, &me, &[z, y]), (Some(h1), Some(h1)));
+        assert_eq!(super::hole_before_defining(&e, &me, &[z]), (None, Some(h1)));
+        e.evaluate(1).unwrap();
+        assert_eq!(super::hole_before_defining(&e, &me, &[x]), (None, None));
     }
 }

@@ -4,18 +4,27 @@
 //! line whose list a page's writer need not look into stands there as a
 //! box whose list is a stand-in (`[T_SEALED, piece, k, fonts, head]`).
 //! The page builder and the routine measure it, and nothing in the
-//! finisher's run looks into it. Where a value leaves the run (a
-//! definition, a contribution, the routine's give-back, a box opened), a
-//! stand-in is replaced by the line's own glue setting and list, read
-//! then ([`Run::unseal`]). The page itself leaves as its shape (the
-//! `pages` entry, the page's key): its writer (`crate::pdfout::PdfPage`)
-//! and the link read the lines from the pieces' units
+//! finisher's run looks into it. A definition keeps it sealed (a box
+//! register, the routine's give-back): the run that reads the register
+//! measures the line as the finisher did. Where a line's list is looked
+//! into (a contribution leaving the run, a box opened by `\unvbox` in
+//! any run, a form), the stand-in is replaced by the line's own glue
+//! setting and list, read then from its piece's unit, the finisher's
+//! window's or, for a line a register carried from another finisher,
+//! the piece's own ([`Run::unseal`], [`Run::unseal_open`]). The page
+//! itself leaves as its shape (the `pages` entry, the page's key): its
+//! writer (`crate::pdfout::PdfPage`, `crate::assemble`'s DVI pages) and
+//! the link read the lines from the pieces' units, by the window's
+//! places and, for lines from other finishers' pieces (given back,
+//! carried in a register; a page with no window of its own), by piece
 //! ([`crate::nodes::fill_sealed`]). A word that keeps its line's
-//! dimensions changes the writer's input, not the finisher's.
+//! dimensions changes the writer's input, not the finishers'.
 //!
 //! Example: a page of lines A, B, C; a word edited in B. The finisher's
 //! reads (the window's shapes) hold; the page's PDF side, which reads
-//! B's unit, and the link run again.
+//! B's unit, and the link run again. LaTeX passes its last page through
+//! a box register at `\end{document}`: the register holds the lines
+//! sealed, so the next finisher, which reads it, stands as well.
 
 use phitex_defuse::{Step, ValueId, View};
 
@@ -33,6 +42,9 @@ pub(crate) type Places = (Option<i64>, i64, Vec<(i64, u32)>);
 pub(crate) struct Sealing {
     units: crate::FxHashMap<i64, (View, u32)>,
     lines: crate::FxHashMap<(i64, u32), View>,
+    /// The units of pieces outside the window that lines a definition
+    /// carried here were read from (by piece; `None`: none found).
+    foreign: crate::FxHashMap<i64, Option<View>>,
     /// The window the units were read in: after which node (none: the
     /// unit's start), to which piece (raw ids).
     window: Option<(Option<i64>, i64)>,
@@ -75,11 +87,43 @@ impl Run<'_, '_> {
         if let Some(&l) = self.sealed.lines.get(&(s.piece, s.k)) {
             return Some(l);
         }
-        let (items, _) = *self.sealed.units.get(&s.piece)?;
+        let items = match self.sealed.units.get(&s.piece) {
+            Some(&(items, _)) => items,
+            None => self.foreign_unit(s.piece)?,
+        };
         let item = self.cx.at(items, Step::Index(s.k))?;
         let l = self.cx.at(item, Step::Index(1))?;
         self.sealed.lines.insert((s.piece, s.k), l);
         Some(l)
+    }
+
+    /// Piece `piece`'s unit's items, a piece outside this run's window
+    /// (a line a definition carried here, a box register's): the last of
+    /// the units up to the piece, read by itself
+    /// ([`crate::pages::unit_items_of`]).
+    fn foreign_unit(&mut self, piece: i64) -> Option<View> {
+        if let Some(&u) = self.sealed.foreign.get(&piece) {
+            return u;
+        }
+        let v = self.v;
+        let w = self
+            .cx
+            .view_through(v.field(super::PITEMS), None, super::node_of(piece))
+            .ok()?;
+        let u = self
+            .cx
+            .at(w, Step::Last)
+            .filter(|&u| self.cx.get(u, Step::Index(0)).and_then(|x| v.as_int(x)) == Some(piece))
+            .and_then(|u| self.cx.at(u, Step::Index(2)));
+        self.sealed.foreign.insert(piece, u);
+        u
+    }
+
+    /// [`Self::unseal`] in any run: a box opened (`\unvbox`) whose lines
+    /// a definition carried, sealed, from a finisher.
+    pub(crate) fn unseal_open(&mut self, x: ValueId) -> ValueId {
+        let mut memo = crate::FxHashMap::default();
+        self.unseal_in(x, &mut memo)
     }
 
     /// `x` with each sealed line in it given its glue setting and list

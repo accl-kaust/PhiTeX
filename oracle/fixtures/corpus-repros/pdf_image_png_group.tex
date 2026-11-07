@@ -1,0 +1,12 @@
+% a PNG with an alpha channel: reading it numbers the document's
+% transparency group, which its write writes into an object stream; an
+% object number TeX reads after the page that shows it counts the
+% image's own objects (its soft mask), not that stream (beautynote,
+% elegantnote-en: /pgfsmask76 for pdfTeX's 75)
+\documentclass{article}
+\usepackage{graphicx}
+\begin{document}
+\includegraphics{png-rgba.png}
+\newpage
+\immediate\pdfobj{<< /After 1 >>}After the image: object \the\pdflastobj.
+\end{document}

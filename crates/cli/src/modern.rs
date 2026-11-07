@@ -73,7 +73,10 @@ fn after_help() -> String {
   Without a file, `phitex.toml` (here or above) names it:
       main = \"paper.tex\"   engine = \"pdflatex\"   output-dir = \"out\"
       copy-pdf = true   (or a directory, relative to phitex.toml's)
-      synctex = false   shell-escape = true   editor = \"code\"   viewer = \"zathura\"
+      synctex = false
+      editor = \"code\"   viewer = \"zathura\"   shell-escape = true
+                          (yours only, `phitex config KEY VALUE`: a project's are ignored,
+                          so that a folder someone sent runs nothing it names)
       cache-limit = \"4GB\"   (0: no cache; or PHITEX_CACHE_LIMIT)
       update-check = true   (yours only: a daily check for a newer release)
       files = \"shelf\"   (TeX's files from Shelf's packs, kept in the cache's shelf/;
@@ -156,14 +159,15 @@ enum Sub {
     ///
     /// Its signature checked, for an install made by phitex.org/install.sh.
     Upgrade,
-    /// Change one of your settings (phitex config update-check on)
+    /// Your settings: all of them (phitex config), one (phitex config
+    /// synctex), or change one (phitex config update-check on)
     ///
     /// Written into ~/.config/phitex/phitex.toml, its other lines kept.
     Config {
         #[arg(value_name = "KEY")]
-        key: String,
+        key: Option<String>,
         #[arg(value_name = "VALUE")]
-        value: String,
+        value: Option<String>,
     },
     /// Remove a build's files (--all: the whole cache)
     Clean {
@@ -262,9 +266,15 @@ struct Opts {
     /// `viewer`, zathura or the like, on the output)
     #[arg(long, global = true)]
     open: bool,
-    /// watch: no live viewer
+    /// watch: no live viewer (the PDF and its files are then written, as by --write)
     #[arg(long, global = true, hide_short_help = true)]
     no_view: bool,
+    /// watch: write the PDF (with its .synctex.gz), the log and the aux
+    /// files into the folder after each build, as build does; without it
+    /// a watch writes nothing there (the pages are in the viewer;
+    /// `watch-write = true` in phitex.toml always writes)
+    #[arg(long, global = true, hide_short_help = true)]
+    write: bool,
     /// watch: the diagnostics at their places after every edit too (the
     /// viewer asks for them; else an edit reports the engine's own only)
     #[arg(long, global = true, hide_short_help = true)]
@@ -365,6 +375,8 @@ pub struct Options {
     pub shell_escape: bool,
     pub open: bool,
     pub view: bool,
+    /// watch: the files written into the folder (`--write`).
+    pub write: bool,
     pub diagnostics: bool,
     /// watch: every edit writes the exact PDF file (`--exact`).
     pub exact_file: bool,
@@ -382,8 +394,8 @@ pub struct Options {
     /// `--shelf`, or the editor's `files` setting (none: `phitex.toml`'s,
     /// else TeX Live).
     pub files: Option<tex::Files>,
-    /// `config`'s key and value.
-    pub set: Option<(String, String)>,
+    /// `config`'s key and value (none: list them; a key alone: show it).
+    pub set: Option<(Option<String>, Option<String>)>,
     /// `--report` (true: `=full`).
     pub report: Option<bool>,
 }
@@ -426,6 +438,7 @@ impl Cli {
             shell_escape: o.shell_escape,
             open: o.open,
             view: !o.no_view,
+            write: o.write,
             diagnostics: o.diagnostics,
             exact_file: o.exact || o.exact_pdf,
             idle: Duration::from_millis(o.idle.unwrap_or(300)),
@@ -474,6 +487,12 @@ pub struct Target {
     /// Where to copy the PDF after a successful build.
     pub copy_pdf: Option<PathBuf>,
     pub synctex: bool,
+    /// Whether `synctex` was asked for or turned off (`--synctex`,
+    /// `--no-synctex`, `synctex =`): else a watch that writes the PDF
+    /// writes its `.synctex.gz` with it.
+    pub synctex_said: bool,
+    /// watch: write the files into the folder (`watch-write`).
+    pub watch_write: bool,
     /// `\write18` runs commands.
     pub shell_escape: bool,
     /// watch: the editor a double-click opens (`--editor`, `phitex.toml`).
@@ -483,6 +502,9 @@ pub struct Target {
     pub viewer: Option<String>,
     /// The cache's limit (`cache-limit`; none: the default).
     pub cache_limit: Option<u64>,
+    /// The engine's threads (`threads` in the user's file; none or 0: one
+    /// per core), under `-j`.
+    pub threads: Option<usize>,
     /// Where TeX's files come from (`--shelf`, `files`; TeX Live by
     /// default).
     pub files: tex::Files,
@@ -517,8 +539,9 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         (Some(_), Some((root, cfg))) if root == cwd => (root, cfg, true),
         _ => (cwd.clone(), config::Config::default(), false),
     };
-    // (the project's settings over the user's, key by key)
-    let cfg = cfg.over(user);
+    // (the project's settings over the user's, key by key; but anything that
+    // runs is the user's to allow: a project someone sent can't ask for it)
+    let cfg = config::without_permissions(cfg, &root).over(user);
     let copy_pdf = match (&o.copy_pdf, &cfg.copy_pdf) {
         (Some(c), _) => copy_dir(c, &cwd, &cwd),
         (None, Some(c)) => copy_dir(c, &cwd, &root),
@@ -645,10 +668,13 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         // (off unless asked for: the pages' glyph origins it is made
         // from cost the build a little)
         synctex: o.synctex.or(cfg.synctex).unwrap_or(false),
+        synctex_said: o.synctex.or(cfg.synctex).is_some(),
+        watch_write: cfg.watch_write.unwrap_or(false),
         shell_escape: o.shell_escape || cfg.shell_escape.unwrap_or(false),
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,
         cache_limit: cfg.cache_limit,
+        threads: cfg.threads.filter(|&n| n > 0),
         files,
         warnings: cfg.warnings,
     })
@@ -677,7 +703,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
             .as_ref()
             .map_or_else(|| PathBuf::from("."), PathBuf::from),
         // (batch mode, as the oracles run: the CLI shows the errors itself)
-        threads: o.threads,
+        threads: o.threads.or(t.threads),
         spec: o.spec.clone(),
         wait_long: o.wait_long,
         node_records: o.node_records,
@@ -917,6 +943,9 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     if !o.lsp && !o.json && !o.quiet {
         crate::upgrade::check(ui);
     }
+    if r.out.errors.is_empty() {
+        crate::star::built(Path::new(&t.file), ui, o.lsp);
+    }
     let code = i32::from(!r.out.errors.is_empty());
     // (the process exits next: the session's engine and tables, hundreds
     // of megabytes, are left to it instead of freed one by one)
@@ -1077,6 +1106,17 @@ pub fn main(args: &[String]) -> ! {
     }
     if command == Command::Config {
         let (k, v) = o.set.clone().unwrap_or_default();
+        let (Some(k), Some(v)) = (k.clone(), v) else {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            match crate::config::listing(k.as_deref(), &cwd, ui.st) {
+                Ok(lines) => lines.iter().for_each(|l| ui.line(l)),
+                Err(e) => {
+                    ui.error(&e);
+                    std::process::exit(crate::EXIT_FAILED);
+                }
+            }
+            std::process::exit(0);
+        };
         match crate::config::set_user(&k, &v) {
             Ok(p) => ui.line(&format!("{k} = {v} in {}", crate::cache::home_relative(&p))),
             Err(e) => {

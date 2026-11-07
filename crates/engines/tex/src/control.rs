@@ -26,8 +26,12 @@ const LAZY_OPEN: i64 = 3;
 /// alone, through a path into its lines ([`crate::tools::lines_field`]),
 /// so that the run depends on the lines it read, not the whole text.
 const LAZY_LINES: i64 = 4;
-pub(crate) const SHIP_OUT_FLAG: i64 = BOX_FLAG + 512;
-pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 513;
+/// e-TeX's box contexts (etex.ch, §1071): `\setbox` of its 32768
+/// registers, local below `global_box_flag`, global from it, then
+/// `\shipout` and the leaders.
+pub(crate) const GLOBAL_BOX_FLAG: i64 = BOX_FLAG + 32768;
+pub(crate) const SHIP_OUT_FLAG: i64 = BOX_FLAG + 65536;
+pub(crate) const LEADER_FLAG: i64 = BOX_FLAG + 65537;
 
 /// `PHITEX_HEARTBEAT_FROM`: the command count the per-command trace starts at.
 static HEARTBEAT_FROM: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -41,7 +45,6 @@ pub(crate) struct Watchdog {
     stamp: u64,
     at: Option<std::time::Instant>,
     cmds_at: u64,
-    ticks: u64,
 }
 
 impl Run<'_, '_> {
@@ -52,6 +55,7 @@ impl Run<'_, '_> {
     pub(crate) fn command(&mut self) -> R<()> {
         loop {
             phitex_pdf::phase::bump(23);
+            self.st.compact_macros();
             // (spec-final §2.4: a run-local count and one branch; the
             // heartbeat's own work every `HB_BATCH` commands)
             self.cmds += 1;
@@ -71,7 +75,13 @@ impl Run<'_, '_> {
                 self.watchdog()?;
             }
             self.no_pull = true;
+            self.cmd_fetch = true;
+            // (a derived name's symbol is expanded through its name,
+            // [`Run::d_ok`])
+            self.d_ok = true;
             let got = self.get_next();
+            self.d_ok = false;
+            self.cmd_fetch = false;
             self.no_pull = false;
             // (the command loop's one check of the token path's halt)
             self.ck()?;
@@ -81,6 +91,11 @@ impl Run<'_, '_> {
             if crate::exec::obs_flag!("PHITEX_CMD_TRACE") {
                 self.cmd_trace();
             }
+            // (`\begin{tikzpicture}`: the picture as a child node of this
+            // run, its output taken here, `crate::pic`)
+            if self.pic_here() && self.pic_begin()? {
+                return self.ck();
+            }
             if self.cur.cmd > cmd::MAX_COMMAND {
                 if self.cur.cmd >= cmd::END_TEMPLATE
                     && self.cur.cmd != cmd::DONT_EXPAND
@@ -88,6 +103,7 @@ impl Run<'_, '_> {
                 {
                     return Ok(());
                 }
+                self.command_call = self.cur.cmd == cmd::CALL;
                 self.expand();
                 self.ck()?;
                 if self.expansion_goes_on() {
@@ -157,10 +173,15 @@ impl Run<'_, '_> {
 
     /// The run's progress, every [`Run::HB_BATCH`] commands (always: a
     /// clock read, a walk of the input's levels and a few compares): a run
-    /// that reads no new line of its input (a document line, or a file's
-    /// read here) for `Limits::stall`, that runs 20 million commands
+    /// of an edit's evaluation that reads no new line of its input (a
+    /// document line, or a file's read here) for the edit's bound
+    /// ([`crate::Build::set_stuck_after`], from the cold build's time; a
+    /// cold build has none: from inside a run, a long computation that
+    /// reads no input, lisp-on-tex's div2 for minutes, cannot be told from
+    /// a loop, and pdflatex stops neither: the build's time limit does),
+    /// that runs 20 million commands
     /// without an assignment or a new line, or past `Limits::memory_bytes`
-    /// resident (looked at every 64 checks), or past the build's time
+    /// of its own values, or past the build's time
     /// limit (`Limits::time`), is stuck, and the evaluation
     /// ends with `EvalError::Stuck` naming it and where it is. A
     /// one-letter edit of amsldoc left a page's run going for minutes at
@@ -186,7 +207,6 @@ impl Run<'_, '_> {
                 stamp,
                 at: Some(now),
                 cmds_at: cmds,
-                ticks: 0,
             };
             return Ok(());
         };
@@ -201,8 +221,7 @@ impl Run<'_, '_> {
             w.stamp = stamp;
             w.cmds_at = cmds;
         }
-        w.ticks += 1;
-        let (still, ticks) = (cmds - w.cmds_at, w.ticks);
+        let still = cmds - w.cmds_at;
         let since = now.duration_since(at);
         let why = if let Some(t) = lim.time
             && self.cx.elapsed().is_some_and(|e| e > t)
@@ -214,7 +233,12 @@ impl Run<'_, '_> {
                 "the build passed its time limit of {} s",
                 t.as_secs()
             ))
-        } else if lim.stall.is_some_and(|s| since >= s) {
+        } else if let ms @ 1.. = self
+            .ops
+            .edit_stall_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && since >= std::time::Duration::from_millis(ms)
+        {
             Some(format!(
                 "it read no new line of its input for {} s",
                 since.as_secs()
@@ -224,15 +248,19 @@ impl Run<'_, '_> {
                 "it ran {} million commands without an assignment or a new line of input, an endless loop",
                 still / 1_000_000
             ))
-        } else if ticks % 64 == 0
-            && let Some(m) = lim.memory_bytes
-            && crate::api::rss_kb() << 10 > m
+        } else if let Some(m) = lim.memory_bytes
+            && self.cx.values().payload_bytes() > m
         {
+            // (the build's own values, not the process's resident memory:
+            // a test binary's builds share one process, and a build in a
+            // 32 GB job was stopped "stuck" at -j1 by its neighbours'
+            // 24 GB, its PDF empty: latexmk_corpus_protrude_koma,
+            // latexmk_ams_index, latexmk_minted, accl 22597)
             #[allow(clippy::cast_precision_loss, reason = "a display of bytes")]
             let gb = |b: u64| b as f64 / f64::from(1u32 << 30);
             Some(format!(
-                "the process holds {:.1} GB, past the limit of {:.1} GB",
-                gb(crate::api::rss_kb() << 10),
+                "its values hold {:.1} GB, past the limit of {:.1} GB",
+                gb(self.cx.values().payload_bytes()),
                 gb(m)
             ))
         } else {
@@ -454,6 +482,25 @@ impl Run<'_, '_> {
         // (§1210's prefixed commands are the same in every mode, and
         // `\relax` does nothing: no mode read)
         let c = self.cur.cmd;
+        // (code entries waiting: only the commands that can see no more of
+        // the table than they ask for leave them waiting)
+        if self.st.bulk_waits()
+            && !matches!(
+                c,
+                cmd::RELAX
+                    | cmd::DEF
+                    | cmd::LET
+                    | cmd::ASSIGN_INT
+                    | cmd::REGISTER
+                    | cmd::ADVANCE
+                    | cmd::DEF_CODE
+                    | cmd::CASE_SHIFT
+                    | cmd::END_GROUP
+                    | cmd::RIGHT_BRACE
+            )
+        {
+            self.flush_bulk_codes();
+        }
         // (XeTeX's `othercases` after a run of characters:
         // `check_for_post_char_toks(big_switch)`)
         if self.xe
@@ -534,6 +581,12 @@ impl Run<'_, '_> {
                         if c <= cmd::MAX_COMMAND {
                             break;
                         }
+                        // (a picture: a child of this run, the command
+                        // its expansion's first command would end the
+                        // blanks at, §1045)
+                        if self.pic_here() && self.pic_begin()? {
+                            return self.ck();
+                        }
                         if (cmd::CALL..cmd::END_TEMPLATE).contains(&c) {
                             self.macro_call();
                             self.ck()?;
@@ -546,7 +599,26 @@ impl Run<'_, '_> {
                         self.ck()?;
                     }
                 } else {
-                    self.skip_blanks_x()?;
+                    // (a picture's `\begin`: a child of this run, else
+                    // expanded and the blanks after it skipped, as
+                    // `get_x_token` would)
+                    loop {
+                        self.pic_stop = true;
+                        self.get_x_token();
+                        self.pic_stop = false;
+                        self.ck()?;
+                        if self.cur.cmd != cmd::SPACER {
+                            break;
+                        }
+                    }
+                    if self.pic_here() {
+                        if self.pic_begin()? {
+                            return self.ck();
+                        }
+                        self.macro_call();
+                        self.ck()?;
+                        self.skip_blanks_x()?;
+                    }
                 }
                 // (a run that read past its text: the token found ends
                 // the command, put back, so that at the next command's
@@ -678,12 +750,14 @@ impl Run<'_, '_> {
                 }
             }
             cmd::HALIGN | cmd::VALIGN => {
+                // §1130: `vmode+halign, hmode+valign: init_align`; the
+                // other mode starts or ends a paragraph (§1090, §1094)
                 if c == cmd::VALIGN && v {
                     self.back_cur();
                     self.new_graf(&md, true)?;
                 } else if c == cmd::HALIGN && h {
                     self.head_for_vmode(&md);
-                } else if c == cmd::HALIGN && v {
+                } else if (c == cmd::HALIGN && v) || (c == cmd::VALIGN && h) {
                     self.init_align(&md)?;
                 } else if c == cmd::HALIGN && md.m == 203 {
                     // §1130: `mmode+halign`: privileged (a display), and
@@ -697,8 +771,8 @@ impl Run<'_, '_> {
                     // §1130 `privileged` (§1051)
                     self.report_illegal_case(&md)?;
                 } else {
-                    // REDUCE-GAP: \valign
-                    self.log("error", "this alignment is not supported")?;
+                    // §1046: `mmode+valign`: insert_dollar_sign
+                    self.insert_dollar_sign()?;
                 }
             }
             cmd::INSERT => self.begin_insert_or_adjust(&md, false)?,
@@ -1078,7 +1152,7 @@ impl Run<'_, '_> {
                 let n = self.scan_eight_bit_int()?;
                 self.scan_optional_equals()?;
                 let md = self.mode()?;
-                let ctx = BOX_FLAG + i64::from(n) + if global { 256 } else { 0 };
+                let ctx = if global { GLOBAL_BOX_FLAG } else { BOX_FLAG } + i64::from(n);
                 self.scan_box(&md, ctx)?;
             }
             cmd::SET_AUX => {
@@ -1104,7 +1178,7 @@ impl Run<'_, '_> {
                 self.scan_optional_equals()?;
                 let n = self.scan_int()?;
                 if n >= 0 {
-                    self.set(&format!("pg:{}", md.vlid), v.int(i64::from(n)), true);
+                    self.set_prev_graf(&md, n);
                 }
             }
             cmd::SET_PAGE_DIMEN => {
@@ -1229,6 +1303,10 @@ impl Run<'_, '_> {
         }
         let e = ch >= 2;
         let p = self.get_r_token()?;
+        // (`\\xdef\\x{\\x...}`: an append, `Run::append_def`)
+        if e && global && a % 4 == 0 && !protected && self.append_def(p)? {
+            return Ok(());
+        }
         let was = e.then(|| self.lines_sink_begin(Sink::Def));
         let (params, body) = self.scan_toks(true, e);
         let hit = was.is_some_and(|w| self.lines_sink_end(w));
@@ -1324,12 +1402,21 @@ impl Run<'_, '_> {
 
     /// `get_r_token` (§1215).
     fn get_r_token(&mut self) -> R<Tok> {
+        // (the name to define: its meaning is not read, [`Run::interp_first`]:
+        // `\\let\\l@ngrel@x` in every `\\providecommand` written to the `.aux`
+        // made the file one read back as its text)
+        let was = std::mem::replace(&mut self.defining, true);
         loop {
-            self.get_name_token()?;
+            let r = self.get_name_token();
+            if r.is_err() {
+                self.defining = was;
+            }
+            r?;
             if self.cur.tok != crate::val::space_tok() {
                 break;
             }
         }
+        self.defining = was;
         if !self.cur.is_cs() {
             // "Missing control sequence inserted": \inaccessible
             self.back_cur();
@@ -1390,8 +1477,12 @@ impl Run<'_, '_> {
         // step of the run's map, nothing read, published as a relation,
         // `State::add`)
         let mut pre = None;
-        if p == 0 && q == cmd::ADVANCE && self.map_ok(l, global) {
+        if p == 0 && q == cmd::ADVANCE && self.step_ok(l, global) {
             let x = self.scan_int()?;
+            // (steps on both sides of a candidate: the value they make
+            // there is what reached the run plus the steps before it, kept
+            // unread, `State::add`; the routine of a page firing there
+            // reads it so, `crate::pages::before_plus`)
             if self.st.add(self.v, l, x, global) {
                 self.muts += 1;
                 return Ok(());
@@ -1569,7 +1660,7 @@ impl Run<'_, '_> {
             m.push_str(" scaled ");
             m.push_str(&(-s).to_string());
         }
-        m.push_str(if self.file(&format!("{name}.tfm"))?.is_some() {
+        m.push_str(if self.font_file(&format!("{name}.tfm"))?.is_some() {
             " not loadable: Bad metric (TFM) file"
         } else if name.len() > 255 {
             " not loadable: Metric (TFM) file name too long"
@@ -1584,7 +1675,7 @@ impl Run<'_, '_> {
     /// had.
     pub(crate) fn tfm_font_info(&mut self, name: &str, s: i32) -> R<Option<i64>> {
         let key = format!("{name}.tfm");
-        let Some(file) = self.file(&key)? else {
+        let Some(file) = self.font_file(&key)? else {
             return Ok(None);
         };
         let v = self.v;
@@ -1697,8 +1788,39 @@ impl Run<'_, '_> {
         let old = self.get_loc(crate::fields::cell::PATTERNS)?;
         let mut all = old.map(|x| list_of(v, x)).unwrap_or_default();
         all.push(v.list(vec![v.int(i64::from(lang)), v.str("p"), v.list(words)]));
+        // (e-TeX: `\savinghyphcodes` positive, the language's hyphenation
+        // codes are the `\lccode`s now, used in its words' place of the
+        // `\lccode`s in force where they are hyphenated: etex.ch's
+        // `store_hyph_codes`)
+        let saving = self.quantity_loc(cmd::ASSIGN_INT, crate::etex::SAVING_HYPH_CODES);
+        if self.int_loc(saving)? > 0 {
+            let mut codes = Vec::with_capacity(256);
+            for c in 0..256u32 {
+                codes.push(v.int(i64::from(self.code(0, c)?)));
+            }
+            all.push(v.list(vec![v.int(i64::from(lang)), v.str("c"), v.list(codes)]));
+        }
         self.set_cell(crate::fields::cell::PATTERNS, v.list(all), true);
         Ok(())
+    }
+
+    /// The hyphenation codes e-TeX saved for language `lang`
+    /// (`\savinghyphcodes`, the last `\patterns` that saved them).
+    fn saved_hyph_codes(&mut self, lang: u16) -> R<Option<Vec<i64>>> {
+        let v = self.v;
+        let Some(x) = self.get_loc(crate::fields::cell::PATTERNS)? else {
+            return Ok(None);
+        };
+        Ok(list_of(v, x).into_iter().rev().find_map(|e| {
+            let xs = list_of(v, e);
+            (xs.first().map(|&l| int_of(v, l)) == Some(i64::from(lang))
+                && xs.get(1).is_some_and(|&k| crate::val::str_of(v, k) == "c"))
+            .then(|| {
+                xs.get(2)
+                    .map(|&l| list_of(v, l).iter().map(|&c| int_of(v, c)).collect())
+                    .unwrap_or_default()
+            })
+        }))
     }
 
     /// `\hyphenation` (§934–§939).
@@ -1706,6 +1828,9 @@ impl Run<'_, '_> {
         self.scan_left_brace()?;
         let lang = phitex_typeset::hyph::cur_lang(self.ipar(Par::language)?);
         let v = self.v;
+        // (e-TeX: the language's saved codes where it has them, in the
+        // `\lccode`s' place: `set_lc_code` with `hyph_index`)
+        let saved = self.saved_hyph_codes(lang)?;
         let mut words: Vec<ValueId> = Vec::new();
         let mut word = String::new();
         loop {
@@ -1717,7 +1842,10 @@ impl Run<'_, '_> {
                         word.push('-');
                     } else {
                         let c = u32::try_from(self.cur.chr).unwrap_or(0);
-                        let lc = i64::from(self.code(0, c)?);
+                        let lc = match &saved {
+                            Some(t) => t.get(c as usize).copied().unwrap_or(0),
+                            None => i64::from(self.code(0, c)?),
+                        };
                         if lc != 0 {
                             word.push(
                                 char::from_u32(u32::try_from(lc).unwrap_or(0)).unwrap_or('?'),
@@ -1727,7 +1855,13 @@ impl Run<'_, '_> {
                 }
                 cmd::CHAR_NUM => {
                     let c = self.scan_char_num()?;
-                    let lc = i64::from(self.code(0, c)?);
+                    let lc = match &saved {
+                        Some(t) => usize::try_from(c)
+                            .ok()
+                            .and_then(|i| t.get(i).copied())
+                            .unwrap_or(0),
+                        None => i64::from(self.code(0, c)?),
+                    };
                     if lc != 0 {
                         word.push(char::from_u32(u32::try_from(lc).unwrap_or(0)).unwrap_or('?'));
                     }
@@ -1762,54 +1896,117 @@ impl Run<'_, '_> {
         if c != 0 {
             self.scan_optional_equals()?;
             let name = self.scan_file_name()?;
-            let key = if name.contains('.') {
-                name.clone()
-            } else {
-                format!("{name}.tex")
-            };
-            // (a document's file the client cut: open, its text read by
-            // the first line read from it, `Run::next_read_line`; a run
-            // that only tests the stream, `\ifeof` after it opens, reads
-            // whether it is cut, not its text, so an edit inside the file
-            // reaches only the runs that read its lines)
-            if self.read_cut(&key)?.is_some() {
-                self.set(&field, v.list(vec![v.int(LAZY_OPEN), v.str(&key)]), true);
-                return Ok(());
+            // (XeTeX: the stream's lines read in the input mode
+            // `\XeTeXdefaultencoding` names now, `u_open_in`'s
+            // `XeTeX_default_input_mode`; `auto` where none was)
+            if self.xe {
+                let m = self
+                    .get("xdefenc")?
+                    .map_or(crate::xetex::mode::AUTO, |x| crate::val::int_of(v, x));
+                self.set(&format!("{field}:enc"), v.int(m), true);
             }
-            // (so too a file the job wrote a round before and reads back
-            // per field: a test of the stream reads whether it exists,
-            // not its text)
-            if self.get(&format!("wopen:{key}"))?.is_none() && self.written_per_field(&key)? {
-                if self.file_lazy(&key)?.is_some() {
-                    self.set(&field, v.list(vec![v.int(LAZY_OPEN), v.str(&key)]), true);
+            // (a pipe, with shell escape on: the command's output read as
+            // the stream's lines, `open_in_or_pipe`; a pipe that does not
+            // open leaves the stream closed)
+            if let Some(cmd) = name.strip_prefix('|')
+                && self.int32("shellescape")? != 0
+            {
+                if let Some(text) = self.pipe_text(cmd)? {
+                    let lines: Vec<ValueId> = crate::expand::split_lines(&text)
+                        .iter()
+                        .map(|l| v.str(l))
+                        .collect();
+                    self.set(&field, v.list(vec![v.int(1), v.list(lines)]), true);
                 }
                 return Ok(());
             }
-            // (a file the job wrote a round before and reads back as its
-            // text: its lines read one by one, `Run::next_read_line`)
-            if self.get(&format!("wopen:{key}"))?.is_none() && self.written_lines(&key)? {
-                self.set(
-                    &field,
-                    v.list(vec![v.int(LAZY_LINES), v.str(&key), v.int(0)]),
-                    true,
-                );
-                return Ok(());
-            }
-            let Some(x) = self.read_file(&key)? else {
-                return Ok(());
-            };
-            let xs = list_of(v, x);
-            if xs.len() >= 2 {
-                let text = str_of(v, xs[1]);
-                let lines: Vec<ValueId> = crate::expand::split_lines(&text)
-                    .iter()
-                    .map(|l| v.str(l))
-                    .collect();
-                let st = v.list(vec![v.int(1), v.list(lines)]);
-                self.set(&field, st, true);
-            }
+            // (kpathsea's `tex` format: `name.tex` first unless the name has
+            // one of its suffixes, then `name`, [`Run::tex_key`])
+            let key = self.tex_key(&name)?;
+            self.open_in_at(&field, &key)?;
         }
         Ok(())
+    }
+
+    /// `\\openin`'s stream `field` opened on file `key`: whether it
+    /// opened (a file there, the client's, cut, or one the job writes).
+    fn open_in_at(&mut self, field: &str, key: &str) -> R<bool> {
+        let v = self.v;
+        // (a document's file the client cut: open, its text read by
+        // the first line read from it, `Run::next_read_line`; a run
+        // that only tests the stream, `\ifeof` after it opens, reads
+        // whether it is cut, not its text, so an edit inside the file
+        // reaches only the runs that read its lines)
+        if self.read_cut(key)?.is_some() {
+            self.set(field, v.list(vec![v.int(LAZY_OPEN), v.str(key)]), true);
+            return Ok(true);
+        }
+        // (so too a file the job wrote a round before and reads back
+        // per field: a test of the stream reads whether it exists,
+        // not its text)
+        if self.get(&format!("wopen:{key}"))?.is_none() && self.written_per_field(key)? {
+            let there = self.file_lazy(key)?.is_some();
+            if there {
+                self.set(field, v.list(vec![v.int(LAZY_OPEN), v.str(key)]), true);
+            }
+            return Ok(there);
+        }
+        // (a file the job wrote a round before and reads back as its
+        // text: its lines read one by one, `Run::next_read_line`)
+        if self.get(&format!("wopen:{key}"))?.is_none() && self.written_lines(key)? {
+            self.set(
+                field,
+                v.list(vec![v.int(LAZY_LINES), v.str(key), v.int(0)]),
+                true,
+            );
+            return Ok(true);
+        }
+        let Some(x) = self.read_file(key)? else {
+            return Ok(false);
+        };
+        let xs = list_of(v, x);
+        if xs.len() >= 2 {
+            let text = str_of(v, xs[1]);
+            let lines: Vec<ValueId> = crate::expand::split_lines(&text)
+                .iter()
+                .map(|l| v.str(l))
+                .collect();
+            let st = v.list(vec![v.int(1), v.list(lines)]);
+            self.set(field, st, true);
+        }
+        Ok(true)
+    }
+
+    /// [`Run::next_read_line`], its bytes made characters as XeTeX's
+    /// `input_line` makes a `\read` file's: in the mode the stream was
+    /// opened in (a UTF-8 byte-order mark skipped on its first line in
+    /// `auto`, [`crate::xetex::decode_line`]). pdfTeX's lines are bytes.
+    pub(crate) fn next_read_line_decoded(&mut self, field: &str, st: ValueId) -> R<Option<String>> {
+        if !self.xe {
+            // (pdfTeX's: through a TCX's `xord`)
+            let t = self.tcx()?;
+            return Ok(self.next_read_line(field, st)?.map(|text| match t {
+                Some(t) => t.reread(&text),
+                None => text,
+            }));
+        }
+        let v = self.v;
+        let first = match &*v.get(st) {
+            Value::List(xs) => match xs.first().map(|&c| crate::val::int_of(v, c)) {
+                Some(LAZY_OPEN | 1) => true,
+                Some(LAZY_LINES) => xs.get(2).is_some_and(|&p| crate::val::int_of(v, p) == 0),
+                _ => xs.get(2).is_none_or(|&p| crate::val::int_of(v, p) == 0),
+            },
+            _ => false,
+        };
+        let m = self
+            .get(&format!("{field}:enc"))?
+            .map_or(crate::xetex::mode::AUTO, |x| crate::val::int_of(v, x));
+        Ok(self.next_read_line(field, st)?.map(|text| {
+            let mut buf: Vec<u32> = text.chars().map(u32::from).collect();
+            crate::xetex::decode_line(&mut buf, m, first);
+            buf.into_iter().filter_map(char::from_u32).collect()
+        }))
     }
 
     /// The next line of the open stream whose state `st` field `field`
@@ -1896,7 +2093,7 @@ impl Run<'_, '_> {
                 // modes; a build has no terminal ([`Run::fatal`])
                 return self.fatal("*** (cannot \\read from terminal in nonstop modes)");
             };
-            let line = self.next_read_line(&field, st)?;
+            let line = self.next_read_line_decoded(&field, st)?;
             let text = line.unwrap_or_default();
             let e = i64::from(self.ipar(Par::endlinechar)?);
             let line = crate::input::Line::of_str(&text, e, true);
@@ -2120,9 +2317,38 @@ impl Run<'_, '_> {
         if crate::exec::obs_flag!("PHITEX_CMD_TRACE") && self.cmd_traced() {
             eprintln!("cmd-trace {} write_out {k}", self.cx.node().raw());
         }
+        // (a stream open on no file: the text goes to the log, where a line
+        // number is made when the log is laid out, so a message saying
+        // "on input line" does not tie its piece to the lines above)
+        let op = self.cx.op();
+        let to_log = (op == self.ops.exec || op == self.ops.resume)
+            && k != 18
+            && !((0..16).contains(&k)
+                && !self.closed.contains(&k)
+                && self
+                    .get(&format!("write:{k}"))?
+                    .is_some_and(|x| x != ValueId::UNIT));
+        let outer = (self.log_marks.take(), self.marks_depth);
+        if to_log {
+            self.log_marks = Some(Vec::new());
+            self.marks_depth = self.xpand_depth + 1;
+        }
+        // (a piece's line to a file: its relative symbols marked, not
+        // forced, resolved where the file's text is read,
+        // docs/spec-relative-counters.md §2.7)
+        let marked = (op == self.ops.exec || op == self.ops.resume)
+            && !to_log
+            && k != 18
+            && self.interp.is_none();
         let was = self.lines_sink_begin(Sink::Log);
-        let s = self.expand_late(body);
+        let s = if marked {
+            self.expand_late_marked(body)
+        } else {
+            self.expand_late(body)
+        };
         let hit = self.lines_sink_end(was);
+        let marks = self.log_marks.take().unwrap_or_default();
+        (self.log_marks, self.marks_depth) = outer;
         if crate::exec::obs_flag!("PHITEX_AUX_TRACE") && s.is_err() {
             eprintln!(
                 "aux-trace: write_out stream {k} node {} halted expanding its text",
@@ -2191,25 +2417,18 @@ impl Run<'_, '_> {
                 .get(&format!("write:{k}"))?
                 .and_then(|x| list_of(v, x).first().map(|&n| str_of(v, n)))
                 .unwrap_or_default();
-            let nl = i64::from(self.ipar(Par::newlinechar)?);
-            let mut line: String = s
-                .chars()
-                .map(|c| {
-                    if i64::from(u32::from(c)) == nl {
-                        '\n'
-                    } else {
-                        c
-                    }
-                })
-                .collect();
+            let mut line = String::with_capacity(s.len() + 1);
+            // (a symbol's mark kept as it is between the characters made
+            // the file's)
+            let mut rest = s.as_str();
+            while let Some(i) = rest.find(crate::defer::WSYM) {
+                let e = rest[i..].find('\u{3}').map_or(rest.len(), |e| i + e + 1);
+                line.push_str(&self.file_chars(&rest[..i])?);
+                line.push_str(&rest[i..e]);
+                rest = &rest[e..];
+            }
+            line.push_str(&self.file_chars(rest)?);
             line.push('\n');
-            // (XeTeX writes UTF-8, controls in `^^` form; the line read
-            // back here is those bytes read as XeTeX reads them)
-            let line = if self.xe {
-                crate::xetex::file_text(&line)
-            } else {
-                line
-            };
             // a file whose read-back only defines: the definitions this
             // line's read-back makes go with it (`wdef:<field>`); a line
             // that does more (contributes, typesets, opens a scope) makes
@@ -2224,20 +2443,25 @@ impl Run<'_, '_> {
             let e = if per_field {
                 // (a text the stream's earlier lines left open goes on
                 // with this one: the file is read back whole)
-                let text = match self.take_wpending(k)? {
+                let mut text = match self.take_wpending(k)? {
                     Some(mut t) => {
                         t.push_str(&line);
                         t
                     }
                     None => line.clone(),
                 };
-                self.interp_point = self.read_point_of(&name)?;
-                let r = if self.xe {
-                    self.interpret_line(&crate::xetex::reread(&text))
-                } else {
-                    self.interpret_line(&text)
-                };
-                self.interp_point = None;
+                // (a line holding symbols read back with each as 0: one
+                // that does more than define makes the file read back as
+                // its text, whatever the digits, and keeps its marks; one
+                // whose read-back defines, or needs the next line, has
+                // its symbols forced, the digits then in its definitions)
+                let mut r = self.interpret_written(&name, &text, true);
+                if crate::defer::has_marks(&text) && !matches!(r, Ok(Some(_)) if !self.interp_plain)
+                {
+                    text = crate::defer::resolve_marked_run(self, &text)?;
+                    line = crate::defer::resolve_marked_run(self, &line)?;
+                    r = self.interpret_written(&name, &text, false);
+                }
                 let r = r?;
                 if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                     eprintln!(
@@ -2271,7 +2495,10 @@ impl Run<'_, '_> {
             };
             self.contribute_stream(e);
         } else {
-            self.log("wlog", &s)?;
+            // (a warning LaTeX writes this way: a diagnostic at the
+            // command that raised it, with the line as it is logged)
+            self.written_warning(&s)?;
+            self.log_lines("wlog", &s, marks)?;
         }
         Ok(())
     }
@@ -2378,6 +2605,85 @@ impl Run<'_, '_> {
     /// `\@setckpt{...}{` over several lines), continued by its next line:
     /// TeX state (`write:pend:<k>`, global like the stream), so a line written
     /// in another node goes on with it; taken (cleared) here.
+    /// A written line (with the stream's pending text before it) read
+    /// back as the file's reader would, at the file's read-back point;
+    /// with `zero`, each symbol's mark in it read as the digit 0
+    /// ([`Run::write_out`]).
+    fn interpret_written(&mut self, name: &str, text: &str, zero: bool) -> R<Option<ValueId>> {
+        let zeroed;
+        let text = if zero && crate::defer::has_marks(text) {
+            zeroed = crate::defer::resolve_marked(text, |_| Ok::<i32, std::convert::Infallible>(0))
+                .unwrap_or_else(|e| match e {});
+            zeroed.as_str()
+        } else {
+            text
+        };
+        self.interp_point = self.read_point_of(name)?;
+        let r = if self.xe {
+            self.interpret_line(&crate::xetex::reread(text))
+        } else if let Some(t) = self.tcx()? {
+            self.interpret_line(&t.reread(text))
+        } else {
+            self.interpret_line(text)
+        };
+        self.interp_point = None;
+        r
+    }
+
+    /// The characters of `s` as a `\write` puts them in its file
+    /// (§1370: `print`, `\newlinechar` a line's end): XeTeX writes UTF-8,
+    /// controls in `^^` form (the line read back is those bytes read as
+    /// XeTeX reads them); pdfTeX under a TCX each character's `xchr` byte
+    /// where printable, else in `^^` form (read back through `xord`).
+    fn file_chars(&mut self, s: &str) -> R<String> {
+        let nl = i64::from(self.ipar(Par::newlinechar)?);
+        let line: String = s
+            .chars()
+            .map(|c| {
+                if i64::from(u32::from(c)) == nl {
+                    '\n'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        Ok(if self.xe {
+            crate::xetex::file_text(&line)
+        } else if let Some(t) = self.tcx()? {
+            let mut out = String::with_capacity(line.len());
+            for c in s.chars() {
+                if i64::from(u32::from(c)) == nl {
+                    out.push('\n');
+                } else {
+                    t.print_file_char(&mut out, u32::from(c));
+                }
+            }
+            out
+        } else {
+            line
+        })
+    }
+
+    /// [`Run::expand_late`] for a piece's line to a file: each relative
+    /// symbol of an integer register in the expanded text is its mark
+    /// ([`crate::defer::wsym_mark`]), neither forced nor read; any other
+    /// symbol prints its digits as `show_toks_into` gives them.
+    pub(crate) fn expand_late_marked(&mut self, body: &[Tok]) -> R<String> {
+        let expanded = self.expand_late_toks(body)?;
+        let mut s = String::new();
+        let mut from = 0;
+        for (i, &t) in expanded.iter().enumerate() {
+            let Some(sym) = crate::defer::reg_sym(t) else {
+                continue;
+            };
+            self.show_toks_into(&mut s, &expanded[from..i])?;
+            s.push_str(&crate::defer::wsym_mark(sym));
+            from = i + 1;
+        }
+        self.show_toks_into(&mut s, &expanded[from..])?;
+        Ok(s)
+    }
+
     fn take_wpending(&mut self, k: i32) -> R<Option<String>> {
         let v = self.v;
         let f = format!("write:pend:{k}");
@@ -2474,6 +2780,7 @@ impl Run<'_, '_> {
     /// of the file that this run wrote it.
     pub(crate) fn open_out(&mut self, n: i64, name: &str) -> R<()> {
         let v = self.v;
+        let name = crate::run::same_dir(name);
         let base = name.rsplit('/').next().unwrap_or(name);
         let name = if base.contains('.') {
             name.to_owned()
@@ -2532,30 +2839,55 @@ impl Run<'_, '_> {
     /// A file this run wrote before this point: the text written so far.
     fn read_own_written(&mut self, key: &str) -> R<Option<ValueId>> {
         let v = self.v;
-        let f = v.field("streams");
-        let before = self.cx.fold(f, None, None);
-        if before.is_err() {
-            self.trace_stop("range streams");
-        }
-        let before = before?;
-        let mut all = v.seq_to_vec(before);
-        all.extend(
-            self.contribs
-                .iter()
-                .filter(|(g, _)| *g == f)
-                .flat_map(|(_, x)| v.seq_to_vec(*x)),
-        );
+        // (that file's stream alone: a write to another file, the `.aux`
+        // line of a heading, is not read here)
+        let f = crate::run::stream_bucket(v, key);
+        let own: Vec<ValueId> = self
+            .contribs
+            .iter()
+            .filter(|(g, _)| *g == f)
+            .flat_map(|(_, x)| v.seq_to_vec(*x))
+            .collect();
+        // (a file this run itself opened, §1374: what was written to it
+        // before is gone, so nothing before the run is read. Read, a
+        // letter typed in one of beamer's fragile frames, each writing and
+        // reading the one `.vrb`, ran every later fragile frame again)
+        let opened = own.iter().rposition(|&e| {
+            !crate::api::is_cand_marker(v, e)
+                && crate::api::page_tag(v, e).is_none()
+                && matches!(list_of(v, e).as_slice(), [n] if str_of(v, *n) == key)
+        });
+        let all = if let Some(i) = opened {
+            own[i..].to_vec()
+        } else {
+            let before = self.cx.fold(f, None, None);
+            if before.is_err() {
+                self.trace_stop("range streams");
+            }
+            let mut all = v.seq_to_vec(before?);
+            all.extend(own);
+            all
+        };
         let text = crate::api::stream_texts(v, &crate::api::doc_order(v, &all))
             .into_iter()
             .find(|(n, _)| n == key)
             .map(|(_, t)| t)
             .unwrap_or_default();
+        let text = crate::defer::resolve_marked_run(self, &text)?;
         Ok(Some(v.list(vec![v.str(&format!("./{key}")), v.str(&text)])))
     }
 
     /// §1371: a token list expanded as `\write` expands it at
     /// `\shipout` (also `\pdfliteral shipout`), shown as a string.
     pub(crate) fn expand_late(&mut self, body: &[Tok]) -> R<String> {
+        let expanded = self.expand_late_toks(body)?;
+        let mut s = String::new();
+        self.show_toks_into(&mut s, &expanded)?;
+        Ok(s)
+    }
+
+    /// [`Run::expand_late`]'s expanded token list, before it is shown.
+    fn expand_late_toks(&mut self, body: &[Tok]) -> R<Vec<Tok>> {
         let mut toks = vec![Tok::ch(1, u32::from(b'{'))];
         toks.extend(body.iter().copied());
         toks.push(Tok::ch(2, u32::from(b'}')));
@@ -2568,9 +2900,7 @@ impl Run<'_, '_> {
         self.ck()?;
         self.get_token();
         self.ck()?;
-        let mut s = String::new();
-        self.show_toks_into(&mut s, &expanded)?;
-        Ok(s)
+        Ok(expanded)
     }
 
     /// A font loaded as `f` by the text (not by a page step's output
@@ -2590,7 +2920,14 @@ impl Run<'_, '_> {
     /// A piece's read of the lines before it (`\inputlineno`), noted by
     /// where the number goes ([`LinesTaint`]).
     fn note_lines_read(&mut self) {
-        let piece = self.cx.op() == self.ops.exec || self.cx.op() == self.ops.resume;
+        // (and a page's routine: hooks' bodies record \inputlineno too, and
+        // Grail's first page's routine, 3.8 s of hyperxmp, ran again for
+        // each line deleted above it, accl 23788)
+        let op = self.cx.op();
+        let piece = op == self.ops.exec
+            || op == self.ops.resume
+            || op == self.ops.finish
+            || op == self.ops.pic;
         // (a number read into the log stands: the log is the run's
         // output, and a number taken back there is the one a run read
         // before the lines ahead of it were in, `D=1` for line 6 at -j8)
@@ -2739,7 +3076,94 @@ impl Run<'_, '_> {
             self.dline_reads.push(f);
         }
         self.note_lines_read();
+        // (observe, `PHITEX_DLINE_TRACE`: who reads a piece's line number)
+        if crate::exec::obs_flag!("PHITEX_DLINE_TRACE") {
+            let v = self.v;
+            let mut ctx = Vec::new();
+            for l in self.input.levels.iter().rev().take(8) {
+                if l.kind == crate::input::kind::TOKS {
+                    let toks: Vec<String> = self
+                        .input
+                        .arena
+                        .get(l.rest())
+                        .iter()
+                        .take(10)
+                        .map(|t| v.render(t.encode(v)))
+                        .collect();
+                    ctx.push(format!("t{}:{}", l.ty, toks.join(" ")));
+                } else {
+                    ctx.push(format!("k{}", l.kind));
+                }
+            }
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let frames: Vec<&str> = bt
+                .lines()
+                .map(str::trim)
+                .filter(|l| {
+                    l.split(':')
+                        .next()
+                        .is_some_and(|n| n.parse::<u32>().is_ok())
+                })
+                .skip(1)
+                .take(14)
+                .collect();
+            eprintln!(
+                "dline-trace: node {} op {:?} cur {} sink {:?} | {} | bt {}",
+                self.cx.node().raw(),
+                self.cx.op(),
+                v.render(self.cur.tok.encode(v)),
+                self.lt.sink,
+                ctx.join(" | "),
+                frames.join(" < ")
+            );
+        }
         Ok(Some(int_of(self.v, x) + i64::from(own.1)))
+    }
+
+    /// A line's number for a report in the log (a box's, §663): where the
+    /// client gives its node's lines, not read at all: the mark
+    /// ([`crate::log::LINE_MARK`]) and its node and place go in `marks`
+    /// and the number is made when the log is laid out, so a report does
+    /// not tie a piece to the lines before it. (The read that finds the
+    /// lines are given is taken back; a read of the number the run made
+    /// itself stands.)
+    pub(crate) fn line_for_log(
+        &mut self,
+        m: crate::run::LineMark,
+        marks: &mut Vec<i64>,
+    ) -> R<String> {
+        // (a written line read back as its reader would, `Run::interpret_line`:
+        // an error's text there goes nowhere, and its line is read by no one;
+        // read, every page's finisher that wrote an `\indexentry` line ran
+        // again for each line inserted above its page, circuitikz)
+        if self.interp.is_some() {
+            return Ok("0".to_owned());
+        }
+        // (no file on the input stack: TeX's `line`, a finisher's the line its
+        // page fired at, `Run::fire_line`, marked as a piece's line is)
+        let m = match (m, self.fire_line) {
+            ((Some(0), 0, None, None), Some(fire)) if self.file_line_here().is_none() => fire,
+            _ => m,
+        };
+        if let (None, _, Some(_), Some(own)) = m {
+            let f = crate::run::dline_field(self.v, own.0);
+            let given = self.cx.env(f)?.is_some();
+            if !self.dline_reads.contains(&f) {
+                self.cx.unread(f);
+            }
+            if given {
+                marks.extend([own.0.cast_signed(), i64::from(own.1)]);
+                return Ok(crate::log::LINE_MARK.to_string());
+            }
+        }
+        // (no mark's number here: a run's own file, or none, as TeX's `line`)
+        let l = self.line_of_mark(m)?;
+        Ok(if l > 0 {
+            l
+        } else {
+            i64::from(self.input_line_no()?)
+        }
+        .to_string())
     }
 
     /// The input left as one source line, for `\inputlineno`.

@@ -1,0 +1,26 @@
+% texlive-vpat (TeX Live manual): a link over three lines of a paragraph inside
+% a box on a line: each line it runs over writes an object (append_link), the
+% middle line, with no whatsit of its own, too. So does an \hbox at the level
+% of a link started in an \hbox of that level on an earlier line. Read-time
+% numbers after them count those objects.
+\documentclass{article}
+\usepackage{hyperref}
+\pdfcompresslevel=9
+\pdfobjcompresslevel=2
+\newcommand\later{\pdfobj reserveobjnum \edef\n{\the\pdflastobj}%
+  \immediate\pdfobj useobjnum \n {(object \n)}\pageref{a}: \n.\par}
+\begin{document}
+\label{a}\later
+\noindent\hbox{\vbox{\hsize=5cm
+  Some text before \href{https://www.example.org/}{a link that runs over three
+  lines of this paragraph, and over more text so that it needs them, and more
+  and more} after it.}}
+\later
+\noindent\hbox{\hbox{a \pdfstartlink user{/Subtype/Link} goto name{a} link}
+  text}\par
+\noindent\hbox{plain \hbox{in a box} line}\par
+\noindent\hbox{\hbox{and \pdfendlink end} \hbox{}}\par
+\later
+\newpage
+\later
+\end{document}

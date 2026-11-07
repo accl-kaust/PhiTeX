@@ -1,0 +1,16 @@
+% !TEX program = xelatex
+% \pdflastypos under XeTeX (and pdfTeX in DVI mode) with \pdfpageheight set:
+% the page's height is \pdfpageheight, not the box's height and depth
+% with the margins (beamer sets it; focus-demo's overlays).
+\documentclass{article}
+\pdfpageheight=200pt
+\pdfpagewidth=300pt
+\makeatletter
+\newcommand\here[1]{\pdfsavepos\write\@auxout{\gdef\string\pos#1{\the\pdflastxpos,\the\pdflastypos}}}
+\makeatother
+\begin{document}
+Here\here{a} and \csname posa\endcsname
+
+\vspace{3cm}
+There\here{b} and \csname posb\endcsname
+\end{document}

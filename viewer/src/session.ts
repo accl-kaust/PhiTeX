@@ -218,10 +218,14 @@ export interface PreviewSink {
   streaming?(s: { pages: number; phase: string } | null): void;
   /** A repaint is on screen, `ms` after the keystroke that made it. */
   painted?(ms: number): void;
+  /** A build finished in `ms` (`first`: the cold one): the timing popover's bars. A watch's host says it from its own socket. */
+  buildTime?(ms: number, first: boolean): void;
   /** Put the editor at `file`'s [from, to) (UTF-16 offsets), opening it if need be. */
   goto?(file: string, from: number, to: number, focus?: boolean): void;
   /** The editor's selection, highlighted on its pages until it changes ([] clears). */
   marks?(marks: { k: number; boxes: [number, number, number, number][] }[]): void;
+  /** The pages' glyph origins came, or changed (a watch makes a build's after it is announced): what was looked up on them before is looked up again. */
+  origins?(): void;
   /**
    * Whether the document's outline is shown (the contents beside the
    * pages): none, or false, it is not asked for after each build; the view
@@ -282,11 +286,36 @@ const defaults: Options = { fuel: 100_000, dpi: 96, checkEveryMs: 5000 };
 
 const image = (r: CoreRes): PageImage | null => (r.canvas && r.size ? { canvas: r.canvas, w: r.size[0], h: r.size[1], links: r.links } : null);
 
+/**
+ * The project's main file, as Overleaf's "Main document" would be: a .tex
+ * file another file inputs (`\input`, `\include`, `\subfile`, `\subfileinclude`,
+ * a subfiles chapter, a standalone figure) is not it, whatever it holds; a
+ * file that inputs others is; then a whole document (`\documentclass` and
+ * `\end{document}`), `main.tex`, the top folder. Never the file open in the
+ * editor for being open.
+ */
 export function guessMain(files: Record<string, string>): string | null {
   const names = Object.keys(files).filter((n) => /\.tex$/i.test(n));
+  const strip = (t: string) => t.replace(/(^|[^\\])%.*$/gm, "$1");
+  // (the names each file inputs, as paths from the project's top, .tex added)
+  const inputs = new Map<string, string[]>();
+  for (const n of names) {
+    const dir = n.includes("/") ? n.slice(0, n.lastIndexOf("/") + 1) : "";
+    const got: string[] = [];
+    for (const m of strip(files[n]).matchAll(/\\(?:input|include|subfile|subfileinclude|includestandalone)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}/g)) {
+      const f = m[1].trim().replace(/^\.\//, "");
+      const tex = /\.tex$/i.test(f) ? f : `${f}.tex`;
+      got.push(tex, dir + tex);
+    }
+    inputs.set(n, got);
+  }
+  const inputted = new Set<string>();
+  for (const [n, got] of inputs) for (const f of got) if (f !== n) inputted.add(f);
   const score = (n: string) => {
-    const t = files[n];
+    const t = strip(files[n]);
     let s = 0;
+    if (inputted.has(n)) s -= 16;
+    if (inputs.get(n)!.some((f) => f !== n && f in files)) s += 8;
     if (/(^|\n)[^%\n]*\\(bye|end\{document\})/.test(t)) s += 4;
     if (/(^|\n)\s*\\documentclass/.test(t)) s += 2;
     if (/^main\.tex$/i.test(n)) s += 1;
@@ -393,8 +422,26 @@ export class PreviewSession {
     // held is gone, "no such handle". Reopened here, a few times at most,
     // since a panic a build always hits would loop)
     core.onEvent?.((e) => {
+      // (a queued edit's build over, as `send` waits for it: built, failed, or the core gone)
+      const ev = (e as { event?: string }).event ?? "";
+      if (this.ended.length && (ev === "settled" || ev === "failed" || ev === "trapped")) for (const f of this.ended.splice(0)) f(e as { event: string });
+      // (a build's time, from every core and the watch alike: the popover's first-build and edit bars; a pass while the job's files settle is not one)
+      if (ev === "settled") {
+        const b = e as { ms?: number; cold?: boolean; settling?: boolean };
+        if (typeof b.ms === "number" && !b.settling) this.sink.buildTime?.(b.ms, !!b.cold);
+      }
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
+      // (the watch's build moved the sources of pages it did not draw again,
+      // a comment line added above them: the glyphs kept are asked again, not
+      // left at the old text's bytes, which put a double-click lines off)
+      // (and the problems' underlines, looked up before the origins were
+      // there, are looked up again: a build's problems reach the view
+      // before its origins do)
+      // (a request for them still in flight may have been answered before
+      // they came, its reply sent after this event: not shared or kept, the
+      // page asked again, glyphsFetch)
+      if (this.o.remote && (e as { event?: string }).event === "origins") return void (this.originsSeen++, this.glyphsAsked.clear(), this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
       if (this.o.remote && "event" in e && WATCH.has(e.event)) return this.onWatch(e as WatchEvent);
       // (a build of the core's began or ended; `preparing`, older cores' name for it)
       if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);
@@ -445,6 +492,15 @@ export class PreviewSession {
         const lost = res.json?.error === "no such handle" || /^(core trapped|PDF driver failed)/.test(res.error ?? "");
         // (a build that came back whole: a trap after it is a new one)
         if (res.ok && (r.op === "edit" || r.op === "status")) this.traps = 0;
+        // (a core that ran out of the memory it got: the same document
+        // outgrows it again, so it is said, not reopened, the host's words
+        // naming the size and what to close)
+        if (lost && this.opened && /needs more than the [\d.]+ GiB of memory/.test(res.error ?? "")) {
+          this.opened = false;
+          this.sink.error(res.error!);
+          this.sink.connection?.(false, res.error!);
+          return res;
+        }
         if (lost && this.opened && r.op !== "open") {
           this.opened = false;
           // (a trap again with no good build between is the same trap, the
@@ -643,7 +699,9 @@ export class PreviewSession {
     this.noteError(r.json);
     this.status(r.json.pending, r.json.undefined_names);
     this.fetchPackages(r.json.missing);
-    this.sink.latency(`opened in ${r.json.build_ms.toFixed(1)} ms (round trip ${(this.now() - t).toFixed(1)} ms)`);
+    // (the open's answer: how long the engine took to answer it, and its own build's time when it built then)
+    const rt = this.now() - t, said = (ms: number) => (ms < 1000 ? `${ms.toFixed(0)} ms` : `${(ms / 1000).toFixed(1)} s`);
+    this.sink.latency(`opened: the engine answered in ${said(rt)}${r.json.build_ms >= 1 ? `, its build ${said(r.json.build_ms)}` : ""}`);
     await (this.sink.layout ? this.layout(Array.isArray(r.json.hashes) ? r.json.hashes : undefined) : this.showPage());
     // (the first build is in: nothing is building for the packages now)
     this.pkg.building = false;
@@ -1025,15 +1083,21 @@ export class PreviewSession {
     // collaborators all ask for a page an edit changed, at once)
     let p = this.glyphsAsked.get(key);
     if (!p) {
-      p = this.glyphsFetch(k, key).finally(() => this.glyphsAsked.delete(key));
-      this.glyphsAsked.set(key, p);
+      const mine: Promise<Glyph[]> = this.glyphsFetch(k, key).finally(() => this.glyphsAsked.get(key) === mine && this.glyphsAsked.delete(key));
+      this.glyphsAsked.set(key, (p = mine));
     }
     return p;
   }
   private glyphsAsked = new Map<string, Promise<Glyph[]>>();
+  /** The watch's `origins` events seen: a page's answer asked before the latest is of the origins before it. */
+  private originsSeen = 0;
 
   private async glyphsFetch(k: number, key: string): Promise<Glyph[]> {
+    const seen = this.originsSeen;
     const r = await this.core.request({ op: "origins", page: k });
+    // (the origins came while this was asked, the answer made before
+    // them: the page asked again, as the event's lookups do)
+    if (seen !== this.originsSeen) return this.glyphsOf(k);
     if (!r.ok || !r.json) return [];
     // (the job's names: "main" for main.tex, "ch/intro.tex", "article.cls")
     const path = (n: string) => {
@@ -1396,6 +1460,8 @@ export class PreviewSession {
 
   /** A send loop is running (it takes what is queued when each build ends). */
   private busy = false;
+  /** Waiting for a queued edit's build to end (`send`): its `settled`, else `failed` or `trapped`. */
+  private ended: ((e: { event: string }) => void)[] = [];
   /** Edits the host gave, and builds they took (the batching's effect). */
   keystrokes = 0;
   builds = 0;
@@ -1627,13 +1693,19 @@ export class PreviewSession {
     for (const [i, e] of edits.entries()) {
       const last = i === edits.length - 1;
       this.builds++;
+      // (the end of its build, if the core queues it: listened for before it is sent, so an early one is not missed)
+      let done: ((e: { event: string }) => void) | undefined;
+      const ended = last ? new Promise<{ event: string }>((res) => ((done = res), this.ended.push(res))) : null;
+      const unheard = () => (this.ended = this.ended.filter((f) => f !== done));
       const r = await this.core.request({ op: "edit", file, ...e, page: last ? this.page : -1, dpi: this.dpi() });
       if (!r.ok) {
+        unheard();
         this.sink.error((typeof r.json?.error === "string" ? r.json.error : undefined) ?? r.error ?? "edit failed");
         if (r.error?.includes("trapped")) await this.reopen();
         return false;
       }
       if (!last) continue;
+      if (!r.json?.queued) unheard();
       const tBack = this.now();
       const j = r.json;
       // (a core that queues the edit and says its build with `settled`:
@@ -1641,6 +1713,12 @@ export class PreviewSession {
       if (j.queued) {
         this.queued = { t0, tSend, tBack };
         this.setPages(j.pages);
+        // (its build waited for and its page drawn before the next round:
+        // sent at once, the next edit's build ran first, and the page's
+        // frame (core1 answers between builds) waited behind it, "waiting
+        // for the engine 1.2 s" while typing)
+        const end = await ended!;
+        if (end.event === "settled") (await this.layout(), this.queuedLatency(end as Extract<WatchEvent, { event: "settled" }>));
         continue;
       }
       this.setPages(j.pages);

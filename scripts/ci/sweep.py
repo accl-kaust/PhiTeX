@@ -2,10 +2,14 @@
 """The corpus sweep (scripts/accl/corpus-sweep): every pinned pdfLaTeX
 manual of ci/manuals.json built cold by `phitex build --exact-pdf` at
 -j 1 and at -j 8, each against the oracle (TeX Live's pdflatex run to a
-settled fixpoint, the manuals.py oracle cache).
+settled fixpoint, the manuals.py oracle cache). The research corpus
+(ci/research.json, gate-shard.sh's research shard) is swept the same
+way, its XeLaTeX and biber documents included (--engines, --tools), and
+with --shelf against Shelf's files instead of TeX Live's.
 
     sweep.py run   --list ci/manuals.json --doc DIR --cache DIR --bin PHITEX --out DIR
-                   [--ids a,b] [--jobs 1,8] [--par 1:20,8:5] [--timeout 120]
+                   [--ids a,b] [--shard K/N] [--jobs 1,8] [--par 1:20,8:5] [--timeout 120]
+                   [--engines pdflatex] [--tools bibtex,makeindex] [--shelf]
     sweep.py table RESULTS_DIR [--json OUT]
 
 Per build: exit, the PDF's md5 against the oracle's, pages against the
@@ -164,10 +168,19 @@ def run_one(c, j, args):
     base = {"id": c["id"], "path": c["path"], "tools": c.get("tools", []), "j": j,
             "oracle_passes": c.get("passes"), "oracle_wall_s": c.get("oracle_wall_s")}
     key, ores, why = oracle(c, args.cache, args.doc)
-    if why:
+    pinned = why == "no oracle in the cache" and c.get("oracle_md5")
+    if why and not pinned:
         return {**base, "status": "no-oracle", "note": why}
-    opdf = key / "files" / ores["pdf"]
-    base.update(oracle_md5=md5(opdf), oracle_pages=npages(opdf))
+    if pinned:
+        # (the list's pinned md5 of the oracle's PDF, built where the
+        # list was pinned from the same image: the oracle is built here
+        # only for a PDF that differs, for where it differs)
+        opdf = None
+        ores = {"pdf": Path(c["main"]).stem + ".pdf"}
+        base.update(oracle_md5=c["oracle_md5"], oracle_pages=c.get("oracle_pages"), oracle="pinned")
+    else:
+        opdf = key / "files" / ores["pdf"]
+        base.update(oracle_md5=md5(opdf), oracle_pages=npages(opdf))
     tag = f"{c['id']}-j{j}"
     run_dir = WORK / "run" / tag
     common.fresh_copy(Path(args.doc) / c["dir"], run_dir)
@@ -177,10 +190,24 @@ def run_one(c, j, args):
     shutil.rmtree(cdir, ignore_errors=True)
     cdir.mkdir(parents=True)
     os.symlink(WORK / "fcache" / "formats", cdir / "formats")
-    env = manuals.side_env(c["engine"], {"PHITEX_TEX_TIME": "1", "PHITEX_CACHE_DIR": str(cdir)}, phitex=True)
+    if args.shelf:
+        # (Shelf's packs fetched once a sweep, kept beside the formats)
+        os.symlink(WORK / "fcache" / "shelf", cdir / "shelf")
+    # (a document with a time limit of its own, `time_limit_s` beside
+    # its entry with the reason in `time_limit_why`: the sweep's wall
+    # limit and the engine's, PHITEX_TIME_LIMIT_SECS, both raised to it
+    # for that document alone. A limit is pdflatex's own wall on the
+    # machine that enforces it, the gate's runner, measured there with
+    # manuals.py's oracle loop; its why names the runner, date and run)
+    limit = max(args.timeout, c.get("time_limit_s") or 0)
+    extra = {"PHITEX_TEX_TIME": "1", "PHITEX_CACHE_DIR": str(cdir)}
+    if c.get("time_limit_s"):
+        extra["PHITEX_TIME_LIMIT_SECS"] = str(c["time_limit_s"])
+    env = manuals.side_env(c["engine"], extra, phitex=True)
     term = run_dir / "term-phitex.txt"
-    cmd = [args.bin, "build", "--exact-pdf", "-j", str(j), "--no-synctex", c["main"]]
-    r = common.run(cmd, run_dir, env, args.timeout, out=term, cpu_s=args.timeout * (j + 4))
+    cmd = [args.bin, "build", "--exact-pdf", "-j", str(j), "--no-synctex", "--engine", c["engine"],
+           *(["--shelf"] if args.shelf else []), c["main"]]
+    r = common.run(cmd, run_dir, env, limit, out=term, cpu_s=limit * (j + 4))
     text = term.read_bytes() if term.exists() else b""
     logb = b""
     try:
@@ -193,7 +220,7 @@ def run_one(c, j, args):
     res["md5"] = md5(pdf) if pdf.exists() else None
     res["pages"] = npages(pdf) if pdf.exists() else None
     if r["timeout"]:
-        res.update(status="timeout", note=f"over {args.timeout} s")
+        res.update(status="timeout", note=f"over {limit} s")
     elif b"panicked at" in text:
         res.update(status="panic", note=first_error(text))
     elif res["md5"] is None:
@@ -204,7 +231,40 @@ def run_one(c, j, args):
             res["note"] = "exit {}: {}".format(r["exit"], first_error(text, logb))
     else:
         res["status"] = "differs"
-        d = pdfdiff.diff(opdf, pdf)
+        if opdf is None and args.diff_oracle and c["id"] not in args.known_ids:
+            # (the oracle built now, for where the PDFs differ; its md5
+            # against the pinned one: another says the image is not the
+            # one the list was pinned from)
+            k2, r2 = manuals.oracle_one(args.doc, c, Path(args.out) / "oracle")
+            if r2.get("status") == "ok":
+                opdf = k2 / "files" / r2["pdf"]
+                if md5(opdf) != c["oracle_md5"]:
+                    res["oracle_rebuilt_md5"] = md5(opdf)
+    doc = args.documented_rows.get(c["id"])
+    if res["status"] == "differs" and doc:
+        # (a manual whose PDF differs from pdfTeX's where pdfTeX has a
+        # bug PhiTeX does not copy, ci/manuals-pdftex-bugs.tsv: compared
+        # with the oracle built here, everything but the objects its row
+        # lists identical and those differing only as its mask allows)
+        if opdf is None:
+            k2, r2 = manuals.oracle_one(args.doc, c, Path(args.out) / "oracle")
+            if r2.get("status") == "ok":
+                opdf = k2 / "files" / r2["pdf"]
+        if opdf is not None and md5(opdf) == res["oracle_md5"]:
+            (WORK / "tmp").mkdir(parents=True, exist_ok=True)
+            ok, why, used = pdfdiff.documented(opdf, pdf, doc["mask"], doc["objs"], WORK / "tmp")
+            res["documented"] = {"ok": ok, "why": why, "objs": used, "doc": doc["doc"]}
+            if ok:
+                res.update(status="documented", note=f"{why} ({doc['doc']})")
+        elif opdf is not None:
+            res["oracle_rebuilt_md5"] = md5(opdf)
+    if res["status"] == "differs" and opdf is None:
+        res["note"] = (f"exit {r['exit']}: " if r["exit"] else "") + "md5 differs from the pinned oracle's"
+        if r["exit"] != 0:
+            res["error"] = first_error(text, logb)
+    elif res["status"] == "differs":
+        (WORK / "tmp").mkdir(parents=True, exist_ok=True)
+        d = pdfdiff.diff(opdf, pdf, WORK / "tmp")
         res["diff"] = d
         res.update(text_diff(opdf, pdf))
         res["note"] = (f"exit {r['exit']}: " if r["exit"] else "") + (d.get("summary") or f"bytes differ at {d.get('byte')}")
@@ -212,40 +272,69 @@ def run_one(c, j, args):
             res["error"] = first_error(text, logb)
     res["term_tail"] = text[-2500:].decode("utf-8", "replace")
     if res["status"] != "exact" or r["exit"] != 0:
-        keep(Path(args.out) / "files" / tag, [
+        res_files = Path(args.out) / "files" / tag
+        res_files.mkdir(parents=True, exist_ok=True)
+        # (what the run left, and the files it read back: a tool's output
+        # is often where a difference starts)
+        (res_files / "files.txt").write_text("".join(f + "\n" for f in common.tree_files(run_dir)))
+        keep(res_files, [
             (term, "term.txt", 400_000),
             (run_dir / f"{job}.log", f"{job}.log", 400_000),
             (pdf, f"{job}.pdf", 8_000_000),
+            *((run_dir / f"{job}.{x}", f"{job}.{x}", 400_000) for x in ("aux", "bbl", "blg", "bcf", "ind", "toc")),
         ])
     shutil.rmtree(run_dir, ignore_errors=True)
     shutil.rmtree(cdir, ignore_errors=True)
     return res
 
 
-def prewarm(args):
-    """The format, built once into the shared format cache."""
+def prewarm(args, engines):
+    """Each engine's format, built once into the shared format cache
+    (with --shelf from Shelf's files, its packs kept there too)."""
     d = WORK / "fcache"
     (d / "formats").mkdir(parents=True, exist_ok=True)
-    w = WORK / "run" / "prewarm"
-    w.mkdir(parents=True, exist_ok=True)
-    (w / "p.tex").write_text("\\documentclass{article}\n\\begin{document}\nx\n\\end{document}\n")
-    env = manuals.side_env("pdflatex", {"PHITEX_CACHE_DIR": str(d)}, phitex=True)
-    r = common.run([args.bin, "build", "--exact-pdf", "-j", "1", "--no-synctex", "p.tex"], w, env, 600, out=w / "term.txt")
-    print(f"prewarm: exit {r['exit']} wall {r['wall_s']} s; formats: {sorted(os.listdir(d / 'formats'))}", flush=True)
-    if r["exit"] != 0:
-        print((w / "term.txt").read_text(errors="replace")[-3000:], flush=True)
+    if args.shelf:
+        (d / "shelf").mkdir(parents=True, exist_ok=True)
+    for e in engines:
+        w = WORK / "run" / f"prewarm-{e}"
+        w.mkdir(parents=True, exist_ok=True)
+        (w / "p.tex").write_text("\\documentclass{article}\n\\begin{document}\nx\n\\end{document}\n")
+        env = manuals.side_env(e, {"PHITEX_CACHE_DIR": str(d)}, phitex=True)
+        cmd = [args.bin, "build", "--exact-pdf", "-j", "1", "--no-synctex", "--engine", e,
+               *(["--shelf"] if args.shelf else []), "p.tex"]
+        r = common.run(cmd, w, env, 900, out=w / "term.txt")
+        print(f"prewarm {e}: exit {r['exit']} wall {r['wall_s']} s; formats: {sorted(os.listdir(d / 'formats'))}", flush=True)
+        if r["exit"] != 0:
+            print((w / "term.txt").read_text(errors="replace")[-3000:], flush=True)
+
+
+def documented_rows(path):
+    """ci/manuals-pdftex-bugs.tsv: id, the docs/differences.md entry, the
+    mask (pdfdiff.MASKS), the oracle's object numbers it may change."""
+    rows = {}
+    for l in open(path) if path else ():
+        if l.strip() and not l.startswith("#"):
+            i, doc, mask, objs = l.rstrip("\n").split("\t")[:4]
+            assert mask in pdfdiff.MASKS, f"{path}: {i}: no mask {mask}"
+            rows[i] = {"doc": doc, "mask": mask, "objs": [int(x) for x in objs.split()]}
+    return rows
 
 
 def cmd_run(args):
-    items = manuals.load_list(args.list)
-    items = [c for c in items if c["engine"] == "pdflatex" and not (set(c.get("tools", [])) - {"bibtex", "makeindex"})]
+    args.documented_rows = documented_rows(args.documented)
+    args.known_ids = set()
+    if args.known:
+        args.known_ids = {l.split()[0] for l in open(args.known) if l.strip() and not l.startswith("#")}
+    items = manuals.shard(manuals.load_list(args.list), args.shard)
+    engines, tools = set(args.engines.split(",")), set(args.tools.split(","))
+    items = [c for c in items if c["engine"] in engines and not (set(c.get("tools", [])) - tools)]
     if args.ids:
         want = set(args.ids.split(","))
         items = [c for c in items if c["id"] in want]
     items = sorted(items, key=lambda c: (-(c.get("oracle_wall_s") or 0), c["id"]))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    prewarm(args)
+    prewarm(args, sorted({c["engine"] for c in items}))
     par = dict((int(a), int(b)) for a, b in (x.split(":") for x in args.par.split(",")))
     print(f"{len(items)} documents, jobs {args.jobs}, parallel {par}, timeout {args.timeout} s", flush=True)
     for j in (int(x) for x in args.jobs.split(",")):
@@ -273,10 +362,12 @@ def load(d):
 
 def cmd_table(args):
     rs = load(args.dir)
+    js = sorted({j for by in rs.values() for j in by})
+    hi = js[-1] if len(js) > 1 else 8
     tot = {"docs": 0, "exact1": 0, "exact8": 0, "same18": 0, "exit0_1": 0, "exit0_8": 0, "rounds_le": 0, "rounds_n": 0}
     rows = []
     for i, by in sorted(rs.items()):
-        a, b = by.get(1, {}), by.get(8, {})
+        a, b = by.get(1, {}), by.get(hi, {})
         if a.get("status") == "no-oracle":
             continue
         tot["docs"] += 1
@@ -289,15 +380,15 @@ def cmd_table(args):
             tot["rounds_n"] += 1
             tot["rounds_le"] += a["rounds"] <= a["oracle_passes"]
         rows.append((i, a, b))
-    print(f"{'document':<50} {'st j1':<8} {'st j8':<8} {'1=8':>3} {'ex1':>3} {'pg/or':>9} {'rd/or':>5} {'w1':>6} {'w8':>6}  note")
-    order = {"panic": 0, "error": 1, "timeout": 2, "harness": 3, "differs": 4, "exact": 5}
+    print(f"{'document':<50} {'st j1':<8} {'st j' + str(hi):<8} {'1=' + str(hi):>3} {'ex1':>3} {'pg/or':>9} {'rd/or':>5} {'w1':>6} {'w8':>6}  note")
+    order = {"panic": 0, "error": 1, "timeout": 2, "harness": 3, "differs": 4, "documented": 5, "exact": 6}
     for i, a, b in sorted(rows, key=lambda x: (order.get(x[1].get("status"), 9), x[0])):
         same = "y" if a.get("md5") and a.get("md5") == b.get("md5") else "n"
         print(f"{i[:50]:<50} {str(a.get('status')):<8} {str(b.get('status')):<8} {same:>3} {str(a.get('exit')):>3} "
               f"{str(a.get('pages')) + '/' + str(a.get('oracle_pages')):>9} {str(a.get('rounds')) + '/' + str(a.get('oracle_passes')):>5} "
-              f"{str(a.get('wall_s')):>6} {str(b.get('wall_s')):>6}  {(a.get('note') or '')[:110]}")
-    print(f"\n{tot['docs']} documents: exact j1 {tot['exact1']}, exact j8 {tot['exact8']}, md5 j1 == j8 {tot['same18']}, "
-          f"exit 0 j1 {tot['exit0_1']}, exit 0 j8 {tot['exit0_8']}, rounds <= oracle passes {tot['rounds_le']}/{tot['rounds_n']}")
+              f"{str(a.get('wall_s')):>6} {str(b.get('wall_s')):>6}  {(a.get('note') or b.get('note') or '')[:110]}")
+    print(f"\n{tot['docs']} documents: exact j1 {tot['exact1']}, exact j{hi} {tot['exact8']}, md5 j1 == j{hi} {tot['same18']}, "
+          f"exit 0 j1 {tot['exit0_1']}, exit 0 j{hi} {tot['exit0_8']}, rounds <= oracle passes {tot['rounds_le']}/{tot['rounds_n']}")
     if args.json:
         common.write_json(args.json, {"totals": tot, "docs": {i: {"j1": a, "j8": b} for i, a, b in rows}})
 
@@ -312,6 +403,14 @@ def main():
     p.add_argument("--bin", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--ids")
+    p.add_argument("--shard")
+    p.add_argument("--engines", default="pdflatex")
+    p.add_argument("--tools", default="bibtex,makeindex")
+    p.add_argument("--shelf", action="store_true")
+    p.add_argument("--diff-oracle", action="store_true",
+                   help="a document whose oracle is only pinned (oracle_md5) and whose PDF differs: its oracle built, for pdfdiff")
+    p.add_argument("--known", help="a file of ids (first word a line) not identical when pinned: no oracle built for them")
+    p.add_argument("--documented", help="ci/manuals-pdftex-bugs.tsv: manuals that may differ from the oracle only in the objects listed, as the listed mask allows (docs/differences.md)")
     p.add_argument("--jobs", default="1,8")
     p.add_argument("--par", default="1:20,8:5")
     p.add_argument("--timeout", type=int, default=120)

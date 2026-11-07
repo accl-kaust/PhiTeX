@@ -81,6 +81,7 @@ const STATIC: &[&str] = &[
     "pdf:match",
     "pdf:objnum",
     "pdf:openaction",
+    "pdf:opened",
     "pdf:pieces",
     "pdf:random",
     "pdf:relaxed",
@@ -188,6 +189,7 @@ params!(
     pdfpagebox,
     pdfpageheight,
     pdfpagewidth,
+    pdfptexuseunderscore,
     pdfsuppressptexinfo,
     pdfthreadmargin,
     pdfvorigin,
@@ -215,6 +217,7 @@ params!(
     vsize,
     widowpenalty,
     xspaceskip,
+    savingvdiscards,
 );
 
 /// The fixed locations of a run's state table ([`crate::state`]):
@@ -322,6 +325,12 @@ pub(crate) mod cell {
     pub(crate) const PDF_MATCH: u32 = (STATIC0 + static_index("pdf:match")) as u32;
     pub(crate) const PDF_OBJNUM: u32 = (STATIC0 + static_index("pdf:objnum")) as u32;
     pub(crate) const PDF_OPENACTION: u32 = (STATIC0 + static_index("pdf:openaction")) as u32;
+    /// pdfTeX's PDF file opened (`check_pdfversion`, pdftex.web:
+    /// `ensure_pdf_open`) by a read-time write: an `\\immediate`
+    /// `\\pdfobj` or `\\pdfxform`, `\\pdfximage`, the first
+    /// `\\pdfcatalog ... openaction`. With no page shipped pdfTeX leaves
+    /// that file with no bytes (its buffer never flushed).
+    pub(crate) const PDF_OPENED: u32 = (STATIC0 + static_index("pdf:opened")) as u32;
     pub(crate) const PDF_PIECES: u32 = (STATIC0 + static_index("pdf:pieces")) as u32;
     pub(crate) const PDF_RANDOM: u32 = (STATIC0 + static_index("pdf:random")) as u32;
     pub(crate) const PDF_RELAXED: u32 = (STATIC0 + static_index("pdf:relaxed")) as u32;
@@ -563,6 +572,14 @@ impl Fields {
         if loc < NSLOT {
             return self.slot_field[loc];
         }
+        // (a spill location is its table's own: its field is in its slot;
+        // asked here, it is one of a table the run no longer has (a
+        // refused picture child's appends once kept them), and no name
+        // answers it: never kept, or the empty name's field would be
+        // sent there by `loc_of` from then on, on this thread)
+        if loc >= 1 << 31 {
+            return v.field("\u{1}spill:gone");
+        }
         let key = u32::try_from(loc).unwrap_or(u32::MAX);
         if let Some(f) = with_names(v, epoch, |c| c.fields.get(&key).copied()) {
             return f;
@@ -593,9 +610,11 @@ impl Fields {
         } else {
             Tok::ch(13, u32::try_from(loc - MEAN_ACTIVE).unwrap_or(0))
         };
-        let f = self
-            .meaning_at(v, epoch, t)
-            .unwrap_or_else(|| v.field("cs:"));
+        // (no meaning here: no name to keep; `cs:` kept at this location
+        // would send the empty name's readers to it)
+        let Some(f) = self.meaning_at(v, epoch, t) else {
+            return v.field("cs:");
+        };
         with_names(v, epoch, |c| {
             bounded(&mut c.locs);
             c.locs.insert(f, u32::try_from(loc).ok());
@@ -812,4 +831,29 @@ fn with_names<T>(v: &Values, epoch: u64, f: impl FnOnce(&mut Named) -> T) -> T {
         }
         f(&mut c)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Fields;
+    use phitex_defuse::Values;
+
+    /// A spill location asked of the build's fields (one of a table a run
+    /// dropped, a refused picture child's) is answered with no name's
+    /// field, and the empty control sequence's location stays its meaning
+    /// slot: kept for it, `\csname\endcsname` defined whatever field the
+    /// spill index held next on the thread (beamertheme-arguelles'
+    /// `\pdfprotrudechars`).
+    #[test]
+    fn a_spill_location_names_no_field_and_moves_none() {
+        let v = Values::new();
+        let fx = Fields::new(&v);
+        let e = v.epoch();
+        let empty = v.field("cs:");
+        let before = fx.loc_of(&v, e, empty);
+        let spill = 1usize << 31 | 1;
+        assert_ne!(fx.field_of(&v, e, spill), empty);
+        assert_eq!(fx.loc_of(&v, e, empty), before);
+        assert!(before.is_some_and(|l| l < 1 << 31));
+    }
 }

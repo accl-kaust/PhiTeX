@@ -1,0 +1,45 @@
+% The research corpus (ci/research.json): a humanities article in
+% KOMA-Script (scrartcl) with babel, csquotes and biblatex's authoryear
+% style through biber, on biblatex's own example database.
+\documentclass[a4paper,11pt,parskip=half,bibliography=totoc]{scrartcl}
+\usepackage[T1]{fontenc}
+\usepackage[ngerman,main=english]{babel}
+\usepackage{lmodern}
+\usepackage{csquotes}
+\usepackage[style=authoryear-comp,backend=biber,maxcitenames=2]{biblatex}
+\addbibresource{biblatex-examples.bib}
+\usepackage{scrlayer-scrpage}
+\pagestyle{scrheadings}
+\ihead{Reading Aristotle}
+\ohead{\pagemark}
+\cfoot{}
+\title{Reading Aristotle Today}
+\subtitle{Notes on Reception and Translation}
+\author{H. Humanist}
+\date{1 January 2026}
+\begin{document}
+\maketitle
+\begin{abstract}
+A short essay in the shape of a humanities paper: author--year
+citations, footnotes, block quotations and a German passage.
+\end{abstract}
+\section{Introduction}
+Aristotle's \textit{Poetics} has been read in many ways
+\autocite{aristotle:poetics}; on the soul he is read differently again
+\autocites[12]{aristotle:anima}[see also][]{aristotle:physics}.\footnote{On
+the translations see \textcite{aristotle:rhetoric}, and for a modern
+reading \textcite{nussbaum}.}
+\section{Quotation}
+\blockquote[{\cite[45]{augustine}}]{Every long quotation, set off from the
+text, is introduced by its author and closed by its source, as the
+humanities ask; it runs on for several lines so that the block
+quotation's margins can be seen at work in the finished page.}
+\section{A German passage}
+\begin{otherlanguage}{ngerman}
+Die \enquote{Übersetzung} ist, wie \textcite{nietzsche:ksa1} zeigt, nie nur
+Übertragung; Silbentrennung und Anführungszeichen folgen dem Deutschen.
+\end{otherlanguage}
+\section{Conclusion}
+Further reading: \cite{kant:kpv,kant:ku,worman}.
+\printbibliography
+\end{document}

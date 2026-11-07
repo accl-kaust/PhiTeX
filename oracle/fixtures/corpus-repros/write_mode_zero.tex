@@ -1,0 +1,10 @@
+% \ifhmode, \ifvmode, \ifmmode and \ifinner are all false while a \write is
+% expanded (TeX sec. 1370, mode:=0).
+\documentclass{article}
+\newwrite\f
+\begin{document}
+Text \immediate\openout\f=\jobname.m
+\immediate\write\f{[\ifhmode h\fi\ifvmode v\fi\ifmmode m\fi\ifinner i\fi]}%
+\immediate\closeout\f
+\input{\jobname.m}
+\end{document}

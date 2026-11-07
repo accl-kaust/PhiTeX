@@ -403,6 +403,7 @@ impl Config {
             ("others_string", "others"),
             ("output_encoding", "UTF-8"),
             ("output_safechars", "0"),
+            ("output_safecharsset", "base"),
             ("sortcase", "1"),
             ("sortupper", "1"),
             ("wraplines", "0"),

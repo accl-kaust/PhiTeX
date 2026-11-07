@@ -261,7 +261,10 @@ pub struct PageRecord {
     post_key: String,
     /// ... and after the page.
     post: Option<Box<Scratch>>,
-    /// The content stream object after its header line and `<<`.
+    /// The content stream object after its header line and `<<`; empty
+    /// where the walk left it uncompressed (`shown` is the content: the
+    /// replay compresses it, as it does a content whose font numbers
+    /// differ).
     blob: Vec<u8>,
     events: Vec<FontEv>,
     /// The fonts the page's resources list.
@@ -335,6 +338,9 @@ pub(crate) struct Recording {
     pub pre_nums: [usize; 3],
     /// Where the content object's bytes begin and end in `out`.
     pub blob: Option<(usize, usize)>,
+    /// Whether the content stream was left uncompressed in `out` (the
+    /// replay compresses it: [`PageRecord`]'s blob is empty then).
+    pub deferred: bool,
     /// The font numbers written in the content ([`PageRecord`]'s).
     pub holes: Vec<(usize, usize, FontId)>,
     pub font_list: Vec<FontId>,
@@ -452,7 +458,9 @@ impl PdfState {
             && !link_at_start
             && self.link_stack.is_empty();
         if pr.simple {
-            pr.blob = self.out[a..b].to_vec();
+            if !rec.deferred {
+                pr.blob = self.out[a..b].to_vec();
+            }
             pr.post = Some(Box::new(self.scratch()));
             pr.font_list = rec.font_list;
             pr.chars = page_chars;
@@ -730,7 +738,7 @@ impl PdfState {
             })
             .collect();
         let report = (!subs.is_empty()).then(|| format!("{} font numbers rewritten", subs.len()));
-        if subs.is_empty() {
+        if subs.is_empty() && !rec.blob.is_empty() {
             self.print(&rec.blob);
         } else {
             self.take_parts(parts);

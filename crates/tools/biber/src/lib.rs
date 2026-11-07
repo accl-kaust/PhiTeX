@@ -94,9 +94,24 @@ pub struct Outcome {
     /// Features of the input this port does not support; the run fails
     /// when there are any.
     pub unsupported: Vec<String>,
+    /// The `.bbl` written in Latin-1 (`output_encoding`), not UTF-8.
+    latin1: bool,
 }
 
 impl Outcome {
+    /// The `.bbl` as the file's bytes, in its output encoding (its
+    /// characters are all in it, [`Outcome::bbl`] recoded).
+    pub fn bbl_bytes(&self) -> Option<Vec<u8>> {
+        let t = self.bbl.as_ref()?;
+        Some(if self.latin1 {
+            t.chars()
+                .map(|c| u8::try_from(u32::from(c)).unwrap_or(b'?'))
+                .collect()
+        } else {
+            t.clone().into_bytes()
+        })
+    }
+
     /// biber's exit status: 2 on a fatal error, else 0.
     pub fn status(&self) -> i32 {
         if self.bbl.is_none() { 2 } else { 0 }
@@ -118,8 +133,14 @@ pub fn default_input_for(output: &str) -> Option<String> {
 pub fn run(bcf: &[u8], files: &mut dyn Files) -> Outcome {
     let mut b = biber::Biber::new(files);
     let text = String::from_utf8_lossy(bcf).into_owned();
-    let r = b.parse_ctrlfile(&text).and_then(|()| b.prepare());
+    // (no data sources: biber's "Be friendly to latexmk" exit, `EXIT_OK`
+    // after `parse_ctrlfile`, its .bbl opened and truncated before it and
+    // left empty)
+    let r = b
+        .parse_ctrlfile(&text)
+        .and_then(|()| if b.no_data { Ok(()) } else { b.prepare() });
     let bbl = match r {
+        Ok(()) if b.no_data => Some(String::new()),
         Ok(()) => Some(b.bbl_text()),
         Err(f) => {
             if !b.errors.contains(&f.0) {
@@ -141,11 +162,14 @@ pub fn run(bcf: &[u8], files: &mut dyn Files) -> Outcome {
     }
     let mut warnings = b.warnings.clone();
     warnings.extend(b.bt_warnings.iter().cloned());
+    let latin1 =
+        recode::Encoding::of(&b.cfg.opt("output_encoding")) == Some(recode::Encoding::Latin1);
     Outcome {
         bbl,
         blg,
         warnings,
         errors: b.errors.clone(),
         unsupported: b.unsupported.clone(),
+        latin1,
     }
 }

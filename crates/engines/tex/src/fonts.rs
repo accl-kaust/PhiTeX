@@ -3,7 +3,7 @@
 //! `phitex-typeset` through its `Fonts` trait.
 
 use crate::exec::LockWait as _;
-use phitex_defuse::FxHashMap;
+use phitex_defuse::{FxHashMap, FxHashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use phitex_defuse::{ValueId, Values};
@@ -67,26 +67,46 @@ pub(crate) fn load(v: &Values, file: ValueId, s: i32) -> Option<Arc<Loaded>> {
 pub(crate) fn load_info(v: &Values, i: &Info) -> Option<Arc<Loaded>> {
     let file = i.file?;
     let l = match i.ls {
-        Some(ls) => load_spaced(v, file, i.s, ls.dw, ls.nolig),
-        None => load(v, file, i.s),
+        Some(ls) => load_spaced(v, file, i.s, ls.dw, ls.nolig || i.nolig),
+        None => load_spaced(v, file, i.s, 0, i.nolig),
     }?;
+    let l = if i.untagged.is_empty() {
+        l
+    } else {
+        untagged(&l, &i.untagged)
+    };
     match i.ex {
         Some((_, e, _)) => Some(expanded(&l, e)),
         None => Some(l),
     }
 }
 
+/// A memo of fonts made from a font (`expanded`, `untagged`) by its
+/// allocation: each entry holds the font it was made from, so that
+/// allocation is never freed and given to another font, whose memo hit
+/// would answer the first font's widths (a font loaded twice at once
+/// by two threads left one copy to drop; `ArsClassica` -j8, 1 build in 72,
+/// a letter-spaced heading set by another font's widths), and a hit is
+/// checked to be the font held.
+type Made<K> = Mutex<FxHashMap<(usize, K), (Arc<Loaded>, Arc<Loaded>)>>;
+
+/// [`Made`]'s answer for `l` under `k`, if the entry is `l`'s.
+fn made<K: std::hash::Hash + Eq>(m: &Made<K>, l: &Arc<Loaded>, k: K) -> Option<Arc<Loaded>> {
+    m.locked()
+        .get(&(Arc::as_ptr(l) as usize, k))
+        .filter(|(from, _)| Arc::ptr_eq(from, l))
+        .map(|(_, x)| x.clone())
+}
+
 /// `auto_expand_font(f, e)` (pdfTeX): font `l` expanded by `e`
 /// thousandths, its widths, italic corrections and kerns
-/// `round_xn_over_d(x, 1000+e, 1000)`; a memo by the font (the loads'
-/// cache keeps it) and `e`.
+/// `round_xn_over_d(x, 1000+e, 1000)`; a memo by the font ([`Made`])
+/// and `e`.
 pub(crate) fn expanded(l: &Arc<Loaded>, e: i32) -> Arc<Loaded> {
-    type Memo = Mutex<FxHashMap<(usize, i32), Arc<Loaded>>>;
-    static M: OnceLock<Memo> = OnceLock::new();
-    let key = (Arc::as_ptr(l) as usize, e);
+    static M: OnceLock<Made<i32>> = OnceLock::new();
     let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
-    if let Some(x) = m.locked().get(&key) {
-        return x.clone();
+    if let Some(x) = made(m, l, e) {
+        return x;
     }
     let r = |x: i32| phitex_typeset::arith::round_xn_over_d(x, 1000 + e, 1000);
     let mut at = l.at.clone();
@@ -103,7 +123,30 @@ pub(crate) fn expanded(l: &Arc<Loaded>, e: i32) -> Arc<Loaded> {
         at_hash: OnceLock::new(),
         whd: OnceLock::new(),
     });
-    m.locked().insert(key, x.clone());
+    m.locked()
+        .insert((Arc::as_ptr(l) as usize, e), (l.clone(), x.clone()));
+    x
+}
+
+/// Font `l` with the tags `\tagcode` took off its characters
+/// (`set_tag_code`, pdfTeX); a memo by the font ([`Made`]) and the tags.
+fn untagged(l: &Arc<Loaded>, tags: &[(u8, u8)]) -> Arc<Loaded> {
+    static M: OnceLock<Made<Vec<(u8, u8)>>> = OnceLock::new();
+    let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
+    if let Some(x) = made(m, l, tags.to_vec()) {
+        return x;
+    }
+    let tfm = l.tfm.clone().without_tags(tags);
+    let x = Arc::new(Loaded {
+        tfm,
+        at: l.at.clone(),
+        at_hash: OnceLock::new(),
+        whd: OnceLock::new(),
+    });
+    m.locked().insert(
+        (Arc::as_ptr(l) as usize, tags.to_vec()),
+        (l.clone(), x.clone()),
+    );
     x
 }
 
@@ -112,10 +155,17 @@ pub(crate) fn expanded_name(name: &str, e: i32) -> String {
     format!("{name}{e:+}")
 }
 
-/// The key of font `name` at `size` expanded by `e` (the key of a font of
-/// its name and size, as `tfm_lookup` finds it).
-pub(crate) fn expanded_key(name: &str, size: i32, e: i32) -> u32 {
-    key_of(&expanded_name(name, e), size, 0)
+/// The key of font `name` at `size` expanded automatically by `e`: of its
+/// name and size, as `tfm_lookup` finds it (a `\font` reloaded after
+/// `\pdffontexpand` shares them); `copy`, a `\pdfcopyfont` (one for each of
+/// microtype's contexts), has its own: pdfTeX numbers one for each copy
+/// at the same `e`.
+pub(crate) fn expanded_key(copy: Option<FontId>, name: &str, size: i32, e: i32) -> u32 {
+    let n = expanded_name(name, e);
+    match copy {
+        Some(f) => key_of(&format!("{n}\u{1}{f}"), size, 0),
+        None => key_of(&n, size, 0),
+    }
 }
 
 /// [`load`] with every width `dw` wider and, if `nolig`, no lig/kern
@@ -144,8 +194,9 @@ fn load_spaced(v: &Values, file: ValueId, s: i32, dw: i32, nolig: bool) -> Optio
             whd: OnceLock::new(),
         }))
     });
-    cache().locked().insert(key, loaded.clone());
-    loaded
+    // (two threads parsing the same font at once: the first one in is
+    // the font, the other's copy is dropped here and held by nothing)
+    cache().locked().entry(key).or_insert(loaded).clone()
 }
 
 /// A letter-spaced font's making (`letter_space_font`, pdfTeX): the
@@ -272,11 +323,33 @@ pub(crate) struct View {
     /// XeTeX's `cur_f` as math leaves it (-1: the null font).
     pub math_cur_f: std::sync::atomic::AtomicI64,
     pub px: FxHashMap<FontId, Box<Px>>,
-    /// An expanded font's base, for its codes.
+    /// An expanded font's base, for its codes (pdfTeX's `pdf_font_blink`:
+    /// the font whose first ask for the ratio made or found it last,
+    /// `copy_expand_params`), as the engine holds it where the view is made.
     pub ex_base: FxHashMap<FontId, FontId>,
+    /// The ratios each font has asked for before this view (pdfTeX's
+    /// `pdf_font_elink`, the engine's `pdf:elink:<f>`).
+    pub elink: FxHashMap<FontId, Vec<i32>>,
+    /// An expanded font bound anew here, by a font's first ask for its
+    /// ratio ([`View::expand`]): the base its codes are from now on.
+    rebound: Mutex<FxHashMap<FontId, FontId>>,
+    /// The fonts' first asks here, by font and ratio.
+    linked_here: Mutex<FxHashSet<(FontId, i32)>>,
+    /// Every ask here, by font and ratio: what the paragraph used of the
+    /// lists in [`View::elink`] (`Run::note_elink_asks`).
+    pub asked: Mutex<FxHashSet<(FontId, i32)>>,
+    /// The fonts whose [`View::elink`] list was looked at, not read: the
+    /// field each, its membership of the ratios asked then recorded.
+    pub elink_peeked: FxHashMap<FontId, phitex_defuse::Field>,
+    /// The expanded fonts' info looked at, not read, by the asking font
+    /// and ratio: the field and the value seen, recorded for the ratios
+    /// the paragraph asks (`Run::note_elink_asks`).
+    pub info_peeked:
+        FxHashMap<(FontId, i32), (phitex_defuse::Field, Option<phitex_defuse::ValueId>)>,
     /// The fonts expanded here: their base and the slot of their metrics.
     exp_index: Mutex<FxHashMap<FontId, (FontId, usize)>>,
-    /// `get_expand_font`'s requests, in order (the first of each).
+    /// `get_expand_font`'s requests, in order (the first of each font's
+    /// for a ratio: what the engine binds as pdfTeX does).
     pub exp_log: Mutex<Vec<(FontId, i32)>>,
 }
 
@@ -287,6 +360,8 @@ pub(crate) struct View {
 pub(crate) struct Px {
     pub expansion: Option<phitex_typeset::fonts::Expansion>,
     pub auto: bool,
+    /// Made by `\pdfcopyfont` (its expanded fonts its own).
+    pub copy: bool,
     pub lp: Box<[i32]>,
     pub rp: Box<[i32]>,
     pub ef: Box<[i32]>,
@@ -310,6 +385,13 @@ pub(crate) struct Info {
     pub s: i32,
     pub ls: Option<Ls>,
     pub ex: Option<(i64, i32, bool)>,
+    /// `\pdfnoligatures` (pdfTeX's `set_no_ligatures`): no character's
+    /// lig/kern program is reached, so no ligature and no kern.
+    pub nolig: bool,
+    /// `\tagcode` below 0 (pdfTeX's `set_tag_code`): by character, the
+    /// tags taken off (1 its lig/kern program, 2 its next larger, 4 its
+    /// extensible), in character order.
+    pub untagged: Vec<(u8, u8)>,
 }
 
 pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
@@ -331,6 +413,21 @@ pub(crate) fn info(v: &Values, x: Option<ValueId>) -> Option<Info> {
             let g = |k: usize| ys.get(k).map(|&z| int_of(v, z));
             Some((g(0)?, i32::try_from(g(1)?).ok()?, g(2)? != 0))
         }),
+        nolig: n(7) != 0,
+        untagged: {
+            let ys = xs.get(8).map(|&y| list_of(v, y)).unwrap_or_default();
+            let mut t: Vec<(u8, u8)> = ys
+                .chunks(2)
+                .filter_map(|p| {
+                    Some((
+                        u8::try_from(int_of(v, *p.first()?)).ok()?,
+                        u8::try_from(int_of(v, *p.get(1)?)).ok()?,
+                    ))
+                })
+                .collect();
+            t.sort_unstable();
+            t
+        },
     })
 }
 
@@ -451,8 +548,13 @@ impl View {
         self.px.get(&base)?.slots.get(i)?.get()
     }
 
-    /// The font whose codes and quad `f` has: an expanded font's base.
+    /// The font whose codes and quad `f` has: an expanded font's base
+    /// (bound anew here, else as the engine holds it, else the font that
+    /// made it here).
     fn base_of(&self, f: FontId) -> FontId {
+        if let Some(&b) = self.rebound.locked().get(&f) {
+            return b;
+        }
         if let Some(&b) = self.ex_base.get(&f) {
             return b;
         }
@@ -693,13 +795,38 @@ impl View {
         let Some((name, size)) = self.names.get(&font) else {
             return font;
         };
-        let k = expanded_key(name, *size, e);
+        let k = expanded_key(p.copy.then_some(font), name, *size, e);
         let Some((l, params)) = self.fonts.get(font) else {
             return font;
         };
         p.slots[i].get_or_init(|| (expanded(l, e), params.clone()));
-        if self.exp_index.locked().insert(k, (font, i)).is_none() && log {
-            self.exp_log.locked().push((font, e));
+        let new = {
+            let mut idx = self.exp_index.locked();
+            if let std::collections::hash_map::Entry::Vacant(v) = idx.entry(k) {
+                v.insert((font, i));
+                true
+            } else {
+                false
+            }
+        };
+        // (pdfTeX's `get_expand_font`: a font's first ask for a ratio goes
+        // through `load_expand_font`, which binds the font `tfm_lookup`
+        // finds, or makes, to the asking font (`copy_expand_params`: its
+        // codes); a later ask finds it in the font's own chain and binds
+        // nothing. The engine binds it so when the run is committed
+        // (`exp_log`); here, for the lines after it in this paragraph)
+        if log {
+            self.asked.locked().insert((font, e));
+        }
+        let first = !self.elink.get(&font).is_some_and(|l| l.contains(&e))
+            && self.linked_here.locked().insert((font, e));
+        if first {
+            if !new || self.ex_base.contains_key(&k) {
+                self.rebound.locked().insert(k, font);
+            }
+            if log {
+                self.exp_log.locked().push((font, e));
+            }
         }
         k
     }
@@ -797,5 +924,101 @@ mod tests {
         // (the key held by the same font: that font)
         let k = pick_key::<()>("cmr10", 655_360, &mut |_| Ok(Some(false))).unwrap();
         assert_eq!(k, first);
+    }
+
+    /// A TFM of two characters, A (width `wa`) and B (width 1), at design
+    /// size 10pt.
+    fn tfm_bytes(wa: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        let pair = |b: &mut Vec<u8>, v: u16| b.extend_from_slice(&v.to_be_bytes());
+        let quad = |b: &mut Vec<u8>, v: u32| b.extend_from_slice(&v.to_be_bytes());
+        // lf lh bc ec nw nh nd ni nl nk ne np
+        for v in [27u16, 12, 65, 66, 3, 2, 1, 1, 0, 0, 0, 0] {
+            pair(&mut b, v);
+        }
+        quad(&mut b, 0x1234_5678);
+        quad(&mut b, 10 << 20);
+        quad(&mut b, 0x0854_6558);
+        quad(&mut b, 0x2074_6578);
+        quad(&mut b, 0x7400_0000);
+        for _ in 5..12 {
+            quad(&mut b, 0);
+        }
+        quad(&mut b, 0x0110_0000); // A: width 1, height 1
+        quad(&mut b, 0x0200_0000); // B: width 2
+        quad(&mut b, 0);
+        quad(&mut b, wa);
+        quad(&mut b, 0x8_0000);
+        quad(&mut b, 0);
+        quad(&mut b, 0x7_0000);
+        quad(&mut b, 0); // depths
+        quad(&mut b, 0); // italics
+        b
+    }
+
+    fn loaded(wa: u32) -> Arc<Loaded> {
+        let tfm = phitex_tfm::parse(&tfm_bytes(wa)).unwrap();
+        let at = tfm.at(10 << 16).unwrap();
+        Arc::new(Loaded {
+            tfm,
+            at,
+            at_hash: OnceLock::new(),
+            whd: OnceLock::new(),
+        })
+    }
+
+    #[test]
+    fn a_font_made_from_a_font_keeps_it_and_answers_for_it_alone() {
+        // (the memos of `expanded` and `untagged` are by the font's
+        // allocation: each entry holds its font, so the allocation is
+        // never another font's while the entry stands, and an entry
+        // answers only for the font it holds)
+        let a = loaded(0x8_0000);
+        let xa = expanded(&a, 100);
+        assert_eq!(
+            Arc::strong_count(&a),
+            2,
+            "the memo holds the font it expanded"
+        );
+        assert!(Arc::ptr_eq(&expanded(&a, 100), &xa), "a hit");
+        let r = |x: i32| phitex_typeset::arith::round_xn_over_d(x, 1100, 1000);
+        assert_eq!(xa.at.width(b'A'), a.at.width(b'A').map(r));
+        let ua = untagged(&a, &[(b'A', 1)]);
+        assert_eq!(
+            Arc::strong_count(&a),
+            3,
+            "the memo holds the font it untagged"
+        );
+        assert!(Arc::ptr_eq(&untagged(&a, &[(b'A', 1)]), &ua));
+        // (a hit on the allocation is checked to be the font held: a
+        // key of the same address as another font is answered afresh)
+        let b = loaded(0x4_0000);
+        let xb = expanded(&b, 100);
+        assert!(!Arc::ptr_eq(&xb, &xa));
+        assert_eq!(xb.at.width(b'A'), b.at.width(b'A').map(r));
+        assert_ne!(xb.at.width(b'A'), xa.at.width(b'A'));
+    }
+
+    #[test]
+    fn a_font_parsed_twice_at_once_is_one_font() {
+        // (the loads' cache: the first font in stays; a second parse of
+        // the same file at the same size, by another thread between the
+        // miss and the insert, gets the first)
+        let v = Values::new();
+        let text: String = tfm_bytes(0x8_0000).iter().map(|&b| char::from(b)).collect();
+        let file = v.list(vec![v.str("ab.tfm"), v.str(&text)]);
+        let first = load(&v, file, 10 << 16).unwrap();
+        let again = load(&v, file, 10 << 16).unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        let ls = load_spaced(&v, file, 10 << 16, 0x1_0000, false).unwrap();
+        assert!(!Arc::ptr_eq(&first, &ls));
+        assert_eq!(
+            ls.at.width(b'A'),
+            first.at.width(b'A').map(|w| w + 0x1_0000)
+        );
+        assert!(Arc::ptr_eq(
+            &ls,
+            &load_spaced(&v, file, 10 << 16, 0x1_0000, false).unwrap()
+        ));
     }
 }

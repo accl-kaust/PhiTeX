@@ -1,0 +1,10 @@
+% A bitmap (PK) font at two sizes: pdfTeX makes an object for each
+% (pdf_init_font shares one only between scalable fonts of a TFM name), so
+% an object made after the page is numbered past both.
+\documentclass{article}
+\font\a=yinit \font\b=yinit at 12pt
+\begin{document}
+{\a A}{\b B}
+\newpage
+\immediate\pdfobj{(x)}Object \the\pdflastobj.
+\end{document}

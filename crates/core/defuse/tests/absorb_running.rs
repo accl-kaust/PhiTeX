@@ -28,6 +28,26 @@ impl Operation for Def {
     }
 }
 
+/// `[]`: a run that checks in for 2 ms: what waits behind it on the
+/// caller's thread goes to another worker (an evaluation's next node runs
+/// where the one before it ran, unless it waits).
+struct Pause;
+
+impl Operation for Pause {
+    fn name(&self) -> &'static str {
+        "pause"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let t = Instant::now();
+        while t.elapsed() < Duration::from_millis(2) {
+            cx.tick(1)?;
+            std::thread::sleep(Duration::from_micros(50));
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
 /// `[f]`: reads f; on 1, spins (a TeX loop on a stale state) for
 /// [`SPIN`], checking the engine (`Ctx::tick`) as a TeX run does every
 /// few thousand expansions, unless it runs on `caller` (the thread that
@@ -119,6 +139,8 @@ fn an_edit_is_taken_while_a_run_spins_on_another_worker() {
         let v = e.values();
         let f = v.field("f");
         let u = e.new_unit();
+        let pause = e.register(Arc::new(Pause));
+        e.push(u, pause, vec![]);
         let d = e.push(u, def, vec![f.0, v.int(1)]);
         let r = e.push(u, sp, vec![f.0]);
         let mut src = Edit {
@@ -172,10 +194,13 @@ fn a_reader_re_asked_while_it_spins_is_stopped_at_its_next_check() {
         let v = e.values();
         let f = v.field("f");
         let u = e.new_unit();
+        let pause = e.register(Arc::new(Pause));
+        let w = e.push(u, pause, vec![]);
         let d = e.push(u, def, vec![f.0, v.int(3)]);
         let r = e.push(u, sp, vec![f.0]);
         e.evaluate(2).unwrap();
         assert_eq!(v.as_int(e.output(r).expect("ran")), Some(3));
+        e.replace(w, pause, vec![]);
         e.replace(d, def, vec![f.0, v.int(1)]);
         // (the reader queued too, its record kept: it runs on the other
         // worker as the caller's runs the definition)

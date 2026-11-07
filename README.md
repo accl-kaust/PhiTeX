@@ -99,7 +99,9 @@ rebuilds on every save. Double-click the page to jump to the source.
 One build, start to finish. `\ref`, `\cite`, the table of contents and the
 index settle in a single run: no "run it twice", no latexmk. BibTeX, biber
 and makeindex run inside the build, and run again only when their input
-changes.
+changes. The glossaries package's lists are made as `makeglossaries` makes
+them (makeindex on `STEM.glo` and `STEM.acn` in the style `STEM.ist`),
+where `STEM.ist` exists.
 
 ```sh
 phitex build paper.tex                    # the finished PDF, like latexmk -pdf
@@ -185,7 +187,10 @@ cargo test
 Contributions are welcome: bug reports, documents that break, fixes, and
 new editor integrations.
 
-- **A PDF that differs from pdflatex's is a bug.** Open an issue with the
+- **A PDF that differs from pdflatex's is a bug**, unless the difference
+  is listed in [docs/differences.md](docs/differences.md): the few places
+  where pdfTeX has a bug of its own (such as reading memory it never set)
+  and PhiTeX writes what pdfTeX means instead. Open an issue with the
   smallest `.tex` file that shows it, the command you ran, and
   `phitex --version`. If it builds with pdflatex and not with PhiTeX, that
   is a bug too.

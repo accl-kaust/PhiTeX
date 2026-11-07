@@ -163,18 +163,90 @@ impl Edits {
     }
 }
 
+/// The PDF a viewer is shown, kept as the host keeps a watch's file: the
+/// exact file, then an update section after each build whose PDF is a
+/// layout ([`Report`]'s `out.layout`), the exact file again when idle
+/// ([`ViewFile::compact`]). A build's file is its last one's and the
+/// objects that changed: nothing read again from disk, no whole file made
+/// again, however long the document.
+#[derive(Default)]
+pub struct ViewFile {
+    /// What the file holds, its bytes, and those bytes as last given out
+    /// (none: nothing yet).
+    at: Option<(phitex_pdf::Updater, Vec<u8>, Arc<[u8]>)>,
+    /// Whether it is the exact file of what it holds.
+    exact: bool,
+}
+
+impl ViewFile {
+    /// The file brought to layout `l`: its bytes (the last ones, shared,
+    /// where nothing changed).
+    ///
+    /// # Errors
+    /// The exact file's link's (the first layout's).
+    pub fn update(&mut self, l: &phitex_pdf::Layout) -> Result<Arc<[u8]>, String> {
+        if let Some((u, bytes, shown)) = self.at.as_mut() {
+            if let phitex_pdf::Section::Append(b) = u.section(l) {
+                bytes.extend_from_slice(&b);
+                *shown = Arc::from(bytes.as_slice());
+                self.exact = false;
+            }
+            return Ok(shown.clone());
+        }
+        let exact = l.exact().map_err(|e| format!("{e}"))?;
+        Ok(self.exact_of(l.clone(), &exact))
+    }
+
+    fn exact_of(&mut self, l: phitex_pdf::Layout, exact: &[u8]) -> Arc<[u8]> {
+        let shown: Arc<[u8]> = Arc::from(exact);
+        self.at = Some((
+            phitex_pdf::Updater::after_exact(l, exact),
+            exact.to_vec(),
+            shown.clone(),
+        ));
+        self.exact = true;
+        shown
+    }
+
+    /// The layout whose exact file [`ViewFile::compact`] makes, where the
+    /// file is not exact: made (the expensive part, on any thread) with
+    /// [`phitex_pdf::Layout::exact`], then taken by `compact`.
+    pub fn to_compact(&self) -> Option<phitex_pdf::Layout> {
+        match &self.at {
+            Some((u, ..)) if !self.exact => Some(u.held().clone()),
+            _ => None,
+        }
+    }
+
+    /// The file made the exact file of what it holds, where it is not:
+    /// its bytes then.
+    ///
+    /// # Errors
+    /// The exact file's link's.
+    pub fn compact(&mut self) -> Result<Option<Arc<[u8]>>, String> {
+        let Some(l) = self.to_compact() else {
+            return Ok(None);
+        };
+        let exact = l.exact().map_err(|e| format!("{e}"))?;
+        Ok(Some(self.exact_of(l, &exact)))
+    }
+}
+
 /// The PDF a viewer is shown of build `r`: its PDF; a DVI's made a PDF
-/// by the host (dvipdfmx); a PDF file written as update sections, as the
-/// host wrote it (`written`). None: no pages.
+/// by the host (dvipdfmx); a PDF given as a layout, `view`'s file
+/// brought to it where there is one, else as the host wrote it
+/// (`written`). None: no pages.
 ///
 /// # Errors
 /// The DVI's conversion's.
 pub fn viewer_pdf(
     s: &Session,
     r: &Report,
+    view: Option<&mut ViewFile>,
     written: impl FnOnce() -> Option<Vec<u8>>,
 ) -> Result<Option<Arc<[u8]>>, String> {
     Ok(match r.main_output() {
+        None if let (Some(l), Some(v)) = (&r.out.layout, view) => Some(v.update(l)?),
         // (a file written as update sections: as it is)
         None if r.out.layout.is_some() => written().map(|b| crate::session::shared(&b)),
         Some(("pdf", b)) => Some(crate::session::shared(b)),
@@ -213,12 +285,61 @@ pub fn tex_text(s: &str) -> String {
 /// places, each a whole problem (the viewer's `Problem`: its line, the
 /// culprit underlined, TeX's context and help), else the transcript's.
 pub fn diagnostics(s: &Session, r: &Report, log: &str) -> Vec<Value> {
+    kinds(items(s, r, log))
+}
+
+/// The diagnostics a build left for later ([`Report::diagnostics_pending`])
+/// for the viewer, made now ([`Session::diagnostics_now`]): as
+/// [`diagnostics`] gives a build's own.
+pub fn late_diagnostics(s: &Session, ds: &[phitex_tex::Diagnostic]) -> Vec<Value> {
+    kinds(placed(s, ds))
+}
+
+/// A build's errors given at once (its diagnostics left for later,
+/// [`Report::diagnostics_pending`]) with the last build's other problems,
+/// until those are made again: the warnings shown stay while typing.
+pub fn with_last_warnings(now: Vec<Value>, last: &[Value]) -> Vec<Value> {
+    let mut v: Vec<Value> = now
+        .into_iter()
+        .filter(|d| d["severity"] == "error")
+        .collect();
+    v.extend(last.iter().filter(|d| d["severity"] != "error").cloned());
+    v
+}
+
+/// (each one's kind, the filters' (problems::kind_of): the viewer's and
+/// the editor's alike)
+fn kinds(mut v: Vec<Value>) -> Vec<Value> {
+    for d in &mut v {
+        let k = crate::problems::kind_of(
+            d["severity"].as_str().unwrap_or(""),
+            d["message"].as_str().unwrap_or(""),
+        );
+        d["kind"] = json!(k);
+    }
+    v
+}
+
+fn items(s: &Session, r: &Report, log: &str) -> Vec<Value> {
     if r.internal.is_none() && !r.diagnostics.is_empty() {
-        return r
-            .diagnostics
+        return placed(s, &r.diagnostics);
+    }
+    others(r, log)
+}
+
+/// The engine's diagnostics at their places, each a whole problem.
+fn placed(s: &Session, ds: &[phitex_tex::Diagnostic]) -> Vec<Value> {
+    {
+        // (each file's text read once, not once a diagnostic: the main
+        // file's made again for each of Grail's warnings, 3 ms of every
+        // keystroke in the browser's core)
+        let mut sources: std::collections::HashMap<&str, Option<Vec<u8>>> =
+            std::collections::HashMap::new();
+        ds
             .iter()
             .map(|d| {
-                let p = crate::problems::from_diagnostic(d, s.source(&d.file).as_deref(), false);
+                let src = sources.entry(d.file.as_str()).or_insert_with(|| s.source(&d.file));
+                let p = crate::problems::from_diagnostic(d, src.as_deref(), false);
                 let chars = |b: usize| p.text.get(..b.min(p.text.len())).map_or(0, |t| t.chars().count());
                 let error = d.severity == phitex_tex::Severity::Error;
                 let engine = d.severity == phitex_tex::Severity::Diagnostic;
@@ -245,8 +366,13 @@ pub fn diagnostics(s: &Session, r: &Report, log: &str) -> Vec<Value> {
                     "detail": d.context,
                 })
             })
-            .collect();
+            .collect()
     }
+}
+
+/// A build's errors and the transcript's warnings, summarised: where the
+/// engine placed none.
+fn others(r: &Report, log: &str) -> Vec<Value> {
     let mut v: Vec<Value> = r
         .out
         .errors

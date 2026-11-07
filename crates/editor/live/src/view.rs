@@ -54,6 +54,18 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// The cache's account, emptied first when asked ([`Viewer::on_cache`]).
 pub type CacheFn = Box<dyn Fn(bool) -> Result<Value, String> + Send>;
 
+/// The user's viewer preferences kept by the host across ports and
+/// browsers (the user's `phitex.toml`: the tips seen, ...): given `Some`
+/// keys and values, those set first; the preferences answered as an
+/// object ([`Viewer::on_prefs`]).
+pub type PrefsFn =
+    Box<dyn Fn(Option<&serde_json::Map<String, Value>>) -> Result<Value, String> + Send>;
+
+/// What the host tells the viewer when asked (`{"op":"info","what":...}`):
+/// this version's news, a file's lines around a problem (the request's
+/// other fields), ...; `None`: not here ([`Viewer::on_info`]).
+pub type InfoFn = Box<dyn Fn(&str, &Value) -> Option<Value> + Send>;
+
 /// What a build left, for the viewer.
 pub struct Built {
     /// The PDF to show (none: no pages, or a DVI that dvipdfmx refused).
@@ -63,8 +75,10 @@ pub struct Built {
     /// TeX's history (0 spotless … 2 errors).
     pub history: i32,
     pub ms: f64,
-    /// Its errors and warnings, each a JSON object.
-    pub diagnostics: Vec<Value>,
+    /// Its errors and warnings, each a JSON object; none: made later,
+    /// when the editing pauses ([`crate::session::Report::diagnostics_pending`],
+    /// [`Viewer::set_diagnostics`]), the last ones shown meanwhile.
+    pub diagnostics: Option<Vec<Value>>,
     /// The time from the change (a save, an editor's keystroke) to now
     /// (none: no change, a cold build): the viewer adds its drawing to it
     /// for the ⚡ chip.
@@ -224,6 +238,13 @@ pub type SelectFn = Box<dyn Fn(&str, (usize, usize), (usize, usize)) + Send>;
 pub struct Viewer {
     pages: Mutex<Pages>,
     diagnostics: Mutex<Value>,
+    /// The first build's time and the builds so far: what a tab that joins
+    /// later was not told.
+    built_times: Mutex<(Option<f64>, u64)>,
+    /// The last build's `settled` and `stats` events, as sent: a tab that
+    /// joins after it is given them ([`Viewer::answer`]'s `info` `built`),
+    /// not "no build yet" until the next edit.
+    last_built: Mutex<(Value, Value)>,
     asks: Mutex<Vec<Ask>>,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
     building: AtomicBool,
@@ -240,6 +261,8 @@ pub struct Viewer {
     /// The cache's size and limit, emptied when asked (the `cache` op:
     /// the viewer's Clear cache; the host's).
     cache: Mutex<Option<CacheFn>>,
+    prefs: Mutex<Option<PrefsFn>>,
+    info: Mutex<Option<InfoFn>>,
     /// The commits of the project's history (the diff's picker).
     log: Mutex<Option<Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>>>,
     /// Shows a source place (file, line, column from 1, and the place as
@@ -267,6 +290,8 @@ impl Default for Viewer {
         Viewer {
             pages: Mutex::new(Pages::default()),
             diagnostics: Mutex::new(json!([])),
+            built_times: Mutex::new((None, 0)),
+            last_built: Mutex::new((Value::Null, Value::Null)),
             asks: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
             building: AtomicBool::new(false),
@@ -275,6 +300,8 @@ impl Default for Viewer {
             transcript: Mutex::new((Arc::from(""), u64::MAX)),
             builds: std::sync::atomic::AtomicU64::new(0),
             cache: Mutex::new(None),
+            prefs: Mutex::new(None),
+            info: Mutex::new(None),
             log: Mutex::new(None),
             goto: Mutex::new(None),
             select: Mutex::new(None),
@@ -286,6 +313,12 @@ impl Default for Viewer {
     }
 }
 
+thread_local! {
+    /// The events made on this thread while it answers in the broadcasts'
+    /// turn ([`Viewer::answer_in_turn`]), sent after its reply.
+    static ANSWERING: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
+}
+
 impl Viewer {
     /// The events from now on go to `emit` (each a JSON text).
     pub fn on_emit(&self, emit: Box<dyn Fn(&str) + Send>) {
@@ -293,9 +326,45 @@ impl Viewer {
     }
 
     fn emit(&self, text: &str) {
+        // (an answer under way on this thread holds the broadcasts' turn:
+        // the event goes out after its reply, [`Viewer::answer_in_turn`])
+        if ANSWERING.with(|a| {
+            a.borrow_mut()
+                .as_mut()
+                .map(|q| q.push(text.to_owned()))
+                .is_some()
+        }) {
+            return;
+        }
         if let Some(e) = lock(&self.emit).as_ref() {
             e(text);
         }
+    }
+
+    /// [`Viewer::answer`] for a browser, its reply given to `send` in the
+    /// broadcasts' turn (the `emit` lock): an event made after the answer
+    /// was made reaches the browser after the reply, never before it. The
+    /// socket's sends take turns with the broadcasts, and a reply made
+    /// before an event but sent after it misled the browser: the console's
+    /// backlog made before a build's end, replayed after the end's live
+    /// "busy" line, left the tab saying "Building…" (the browser suite's
+    /// title red, 1 run in 20); a page's origins answered "not made yet"
+    /// after the `origins` event said they were. An event the answer makes
+    /// itself goes after the reply. `send`'s result returned.
+    pub fn answer_in_turn(&self, req: &Value, send: impl FnOnce(&str) -> bool) -> bool {
+        let turn = lock(&self.emit);
+        ANSWERING.with(|a| *a.borrow_mut() = Some(Vec::new()));
+        let reply = self.answer(req);
+        let later = ANSWERING
+            .with(|a| a.borrow_mut().take())
+            .unwrap_or_default();
+        let ok = send(&reply);
+        if let Some(e) = turn.as_ref() {
+            for t in &later {
+                e(t);
+            }
+        }
+        ok
     }
 
     /// A `source` place shown by `goto(file, line, col, place)`.
@@ -322,7 +391,8 @@ impl Viewer {
 
     /// Page `k` of the PDF shown ([`Viewer::pdf`]) at `scale` pixels a
     /// point, as strips (`phitex_render`): its size in pixels and points,
-    /// its bands (each `[key, top, height]`, the key in hex), its text and
+    /// its bands (each `[key, top, height, left, width]`, the key in hex:
+    /// a line, or its part in one column), its text and
     /// links (`viewer/src/types.ts`' `Link`), and what drawing it took
     /// (`drawn` and `kept` bands, microseconds).
     pub fn frame(&self, k: usize, scale: f32) -> Option<Value> {
@@ -347,7 +417,7 @@ impl Viewer {
         let bands: Vec<Value> = f
             .bands
             .iter()
-            .map(|b| json!([format!("{:016x}", b.key), b.y, b.h]))
+            .map(|b| json!([format!("{:016x}", b.key), b.y, b.h, b.x, b.w]))
             .collect();
         let links: Vec<Value> = f
             .links
@@ -500,6 +570,11 @@ impl Viewer {
     pub fn console(self: &Arc<Self>) -> Box<dyn Fn(Value) + Send> {
         let s = self.clone();
         Box::new(move |item: Value| {
+            // (kept and sent in one turn of the broadcasts: a backlog
+            // answered in its turn holds every item sent before it and
+            // none sent after, [`Viewer::answer_in_turn`])
+            let answering = ANSWERING.with(|a| a.borrow().is_some());
+            let turn = (!answering).then(|| lock(&s.emit));
             {
                 let mut c = lock(&s.console);
                 if item["kind"] == "status" {
@@ -511,7 +586,15 @@ impl Viewer {
                     c.0.push_back(item.clone());
                 }
             }
-            s.emit(&json!({"event": "console", "item": item}).to_string());
+            let text = json!({"event": "console", "item": item}).to_string();
+            match &turn {
+                Some(t) => {
+                    if let Some(e) = t.as_ref() {
+                        e(&text);
+                    }
+                }
+                None => s.emit(&text),
+            }
         })
     }
 
@@ -552,6 +635,16 @@ impl Viewer {
     /// `{bytes, limit, dir, freed}`.
     pub fn on_cache(&self, cache: CacheFn) {
         *lock(&self.cache) = Some(cache);
+    }
+
+    /// The user's preferences for the `prefs` op ([`PrefsFn`]).
+    pub fn on_prefs(&self, prefs: PrefsFn) {
+        *lock(&self.prefs) = Some(prefs);
+    }
+
+    /// What the host tells for the `info` op ([`InfoFn`]).
+    pub fn on_info(&self, info: InfoFn) {
+        *lock(&self.info) = Some(info);
     }
 
     pub fn on_log(&self, log: Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>) {
@@ -660,6 +753,20 @@ impl Viewer {
 
     /// The file on disk is exact already (nothing to write when idle):
     /// the browsers told, as when it is written.
+    /// A build's stats, as the watch's `s` shows them (one object, the
+    /// same fields every build): `{"event":"stats", ...}`, for a timing
+    /// popover's "Copy debug info". Sent for every build, after `settled`.
+    pub fn stats(&self, stats: &Value) {
+        let mut e = serde_json::Map::new();
+        e.insert("event".into(), json!("stats"));
+        if let Value::Object(m) = stats {
+            e.extend(m.clone());
+        }
+        let stats = Value::Object(e);
+        self.emit(&stats.to_string());
+        lock(&self.last_built).1 = stats;
+    }
+
     pub fn written_exact(&self) {
         self.emit(&json!({"event": "written", "exact": true}).to_string());
     }
@@ -669,6 +776,34 @@ impl Viewer {
     pub fn pdf_replaced(&self, pdf: Option<Arc<[u8]>>) {
         lock(&self.pages).pdf = pdf;
         self.emit(&json!({"event": "written", "exact": true}).to_string());
+    }
+
+    /// The diagnostics the viewers have, each a JSON object.
+    pub fn diagnostics_items(&self) -> Vec<Value> {
+        lock(&self.diagnostics)
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The last build's diagnostics, each a JSON object, given to the
+    /// viewers (a build's own, or made after it, when the editing paused):
+    /// sent only where they are not the last ones.
+    pub fn set_diagnostics(&self, d: &[Value]) {
+        let items = Value::from(d.to_vec());
+        // (the lock let go before the event: an answer holds the events'
+        // turn and then reads them)
+        let fresh = {
+            let mut last = lock(&self.diagnostics);
+            let fresh = *last != items;
+            if fresh {
+                last.clone_from(&items);
+            }
+            fresh
+        };
+        if fresh {
+            self.emit(&json!({"event": "diagnostics", "items": items}).to_string());
+        }
     }
 
     /// A build is in: its PDF and pages' hashes kept, the viewers told
@@ -695,11 +830,18 @@ impl Viewer {
         let n = b.hashes.len();
         pages.hashes.clone_from(&b.hashes);
         drop(pages);
-        let items = Value::from(b.diagnostics.clone());
-        self.emit(&json!({"event": "diagnostics", "items": items}).to_string());
-        *lock(&self.diagnostics) = items;
+        if let Some(d) = &b.diagnostics {
+            self.set_diagnostics(d);
+        }
         if let Some(c) = &b.changed {
             self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
+        }
+        {
+            let mut t = lock(&self.built_times);
+            t.1 += 1;
+            if b.parts.get("cold") == Some(&json!(true)) {
+                t.0 = Some(b.ms);
+            }
         }
         // (the build's time and parts: a timing popover's, the first build's
         // too, which has no change to time from)
@@ -709,7 +851,9 @@ impl Viewer {
         e.insert("ms".into(), json!(b.ms));
         e.insert("history".into(), json!(b.history));
         e.extend(b.parts.clone());
-        self.emit(&Value::Object(e).to_string());
+        let settled = Value::Object(e);
+        self.emit(&settled.to_string());
+        lock(&self.last_built).0 = settled;
         (changed, n)
     }
 }
@@ -756,11 +900,17 @@ impl Viewer {
 
 /// Lines of a page's text as the viewer takes them (`viewer/src/text.ts`'
 /// `TextLine`).
+/// The pages' text lines as the viewer takes them, every place to a
+/// hundredth of a point (a twelfth of a pixel at 800%): written whole, a
+/// place was 17 digits, and a Grail page's frame 215 KB of them, each
+/// keystroke's made, sent and parsed.
 fn lines_json(lines: &[phitex_render::TextLine]) -> Value {
+    let r = |x: f64| (x * 100.0).round() / 100.0;
+    let all = |xs: &[f64]| xs.iter().map(|&x| r(x)).collect::<Vec<f64>>();
     Value::Array(
         lines
             .iter()
-            .map(|l| json!({"x": l.x, "y": l.y, "w": l.w, "size": l.size, "text": l.text, "xs": l.xs, "rs": l.rs}))
+            .map(|l| json!({"x": r(l.x), "y": r(l.y), "w": r(l.w), "size": r(l.size), "text": l.text, "xs": all(&l.xs), "rs": all(&l.rs)}))
             .collect(),
     )
 }
@@ -916,6 +1066,11 @@ impl Viewer {
                 s.ask(Ask::Rebuild);
                 ok(json!({}))
             }
+            // (Clean rebuild: the build dropped, made again from nothing)
+            "cold" => {
+                s.ask(Ask::Cold);
+                ok(json!({}))
+            }
             "console" => {
                 let c = lock(&s.console);
                 ok(json!({"items": c.0.iter().collect::<Vec<_>>(), "status": c.1}))
@@ -926,6 +1081,28 @@ impl Viewer {
                     Some(Ok(v)) => ok(v),
                     Some(Err(e)) => fail(&e),
                     None => fail("no cache here"),
+                }
+            }
+            // (`{"op":"prefs"}`: the user's viewer preferences; with
+            // `"set":{...}` those set first)
+            "prefs" => {
+                let set = req.get("set").and_then(Value::as_object);
+                match lock(&s.prefs).as_ref().map(|f| f(set)) {
+                    Some(Ok(v)) => ok(v),
+                    Some(Err(e)) => fail(&e),
+                    None => fail("no preferences here"),
+                }
+            }
+            "info" if text("what").as_deref() == Some("built") => {
+                let t = lock(&s.built_times);
+                let last = lock(&s.last_built);
+                ok(json!({"first_ms": t.0, "builds": t.1, "settled": last.0, "stats": last.1}))
+            }
+            "info" => {
+                let what = text("what").unwrap_or_default();
+                match lock(&s.info).as_ref().and_then(|f| f(&what, req)) {
+                    Some(v) => ok(v),
+                    None => fail(&format!("no {what:?} here")),
                 }
             }
             "diff" => ok(lock(&s.diff).state.clone()),
@@ -1101,6 +1278,66 @@ pub fn base64(b: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A reply made before an event is sent before it: the console's
+    /// backlog answered while a build ends, its live "busy" clear made
+    /// meanwhile on another thread, reaches the browser after the reply
+    /// (it went first, and the replayed backlog left the tab "Building…").
+    /// A tab that joins after a build is given that build's stats (and
+    /// its `settled`) in `info` `built`, not nothing until the next one.
+    #[test]
+    fn a_tab_that_joins_late_is_given_the_last_builds_stats() {
+        let v = Viewer::default();
+        let built = |v: &Viewer| -> Value {
+            serde_json::from_str(&v.answer(&json!({"id": 1, "op": "info", "what": "built"})))
+                .unwrap()
+        };
+        assert_eq!(built(&v)["json"]["stats"], Value::Null);
+        v.stats(&json!({"build": 3, "wall_ms": 7.0}));
+        let j = built(&v);
+        assert_eq!(j["json"]["stats"]["event"], "stats");
+        assert_eq!(j["json"]["stats"]["build"], 3);
+    }
+
+    #[test]
+    fn a_reply_goes_before_the_events_made_after_it() {
+        use std::sync::mpsc;
+        let v = Arc::new(Viewer::default());
+        let got: Arc<Mutex<Vec<String>>> = Arc::default();
+        {
+            let got = got.clone();
+            v.on_emit(Box::new(move |t: &str| lock(&got).push(t.to_owned())));
+        }
+        let tell = v.console();
+        tell(json!({"kind": "busy", "text": "build 1"}));
+        let (answered, go) = mpsc::channel();
+        let w = {
+            let (v, got) = (v.clone(), got.clone());
+            std::thread::spawn(move || {
+                v.answer_in_turn(&json!({"id": 1, "op": "console"}), |r| {
+                    answered.send(()).unwrap();
+                    // (the other thread's event made now, while the reply waits to go)
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    lock(&got).push(format!("reply {r}"));
+                    true
+                })
+            })
+        };
+        go.recv().unwrap();
+        tell(json!({"kind": "busy", "text": ""}));
+        assert!(w.join().unwrap());
+        let got = lock(&got).clone();
+        let reply = got.iter().position(|t| t.starts_with("reply")).unwrap();
+        assert!(
+            got[reply].contains("build 1") && !got[reply].contains(r#""text":"""#),
+            "{got:?}"
+        );
+        let clear = got.iter().position(|t| t.contains(r#""text":"""#)).unwrap();
+        assert!(
+            reply < clear,
+            "the clear made after the answer went before its reply: {got:?}"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -1151,7 +1388,7 @@ mod tests {
             hashes: Vec::new(),
             history: 0,
             ms: 0.0,
-            diagnostics: Vec::new(),
+            diagnostics: Some(Vec::new()),
             since_ms: None,
             origins: None,
             changed: None,
@@ -1227,5 +1464,25 @@ mod tests {
     fn page_ranges() {
         assert_eq!(ranges(&[1, 3, 4, 5, 7, 8]), "1, 3–5, 7–8");
         assert_eq!(ranges(&[]), "");
+    }
+
+    /// A text line's places go to the viewer to a hundredth of a point.
+    #[test]
+    fn text_places_to_a_hundredth() {
+        let l = phitex_render::TextLine {
+            x: 72.123_456_789,
+            y: 100.0 / 3.0,
+            w: 10.005_1,
+            size: 9.962_59,
+            text: "ab".into(),
+            xs: vec![72.123_456_789, 77.777_777],
+            rs: vec![77.777_777, 82.004_999],
+        };
+        let j = lines_json(&[l]);
+        assert_eq!(
+            j,
+            json!([{"x": 72.12, "y": 33.33, "w": 10.01, "size": 9.96, "text": "ab",
+                    "xs": [72.12, 77.78], "rs": [77.78, 82.0]}])
+        );
     }
 }

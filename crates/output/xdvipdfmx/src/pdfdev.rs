@@ -110,7 +110,7 @@ pub const TEN_POW_INV: [f64; 10] = [
 ];
 
 /// `struct dev_param`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct DevParam {
     pub autorotate: i32,
     /// 0: ignore colors.
@@ -118,7 +118,7 @@ pub struct DevParam {
 }
 
 /// `text_state.matrix`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct TextMatrix {
     pub slant: f64,
     pub extend: f64,
@@ -143,7 +143,7 @@ pub fn text_matrix(slant: f64, extend: f64, rotate: i32) -> [f64; 4] {
 }
 
 /// `struct text_state`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct TextState {
     /// Index into `PdfDev::fonts` (-1: none).
     pub font_id: i32,
@@ -164,7 +164,7 @@ pub struct TextState {
 /// C's `used_chars` (a pointer into the pdf_font's usedchars) is not a
 /// field: mark glyphs through `font_id` (`pdf_get_font_usedchars`
 /// semantics, the descendant's for a Type0 font).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct DevFont {
     /// The pdf_font's used-glyph table (C's `used_chars`), once the font
     /// is set.
@@ -189,7 +189,7 @@ pub struct DevFont {
 }
 
 /// `struct dev_unit`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct DevUnit {
     /// DVI unit to bp multiplier.
     pub dvi2pts: f64,
@@ -200,7 +200,7 @@ pub struct DevUnit {
 }
 
 /// `struct pdf_dev`.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfDev {
     pub motion_state: i32,
     pub param: DevParam,
@@ -213,10 +213,22 @@ pub struct PdfDev {
     /// `sbuf0` (scratch: `handle_multibyte_string`'s output, kept between
     /// calls as C's static is, not allocated and zeroed for each string).
     pub sbuf0: Vec<u8>,
+    /// While a link records them ([`crate::api::Session::record_usage`]):
+    /// the glyphs marked used since the last taken, each as
+    /// [`usage_key`] gives it.
+    pub page_used: Option<Vec<u64>>,
+}
+
+/// A glyph marked used ([`PdfDev::page_used`]): the device font's index,
+/// whether the font is composite (its table a bit a CID, else a byte a
+/// code), the code.
+#[must_use]
+pub fn usage_key(fi: usize, composite: bool, code: u32) -> u64 {
+    ((fi as u64) << 33) | (u64::from(composite) << 32) | u64::from(code)
 }
 
 /// pdfdev.c's statics.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `pdev`.
     pub pdev: PdfDev,
@@ -663,12 +675,18 @@ impl Dpx {
                 while i + 1 < s.len() {
                     let cid = (u16::from(s[i]) << 8) | u16::from(s[i + 1]);
                     uc.add2(u32::from(cid));
+                    if let Some(p) = self.dev.pdev.page_used.as_mut() {
+                        p.push(usage_key(fi, true, u32::from(cid)));
+                    }
                     i += 2;
                 }
             }
         } else if let Some(uc) = used_chars {
             for &c in &s {
                 uc.set(c as usize, 1);
+                if let Some(p) = self.dev.pdev.page_used.as_mut() {
+                    p.push(usage_key(fi, false, u32::from(c)));
+                }
             }
         }
         let dir = self.dev.pdev.text_state.dir_mode;

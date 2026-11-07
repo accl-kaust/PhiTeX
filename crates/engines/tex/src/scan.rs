@@ -87,6 +87,12 @@ pub(crate) const NUM_CHR: i32 = i32::MIN + 7;
 pub(crate) enum Num {
     Int(i32),
     Macro(Tok, bool),
+    /// An integer register's value reaching the piece plus `j`: the
+    /// register alone unread in a piece, its symbol, or an expression of
+    /// one plus a constant (docs/spec-relative-counters.md §2.2), which a
+    /// comparison with a constant reads as its outcome alone
+    /// (`Run::reg_order`).
+    Reg(crate::state::Loc, i32),
 }
 
 impl Run<'_, '_> {
@@ -215,9 +221,40 @@ impl Run<'_, '_> {
     pub(crate) fn scan_int_num(&mut self) -> R<Num> {
         self.radix = 0;
         self.num_reads = true;
+        let defer = self.defer_allowed();
+        let was = if defer {
+            self.reg_stop.replace(self.expand_depth)
+        } else {
+            self.reg_stop
+        };
         let negative = self.skip_signs();
+        self.reg_stop = was;
         self.num_reads = false;
         let negative = negative?;
+        // (a register's symbol of this piece: relative, [`Num::Reg`],
+        // where the number ends at it, §444: no digit after it, one
+        // space taken; else its digits, as TeX's)
+        if self.cur.cmd == cmd::SYM
+            && let Some(s) = crate::defer::sym_of(self.cur.tok)
+        {
+            let t0 = self.cur.tok;
+            self.get_x_token();
+            self.ck()?;
+            let u = self.cur.tok;
+            let digit = !u.is_cs_or_active() && u.cat() == Some(12) && (48..=57).contains(&u.chr());
+            if !negative && !digit && s.node == self.sym_node() {
+                if self.cur.cmd != cmd::SPACER {
+                    self.back_input(u);
+                }
+                let loc = s.loc(self);
+                return Ok(Num::Reg(loc, s.j));
+            }
+            self.back_input(u);
+            crate::defer::expand_any(self, t0)?;
+            self.get_x_token();
+            self.ck()?;
+            return Ok(Num::Int(self.scan_int_from(negative)?));
+        }
         if self.cur.cmd == cmd::RELAX && self.cur.chr == NUM_CHR {
             let tok = self.cur.tok;
             // (the macro's digits read, the scan reads on, §444: a digit
@@ -252,9 +289,26 @@ impl Run<'_, '_> {
             return Ok(match n {
                 Num::Int(x) => Num::Int(if negative { -x } else { x }),
                 Num::Macro(t, neg) => Num::Macro(t, neg != negative),
+                r @ Num::Reg(..) if !negative => r,
+                r @ Num::Reg(..) => Num::Int(self.num_int(r)?.wrapping_neg()),
             });
         }
-        Ok(Num::Int(self.scan_int_from(negative)?))
+        // (an integer register alone, unread in a piece: relative,
+        // [`Num::Reg`], as `\\number` makes its symbol)
+        self.defer_ok = !negative && defer;
+        let x = self.scan_int_from(negative);
+        self.defer_ok = false;
+        let x = x?;
+        if let Some((loc, j)) = self.defer_sym.take() {
+            return Ok(Num::Reg(loc, j));
+        }
+        if let Some(loc) = self.defer_hit.take() {
+            let j = self.st.steps_of(loc);
+            self.st.note_symbol(loc);
+            self.st.note_read(loc);
+            return Ok(Num::Reg(loc, j));
+        }
+        Ok(Num::Int(x))
     }
 
     /// The value of `n`, reading its macro's number where it is one.
@@ -264,6 +318,11 @@ impl Run<'_, '_> {
             Num::Macro(t, neg) => {
                 let x = self.num_value(t)?;
                 if neg { -x } else { x }
+            }
+            Num::Reg(loc, j) => {
+                let node = self.sym_node();
+                let reg = self.count_reg(loc).unwrap_or(0);
+                crate::defer::force(self, crate::defer::Sym { reg, node, j })?
             }
         })
     }
@@ -823,7 +882,7 @@ impl Run<'_, '_> {
             }
             cmd::ASSIGN_INT => {
                 let l = self.quantity_loc(c, m);
-                if defer && self.defer_at(l) {
+                if defer && self.defer_at(l)? {
                     IVal::Int(0)
                 } else {
                     IVal::Int(crate::val::i32_of(self.v, self.get_loc(l)?))
@@ -859,8 +918,9 @@ impl Run<'_, '_> {
                 if self.mode_zero {
                     IVal::Int(0)
                 } else {
+                    // (the level's, a list the run builds: a `\vbox`'s)
                     let md = self.mode()?;
-                    IVal::Int(self.int32(&format!("pg:{}", md.vlid))?)
+                    IVal::Int(self.prev_graf(&md)?)
                 }
             }
             cmd::SET_PAGE_INT | cmd::SET_SHAPE | cmd::ASSIGN_FONT_INT
@@ -917,7 +977,7 @@ impl Run<'_, '_> {
                 match m {
                     0 => {
                         let l = self.reg_loc(0, n);
-                        if defer && self.defer_at(l) {
+                        if defer && self.defer_at(l)? {
                             IVal::Int(0)
                         } else {
                             IVal::Int(crate::val::i32_of(self.v, self.get_loc(l)?))
@@ -934,7 +994,14 @@ impl Run<'_, '_> {
                     }
                 }
             }
-            cmd::LAST_ITEM => self.last_item(m)?,
+            cmd::LAST_ITEM => {
+                // (`\\numexpr` as a deferring scan's quantity: its value may
+                // be a register's symbol plus a constant, [`Run::defer_sym`])
+                self.expr_defer = defer && m == crate::etex::li::NUM_EXPR;
+                let x = self.last_item(m);
+                self.expr_defer = false;
+                x?
+            }
             _ => {
                 // §428: "You can't use x after \the"
                 self.back_cur();
@@ -977,6 +1044,13 @@ impl Run<'_, '_> {
 
     #[allow(clippy::too_many_lines)]
     fn scan_toks_r(&mut self, macro_def: bool, xpand: bool) -> R<(Vec<Tok>, Vec<Tok>)> {
+        self.xpand_depth += 1;
+        let r = self.scan_toks_at(macro_def, xpand);
+        self.xpand_depth -= 1;
+        r
+    }
+
+    fn scan_toks_at(&mut self, macro_def: bool, xpand: bool) -> R<(Vec<Tok>, Vec<Tok>)> {
         // §473: `scanner_status:=defining` or `absorbing`;
         // `warning_index:=cur_cs`
         let status = if macro_def {
@@ -987,6 +1061,21 @@ impl Run<'_, '_> {
         let was = self.scanner.replace((status, self.cur.tok));
         let r = self.scan_toks_in(macro_def, xpand);
         self.scanner = was;
+        // (§338's error met in the scan: logged now, its runaway list the
+        // parameter text and the body as scanned, §306's `def_ref`)
+        if self.runaway_due.is_some() {
+            match &r {
+                Ok((params, body)) => {
+                    let mut all = params.clone();
+                    if macro_def {
+                        all.push(crate::val::end_match());
+                    }
+                    all.extend_from_slice(body);
+                    self.take_runaway(Some(&all))?;
+                }
+                Err(_) => self.take_runaway(None)?,
+            }
+        }
         r
     }
 
@@ -1007,6 +1096,17 @@ impl Run<'_, '_> {
                 self.get_token_stored();
                 self.ck()?;
                 let tok = self.cur.tok;
+                // (a deferred read's symbol among the delimiters: TeX has
+                // its digits there, matched one by one, `Run::sym_arg`; a
+                // derived name is the one control sequence it names)
+                if self.cur.cmd == cmd::SYM {
+                    if crate::defer::is_dname(tok) {
+                        params.push(crate::defer::dname_concrete(self, tok)?);
+                    } else {
+                        crate::defer::expand_any(self, tok)?;
+                    }
+                    continue;
+                }
                 if !tok.is_cs_or_active() && matches!(tok.cat(), Some(1 | 2)) {
                     if tok.cat() == Some(2) {
                         // §475 "Missing { inserted": `\def\a}` is `\def\a{}`
@@ -1076,7 +1176,11 @@ impl Run<'_, '_> {
                         break;
                     }
                     if self.cur.cmd == cmd::THE {
+                        self.the_in_text = self.cur.chr == 0
+                            && self.log_marks.is_some()
+                            && self.marks_depth == self.xpand_depth;
                         let q = self.the_toks();
+                        self.the_in_text = false;
                         self.ck()?;
                         body.extend(q);
                     } else if self.cur.cmd >= cmd::END_TEMPLATE
@@ -1111,7 +1215,9 @@ impl Run<'_, '_> {
                 if macro_def && tok.is_cs_or_active() {
                     // (§479: whether it is the macro parameter character)
                     let was = std::mem::replace(&mut self.step_reads, true);
+                    self.param_look = true;
                     let r = self.set_cur(tok);
+                    self.param_look = false;
                     self.step_reads = was;
                     r?;
                 }

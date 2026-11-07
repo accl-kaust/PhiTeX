@@ -9,6 +9,26 @@ use std::fmt::Write as _;
 
 use phitex_tex::Options;
 
+/// A macro redefined in a loop leaves its old bodies behind, which the
+/// table's macro store drops once it has doubled (`State::compact_macros`,
+/// lisp-on-tex's div2 grew to 60 GB): the meanings a slot, a `\let` copy
+/// and a group's save hold stay theirs across the renumbering.
+#[test]
+fn macros_redefined_in_a_loop_keep_their_meanings() {
+    let src = "\\def\\keep{K}\\def\\a{A}\\let\\y=\\a\n\\count1=0\n\
+               {\\def\\a{G}\\loop\\xdef\\x{\\the\\count1}\\advance\\count1 by 1 \\ifnum\\count1<140000 \\repeat\n\
+               \\message{[in:\\a:\\x]}}\n\\message{[out:\\keep:\\a:\\y:\\x]}\n\\bye\n";
+    let dir = common::scratch("state-macro-loop");
+    let b = common::build(
+        common::options("./d.tex", "d", "", &dir),
+        Some(&common::plain()),
+        src,
+    );
+    let log = b.output().1;
+    assert!(log.contains("[in:G:139999]"), "inside the group: {log}");
+    assert!(log.contains("[out:K:A:A:139999]"), "after it: {log}");
+}
+
 fn runs_of_report(r: &phitex_tex::Report, op: &str) -> u64 {
     r.runs_by_op
         .iter()

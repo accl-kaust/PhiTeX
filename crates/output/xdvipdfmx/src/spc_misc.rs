@@ -15,7 +15,7 @@ use crate::specials::{SpcArg, SpcEnv, SpcHandler, cstr};
 pub const PDFCOLORSTACK_MAX_STACK: usize = 256;
 
 /// `struct stack`: one pdfcolorstack.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct Stack {
     pub page: i32,
     pub direct: i32,
@@ -24,7 +24,7 @@ pub struct Stack {
 }
 
 /// `struct fontattr`: a `pdffontattr` applied at the end of the document.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct Fontattr {
     pub ident: Vec<u8>,
     pub size: f64,
@@ -32,7 +32,7 @@ pub struct Fontattr {
 }
 
 /// spc_misc.c's `static` state.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct State {
     /// `spc_stack.stacks` (`PDFCOLORSTACK_MAX_STACK` of them).
     pub stacks: Vec<Stack>,

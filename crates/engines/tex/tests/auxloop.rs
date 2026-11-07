@@ -263,6 +263,53 @@ fn a_line_that_typesets_reads_the_file_back_as_text() {
     );
 }
 
+/// A line that measures a box and sets a dimension from it only defines
+/// (hypdoc's `\\HD@SetMacroIndent` in the `.aux` of every manual with its
+/// source): the file is read back per field, the value as TeX's. A box left
+/// on the page by a line, or kept in a register by it (abspos's `\\absput`,
+/// a box kept for shipout), still reads it back as text.
+#[test]
+fn a_line_that_measures_a_box_only_defines() {
+    let doc = |line: &str| {
+        format!(
+            "\\newdimen\\ind \\newbox\\tmp \\newbox\\kept\n\\def\\set#1{{\\begingroup\\setbox\\tmp\\hbox{{{{#1}}}}\\global\\ind=\\wd\\tmp\\endgroup}}\n\\def\\keep#1{{\\global\\setbox\\kept\\hbox{{#1}}}}\n\
+             \\openin15=\\jobname.aux \\ifeof15 \\else\\closein15 \\input\\jobname.aux \\fi\n\
+             \\immediate\\openout1=\\jobname.aux\n\\immediate\\write1{{{line}}}\n\\immediate\\closeout1\n\
+             Width \\the\\ind.\\par\\ifvoid\\kept\\else\\box\\kept\\fi\n\\bye\n"
+        )
+    };
+    let dir = common::fixtures().join("plain");
+    let build = |name: &str, text: &str| {
+        let opts = Options {
+            fixpoint: true,
+            ..common::options(&format!("./{name}.tex"), name, "", &dir)
+        };
+        common::build(opts, Some(&common::plain()), text)
+    };
+    let b = build("m", &doc("\\noexpand\\set{abc}"));
+    assert!(
+        b.wkeys().iter().any(|(n, _)| n == "m.aux"),
+        "read back per field: {:?}",
+        b.wkeys()
+    );
+    // (cmr10's "abc": 5pt, 5.55557pt, 4.44444pt less a kern: not zero)
+    let (dvi, _) = b.output();
+    let text = String::from_utf8_lossy(&dvi);
+    assert!(!text.contains("0.0pt"), "the width reached the text");
+    let c = build("n", &doc("\\noexpand\\hbox{abc}"));
+    assert!(
+        !c.wkeys().iter().any(|(n, _)| n == "n.aux"),
+        "a box left by the line: as text: {:?}",
+        c.wkeys()
+    );
+    let k = build("k", &doc("\\noexpand\\keep{abc}"));
+    assert!(
+        !k.wkeys().iter().any(|(n, _)| n == "k.aux"),
+        "a box kept by the line: as text: {:?}",
+        k.wkeys()
+    );
+}
+
 /// A file the job writes only where it is missing, then reads (a package
 /// a document carries in its own text): TeX's next run finds the file the
 /// run before wrote, so it does not write it again and reads it; the
@@ -441,4 +488,215 @@ Status \st.
         r.iter().any(|x| x.contains("openin")),
         "the node that read the file's first line did not run again: {r:?}"
     );
+}
+
+/// A run that reads the `.aux` inline and goes on past a page candidate
+/// (LaTeX's `\begin{document}`: the `.aux` read, then the hooks): its
+/// rest is a resume reading the run's continuation at the cut (the
+/// file read in a group: inline, its units not pieces of their own). The
+/// `.aux` one line longer (a `\citation` more) runs the reader again,
+/// and the continuation it leaves is the same: the number of lines the
+/// run began is no part of it, so the rest does not run again (on
+/// Grail every `\cite` added and every heading edited ran the rest of
+/// `\begin{document}` again, 150 ms).
+#[test]
+fn a_longer_aux_does_not_run_the_rest_after_its_reader_again() {
+    let doc = |n: usize| {
+        let writes = "\\immediate\\write1{a}\n".repeat(n);
+        format!(
+            r"\def\start{{\begingroup\openin15=\jobname.aux \ifeof15 \else\closein15 \input\jobname.aux \fi\endgroup
+  Before the cut.\par After the cut, the rest of the run.\par}}
+\start
+
+Text between.
+
+\immediate\openout1=\jobname.aux
+
+{writes}
+\bye
+"
+        )
+    };
+    let dir = common::fixtures().join("plain");
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..common::options("./c.tex", "c", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&common::plain()), &doc(2));
+        // (one line more each time, then fewer)
+        for n in [3, 4, 5, 2] {
+            b.edit(&doc(n));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {n} lines: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&common::plain()), &doc(n));
+            let d = common::first_difference(&b.output().0, &cold.output().0);
+            assert!(
+                d.is_none(),
+                "-j{threads} {n}: edit differs from cold: {d:?}"
+            );
+            assert!(
+                r.iter()
+                    .any(|x| x.starts_with("exec") && x.contains("\\start")),
+                "-j{threads} {n}: the reader of the .aux did not run again: {r:?}"
+            );
+            // (the file's node runs once: it reads no definition of its
+            // own file's text or size, which it makes itself)
+            assert!(
+                !r.iter().any(|x| x.starts_with("files Changed wsize:")
+                    || x.starts_with("files Changed wtext:")),
+                "-j{threads} {n}: the .aux's node ran again on its own text: {r:?}"
+            );
+            // (the rest is a resume reading `cont:<reader>:<k>`)
+            assert!(
+                !r.iter().any(|x| x.contains("Changed cont:")),
+                "-j{threads} {n}: the rest after the reader ran again: {r:?}"
+            );
+        }
+    }
+}
+
+/// Text after a page defining, in the macro that looked for a file in
+/// vain, a field the page's output routine defines: keeping the value
+/// there for the lines written later reads the field, a read held while
+/// the pages have not reached the text. The run stops there and runs
+/// again; it used to go on without the value and commit, with what it
+/// published depending on when the pages got there (a debug build's
+/// assertion in the scheduler, a run ended past a stop it did not
+/// return; Grail's `\inputminted`s under `PHITEX_RESUME_CHECK`).
+#[test]
+fn a_definition_kept_for_a_read_back_stops_at_the_frontier() {
+    use std::fmt::Write as _;
+    let mut doc = String::from(
+        r"\newcount\n
+\output={\global\def\mine{routine}\shipout\box255 }
+\def\window{\openin1=nosuchfile.xyz \global\def\mine{text}}
+\immediate\openout1=f.aux
+",
+    );
+    for i in 0..400 {
+        writeln!(
+            doc,
+            "Paragraph {i} of the text, long enough for the pages to fire.\n"
+        )
+        .unwrap();
+        if i % 40 == 39 {
+            doc.push_str("\\window\n\n");
+        }
+    }
+    doc.push_str("\\immediate\\write1{\\noexpand\\gdef\\noexpand\\seen{\\mine}}\n\\bye\n");
+    let dir = common::fixtures().join("plain");
+    let opts = Options {
+        fixpoint: true,
+        ..common::options("./w.tex", "w", "", &dir)
+    };
+    let b = common::build(opts, Some(&common::plain()), &doc);
+    assert!(!b.output().0.is_empty(), "no output");
+}
+
+/// A read-back line that defines a register past the fixed ones (a spill
+/// location numbered by the line), then a long run of commands in the same
+/// node: the line's changes are rolled back after it, its location with
+/// them, and the checkpoints after it name the registers the run defined by
+/// their fields. Kept from the line, the register's location had no field
+/// any more (`Fields::field_of` of a spill location, a debug assertion), and
+/// in a release build that location was cached as the empty name's and a
+/// later resume wrote the empty name's slot over another field's
+/// (simpledarkblue -j4: `\fontdimen6` of the current font read as 0, a
+/// `0.25em` skip as 0pt, about 1 build in 5).
+#[test]
+fn a_read_back_line_s_register_location_goes_with_its_rollback() {
+    const DOC: &str = r"\openin15=\jobname.aux \ifeof15 \else\closein15 \input\jobname.aux \fi
+\immediate\openout1=\jobname.aux
+\immediate\write1{\global\count300=7 }
+\immediate\closeout1
+\count1=0 \loop\advance\count1 by1 \ifnum\count1<4000 \repeat
+Value: \the\count300.
+\bye
+";
+    let dir = common::fixtures().join("plain");
+    let opts = Options {
+        fixpoint: true,
+        ..common::options("./r.tex", "r", "", &dir)
+    };
+    let b = common::build(opts, Some(&common::plain()), DOC);
+    let (dvi, _) = b.output();
+    assert!(dvi.windows(4).any(|w| w == b"alue"), "no page text");
+}
+
+/// A line that adds to what a line before it in the same file defined
+/// (biblatex's `\abx@aux@cite` adding a key to a list, `\blx@pagesum@old`
+/// taking a digit per page line): the file is a fold, its definitions
+/// those of its whole text read at once from the read-back point, so it
+/// is still read back per field. The list holds every line's item, as
+/// TeX's read of the file leaves it; a line added to the list changes
+/// that field alone, and the run that reads the file back, which uses
+/// another field, does not run again (read as its text, it ran again on
+/// every change of the file); every edit's output equals a cold build's.
+#[test]
+fn a_line_adding_to_an_earlier_line_s_list_reads_back_per_field() {
+    let doc = |extra: &str| {
+        format!(
+            r"\def\lst{{}}\def\addto#1{{\xdef\lst{{\lst#1,}}}}\def\other{{}}
+
+\openin15=\jobname.aux \ifeof15 \else\closein15 \input\jobname.aux \fi Other: \other.
+
+\immediate\openout1=\jobname.aux
+\immediate\write1{{\noexpand\addto{{a}}}}\immediate\write1{{\noexpand\gdef\noexpand\other{{xyz}}}}
+
+Middle{extra}.
+
+List: \lst.
+\bye
+"
+        )
+    };
+    let more = "\\immediate\\write1{\\noexpand\\addto{b}}";
+    let dir = common::fixtures().join("plain");
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..common::options("./fold.tex", "fold", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&common::plain()), &doc(more));
+        let (dvi, _) = b.output();
+        let has = |d: &[u8], w: &[u8]| d.windows(w.len()).any(|x| x == w);
+        assert!(
+            has(&dvi, b"a,b,") && has(&dvi, b"xyz"),
+            "-j{threads}: the list after the read-back: {}",
+            String::from_utf8_lossy(&dvi)
+        );
+        for extra in ["", more, " and more", ""] {
+            b.edit(&doc(extra));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {extra:?}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&common::plain()), &doc(extra));
+            let d = common::first_difference(&b.output().0, &cold.output().0);
+            assert!(
+                d.is_none(),
+                "-j{threads} {extra:?}: edit differs from cold: {d:?}"
+            );
+            assert!(
+                !r.iter()
+                    .any(|x| x.starts_with("exec") && x.contains("openin")),
+                "-j{threads} {extra:?}: the run reading the file back ran again: {r:?}"
+            );
+        }
+    }
 }

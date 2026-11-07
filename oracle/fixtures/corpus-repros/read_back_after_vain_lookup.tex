@@ -1,0 +1,9 @@
+% A file looked for in vain before the .aux is read back as its text
+% (transparent's lines, the first defining what the next ones read): the
+% .aux's lines written later read the state at its read-back point
+\documentclass{article}
+\usepackage{transparent}
+\AddToHook{begindocument/before}{\IfFileExists{no-such-file.tex}{}{}}
+\begin{document}
+\transparent{0.5}Half \transparent{0.5}again \transparent{1}whole.
+\end{document}

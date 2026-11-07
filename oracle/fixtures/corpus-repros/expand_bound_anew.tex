@@ -1,0 +1,31 @@
+% easyformat (microtype, lmodern): \scshape under \bfseries has no shape, and
+% LaTeX's substitute is the bold font loaded anew after its \pdffontexpand, a
+% font of its own with microtype's small-caps protrusion codes. Its
+% \pdffontexpand binds the expanded fonts the two share (ec-lmbx10-20, +20:
+% pdfTeX's load_expand_font over what tfm_lookup finds, copy_expand_params) to
+% it, and bold text after the group, whose font asked for them before, still
+% sets its margin kerns by the small-caps codes (pdflatex: "y" protrudes
+% 0.299 pt, 26 of the quad, not the bold font's 37). The one-line paragraphs are
+% stretched (\parfillskip 0), so the margin kern moves their glue; a shrunk line
+% at its limit would hide it. Oracle: pdflatex.
+\documentclass{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\begin{document}
+\bfseries Quick disclaimer.
+
+\parbox{230pt}{\parfillskip=0pt plus 0pt\relax already really busy today Friday\par}
+
+{\scshape nasa and esa are probably the best known space agencies.
+
+\parbox{230pt}{\parfillskip=0pt plus 0pt\relax already really busy today Friday\par}}
+
+\parbox{230pt}{\parfillskip=0pt plus 0pt\relax already really busy today Friday\par}
+
+\parbox{385pt}{easyformat makes an underscore an active character, however it was already special before so you still have to type a backslash if you want to insert an underscore. The same can be said of the hat, however since this one is difficult to add in ordinary ways, the package gives you a command to get it.}
+
+\parbox{300pt}{easyformat makes an underscore an active character, however it was already special before so you still have to type a backslash if you want to insert an underscore. The same can be said of the hat, however since this one is difficult to add in ordinary ways, the package gives you a command to get it.}
+
+\parbox{250pt}{To make it work we would have to make it an active character, however this would break things like sections. The underscore is already protected because of its meaning in mathmode. However, it has little to no use in textmode. This is why we can use it for this purpose and not the asterisk.}
+\end{document}

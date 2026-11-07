@@ -125,7 +125,7 @@ fn the_loop_parks_at_holes_and_resumes() {
     );
     assert_eq!(
         b.stats.units_folded("pages"),
-        b.stats.units_contributed("vprof"),
+        b.units_contributed("vprof"),
         "every profile unit folded exactly once over all runs of the loop"
     );
 }
@@ -315,4 +315,71 @@ fn runs_of_report(r: &phitex_tex::Report, op: &str) -> u64 {
 
 fn page_of_paragraph(b: &phitex_tex::Build, i: usize) -> usize {
     b.page_of_text(&format!("Paragraph {i} "))
+}
+
+/// A stretch of pages one command makes inside a group of the text's own
+/// (the shape of `\printindex`'s index in `multicols`) that reads
+/// `\pagetotal` at its end, after pages fired at its candidates: the run
+/// ends at the last of them, its rest one resume after that page's
+/// finisher, not one rest per page each running on to the read
+/// (circuitikz's index: 16 rests, 307 ms down to 69 ms one after
+/// another). The value read and the pages are those of the same text
+/// outside the group, which is cut at every candidate; at one and eight
+/// threads.
+#[test]
+fn a_page_read_after_pages_fired_in_a_group_ends_the_run_at_the_last() {
+    let dir = common::scratch("pages2-group-read");
+    // (lines as boxes on the main vertical list: a candidate after each,
+    // no paragraph to end at)
+    let body = (0..400).fold(String::new(), |mut s, i| {
+        let _ = writeln!(s, "\\hbox{{Line {i} of the stretch, a box of its own.}}");
+        s
+    });
+    let doc = |group: bool| {
+        let (open, close) = if group {
+            ("\\begingroup ", "\\endgroup ")
+        } else {
+            ("", "")
+        };
+        format!(
+            "\\long\\def\\stuff{{{open}{body}\\message{{PT=\\the\\pagetotal}}{close}}}\n\\stuff\n\\bye\n"
+        )
+    };
+    let read = |log: &str| {
+        log.split("PT=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .map(str::to_owned)
+    };
+    for threads in [1, 8] {
+        let opts = |name: &str| Options {
+            threads: Some(threads),
+            ..common::options(&format!("./{name}.tex"), name, "", &dir)
+        };
+        let flat = common::build(opts("flat"), Some(&common::plain()), &doc(false));
+        let grouped = common::build(opts("grouped"), Some(&common::plain()), &doc(true));
+        let pages = grouped.pages().len() as u64;
+        assert!(pages >= 4, "-j{threads}: several pages: {pages}");
+        let ((fd, fl), (gd, gl)) = (flat.output(), grouped.output());
+        assert_eq!(gd, fd, "-j{threads}: the pages are the ungrouped text's");
+        assert!(
+            read(&fl).is_some(),
+            "-j{threads}: the read is logged: {}",
+            common::log_excerpt(&fl)
+        );
+        assert_eq!(
+            read(&gl),
+            read(&fl),
+            "-j{threads}: \\pagetotal as the ungrouped text reads it"
+        );
+        // (the rests the group left: one per page fired in it, and the
+        // closing ones, where each ran on to the read and was cut at its
+        // first page: 10 for 8 pages; 4 now)
+        let rests = nodes_of(&grouped, "resume");
+        assert!(
+            rests as u64 * 2 <= pages,
+            "-j{threads}: one rest of the group, not one per page ({pages}): {:?}",
+            grouped.stats.placed_by_op
+        );
+    }
 }

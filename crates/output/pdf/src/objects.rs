@@ -116,19 +116,31 @@ impl PdfState {
 
     /// The objects numbered after object `n` (an image's written after
     /// its own, [`PdfState::write_ximage`]): how many, object streams
-    /// apart, and how many of them went into an object stream.
+    /// apart, and how many objects went into an object stream opened
+    /// after it, those numbered before it among them (a PNG's
+    /// transparency group, numbered where the image is read and written
+    /// with it, `pdf_begin_obj(group, 2)`: an object of the document's
+    /// stream, not one of its own).
     #[must_use]
     pub fn objects_after(&self, n: usize) -> (usize, usize) {
         let mut streams = std::collections::BTreeSet::new();
         let mut in_streams = 0;
-        for o in self.objs.iter().skip(n + 1) {
-            if o.os_idx >= 0 && o.offset > 0 {
+        let after = |c: i64| usize::try_from(c).is_ok_and(|c| c > n);
+        for o in self.objs.iter() {
+            if o.os_idx >= 0 && after(o.offset) {
                 in_streams += 1;
                 streams.insert(o.offset);
             }
         }
         let after = self.objs.len().saturating_sub(n + 1);
         (after - streams.len(), in_streams)
+    }
+
+    /// Whether this writer wrote the document's transparency group (a
+    /// PNG's alpha channel) into an object stream.
+    #[must_use]
+    pub fn png_group_in_stream(&self) -> bool {
+        self.png_group_written && self.objs[self.png_group].os_idx >= 0
     }
 
     pub(crate) fn sys_obj_ptr(&self) -> usize {

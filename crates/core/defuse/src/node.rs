@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
-use crate::api::{Brackets, Cause, Effect, Locality, NodeId, OpId, PathId, UnitId};
+use crate::api::{Brackets, Cause, Effect, Locality, NodeId, OpId, PathId, Rel, UnitId};
 use crate::index::RangeKey;
 use crate::lock::{Lock, Mx};
 use crate::order::{Pos, SegId};
@@ -52,6 +52,11 @@ pub(crate) struct Node {
     /// it is still `Running`: a walk that finds one of them changed marks it
     /// as `sched::mark_dirty` does.
     pub(crate) committing: AtomicBool,
+    /// A `next` reader was filed as stopped here while the node ran
+    /// (`commit::file_stop`): its commit may have taken its stops before
+    /// that filing, so the end of the run takes them again
+    /// (`commit::reask_late_stops`).
+    pub(crate) late_stops: AtomicBool,
     /// Runs in this evaluation (`Limits::runs_per_node`), the evaluation
     /// they count in.
     pub(crate) runs: AtomicU32,
@@ -76,6 +81,20 @@ pub(crate) struct Node {
     /// says one waits, read without the lock.
     pub(crate) stale_wake: Mx<Option<Wake>>,
     pub(crate) stale: AtomicBool,
+    /// The first commit whose filed readers stand
+    /// ([`crate::commit::FILED`], [`ReadRec::filed`]): every commit after it
+    /// went on from the run before and kept its reads.
+    pub(crate) filed_floor: AtomicU32,
+    /// A re-ask came while this run ran. Unlike [`Node::stale`] it stays
+    /// set to the commit: what the commit does not check of itself, the
+    /// filed reads, it checks when this says one may have moved.
+    pub(crate) asked: AtomicBool,
+    /// Its wake is more than one: a re-ask came while it was queued (or a
+    /// re-ask kept for a run's check while one was) and only one cause is
+    /// told ([`crate::sched`]'s `merge_woke`, `note_stale`). The next run
+    /// takes it (`Ctx::new`): woken by the answer it parked on, it is not
+    /// woken by that answer alone, and its commit checks the reads it kept.
+    pub(crate) woke_merged: AtomicBool,
     /// Fields whose walks stopped at it while it had not committed
     /// (`commit::first_hole`), each with the scope depth of the definition
     /// walked from: walked on from it when it commits, is taken or is
@@ -121,6 +140,27 @@ pub(crate) struct Node {
     /// give-back reached again. True once it leaves the line
     /// (`commit::release_leaving`): from then on it claims nothing.
     pub(crate) claim_mx: Mx<bool>,
+    /// A run of it stopped at the settling layer's frontier
+    /// (`Ctx::hold_at_frontier`, `Ctx::wait_settled`): one begun past the
+    /// frontier would most likely stop there again, its work thrown away,
+    /// so it waits for the frontier first (`sched::work`). Only when it
+    /// runs: what it makes is what it would make anyway.
+    pub(crate) held_frontier: AtomicBool,
+    /// A wake of it moved the settling layer's frontier back
+    /// (`sched::frontier_back`): the frontier it set, the one it replaced
+    /// and `Engine::frontier_gen` then. Its commit puts the replaced one
+    /// back when nothing has set the frontier since and the layer is not
+    /// to run again (`sched::frontier_restore`).
+    pub(crate) back_frontier: Mx<Option<(u64, u64, u64)>>,
+    /// Its re-asks for fields changed by commits still going on: the
+    /// committing node, that commit's run serial, the node's `restated`
+    /// then and the field (`sched::asked_before`).
+    pub(crate) asks: Mx<Vec<(NodeId, u32, u32, Field)>>,
+    /// Counts the times a value it filed was put right in place after it
+    /// was filed (a relation counted again from its input,
+    /// `commit::settle_rel`, `commit::walk_here`): a re-ask for its change
+    /// made before carried the older value (`sched::asked_before`).
+    pub(crate) restated: AtomicU32,
     /// Placed as its placer's continuation (`Ctx::follow`,
     /// `Ctx::follow_after`), not as its child: a node placed after the
     /// placer and its children goes before it.
@@ -139,12 +179,42 @@ pub(crate) struct Node {
     /// re-asked at once, not held to the quiet point
     /// (`sched::settles_edge`).
     pub(crate) settle_now: AtomicBool,
+    /// Its last run panicked on inputs that hold, held for
+    /// `Engine::evaluate`'s decision once the line is quiet: no run of it
+    /// comes in this pool, so no run waits for its commit
+    /// (`sched::settled_node`).
+    pub(crate) held_panic: AtomicBool,
     /// Where it stands among the nodes placed at its anchor: 0 a child
     /// of it, 1 after it and its children (another's `Ctx::follow_after`,
     /// or the placement after it in its placer's run), 2 its own
     /// continuation (`Ctx::follow`). Those of a lower slot stand before
     /// those of a higher one.
     pub(crate) slot: AtomicU8,
+    /// Whether its last commit was refuted by the commit itself (a read it
+    /// resumed on moved): its record's reads may hold while the state it
+    /// parked rests on the old answers (`Ctx::last_run_stands`).
+    pub(crate) refuted: AtomicBool,
+    /// Its last commit that published anything moved what a later node
+    /// read, or it never ran (`sched::note_move`): those wait for it to
+    /// settle (`sched::hold_for`). A node of a chain, or one that never ran,
+    /// is listed in `Engine::movers`.
+    pub(crate) moves: AtomicBool,
+    /// It is the front of a node an edit removed (`sched::mark_front`):
+    /// the first after it to run again, those after it waiting for it
+    /// in `Engine::movers` until it commits (`sched::clear_front`).
+    pub(crate) front: AtomicBool,
+    /// It was stopped before a run to wait for a node (`sched::work`): the
+    /// wake that asked for the run still stands; its waiting ended by
+    /// that node's settling clears this (`sched::release_waiting`), a
+    /// quiet point's does not.
+    pub(crate) held: AtomicBool,
+    /// How long its longest run that committed took, ns (`sched::work`).
+    pub(crate) full_ns: AtomicU64,
+    /// Its order among the nodes placed after the same anchor in slot 1
+    /// by different placers (`Ctx::rank_placement`): one of a lower rank
+    /// stands before one of a higher; 0 none (placed right after the
+    /// anchor's children, before those already there).
+    pub(crate) rank: AtomicU64,
     /// Its operation's static effect (`Operation::effect`), packed
     /// (`pack_effect`): asked once when the node is made or its text
     /// replaced.
@@ -159,7 +229,9 @@ pub(crate) struct Node {
     /// The fields other nodes' reads anchored at it read (`At::Before`,
     /// `At::AfterOwn`): its removal looks for those readers in its
     /// segment, under those fields alone.
-    pub(crate) anchored: Mx<Vec<Field>>,
+    /// A set: a picture's run files 144 000 reads at its parent, of
+    /// thousands of fields, each looked up here.
+    pub(crate) anchored: Mx<crate::values::FxHashSet<Field>>,
     /// Relocated since its last commit (`commit::relocate`): its next
     /// commit checks its placements where it stands now, though its run
     /// published nothing new (`Ctx::unchanged`).
@@ -206,15 +278,26 @@ impl Node {
             claimer: AtomicU64::new(0),
             claim_end: AtomicU64::new(0),
             claim_mx: Mx::new(false),
+            held_frontier: AtomicBool::new(false),
+            back_frontier: Mx::new(None),
+            asks: Mx::new(Vec::new()),
+            restated: AtomicU32::new(0),
             follows: AtomicBool::new(false),
             anchor: AtomicU64::new(0),
             state_stale: AtomicBool::new(false),
             settle_now: AtomicBool::new(false),
+            held_panic: AtomicBool::new(false),
             slot: AtomicU8::new(0),
+            rank: AtomicU64::new(0),
+            full_ns: AtomicU64::new(0),
+            refuted: AtomicBool::new(false),
+            moves: AtomicBool::new(false),
+            front: AtomicBool::new(false),
+            held: AtomicBool::new(false),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             bracket_gen: AtomicU64::new(0),
-            anchored: Mx::new(Vec::new()),
+            anchored: Mx::new(crate::values::FxHashSet::default()),
             moved: AtomicBool::new(false),
             claim_all: AtomicBool::new(false),
             id,
@@ -226,6 +309,7 @@ impl Node {
             pos: AtomicU64::new(pos.0),
             state: AtomicU8::new(State::Dirty as u8),
             committing: AtomicBool::new(false),
+            late_stops: AtomicBool::new(false),
             runs: AtomicU32::new(0),
             run_epoch: AtomicU64::new(0),
             reruns: AtomicU32::new(0),
@@ -234,6 +318,9 @@ impl Node {
             last: Mx::new(None),
             woke: Mx::new(None),
             stale_wake: Mx::new(None),
+            filed_floor: AtomicU32::new(0),
+            asked: AtomicBool::new(false),
+            woke_merged: AtomicBool::new(false),
             stale: AtomicBool::new(false),
             stopped: Mx::new(Vec::new()),
             waiters: Mx::new(Vec::new()),
@@ -352,6 +439,10 @@ impl Node {
         self.slot.load(Ordering::Acquire)
     }
 
+    pub(crate) fn rank(&self) -> u64 {
+        self.rank.load(Ordering::Acquire)
+    }
+
     pub(crate) fn pos_hint(&self) -> Pos {
         Pos(self.pos.load(Ordering::Acquire))
     }
@@ -397,10 +488,18 @@ pub(crate) struct RunRecord {
     pub(crate) defs: Vec<DefRec>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) reads: Vec<ReadRec>,
+    /// The nodes whose definitions its reads got, each once (those it
+    /// kept from its last run's with them): what its next run waits for
+    /// (`read::open_definer_before`). A hint.
+    pub(crate) sources: Box<[NodeId]>,
     /// Its placements in order (`Ctx::child`, `Ctx::follow`), matched by
     /// (op, args) at the next commit so unchanged ones are kept.
     pub(crate) placed: Vec<NodeId>,
     pub(crate) claim: usize,
+    /// Its claim was of the rest (`Ctx::claim_rest`, `Node::claim_all`):
+    /// kept with the count, which means every text node after it then,
+    /// not that many siblings.
+    pub(crate) claim_all: bool,
     pub(crate) effect: Effect,
     /// Filed before any run: predictions, replaced by the first commit.
     pub(crate) provisional: bool,
@@ -422,8 +521,10 @@ impl RunRecord {
             defs,
             contribs: Vec::new(),
             reads: Vec::new(),
+            sources: Box::default(),
             placed: Vec::new(),
             claim: 0,
+            claim_all: false,
             state: None,
             effect: Effect::None,
             provisional: true,
@@ -437,9 +538,9 @@ pub(crate) struct DefRec {
     pub(crate) f: Field,
     pub(crate) loc: Locality,
     /// For a relation (`Ctx::define_rel`): the value computed from the
-    /// reaching input at commit time; `rel` is the constant.
+    /// reaching input at commit time; `rel` is the relation.
     pub(crate) value: ValueId,
-    pub(crate) rel: Option<i64>,
+    pub(crate) rel: Option<Rel>,
 }
 
 /// Where a read looks, relative to the reader.
@@ -502,6 +603,13 @@ pub(crate) struct ReadRec {
     /// Its field's change count before it read ([`crate::Engine`]'s
     /// `field_epoch`; `u64::MAX` for a read of none).
     pub(crate) epoch: u64,
+    /// Kept by a run going on from a commit before, which filed it: its
+    /// reader stands ([`Node::filed_floor`]), and a commit neither files nor
+    /// checks it again. A page loop parked on a long page keeps every
+    /// read since the page began, and files and checks them all at every
+    /// contributor otherwise (knowledge's manual: 6440 commits of up to
+    /// 35 000 reads, half its build).
+    pub(crate) filed: bool,
 }
 
 impl ReadKind {
@@ -552,10 +660,21 @@ pub(crate) struct Product {
     pub(crate) defs: Vec<DefRec>,
     pub(crate) contribs: Vec<(Field, ValueId)>,
     pub(crate) reads: Vec<ReadRec>,
+    /// The nodes whose definitions the reads got (`RunRecord::sources`).
+    pub(crate) sources: Vec<NodeId>,
     pub(crate) placements: Vec<Placement>,
+    /// The placements' ranks (`Ctx::rank_placement`), by index; one past
+    /// the end is 0.
+    pub(crate) ranks: Vec<u64>,
     pub(crate) claim: usize,
+    /// The claim is of the rest (`Ctx::claim_rest`).
+    pub(crate) claim_all: bool,
     /// What the run set (`Ctx::set_effect`); None: its operation's.
     pub(crate) effect: Option<Effect>,
+    /// The brackets placements of an operation whose effect waits for
+    /// its run (`Effect::Pending`) are filed with until they run
+    /// (`Ctx::predict_placed_effect`), by placement index.
+    pub(crate) place_effects: Vec<(usize, Effect)>,
     /// The scope epoch when the run began (`Engine::scope_gen`): a
     /// bracket changed since may have moved any of its reads.
     pub(crate) scope_gen: u64,
@@ -563,6 +682,13 @@ pub(crate) struct Product {
     /// record's definitions, contributions, placements and output stand,
     /// with this run's reads.
     pub(crate) unchanged: bool,
+    /// With `unchanged`, the run's own claim stands, not the last
+    /// record's (`Ctx::unchanged_unclaimed`).
+    pub(crate) own_claim: bool,
+    /// The run stopped at a hole with nothing to say (`Ctx::keep_last_at_hole`):
+    /// its last run's products stand, but not that run's state, whose
+    /// checkpoints count reads of that run, not of this one's record.
+    pub(crate) at_hole: bool,
     /// `Ctx::park`: the state the next run resumes from.
     pub(crate) state: Option<ValueId>,
     /// `Ctx::parked_on`: the field whose answer the run stopped for.
@@ -570,11 +696,19 @@ pub(crate) struct Product {
     /// The run took its last run's state (`Ctx::resumed`): that run's
     /// reads stand with this one's.
     pub(crate) resumed: std::cell::Cell<bool>,
+    /// With `resumed`: only the first this many of the last run's reads
+    /// stand with this one's (`Ctx::goes_on_after_reads`): the run went on
+    /// from a point of its last run reached after those reads.
+    pub(crate) kept_reads: std::cell::Cell<Option<usize>>,
     /// The site the run was woken by (`Ctx::woken_by`: a range's start,
     /// a changed definition's node): a kept read from it that still moved
     /// at the commit is one the run did not read again where it was told
     /// to go back before it.
     pub(crate) woken_at: Option<NodeId>,
+    /// The run was woken by the answer its last run parked on
+    /// (`Ctx::parked_on`), and by nothing else (`Node::woke_merged`), so
+    /// the kept reads it does not check stood until it ran.
+    pub(crate) on_park: bool,
     /// `Ctx::settle_now`: its definitions reach readers outside the
     /// settling layer at once.
     pub(crate) settle_now: bool,
@@ -584,4 +718,7 @@ pub(crate) struct Product {
     /// `Ctx::set_frontier`: the settling layer's frontier this run moves
     /// (`Some(None)`: none, every reader free).
     pub(crate) frontier: Option<Option<NodeId>>,
+    /// `Ctx::last_run_stands`: the last run's record, every read of which
+    /// still holds; nothing ran ([`crate::commit::commit_stood`]).
+    pub(crate) stood: Option<Arc<RunRecord>>,
 }

@@ -8,6 +8,10 @@
 #   scripts/accl/gate-fast edits [COMMIT]   amsldoc's edit histories at
 #                                       -j 8 and 16 with 50 edits (the
 #                                       measurement; the gate runs 10)
+#   scripts/accl/gate-fast research [COMMIT]   the research corpus
+#                                       (gate-shard.sh research 0 1: ci/research.json
+#                                       against TeX Live, one job in the -doc
+#                                       image, GATE_RESEARCH_IMAGE)
 #   scripts/accl/gate-fast control CTL  build control commit CTL, time its
 #                                       cold watch builds, record them in
 #                                       scripts/accl/gate-control/CTL (commit
@@ -66,6 +70,10 @@ slurm='export PATH=/opt/slurm/current/bin:$PATH;'
 # call here and in the accl it runs retried, sshmux/ssh)
 export SSH=$here/sshmux/ssh
 export RSYNC_RSH=$SSH GIT_SSH_COMMAND=$SSH
+# (the CI image: the tools image with TeX Live's documentation and
+# language collections, phitex-ci.def; the tests shard, the one-job gate
+# and the research corpus run in it)
+ci_img=${GATE_CI_IMAGE:-phitex-ci-2026-09-25}
 ORACLE=code/flinner/phitex-runs/amsldoc-oracle-epoch.pdf
 # the latex tests heaviest first (measured: test-walls.txt of the shards)
 ORDER_FILE=$here/gate-latex-order.txt
@@ -197,7 +205,14 @@ submit() {
       ids+=("$(sub "-c 10 --mem=24G -t 00:20:00 -J gf-latex$k $(on_bins "$T")" latex "$k" "$n")")
     done
   fi
-  if on tests; then ids+=("$(sub "-c 16 --mem=48G -t 01:30:00 -J gf-tests $(on_bins "wtests")" tests)"); fi
+  # (the tests in the CI image, as CI runs them: the tools image lacks
+  # the language packages corpus_repros' documents load, ngerman and
+  # babel-magyar among them)
+  if on tests; then
+    local topts
+    topts="-c 16 --mem=48G -t 01:30:00 -J gf-tests $(on_bins "wtests")"
+    ids+=("$(sub "${topts/--export=ALL,/--export=ALL,ACCL_IMAGE=$ci_img,}" tests)")
+  fi
   # (the timing control: its timings as `gate-fast control` recorded
   # them, never built per gate; GATE_CONTROL= none)
   if on ams; then
@@ -257,11 +272,27 @@ one_job() {
     cpus=$((cpus + ${k%%:*}))
   done
   [ "$cpus" -ge 16 ] || cpus=16
-  id=$(sub "-c $cpus --mem=${GATE_ONE_MEM:-200G} -t ${GATE_ONE_TIME:-01:40:00} -J gf-all --export=ALL,ACCL_ROOT=$ROOT,ACCL_STORE_OUT=$st$in" all "${specs[@]}")
+  id=$(sub "-c $cpus --mem=${GATE_ONE_MEM:-200G} -t ${GATE_ONE_TIME:-01:40:00} -J gf-all --export=ALL,ACCL_IMAGE=$ci_img,ACCL_ROOT=$ROOT,ACCL_STORE_OUT=$st$in" all "${specs[@]}")
   echo "gate-fast: commit $c, oracle md5 $want, one job ($cpus CPUs)" >&2
   mkdir -p "$runs"
   echo "$c $id" >> "$runs/gate-fast.ids"
   echo "$id"
+}
+
+# the research corpus in one job (its own: the -doc image, which the
+# other shards do not run in; on the build's users' CLI)
+research() {
+  local opts img=${GATE_RESEARCH_IMAGE:-$ci_img}
+  c=$(git rev-parse "${1:-HEAD}^{commit}")
+  order=""
+  stage
+  ids=()
+  build_first
+  opts="-c ${GATE_RESEARCH_CPUS:-16} --mem=64G -t 03:00:00 -J gf-research $(on_bins cli)"
+  opts=${opts/--export=ALL,/--export=ALL,ACCL_IMAGE=$img,}
+  ids+=("$(sub "$opts" research 0 1)")
+  echo "gate-fast: research corpus of $c in $img, jobs ${ids[*]}" >&2
+  echo "${ids[*]}"
 }
 
 # the 50-edit histories (a measurement, not the gate)
@@ -295,7 +326,7 @@ control() {
 }
 
 # FIELDS J...: "JobID|FIELDS" lines of all those jobs, one sacct call
-acct() { local f=$1; shift; $SSH $H "$slurm sacct -j $(IFS=,; echo "$*") -n -X -P -o JobID,$f" 2>/dev/null; }
+acct() { local f=$1; shift; $SSH $SH "$slurm sacct -j $(IFS=,; echo "$*") -n -X -P -o JobID,$f" 2>/dev/null; }
 secs() { awk -F'[-:]' '{ if (NF == 4) print $1*86400+$2*3600+$3*60+$4; else if (NF == 3) print $1*3600+$2*60+$3; else print $1*60+$2 }' <<< "$1"; }
 
 # (all the jobs still running in one query a minute; a query that fails,
@@ -406,6 +437,7 @@ table() {
 case ${1:-} in
   wait) shift; wait_all "$@" ;;
   edits) shift; edits50 "$@" ;;
+  research) shift; research "$@" ;;
   control) shift; control "$@" ;;
   table) shift; table "$@" ;;
   -h | --help) sed -n '2,20p' "$0" ;;

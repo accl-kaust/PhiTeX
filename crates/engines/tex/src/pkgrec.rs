@@ -25,7 +25,7 @@ use crate::exec::LockWait as _;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 
-use phitex_defuse::{FxHashMap, ValueId, Values};
+use phitex_defuse::{FxHashMap, FxHashSet, ValueId, Values};
 
 use crate::val::{int_of, list_of, str_of};
 
@@ -95,7 +95,7 @@ pub(crate) fn node_key(text: &str) -> String {
         let mut t = String::with_capacity(text.len());
         let mut rest = text;
         while let Some(k) = rest.find('\n') {
-            t.push_str(rest[..k].trim_end_matches([' ', '\t', '\r']));
+            t.push_str(rest[..k].trim_end_matches([' ', '\r']));
             t.push('\n');
             rest = &rest[k + 1..];
         }
@@ -359,6 +359,13 @@ pub(crate) fn decode_entry(v: &Values, e: ValueId) -> Option<(u64, String, Rec)>
 /// the optimistic hint.
 pub(crate) struct LoadHints {
     pub recs: Mutex<Recs>,
+    /// Where a load's record not in `recs` is asked, once per load key
+    /// ([`crate::Options::pkgrec_source`]).
+    source: Option<crate::api::PkgrecSource>,
+    /// The keys asked of `source` (found or not).
+    asked: Mutex<FxHashSet<String>>,
+    /// The keys whose record [`Self::merge`] changed or made.
+    changed: Mutex<FxHashSet<String>>,
     finder: crate::api::Finder,
     /// The hash of each file's text as found (0: absent), asked once.
     now: Mutex<FxHashMap<String, u64>>,
@@ -377,12 +384,16 @@ pub(crate) struct LoadHints {
 impl LoadHints {
     pub(crate) fn new(
         recs: Recs,
+        source: Option<crate::api::PkgrecSource>,
         finder: crate::api::Finder,
         optimistic: bool,
         predict: bool,
     ) -> LoadHints {
         LoadHints {
             recs: Mutex::new(recs),
+            source,
+            asked: Mutex::new(FxHashSet::default()),
+            changed: Mutex::new(FxHashSet::default()),
             finder,
             now: Mutex::new(FxHashMap::default()),
             optimistic,
@@ -392,9 +403,36 @@ impl LoadHints {
         }
     }
 
+    /// The record under `key`: the build's, else the source's, asked
+    /// the first time the key is. The ask holds `asked` (not the
+    /// records' lock, which the build's other loads take): a thread
+    /// asking the same key meanwhile waits for its answer rather than
+    /// taking the key as recordless.
+    fn rec(&self, key: &str) -> Option<Rec> {
+        if let Some(r) = self.recs.locked().get(key) {
+            return Some(r.clone());
+        }
+        // (a document node's record is the document's own, all given
+        // up front: [`crate::Options::noderec`])
+        let src = self.source.as_ref().filter(|_| !is_node_key(key))?;
+        let mut asked = self.asked.locked();
+        if let Some(r) = self.recs.locked().get(key) {
+            return Some(r.clone());
+        }
+        if !asked.insert(key.to_owned()) {
+            return None;
+        }
+        // (the bytes hold their key: another key's record, one whose
+        // name only hashed alike, is not taken)
+        let r = parse(&src(key)?).remove(key)?;
+        self.recs.locked().insert(key.to_owned(), r.clone());
+        drop(asked);
+        Some(r)
+    }
+
     /// The record under `key` when it matches the files as they are now.
     fn matching(&self, v: &Values, key: &str) -> Option<Rec> {
-        let r = self.recs.locked().get(key).cloned()?;
+        let r = self.rec(key)?;
         r.matches(|n| Some(self.hash_now(v, n))).then_some(r)
     }
 
@@ -448,9 +486,7 @@ impl LoadHints {
     /// Whether the record of the node `text` lists file `name` by its
     /// text (one it read cut, [`UNITS`], matches any text of it).
     pub(crate) fn reads_file(&self, text: &str, name: &str) -> bool {
-        self.recs
-            .locked()
-            .get(&node_key(text))
+        self.rec(&node_key(text))
             .is_some_and(|r| r.files.iter().any(|(n, h)| n == name && *h != UNITS))
     }
 
@@ -462,7 +498,7 @@ impl LoadHints {
     pub(crate) fn hint_for(&self, v: &Values, text: &str) -> Option<String> {
         let k = node_key(text);
         let node = is_node_key(&k);
-        let rec = self.recs.locked().get(&k).cloned();
+        let rec = self.rec(&k);
         if crate::exec::obs_flag!("PHITEX_PKG_TRACE") {
             match &rec {
                 None => eprintln!("pkgrec: {k}: no record"),
@@ -505,12 +541,39 @@ impl LoadHints {
         None
     }
 
-    /// The records with `fresh` (load key, record) replacing theirs.
+    /// The records with `fresh` (load key, record) replacing theirs;
+    /// those that differ noted as changed ([`Self::changed`]).
     pub(crate) fn merge(&self, fresh: Vec<(String, Rec)>) {
-        let mut r = self.recs.locked();
         for (k, x) in fresh {
-            r.insert(k, x);
+            // (the kept record asked first: one equal to it is not new)
+            let _ = self.rec(&k);
+            let mut r = self.recs.locked();
+            if r.get(&k) != Some(&x) {
+                r.insert(k.clone(), x);
+                drop(r);
+                self.changed.locked().insert(k);
+            }
         }
+    }
+
+    /// The records [`Self::merge`] changed whose key `keep` keeps, each
+    /// by its key as the bytes of it alone ([`serialise`]).
+    pub(crate) fn changed(&self, keep: impl Fn(&str) -> bool) -> Vec<(String, Vec<u8>)> {
+        let mut keys: Vec<String> = self
+            .changed
+            .locked()
+            .iter()
+            .filter(|k| keep(k))
+            .cloned()
+            .collect();
+        keys.sort();
+        let r = self.recs.locked();
+        keys.into_iter()
+            .filter_map(|k| {
+                let one: Recs = std::iter::once((k.clone(), r.get(&k)?.clone())).collect();
+                Some((k, serialise(&one)))
+            })
+            .collect()
     }
 
     /// The records whose key `keep` keeps, as bytes.

@@ -186,8 +186,16 @@ pub struct Progress {
     slots: Box<[AtomicU64]>,
     done: AtomicU64,
     total: AtomicU64,
-    /// The highest page number a finisher reached in this evaluation.
+    /// The highest page a finisher reached in this evaluation: the
+    /// pages shipped up to its firing, its own with them.
     page: AtomicU64,
+    /// The pages each finisher shipped on its last run, by its node:
+    /// its firing's place (the ordinary firings up to it, whether it is
+    /// a special one, [`crate::pages::Page`]) and the pages. Kept across
+    /// evaluations (an edit's finishers that did not run again shipped
+    /// what they shipped), the nodes gone dropped
+    /// ([`Progress::keep_ships`]).
+    ships: std::sync::Mutex<FxHashMap<u64, (i64, bool, u32)>>,
     /// The evaluations begun (the first 1).
     evaluations: AtomicU64,
     on_page: OnceLock<PageHook>,
@@ -230,6 +238,7 @@ impl Progress {
             done: AtomicU64::new(0),
             total: AtomicU64::new(0),
             page: AtomicU64::new(0),
+            ships: std::sync::Mutex::new(FxHashMap::default()),
             evaluations: AtomicU64::new(0),
             on_page: OnceLock::new(),
             format: AtomicU64::new(0),
@@ -312,14 +321,44 @@ impl Progress {
         self.evaluations.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A finisher reached page `n` (its ordinary pages counted, the
-    /// first 1).
-    pub(crate) fn note_page(&self, n: u64) {
-        if self.page.fetch_max(n, Ordering::Relaxed) < n
+    /// The finisher `node`, of the firing at `place` (the ordinary
+    /// firings up to it, whether it is a special one), shipped `shipped`
+    /// pages: the page the build reached is the pages shipped by the
+    /// firings up to it, this one's with them. Not the firings counted:
+    /// a routine may ship no page (a two-column page's first column) or
+    /// several (Grail, two columns: "page 35" of its 18 pages).
+    pub(crate) fn note_ships(&self, node: u64, place: (i64, bool), shipped: u32) {
+        let n = {
+            let mut s = self
+                .ships
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // (an ordinary firing's place is one firing's: a finisher
+            // made again in its place replaces the one before)
+            if !place.1 {
+                s.retain(|&k, e| k == node || (e.0, e.1) != place);
+            }
+            s.insert(node, (place.0, place.1, shipped));
+            s.values()
+                .filter(|e| (e.0, e.1) <= place)
+                .map(|e| u64::from(e.2))
+                .sum::<u64>()
+        };
+        if n > 0
+            && self.page.fetch_max(n, Ordering::Relaxed) < n
             && let Some(h) = self.on_page.get()
         {
             (h.0)(self.evaluations.load(Ordering::Relaxed), n);
         }
+    }
+
+    /// Only the finishers `live` keeps counted ([`Progress::note_ships`]):
+    /// the nodes gone shipped nothing that stands.
+    pub(crate) fn keep_ships(&self, live: impl Fn(u64) -> bool) {
+        self.ships
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|&k, _| live(k));
     }
 
     /// The highest page a finisher reached in this evaluation (0: none

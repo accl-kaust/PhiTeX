@@ -24,6 +24,7 @@ use super::{
     R, Run, Seg, Shared, State, Stop, ValueId, Values, glue_of, glue_value, group, int_of, list_of,
     nodes, ops, replaced, run_node, some, str_of, toks_of, toks_value,
 };
+use crate::state::AtVal;
 
 /// What a run had done when it passed a candidate: at its end, a page
 /// finishing at its last candidate finishes at the end of the piece iff
@@ -66,13 +67,26 @@ pub(crate) struct CandMark {
     /// page fires at that the run read the page after
     /// ([`Run::order_after_own_page`]).
     pub open_cut: bool,
+    /// Whether a second pass can end the run here at a paragraph's start
+    /// inside conditionals of its own: the continuation carries them, as
+    /// at a forced one (amsmath's display in `\ifmmode`'s `\else`); a
+    /// read of the pages' objects after it ends here where a page fires
+    /// ([`Run::order_after_pages`]).
+    pub par_cut: bool,
 }
+
+/// The start of [`Run::order_after_pages`]' engine diagnostic.
+pub(crate) const PAGES_OBJECTS_DEFECT: &str = "the pages' objects read in a piece after a candidate a page can fire at and no pass can end at";
 
 impl Run<'_, '_> {
     /// Whether the run is on the main vertical list, at most a paragraph
     /// just begun above it (`nest_ptr <= 1` of §1091, §1200; `mode =
     /// vmode` of §1076, §1094, §1100, §1103, §812).
     pub(crate) fn at_outer(&mut self) -> R<bool> {
+        // (a picture child builds a list of its own, never the main one)
+        if self.pic_child.is_some() {
+            return Ok(false);
+        }
         let base = self.base_mode()?;
         if base.lid != 0 || base.km != 1 {
             return Ok(false);
@@ -104,7 +118,8 @@ impl Run<'_, '_> {
 
     /// [`Run::finish_candidate`]; `newgraf`: the candidate of a
     /// paragraph's start (§1091), after its level is pushed, its indent
-    /// box appended and `\everypar` put on the input.
+    /// box appended and `\everypar` put on the input; or of a display's
+    /// start (§1145), its math level pushed and `\everydisplay` on the input.
     pub(crate) fn finish_candidate_at(&mut self, newgraf: bool) -> R<()> {
         if !self.at_outer()? {
             return Ok(());
@@ -128,11 +143,20 @@ impl Run<'_, '_> {
         // only groups the run opened on the main vertical list, which own
         // no list: the continuation carries every level, §1091's list
         // and the input `\everypar` left, as a cut inside such groups)
+        // (a display's start, §1145, is one too: the paragraph before it
+        // broken into lines, its math level just pushed on top, empty,
+        // `\everydisplay` on the input; the routine of a page made to fire
+        // there runs before the display and the rest of the paragraph,
+        // which read what it defines: a `\marginpar` after the display
+        // conses `\@currlist` as the routine of the one before left it)
         let par_start = newgraf
             && self.nest.split_last().is_some_and(|(top, below)| {
-                top.owns && top.group == 0 && below.iter().all(|l| !l.owns && l.group != 0)
+                top.owns
+                    && (top.group == 0 || (top.group == group::MATH_SHIFT && top.mode == 203))
+                    && below.iter().all(|l| !l.owns && l.group != 0)
             });
         let restartable = can || (par_start && self.conds.is_empty());
+        let par_cut = par_start && !self.conds.is_empty();
         // (a rest of blank input makes no node: the piece runs it, spaces
         // and an empty line's `\par` in vertical mode, §1070)
         let open_cut = self.open_span() && self.cuttable_open();
@@ -150,7 +174,7 @@ impl Run<'_, '_> {
                 || (self.cand_marks.is_empty() && self.forced_pending_before()?));
         let cuttable = fresh
             && (((can || forced_par) && !self.rest_blank()?)
-                || ((restartable || open_cut || forced_par) && self.stop_at == Some(k)));
+                || ((restartable || open_cut || par_cut || forced_par) && self.stop_at == Some(k)));
         self.cand_marks.push(CandMark {
             k,
             stamp: self.st.stamp(),
@@ -164,8 +188,12 @@ impl Run<'_, '_> {
             fresh,
             restartable,
             open_cut,
+            par_cut,
         });
         self.st.mark_candidate();
+        if fresh {
+            self.note_page_regs_held();
+        }
         if crate::exec::obs_flag!("PHITEX_CAND_TRACE") {
             self.trace_candidate(k, newgraf, fresh, cuttable);
         }
@@ -193,6 +221,70 @@ impl Run<'_, '_> {
             }
             self.cut = Some(k);
             return Err(Halt::Cut);
+        }
+        // (the run goes on past it: the routine of a page firing here
+        // runs before the text after it, wherever it is: a candidate of
+        // nothing contributed fires no page, §994)
+        if fresh {
+            self.note_engine_reads();
+            self.st.mark_past(k);
+            self.apply_fire_conflict(k)?;
+        }
+        Ok(())
+    }
+
+    /// A candidate the run goes on past: what the routine of a page
+    /// firing there did that the run used ([`super::FIRE_CONFLICT`], that
+    /// page's finisher's), in force here, as TeX's text after the routine
+    /// has it: its global values, the box registers it used up, and its
+    /// `\\aftergroup` tokens, read next (§1100, after this `build_page`).
+    /// None of it is the run's own definition: the finisher, after the
+    /// run, defines it, and readers after the run are asked again only
+    /// where a value changed.
+    fn apply_fire_conflict(&mut self, k: u32) -> R<()> {
+        let op = self.cx.op();
+        if !((op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc))
+            || self.interp.is_some()
+        {
+            return Ok(());
+        }
+        let v = self.v;
+        let f = super::fire_conflict_field(v, self.cx.node(), k);
+        let at = phitex_defuse::At::End(self.cx.unit());
+        let phitex_defuse::FieldAt::Def(x, _) = self.cx.read_at(f, at)? else {
+            return Ok(());
+        };
+        let after = v.field(super::RTN_AFTER);
+        for e in list_of(v, x) {
+            let ys = list_of(v, e);
+            let Some(&f) = ys.first() else { continue };
+            let (f, x) = (Field(f), ys.get(1).copied());
+            if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+                eprintln!(
+                    "fire-apply: node {} candidate {k}: {}",
+                    self.cx.node().raw(),
+                    crate::val::field_name(v, f)
+                );
+            }
+            if f == after {
+                self.back_toks(toks_of(v, x));
+                continue;
+            }
+            if let Some(n) = super::box_reg_of(v, f) {
+                // (§1079: at the level of the binding, which the groups
+                // keep or restore as TeX's)
+                let b = x.and_then(|x| {
+                    list_of(v, x)
+                        .get(1)
+                        .copied()
+                        .filter(|&b| b != ValueId::UNIT)
+                });
+                self.modify_box_reg(n, b)?;
+                continue;
+            }
+            let loc = self.loc_of(f);
+            self.st.apply_global(v, loc, x);
+            self.st.note_applied(loc);
         }
         Ok(())
     }
@@ -237,8 +329,16 @@ impl Run<'_, '_> {
         } else if k == 0 && !self.own_page_params_put() {
             // (the parameters reaching the piece, unless an item of it
             // already noted the ones it set, `Run::append`: that marker
-            // is later in force and this one, after it, would undo it)
-            self.put_page_params_reaching();
+            // is later in force and this one, after it, would undo it.
+            // A resume holding a parameter's binding local to a group open
+            // at its cut has it in its table only, not where the fold and
+            // `Run::pin_reaching_page_params` read: its value given here,
+            // the table's as nothing was set since the run began)
+            if self.st.carries_page_param() {
+                self.put_page_params()?;
+            } else {
+                self.put_page_params_reaching();
+            }
         }
         for n in std::mem::take(&mut self.ins_pending) {
             // (the class's registers as this run left them when it
@@ -305,25 +405,36 @@ impl Run<'_, '_> {
             && self.has_input()
     }
 
-    /// A read of the page (`\pagegoal`, `\pagetotal`, ...) after a
-    /// candidate of the run's own a page fires at (`k`): TeX ran that
-    /// page's routine there, and what the run reads after it (the page,
-    /// what the routine set: LaTeX's `\vsize` for a float it placed) is
-    /// the routine's. The run goes again from its start and ends at that
-    /// candidate ([`Halt::Recut`]), its rest a resume placed after the
-    /// page's finisher.
-    pub(crate) fn order_after_own_page(&mut self, k: u32) -> R<()> {
+    /// A read of the page (`\pagegoal`, `\pagetotal`, ...) after
+    /// candidates of the run's own pages fire at (`ks`, in order): TeX ran
+    /// those pages' routines there, and what the run reads after them (the
+    /// page, what the routine set: LaTeX's `\vsize` for a float it placed)
+    /// is the last one's. The run goes again from its start and ends at
+    /// the last of them a pass can end at ([`Halt::Recut`]), its rest a
+    /// resume placed after that page's finisher; it goes on past those
+    /// before, their finishers run on its state there as at any candidate
+    /// it goes on past ([`Run::preload_candidate`]). Ended at the first,
+    /// the rest ran on to the read again past the next page's candidate
+    /// and was cut there in turn, each rest a pass over what was left
+    /// after it: circuitikz's index in `multicols`, read at its end, 16
+    /// rests from 307 ms down to 69 ms one after another, 1.8 s of an
+    /// edit's 2.7 s. Where the builder's pages after the first are not the
+    /// settled ones (the routines gave something back), the rest reads
+    /// the page after one of its own and is cut again.
+    pub(crate) fn order_after_own_page(&mut self, ks: &[u32]) -> R<()> {
         let op = self.cx.op();
         let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
         if !piece || self.cut.is_some() || self.stop_at.is_some() {
             return Ok(());
         }
-        let Some(m) = self.cand_marks.iter().find(|m| m.k == k) else {
+        let Some(m) = ks.iter().rev().find_map(|&k| {
+            self.cand_marks
+                .iter()
+                .find(|m| m.k == k && m.fresh && (m.restartable || m.open_cut || m.par_cut))
+        }) else {
             return Ok(());
         };
-        if !m.fresh || !(m.restartable || m.open_cut) {
-            return Ok(());
-        }
+        let k = m.k;
         if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
             eprintln!(
                 "page-trace: node {} ends at candidate {k}: a read of the page after a page fired there",
@@ -331,6 +442,136 @@ impl Run<'_, '_> {
             );
         }
         Err(Halt::Recut(k))
+    }
+
+    /// The location of field `f` where the run's reads of it can be
+    /// dated ([`crate::state::read_by_position`]), without making one.
+    fn dated_loc(&self, f: Field) -> Option<Loc> {
+        let l = match self.ops.fields.loc_of(self.v, self.cx.values_epoch(), f) {
+            Some(l) => Loc::try_from(l).ok()?,
+            None => self.st.spill_of(f)?,
+        };
+        crate::state::read_by_position(l).then_some(l)
+    }
+
+    /// The fields the run read from the engine since it last looked, as
+    /// read across every candidate before: what reads them by a way past
+    /// the table (a skipped branch's class of a token, `\\ifdefined`)
+    /// holds no binding the table could date.
+    fn note_engine_reads(&mut self) {
+        let n = self.cx.reads_len();
+        if self.st.past_n() > 0 {
+            for (_, f) in self.cx.fields_read_since(self.reads_noted) {
+                if let Some(l) = self.dated_loc(f) {
+                    self.st.note_read_elsewhere(l);
+                }
+            }
+        }
+        self.reads_noted = n;
+    }
+
+    /// At a pass's end (`ops::run_node`): the candidates of the run's own
+    /// it went on past where a page can fire and a second pass can end
+    /// (a paragraph's start, a candidate inside groups or conditionals of
+    /// its own), and what it read across them. TeX runs the routine of a
+    /// page firing there at that `build_page`, and the text after it reads
+    /// every global the routine set (classicthesis-xe's `\\thepage` and
+    /// LaTeX's `\\glb@currsize`, a shipout hook's macro); the run read
+    /// every field at its own position, before the page's finisher. The
+    /// finisher reads this ([`super::FIRE_USED`]) and, where its routine
+    /// changed a field the run read across that candidate, defines
+    /// [`super::FIRE_CONFLICT`], which asks the run again, and
+    /// [`Run::apply_fire_conflict`] puts it in force at the candidate. A
+    /// page whose routine changed only what the run did not read across its
+    /// candidate changes nothing the run did: what the run read of those it
+    /// bound itself after the candidate (`\\font@name`, every
+    /// `\\selectfont`), and its later definitions stand over the routine's
+    /// ([`Run::give_way`]). What the run put in force counts as read there:
+    /// applying a routine's value is always what TeX does, and without it
+    /// a field read only on the way the old value took would come and go
+    /// with each run.
+    ///
+    /// What the run read in ways it cannot date
+    /// ([`crate::state::read_by_position`]) counts as read across all its
+    /// candidates.
+    pub(crate) fn order_after_fires(&mut self) {
+        let op = self.cx.op();
+        let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
+        if !piece || self.interp.is_some() {
+            return;
+        }
+        let v = self.v;
+        let ks = self.st.past_ks();
+        if ks.is_empty() {
+            return;
+        }
+        self.note_engine_reads();
+        let ranges = self.fire_read_across(&ks);
+        let node = self.cx.node();
+        if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+            eprintln!(
+                "fire-pass: node {} past {ks:?}: {} ranges",
+                node.raw(),
+                ranges.len()
+            );
+        }
+        let int = |k: u32| v.int(i64::from(k));
+        let mut buckets = vec![Vec::new(); super::FIRE_USED_BUCKETS];
+        for (f, a, b) in ranges {
+            let ys: &mut Vec<ValueId> = &mut buckets[super::fire_used_bucket(f)];
+            ys.push(f);
+            ys.push(int(a));
+            ys.push(int(b));
+        }
+        let buckets = buckets.into_iter().map(|ys| v.list(ys)).collect();
+        let passed = v.list(ks.iter().map(|&k| int(k)).collect());
+        self.cx.define_with(
+            super::fire_used_field(v, node),
+            v.list(vec![v.list(buckets), passed]),
+            Locality::Global,
+        );
+    }
+
+    /// Each stretch of candidates the run read a field across, sorted by
+    /// field then candidate, merged: `(field, first k, last k)`.
+    fn fire_read_across(&mut self, ks: &[u32]) -> Vec<(ValueId, u32, u32)> {
+        let (first, last) = (ks[0], ks[ks.len() - 1]);
+        let mut by: Vec<(ValueId, u32, u32)> = Vec::new();
+        for (l, a, b) in self.st.reads_across() {
+            let Some(xs) = ks.get(a as usize..(b as usize).min(ks.len())) else {
+                continue;
+            };
+            let (Some(&from), Some(&to)) = (xs.first(), xs.last()) else {
+                continue;
+            };
+            by.push((self.loc_field_peek(l).0, from, to));
+        }
+        // (what the run holds that it cannot date: all its candidates)
+        let reads: Vec<Field> = self.cx.fields_read_since(0).map(|(_, f)| f).collect();
+        for f in reads {
+            if self.dated_loc(f).is_none() {
+                by.push((f.0, first, last));
+            }
+        }
+        let locs: Vec<Loc> = self
+            .st
+            .held_locs()
+            .chain(self.st.defined_stamped().into_iter().map(|d| d.0))
+            .collect();
+        for l in locs {
+            if !crate::state::read_by_position(l) {
+                by.push((self.loc_field_peek(l).0, first, last));
+            }
+        }
+        by.sort_unstable();
+        let mut out: Vec<(ValueId, u32, u32)> = Vec::with_capacity(by.len());
+        for (f, a, b) in by {
+            match out.last_mut() {
+                Some(x) if x.0 == f && a <= x.2 => x.2 = x.2.max(b),
+                _ => out.push((f, a, b)),
+            }
+        }
+        out
     }
 
     /// A read of the objects the pages shipped before this run
@@ -342,14 +583,19 @@ impl Run<'_, '_> {
     /// such candidate ([`Halt::Recut`], [`Run::finish_candidate`])
     /// whether or not a page fires there (the piece's boundaries are its
     /// text's alone), its rest a resume placed after the pages firing
-    /// there, which reads their objects. Where no pass can end at it (inside a conditional of the
+    /// there, which reads their objects. Where no pass can end at it (inside a list of the
     /// run's own), the read stands where no page fires at the run's
     /// candidates ([`Run::page_fires_in_own`]). (`why`: the reader, for
     /// the trace.)
-    #[allow(
-        clippy::assertions_on_constants,
-        reason = "a debug or observe build stops on the defect"
-    )]
+    ///
+    /// The defect is an engine diagnostic of the run, which stands only
+    /// where the settled line keeps the run: a run on a page state that
+    /// moves since (a page firing at its candidate where the settled
+    /// pages fire none) is gone with its diagnostic. A debug or observe
+    /// build stops on one that stands ([`PAGES_OBJECTS_DEFECT`],
+    /// `Build::settle`), not on a run's: a panic withholds the run's
+    /// output, the pages it reads move again, and the line never
+    /// settles (asmeconf at -j1).
     pub(crate) fn order_after_pages(&mut self, why: &str) -> R<()> {
         let op = self.cx.op();
         let piece = (op == self.ops.exec || op == self.ops.resume) && (self.top || self.doc);
@@ -359,22 +605,28 @@ impl Run<'_, '_> {
         let Some(m) = self.cand_marks.iter().find(|m| m.fresh) else {
             return Ok(());
         };
-        let (k, restartable) = (m.k, m.restartable);
-        // (no pass can end there: complete where no page fires at any of
-        // the run's candidates, the page builder's fold over the profiles
-        // to its own says: a read of the page state, [`Feedback::PageSoFar`];
-        // where one can, it ends there whatever the pages do)
+        let (k, restartable, open_cut) = (m.k, m.restartable, m.open_cut || m.par_cut);
+        // (inside a span of the run's own: complete where no page fires
+        // at any of the run's candidates, the page builder's fold over the
+        // profiles to its own says: a read of the page state,
+        // [`Feedback::PageSoFar`]; where a pass can end outside one, it
+        // ends there whatever the pages do)
         if !restartable && !self.page_fires_in_own()? {
             return Ok(());
         }
-        if !restartable {
-            // (a candidate inside a span of the run's own no pass can end
+        // (a page fires at one: a second pass can end inside groups or
+        // conditionals of the run's own that own no list, the continuation
+        // carrying them ([`CandMark::open_cut`]; a paragraph's start,
+        // [`CandMark::par_cut`]): tex-vpat's resume cut inside four
+        // conditionals, an `\item`'s object numbers read after its first
+        // candidate; spath3's pgf `\immediate\pdfobj`)
+        if !restartable && !open_cut {
+            // (a candidate inside a list of the run's own no pass can end
             // at: a page firing there would be missing from the number)
             let msg = format!(
-                "the pages' objects read in a piece after a candidate a page can fire at and no pass can end at ({why}, candidate {k}): a number here may miss that page's objects (node {})",
+                "{PAGES_OBJECTS_DEFECT} ({why}, candidate {k}): a number here may miss that page's objects (node {})",
                 self.cx.node().raw()
             );
-            assert!(!cfg!(any(debug_assertions, feature = "observe")), "{msg}");
             self.engine_diag(&msg);
             return Ok(());
         }
@@ -622,6 +874,7 @@ impl Run<'_, '_> {
             "param:maxdepth",
             "param:topskip",
             "param:holdinginserts",
+            "param:savingvdiscards",
         ];
         let mut defined = false;
         for n in names {
@@ -647,6 +900,7 @@ impl Run<'_, '_> {
             v.int(int(xs[1])),
             glue_value(v, &glue_of(v, xs[2])),
             v.int(int(xs[3])),
+            v.int(int(xs[4])),
         ]);
         for x in raw.iter_mut() {
             if nodes::tag(v, *x) == nodes::T_PAGE_PARAMS && list_of(v, *x).len() == 1 {
@@ -939,26 +1193,50 @@ impl Run<'_, '_> {
         let mut held: Vec<(Field, Loc, Option<ValueId>)> = Vec::new();
         for l in at.locs() {
             let f = self.loc_field(l);
-            held.push((f, l, self.st.id_of(l, v)));
+            // (a register only stepped, unread: nothing it holds is a value)
+            let end = if self.st.is_loaded(l) {
+                self.st.id_of(l, v)
+            } else {
+                None
+            };
+            held.push((f, l, end));
         }
         held.sort_unstable_by_key(|x| (x.0.0.raw(), x.1));
         // (a candidate's `[value]` lists, one per value: the same value
         // stands at many candidates)
-        let kvs: std::cell::RefCell<phitex_defuse::FxHashMap<Option<ValueId>, ValueId>> =
+        let kvs: std::cell::RefCell<phitex_defuse::FxHashMap<(Option<ValueId>, i64), ValueId>> =
             std::cell::RefCell::default();
-        let kv_list = |x: Option<ValueId>| {
+        let kv_list = |x: Option<ValueId>, after: i64| {
             *kvs.borrow_mut()
-                .entry(x)
-                .or_insert_with(|| v.list(x.into_iter().collect()))
+                .entry((x, after))
+                .or_insert_with(|| v.list(std::iter::once(v.int(after)).chain(x).collect()))
         };
         let before = v.str(BEFORE_PIECE);
+        let pluses: std::cell::RefCell<phitex_defuse::FxHashMap<(i32, i64), ValueId>> =
+            std::cell::RefCell::default();
         // (`[value]` or `[]` (absent) where the run had it; one it had
         // neither read nor defined before is what reached the piece,
-        // [`BEFORE_PIECE`], the finisher reads it there)
-        let kv_at = |i: usize, l: Loc| match at.get(i, l) {
-            Some(Some(x)) => kv_list(x),
-            Some(None) => before,
-            None => ValueId::UNIT,
+        // [`BEFORE_PIECE`], the finisher reads it there; a register it
+        // stepped and did not read, that plus the steps, [`before_plus`]:
+        // the piece needs no read of it for its page's routine)
+        let kv_at = |i: usize, l: Loc| {
+            let after = || {
+                at.made_after(i, l)
+                    .and_then(|j| marks.get(j))
+                    .map_or(-1, |m| i64::from(m.k))
+            };
+            match at.get(i, l) {
+                Some(AtVal::Known(x)) => kv_list(x, after()),
+                Some(AtVal::Reaching(0)) => before,
+                Some(AtVal::Reaching(c)) => {
+                    let a = after();
+                    *pluses
+                        .borrow_mut()
+                        .entry((c, a))
+                        .or_insert_with(|| super::before_plus(v, c, a))
+                }
+                None => ValueId::UNIT,
+            }
         };
         // (the files written after each candidate)
         let streams: Vec<Vec<Field>> = marks
@@ -990,14 +1268,29 @@ impl Run<'_, '_> {
         let monotone = marks.windows(2).all(|w| {
             w[0].stamp <= w[1].stamp && w[0].gids <= w[1].gids && w[0].contribs <= w[1].contribs
         });
+        // (how a name standing at the run's end stands: a definition, put
+        // back over the routine's (1), or steps of a register the run
+        // never read, `b` after candidate `i`, which TeX makes on whatever
+        // the routine left there ([`stands_as_steps`]): the finisher adds
+        // them to the routine's value and reads nothing)
+        let st = &self.st;
+        let stand_code = |i: usize, l: Loc, stands: bool| -> i64 {
+            if !stands {
+                return 0;
+            }
+            match (st.unread_steps(l), at.get(i, l)) {
+                (Some(s), Some(AtVal::Reaching(c))) => stands_as_steps(s.wrapping_sub(c)),
+                _ => 1,
+            }
+        };
         let mut stretches = if monotone {
-            src.by_field(&kv_at)
+            src.by_field(&kv_at, &stand_code)
         } else {
-            src.by_candidate(&kv_at)
+            src.by_candidate(&kv_at, &stand_code)
         };
         if crate::exec::obs_flag!("PHITEX_STRETCHES_CHECK") && monotone {
             let mut a = stretches.clone();
-            let mut b = src.by_candidate(&kv_at);
+            let mut b = src.by_candidate(&kv_at, &stand_code);
             a.sort_unstable_by_key(|x| (x.0.raw(), x.3));
             b.sort_unstable_by_key(|x| (x.0.raw(), x.3));
             assert!(
@@ -1019,11 +1312,11 @@ impl Run<'_, '_> {
         let n = |x: usize| v.int(i64::try_from(x).unwrap_or(i64::MAX));
         let mut index = Vec::with_capacity(stretches.len() * 5);
         for &(f, g, kv, lo, hi) in &stretches {
-            index.extend([f, v.int(i64::from(g)), v.int(kv_kind(v, kv)), n(lo), n(hi)]);
+            index.extend([f, v.int(g), v.int(kv_kind(v, kv)), n(lo), n(hi)]);
         }
         let stretches = stretches
             .into_iter()
-            .flat_map(|(f, g, kv, lo, hi)| [f, v.int(i64::from(g)), kv, n(lo), n(hi)])
+            .flat_map(|(f, g, kv, lo, hi)| [f, v.int(g), kv, n(lo), n(hi)])
             .collect();
         (
             ValueId::UNIT,
@@ -1089,6 +1382,36 @@ impl Run<'_, '_> {
         let (reads, defs) = self.check_data(Some(k));
         self.pin_reaching_page_params(&mut raw)?;
         let (cont, locals) = self.cont_encode()?;
+        if crate::exec::obs_flag!("PHITEX_CONT_DUMP") {
+            let xs = list_of(v, cont);
+            for (i, &x) in xs.iter().enumerate() {
+                let parts = list_of(v, x);
+                eprintln!(
+                    "contdump: node {} k {k} part {i} digest {:016x} len {}: {}",
+                    self.cx.node().raw(),
+                    crate::val::digest(v, x),
+                    parts.len(),
+                    v.render(x).chars().take(300).collect::<String>()
+                );
+                for (j, &y) in parts.iter().enumerate() {
+                    eprintln!(
+                        "contdump:   {i}.{j} {:016x} {}",
+                        crate::val::digest(v, y),
+                        v.render(y).chars().take(200).collect::<String>()
+                    );
+                    // (the state's slots, saves and definitions one by one)
+                    if i == 4 && j < 3 {
+                        for (m, &z) in list_of(v, y).iter().enumerate() {
+                            eprintln!(
+                                "contdump:     {i}.{j}.{m} {:016x} {}",
+                                crate::val::digest(v, z),
+                                v.render(z).chars().take(300).collect::<String>()
+                            );
+                        }
+                    }
+                }
+            }
+        }
         self.contribute_units(&raw, Some(k), reads, defs, locals)?;
         let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
         let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
@@ -1111,18 +1434,46 @@ impl Run<'_, '_> {
         // the piece's and the candidate's, a change of the piece's state
         // at the cut a definition that changed, which reruns the rest in
         // place, docs/spec-continuations.md §2.2)
+        // (the rest is the piece's, whichever candidate it is cut at,
+        // [`CUT_K`]: a cut that moves to another candidate, a page firing
+        // a line earlier inside a paragraph, changes the continuation and
+        // reruns the same rest in place. Keyed by the candidate, the rest
+        // was made anew, and so was every rest after it, one link per
+        // commit, each one for a moment the definition every reader after
+        // it met: lineno's second pass at -j1, whose routine fires at every
+        // line, never ended (a finisher re-asked 17 times by one field,
+        // the rests' page chain folded again for each), and thumbs'
+        // overview loop at -j4 and -j8 now and then ran on for ever)
+        // (observe, `PHITEX_CONT_TRACE=<piece>`: the continuation a piece
+        // hands its rest, to find what in it moves with an edit)
+        if crate::exec::obs_str!("PHITEX_CONT_TRACE")
+            .is_some_and(|w| w == int_of(v, pid).to_string())
+        {
+            eprintln!("cont-trace: {} {}", int_of(v, pid), v.render(cont));
+        }
         self.cx.define_with(
-            cont_field(v, pid, k),
+            cont_field(v, pid, CUT_K),
             v.list(vec![cont, v.int(rest)]),
             Locality::Global,
         );
         if let Some(t) = self.tool_cut {
             self.cx.follow(self.ops.toolnode, list_of(v, t));
         }
-        self.cx.follow(
+        let i = self.cx.follow(
             self.ops.resume,
-            vec![v.int(flags), pid, v.int(i64::from(k))],
+            vec![v.int(flags), pid, v.int(i64::from(CUT_K))],
         );
+        // (its brackets until it runs, from its continuation's scope
+        // shape as a piece's are from its text: a close the piece's text
+        // predicted that the cut moves into the rest is filed there in
+        // this commit, so the readers after the rest keep their depth.
+        // Left to the rest's run, each such cut filed the piece's close
+        // away and the rest's run filed it back, two walks of every
+        // reader after them and the runs between woken on a scope left
+        // open: 268 of the 956 bracket changes at commit in the beamer
+        // user guide's -j4 build, mc 80293.)
+        let e = crate::ops::predicted_effect(self.ops, v, &[cont], true);
+        self.cx.predict_placed_effect(i, e);
         Ok(())
     }
 
@@ -1155,14 +1506,36 @@ impl Run<'_, '_> {
         for e in list_of(v, a(8)) {
             let xs = list_of(v, e);
             let Some(&f) = xs.first() else { continue };
-            let stands = xs.get(1).is_some_and(|&g| int_of(v, g) != 0);
-            if stands && gdefs.contains(&f) {
-                restore.push(Field(f));
+            let code = xs.get(1).map_or(0, |&g| int_of(v, g));
+            if code != 0 && gdefs.contains(&f) {
+                restore.push((Field(f), steps_standing(code)));
             }
         }
-        for f in restore {
-            let x = self.eng_read(f)?;
+        let at = self.fin_page().map(|p| p.at);
+        for (f, steps) in restore {
             let loc = self.loc_of(f);
+            if let Some(at) = at {
+                let left = self.st.id_of(loc, v);
+                self.cx.define_with(
+                    super::fire_left_field(v, at, f),
+                    v.list(left.into_iter().collect()),
+                    Locality::Global,
+                );
+            }
+            // (steps of a register the piece never read: TeX makes them on
+            // what the routine left, so they go on the routine's value, as
+            // a step of its own where it only stepped the register too; the
+            // value reaching here is the piece's steps on what reached the
+            // piece, without the routine's, and reading it made every such
+            // finisher a reader of `\g__mark_int` (amsldoc at -j8))
+            if let Some(b) = steps {
+                if b != 0 && !self.st.add(v, loc, b, true) {
+                    let x = self.int_loc(loc)?;
+                    self.set_loc(loc, crate::state::Entry::int(x.wrapping_add(b)), true);
+                }
+                continue;
+            }
+            let x = self.eng_read(f)?;
             self.set_loc(loc, crate::state::Entry::raw(x), true);
         }
         Ok(())
@@ -1265,6 +1638,19 @@ impl Run<'_, '_> {
     /// with no saves or definitions below them.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn cont_encode_as(&mut self, closed: bool) -> R<(ValueId, Vec<ValueId>)> {
+        self.cont_encode_with(closed, true)
+    }
+
+    /// [`Run::cont_encode_as`]; `frames` false: no input (a checkpoint's,
+    /// whose input is the node's text from its place, `crate::resume`:
+    /// the rest encoded at every checkpoint would cost the text's length
+    /// at each).
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn cont_encode_with(
+        &mut self,
+        closed: bool,
+        with_frames: bool,
+    ) -> R<(ValueId, Vec<ValueId>)> {
         let v = self.v;
         // (each token level's file line: of the innermost file read
         // below it, §304, a file it is inside staying open until the
@@ -1304,7 +1690,8 @@ impl Run<'_, '_> {
         };
         let base_here = here_of(base);
         let mut frames = Vec::new();
-        for (i, l) in self.input.levels.iter().enumerate().rev() {
+        let levels: &[crate::input::Level] = if with_frames { &self.input.levels } else { &[] };
+        for (i, l) in levels.iter().enumerate().rev() {
             match l.kind {
                 crate::input::kind::TOKS => {
                     let r = self.input.arena.get(l.rest());
@@ -1320,7 +1707,11 @@ impl Run<'_, '_> {
                 _ => frames.extend(file_frames(v, self.input.file(*l))),
             }
         }
-        for s in self.input.text_rest() {
+        for s in if with_frames {
+            self.input.text_rest()
+        } else {
+            &[]
+        } {
             match s {
                 Seg::Line(l) => {
                     if let Some(f) = line_frame(v, l) {
@@ -1350,8 +1741,13 @@ impl Run<'_, '_> {
                 self.st.debug_marks(l)
             );
         }
+        self.flush_bulk_codes();
         let mut c = self.st.cont(v, &open);
-        if closed {
+        // (a checkpoint's table is its base table, the save stack with
+        // it, `State::base_of`: none here, and its stamps and groups as
+        // they are, as the base table holds them)
+        let raw = !with_frames;
+        if closed || raw {
             c.slots.clear();
             c.save.clear();
             c.defined.clear();
@@ -1385,7 +1781,9 @@ impl Run<'_, '_> {
         gids.dedup();
         // (0 stays 0: no stamp, no group)
         let st_of = |x: u64| -> u64 {
-            if x == 0 {
+            if raw {
+                x
+            } else if x == 0 {
                 0
             } else {
                 u64::try_from(stamps.partition_point(|&y| y < x)).unwrap_or(0)
@@ -1393,7 +1791,9 @@ impl Run<'_, '_> {
             }
         };
         let gid_of = |x: u32| -> u32 {
-            if x == 0 {
+            if raw {
+                x
+            } else if x == 0 {
                 0
             } else {
                 u32::try_from(gids.partition_point(|&y| y < x)).unwrap_or(0)
@@ -1479,9 +1879,20 @@ impl Run<'_, '_> {
                     g.map(gid_of),
                 )
             });
+            // (a binding the resume does not keep, `loaded` false, is
+            // read from the engine there: its value is no part of the
+            // continuation. Carried, a global definition the run made in
+            // a group it opened, a `\newlabel` read from the `.aux` in
+            // `\begin{document}`'s, changed the continuation, and the
+            // rest of `\begin{document}` ran again for one label: Grail's
+            // heading edit, 144 ms)
             slots.push(v.list(vec![
                 f.0,
-                opt_val(s.cur),
+                if s.loaded {
+                    opt_val(s.cur)
+                } else {
+                    ValueId::UNIT
+                },
                 v.int(i64::from(s.loaded)),
                 v.int(i64::from(gid_of(s.save_gid))),
                 v.int(i64::from_ne_bytes(st_of(s.save_stamp).to_ne_bytes())),
@@ -1496,7 +1907,11 @@ impl Run<'_, '_> {
             let f = self.loc_field(s.loc);
             saves.push(v.list(vec![
                 f.0,
-                opt_val(s.prev),
+                if s.prev_loaded {
+                    opt_val(s.prev)
+                } else {
+                    ValueId::UNIT
+                },
                 v.int(i64::from(s.prev_loaded)),
                 v.int(i64::from(gid_of(s.gid))),
                 v.int(i64::from_ne_bytes(st_of(s.stamp).to_ne_bytes())),
@@ -1521,8 +1936,14 @@ impl Run<'_, '_> {
             v.int(self.next_lid),
             v.int(self.last_par.0),
             v.int(self.last_par.1),
-            v.int(self.lines_entered),
-            v.int(i64::from_ne_bytes(self.lines_read.to_ne_bytes())),
+            // (the lines the run began, in all files: counts a run
+            // compares only with themselves (its watchdog's progress, a
+            // candidate's mark, `Run::same_first_token`), not carried: a
+            // file read before the cut one line longer, the `.aux` with a
+            // `\citation` more, would change the continuation for
+            // nothing, and the rest of `\begin{document}` ran again)
+            v.int(0),
+            v.int(0),
             v.int(i64::from(self.eof)),
             v.int(i64::from(self.radix)),
             v.int(self.cur_order as i64),
@@ -1570,17 +1991,12 @@ impl Run<'_, '_> {
         Ok((cont, locals))
     }
 
-    /// A resume piece's start: the continuation `x` ([`Run::cont_encode`])
-    /// loaded; the base-level values the open groups' bindings hide
-    /// checked against the engine's reaching here (a global definition
-    /// between the cut and here, the finisher's, replaces the binding and
-    /// makes the groups' saves inert, §283).
-    #[allow(clippy::too_many_lines)]
-    pub(crate) fn cont_load(&mut self, x: ValueId, pid: ValueId) -> R<()> {
+    /// The continuation `x`'s text as the run's input, from its start,
+    /// with each segment's file line ([`Run::cont_load`]).
+    pub(crate) fn cont_text(&mut self, x: ValueId) -> R<()> {
         let v = self.v;
         let xs = list_of(v, x);
-        let a = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
-        let frames = self.resolve_units(&[a(0)])?;
+        let frames = self.resolve_units(&[xs.first().copied().unwrap_or(ValueId::UNIT)])?;
         self.input.text = crate::run::decode_segs(v, &frames);
         // (where each segment was read: a token frame's file line)
         self.cont_lines = frames
@@ -1592,6 +2008,26 @@ impl Run<'_, '_> {
             .map(|&f| crate::run::frame_line(v, f))
             .collect();
         self.input.text_at = 0;
+        Ok(())
+    }
+
+    /// A resume piece's start: the continuation `x` ([`Run::cont_encode`])
+    /// loaded; the base-level values the open groups' bindings hide
+    /// checked against the engine's reaching here (a global definition
+    /// between the cut and here, the finisher's, replaces the binding and
+    /// makes the groups' saves inert, §283).
+    pub(crate) fn cont_load(&mut self, x: ValueId, pid: ValueId) -> R<()> {
+        self.cont_text(x)?;
+        self.cont_state(x, pid)
+    }
+
+    /// [`Run::cont_load`] past the text: the state, the nest, the
+    /// conditionals and the rest the continuation carries.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn cont_state(&mut self, x: ValueId, pid: ValueId) -> R<()> {
+        let v = self.v;
+        let xs = list_of(v, x);
+        let a = |i: usize| xs.get(i).copied().unwrap_or(ValueId::UNIT);
         // the state table first: the levels index its saves
         let st = list_of(v, a(4));
         let sa = |i: usize| st.get(i).copied().unwrap_or(ValueId::UNIT);
@@ -1697,6 +2133,22 @@ impl Run<'_, '_> {
             // the binding was made after left it standing)
             if replaced(&gdefs, f, piece, after) {
                 let loc = self.loc_of(f);
+                if super::box_reg_of(v, f).is_some()
+                    && let Some(x) = x1
+                {
+                    if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+                        eprintln!(
+                            "fire-box: rest {} takes {}",
+                            self.cx.node().raw(),
+                            crate::val::field_name(v, f)
+                        );
+                    }
+                    // (a routine's `\box`, §1079: the binding replaced at
+                    // its level, which the groups keep or restore as TeX's)
+                    self.st
+                        .modify(loc, crate::state::Entry::raw(Some(x)), false, false);
+                    continue;
+                }
                 self.st.override_global(loc, x1);
                 continue;
             }
@@ -1756,7 +2208,6 @@ impl Run<'_, '_> {
         self.next_lid = n(0);
         self.last_par = (n(1), n(2));
         self.lines_entered = n(3);
-        self.lines_read = u64::from_ne_bytes(n(4).to_ne_bytes());
         self.eof = n(5) != 0;
         self.radix = i32::try_from(n(6)).unwrap_or(0);
         self.cur_order = crate::val::order(n(7));
@@ -1777,6 +2228,11 @@ impl Run<'_, '_> {
 /// The candidate number of a resume after a run that closed its scope
 /// inside a level of its own ([`Run::close_resume`]): no candidate's.
 pub(crate) const CLOSE_K: u32 = u32::MAX;
+
+/// The candidate number of the rest of a piece cut at a candidate
+/// ([`Run::fold_here`]): one for every candidate, so the rest is the same
+/// node wherever the piece is cut (docs/spec-continuations.md §2.1).
+pub(crate) const CUT_K: u32 = 0;
 
 impl Run<'_, '_> {
     /// A run that closed the engine scope it ran in with a level of its
@@ -1809,10 +2265,11 @@ pub(crate) fn cont_field(v: &Values, pid: ValueId, k: u32) -> Field {
     v.field(&format!("cont:{}:{k}", int_of(v, pid)))
 }
 
-/// The rest of a piece after a cut: arguments `[flags, piece,
-/// candidate]`, the piece's text kind, the cutting piece's node and the
-/// candidate cut at: nothing of the piece's state, so a changed state at
-/// the cut reruns the same node (docs/spec-continuations.md §2.1). Its
+/// The rest of a piece after a cut: arguments `[flags, piece, k]`, the
+/// piece's text kind, the cutting piece's node and [`CUT_K`] (a cut at a
+/// candidate) or [`CLOSE_K`] (a close): nothing of the piece's state or of
+/// where it was cut, so a changed state at the cut, or a cut at another
+/// candidate, reruns the same node (docs/spec-continuations.md §2.1). Its
 /// continuation and claim guess it reads from the piece's field
 /// ([`cont_field`]). It runs the input left in the groups left open, as
 /// the piece would have gone on, reading what the finishers before it
@@ -1863,7 +2320,13 @@ impl Operation for Resume {
                 .and_then(|&g| v.as_int(g))
                 .and_then(|n| usize::try_from(n).ok());
             text = cont;
-            r.cont_load(cont, a(1))?;
+            // (on from a checkpoint of its last run on this continuation,
+            // `crate::resume`; checkpoints taken as it goes)
+            r.cont_text(cont)?;
+            if !r.resume_edit()? {
+                r.cont_state(cont, a(1))?;
+            }
+            r.ck_begin();
             r.run_all()
         });
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {
@@ -1883,10 +2346,10 @@ impl Operation for Resume {
 /// Two lists each sorted by field then standing first, merged in that
 /// order, `a`'s before `b`'s at a tie: a stable sort of `a` then `b`.
 fn merge_stable(
-    a: impl Iterator<Item = (ValueId, bool, ValueId)>,
-    b: Vec<(ValueId, bool, ValueId)>,
-) -> Vec<(ValueId, bool, ValueId)> {
-    let key = |x: &(ValueId, bool, ValueId)| (x.0.raw(), !x.1);
+    a: impl Iterator<Item = (ValueId, i64, ValueId)>,
+    b: Vec<(ValueId, i64, ValueId)>,
+) -> Vec<(ValueId, i64, ValueId)> {
+    let key = |x: &(ValueId, i64, ValueId)| (x.0.raw(), x.1 == 0);
     let mut out = Vec::with_capacity(b.len());
     let mut b = b.into_iter().peekable();
     for x in a {
@@ -1901,12 +2364,14 @@ fn merge_stable(
 
 /// The kind of a name's value in a piece's check data: 0 none (`UNIT`), 1
 /// what reached the piece ([`BEFORE_PIECE`]), 2 a value (`[value]` or
-/// `[]`).
+/// `[]`), 3 what reached the piece plus steps ([`super::before_plus`]).
 fn kv_kind(v: &Values, kv: ValueId) -> i64 {
     if kv == ValueId::UNIT {
         0
     } else if kv == v.str(BEFORE_PIECE) {
         1
+    } else if super::reaching_plus(v, kv).is_some() {
+        3
     } else {
         2
     }
@@ -1938,8 +2403,22 @@ pub(crate) fn names_index_at(
 type RunDef = (Field, bool, Loc, u64, bool, Option<u32>);
 
 /// A field's name over a stretch of candidates `[lo, hi)`: the field,
-/// whether its definition stands, its value there.
-type Stretch = (ValueId, bool, ValueId, usize, usize);
+/// how its definition stands (0 not, 1 as a definition, else
+/// [`stands_as_steps`]), its value there.
+type Stretch = (ValueId, i64, ValueId, usize, usize);
+
+/// A standing name's code in a piece's check data for steps `b` the run
+/// made of an integer register it never read, after the candidate: bit 1
+/// set, `b` above the two low bits ([`steps_standing`]).
+pub(crate) fn stands_as_steps(b: i32) -> i64 {
+    (i64::from(b) << 2) | 2
+}
+
+/// The steps a standing name's code holds ([`stands_as_steps`]), if it is
+/// one of steps.
+pub(crate) fn steps_standing(code: i64) -> Option<i32> {
+    (code & 2 != 0).then(|| i32::try_from(code >> 2).unwrap_or(0))
+}
 
 /// What a piece's names at its candidates are made of
 /// ([`Run::check_data`]): a candidate's names are its locals, the
@@ -1970,8 +2449,12 @@ struct NameSource {
 
 impl NameSources<'_> {
     /// Every candidate's names, each made in full, folded into stretches.
-    fn by_candidate(&self, kv_at: &dyn Fn(usize, Loc) -> ValueId) -> Vec<Stretch> {
-        let mut open: phitex_defuse::FxHashMap<ValueId, (bool, ValueId, usize, usize)> =
+    fn by_candidate(
+        &self,
+        kv_at: &dyn Fn(usize, Loc) -> ValueId,
+        code: &dyn Fn(usize, Loc, bool) -> i64,
+    ) -> Vec<Stretch> {
+        let mut open: phitex_defuse::FxHashMap<ValueId, (i64, ValueId, usize, usize)> =
             phitex_defuse::FxHashMap::default();
         let mut stretches: Vec<Stretch> = Vec::new();
         for (i, m) in self.marks.iter().enumerate() {
@@ -1985,12 +2468,12 @@ impl NameSources<'_> {
                     self.held
                         .iter()
                         .filter_map(|&(f, l, end)| match self.at.get(i, l) {
-                            Some(Some(x)) if x != end => Some((f.0, false, kv_of(l))),
+                            Some(AtVal::Known(x)) if x != end => Some((f.0, 0, kv_of(l))),
                             _ => None,
                         });
-                let mut streams: Vec<(ValueId, bool, ValueId)> = self.streams[i]
+                let mut streams: Vec<(ValueId, i64, ValueId)> = self.streams[i]
                     .iter()
-                    .map(|f| (f.0, false, ValueId::UNIT))
+                    .map(|f| (f.0, 0, ValueId::UNIT))
                     .collect();
                 streams.sort_by_key(|x| x.0.raw());
                 let names = merge_stable(restored, streams);
@@ -1998,9 +2481,9 @@ impl NameSources<'_> {
                     .defs
                     .iter()
                     .filter(|d| d.3 > m.stamp && !(d.4 && d.5.is_some_and(|g| g > m.gids)))
-                    .map(|d| (d.0.0, d.1, kv_of(d.2)));
+                    .map(|d| (d.0.0, code(i, d.2, d.1), kv_of(d.2)));
                 let own = merge_stable(after, names);
-                let locals = self.locals.iter().map(|&(l, f)| (f.0, false, kv_of(l)));
+                let locals = self.locals.iter().map(|&(l, f)| (f.0, 0, kv_of(l)));
                 let mut names = merge_stable(locals, own);
                 names.dedup_by_key(|x| x.0);
                 for (f, g, kv) in names {
@@ -2032,7 +2515,11 @@ impl NameSources<'_> {
     /// covers the candidates before it that its group is open at, a
     /// value changes only where a candidate holds the location, so a
     /// field's name is looked at only where one of its sources changes.
-    fn by_field(&self, kv_at: &dyn Fn(usize, Loc) -> ValueId) -> Vec<Stretch> {
+    fn by_field(
+        &self,
+        kv_at: &dyn Fn(usize, Loc) -> ValueId,
+        code: &dyn Fn(usize, Loc, bool) -> i64,
+    ) -> Vec<Stretch> {
         let n = self.n;
         let lasts: Vec<usize> = (0..n).filter(|&i| self.is_last[i]).collect();
         let mut out: Vec<Stretch> = Vec::new();
@@ -2063,7 +2550,10 @@ impl NameSources<'_> {
                 } else {
                     srcs.iter()
                         .find(|s| s.covers.iter().any(|&(lo, hi)| lo <= a && a < hi))
-                        .map(|s| (s.stands, s.loc.map_or(ValueId::UNIT, |l| kv_at(a, l))))
+                        .map(|s| match s.loc {
+                            Some(l) => (code(a, l, s.stands), kv_at(a, l)),
+                            None => (i64::from(s.stands), ValueId::UNIT),
+                        })
                 };
                 match (&mut cur, name) {
                     (Some(c), Some((g, kv))) if c.1 == g && c.2 == kv && c.4 == a => c.4 = b,
@@ -2115,7 +2605,7 @@ impl NameSources<'_> {
             let mut covers = Vec::new();
             let mut from = 0;
             for &(j, x) in self.at.history(l) {
-                if let Some(x) = x
+                if let AtVal::Known(x) = x
                     && x != end
                 {
                     covers.push((from, j + 1));

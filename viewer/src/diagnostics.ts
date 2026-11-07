@@ -12,6 +12,8 @@ export interface Diagnostic {
   severity: Severity;
   /** Stable, for filtering and a JSON mode: "unclosed-brace", "latex", ... */
   code: string;
+  /** The filters' kind, as the build named it (phitex-live's problems::kind_of, the editor's filter too); none: `kindOf` reads it off the message. */
+  kind?: Kind;
   message: string;
   file?: string;
   /** 1-based. */
@@ -20,6 +22,31 @@ export interface Diagnostic {
   detail?: string;
   /** The whole problem, when the build told it (`phitex watch`'s diagnostics): shown as its card. */
   problem?: Problem;
+}
+
+/** A problem's kind, for the problems' filters (panel.ts): errors, then the warnings by what they are about. */
+export type Kind = "error" | "overfull" | "underfull" | "reference" | "font" | "other";
+
+/** The kinds, in the filters' order, with their names. */
+export const KINDS: [Kind, string][] = [
+  ["error", "Errors"],
+  ["overfull", "Overfull"],
+  ["underfull", "Underfull"],
+  ["reference", "References"],
+  ["font", "Fonts"],
+  ["other", "Other"],
+];
+
+/** What `d` is about: its `kind` when the build gave it (phitex-live's problems::kind_of: one rule for the viewer and the editor), else read here the same way: an error; an overfull or underfull box (TeX's "Overfull \hbox", "Underfull \vbox", "Tight", "Loose"); an undefined reference or citation (LaTeX's, BibTeX's); a font (a missing character, a substitution); else other. */
+export function kindOf(d: { severity: string; message: string; kind?: string }): Kind {
+  if (d.kind && KINDS.some(([k]) => k === d.kind)) return d.kind as Kind;
+  if (d.severity === "error" || d.severity === "fatal") return "error";
+  const m = d.message;
+  if (/^Overfull \\[hv]box|^Tight \\[hv]box/.test(m)) return "overfull";
+  if (/^Underfull \\[hv]box|^Loose \\[hv]box/.test(m)) return "underfull";
+  if (/[Rr]eference|[Cc]itation|database entry|undefined references|\bLabel\b/.test(m)) return "reference";
+  if (/[Ff]ont|Missing character/.test(m)) return "font";
+  return "other";
 }
 
 /** The build's first TeX error, as the core reads it off the terminal. */

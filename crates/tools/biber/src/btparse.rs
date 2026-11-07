@@ -251,7 +251,8 @@ impl Macros {
         for s in v {
             match s {
                 Simple::Str(x) | Simple::Num(x) => o.push_str(x),
-                Simple::Macro(m) => match self.0.get(m) {
+                // (looked up lowercased, as defined: `JACM` is `@string{jacm}`'s)
+                Simple::Macro(m) => match self.0.get(&m.to_ascii_lowercase()) {
                     Some(t) => o.push_str(t),
                     None => warns.push(alloc::format!(
                         "line {line}, warning: undefined macro \"{m}\""

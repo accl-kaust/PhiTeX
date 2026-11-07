@@ -1,0 +1,21 @@
+% Box registers past 255 (e-TeX's 32768): \setbox<n> for n of 256 and
+% more was read with TeX82's contexts (global_box_flag box_flag+256,
+% ship_out_flag box_flag+512), so \setbox300 set register 44 globally
+% and \setbox600 shipped its box out; forest's node boxes, local
+% registers from \locbox (elocalloc), came out empty (milsymb's
+% directory tree).
+\documentclass{article}
+\usepackage{elocalloc}
+\usepackage{forest}
+\begin{document}
+\setbox300\hbox{A}\box300
+\setbox44\hbox{B}{\setbox300\hbox{C}}\box44\box300
+\setbox600\hbox{D}\box600
+\mathchardef\m=32000 \setbox\m\hbox{E}\copy\m
+{\global\setbox\m\hbox{F}}\box\m
+{\locbox\b \setbox\b\hbox{G}\global\setbox1\box\b}\box1
+
+\begin{forest}
+[MilSymb [text [normal]] [air]]
+\end{forest}
+\end{document}

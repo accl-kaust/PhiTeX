@@ -94,6 +94,7 @@ mod encodings;
 mod epdffont;
 mod font;
 mod image;
+pub mod lr;
 mod macnames;
 pub mod map;
 mod marks;
@@ -160,7 +161,7 @@ use phitex_typeset::arith::Scaled;
 use phitex_typeset::fonts::FontId;
 use phitex_typeset::node::BoxNode;
 
-pub use crate::image::{ImageSpec, PageBox, XImageInfo};
+pub use crate::image::{ImageSpec, PageBox, XImageInfo, open_doc};
 use crate::map::MapEntry;
 use crate::num::ONE_HUNDRED_INCH;
 pub use crate::objects::ObjBody;
@@ -301,6 +302,16 @@ pub struct PdfParams {
     /// `output_file_name`, e.g. `doc.pdf`: the `/ID` is the MD5 of the
     /// date and this name (`print_ID`, `utils.c`).
     pub output_file_name: String,
+}
+
+impl PdfParams {
+    /// pdfTeX's `get_ptex_use_underscore`: `/PTEX_Fullbanner` and an
+    /// included PDF's `/PTEX_FileName` (for `.`) under
+    /// `\\pdfptexuseunderscore`, and always in a PDF 2.0 file.
+    #[must_use]
+    pub fn ptex_underscore(&self) -> bool {
+        self.ptex_use_underscore > 0 || self.major_version >= 2
+    }
 }
 
 impl Default for PdfParams {
@@ -853,6 +864,9 @@ pub struct PdfState {
     cur_page_height: Scaled,
     cur_s: i32,
     doing_leaders: bool,
+    /// e-TeX's `cur_dir`: 1 inside right-to-left text (TeX--XeT); 0
+    /// between boxes shipped.
+    cur_dir: u8,
     /// `is_shipping_page`.
     shipping_page: bool,
     /// `pdf_cur_form` and the form's size.
@@ -1005,6 +1019,7 @@ impl PdfState {
             cur_page_height: 0,
             cur_s: -1,
             doing_leaders: false,
+            cur_dir: 0,
             shipping_page: false,
             cur_form: 0,
             xform_height: 0,

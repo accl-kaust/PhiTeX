@@ -1,0 +1,28 @@
+% A definition in an environment, and a page that ends in its last paragraph.
+% The node that closes the environment holds the page's candidate; the
+% routine, which runs inside the group, reads the environment's binding (a
+% header's macro: kotex-utf's \interhchar, its letterspacing). The finisher
+% stands after that node, out of the environment's sight.
+\documentclass{article}
+\makeatletter
+\def\x{outer}
+\def\@oddhead{\x\hfil\thepage}
+\makeatother
+\def\t{Some words to fill the lines of a paragraph, and more of them. }
+\def\tt{\t\t\t\t\t\t\t\t\t\t}
+\begin{document}
+\tt
+
+\tt
+
+\tt
+
+\begin{quote}
+\def\x{inner}
+\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt
+\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt\tt
+\end{quote}
+
+\paragraph{After}
+Last.
+\end{document}

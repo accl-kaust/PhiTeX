@@ -1,0 +1,7 @@
+% mparhack (classicthesis): every page numbered, a \cleardoublepage after
+% page 1 making the blank page 2.
+\documentclass[twoside]{report}
+\usepackage{mparhack}
+\begin{document}
+A [\thepage]\clearpage\cleardoublepage B [\thepage]\newpage C [\thepage]
+\end{document}

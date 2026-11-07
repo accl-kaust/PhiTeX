@@ -13,6 +13,7 @@
 // needed for the letters). Under prefers-reduced-motion the logo stands still.
 
 import { WORD, WOVEN, MARK, LOCKUP, SEEDS } from "./opening-art.ts";
+import { html, svg as svgParts, svgArt } from "./html.ts";
 
 const NS = "http://www.w3.org/2000/svg";
 const f2 = (v: number) => +v.toFixed(2);
@@ -37,11 +38,7 @@ let uid = 0;
 /** The art with its ids made unique to this sheet, in `fill`. */
 const art = (a: { body: string }, fill: string, tag: string) => a.body.replace(/§/g, `phx${tag}-`).replace(/#FILL/g, fill);
 
-const svgOf = (markup: string) => {
-  const t = document.createElement("template");
-  t.innerHTML = markup;
-  return t.content.firstElementChild as SVGSVGElement;
-};
+const svgOf = (markup: string) => svgArt(markup).firstElementChild as SVGSVGElement;
 
 /**
  * The byline under ΦTeX ("by ACCL | KAUST"), landing as ACCL's logo does:
@@ -63,20 +60,20 @@ function byline(svg: SVGSVGElement, word: Box) {
   const g = document.createElementNS(NS, "g"), wid = `phx-by${uid++}`;
   svg.append(g);
   let x = x0;
-  g.insertAdjacentHTML("beforeend", `<text x="${f2(x)}" y="${f2(mid + 0.19 * h)}" fill="${BY.faint}" style="font: 400 ${f2(0.55 * h)}px ${SANS}">by</text>`);
+  g.append(svgParts`<text x="${f2(x)}" y="${f2(mid + 0.19 * h)}" fill="${BY.faint}" style="font: 400 ${f2(0.55 * h)}px ${SANS}">by</text>`);
   const byT = g.lastElementChild!;
   x += byW + gap;
   for (const [k, v] of [["x", x], ["y", top], ["width", lw], ["height", h]] as const) lockup.setAttribute(k, String(f2(v)));
   g.append(lockup);
   x += lw + sep;
-  g.insertAdjacentHTML("beforeend", `<rect x="${f2(x)}" y="${f2(top)}" width="${f2(0.1 * h)}" height="${f2(h)}" fill="${BY.faint}"/>`);
+  g.append(svgParts`<rect x="${f2(x)}" y="${f2(top)}" width="${f2(0.1 * h)}" height="${f2(h)}" fill="${BY.faint}"/>`);
   const rule = g.lastElementChild!;
   x += sep;
   for (const [k, v] of [["x", x], ["y", mid - sh / 2], ["width", sw], ["height", sh]] as const) seeds.setAttribute(k, String(f2(v)));
   g.append(seeds);
   x += sw + gap * 0.6;
   const ks = letters.map((c, i) => {
-    g.insertAdjacentHTML("beforeend", `<text x="${f2(x)}" y="${f2(mid + 0.26 * h)}" fill="${BY.kaust}" style="font: 700 ${f2(0.72 * h)}px ${SANS}">${c}</text>`);
+    g.append(svgParts`<text x="${f2(x)}" y="${f2(mid + 0.26 * h)}" fill="${BY.kaust}" style="font: 700 ${f2(0.72 * h)}px ${SANS}">${c}</text>`);
     x += adv[i];
     return g.lastElementChild!;
   });
@@ -100,7 +97,7 @@ function byline(svg: SVGSVGElement, word: Box) {
   const wg = document.createElementNS(NS, "g");
   words[0]?.before(wg);
   words.forEach((w) => wg.append(w));
-  lockup.insertAdjacentHTML("afterbegin", `<defs><clipPath id="${wid}"><rect x="97.5" y="-50" width="1000" height="200"/></clipPath></defs>`);
+  lockup.prepend(svgParts`<defs><clipPath id="${wid}"><rect x="97.5" y="-50" width="1000" height="200"/></clipPath></defs>`);
   const clipped = document.createElementNS(NS, "g");
   wg.before(clipped);
   clipped.append(wg);
@@ -143,6 +140,14 @@ export interface Opening {
   done(): Promise<void>;
   /** Gone at once. */
   stop(): void;
+  /**
+   * The build's step, as the sheet would say it (what, how far: undefined
+   * when not known, its detail): an opening that has it says the steps
+   * itself, as part of the animation, and the sheet's own are not shown.
+   */
+  step?(what: string, pct: number | undefined, detail: string): void;
+  /** "Did you know", said by the opening itself (with step). */
+  hint?(text: string): void;
 }
 
 /**
@@ -152,12 +157,11 @@ export interface Opening {
 export function opening(box: HTMLElement, fill: string, bg: string): Opening {
   const tag = String(uid++);
   const w = WORD, size = w.size, phi = w.letters[0];
-  box.insertAdjacentHTML(
-    "beforeend",
-    `<svg class="phx-open" preserveAspectRatio="none" aria-hidden="true">
+  box.append(
+    html`<svg class="phx-open" preserveAspectRatio="none" aria-hidden="true">
     <defs><mask id="phx-hole${tag}" maskUnits="userSpaceOnUse" x="-1e5" y="-1e5" width="2e5" height="2e5"><rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="#fff"/>
       <path class="phx-hole" d="${PHI_COUNTER}" fill="#000" opacity="0" transform="translate(${f2(phi.x)} ${f2(phi.y)}) scale(${size / 1000} ${-size / 1000})"/></mask></defs>
-    <rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="${bg}" mask="url(#phx-hole${tag})"/>${art(WOVEN, fill, tag)}</svg>`,
+    <rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="${bg}" mask="url(#phx-hole${tag})"/>${svgArt(art(WOVEN, fill, tag))}</svg>`,
   );
   const el = box.lastElementChild as SVGSVGElement, hole = el.querySelector(".phx-hole")!;
   const by = byline(el, WOVEN);
@@ -170,7 +174,7 @@ export function opening(box: HTMLElement, fill: string, bg: string): Opening {
   const tmp = document.createElementNS(NS, "svg");
   tmp.style.cssText = "position:absolute;width:0;height:0;visibility:hidden";
   document.body.append(tmp);
-  tmp.innerHTML = art(MARK, fill, `${tag}m`);
+  tmp.replaceChildren(svgArt(art(MARK, fill, `${tag}m`)));
   const S = [0, 1, 2, 3].map((j) => {
     const ps = [...el.querySelectorAll<SVGPathElement>(`.phx-s${j}`)];
     const full = ps[0].getTotalLength(), part = tmp.querySelector<SVGPathElement>(`.phx-s${j}`)!.getTotalLength();
@@ -251,52 +255,6 @@ export function opening(box: HTMLElement, fill: string, bg: string): Opening {
       el.remove();
       finish();
     },
-  };
-}
-
-/**
- * The opening as a Windows 98 setup dialog (the loading animation's
- * "retro" choice): a grey bevelled window on the teal desktop, its title
- * bar navy, a page flying from one folder to the other, and the blocky
- * progress bar marching on until the document is in. CSS only.
- */
-export function retro(box: HTMLElement): Opening {
-  box.insertAdjacentHTML(
-    "beforeend",
-    `<div class="phx-retro" aria-hidden="true"><style>
-.phx-retro{position:absolute;inset:0;background:#008080;display:flex;align-items:center;justify-content:center;font:11px/1.3 "MS Sans Serif",Tahoma,"Segoe UI",sans-serif;color:#000;transition:opacity .3s}
-.phx-retro.out{opacity:0}
-#opening:has(.phx-retro) .what,#opening:has(.phx-retro) .detail{color:#fff}
-.phx-retro .w{width:min(300px,86%);background:#c0c0c0;border:2px solid;border-color:#fff #000 #000 #fff;box-shadow:inset -1px -1px #808080,inset 1px 1px #dfdfdf;padding:3px}
-.phx-retro .t{display:flex;align-items:center;gap:2px;height:18px;padding:0 3px;color:#fff;font-weight:bold;background:linear-gradient(90deg,#000080,#1084d0)}
-.phx-retro .t span{flex:1}
-.phx-retro .t i{font-style:normal;width:16px;height:14px;line-height:12px;text-align:center;color:#000;background:#c0c0c0;border:1px solid;border-color:#fff #000 #000 #fff;font-size:10px}
-.phx-retro .b{padding:12px 10px 10px}
-.phx-retro .fly{position:relative;height:40px;margin-bottom:10px}
-.phx-retro .fold{position:absolute;top:10px;width:30px;height:22px;background:#e8d36a;border:1px solid #806000}
-.phx-retro .fold::before{content:"";position:absolute;left:-1px;top:-6px;width:12px;height:5px;background:#e8d36a;border:1px solid #806000;border-bottom:none}
-.phx-retro .f1{left:8%}.phx-retro .f2{right:8%}
-.phx-retro .pg{position:absolute;top:4px;left:12%;width:14px;height:18px;background:#fff;border:1px solid #000;animation:phx-fly 1.6s linear infinite}
-.phx-retro .pg::after{content:"";position:absolute;left:2px;right:2px;top:4px;height:8px;background:repeating-linear-gradient(#000 0 1px,transparent 1px 3px)}
-@keyframes phx-fly{0%{transform:translate(0,8px) rotate(-20deg)}50%{transform:translate(calc(min(300px,86vw)*.33),-6px) rotate(0)}100%{transform:translate(calc(min(300px,86vw)*.66),8px) rotate(20deg)}}
-.phx-retro p{margin:0 0 8px}
-.phx-retro .bar{height:16px;border:1px solid;border-color:#808080 #fff #fff #808080;padding:2px;overflow:hidden;position:relative}
-.phx-retro .bar span{position:absolute;top:2px;bottom:2px;left:2px;width:100%;background:repeating-linear-gradient(90deg,#000080 0 8px,transparent 8px 10px);animation:phx-march 2.4s steps(24) infinite}
-@keyframes phx-march{0%{transform:translateX(-100%)}100%{transform:translateX(0)}}
-@media (prefers-reduced-motion:reduce){.phx-retro .pg,.phx-retro .bar span{animation:none}.phx-retro .bar span{transform:translateX(-40%)}}
-</style><div class="w"><div class="t"><span>PhiTeX Setup</span><i>_</i><i>□</i><i>×</i></div><div class="b"><div class="fly"><div class="fold f1"></div><div class="pg"></div><div class="fold f2"></div></div><p>Typesetting your document…</p><div class="bar"><span></span></div></div></div></div>`,
-  );
-  const el = box.lastElementChild as HTMLElement;
-  let gone = false;
-  const stop = () => void ((gone = true), el.remove());
-  return {
-    done: () =>
-      new Promise((r) => {
-        if (gone) return r();
-        el.classList.add("out");
-        setTimeout(() => (stop(), r()), 300);
-      }),
-    stop,
   };
 }
 

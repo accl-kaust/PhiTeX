@@ -58,16 +58,19 @@ fn a_fatal_error_ends_the_job_on_one_thread() {
     );
 }
 
-/// Eight threads: pieces that had started before the fatal run committed
-/// finish, nothing else runs; far fewer than the paragraphs, and no page.
+/// Eight threads: pieces that had begun before the fatal run claimed the
+/// rest of the input finish, none after it begins once it has, and no
+/// page is finished. (How many had begun is the scheduler's: the other
+/// workers run ahead while the first runs the pieces before the error,
+/// 34 to 222 runs at two CPUs, mc 79080, 79123; a bound on that count
+/// failed on a loaded runner.)
 #[test]
 fn a_fatal_error_ends_the_job_on_eight_threads() {
     let b = build(8);
     assert!(b.fatal(), "{:?}", b.stats.runs_by_op);
-    let (exec, live) = (common::runs_of(&b, "exec"), b.nodes_by_op("exec") as u64);
-    assert!(
-        exec < live / 2,
-        "at most the pieces that had started: {exec} runs of {live} pieces, {:?}",
+    assert_eq!(
+        b.stats.starts_after_fatal, 0,
+        "no piece after the error begins once its run claimed the rest: {:?}",
         b.stats.runs_by_op
     );
     assert_eq!(
@@ -232,4 +235,38 @@ fn a_read_on_waits_for_the_text_before_it() {
         pulled[1], pulled[0],
         "the siblings read on into at -j8, as at -j1"
     );
+}
+
+/// The job's text read to its end at the top level, a page shipped and no
+/// `\end` (the biblatex manual cut inside an `ltxexample`, whose
+/// `\end{document}` the example read as its text): TeX reads the terminal
+/// next, which a nonstop build has none of (§360), "*** (job aborted, no
+/// legal \end found)", and the page shipped before stands. Before, the last
+/// piece ended as one whose text goes on: no fatal error, the page loop
+/// waited for a main list that never ended, and the build wrote no output
+/// file ("the pages' writers ran before every page had finished"). Oracle:
+/// pdflatex and xelatex, "! Emergency stop." (accl 23309).
+#[test]
+fn the_text_ending_with_no_end_ends_the_job() {
+    let src = "Page one.\\vfill\\eject\nPage two.\n";
+    for threads in [1, 8] {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let dir = common::scratch(&format!("no-end-{threads}"));
+            let opts = Options {
+                threads: Some(threads),
+                ..common::options("./d.tex", "d", "", &dir)
+            };
+            let b = common::build(opts, Some(&common::plain()), src);
+            let _ = tx.send((b.fatal(), b.output().1));
+        });
+        let (fatal, log) = rx
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .unwrap_or_else(|_| panic!("-j{threads}: the build did not end in 120 s"));
+        assert!(
+            fatal && log.contains("*** (job aborted, no legal \\end found)"),
+            "-j{threads}: the job is aborted:\n{log}"
+        );
+        assert!(log.contains("[1]"), "-j{threads}: page 1 shipped:\n{log}");
+    }
 }

@@ -35,7 +35,20 @@ fn scratch(name: &str, threads: usize) -> PathBuf {
 
 /// [`build`] at `threads` threads.
 fn build_j(name: &str, threads: usize) -> (Vec<u8>, String) {
-    let dir = scratch(name, threads);
+    build_out(name, threads, "pdf")
+}
+
+/// [`build_j`]'s output file `NAME.ext` (a DVI's, `ext` `dvi`).
+fn build_out(name: &str, threads: usize, ext: &str) -> (Vec<u8>, String) {
+    build_out_in(name, "", threads, ext)
+}
+
+/// [`build_out`] in a scratch directory of its own, `NAME<tag>-jN`: for a
+/// test building a document another test builds at the same thread count
+/// (the tests run side by side; in one directory one's build removed the
+/// other's output, "can't write ./NAME.pdf").
+fn build_out_in(name: &str, tag: &str, threads: usize, ext: &str) -> (Vec<u8>, String) {
+    let dir = scratch(&format!("{name}{tag}"), threads);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory");
     let tex = format!("{name}.tex");
@@ -64,7 +77,7 @@ fn build_j(name: &str, threads: usize) -> (Vec<u8>, String) {
         .env_remove("PHITEX_COMPAT")
         .output()
         .expect("phitex runs");
-    let pdf = std::fs::read(dir.join(format!("{name}.pdf"))).unwrap_or_default();
+    let pdf = std::fs::read(dir.join(format!("{name}.{ext}"))).unwrap_or_default();
     let term =
         String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     (pdf, term)
@@ -121,6 +134,64 @@ fn check_aux(name: &str) {
 fn written_text_lost_write() {
     check_aux("written_text_lost_write");
 }
+
+/// `NAME.tex` built at one and at four threads: its output file
+/// (`NAME.ext`) equals the oracle's at both.
+fn check_threads(name: &str, ext: &str) {
+    let want = std::fs::read(fixtures().join(format!("{name}.{ext}"))).expect("the oracle");
+    for j in [1, 4] {
+        let (got, term) = build_out(name, j, ext);
+        if got != want {
+            let n = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
+            let errors: Vec<&str> = term
+                .lines()
+                .filter(|l| l.starts_with("error"))
+                .take(5)
+                .collect();
+            panic!(
+                "{name} -j{j}: the {ext} file differs from the oracle's at byte {n} ({} vs {} bytes); first errors: {errors:?}",
+                got.len(),
+                want.len()
+            );
+        }
+    }
+}
+
+/// A plain TeX repro whose lines a box register carries out of the
+/// output routine that sealed them (`crate::pages::seal`): its PDF
+/// (pdftex's) and its DVI (`NAME_dvi.tex`, etex's), each at one and at
+/// four threads.
+macro_rules! sealed_repro {
+    ($name:ident, $why:literal) => {
+        #[doc = $why]
+        #[test]
+        fn $name() {
+            check_threads(stringify!($name), "pdf");
+            check_threads(concat!(stringify!($name), "_dvi"), "dvi");
+        }
+    };
+}
+
+sealed_repro!(
+    sealed_box_held,
+    "a routine's page lines kept in a box register and placed by the next piece of the document (\\box): sealed in the register, read from their pieces' units where the page is written (oracles: pdftex and etex in the CI image)"
+);
+sealed_repro!(
+    sealed_unvbox_held,
+    "a routine's page lines kept in a box register and unboxed by the next piece (\\unvbox outside the finisher that sealed them, `Run::unseal_open`; oracles: pdftex and etex in the CI image)"
+);
+sealed_repro!(
+    sealed_lastbox_held,
+    "one line of a routine's page (\\lastbox) kept in a box register and placed by the next piece: a sealed line itself carried out of its finisher (oracles: pdftex and etex in the CI image)"
+);
+sealed_repro!(
+    sealed_lastbox_copied,
+    "one line of a routine's page kept in a box register, copied and unhboxed by the next piece (\\copy, \\unhcopy; oracles: pdftex and etex in the CI image)"
+);
+sealed_repro!(
+    sealed_given_back,
+    "a routine's page lines kept in a box register and given back by the next routine (\\unvbox in the output routine): the last page's lines all from other finishers' pieces, shipped by a finisher with no sealed window of its own, written with its lines read by piece; the DVI's lines were empty boxes with the finishers' definitions sealed and no places on such a page (oracles: pdftex and etex in the CI image)"
+);
 
 macro_rules! repro {
     ($name:ident, $why:literal) => {
@@ -349,6 +420,182 @@ fn pdfmapfile_vf_local_fonts() {
     }
 }
 
+/// `\input` of a name with a font's extension: CJK.sty's `\input
+/// CJK.enc` is TeX's lookup, kpathsea's `tex` format (TEXINPUTS), as
+/// `\openin`'s; the font side's lookups (a map line's encoding, a TFM)
+/// are in the format the extension names. The finders took the format
+/// from the extension for both, so CJK.enc was looked for among the
+/// encodings and not found ("I can't find file": the manuals of cjk-ko,
+/// kotex-utf and nstc-proposal). At -j1 and -j4 (oracle: pdflatex in
+/// the CI image, accl 22458; passing in 22464).
+#[test]
+fn input_enc_named_file() {
+    check_threads("input_enc_named_file", "pdf");
+}
+
+/// TeX's lookup of a name whose last component has an extension the
+/// `tex` format does not know (`1.0.0-1`, spelatex's chunk files): as
+/// kpathsea (TeX Live's `try_std_extension_first`), `name.tex` first,
+/// then the name itself, for `\input`, `\openin` and `\pdffilesize`;
+/// and `./name` the file the job writes as `name`. A dot anywhere in the
+/// name (`./` too) took it as given, and `./` made another file than the
+/// job's, so `\input{./example-spel/1.0.0.0.0.0-1}` found nothing and
+/// LaTeX asked the terminal for another name (the spelatex manual:
+/// "cannot \read from terminal in nonstop modes"). At -j1 and -j4
+/// (oracle: pdflatex in the CI image, accl 22475; passing in 22505).
+#[test]
+fn input_dotted_name() {
+    check_threads("input_dotted_name", "pdf");
+}
+
+/// `\input` of a name with an extension the `tex` format does not know,
+/// a file the job writes: kpathsea finds `name` (no `name.tex`), and
+/// what TeX keeps of the file is that one's. The lookup found `name` but
+/// kept its read-back, read-back point and seed under `name.tex`, so a
+/// `.dat` read back from the run before defined nothing (phitex-tex's
+/// `auxloop::a_file_of_definitions_is_read_back_per_field_whatever_its_name`),
+/// conv-xkv's `.cut` written and read in one run left `\fname`
+/// undefined, and hyperref's `.out` and probsoln's `excluded.tex` never
+/// settled. At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn input_dotted_read_back() {
+    check_threads("input_dotted_read_back", "pdf");
+}
+
+/// pdfTeX 1.40.26's structure destinations: `\pdfdest struct n` (a
+/// destination naming structure element `n`'s object, not its page's)
+/// and a `goto` action's `struct` (its `/SD`, with `file` the text as
+/// given), each identifier of a namespace of its own (`num 3` and
+/// `struct … num 3` two objects), one named by a link before its page
+/// defines it and one by an outline. `\pdfdest struct` was an error
+/// ("identifier type missing": the tex-vpat manual) and an action's
+/// `struct` was read as its identifier. At -j1 and -j4 (oracle:
+/// pdflatex, pdfTeX 1.40.29 in the CI image, accl 22464, passing there).
+#[test]
+fn pdfdest_struct() {
+    check_threads("pdfdest_struct", "pdf");
+}
+
+/// A file looked for in vain, then the `.aux` read back as its text
+/// (transparent's `\transparent@use` lines, the first defining
+/// `\TRP.5`, which the next read): the lines written later are read
+/// under the state at the read-back point, the values the read-back's
+/// own definitions replaced. The vain lookup left a pending read-back
+/// point that took those values for a file never written, so the lines
+/// read `\TRP.5` as defined and the rounds alternated between reading
+/// the `.aux` per field and as its text, never settling (the milog
+/// manual: "still changed after 5 rounds"). At -j1 and -j4 (oracle:
+/// pdflatex in the CI image, accl 22529, passing there).
+#[test]
+fn read_back_after_vain_lookup() {
+    check_threads("read_back_after_vain_lookup", "pdf");
+}
+
+/// `\pdfinterwordspaceon`'s space font: its font object is made where a
+/// page first uses it, as any font's (`pdf_use_font`); the fold of the
+/// pages' objects counted the fonts the list names only, so an object
+/// number TeX read after such a page was one short (tex-vpat's
+/// structure elements, one number low from its first page on). Its
+/// page also has `\pdfobj reserveobjnum` in the text, whose optional
+/// space after the keyword was a space of the paragraph. At -j1 and -j4
+/// (oracle: pdflatex in the CI image, accl 22529; passing in 22533).
+#[test]
+fn interword_space_font_object() {
+    check_threads("interword_space_font_object", "pdf");
+}
+
+/// A raw object a page names with `\pdfrefobj`, neither a stream nor
+/// `\immediate`, is written with the page ("Write out pending raw
+/// objects", `pdf_begin_obj(k, 1)`), into an object stream. The pages'
+/// fold of the objects counted the page's dictionary, resources and
+/// annotations toward a stream's 100 but not those, so the next stream's
+/// number fell later and every object number TeX read after it was one
+/// short: iacrj's `/Metadata 183 0 R` for pdfTeX's 184 (its raw /Group
+/// and info objects on page 1; `PHITEX_ALLOC_TRACE`, accl 22639). At -j1
+/// and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn raw_objects_in_object_streams() {
+    check_threads("raw_objects_in_object_streams", "pdf");
+}
+
+/// An included PDF page with a `/Group`: the page that first shows it
+/// numbers the group's object (`out_image`), and the image's write puts
+/// it into an object stream. The image's own writer (`ximage_own_info`),
+/// showing no page, wrote the group in the image's dictionary and
+/// counted no object for it, so every object number TeX read after that
+/// page was one short: iacrj's logo, `/Metadata 183 0 R` for pdfTeX's 184
+/// (`PHITEX_ALLOC_TRACE`, page 1's objects in object streams 21 for 22,
+/// accl 22754). At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdf_image_page_group() {
+    check_threads("pdf_image_page_group", "pdf");
+}
+
+/// An included PDF page whose `/Group` is an indirect object: the image's
+/// own writer, showing no page, copied the group's object into the
+/// image (an object), and the count of the page's group was added on
+/// top, so every object number TeX read after the page was one past
+/// pdfTeX's (df0d049ac counted the group for every included page with
+/// one). The own writer now shows the image as the page does
+/// (`out_image` numbers the group), and the write makes what pdfTeX's
+/// makes. At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdf_image_page_group_ref() {
+    check_threads("pdf_image_page_group_ref", "pdf");
+}
+
+/// A PNG with an alpha channel: reading it numbers the document's
+/// transparency group, and its write writes the group into an object
+/// stream, which that write opens. The image's own writer counted the
+/// stream with the image's objects (`PdfState::objects_after` took only
+/// the streams its later objects went into for streams), so every
+/// object number TeX read after the page showing it was one past
+/// pdfTeX's (beautynote's `/pgfsmask76` for 75, elegantnote-en; hidden
+/// there until df0d049ac counted the included PDF's page group, one
+/// short, beside it; `objects_after`'s fix is 9dd4e3020's, as
+/// `png_alpha_objects_counted`'s). At -j1 and -j4 (oracle: pdflatex in the
+/// CI image).
+#[test]
+fn pdf_image_png_group() {
+    check_threads("pdf_image_png_group", "pdf");
+}
+
+/// A line a node boundary cuts right after a control word: its
+/// continuation, the next sibling's first segment, began in a state of
+/// its own, so the space after the name (skipped on one line, §354) was a
+/// space token there. smartunits' `pdfinfo={Title={ smartunits -
+/// \smart@version }}` ended in a space (`/Title <...0020>`), the cut
+/// falling there once a `\NewDocumentCommand` was in the preamble
+/// (`\showtokens` of the line: `\smart@version  .`, accl 22792). At -j1
+/// and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn cut_after_control_word() {
+    check_threads("cut_after_control_word", "pdf");
+}
+
+/// `\pdfnoligatures` (pdfTeX's `set_no_ligatures`): the font's
+/// characters lose their lig/kern programs, no ligature and no kern. The
+/// primitive set a mark nothing read, so microtype's tracked small caps
+/// kept their ligatures: lie-hasse's section title "Three dimensional
+/// effect" had the ff ligature and sat 0.275bp off pdfTeX's, centred
+/// (accl 22608, 22724). At -j1 and -j4 (oracle: pdflatex in the CI image).
+#[test]
+fn pdfnoligatures() {
+    check_threads("pdfnoligatures", "pdf");
+}
+
+/// `\tagcode` below 0 (pdfTeX's `set_tag_code`): the character's tags
+/// taken off for good, -1 its lig/kern program. The code was kept and
+/// read back, but the font kept its tags, so microtype's tracked small
+/// caps (`no ligatures={f}`, a `\tagcode` of the f) kept the ff
+/// ligature: lie-hasse's section title "Three dimensional effect" sat
+/// 0.275bp off pdfTeX's (accl 22825, its own preamble). At -j1 and -j4
+/// (oracle: pdflatex in the CI image).
+#[test]
+fn tagcode_ligatures() {
+    check_threads("tagcode_ligatures", "pdf");
+}
+
 /// `\pdffontattr` and `\pdfnobuiltintounicode` of a virtual font (cmap's,
 /// for every font it loads; libertine's T1 fonts are virtual) set its
 /// fields without reading it in (no `do_vf`): pdfTeX numbers its local
@@ -426,3 +673,660 @@ repro!(
     type3_pk_font_xe,
     "bitmap fonts under XeLaTeX: xdvipdfmx's pkfont.c (crates/output/xdvipdfmx/src/pkfont.rs) embeds yinit's PK files, made by mktexpk in process, as a Type 3 font; was xdvipdfmx's fatal error (oracle: xelatex in the CI image, mc 77373)"
 );
+repro!(
+    eps_base35_font_xe,
+    "an EPS figure with text in a base 35 font under XeLaTeX (revtex-aps-xe, revtex-aip-xe: `fig_1.eps`): the job's view of xdvipdfmx's files (phitex-live's `JobFiles`) did not pass Ghostscript's fonts on, so the in-process distiller's findfont found no Times-Roman and xdvipdfmx stopped (/invalidfont); no PDF (oracle: xelatex in the CI image)"
+);
+repro!(
+    biber_macro_case,
+    "biber: an @string macro used in another case than its definition's (acm-sigconf-biblatex: `journal = CACM` for `@String{CACM = ...}`) was undefined, the field lost (82 destinations moved); btparse defines them lowercased and looks them up lowercased (oracle: latexmk, pdflatex and biber in the CI image)"
+);
+repro!(
+    prevgraf_vbox,
+    "\\prevgraf in a \\vbox: read and assigned through the field of the enclosing list's name, never the level the run builds the box on, where the paragraph's end put its lines: 0 for 4 (oracle: pdflatex in the CI image)"
+);
+repro!(
+    lineno_vbox_abstract,
+    "AASTeX's abstract with line numbers: lineno's \\linenumberpar puts its penalty after a paragraph only when \\prevgraf grew, which read 0 in the abstract's \\vbox; each paragraph's last line went unnumbered, every number after one less (aastex, aastex-xe; oracle: pdflatex in the CI image)"
+);
+repro!(
+    pk_fonts_own_objects,
+    "bitmap (PK) fonts never share an object (`pdf_init_font` shares only scalable fonts of a TFM name): yinit at two sizes is two objects, and the read-time fold counted one, numbering an object after the page one too low (oracle: pdflatex in the CI image)"
+);
+repro!(
+    output_step_then_local_group,
+    "a register stepped globally by a constant it never read (the output routine's \\global\\advance\\c@page), then set locally in a group (mparhack's hook, {\\advance\\c@page\\m@ne}): the set dropped the step, the run published nothing and every page was page 1 (classicthesis: a blank page missing, every page number after it off; oracle: pdflatex in the CI image)"
+);
+repro!(
+    mparhack_page_numbers,
+    "mparhack's page numbers (classicthesis): \\c@page lost the output routine's step, so \\cleardoublepage made no blank page (oracle: pdflatex in the CI image)"
+);
+repro!(
+    output_pagegoal,
+    "research corpus (aastex, aastex-xe: Table 1 at the top of page 4, pdfTeX's on page 5): while the output routine is active \\pagegoal and its kin read page_so_far as the page's fire left it (§421), and PhiTeX read the emptied page's \\maxdimen and 0; ltxgrid's \\@add@float takes \\vsize-\\pagegoal into \\@pageht, which came out near -\\maxdimen, so every float fitted where it was met (oracle: pdflatex in the CI image, mc 77786)"
+);
+repro!(
+    aftergroup_scope_paragraph,
+    "research corpus (classicthesis, classicthesis-xe: the title 2.277 pt right of pdfTeX's, the title's colour on every page after): a group opened in vertical mode ends inside a paragraph begun in it (\\begingroup\\color{CTtitle}\\spacedallcaps{...}\\endgroup); the scope's \\aftergroup tokens (\\reset@color's pop) were read by the paragraph's level's id, not the scope's, and dropped, the space before them taken off the line (oracle: pdflatex in the CI image, mc 77793)"
+);
+repro!(
+    lineno_last_page_xe,
+    "research corpus (aastex-xe: page 8's text gone, its line numbers left): under XeLaTeX a page's sealed lines are filled by the end node from their pieces' units; lineno's routine gives every line back, so the last page's lines all came back from routines before and its finisher sealed none of its own: the page carried no places, and its lines were never filled (the PDF writer's `sealed_units` too); now an empty window, each line's piece's unit read by itself (oracle: xelatex in the CI image, mc 77824)"
+);
+repro!(
+    protrusion_math_glue,
+    "research corpus (acm-sigconf-biblatex: a bibliography line's spacing, -250 for -248, other expanded fonts made, one font fewer numbered, /F460 for /F461): margin protrusion passes over glue only when its spec is the shared zero_glue (cp_skipable); a math glue made ordinary (§732, biblatex's URLs' \\mskip; §766, the spacing between atoms) has a spec of its own, and PhiTeX took it for zero_glue and protruded the character before it (oracle: pdflatex in the CI image, mc 77829)"
+);
+repro!(
+    list_depth_scope,
+    "research corpus (classicthesis, classicthesis-xe: the title page's list one level deeper than pdfTeX's): a list's \\global\\advance\\@listdepth\\@ne, then a local \\advance\\@listdepth\\m@ne in the group the run leaves open (KOMA's addmargin); the run published the step as a relation and the scope's 0 beside it, a field holds a relation or values, not both, so inside it read 1; now the step is published as the value it makes beneath the scope's own (oracle: pdflatex in the CI image, mc 77852)"
+);
+repro!(
+    output_aftergroup,
+    "research corpus (thuthesis: the text after a float placed here 3.488 pt higher than pdfTeX's): the output group's \\aftergroup tokens are read in the main vertical mode after the routine, before the text's next ones (§1100); thuthesis's \\@addtocurcol leaves \\vskip\\intextsep\\nointerlineskip there, and the finisher ran them on its own list, dropped. Now the finisher defines them and the first piece after it reads them first (oracle: pdflatex in the CI image, mc 77860)"
+);
+repro!(
+    pdf_fontname_share,
+    "\\pdffontname and \\pdffontobjnum of one scalable TFM at several sizes: pdfTeX's `pdf_init_font` makes one object for them, named by the first font's number (`obj_info`); each font made an object of its own and was named by its own number (32 41 42 and objects 1 2 3 for pdfTeX's 32 32 32 and 1 1 1) (oracle: pdflatex in the CI image, mc 77924)"
+);
+repro!(
+    page_counter_after_own_page,
+    "manuals (gu's gudoc: pages 10-14 numbered 8,9,8,9,10, /PageLabels written): a page fires at a candidate inside a conditional the text's run opens, and a float after it reads \\c@page and puts it back (tabularx's trial runs, \\TX@ckpt); the run read the register at its own position, the value before that page, and the restore took the page's steps back; now a piece's read of a page-layer register after a candidate of its own a page fires at ends the run there, its rest a resume after the page's finisher (oracle: pdflatex in the CI image, accl 22558)"
+);
+
+/// TeX Live manuals euromoney, heria, pygmentex and zed2e (`\valign`):
+/// "this alignment is not supported" (control.rs REDUCE-GAP). Now the
+/// alignment's vertical variant, §768-§812 with tex.web's modes swapped:
+/// the alignment in -hmode, its entries in -vmode (depth limit 0, a
+/// paragraph in one ended by its `&`), columns on the horizontal list
+/// with space factor 1000; \noalign, \tabskip, \span, \omit, \crcr,
+/// \everycr, `to` and `spread`, nested in and around \halign. The next
+/// entry's first token is read after the entry's group ends (§791), so
+/// its \aftergroup tokens come first and its local definitions are
+/// undone, \halign's too. At -j1 and -j4 (oracle: pdftex in the CI image).
+#[test]
+fn valign_columns() {
+    check_threads("valign_columns", "pdf");
+}
+
+/// research corpus (classicthesis: a font number on page 31 three above
+/// pdfTeX's): microtype's letter-spaced small caps over mathpazo's virtual
+/// `pplrc9d`, expanded (`pplrc9d+80ls+20`), has a local font made anew
+/// (`pplrc9d+20`, `auto_expand_vf`) that is an expanded virtual font in
+/// turn, with local fonts of its own. pdfTeX makes them where the font is
+/// first shipped and never again; the engine keyed the inner ones by the
+/// page's handle of their virtual font, another on each page, and made
+/// them again on a later page whose step read other local fonts first.
+/// At -j1 and -j4 (oracle: pdflatex in the CI image, accl 22577; the base
+/// differs at byte 974).
+#[test]
+fn vf_expanded_local_vf() {
+    check_threads("vf_expanded_local_vf", "pdf");
+}
+repro!(
+    marginpar_after_display,
+    "manuals (hep-paper, verifiche: 'Float(s) lost'): a \\marginpar before a display in a paragraph and another after it; the first one's -10004 fires at the display's start (§1145's build_page) and its routine takes it off \\@currlist before the text after the display conses the second on. The piece ran on through the display's start (a list of its own open), its \\@currlist still holding the first, and that definition stood over the routine's: the second was never output. A display's start is now a cut where a page is made to fire, as a paragraph's start is (oracle: pdflatex in the CI image, accl 22589)"
+);
+
+/// TeX Live manual proofread: soul's highlighting puts a `TikZ` mark
+/// (`\pdfsavepos` and a `\write` of `\pgfsyspdfmark`) into the pre-break
+/// text of a discretionary at each hyphenation point; where the line does
+/// not break there, `hlist_out` never meets it (§622) and nothing is
+/// written. The shipout ran every whatsit the page's decoding held, a
+/// discretionary's pre-break and post-break text's too: the .aux had a
+/// mark at x 0 for each (oracle: pdflatex in the CI image, accl 22640).
+#[test]
+fn write_in_unbroken_discretionary() {
+    check_aux("write_in_unbroken_discretionary");
+    check_threads("write_in_unbroken_discretionary", "pdf");
+}
+
+/// TeX Live manuals hfutthesis, zhlineskip, highlightx, caspervector
+/// (xelatex): a document line's comment read as text (verbatim's `%` is
+/// no comment) is spliced back from the canonical text's mark as the
+/// file's bytes; under XeTeX they are decoded in the file's input mode as
+/// the line around them was. They were the bytes' characters ("Missing
+/// character: There is no ^^80"). At -j1 and -j4 (oracle: xelatex in the
+/// CI image, accl 22729; the base differs).
+#[test]
+fn xe_verbatim_comment() {
+    check_threads("xe_verbatim_comment", "pdf");
+}
+
+/// TeX Live manual tkz-tab (xelatex): etoc reads the .toc with `\read`;
+/// XeTeX's `input_line` decodes a `\read` or `\readline` line from UTF-8
+/// (the input mode `\XeTeXdefaultencoding` named when the stream
+/// opened), and the line's bytes were its characters: "DÃ©finition" in
+/// the contents. At -j1 and -j4 (oracle: xelatex in the CI image, accl
+/// 22748; the base differs).
+#[test]
+fn xe_read_utf8() {
+    check_threads("xe_read_utf8", "pdf");
+}
+repro!(
+    box_registers_past_255,
+    "manuals (milsymb: forest's directory tree drawn without its node texts): \\setbox<n> past 255 was read with TeX82's box contexts (global_box_flag box_flag+256, ship_out_flag box_flag+512), so \\setbox300 set register 44 globally and \\setbox600 shipped its box; e-TeX's are box_flag+32768 and box_flag+65536 (etex.ch §1071). forest's node boxes are \\locbox registers counted down from 32767 (oracle: pdflatex in the CI image, accl 22653)"
+);
+
+/// TeX Live manual sample-polski (pdflatex): its first line is
+/// `%& --translate-file=il2-pl`, a TCX web2c's `parse_first_line` reads
+/// and pdfTeX applies: each byte of a file's line through its `xord` (the
+/// ISO-8859-2 text in T1's codes), each written character through its
+/// `xchr` where `xprn` says it prints, else in `^^` form, read back
+/// through `xord` (the .toc, a `\read`). The TCX was not read, the bytes
+/// were their own characters ("tre\xb6ci" for "treści"). At -j1 and -j4
+/// (oracle: pdftex in the CI image, accl 22852; the base differs).
+#[test]
+fn tcx_first_line() {
+    check_threads("tcx_il2pl", "pdf");
+}
+
+/// TeX Live manual beautybook-en (pdflatex): a PNG with an alpha channel
+/// shown on a page; pdfTeX writes its soft mask after the page (an object
+/// of its own) and its transparency group, numbered when it was read,
+/// into the document's object stream. The image's own writer, measuring
+/// what writing it makes, counted the object stream it opened for the
+/// group as an object: every read-time number after the page was one
+/// past pdfTeX's (pgf's `/pgfsmask146` for 144; here the `\pdflastobj`
+/// typeset). At -j1 and -j4 (oracle: pdftex in the CI image, accl 22935;
+/// the base differs).
+#[test]
+fn png_alpha_objects_counted() {
+    check_threads("png_alpha_count", "pdf");
+}
+
+/// manuals (spath3: pgf's `\immediate\pdfobj` numbered 404 for pdfTeX's
+/// 429, the 25 objects of the page firing before it missing; tex-vpat):
+/// an object number read inside a conditional the text's run opens,
+/// after a candidate inside it where a page fires. No pass of the run
+/// could end at a paragraph's start or a paragraph's end inside its own
+/// conditionals, so the number missed that page's objects
+/// (`PAGES_OBJECTS_DEFECT`). Now, where a page fires at one of its
+/// candidates, the run ends at the first such candidate a second pass
+/// can end at, the continuation carrying the conditionals
+/// (`Run::order_after_pages`; oracle: pdftex in the CI image, accl 23046,
+/// 23055).
+#[test]
+fn pages_objects_in_conditional() {
+    check_threads("pages_objects_in_conditional", "pdf");
+}
+
+/// TeX Live manual huaz (pdflatex): the text analysis took `\lstinline`
+/// in `\newcommand{\code}{\lstinline}` for a verbatim run and cut the
+/// body into pieces of a few tokens, one cut inside the word `''.` that
+/// `\huqq{az asztal}.` makes. A run ending its piece inside a character
+/// run (§1038's lookahead at the end of the node's text) ended the word
+/// there, as if no character followed, and read the next piece on only
+/// after: pdfTeX's kern between `''` (the ligature) and `.` was missing.
+/// The run now reads the next piece on inside the lookahead, so a cut the
+/// analysis put inside a word costs nothing. At -j1 and -j4 (oracle:
+/// pdftex in the CI image, accl 23105; the base differs).
+#[test]
+fn word_across_cut() {
+    check_threads("word_across_cut", "pdf");
+}
+
+/// research corpus (classicthesis-xe: `\thepage` and LaTeX's
+/// `\glb@currsize` after a page read as before it): a page fires at a
+/// paragraph's start inside a group the text's run opens, and the
+/// paragraphs after it read a macro the output routine defines globally
+/// (a shipout hook counting the pages). The run went on past the
+/// candidate and read it at its own position, the value before the page.
+/// Now every such candidate is a cut, its rest a resume after the
+/// finisher of a page firing there (oracle: pdflatex in the CI image,
+/// accl 22727).
+#[test]
+fn routine_global_after_own_page() {
+    check_threads("routine_global_after_own_page", "pdf");
+}
+
+/// [`routine_global_after_own_page`] under plain's routine with one
+/// `\xdef`, the paragraphs made by a recursive macro in `\begingroup`
+/// (oracle: pdftex in the CI image).
+#[test]
+fn routine_global_bounded() {
+    check_threads("routine_global_bounded", "pdf");
+}
+
+/// TeX Live manual ryesample (pdflatex): the glossaries package's lists,
+/// `STEM.glo` and `STEM.acn`, made into `STEM.gls` and `STEM.acr` by
+/// makeindex in the style `STEM.ist` the package writes, as the corpus
+/// loop runs them (`makeglossaries`'s calls; latexmk with that custom
+/// dependency). No tool claimed them: the glossaries were empty and the
+/// pages two short. At -j1 and -j4 (oracle: pdflatex and makeindex in
+/// the CI image, latexmk with the loop's rule, accl 23161; the base
+/// differs).
+#[test]
+fn glossaries_made() {
+    check_threads("glossaries_tool", "pdf");
+}
+
+/// TeX Live manual ibycus-babel-test (pdflatex): ibyhyph.tex loads its
+/// patterns with e-TeX's `\savinghyphcodes=1` after making the accent
+/// characters (parentheses, quotes, `=`, `+`, `|`) letters by `\lccode`; e-TeX hyphenates an ibycus word with those
+/// saved codes in the `\lccode`s' place (`store_hyph_codes`,
+/// `set_lc_code`), the document's `\lccode`s of the accents being 0.
+/// The codes were not saved: no ibycus word was hyphenated. At -j1 and
+/// -j4 (oracle: pdflatex in the CI image, accl 23201; the base differs).
+#[test]
+fn saved_hyph_codes() {
+    check_threads("saved_hyph_codes", "pdf");
+}
+
+/// manual subfigure's test at -j4 (a page shipped twice, the pages after
+/// it numbered one higher, 6 of 8 runs): the lists of figures and tables
+/// grow by a page in the second evaluation, the loop node that fired the
+/// List of Tables' first page fires the next one itself, and its old rest,
+/// woken by a hole filling before its start's change, folded on from its
+/// parked tail and fired that page again. A rest whose start moved folds
+/// from the new one, whatever woke it (`LoopState::began`; oracle:
+/// pdflatex in the CI image, accl 23217: the base differs in 5 of 10 runs
+/// at -j4).
+#[test]
+fn rest_start_moved() {
+    check_threads("rest_start_moved", "pdf");
+}
+
+/// TeX Live manual focus-demo (xelatex, beamer): `\pdflastypos` is
+/// measured from the page's top, the page's height being `\pdfpageheight`
+/// when it is not zero, in XeTeX and in pdfTeX's DVI mode alike ("Calculate
+/// DVI page dimensions and margins"); beamer sets it. The height was the
+/// shipped box's with twice the offsets and the DVI origin, so tikz's
+/// `remember picture` overlays were drawn 1in off. At -j1 and -j4
+/// (oracle: xelatex in the CI image, accl 23258; the base differs).
+#[test]
+fn savepos_pageheight() {
+    check_threads("savepos_pageheight", "pdf");
+}
+
+/// TeX Live manual snaptodo (pdflatex): `\pdflastxpos` past an unbroken
+/// discretionary with text of its own (a hyphenated word's ligature or
+/// kern, an explicit `\discretionary`): pdfTeX ships that text in the
+/// line, tex.web's `replace_count` nodes after the discretionary, and the
+/// positions' fold passed over it, so a later `\pdfsavepos` in the line was
+/// short by its width (snaptodo's second note 4.72pt off). At -j1 and -j4
+/// (oracle: pdftex in the CI image, accl 23274; the base differs).
+#[test]
+fn savepos_disc() {
+    check_threads("savepos_disc", "pdf");
+}
+
+/// TeX Live manual pinlabdoc (pdflatex): pinlabel reads its figure's size
+/// with `\pdfximagebbox`, an included PDF page's box (pdfTeX's
+/// `pdf_ximage_bbox_code`: its origin, and that plus the page's size);
+/// the image's record held the bitmap size `image_info` reads, 0 for a
+/// PDF, so every `\pinlabel` was placed on a figure of no size. At -j1
+/// and -j4 (oracle: pdftex in the CI image, accl 23321; the base differs).
+#[test]
+fn ximage_bbox() {
+    check_threads("ximage_bbox", "pdf");
+}
+
+/// The document's text read to its end with no `\end` (an example
+/// environment left open swallows `\end{document}`, as the biblatex manual
+/// cut inside an `ltxexample`), under XeLaTeX: "! Emergency stop. ***
+/// (job aborted, no legal \end found)", and the page shipped before is
+/// xelatex's PDF. Was no output file ("the pages' writers ran before every
+/// page had finished"): the last piece ended as one whose text goes on,
+/// and the main list never ended. At -j1 and -j4 (oracle: xelatex in the
+/// CI image, accl 23340).
+#[test]
+fn text_ends_without_end_xe() {
+    let name = "text_ends_without_end_xe";
+    let want = std::fs::read(fixtures().join(format!("{name}.pdf"))).expect("the oracle");
+    for j in [1, 4] {
+        let (got, term) = build_j(name, j);
+        assert!(
+            got == want,
+            "{name} -j{j}: the PDF differs from xelatex's ({} vs {} bytes): {}",
+            got.len(),
+            want.len(),
+            term.lines().last().unwrap_or("")
+        );
+    }
+}
+
+/// TeX Live manual nddiss (pdflatex, pdfx): `\pdfomitcharset`,
+/// `\pdfomitinfodict` and `\pdfomitprocset` were primitives the writer
+/// never read: every subset Type 1 font had its `/CharSet`, the file its
+/// Info dictionary and each page its `/ProcSet`. The first two are read
+/// where pdfTeX writes the fonts and the Info dictionary (the end), the
+/// third with each page's parameters. At -j1 and -j4 (oracle: pdftex in
+/// the CI image, mc 79143; the base differs).
+#[test]
+fn pdf_omit_params() {
+    check_threads("pdf_omit_params", "pdf");
+}
+
+/// TeX Live manual showexpl-test (xelatex): an included PDF's form whose
+/// `/Length` is an indirect object. xdvipdfmx imports that object with
+/// the form (`pdf_import_object` of the stream's dictionary) and writes
+/// it when the file it was read from is let go, `pdf_files_close` after
+/// the fonts; `PhiTeX`'s writer never let the files go, so the object was
+/// never written and its number was left empty (showexpl's included
+/// picture: two `Type1C` font files' lengths). At -j1 and -j4 (oracle:
+/// xelatex in the CI image, mc 79161).
+#[test]
+fn xe_import_length() {
+    check_threads("xe_import_length", "pdf");
+}
+
+/// TeX Live manual przechlewski-book wkmgr1 (pdflatex), cut: a binding
+/// local to a group open where a page fires is the routine's, given to
+/// the finisher to be read where it is used (`State::set_lazy`). A local
+/// definition in a group of the routine (hyperref's `\pdfstringdef`
+/// lets `\footnotesize` be `\@empty`) dropped it, and the group's close
+/// gave back the location unread with nothing to read it from: the
+/// routine read the value reaching the finisher, the one outside the
+/// group. prelim2e's draft line on the title page, `\footnotesize` there
+/// `\small` (the class's titlepage), came out at 9pt for 10pt; moreenum's
+/// first page fired inside a `\small` group and loaded the font of the
+/// wrong size, every font number after it one off. The save now keeps
+/// the binding and the close restores it. At -j1 and -j4 (oracle: pdftex
+/// in the CI image, mc 79240; the base differs, mc 79241).
+#[test]
+fn routine_local_after_group() {
+    check_threads("routine_local_after_group", "pdf");
+}
+
+/// TeX Live manuals biblatex-cheatsheet and mtc-2c (pdflatex), cut:
+/// `\maketitle` as the first thing inside `multicols`. multicol sets
+/// `\vsize` to three columns' height with a local definition in its
+/// environment's group, and the pieces after it inside `\maketitle`'s
+/// group go on from continuations whose tables hold that binding, which
+/// no field has. Their page parameter marker read the field, the
+/// `\textheight` from outside the environment, and the page's first box
+/// froze `\pagegoal` on it: a first page one column high, one page too
+/// many. At -j1 and -j4 (oracle: pdftex in the CI image).
+#[test]
+fn multicol_title_inside() {
+    check_threads("multicol_title_inside", "pdf");
+}
+
+/// TeX Live manual montex (pdflatex): rlbicig.sty's right-to-left text,
+/// e-TeX's TeX--XeT (`\beginR` ... `\endR`). pdfTeX's `pdf_hlist_out`
+/// reverses each right-to-left segment as it reaches it (e-TeX's
+/// `reverse`: glue set as kerns, leaders fixed, edges, a box inside
+/// reversed whole), as the DVI writer already did; the PDF writer wrote
+/// the segment in its logical order. At -j1 and -j4 (oracle: pdftex in
+/// the CI image, mc 79261; the base differs, mc 79263).
+#[test]
+fn pdf_texxet() {
+    check_threads("pdf_texxet", "pdf");
+}
+
+/// Two PNGs with an alpha channel: writing the first writes the
+/// document's transparency group into an object stream, the second has
+/// none to write. The pages' fold counted it with each image, so an
+/// object number TeX read where a stream opened was one past pdfTeX's:
+/// cursolatex's form numbers, pgf's masks and shadows. At -j1 and -j4.
+#[test]
+fn pdf_image_png_group_once() {
+    check_threads("pdf_image_png_group_once", "pdf");
+}
+
+/// TeX Live manual enumitem-de (pdflatex): `\begin{verbatim}` and a tab at
+/// the line's end. web2c's `input_line` trims spaces and line ends, not
+/// tabs, in pdfTeX as in XeTeX; `PhiTeX` trimmed tabs for pdfTeX, so the
+/// verbatim's empty first line was missing and the page broke elsewhere.
+/// At -j1 and -j4 (oracle: pdftex in the CI image, accl 23645).
+#[test]
+fn line_end_tab() {
+    check_threads("line_end_tab", "pdf");
+}
+
+/// A page fires in paragraphs inside a group the text's run opens, and
+/// its routine leaves tokens with `\aftergroup`: TeX reads them right
+/// after that `build_page` (§1100), so what follows sees what they do. The
+/// piece that went on past the page goes again with them read there.
+/// Oracle: pdftex in the CI image.
+#[test]
+fn routine_aftergroup_in_group() {
+    check_threads("routine_aftergroup_in_group", "pdf");
+}
+
+/// [`routine_aftergroup_in_group`] as afterpage.sty has it: the next
+/// page's colour restored (pagecolor-example). Oracle: pdflatex.
+#[test]
+fn afterpage_in_group() {
+    check_threads("afterpage_in_group", "pdf");
+}
+
+/// A routine's `\box` of a register the text's open group bound: void at
+/// the binding's level (§1079), whatever group the routine runs in
+/// (longtable's `\LT@foot` at `\endlongtable`: typstfun's `\vsize` kept
+/// the foot's height, a row more on a later table's page). Oracle: pdflatex.
+#[test]
+fn routine_box_used_in_group() {
+    check_threads("routine_box_used_in_group", "pdf");
+}
+
+/// TeX Live manual `moderncv_userguide` (pdflatex): a footnote inside
+/// `multicols`, put back after it. multicol multiplies `\count\footins`
+/// and `\skip\footins` by its columns, locally in its group; the routine
+/// run at the environment's end sees those values and the builder took
+/// them from its give-back, where the group's end after it defines
+/// nothing: the page's goal lost three times the footnote's height. At
+/// -j1 and -j4 (oracle: pdftex in the CI image, accl 23665).
+#[test]
+fn multicol_footnote_after() {
+    check_threads("multicol_footnote_after", "pdf");
+}
+
+/// TeX Live manual texlive-vpat (pdflatex): a link over three lines of a
+/// paragraph in a box on a line. A sealed line's skeleton kept only the
+/// boxes with whatsits in them, so the read-time fold of a page's objects
+/// (`mark_events`) missed the link's piece on the middle line, and every
+/// read-time object number after it was one low: pointers to struct
+/// elements and pages one before their objects. At -j1 and -j4 (oracle:
+/// pdftex in the CI image, accl 23719).
+#[test]
+fn link_over_plain_line() {
+    check_threads("link_over_plain_line", "pdf");
+}
+
+/// TeX Live manual texlive-vpat (pdflatex): `\pdffilemoddate` is the
+/// file's own time, in UTC under `FORCE_SOURCE_DATE`, which pins no file's
+/// date (utils.c `getfilemoddate`); `PhiTeX` gave `SOURCE_DATE_EPOCH`. A
+/// tagged document embeds its `.css` with it, `/ModDate` in the file's
+/// `/Params`. At -j1 and -j4 (oracle: pdftex in the CI image, mc 79410).
+#[test]
+fn file_mod_date() {
+    check_threads("file_mod_date", "pdf");
+}
+
+/// TeX Live manuals knowledge and minutes (pdflatex): a page fires where a
+/// paragraph starts inside a conditional of the piece's own, and the run
+/// reads `\value{page}` after it (`\setcounter{page}{\value{page}}`). A cut
+/// at such a candidate is what a second pass can make (`par_cut`), and
+/// `Run::order_after_own_page` did not take it: the read stood with the value
+/// from before the routine, and put back, undid its step. At -j1 and -j4
+/// (oracle: pdftex in the CI image, mc 79427; the base differs, mc 79428).
+#[test]
+fn page_read_after_par_in_cond() {
+    check_threads("page_read_after_par_in_cond", "pdf");
+}
+
+/// `\pdfsavepos` in right-to-left text: the number TeX reads back is
+/// where the output puts the whatsit, in the reversed segment (it was the
+/// list's order: fariscovernew's pgf pictures in an RTL paragraph, placed
+/// by their marks, 3.5 pt off). Oracle: pdftex in the CI image.
+#[test]
+fn pdf_savepos_texxet() {
+    check_threads("pdf_savepos_texxet", "pdf");
+}
+
+/// A routine's global definitions and what the text's run read across the
+/// page's candidate: a value the run bound itself after the candidate is
+/// its own, an older binding read again after a group (or a group's binding
+/// from before the candidate) is the routine's. At -j1 and -j4 (oracle:
+/// pdftex in the CI image).
+#[test]
+fn routine_global_read_by_position() {
+    check_threads("routine_global_read_by_position", "pdf");
+}
+
+/// TeX Live manual kotex-utf-doc (pdflatex): a definition in an environment
+/// and a page that ends in its last paragraph. The routine runs inside the
+/// group and reads the binding (a header's macro; kotex-utf's `\interhchar`,
+/// 3pt in its header's letterspacing); the finisher stands after the node
+/// that closes the group, which lists only its own definitions, and read
+/// the value outside. At -j1 and -j4 (oracle: pdflatex in the CI image, accl
+/// 24082; the base differs).
+#[test]
+fn routine_reads_binding_of_closed_scope() {
+    check_threads("kotex_scope_binding", "pdf");
+}
+
+/// TeX Live manual typog-example (pdflatex, microtype's contexts): each
+/// copy of a font expands to fonts of its own, even at a ratio another copy
+/// already has; they took one font by name and size, so every font loaded
+/// after them had a number six too small (`/F559` for `/F565`). A `\font`
+/// loaded anew after `\pdffontexpand` (`LaTeX_RefSheet`) does find those of
+/// its name and size. Oracle: pdftex in the CI image.
+#[test]
+fn expand_copies_numbered() {
+    check_threads("expand_copies_numbered", "pdf");
+}
+
+/// TeX Live manual asmejour-template (pdflatex, flushend): `\pagediscards`
+/// gave nothing and `\savingvdiscards` was not followed, so flushend's
+/// measure of the glue between its balanced columns was 0 pt, not 1.72 pt:
+/// the last page's second column came out 1.73 pt short and all its glue set
+/// differently. Also `\splitdiscards`. Oracle: pdftex in the CI image.
+#[test]
+fn page_discards() {
+    check_threads("page_discards", "pdf");
+}
+
+/// Loops of register arithmetic and code assignments (`Run::counted_loop`):
+/// each shape it runs whole, and each it must leave to the interpreter (a
+/// value or character out of range, an overflow, a pending
+/// `\afterassignment`, `\globaldefs`, a body with anything else in it).
+/// Oracles: pdftex and xetex in the CI image.
+#[test]
+fn count_loop() {
+    check_threads("count_loop", "pdf");
+}
+
+/// [`count_loop`] under XeTeX: the code tables past 255.
+#[test]
+fn count_loop_xe() {
+    check_threads("count_loop_xe", "pdf");
+}
+
+/// TeX Live manual ualberta: an `\\input` file whose last line has no newline.
+/// That line still ends (§31) and gives its space; a slice of the file took
+/// it as cut mid-line, one space short, so a paragraph running on into the
+/// next chapter's `\\clearpage` set its last line looser than pdflatex. Oracle:
+/// pdftex in the CI image (accl 23980; the base is one space short, 23978).
+#[test]
+fn eof_no_newline() {
+    check_threads("eof_no_newline", "pdf");
+}
+
+/// Found in amsldoc-vi's probes: `\ifhmode` and its like are all false while
+/// a `\write` is expanded (§1370, `mode:=0`); they answered the mode around
+/// it, though `\prevdepth` and `\spacefactor` there already knew. Oracle:
+/// pdftex in the CI image.
+#[test]
+fn write_mode_zero() {
+    check_threads("write_mode_zero", "pdf");
+}
+
+/// TeX Live manual ijmsample (pdflatex): pages fire at candidates in the
+/// group a list opens other than a paragraph's start, and the text after
+/// each reads the page counter. A piece applied a routine's values only at
+/// a paragraph's start; a routine then began with the piece's value there,
+/// and the counter stopped stepping (page 20 printed 6). At -j1 and -j4
+/// (oracle: pdflatex in the CI image, accl 24233; the base differs).
+#[test]
+fn routine_page_at_any_candidate() {
+    check_threads("routine_page_at_any_candidate", "pdf");
+}
+
+/// An `\outer` macro met in a token list while a macro's arguments or a
+/// list's body are scanned: "Forbidden control sequence found" (§336, §357).
+/// The scans took a list's tokens without looking at their meanings, so the
+/// macro went into the argument as a plain token and the text came out
+/// otherwise. Oracle: pdftex in the CI image.
+#[test]
+fn outer_in_scan() {
+    check_threads("outer_in_scan", "pdf");
+}
+
+/// thuthesis (natbib + bibunits): a second job-written file (a bibunit's
+/// `.aux`) read back where its unit starts, after `\AtBeginDocument` made
+/// `\bibstyle` `\@gobble`. The main `.aux`'s read at `\begin{document}` had
+/// run natbib's `\bibstyle`, whose style hook `\let`s `\bibstyle` to
+/// `\@gobble`, and left `wpre:cs:bibstyle` natbib's; the unit file's
+/// `\bibstyle` line took that `wpre:` as the value its own read-back
+/// replaced and ran the hook again, in every other round, so the rounds
+/// never settled (exit 1, "still changed after 5 rounds"). A line reads a
+/// `wpre:` only from its own run. Oracle: pdflatex in the CI image.
+#[test]
+fn aux_pre_other_point() {
+    let name = "aux_pre_other_point";
+    let want = std::fs::read(fixtures().join(format!("{name}.pdf"))).expect("the oracle");
+    for j in [1, 4] {
+        let (got, term) = build_out(name, j, "pdf");
+        assert!(
+            !term.contains("still changed") && !term.contains("no fixpoint"),
+            "{name} -j{j}: the rounds did not settle: {term}"
+        );
+        assert!(got == want, "{name} -j{j}: the PDF differs from pdflatex's");
+    }
+}
+
+/// TeX Live manual easyformat (microtype): `\scshape` under `\bfseries` has
+/// no shape, and LaTeX's substitute is the bold font loaded anew after its
+/// `\pdffontexpand`, a font of its own with microtype's small-caps
+/// protrusion. Its `\pdffontexpand` binds the expanded fonts the two fonts
+/// share to it (pdfTeX's `load_expand_font` over what `tfm_lookup` finds:
+/// `copy_expand_params`, the blink and the codes), and the bold text after
+/// the group, whose font asked for those ratios before, still sets its
+/// margin kerns by the small-caps codes. `PhiTeX` bound an expanded font to
+/// whichever font last asked for it. Oracle: pdflatex in the CI image, at
+/// -j1 and -j4.
+#[test]
+fn expand_bound_anew() {
+    check_threads("expand_bound_anew", "pdf");
+}
+
+/// TeX Live manual auguide4-1 (revtex 4.1's author guide, pdflatex; its
+/// file as it is, renamed, with its docs.sty): a loop rest of the page
+/// builder keeps the pages it fired while it waits for the give-back of
+/// the page it starts after. Its first
+/// page's finisher stood after that page's finisher, both pages firing in
+/// one piece; that page then fired in an earlier piece, its finisher moved
+/// there, and the kept one moved with it, before the piece its own page
+/// fired in. Its routine read the text there as it was before that piece
+/// and refuted itself for ever, and the rest's wake by the give-back was
+/// held for a quiet point that never came: -j1 never ended. Now a waiting
+/// rest whose start moved that finisher places its kept pages again. The
+/// PDF is pdflatex's (latexmk in the CI image, accl 24905) at -j1 and -j4.
+#[test]
+fn loop_rest_kept_finisher_moved() {
+    check_threads("revtex_rest_finisher_moved", "pdf");
+}
+
+/// [`page_discards`] at eight threads, 24 builds: a `\penalty` after
+/// `\savingvdiscards=0` adds the page parameters' marker before its
+/// candidate; when that marker's read of `\vsize` was held at the
+/// settling layer's frontier, the halt it raised was dropped as the
+/// candidate cut the run, the marker was missing with every read
+/// holding, and the last two pages showed discards pdflatex drops (with
+/// the fix taken out, 18 builds in 60 at -j8, 4 in 60 at -j4, mc 80536).
+/// Each build is the oracle's.
+#[test]
+fn page_discards_marker_held_at_the_frontier() {
+    let want = std::fs::read(fixtures().join("page_discards.pdf")).expect("the oracle");
+    for i in 0..24 {
+        let (got, term) = build_out_in("page_discards", "-held", 8, "pdf");
+        assert!(
+            got == want,
+            "page_discards -j8 build {i} differs from the oracle: {}",
+            term.lines().last().unwrap_or("")
+        );
+    }
+}

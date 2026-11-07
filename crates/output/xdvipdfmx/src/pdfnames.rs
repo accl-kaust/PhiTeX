@@ -17,7 +17,7 @@ pub const MAX_KEY: usize = 32;
 pub const NAME_CLUSTER: i32 = 4;
 
 /// `struct obj_data`: a hash table value.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct ObjData {
     pub reference: Option<Obj>,
     pub object: Option<Obj>,

@@ -150,8 +150,14 @@ and used at once (the client's answer is not waited for).
 
 ```json
 {"state": "starting" | "fetching" | "typesetting" | "ready" | "failed" | "stopped",
- "ms": 67.2, "pages": 3, "errors": 0, "warnings": 2, "engine": "native" | "wasm"}
+ "ms": 67.2, "pages": 3, "errors": 0, "warnings": 2, "engine": "native" | "wasm",
+ "root": "/home/me/paper", "main": "paper.tex"}
 ```
+
+- `root`, `main`: the folder the watch runs in and its main file, named
+  from there. The watch may run above the editor's root (a chapter opened
+  first, its main file found one folder up, `\input`ing it): a client
+  sends the files under `root` to this watch rather than start another.
 
 - Sent at every change of `state` and after every build.
 - `starting`: after `initialized`, before the first build is in.
@@ -355,7 +361,12 @@ pub trait PackSource: Send + Sync {
   `.resolve(name, format, engine)`, `.packs(path, engine)`,
   `.check(id, raw)`; `Files::new(index, source, engine)`, `.find(name)`
   / `.locate(name)` (fetching), `.read(path)`, `.key(name)` (a content
-  key, nothing fetched), `.on_fetch(hook)` (`Fetch::Asked`, `Arrived`,
+  key, nothing fetched: the file's own content sum, the index's
+  `file_sums` column, so a format holds across releases that leave its
+  files as they were), `.published_format(name)` (the release's own
+  format of that store name, its pack fetched; a host gives it as
+  `phitex_live::host::Host::published_format`, taken when the store's
+  format is none or stale), `.on_fetch(hook)` (`Fetch::Asked`, `Arrived`,
   `Failed`); `PackSource::pack(id)`, `.packs(ids)` (a source that fetches
   at once overrides it); `gunzip`, `unpack`, `engine`, `format_of`.
 - **The rule** (the frontends' `resolve.ts` and `core/src/shelf.rs`

@@ -66,9 +66,13 @@ pub trait ShellHook: Send + Sync {
 
 Rules for an implementation:
 
-1. **Any thread, any time, any number of times.** The engine calls it from
-   its workers, possibly several at once, and possibly for a run that is
-   later thrown away (a run on inputs that turned out stale). So a call
+1. **Any thread, possibly several at once.** The engine calls it from its
+   workers, and only from a node at the committed frontier: every node
+   before it has committed in this pass with no re-ask pending, and no
+   page before it is left to fire (`Ctx::wait_settled`), so a command
+   never runs on a view of the job's files that TeX's order never had. A
+   later pass or an edit that changes the files it read calls it again
+   (as pdflatex's next run would). So a call
    must not leave anything behind that the job or a later call could see:
    each call gets a fresh working directory, and what the command did
    reaches the job only through the returned `ShellRan`.
@@ -157,7 +161,8 @@ pdflatex leaves `_minted/` there.
   process (a file read by the host itself), and `None` where access times
   do not move (`noatime`), or when a directory's moved (listed);
 - unrestricted (`shell_escape = 1`) only with `-shell-escape` or
-  `shell-escape = true` in `phitex.toml`; restricted otherwise.
+  `shell-escape = true` in the user's `phitex.toml` (a project's is ignored
+  and said: a project folder may be anyone's); restricted otherwise.
 
 The runner lives in the CLI and is passed in through `Options`; nothing in
 the engine spawns a process or touches the file system.
@@ -172,7 +177,15 @@ phitex-tex has no wasm imports for this: a wasm host implements
   (`u32 n, (u32 len, name, u32 len, bytes) × n`, little-endian, as
   `host-glue.mjs` frames files) to the host's thread that holds Pyodide
   (thread 0) and waits on a `Condvar` for the answer (`i32 status`, the
-  files written framed, the names removed framed with no bytes);
+  files written framed, the names removed framed with no bytes, then,
+  only when the host did not run the command, `u32 len, why` in UTF-8:
+  minted's runner failed to load or is not loaded, a command other than
+  latexminted, a thrown error's text);
+- a call the host could not run (a failing status, nothing written, a
+  why) is one plain diagnostic, "`<program>' could not run here: <why>",
+  TeX's log line staying web2c's `executed safely (allowed)`; the native
+  runner says why for the shell's own 126 and 127 (a program not found);
+  a command that ran and failed says no why and keeps its own errors;
 - `files` is exactly what `run` is given: the host adds nothing of its own
   (the old glue added the host's project files and its own written files:
   the engine now hands those it means the command to see);

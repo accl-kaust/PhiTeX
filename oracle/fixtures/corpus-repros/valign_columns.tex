@@ -1,0 +1,60 @@
+% \valign (tex.web §768-§812 in its vertical variant): columns of several
+% entries, \noalign material between them, \tabskip glue set and changed in
+% the preamble, a periodic preamble, \span and \omit, \crcr and \everycr,
+% `to` and `spread`, paragraphs inside entries, \aftergroup in an entry,
+% a \valign in an \halign's entry and an \halign in a \valign's entry, and
+% a \valign in restricted horizontal mode. The space factor after a
+% \valign is the alignment's (1000 after a column, the paragraph's before
+% the first).
+% (PDF: pdftex, the oracle made in the CI image)
+\pdfoutput=1 \hsize=300pt \vsize=600pt \parindent=10pt \baselineskip=12pt
+\lineskip=1pt \lineskiplimit=0pt \nopagenumbers
+
+% three columns, \noalign between them, \tabskip changed in the preamble
+\noindent Before\valign{\tabskip=2pt\vfil#\vfil\tabskip=3pt plus 1pt&\hbox{#}\tabskip=0pt\cr
+\hbox{A}\hbox{AA}&B\cr
+\noalign{\hskip 5pt\vrule width 1pt\hskip 5pt}
+\hbox{C}&D\cr
+\hrule height 2pt width 10pt&E\cr}. After a column, then more words.
+\par
+
+% to and spread, a paragraph in an entry, \omit and \span
+\noindent\valign to 60pt{#\vfil\tabskip=0pt plus 1fil&#\vfil\cr
+\hbox{x}&\hbox{y}\cr
+\hbox{z}&\hsize=60pt \parindent=0pt Paragraph text in an entry of a column\cr
+\omit\hbox{omitted}\vskip 3pt&\hbox{w}\cr
+\hbox{spanning both}\span\omit\cr}
+\quad\valign spread 10pt{\hbox{#}&\hbox{(#)}\cr a&b\cr c\cr}
+\par
+
+% a periodic preamble, \crcr and \everycr
+\everycr{\noalign{\hskip 2pt}}
+\noindent\valign{\hbox{#}\vfil\tabskip=1pt&&\hbox{[#]}\cr
+1&2&3&4\crcr
+5\cr\crcr
+6&7\crcr}
+\everycr{}
+\par
+
+% \aftergroup in an entry: read where the next entry begins
+\def\star{\hbox{*}}
+\noindent\valign{#&#\cr \hbox{p}\aftergroup\star&\hbox{q}\cr}
+\par
+% (and in an \halign: the next entry's first token is read after the
+% entry's group ends, its local definitions undone)
+\halign{#&#\cr \def\x{X}a\aftergroup\star&\ifx\x\undefined U\else D\fi\cr}
+
+% a \valign in an \halign's entry, an \halign in a \valign's entry
+\halign{#\hfil\tabskip=6pt&\hfil#\cr
+left&\valign{\hbox{#}\vfil&\hbox{#}\cr u&v\cr w&x\cr}\cr
+\noalign{\kern 4pt}
+again&\vbox{\hbox{one}\hbox{two}}\cr}
+\noindent\valign{#\vfil\cr
+\halign{#\hfil&\quad#\cr a&b\cr ccc&d\cr}\cr
+\hbox{next column}\cr}
+\par
+
+% restricted horizontal mode
+\setbox0=\hbox{\valign{\hbox{#}&\hbox{#}\cr r&s\cr t&u\cr}}
+\noindent\copy0\ \ wd=\the\wd0.
+\bye

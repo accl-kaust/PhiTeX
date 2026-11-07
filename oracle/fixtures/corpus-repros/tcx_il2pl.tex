@@ -1,0 +1,14 @@
+%& --translate-file=il2-pl
+\UseRawInputEncoding
+\documentclass{article}
+\usepackage[T1]{fontenc}
+\begin{document}
+\tableofcontents
+\section{Za¿ó³æ gê¶l± ja¼ñ}
+¦ródtekst: ±æê³ñó¶¼¿ ¡ÆÊ£ÑÓ¦¬¯ i ¢.
+\newwrite\w \immediate\openout\w=\jobname.tst
+\immediate\write\w{±¶^^b6¢x}
+\immediate\closeout\w
+\newread\r \openin\r=\jobname.tst \read\r to\x \closein\r
+[\meaning\x] [\x]
+\end{document}

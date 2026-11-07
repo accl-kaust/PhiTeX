@@ -88,6 +88,9 @@ pub struct XImageInfo {
     pub pages: i32,
     /// `img_colordepth`.
     pub colordepth: i32,
+    /// `\pdfximagebbox` 1 to 4: an included PDF page's box (its
+    /// origin, and that plus the page's size); 0 for other images.
+    pub bbox: [Scaled; 4],
 }
 
 /// A PDF page's part of an image (`pdf_image_struct`).
@@ -185,6 +188,23 @@ impl XImage {
             depth: self.depth,
             pages: self.pages,
             colordepth: self.bits,
+            bbox: [1, 2, 3, 4].map(|j| self.bbox(j)),
+        }
+    }
+
+    /// `\pdfximagebbox` j (1 to 4; pdfTeX's `pdf_ximage_bbox_code`).
+    fn bbox(&self, j: i32) -> Scaled {
+        let Some(i) = self.image.as_ref() else {
+            return 0;
+        };
+        match &i.kind {
+            Kind::Pdf(p) => match j {
+                1 => p.orig_x,
+                2 => p.orig_y,
+                3 => p.orig_x + i.width,
+                _ => p.orig_y + i.height,
+            },
+            _ => 0,
         }
     }
 }
@@ -541,6 +561,53 @@ fn getint(d: &[u8], pos: usize) -> Option<i32> {
 const IDAT: i32 = 0x4944_4154;
 const IEND: i32 = 0x4945_4E44;
 
+/// How many opened files [`open_doc`] keeps a thread (each holds its
+/// file's bytes).
+const OPENED_KEEP: usize = 4;
+
+/// A file [`open_doc`] opened: its bytes' address and length, the bytes
+/// (kept so the address is not reused), and the opened file.
+type Opened = ((usize, usize), Arc<[u8]>, Doc);
+
+thread_local! {
+    /// The files [`open_doc`] opened last on this thread, newest first.
+    static OPENED: std::cell::RefCell<Vec<Opened>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// `data` opened (`Doc::open`), a pure function of the bytes: the files
+/// this thread opened last, by their shared copy, given again as a
+/// clone. Each `\pdfximage` of a page of one PDF opens the file a few
+/// times over (what TeX reads of it, the objects its write makes, the
+/// writer's record and the link's replay of it): hwemoji's 3600 pages
+/// of one 7 MB file read its cross-reference some 20 000 times.
+///
+/// # Errors
+/// What `Doc::open` meets.
+pub fn open_doc(data: &Arc<[u8]>) -> Result<Doc, phitex_codecs::pdfread::Error> {
+    let key = (Arc::as_ptr(data).cast::<u8>() as usize, data.len());
+    let hit = OPENED.with(|o| {
+        let mut o = o.borrow_mut();
+        let i = o
+            .iter()
+            .position(|(k, b, _)| *k == key && Arc::ptr_eq(b, data))?;
+        let e = o.remove(i);
+        let d = e.2.clone();
+        o.insert(0, e);
+        Some(d)
+    });
+    if let Some(d) = hit {
+        return Ok(d);
+    }
+    let d = Doc::open(data)?;
+    OPENED.with(|o| {
+        let mut o = o.borrow_mut();
+        o.insert(0, (key, data.clone(), d.clone()));
+        o.truncate(OPENED_KEEP);
+    });
+    Ok(d)
+}
+
 /// A copy of an included page in progress (`write_epdf`'s locals and
 /// the document's `inObjList`).
 struct Copy<'d> {
@@ -697,8 +764,7 @@ impl PdfState {
             });
             self.epdf_docs.len() - 1
         };
-        let doc =
-            Doc::open(&spec.data).map_err(|_| fail(name, "xpdf: reading PDF image failed"))?;
+        let doc = open_doc(&spec.data).map_err(|_| fail(name, "xpdf: reading PDF image failed"))?;
         let found = doc.version as f32;
         let wanted = (f64::from(self.fixed_major) + f64::from(self.fixed_minor) * 0.1) as f32;
         if f64::from(found) > f64::from(wanted) + 0.01 && spec.inclusion_errorlevel > 0 {
@@ -793,6 +859,29 @@ impl PdfState {
         self.aux.ximages.get(&n).map(XImage::info)
     }
 
+    /// `out_image`'s page group for an included PDF page `n` shown where
+    /// no image set the page's group before: its `/Group`'s object
+    /// numbered here the first time (`pdf_new_objnum`), then the image's
+    /// write writes the group as that object (`pdf_begin_obj(group, 2)`)
+    /// in place of copying it into its dictionary.
+    pub fn show_ximage_group(&mut self, n: usize) {
+        let Some(x) = self.aux.ximages.get(&n) else {
+            return;
+        };
+        let group_ref = x.group_ref;
+        if group_ref != 0 && self.page_group_val == 0 {
+            if group_ref == -1 {
+                self.page_group_val = self.new_objnum_();
+                let g = i32::try_from(self.page_group_val).unwrap_or(0);
+                if let Some(x) = self.aux.ximages.get_mut(&n) {
+                    x.group_ref = g;
+                }
+            } else {
+                self.page_group_val = usize::try_from(group_ref).unwrap_or(0);
+            }
+        }
+    }
+
     /// Whether `n` is a `\pdfximage` (`pdf_check_obj(obj_type_ximage, n)`).
     #[must_use]
     pub fn is_ximage(&self, n: usize) -> bool {
@@ -803,18 +892,7 @@ impl PdfState {
     /// page, 0 for other images.
     #[must_use]
     pub fn ximage_bbox(&self, n: usize, j: i32) -> Scaled {
-        let Some(i) = self.aux.ximages.get(&n).and_then(|x| x.image.as_ref()) else {
-            return 0;
-        };
-        match &i.kind {
-            Kind::Pdf(p) => match j {
-                1 => p.orig_x,
-                2 => p.orig_y,
-                3 => p.orig_x + i.width,
-                _ => p.orig_y + i.height,
-            },
-            _ => 0,
-        }
+        self.aux.ximages.get(&n).map_or(0, |x| x.bbox(j))
     }
 
     /// `\immediate\pdfximage`: `pdf_write_image(pdf_last_ximage)`.
@@ -846,17 +924,7 @@ impl PdfState {
         let py = self.origin_v - self.cur_v;
         let total = height + depth;
         if let Kind::Pdf(p) = &image.kind {
-            if group_ref != 0 && self.page_group_val == 0 {
-                if group_ref == -1 {
-                    self.page_group_val = self.new_objnum_();
-                    let g = i32::try_from(self.page_group_val).unwrap_or(0);
-                    if let Some(x) = self.aux.ximages.get_mut(&n) {
-                        x.group_ref = g;
-                    }
-                } else {
-                    self.page_group_val = usize::try_from(group_ref).unwrap_or(0);
-                }
-            }
+            self.show_ximage_group(n);
             self.print_real(ext_xn_over_d(width, TEN_POW[6], i64::from(img_w)), 6);
             self.print(b" 0 0 ");
             self.print_real(ext_xn_over_d(total, TEN_POW[6], i64::from(img_h)), 6);
@@ -1500,11 +1568,7 @@ impl PdfState {
         src: &dyn FontSource,
     ) -> Result<(), PdfError> {
         let file = image.name.clone();
-        let sep: &[u8] = if self.p.ptex_use_underscore > 0 {
-            b"_"
-        } else {
-            b"."
-        };
+        let sep: &[u8] = if self.p.ptex_underscore() { b"_" } else { b"." };
         let suppress = self.p.suppress_ptex_info;
         let objs = {
             let d = &mut self.epdf_docs[im.doc];
@@ -1512,7 +1576,7 @@ impl PdfState {
             std::mem::take(&mut d.objs)
         };
         let doc =
-            Doc::open(&image.data).map_err(|_| fail(&file, "xpdf: reading PDF image failed"))?;
+            open_doc(&image.data).map_err(|_| fail(&file, "xpdf: reading PDF image failed"))?;
         let page = doc
             .page(usize::try_from(im.page).unwrap_or(0))
             .ok_or_else(|| fail(&file, "xpdf: reading PDF image failed"))?;
@@ -1757,6 +1821,37 @@ mod tests {
         assert_eq!(num_to_pdf(1.5), b"1.5");
         assert_eq!(num_to_pdf(-0.25), b"-0.25");
         assert_eq!(num_to_pdf(3.0), b"3");
+    }
+
+    /// `open_doc`: a file opened again by its shared bytes is the
+    /// thread's kept copy (one entry, the same answers), another copy of
+    /// the same bytes is opened anew, and the thread keeps at most
+    /// `OPENED_KEEP` files.
+    #[test]
+    fn open_doc_keeps_the_files_opened_last() {
+        let f = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../oracle/fixtures/corpus-repros/pdf_image_objects_counted/hello.pdf"
+        ))
+        .unwrap();
+        let a: Arc<[u8]> = Arc::from(f.clone());
+        let n = OPENED.with(|o| o.borrow().len());
+        let d1 = open_doc(&a).unwrap();
+        let d2 = open_doc(&a).unwrap();
+        assert_eq!(d1.num_pages(), d2.num_pages());
+        assert_eq!(OPENED.with(|o| o.borrow().len()), n + 1, "kept once");
+        let b: Arc<[u8]> = Arc::from(f);
+        assert_eq!(open_doc(&b).unwrap().num_pages(), d1.num_pages());
+        assert_eq!(
+            OPENED.with(|o| o.borrow().len()),
+            n + 2,
+            "another copy: opened anew"
+        );
+        for _ in 0..OPENED_KEEP {
+            let c: Arc<[u8]> = Arc::from(&*a);
+            open_doc(&c).unwrap();
+        }
+        assert_eq!(OPENED.with(|o| o.borrow().len()), OPENED_KEEP);
     }
 
     #[test]

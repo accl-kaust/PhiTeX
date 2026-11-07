@@ -1,0 +1,451 @@
+%% Sample bibliography file for asmeconf.bst and asmeconf.cls
+%%
+%% Revised: 9 July 2025
+%% Copyright John H. Lienhard, MIT
+%% Offered under the MIT license: https://ctan.org/license/mit 
+
+@article{ning2002,
+  author 	= {Xiang Ning and Mary Rose Lovell},
+  title 	= {On the Sliding Friction Characteristics of Unidirectional Continuous FRP Deposits},
+  journal 	= {ASME Journal of Tribology},
+  year 		= {2002},
+  volume 	= {48},
+  number 	= {5},
+  pages 	= {2000--2008},
+  doi 		= {10.1115/1.4042912},
+}
+%% article supports these fields: 	author, year, title, journal, volume, number, pages OR eid (and numpages), 
+%%									doi, url, eprint with archive, note.  
+%%
+%% There's no need to give the URL if it is simply the DOI, since the DOI itself will be hyperlinked.
+%%			  url = {https://doi.org/10.1115/1.4042912}. ASME requests that a URL point to the abstract.
+
+@BOOK{gibson2008,
+  title 	= {The Big Book of Cellular Studies},
+  publisher = {John Wiley and Sons},
+  year 		= {2008},
+  author 	= {Tom A. Gibson and Matthew A. Tucker},
+  address 	= {New York},
+}
+%% book supports these fields: 	author OR editor, year, title, edition, series, volume OR number 
+%%								publisher, address, doi, url, eprint with archive, version, versiontype, note. 
+%% You can change "Version" with "versiontype, e.g., versiontype = {Release},
+
+@INCOLLECTION{stevens1999,
+  author 	= {Thomas T. Stevens},
+  title 	= {Stochastic Fields and Their Digital Simulation},
+  booktitle = {Stochastic Methods},
+  publisher = {Martimius Publishers},
+  address 	= {Dordrecht},
+  year 		= {1999},
+  pages 	= {22--36},
+}
+%% incollection supports these fields:  author, year, title, booktitle, edition, editor, series,  
+%%										volume OR number, publisher, address, type, chapter, 
+%%										pages, doi, note, eprint with archive, url, urldate.
+%%
+%% type = { }, changes default "Chap." to something else.
+
+@inproceedings{wions2005,
+  author 	= {Thomas Wions and Christopher D. Mills}, 
+  title 	= {Structural Dynamics in Parallel Manipulation},
+  booktitle = {Proceedings of the ASME IDETC/CIE},
+  number 	= {DETC2005-99532},
+  venue 	= {New Orleans, LA},
+  eventdate = {September 10--13},
+  year 		= {2005},
+  pages 	= {777--798},
+  doi 		= {10.1115/1.4042912},
+  url 		= {https://doi.org/10.1115/1.4042912},
+}
+%% inproceedings supports these fields: author, year, title, booktitle, edition, editor, volume, 
+%%										organization OR publisher, address, venue, eventdate, 
+%%										[paper] number, pages, doi, note, eprint with archive, url, urldate. 
+%%
+%% Note that venue and eventdate are specific to the asmeconf.bst style.
+%% There's actually no need to give the URL if it is simply the DOI because the DOI itself will be hyperlinked.
+%% ASME requests that the URL point to the abstract.
+
+@phdthesis{smith2002,
+  author 	= {Robert Smith},
+  title 	= {Conformal Lubricated Contact of Cylindrical Surfaces Involved in a Non-Steady Motion},
+  school 	= {Rochester Institute of Technology},
+  address 	= {Rochester, NY},
+  year 		= {2002},
+  doi 		= {10.1115/1.4042912},
+  url 		= {https://doi.org/10.1115/1.4042912},
+}
+%% phdthesis supports these fields: author, title, school, address, year,  type, note.
+%% 									doi, eprint with archive, url, urldate, urltype
+%%
+%% type = {Sc{D} {T}hesis}, could be added to change the type of thesis. 
+%% There's really no need to give the URL if it is simply the DOI; the DOI itself will be hyperlinked. 
+%% ASME requests that the URL point to the abstract.
+
+@mastersthesis{smith1998,
+  author 	= {Robert Smith},
+  title 	= {Conformal Lubricated Contact of Cylindrical Surfaces Involved in a Steady Motion},
+  school 	= {Rochester Institute of Technology},
+  address 	= {Rochester, NY},
+  year 		= {1998},
+}
+%% mastersthesis supports these fields: author, title, school, address, year,  type, note,
+%% 										doi, eprint with archive, url, urldate, urltype
+%%
+%% type={} can optionally be used to change the type of thesis, as in next example. Default is "Master's thesis". 
+%% ASME requests that the URL point to the abstract.
+
+@mastersthesis{smith1996,
+  author 	= {Robert Smith},
+  title 	= {Cylindrical Surfaces Involved in a Steady Motion},
+  type 		= {{BS} {T}hesis},
+  school 	= {Rochester Institute of Technology},
+  address 	= {Rochester, NY},
+  year 		= {1996},
+}
+%% To get a bachelor's thesis, use type = {} as above.
+
+@techreport{watson1982,
+  author 	= {David Watson},
+  title 	= {Evaporative Heat Transfer in the Contact Line of a Mixture},
+  institution = {Iowa State University},
+  address 	= {Ames, IA},
+  number 	= {HTL-26, CFD-4}, 
+  year 		= {1982},
+  doi 		= {10.1115/1.4042912},
+  url 		= {https://doi.org/10.1115/1.4042912},
+}
+%% techreport supports the fields: 	author, title, number, institution, address, year, doi, url, 
+%%									eprint with archive, note. 
+%%
+%% if type = is omitted, it will default to "Tech. Rep." See the example below for changing this.
+
+@techreport{reynolds58,
+  author 	= {William C. Reynolds and William M. Kays and Stephen J. Kline},
+  title 	= {Heat Transfer in the Incompressible Turbulent Boundary Layer. {I}--{C}onstant Wall Temperature},
+  type 		= {Memorandum},
+  institution = {NASA},
+  address 	= {Washington, DC},
+  number 	= {12-1-58W},
+  year 		= {1958},
+  eprint	= {2060/19980228020},
+  archive 	= hdl,
+}
+% if type = is omitted, it will default to "Tech. Rep."
+
+@incollection{DKE70,
+  author    = {Donald K. Edwards},
+  title 	= {Thermal Radiation Measurements},
+  editor    = {Ernst R. G. Eckert and Richard J. Goldstein},
+  booktitle = {Measurement Techniques in Heat Transfer}, 
+  chapter   = {9},
+  pages     = {353--396},
+  volume 	= {130},
+  series	= {{AGARD}ograph},
+  publisher = {Technivision Services},
+  address   = {Slough, England},
+  year	 	= {1970},
+  note 		= {Published by the Advisory Group for Aerospace Research and Development of {NATO}},
+}
+%% If you need to change "Chap." to something else, use for example:  type = {{C}hapter},
+%% It's very uncommon to have the "series" field as above.
+
+@article{lienhard2020,
+    author = {Lienhard, John H.},
+    title = {Heat Transfer in Flat-Plate Boundary Layers: A Correlation for Laminar, Transitional, and Turbulent Flow},
+    journal = jht,
+    volume = {142},
+    number = {6},
+    eid = {061805},
+    year = {2020},
+    month = jun,
+    doi = {10.1115/1.4046795},
+}
+%% Note eid field rather than page numbers.  Will not produce "pp." before the eid number.
+%% May include numpages = {} to get "eid (numpages pages)"
+%% Note use of jht macro for title title (produces "ASME J. Heat Transfer"). All ASME journals have macros.
+
+@article{lienhard2019,
+    author = {Lienhard, John H.},
+    title = {Linearization of Nongray Radiation Exchange: The Internal Fractional Function Reconsidered},
+    journal = jht,
+    volume = {141},
+    number = {5},
+    eid = {052701},
+    year = {2019},
+    month = mar,
+    doi = {10.1115/1.4042158},
+}
+%% note use of: eid in place of pages, and use of jhmt macro for the journal name
+
+@online{bezos2025,
+  author 	= {Javier Bezos and Johannes L. Braams},
+  title 	= {{\texttt{babel}}: Localization and internationalization},
+  organization = {Comprehensive \TeX\ Archive Network},
+  version	= {25.25},
+  year 		= {2025},
+  url 		= {https://ctan.org/pkg/babel},
+  urldate 	= {March 14, 2025},
+}      
+%% online supports these fields: author OR editor, year, title, version, versiontype, organization, address, 
+%%                               note, url OR eprint with archive, urldate, urltype
+%% You can change "Accessed" with "urltype", e.g., urltype = {retrieved},
+%% You can change "Version" with "versiontype, e.g., versiontype = {Release},
+
+@online{lienhard2025,
+  author 	= {Lienhard, John H.},
+  title 	= {Example of {\LuaLaTeX} with {\texttt{asmeconf.cls}} for {ODE} integration},
+  version	= {1.02},
+  organization = {Comprehensive \TeX\ Archive Network},
+  year 		= {2025},
+  url		= {https://www.ctan.org/pkg/asmeconf},
+  urldate 	= {March 16, 2025},
+}    
+
+@online{lienhard2021,
+  author 	= {Lienhard, John H.},
+  title 	= {Language Support in {\texttt{asmeconf}}: non-latin alphabets, {\LuaLaTeX}, and {\texttt{fontspec}}},
+  version	= {1.2},
+  organization = {Comprehensive \TeX\ Archive Network},
+  year 		= {2025},
+  url		= {https://www.ctan.org/pkg/asmeconf},
+  urldate 	= {March 16, 2025},
+}    
+
+@article{pohlhausen1921,
+  author 	= {Pohlhausen, E.},
+  title 	= {Der {W}\"{a}rmeaustausch zwischen festen K\"{o}rpern und {F}l\"{u}ssigkeiten mit kleiner reibung und kleiner {W}\"{a}rmeleitung},
+  journal 	= {Zeitschrift f\"{u}r {A}ngewandte {M}athematik und {Me}chanik},
+  volume 	= {1},
+  number 	= {2},
+  pages 	= {115--121},
+  doi 		= {10.1002/zamm.19210010205},
+  year 		= {1921},
+}
+%url = {https://onlinelibrary.wiley.com/doi/abs/10.1002/zamm.19210010205},
+
+@book{fourier1822,
+  author  	= {Jean Baptiste Joseph Fourier},
+  year		= {1822},
+  title		= {Th\'{e}orie Analytique de la Chaleur},
+  publisher = {Firmin Didot, P\`{e}re et Fils},
+  address	= {Paris},
+  url		= {https://books.google.com/books?id=1TUVAAAAQAAJ},
+}
+%%	English translation is here:
+%%  url	= {https://archive.org/details/analyticaltheory00fourrich},
+                     
+@BOOK{johnson1980,
+  editor 	= {Howard Johnson},
+  title 	= {Title of Edited Book},
+  publisher = {John Wiley and Sons, Inc.},
+  address 	= {New York, NY},
+  year 		= {1980},
+}
+%% edited book
+
+@proceedings{proceedings,
+  title		= {The Title of the Proceedings},
+  year		= 2015,
+  editor	= {Al Yankovich and Howard Stern},
+  volume	= {15},
+  organization = {Organization},
+  venue		= {Boston, MA},
+  eventdate	= {April 27--28},
+  url		= {http://web.mit.edu},
+  note		= {Optional note},
+}
+%% proceedings supports these fields: author OR editor, year, title, edition, editor, 
+%%                                    series, volume OR number, organization, publisher, 
+%%                                    address [of organization or publisher], venue, eventdate,
+%%                                    doi, url, eprint with archive.
+%%
+%% The organization will appear as author/editor if those fields are both empty.
+%% In most instances, the publisher is the organization so only one of these two fields should be used
+
+@misc{govindan2017,
+  author 	= {Prakash Narayan Govindan and Steven Lam and Maximus G. {St. John}},
+  title 	= {Systems Including a Condensing Apparatus Such As a Bubble Column Condenser}, 
+  howpublished = {US Patent {\#}9700811},
+  year 		= {2017},
+  url		= {https://patents.google.com/patent/US9700811B2},
+}
+%% US Patent 
+
+@misc{Fong2015,
+  title 	= {Analytical Methods for Squaring the Disc},
+  author 	= {Chamberlain Fong},
+  howpublished = {{\itshape ArXiv e-prints}},
+  year 		= {2015},
+  eprint 	= {1509.06344},
+  archive	= arxiv,
+}
+%%  eprint + arxiv produces the same result as: url = {https://arxiv.org/abs/1509.06344v3},
+
+@manual{GSL,
+  title		= {{GNU} Scientific Library},
+  author 	= {Mark Galassi 
+	and Jim Davies
+	and James Theiler
+	and Brian Gough
+	and Gerard Jungman
+	and Patrick Alken
+	and Michael Booth
+	and Fabrice Rossi
+	and Rhys Ulerich},
+	version = {2.7},
+	versiontype = {Release},
+  organization = {Free Software Foundation},
+  address 	= {Boston, MA},
+  year 		= 2021,
+  url 		= {https://www.gnu.org/software/gsl/},
+}
+%% manual supports these fields: 	author, year, title, edition, organization, address, 
+%%									doi, eprint with archive, urldate, url, version, versiontype, note.
+%% You can change "Accessed" with "urltype", e.g., urltype = {retrieved},
+%% You can change "Version" with "versiontype, e.g., versiontype = {Release},
+
+
+@online{amsmath,
+  author 	= {{American Mathematical Society} and {\LaTeX{}3 Project}},
+  title 	= {User's Guide for the \textsf{amsmath} Package},
+  version	= {2.17t},
+  organization = {Comprehensive \TeX\ Archive Network},
+  year 		= {2024},
+  url 		= {https://ctan.org/tex-archive/macros/latex/required/amsmath/amsldoc.pdf},
+  urldate 	= {March 14, 2025},
+}
+
+@online{lienhard2022,
+  author 	= {Lienhard, John H.},
+  title 	= {Wide Equations in {\texttt{asmeconf.cls}}},
+  version	= {1.11},
+  organization = {Comprehensive \TeX\ Archive Network},
+  year 		= {2025},
+  url		= {https://www.ctan.org/pkg/asmeconf},
+  urldate 	= {March 16, 2025},
+}    
+
+@online{sharpe1,
+  author 	= {Michael Sharpe},
+  title 	= {New {TX} Font Package},
+  version	= {1.640},
+  organization = {Comprehensive \TeX\ Archive Network},
+  year 		= {2020},
+  url 		= {https://ctan.org/pkg/newtx},
+  urldate 	= {January 4, 2021},
+}
+
+@online{sharpe2,
+  author 	= {Michael Sharpe},
+  title 	= {The \textsf{mathalpha}, {AKA} \textsf{mathalfa} Package},
+  version	= {1.145},
+  organization = {Comprehensive \TeX\ Archive Network},
+  year 		= {2025},
+  url 		= {https://ctan.org/pkg/mathalpha},
+  urldate 	= {March 9, 2025},
+}
+
+@online{robertson2023,
+  author 	= {Will Robertson},
+  title 	= {Experimental Unicode mathematical typesetting: The \textsf{unicode-math} package},
+  version	= {0.8r},
+  organization = {Comprehensive \TeX\ Archive Network},
+  year 		= {2023},
+  url 		= {https://ctan.org/pkg/unicode-math},
+  urldate 	= {March 9, 2025},
+}
+
+@online{tolusis,
+  author 	= {Sigitas Tolu{\v{s}}is},
+  title 	= {The \textsf{flushend} Package},
+  version	= {4.0},
+  organization = {Comprehensive \TeX\ Archive Network},
+  year 		= {2021},
+  url		= {https://www.ctan.org/pkg/flushend},
+  urldate 	= {March 14, 2025},
+}
+
+@online{bottcher,
+  author 	= {Stephan I. B{\"o}ttcher and Uwe L{\"u}ck and Karl Wette},
+  title 	= {\textsf{lineno.sty}: A {\LaTeX} Package to Attach Line Numbers to Paragraphs},
+  version	= {5.4},
+  organization = {Comprehensive \TeX\ Archive Network},
+  year 		= {2025},
+  url 		= {https://www.ctan.org/pkg/lineno},
+  urldate 	= {March 14, 2025},
+}
+
+@online{oostrum,
+  author 	= {Piet van Oostrum},
+  title 	= {The \textsf{fancyhdr} and \textsf{extramarks} Packages},
+  version	= {5.2},
+  organization = {Comprehensive \TeX\ Archive Network},
+  year 		= {2025},
+  url 		= {https://www.ctan.org/pkg/fancyhdr},
+  urldate 	= {March 14, 2025},
+}                           
+
+@online{fairbairns,
+  author 	= {Robin Fairbairns and Sebastian Rahtz and Leonor Barroca},
+  title 	= {A Package for Rotated Objects in \LaTeX},
+  version	= {2.16d},
+  organization = {Comprehensive \TeX\ Archive Network},
+  year 		= {2016},
+  url 		= {https://www.ctan.org/pkg/rotating},
+  urldate 	= {October 2, 2019},
+}      
+
+@online{mpl,
+  title		= {mpl colormaps},
+  author	= {St{\'e}fan {van der Walt} and Nathaniel Smith},
+  organization = {GitHub},
+  address 	= {San Francisco, CA},
+  year 		= 2015,
+  url 		= {http://bids.github.io/colormap/},
+  urldate 	= {August 26, 2018},
+}
+
+@inbook{inbook,
+  author 	= {Winston S. Churchill},
+  year 		= {1948},
+  title 	= {The Gathering Storm},
+  edition 	= {1},
+  series 	= {The Second World War},
+  volume 	= {1},
+  chapter	= {5},
+  pages 	= {66--89},
+  publisher = {Houghton Mifflin Co.},
+  address 	= {Boston},
+  note 		= {{``The Locust Years''}},
+}
+%% inbook supports these fields: 	author OR editor, year, title, edition, series, 
+%%									volume OR number, doi, url, eprint with archive, publisher, 
+%%									address, version, versiontype, note. 
+%%
+%% type={} field changes "Chap." to something else.
+%% You can change "Version" with "versiontype, e.g., versiontype = {Release},
+
+
+@BOOK{book,
+  author 	= {James Tiberius Kirk},
+  year 		= {2288},
+  title 	= {Decline and Fall of the Romulan Empire},
+  edition 	= {7},
+  series 	= {Humankind's Greatest Writings},
+  volume 	= {23},
+  url 		= {http://web.mit.edu},
+  publisher = {Vulcan Free Press},
+  address 	= {T'Paal},
+  note = {to appear},
+}
+
+% not currently citing this one
+  author 	= {G\"{u}nter Milde},
+  title 	= {{\texttt{substitutefont}}---Easy font substitution},
+  version	= {0.1.4},
+  organization = {Comprehensive \TeX\ Archive Network},
+  year 		= {2013},
+  url 		= {https://www.ctan.org/pkg/substitutefont},
+  urldate 	= {December 9, 2020},
+     

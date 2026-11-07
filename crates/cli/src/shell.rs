@@ -143,6 +143,24 @@ fn tree(root: &Path) -> (Vec<String>, Vec<PathBuf>) {
     (files, dirs)
 }
 
+/// Why the shell did not run the command at all: its own 127 (not
+/// found) and 126 (found but not runnable), its message the why; any
+/// other status is the command's own, which says its errors (empty).
+fn shell_why(status: i32, stderr: &[u8]) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    match std::process::ExitStatus::from_raw(status).code() {
+        Some(c @ (126 | 127)) => {
+            let said = String::from_utf8_lossy(stderr);
+            let said = said.lines().rev().find(|l| !l.trim().is_empty());
+            said.map_or_else(
+                || format!("the shell could not run it (status {c})"),
+                |l| l.trim().to_owned(),
+            )
+        }
+        _ => String::new(),
+    }
+}
+
 /// A name the engine hands that stays inside the scratch directory.
 fn inside(name: &str) -> bool {
     let p = Path::new(name);
@@ -161,12 +179,14 @@ impl ShellHook for ProcessHook {
         use std::os::unix::process::ExitStatusExt;
         let track = atime_moves();
         let dir = scratch();
-        let fail = |status| ShellRan {
-            status,
+        // (not run at all: `system`'s 127, and why, which the engine says)
+        let fail = |why: String| ShellRan {
+            status: 127 << 8,
+            why,
             ..ShellRan::default()
         };
-        if std::fs::create_dir_all(&dir).is_err() {
-            return fail(127 << 8);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return fail(format!("its working directory could not be made: {e}"));
         }
         let given: Vec<&(String, Arc<[u8]>)> = files.iter().filter(|(n, _)| inside(n)).collect();
         for (n, b) in &given {
@@ -192,13 +212,21 @@ impl ShellHook for ProcessHook {
             .arg(command)
             .current_dir(&dir)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         for (k, v) in &self.env {
             cmd.env(k, v);
         }
         // (`system`'s status: the shell's own 127 when it cannot start)
-        let status = cmd.status().map_or(127 << 8, ExitStatusExt::into_raw);
+        // (and its standard output, which a piped input reads)
+        let (status, stdout, stderr) = match cmd.output() {
+            Ok(o) => (o.status.into_raw(), o.stdout, o.stderr),
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                return fail(format!("/bin/sh could not start: {e}"));
+            }
+        };
+        let why = shell_why(status, &stderr);
         // (what it read, before this reads anything back: a directory
         // listed, all of it)
         let read = if track && !dirs.iter().any(|d| d.is_dir() && was_read(d)) {
@@ -249,6 +277,8 @@ impl ShellHook for ProcessHook {
             wrote,
             removed,
             read,
+            stdout,
+            why,
         }
     }
 }
@@ -285,6 +315,15 @@ mod tests {
         if let Some(read) = &r.read {
             assert_eq!(read, &vec!["a.txt".to_owned()]);
         }
-        assert_eq!(h.run("exit 3", &files).status, 3 << 8);
+        let r = h.run("exit 3", &files);
+        assert_eq!((r.status, r.why.as_str()), (3 << 8, ""));
+        // (a program not found never ran: the shell's 127, its message the why)
+        let r = h.run("phitex-no-such-program-here 'x'", &files);
+        assert_eq!(r.status, 127 << 8);
+        assert!(
+            r.why.contains("phitex-no-such-program-here") && r.why.contains("not found"),
+            "{:?}",
+            r.why
+        );
     }
 }

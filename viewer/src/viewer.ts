@@ -4,6 +4,7 @@
 // core). The page most in view is the one an edit paints first.
 
 import type { Link, PageImage } from "./types.ts";
+import { LAYER_LINES } from "./text.ts";
 
 export interface ViewerHost {
   /** Draw page `k` (the viewer wants it: in view, and not drawn at its hash). */
@@ -112,6 +113,18 @@ export class Viewer {
         host.selected?.(sel2);
       }, 0);
     root.addEventListener("pointerup", pick);
+    // (the selection drawn as pdf.js draws it: one block a line, from its
+    // first character's left edge to its last's right, the line's height,
+    // word spaces and kerns included; the browser's own box a glyph made
+    // it striped. What is copied is the text layer's, as before)
+    let drawing = 0;
+    root.ownerDocument.addEventListener("selectionchange", () => {
+      if (drawing) return;
+      drawing = requestAnimationFrame(() => {
+        drawing = 0;
+        this.drawSelection();
+      });
+    });
     // (while a drag selects: told as it goes, at most once a frame, not only when the button is let go)
     let dragFrame = 0;
     root.addEventListener("pointerdown", () => (told = ""));
@@ -156,9 +169,12 @@ export class Viewer {
       }
       this.goToPlace(to, hit[5] ?? null);
     });
+    // (over a link, the hand: a class on its page, which print.ts makes win
+    // over the text layer's own text cursor; a link is nearly always text,
+    // so a cursor set on the page alone never showed)
     root.addEventListener("mousemove", (e) => {
       const el = (e.target as Element).closest<HTMLElement>(".slot");
-      if (el) el.style.cursor = this.linkAt(e) ? "pointer" : "";
+      if (el) el.classList.toggle("on-link", !!this.linkAt(e));
     });
   }
 
@@ -211,6 +227,45 @@ export class Viewer {
     if (first && !seen) this.scroller.scrollTo({ top: first.offsetTop + first.parentElement!.offsetTop - this.scroller.clientHeight / 3, behavior: "auto" });
   }
 
+  /** The text selected on the pages, as blocks a line (`.mark.seltext`), the old ones gone. */
+  private drawSelection(): void {
+    for (const m of this.root.querySelectorAll(".seltext")) m.remove();
+    const rn = this.root.getRootNode() as ShadowRoot & { getSelection?: () => Selection | null };
+    const sel = rn.getSelection?.() ?? this.root.ownerDocument.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return;
+    const { w, h } = this.size;
+    for (let i = 0; i < sel.rangeCount; i++) {
+      const r = sel.getRangeAt(i);
+      for (const s of this.slots) {
+        if (!r.intersectsNode(s.el)) continue;
+        for (const t of s.el.querySelectorAll("text")) {
+          const l = LAYER_LINES.get(t);
+          if (!l || !l.text || !r.intersectsNode(t)) continue;
+          const node = t.firstChild;
+          const from = node && r.startContainer === node ? r.startOffset : 0;
+          const to = node && r.endContainer === node ? r.endOffset : l.text.length;
+          if (to <= from) continue;
+          const x0 = l.xs?.[from] ?? l.x, x1 = l.rs?.[to - 1] ?? l.x + l.w;
+          const m = document.createElement("div");
+          m.className = "mark seltext";
+          const top = l.y - l.size * 0.8, ht = l.size * 1.05;
+          Object.assign(m.style, { left: `${(x0 / w) * 100}%`, top: `${(top / h) * 100}%`, width: `${((x1 - x0) / w) * 100}%`, height: `${(ht / h) * 100}%` });
+          s.el.append(m);
+        }
+      }
+    }
+  }
+
+  /** Esc: the highlights gone (the editor's selection and cursor's word, a double-click's place, find's matches) and the text selected on the pages; whether there were any. */
+  unmark(): boolean {
+    const ms = this.root.querySelectorAll(".mark");
+    const sel = this.root.ownerDocument.getSelection();
+    const had = ms.length > 0 || (!!sel && !sel.isCollapsed && this.root.contains(sel.anchorNode));
+    for (const m of ms) m.remove();
+    if (had) sel?.removeAllRanges();
+    return had;
+  }
+
   /**
    * Collaborators' cursors: each its word's `boxes` on page `k` tinted in
    * its `hue`, its `label` above the first box; the whole set, the last
@@ -236,6 +291,8 @@ export class Viewer {
       tag.className = "peer peer-tag";
       tag.style.setProperty("--hue", String(hue));
       tag.textContent = label;
+      // (its size the line's, as a part of the page's width: it zooms with the page, CSS's cqw on .slot)
+      tag.style.setProperty("--fs", String((boxes[0][3] * 0.72) / w));
       at(tag, boxes[0][0], boxes[0][1]);
       s.el.append(tag);
     }
@@ -247,12 +304,68 @@ export class Viewer {
    * set, the last one's replaced ([] clears). Never scrolls, never asks
    * for a page: a page not drawn yet shows them when it is (paint keeps them).
    */
-  culprits(marks: { k: number; boxes: [number, number, number, number][]; severity: "error" | "warning"; i?: number }[]): void {
+  /**
+   * Where places on the pages are along the whole scroll, as fractions
+   * (0 the top of the first page, 1 the end of the last): the scrollbar's
+   * marks (panel.ts). `y` in PDF points from the page's top.
+   */
+  fractions(places: { k: number; y: number }[]): number[] {
+    const total = this.scroller.scrollHeight || 1;
+    return places.map(({ k, y }) => {
+      const s = this.slots[k];
+      if (!s) return -1;
+      return (s.el.offsetTop + (y / this.size.h) * s.el.offsetHeight) / total;
+    });
+  }
+
+  /** Scroll so page `k`'s place `y` (PDF points from its top) is a third down the view. */
+  scrollToPlace(k: number, y: number): void {
+    const s = this.slots[k];
+    if (!s) return;
+    this.scroller.scrollTo({ top: s.el.offsetTop + (y / this.size.h) * s.el.offsetHeight - this.scroller.clientHeight / 3 });
+  }
+
+  /** The culprits drawn last (a page painted later draws its bars again). */
+  private culpritMarks: Parameters<Viewer["culprits"]>[0] = [];
+
+  culprits(marks: { k: number; boxes: [number, number, number, number][]; severity: "error" | "warning"; i?: number; rule?: "overfull" | "underfull"; amount?: number }[]): void {
+    this.culpritMarks = marks;
     for (const m of this.root.querySelectorAll(".culprit")) m.remove();
     const { w, h } = this.size;
-    for (const { k, boxes, severity, i } of marks) {
+    for (const { k, boxes, severity, i, rule, amount } of marks) {
       const s = this.slots[k];
       if (!s) continue;
+      // (an overfull or underfull box: a bar at the end of its line, as
+      // pdflatex's draft \overfullrule; drawn here only, never in the PDF)
+      if (rule && boxes.length) {
+        const [x, y, bw, bh] = boxes[0];
+        const lines = [...s.el.querySelectorAll("text")]
+          .map((t) => LAYER_LINES.get(t))
+          .filter((l): l is NonNullable<typeof l> => !!l && !!l.text)
+          .sort((a, b) => a.y - b.y);
+        const right = (l: (typeof lines)[number]) => l.rs?.[l.rs.length - 1] ?? l.x + l.w;
+        // (the problem's place is its paragraph's: its line, and the lines
+        // after it as close as a paragraph's; an overfull one is the line
+        // that ends `amount` past where the others end)
+        let at = lines.findIndex((l) => l.y >= y && l.y - l.size <= y + bh);
+        let line = at >= 0 ? lines[at] : undefined;
+        if (line && amount) {
+          const par = [line];
+          for (let j = at + 1; j < lines.length && lines[j].y - lines[j - 1].y <= lines[j].size * 1.6; j++) par.push(lines[j]);
+          const ends = par.map(right).sort((a, b) => a - b);
+          const just = ends[ends.length >> 1];
+          line = par.reduce((best, l) => (Math.abs(right(l) - just - amount) < Math.abs(right(best) - just - amount) ? l : best), line);
+        }
+        const end = line ? right(line) : x + bw;
+        const top = line ? line.y - line.size * 0.75 : y;
+        const ht = line ? line.size * 0.95 : bh;
+        const m = document.createElement("div");
+        m.className = `culprit rule ${rule}`;
+        if (i !== undefined) m.dataset.i = String(i);
+        Object.assign(m.style, { left: `${((end + 1.5) / w) * 100}%`, top: `${(top / h) * 100}%`, width: `${(5 / w) * 100}%`, height: `${(ht / h) * 100}%` });
+        s.el.append(m);
+        continue;
+      }
       for (const [x, y, bw, bh] of boxes) {
         const m = document.createElement("div");
         m.className = `culprit ${severity}`;
@@ -454,6 +567,8 @@ export class Viewer {
     // read after each page's writes laid the view out again for each)
     const boxes = painted.map((s) => s.el.getBoundingClientRect());
     painted.forEach((s, i) => this.snap(s, boxes[i]));
+    // (a box's bar placed by its line's text: drawn again once the page's text is there)
+    if (this.culpritMarks.some((m) => m.rule && painted.some((s) => Number(s.el.dataset.k) === m.k))) this.culprits(this.culpritMarks);
     if (this.toPaint.size) this.paintFrame = requestAnimationFrame(() => this.paintSome());
   }
 

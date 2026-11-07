@@ -1,0 +1,54 @@
+% The research corpus (ci/research.json): a chemistry or biology paper's
+% usual packages: mhchem, chemfig, siunitx, booktabs, natbib.
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[version=4]{mhchem}
+\usepackage{chemfig}
+\usepackage{siunitx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage[numbers,super]{natbib}
+\usepackage{hyperref}
+\title{Esterification Kinetics of Acetic Acid}
+\author{F. Chemist \and G. Biologist}
+\date{}
+\begin{document}
+\maketitle
+\section{Introduction}
+The chemical bond\cite{pauling1931} and the double helix\cite{watson1953}
+need no introduction; kinetics follows the textbook\cite{atkins2018}.
+\section{Reactions}
+Fischer esterification:
+\begin{center}
+\ce{CH3COOH + C2H5OH <=>[\ce{H2SO4}] CH3COOC2H5 + H2O}
+\end{center}
+Combustion of methane, \ce{CH4 + 2 O2 -> CO2 + 2 H2O}, releases
+\SI{-890.3}{\kilo\joule\per\mole}; the sulfate ion is \ce{SO4^2-}, heavy
+water \ce{D2O}, and the isotope \ce{^{14}_{6}C} decays by
+\ce{^{14}_{6}C -> ^{14}_{7}N + e- + \bar{\nu}_e}.
+\section{Structures}
+\begin{center}
+\chemfig{*6((-OH)=-=-=-)} \qquad
+\chemfig{H_3C-C(=[1]O)-[7]O-CH_2-CH_3} \qquad
+\chemfig{[:30]*6(-=-(-NH_2)=-=)}
+\end{center}
+\section{Results}
+\begin{table}[h]
+\centering
+\caption{Rate constants at three temperatures.}
+\begin{tabular}{S[table-format=3.0] S[table-format=1.2e-1] S[table-format=2.1]}
+\toprule
+{$T$ (\si{\kelvin})} & {$k$ (\si{\liter\per\mole\per\second})} & {Yield (\si{\percent})} \\
+\midrule
+298 & 1.20e-4 & 62.5 \\
+323 & 5.80e-4 & 71.3 \\
+348 & 2.10e-3 & 78.9 \\
+\bottomrule
+\end{tabular}
+\end{table}
+The Arrhenius equation $k = A\,\mathrm{e}^{-E_a/RT}$ gives
+$E_a = \SI{52.4 \pm 1.3}{\kilo\joule\per\mole}$.
+\bibliographystyle{unsrtnat}
+\bibliography{chem}
+\end{document}

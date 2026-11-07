@@ -45,6 +45,9 @@ pub struct Document {
     output: Option<(&'static str, Arc<Vec<u8>>)>,
     /// Whether the last build's origins are still to be made.
     origins_due: bool,
+    /// Whether the last build's diagnostics are still to be made
+    /// ([`crate::session::Report::diagnostics_pending`]).
+    diagnostics_due: bool,
     /// The language server attached ([`Document::lsp`]): told each
     /// build's start, progress and end.
     lsp: Lsp,
@@ -182,6 +185,7 @@ impl Document {
             builds: 0,
             output: None,
             origins_due: false,
+            diagnostics_due: false,
             lsp,
         }
     }
@@ -274,6 +278,9 @@ impl Document {
                     again = true;
                 }
                 Applied::Rebuild => {
+                    // (every file read again: what the host gave since, a
+                    // figure replaced in Overleaf, is what this build reads)
+                    self.session.reread_all();
                     why.push("asked in the viewer".to_owned());
                     asked = true;
                     again = true;
@@ -292,12 +299,41 @@ impl Document {
         }
         if again {
             self.build(&why.join(", "), came);
-        }
-        // (nothing waits: the origins the last build changed, made now)
-        if self.origins_due && !self.viewer.has_asks() {
+        } else if self.origins_due && !self.viewer.has_asks() {
+            // (nothing waits: the origins the last build changed, made
+            // now, in a step of their own: a host that answers its
+            // requests between steps, the single-threaded core, answers
+            // the pages asked after the build before them, not after
+            // them, Grail's 21 ms a keystroke)
             self.origins_now();
+        } else if self.diagnostics_due && !self.viewer.has_asks() {
+            // (then, in a step of their own, the diagnostics the build
+            // left for later: low priority, never on the typing path; an
+            // edit before them drops them, its build has its own)
+            self.diagnostics_now();
         }
         std::mem::take(&mut *lock(&self.events))
+    }
+
+    /// Whether work nobody waits for is left (the last build's origins):
+    /// [`Document::step`] does it when nothing is asked; a host that
+    /// steps the document steps it again, after what waits.
+    pub fn pending(&self) -> bool {
+        self.origins_due || self.diagnostics_due
+    }
+
+    /// The diagnostics the last build left for later, made and given to
+    /// the viewer and the language server; [`Document::step`] makes them
+    /// once no ask waits and the origins are made.
+    pub fn diagnostics_now(&mut self) {
+        if !std::mem::take(&mut self.diagnostics_due) {
+            return;
+        }
+        let d = crate::watch::late_diagnostics(&self.session, &self.session.diagnostics_now());
+        self.viewer.set_diagnostics(&d);
+        if let Some(l) = self.lsp_server() {
+            l.diagnostics(&d);
+        }
     }
 
     /// The pages' origins (glyph to source, SyncTeX's) of the last build,
@@ -306,9 +342,8 @@ impl Document {
     /// edits come) calls this.
     pub fn origins_now(&mut self) {
         self.origins_due = false;
-        let s = &self.session;
-        if let Some(o) = s.origins() {
-            self.viewer.set_origins(Some(o), s.origins_changed());
+        if let Some((o, changed)) = self.session.origins_update() {
+            self.viewer.set_origins(Some(o), Some(changed));
         }
     }
 
@@ -334,9 +369,9 @@ impl Document {
                     since_ms: None,
                     origins: None,
                     changed: None,
-                    diagnostics: vec![
-                        json!({"severity": "error", "code": "engine", "message": first}),
-                    ],
+                    diagnostics: Some(vec![
+                        json!({"severity": "error", "code": "engine", "kind": "error", "message": first}),
+                    ]),
                     parts: serde_json::Map::new(),
                 };
                 v.built(&failed);
@@ -354,7 +389,7 @@ impl Document {
             s.write(&r, true)
         };
         let main = written.as_ref().ok().and_then(|w| w.main.clone());
-        let pdf = viewer_pdf(s, &r, || {
+        let pdf = viewer_pdf(s, &r, None, || {
             main.as_deref().and_then(|p: &Path| s.host().read(p))
         });
         let mut errors = r.out.errors.clone();
@@ -389,9 +424,21 @@ impl Document {
             // typing path, `Document::origins_now`)
             origins: None,
             changed: None,
-            diagnostics: diagnostics(s, &r, &log),
+            // (an edit's at their places later, `Document::diagnostics_now`;
+            // its errors at once, the last warnings with them)
+            diagnostics: if !r.diagnostics_pending {
+                Some(diagnostics(s, &r, &log))
+            } else if r.out.errors.is_empty() {
+                None
+            } else {
+                Some(crate::watch::with_last_warnings(
+                    diagnostics(s, &r, &log),
+                    &v.diagnostics_items(),
+                ))
+            },
             parts: Built::parts_of(s, &r),
         };
+        self.diagnostics_due = r.diagnostics_pending;
         v.built(&built);
         if let Some(l) = &lsp {
             l.built(&built);
@@ -634,6 +681,204 @@ mod tests {
         assert_eq!(two.get(Key::Doc("wkeys")), None);
     }
 
+    /// Shelf's files as a host gives them (the frontends' wasm core, the
+    /// CLI's `--shelf`): found through the release's index, their packs
+    /// from memory, each pack asked recorded (by its name, the id without
+    /// its hash).
+    struct ShelfFiles {
+        files: Arc<phitex_shelf::Files>,
+        asked: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct Served(HashMap<String, Vec<u8>>, Arc<Mutex<Vec<String>>>);
+
+    impl phitex_shelf::PackSource for Served {
+        fn pack(&self, id: &str) -> Result<Vec<u8>, String> {
+            let stem = id.rsplit_once('-').map_or(id, |(s, _)| s);
+            lock(&self.1).push(stem.to_owned());
+            self.0
+                .get(id)
+                .cloned()
+                .ok_or_else(|| format!("no pack {id}"))
+        }
+    }
+
+    impl ShelfFiles {
+        fn new(release: (phitex_shelf::Index, HashMap<String, Vec<u8>>)) -> ShelfFiles {
+            let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+            let src = Arc::new(Served(release.1, asked.clone()));
+            ShelfFiles {
+                files: Arc::new(phitex_shelf::Files::new(Arc::new(release.0), src, "pdftex")),
+                asked,
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            let mut a = lock(&self.asked).clone();
+            a.sort();
+            a
+        }
+    }
+
+    impl Host for ShelfFiles {
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            self.files.locate(name).map(PathBuf::from)
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            self.files.read(&path.to_string_lossy()).map(|b| b.to_vec())
+        }
+        fn content_key(&self) -> Option<phitex_tex::ContentKey> {
+            let f = self.files.clone();
+            Some(Arc::new(move |name: &str| f.key(name)))
+        }
+        fn published_format(&self, name: &str) -> Option<Vec<u8>> {
+            self.files.published_format(name)
+        }
+    }
+
+    /// A store in memory that keeps formats, counting their puts.
+    #[derive(Default)]
+    struct Formats(Mutex<HashMap<String, ([u8; 32], Vec<u8>)>>, Mutex<usize>);
+
+    impl crate::host::Store for Formats {
+        fn get(&self, _key: crate::host::Key<'_>) -> Option<Vec<u8>> {
+            None
+        }
+        fn put(&self, _key: crate::host::Key<'_>, _bytes: &[u8]) {}
+        fn format(&self, name: &str) -> Option<([u8; 32], Vec<u8>)> {
+            lock(&self.0).get(name).cloned()
+        }
+        fn put_format(&self, name: &str, key: &[u8; 32], bytes: &[u8]) {
+            *lock(&self.1) += 1;
+            lock(&self.0).insert(name.to_owned(), (*key, bytes.to_vec()));
+        }
+    }
+
+    impl Formats {
+        fn only(&self) -> (String, [u8; 32], Vec<u8>) {
+            let f = lock(&self.0);
+            assert_eq!(f.len(), 1, "one format stored");
+            let (n, (k, b)) = f.iter().next().expect("a format");
+            (n.clone(), *k, b.clone())
+        }
+        fn puts(&self) -> usize {
+            *lock(&self.1)
+        }
+    }
+
+    /// A format is good while the files it read are: one made on a Shelf
+    /// release stays good on a later release that changed other files
+    /// and gave every pack another id, nothing fetched to say so (a
+    /// format keyed by pack ids was found stale and made again in the
+    /// browser, every hyphenation pack fetched); one whose file changed
+    /// is not, and is made again. A release's own format is taken when
+    /// the store has none, or a stale one: a download, not a build.
+    #[test]
+    fn a_format_holds_while_the_files_it_read_do() {
+        let ini: &[u8] = b"\\catcode`\\{=1 \\catcode`\\}=2 \\input hyph-de.tex \\dump\n";
+        let de = "tex/generic/hyph-utf8/patterns/hyph-de.tex";
+        let fr = "tex/generic/hyph-utf8/patterns/hyph-fr.tex";
+        let job = || Job {
+            engine: crate::tex::engine("tex").unwrap(),
+            ini: false,
+            etex: false,
+            ..job()
+        };
+        let text = "\\shipout\\hbox{\\pat}\\end\n";
+        let build = |host: &Arc<ShelfFiles>, store: &Arc<Formats>| {
+            let s = Session::new(
+                job(),
+                Arc::from(text),
+                host.clone(),
+                Some(store.clone() as Arc<dyn crate::host::Store>),
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            );
+            let mut d = Document::new(s, "doc.tex");
+            let ev = d.step();
+            let b = ev.iter().find(|e| e["event"] == "build").expect("a build");
+            assert_eq!(b["ok"], true, "{ev:?}");
+        };
+        let a: &[(&str, &[phitex_shelf::PackFile<'_>])] = &[
+            ("tex-ini", &[("tex/plain/config/tex.ini", ini)]),
+            (
+                "hyphen-german",
+                &[(de, b"\\def\\pat{1}"), (fr, b"\\def\\x{1}")],
+            ),
+        ];
+        let store = Arc::new(Formats::default());
+        let on_a = Arc::new(ShelfFiles::new(phitex_shelf::release("tl-test.1", a, &[])));
+        build(&on_a, &store);
+        assert_eq!(on_a.asked(), ["hyphen-german", "tex-ini"]);
+        let (_, made_a, _) = store.only();
+        // (B: another file of the pack changed, the ini's pack renamed:
+        // every pack id another, the format's files as they were)
+        let b: &[(&str, &[phitex_shelf::PackFile<'_>])] = &[
+            ("ini", &[("tex/plain/config/tex.ini", ini)]),
+            (
+                "hyphen-german",
+                &[(de, b"\\def\\pat{1}"), (fr, b"\\def\\x{2}")],
+            ),
+        ];
+        let on_b = Arc::new(ShelfFiles::new(phitex_shelf::release("tl-test.2", b, &[])));
+        build(&on_b, &store);
+        assert_eq!(
+            on_b.asked(),
+            Vec::<String>::new(),
+            "the format checked by fetching packs"
+        );
+        assert_eq!(store.puts(), 1, "the format made again");
+        // (C: the file the format read changed: made again, on it)
+        let c: &[(&str, &[phitex_shelf::PackFile<'_>])] = &[
+            ("ini", &[("tex/plain/config/tex.ini", ini)]),
+            (
+                "hyphen-german",
+                &[(de, b"\\def\\pat{3}"), (fr, b"\\def\\x{2}")],
+            ),
+        ];
+        let on_c = Arc::new(ShelfFiles::new(phitex_shelf::release("tl-test.3", c, &[])));
+        build(&on_c, &store);
+        let (name, made_c, _) = store.only();
+        assert_ne!(made_c, made_a, "a stale format kept");
+        assert_eq!(on_c.asked(), ["hyphen-german", "ini"]);
+        // (D: changed again, its format published: a fresh store and a
+        // stale one take it, neither making it nor reading its files)
+        let d: &[(&str, &[phitex_shelf::PackFile<'_>])] = &[
+            ("ini", &[("tex/plain/config/tex.ini", ini)]),
+            (
+                "hyphen-german",
+                &[(de, b"\\def\\pat{4}"), (fr, b"\\def\\x{2}")],
+            ),
+        ];
+        let made = Arc::new(Formats::default());
+        build(
+            &Arc::new(ShelfFiles::new(phitex_shelf::release("tl-test.4", d, &[]))),
+            &made,
+        );
+        let (made_name, made_d, state) = made.only();
+        assert_eq!(made_name, name);
+        let published =
+            || phitex_shelf::release("tl-test.4", d, &[(name.as_str(), state.as_slice())]);
+        let fresh = Arc::new(Formats::default());
+        let on_d = Arc::new(ShelfFiles::new(published()));
+        build(&on_d, &fresh);
+        assert_eq!(
+            on_d.asked(),
+            [format!("fmt-{name}")],
+            "the format made, not taken"
+        );
+        assert_eq!(fresh.only().1, made_d, "the published format kept");
+        let on_d = Arc::new(ShelfFiles::new(published()));
+        build(&on_d, &store);
+        // (the stale format's changed file fetched by its check, the ini's
+        // not: no build)
+        assert_eq!(
+            on_d.asked(),
+            [format!("fmt-{name}"), "hyphen-german".to_owned()]
+        );
+        assert_eq!(store.only().1, made_d);
+    }
+
     /// `n` pages, each fired by the page builder (the progress counts
     /// the pages its finishers reach, `phitex_tex::Progress::on_page`).
     fn pages(n: usize) -> String {
@@ -709,6 +954,109 @@ mod tests {
         assert_eq!(built["why"], "doc.tex (editor)", "{ev:?}");
         let p = d.request(&json!({"id": 8, "op": "pages"}));
         assert_eq!(p["json"]["pages"].as_array().map(Vec::len), Some(3), "{p}");
+    }
+
+    /// An edit's warnings at their places are made after its build, in a
+    /// step of their own once nothing is asked (never on the typing
+    /// path), and reach the viewer and the language server then; an
+    /// edit with an error has its diagnostics at once.
+    #[test]
+    fn an_edits_warnings_come_after_its_build() {
+        let doc = |boxes: usize, error: bool| {
+            let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 \\hsize=100pt \\vsize=100pt \\output={\\shipout\\box255} ".to_owned();
+            for _ in 0..boxes {
+                t.push_str("\\hbox to 10pt{\\vrule width 50pt}\n");
+            }
+            if error {
+                t.push_str("\\undefinedcs\n");
+            }
+            t.push_str("\\end\n");
+            t
+        };
+        let mut d = Document::new(
+            session(&doc(1, false), Arc::new(Memory::default())),
+            "doc.tex",
+        );
+        let sent: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let s = sent.clone();
+        let server = d.lsp(Box::new(move |v| lock(&s).push(v.clone())), None);
+        server.handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": "file:///p"}}));
+        server.handle(&json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}));
+        let warnings = |e: &Value| {
+            e["items"].as_array().map_or(0, |v| {
+                v.iter().filter(|d| d["severity"] == "warning").count()
+            })
+        };
+        let ev = d.step();
+        let cold = ev
+            .iter()
+            .find(|e| e["event"] == "diagnostics")
+            .expect("the cold build's");
+        assert_eq!(warnings(cold), 1, "{ev:?}");
+        while d.pending() {
+            d.step();
+        }
+        lock(&sent).clear();
+        d.request(&json!({"id": 2, "op": "set_file", "file": "doc.tex", "text": doc(3, false)}));
+        let ev = d.step();
+        assert!(ev.iter().any(|e| e["event"] == "build"), "{ev:?}");
+        assert!(
+            ev.iter().all(|e| e["event"] != "diagnostics"),
+            "not on the typing path: {ev:?}"
+        );
+        let status = lock(&sent)
+            .iter()
+            .rev()
+            .find(|m| m["method"] == "phitex/status")
+            .cloned();
+        assert_eq!(
+            status
+                .as_ref()
+                .map(|m| m["params"]["warnings_updating"].clone()),
+            Some(json!(true)),
+            "{status:?}"
+        );
+        assert!(d.pending());
+        let mut later = Vec::new();
+        while d.pending() {
+            later.extend(d.step());
+        }
+        let late = later
+            .iter()
+            .find(|e| e["event"] == "diagnostics")
+            .expect("made once idle");
+        assert_eq!(warnings(late), 3, "{later:?}");
+        let got = lock(&sent).clone();
+        let published = got
+            .iter()
+            .rev()
+            .find(|m| m["method"] == "textDocument/publishDiagnostics")
+            .expect("published");
+        assert_eq!(
+            published["params"]["diagnostics"].as_array().map(Vec::len),
+            Some(3),
+            "{published}"
+        );
+        let status = got
+            .iter()
+            .rev()
+            .find(|m| m["method"] == "phitex/status")
+            .expect("a status");
+        assert_eq!(status["params"]["warnings"], 3, "{status}");
+        assert_eq!(status["params"]["warnings_updating"], false, "{status}");
+        // (an error: at once, at its place)
+        d.request(&json!({"id": 3, "op": "set_file", "file": "doc.tex", "text": doc(1, true)}));
+        let ev = d.step();
+        let now = ev
+            .iter()
+            .find(|e| e["event"] == "diagnostics")
+            .expect("with the build");
+        assert!(
+            now["items"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|d| d["severity"] == "error" && d["line"] == 2)),
+            "{now}"
+        );
     }
 
     /// A document's language server (the wasm core's): told the cold
@@ -938,6 +1286,73 @@ mod tests {
             (path == Path::new("nomap10.tfm"))
                 .then(|| include_bytes!("../../../../oracle/fixtures/pdf/nomap10.tfm").to_vec())
         }
+    }
+
+    /// A viewer's PDF kept as update sections where no file is written
+    /// (`Session::view_layout`): an edit's file is the last one's bytes
+    /// and the objects that changed, and the file made exact when idle
+    /// is the one a build from nothing writes.
+    #[test]
+    fn a_viewers_file_is_updated_then_made_exact() {
+        let doc = |w: usize| {
+            let mut t =
+                "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\pdfcompresslevel=0\n".to_owned();
+            for k in 0..3 {
+                t.push_str(&format!(
+                    "\\shipout\\hbox{{\\vrule width {}pt height 5pt}}\n",
+                    10 + k + w
+                ));
+            }
+            t.push_str("\\end\n");
+            t
+        };
+        let session = |text: &str| {
+            Session::new(
+                Job {
+                    engine: crate::tex::engine("pdftex").unwrap(),
+                    ..job()
+                },
+                Arc::from(text),
+                Arc::new(Nothing),
+                None,
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            )
+        };
+        let mut s = session(&doc(0));
+        s.view_layout = true;
+        let mut vf = crate::watch::ViewFile::default();
+        let r = s.build();
+        assert!(r.out.layout.is_some(), "a layout, not bytes");
+        let first = crate::watch::viewer_pdf(&s, &r, Some(&mut vf), || None)
+            .unwrap()
+            .unwrap();
+        assert!(first.starts_with(b"%PDF"));
+        s.set_text(doc(7));
+        let r = s.build();
+        let second = crate::watch::viewer_pdf(&s, &r, Some(&mut vf), || None)
+            .unwrap()
+            .unwrap();
+        assert!(
+            second.len() > first.len() && second.starts_with(&first),
+            "an update section after the last bytes"
+        );
+        assert!(vf.to_compact().is_some());
+        let exact = vf.compact().unwrap().expect("not exact before");
+        assert!(vf.compact().unwrap().is_none(), "exact now");
+        let mut cold = session(&doc(7));
+        let r = cold.build();
+        assert_eq!(
+            &*exact,
+            r.out.pdf.as_slice(),
+            "the exact file a cold build writes"
+        );
+        // (the same build again: the same bytes, shared)
+        let r = s.build();
+        let again = crate::watch::viewer_pdf(&s, &r, Some(&mut vf), || None)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&again, &exact));
     }
 
     /// A font with no map entry: pdfTeX's fatal error at the end of the
