@@ -370,6 +370,118 @@ fn dpx_suffix(format: phitex_live::dvipdf::Format) -> &'static str {
 /// Shelf's, never TeX Live's.
 pub struct ShelfHost {
     pub files: Arc<Files>,
+    /// The search paths a `.latexmkrc` set (TEXINPUTS, BIBINPUTS,
+    /// BSTINPUTS), over the project's directory and Shelf's.
+    pub inputs: Arc<Inputs>,
+}
+
+/// A `.latexmkrc`'s search paths as folders on disk: each variable's
+/// folders in order (a `//` element's subfolders after it, by name),
+/// `None` where the default search goes (the project's directory, then
+/// Shelf). A variable not set: the default search alone.
+#[derive(Debug, Default)]
+pub struct Inputs {
+    tex: Option<Vec<Option<PathBuf>>>,
+    bib: Option<Vec<Option<PathBuf>>>,
+    bst: Option<Vec<Option<PathBuf>>>,
+}
+
+impl Inputs {
+    /// The folders of `vars` (a job's `inputs`).
+    pub fn of(vars: &[(String, String)]) -> Inputs {
+        let dirs = |var: &str| {
+            let v = vars.iter().find(|(k, _)| k == var)?;
+            let mut out = Vec::new();
+            for e in phitex_live::latexmkrc::elements(&v.1) {
+                match e {
+                    phitex_live::latexmkrc::Element::Default => out.push(None),
+                    phitex_live::latexmkrc::Element::Dir { path, sub } => {
+                        let p = expand_home(&path);
+                        if sub {
+                            subdirs(&p, &mut out, 0);
+                        } else {
+                            out.push(Some(p));
+                        }
+                    }
+                }
+            }
+            Some(out)
+        };
+        Inputs {
+            tex: dirs("TEXINPUTS"),
+            bib: dirs("BIBINPUTS"),
+            bst: dirs("BSTINPUTS"),
+        }
+    }
+}
+
+fn expand_home(p: &str) -> PathBuf {
+    match (p.strip_prefix('~'), std::env::var_os("HOME")) {
+        (Some(rest), Some(h)) => PathBuf::from(format!("{}{rest}", h.to_string_lossy())),
+        _ => PathBuf::from(p),
+    }
+}
+
+/// `dir` and its subfolders, depth first, each folder's by name (hidden
+/// ones left out, as kpathsea leaves them; at most 32 deep).
+fn subdirs(dir: &Path, out: &mut Vec<Option<PathBuf>>, depth: usize) {
+    if !dir.is_dir() {
+        return;
+    }
+    out.push(Some(dir.to_path_buf()));
+    if depth >= 32 {
+        return;
+    }
+    let mut subs: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.path())
+        .collect();
+    subs.sort();
+    for s in subs {
+        subdirs(&s, out, depth + 1);
+    }
+}
+
+/// `name` along `dirs` (none: the default search alone), `default` where
+/// its empty element is; an absolute name or one from `./` or `../` is
+/// not searched (kpathsea's rule).
+fn along<T>(
+    dirs: Option<&Vec<Option<PathBuf>>>,
+    name: &str,
+    found: impl Fn(PathBuf) -> Option<T>,
+    default: impl Fn() -> Option<T>,
+) -> Option<T> {
+    let Some(dirs) = dirs else {
+        return default();
+    };
+    if name.starts_with('/') || name.starts_with("./") || name.starts_with("../") {
+        return default();
+    }
+    dirs.iter().find_map(|d| match d {
+        Some(d) => project(&d.join(name).to_string_lossy()).and_then(&found),
+        None => default(),
+    })
+}
+
+impl ShelfHost {
+    /// The host on `files`, the job's search variables `vars` applied.
+    pub fn new(files: Arc<Files>, vars: &[(String, String)]) -> ShelfHost {
+        ShelfHost {
+            files,
+            inputs: Arc::new(Inputs::of(vars)),
+        }
+    }
+
+    fn plain(files: Arc<Files>) -> ShelfHost {
+        ShelfHost {
+            files,
+            inputs: Arc::default(),
+        }
+    }
 }
 
 /// The release's font index from `files` ([`FONT_INDEX`]), its relative
@@ -427,10 +539,12 @@ impl ShelfHost {
 
 impl Host for ShelfHost {
     fn locate(&self, name: &str) -> Option<PathBuf> {
-        project(name).or_else(|| {
-            self.files
-                .find_in(name, "tex")
-                .map(|(p, _)| PathBuf::from(p))
+        along(self.inputs.tex.as_ref(), name, Some, || {
+            project(name).or_else(|| {
+                self.files
+                    .find_in(name, "tex")
+                    .map(|(p, _)| PathBuf::from(p))
+            })
         })
     }
 
@@ -508,6 +622,7 @@ impl Host for ShelfHost {
 
     fn tool_finder(&self) -> Option<ToolFinder> {
         let f = self.files.clone();
+        let inputs = self.inputs.clone();
         Some(Arc::new(
             move |search: phitex_tex::ToolSearch, name: &str| {
                 let ext = match search {
@@ -518,7 +633,7 @@ impl Host for ShelfHost {
                     // Shelf serves them)
                     phitex_tex::ToolSearch::GsFont => {
                         return gs_font_path(name)
-                            .and_then(|p| ShelfHost { files: f.clone() }.find(&p));
+                            .and_then(|p| ShelfHost::plain(f.clone()).find(&p));
                     }
                     // (METAFONT's inputs and web2c's files, in their
                     // formats whatever the suffix: `mf.ini`, `cp227.tcx`)
@@ -539,7 +654,19 @@ impl Host for ShelfHost {
                 } else {
                     format!("{name}{ext}")
                 };
-                ShelfHost { files: f.clone() }.find(&name)
+                // (BIBINPUTS, BSTINPUTS: a `.latexmkrc`'s folders)
+                let dirs = match search {
+                    phitex_tex::ToolSearch::BibStyle => inputs.bst.as_ref(),
+                    phitex_tex::ToolSearch::BibData => inputs.bib.as_ref(),
+                    _ => None,
+                };
+                let read = |p: PathBuf| {
+                    let b = std::fs::read(&p).ok()?;
+                    Some((p.to_string_lossy().into_owned(), b))
+                };
+                along(dirs, &name, read, || {
+                    ShelfHost::plain(f.clone()).find(&name)
+                })
             },
         ))
     }
@@ -548,13 +675,16 @@ impl Host for ShelfHost {
     /// each in a scratch directory of its own, without TeX Live's
     /// variables (no kpathsea here).
     fn shell_hook(&self, job: &Job) -> Option<Arc<dyn phitex_tex::ShellHook>> {
-        Some(Arc::new(crate::shell::ProcessHook::new(
-            job.path
-                .parent()
-                .filter(|d| !d.as_os_str().is_empty())
-                .unwrap_or(Path::new(".")),
-            std::iter::empty(),
-        )))
+        Some(Arc::new(
+            crate::shell::ProcessHook::new(
+                job.path
+                    .parent()
+                    .filter(|d| !d.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+                std::iter::empty(),
+            )
+            .with_vars(&job.inputs),
+        ))
     }
 
     /// dvipdfmx's files: the project's (pictures), else Shelf's by name in
@@ -594,7 +724,7 @@ impl Host for ShelfHost {
                     // (Ghostscript's fonts by their file names, where
                     // Shelf serves them)
                     let p = gs_font_path(std::str::from_utf8(name).ok()?)?;
-                    ShelfHost { files: f3.clone() }
+                    ShelfHost::plain(f3.clone())
                         .find(&p)
                         .map(|(_, b)| Arc::from(b.as_slice()))
                 })
@@ -603,7 +733,7 @@ impl Host for ShelfHost {
                 let f4 = self.files.clone();
                 Box::new(move |path| {
                     let p = std::str::from_utf8(path).ok()?;
-                    ShelfHost { files: f4.clone() }.stamp(Path::new(p))
+                    ShelfHost::plain(f4.clone()).stamp(Path::new(p))
                 })
             }),
         ))

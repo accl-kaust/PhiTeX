@@ -298,6 +298,7 @@ fn job(main: &str, engine: phitex_live::tex::Engine, ini: bool, threads: Option<
         fixpoint: true,
         cache_limit: None,
         edit_diagnostics: true,
+        inputs: Vec::new(),
     }
 }
 
