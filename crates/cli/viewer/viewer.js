@@ -3457,6 +3457,12 @@ var Panel = class {
   store;
   at = 0;
   last = null;
+  /** A page drawn in this page's life: the engine is up, a rebuild's opening starts past loading it. */
+  drewOnce = false;
+  /** The step an opening says first: the one now, else loading the engine (or, once it ran here, the packages). */
+  firstStep() {
+    return this.stepNow || this.words.steps[this.drewOnce ? 1 : 0];
+  }
   url = null;
   lastStatus = null;
   listeners = [];
@@ -3792,7 +3798,7 @@ var Panel = class {
     this.wasShown = on;
     this.host.style.display = display;
     if (on && !was) this.redraw();
-    if (on && !this.last) this.step(this.stepNow || this.words.steps[0], void 0, "");
+    if (on && !this.last) this.step(this.firstStep(), void 0, "");
   }
   wasShown;
   save() {
@@ -4406,7 +4412,7 @@ var Panel = class {
     this.lastLook = id;
     if (id !== "off") this.seen(["opening"]);
     el.classList.toggle("owns", !!anim.step);
-    if (anim.step) anim.step(this.stepNow || this.words.steps[0], void 0, "");
+    if (anim.step) anim.step(this.firstStep(), void 0, "");
     this.animSince = performance.now();
   }
   /** When the opening began: a page there within 400 ms (a project already built) is shown at once, no opening. */
@@ -5685,6 +5691,7 @@ var Panel = class {
       return;
     }
     this.last = img;
+    this.drewOnce = true;
     this.walkEnd();
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");

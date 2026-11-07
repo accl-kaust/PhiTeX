@@ -439,6 +439,12 @@ export class Panel {
   private store?: Prefs;
   private at = 0;
   private last: PageImage | null = null;
+  /** A page drawn in this page's life: the engine is up, a rebuild's opening starts past loading it. */
+  private drewOnce = false;
+  /** The step an opening says first: the one now, else loading the engine (or, once it ran here, the packages). */
+  private firstStep(): string {
+    return this.stepNow || this.words.steps[this.drewOnce ? 1 : 0];
+  }
   private url: string | null = null;
   private lastStatus: Status | null = null;
   private listeners: ((s: ViewState) => void)[] = [];
@@ -812,7 +818,7 @@ export class Panel {
     this.host.style.display = display;
     if (on && !was) this.redraw();
     // (shown with no page yet: the first page's sheet, the opening on it)
-    if (on && !this.last) this.step(this.stepNow || this.words.steps[0], undefined, "");
+    if (on && !this.last) this.step(this.firstStep(), undefined, "");
   }
   private wasShown?: boolean;
 
@@ -1524,7 +1530,7 @@ export class Panel {
     // (one that says the steps itself: the sheet's own not shown)
     el.classList.toggle("owns", !!anim.step);
     // (and the step the sheet says now, a rebuild's first: the watch says no other)
-    if (anim.step) anim.step(this.stepNow || this.words.steps[0], undefined, "");
+    if (anim.step) anim.step(this.firstStep(), undefined, "");
     this.animSince = performance.now();
   }
 
@@ -3031,6 +3037,7 @@ export class Panel {
       return;
     }
     this.last = img;
+    this.drewOnce = true;
     this.walkEnd();
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
