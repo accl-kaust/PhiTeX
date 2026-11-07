@@ -778,6 +778,14 @@ impl Viewer {
         self.emit(&json!({"event": "written", "exact": true}).to_string());
     }
 
+    /// The diagnostics the viewers have, each a JSON object.
+    pub fn diagnostics_items(&self) -> Vec<Value> {
+        lock(&self.diagnostics)
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// The last build's diagnostics, each a JSON object, given to the
     /// viewers (a build's own, or made after it, when the editing paused):
     /// sent only where they are not the last ones.

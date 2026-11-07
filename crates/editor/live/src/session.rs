@@ -333,8 +333,8 @@ pub struct Report {
     pub settled: Option<(u64, u64)>,
     /// An edit's diagnostics at their places are made after the build,
     /// when the editing pauses ([`Session::diagnostics_now`]): the build
-    /// reports the engine's own at no place, its errors (TeX's included)
-    /// at once; a build with errors has them all at their places now.
+    /// reports the engine's own at no place and its errors (TeX's at
+    /// their places, `diagnostics`) at once, its warnings then.
     pub diagnostics_pending: bool,
 }
 
@@ -1257,12 +1257,11 @@ impl Session {
                     .collect()
             })
             .collect();
-        // (an edit with errors: its diagnostics at their places at once,
-        // the errors' underlines with them; else made when asked)
-        let defer = why == "edit" && self.job.edit_diagnostics;
-        let diagnostics_pending = defer && errors.is_empty() && internal.is_none();
-        if defer && !diagnostics_pending {
-            diagnostics = b.diagnostics();
+        // (an edit's errors at their places at once, the errors'
+        // underlines with them; its warnings placed when asked)
+        let diagnostics_pending = why == "edit" && self.job.edit_diagnostics && internal.is_none();
+        if diagnostics_pending && !errors.is_empty() {
+            diagnostics = b.error_diagnostics();
         }
         // (a PDF file's pages: not known until the engine reports them;
         // the viewer counts the PDF's itself and draws each page again)

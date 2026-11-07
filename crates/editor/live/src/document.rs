@@ -424,8 +424,18 @@ impl Document {
             // typing path, `Document::origins_now`)
             origins: None,
             changed: None,
-            // (an edit's at their places later, `Document::diagnostics_now`)
-            diagnostics: (!r.diagnostics_pending).then(|| diagnostics(s, &r, &log)),
+            // (an edit's at their places later, `Document::diagnostics_now`;
+            // its errors at once, the last warnings with them)
+            diagnostics: if !r.diagnostics_pending {
+                Some(diagnostics(s, &r, &log))
+            } else if errors.is_empty() {
+                None
+            } else {
+                Some(crate::watch::with_last_warnings(
+                    diagnostics(s, &r, &log),
+                    &v.diagnostics_items(),
+                ))
+            },
             parts: Built::parts_of(s, &r),
         };
         self.diagnostics_due = r.diagnostics_pending;

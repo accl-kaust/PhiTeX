@@ -295,6 +295,18 @@ pub fn late_diagnostics(s: &Session, ds: &[phitex_tex::Diagnostic]) -> Vec<Value
     kinds(placed(s, ds))
 }
 
+/// A build's errors given at once (its diagnostics left for later,
+/// [`Report::diagnostics_pending`]) with the last build's other problems,
+/// until those are made again: the warnings shown stay while typing.
+pub fn with_last_warnings(now: Vec<Value>, last: &[Value]) -> Vec<Value> {
+    let mut v: Vec<Value> = now
+        .into_iter()
+        .filter(|d| d["severity"] == "error")
+        .collect();
+    v.extend(last.iter().filter(|d| d["severity"] != "error").cloned());
+    v
+}
+
 /// (each one's kind, the filters' (problems::kind_of): the viewer's and
 /// the editor's alike)
 fn kinds(mut v: Vec<Value>) -> Vec<Value> {

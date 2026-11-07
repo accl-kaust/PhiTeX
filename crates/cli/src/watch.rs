@@ -1355,8 +1355,13 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     last_diags.borrow().as_ref().map(|x| x.1.clone())
                 } else if pending {
                     // (made when the editing pauses: the last ones shown
-                    // meanwhile)
-                    None
+                    // meanwhile, its errors with them at once)
+                    (!r.out.errors.is_empty()).then(|| {
+                        phitex_live::watch::with_last_warnings(
+                            diagnostics(s, &r, &log),
+                            last_diags.borrow().as_ref().map_or(&[][..], |x| &x.1),
+                        )
+                    })
                 } else {
                     let d = diagnostics(s, &r, &log);
                     *last_diags.borrow_mut() = r.settled.map(|k| (k, d.clone()));
@@ -1421,7 +1426,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // (pending: no errors, and the last warnings counted until they
         // are made again, said to be updating)
         let placed = if pending {
-            (0, last.borrow().placed.1)
+            (
+                crate::problems::shown_count(&r.diagnostics, false),
+                last.borrow().placed.1,
+            )
         } else if same_eval && r.diagnostics_pending {
             last.borrow().placed
         } else {
@@ -1777,8 +1785,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if phitex_tex::tex_time() {
             eprintln!("watch phases: after the event {:?}", tevent.elapsed());
         }
-        // (pending, or the same evaluation's: the last ones kept until made)
-        if !pending && !(same_eval && r.diagnostics_pending) {
+        // (pending, or the same evaluation's: the last ones kept until
+        // made; a pending build's errors for `p`)
+        if (!pending && !(same_eval && r.diagnostics_pending)) || (pending && failed) {
             last.borrow_mut().diags = std::mem::take(&mut r.diagnostics);
         }
         // (nothing written: the last build kept, for the way out's question)

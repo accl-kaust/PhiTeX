@@ -8394,9 +8394,29 @@ impl Build {
         {
             return d.clone();
         }
-        let d = self.diagnostics_made();
+        let d = self.diagnostics_made(false);
         *self.diags_last.locked() = Some((key, d.clone()));
         d
+    }
+
+    /// [`Build::diagnostics`]'s errors alone, at their places (with the
+    /// engine's own at no place): what an edit shows at once, its
+    /// warnings placed later, when the editing pauses. The warnings are
+    /// not placed, and what the next [`Build::diagnostics`] keeps from
+    /// the last one stays as it is.
+    #[must_use]
+    pub fn error_diagnostics(&self) -> Vec<Diagnostic> {
+        let key = (self.settles, self.text.len());
+        if let Some((k, d)) = self.diags_last.locked().as_ref()
+            && *k == key
+        {
+            return d
+                .iter()
+                .filter(|d| d.severity != Severity::Warning || d.range == (0, 0))
+                .cloned()
+                .collect();
+        }
+        self.diagnostics_made(true)
     }
 
     /// Which evaluation the build's results are of: the build's number
@@ -8407,8 +8427,9 @@ impl Build {
         (self.serial, self.settles)
     }
 
-    /// [`Build::diagnostics`], made.
-    fn diagnostics_made(&self) -> Vec<Diagnostic> {
+    /// [`Build::diagnostics`], made; `errors_only`: TeX's warnings left
+    /// out, not placed ([`Build::error_diagnostics`]).
+    fn diagnostics_made(&self, errors_only: bool) -> Vec<Diagnostic> {
         let t_spans = std::time::Instant::now();
         let v = self.g.eng.values();
         // the document's text and its nodes' spans: the text itself where
@@ -8521,12 +8542,20 @@ impl Build {
                     .collect::<Vec<_>>()
             })
             .collect();
-        let memo_old = std::mem::take(&mut *self.diag_memo.locked());
+        // (errors alone: none taken from the kept ones, none kept)
+        let memo_old = if errors_only {
+            FxHashMap::default()
+        } else {
+            std::mem::take(&mut *self.diag_memo.locked())
+        };
         let mut memo_new: FxHashMap<u64, Diagnostic> = FxHashMap::default();
         for e in entries {
             let xs = list_of(v, e);
             let int = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
             let kind = int(0);
+            if errors_only && kind != 1 {
+                continue;
+            }
             let message = xs.get(1).map(|&x| str_of(v, x)).unwrap_or_default();
             let seg = xs.get(5).map(|&x| str_of(v, x)).unwrap_or_default();
             let loc = usize::try_from(int(6)).unwrap_or(0);
@@ -8734,7 +8763,9 @@ impl Build {
             memo_new.insert(key, d.clone());
             out.push(d);
         }
-        *self.diag_memo.locked() = memo_new;
+        if !errors_only {
+            *self.diag_memo.locked() = memo_new;
+        }
         // pdfTeX's fatal `pdftex_fail` (the output's: a font without a
         // map entry), or XeTeX's driver's: at no place of the text, so at
         // its end, where the job stopped; its message as pdfTeX's line has
