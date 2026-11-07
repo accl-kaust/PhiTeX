@@ -279,9 +279,30 @@ impl Run<'_, '_> {
             || self.mode_zero
             || !self.nest.iter().any(|l| l.owns)
         {
+            if trace() {
+                eprintln!(
+                    "pic: node {} at \\begin: not here (interp {}, skip {}, mode zero {}, a list of its own {})",
+                    self.cx.node().raw(),
+                    self.interp.is_some(),
+                    self.in_skip,
+                    self.mode_zero,
+                    self.nest.iter().any(|l| l.owns)
+                );
+            }
             return false;
         }
         let Some(body) = self.pic_find() else {
+            if trace() {
+                let top = self.input.levels.last().map(|l| l.kind);
+                eprintln!(
+                    "pic: node {} at \\begin: no picture body found (input top {top:?}, rescanned {})",
+                    self.cx.node().raw(),
+                    self.input
+                        .levels
+                        .last()
+                        .is_some_and(|&l| l.kind == kind::LINE && self.input.line(l).rescanned)
+                );
+            }
             return false;
         };
         let hash = body.hash;
