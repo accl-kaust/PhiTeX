@@ -802,11 +802,19 @@ impl phitex_live::latexmkrc::RcFiles for Disk {
             .map(|b| String::from_utf8_lossy(&b).into_owned())
     }
 
+    /// Perl's `abs_path`: symbolic links resolved; a last part that does
+    /// not exist (`(eval 1)`, latexmk's `__FILE__`) kept on its resolved
+    /// folder.
     fn canonical(&self, path: &str) -> String {
-        std::fs::canonicalize(path).map_or_else(
-            |_| phitex_live::latexmkrc::normalize(path),
-            |p| p.to_string_lossy().into_owned(),
-        )
+        let plain = phitex_live::latexmkrc::normalize(path);
+        if let Ok(p) = std::fs::canonicalize(&plain) {
+            return p.to_string_lossy().into_owned();
+        }
+        let p = Path::new(&plain);
+        match (p.parent().map(std::fs::canonicalize), p.file_name()) {
+            (Some(Ok(dir)), Some(name)) => dir.join(name).to_string_lossy().into_owned(),
+            _ => plain,
+        }
     }
 }
 
