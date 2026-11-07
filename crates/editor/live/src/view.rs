@@ -804,15 +804,15 @@ impl Viewer {
         let items = Value::from(b.diagnostics.clone());
         // (the lock let go before the event: an answer holds the events'
         // turn and then reads them)
-        let changed = {
+        let fresh = {
             let mut last = lock(&self.diagnostics);
-            let changed = *last != items;
-            if changed {
+            let fresh = *last != items;
+            if fresh {
                 last.clone_from(&items);
             }
-            changed
+            fresh
         };
-        if changed {
+        if fresh {
             self.emit(&json!({"event": "diagnostics", "items": items}).to_string());
         }
         if let Some(c) = &b.changed {
