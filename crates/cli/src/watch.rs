@@ -1126,6 +1126,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (the last output written without errors, and its PDF for the viewer)
     let mut last_pdf = None;
     let mut last_layout: Option<u64> = None;
+    // (the viewer's diagnostics and the evaluation they were made of,
+    // `Report::settled`)
+    let mut last_diags: Option<((u64, u64), Vec<serde_json::Value>)> = None;
     let mut last_hashes: Vec<u64> = Vec::new();
     // (`viewer = "zathura"`: --open starts it on the output, once)
     let open_cmd = t.viewer.clone().filter(|_| o.open);
@@ -1319,7 +1322,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 since_ms: since.map(|t| t.elapsed().as_secs_f64() * 1e3),
                 origins: None,
                 changed: None,
-                diagnostics: diagnostics(s, &r, &log),
+                diagnostics: match (&last_diags, r.settled) {
+                    // (the evaluation the last build's were made of: those)
+                    (Some((k, d)), Some(now)) if *k == now => d.clone(),
+                    _ => {
+                        let d = diagnostics(s, &r, &log);
+                        last_diags = r.settled.map(|k| (k, d.clone()));
+                        d
+                    }
+                },
                 parts: Built::parts_of(s, &r),
             };
             origins_due.set(true);

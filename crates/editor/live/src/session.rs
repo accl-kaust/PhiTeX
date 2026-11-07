@@ -326,6 +326,11 @@ pub struct Report {
     /// The format could not be had (its ini file not found): the one
     /// error says why.
     pub format_failed: bool,
+    /// The engine's build and how many evaluations it settled
+    /// ([`phitex_tex::Build::settled_key`]): two reports with the same
+    /// key are of the same evaluation (`r` with nothing changed), their
+    /// diagnostics the same. None: a failed build.
+    pub settled: Option<(u64, u64)>,
 }
 
 /// Whether `e`, one of a build's errors ([`Output::errors`]), is a line of
@@ -772,6 +777,7 @@ impl Session {
             internal,
             diagnostics: Vec::new(),
             format_failed: false,
+            settled: None,
         };
         let mut text = self.text_now();
         phitex_tex::timeline::lap("session: the text now (copied)");
@@ -1344,6 +1350,7 @@ impl Session {
             diagnostics,
             warnings,
             format_failed: false,
+            settled: Some(b.settled_key()),
             notes: std::iter::once(format!(
                 "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds (runs by pass {:?}), realised cp {} nodes; guesses refuted: {} claims, {} effects, {} claim siblings, {} definitions; {} nodes placed, {} freed",
                 s.nodes_run,
