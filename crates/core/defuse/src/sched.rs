@@ -2687,6 +2687,64 @@ pub(crate) fn settled_node(eng: &Engine, n: NodeId) -> bool {
 /// A run that stopped to wait for node `on`'s commit (`Ctx::read`):
 /// dirty, queued nowhere, listed under `on` (`Shared::waiting`) unless
 /// `on` has committed meanwhile or the run was re-asked (then queued).
+/// The node a run of `me` gives its worker to, if one: every worker is
+/// at work and none is still to start, no run of `me`'s unit at work is
+/// placed after `me` (the run furthest ahead gives way, one at a time),
+/// and a node of `me`'s unit placed before `me` waits in a ready queue for
+/// a worker: the earliest such. A run past a node still to run rests on
+/// a guess of that node's answer, and a guess TeX never reads may loop
+/// where the true input does not; held by such runs, every worker could
+/// stay away from the text that would answer their guesses for ever
+/// (biblatex at -j4, 1 build in 4 on four CPUs: three runs in bookmark's
+/// parent walk on a guessed chain for minutes, 3500 nodes before them
+/// queued). With this the earliest work waiting always gets a worker at
+/// the next step of the run furthest ahead, at any speed and load. No
+/// time is measured.
+pub(crate) fn starved_by(eng: &Engine, w: &Worker, me: &Node) -> Option<NodeId> {
+    let sh = &w.shared;
+    if sh.n == 1 || sh.idle.load(Ordering::SeqCst) > 0 || sh.spawned.load(Ordering::Relaxed) < sh.n {
+        return None;
+    }
+    let at = me.pos_hint().0;
+    for slot in &sh.at_work {
+        let raw = slot.load(Ordering::Acquire);
+        if raw == 0 || raw - 1 == me.id.raw() {
+            continue;
+        }
+        if eng
+            .placed_node(NodeId::from_raw(raw - 1))
+            .is_some_and(|o| o.unit == me.unit && o.pos_hint().0 > at)
+        {
+            return None;
+        }
+    }
+    let mut best: Option<(u64, NodeId)> = None;
+    for r in &sh.ready {
+        if r.len.load(Ordering::Relaxed) == 0 {
+            continue;
+        }
+        let q = r.heap.lock();
+        let keys = q
+            .placed
+            .iter()
+            .map(|x| ((x.0).0, (x.0).3))
+            .chain(q.at_frontier.iter().map(|x| ((x.0).0, (x.0).2)));
+        for (p, raw) in keys {
+            if p >= at || best.is_some_and(|b| b.0 <= p) {
+                continue;
+            }
+            let id = NodeId::from_raw(raw);
+            if eng
+                .placed_node(id)
+                .is_some_and(|n| n.unit == me.unit && n.state() == State::Dirty && n.pos_hint().0 < at)
+            {
+                best = Some((p, id));
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
 fn park_waiting(eng: &Engine, pool: &Pool, w: &Worker, node: &Node, on: Option<NodeId>) {
     let committed = |n: NodeId| settled_node(eng, n);
     if node.state() != State::Running || on.is_none_or(committed) || !node.cas_state(State::Running, State::Dirty) {

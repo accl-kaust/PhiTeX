@@ -1538,6 +1538,27 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// At a step of my run (the client's: TeX's every few thousand
+    /// commands): where every worker is at work, I am the run of my unit
+    /// furthest ahead, and a node of my unit before me waits for a worker
+    /// ([`crate::sched::starved_by`]), I give my worker to it: I stop,
+    /// nothing filed, my last run's products standing, and run again when
+    /// that node commits. A run past a node still to run rests on a guess
+    /// of its answer, which may loop where TeX's input does not; so the
+    /// earliest work waiting is never kept from a worker by runs on
+    /// guesses after it, whatever the speed of the machine.
+    pub fn yield_to_prefix(&mut self) -> Result<(), Stop> {
+        self.check()?;
+        let Some(w) = self.worker else {
+            return Ok(());
+        };
+        if let Some(x) = crate::sched::starved_by(self.eng, w, self.me) {
+            self.wait_on = Some(x);
+            return Err(stop());
+        }
+        Ok(())
+    }
+
     /// [`Ctx::hole_before`] where the text before me can change what I
     /// read: the first node before me that has not committed and whose
     /// operation may define one of `fields` (`Operation::may_define`),
