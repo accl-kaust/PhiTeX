@@ -590,7 +590,6 @@ pub(crate) struct Undo {
     metas: Vec<(usize, Meta)>,
     metas_logged: phitex_defuse::FxHashSet<usize>,
     lens: [usize; 7],
-    spill_added: Vec<Field>,
     save: Vec<Saved>,
     defined: Vec<Loc>,
     scope_extra: Vec<(Loc, Entry, Locality)>,
@@ -921,7 +920,6 @@ impl State {
                 self.eq.len(),
                 self.spill.len(),
             ],
-            spill_added: Vec::new(),
             save: self.save.clone(),
             defined: self.defined.clone(),
             scope_extra: self.scope_extra.clone(),
@@ -962,15 +960,24 @@ impl State {
                 *x = sl;
             }
         }
-        // (slots made since: dropped, as the table did not have them)
+        // (slots made since: dropped, as the table did not have them. A
+        // spill location numbered since keeps its field, its slot empty:
+        // a location is one field's for the table's life, so whatever
+        // kept it across the rollback, a run's structure or a cache of
+        // the build's fields, names that field still, never another
+        // one numbered again at that index: `Fields::field_of` asked for
+        // a location gone put the empty name's field at it, and
+        // `\csname\endcsname` then defined `\pdfprotrudechars`,
+        // beamertheme-arguelles at -j1, as `\fontdimen6` before,
+        // simpledarkblue at -j4)
         self.eq.truncate(eq);
-        self.spill.truncate(spill);
-        for f in u.spill_added {
-            self.spill_ix.remove(&f);
+        for s in self.spill.iter_mut().skip(spill) {
+            *s = Slot {
+                field: s.field,
+                ..Slot::default()
+            };
         }
         let n = u32::try_from(spill).unwrap_or(u32::MAX);
-        self.numbered.retain(|_, i| *i < n);
-        // (a spill location dropped is another's when it is numbered again)
         self.read_across
             .get_mut()
             .retain(|e| e.0 & SPILL == 0 || e.0 & !SPILL < n);
@@ -1354,9 +1361,6 @@ impl State {
         }
         let i = u32::try_from(self.spill.len()).unwrap_or(0);
         self.spill_ix.insert(f, i);
-        if let Some(u) = self.undo.as_mut() {
-            u.spill_added.push(f);
-        }
         let l = SPILL | i;
         self.slot(l).field = Some(f);
         l
