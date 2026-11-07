@@ -421,18 +421,7 @@ impl Run<'_, '_> {
             // them was asked again, then again when the child had run
             // (Grail's changed drawing: 198 paragraphs checked, the first
             // load of an 8 pt font gone for that while))
-            if let Some(g) = self.cx.last_placed_output(i, self.ops.pic).filter(|&g| {
-                let gs = list_of(v, g);
-                g != ValueId::UNIT && gs.first().is_some_and(|&t| int_of(v, t) == 0)
-            }) {
-                let x = self.cx.placed_output_or(i, g);
-                self.pic_apply(&body, x);
-                if trace() {
-                    eprintln!(
-                        "pic: node {node} {} {hash:x}: placed, no output yet, its last run's picture here taken",
-                        body.name
-                    );
-                }
+            if self.pic_guess(i, &body) {
                 return Ok(true);
             }
             // (none: as if the picture were empty; its picture runs once,
@@ -470,6 +459,30 @@ impl Run<'_, '_> {
             );
         }
         Ok(true)
+    }
+
+    /// [`Run::pic_begin`] for a child that has not run: the output of the
+    /// picture this node's last run placed at index `i` applied as the
+    /// guess, where there is one the child did not refuse. Whether it was.
+    fn pic_guess(&mut self, i: usize, body: &Body) -> bool {
+        let v = self.v;
+        let Some(g) = self.cx.last_placed_output(i, self.ops.pic).filter(|&g| {
+            let gs = list_of(v, g);
+            g != ValueId::UNIT && gs.first().is_some_and(|&t| int_of(v, t) == 0)
+        }) else {
+            return false;
+        };
+        let x = self.cx.placed_output_or(i, g);
+        self.pic_apply(body, x);
+        if trace() {
+            eprintln!(
+                "pic: node {} {} {:x}: placed, no output yet, its last run's picture here taken",
+                self.cx.node().raw(),
+                body.name,
+                body.hash
+            );
+        }
+        true
     }
 
     /// `PHITEX_PIC_TRACE`: why a `\\begin` found no picture body here.
