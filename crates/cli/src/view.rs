@@ -409,10 +409,17 @@ fn serve(s: &Arc<Shared>, conn: TcpStream) {
     }
 }
 
-/// A WebSocket's requests, answered in order until it closes. Its reads
-/// and the broadcasts take turns on the one lock (pings are answered by
-/// `tungstenite` inside the reads).
+/// A WebSocket's requests, answered in order until it closes. The
+/// socket is waited on for a request without its lock (a look at its
+/// bytes, [`TcpStream::peek`]); only once bytes are there do the reads
+/// take the lock, the broadcasts' too, so an event sent while no
+/// request comes goes out at once. Waiting for a request under the lock,
+/// each event waited for the read to give up ([`ws::POLL`], 20 ms): `r`
+/// with nothing changed took 33 ms to reach the viewer, most of it six
+/// events each waiting its turn (pings are answered by `tungstenite`
+/// inside the reads).
 fn socket(s: &Arc<Shared>, sock: WebSocket<TcpStream>) {
+    let probe = sock.get_ref().try_clone().ok();
     let client = Arc::new(Client {
         out: Mutex::new(sock),
     });
@@ -422,26 +429,55 @@ fn socket(s: &Arc<Shared>, sock: WebSocket<TcpStream>) {
         c.len()
     };
     clients(s, n);
-    loop {
-        let msg = lock(&client.out).read();
-        let text = match msg {
-            Ok(Message::Text(t)) => t,
-            Ok(Message::Close(_)) => break,
-            Err(e) if ws::timed_out(&e) => {
-                // (the lock let go a moment: a waiting broadcast goes first)
-                std::thread::sleep(std::time::Duration::from_millis(1));
-                continue;
+    'conn: loop {
+        // (bytes there, or the socket closed or failed, looked at with the
+        // lock let go; the reads below wait no longer than [`ws::DRAIN`])
+        if let Some(p) = &probe {
+            let _ = p.set_read_timeout(Some(ws::POLL));
+            match p.peek(&mut [0u8; 1]) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => break,
             }
-            Err(_) => break,
-            Ok(_) => continue,
-        };
-        let Ok(req) = serde_json::from_str::<Value>(text.as_str()) else {
-            continue;
-        };
-        // (in the broadcasts' turn: no event made after the answer goes
-        // before it, `Viewer::answer_in_turn`)
-        if !s.viewer.answer_in_turn(&req, |reply| client.send(reply)) {
-            break;
+            let _ = p.set_read_timeout(Some(ws::DRAIN));
+        }
+        // (every message the bytes make, read under the lock and answered
+        // with it let go: an answer sends under it)
+        let mut texts = Vec::new();
+        {
+            let mut out = lock(&client.out);
+            loop {
+                match out.read() {
+                    Ok(Message::Text(t)) => texts.push(t),
+                    Ok(Message::Close(_)) => break 'conn,
+                    Err(e) if ws::timed_out(&e) => break,
+                    Err(_) => break 'conn,
+                    Ok(_) => {}
+                }
+            }
+        }
+        if probe.is_none() {
+            // (no look without the lock: the lock let go a moment, a
+            // waiting broadcast goes first)
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        for text in texts {
+            let Ok(req) = serde_json::from_str::<Value>(text.as_str()) else {
+                continue;
+            };
+            // (in the broadcasts' turn: no event made after the answer goes
+            // before it, `Viewer::answer_in_turn`)
+            if !s.viewer.answer_in_turn(&req, |reply| client.send(reply)) {
+                break 'conn;
+            }
         }
     }
     let _ = lock(&client.out).close(None);
