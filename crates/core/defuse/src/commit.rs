@@ -794,6 +794,11 @@ fn pos_in(inner: &Inner, node: &Node) -> Pos {
 pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product) -> CommitStats {
     let mut st = CommitStats::default();
     let t0 = Instant::now();
+    // (a run whose last run stood that `commit_stood` left to a full
+    // commit: that run's reads are this one's)
+    if let Some(r) = p.stood.take() {
+        p.reads.extend(r.reads.iter().cloned());
+    }
     let ww = Some(w);
     // (a run that published nothing new: the last record's products, its
     // placements kept as they are)
@@ -2525,6 +2530,57 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     st.reask_ns = ns(t0).saturating_sub(st.commit_ns);
     st
+}
+
+/// The commit of a run that did not run: every read of its last run still
+/// gave what it gave (`Ctx::last_run_stands`), so its last record stands,
+/// its definitions, contributions, output, placements and reads alike.
+/// Those reads' readers are filed at the record's serial and stood
+/// through the check, each with the answer it saw, so nothing is filed
+/// again and the serial stays: a change after the check re-asks the node
+/// as it would any reader of the record. What a commit does besides the
+/// filing: the `next` readers stopped at the node while it was open,
+/// asked again; the parent waiting for it and the runs parked on it, let
+/// go; the front of a removal, ended. A full commit refiled every read,
+/// a second's picture's 144 000 (300 ms of defs, readers and re-asks
+/// each time it stood, Grail's deleted paragraph 224 such commits, 1.2 s
+/// of its 5.8 s). None, to commit in full: a re-ask came while it was
+/// checked (`Node::asked`), a bracket moved meanwhile, or it moved or
+/// went.
+pub(crate) fn commit_stood(
+    eng: &Engine,
+    w: &Worker,
+    node: &Arc<Node>,
+    r: &Arc<RunRecord>,
+    scope_gen: u64,
+) -> Option<CommitStats> {
+    let t0 = Instant::now();
+    let ww = Some(w);
+    if node.moved.load(Ordering::Acquire) || !node.record().is_some_and(|x| Arc::ptr_eq(&x, r)) {
+        return None;
+    }
+    let stops = {
+        let (_, mut inner) = own_write(eng, node)?;
+        // (set before `asked` is read, as a commit sets it: a re-ask from
+        // here on marks the node to run again, `sched::mark_stale_now`)
+        node.committing.store(true, Ordering::SeqCst);
+        if node.asked.load(Ordering::SeqCst)
+            || (read::scoped(eng) && eng.scope_gen.load(Ordering::Acquire) != scope_gen)
+        {
+            return None;
+        }
+        take_stops(&mut inner, node.id)
+    };
+    let mut st = CommitStats::default();
+    crate::sched::clear_front(eng, node);
+    reask_stops(eng, ww, stops, node.id, &mut st);
+    if let Some(parent) = node.parent {
+        wake_waiting(eng, ww, eng.node(parent), node.id, &mut st);
+    }
+    crate::sched::release_waiting(eng, ww, node.id);
+    *w.log.lock().wasted_by_op.entry(node.op()).or_default() += 1;
+    st.commit_ns = ns(t0);
+    Some(st)
 }
 
 /// A filed reader's serial: it stands from its node's `filed_floor` to

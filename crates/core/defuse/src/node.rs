@@ -716,4 +716,7 @@ pub(crate) struct Product {
     /// `Ctx::set_frontier`: the settling layer's frontier this run moves
     /// (`Some(None)`: none, every reader free).
     pub(crate) frontier: Option<Option<NodeId>>,
+    /// `Ctx::last_run_stands`: the last run's record, every read of which
+    /// still holds; nothing ran ([`crate::commit::commit_stood`]).
+    pub(crate) stood: Option<Arc<RunRecord>>,
 }

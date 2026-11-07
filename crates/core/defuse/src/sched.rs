@@ -2527,7 +2527,11 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             // (commits under way at once, `Report::commits_at_once`)
             let at_once = eng.committing.fetch_add(1, Ordering::Relaxed) + 1;
             eng.commit_peak.fetch_max(at_once, Ordering::Relaxed);
-            let st = commit(eng, w, node, product);
+            let st = match product.stood.clone() {
+                Some(r) => crate::commit::commit_stood(eng, w, node, &r, product.scope_gen),
+                None => None,
+            }
+            .unwrap_or_else(|| commit(eng, w, node, product));
             eng.committing.fetch_sub(1, Ordering::Relaxed);
             // (the store past the collection's mark: the workers called to
             // its barrier as their runs end)

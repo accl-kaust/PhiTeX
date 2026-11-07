@@ -129,6 +129,7 @@ impl<'a> Ctx<'a> {
                 waits: Vec::new(),
                 frontier: None,
                 parked_on: None,
+                stood: None,
             },
             views: Vec::new(),
             ep: u64::MAX,
@@ -1805,7 +1806,9 @@ impl<'a> Ctx<'a> {
             return None;
         }
         let output = r.output;
-        self.product.reads.extend(r.reads.iter().cloned());
+        // (its reads are the record's, filed as its readers: the commit
+        // keeps them where they are, `commit::commit_stood`)
+        self.product.stood = Some(r.clone());
         self.product.unchanged = true;
         Some(output)
     }
