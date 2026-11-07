@@ -2256,9 +2256,7 @@ pub(crate) fn clear_front(eng: &Engine, node: &Node) {
 fn unrun_guessed_placement(eng: &Engine, node: &Node) -> Option<NodeId> {
     let r = node.run_record()?;
     r.reads.iter().find_map(|rd| match rd.kind {
-        crate::node::ReadKind::Placed { i, guess: true } => {
-            r.placed.get(i).copied().filter(|&c| !settled_node(eng, c))
-        }
+        crate::node::ReadKind::Placed { i, guess: true } => r.placed.get(i).copied().filter(|&c| !settled_node(eng, c)),
         _ => None,
     })
 }
