@@ -1288,6 +1288,9 @@ pub(crate) struct Run<'c, 'a> {
     /// A finisher's piece, where the piece closes the engine scope it ran
     /// in after the page's candidate: [`Run::fin_read_in_scope`].
     pub fin_scope_closer: Option<phitex_defuse::NodeId>,
+    /// The pages this run shipped (`\shipout`): a finisher's, told to
+    /// the progress ([`crate::exec::Progress::note_ships`]).
+    pub shipped: u32,
     /// The fields the piece defined after the candidate whose value there
     /// a routine before this finisher's replaced ([`Run::preload_candidate`]).
     #[allow(clippy::option_option)]
@@ -1578,6 +1581,7 @@ impl<'c, 'a> Run<'c, 'a> {
             cand_marks: Vec::new(),
             page_regs_held: Vec::new(),
             fin_scope_closer: None,
+            shipped: 0,
             fin_replaced: Vec::new(),
             reads_noted: 0,
             fin_rtn_after: None,
