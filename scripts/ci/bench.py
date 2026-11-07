@@ -131,6 +131,28 @@ def median(xs):
     return statistics.median(xs) if xs else None
 
 
+def requeued_edits(args, work):
+    """Edit-matrix documents queued again for this node (a file
+    OUT/edit-requeue/<doc> holding the node's name: a re-time, after a
+    harness fix or a disturbed node), timed before the next document is
+    claimed, into OUT/edits/<node>-<doc>-<time>."""
+    # (bench.sbatch's box: the harness at /h, Grail at /g)
+    args.repo = args.repo or ("/h" if Path("/h/ci/manuals.json").exists() else None)
+    args.grail = args.grail or ("/g" if Path("/g").is_dir() else None)
+    q = Path(args.out) / "edit-requeue"
+    if not args.repo:
+        return
+    host = os.uname().nodename.split(".")[0]
+    for f in sorted(q.glob("*")) if q.is_dir() else []:
+        if f.read_text().strip() != host:
+            continue
+        f.unlink()
+        a = argparse.Namespace(bin=args.bin, docs=f.name, repo=args.repo, doc="/usr/share/doc/texlive",
+                               grail=args.grail, reps=5, build_tmo=600,
+                               out=str(Path(args.out) / "edits" / f"{host}-{f.name}-{time.strftime('%H%M')}"))
+        cmd_edits(a)
+
+
 def cmd_cold(args):
     import manuals
     work = Path(os.environ.get("CI_WORK", "/w"))
@@ -149,6 +171,7 @@ def cmd_cold(args):
     host = os.uname().nodename
     print(f"{len(items)} documents of {args.corpus} on {host}, {args.runs} runs each", flush=True)
     for c in items:
+        requeued_edits(args, work)
         res_p = out / f"{c['id']}.json"
         if res_p.exists():
             continue
@@ -368,22 +391,27 @@ def cmd_json(args):
 
     edit = None
     eps, missing = [], []
-    for d in args.edits or []:
+    # (a document timed again, in a later directory, replaces its earlier rows)
+    rows = {}
+    for d in sorted(args.edits or [], key=lambda d: os.path.getmtime(d)):
         for p in sorted(Path(d).glob("*.jsonl")):
             if p.name.endswith("-cells.jsonl"):
                 continue
-            for line in open(p):
-                r = json.loads(line)
-                j1 = r.get("j1")
-                o = r.get("oracle") or {}
-                eng = EDIT_DOCS[r["doc"]][2] or next((c["engine"] for c in mj["manuals"] if c["id"] == EDIT_DOCS[r["doc"]][0]), None)
-                if not j1 or not o.get("wall_s"):
-                    missing.append(f"{r['doc']} {r['kind']}/{r['place']}")
-                    continue
-                eps.append({"doc": EDIT_TITLES.get(r["doc"], r["doc"]), "engine": eng,
-                            "edit": f"{KIND_WORDS.get(r['kind'], r['kind'])} ({r['place']})",
-                            "ms": round(j1["med_ms"], 1), "oracle_s": round(o["wall_s"], 3),
-                            "same_pdf_as_oracle": bool(o.get("pdf")) and j1.get("pdfs") == [o.get("pdf")]})
+            recs = [json.loads(line) for line in open(p)]
+            if recs:
+                rows[recs[0]["doc"]] = recs
+    for doc, recs in rows.items():
+        for r in recs:
+            j1 = r.get("j1")
+            o = r.get("oracle") or {}
+            eng = EDIT_DOCS[r["doc"]][2] or next((c["engine"] for c in mj["manuals"] if c["id"] == EDIT_DOCS[r["doc"]][0]), None)
+            if not j1 or not o.get("wall_s"):
+                missing.append(f"{r['doc']} {r['kind']}/{r['place']}")
+                continue
+            eps.append({"doc": EDIT_TITLES.get(r["doc"], r["doc"]), "engine": eng,
+                        "edit": f"{KIND_WORDS.get(r['kind'], r['kind'])} ({r['place']})",
+                        "ms": round(j1["med_ms"], 1), "oracle_s": round(o["wall_s"], 3),
+                        "same_pdf_as_oracle": bool(o.get("pdf")) and j1.get("pdfs") == [o.get("pdf")]})
     if eps:
         mss = [p["ms"] for p in eps]
         buckets, lo = [], 0
@@ -402,7 +430,7 @@ def cmd_json(args):
     if machine is not None:
         # (the nodes the included measurements ran on)
         machine["nodes"] = sorted({r["node"] for k in args.corpora.split(",") for r in res[k].values()}
-                                  | {Path(d).name for d in args.edits or [] if any(Path(d).glob("*.jsonl"))})
+                                  | {Path(d).name.split("-")[0] for d in args.edits or [] if any(Path(d).glob("*.jsonl"))})
     out = {
         # (every point is a measurement; what is not measured yet is left
         # out and named in covers)
@@ -434,6 +462,8 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--runs", type=int, default=3)
     p.add_argument("--ids")
+    p.add_argument("--repo", help="the harness's repo files, for requeued edits")
+    p.add_argument("--grail")
     p = sub.add_parser("edits")
     p.add_argument("--bin", required=True)
     p.add_argument("--docs", required=True)
