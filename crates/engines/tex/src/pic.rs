@@ -306,9 +306,25 @@ impl Run<'_, '_> {
         let Some(body) = self.pic_find() else {
             if trace() {
                 let top = self.input.levels.last().map(|l| l.kind);
+                let here: String = self
+                    .input
+                    .levels
+                    .last()
+                    .filter(|l| l.kind == kind::LINE)
+                    .map(|&l| {
+                        let ln = self.input.line(l);
+                        ln.buf
+                            .iter()
+                            .skip(ln.loc)
+                            .take(30)
+                            .filter_map(|&c| char::from_u32(c))
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 eprintln!(
-                    "pic: node {} at \\begin: no picture body found (input top {top:?}, rescanned {})",
+                    "pic: node {} at \\begin: no picture body found (input top {top:?}, levels {}, next {here:?}, rescanned {})",
                     self.cx.node().raw(),
+                    self.input.levels.len(),
                     self.input
                         .levels
                         .last()
