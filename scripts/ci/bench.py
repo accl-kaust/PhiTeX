@@ -133,9 +133,11 @@ def median(xs):
 
 def requeued_edits(args, work):
     """Edit-matrix documents queued again for this node (a file
-    OUT/edit-requeue/<doc> holding the node's name: a re-time, after a
-    harness fix or a disturbed node), timed before the next document is
-    claimed, into OUT/edits/<node>-<doc>-<time>."""
+    OUT/edit-requeue/<doc> holding the node's name, and optionally a
+    binary (a path under OUT) and the phases (timed:oracle by default):
+    a re-time, after a harness fix, a disturbed node or a fixed build),
+    timed before the next document is claimed, into
+    OUT/edits/<node>-<doc>-<time>; its binary's md5 in binary.txt."""
     # (bench.sbatch's box: the harness at /h, Grail at /g)
     args.repo = args.repo or ("/h" if Path("/h/ci/manuals.json").exists() else None)
     args.grail = args.grail or ("/g" if Path("/g").is_dir() else None)
@@ -144,12 +146,17 @@ def requeued_edits(args, work):
         return
     host = os.uname().nodename.split(".")[0]
     for f in sorted(q.glob("*")) if q.is_dir() else []:
-        if f.read_text().strip() != host:
+        words = f.read_text().split()
+        if not words or words[0] != host:
             continue
         f.unlink()
-        a = argparse.Namespace(bin=args.bin, docs=f.name, repo=args.repo, doc="/usr/share/doc/texlive",
+        binary = str(Path(args.out) / words[1]) if len(words) > 1 and words[1] != "-" else args.bin
+        phases = words[2] if len(words) > 2 else None
+        a = argparse.Namespace(bin=binary, phases=phases, docs=f.name, repo=args.repo, doc="/usr/share/doc/texlive",
                                grail=args.grail, reps=5, build_tmo=600,
                                out=str(Path(args.out) / "edits" / f"{host}-{f.name}-{time.strftime('%H%M')}"))
+        Path(a.out).mkdir(parents=True, exist_ok=True)
+        (Path(a.out) / "binary.txt").write_text(f"{words[1] if len(words) > 1 else 'job binary'} {md5(binary)}\n")
         cmd_edits(a)
 
 
@@ -249,7 +256,7 @@ def cmd_edits(args):
             main, eng = c["main"], c["engine"]
             shutil.copytree(Path(args.doc) / c["dir"], sd)
         subprocess.run(["chmod", "-R", "u+w", str(sd)])
-        env = dict(os.environ, JS="1", REPS=str(args.reps), PHASES="timed:oracle", PO="0",
+        env = dict(os.environ, JS="1", REPS=str(args.reps), PHASES=getattr(args, "phases", None) or "timed:oracle", PO="0",
                    WORK=str(work / f"m-{doc}"), PHITEX_CACHE_DIR=str(work / f"cache-{doc}"),
                    BUILD_TMO=str(args.build_tmo), CAP_SKIP="1")
         t0 = time.time()
@@ -304,6 +311,7 @@ def pct(xs, q):
 
 
 def cmd_json(args):
+    args.binaries = dict(x.split("=", 1) for x in args.binary_name)
     repo = Path(args.repo)
     research = json.load(open(repo / "ci" / "research.json"))
     mj = json.load(open(repo / "ci" / "manuals.json"))
@@ -398,9 +406,17 @@ def cmd_json(args):
             if p.name.endswith("-cells.jsonl"):
                 continue
             recs = [json.loads(line) for line in open(p)]
-            if recs:
-                rows[recs[0]["doc"]] = recs
-    for doc, recs in rows.items():
+            if not recs:
+                continue
+            # (a re-time of PhiTeX's side alone keeps TeX Live's rebuilds
+            # from the earlier directory: the same edited sources)
+            old = {(r["kind"], r["place"]): r for r in rows.get(recs[0]["doc"], ([], None))[0]}
+            for r in recs:
+                if not r.get("oracle") and old.get((r["kind"], r["place"]), {}).get("oracle"):
+                    r["oracle"] = old[(r["kind"], r["place"])]["oracle"]
+            b = Path(d) / "binary.txt"
+            rows[recs[0]["doc"]] = (recs, b.read_text().split()[0] if b.exists() else None)
+    for doc, (recs, binary) in rows.items():
         for r in recs:
             j1 = r.get("j1")
             o = r.get("oracle") or {}
@@ -411,7 +427,8 @@ def cmd_json(args):
             eps.append({"doc": EDIT_TITLES.get(r["doc"], r["doc"]), "engine": eng,
                         "edit": f"{KIND_WORDS.get(r['kind'], r['kind'])} ({r['place']})",
                         "ms": round(j1["med_ms"], 1), "oracle_s": round(o["wall_s"], 3),
-                        "same_pdf_as_oracle": bool(o.get("pdf")) and j1.get("pdfs") == [o.get("pdf")]})
+                        "same_pdf_as_oracle": bool(o.get("pdf")) and j1.get("pdfs") == [o.get("pdf")],
+                        **({"build": args.binaries.get(binary, binary)} if binary else {})})
     if eps:
         mss = [p["ms"] for p in eps]
         buckets, lo = [], 0
@@ -487,6 +504,8 @@ def main():
     p.add_argument("--covers")
     p.add_argument("--method")
     p.add_argument("--edit-note")
+    p.add_argument("--binary-name", action="append", default=[],
+                   help="FILE=COMMIT: the commit a re-time's binary was built from")
     args = ap.parse_args()
     {"cold": cmd_cold, "edits": cmd_edits, "json": cmd_json}[args.cmd](args)
 
