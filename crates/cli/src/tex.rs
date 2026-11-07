@@ -116,10 +116,16 @@ pub struct Tree {
 
 impl Tree {
     /// The tree for engine `e`: kpathsea as its program, made once (its
-    /// `texmf.cnf` and `ls-R` read at the first lookup).
-    pub fn open(e: &Engine) -> Tree {
+    /// `texmf.cnf` and `ls-R` read at the first lookup), with the search
+    /// variables `vars` set over the environment's (a `.latexmkrc`'s
+    /// TEXINPUTS, as latexmk sets it for the engine it runs).
+    pub fn open(e: &Engine, vars: &[(String, String)]) -> Tree {
+        let mut k = kpse(e.name, e.kpse_engine);
+        for (name, value) in vars {
+            k.set_var(name, value);
+        }
         Tree {
-            kpse: Mutex::new(kpse(e.name, e.kpse_engine)),
+            kpse: Mutex::new(k),
             glyph: Mutex::new(None),
         }
     }

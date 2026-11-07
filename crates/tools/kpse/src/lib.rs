@@ -812,6 +812,20 @@ impl Kpse {
             .map(|(k, v)| (k.as_slice(), v.as_slice()))
     }
 
+    /// Variable `name` set to `value` for this instance's searches, over
+    /// the environment's (as a process that sets it before kpathsea
+    /// starts: latexmk's `$ENV{TEXINPUTS}` from a `.latexmkrc`), and
+    /// exported with kpathsea's own ([`Kpse::exported`]). The search paths
+    /// made so far are made again.
+    pub fn set_var(&mut self, name: &str, value: &str) {
+        self.env_overlay
+            .insert(name.as_bytes().to_vec(), value.as_bytes().to_vec());
+        self.paths
+            .retain(|&f, _| f == Format::Cnf || f == Format::Db);
+        self.made.clear();
+        self.element_dirs_cache.clear();
+    }
+
     /// `kpathsea_reset_program_name`: search as the program `progname`
     /// from now on (the search paths made so far are made again, but for
     /// `texmf.cnf`'s and the databases').

@@ -4053,3 +4053,112 @@ fn copied_text_has_its_word_spaces() {
     }
     assert!(bad.is_empty(), "text without its word spaces: {bad:?}");
 }
+
+/// `oracle/fixtures/latexmkrc/NAME/` copied (hidden files too) into a
+/// fresh directory, with an empty home of its own (no user's
+/// `.latexmkrc`) beside it.
+fn latexmkrc_project(name: &str, test: &str) -> (PathBuf, PathBuf) {
+    fn copy(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("a directory");
+        for e in std::fs::read_dir(from).expect("the fixture").flatten() {
+            let t = to.join(e.file_name());
+            if e.file_type().expect("a type").is_dir() {
+                copy(&e.path(), &t);
+            } else {
+                std::fs::copy(e.path(), &t).expect("a copy");
+            }
+        }
+    }
+    let d = scratch(test);
+    let project = d.join(name);
+    copy(&fixtures().join("latexmkrc").join(name), &project);
+    let home = d.join("home");
+    std::fs::create_dir_all(&home).expect("a home");
+    (project, home)
+}
+
+/// `phitex build ARGS` in `dir`, latexmk's rc files only the project's
+/// (`home` the user's, no system file), as scripts/bless-latexmkrc.sh
+/// runs latexmk.
+fn build_with_rc(dir: &Path, home: &Path, args: &[&str]) -> (bool, String) {
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), dir)
+        .arg("build")
+        .args(args)
+        .env("HOME", home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("TEXINPUTS")
+        .env("LATEXMKRCSYS", home.join("no-system-latexmkrc"))
+        .output()
+        .expect("phitex runs");
+    let errs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    eprintln!("phitex build {args:?} in {}:\n{errs}", dir.display());
+    (out.status.success(), errs)
+}
+
+/// The PDF at `got` is latexmk's (`oracle/fixtures/latexmkrc/WANT.pdf`).
+fn same_as_latexmk(got: &Path, want: &str) {
+    let want = std::fs::read(fixtures().join("latexmkrc").join(format!("{want}.pdf")))
+        .expect("the latexmk oracle (scripts/bless-latexmkrc.sh)");
+    let got_b = std::fs::read(got).unwrap_or_default();
+    assert!(
+        got_b == want,
+        "{} is not latexmk's: {}",
+        got.display(),
+        first_difference(&got_b, &want)
+    );
+}
+
+/// The course repository's labs (its `.latexmkrc` puts `common/tex//` on
+/// TEXINPUTS through `ensure_path` and `dirname(abs_path(__FILE__))`)
+/// built from the repository's root, as `latexmk -pdf
+/// lab1-setup/lab1.tex` there: the style and the logo found, the PDF
+/// latexmk's.
+#[test]
+fn latexmkrc_course_lab_from_the_root() {
+    let _one = one();
+    let (root, home) = latexmkrc_project("course", "latexmkrc-course-root");
+    let (ok, errs) = build_with_rc(&root, &home, &["lab1-setup/lab1.tex"]);
+    assert!(ok, "the lab did not build from the root:\n{errs}");
+    assert!(!errs.contains("not applied"), "{errs}");
+    same_as_latexmk(&root.join("lab1-setup/lab1.pdf"), "course-root");
+}
+
+/// The same lab from inside its folder, through its small `.latexmkrc`
+/// that `do`es the root's (`__FILE__` there is `../.latexmkrc`).
+#[test]
+fn latexmkrc_course_lab_from_its_folder() {
+    let _one = one();
+    let (root, home) = latexmkrc_project("course", "latexmkrc-course-lab");
+    let lab = root.join("lab1-setup");
+    let (ok, errs) = build_with_rc(&lab, &home, &["lab1.tex"]);
+    assert!(ok, "the lab did not build from its folder:\n{errs}");
+    same_as_latexmk(&lab.join("lab1.pdf"), "course-lab");
+    // (the root's rc file is what finds the style: without the lab's
+    // small one, the style is not found, as latexmk would not find it)
+    std::fs::remove_file(lab.join(".latexmkrc")).expect("removed");
+    let (ok, errs) = build_with_rc(&lab, &home, &["lab1.tex"]);
+    assert!(!ok, "built without the rc file:\n{errs}");
+    assert!(errs.contains("cs221p-lab.sty"), "{errs}");
+}
+
+/// A paper beside a shared style folder (`$ENV{'TEXINPUTS'} =
+/// '../common/tex//:' . $ENV{'TEXINPUTS'}`): built as latexmk builds it;
+/// its `$pdf_mode` said once as not applied.
+#[test]
+fn latexmkrc_shared_style_folder() {
+    let _one = one();
+    let (root, home) = latexmkrc_project("shared", "latexmkrc-shared");
+    let paper = root.join("paper");
+    let (ok, errs) = build_with_rc(&paper, &home, &["paper.tex"]);
+    assert!(ok, "the paper did not build:\n{errs}");
+    assert_eq!(
+        errs.matches(".latexmkrc:3: $pdf_mode not applied").count(),
+        1,
+        "{errs}"
+    );
+    same_as_latexmk(&paper.join("paper.pdf"), "shared");
+}

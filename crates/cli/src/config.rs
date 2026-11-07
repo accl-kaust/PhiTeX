@@ -788,6 +788,56 @@ fn project_warning(warnings: &mut Vec<String>, key: &str, why: &str) {
     ));
 }
 
+/// The rc files on disk, for [`phitex_live::latexmkrc`].
+struct Disk;
+
+impl phitex_live::latexmkrc::RcFiles for Disk {
+    fn read(&self, path: &str) -> Option<String> {
+        let p = Path::new(path);
+        if !p.is_file() {
+            return None;
+        }
+        std::fs::read(p)
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    }
+
+    /// Perl's `abs_path`: symbolic links resolved; a last part that does
+    /// not exist (`(eval 1)`, latexmk's `__FILE__`) kept on its resolved
+    /// folder.
+    fn canonical(&self, path: &str) -> String {
+        let plain = phitex_live::latexmkrc::normalize(path);
+        if let Ok(p) = std::fs::canonicalize(&plain) {
+            return p.to_string_lossy().into_owned();
+        }
+        let p = Path::new(&plain);
+        match (p.parent().map(std::fs::canonicalize), p.file_name()) {
+            (Some(Ok(dir)), Some(name)) => dir.join(name).to_string_lossy().into_owned(),
+            _ => plain,
+        }
+    }
+}
+
+/// latexmk's rc files as latexmk run in `dir` reads them (the system's,
+/// the user's, `dir`'s own), with this process's environment.
+pub fn latexmkrc(dir: &Path) -> phitex_live::latexmkrc::Rc {
+    use phitex_live::latexmkrc as rc;
+    let var = |n: &str| std::env::var(n).ok();
+    let home = var("HOME");
+    let w = rc::Where {
+        cwd: dir.to_string_lossy().into_owned(),
+        home_config_is_dir: home
+            .as_deref()
+            .is_some_and(|h| Path::new(h).join(".config").is_dir()),
+        home,
+        xdg_config_home: var("XDG_CONFIG_HOME"),
+        latexmkrcsys: var("LATEXMKRCSYS"),
+        system_and_user: true,
+    };
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    rc::read(&rc::order(&w), &w.cwd, &env, &Disk)
+}
+
 /// The project's `phitex.toml` at `dir` or above.
 fn find_file(dir: &Path) -> Option<PathBuf> {
     dir.ancestors().map(|d| d.join(FILE)).find(|p| p.is_file())

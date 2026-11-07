@@ -56,7 +56,7 @@ impl Session {
         // (kpathsea opened for the job and for the format on threads of
         // their own while the main file is read)
         let (text, tree, format_tree) = std::thread::scope(|s| {
-            let tree = s.spawn(|| Arc::new(tex::Tree::open(&job.engine)));
+            let tree = s.spawn(|| Arc::new(tex::Tree::open(&job.engine, &job.inputs)));
             let format_tree = s.spawn(|| Arc::new(tex::Tree::open_format(&job.engine)));
             let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()));
             phitex_tex::timeline::lap("session: the main file read");
@@ -93,7 +93,7 @@ impl Session {
             crate::shelf::font_index(&files)?;
         }
         let (store, out) = Self::store_and_out(&job, note);
-        let host = Arc::new(crate::shelf::ShelfHost { files });
+        let host = Arc::new(crate::shelf::ShelfHost::new(files, &job.inputs));
         Ok(Session {
             live: phitex_live::session::Session::new(job, text, host, store, out.clone(), status),
             out,
@@ -251,13 +251,16 @@ impl Host for Machine {
     /// The commands neither in process nor refused: run as processes,
     /// each in a scratch directory of its own.
     fn shell_hook(&self, job: &Job) -> Option<Arc<dyn phitex_tex::ShellHook>> {
-        Some(Arc::new(crate::shell::ProcessHook::new(
-            job.path
-                .parent()
-                .filter(|d| !d.as_os_str().is_empty())
-                .unwrap_or(Path::new(".")),
-            crate::tex::kpse("pdftex", "pdftex").exported(),
-        )))
+        Some(Arc::new(
+            crate::shell::ProcessHook::new(
+                job.path
+                    .parent()
+                    .filter(|d| !d.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+                crate::tex::kpse("pdftex", "pdftex").exported(),
+            )
+            .with_vars(&job.inputs),
+        ))
     }
 
     fn xdv_files(&self, dir: &Path) -> Option<phitex_live::dvipdf::FilesFor> {

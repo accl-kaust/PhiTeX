@@ -188,6 +188,11 @@ pub struct Job {
     /// An edit's diagnostics at their places (a viewer's, `--diagnostics`);
     /// else an edit reports the engine's own, at no place, only.
     pub edit_diagnostics: bool,
+    /// The search paths set over the host's (a `.latexmkrc`'s
+    /// `$ENV{TEXINPUTS}`, `BIBINPUTS`, `BSTINPUTS`, [`crate::latexmkrc`]):
+    /// each variable's value in kpathsea's syntax, its relative elements
+    /// absolute. Empty: the host's own.
+    pub inputs: Vec<(String, String)>,
 }
 
 /// One run of a build.
