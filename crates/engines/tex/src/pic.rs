@@ -413,10 +413,30 @@ impl Run<'_, '_> {
         let i = self.cx.child_once(self.ops.pic, args);
         self.muts += 1;
         let Some(x) = self.cx.placed_output_peek(i) else {
-            // (no output yet: the run goes on as if the picture were
-            // empty, and the child's commit asks it again; its picture
-            // runs once, in the child, on another thread where one is
-            // free)
+            // (no output yet: the run goes on on the output of the
+            // picture its last run placed here, an edited picture's old
+            // one, and the child's commit asks it again where its own
+            // differs: the fonts, names and appends the picture made stand
+            // meanwhile, where empty they went and every later reader of
+            // them was asked again, then again when the child had run
+            // (Grail's changed drawing: 198 paragraphs checked, the first
+            // load of an 8 pt font gone for that while))
+            if let Some(g) = self.cx.last_placed_output(i, self.ops.pic).filter(|&g| {
+                let gs = list_of(v, g);
+                g != ValueId::UNIT && gs.first().is_some_and(|&t| int_of(v, t) == 0)
+            }) {
+                let x = self.cx.placed_output_or(i, g);
+                self.pic_apply(&body, x);
+                if trace() {
+                    eprintln!(
+                        "pic: node {node} {} {hash:x}: placed, no output yet, its last run's picture here taken",
+                        body.name
+                    );
+                }
+                return Ok(true);
+            }
+            // (none: as if the picture were empty; its picture runs once,
+            // in the child, on another thread where one is free)
             self.cx.placed_output_or(i, ValueId::UNIT);
             self.pic_skip(&body.skip);
             self.muts += 1;

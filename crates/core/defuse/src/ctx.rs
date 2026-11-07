@@ -1275,6 +1275,20 @@ impl<'a> Ctx<'a> {
         read::final_read(self.eng, f).value
     }
 
+    /// The output of my last run's `i`-th placement, if it was a node of
+    /// operation `op` that has run: a guess for this run's `i`-th
+    /// placement, of `op` too, whose own node has not run (an edited
+    /// picture's child, placed anew, `Ctx::placed_output_or`). Not
+    /// recorded, a peek.
+    #[must_use]
+    pub fn last_placed_output(&self, i: usize, op: OpId) -> Option<ValueId> {
+        let c = *self.last.as_ref()?.placed.get(i)?;
+        let n = self.eng.node(c);
+        (n.op() == op && n.state() != State::Gone)
+            .then(|| n.run_record().map(|r| r.output))
+            .flatten()
+    }
+
     /// The output of the node my `i`-th placement of this run stands for
     /// (`Ctx::placed_output_or`'s), if it has run: not recorded, a peek.
     /// A run that stops for a placement's output reads it with
