@@ -814,19 +814,16 @@ impl Server {
         // (diagnostics made later, when the editing pauses: the last ones
         // stand meanwhile, their warnings said to be updating,
         // `Server::diagnostics`)
-        let (engine_failed, engine, format) = match &b.diagnostics {
-            Some(d) => {
-                let p = self.publish(d);
-                lock(&self.st).warnings_updating = false;
-                (facts.errors, facts.warnings) = (p.errors, p.warnings);
-                (p.engine_failed, p.engine, p.format)
-            }
-            None => {
-                let mut st = lock(&self.st);
-                facts.warnings = st.last.warnings;
-                st.warnings_updating = true;
-                (false, None, None)
-            }
+        let (engine_failed, engine, format) = if let Some(d) = &b.diagnostics {
+            let p = self.publish(d);
+            lock(&self.st).warnings_updating = false;
+            (facts.errors, facts.warnings) = (p.errors, p.warnings);
+            (p.engine_failed, p.engine, p.format)
+        } else {
+            let mut st = lock(&self.st);
+            facts.warnings = st.last.warnings;
+            st.warnings_updating = true;
+            (false, None, None)
         };
         let token = {
             let mut st = lock(&self.st);

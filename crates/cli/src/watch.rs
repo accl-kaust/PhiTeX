@@ -1787,7 +1787,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         }
         // (pending, or the same evaluation's: the last ones kept until
         // made; a pending build's errors for `p`)
-        if (!pending && !(same_eval && r.diagnostics_pending)) || (pending && failed) {
+        let kept = same_eval && r.diagnostics_pending;
+        if if pending { failed } else { !kept } {
             last.borrow_mut().diags = std::mem::take(&mut r.diagnostics);
         }
         // (nothing written: the last build kept, for the way out's question)
@@ -1964,7 +1965,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                     .expect("a thread");
                             }
                             None => {
-                                held.push_back((Instant::now(), Event::Compacted(b, Ok(false))))
+                                held.push_back((Instant::now(), Event::Compacted(b, Ok(false))));
                             }
                         },
                     }

@@ -6281,6 +6281,10 @@ pub struct Diagnostic {
     pub help: Option<String>,
 }
 
+/// A build's diagnostics kept with the evaluation and text they are of
+/// ([`Build::diagnostics`]).
+type DiagsKept = ((u64, usize), Vec<Diagnostic>);
+
 /// A document built on the graph, kept for edits.
 #[allow(clippy::struct_excessive_bools)]
 pub struct Build {
@@ -6328,7 +6332,7 @@ pub struct Build {
     /// evaluations settled (`settles`) and text length they were made at
     /// (the text moves only in an evaluation settled): a build that settled nothing since (`r` with nothing
     /// changed) gives them again, not made anew (Grail: 279, 1.7 ms).
-    diags_last: Mutex<Option<((u64, usize), Vec<Diagnostic>)>>,
+    diags_last: Mutex<Option<DiagsKept>>,
     /// Evaluations settled (`Build::settle` past its nothing-to-settle).
     settles: u64,
     /// This build's number among the process's ([`Build::settled_key`]).
@@ -8382,7 +8386,6 @@ impl Build {
             .collect()
     }
 
-    #[allow(clippy::too_many_lines)]
     /// The diagnostics of the last build or edit: TeX's errors and
     /// warnings (box reports, missing characters) where the input was,
     /// and the engine's evaluation errors; by file, then byte.
@@ -8429,6 +8432,7 @@ impl Build {
 
     /// [`Build::diagnostics`], made; `errors_only`: TeX's warnings left
     /// out, not placed ([`Build::error_diagnostics`]).
+    #[allow(clippy::too_many_lines)]
     fn diagnostics_made(&self, errors_only: bool) -> Vec<Diagnostic> {
         let t_spans = std::time::Instant::now();
         let v = self.g.eng.values();
