@@ -2192,6 +2192,41 @@ pub(crate) fn clear_move(eng: &Engine, node: &Node) {
     }
 }
 
+/// A node an edit removed at `at` in unit `u` (`Engine::remove`) leaves
+/// the state after it as no run has seen it: the first node after it that
+/// is to run again is the front of that change, the first to run on it at
+/// one thread, and what it defines now is not known (the font a deleted
+/// paragraph first loaded is loaded by the next paragraph that uses it).
+/// Those after it wait for it (`hold_for`), as for a node an edit made
+/// (`enqueue`), until it commits, changed or not (`clear_front`). Run
+/// sooner, each ran on the removed node's definitions gone and none in
+/// their place, a state no order of the runs has, and again once the front
+/// had committed: microtype's font list, every paragraph after a deleted
+/// one that first used a font at -j8, then those that first use a font
+/// again on the list, about one edit in 13
+/// (`a_font_list_append_does_not_run_again_when_the_list_moves`).
+pub(crate) fn mark_front(eng: &Engine, at: crate::order::Pos, u: crate::api::UnitId) {
+    let Some(x) = crate::read::on_one_layout(eng, || crate::read::to_run_after(eng, at, u)) else {
+        return;
+    };
+    let Some(n) = eng.placed_node(x) else { return };
+    if !n.front.swap(true, Ordering::AcqRel) && eng.movers.lock().insert(x) {
+        eng.movers_n.fetch_add(1, Ordering::Release);
+    }
+}
+
+/// A front's commit, or its removal (`mark_front`): those after it wait
+/// for it no more. (A front is never one of a chain, whose moves keep it
+/// listed, `note_move`.)
+pub(crate) fn clear_front(eng: &Engine, node: &Node) {
+    if node.front.load(Ordering::Relaxed)
+        && node.front.swap(false, Ordering::AcqRel)
+        && eng.movers.lock().remove(&node.id)
+    {
+        eng.movers_n.fetch_sub(1, Ordering::Release);
+    }
+}
+
 /// The unsettled node `node` should wait for, by the last evaluation's
 /// graph: one before it that has never run or moved a read of its chain
 /// (`read::mover_before`), or that its last run read from and that moved a

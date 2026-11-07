@@ -1208,6 +1208,38 @@ pub(crate) fn unsettled_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     None
 }
 
+/// The first node after position `at` in unit `u` that is to run again
+/// (dirty or at work) and that those after it may wait for
+/// (`sched::hold_for`: not the page loop's nor a quiet point's, and not
+/// one of a chain, which waits by its own moves): the front of a node an
+/// edit removed at `at` (`sched::mark_front`).
+pub(crate) fn to_run_after(eng: &Engine, at: Pos, u: crate::api::UnitId) -> Option<NodeId> {
+    let end = eng.unit(u).end;
+    let mut cur = eng.seg_for_pos(at).map(|s| s.id);
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= end {
+            return None;
+        }
+        if seg.unit == u {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((Excluded(at), Unbounded)) {
+                let n = eng.node(*id);
+                if n.unit != u || !matches!(n.state(), State::Dirty | State::Running | State::RunningDirty) {
+                    continue;
+                }
+                let op = eng.op(n.op());
+                if !op.chains() && !op.works_at_frontier() && !op.final_only() && !n.held_panic.load(Ordering::Acquire)
+                {
+                    return Some(*id);
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    None
+}
+
 /// The nearest node before `me` in its unit that is a piece of the text
 /// (`Operation::text`) asked again since it committed: dirty or running.
 /// What a run that would end the job's text at `me` (a fatal error's

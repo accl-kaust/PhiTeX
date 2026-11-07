@@ -194,6 +194,10 @@ pub(crate) struct Node {
     /// settle (`sched::hold_for`). A node of a chain, or one that never ran,
     /// is listed in `Engine::movers`.
     pub(crate) moves: AtomicBool,
+    /// It is the front of a node an edit removed (`sched::mark_front`):
+    /// the first after it to run again, those after it waiting for it
+    /// in `Engine::movers` until it commits (`sched::clear_front`).
+    pub(crate) front: AtomicBool,
     /// It was stopped before a run to wait for a node (`sched::work`): the
     /// wake that asked for the run still stands; its waiting ended by
     /// that node's settling clears this (`sched::release_waiting`), a
@@ -280,6 +284,7 @@ impl Node {
             full_ns: AtomicU64::new(0),
             refuted: AtomicBool::new(false),
             moves: AtomicBool::new(false),
+            front: AtomicBool::new(false),
             held: AtomicBool::new(false),
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
