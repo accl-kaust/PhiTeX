@@ -857,6 +857,36 @@ fn a_refused_picture_child_leaves_the_empty_name_its_own() {
     }
 }
 
+/// A picture after a page fired inside conditionals of its piece's own
+/// (`pdfdocs/picroutine.tex`: a heading's spacing and break inside
+/// `\ifnum`, the picture in the same expansion): the page's routine draws
+/// two pictures in the shipout hook, stepping TikZ's picture counter,
+/// and the piece goes on past the candidate with the routine's values put
+/// in force there. The picture child reads them as its parent holds them
+/// (it read the counter from before the routine: beautybook-en's
+/// `pgfid59` twice, its page 19 frame drawn from page 14's position). The
+/// PDF is pdfTeX's at -j1, -j4 and -j8.
+#[test]
+#[ignore = "heavy: the LaTeX format"]
+fn a_picture_after_a_page_fired_in_its_piece_sees_the_routines_values() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let name = "picroutine";
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+        .expect("the oracle");
+    for threads in [1usize, 4, 8] {
+        let opts = Options {
+            threads: Some(threads),
+            ..pdf_opts(name, &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), &src);
+        let (pdf, _) = b.output();
+        if let Some(d) = common::first_difference(&pdf, &want) {
+            panic!("{name} -j {threads}: pdf {d}");
+        }
+    }
+}
+
 /// The page layer's work, by the engine's counters, on floats2col (the
 /// document of [`latex_twocol_floats_runs`]: twocolumn, 194 routine
 /// fires, floats and marginpars whose routines hand back `\@freelist`,
