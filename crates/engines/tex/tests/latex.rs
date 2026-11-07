@@ -1926,6 +1926,47 @@ fn an_input_files_error_after_edits_is_where_a_cold_build_places_it() {
     assert_eq!(errors(&b), want, "the edits' errors, the cold build's");
 }
 
+/// The diagnostics of an `\input` file after an edit that adds a line
+/// before them and leaves the bytes before them as many (a word made a
+/// wider character: oracle/fixtures/latex/diagshift2, the edit fuzz's
+/// longtable document) are a cold build's: their lines, and the "on input
+/// line N" of LaTeX's warnings. The diagnostics kept from the last call
+/// were found by their entry, line text and byte, not their line's
+/// number, and stayed a line early.
+#[test]
+fn an_input_files_warnings_after_a_line_is_added_are_a_cold_builds() {
+    let fx = common::fixtures().join("latex/diagshift2");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latex-diagshift2");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("tex")).expect("a scratch directory");
+    let src = common::read(&fx.join("main.tex"));
+    std::fs::write(dir.join("main.tex"), &src).expect("the document");
+    let text = |k: u32| std::fs::read(fx.join(format!("s{k}.tex"))).expect("a text of the file");
+    std::fs::write(dir.join("tex/D-caching.tex"), text(10)).expect("the input file");
+    let shown = |b: &phitex_tex::Build| -> Vec<(String, usize, String)> {
+        let mut ds: Vec<_> = b
+            .diagnostics()
+            .into_iter()
+            .filter(|d| d.file.ends_with("D-caching.tex"))
+            .map(|d| (d.file, d.line, d.message))
+            .collect();
+        ds.sort();
+        ds
+    };
+    let mut b = common::build(pdf_opts("main", &dir), Some(&prelude(true)), &src);
+    let _ = shown(&b);
+    b.edit_file("tex/D-caching.tex", Some(&text(11)));
+    std::fs::write(dir.join("tex/D-caching.tex"), text(11)).expect("the input file");
+    let cold = common::build(pdf_opts("main", &dir), Some(&prelude(true)), &src);
+    let want = shown(&cold);
+    assert!(
+        want.iter()
+            .any(|d| d.1 == 77 && d.2.contains("on input line 77")),
+        "the cold build's warning at line 77: {want:#?}"
+    );
+    assert_eq!(shown(&b), want, "the edit's diagnostics, the cold build's");
+}
+
 /// A measure: amsldoc (`bench/amsldoc`) built as latexmk would, then
 /// one sentence added to a paragraph (its lines re-broken): the nodes
 /// that ran again and why (`PHITEX_EDIT_TEXT`: `OLD=>NEW` instead).

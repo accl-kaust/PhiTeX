@@ -8594,6 +8594,8 @@ impl Build {
         // (an `\input` file's text, read once a call, not once an entry)
         let mut files: phitex_defuse::FxHashMap<String, Arc<str>> =
             phitex_defuse::FxHashMap::default();
+        // (each file's line starts, made once a call)
+        let mut file_lines: FxHashMap<String, Vec<usize>> = FxHashMap::default();
         // (the files the job wrote, as it wrote them: made once a call,
         // at the first diagnostic in one)
         let mut written: Option<Vec<(String, String)>> = None;
@@ -8764,8 +8766,21 @@ impl Build {
                 0
             };
             let head = &text[..b];
+            // (the document's line by its line starts; a file's by its own,
+            // made once a call)
+            let line = if file == docname {
+                doc_lines.partition_point(|&k| k <= b)
+            } else {
+                file_lines
+                    .entry(file.clone())
+                    .or_insert_with(|| line_starts(text))
+                    .partition_point(|&k| k <= b)
+            };
             // (placed by the last call: the same entry at the same place
-            // in the same line)
+            // in the same line, of the same number: an edit that adds a
+            // line before it and leaves the bytes before it as many, a word
+            // made a wider character, moves its line, and the message's
+            // "on input line N" with it; the place kept was a line early)
             let key = {
                 let ls = head.rfind('\n').map_or(0, |k| k + 1);
                 let le = text[b..].find('\n').map_or(text.len(), |k| b + k);
@@ -8774,6 +8789,7 @@ impl Build {
                     &[
                         u64::try_from(at).unwrap_or(0),
                         phitex_defuse::hash_bytes(0, file.as_bytes()),
+                        u64::try_from(line).unwrap_or(0),
                     ],
                 )
             };
@@ -8787,12 +8803,6 @@ impl Build {
                 out.push(d.clone());
                 continue;
             }
-            // (the document's line by its line starts; a file's counted)
-            let line = if file == docname {
-                doc_lines.partition_point(|&k| k <= b)
-            } else {
-                head.bytes().filter(|&c| c == b'\n').count() + 1
-            };
             let ls = head.rfind('\n').map_or(0, |k| k + 1);
             let le = text[b..].find('\n').map_or(text.len(), |k| b + k);
             let before: String = text[ls..b].to_owned();
