@@ -1444,6 +1444,13 @@ impl Run<'_, '_> {
         // line, never ended (a finisher re-asked 17 times by one field,
         // the rests' page chain folded again for each), and thumbs'
         // overview loop at -j4 and -j8 now and then ran on for ever)
+        // (observe, `PHITEX_CONT_TRACE=<piece>`: the continuation a piece
+        // hands its rest, to find what in it moves with an edit)
+        if crate::exec::obs_str!("PHITEX_CONT_TRACE")
+            .is_some_and(|w| w == int_of(v, pid).to_string())
+        {
+            eprintln!("cont-trace: {} {}", int_of(v, pid), v.render(cont));
+        }
         self.cx.define_with(
             cont_field(v, pid, CUT_K),
             v.list(vec![cont, v.int(rest)]),

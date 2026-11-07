@@ -2114,9 +2114,12 @@ impl<'c, 'a> Run<'c, 'a> {
     pub(crate) fn map_ok(&self, loc: Loc, global: bool) -> bool {
         let op = self.cx.op();
         let routine = op == self.ops.finish && global;
+        // (a picture's or a loop's child: its steps handed back to its
+        // parent as steps, `crate::pic`'s `pic_steps`)
+        let child = op == self.ops.pic;
         self.count_reg(loc).is_some()
-            && (op == self.ops.exec || op == self.ops.resume || routine)
-            && (self.doc || routine)
+            && (op == self.ops.exec || op == self.ops.resume || routine || child)
+            && (self.doc || routine || child)
             && !self.rec_load
             && self.interp.is_none()
             && !self.read_back_done
@@ -2136,8 +2139,7 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         let op = self.cx.op();
         self.count_reg(loc).is_some()
-            && (op == self.ops.exec || op == self.ops.resume)
-            && self.doc
+            && ((op == self.ops.exec || op == self.ops.resume) && self.doc || op == self.ops.pic)
             && !self.rec_load
             && self.interp.is_none()
             && !self.read_back_done
@@ -2187,13 +2189,28 @@ impl<'c, 'a> Run<'c, 'a> {
     /// node's position). `PHITEX_NO_DEFER=1` turns it off (observe builds).
     pub(crate) fn defer_allowed(&self) -> bool {
         let op = self.cx.op();
-        (op == self.ops.exec || op == self.ops.resume)
-            && self.doc
+        ((op == self.ops.exec || op == self.ops.resume) && self.doc || op == self.ops.pic)
             && !self.rec_load
             && self.interp.is_none()
             && !self.read_back_done
             && !self.read_point_here
             && !crate::exec::obs_flag!("PHITEX_NO_DEFER")
+    }
+
+    /// The piece a symbol this run makes stands for (`crate::defer::Sym`):
+    /// the run's own node, or for a picture or loop child (`crate::pic`),
+    /// which reads before its placer, the placer: its symbol is the
+    /// register reaching the placer plus the steps the placer made before
+    /// the child (handed over with its bindings) and the child's own, as
+    /// TeX's value there is, and it resolves the same in the placer, in a
+    /// finisher or in any other run.
+    pub(crate) fn sym_node(&self) -> phitex_defuse::NodeId {
+        if self.pic_child.is_some()
+            && let Some(p) = self.cx.reads_before()
+        {
+            return p;
+        }
+        self.cx.node()
     }
 
     /// A definition of integer register `loc` about to be made: the
@@ -2222,6 +2239,13 @@ impl<'c, 'a> Run<'c, 'a> {
             || (self.st.has_map(loc) && crate::defer::deferrable(self, loc))
         {
             return Ok(false);
+        }
+        // (a child's register its parent bound: the parent's value)
+        if self.pic_child.is_some() {
+            let f = self.loc_field(loc);
+            if self.pic_overlay_has(f)? {
+                return Ok(false);
+            }
         }
         // (a symbol is resolved as of the piece's position: made after a
         // candidate of its own a page fires at, it would stand for the

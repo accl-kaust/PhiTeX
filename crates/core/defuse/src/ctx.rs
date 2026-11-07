@@ -218,6 +218,13 @@ impl<'a> Ctx<'a> {
     /// (`view_field`, `view`) stay mine: a field the placer defines for
     /// me is read there, and so is my scope depth (`depth`). A node with
     /// no placer reads at its position.
+    /// The node my reads of reaching definitions are made before
+    /// ([`Ctx::read_before_placer`]): my placer, if I read before it.
+    #[must_use]
+    pub fn reads_before(&self) -> Option<NodeId> {
+        self.before_placer
+    }
+
     pub fn read_before_placer(&mut self) {
         self.before_placer = self.me.parent;
     }

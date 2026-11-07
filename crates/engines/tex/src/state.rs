@@ -3128,6 +3128,28 @@ impl State {
     /// group or not) with its binding now (`None`: absent): the run's
     /// state at this point where it is not the engine's (a picture
     /// child's view of its parent, `crate::pic`).
+    /// The registers the run has stepped without reading or defining
+    /// them (a map that adds, `State::add`): `(loc, steps, global)` each,
+    /// in the order touched. A child reading before the run
+    /// (`crate::pic`) starts from them, as TeX's picture starts from the
+    /// value the run left.
+    pub(crate) fn mapped_now(&self) -> Vec<(Loc, i32, bool)> {
+        let mut out = Vec::new();
+        for &l in &self.touched {
+            let Some(s) = self.slot_ref(l) else { continue };
+            if s.mapped == MAP_NONE
+                || s.meta != 0
+                || s.e.flags & LOADED != 0
+                || !s.map.keep
+                || s.map.add == 0
+            {
+                continue;
+            }
+            out.push((l, s.map.add, s.mapped == MAP_GLOBAL));
+        }
+        out
+    }
+
     pub(crate) fn defined_now(&self, v: &Values) -> Vec<(Loc, Option<ValueId>)> {
         let mut out = Vec::new();
         for &l in &self.touched {

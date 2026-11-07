@@ -130,7 +130,7 @@ fn routine_regs(r: &mut Run<'_, '_>) {
 /// operand was the register alone: `scan_int` clears `defer_ok` as soon
 /// as it consumes anything but that one internal quantity).
 pub(crate) fn symbol_for(r: &mut Run<'_, '_>, loc: Loc) -> Tok {
-    let node = r.cx.node();
+    let node = r.sym_node();
     let j = r.st.steps_of(loc);
     r.st.note_symbol(loc);
     r.st.note_read(loc);
@@ -141,7 +141,7 @@ pub(crate) fn symbol_for(r: &mut Run<'_, '_>, loc: Loc) -> Tok {
 /// [`symbol_for`] with steps `j` given: a register's value reaching the
 /// piece plus `j` (an expression's on it, [`Run::defer_sym`]).
 pub(crate) fn symbol_with(r: &mut Run<'_, '_>, loc: Loc, j: i32) -> Tok {
-    let node = r.cx.node();
+    let node = r.sym_node();
     r.st.note_symbol(loc);
     r.st.note_read(loc);
     let reg = r.count_reg(loc).expect("deferrable: an integer register");
@@ -152,7 +152,7 @@ pub(crate) fn symbol_with(r: &mut Run<'_, '_>, loc: Loc, j: i32) -> Tok {
 /// in a finisher, [`leaked`] anywhere else.
 pub(crate) fn value(r: &mut Run<'_, '_>, s: Sym) -> crate::run::R<i32> {
     match r.op_name() {
-        "exec" | "resume" => force(r, s),
+        "exec" | "resume" | "pic" => force(r, s),
         "finish" => resolve(r, s),
         _ => leaked(r, s),
     }
@@ -199,7 +199,7 @@ pub(crate) fn force(r: &mut Run<'_, '_>, s: Sym) -> crate::run::R<i32> {
     if crate::exec::obs_flag!("PHITEX_SYM_TRACE") {
         trace_force(r, s);
     }
-    if s.node != r.cx.node() {
+    if s.node != r.sym_node() {
         return resolve(r, s);
     }
     r.defer_ok = false;
@@ -345,7 +345,7 @@ pub(crate) fn try_symbolic(r: &mut Run<'_, '_>, loc: Loc, global: bool) -> crate
 /// Register `loc` set to symbol `s`: a restore where `s` is this
 /// piece's own symbol of `loc`, else an alias.
 fn symbolic(r: &mut Run<'_, '_>, loc: Loc, s: Sym, global: bool) -> bool {
-    let node = r.cx.node();
+    let node = r.sym_node();
     if Sym::at(r, loc, node) == Some(s) {
         return restore_reaching(r, loc, global);
     }
@@ -697,7 +697,7 @@ pub(crate) fn name_chars(
         if r.cur.cmd == cmd::SYM
             && let Some(s) = sym_of(r.cur.tok)
         {
-            if keep && kept.is_none() && s.node == r.cx.node() {
+            if keep && kept.is_none() && s.node == r.sym_node() {
                 kept = Some((name.len(), s));
                 continue;
             }
@@ -744,7 +744,7 @@ pub(crate) fn derived_read(
     suffix: &str,
     p: phitex_defuse::PathId,
 ) -> crate::run::R<Option<Answer>> {
-    if s.node != r.cx.node()
+    if s.node != r.sym_node()
         || !r.defer_allowed()
         || r.rb.is_some()
         || prefix.ends_with(|c: char| c.is_ascii_digit() || c == '-')
