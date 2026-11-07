@@ -572,8 +572,14 @@ impl Fields {
         if loc < NSLOT {
             return self.slot_field[loc];
         }
-        // (a spill location is its table's own: its field is in its slot)
+        // (a spill location is its table's own: its field is in its slot;
+        // asked here, it is one the table no longer has, a rollback's,
+        // and no name answers it: never kept, or the empty name's field
+        // would be sent there by `loc_of` from then on, on this thread)
         debug_assert!(loc < 1 << 31, "field of a spill location {loc}");
+        if loc >= 1 << 31 {
+            return v.field("\u{1}spill:gone");
+        }
         let key = u32::try_from(loc).unwrap_or(u32::MAX);
         if let Some(f) = with_names(v, epoch, |c| c.fields.get(&key).copied()) {
             return f;
