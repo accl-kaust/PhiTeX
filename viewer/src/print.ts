@@ -187,6 +187,7 @@ header:active { cursor: grabbing; }
 .timing .c0 { background: var(--ph-progress); } .timing .c1 { background: var(--ph-accent); } .timing .c2 { background: var(--ph-fg2); } .timing .c3 { background: var(--ph-border); }
 .timing .foot { margin-top: 8px; color: var(--ph-fg2); font-size: 12px; overflow-wrap: anywhere; }
 .timing .foot.err { color: var(--ph-danger); }
+.timing .copydbg { margin: 8px 0 0; font-size: 12px; }
 
 /* problems: Overleaf's log entries, in a popover under the bar */
 /* (the problems' filters: a kind a pill, on or off) */
@@ -279,6 +280,8 @@ header:active { cursor: grabbing; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
+/* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
+.slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
@@ -298,9 +301,10 @@ header:active { cursor: grabbing; }
 .smarks i.error { background: var(--ph-danger, #d93025); }
 .smarks i.change { background: var(--ph-accent, #1d3e72); }
 .phx-card[data-key] { cursor: pointer; }
-/* (an overfull box's bar at its line's end, pdflatex's draft rule, drawn by the viewer only; an underfull's hollow) */
+/* (an overfull box's bar at its line's end, where pdflatex's draft rule goes, drawn by the viewer only, in the warning's
+   amber, as its tooltip and the underfull's outline: draft black read as a broken block, and vanished on a dark page; an underfull's hollow) */
 .slot .culprit.rule::after { display: none; }
-.slot .culprit.rule.overfull { background: #1b222c; }
+.slot .culprit.rule.overfull { background: rgb(199 119 0 / 85%); border-radius: 1px; }
 .slot .culprit.rule.underfull { box-shadow: inset 0 0 0 1.5px #c77700; }
 /* (a culprit hovered: its problem's message, a small tooltip under the line) */
 .ctip { position: absolute; z-index: 8; max-width: min(420px, calc(100% - 16px)); display: flex; gap: 6px; align-items: flex-start; padding: 5px 9px;

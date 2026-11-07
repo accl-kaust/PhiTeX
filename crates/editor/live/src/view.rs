@@ -239,6 +239,10 @@ pub struct Viewer {
     /// The first build's time and the builds so far: what a tab that joins
     /// later was not told.
     built_times: Mutex<(Option<f64>, u64)>,
+    /// The last build's `settled` and `stats` events, as sent: a tab that
+    /// joins after it is given them ([`Viewer::answer`]'s `info` `built`),
+    /// not "no build yet" until the next edit.
+    last_built: Mutex<(Value, Value)>,
     asks: Mutex<Vec<Ask>>,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
     building: AtomicBool,
@@ -285,6 +289,7 @@ impl Default for Viewer {
             pages: Mutex::new(Pages::default()),
             diagnostics: Mutex::new(json!([])),
             built_times: Mutex::new((None, 0)),
+            last_built: Mutex::new((Value::Null, Value::Null)),
             asks: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
             building: AtomicBool::new(false),
@@ -384,7 +389,8 @@ impl Viewer {
 
     /// Page `k` of the PDF shown ([`Viewer::pdf`]) at `scale` pixels a
     /// point, as strips (`phitex_render`): its size in pixels and points,
-    /// its bands (each `[key, top, height]`, the key in hex), its text and
+    /// its bands (each `[key, top, height, left, width]`, the key in hex:
+    /// a line, or its part in one column), its text and
     /// links (`viewer/src/types.ts`' `Link`), and what drawing it took
     /// (`drawn` and `kept` bands, microseconds).
     pub fn frame(&self, k: usize, scale: f32) -> Option<Value> {
@@ -409,7 +415,7 @@ impl Viewer {
         let bands: Vec<Value> = f
             .bands
             .iter()
-            .map(|b| json!([format!("{:016x}", b.key), b.y, b.h]))
+            .map(|b| json!([format!("{:016x}", b.key), b.y, b.h, b.x, b.w]))
             .collect();
         let links: Vec<Value> = f
             .links
@@ -745,6 +751,20 @@ impl Viewer {
 
     /// The file on disk is exact already (nothing to write when idle):
     /// the browsers told, as when it is written.
+    /// A build's stats, as the watch's `s` shows them (one object, the
+    /// same fields every build): `{"event":"stats", ...}`, for a timing
+    /// popover's "Copy debug info". Sent for every build, after `settled`.
+    pub fn stats(&self, stats: &Value) {
+        let mut e = serde_json::Map::new();
+        e.insert("event".into(), json!("stats"));
+        if let Value::Object(m) = stats {
+            e.extend(m.clone());
+        }
+        let stats = Value::Object(e);
+        self.emit(&stats.to_string());
+        lock(&self.last_built).1 = stats;
+    }
+
     pub fn written_exact(&self) {
         self.emit(&json!({"event": "written", "exact": true}).to_string());
     }
@@ -801,7 +821,9 @@ impl Viewer {
         e.insert("ms".into(), json!(b.ms));
         e.insert("history".into(), json!(b.history));
         e.extend(b.parts.clone());
-        self.emit(&Value::Object(e).to_string());
+        let settled = Value::Object(e);
+        self.emit(&settled.to_string());
+        lock(&self.last_built).0 = settled;
         (changed, n)
     }
 }
@@ -848,11 +870,17 @@ impl Viewer {
 
 /// Lines of a page's text as the viewer takes them (`viewer/src/text.ts`'
 /// `TextLine`).
+/// The pages' text lines as the viewer takes them, every place to a
+/// hundredth of a point (a twelfth of a pixel at 800%): written whole, a
+/// place was 17 digits, and a Grail page's frame 215 KB of them, each
+/// keystroke's made, sent and parsed.
 fn lines_json(lines: &[phitex_render::TextLine]) -> Value {
+    let r = |x: f64| (x * 100.0).round() / 100.0;
+    let all = |xs: &[f64]| xs.iter().map(|&x| r(x)).collect::<Vec<f64>>();
     Value::Array(
         lines
             .iter()
-            .map(|l| json!({"x": l.x, "y": l.y, "w": l.w, "size": l.size, "text": l.text, "xs": l.xs, "rs": l.rs}))
+            .map(|l| json!({"x": r(l.x), "y": r(l.y), "w": r(l.w), "size": r(l.size), "text": l.text, "xs": all(&l.xs), "rs": all(&l.rs)}))
             .collect(),
     )
 }
@@ -1037,7 +1065,8 @@ impl Viewer {
             }
             "info" if text("what").as_deref() == Some("built") => {
                 let t = lock(&s.built_times);
-                ok(json!({"first_ms": t.0, "builds": t.1}))
+                let last = lock(&s.last_built);
+                ok(json!({"first_ms": t.0, "builds": t.1, "settled": last.0, "stats": last.1}))
             }
             "info" => {
                 let what = text("what").unwrap_or_default();
@@ -1223,6 +1252,22 @@ mod tests {
     /// backlog answered while a build ends, its live "busy" clear made
     /// meanwhile on another thread, reaches the browser after the reply
     /// (it went first, and the replayed backlog left the tab "Building…").
+    /// A tab that joins after a build is given that build's stats (and
+    /// its `settled`) in `info` `built`, not nothing until the next one.
+    #[test]
+    fn a_tab_that_joins_late_is_given_the_last_builds_stats() {
+        let v = Viewer::default();
+        let built = |v: &Viewer| -> Value {
+            serde_json::from_str(&v.answer(&json!({"id": 1, "op": "info", "what": "built"})))
+                .unwrap()
+        };
+        assert_eq!(built(&v)["json"]["stats"], Value::Null);
+        v.stats(&json!({"build": 3, "wall_ms": 7.0}));
+        let j = built(&v);
+        assert_eq!(j["json"]["stats"]["event"], "stats");
+        assert_eq!(j["json"]["stats"]["build"], 3);
+    }
+
     #[test]
     fn a_reply_goes_before_the_events_made_after_it() {
         use std::sync::mpsc;
@@ -1389,5 +1434,25 @@ mod tests {
     fn page_ranges() {
         assert_eq!(ranges(&[1, 3, 4, 5, 7, 8]), "1, 3–5, 7–8");
         assert_eq!(ranges(&[]), "");
+    }
+
+    /// A text line's places go to the viewer to a hundredth of a point.
+    #[test]
+    fn text_places_to_a_hundredth() {
+        let l = phitex_render::TextLine {
+            x: 72.123_456_789,
+            y: 100.0 / 3.0,
+            w: 10.005_1,
+            size: 9.962_59,
+            text: "ab".into(),
+            xs: vec![72.123_456_789, 77.777_777],
+            rs: vec![77.777_777, 82.004_999],
+        };
+        let j = lines_json(&[l]);
+        assert_eq!(
+            j,
+            json!([{"x": 72.12, "y": 33.33, "w": 10.01, "size": 9.96, "text": "ab",
+                    "xs": [72.12, 77.78], "rs": [77.78, 82.0]}])
+        );
     }
 }

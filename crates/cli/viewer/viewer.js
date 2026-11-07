@@ -351,7 +351,7 @@ var Viewer = class {
     });
     root.addEventListener("mousemove", (e) => {
       const el = e.target.closest(".slot");
-      if (el) el.style.cursor = this.linkAt(e) ? "pointer" : "";
+      if (el) el.classList.toggle("on-link", !!this.linkAt(e));
     });
   }
   /** The link under a pointer event (its page's, from MuPDF), if any. */
@@ -1073,6 +1073,7 @@ header:active { cursor: grabbing; }
 .timing .c0 { background: var(--ph-progress); } .timing .c1 { background: var(--ph-accent); } .timing .c2 { background: var(--ph-fg2); } .timing .c3 { background: var(--ph-border); }
 .timing .foot { margin-top: 8px; color: var(--ph-fg2); font-size: 12px; overflow-wrap: anywhere; }
 .timing .foot.err { color: var(--ph-danger); }
+.timing .copydbg { margin: 8px 0 0; font-size: 12px; }
 
 /* problems: Overleaf's log entries, in a popover under the bar */
 /* (the problems' filters: a kind a pill, on or off) */
@@ -1165,6 +1166,8 @@ header:active { cursor: grabbing; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
+/* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
+.slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
@@ -1184,9 +1187,10 @@ header:active { cursor: grabbing; }
 .smarks i.error { background: var(--ph-danger, #d93025); }
 .smarks i.change { background: var(--ph-accent, #1d3e72); }
 .phx-card[data-key] { cursor: pointer; }
-/* (an overfull box's bar at its line's end, pdflatex's draft rule, drawn by the viewer only; an underfull's hollow) */
+/* (an overfull box's bar at its line's end, where pdflatex's draft rule goes, drawn by the viewer only, in the warning's
+   amber, as its tooltip and the underfull's outline: draft black read as a broken block, and vanished on a dark page; an underfull's hollow) */
 .slot .culprit.rule::after { display: none; }
-.slot .culprit.rule.overfull { background: #1b222c; }
+.slot .culprit.rule.overfull { background: rgb(199 119 0 / 85%); border-radius: 1px; }
 .slot .culprit.rule.underfull { box-shadow: inset 0 0 0 1.5px #c77700; }
 /* (a culprit hovered: its problem's message, a small tooltip under the line) */
 .ctip { position: absolute; z-index: 8; max-width: min(420px, calc(100% - 16px)); display: flex; gap: 6px; align-items: flex-start; padding: 5px 9px;
@@ -2515,6 +2519,7 @@ var Panel = class {
     this.last = null;
     this.lastStatus = null;
     this.speed = void 0;
+    this.built = void 0;
     this.at = 0;
     clearTimeout(this.staleTimer);
     this.staleSince = 0;
@@ -2685,9 +2690,8 @@ var Panel = class {
     } else if (this.warm) t = "Preparing instant typing\u2026", m = `${Math.round((Date.now() - this.warm.since) / 1e3)} s`;
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet", err = !!errs;
     else if (this.reopen || !this.last && this.viewer.pages === 0) t = this.stepNow || "Opening\u2026";
-    else if (errs) t = `Built with ${errs} error${errs === 1 ? "" : "s"}`, m = this.speed ? dur(this.speed.ms) : "", err = true;
-    else if (this.speed?.first) t = "First page", m = dur(this.speed.ms);
-    else t = "Built", m = this.speed ? dur(this.speed.ms) : "";
+    else if (errs) t = `Built with ${errs} error${errs === 1 ? "" : "s"}`, m = this.latest() ? dur(this.latest().ms) : "", err = true;
+    else t = this.latest()?.label ?? "Built", m = this.latest() ? dur(this.latest().ms) : "";
     text.textContent = t;
     more.textContent = m ? `\xB7 ${m}` : "";
     const was = this.statusNow;
@@ -4151,7 +4155,10 @@ var Panel = class {
     const w = this.walk;
     if (!w || w.ms === void 0 || !this.speed?.first) return "";
     const parts = w.parts.filter(([, ms]) => ms >= 1);
-    return `<div class="row"><span class="k">From opening to the first page</span><span class="v">${esc3(dur(w.ms))}</span><div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div></div>`;
+    return (
+      // (its total is the head's, "First page · 124 s": said once)
+      `<div class="row"><span class="k">Where the time went</span><span class="v"></span><div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div></div>`
+    );
   }
   /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
   downloads = { n: 0, bytes: 0, ms: 0 };
@@ -4169,12 +4176,38 @@ var Panel = class {
   buildTime(ms, first) {
     if (first) this.times = { first: ms, edits: [] };
     else this.times.edits.push(ms);
+    this.built = { ms, at: performance.now(), first };
+    this.renderStatus();
     if (!this.$("#m-time").hidden) this.timing();
+    this.emit();
   }
-  /** This tab joined `builds` builds in: `first` the first build's time for the bars; the first build's paint was not this tab's, so its next is not called one. */
-  joinedLate(first, builds) {
+  /** The last build the host said (buildTime), painted or not; `joined`: the one before this tab joined (joinedLate). */
+  built;
+  /**
+   * What the status and the timing popover's head say: the newest of the
+   * last paint (its time from the keystroke) and the last build (one that
+   * changed no page paints nothing, and was not said before: grail's 7 s).
+   */
+  latest() {
+    const s = this.speed, b = this.built;
+    if (b && (!s || b.at > s.at)) return { label: b.first ? "First build" : b.joined ? "Last build" : "Built, no page changed", ms: b.ms, first: b.first };
+    if (s) return { label: s.first ? "First page" : "Built", ms: s.ms, first: !!s.first };
+    return void 0;
+  }
+  /**
+   * This tab joined `builds` builds in: `first` the first build's time for
+   * the bars; the first build's paint was not this tab's, so its next is not
+   * called one; `last` the last build's time, for the status and the popover's
+   * head ("Last build", or "First build" if it was the only one).
+   */
+  joinedLate(first, builds, last) {
     if (first !== void 0 && this.times.first === void 0) this.times.first = first;
     if (builds >= 1) this.paints = Math.max(this.paints, 1);
+    if (last && !this.built) {
+      this.built = { ms: last.ms, at: performance.now(), first: last.cold, joined: true };
+      this.renderStatus();
+      if (!this.$("#m-time").hidden) this.timing();
+    }
   }
   /** The bars: the first build, the last edit, the edits' median, each as long as its time (the longest the full width; a short one at least a sliver). */
   timeBars() {
@@ -4198,16 +4231,46 @@ var Panel = class {
   timing() {
     const el = this.$("#m-time");
     const parts = this.timingParts().map(([k, v]) => part2(k, v));
-    const e2e = parts.find((p) => p.key === "keystroke\u2192page")?.ms ?? this.speed?.ms;
-    const head = this.speed?.first ? ["First page", this.speed.ms] : e2e !== void 0 ? ["Keystroke to page", e2e] : null;
+    const l = this.latest();
+    const e2e = parts.find((p) => p.key === "keystroke\u2192page")?.ms ?? l?.ms;
+    const head = !l ? e2e !== void 0 ? ["Keystroke to page", e2e] : null : l.first || l.label !== "Built" ? [l.label, l.ms] : ["Keystroke to page", e2e ?? l.ms];
     const rows = parts.map((p) => {
       const bar2 = p.split?.length ? `<div class="tbar">${p.split.map(([n, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${p.split.map(([n, ms], i) => `<span><i class="c${i}"></i>${esc3(n)} ${esc3(dur(ms))}</span>`).join("")}</div>` : "";
       return `<div class="row"><span class="k">${esc3(p.label)}</span><span class="v">${esc3(p.value)}</span>${bar2}${p.note ? `<span class="note">${esc3(p.note)}</span>` : ""}</div>`;
     }).join("");
     const strips2 = framePart(this.$("#stripsline").dataset.frame);
-    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.walkPart() + this.timeBars() + this.downloadsPart() + rows + strips2 + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
+    el.innerHTML = (head ? `<div class="head"><span>${esc3(String(head[0]))}</span><b>${esc3(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.walkPart() + this.timeBars() + this.downloadsPart() + rows + strips2 + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div><button type="button" class="reportbtn copydbg">Copy debug info</button>`;
+    el.querySelector(".copydbg").onclick = (e) => {
+      e.stopPropagation();
+      const b = e.currentTarget;
+      void this.debugInfo().then((t) => navigator.clipboard.writeText(t)).then(() => b.textContent = "Copied \u2713", () => b.textContent = "Couldn't copy");
+    };
     el.querySelector(".foot").textContent = parts.length || this.walk?.ms !== void 0 ? "" : this.lat?.summary ?? "";
     el.querySelector(".msg").textContent = this.msgText;
+  }
+  /**
+   * The timing popover's numbers as plain text, for a bug report or a chat:
+   * the host's lines (version, engine, files), the last build's head and
+   * parts as the session or the watch said them, the first page's steps,
+   * the downloads, the last page drawn, and this machine.
+   */
+  async debugInfo() {
+    const out = [...await this.ev.onDebugInfo?.().catch(() => []) ?? []];
+    const l = this.latest();
+    if (l) out.push(`${l.label}: ${dur(l.ms)}`);
+    if (this.lat?.summary) out.push(this.lat.summary);
+    for (const line of (this.lat?.details ?? "").split("\n").filter(Boolean)) out.push(`  ${line.trim()}`);
+    const w = this.walk;
+    if (w?.ms !== void 0) out.push(`opening to first page ${dur(w.ms)}: ${w.parts.map(([n, ms]) => `${n.toLowerCase()} ${dur(ms)}`).join(", ")}`);
+    const d = this.downloads;
+    if (d.n) out.push(`downloads: ${d.n} packages, ${(d.bytes / 1e6).toFixed(1)} MB, ${dur(d.ms)}`);
+    const t = this.times;
+    if (t.first !== void 0) out.push(`first build ${dur(t.first)}${t.edits.length ? `; edits ${t.edits.length}, last ${dur(t.edits[t.edits.length - 1])}, median ${dur([...t.edits].sort((a, b) => a - b)[t.edits.length >> 1])}` : ""}`);
+    const f = this.$("#stripsline").dataset.frame;
+    if (f) out.push(`last page drawn: ${f}`);
+    const nav = navigator;
+    out.push(`machine: ${nav.hardwareConcurrency ?? "?"} cores, ${nav.userAgentData?.platform || nav.platform || "?"}; ${nav.userAgent}`);
+    return out.join("\n") + "\n";
   }
   /** The last message (connected, files read, a debug check's result), shown in the timing popover. */
   msgText = "";
@@ -4743,6 +4806,8 @@ var PreviewSession = class {
   constructor(host2, core, sink, opts = {}) {
     this.host = host2;
     core.onEvent?.((e) => {
+      const ev = e.event ?? "";
+      if (this.ended.length && (ev === "settled" || ev === "failed" || ev === "trapped")) for (const f of this.ended.splice(0)) f(e);
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
       if (this.o.remote && e.event === "origins") return void (this.originsSeen++, this.glyphsAsked.clear(), this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
@@ -5630,6 +5695,8 @@ var PreviewSession = class {
   }
   /** A send loop is running (it takes what is queued when each build ends). */
   busy = false;
+  /** Waiting for a queued edit's build to end (`send`): its `settled`, else `failed` or `trapped`. */
+  ended = [];
   /** Edits the host gave, and builds they took (the batching's effect). */
   keystrokes = 0;
   builds = 0;
@@ -5823,18 +5890,25 @@ var PreviewSession = class {
     for (const [i, e] of edits.entries()) {
       const last = i === edits.length - 1;
       this.builds++;
+      let done;
+      const ended = last ? new Promise((res) => (done = res, this.ended.push(res))) : null;
+      const unheard = () => this.ended = this.ended.filter((f) => f !== done);
       const r = await this.core.request({ op: "edit", file, ...e, page: last ? this.page : -1, dpi: this.dpi() });
       if (!r.ok) {
+        unheard();
         this.sink.error((typeof r.json?.error === "string" ? r.json.error : void 0) ?? r.error ?? "edit failed");
         if (r.error?.includes("trapped")) await this.reopen();
         return false;
       }
       if (!last) continue;
+      if (!r.json?.queued) unheard();
       const tBack = this.now();
       const j = r.json;
       if (j.queued) {
         this.queued = { t0, tSend, tBack };
         this.setPages(j.pages);
+        const end = await ended;
+        if (end.event === "settled") await this.layout(), this.queuedLatency(end);
         continue;
       }
       this.setPages(j.pages);
@@ -5975,16 +6049,16 @@ var Strips = class {
   }
   /** `f` composed: a canvas of its window (the page, but for a window's frame), white under its strips. */
   canvas(f) {
-    const [, y, w, h] = f.win ?? [0, 0, f.pw, f.ph];
+    const [x, y, w, h] = f.win ?? [0, 0, f.pw, f.ph];
     const c = document.createElement("canvas");
     c.width = w;
     c.height = h;
     const g = c.getContext("2d");
     g.fillStyle = "#fff";
     g.fillRect(0, 0, w, h);
-    for (const [key, top] of f.bands) {
+    for (const [key, top, , left] of f.bands) {
       const b = this.kept.get(key);
-      if (b) g.drawImage(b, 0, top - y);
+      if (b) g.drawImage(b, (left ?? x) - x, top - y);
     }
     return c;
   }
@@ -6414,6 +6488,21 @@ function timing(s) {
     parts.filter((p) => p[1] !== null).map(([k, v]) => `${k.padEnd(17)}  ${v}`).join("\n")
   ];
 }
+var lastStats;
+function statsLines(s) {
+  const n = s.nodes ?? {};
+  const size = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
+  const pc = s.pages_changed;
+  const changed = pc === void 0 ? "?" : pc.length && pc.length <= 8 ? `${pc.length} (${pc.join(", ")})` : String(pc.length);
+  return [
+    `PhiTeX ${s.version ?? "?"} \xB7 ${s.engine ?? "?"} \xB7 files from ${s.files === "shelf" ? `Shelf ${s.files_release ?? "?"}` : s.files === "texlive" ? "TeX Live" : "?"}`,
+    `build ${s.build ?? "?"} (${s.why ?? "?"}) ${s.ok === false ? "failed" : "ok"} in ${dur2(s.wall_ms ?? 0)}: ${Object.entries(s.phases_ms ?? {}).map(([k, ms]) => `${k} ${dur2(ms)}`).join(" \xB7 ")}`,
+    `nodes ${n.ran ?? "?"} ran, ${n.kept ?? "?"} kept of ${n.live ?? "?"} \xB7 ${s.runs ?? "?"} runs, ${s.rounds ?? "?"} rounds \xB7 pages ${changed} of ${s.pages ?? "?"} changed`,
+    `${s.cores_busy == null ? `threads ${s.threads ?? "?"}` : `parallel ${s.cores_busy.toFixed(1)} of ${s.threads ?? "?"} threads busy`} \xB7 busy ${dur2(s.busy_ms ?? 0)}, engine ${dur2(s.engine_ms ?? 0)}, wasted ${dur2(s.wasted_ms ?? 0)}`,
+    `memory ${s.resident_kb === void 0 ? "?" : size(s.resident_kb * 1024)} resident, values ${s.values_bytes === void 0 ? "?" : size(s.values_bytes)}`,
+    `hints ${Object.entries(s.hints ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "\u2014"}`
+  ];
+}
 var Pages = class {
   sock;
   /** A change on its way to the screen: ms from its save to `settled`, and when that came. */
@@ -6423,6 +6512,7 @@ var Pages = class {
   constructor(sock2) {
     this.sock = sock2;
     sock2.onEvent((e) => {
+      if (e.event === "stats") return void (lastStats = e);
       if (e.event !== "settled") return;
       this.texts = null;
       const s = e;
@@ -6546,6 +6636,12 @@ var panel = new Panel(
       if (r.ok) panel.news(String(r.json?.version ?? ""), String(r.json?.text ?? ""));
       else panel.msg("No news for this version", false, true);
     }),
+    // (the timing popover's "Copy debug info": the last build's stats, the CLI's `s` stats; before any, the version, the news op's)
+    onDebugInfo: async () => {
+      if (lastStats) return ["phitex watch", ...statsLines(lastStats)];
+      const r = await sock.request({ op: "info", what: "news" });
+      return [`PhiTeX ${r.ok ? String(r.json?.version ?? "?") : "?"} \xB7 phitex watch`];
+    },
     // (the tips seen: the user's phitex.toml through the watch, the same on every port and browser)
     onTipsSeen: (ids) => void sock.request({ op: "prefs", set: { "tips-seen": ids } }),
     // (the problems' filters: kept the same way)
@@ -6720,7 +6816,12 @@ sock.onOpen = () => {
   if (started) return void session.resync();
   started = true;
   void sock.request({ op: "info", what: "built" }).then((r) => {
-    if (r.ok && Number(r.json?.builds) > 0) panel.joinedLate(typeof r.json?.first_ms === "number" ? r.json.first_ms : void 0, Number(r.json.builds));
+    if (!r.ok || !(Number(r.json?.builds) > 0)) return;
+    const st = r.json?.stats, se = r.json?.settled;
+    const last = se && typeof se.ms === "number" ? { ms: se.ms, cold: !!se.cold } : void 0;
+    panel.joinedLate(typeof r.json?.first_ms === "number" ? r.json.first_ms : void 0, Number(r.json.builds), last);
+    if (st && typeof st === "object" && !lastStats) lastStats = st;
+    if (se && typeof se.ms === "number") panel.latency(...timing(se));
   });
   void session.start();
 };

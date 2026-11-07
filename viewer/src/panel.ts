@@ -136,6 +136,8 @@ export interface PanelEvents {
   onSyncSource?(k: number, x: number, y: number): void;
   /** The anonymized debug report (report.ts), for "Report a problem". */
   onReport?(): Promise<string>;
+  /** The host's lines for the timing popover's "Copy debug info" (PhiTeX's version, the engine, where the files come from), first. */
+  onDebugInfo?(): Promise<string[]>;
   /** Run this project with engine `e` from now on (the card's buttons). */
   onEngine?(e: Engine): void;
   /** The editor to `file`'s [from, to) (UTF-16 offsets); `focus` false keeps the focus on the page. */
@@ -729,6 +731,7 @@ export class Panel {
     this.last = null;
     this.lastStatus = null;
     this.speed = undefined;
+    this.built = undefined;
     this.at = 0;
     clearTimeout(this.staleTimer);
     this.staleSince = 0;
@@ -930,9 +933,8 @@ export class Panel {
     // (an opening up, a rebuild's too: its step, not the last build's status)
     else if (this.reopen || (!this.last && this.viewer.pages === 0)) t = this.stepNow || "Opening…";
     // (the time, errors or not: "Built with 2 errors · 42 ms")
-    else if (errs) (t = `Built with ${errs} error${errs === 1 ? "" : "s"}`), (m = this.speed ? dur(this.speed.ms) : ""), (err = true);
-    else if (this.speed?.first) (t = "First page"), (m = dur(this.speed.ms));
-    else (t = "Built"), (m = this.speed ? dur(this.speed.ms) : "");
+    else if (errs) (t = `Built with ${errs} error${errs === 1 ? "" : "s"}`), (m = this.latest() ? dur(this.latest()!.ms) : ""), (err = true);
+    else (t = this.latest()?.label ?? "Built"), (m = this.latest() ? dur(this.latest()!.ms) : "");
     text.textContent = t;
     more.textContent = m ? `· ${m}` : "";
     const was = this.statusNow;
@@ -2618,7 +2620,8 @@ export class Panel {
     if (!w || w.ms === undefined || !this.speed?.first) return "";
     const parts = w.parts.filter(([, ms]) => ms >= 1);
     return (
-      `<div class="row"><span class="k">From opening to the first page</span><span class="v">${esc(dur(w.ms))}</span>` +
+      // (its total is the head's, "First page · 124 s": said once)
+      `<div class="row"><span class="k">Where the time went</span><span class="v"></span>` +
       `<div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
       `<div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc(n)} ${esc(dur(ms))}</span>`).join("")}</div></div>`
     );
@@ -2643,13 +2646,42 @@ export class Panel {
   buildTime(ms: number, first: boolean): void {
     if (first) this.times = { first: ms, edits: [] };
     else this.times.edits.push(ms);
+    this.built = { ms, at: performance.now(), first };
+    // (a build that changed no page paints nothing: the status and the popover say it all the same)
+    this.renderStatus();
     if (!this.$("#m-time").hidden) this.timing();
+    this.emit();
   }
 
-  /** This tab joined `builds` builds in: `first` the first build's time for the bars; the first build's paint was not this tab's, so its next is not called one. */
-  joinedLate(first: number | undefined, builds: number): void {
+  /** The last build the host said (buildTime), painted or not; `joined`: the one before this tab joined (joinedLate). */
+  private built?: { ms: number; at: number; first: boolean; joined?: boolean };
+
+  /**
+   * What the status and the timing popover's head say: the newest of the
+   * last paint (its time from the keystroke) and the last build (one that
+   * changed no page paints nothing, and was not said before: grail's 7 s).
+   */
+  private latest(): { label: string; ms: number; first: boolean } | undefined {
+    const s = this.speed, b = this.built;
+    if (b && (!s || b.at > s.at)) return { label: b.first ? "First build" : b.joined ? "Last build" : "Built, no page changed", ms: b.ms, first: b.first };
+    if (s) return { label: s.first ? "First page" : "Built", ms: s.ms, first: !!s.first };
+    return undefined;
+  }
+
+  /**
+   * This tab joined `builds` builds in: `first` the first build's time for
+   * the bars; the first build's paint was not this tab's, so its next is not
+   * called one; `last` the last build's time, for the status and the popover's
+   * head ("Last build", or "First build" if it was the only one).
+   */
+  joinedLate(first: number | undefined, builds: number, last?: { ms: number; cold: boolean }): void {
     if (first !== undefined && this.times.first === undefined) this.times.first = first;
     if (builds >= 1) this.paints = Math.max(this.paints, 1);
+    if (last && !this.built) {
+      this.built = { ms: last.ms, at: performance.now(), first: last.cold, joined: true };
+      this.renderStatus();
+      if (!this.$("#m-time").hidden) this.timing();
+    }
   }
 
   /** The bars: the first build, the last edit, the edits' median, each as long as its time (the longest the full width; a short one at least a sliver). */
@@ -2684,8 +2716,9 @@ export class Panel {
     const el = this.$("#m-time");
     const parts = this.timingParts().map(([k, v]) => part(k, v));
     // (the headline: a first build's time, else keystroke to page as the session measured it, else the host's paint)
-    const e2e = parts.find((p) => p.key === "keystroke→page")?.ms ?? this.speed?.ms;
-    const head = this.speed?.first ? ["First page", this.speed.ms] : e2e !== undefined ? ["Keystroke to page", e2e] : null;
+    const l = this.latest();
+    const e2e = parts.find((p) => p.key === "keystroke→page")?.ms ?? l?.ms;
+    const head = !l ? (e2e !== undefined ? ["Keystroke to page", e2e] : null) : l.first || l.label !== "Built" ? [l.label, l.ms] : ["Keystroke to page", e2e ?? l.ms];
     const rows = parts
       .map((p) => {
         const bar = p.split?.length
@@ -2704,10 +2737,43 @@ export class Panel {
       this.downloadsPart() +
       rows +
       strips +
-      `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
+      `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>` +
+      `<button type="button" class="reportbtn copydbg">Copy debug info</button>`;
+    el.querySelector<HTMLButtonElement>(".copydbg")!.onclick = (e) => {
+      e.stopPropagation();
+      const b = e.currentTarget as HTMLButtonElement;
+      void this.debugInfo()
+        .then((t) => navigator.clipboard.writeText(t))
+        .then(() => (b.textContent = "Copied ✓"), () => (b.textContent = "Couldn't copy"));
+    };
     // (the summary line only when there are no parts to say it)
     el.querySelector(".foot")!.textContent = parts.length || this.walk?.ms !== undefined ? "" : (this.lat?.summary ?? "");
     el.querySelector(".msg")!.textContent = this.msgText;
+  }
+
+  /**
+   * The timing popover's numbers as plain text, for a bug report or a chat:
+   * the host's lines (version, engine, files), the last build's head and
+   * parts as the session or the watch said them, the first page's steps,
+   * the downloads, the last page drawn, and this machine.
+   */
+  private async debugInfo(): Promise<string> {
+    const out: string[] = [...((await this.ev.onDebugInfo?.().catch(() => [])) ?? [])];
+    const l = this.latest();
+    if (l) out.push(`${l.label}: ${dur(l.ms)}`);
+    if (this.lat?.summary) out.push(this.lat.summary);
+    for (const line of (this.lat?.details ?? "").split("\n").filter(Boolean)) out.push(`  ${line.trim()}`);
+    const w = this.walk;
+    if (w?.ms !== undefined) out.push(`opening to first page ${dur(w.ms)}: ${w.parts.map(([n, ms]) => `${n.toLowerCase()} ${dur(ms)}`).join(", ")}`);
+    const d = this.downloads;
+    if (d.n) out.push(`downloads: ${d.n} packages, ${(d.bytes / 1e6).toFixed(1)} MB, ${dur(d.ms)}`);
+    const t = this.times;
+    if (t.first !== undefined) out.push(`first build ${dur(t.first)}${t.edits.length ? `; edits ${t.edits.length}, last ${dur(t.edits[t.edits.length - 1])}, median ${dur([...t.edits].sort((a, b) => a - b)[t.edits.length >> 1])}` : ""}`);
+    const f = this.$("#stripsline").dataset.frame;
+    if (f) out.push(`last page drawn: ${f}`);
+    const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
+    out.push(`machine: ${nav.hardwareConcurrency ?? "?"} cores, ${nav.userAgentData?.platform || nav.platform || "?"}; ${nav.userAgent}`);
+    return out.join("\n") + "\n";
   }
 
   /** The last message (connected, files read, a debug check's result), shown in the timing popover. */

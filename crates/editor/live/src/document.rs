@@ -295,12 +295,22 @@ impl Document {
         }
         if again {
             self.build(&why.join(", "), came);
-        }
-        // (nothing waits: the origins the last build changed, made now)
-        if self.origins_due && !self.viewer.has_asks() {
+        } else if self.origins_due && !self.viewer.has_asks() {
+            // (nothing waits: the origins the last build changed, made
+            // now, in a step of their own: a host that answers its
+            // requests between steps, the single-threaded core, answers
+            // the pages asked after the build before them, not after
+            // them, Grail's 21 ms a keystroke)
             self.origins_now();
         }
         std::mem::take(&mut *lock(&self.events))
+    }
+
+    /// Whether work nobody waits for is left (the last build's origins):
+    /// [`Document::step`] does it when nothing is asked; a host that
+    /// steps the document steps it again, after what waits.
+    pub fn pending(&self) -> bool {
+        self.origins_due
     }
 
     /// The pages' origins (glyph to source, SyncTeX's) of the last build,
@@ -309,9 +319,8 @@ impl Document {
     /// edits come) calls this.
     pub fn origins_now(&mut self) {
         self.origins_due = false;
-        let s = &self.session;
-        if let Some(o) = s.origins() {
-            self.viewer.set_origins(Some(o), s.origins_changed());
+        if let Some((o, changed)) = self.session.origins_update() {
+            self.viewer.set_origins(Some(o), Some(changed));
         }
     }
 

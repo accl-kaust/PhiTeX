@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
-use crate::api::{Brackets, Cause, Effect, Locality, NodeId, OpId, PathId, UnitId};
+use crate::api::{Brackets, Cause, Effect, Locality, NodeId, OpId, PathId, Rel, UnitId};
 use crate::engine::Engine;
 use crate::index::RangeKey;
 use crate::lock::ns;
@@ -436,7 +436,7 @@ struct Filed {
     f: Field,
     depth: u16,
     value: ValueId,
-    rel: Option<i64>,
+    rel: Option<Rel>,
     multi: bool,
 }
 
@@ -445,7 +445,7 @@ struct Filed {
 /// outermost of all); a relation is never one of several.
 fn filed_defs(v: &Values, defs: &[DefRec], b: &Brackets) -> Vec<Filed> {
     let mut at: FxHashMap<Field, usize> = FxHashMap::default();
-    type Parts = (Field, Option<i64>, Vec<(u16, ValueId)>);
+    type Parts = (Field, Option<Rel>, Vec<(u16, ValueId)>);
     let mut ps: Vec<Parts> = Vec::with_capacity(defs.len());
     for d in defs {
         let depth = def_depth(d.loc, b);
@@ -1137,7 +1137,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let nc = rec.contribs.len() + old_contribs.len();
     let mut changed_defs: Vec<Field> = Vec::with_capacity(nd);
     let mut changed_contribs: Vec<Field> = Vec::with_capacity(nc);
-    let mut rels: Vec<(Field, i64)> = Vec::with_capacity(rec.defs.len());
+    let mut rels: Vec<(Field, Rel)> = Vec::with_capacity(rec.defs.len());
     let mut placed: Vec<NodeId> = Vec::with_capacity(p.placements.len().max(old_placed.len()));
     let mut made: Vec<Arc<Node>> = Vec::with_capacity(p.placements.len());
     // (the scratch of the filing under the lock, each as long as it can
@@ -2238,7 +2238,14 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         }
     }
     // 5. a first relation by this operation
-    for (f, c) in rels.into_iter().filter(|_| eng.op(node.op()).alike()) {
+    for (f, c) in rels
+        .into_iter()
+        .filter_map(|(f, c)| match c {
+            Rel::Add(c) => Some((f, c)),
+            Rel::Append(_) => None,
+        })
+        .filter(|_| eng.op(node.op()).alike())
+    {
         learn_shape(eng, ww, node.op(), f, c, &mut st);
     }
     // 6. the node's own reads the lock could not answer
@@ -2574,7 +2581,6 @@ fn walk_here(
     if read::scoped(eng) {
         return Here::From(by);
     }
-    let v = eng.values();
     let op = eng.node(by).op();
     let (mut from, mut by) = (from, by);
     loop {
@@ -2617,14 +2623,25 @@ fn walk_here(
             return Here::On(by);
         };
         let Some(c) = d.rel else {
+            // (an alias of the field itself: the relations after it add to
+            // the value it names, which may be the one that moved; walked
+            // after the lock, `reask_from`)
+            if read::alias_of_self(&eng.values, f, d.value) {
+                return Here::From(d.by);
+            }
             return Here::Done;
         };
         let Some((_, i)) = Segment::reaching(inner, f, p, false) else {
             return Here::From(by);
         };
-        // (an alias's input, `read::through_aliases`, is not followed under
-        // the lock: the relation's own settle puts it right, `settle_rel`)
-        let nv = v.int(v.as_int(i.value).unwrap_or(0).wrapping_add(c));
+        let nv = match c {
+            // (an alias's input is followed after the lock, `read::rel_value`)
+            Rel::Add(_) if read::alias_of_self(&eng.values, f, i.value) => return Here::From(by),
+            // (an append's input, `read::through_aliases`, is not followed
+            // under the lock: the relation's own settle puts it right,
+            // `settle_rel`)
+            _ => read::rel_plain(eng, c, Some(i.value)),
+        };
         if nv == d.value {
             return Here::Done;
         }
@@ -2664,7 +2681,7 @@ pub(crate) fn settle_predictions(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>
 /// after the write still gives the value written: a walk that read an
 /// older input and wrote after one that read a newer is put right by its
 /// own read after. Whether the filed value changed.
-pub(crate) fn settle_rel(eng: &Engine, f: Field, by: NodeId, c: i64) -> bool {
+pub(crate) fn settle_rel(eng: &Engine, f: Field, by: NodeId, c: Rel) -> bool {
     let n = eng.node(by);
     let mut changed = false;
     loop {
@@ -2946,6 +2963,16 @@ pub(crate) fn reask_from(
         match next {
             Some((_, d, k)) => {
                 let Some(c) = d.rel else {
+                    // (an alias of the field itself names a value before it,
+                    // which this walk may have moved: the relations after it
+                    // add to that, `read::rel_value`; walked on, each
+                    // stopping it where it stays)
+                    if read::alias_of_self(&eng.values, f, d.value) {
+                        by = Some(d.by);
+                        level = k;
+                        passed = false;
+                        continue;
+                    }
                     return;
                 };
                 if !settle_rel(eng, f, d.by, c) {
@@ -3721,7 +3748,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
         eng.shapes_n.fetch_add(1, Ordering::Release);
     }
     let v = eng.values();
-    let plus = |carried: Option<ValueId>, c: i64| v.int(carried.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c));
+    let plus = |carried: Option<ValueId>, c: i64| read::rel_add(v, carried, c);
     let mut carried: Option<ValueId> = read::env_value(eng, f);
     let mut to_walk: Vec<(SegId, NodeId)> = Vec::new();
     for sid in eng.order.all() {
@@ -3771,7 +3798,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
                         depth: 0,
                         value: nv,
                         by: n,
-                        rel: Some(c),
+                        rel: Some(Rel::Add(c)),
                         provisional: true,
                         multi: false,
                     },
@@ -3786,7 +3813,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
                     i += 1;
                 }
                 if let Some(cc) = d.rel {
-                    let nv = plus(carried, cc);
+                    let nv = read::rel_plain(eng, cc, carried);
                     if nv != d.value {
                         if let Some(e) = m.get_mut(&dp) {
                             e.value = nv;
@@ -3814,7 +3841,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
                 f,
                 loc: Locality::Local,
                 value: nv,
-                rel: Some(c),
+                rel: Some(Rel::Add(c)),
             });
             *last = Some(Arc::new(RunRecord::provisional(defs)));
             st.shaped += 1;
@@ -3918,7 +3945,7 @@ pub(crate) fn predict(eng: &Engine, op: OpId, args: &[ValueId]) -> Predicted {
         f,
         loc: Locality::Local,
         value: ValueId::UNIT,
-        rel: Some(c),
+        rel: Some(Rel::Add(c)),
     }));
     Predicted {
         rec: (!defs.is_empty()).then(|| Arc::new(RunRecord::provisional(defs))),
@@ -3959,7 +3986,6 @@ fn placed_effect(effects: &[(usize, Effect)], i: usize, n: &Node, pred: &mut Pre
 /// input in this segment or the environment (the commit that places it
 /// puts the value right from the true input, `settle_predictions`).
 pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, node: &Arc<Node>, pred: Predicted) {
-    let v = eng.values();
     let pos = node.pos_hint();
     let Predicted { rec, shaped, effect } = pred;
     // (its brackets before it runs: readers after it see the depth it
@@ -3972,11 +3998,11 @@ pub(crate) fn file_predicted(eng: &Engine, seg: &Segment, inner: &mut Inner, nod
     };
     let r = Arc::get_mut(&mut rec).expect("a prediction not filed yet");
     for d in &mut r.defs[shaped..] {
-        let c = d.rel.unwrap_or(0);
+        let c = d.rel.unwrap_or(Rel::Add(0));
         let input = Segment::reaching(inner, d.f, pos, false)
             .map(|(_, d)| d.value)
             .or_else(|| read::env_value(eng, d.f));
-        d.value = v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c));
+        d.value = read::rel_plain(eng, c, input);
     }
     for d in &rec.defs {
         let m = inner.defs.entry(d.f).or_default();
@@ -5317,10 +5343,8 @@ pub(crate) fn match_placements(eng: &Engine, last: &[NodeId], new: &[Placement])
 }
 
 /// `rel_value` at a node's label, read under its segment's lock.
-pub(crate) fn rel_value_at(eng: &Engine, f: Field, at: NodeId, c: i64) -> ValueId {
-    let v = eng.values();
-    let input = read::through_aliases(eng, reaching_at(eng, f, at, false).and_then(|r| r.value));
-    v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c))
+pub(crate) fn rel_value_at(eng: &Engine, f: Field, at: NodeId, c: Rel) -> ValueId {
+    read::rel_value(eng, f, reaching_at(eng, f, at, false).and_then(|r| r.value), c)
 }
 
 /// The brackets a commit files for its node: what its run set, else its
@@ -6042,12 +6066,12 @@ fn reask_rest(
     let wanted = |f: &Field| only.is_none_or(|o| o.contains(f));
     let inside = |q: Pos| q >= from && to.is_none_or(|t| q <= t);
     // (relations in line order: one put right feeds the next one's input)
-    let mut rels: Vec<(Field, NodeId, i64)> = Vec::new();
+    let mut rels: Vec<(Field, NodeId, Rel)> = Vec::new();
     let mut cur = eng.seg_for_pos(from).map(|s| s.id);
     while let Some(sid) = cur {
         let seg = eng.seg(sid);
         let inner = seg.inner.read();
-        let mut here: Vec<(Pos, Field, NodeId, i64)> = Vec::new();
+        let mut here: Vec<(Pos, Field, NodeId, Rel)> = Vec::new();
         for (f, m) in inner.defs.iter().filter(|(f, _)| wanted(f)) {
             for (q, d) in m.iter() {
                 if let Some(c) = d.rel

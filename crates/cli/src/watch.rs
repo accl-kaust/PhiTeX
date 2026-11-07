@@ -68,6 +68,8 @@ struct Kept {
     view: Option<View>,
     view_made: bool,
     building: Arc<AtomicBool>,
+    /// The watch's loop waits for an event ([`Here::waiting`]).
+    waiting: Arc<AtomicBool>,
     told: Arc<AtomicBool>,
     /// The way out asks whether to write the PDF ([`Here::asking`]).
     asking: Arc<AtomicBool>,
@@ -330,6 +332,11 @@ struct Here {
     /// on the output: the watch's own loop opens that).
     url: Option<String>,
     building: Arc<AtomicBool>,
+    /// The watch's loop waits for an event: a key it would answer now.
+    /// Not waiting, it is at work (a build, a diff's, the history read,
+    /// a file written), and the keys that need nothing of that work are
+    /// answered here: q and Ctrl-C quit whatever the loop is doing.
+    waiting: Arc<AtomicBool>,
     /// The wait for the build said already (this build).
     told: Arc<AtomicBool>,
     /// For the cache's line on the way out.
@@ -344,14 +351,37 @@ fn help(ui: &Ui) {
     }
 }
 
+/// A build runs, or the watch's loop is at other work: not waiting for
+/// keys.
+fn busy(building: &AtomicBool, waiting: &AtomicBool) -> bool {
+    building.load(Ordering::Relaxed) || !waiting.load(Ordering::Relaxed)
+}
+
+/// The next event, `wait` at most, the loop marked waiting meanwhile
+/// ([`Here::waiting`]): the only time keys go to it.
+fn wait_for(
+    rx: &mpsc::Receiver<(Instant, Event)>,
+    wait: Duration,
+    waiting: &AtomicBool,
+) -> Result<(Instant, Event), mpsc::RecvTimeoutError> {
+    waiting.store(true, Ordering::Relaxed);
+    let e = rx.recv_timeout(wait);
+    waiting.store(false, Ordering::Relaxed);
+    e
+}
+
 impl Here {
+    fn busy(&self) -> bool {
+        busy(&self.building, &self.waiting)
+    }
+
     /// Key `k` answered here (true), or for the watch's loop.
     fn answer(&self, k: Key) -> bool {
         if self.asking.load(Ordering::Relaxed) {
             return false;
         }
         let ui = &self.ui;
-        let busy = self.building.load(Ordering::Relaxed);
+        let busy = self.busy();
         match k {
             Key::Help => help(ui),
             Key::Clear => ui.clear(),
@@ -364,11 +394,11 @@ impl Here {
                     ui.warning(&format!("could not start a browser: open {url}"));
                 }
             }
-            // (q or Ctrl-C while a build runs: out now, the build dropped)
+            // (q or Ctrl-C while the loop works: out now, the work dropped)
             Key::Quit if busy => {
                 ui.finish();
                 keys::restore();
-                ui.line(&ui.st.dim("stopped during a build"));
+                ui.line(&ui.st.dim("stopped while working"));
                 modern::cache_summary(&self.target, ui);
                 std::process::exit(0);
             }
@@ -377,7 +407,7 @@ impl Here {
                 if !self.told.swap(true, Ordering::Relaxed) {
                     ui.line(
                         &ui.st
-                            .dim("phitex watch: a build is running; this comes after it"),
+                            .dim("phitex watch: still working; this comes after it"),
                     );
                 }
                 return false;
@@ -595,6 +625,7 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         view: None,
         view_made: false,
         building: Arc::default(),
+        waiting: Arc::default(),
         told: Arc::default(),
         asking: Arc::default(),
         reading: false,
@@ -967,6 +998,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     });
     let raw = lsp.is_none() && !ui.json && keys::raw();
     let building = kept.building.clone();
+    let at_wait = kept.waiting.clone();
     let told = kept.told.clone();
     // (standard input read by the first session's thread, for them all)
     if !std::mem::replace(&mut kept.reading, true) {
@@ -978,6 +1010,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 .filter(|_| t.viewer.is_none())
                 .map(|v| v.url().to_owned()),
             building: building.clone(),
+            waiting: at_wait.clone(),
             told: told.clone(),
             target: t.clone(),
             asking: kept.asking.clone(),
@@ -1430,7 +1463,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             out.push_str(&tail.join("  "));
         }
         ui.line(out.trim_end());
-        // (for `s`: the build's phases, its reuse, its parallelism)
+        // (for `s`: the build's phases, its reuse, its parallelism; the
+        // phases kept for the viewer's stats too)
+        let phases = status.take();
         {
             let mut rows = Vec::new();
             if builds > 1 && live > 0 {
@@ -1442,8 +1477,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             } else {
                 rows.push(("nodes".to_owned(), format!("{nodes} run")));
             }
-            for (name, d) in status.take() {
-                rows.push((name, ms(d)));
+            for (name, d) in &phases {
+                rows.push((name.clone(), ms(*d)));
             }
             if let Some(x) = r.runs.last() {
                 // (how parallel the build was, in three facts: the cores
@@ -1541,6 +1576,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             );
             last.borrow_mut().summary = tree(st, head, &rows);
         }
+        // (what `s` shows, as one object, for every build, a build that
+        // changed no page too: the viewer's "Copy debug info")
+        let build_info = build_stats(t, s, &r, builds, why, &phases);
+        if let Some(v) = &view {
+            v.stats(&build_info);
+        }
         // (the panels `s` and `w` pinned: shown after every build, so the
         // keys need not be pressed again)
         {
@@ -1597,6 +1638,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 },
             })),
             "wall_ms": r.wall.as_secs_f64() * 1e3,
+            "stats": build_info,
             "errors": r.out.errors,
             "diagnostics": r.engine_diagnostics(),
         }));
@@ -1723,7 +1765,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         // (the viewers told which pages' origins changed and how
                         // far an edit moved the rest: a page no build drew again
                         // keeps its origins, shifted, not those of the old text)
-                        v.set_origins(s.origins(), s.origins_changed());
+                        match s.origins_update() {
+                            Some((o, changed)) => v.set_origins(Some(o), Some(changed)),
+                            None => v.set_origins(None, None),
+                        }
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => break,
@@ -1734,7 +1779,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         });
         let first = match held.pop_front() {
             Some(e) => e,
-            None => match rx.recv_timeout(wait) {
+            None => match wait_for(&rx, wait, &at_wait) {
                 Ok(e) => e,
                 Err(mpsc::RecvTimeoutError::Timeout) if idle_since.take().is_some() => {
                     // (idle: the exact PDF file written on a thread of
@@ -2205,6 +2250,57 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     quit(ui, &mut s, None)
 }
 
+/// Build `builds`'s stats, as `s` shows them, for the viewer's "Copy debug
+/// info" and the `build` event: one object, the same fields every build
+/// (none of them left out when nothing ran or no page changed).
+fn build_stats(
+    t: &Target,
+    s: &session::Session,
+    r: &session::Report,
+    builds: usize,
+    why: &str,
+    phases: &[(String, Duration)],
+) -> serde_json::Value {
+    let x = r.runs.last();
+    let nodes = x.map_or(0, |x| x.commands_run);
+    let live = x.map_or(0, |x| x.live as u64);
+    let phase_ms: serde_json::Map<String, serde_json::Value> = phases
+        .iter()
+        .map(|(n, d)| (n.clone(), json!(d.as_secs_f64() * 1e3)))
+        .collect();
+    json!({
+        "build": builds,
+        "why": why,
+        "version": env!("CARGO_PKG_VERSION"),
+        "engine": s.job.engine.name,
+        "files": if t.files == crate::tex::Files::Shelf { "shelf" } else { "texlive" },
+        // (the Shelf release the files are from; none: TeX Live's)
+        "files_release": (t.files == crate::tex::Files::Shelf).then(crate::shelf::release),
+        "wall_ms": r.wall.as_secs_f64() * 1e3,
+        "phases_ms": phase_ms,
+        "hints": x.map(|x| json!({
+            "bounded": x.hints[0],
+            "any": x.hints[1],
+            "violations": x.hints[2],
+            "undeclared": x.hints[3],
+            "stops": x.hints[4],
+            "pending_waits": x.hints[5],
+        })),
+        "nodes": {"ran": nodes, "kept": live.saturating_sub(nodes), "live": live},
+        "runs": x.map_or(0, |x| x.runs),
+        "rounds": x.map_or(0, |x| x.rounds),
+        "pages": r.pages(),
+        "pages_changed": r.out.pages_changed,
+        "threads": x.map_or(0, |x| x.threads),
+        "cores_busy": x.and_then(session::RunInfo::speedup),
+        "busy_ms": x.map_or(0.0, |x| x.busy.as_secs_f64() * 1e3),
+        "engine_ms": x.map_or(0.0, |x| x.engine_wall.as_secs_f64() * 1e3),
+        "wasted_ms": x.map_or(0.0, |x| x.wasted.as_secs_f64() * 1e3),
+        "resident_kb": x.map_or(0, |x| x.rss_kb),
+        "values_bytes": x.map_or(0, |x| x.values_bytes),
+        "ok": r.out.errors.is_empty(),
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2215,6 +2311,17 @@ mod tests {
         assert_eq!(line_key(" q "), Key::Quit);
         assert_eq!(line_key("quit"), Key::Quit);
         assert_eq!(line_key("xyz"), Key::Other('x'));
+    }
+
+    #[test]
+    fn keys_are_answered_where_read_while_the_loop_works() {
+        let (building, waiting) = (AtomicBool::new(false), AtomicBool::new(false));
+        // (no build, but the loop at other work: a diff's build, say)
+        assert!(busy(&building, &waiting));
+        waiting.store(true, Ordering::Relaxed);
+        assert!(!busy(&building, &waiting));
+        building.store(true, Ordering::Relaxed);
+        assert!(busy(&building, &waiting));
     }
 
     #[test]

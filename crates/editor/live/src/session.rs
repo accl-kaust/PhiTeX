@@ -1425,19 +1425,29 @@ impl Session {
         })
     }
 
-    /// The pages whose origins changed since the last ask and the edits
-    /// since then, `(file, at, delta)` in [`crate::view::Origins`]'
-    /// file indices ([`phitex_tex::Build::origins_changed`]: a viewer
-    /// that keeps the pages' origins shifts its offsets by the deltas and
-    /// asks again for those pages only); none where the build keeps no
+    /// The pages' origins ([`Session::origins`]) with the pages whose
+    /// origins changed since the last ask and the edits since then,
+    /// `(file, at, delta)` in [`crate::view::Origins`]' file indices
+    /// ([`phitex_tex::Build::origins_update`]: a viewer that keeps the
+    /// pages' origins shifts its offsets by the deltas and asks again for
+    /// those pages only), made at once; none where the build keeps no
     /// origins.
-    pub fn origins_changed(&self) -> Option<crate::view::OriginsChanged> {
+    pub fn origins_update(&self) -> Option<(crate::view::Origins, crate::view::OriginsChanged)> {
         let b = self
             .build
             .as_ref()
             .filter(|_| self.job.origins || self.job.synctex)?;
-        let (pages, edits) = b.origins_changed();
-        Some(crate::view::OriginsChanged { pages, edits })
+        let (pages, changed, edits) = b.origins_update();
+        Some((
+            crate::view::Origins {
+                pages,
+                files: b.origin_files(),
+            },
+            crate::view::OriginsChanged {
+                pages: changed,
+                edits,
+            },
+        ))
     }
 
     /// The main text with the editor's buffer for it, if there is one.

@@ -1972,6 +1972,39 @@ fn exit_statuses() {
     assert_eq!(status(&["build", "--engine", "tex", "bad.tex"]), Some(1));
 }
 
+/// Builds' `stats` (the `build` events'): the fields the viewer's debug
+/// info reads, the same set in each (the first a cold build of `tex`).
+fn stats_alike(evs: &[&serde_json::Value]) {
+    let cold = evs[0];
+    let keys = |e: &serde_json::Value| -> Vec<String> {
+        e["stats"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    for k in [
+        "nodes",
+        "runs",
+        "phases_ms",
+        "threads",
+        "cores_busy",
+        "resident_kb",
+        "engine",
+        "files",
+        "files_release",
+        "version",
+        "wall_ms",
+        "hints",
+    ] {
+        assert!(keys(cold).iter().any(|x| x == k), "no stats.{k}: {cold}");
+    }
+    assert_eq!(cold["stats"]["engine"], "tex", "{cold}");
+    assert!(cold["stats"]["phases_ms"].is_object(), "{cold}");
+    for e in &evs[1..] {
+        assert_eq!(keys(cold), keys(e), "{cold} {e}");
+    }
+}
+
 /// `phitex watch --json` on a plain document (`tex`): a word edited on
 /// disk is build 2, an edit of the line it is on, fewer nodes run than
 /// cold, and its DVI file is a cold build's of the edited text; an edit
@@ -2020,8 +2053,10 @@ fn watch_plain_edit() {
     let broken = edited.replacen(" thy ", " \\undefinedcs ", 1);
     std::thread::sleep(Duration::from_millis(50));
     std::fs::write(dir.join("story.tex"), &broken).expect("the broken edit");
+    let edit = ev;
     let ev = until(&mut lines, "build", &3.into(), &mut seen);
     assert_eq!(ev["ok"], false, "{ev}");
+    stats_alike(&[&cold, &edit, &ev]);
     let failed = std::fs::read(dir.join("story.dvi")).expect("the failed build's DVI");
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
@@ -3596,6 +3631,155 @@ fn watch_open_starts_only_the_users_viewer() {
     }
 }
 
+/// The figures' pictures as child nodes of their figures' runs (an edit's
+/// evaluation only, `crate::pic` in phitex-tex): a picture inside
+/// `\resizebox`'s argument, one read from an `\input` file, two in one
+/// float, one that `\xdef`s a macro its caption reads, one that selects
+/// a font size first that its caption selects too, two that step a
+/// counter (`\global\advance`) their captions show, the first reading a
+/// macro its caption then `\xdef`s (TeX's picture sees the value before
+/// the caption's): the figure's run makes the picture's definitions its
+/// own where the picture stands, and the picture reads before the
+/// figure's run. Edits that move the floats (a figure deleted and put back, a paragraph
+/// before them deleted), a word before them, a picture's own text and
+/// the text a picture follows in its float changed (the picture looks
+/// only at the item before it, `Run::pic_take_list`): each edit's PDF is `phitex build`'s of its text, byte for
+/// byte, at one thread and at four.
+#[test]
+#[ignore = "heavy: the pdflatex format and tikz; run on the cluster"]
+fn watch_picture_children_exact() {
+    for j in ["1", "4"] {
+        picture_children_exact(j);
+    }
+}
+
+/// The document of [`picture_children_exact`], its first figure `fig1`.
+fn picture_children_text(fig1: &str) -> String {
+    format!(
+        "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\newcount\\picn \\def\\capword{{before}}\n\\begin{{document}}\n\\section{{One}}\nAlpha words come first in this paragraph of the start.\n\nBeta words stand in the second paragraph, before the figures.\n{fig1}\
+Gamma text between the floats, see Figure~\\ref{{fig:a}}.\n\n\\begin{{figure}}[b]\\centering\n\\input{{pic2}}\n\\caption{{Second, after \\ref{{fig:a}}}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\draw[red] (0,0) circle (1);\n\\end{{tikzpicture}}\n\\begin{{tikzpicture}}\n\\fill[blue] (0,0) rectangle (1,1);\n\\end{{tikzpicture}}\n\\caption{{Two pictures}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\node {{x}};\\xdef\\picnote{{seen in the picture}}\n\\end{{tikzpicture}}\n\\caption{{Note: \\picnote}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\node {{\\fontsize{{13}}{{15}}\\selectfont big}};\n\\end{{tikzpicture}}\n\\caption{{\\fontsize{{13}}{{15}}\\selectfont A caption in the picture's size}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped \\the\\picn\\xdef\\capword{{after}}}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped again \\the\\picn}}\n\\end{{figure}}\n\
+\\begin{{figure}}[t]\\centering Inline words before \\unskip\\begin{{tikzpicture}}\\draw (0,0) -- (1,1);\\end{{tikzpicture}}\\hfil\\begin{{tikzpicture}}\\fill (0,0) circle (0.2);\\end{{tikzpicture}}\n\\caption{{Pictures after text}}\n\\end{{figure}}\n\
+Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon words in the next section.\n\\end{{document}}\n"
+    )
+}
+
+/// One edit of [`picture_children_exact`]'s text.
+type Edit = Box<dyn Fn(&str) -> String>;
+
+fn picture_children_exact(threads: &str) {
+    let _one = one();
+    let name = format!("pic-children-j{threads}");
+    let pic2 = "\\begin{tikzpicture}\n\\draw[thick] (0,0) -- (3,0) -- (3,2) -- cycle;\n\\node at (1.5,0.7) {input};\n\\end{tikzpicture}\n";
+    let fig1 = "\\begin{figure}[t]\\centering\n\\resizebox{0.4\\linewidth}{!}{%\n\\begin{tikzpicture}\n\\draw (0,0) -- (2,1) node[right] {left};\n\\node[draw] (a) at (0,0) {A};\n\\end{tikzpicture}}\n\\caption{First figure}\\label{fig:a}\n\\end{figure}\n";
+    let text = picture_children_text(fig1);
+    let dir = scratch(&name);
+    std::fs::write(dir.join("pics.tex"), &text).expect("the document");
+    std::fs::write(dir.join("pic2.tex"), pic2).expect("the input");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--exact-pdf",
+            "--engine",
+            "pdflatex",
+            "-j",
+            threads,
+            "pics.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let fig1 = fig1.to_owned();
+    let edits: Vec<Edit> = vec![
+        Box::new(move |t| t.replacen(&fig1, "", 1)),
+        Box::new(|t| t.replacen("Alpha words", "Alpha letters", 1)),
+        Box::new(|t| t.replacen("circle (1)", "circle (0.8)", 1)),
+        Box::new(|t| {
+            t.replacen(
+                "Beta words stand in the second paragraph, before the figures.\n",
+                "",
+                1,
+            )
+        }),
+        Box::new(|t| t.replacen("Gamma text", "Gamma words", 1)),
+        Box::new(|t| t.replacen("Inline words before", "Inline text set before", 1)),
+    ];
+    let mut now = text.clone();
+    let mut texts = vec![(
+        now.clone(),
+        std::fs::read(dir.join("pics.pdf")).expect("the cold PDF"),
+    )];
+    // (each edit, then all of them taken back one by one: the reverts
+    // must give the cold build's file again)
+    let mut steps: Vec<String> = Vec::new();
+    for e in &edits {
+        let next = e(&now);
+        assert_ne!(next, now, "an edit changed nothing");
+        now = next;
+        steps.push(now.clone());
+    }
+    steps.extend(texts_back(&text, &steps));
+    for (k, t) in steps.iter().enumerate() {
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(dir.join("pics.tex"), t).expect("the edit");
+        let line = until(&mut lines, "build", &(k as u64 + 2).into(), &mut seen);
+        assert_eq!(line["ok"], true, "j{threads} edit {k}: {line}");
+        std::thread::sleep(Duration::from_millis(300));
+        let pdf = std::fs::read(dir.join("pics.pdf")).expect("the watch's PDF");
+        texts.push((t.clone(), pdf));
+    }
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    assert!(
+        texts.last().map(|x| &x.1) == texts.first().map(|x| &x.1),
+        "j{threads}: the last revert's PDF is not the cold build's"
+    );
+    for (k, (t, watched)) in texts.iter().enumerate().skip(1) {
+        let cold_dir = scratch(&format!("{name}-cold-{k}"));
+        std::fs::write(cold_dir.join("pics.tex"), t).expect("the edited document");
+        std::fs::write(cold_dir.join("pic2.tex"), pic2).expect("the input");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
+            .args(["build", "--engine", "pdflatex", "-j", threads, "pics.tex"])
+            .output()
+            .expect("phitex build runs");
+        assert!(
+            out.status.success(),
+            "j{threads} step {k}: the cold build failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let cold_pdf = std::fs::read(cold_dir.join("pics.pdf")).expect("the cold PDF");
+        assert!(
+            *watched == cold_pdf,
+            "j{threads} step {k}: the watch's exact PDF is not the cold build's: {}",
+            first_difference(watched, &cold_pdf)
+        );
+    }
+}
+
+/// The texts after each of `steps` is taken back, the last first: the
+/// steps before it, then the start `text`.
+fn texts_back(text: &str, steps: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = steps.iter().rev().skip(1).cloned().collect();
+    out.push(text.to_owned());
+    out
+}
+
 /// `phitex watch` writing a file a `\write18` command made in a folder of
 /// its own (minted's `_minted/`) makes that folder: the folder's own event
 /// is the watch's write, not a source changed (though the build looked
@@ -3715,4 +3899,59 @@ fn the_viewers_settings_are_the_users() {
         said.contains("`threads` in a project's phitex.toml is ignored"),
         "a project's threads not said:\n{said}"
     );
+}
+
+/// Text copied or searched in the viewer has its word spaces in every
+/// kind of font, and none inside words: XeLaTeX with a TrueType font of
+/// 2048 units to the em (`DejaVu` Serif) and with an OpenType CFF one
+/// (Latin Modern), pdfLaTeX with Type 1 fonts (Type 3 ones: the
+/// renderer's `word_spaces_are_read_from_the_gaps`, a PK font not being
+/// made in the CI image). Each line once with the font's own
+/// spaces and once with spaces of .15em (a justified line's spaces
+/// shrink that far: Grail's Libertine lines, "Thesedependenciesobstruct",
+/// had none). The renderer's text layer
+/// (`phitex_render::Renderer::text`) of the PDF `phitex build` writes.
+#[test]
+#[ignore = "heavy: the xelatex and pdflatex formats; run on accl"]
+fn copied_text_has_its_word_spaces() {
+    let _one = one();
+    let body = "\\begin{document}\nalpha beta gamma delta\n\n{\\spaceskip=.15em\\relax tight words set close\\par}\n\\end{document}\n";
+    let docs: [(&str, &str, &str); 3] = [
+        (
+            "xe-ttf",
+            "xelatex",
+            "\\documentclass{article}\\usepackage{fontspec}\\setmainfont{DejaVuSerif.ttf}",
+        ),
+        (
+            "xe-otf",
+            "xelatex",
+            "\\documentclass{article}\\usepackage{fontspec}",
+        ),
+        ("pdf-type1", "pdflatex", "\\documentclass{article}"),
+    ];
+    let mut bad = Vec::new();
+    for (name, engine, head) in docs {
+        let dir = scratch(&format!("spaces-{name}"));
+        std::fs::write(dir.join("doc.tex"), format!("{head}\n{body}")).expect("the document");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args(["build", "--engine", engine, "doc.tex"])
+            .output()
+            .expect("phitex runs");
+        assert!(
+            out.status.success(),
+            "{name}: build failed:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let pdf: std::sync::Arc<[u8]> = std::fs::read(dir.join("doc.pdf")).expect("the PDF").into();
+        let mut r = phitex_render::Renderer::new();
+        let lines = r.text(&pdf, 0).expect("page 1's text");
+        let all: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+        eprintln!("{name}: {all:?}");
+        for want in ["alpha beta gamma delta", "tight words set close"] {
+            if !all.iter().any(|l| l.trim() == want) {
+                bad.push(format!("{name}: {want:?} not in {all:?}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "text without its word spaces: {bad:?}");
 }

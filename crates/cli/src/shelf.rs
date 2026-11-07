@@ -52,7 +52,7 @@ pub const FONT_INDEX: &str = "fonts/misc/partex/fontindex.pxfi";
 
 /// The Shelf release this PhiTeX builds from (its index and packs): two
 /// machines with the same PhiTeX build a document from the same files.
-pub const RELEASE: &str = "tl2026.8";
+pub const RELEASE: &str = "tl2026.9";
 
 /// The release built from: [`RELEASE`], or `PHITEX_SHELF_RELEASE` (a
 /// release being made, checked before it is this binary's).
