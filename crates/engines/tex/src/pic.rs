@@ -424,8 +424,11 @@ impl Run<'_, '_> {
         // again for each one's new output, one picture a pass: lie-hasse's
         // page of diagrams after a page's routine moved TikZ's counter,
         // a 45 s piece run once per picture, past 3000 s cold, accl 26269)
+        // (and one that has yet to run again on it, re-asked or running on
+        // another thread: its output is of an older view as well, at -j4
+        // taken and the run asked again for each new one, 2503 s)
         let peeked = self.cx.placed_output_peek(i);
-        if peeked.is_some() && !view_held {
+        if peeked.is_some() && !(view_held && self.cx.placed_output_settled(i).is_some()) {
             self.muts += 1;
             if trace() {
                 eprintln!(

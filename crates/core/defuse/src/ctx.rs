@@ -1364,6 +1364,19 @@ impl<'a> Ctx<'a> {
         self.placed_child_output(i)
     }
 
+    /// [`Ctx::placed_output_peek`] where that node has committed its last
+    /// run and nothing has asked it again since (clean, not a guess of a
+    /// run in flight): its output is of the inputs it has now. Not
+    /// recorded, a peek.
+    pub fn placed_output_settled(&mut self, i: usize) -> Option<ValueId> {
+        self.placed_child_output(i)?;
+        let (op, args) = self.product.placements.get(i)?.key();
+        let c = *self.placed_keys.as_ref()?.get(&(op, Arc::from(args)))?;
+        let n = self.eng.node(c);
+        let r = n.run_record()?;
+        (n.state() == State::Clean && !r.provisional).then_some(r.output)
+    }
+
     /// The node my `i`-th placement of this run stands for re-asks me at
     /// its next commit, whatever its output (a loop that stops for a
     /// child's result, not going on on a guess of it, nor on the output
