@@ -172,11 +172,14 @@ impl Run<'_, '_> {
     }
 
     /// Whether the run's operation takes checkpoints: a piece's run, a
-    /// document node's text (exec) or the rest of a piece cut at a
-    /// candidate (resume).
+    /// document node's text (exec), the rest of a piece cut at a
+    /// candidate (resume) or a picture's child (pic, `crate::pic`: a
+    /// picture asked again for a read in its last stretch goes on from
+    /// there, Grail's figures after a deleted one that first loaded a
+    /// font or stepped pgf's arrow count ran whole, 0.7-1.3 s each).
     fn ck_op(&self) -> bool {
         let op = self.cx.op();
-        op == self.ops.exec || op == self.ops.resume
+        op == self.ops.exec || op == self.ops.resume || op == self.ops.pic
     }
 
     /// What a run's checkpoints are taken on: the node's arguments, and
@@ -247,7 +250,7 @@ impl Run<'_, '_> {
     /// joined by `+`.
     fn ck_refusal(&self) -> String {
         let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
-        let checks: [(bool, &'static str); 26] = [
+        let checks: [(bool, &'static str); 25] = [
             (self.input.levels.is_empty(), "no input"),
             (
                 !self.input.levels.iter().skip(1).all(toks)
@@ -279,10 +282,6 @@ impl Run<'_, '_> {
             (!self.seeded.is_empty(), "seeded"),
             (self.defer_hit.is_some(), "defer"),
             (self.rb.is_some(), "read-back child"),
-            (
-                !self.appending.is_empty() || !self.appending_vals.is_empty(),
-                "append pending",
-            ),
             (self.mode_zero, "mode zero"),
             (
                 self.fin_box.is_some() || self.tool_cut.is_some(),
@@ -346,8 +345,6 @@ impl Run<'_, '_> {
             || !self.seeded.is_empty()
             || self.defer_hit.is_some()
             || self.rb.is_some()
-            || !self.appending.is_empty()
-            || !self.appending_vals.is_empty()
             || self.mode_zero
             || self.fin_box.is_some()
             || self.tool_cut.is_some()
@@ -692,6 +689,30 @@ impl Run<'_, '_> {
         let v = self.v;
         let a = list_of(v, ck);
         let Some(&at) = a.get(5) else { return Ok(()) };
+        // (`PHITEX_CK_MATCH_TRACE`, observe: a run asked again, at each of
+        // its checkpoints, against its last run's checkpoint at the same
+        // place in its input (whatever its command count): where they
+        // differ)
+        if crate::exec::obs_flag!("PHITEX_CK_MATCH_TRACE") && a.len() > 19 {
+            let same_place = last
+                .iter()
+                .map(|&x| list_of(v, x))
+                .filter(|b| b.len() == a.len() && b[19] == a[19] && b[..5] == a[..5])
+                .min_by_key(|b| (0..a.len()).filter(|&i| a[i] != b[i]).count());
+            eprintln!(
+                "ck-match: node {} at command {}: {}",
+                self.cx.node().raw(),
+                self.cmds,
+                same_place.map_or_else(
+                    || "no checkpoint of the last run at this place".to_owned(),
+                    |b| format!(
+                        "the last run's at command {}: {}",
+                        int_of(v, b[5]),
+                        ck_diff(v, &a, &b)
+                    )
+                )
+            );
+        }
         let Some((j, b)) = last
             .iter()
             .enumerate()
@@ -1048,6 +1069,28 @@ impl Run<'_, '_> {
                     })
                     .collect(),
             ),
+            // (a picture's child: the parent's steps it started from, the
+            // parent's items it took and its streams, `Run::pic_ck`)
+            self.pic_ck(),
+            // (the appends pending to lists the run never read, each the
+            // field and what it appends, `Run::appending`: a run met one
+            // took no checkpoint after it, and microtype appends each
+            // font a picture selects to its font list, so a TikZ picture
+            // took none past its first font, Grail's 4-5 million commands
+            // each without one)
+            {
+                let toks = self.appending.clone();
+                let vals = self.appending_vals.clone();
+                let toks: Vec<ValueId> = toks
+                    .into_iter()
+                    .map(|(l, t)| v.list(vec![self.loc_field(l).0, crate::val::toks_value(v, &t)]))
+                    .collect();
+                let vals: Vec<ValueId> = vals
+                    .into_iter()
+                    .map(|(l, xs)| v.list(vec![self.loc_field(l).0, v.list(xs)]))
+                    .collect();
+                v.list(vec![v.list(toks), v.list(vals)])
+            },
         ])
     }
 
@@ -1143,10 +1186,16 @@ impl Run<'_, '_> {
             aopen,
             read_back,
             kids,
-        ] = xs[..]
+        ] = xs[..xs.len().min(15)]
         else {
             return;
         };
+        if let Some(&pic) = xs.get(15) {
+            self.pic_ck_restore(pic);
+        }
+        if let Some(&ap) = xs.get(16) {
+            self.ck_appends_restore(ap);
+        }
         let ops = [self.ops.put, self.ops.toolnode, self.ops.pdfpage];
         self.kids = list_of(v, kids)
             .into_iter()
@@ -1213,6 +1262,29 @@ impl Run<'_, '_> {
         self.lt.hit = b & 1 != 0;
         self.lt.weak = b & 2 != 0;
         self.lt.strong = b & 4 != 0;
+    }
+
+    /// The appends pending a checkpoint holds put back
+    /// ([`Run::ck_run_state`]).
+    fn ck_appends_restore(&mut self, ap: ValueId) {
+        let v = self.v;
+        let [toks, vals] = list_of(v, ap)[..] else {
+            return;
+        };
+        let mut appending = Vec::new();
+        for e in list_of(v, toks) {
+            if let [f, t] = list_of(v, e)[..] {
+                appending.push((self.loc_of(Field(f)), crate::val::toks_of(v, Some(t))));
+            }
+        }
+        let mut appending_vals = Vec::new();
+        for e in list_of(v, vals) {
+            if let [f, xs] = list_of(v, e)[..] {
+                appending_vals.push((self.loc_of(Field(f)), list_of(v, xs)));
+            }
+        }
+        self.appending = appending;
+        self.appending_vals = appending_vals;
     }
 
     /// The checkpoints taken so far, with the indices of those this run
@@ -1524,6 +1596,10 @@ impl Run<'_, '_> {
         // (a resume's segments' file lines, as its continuation gave
         // them: the checkpoint's continuation holds those of its rest)
         let lines = std::mem::take(&mut self.cont_lines);
+        // (the checkpoint's nest is the whole nest: a picture's child
+        // pushed its base level before it went on from one, which stayed
+        // under the restored levels, its items left out of its output)
+        self.nest.clear();
         self.cont_load(c[6], ValueId::UNIT)?;
         self.st.with_base(v, base);
         if let Some(&ls) = c.get(15) {
@@ -1702,8 +1778,10 @@ impl Run<'_, '_> {
             .iter()
             .map(|a| a.iter().map(|x| x.raw()).collect())
             .collect();
+        // (a picture's child: its output, which holds what it made)
+        let pic = self.pic_out.map(|x| v.render(x)).unwrap_or_default();
         format!(
-            "pub {pubd:?}\ncontribs {contribs:?}\nkids {kids:?}\nlines {lines:?}\nfread {:?}\neffect {:?}\nconds {:?}\nleft {left:?}\nerrors {}",
+            "pub {pubd:?}\ncontribs {contribs:?}\nkids {kids:?}\nlines {lines:?}\nfread {:?}\neffect {:?}\nconds {:?}\nleft {left:?}\nerrors {}\npic {pic}",
             self.fread, self.effect, self.conds, self.error_count
         )
     }
@@ -1733,6 +1811,14 @@ impl Run<'_, '_> {
                 .collect();
             return format!("no checkpoint of the whole run at command {at:?} (its: {cmds:?})");
         };
+        ck_diff(v, &a, &b)
+    }
+}
+
+/// Where checkpoints `a` and `b` differ, by path (a base slot by its
+/// field), as one line ([`Run::ck_compare`], `PHITEX_CK_MATCH_TRACE`).
+fn ck_diff(v: &phitex_defuse::Values, a: &[ValueId], b: &[ValueId]) -> String {
+    {
         if a.len() != b.len() {
             return format!("lengths {} {}", a.len(), b.len());
         }

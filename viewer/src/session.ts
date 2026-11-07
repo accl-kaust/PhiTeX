@@ -24,6 +24,7 @@ import { boxes, from, glyphNear, glyphs, lineAt, nearest, wordBytes, wordNear, t
 import { diagnose, type Diagnostic, type TexError } from "./diagnostics.ts";
 import { DELIVERED, isPackageFile, referenced, noPackages, type PackageSource, type PackageState } from "./packages.ts";
 import { asDiagnostic, type Problem } from "./problems.ts";
+import { latexmkFiles, latexmkNotes } from "./latexmkrc.ts";
 import type { Entry } from "./outline.ts";
 
 /** The events Options.remote's host tells (WatchEvent), routed to onWatch. */
@@ -50,7 +51,7 @@ export interface EditorHost {
 
 /** The core's requests (worker.ts's `Req`, less the routing fields). */
 export type CoreReq =
-  | { op: "open"; main: string; files: Record<string, string>; fuel: number; engine?: Engine; workers?: 1 }
+  | { op: "open"; main: string; files: Record<string, string>; fuel: number; engine?: Engine; workers?: 1; latexmk?: { files: Record<string, string>; exact: boolean }; projectFiles?: string[] }
   | { op: "edit"; file: string; start: number; end: number; text: string; page: number; dpi: number }
   | { op: "set_file"; file: string; text: string }
   | { op: "png"; page: number; dpi: number }
@@ -166,7 +167,7 @@ export type CursorEvent =
 /** A Shelf pack the host fetches for a core that fetches its own (asked or prefetched, once per id), with its size once in. */
 export type PackEvent = { event: "pack"; id: string; state: "fetching" | "done" | "failed"; bytes?: number };
 
-export type CoreEvent = StreamEvent | WatchEvent | CursorEvent | PackEvent | { event: "building"; on: boolean } | { event: "preparing"; on: boolean } | { event: "switched" } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
+export type CoreEvent = StreamEvent | WatchEvent | CursorEvent | PackEvent | { event: "building"; on: boolean } | { event: "preparing"; on: boolean } | { event: "switched" } | { event: "latexmkrc"; notes: string[] } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
 /** A collaborator's mark: its page, its glyphs' boxes, their label and hue. */
 type Peer = { k: number; boxes: [number, number, number, number][]; label: string; hue: number };
 
@@ -458,6 +459,8 @@ export class PreviewSession {
         return;
       }
       if (e.event === "pack") return this.onPack(e);
+      // (the open's rc files: what they set that was not applied, said once an open)
+      if (e.event === "latexmkrc") return void ((this.rcNotes = latexmkNotes(e.notes)), this.statusSoon());
       if (e.event === "page" || e.event === "progress" || e.event === "done") this.onStream(e as StreamEvent);
     });
     this.core = {
@@ -669,7 +672,12 @@ export class PreviewSession {
     await this.prefetch(["pdftex.map", ...Object.values(this.files).flatMap(referenced)]);
     // (an open with minted in the sources loads the worker's \write18 runner, Pyodide)
     this.minted = Object.values(this.files).some(usesMinted);
-    const r = await this.core.request({ op: "open", main: this.main, files: { ...this.pkgFiles, ...shims, ...this.files }, fuel: this.o.fuel, engine, workers: this.o.workers });
+    // (the project's latexmkrc, as Overleaf reads it: its search paths applied by the core, the rest said)
+    const rc = latexmkFiles(this.files);
+    this.rcFiles = new Set(Object.keys(rc ?? {}));
+    this.rcNotes = [];
+    const latexmk = rc && { files: rc, exact: false };
+    const r = await this.core.request({ op: "open", main: this.main, files: { ...this.pkgFiles, ...shims, ...this.files }, fuel: this.o.fuel, engine, workers: this.o.workers, latexmk, projectFiles: rc && Object.keys(this.files) });
     if (!r.ok) return this.sink.error((typeof r.json?.error === "string" ? r.json.error : undefined) ?? r.error ?? "open failed");
     this.sink.connection?.(true);
     // (streamed: the pages come as they are shipped, onStream; then its end,
@@ -757,6 +765,10 @@ export class PreviewSession {
   /** The core runs LaTeX (the open reply's `engine`; until it says, as phitex's, the default build). */
   private latex = true;
   private diags: Diagnostic[] = [];
+  /** The open's rc files (latexmkrc.ts): an edit to one reopens. */
+  private rcFiles = new Set<string>();
+  /** What the open's rc files set that was not applied (the core's `latexmkrc` event). */
+  private rcNotes: Diagnostic[] = [];
   /** The last build's first TeX error (the core's status), if it had one. */
   private texError?: TexError;
   private noteError(j: { history?: number; error?: unknown }): void {
@@ -788,7 +800,7 @@ export class PreviewSession {
       });
       this.lastWarned = this.now();
     }
-    this.sink.status({ pages: this.pages, pending, main: this.main, file: this.open, diagnostics: this.diags });
+    this.sink.status({ pages: this.pages, pending, main: this.main, file: this.open, diagnostics: this.rcNotes.length ? [...this.diags, ...this.rcNotes] : this.diags });
   }
 
   /** Packages the core was given (kept apart from the project's files: never diagnosed, never a main). */
@@ -1433,6 +1445,7 @@ export class PreviewSession {
     if (old === undefined) {
       this.files[file] = text;
       if (this.opened) this.chain = this.chain.then(() => this.core.request({ op: "set_file", file, text }).then(() => undefined));
+      this.rcChanged(file);
       return;
     }
     const e = diff(old, text);
@@ -1447,6 +1460,7 @@ export class PreviewSession {
     if (!b.size) this.since.set(file, this.now());
     for (const e of edits) b.push(e);
     this.keystrokes += edits.length;
+    this.rcChanged(file);
     if (!this.scheduled) {
       this.scheduled = true;
       const f = () => this.flush();
@@ -1456,6 +1470,14 @@ export class PreviewSession {
       // come while a build runs are merged by the send loop anyway)
       else setTimeout(f, 0);
     }
+  }
+
+  private rcTimer?: ReturnType<typeof setTimeout>;
+  /** `file` changed: one of the open's rc files, or a new root one, reopens (once typing pauses): the core reads them at an open only. */
+  private rcChanged(file: string): void {
+    if (!this.opened || !(this.rcFiles.has(file) || file === "latexmkrc" || file === ".latexmkrc")) return;
+    clearTimeout(this.rcTimer);
+    this.rcTimer = setTimeout(() => (this.chain = this.chain.then(() => this.reopen())), 800);
   }
 
   /** A send loop is running (it takes what is queued when each build ends). */

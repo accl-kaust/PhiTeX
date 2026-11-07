@@ -532,6 +532,11 @@ pub struct Target {
     pub warnings: Vec<String>,
     /// The search paths a `.latexmkrc` set (the job's `inputs`).
     pub inputs: Vec<(String, String)>,
+    /// The settings' files read, and those looked for and not there
+    /// (absolute): `phitex.toml`, the user's, the `.latexmkrc` files and
+    /// those they `do`. A watch resolves its target again when one
+    /// changes.
+    pub config_files: Vec<PathBuf>,
 }
 
 impl Target {
@@ -551,6 +556,25 @@ const MAGIC_HEAD: u64 = 1 << 16;
 /// The directory phitex was started in (a watch resolves its target
 /// again after it entered the build's): where latexmk would be run.
 static STARTED_IN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// [`resolve`] again, from the directory phitex was started in (where
+/// `o`'s file is named from, and latexmk's rc files are read), as the
+/// first time: the target (its job made), and the directory its build
+/// runs in. The
+/// current directory is left as it was (a watch's session runs on until
+/// the next begins there).
+pub(crate) fn resolve_again(o: &Options) -> Result<(Target, PathBuf), String> {
+    let here = std::env::current_dir().map_err(|e| e.to_string())?;
+    if let Some(started) = STARTED_IN.get() {
+        std::env::set_current_dir(started)
+            .map_err(|e| format!("can't enter {}: {e}", started.display()))?;
+    }
+    // (its job made there, where its file is named from)
+    let t = resolve(o).and_then(|t| job(&t, o).map(|_| t));
+    let dir = std::env::current_dir().map_err(|e| e.to_string());
+    std::env::set_current_dir(&here).map_err(|e| format!("can't enter {}: {e}", here.display()))?;
+    Ok((t?, dir?))
+}
 
 pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -595,6 +619,18 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         v.join(":")
     });
     let rc = config::latexmkrc(&started, start.as_deref());
+    // (what a change of rereads: the rc files read, those latexmk run here
+    // would read if they were there, phitex.toml, the user's)
+    let mut config_files: Vec<PathBuf> = rc.read.iter().map(|f| started.join(f)).collect();
+    config_files.extend([".latexmkrc", "latexmkrc"].map(|f| started.join(f)));
+    config_files.push(if configured {
+        root.join(config::FILE)
+    } else {
+        started.join(config::FILE)
+    });
+    config_files.extend(config::user_file());
+    config_files.sort();
+    config_files.dedup();
     let mut inputs = rc.vars.clone();
     if let Some(start) = start
         && rc.var("TEXINPUTS").is_none()
@@ -797,6 +833,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         files,
         warnings: [cfg.warnings, rc_warnings].concat(),
         inputs,
+        config_files,
     })
 }
 

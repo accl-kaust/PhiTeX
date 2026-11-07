@@ -69,7 +69,11 @@ impl Session {
         });
         let text = text?;
         let (store, out) = Self::store_and_out(&job, note);
-        let host = Arc::new(Machine { tree, format_tree });
+        let host = Arc::new(Machine {
+            tree,
+            format_tree,
+            distribution: std::sync::OnceLock::new(),
+        });
         Ok(Session {
             live: phitex_live::session::Session::new(job, text, host, store, out.clone(), status),
             out,
@@ -157,6 +161,9 @@ impl Session {
 struct Machine {
     tree: Arc<tex::Tree>,
     format_tree: Arc<tex::Tree>,
+    /// The distribution's folders ([`tex::Tree::distribution`]), once
+    /// asked.
+    distribution: std::sync::OnceLock<Vec<PathBuf>>,
 }
 
 impl Host for Machine {
@@ -188,6 +195,14 @@ impl Host for Machine {
 
     fn canonical(&self, path: &Path) -> PathBuf {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// Under one of TeX Live's trees, or the cache's fonts: as found (no
+    /// call to the system), else canonical.
+    fn distribution(&self, path: &Path) -> bool {
+        let dirs = self.distribution.get_or_init(|| self.tree.distribution());
+        let under = |p: &Path| dirs.iter().any(|d| p.starts_with(d));
+        under(path) || (path.is_absolute() && std::fs::canonicalize(path).is_ok_and(|p| under(&p)))
     }
 
     fn has_format_file(&self, name: &str) -> bool {

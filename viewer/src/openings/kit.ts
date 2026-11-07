@@ -100,7 +100,7 @@ export function loop(frame: (t: number, dt: number) => void) {
  * and says how long it takes, in ms), then the layer is removed; stop() at once.
  * `cleanup` runs either way (timers, frame loops).
  */
-export function ending(el: HTMLElement, exit: () => number, cleanup: () => void = () => {}, says?: Pick<Opening, "step" | "hint">): Opening {
+export function ending(el: HTMLElement, exit: (page?: HTMLCanvasElement) => number, cleanup: () => void = () => {}, says?: Pick<Opening, "step" | "hint">): Opening {
   let over = false, ending: Promise<void> | null = null;
   const stop = () => {
     if (over) return;
@@ -110,10 +110,10 @@ export function ending(el: HTMLElement, exit: () => number, cleanup: () => void 
   };
   return {
     ...says,
-    done: () =>
+    done: (page?: HTMLCanvasElement) =>
       (ending ??= new Promise((ok) => {
         if (over) return ok();
-        const ms = reduced() ? 0 : exit();
+        const ms = reduced() ? 0 : exit(page);
         setTimeout(() => (stop(), ok()), ms);
       })),
     stop,

@@ -160,5 +160,10 @@ modules) is not run, and its line is said with why.
   (`--shelf`): the search paths are kpathsea's in a TeX Live build, and
   searched on disk before the project's folder and Shelf in a Shelf build;
   `\write18` commands see them too, as they would under latexmk.
+  `phitex watch` rebuilds when any file the build read changes, in
+  whatever folder it was found (a style of a `TEXINPUTS` folder, a `.bib`
+  of a `BIBINPUTS` one), and reads the rc files again when one of them
+  (or a file one `do`es) changes, or one appears where latexmk looks:
+  the next build searches the new paths.
 - Under `pdflatex` (phitex run by that name), no rc file is read, as
   pdflatex reads none.

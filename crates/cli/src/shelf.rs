@@ -582,6 +582,12 @@ impl Host for ShelfHost {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
+    /// A pack's file (the cache's fonts too).
+    fn distribution(&self, path: &Path) -> bool {
+        path.to_string_lossy().starts_with(phitex_shelf::TL)
+            || path.starts_with(crate::tex::cache_dir())
+    }
+
     fn has_format_file(&self, name: &str) -> bool {
         self.files.path_of(name).is_some()
     }
