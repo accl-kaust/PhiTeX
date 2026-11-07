@@ -216,6 +216,15 @@ pub enum Step {
     /// reader standing. Answered only where a read has a position
     /// ([`crate::Ctx::read_derived`]); elsewhere it gives none.
     Derived(ValueId),
+    /// A guarded read's first step (`Ctx::read_path_member`), `spec` the
+    /// list `[list, names, elem]`: the value itself, read by a reader
+    /// whose answer matters only while `elem` is an element of what path
+    /// `names` (its id as an integer) gives of field `list` where the
+    /// reader reads. Checked again, a read whose element has left that
+    /// list holds whatever it answers: the run that made it would not
+    /// look at it (a list of names appended to, each name's meaning
+    /// checked, a name's first append moved past the reader).
+    Member(ValueId),
     Each(PathId),
     Indices(ValueId),
     Keys(ValueId),

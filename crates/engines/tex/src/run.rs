@@ -4304,7 +4304,7 @@ impl<'c, 'a> Run<'c, 'a> {
             let names = seen.map(|x| list_of(v, x)).unwrap_or_default();
             for &n in &names {
                 for t in crate::val::toks_of(v, Some(n)) {
-                    if !self.does_not_expand(t)? {
+                    if !self.does_not_expand(t, Some((f, names_p, n)))? {
                         if crate::exec::obs_flag!("PHITEX_APPEND_TRACE") {
                             let tl = self.mean_loc(t);
                             eprintln!(
@@ -4340,7 +4340,15 @@ impl<'c, 'a> Run<'c, 'a> {
     /// binding where it holds one (a font identifier the run looked up,
     /// `\\ifx\\csname…`, or loaded), else read as its class alone
     /// ([`Run::class_lookup`]).
-    fn does_not_expand(&mut self, tok: Tok) -> R<bool> {
+    ///
+    /// With `member` (`(list, names, n)`: `tok` is in name `n` of what
+    /// path `names` gives of field `list`, an append's base), the class
+    /// read is guarded by it ([`phitex_defuse::Ctx::read_path_member`]):
+    /// a name the list no longer holds where this run reads (its first
+    /// append moved past it, or went) is not looked at by a run again,
+    /// so its meaning there (none, its first definition moved with it)
+    /// leaves this run standing.
+    fn does_not_expand(&mut self, tok: Tok, member: Option<(Field, phitex_defuse::PathId, ValueId)>) -> R<bool> {
         let v = self.v;
         if let Some(l) = self.mean_loc(tok)
             && self.st.is_loaded(l)
@@ -4352,7 +4360,7 @@ impl<'c, 'a> Run<'c, 'a> {
             ) >= 0
                 && x.is_some());
         }
-        Ok(self.class_lookup(tok)?.is_some())
+        Ok(self.class_lookup(tok, member)?.is_some())
     }
 
     /// The next token, its meaning not read (`get_r_token`'s way).
@@ -5900,7 +5908,7 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(());
         }
         if self.class_reads
-            && let Some(c) = self.class_lookup(tok)?
+            && let Some(c) = self.class_lookup(tok, None)?
         {
             self.cur = Cur {
                 tok,
@@ -5969,7 +5977,14 @@ impl<'c, 'a> Run<'c, 'a> {
     /// this run standing. `None` where the meaning is needed in full
     /// (expandable, undefined, this run's own binding).
     #[inline(never)]
-    fn class_lookup(&mut self, tok: Tok) -> R<Option<u8>> {
+    ///
+    /// With `member`, the read is guarded ([`Run::does_not_expand`]) and
+    /// not kept for the run's later lookups, which read it themselves.
+    fn class_lookup(
+        &mut self,
+        tok: Tok,
+        member: Option<(Field, phitex_defuse::PathId, ValueId)>,
+    ) -> R<Option<u8>> {
         let Some(l) = self.mean_loc(tok) else {
             return Ok(None);
         };
@@ -5982,10 +5997,12 @@ impl<'c, 'a> Run<'c, 'a> {
             return Ok(Some(m.class));
         }
         let f = self.loc_field(l);
-        let Some(x) = self
-            .cx
-            .read_path(f, phitex_defuse::PathId::of_proj(self.ops.class_proj))?
-        else {
+        let p = phitex_defuse::PathId::of_proj(self.ops.class_proj);
+        let x = match member {
+            Some((list, names, n)) => self.cx.read_path_member(f, p, list, names, n)?,
+            None => self.cx.read_path(f, p)?,
+        };
+        let Some(x) = x else {
             self.trace_path_read(f, "class", None);
             return Ok(None);
         };
@@ -5993,6 +6010,9 @@ impl<'c, 'a> Run<'c, 'a> {
         let Ok(c) = u8::try_from(int_of(self.v, x)) else {
             return Ok(None);
         };
+        if member.is_some() {
+            return Ok(Some(c));
+        }
         let e = self.memos.entry(l);
         e.has |= crate::state::M_CLASS;
         e.class = c;

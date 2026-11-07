@@ -998,6 +998,61 @@ fn a_box_voided_globally_and_deleted_reruns_no_reader_of_it() {
     assert_eq!(readers, 0, "no reader of the box runs again");
 }
 
+/// A list of fonts appended to by an `\xdef` as each font is first
+/// loaded (microtype's `\MT@font@list`): deleting the paragraph that first
+/// loaded a font moves its load (and its append) to a later paragraph.
+/// A paragraph between them, which appended another font and so checked
+/// the names in the list (the moved one among them) not to expand, does
+/// not run again: the list it appends to no longer holds the name there.
+/// Only the new first loader runs for the font.
+#[test]
+fn a_font_first_loaded_later_reruns_no_appender_between() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from(
+        "\\vsize=400pt \\hsize=150pt \\parindent=0pt\n\\def\\fontlist{\\tenrm}\n\
+         \\def\\load#1#2{\\expandafter\\ifx\\csname F#1\\endcsname\\relax\n\
+         \\global\\expandafter\\font\\csname F#1\\endcsname=cmr10 at #2pt\n\
+         \\xdef\\fontlist{\\fontlist\\csname F#1\\endcsname}\\fi\n\
+         {\\csname F#1\\endcsname x}}\n\n",
+    );
+    src.push_str("Paragraph zero has a few words.\n\n");
+    src.push_str("Paragraph one \\load{a}{11} loads a first.\n\n");
+    src.push_str("Paragraph two \\load{b}{12} loads b first.\n\n");
+    src.push_str("Paragraph three \\load{a}{11} uses a.\n\n");
+    for k in 4..8 {
+        let _ = write!(src, "Paragraph {k} \\load{{a}}{{11}} uses a.\n\n");
+    }
+    src.push_str("Last words.\n\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./fl.tex", "fl", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replace("Paragraph one \\load{a}{11} loads a first.\n\n", "");
+    assert_ne!(text, src);
+    b.edit(&text);
+    for (n, op, why) in &b.stats.reruns {
+        eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
+    }
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let (out, _) = b.output();
+    let (cold_out, _) = cold.output();
+    assert!(
+        common::first_difference(&out, &cold_out).is_none(),
+        "the output is a cold build's"
+    );
+    let readers: Vec<String> = b
+        .stats
+        .reruns
+        .iter()
+        .filter(|(_, op, why)| *op == "exec" && why.contains("cs:Fa"))
+        .map(|(n, _, _)| b.describe_node(*n))
+        .collect();
+    assert!(
+        readers.len() <= 1,
+        "only the new first loader of the font runs for it: {readers:?}"
+    );
+}
+
 /// A long paragraph edited near its end: the first edit's run (from the
 /// start) takes checkpoints, the next ones go on from one; an edit at its
 /// start runs from the start (taking them again); each output is the

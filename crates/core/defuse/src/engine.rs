@@ -1783,6 +1783,7 @@ impl Engine {
             | Step::Cmp(x)
             | Step::Within(x)
             | Step::Derived(x)
+            | Step::Member(x)
             | Step::Indices(x)
             | Step::Keys(x)
             | Step::Rank(x)
