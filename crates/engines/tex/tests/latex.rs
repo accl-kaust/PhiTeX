@@ -1144,6 +1144,40 @@ fn latex_input_in_picture_first_edit() {
     }
 }
 
+/// A run again costs no more than its first run: a one-word edit of a
+/// paragraph holding a `TikZ` picture of many circles (the frontends'
+/// 12-line document: 16 s an edit for a 5.8 s cold build) makes fewer
+/// values than the cold build made. The edited node's run took a
+/// checkpoint of the picture's state every 600 commands, whatever it
+/// cost; a cold run spaces them by their cost (`resume::ck_gap`).
+#[test]
+fn latex_a_rerun_costs_no_more_than_its_first_run() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-rerun-cost");
+    let _ = std::fs::create_dir_all(&dir);
+    let src = "\\documentclass{article}\n\\usepackage{tikz}\n\\begin{document}\nMost edits change one paragraph.\n\\begin{tikzpicture}\\foreach \\i in {1,...,20}{\\foreach \\j in {1,...,30}{\\draw (\\i*0.3,\\j*0.2) circle (0.05);}}\\end{tikzpicture}\n\\end{document}\n";
+    std::fs::write(dir.join("rerun.tex"), src).expect("write");
+    let empty = {
+        let b = common::build(
+            pdf_opts("rerun", &dir),
+            Some(&prelude(true)),
+            "\\documentclass{article}\\begin{document}x\\end{document}\n",
+        );
+        b.stats.values_bytes
+    };
+    let mut b = common::build(pdf_opts("rerun", &dir), Some(&prelude(true)), src);
+    let cold = b.stats.values_bytes.saturating_sub(empty);
+    let before = b.stats.values_bytes;
+    let new = src.replace("Most edits", "Many edits");
+    b.edit(&new);
+    let edit = b.stats.values_bytes.saturating_sub(before);
+    eprintln!("values: cold {cold} bytes past an empty document's, the edit {edit} more");
+    assert!(b.stats.nodes_run > 0, "the edit ran nothing");
+    assert!(
+        edit <= cold,
+        "a one-word edit made {edit} bytes of values, its cold build {cold}"
+    );
+}
+
 /// Unchanged bytes change nothing (`r` in a watch: every file the build
 /// read staged again from disk, the main text sent again; an editor
 /// saving a file unchanged): with `pdfdocs/inputs.tex`, its cut
