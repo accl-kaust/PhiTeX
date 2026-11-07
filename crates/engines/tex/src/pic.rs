@@ -279,7 +279,7 @@ impl Run<'_, '_> {
             && self.cur.tok == begin_tok()
     }
 
-    pub(crate) fn pic_begin(&mut self) -> bool {
+    pub(crate) fn pic_begin(&mut self) -> R<bool> {
         // (a list of the run's own to put the picture's items on: on the
         // engine's main list they are contributions, `Run::pic_shape`)
         if self.interp.is_some()
@@ -297,13 +297,26 @@ impl Run<'_, '_> {
                     self.nest.iter().any(|l| l.owns)
                 );
             }
-            return false;
+            return Ok(false);
         }
         // (the `\begin` read from a token list it was put back in, a run
         // of characters' next command: the list it emptied gone, the
         // body read from the input below it)
         self.input.pop_spent();
-        let Some(body) = self.pic_find() else {
+        // (a body running on into the siblings' text (a paragraph that
+        // goes on past a display, the picture's text a slice of its own):
+        // their text claimed now, as reading the picture inline would
+        // claim it at once)
+        let mut found = self.pic_find();
+        let mut pulls = 0;
+        while found.is_none() && pulls < 64 && self.pic_reads_on() {
+            if !self.pull()? {
+                break;
+            }
+            pulls += 1;
+            found = self.pic_find();
+        }
+        let Some(body) = found else {
             if trace() {
                 let top = self.input.levels.last().map(|l| l.kind);
                 let here: String = self
@@ -351,7 +364,7 @@ impl Run<'_, '_> {
                         .is_some_and(|&l| l.kind == kind::LINE && self.input.line(l).rescanned)
                 );
             }
-            return false;
+            return Ok(false);
         };
         let hash = body.hash;
         let node = self.cx.node().raw();
@@ -362,7 +375,7 @@ impl Run<'_, '_> {
                     body.name
                 );
             }
-            return false;
+            return Ok(false);
         }
         let v = self.v;
         // (the field's name: the body's text and its place among this
@@ -395,7 +408,7 @@ impl Run<'_, '_> {
                     body.name
                 );
             }
-            return true;
+            return Ok(true);
         };
         let xs = list_of(v, x);
         if x == ValueId::UNIT || xs.first().is_none_or(|&t| int_of(v, t) != 0) {
@@ -407,7 +420,7 @@ impl Run<'_, '_> {
                     xs.get(1).map(|&w| v.render(w)).unwrap_or_default()
                 );
             }
-            return false;
+            return Ok(false);
         }
         let x = self.cx.placed_output_or(i, ValueId::UNIT);
         self.pic_apply(&body, x);
@@ -418,7 +431,19 @@ impl Run<'_, '_> {
                 xs.get(1).map_or(0, |&l| list_of(v, l).len())
             );
         }
-        true
+        Ok(true)
+    }
+
+    /// Whether the picture's `\begin{name}` ends its line's text here and
+    /// its body is in the siblings' text not claimed yet: the node's
+    /// text read to its end, one line on the input.
+    fn pic_reads_on(&self) -> bool {
+        let [top] = self.input.levels[..] else {
+            return false;
+        };
+        top.kind == kind::LINE
+            && self.input.text_at >= self.input.text.len()
+            && name_in_chars(&self.input.line(top).buf, self.input.line(top).loc).is_some()
     }
 
     /// The ordinal of a picture of text `hash` among this run's.

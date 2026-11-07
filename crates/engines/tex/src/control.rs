@@ -93,7 +93,7 @@ impl Run<'_, '_> {
             }
             // (`\begin{tikzpicture}`: the picture as a child node of this
             // run, its output taken here, `crate::pic`)
-            if self.pic_here() && self.pic_begin() {
+            if self.pic_here() && self.pic_begin()? {
                 return self.ck();
             }
             if self.cur.cmd > cmd::MAX_COMMAND {
@@ -584,7 +584,7 @@ impl Run<'_, '_> {
                         // (a picture: a child of this run, the command
                         // its expansion's first command would end the
                         // blanks at, §1045)
-                        if self.pic_here() && self.pic_begin() {
+                        if self.pic_here() && self.pic_begin()? {
                             return self.ck();
                         }
                         if (cmd::CALL..cmd::END_TEMPLATE).contains(&c) {
@@ -612,7 +612,7 @@ impl Run<'_, '_> {
                         }
                     }
                     if self.pic_here() {
-                        if self.pic_begin() {
+                        if self.pic_begin()? {
                             return self.ck();
                         }
                         self.macro_call();
