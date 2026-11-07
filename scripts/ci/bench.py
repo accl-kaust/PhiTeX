@@ -422,6 +422,8 @@ def cmd_json(args):
         edit = {"cases": len(eps), "under_100ms": sum(1 for m in mss if m <= 100), "p50_ms": round(pct(mss, 0.5), 1),
                 "buckets": buckets, "points": eps,
                 "worst": [{"doc": p["doc"], "edit": p["edit"], "ms": p["ms"]} for p in sorted(eps, key=lambda p: -p["ms"])[:10]]}
+        if args.edit_note:
+            edit["note"] = args.edit_note
         covers.append(f"edits: {len(eps)} one-thread edit cases measured" + (f", {len(missing)} without a time ({'; '.join(missing[:20])})" if missing else ""))
     else:
         measured_all = False
@@ -484,6 +486,7 @@ def main():
     p.add_argument("--corpora", default="manuals,research")
     p.add_argument("--covers")
     p.add_argument("--method")
+    p.add_argument("--edit-note")
     args = ap.parse_args()
     {"cold": cmd_cold, "edits": cmd_edits, "json": cmd_json}[args.cmd](args)
 
