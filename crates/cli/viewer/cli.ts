@@ -17,6 +17,7 @@
 // Bundled by scripts/viewer-bundle.sh into viewer.js.
 
 import { Panel } from "../../../viewer/src/panel.ts";
+import { html } from "../../../viewer/src/html.ts";
 import { PreviewSession, type CoreEvent, type CoreRes, type CoreTransport, type EditorHost } from "../../../viewer/src/session.ts";
 import { composeLine, search, type Hit, type TextLine } from "../../../viewer/src/text.ts";
 import { Strips, type Frame, type StripSource } from "../../../viewer/src/strips.ts";
@@ -365,7 +366,7 @@ const panel = new Panel(
       badge: "watch",
       badgeTitle: "phitex watch: built from the files on disk, again at each save",
       byline: "phitex watch",
-      about: `<b>phitex watch</b>: the document built from the files on disk, again at each save, its pages here as
+      about: html`<b>phitex watch</b>: the document built from the files on disk, again at each save, its pages here as
         they are shipped. Nothing leaves this machine.
         <div class="about-foot">Free software (AGPL-3.0-only), provided as is, without any warranty.</div>`,
       openFailed: "Restart phitex watch, then reload this page.",

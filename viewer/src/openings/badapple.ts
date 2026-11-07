@@ -6,6 +6,7 @@
 // the paper (the page under it), and its black melts away from every edge,
 // the silhouettes eroding to nothing, until the page alone is left.
 
+import { html } from "../html.ts";
 import { layer, ending, loop, PAPER, type Opening } from "./kit.ts";
 import { FRAMES, W, H, FPS, DATA } from "./badapple-data.ts";
 
@@ -60,7 +61,7 @@ export function badapple(box: HTMLElement, dark: boolean): Opening {
 .phx-ba.out { background: transparent; }
 .phx-ba.out .sub, .phx-ba.out .cr { opacity: 0; }
 .phx-ba.out .scr { left: 0; right: 0; top: 0; aspect-ratio: auto; height: 100%; box-shadow: none; background: transparent; }`,
-    `<div class="scr"><canvas></canvas></div><div class="sub"><div class="what"></div><div class="det"></div><div class="hint"></div></div>
+    html`<div class="scr"><canvas></canvas></div><div class="sub"><div class="what"></div><div class="det"></div><div class="hint"></div></div>
      <div class="cr">Bad Apple!! · Alstroemeria Records feat. nomico · PV: Anira · original: ZUN</div>`,
   );
   const $ = (s: string) => el.querySelector<HTMLElement>(s)!;
