@@ -190,6 +190,46 @@ impl Tree {
     }
 }
 
+/// kpathsea's variables naming the trees TeX Live installed, or made
+/// itself (its formats, its maps, its configuration): the distribution, as
+/// a watch knows it ([`Tree::distribution`]). TEXMFHOME, the user's own
+/// files, is not among them.
+const DISTRIBUTION_VARS: [&str; 8] = [
+    "TEXMFROOT",
+    "TEXMFDIST",
+    "TEXMFMAIN",
+    "TEXMFLOCAL",
+    "TEXMFSYSVAR",
+    "TEXMFSYSCONFIG",
+    "TEXMFVAR",
+    "TEXMFCONFIG",
+];
+
+impl Tree {
+    /// The folders of the distribution's trees ([`DISTRIBUTION_VARS`]),
+    /// canonical, and the cache's (the fonts the engine made).
+    pub fn distribution(&self) -> Vec<PathBuf> {
+        let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut out: Vec<PathBuf> = vec![cache_dir()];
+        for var in DISTRIBUTION_VARS {
+            let Some(v) = k.var_value(var) else { continue };
+            let v = String::from_utf8_lossy(&v).replace("!!", "");
+            for d in v.split([',', ':', ';', '{', '}']) {
+                if d.starts_with('/') {
+                    out.push(PathBuf::from(d));
+                }
+            }
+        }
+        let mut out: Vec<PathBuf> = out
+            .into_iter()
+            .map(|d| d.canonicalize().unwrap_or(d))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
 impl Tree {
     /// Where font `font`'s PK file at `dpi` dots per inch is (the name
     /// `cmr10.600pk` a PK font's lookup asks for, [`phitex_kpse::pk_name`]):

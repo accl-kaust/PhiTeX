@@ -79,9 +79,12 @@ struct Kept {
 
 /// What the last build read ([`phitex_live::session::Session::watched`]):
 /// a change of one of these files rebuilds, whatever its extension (an
-/// image, a `.bib`, `\input{notes.md}`, a figure another program made),
-/// and so does a file appearing under a name the build looked for and did
-/// not find. Before the first build every file does (nothing is known).
+/// image, a `.bib`, `\input{notes.md}`, a figure another program made)
+/// and whatever folder it is in (a package found through TEXINPUTS, a
+/// chapter of `../`), and so does a file appearing under a name the build
+/// looked for and did not find. Before the first build every file of the
+/// watch's folder does (nothing is known). A change of a settings' file
+/// (`config`) resolves the target again.
 #[derive(Default)]
 struct Wanted {
     built: bool,
@@ -89,31 +92,48 @@ struct Wanted {
     paths: HashSet<PathBuf>,
     /// The names asked for, from the watch's folder.
     names: HashSet<String>,
+    /// The settings' files ([`modern::Target::config_files`]), canonical
+    /// where they are.
+    config: HashSet<PathBuf>,
 }
 
 type WantedRef = Arc<Mutex<Wanted>>;
 
 impl Wanted {
-    fn of(w: phitex_live::session::Watched, root: &Path) -> Wanted {
+    fn of(w: phitex_live::session::Watched, root: &Path, config: HashSet<PathBuf>) -> Wanted {
         Wanted {
             built: w.built,
-            paths: w
-                .paths
-                .iter()
-                .map(|p| {
-                    let p = root.join(p);
-                    p.canonicalize().unwrap_or(p)
-                })
-                .collect(),
+            paths: w.paths.iter().map(|p| canonical(&root.join(p))).collect(),
             names: w.names.into_iter().collect(),
+            config,
         }
     }
 
-    /// Whether a change of `p` (under `root`) is one the build reads: in
-    /// no hidden folder, and read, or looked for by its name (`fig`, as
+    /// The settings' files `files`, as [`Wanted::config`] holds them.
+    fn config_of(files: &[PathBuf]) -> HashSet<PathBuf> {
+        files.iter().map(|p| canonical(p)).collect()
+    }
+
+    /// Whether `p` is a settings' file.
+    fn is_config(&self, p: &Path) -> bool {
+        self.config.contains(p) || self.config.contains(&canonical(p))
+    }
+
+    /// Whether a change of `p` is one the build reads: a file it read,
+    /// wherever it is, or a settings' file; else under `root`, in no
+    /// hidden folder, looked for by its name (`fig`, as
     /// `\includegraphics{fig}` asks for `fig.png`, is asked for whole).
     fn wants(&self, root: &Path, p: &Path) -> bool {
-        let rel = p.strip_prefix(root).unwrap_or(p);
+        if self.is_config(p) {
+            return true;
+        }
+        let c = canonical(p);
+        if self.paths.contains(&c) || self.paths.contains(p) {
+            return true;
+        }
+        let Ok(rel) = p.strip_prefix(root) else {
+            return false;
+        };
         if rel
             .components()
             .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
@@ -123,14 +143,52 @@ impl Wanted {
         if !self.built {
             return true;
         }
-        let c = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-        if self.paths.contains(&c) || self.paths.contains(p) {
-            return true;
-        }
         let r = rel.to_string_lossy();
         self.names.contains(r.as_ref())
             || r.strip_suffix(".tex")
                 .is_some_and(|n| self.names.contains(n))
+    }
+
+    /// The folders outside `root` (canonical) the files of `self` are in:
+    /// watched besides it.
+    fn folders_outside(&self, root: &Path) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = self
+            .paths
+            .iter()
+            .chain(&self.config)
+            .filter(|p| !p.starts_with(root))
+            .filter_map(|p| p.parent().map(Path::to_path_buf))
+            .filter(|d| d.is_dir() && !d.starts_with(root))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
+/// `p` canonical, where it is (else as it is).
+fn canonical(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// The system's watcher and the folders it watches outside the watch's
+/// own (each alone, not what is below it).
+struct Watching {
+    w: notify::RecommendedWatcher,
+    /// The watch's folder, canonical.
+    root: PathBuf,
+    outside: HashSet<PathBuf>,
+}
+
+impl Watching {
+    /// The folders of `wanted`'s files outside the watch's folder
+    /// watched too, those not yet.
+    fn add(&mut self, wanted: &Wanted) {
+        for d in wanted.folders_outside(&self.root) {
+            if !self.outside.contains(&d) && self.w.watch(&d, RecursiveMode::NonRecursive).is_ok() {
+                self.outside.insert(d);
+            }
+        }
     }
 }
 
@@ -647,7 +705,7 @@ fn reconfigured(
     o: &Options,
     s: &phitex_live::lsp::Settings,
     lsp: Option<&Lsp>,
-) -> Option<(Target, Options)> {
+) -> Option<(Target, Options, PathBuf)> {
     let mut o2 = o.clone();
     if let Some(n) = s.threads {
         o2.threads = Some(n);
@@ -681,23 +739,20 @@ fn reconfigured(
                 .show_message(1, &format!("PhiTeX: the settings: {e}"));
         }
     };
-    let t2 = match modern::resolve(&o2) {
+    let (t2, dir) = match modern::resolve_again(&o2) {
         Ok(t2) => t2,
         Err(e) => {
             said(&e);
             return None;
         }
     };
-    if o2.threads == o.threads && same_main(&t2.file, &t.file) && t2.files == t.files {
+    if o2.threads == o.threads
+        && same_main(&dir.join(&t2.file).to_string_lossy(), &t.file)
+        && t2.files == t.files
+    {
         return None;
     }
-    match modern::job(&t2, &o2) {
-        Ok(_) => Some((t2, o2)),
-        Err(e) => {
-            said(&e);
-            None
-        }
-    }
+    Some((t2, o2, dir))
 }
 
 /// One session of the watch, on target `t`: its builds until the watch
@@ -1003,12 +1058,24 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     };
     let owned = |f: &str| lsp.as_ref().is_some_and(|l| l.owns(f));
     let ours: Ours = Arc::default();
-    // (kept for the watch's life: dropping it stops the events)
-    let wanted: WantedRef = Arc::default();
-    let _files = watcher(&root, wanted.clone(), ours.clone(), tx.clone()).unwrap_or_else(|e| {
-        ui.error(&format!("can't watch {}: {e}", root.display()));
-        std::process::exit(crate::EXIT_FAILED);
+    // (kept for the session's life: dropping it stops the events)
+    let config = Wanted::config_of(&t.config_files);
+    let wanted: WantedRef = Arc::new(Mutex::new(Wanted {
+        config: config.clone(),
+        ..Wanted::default()
+    }));
+    let watching = RefCell::new(Watching {
+        w: watcher(&root, wanted.clone(), ours.clone(), tx.clone()).unwrap_or_else(|e| {
+            ui.error(&format!("can't watch {}: {e}", root.display()));
+            std::process::exit(crate::EXIT_FAILED);
+        }),
+        root: canonical(&root),
+        outside: HashSet::new(),
     });
+    // (the settings' files outside the folder, watched from the start)
+    watching
+        .borrow_mut()
+        .add(&wanted.lock().unwrap_or_else(PoisonError::into_inner));
     let raw = lsp.is_none() && !ui.json && keys::raw();
     let building = kept.building.clone();
     let at_wait = kept.waiting.clone();
@@ -1802,8 +1869,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             *unwritten.borrow_mut() = Some(r);
         }
         phitex_tex::timeline::lap("watch: the report dropped");
-        // (the files a change of rebuilds: what this build read)
-        *wanted.lock().unwrap_or_else(PoisonError::into_inner) = Wanted::of(s.watched(), &root);
+        // (the files a change of rebuilds: what this build read, their
+        // folders outside the watch's watched too)
+        let w = Wanted::of(s.watched(), &root, config.clone());
+        watching.borrow_mut().add(&w);
+        *wanted.lock().unwrap_or_else(PoisonError::into_inner) = w;
         phitex_tex::timeline::end(&format!("build {builds}"));
     };
     // (what came while a build ran and it could not take: done after it)
@@ -2007,7 +2077,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             match e {
                 Event::Configure(c) => {
                     if let Some(n) = reconfigured(t, o, &c, lsp.as_deref()) {
-                        next = Some(n);
+                        next = Some((n, "the editor's settings changed"));
                     }
                 }
                 Event::Key(k) => match k {
@@ -2132,10 +2202,33 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     // file did, so a save's temporary file (written, then
                     // renamed to the main file) or a folder the build made
                     // would build again a document no file of changed)
-                    let ps: Vec<PathBuf> = {
+                    let (settings, ps): (Vec<PathBuf>, Vec<PathBuf>) = {
                         let w = wanted.lock().unwrap_or_else(PoisonError::into_inner);
-                        ps.into_iter().filter(|p| w.wants(&root, p)).collect()
+                        ps.into_iter()
+                            .filter(|p| w.wants(&root, p))
+                            .partition(|p| w.is_config(p))
                     };
+                    // (a settings' file changed (a .latexmkrc, a file it
+                    // `do`es, phitex.toml): the target resolved again, a
+                    // new session on its search paths)
+                    if !settings.is_empty() && next.is_none() {
+                        match modern::resolve_again(o) {
+                            Ok((t2, dir)) => {
+                                for w in &t2.warnings {
+                                    ui.warning(w);
+                                }
+                                next = Some(((t2, o.clone(), dir), "the settings changed"));
+                            }
+                            Err(e) => ui.error(&format!(
+                                "the settings ({}): {e}",
+                                settings
+                                    .iter()
+                                    .map(|p| p.display().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )),
+                        }
+                    }
                     for p in ps {
                         let rel = p
                             .strip_prefix(&root)
@@ -2253,10 +2346,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             {
                 ui.error(&e);
             }
-            ui.line(&st.dim("phitex watch: the editor's settings changed: a new session"));
+            let ((t2, o2, dir), why) = n;
+            ui.line(&st.dim(&format!("phitex watch: {why}: a new session")));
+            if let Err(e) = std::env::set_current_dir(&dir) {
+                ui.error(&format!("can't enter {}: {e}", dir.display()));
+                std::process::exit(crate::EXIT_FAILED);
+            }
             kept.rx = Some(rx);
             kept.view = view;
-            return n;
+            return (t2, o2);
         }
         // (a change the last build took while it ran: built already)
         // (r, or Rebuild in the viewer: built again whatever)

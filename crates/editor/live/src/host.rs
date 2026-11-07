@@ -66,6 +66,13 @@ pub trait Host: Send + Sync {
         false
     }
 
+    /// Whether the file at `path` (as [`Host::locate`] found it) is the
+    /// distribution's, read-only: TeX Live's trees, Shelf's packs. A
+    /// watch watches every other file a build read, wherever it is.
+    fn distribution(&self, _path: &Path) -> bool {
+        false
+    }
+
     /// `path` as the host names it whole (the SyncTeX file's directory:
     /// the CLI's canonical path); as it is by default.
     fn canonical(&self, path: &Path) -> PathBuf {

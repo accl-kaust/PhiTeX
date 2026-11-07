@@ -4230,3 +4230,210 @@ fn phitex_toml_inputs() {
     assert!(ok, "{errs}");
     same_as_latexmk(&paper.join("paper.pdf"), "shared");
 }
+
+/// The project of [`watch_follows_what_the_build_read_anywhere`] at `root`:
+/// a lab's document in `lab/` that loads a style of `common/tex/` (on
+/// TEXINPUTS through the root's `.latexmkrc`) and inputs a chapter of
+/// `../shared/`; `other/tex/` holds another style of the same name.
+fn outside_project(root: &Path, style: &str, chapter: &str, styles: &str) {
+    for d in ["lab", "common/tex", "other/tex", "shared"] {
+        std::fs::create_dir_all(root.join(d)).expect("a folder");
+    }
+    std::fs::write(
+        root.join(".latexmkrc"),
+        format!(
+            "ensure_path('TEXINPUTS', '{}/{styles}//');\n",
+            root.display()
+        ),
+    )
+    .expect("the rc file");
+    std::fs::write(
+        root.join("common/tex/x.sty"),
+        format!("\\newcommand\\word{{{style}}}\n"),
+    )
+    .expect("the style");
+    std::fs::write(
+        root.join("other/tex/x.sty"),
+        "\\newcommand\\word{Elsewhere}\n",
+    )
+    .expect("the other style");
+    std::fs::write(root.join("shared/ch.tex"), format!("{chapter}\n")).expect("the chapter");
+    std::fs::write(
+        root.join("lab/a.tex"),
+        "\\documentclass{article}\n\\usepackage{x}\n\\begin{document}\nThe word is \\word.\n\n\\input{../shared/ch}\n\\end{document}\n",
+    )
+    .expect("the document");
+}
+
+/// The next `build` event of a watch, whatever its number (a new session
+/// counts its builds from 1 again).
+fn next_build(
+    lines: &mut impl Iterator<Item = String>,
+    seen: &mut Vec<String>,
+) -> serde_json::Value {
+    for l in lines.by_ref() {
+        seen.push(l.clone());
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&l)
+            && (v["event"] == "build" || v["event"] == "failed")
+        {
+            return v;
+        }
+    }
+    panic!("the watch ended before a build: {seen:?}");
+}
+
+/// `phitex watch` rebuilds on a change of any file the build read from
+/// disk, whatever folder it is in, and of the settings' files: run from
+/// a project's root on `lab/a.tex` (the build in `lab/`), a style found
+/// through the root's `.latexmkrc` (TEXINPUTS), a chapter `\input` from
+/// `../shared/`, and the `.latexmkrc` itself pointed at another folder
+/// (the target resolved again, the style found there); then from `lab/`,
+/// whose `.latexmkrc` `do`es the root's, a change of the root's. Each
+/// PDF the watch writes is a clean build's of the same files.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn watch_follows_what_the_build_read_anywhere() {
+    let _one = one();
+    let d = scratch("watch-outside");
+    let root = d.join("project");
+    let home = d.join("home");
+    std::fs::create_dir_all(&home).expect("a home");
+    outside_project(&root, "Before", "Chapter one.", "common/tex");
+    let watch = |dir: &Path, file: &str| {
+        command(Path::new(env!("CARGO_BIN_EXE_phitex")), dir)
+            .args([
+                "watch",
+                "--write",
+                "--json",
+                "--no-view",
+                "--exact-pdf",
+                "--engine",
+                "pdflatex",
+                file,
+            ])
+            .env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("TEXINPUTS")
+            .env("LATEXMKRCSYS", home.join("no-system-latexmkrc"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("phitex watch runs")
+    };
+    // (a clean build of the files as `outside_project` lays them out)
+    let clean = |k: usize, style: &str, chapter: &str, styles: &str| {
+        let r = d.join(format!("clean-{k}"));
+        let _ = std::fs::remove_dir_all(&r);
+        outside_project(&r, style, chapter, styles);
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &r)
+            .args(["build", "--engine", "pdflatex", "lab/a.tex"])
+            .env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("TEXINPUTS")
+            .env("LATEXMKRCSYS", home.join("no-system-latexmkrc"))
+            .output()
+            .expect("phitex build runs");
+        assert!(
+            out.status.success(),
+            "clean build {k}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read(r.join("lab/a.pdf")).expect("the clean PDF")
+    };
+    let pdf = root.join("lab/a.pdf");
+    let mut child = watch(&root, "lab/a.tex");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = next_build(&mut lines, &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let first = std::fs::read(&pdf).expect("the cold PDF");
+    assert!(
+        first == clean(0, "Before", "Chapter one.", "common/tex"),
+        "the cold PDF is not the clean build's"
+    );
+    let steps: [(&str, &str, &str, &str, &str); 3] = [
+        // (the file changed, its new text; the project's words then)
+        (
+            "common/tex/x.sty",
+            "\\newcommand\\word{After}\n",
+            "After",
+            "Chapter one.",
+            "common/tex",
+        ),
+        (
+            "shared/ch.tex",
+            "Chapter two.\n",
+            "After",
+            "Chapter two.",
+            "common/tex",
+        ),
+        (".latexmkrc", "", "After", "Chapter two.", "other/tex"),
+    ];
+    let mut last = first;
+    for (k, (file, text, style, chapter, styles)) in steps.into_iter().enumerate() {
+        std::thread::sleep(Duration::from_millis(50));
+        let text = if file == ".latexmkrc" {
+            format!(
+                "ensure_path('TEXINPUTS', '{}/{styles}//');\n",
+                root.display()
+            )
+        } else {
+            text.to_owned()
+        };
+        std::fs::write(root.join(file), text).expect("the edit");
+        let ev = next_build(&mut lines, &mut seen);
+        assert_eq!(ev["ok"], true, "{file}: {ev}");
+        std::thread::sleep(Duration::from_millis(300));
+        let now = std::fs::read(&pdf).expect("the watch's PDF");
+        assert!(now != last, "{file}: the PDF did not change");
+        let want = clean(k + 1, style, chapter, styles);
+        assert!(
+            now == want,
+            "{file}: the watch's PDF is not the clean build's: {}",
+            first_difference(&now, &want)
+        );
+        last = now;
+    }
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    // (from the lab's folder: its rc file `do`es the root's)
+    std::fs::write(root.join("lab/.latexmkrc"), "do \"../.latexmkrc\";\n").expect("the lab's rc");
+    let lab = root.join("lab");
+    let mut child = watch(&lab, "a.tex");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let cold = next_build(&mut lines, &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        std::fs::read(&pdf).expect("the PDF") == last,
+        "from the lab's folder: not the PDF built from the root"
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(
+        root.join(".latexmkrc"),
+        format!(
+            "ensure_path('TEXINPUTS', '{}/common/tex//');\n",
+            root.display()
+        ),
+    )
+    .expect("the root's rc edited");
+    let ev = next_build(&mut lines, &mut seen);
+    assert_eq!(ev["ok"], true, "the root's rc: {ev}");
+    std::thread::sleep(Duration::from_millis(300));
+    let now = std::fs::read(&pdf).expect("the watch's PDF");
+    let want = clean(4, "After", "Chapter two.", "common/tex");
+    assert!(
+        now == want,
+        "the root's rc: the watch's PDF is not the clean build's: {}",
+        first_difference(&now, &want)
+    );
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+}
