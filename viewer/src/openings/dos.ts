@@ -5,6 +5,7 @@
 // in: the bar fills, then the screen clears a text row at a time from the
 // top, the page under each row, and the monitor's bezel fades.
 
+import { html } from "../html.ts";
 import { layer, ending, crt, type Opening } from "./kit.ts";
 
 const COLS = 26;
@@ -30,7 +31,7 @@ export function dos(box: HTMLElement): Opening {
 .phx-dos.clear .led, .phx-dos.clear .brand { opacity: 0; transition: opacity .2s; }
 .phx-dos.clear .scr { box-shadow: none; animation: phx-dos-clear .5s steps(14, end) forwards; }
 @keyframes phx-dos-clear { from { clip-path: inset(0 0 0 0); } to { clip-path: inset(100% 0 0 0); } }`,
-    `<div class="scr"><div class="txt"><div class="top">PhiTeX Setup</div>
+    html`<div class="scr"><div class="txt"><div class="top">PhiTeX Setup</div>
      <div class="main"><p>Please wait while Setup typesets your document.</p>
      <div class="box"><div class="now">Starting…</div><div class="bar"></div><div class="pct">&nbsp;</div><div class="file">&nbsp;</div></div>
      <div class="tip"><b>Did you know?</b> <span></span></div></div>

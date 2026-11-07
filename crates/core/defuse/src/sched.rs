@@ -1730,6 +1730,12 @@ pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
 /// committing by the second and ran a third time, on reads that all held
 /// (`moving_breaks_rescan_touched_pages_and_one` at -j4, 1 build in 60:
 /// the page loop's rest four times, mc 80629). Records the re-ask.
+/// But not where the node put right in place since what it published
+/// (`Node::restated`): a reader that read the older value and committed
+/// between the two re-asks was asked only for it, and the second re-ask
+/// is the one that carries the change (a relation counted again from an
+/// input that moved under it, `commit::settle_rel`: a name built from a
+/// stepped counter kept the counter's older value at -j8, 1 build in 15).
 fn asked_before(eng: &Engine, n: &Node, wake: &Wake) -> bool {
     let (Some(by), Cause::Changed { field, .. } | Cause::Range { field, .. }) = (wake.by, &wake.cause) else {
         return false;
@@ -1740,7 +1746,12 @@ fn asked_before(eng: &Engine, n: &Node, wake: &Wake) -> bool {
     let Some(b) = eng.placed_node(by).filter(|b| b.committing.load(Ordering::Acquire)) else {
         return false;
     };
-    let key = (by, b.serial.load(Ordering::Acquire), *field);
+    let key = (
+        by,
+        b.serial.load(Ordering::Acquire),
+        b.restated.load(Ordering::Acquire),
+        *field,
+    );
     let mut asks = n.asks.lock();
     if asks.contains(&key) {
         return true;
@@ -1748,7 +1759,7 @@ fn asked_before(eng: &Engine, n: &Node, wake: &Wake) -> bool {
     // (kept while their commits go on: another node's re-ask between two
     // of one commit's, the routine's of the page after, left only its own
     // and the commit's second re-ask went through, 1 build in 160)
-    asks.retain(|&(m, ser, _)| {
+    asks.retain(|&(m, ser, _, _)| {
         eng.placed_node(m)
             .is_some_and(|x| x.committing.load(Ordering::Acquire) && x.serial.load(Ordering::Acquire) == ser)
     });

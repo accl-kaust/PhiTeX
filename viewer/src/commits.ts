@@ -7,6 +7,8 @@
 // fetched through `load`, the pair chosen handed to `pick`. No dependency
 // on the viewer.
 
+import { html, svg } from "./html.ts";
+
 /** A commit, newest first in topological order (`phitex watch`'s `diff_log` op gives them). */
 export interface Commit {
   id: string;
@@ -87,7 +89,6 @@ export function ago(t: number, now = Date.now() / 1000): string {
   return "just now";
 }
 
-const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 
 const ROW = 24;
 const LANE = 12;
@@ -228,13 +229,13 @@ export class Commits {
 
   private render(): void {
     const scroll = this.el.scrollTop;
-    this.el.innerHTML = this.html();
+    this.el.replaceChildren(this.html());
     this.el.scrollTop = scroll;
   }
 
-  private html(): string {
-    if (this.error) return `<div class="note err">${esc(this.error)}</div>`;
-    if (!this.commits.length) return `<div class="note">${this.loading ? "reading the history…" : "no commits"}</div>`;
+  private html(): DocumentFragment {
+    if (this.error) return html`<div class="note err">${this.error}</div>`;
+    if (!this.commits.length) return html`<div class="note">${this.loading ? "reading the history…" : "no commits"}</div>`;
     const { rows, width } = layout(this.commits);
     const W = (width + 1) * LANE;
     const x = (l: number) => LANE / 2 + l * LANE + 2;
@@ -242,21 +243,21 @@ export class Commits {
     const ti = this.to ? this.find(this.to) : -1;
     const tree = this.from !== null && !this.to;
     // (the working tree, above all: the range from To down to From marked)
-    const top = `<div class="row${tree ? " to" : ""}" title="Shift-click: diff the working tree"><svg width="${W}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 4}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${tree ? '<span class="end">TO</span>' : ""}<i>the working tree</i></span></div>`;
+    const top = html`<div class="row${tree ? " to" : ""}" title="Shift-click: diff the working tree"><svg width="${W}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 4}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${tree ? html`<span class="end">TO</span>` : ""}<i>the working tree</i></span></div>`;
     const lines = this.commits.map((c, i) => {
       const r = rows[i];
       const col = COLORS[r.lane % COLORS.length];
       // (the lines down to the next row, over its top half)
-      const svg = r.down.map(([a, b]) => `<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
-      svg.push(c.parents.length > 1 ? `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
-      const pills = c.refs.map((f) => `<span class="pill ${KINDS.has(f.kind) ? f.kind : "branch"}">${esc(f.name)}</span>`).join("");
+      const marks = r.down.map(([a, b]) => svg`<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
+      marks.push(c.parents.length > 1 ? svg`<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : svg`<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
+      const pills = c.refs.map((f) => html`<span class="pill ${KINDS.has(f.kind) ? f.kind : "branch"}">${f.name}</span>`);
       const lo = this.to ? ti : -1;
       const cls = i === fi ? " from" : i === ti ? " to" : fi >= 0 && i > lo && i < fi ? " inrange" : "";
-      const end = i === fi ? '<span class="end">FROM</span>' : i === ti ? '<span class="end">TO</span>' : "";
+      const end = i === fi ? html`<span class="end">FROM</span>` : i === ti ? html`<span class="end">TO</span>` : "";
       const title = `${c.subject}\n${c.author}, ${new Date(c.time * 1000).toLocaleString()}\nclick: From · shift-click: To · double-click: against its first parent`;
-      return `<div class="row${cls}" data-i="${i}" title="${esc(title)}"><svg width="${W}" height="${ROW}">${svg.join("")}</svg><span class="txt">${end}<span class="sha">${esc(c.short)}</span>${pills}${c.parents.length > 1 ? "<i>merge:</i> " : ""}${esc(c.subject)}<span class="who">${esc(c.author)}, ${ago(c.time)}</span></span></div>`;
+      return html`<div class="row${cls}" data-i="${i}" title="${title}"><svg width="${W}" height="${ROW}">${marks}</svg><span class="txt">${end}<span class="sha">${c.short}</span>${pills}${c.parents.length > 1 ? html`<i>merge:</i> ` : ""}${c.subject}<span class="who">${c.author}, ${ago(c.time)}</span></span></div>`;
     });
-    const more = this.more ? `<div class="note"><button type="button" data-more>${this.loading ? "reading…" : "more…"}</button></div>` : "";
-    return top + lines.join("") + more;
+    const more = this.more ? html`<div class="note"><button type="button" data-more>${this.loading ? "reading…" : "more…"}</button></div>` : "";
+    return html`${top}${lines}${more}`;
   }
 }

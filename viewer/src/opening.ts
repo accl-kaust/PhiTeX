@@ -13,6 +13,7 @@
 // needed for the letters). Under prefers-reduced-motion the logo stands still.
 
 import { WORD, WOVEN, MARK, LOCKUP, SEEDS } from "./opening-art.ts";
+import { html, svg as svgParts, svgArt } from "./html.ts";
 
 const NS = "http://www.w3.org/2000/svg";
 const f2 = (v: number) => +v.toFixed(2);
@@ -37,11 +38,7 @@ let uid = 0;
 /** The art with its ids made unique to this sheet, in `fill`. */
 const art = (a: { body: string }, fill: string, tag: string) => a.body.replace(/§/g, `phx${tag}-`).replace(/#FILL/g, fill);
 
-const svgOf = (markup: string) => {
-  const t = document.createElement("template");
-  t.innerHTML = markup;
-  return t.content.firstElementChild as SVGSVGElement;
-};
+const svgOf = (markup: string) => svgArt(markup).firstElementChild as SVGSVGElement;
 
 /**
  * The byline under ΦTeX ("by ACCL | KAUST"), landing as ACCL's logo does:
@@ -63,20 +60,20 @@ function byline(svg: SVGSVGElement, word: Box) {
   const g = document.createElementNS(NS, "g"), wid = `phx-by${uid++}`;
   svg.append(g);
   let x = x0;
-  g.insertAdjacentHTML("beforeend", `<text x="${f2(x)}" y="${f2(mid + 0.19 * h)}" fill="${BY.faint}" style="font: 400 ${f2(0.55 * h)}px ${SANS}">by</text>`);
+  g.append(svgParts`<text x="${f2(x)}" y="${f2(mid + 0.19 * h)}" fill="${BY.faint}" style="font: 400 ${f2(0.55 * h)}px ${SANS}">by</text>`);
   const byT = g.lastElementChild!;
   x += byW + gap;
   for (const [k, v] of [["x", x], ["y", top], ["width", lw], ["height", h]] as const) lockup.setAttribute(k, String(f2(v)));
   g.append(lockup);
   x += lw + sep;
-  g.insertAdjacentHTML("beforeend", `<rect x="${f2(x)}" y="${f2(top)}" width="${f2(0.1 * h)}" height="${f2(h)}" fill="${BY.faint}"/>`);
+  g.append(svgParts`<rect x="${f2(x)}" y="${f2(top)}" width="${f2(0.1 * h)}" height="${f2(h)}" fill="${BY.faint}"/>`);
   const rule = g.lastElementChild!;
   x += sep;
   for (const [k, v] of [["x", x], ["y", mid - sh / 2], ["width", sw], ["height", sh]] as const) seeds.setAttribute(k, String(f2(v)));
   g.append(seeds);
   x += sw + gap * 0.6;
   const ks = letters.map((c, i) => {
-    g.insertAdjacentHTML("beforeend", `<text x="${f2(x)}" y="${f2(mid + 0.26 * h)}" fill="${BY.kaust}" style="font: 700 ${f2(0.72 * h)}px ${SANS}">${c}</text>`);
+    g.append(svgParts`<text x="${f2(x)}" y="${f2(mid + 0.26 * h)}" fill="${BY.kaust}" style="font: 700 ${f2(0.72 * h)}px ${SANS}">${c}</text>`);
     x += adv[i];
     return g.lastElementChild!;
   });
@@ -100,7 +97,7 @@ function byline(svg: SVGSVGElement, word: Box) {
   const wg = document.createElementNS(NS, "g");
   words[0]?.before(wg);
   words.forEach((w) => wg.append(w));
-  lockup.insertAdjacentHTML("afterbegin", `<defs><clipPath id="${wid}"><rect x="97.5" y="-50" width="1000" height="200"/></clipPath></defs>`);
+  lockup.prepend(svgParts`<defs><clipPath id="${wid}"><rect x="97.5" y="-50" width="1000" height="200"/></clipPath></defs>`);
   const clipped = document.createElementNS(NS, "g");
   wg.before(clipped);
   clipped.append(wg);
@@ -160,12 +157,11 @@ export interface Opening {
 export function opening(box: HTMLElement, fill: string, bg: string): Opening {
   const tag = String(uid++);
   const w = WORD, size = w.size, phi = w.letters[0];
-  box.insertAdjacentHTML(
-    "beforeend",
-    `<svg class="phx-open" preserveAspectRatio="none" aria-hidden="true">
+  box.append(
+    html`<svg class="phx-open" preserveAspectRatio="none" aria-hidden="true">
     <defs><mask id="phx-hole${tag}" maskUnits="userSpaceOnUse" x="-1e5" y="-1e5" width="2e5" height="2e5"><rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="#fff"/>
       <path class="phx-hole" d="${PHI_COUNTER}" fill="#000" opacity="0" transform="translate(${f2(phi.x)} ${f2(phi.y)}) scale(${size / 1000} ${-size / 1000})"/></mask></defs>
-    <rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="${bg}" mask="url(#phx-hole${tag})"/>${art(WOVEN, fill, tag)}</svg>`,
+    <rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="${bg}" mask="url(#phx-hole${tag})"/>${svgArt(art(WOVEN, fill, tag))}</svg>`,
   );
   const el = box.lastElementChild as SVGSVGElement, hole = el.querySelector(".phx-hole")!;
   const by = byline(el, WOVEN);
@@ -178,7 +174,7 @@ export function opening(box: HTMLElement, fill: string, bg: string): Opening {
   const tmp = document.createElementNS(NS, "svg");
   tmp.style.cssText = "position:absolute;width:0;height:0;visibility:hidden";
   document.body.append(tmp);
-  tmp.innerHTML = art(MARK, fill, `${tag}m`);
+  tmp.replaceChildren(svgArt(art(MARK, fill, `${tag}m`)));
   const S = [0, 1, 2, 3].map((j) => {
     const ps = [...el.querySelectorAll<SVGPathElement>(`.phx-s${j}`)];
     const full = ps[0].getTotalLength(), part = tmp.querySelector<SVGPathElement>(`.phx-s${j}`)!.getTotalLength();

@@ -10,6 +10,7 @@
 // opens, its halves shaded until flat, the creases fading. A page that comes
 // mid-fold unfolds from that fold.
 
+import { html } from "../html.ts";
 import { layer, ending, PAPER, INK, type Opening } from "./kit.ts";
 
 type P = [number, number];
@@ -57,7 +58,7 @@ export function plane(box: HTMLElement, dark: boolean): Opening {
 .phx-pl .cap .det { font-size: 2.4cqw; color: ${mute}; margin: .8cqw 0 0 6cqw; min-height: 1.4em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .phx-pl .cap .hint { font-size: 2.3cqw; color: ${mute}; margin: 3cqw 0 0 6cqw; line-height: 1.45; }
 .phx-pl.out .cap { opacity: 0; }`,
-    `<svg viewBox="0 0 85 110" preserveAspectRatio="xMidYMid meet">
+    html`<svg viewBox="0 0 85 110" preserveAspectRatio="xMidYMid meet">
       <defs>
         <pattern id="phx-pl-grid" width="5" height="5" patternUnits="userSpaceOnUse"><path d="M5 0H0V5" fill="none" stroke="${grid}" stroke-width=".25"/></pattern>
         <mask id="phx-pl-m" maskUnits="userSpaceOnUse" x="-50" y="-50" width="185" height="210"><rect x="-50" y="-50" width="185" height="210" fill="#fff"/><polygon class="hole" points="" fill="#000"/></mask>

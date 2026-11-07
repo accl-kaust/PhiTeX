@@ -7,8 +7,17 @@
 // the logo sweep across the sheet one after another, the page coming in
 // behind the last.
 
+import { html, svgArt } from "../html.ts";
 import { layer, ending, wipe, RIBBON, PAPER, type Opening } from "./kit.ts";
 import { LOCKUP, SEEDS } from "../opening-art.ts";
+
+/** A logo's <svg> (the build's art), of class `cls`, hidden from readers. */
+const art = (markup: string, cls: string) => {
+  const s = svgArt(markup).firstElementChild!;
+  s.setAttribute("class", cls);
+  s.setAttribute("aria-hidden", "true");
+  return s;
+};
 
 const STEPS = ["Reading the project", "Fetching packages", "Typesetting"];
 
@@ -45,9 +54,9 @@ export function kaust(box: HTMLElement, dark: boolean): Opening {
 .phx-ka.sweep .st { animation: none; opacity: 1; height: 16cqw; transition: transform .62s cubic-bezier(.55,0,.35,1); }
 .phx-ka.sweep .st:nth-of-type(2) { transition-delay: .05s; } .phx-ka.sweep .st:nth-of-type(3) { transition-delay: .1s; } .phx-ka.sweep .st:nth-of-type(4) { transition-delay: .15s; }
 .phx-ka.sweep.go .st { transform: rotate(-50.5deg) translateY(150cqw); }`,
-    `<div class="st"></div><div class="st"></div><div class="st"></div><div class="st"></div>
-     <div class="row">${LOCKUP.replace("<svg ", `<svg class="lk" aria-hidden="true" `).replace(/#1D3E72/gi, dark ? "#e4e6ea" : "#1D3E72")}<div class="rule"></div>${SEEDS.replace("<svg ", `<svg class="sd" aria-hidden="true" `)}</div>
-     <div class="prog">${RIBBON.map((c) => `<i style="--c:${c}"><b></b></i>`).join("")}</div>
+    html`<div class="st"></div><div class="st"></div><div class="st"></div><div class="st"></div>
+     <div class="row">${art(LOCKUP.replace(/#1D3E72/gi, dark ? "#e4e6ea" : "#1D3E72"), "lk")}<div class="rule"></div>${art(SEEDS, "sd")}</div>
+     <div class="prog">${RIBBON.map((c) => html`<i style="--c:${c}"><b></b></i>`)}</div>
      <div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div>`,
   );
   const $ = (s: string) => el.querySelector<HTMLElement>(s)!;

@@ -177,7 +177,15 @@ phitex-tex has no wasm imports for this: a wasm host implements
   (`u32 n, (u32 len, name, u32 len, bytes) × n`, little-endian, as
   `host-glue.mjs` frames files) to the host's thread that holds Pyodide
   (thread 0) and waits on a `Condvar` for the answer (`i32 status`, the
-  files written framed, the names removed framed with no bytes);
+  files written framed, the names removed framed with no bytes, then,
+  only when the host did not run the command, `u32 len, why` in UTF-8:
+  minted's runner failed to load or is not loaded, a command other than
+  latexminted, a thrown error's text);
+- a call the host could not run (a failing status, nothing written, a
+  why) is one plain diagnostic, "`<program>' could not run here: <why>",
+  TeX's log line staying web2c's `executed safely (allowed)`; the native
+  runner says why for the shell's own 126 and 127 (a program not found);
+  a command that ran and failed says no why and keeps its own errors;
 - `files` is exactly what `run` is given: the host adds nothing of its own
   (the old glue added the host's project files and its own written files:
   the engine now hands those it means the command to see);

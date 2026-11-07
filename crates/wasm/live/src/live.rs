@@ -120,6 +120,12 @@ impl Host for Shelf {
         self.files.read(&path.to_string_lossy()).map(|b| b.to_vec())
     }
 
+    /// [`Files::stamp`]: a Rebuild reads again only what the host gave
+    /// since, as `r` in the watch reads only what changed on disk.
+    fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+        self.files.stamp(&path.to_string_lossy())
+    }
+
     /// Shelf's files keyed by their own content (the index's sums) and
     /// path, none read: a warm start checks the format against them
     /// without fetching them ([`Files::key`]).

@@ -5,6 +5,7 @@
 // Page in: one last drop floods the sheet, and the page comes up through the
 // middle of the ink.
 
+import { html } from "../html.ts";
 import { layer, ending, hole, INK, PAPER, type Opening } from "./kit.ts";
 
 /** Where the drops land: the blot's centre, a third of the way down. */
@@ -32,7 +33,7 @@ export function ink(box: HTMLElement, dark: boolean): Opening {
 .phx-ink.out .flood { animation: phx-ink-flood .38s cubic-bezier(.5,0,.7,1) forwards; }
 .phx-ink.out .cap { opacity: 0; transition: opacity .2s; }
 @keyframes phx-ink-flood { to { transform: scale(10); } }`,
-    `<div class="blot"></div><div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div><div class="flood"></div>`,
+    html`<div class="blot"></div><div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div><div class="flood"></div>`,
   );
   const $ = (s: string) => el.querySelector<HTMLElement>(s)!;
   const blot = $(".blot");

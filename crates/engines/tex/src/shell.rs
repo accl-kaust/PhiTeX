@@ -41,6 +41,12 @@ pub struct ShellRan {
     /// What it wrote to its standard output: the text a piped input
     /// (`\\input|cmd`, web2c's `open_in_or_pipe`) reads.
     pub stdout: Vec<u8>,
+    /// Why the host could not run it at all (empty: it ran, or the host
+    /// does not say): a runner that failed to load, a program not found.
+    /// With a failing status and nothing written, the engine says it
+    /// plainly, once a call (`\\write18`, a piped input); TeX's log line
+    /// stays web2c's.
+    pub why: String,
 }
 
 /// Runs the commands `\write18` allows ([`crate::Options::shell_hook`]).
@@ -256,6 +262,8 @@ pub(crate) struct Made {
     wrote: Vec<(String, String)>,
     removed: Vec<String>,
     stdout: String,
+    /// [`ShellRan::why`].
+    why: String,
 }
 
 /// The files a call read, each with its text's key (`None`: absent).
@@ -441,6 +449,7 @@ fn call(ops: &crate::run::Ops, cmd: &str, files: &[(String, String)]) -> Option<
         wrote,
         removed,
         stdout: chars(&r.stdout),
+        why: r.why.clone(),
     });
     memo.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -607,6 +616,15 @@ impl Run<'_, '_> {
                 }
             }
         };
+        // (the host could not run the command at all and said why: one
+        // plain diagnostic, the program's own errors after it being only
+        // what follows from nothing made; a command that ran and failed,
+        // no why, keeps its own. TeX's log line stays web2c's
+        // `executed safely (allowed)`, which web2c writes too)
+        if made.status != 0 && made.wrote.is_empty() && !made.why.is_empty() {
+            let name = cmd.split_whitespace().next().unwrap_or_default();
+            self.diag(true, &format!("`{name}' could not run here: {}", made.why));
+        }
         if made.status != 0 && crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!("shell: {cmd:?} returned {}", made.status);
         }
