@@ -3092,6 +3092,26 @@ pub(crate) fn reask_from(
             let readers: Vec<Reader> = match inner.readers.get(&f) {
                 Some(rs) => {
                     st.walked += rs.len() as u64;
+                    // (`PHITEX_REASK_TRACE`, profile: a segment's readers
+                    // of the field past 10 000, by node)
+                    if rs.len() > 10_000 && crate::obs::enabled() && std::env::var_os("PHITEX_REASK_TRACE").is_some() {
+                        let mut by_node: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
+                        for r in rs {
+                            *by_node.entry(r.node.raw()).or_default() += 1;
+                        }
+                        let mut top: Vec<(u64, usize)> = by_node.into_iter().collect();
+                        top.sort_by_key(|x| std::cmp::Reverse(x.1));
+                        top.truncate(5);
+                        eprintln!(
+                            "reask-trace: {} seg {cur:?}: {} readers, by node {top:?}, live of the top {:?}",
+                            eng.values().render(f.0),
+                            rs.len(),
+                            top.first().map(|t| rs
+                                .iter()
+                                .filter(|r| r.node.raw() == t.0 && live(eng, r.node, r.serial))
+                                .count())
+                        );
+                    }
                     rs.iter()
                         .filter(|r| {
                             let ap = eng.node(r.anchor).pos_hint();
