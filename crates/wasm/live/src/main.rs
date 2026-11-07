@@ -53,7 +53,14 @@
 )]
 #[cfg(target_arch = "wasm32")]
 mod abi;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(
+        dead_code,
+        reason = "the wasm core's files; their stamps tested natively"
+    )
+)]
 mod files;
 #[allow(
     unsafe_code,
