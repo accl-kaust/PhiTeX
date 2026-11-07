@@ -321,10 +321,30 @@ impl Run<'_, '_> {
                             .collect()
                     })
                     .unwrap_or_default();
+                let segs: Vec<String> = self
+                    .input
+                    .text
+                    .iter()
+                    .skip(self.input.text_at)
+                    .take(4)
+                    .map(|s| match s {
+                        Seg::Line(l) => format!(
+                            "line {:?}",
+                            l.buf
+                                .iter()
+                                .take(24)
+                                .filter_map(|&c| char::from_u32(c))
+                                .collect::<String>()
+                        ),
+                        Seg::Toks(t) => format!("toks {}", t.len()),
+                        Seg::File(_) => "file".to_owned(),
+                    })
+                    .collect();
                 eprintln!(
-                    "pic: node {} at \\begin: no picture body found (input top {top:?}, levels {}, next {here:?}, rescanned {})",
+                    "pic: node {} at \\begin: no picture body found (input top {top:?}, levels {}, next {here:?}, text after {segs:?}, pulled {}, rescanned {})",
                     self.cx.node().raw(),
                     self.input.levels.len(),
+                    self.pulled,
                     self.input
                         .levels
                         .last()
