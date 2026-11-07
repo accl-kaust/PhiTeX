@@ -1301,7 +1301,7 @@ fn latex_pictures_in_a_paragraph_are_children() {
 fn latex_a_picture_asked_again_goes_on_from_a_checkpoint() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pic-ck");
     let _ = std::fs::create_dir_all(&dir);
-    let src = "\\documentclass{article}\n\\usepackage{tikz}\n\\begin{document}\nFirst words.\n\n\\gdef\\mymark{marked}Second words.\n\nThird words.\n\n\\begin{tikzpicture}\\foreach \\i in {1,...,40}{\\foreach \\j in {1,...,30}{\\draw (\\i*0.3,\\j*0.2) circle (0.05);}}\\node at (0,-1) {\\ifdefined\\mymark\\else\\gdef\\mymark{marked}\\fi\\mymark};\\end{tikzpicture}\n\nLast words \\mymark.\n\\end{document}\n";
+    let src = "\\documentclass{article}\n\\usepackage{tikz}\n\\begin{document}\nFirst words.\n\n\\gdef\\mymark{marked}Second words.\n\nThird words, then a picture:\n\\begin{tikzpicture}\\foreach \\i in {1,...,40}{\\foreach \\j in {1,...,30}{\\draw (\\i*0.3,\\j*0.2) circle (0.05);}}\\node at (0,-1) {\\ifdefined\\mymark\\else\\gdef\\mymark{marked}\\fi\\mymark};\\end{tikzpicture}\n\nLast words \\mymark.\n\\end{document}\n";
     std::fs::write(dir.join("picck.tex"), src).expect("write");
     let mut b = common::build(pdf_opts("picck", &dir), Some(&prelude(true)), src);
     let before = b.pages();
