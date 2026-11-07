@@ -60,7 +60,8 @@ export function ink(box: HTMLElement, dark: boolean): Opening {
   let seen = new Set<string>(), rain = 0, what = "";
   const step = (w: string, pct: number | undefined, detail: string) => {
     write($(".what"), w);
-    write($(".det"), pct !== undefined ? detail.split(" · ").slice(0, 2).join(" · ") : detail);
+    // (the detail as it is: a package a few times a second, bled in each time, was never sharp)
+    $(".det").textContent = pct !== undefined ? detail.split(" · ").slice(0, 2).join(" · ") : detail;
     const pkg = pct !== undefined ? detail.split(" · ")[0] : "";
     if (pkg && !seen.has(pkg)) (seen.add(pkg), drop());
     if (w !== what) {

@@ -2631,7 +2631,7 @@ function ink(box, dark) {
   let seen = /* @__PURE__ */ new Set(), rain = 0, what = "";
   const step = (w, pct, detail) => {
     write($(".what"), w);
-    write($(".det"), pct !== void 0 ? detail.split(" \xB7 ").slice(0, 2).join(" \xB7 ") : detail);
+    $(".det").textContent = pct !== void 0 ? detail.split(" \xB7 ").slice(0, 2).join(" \xB7 ") : detail;
     const pkg = pct !== void 0 ? detail.split(" \xB7 ")[0] : "";
     if (pkg && !seen.has(pkg)) seen.add(pkg), drop();
     if (w !== what) {
@@ -2939,6 +2939,7 @@ function glyphs(box, dark) {
 .phx-gl .cap .det { font-size: 2.7cqw; color: ${mute}; margin-top: 1cqw; min-height: 1.3em; }
 .phx-gl .cap .hint { font-size: 2.6cqw; font-style: italic; color: ${mute}; margin-top: 5cqw; line-height: 1.4; }
 .phx-gl .shelf { position: absolute; left: 8%; right: 8%; bottom: 9%; display: flex; flex-wrap: wrap-reverse; justify-content: center; align-content: flex-start; gap: .8cqw 1.4cqw; padding-bottom: 1.4cqw; border-bottom: .5cqw solid ${dark ? "#4a4e57" : "#c9ced8"}; transition: opacity .25s; }
+.phx-gl .shelf .more { font: 2.4cqw/1.4 "DM Mono", ui-monospace, monospace; padding: .2cqw 1.2cqw; color: ${mute}; animation: none !important; }
 .phx-gl .shelf span { font: 2.4cqw/1.4 "DM Mono", ui-monospace, monospace; padding: .2cqw 1.2cqw; border-radius: .6cqw; color: #fff; animation: phx-gl-land .7s cubic-bezier(.5,0,.7,.4) both, phx-gl-bounce .35s cubic-bezier(.3,1.8,.5,1) .7s; }
 @keyframes phx-gl-land { from { transform: translateY(-110cqw) rotate(var(--r)); } to { transform: translateY(0) rotate(0); } }
 @keyframes phx-gl-bounce { 0% { transform: scaleY(.7) translateY(.6cqw); } 100% { transform: none; } }
@@ -3012,7 +3013,15 @@ function glyphs(box, dark) {
       w.textContent = pkg;
       w.style.background = [INK.light, ...RIBBON][seen.size % 5];
       w.style.setProperty("--r", `${(Math.random() - 0.5) * 40}deg`);
-      $(".shelf").append(w);
+      const shelf = $(".shelf");
+      shelf.append(w);
+      const names = shelf.querySelectorAll("span:not(.more)");
+      if (names.length > 12) {
+        names[0].remove();
+        let more = shelf.querySelector(".more");
+        if (!more) more = document.createElement("span"), more.className = "more", shelf.prepend(more);
+        more.textContent = `+${seen.size - 12}`;
+      }
     }
   };
   const hint = (text) => $(".hint").textContent = `Did you know? ${text}`;

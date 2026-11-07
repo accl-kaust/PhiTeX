@@ -21,6 +21,7 @@ export function glyphs(box: HTMLElement, dark: boolean): Opening {
 .phx-gl .cap .det { font-size: 2.7cqw; color: ${mute}; margin-top: 1cqw; min-height: 1.3em; }
 .phx-gl .cap .hint { font-size: 2.6cqw; font-style: italic; color: ${mute}; margin-top: 5cqw; line-height: 1.4; }
 .phx-gl .shelf { position: absolute; left: 8%; right: 8%; bottom: 9%; display: flex; flex-wrap: wrap-reverse; justify-content: center; align-content: flex-start; gap: .8cqw 1.4cqw; padding-bottom: 1.4cqw; border-bottom: .5cqw solid ${dark ? "#4a4e57" : "#c9ced8"}; transition: opacity .25s; }
+.phx-gl .shelf .more { font: 2.4cqw/1.4 "DM Mono", ui-monospace, monospace; padding: .2cqw 1.2cqw; color: ${mute}; animation: none !important; }
 .phx-gl .shelf span { font: 2.4cqw/1.4 "DM Mono", ui-monospace, monospace; padding: .2cqw 1.2cqw; border-radius: .6cqw; color: #fff; animation: phx-gl-land .7s cubic-bezier(.5,0,.7,.4) both, phx-gl-bounce .35s cubic-bezier(.3,1.8,.5,1) .7s; }
 @keyframes phx-gl-land { from { transform: translateY(-110cqw) rotate(var(--r)); } to { transform: translateY(0) rotate(0); } }
 @keyframes phx-gl-bounce { 0% { transform: scaleY(.7) translateY(.6cqw); } 100% { transform: none; } }
@@ -101,7 +102,16 @@ export function glyphs(box: HTMLElement, dark: boolean): Opening {
       w.textContent = pkg;
       w.style.background = [INK.light, ...RIBBON][seen.size % 5];
       w.style.setProperty("--r", `${(Math.random() - 0.5) * 40}deg`);
-      $(".shelf").append(w);
+      const shelf = $(".shelf");
+      shelf.append(w);
+      // (many packages, 80 for some documents: the shelf keeps the last dozen, two rows at most, the others counted)
+      const names = shelf.querySelectorAll("span:not(.more)");
+      if (names.length > 12) {
+        names[0].remove();
+        let more = shelf.querySelector<HTMLElement>(".more");
+        if (!more) (more = document.createElement("span")), (more.className = "more"), shelf.prepend(more);
+        more.textContent = `+${seen.size - 12}`;
+      }
     }
   };
   const hint = (text: string) => ($(".hint").textContent = `Did you know? ${text}`);
