@@ -3147,8 +3147,9 @@ impl State {
     }
 
     /// Every location the run defined so far (locally or globally, in a
-    /// group or not), and every integer register it loaded and stepped,
-    /// with its binding now (`None`: absent): the run's state at this
+    /// group or not), every integer register it loaded and stepped, and
+    /// every value it holds in place of the engine's (preloaded), with
+    /// its binding now (`None`: absent): the run's state at this
     /// point where it is not the engine's (a picture child's view of its
     /// parent, `crate::pic`).
     pub(crate) fn defined_now(&self, v: &Values) -> Vec<(Loc, Option<ValueId>)> {
@@ -3165,9 +3166,16 @@ impl State {
             // not the engine's, though nothing defined it; `mapped_now`
             // has only the steps of a register never loaded)
             let stepped = s.mapped != MAP_NONE;
+            // (a value put in force in place of the engine's: a routine's
+            // global at a candidate the run went past, `State::apply_global`,
+            // a finisher's piece state at its candidate or a read-back
+            // line's, `State::preload`: the parent's, not what reached it,
+            // beautybook's section heading after a page whose routine drew
+            // three pictures numbered itself as if they were not there)
+            let preloaded = s.e.flags & PRELOADED != 0;
             // (a binding a group's end took back to one the run never
             // loaded: the engine's, which the child reads itself)
-            if !(defined || stepped) || s.e.flags & LOADED == 0 {
+            if !(defined || stepped || preloaded) || s.e.flags & LOADED == 0 {
                 continue;
             }
             let cur = if s.e.flags & HAS_ID != 0 {
