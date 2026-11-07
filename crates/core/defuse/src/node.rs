@@ -481,6 +481,14 @@ impl Node {
     }
 }
 
+/// A check of a record's reads ([`RunRecord::read_holds`]): the folds
+/// it made, and the reads it found holding.
+#[derive(Default)]
+pub(crate) struct HoldMemo {
+    pub(crate) fold: crate::read::FoldMemo,
+    held: crate::FxHashMap<(ReadKind, PathId, Option<ValueId>), ()>,
+}
+
 /// What a run produced, as the commit took it.
 pub(crate) struct RunRecord {
     pub(crate) serial: u32,
@@ -511,9 +519,90 @@ pub(crate) struct RunRecord {
     /// the node, whatever their output (`Ctx::placed_output_wait`). Not
     /// reads: nothing checks them, no run keeps them.
     pub(crate) waits: Box<[usize]>,
+    /// The engine's scope generation before its first read (a run that
+    /// kept reads of the one before, that one's when older): while it
+    /// stands, a read of a field whose change count is the one it read
+    /// at gives what it gave ([`RunRecord::read_holds`]).
+    pub(crate) scope_gen: u64,
+    /// The same for the relocations counted (`Engine::moves_gen`).
+    pub(crate) moves_gen: u64,
 }
 
 impl RunRecord {
+    /// Whether its read `rd` still gives what it gave: unchecked where
+    /// nothing of its field changed since it read (a read at a place
+    /// that stands, its field's change count as it was, no scope moved),
+    /// as a commit's check takes its reads (`commit::commit`'s
+    /// refutation); else asked (`read::holds`). A picture's child holds up to 144 000 reads:
+    /// asked one by one, a check that found them all standing cost
+    /// 70-140 ms (Grail, a deleted paragraph: 0.46 s of it).
+    pub(crate) fn read_holds(
+        &self,
+        eng: &crate::Engine,
+        me: &Node,
+        rd: &ReadRec,
+        scope_moved: bool,
+        memo: &mut HoldMemo,
+    ) -> bool {
+        // (a read made again, as one before it found holding: a run asks
+        // one thing many times, a `TikZ` picture microtype's font list
+        // 20 592 times by 76 paths, each asked again at every check)
+        let key = (rd.kind.clone(), rd.path, rd.seen);
+        if memo.held.contains_key(&key) {
+            return true;
+        }
+        let ok = self.read_holds_once(eng, me, rd, scope_moved, &mut memo.fold);
+        if ok {
+            memo.held.insert(key, ());
+        }
+        ok
+    }
+
+    /// [`RunRecord::read_holds`] for one read.
+    fn read_holds_once(
+        &self,
+        eng: &crate::Engine,
+        me: &Node,
+        rd: &ReadRec,
+        scope_moved: bool,
+        memo: &mut crate::read::FoldMemo,
+    ) -> bool {
+        // (a read at a place: at the reader, or before or after a node
+        // still there and not moved, whose answer only a change of its
+        // field's definitions moves; not a final read, which reads what
+        // was published at a quiet point, nor a fold or a search, whose
+        // bounds may go with no change of the field: a read before a
+        // node removed since answers none)
+        let at_place = |n: NodeId| {
+            let a = eng.node(n);
+            a.state() != State::Gone && !a.moved.load(Ordering::Acquire)
+        };
+        let placed = match &rd.kind {
+            ReadKind::Field { at: Anchor::Me, .. } => at_place(me.id),
+            ReadKind::Field {
+                at: Anchor::Before(n) | Anchor::AfterOwn(n),
+                ..
+            } => at_place(me.id) && at_place(*n),
+            ReadKind::Env { .. } => true,
+            _ => false,
+        };
+        if placed
+            && !scope_moved
+            && rd.epoch != u64::MAX
+            && rd.kind.field().is_some_and(|f| eng.field_epoch(f) == rd.epoch)
+        {
+            return true;
+        }
+        crate::read::holds(eng, me, rd, memo)
+    }
+
+    /// Whether the scope generation moved since its reads were made, or a
+    /// node was relocated ([`RunRecord::read_holds`]'s `scope_moved`).
+    pub(crate) fn scope_moved(&self, eng: &crate::Engine) -> bool {
+        (crate::read::scoped(eng) && eng.scope_gen.load(Ordering::Acquire) != self.scope_gen)
+            || eng.moves_gen.load(Ordering::Acquire) != self.moves_gen
+    }
+
     pub(crate) fn provisional(defs: Vec<DefRec>) -> RunRecord {
         RunRecord {
             serial: 0,
@@ -529,6 +618,8 @@ impl RunRecord {
             effect: Effect::None,
             provisional: true,
             waits: Box::default(),
+            scope_gen: 0,
+            moves_gen: 0,
         }
     }
 }
@@ -678,6 +769,8 @@ pub(crate) struct Product {
     /// The scope epoch when the run began (`Engine::scope_gen`): a
     /// bracket changed since may have moved any of its reads.
     pub(crate) scope_gen: u64,
+    /// The relocations counted when it began (`Engine::moves_gen`).
+    pub(crate) moves_gen: u64,
     /// The run published nothing new (`Ctx::unchanged`): the last
     /// record's definitions, contributions, placements and output stand,
     /// with this run's reads.

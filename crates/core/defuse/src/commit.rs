@@ -493,6 +493,10 @@ const ANCHOR_BATCH: usize = 4096;
 /// segment's first reader of `f` (the caller adds it to the index once the
 /// lock is released). `spare` is a list made before the lock, used for a
 /// field's first.
+/// A reader as a commit files it once (`commit`'s `filed_once`): field,
+/// serial, anchor, inclusive, path and answer.
+type FiledKey = (Field, u32, NodeId, bool, PathId, Option<ValueId>);
+
 fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, spare: &mut Vec<Reader>) -> bool {
     if r.anchor != r.node {
         eng.node(r.anchor).anchored.lock().insert(f);
@@ -1130,6 +1134,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         provisional: false,
         state: p.state,
         waits: std::mem::take(&mut p.waits).into_boxed_slice(),
+        // (its reads kept from the run before were made under that run's)
+        scope_gen: match node.record() {
+            Some(r) if p.unchanged || p.resumed.get() => p.scope_gen.min(r.scope_gen),
+            _ => p.scope_gen,
+        },
+        moves_gen: match node.record() {
+            Some(r) if p.unchanged || p.resumed.get() => p.moves_gen.min(r.moves_gen),
+            _ => p.moves_gen,
+        },
     });
     let mut spare_readers: Vec<Reader> = Vec::with_capacity(4);
     let fields_of = |r: &Option<Arc<RunRecord>>| -> (Vec<Field>, Vec<Field>) {
@@ -1190,6 +1203,13 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     let mut room: Option<Made> = None;
     let mut next_answers: FxHashMap<usize, Option<ValueId>> = FxHashMap::default();
     let parks = rec.state.is_some();
+    // (the readers filed, each once: a run asks one thing many times, a
+    // `TikZ` picture whether microtype's font list holds a font at each
+    // node's text, 20 592 reads of the list by 76 paths; filed each, every
+    // change of the list walked them all, 0.4 s of Grail's paragraph
+    // delete in its walks. Two records of one node, serial, place, path
+    // and answer are one reader: a walk asks them alike)
+    let mut filed_once: FxHashSet<FiledKey> = FxHashSet::default();
     for (ri, r) in rec.reads.iter().enumerate() {
         if r.filed && !file_all {
             continue;
@@ -1218,6 +1238,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     path: r.path,
                     seen: r.seen,
                 };
+                if !filed_once.insert((*f, serial, anchor, inclusive, r.path, r.seen)) {
+                    continue;
+                }
                 // (a derived read's witness, kept from an earlier run (one
                 // that stood, a state resumed from): filed on the field its
                 // name gives now as well, before the lock, so a change of
@@ -3089,6 +3112,46 @@ pub(crate) fn reask_from(
             let readers: Vec<Reader> = match inner.readers.get(&f) {
                 Some(rs) => {
                     st.walked += rs.len() as u64;
+                    // (`PHITEX_REASK_TRACE`, profile: a segment's readers
+                    // of the field past 10 000, by node)
+                    if rs.len() > 10_000 && crate::obs::enabled() && std::env::var_os("PHITEX_REASK_TRACE").is_some() {
+                        let mut by_node: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
+                        for r in rs {
+                            *by_node.entry(r.node.raw()).or_default() += 1;
+                        }
+                        let mut top: Vec<(u64, usize)> = by_node.into_iter().collect();
+                        top.sort_by_key(|x| std::cmp::Reverse(x.1));
+                        top.truncate(5);
+                        let mut paths: Vec<PathId> = rs
+                            .iter()
+                            .filter(|r| top.first().is_some_and(|t| r.node.raw() == t.0))
+                            .map(|r| r.path)
+                            .collect();
+                        paths.sort_unstable_by_key(|p| p.0);
+                        paths.dedup();
+                        eprintln!(
+                            "reask-trace: {} seg {cur:?}: {} readers, by node {top:?}, live of the top {:?}, its paths {}: {:?}",
+                            eng.values().render(f.0),
+                            rs.len(),
+                            top.first().map(|t| rs
+                                .iter()
+                                .filter(|r| r.node.raw() == t.0 && live(eng, r.node, r.serial))
+                                .count()),
+                            paths.len(),
+                            paths
+                                .iter()
+                                .take(3)
+                                .map(|&p| eng.path_steps(p).map(|s| s
+                                    .iter()
+                                    .map(|x| match x {
+                                        crate::Step::Member(m) | crate::Step::Derived(m) =>
+                                            eng.values().render(*m).chars().take(80).collect(),
+                                        other => format!("{other:?}"),
+                                    })
+                                    .collect::<Vec<String>>()))
+                                .collect::<Vec<_>>()
+                        );
+                    }
                     rs.iter()
                         .filter(|r| {
                             let ap = eng.node(r.anchor).pos_hint();
@@ -4818,6 +4881,8 @@ pub(crate) fn edit_placed(eng: &Engine, placer: NodeId, f: impl FnOnce(&mut Vec<
         provisional: r.provisional,
         state: r.state,
         waits: r.waits.clone(),
+        scope_gen: r.scope_gen,
+        moves_gen: r.moves_gen,
     }));
 }
 
@@ -5168,6 +5233,7 @@ pub(crate) fn relocate(
         .widen_over(Pos(lo.0.saturating_sub(1)), Pos(hi.0.saturating_add(1)));
     // each runs again where it stands, in their order (the ready heap
     // takes the first queued first among equal keys, `sched::Ready`)
+    eng.moves_gen.fetch_add(1, Ordering::AcqRel);
     for m in &landed {
         m.moved.store(true, Ordering::Release);
         // (a parked state rests on reads at the old place)
