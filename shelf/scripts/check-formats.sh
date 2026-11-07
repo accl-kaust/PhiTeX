@@ -11,7 +11,8 @@
 # scripts/check.sh, in the same environment.
 #
 #   ROOT=<PhiTeX checkout> REL=<releases dir> LABEL=tl2026 NEW=tl2026.N \
-#   BIN=<phitex> W=<check.sh's scratch> OUT=<results> shelf/scripts/check-formats.sh
+#   BIN=<phitex> W=<check.sh's scratch> OUT=<results> [ONLY="<format> ..."] \
+#     shelf/scripts/check-formats.sh
 set -u
 root=$ROOT rel=$REL label=$LABEL new=$NEW bin=$BIN w=$W out=$OUT
 port=8125
@@ -22,6 +23,9 @@ sleep 1
 export SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1
 fails=0 n=0
 names=$(python3 -c "import json,sys;print('\n'.join(json.load(open(sys.argv[1])).get('formats') or {}))" "$rel/$label/release.json")
+# (ONLY: these formats alone, the ones BIN's identity made; an earlier
+# identity's is taken by its own PhiTeX, not this one)
+[ -n "${ONLY:-}" ] && names=$(echo "$names" | grep -xF -f <(tr ' ' '\n' <<< "$ONLY" | grep .))
 for name in $names; do
   engine=${name%%-*}
   # (a document check.sh built, with a PDF: the one the format made made)

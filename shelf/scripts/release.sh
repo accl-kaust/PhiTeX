@@ -13,6 +13,17 @@
 #   shelf/scripts/release.sh            # from the checkout's root
 #
 # LABEL (default tl2026), SHELF_HOST (default https://v1.shelf.phitex.org).
+#
+# FORMATS_COMMIT=<PhiTeX commit>: no new release, no TeX Live fetched; the
+# formats of that commit's PhiTeX (its engine identity) added to the
+# release the host serves now. That commit's phitex is built, checked
+# against TeX Live on the served release (scripts/check.sh, TeX Live's
+# engines over the release's own files, its fonts among them; the maps'
+# check skipped, made when the release was), the formats its builds made
+# published with it (release.py --formats: the earlier identities' kept,
+# each pack under 20 MB) and each checked to be taken
+# (scripts/check-formats.sh); release.txt names the served release and
+# formats.txt the formats added.
 set -euo pipefail
 root=$PWD s=$PWD/shelf w=$PWD/out/shelf out=$PWD/out/shelf-results
 label=${LABEL:-tl2026} host=${SHELF_HOST:-https://v1.shelf.phitex.org}
@@ -27,6 +38,36 @@ python3 scripts/fetch-live.py "$host" "$label" releases-v1
 old=$(json "releases-v1/$label/release.json" release)
 min=$(json "releases-v1/$label/release.json" min_extension)
 echo "served: $old (min_extension $min) $(date +%T)"
+
+# (formats only: FORMATS_COMMIT's PhiTeX, its formats on the served release)
+if [ -n "${FORMATS_COMMIT:-}" ]; then
+  at=$w/at
+  rm -rf "$at" && mkdir -p "$at"
+  git -C "$root" -c safe.directory='*' archive "$FORMATS_COMMIT" | tar -x -C "$at"
+  (cd "$at" && CARGO_TARGET_DIR=$w/at-target cargo build -q --profile fastdev -p phitex-cli --bin phitex)
+  bin=$w/at-target/fastdev/phitex
+  echo "PhiTeX $FORMATS_COMMIT built $(date +%T)" | tee -a "$out/summary.txt"
+  rm -rf "$w/check"
+  ROOT="$root" REL="$s/releases-v1" LABEL="$label" NEW="$old" BIN="$bin" \
+    FTREE="$w/check/tree/texmf-dist" W="$w/check" OUT="$out" TLPDB= bash scripts/check.sh
+  before=$(python3 -c "import json,sys;print(' '.join(json.load(open(sys.argv[1])).get('formats') or {}))" "releases-v1/$label/release.json")
+  python3 release.py "$label" --releases releases-v1 --formats "$w/check/c-shelf/formats" | tee -a "$out/summary.txt"
+  python3 - "releases-v1/$label/release.json" "$before" > "$out/formats.txt" <<'NEW'
+import json, sys
+have = json.load(open(sys.argv[1])).get("formats") or {}
+print(" ".join(sorted(set(have) - set(sys.argv[2].split()))))
+NEW
+  [ -n "$(tr -d ' \n' < "$out/formats.txt")" ] || { echo "$FORMATS_COMMIT: no format new to $old (its identity's formats are served)" | tee -a "$out/summary.txt"; : > "$out/release.txt"; exit 0; }
+  ROOT="$root" REL="$s/releases-v1" LABEL="$label" NEW="$old" BIN="$bin" ONLY="$(cat "$out/formats.txt")" \
+    W="$w/check" OUT="$out" bash scripts/check-formats.sh
+  rm -rf "public/$label"
+  cp -r "releases-v1/$label" "public/$label"
+  n=$(find public -type f | wc -l)
+  if [ "$n" -gt 19500 ]; then echo "public/ has $n files: Cloudflare Pages allows 20000 (README: Retention)" >&2; exit 1; fi
+  echo "$old" > "$out/release.txt"
+  echo "site: $old with the formats of $FORMATS_COMMIT ($(cat "$out/formats.txt")), $n files, $(du -sh public | cut -f1)" | tee -a "$out/summary.txt"
+  exit 0
+fi
 
 # (2) TeX Live's package database and archives, and the fonts' tree
 FETCH_ONLY=1 FONT_TREE="$w/ftree" python3 build.py "$label"

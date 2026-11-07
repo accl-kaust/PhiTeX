@@ -36,6 +36,12 @@ tree_unpack "$rel/$label" "$new" "$w/tree/texmf-dist" | tee -a "$out/summary.txt
 # one had renamed or dropped, SourceSansPro, SourceSerifPro,
 # mfb-oldstyle's ts1, run 41296048903)
 fails=0
+if [ -z "$tlpdb" ]; then
+  # (no package database: a release already published, checked when it
+  # was made, its formats checked again for another PhiTeX, release.sh's
+  # FORMATS_COMMIT)
+  echo "pdftex.map: not checked (no TLPDB: the release's own check made it)" | tee -a "$out/summary.txt"
+else
 python3 - "$tlpdb" "$w/tree/texmf-dist/fonts/map/pdftex/updmap/pdftex.map" > "$out/map-missing.txt" <<'NAMES'
 import lzma, os, sys, tarfile
 db, pdfmap = sys.argv[1:3]
@@ -65,6 +71,7 @@ NAMES
 n=$(wc -l < "$out/map-missing.txt")
 echo "pdftex.map: $n of TeX Live's fonts missing from the release$([ "$n" = 0 ] || echo ": $(head -8 "$out/map-missing.txt" | tr '\n' ' ')...")" | tee -a "$out/summary.txt"
 [ "$n" = 0 ] || fails=$((fails + 1))
+fi
 
 # (6) the documents: PhiTeX's fixtures, plain TeX for each engine, and
 # scripts/release-docs/ (research templates); a document's engine is its
