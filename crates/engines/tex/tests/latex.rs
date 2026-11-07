@@ -841,6 +841,10 @@ fn a_refused_picture_child_leaves_the_empty_name_its_own() {
         let b = common::build(opts, Some(&prelude(true)), &src);
         let (_, log) = b.output();
         assert!(
+            log.contains("[counts 7 8 9]"),
+            "-j {threads}: the registers past 255 the paragraph set keep their values"
+        );
+        assert!(
             log.contains("[empty defined]"),
             "-j {threads}: the empty name is defined after \\csname\\endcsname, as TeX has it"
         );
