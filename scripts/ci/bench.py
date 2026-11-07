@@ -416,6 +416,8 @@ def cmd_json(args):
     }
     if args.note:
         out["note"] = args.note
+    if args.method:
+        out["method"] = args.method
     common.write_json(args.out, out)
     print(json.dumps({"covers": out["covers"], "cold": summary, "edit": {k: v for k, v in (edit or {}).items() if k not in ("points", "worst")},
                       "differences": len(differences)}, indent=1))
@@ -451,6 +453,7 @@ def main():
     p.add_argument("--note")
     p.add_argument("--corpora", default="manuals,research")
     p.add_argument("--covers")
+    p.add_argument("--method")
     args = ap.parse_args()
     {"cold": cmd_cold, "edits": cmd_edits, "json": cmd_json}[args.cmd](args)
 
