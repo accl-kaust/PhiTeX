@@ -44,7 +44,7 @@ const SPACE: u64 = 4;
 /// `spacing` (`SPACE` times what the run's parts cost) apart at least in
 /// every run, an edited one too: what its checkpoints cost stays a share
 /// of what it does, so a run again never costs more than its first run
-/// (an edited paragraph holding a 2400-circle TikZ picture took a
+/// (an edited paragraph holding a 2400-circle `TikZ` picture took a
 /// checkpoint of its picture's state every 600 commands, whatever it
 /// cost: 5.8 s a one-word edit for its 1.7 s cold run, values 0.6 -> 3.2
 /// million); doubling in a dense run (an edited one) gone on from a
