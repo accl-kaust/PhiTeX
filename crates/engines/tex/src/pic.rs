@@ -350,7 +350,8 @@ impl Run<'_, '_> {
     }
 
     /// [`Run::pic_ck`]'s state put back in a child going on from a
-    /// checkpoint: its appends pending were none there.
+    /// checkpoint (its appends pending come back with the run's,
+    /// `Run::ck_run_restore`).
     pub(crate) fn pic_ck_restore(&mut self, x: ValueId) {
         let v = self.v;
         let Some(p) = self.pic_child.as_mut() else {
@@ -368,8 +369,6 @@ impl Run<'_, '_> {
                 _ => None,
             })
             .collect();
-        self.appending.clear();
-        self.appending_vals.clear();
     }
 
     /// At `\begin` read by the command loop: whether the picture's body
@@ -1252,8 +1251,8 @@ impl Run<'_, '_> {
         // (asked again for a read that moved, its text the same: on from
         // its last run's last checkpoint before that read, as a piece's
         // run goes on, `crate::resume`; the checkpoint holds the steps it
-        // started from, the parent's items it took and its streams, and
-        // was taken with no append pending)
+        // started from, the parent's items it took, its streams and its
+        // appends pending)
         if !self.resume_edit()? {
             self.appending = appending;
             self.appending_vals = appending_vals;

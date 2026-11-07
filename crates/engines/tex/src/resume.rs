@@ -250,7 +250,7 @@ impl Run<'_, '_> {
     /// joined by `+`.
     fn ck_refusal(&self) -> String {
         let toks = |l: &crate::input::Level| l.kind == crate::input::kind::TOKS;
-        let checks: [(bool, &'static str); 26] = [
+        let checks: [(bool, &'static str); 25] = [
             (self.input.levels.is_empty(), "no input"),
             (
                 !self.input.levels.iter().skip(1).all(toks)
@@ -282,10 +282,6 @@ impl Run<'_, '_> {
             (!self.seeded.is_empty(), "seeded"),
             (self.defer_hit.is_some(), "defer"),
             (self.rb.is_some(), "read-back child"),
-            (
-                !self.appending.is_empty() || !self.appending_vals.is_empty(),
-                "append pending",
-            ),
             (self.mode_zero, "mode zero"),
             (
                 self.fin_box.is_some() || self.tool_cut.is_some(),
@@ -349,8 +345,6 @@ impl Run<'_, '_> {
             || !self.seeded.is_empty()
             || self.defer_hit.is_some()
             || self.rb.is_some()
-            || !self.appending.is_empty()
-            || !self.appending_vals.is_empty()
             || self.mode_zero
             || self.fin_box.is_some()
             || self.tool_cut.is_some()
@@ -1054,6 +1048,25 @@ impl Run<'_, '_> {
             // (a picture's child: the parent's steps it started from, the
             // parent's items it took and its streams, `Run::pic_ck`)
             self.pic_ck(),
+            // (the appends pending to lists the run never read, each the
+            // field and what it appends, `Run::appending`: a run met one
+            // took no checkpoint after it, and microtype appends each
+            // font a picture selects to its font list, so a TikZ picture
+            // took none past its first font, Grail's 4-5 million commands
+            // each without one)
+            {
+                let toks = self.appending.clone();
+                let vals = self.appending_vals.clone();
+                let toks: Vec<ValueId> = toks
+                    .into_iter()
+                    .map(|(l, t)| v.list(vec![self.loc_field(l).0, crate::val::toks_value(v, &t)]))
+                    .collect();
+                let vals: Vec<ValueId> = vals
+                    .into_iter()
+                    .map(|(l, xs)| v.list(vec![self.loc_field(l).0, v.list(xs)]))
+                    .collect();
+                v.list(vec![v.list(toks), v.list(vals)])
+            },
         ])
     }
 
@@ -1155,6 +1168,24 @@ impl Run<'_, '_> {
         };
         if let Some(&pic) = xs.get(15) {
             self.pic_ck_restore(pic);
+        }
+        if let Some(&ap) = xs.get(16)
+            && let [toks, vals] = list_of(v, ap)[..]
+        {
+            let mut ap = Vec::new();
+            for e in list_of(v, toks) {
+                if let [f, t] = list_of(v, e)[..] {
+                    ap.push((self.loc_of(Field(f)), crate::val::toks_of(v, Some(t))));
+                }
+            }
+            let mut apv = Vec::new();
+            for e in list_of(v, vals) {
+                if let [f, xs] = list_of(v, e)[..] {
+                    apv.push((self.loc_of(Field(f)), list_of(v, xs)));
+                }
+            }
+            self.appending = ap;
+            self.appending_vals = apv;
         }
         let ops = [self.ops.put, self.ops.toolnode, self.ops.pdfpage];
         self.kids = list_of(v, kids)
