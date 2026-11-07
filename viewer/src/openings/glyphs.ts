@@ -6,6 +6,7 @@
 // of the page, the lines of glyphs settling where the text will be, the words
 // fade with them.
 
+import { html } from "../html.ts";
 import { layer, loop, ending, PAPER, INK, RIBBON, type Opening } from "./kit.ts";
 
 const GLYPHS = [..."∑∫∂∇πφΦαβγλμσθ√∞≈≠≤≥§¶{}[]\\$&^_#%ﬁﬂ"];
@@ -29,7 +30,7 @@ export function glyphs(box: HTMLElement, dark: boolean): Opening {
 @keyframes phx-gl-bounce { 0% { transform: scaleY(.7) translateY(.6cqw); } 100% { transform: none; } }
 @keyframes phx-gl-drop { 0% { transform: none; } 14% { transform: translate(-.6cqw, -.8cqw) rotate(-10deg); } 85% { opacity: 1; } to { transform: translate(-4cqw, 24cqw) rotate(-40deg); opacity: 0; } }
 .phx-gl.out .cap, .phx-gl.out .shelf { opacity: 0; }`,
-    `<canvas></canvas><div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div><div class="shelf"></div>`,
+    html`<canvas></canvas><div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div><div class="shelf"></div>`,
   );
   const cv = el.querySelector("canvas")!, ctx = cv.getContext("2d")!, dpr = devicePixelRatio || 1;
   const W = (cv.width = box.clientWidth * dpr), H = (cv.height = box.clientHeight * dpr);

@@ -5,6 +5,8 @@
 // and TeX's help. Host-neutral: the host gives the items (snippet::json's,
 // the `diagnostics` event's) and what opening a place does.
 
+import { html } from "./html.ts";
+
 /** One diagnostic, as `snippet::json` writes it. */
 export interface Problem {
   severity: "fatal" | "error" | "warning" | "note";
@@ -27,7 +29,6 @@ export interface Problem {
   box: { lines: [number, number]; amount: number; excerpt: string } | null;
 }
 
-const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 
 /** Errors (fatal ones too) and warnings, counted. */
 export function counts(items: Problem[]): { errors: number; warnings: number } {
@@ -103,20 +104,20 @@ export class Problems {
 
   private render(): void {
     const { errors, warnings } = counts(this.items);
-    const head = `<header><b>${errors ? `${errors} error${errors === 1 ? "" : "s"}` : "No errors"}</b>${warnings ? ` · ${warnings} warning${warnings === 1 ? "" : "s"}` : ""}<button type="button" class="phx-close" aria-label="Close">Esc</button></header>`;
+    const head = html`<header><b>${errors ? `${errors} error${errors === 1 ? "" : "s"}` : "No errors"}</b>${warnings ? ` · ${warnings} warning${warnings === 1 ? "" : "s"}` : ""}<button type="button" class="phx-close" aria-label="Close">Esc</button></header>`;
     // (errors first, then warnings, then notes: each in the order TeX met them)
     const rank = { fatal: 0, error: 0, warning: 1, note: 2 } as const;
     const sorted = [...this.items].sort((a, b) => rank[a.severity] - rank[b.severity]);
-    this.el.innerHTML = `<div class="phx-card">${head}<ol>${sorted.map((p) => item(p)).join("")}</ol><footer>Click a place to open it in the editor · Esc or a click outside closes this · it opens again when the errors change</footer></div>`;
+    this.el.replaceChildren(html`<div class="phx-card">${head}<ol>${sorted.map((p) => item(p))}</ol><footer>Click a place to open it in the editor · Esc or a click outside closes this · it opens again when the errors change</footer></div>`);
   }
 }
 
-function place(file: string, line: number | null, col: number | null, text?: string): string {
-  return `<a href="#" class="phx-place" data-file="${esc(file)}" data-line="${Number(line) || 1}" data-col="${Number(col) || 1}">${esc(text ?? `${file}${line ? `:${line}` : ""}${col ? `:${col}` : ""}`)}</a>`;
+function place(file: string, line: number | null, col: number | null, text?: string): DocumentFragment {
+  return html`<a href="#" class="phx-place" data-file="${file}" data-line="${Number(line) || 1}" data-col="${Number(col) || 1}">${text ?? `${file}${line ? `:${line}` : ""}${col ? `:${col}` : ""}`}</a>`;
 }
 
-/** One problem's card (the CLI's panel, and the Overleaf-style panel's diagnostics drawer). */
-export function problemHtml(p: Problem): string {
+/** One problem's card, an <li> (the CLI's panel, and the Overleaf-style panel's diagnostics drawer). */
+export function problemNode(p: Problem): DocumentFragment {
   return item(p);
 }
 
@@ -128,27 +129,24 @@ export function asDiagnostic(p: Problem): { severity: "error" | "warning" | "inf
   return { severity, code: p.code, message: p.message, file: p.file ?? undefined, line: p.line ?? undefined, problem: p };
 }
 
-function item(p: Problem): string {
+function item(p: Problem): DocumentFragment {
   // (a class name: only the four known)
   const sev = p.severity === "fatal" ? "error" : p.severity === "warning" || p.severity === "note" ? p.severity : "error";
-  const where = p.file ? place(p.file, p.line, p.col) : "";
-  let ex = "";
+  let ex: DocumentFragment | "" = "";
   if (p.excerpt) {
     const chars = [...p.excerpt.text];
     const a = chars.slice(0, p.excerpt.start).join("");
     const b = chars.slice(p.excerpt.start, p.excerpt.start + p.excerpt.len).join("");
     const c = chars.slice(p.excerpt.start + p.excerpt.len).join("");
-    ex = `<pre class="phx-excerpt">${p.line ? `<span class="phx-ln">${Number(p.line)} │ </span>` : ""}${esc(a)}<mark>${esc(b)}</mark>${esc(c)}</pre>`;
+    ex = html`<pre class="phx-excerpt">${p.line ? html`<span class="phx-ln">${Number(p.line)} │ </span>` : ""}${a}<mark>${b}</mark>${c}</pre>`;
   }
   const ctx = p.context.length
-    ? `<details class="phx-ctx"><summary>in ${p.context.map((m) => `<code>${esc(m.name)}</code>`).join(" ← ")}</summary>${p.context
-        .map((m) => `<pre><b>${esc(m.name)}</b> ${esc(m.before)}<mark>‸</mark>${esc(m.after)}</pre>`)
-        .join("")}</details>`
+    ? html`<details class="phx-ctx"><summary>in ${p.context.map((m, i) => [i ? " ← " : "", html`<code>${m.name}</code>`])}</summary>${p.context.map((m) => html`<pre><b>${m.name}</b> ${m.before}<mark>‸</mark>${m.after}</pre>`)}</details>`
     : "";
-  const inc = p.included.length ? `<div class="phx-inc">included from ${p.included.map((i) => place(i.file, i.line, 1)).join(", ")}</div>` : "";
-  const box = p.box ? `<pre class="phx-excerpt">${esc(p.box.excerpt)}</pre>` : "";
-  const list = (cls: string, xs: string[]) => (xs.length ? `<ul class="${cls}">${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : "");
-  return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc(p.code)}</code>` : ""}<span>${esc(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...(p.help.length ? [p.help.join(" ").replace(/\s+/g, " ").trim()] : []), ...p.suggestions])}</li>`;
+  const inc = p.included.length ? html`<div class="phx-inc">included from ${p.included.map((i, k) => [k ? ", " : "", place(i.file, i.line, 1)])}</div>` : "";
+  const box = p.box ? html`<pre class="phx-excerpt">${p.box.excerpt}</pre>` : "";
+  const list = (cls: string, xs: string[]) => (xs.length ? html`<ul class="${cls}">${xs.map((x) => html`<li>${x}</li>`)}</ul>` : "");
+  return html`<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${String(p.severity)}</span>${p.code ? html`<code class="phx-code">${p.code}</code>` : ""}<span>${p.message}</span></div>${p.file ? html`<div class="phx-where">${place(p.file, p.line, p.col)}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...(p.help.length ? [p.help.join(" ").replace(/\s+/g, " ").trim()] : []), ...p.suggestions])}</li>`;
 }
 
 /** The problems' CSS, in the panel's tokens (print.ts), with fallbacks for a page without them (the modal Problems). */

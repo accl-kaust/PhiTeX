@@ -5,6 +5,7 @@
 // page is set. Page in: every block flattens into a thin line, the rows
 // becoming lines of text, and they fade with the HUD onto the page.
 
+import { html } from "../html.ts";
 import { layer, loop, ending, RIBBON, PAPER, INK, type Opening } from "./kit.ts";
 
 const COLS = 10;
@@ -39,7 +40,7 @@ export function tetris(box: HTMLElement, dark: boolean): Opening {
 @keyframes phx-tet-tick { to { transform: translateX(-100%); } }
 .phx-tet.out { background: transparent; }
 .phx-tet.out .hud, .phx-tet.out .tick { opacity: 0; }`,
-    `<canvas></canvas><div class="hud"><div><b>Stage</b><div class="v st">Ready</div></div><div><b>Packages</b><div class="meter">${"<i></i>".repeat(8)}</div></div><div><b>Page</b><div class="v pg">–</div></div><div><b>Next</b><div class="next"></div></div></div>
+    html`<canvas></canvas><div class="hud"><div><b>Stage</b><div class="v st">Ready</div></div><div><b>Packages</b><div class="meter">${Array.from({ length: 8 }, () => html`<i></i>`)}</div></div><div><b>Page</b><div class="v pg">–</div></div><div><b>Next</b><div class="next"></div></div></div>
      <div class="tick"><span></span></div>`,
   );
   const $ = (s: string) => el.querySelector<HTMLElement>(s)!;

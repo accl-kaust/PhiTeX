@@ -4,6 +4,7 @@
 // line's end and the paper feeding up. Page in: the typed letters blur and
 // dissolve into the typeset page under them (typewritten → typeset).
 
+import { html } from "../html.ts";
 import { layer, ending, PAPER, type Opening } from "./kit.ts";
 
 export function typewriter(box: HTMLElement, dark: boolean, doc = "document.tex"): Opening {
@@ -24,7 +25,7 @@ export function typewriter(box: HTMLElement, dark: boolean, doc = "document.tex"
 .phx-tw.out { background: transparent; }
 .phx-tw.out .roll { filter: blur(.35cqw); opacity: 0; transition: filter .45s ease-in, opacity .5s ease-in; }
 .phx-tw.out .cur, .phx-tw.out .ding { display: none; }`,
-    `<div class="roll"></div><div class="ding">ding</div>`,
+    html`<div class="roll"></div><div class="ding">ding</div>`,
   );
   const roll = el.querySelector<HTMLElement>(".roll")!, ding = el.querySelector<HTMLElement>(".ding")!;
   const cursor = document.createElement("span");
