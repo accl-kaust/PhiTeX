@@ -187,8 +187,7 @@ class Pages implements CoreTransport {
       const since = typeof s.since_ms === "number" ? s.since_ms : s.cold && typeof s.ms === "number" ? s.ms : null;
       this.change = since === null ? null : { since, at: performance.now() };
       if (typeof s.ms === "number") panel.latency(...timing(s));
-      // (the bars: the first build's time, then each edit's)
-      if (typeof s.ms === "number") panel.buildTime(s.ms, !!s.cold);
+      // (the bars' times: the session's, from the same event)
     });
   }
 

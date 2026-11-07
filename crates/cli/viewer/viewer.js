@@ -4828,6 +4828,10 @@ var PreviewSession = class {
     core.onEvent?.((e) => {
       const ev = e.event ?? "";
       if (this.ended.length && (ev === "settled" || ev === "failed" || ev === "trapped")) for (const f of this.ended.splice(0)) f(e);
+      if (ev === "settled") {
+        const b = e;
+        if (typeof b.ms === "number" && !b.settling) this.sink.buildTime?.(b.ms, !!b.cold);
+      }
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
       if (this.o.remote && e.event === "origins") return void (this.originsSeen++, this.glyphsAsked.clear(), this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
@@ -6548,7 +6552,6 @@ var Pages = class {
       const since = typeof s.since_ms === "number" ? s.since_ms : s.cold && typeof s.ms === "number" ? s.ms : null;
       this.change = since === null ? null : { since, at: performance.now() };
       if (typeof s.ms === "number") panel.latency(...timing(s));
-      if (typeof s.ms === "number") panel.buildTime(s.ms, !!s.cold);
     });
   }
   async request(op) {
