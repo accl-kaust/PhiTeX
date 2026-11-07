@@ -1957,6 +1957,10 @@ pub struct Stats {
     /// id, its operation, and why (the engine's `Rerun` kind and the
     /// field's name).
     pub reruns: Vec<(u64, &'static str, String)>,
+    /// The nodes of the last build or edit whose run stood on its last
+    /// run's reads (`phitex_defuse::Report::stood`): made to run again
+    /// (`reruns`), their operation did not run.
+    pub stood: Vec<u64>,
     /// (measure, with `PHITEX_RUN_LOG` set) every run attempt in the last
     /// build or edit, in order: the node's raw id, its operation, whether
     /// it resumed a parked run, whether it ran speculatively, how it
@@ -2792,6 +2796,7 @@ impl Stats {
             }
             self.reruns.push((n.raw(), op, why));
         }
+        self.stood.extend(r.stood.iter().map(|n| n.raw()));
         if crate::exec::prof_flag!("PHITEX_RUN_LOG") {
             let log = std::mem::take(&mut *crate::ops::RUN_LOG.locked());
             let round = self.rounds;

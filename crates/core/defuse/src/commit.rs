@@ -485,16 +485,17 @@ fn filed_defs(v: &Values, defs: &[DefRec], b: &Brackets) -> Vec<Filed> {
         .collect()
 }
 
+/// The most reads at one anchor a commit files under one hold of that
+/// anchor's segment's lock (`commit`'s step 2).
+const ANCHOR_BATCH: usize = 4096;
+
 /// Files a reader record in a segment it is anchored in; true for the
 /// segment's first reader of `f` (the caller adds it to the index once the
 /// lock is released). `spare` is a list made before the lock, used for a
 /// field's first.
 fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, spare: &mut Vec<Reader>) -> bool {
     if r.anchor != r.node {
-        let mut a = eng.node(r.anchor).anchored.lock();
-        if !a.contains(&f) {
-            a.push(f);
-        }
+        eng.node(r.anchor).anchored.lock().insert(f);
     }
     let v = inner.readers.entry(f).or_insert_with(|| std::mem::take(spare));
     let first = v.is_empty();
@@ -794,6 +795,11 @@ fn pos_in(inner: &Inner, node: &Node) -> Pos {
 pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product) -> CommitStats {
     let mut st = CommitStats::default();
     let t0 = Instant::now();
+    // (a run whose last run stood that `commit_stood` left to a full
+    // commit: that run's reads are this one's)
+    if let Some(r) = p.stood.take() {
+        p.reads.extend(r.reads.iter().cloned());
+    }
     let ww = Some(w);
     // (a run that published nothing new: the last record's products, its
     // placements kept as they are)
@@ -1988,7 +1994,13 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // (a node read at that is gone by now: a read that found a value there
     // finds none, and no removal will ask it again)
     let mut anchor_gone: Vec<(Field, NodeId)> = gone_kept;
-    for (f, r, at) in other_reads {
+    // (the reads at one anchor, in a row, filed under one hold of its
+    // segment's lock, at most `ANCHOR_BATCH` a hold: a picture's run reads
+    // everything before its parent, 144 000 reads at one node, a lock
+    // taken each)
+    let mut other_reads = other_reads.into_iter().peekable();
+    let mut firsts: Vec<Field> = Vec::new();
+    while let Some((f, r, at)) = other_reads.next() {
         // (a read at a unit's end: filed with the field, not at the node
         // that was last when it committed. A node placed after that one,
         // or a split of the last segment under way while the last node
@@ -2002,16 +2014,39 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             eng.ranges.add_end(f, u, r, |x| live(eng, x.node, x.serial));
             continue;
         }
-        let a = eng.node(r.anchor);
+        let anchor = r.anchor;
+        let a = eng.node(anchor);
         let mut spare: Vec<Reader> = Vec::with_capacity(4);
         if let Some((seg, mut inner)) = own_write(eng, a) {
-            let first = file_reader(eng, &mut inner, f, r, &mut spare);
-            drop(inner);
-            if first {
-                eng.readers.add(f, seg.lo, seg.id);
+            firsts.clear();
+            if file_reader(eng, &mut inner, f, r, &mut spare) {
+                firsts.push(f);
             }
-        } else if r.seen.is_some() {
-            anchor_gone.push((f, r.anchor));
+            let mut n = 1;
+            while n < ANCHOR_BATCH
+                && let Some((g, r2, _)) =
+                    other_reads.next_if(|(_, x, at)| x.anchor == anchor && !matches!(at, Anchor::End(_)))
+            {
+                if file_reader(eng, &mut inner, g, r2, &mut spare) {
+                    firsts.push(g);
+                }
+                n += 1;
+            }
+            drop(inner);
+            for &g in &firsts {
+                eng.readers.add(g, seg.lo, seg.id);
+            }
+        } else {
+            if r.seen.is_some() {
+                anchor_gone.push((f, anchor));
+            }
+            while let Some((g, r2, _)) =
+                other_reads.next_if(|(_, x, at)| x.anchor == anchor && !matches!(at, Anchor::End(_)))
+            {
+                if r2.seen.is_some() {
+                    anchor_gone.push((g, anchor));
+                }
+            }
         }
     }
     file_ranges(eng, ww, range_reads, node.id, &mut st);
@@ -2525,6 +2560,105 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     }
     st.reask_ns = ns(t0).saturating_sub(st.commit_ns);
     st
+}
+
+/// The commit of a run that did not run: every read of its last run still
+/// gave what it gave (`Ctx::last_run_stands`), so its last record stands,
+/// its definitions, contributions, output, placements and reads alike.
+/// Those reads' readers are filed at the record's serial and stood
+/// through the check, each with the answer it saw, so nothing is filed
+/// again and the serial stays: a change after the check re-asks the node
+/// as it would any reader of the record. What a commit does besides the
+/// filing: a derived read filed on the field its name gives now
+/// (`file_witness`); the `next` readers stopped at the node while it was
+/// open, asked again; the parent waiting for it and the runs parked on it,
+/// let go; the front of a removal, ended. A full commit refiled every read,
+/// a second's picture's 144 000 (300 ms of defs, readers and re-asks
+/// each time it stood, Grail's deleted paragraph 224 such commits, 1.2 s
+/// of its 5.8 s). None, to commit in full: a re-ask came while it was
+/// checked (`Node::asked`), a bracket moved meanwhile, a `next` read in
+/// the record (filed where its search stops now), or it moved or went.
+pub(crate) fn commit_stood(
+    eng: &Engine,
+    w: &Worker,
+    node: &Arc<Node>,
+    r: &Arc<RunRecord>,
+    scope_gen: u64,
+) -> Option<CommitStats> {
+    let t0 = Instant::now();
+    let ww = Some(w);
+    // (a `next` read is filed at the node its search stops at now, which
+    // the record does not hold: a commit files it again, `file_ranges`)
+    if node.moved.load(Ordering::Acquire)
+        || !node.record().is_some_and(|x| Arc::ptr_eq(&x, r))
+        || r.reads
+            .iter()
+            .any(|x| matches!(x.kind, ReadKind::Next { .. } | ReadKind::Hole))
+    {
+        return None;
+    }
+    {
+        let (_, inner) = own_write(eng, node)?;
+        // (set before `asked` is read, as a commit sets it: a re-ask from
+        // here on marks the node to run again, `sched::mark_stale_now`)
+        node.committing.store(true, Ordering::SeqCst);
+        if node.asked.load(Ordering::SeqCst)
+            || (read::scoped(eng) && eng.scope_gen.load(Ordering::Acquire) != scope_gen)
+        {
+            return None;
+        }
+        drop(inner);
+    }
+    // (a derived read's witness: filed on the field its name gives now,
+    // as a commit files it, so a change of that field asks the node again
+    // (there already where the name did not move, `file_witness`); then
+    // the read checked again, for a change of that field whose walk
+    // passed before the witness was there)
+    let mut memo = read::FoldMemo::new();
+    for rd in &r.reads {
+        if let ReadKind::Field { f, at } = rd.kind
+            && let Some((anchor, inclusive)) = match at {
+                Anchor::Me => Some((node.id, false)),
+                Anchor::Before(n) => Some((n, false)),
+                Anchor::AfterOwn(n) => Some((n, true)),
+                Anchor::End(_) | Anchor::Final => None,
+            }
+            && let Some(spec) = read::derived_spec(eng, rd.path)
+            && read::derived_base(eng.values(), spec) != Some(f)
+            && let Some(g) = read::derived_field_at(eng, spec, anchor, inclusive)
+            && g != f
+        {
+            file_witness(
+                eng,
+                g,
+                &Reader {
+                    node: node.id,
+                    serial: r.serial,
+                    anchor,
+                    inclusive,
+                    path: rd.path,
+                    seen: rd.seen,
+                },
+            );
+            if !read::holds(eng, node, rd, &mut memo) {
+                return None;
+            }
+        }
+    }
+    let stops = {
+        let (_, mut inner) = own_write(eng, node)?;
+        take_stops(&mut inner, node.id)
+    };
+    let mut st = CommitStats::default();
+    crate::sched::clear_front(eng, node);
+    reask_stops(eng, ww, stops, node.id, &mut st);
+    if let Some(parent) = node.parent {
+        wake_waiting(eng, ww, eng.node(parent), node.id, &mut st);
+    }
+    crate::sched::release_waiting(eng, ww, node.id);
+    *w.log.lock().wasted_by_op.entry(node.op()).or_default() += 1;
+    st.commit_ns = ns(t0);
+    Some(st)
 }
 
 /// A filed reader's serial: it stands from its node's `filed_floor` to
@@ -3414,6 +3548,11 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
         },
         None => Cause::Environment { field: f },
     };
+    // (a guarded read whose element has left its list where it reads:
+    // a run would not look at it, `read::member_reader`)
+    if !read::member_reader(eng, r) {
+        return;
+    }
     let now = reader_answer(eng, f, r);
     if now != r.seen {
         note_refute(eng, f, r.node, by, r.seen, now);
@@ -5152,7 +5291,7 @@ fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
     let pos = m.pos_hint();
     let hole = m.is_hole();
     let rec = m.record();
-    let mut fs: Vec<Field> = m.anchored.lock().clone();
+    let mut fs: Vec<Field> = m.anchored.lock().iter().copied().collect();
     if let Some(r) = &rec {
         fs.extend(r.reads.iter().filter_map(|x| match x.kind {
             ReadKind::Field { f, at: Anchor::Me } => Some(f),
