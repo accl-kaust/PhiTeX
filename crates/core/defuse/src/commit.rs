@@ -2539,14 +2539,15 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
 /// through the check, each with the answer it saw, so nothing is filed
 /// again and the serial stays: a change after the check re-asks the node
 /// as it would any reader of the record. What a commit does besides the
-/// filing: the `next` readers stopped at the node while it was open,
-/// asked again; the parent waiting for it and the runs parked on it, let
-/// go; the front of a removal, ended. A full commit refiled every read,
+/// filing: a derived read filed on the field its name gives now
+/// (`file_witness`); the `next` readers stopped at the node while it was
+/// open, asked again; the parent waiting for it and the runs parked on it,
+/// let go; the front of a removal, ended. A full commit refiled every read,
 /// a second's picture's 144 000 (300 ms of defs, readers and re-asks
 /// each time it stood, Grail's deleted paragraph 224 such commits, 1.2 s
 /// of its 5.8 s). None, to commit in full: a re-ask came while it was
-/// checked (`Node::asked`), a bracket moved meanwhile, or it moved or
-/// went.
+/// checked (`Node::asked`), a bracket moved meanwhile, a `next` read in
+/// the record (filed where its search stops now), or it moved or went.
 pub(crate) fn commit_stood(
     eng: &Engine,
     w: &Worker,
@@ -2556,7 +2557,14 @@ pub(crate) fn commit_stood(
 ) -> Option<CommitStats> {
     let t0 = Instant::now();
     let ww = Some(w);
-    if node.moved.load(Ordering::Acquire) || !node.record().is_some_and(|x| Arc::ptr_eq(&x, r)) {
+    // (a `next` read is filed at the node its search stops at now, which
+    // the record does not hold: a commit files it again, `file_ranges`)
+    if node.moved.load(Ordering::Acquire)
+        || !node.record().is_some_and(|x| Arc::ptr_eq(&x, r))
+        || r.reads
+            .iter()
+            .any(|x| matches!(x.kind, ReadKind::Next { .. } | ReadKind::Hole))
+    {
         return None;
     }
     {
