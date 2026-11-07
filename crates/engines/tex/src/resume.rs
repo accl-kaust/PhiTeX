@@ -172,11 +172,14 @@ impl Run<'_, '_> {
     }
 
     /// Whether the run's operation takes checkpoints: a piece's run, a
-    /// document node's text (exec) or the rest of a piece cut at a
-    /// candidate (resume).
+    /// document node's text (exec), the rest of a piece cut at a
+    /// candidate (resume) or a picture's child (pic, `crate::pic`: a
+    /// picture asked again for a read in its last stretch goes on from
+    /// there, Grail's figures after a deleted one that first loaded a
+    /// font or stepped pgf's arrow count ran whole, 0.7-1.3 s each).
     fn ck_op(&self) -> bool {
         let op = self.cx.op();
-        op == self.ops.exec || op == self.ops.resume
+        op == self.ops.exec || op == self.ops.resume || op == self.ops.pic
     }
 
     /// What a run's checkpoints are taken on: the node's arguments, and
@@ -1048,6 +1051,9 @@ impl Run<'_, '_> {
                     })
                     .collect(),
             ),
+            // (a picture's child: the parent's steps it started from, the
+            // parent's items it took and its streams, `Run::pic_ck`)
+            self.pic_ck(),
         ])
     }
 
@@ -1143,10 +1149,13 @@ impl Run<'_, '_> {
             aopen,
             read_back,
             kids,
-        ] = xs[..]
+        ] = xs[..xs.len().min(15)]
         else {
             return;
         };
+        if let Some(&pic) = xs.get(15) {
+            self.pic_ck_restore(pic);
+        }
         let ops = [self.ops.put, self.ops.toolnode, self.ops.pdfpage];
         self.kids = list_of(v, kids)
             .into_iter()
@@ -1702,8 +1711,10 @@ impl Run<'_, '_> {
             .iter()
             .map(|a| a.iter().map(|x| x.raw()).collect())
             .collect();
+        // (a picture's child: its output, which holds what it made)
+        let pic = self.pic_out.map(|x| v.render(x)).unwrap_or_default();
         format!(
-            "pub {pubd:?}\ncontribs {contribs:?}\nkids {kids:?}\nlines {lines:?}\nfread {:?}\neffect {:?}\nconds {:?}\nleft {left:?}\nerrors {}",
+            "pub {pubd:?}\ncontribs {contribs:?}\nkids {kids:?}\nlines {lines:?}\nfread {:?}\neffect {:?}\nconds {:?}\nleft {left:?}\nerrors {}\npic {pic}",
             self.fread, self.effect, self.conds, self.error_count
         )
     }
