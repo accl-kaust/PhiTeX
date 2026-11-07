@@ -513,6 +513,7 @@ mod search_tests {
             vec![
                 "common/tex/x.sty",
                 "common/tex/a/x.sty",
+                "common/tex/a/b/sub/x.sty",
                 "common/tex/zz/x.sty"
             ]
         );
