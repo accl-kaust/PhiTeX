@@ -144,7 +144,7 @@ fn dvi_fixtures() {
 /// ("Misplaced ..."), and a `&` or `\cr` read where an entry's braces do
 /// not balance (a brace inserted, "Missing { inserted" or "Missing }
 /// inserted"): TeX's DVI file and TeX's errors, in order. The command
-/// loop said "You can't use `\noalign' in restricted horizontal mode"
+/// loop said "You can't use \noalign in restricted horizontal mode"
 /// and inserted no brace, and an unbalanced table went on otherwise
 /// than TeX (into an endless loop where pdflatex stops).
 #[test]
