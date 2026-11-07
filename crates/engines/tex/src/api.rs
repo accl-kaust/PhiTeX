@@ -62,6 +62,11 @@ pub type ContentKey = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Syn
 /// ([`Options::prelude_fallback`]).
 pub type PreludeSource = Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>;
 
+/// One package load's record by its key (`crate::pkgrec`): the bytes
+/// [`Build::changed_pkgrecs`] gave for it, asked when the build first
+/// meets the load ([`Options::pkgrec_source`]); none when not kept.
+pub type PkgrecSource = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
+
 /// The searches a tool's support files are found by ([`Options::tool_finder`]):
 /// kpathsea's formats for them, as `bibtex`, `biber` and `makeindex` ask.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -268,6 +273,14 @@ pub struct Options {
     /// uses what any earlier one learned (`crate::pkgrec`). Empty: none
     /// (every load unbounded, or optimistic under speculation).
     pub pkgrec: Vec<u8>,
+    /// The package loads' records one by one, by load key: asked for
+    /// each load the build meets that [`Self::pkgrec`] does not hold, so
+    /// a build reads its own loads' records only, never every record
+    /// the machine kept (thousands of loads, each with its published
+    /// values: a one-page document read, merged and wrote them all
+    /// again, two seconds and gigabytes). Stored back by
+    /// [`Build::changed_pkgrecs`].
+    pub pkgrec_source: Option<PkgrecSource>,
     /// The document nodes' records ([`Build::export_noderec`]): those
     /// whose own text cannot bound what they define, keyed by their
     /// text, kept per document (`crate::pkgrec`). Merged with
@@ -989,6 +1002,7 @@ impl Default for Options {
             written_init: Vec::new(),
             made_init: Vec::new(),
             pkgrec: Vec::new(),
+            pkgrec_source: None,
             noderec: Vec::new(),
             node_records: true,
             pkg_predict: false,
@@ -6497,6 +6511,7 @@ impl Build {
         recs.extend(crate::pkgrec::parse(&opts.noderec));
         g.loads = Some(Arc::new(crate::pkgrec::LoadHints::new(
             recs,
+            opts.pkgrec_source.clone(),
             opts.finder.clone(),
             optimistic,
             predict,
@@ -7663,6 +7678,19 @@ impl Build {
             Some(l) => l.bytes_where(|k| !crate::pkgrec::is_node_key(k)),
             None => self.opts.pkgrec.clone(),
         }
+    }
+
+    /// The package loads' records this build changed or made, each as
+    /// the bytes [`Options::pkgrec_source`] gives back for its key: what
+    /// a host keeping the records one by one stores (the rest are as it
+    /// gave them).
+    #[must_use]
+    pub fn changed_pkgrecs(&self) -> Vec<(String, Vec<u8>)> {
+        self.g
+            .loads
+            .as_ref()
+            .map(|l| l.changed(|k| !crate::pkgrec::is_node_key(k)))
+            .unwrap_or_default()
     }
 
     /// The document nodes' records ([`Options::noderec`]): those of the

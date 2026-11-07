@@ -33,6 +33,15 @@ pub struct Cache {
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 
+/// Per cache directory, the bytes it held when this process last walked
+/// it ([`Cache::evict`]) plus those [`Cache::put`] wrote since: at least
+/// what it holds now, short only of other processes' writes (each of
+/// which keeps the cache to its limit itself). A put walks the cache,
+/// every file of it, only once this passes the limit: a build stores
+/// each package load's record, its document's records and its format,
+/// and walking for each was a walk of the whole cache per file stored.
+static KNOWN_USAGE: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
+
 /// The package cache's directory in the cache's (`phitex-shelf`'s).
 pub const SHELF: &str = "shelf";
 
@@ -229,7 +238,18 @@ impl Cache {
         let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
         std::fs::write(&tmp, bytes)?;
         std::fs::rename(&tmp, path)?;
-        self.evict(keep);
+        let known = {
+            let mut k = KNOWN_USAGE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            k.iter_mut().find(|(d, _)| *d == self.dir).map(|(_, b)| {
+                *b += bytes.len() as u64;
+                *b
+            })
+        };
+        if known.is_none_or(|b| b > self.limit) {
+            self.evict(keep);
+        }
         Ok(())
     }
 
@@ -283,6 +303,13 @@ impl Cache {
                 total -= e.size;
                 freed += e.size;
             }
+        }
+        let mut k = KNOWN_USAGE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match k.iter_mut().find(|(d, _)| *d == self.dir) {
+            Some(e) => e.1 = total,
+            None => k.push((self.dir.clone(), total)),
         }
         freed
     }
