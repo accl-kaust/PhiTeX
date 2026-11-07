@@ -8046,6 +8046,29 @@ impl Build {
             .map(ValueId::raw)
     }
 
+    /// The text a tool made as `name` (a `.bbl`, an `.ind`) of one of
+    /// `written`, the files the job wrote ([`Build::files`]), as the last
+    /// evaluation left it: what `\input` of `name` read.
+    fn made_text(&self, written: &[(String, String)], name: &str) -> Option<String> {
+        let v = self.g.eng.values();
+        if !written
+            .iter()
+            .any(|(input, _)| crate::tools::made_names(input).iter().any(|o| o == name))
+        {
+            return None;
+        }
+        let defs = self
+            .g
+            .eng
+            .defined_by_live(crate::tools::made_field(v, name));
+        let &(_, x) = defs.first().filter(|_| defs.len() == 1)?;
+        // (`[path, text, ..]`, as the run reads it)
+        match list_of(v, x)[..] {
+            [_, t, ..] => Some(str_of(v, t)),
+            _ => None,
+        }
+    }
+
     /// What the tools made of the files the job wrote, as the last
     /// evaluation left it (the `.bbl`, the `.ind`): [`Options::made_init`]
     /// for a later session of the same document.
@@ -8566,6 +8589,9 @@ impl Build {
         // (an `\input` file's text, read once a call, not once an entry)
         let mut files: phitex_defuse::FxHashMap<String, Arc<str>> =
             phitex_defuse::FxHashMap::default();
+        // (the files the job wrote, as it wrote them: made once a call,
+        // at the first diagnostic in one)
+        let mut written: Option<Vec<(String, String)>> = None;
         // (each text node's move since it was sliced, by its index)
         let mut shifts: phitex_defuse::FxHashMap<usize, i64> = phitex_defuse::FxHashMap::default();
         // (and each cut file's pieces', [`DocFile::shifts`])
@@ -8639,23 +8665,38 @@ impl Build {
             {
                 // a line of an `\input` file: its characters are bytes
                 let name = str_of(v, n);
-                // (a file the job writes and reads back, a `.bbl`, `.aux` or
-                // `.toc`: the text the build read, its `file:` value
-                // (latin1 of its bytes); the finder has none, or a stale
-                // copy on disk, and every error in it was placed at its
-                // first line, "paper.bbl:1")
+                // (a file the job writes and reads back, an `.aux` or a
+                // `.toc`: the text it wrote, which a settled build read
+                // back; a tool's output, a `.bbl`: the text the build was
+                // given, its `file:` value. Both as characters, one per
+                // byte. The finder has none of them, or a stale copy on
+                // disk, and every error in one was placed at its first
+                // line: "paper.bbl:1" for an error on line 16)
                 file_text = files
                     .entry(name.clone())
                     .or_insert_with(|| {
-                        let back = || self.g.file_text(&name);
-                        if self.g.written.contains(&name)
-                            && let Some(t) = back()
+                        let bare = name.trim_start_matches("./");
+                        if self
+                            .g
+                            .written
+                            .iter()
+                            .any(|w| w.trim_start_matches("./") == bare)
+                            && let Some((_, t)) = written
+                                .get_or_insert_with(|| self.files())
+                                .iter()
+                                .find(|(n, _)| n.trim_start_matches("./") == bare)
                         {
-                            return t;
+                            return t.as_str().into();
                         }
-                        match (self.opts.finder)(name.trim_start_matches("./")) {
+                        if let Some(t) =
+                            self.made_text(written.get_or_insert_with(|| self.files()), bare)
+                        {
+                            return t.into();
+                        }
+                        let given = || self.g.file_text(&name).or_else(|| self.g.file_text(bare));
+                        match (self.opts.finder)(bare) {
                             Some((_, bytes)) => latin1(&bytes).into(),
-                            None => back().unwrap_or_default(),
+                            None => given().unwrap_or_default(),
                         }
                     })
                     .clone();

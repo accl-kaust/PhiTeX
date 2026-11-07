@@ -1853,6 +1853,40 @@ fn tool_warnings_are_diagnostics() {
     );
 }
 
+/// An error in the `.bbl` BibTeX made is placed at its line there, as
+/// pdflatex's log says it (`l.5`): the diagnostic's line was found in
+/// the file's text asked of the finder, which has no `.bbl` the build
+/// made, so every error in one was at line 1 (the Overleaf extension's
+/// "TeX capacity exceeded ... at paper.bbl:1", the error on line 16).
+#[test]
+fn an_error_in_the_bbl_is_at_its_line() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bbl-error-line");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    std::fs::write(
+        dir.join("refs.bib"),
+        "@misc{x, author = {A. Author}, title = {Tea \\undefinedmacro time}, year = 2020}\n",
+    )
+    .expect("the database");
+    let src = "\\documentclass{article}\n\\begin{document}\nSee~\\cite{x}.\n\
+               \\bibliographystyle{plain}\n\\bibliography{refs}\n\\end{document}\n";
+    std::fs::write(dir.join("be.tex"), src).expect("the document");
+    let opts = Options {
+        fixpoint: true,
+        tool_finder: Some(common::tool_finder(&dir)),
+        ..pdf_opts("be", &dir)
+    };
+    let b = common::build(opts, Some(&prelude(true)), src);
+    let ds = b.diagnostics();
+    let d = ds
+        .iter()
+        .find(|d| d.message == "Undefined control sequence")
+        .unwrap_or_else(|| panic!("the error: {ds:#?}"));
+    assert!(d.file.ends_with("be.bbl"), "{d:?}");
+    assert_eq!(d.line, 5, "{d:?}");
+    assert!(d.context.starts_with("l.5 "), "{d:?}");
+}
+
 /// A measure: amsldoc (`bench/amsldoc`) built as latexmk would, then
 /// one sentence added to a paragraph (its lines re-broken): the nodes
 /// that ran again and why (`PHITEX_EDIT_TEXT`: `OLD=>NEW` instead).
