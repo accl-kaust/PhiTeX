@@ -2254,16 +2254,6 @@ pub(crate) fn clear_front(eng: &Engine, node: &Node) {
 /// counted, unmoving ones too, makes pages that run side by side one chain
 /// (para4000's deleted paragraph, -j8, 108 ms to 228 ms): hence `Node::moves`.
 /// The page loop's rests are not held: they go on on a guess by themselves.
-/// A placement whose output `node`'s last run read on its guess
-/// (`ReadKind::Placed { guess: true }`) and that has not committed since.
-fn unrun_guessed_placement(eng: &Engine, node: &Node) -> Option<NodeId> {
-    let r = node.run_record()?;
-    r.reads.iter().find_map(|rd| match rd.kind {
-        crate::node::ReadKind::Placed { i, guess: true } => r.placed.get(i).copied().filter(|&c| !settled_node(eng, c)),
-        _ => None,
-    })
-}
-
 fn hold_for(eng: &Engine, node: &Node) -> Option<NodeId> {
     let op = eng.op(node.op());
     if op.works_at_frontier() || op.final_only() {
@@ -2293,19 +2283,6 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     {
         if run_log() {
             eprintln!("long: node {} waits for {}", n.raw(), x.raw());
-        }
-        node.held.store(true, Ordering::Release);
-        park_waiting(eng, pool, w, node, Some(x));
-        return Ok(());
-    }
-    // (a placer whose last run read placements' outputs on its guess, the
-    // nodes not run yet (pictures it placed, `Ctx::placed_output_or`):
-    // they run first, and it runs once on all their outputs. Run before
-    // them, as their place after it puts it, it ran again for each one's
-    // commit: lie-hasse's page of 24 diagrams, a 55 s piece run 24 times)
-    if !quiet && let Some(x) = unrun_guessed_placement(eng, node) {
-        if run_log() {
-            eprintln!("placed: node {} waits for {}", n.raw(), x.raw());
         }
         node.held.store(true, Ordering::Release);
         park_waiting(eng, pool, w, node, Some(x));

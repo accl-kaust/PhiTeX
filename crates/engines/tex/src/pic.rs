@@ -424,18 +424,22 @@ impl Run<'_, '_> {
             if self.pic_guess(i, &body) {
                 return Ok(true);
             }
-            // (none: as if the picture were empty; its picture runs once,
-            // in the child, on another thread where one is free)
-            self.cx.placed_output_or(i, ValueId::UNIT);
-            self.pic_skip(&body.skip);
+            // (none: the picture read here, inline, as TeX reads it, and
+            // the child placed for the runs after this one, its output not
+            // read now (exact by construction, it is this one; the edits
+            // after take it). Gone on as if empty, the pictures after it
+            // were given the state without this one's work, their children
+            // ran on it, and the run went again for each one's output, one
+            // more right each time: lie-hasse's page of 24 diagrams, a 55 s
+            // piece run 24 times, past 3000 s cold where 1073 s, accl 26269)
             self.muts += 1;
             if trace() {
                 eprintln!(
-                    "pic: node {node} {} {hash:x}: placed, no output yet, empty",
+                    "pic: node {node} {} {hash:x}: placed, no output yet, inline",
                     body.name
                 );
             }
-            return Ok(true);
+            return Ok(false);
         };
         let xs = list_of(v, x);
         if x == ValueId::UNIT || xs.first().is_none_or(|&t| int_of(v, t) != 0) {
