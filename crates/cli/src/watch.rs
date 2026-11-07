@@ -1322,6 +1322,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             // (a layout: the viewer's file brought to it, its last bytes
             // and the objects that changed, nothing read from disk; the
             // same: that PDF kept)
+            phitex_tex::timeline::lap("watch: before the viewer's PDF");
             if view.is_some() {
                 let mut vf = view_file.borrow_mut();
                 match phitex_live::watch::viewer_pdf(s, &r, Some(&mut vf), || {
@@ -1340,6 +1341,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 .join(format!("{}.log", s.job.jobname))
                 .display()
                 .to_string();
+            phitex_tex::timeline::lap("watch: the viewer's PDF");
             status.set("viewer");
             last_hashes.clone_from(&r.out.page_hashes);
             let b = Built {
@@ -1369,11 +1371,13 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 },
                 parts: Built::parts_of(s, &r),
             };
+            phitex_tex::timeline::lap("watch: the viewer's build (its diagnostics, parts)");
             origins_due.set(true);
             if let Some(v) = &view {
                 v.built(&b);
                 v.building(false);
             }
+            phitex_tex::timeline::lap("watch: the viewers told");
             if let Some(l) = &lsp {
                 // (what phitex.savePdf copies: the PDF file, else a DVI's
                 // PDF made for the viewer; set before the build is told
