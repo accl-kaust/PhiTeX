@@ -493,6 +493,10 @@ const ANCHOR_BATCH: usize = 4096;
 /// segment's first reader of `f` (the caller adds it to the index once the
 /// lock is released). `spare` is a list made before the lock, used for a
 /// field's first.
+/// A reader as a commit files it once (`commit`'s `filed_once`): field,
+/// serial, anchor, inclusive, path and answer.
+type FiledKey = (Field, u32, NodeId, bool, PathId, Option<ValueId>);
+
 fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, spare: &mut Vec<Reader>) -> bool {
     if r.anchor != r.node {
         eng.node(r.anchor).anchored.lock().insert(f);
@@ -1205,7 +1209,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // change of the list walked them all, 0.4 s of Grail's paragraph
     // delete in its walks. Two records of one node, serial, place, path
     // and answer are one reader: a walk asks them alike)
-    let mut filed_once: FxHashMap<(Field, u32, NodeId, bool, PathId, Option<ValueId>), ()> = FxHashMap::default();
+    let mut filed_once: FxHashSet<FiledKey> = FxHashSet::default();
     for (ri, r) in rec.reads.iter().enumerate() {
         if r.filed && !file_all {
             continue;
@@ -1234,10 +1238,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     path: r.path,
                     seen: r.seen,
                 };
-                if filed_once
-                    .insert((*f, serial, anchor, inclusive, r.path, r.seen), ())
-                    .is_some()
-                {
+                if !filed_once.insert((*f, serial, anchor, inclusive, r.path, r.seen)) {
                     continue;
                 }
                 // (a derived read's witness, kept from an earlier run (one

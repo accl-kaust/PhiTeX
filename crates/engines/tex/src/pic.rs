@@ -1214,38 +1214,7 @@ impl Run<'_, '_> {
             streams: Vec::new(),
             base_steps: Vec::new(),
         });
-        // (the parent's appends to lists it never read, pending at the
-        // picture: the child's to make or go on with, `Run::append_def`)
-        let view = self.pic_view()?;
-        let pending = self.cx.get(view, Step::Key(v.str(APPENDING)));
-        let mut appending = Vec::new();
-        for e in pending.map(|x| list_of(v, x)).unwrap_or_default() {
-            if let [f, t] = list_of(v, e)[..] {
-                let loc = self.loc_of(Field(f));
-                appending.push((loc, toks_of(v, Some(t))));
-            }
-        }
-        let base = self.cx.get(view, Step::Key(v.str(PARENT_STEPS)));
-        let mut steps = Vec::new();
-        for e in base.map(|x| list_of(v, x)).unwrap_or_default() {
-            if let [f, c, g] = list_of(v, e)[..] {
-                let loc = self.loc_of(Field(f));
-                steps.push((
-                    loc,
-                    Field(f),
-                    i32::try_from(int_of(v, c)).unwrap_or(0),
-                    int_of(v, g) != 0,
-                ));
-            }
-        }
-        let pending = self.cx.get(view, Step::Key(v.str(APPENDING_VALS)));
-        let mut appending_vals = Vec::new();
-        for e in pending.map(|x| list_of(v, x)).unwrap_or_default() {
-            if let [f, xs] = list_of(v, e)[..] {
-                let loc = self.loc_of(Field(f));
-                appending_vals.push((loc, list_of(v, xs)));
-            }
-        }
+        let (appending, steps, appending_vals) = self.pic_pending()?;
         let conds0 = (self.conds.clone(), self.if_codes.clone());
         self.input.append_text(fs);
         // (asked again for a read that moved, its text the same: on from
@@ -1288,6 +1257,53 @@ impl Run<'_, '_> {
             self.settle_lines();
         }
         Ok(())
+    }
+
+    /// What the parent left pending at the picture, from its locals'
+    /// field: its appends to lists it never read (the child's to make or
+    /// go on with, `Run::append_def`), the registers it stepped unread
+    /// (by location, field, steps, whether global) and its values
+    /// appended pending.
+    #[allow(clippy::type_complexity)]
+    fn pic_pending(
+        &mut self,
+    ) -> R<(
+        Vec<(crate::state::Loc, Vec<Tok>)>,
+        Vec<(crate::state::Loc, Field, i32, bool)>,
+        Vec<(crate::state::Loc, Vec<ValueId>)>,
+    )> {
+        let v = self.v;
+        let view = self.pic_view()?;
+        let pending = self.cx.get(view, Step::Key(v.str(APPENDING)));
+        let mut appending = Vec::new();
+        for e in pending.map(|x| list_of(v, x)).unwrap_or_default() {
+            if let [f, t] = list_of(v, e)[..] {
+                let loc = self.loc_of(Field(f));
+                appending.push((loc, toks_of(v, Some(t))));
+            }
+        }
+        let base = self.cx.get(view, Step::Key(v.str(PARENT_STEPS)));
+        let mut steps = Vec::new();
+        for e in base.map(|x| list_of(v, x)).unwrap_or_default() {
+            if let [f, c, g] = list_of(v, e)[..] {
+                let loc = self.loc_of(Field(f));
+                steps.push((
+                    loc,
+                    Field(f),
+                    i32::try_from(int_of(v, c)).unwrap_or(0),
+                    int_of(v, g) != 0,
+                ));
+            }
+        }
+        let pending = self.cx.get(view, Step::Key(v.str(APPENDING_VALS)));
+        let mut appending_vals = Vec::new();
+        for e in pending.map(|x| list_of(v, x)).unwrap_or_default() {
+            if let [f, xs] = list_of(v, e)[..] {
+                let loc = self.loc_of(Field(f));
+                appending_vals.push((loc, list_of(v, xs)));
+            }
+        }
+        Ok((appending, steps, appending_vals))
     }
 
     /// Why the child's run cannot stand as a picture's: anything of it

@@ -1169,23 +1169,8 @@ impl Run<'_, '_> {
         if let Some(&pic) = xs.get(15) {
             self.pic_ck_restore(pic);
         }
-        if let Some(&ap) = xs.get(16)
-            && let [toks, vals] = list_of(v, ap)[..]
-        {
-            let mut ap = Vec::new();
-            for e in list_of(v, toks) {
-                if let [f, t] = list_of(v, e)[..] {
-                    ap.push((self.loc_of(Field(f)), crate::val::toks_of(v, Some(t))));
-                }
-            }
-            let mut apv = Vec::new();
-            for e in list_of(v, vals) {
-                if let [f, xs] = list_of(v, e)[..] {
-                    apv.push((self.loc_of(Field(f)), list_of(v, xs)));
-                }
-            }
-            self.appending = ap;
-            self.appending_vals = apv;
+        if let Some(&ap) = xs.get(16) {
+            self.ck_appends_restore(ap);
         }
         let ops = [self.ops.put, self.ops.toolnode, self.ops.pdfpage];
         self.kids = list_of(v, kids)
@@ -1253,6 +1238,29 @@ impl Run<'_, '_> {
         self.lt.hit = b & 1 != 0;
         self.lt.weak = b & 2 != 0;
         self.lt.strong = b & 4 != 0;
+    }
+
+    /// The appends pending a checkpoint holds put back
+    /// ([`Run::ck_run_state`]).
+    fn ck_appends_restore(&mut self, ap: ValueId) {
+        let v = self.v;
+        let [toks, vals] = list_of(v, ap)[..] else {
+            return;
+        };
+        let mut appending = Vec::new();
+        for e in list_of(v, toks) {
+            if let [f, t] = list_of(v, e)[..] {
+                appending.push((self.loc_of(Field(f)), crate::val::toks_of(v, Some(t))));
+            }
+        }
+        let mut appending_vals = Vec::new();
+        for e in list_of(v, vals) {
+            if let [f, xs] = list_of(v, e)[..] {
+                appending_vals.push((self.loc_of(Field(f)), list_of(v, xs)));
+            }
+        }
+        self.appending = appending;
+        self.appending_vals = appending_vals;
     }
 
     /// The checkpoints taken so far, with the indices of those this run
