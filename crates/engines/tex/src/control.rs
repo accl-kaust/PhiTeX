@@ -912,13 +912,107 @@ impl Run<'_, '_> {
             }
             cmd::XRAY => self.show_whatever()?,
             cmd::EXTENSION => self.do_extension(&md)?,
+            // (§1126: in every mode; they were "You can't use `\noalign'
+            // in restricted horizontal mode", pdfTeX's "Misplaced
+            // \noalign", and a `&` or `\cr` no alignment took had none
+            // of §1127's braces inserted: an unbalanced pasted table
+            // went on otherwise than pdflatex, into an endless loop where
+            // pdflatex stops)
+            cmd::TAB_MARK | cmd::CAR_RET => self.align_error()?,
+            cmd::NO_ALIGN => self.misplaced("noalign", "only after the \\cr of")?,
+            cmd::OMIT => self.misplaced("omit", "only after tab marks or the \\cr of")?,
             _ => {
-                // forbidden cases, alignment errors, math in non-math
-                // modes (§1046–§1048): errors
+                // forbidden cases, math in non-math modes (§1046–§1048):
+                // errors
                 self.report_illegal_case(&md)?;
             }
         }
         Ok(())
+    }
+
+    /// `align_error` (§1127, §1128): a `&`, `\span`, `\cr` or `\crcr`
+    /// the command loop reads. Outside an alignment's entry
+    /// (`align_state` past 2) it is misplaced, an error, and ignored;
+    /// else a brace is inserted before it to end or begin the entry's
+    /// group as its count needs (`ins_error`, §327: put back as inserted
+    /// text, its count in `align_state` undone as `back_input` undoes
+    /// it).
+    fn align_error(&mut self) -> R<()> {
+        let s = self.astate();
+        if s.abs() > 2 {
+            // (§1128's `print_cmd_chr`: `\span`, `\cr`, `\crcr`, or the
+            // tab character)
+            let what = if self.cur.tok.is_cs_or_active() {
+                let n = crate::val::prim_name(self.cur.cmd, self.cur.chr).unwrap_or(
+                    if self.cur.cmd == cmd::CAR_RET {
+                        "cr"
+                    } else {
+                        "span"
+                    },
+                );
+                format!("\\{n}")
+            } else {
+                format!(
+                    "alignment tab character {}",
+                    char::from_u32(self.cur.tok.chr()).unwrap_or('&')
+                )
+            };
+            let tab = !self.cur.tok.is_cs_or_active() && self.cur.tok.chr() == u32::from(b'&');
+            let help: &[&str] = if tab {
+                &[
+                    "I can't figure out why you would want to use a tab mark",
+                    "here. If you just want an ampersand, the remedy is",
+                    "simple: Just type `I\\&' now. But if some right brace",
+                    "up above has ended a previous alignment prematurely,",
+                    "you're probably due for more error messages, and you",
+                    "might try typing `S' now just to see what is salvageable.",
+                ]
+            } else {
+                &[
+                    "I can't figure out why you would want to use a tab mark",
+                    "or \\cr or \\span just now. If something like a right brace",
+                    "up above has ended a previous alignment prematurely,",
+                    "you're probably due for more error messages, and you",
+                    "might try typing `S' now just to see what is salvageable.",
+                ]
+            };
+            return self.log_help("error", &format!("Misplaced {what}"), help);
+        }
+        self.back_cur();
+        let (t, msg) = if s < 0 {
+            self.set_astate(s + 1);
+            (Tok::ch(1, u32::from(b'{')), "Missing { inserted")
+        } else {
+            self.set_astate(s - 1);
+            (Tok::ch(2, u32::from(b'}')), "Missing } inserted")
+        };
+        if self.aopen != 0 {
+            self.end_spent_lists();
+        }
+        self.uncount_brace(t);
+        self.push_inserted(t);
+        self.log_help(
+            "error",
+            msg,
+            &[
+                "I've put in what seems to be necessary to fix",
+                "the current column of the current alignment.",
+                "Try to go on, since this might almost work.",
+            ],
+        )
+    }
+
+    /// `no_align_error` and `omit_error` (§1129): `\noalign` or `\omit`
+    /// where no alignment takes it: an error, and ignored.
+    fn misplaced(&mut self, name: &str, where_: &str) -> R<()> {
+        self.log_help(
+            "error",
+            &format!("Misplaced \\{name}"),
+            &[
+                &format!("I expect to see \\{name} {where_}"),
+                "an alignment. Proceed, and I'll ignore this case.",
+            ],
+        )
     }
 
     /// `prefixed_command` (§1211–§1269): the common assignments here,

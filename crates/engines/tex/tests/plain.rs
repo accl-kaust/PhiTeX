@@ -140,6 +140,39 @@ fn dvi_fixtures() {
     ]);
 }
 
+/// §1126–§1129: a `&`, `\cr`, `\omit` or `\noalign` no alignment takes
+/// ("Misplaced ..."), and a `&` or `\cr` read where an entry's braces do
+/// not balance (a brace inserted, "Missing { inserted" or "Missing }
+/// inserted"): TeX's DVI file and TeX's errors, in order. The command
+/// loop said "You can't use `\noalign' in restricted horizontal mode"
+/// and inserted no brace, and an unbalanced table went on otherwise
+/// than TeX (into an endless loop where pdflatex stops).
+#[test]
+fn alignment_errors() {
+    let cases = ["alignerr", "alignerr2", "alignerr3"];
+    run(&cases.map(|c| ("dvi", c, false, false)));
+    let fx = common::fixtures().join("dvi");
+    let errors = |log: &str| -> Vec<String> {
+        log.lines()
+            .filter(|l| l.starts_with("! "))
+            .map(str::to_owned)
+            .collect()
+    };
+    for name in cases {
+        let want = std::fs::read(fx.join(format!("{name}.dvi"))).expect("the oracle");
+        let src = common::read(&fx.join(format!("{name}.tex")));
+        let opts = common::options(
+            &format!("./{name}.tex"),
+            name,
+            &common::dvi_comment(&want),
+            &fx,
+        );
+        let b = common::build(opts, None, &src);
+        let tex = std::fs::read_to_string(fx.join(format!("{name}.log"))).expect("TeX's log");
+        assert_eq!(errors(&b.output().1), errors(&tex), "{name}: the errors");
+    }
+}
+
 #[test]
 fn display() {
     run(&[
