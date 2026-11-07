@@ -1875,30 +1875,27 @@ impl Session {
                 .rev()
                 .find(|(n, _)| *n == key || host.same_file(n, &key))
                 .and_then(|(_, t)| t.clone());
-            let bytes = match buffered {
-                Some(t) => {
-                    // (an editor's text: no key of the disk's holds for it)
-                    stamps
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .remove(&p);
-                    tex::bytes(&t)
-                }
-                None => {
-                    let k = host.stamp(&p);
-                    let b = host.read(&p)?;
-                    if let Some(k) = k {
-                        let mut m = stamps.lock().unwrap_or_else(PoisonError::into_inner);
-                        match m.get_mut(&p) {
-                            Some(old) if *old != k => old.clear(),
-                            Some(_) => {}
-                            None => {
-                                m.insert(p.clone(), k);
-                            }
+            let bytes = if let Some(t) = buffered {
+                // (an editor's text: no key of the disk's holds for it)
+                stamps
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&p);
+                tex::bytes(&t)
+            } else {
+                let k = host.stamp(&p);
+                let b = host.read(&p)?;
+                if let Some(k) = k {
+                    let mut m = stamps.lock().unwrap_or_else(PoisonError::into_inner);
+                    match m.get_mut(&p) {
+                        Some(old) if *old != k => old.clear(),
+                        Some(_) => {}
+                        None => {
+                            m.insert(p.clone(), k);
                         }
                     }
-                    b
                 }
+                b
             };
             Some((shown, bytes))
         })
