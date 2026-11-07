@@ -834,6 +834,10 @@ pub(crate) struct Run<'c, 'a> {
     /// a document piece's run of an edit's evaluation. `pic_child`: this
     /// run is the child.
     pub pic_on: bool,
+    /// `get_x_token` stops at a picture's `\begin`, unexpanded, for the
+    /// caller to place the picture as a child (a run of characters'
+    /// next command, `\ignorespaces`' next token: [`Run::pic_here`]).
+    pub pic_stop: bool,
     /// The hashes of the pictures this run met, in order.
     pub pic_seen: Vec<u64>,
     pub pic_child: Option<crate::pic::PicChild>,
@@ -1436,6 +1440,7 @@ impl<'c, 'a> Run<'c, 'a> {
             pull_orig: Vec::new(),
             pull_box: Vec::new(),
             pic_on: false,
+            pic_stop: false,
             pic_seen: Vec::new(),
             pic_child: None,
             pic_out: None,

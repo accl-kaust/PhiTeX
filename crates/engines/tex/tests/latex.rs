@@ -819,6 +819,48 @@ fn at_one_thread_no_run_is_refuted() {
     assert!(bad.is_empty(), "{bad:?}");
 }
 
+/// A picture child that refuses (a read-time object) after a paragraph
+/// of its piece broken with font expansion, whose appends to the fonts'
+/// expansion lists it started with: it drops them with its table, and
+/// the empty control sequence that `\csname\endcsname` makes `\relax`
+/// afterwards is that name's, defined in the pieces after it, at one
+/// thread and at eight (a refused child kept them, and its publication
+/// put the empty name's field at a spill location for the thread:
+/// beamertheme-arguelles' `\pdfprotrudechars` made `\relax`).
+#[test]
+#[ignore = "heavy: the LaTeX format"]
+fn a_refused_picture_child_leaves_the_empty_name_its_own() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let name = "picrefuse";
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    for threads in [1usize, 8] {
+        let opts = Options {
+            threads: Some(threads),
+            ..pdf_opts(name, &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), &src);
+        let (_, log) = b.output();
+        assert!(
+            log.contains("[counts 4 5 6]"),
+            "-j {threads}: the registers past 255 the picture's paragraph set keep their values: {}",
+            log.lines()
+                .find(|l| l.contains("[counts"))
+                .unwrap_or("no message")
+        );
+        assert!(
+            log.contains("[counts 7 8 9]"),
+            "-j {threads}: the registers past 255 the paragraph set keep their values: {}",
+            log.lines()
+                .find(|l| l.contains("[counts"))
+                .unwrap_or("no message")
+        );
+        assert!(
+            log.contains("[empty defined]"),
+            "-j {threads}: the empty name is defined after \\csname\\endcsname, as TeX has it"
+        );
+    }
+}
+
 /// The page layer's work, by the engine's counters, on floats2col (the
 /// document of [`latex_twocol_floats_runs`]: twocolumn, 194 routine
 /// fires, floats and marginpars whose routines hand back `\@freelist`,
@@ -1176,6 +1218,45 @@ fn latex_a_rerun_costs_no_more_than_its_first_run() {
         edit <= cold,
         "a one-word edit made {edit} bytes of values, its cold build {cold}"
     );
+}
+
+/// Pictures in a paragraph are children of its run, after characters
+/// and after a display too (the frontends' document: its picture ran
+/// again at every word edit of its paragraph): a word edit before them,
+/// on their own line too (a typed word moves their bytes in the file),
+/// runs no picture again, and the PDF is a cold build's.
+#[test]
+fn latex_pictures_in_a_paragraph_are_children() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-par-pics");
+    let _ = std::fs::create_dir_all(&dir);
+    let src = "\\documentclass{article}\n\\usepackage{amsmath}\n\\usepackage{tikz}\n\\begin{document}\nSome words before it.\nMore words \\begin{tikzpicture}\\draw (0,0) circle (1);\\end{tikzpicture} and after it.\n\nA paragraph with a display, most edits change one paragraph.\n\\begin{equation} t_{edit} = t_{par} + t_{page} \\end{equation}\n\\begin{tikzpicture}\\foreach \\i in {1,...,5}{\\draw (\\i*0.3,0) circle (0.05);}\\end{tikzpicture}\nAnd words after the picture.\n\\end{document}\n";
+    std::fs::write(dir.join("parpics.tex"), src).expect("write");
+    let mut b = common::build(pdf_opts("parpics", &dir), Some(&prelude(true)), src);
+    let before = b.pages();
+    let cold_pics = common::runs_of(&b, "pic");
+    for (k, (a, z)) in [
+        ("Some words", "Some other words"),
+        ("More words", "More of the words"),
+        ("most edits", "many edits"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let new = src.replace(a, z);
+        b.edit(&new);
+        let pics = common::runs_of(&b, "pic");
+        let cold = common::build(pdf_opts("parpics", &dir), Some(&prelude(true)), &new);
+        assert!(
+            cold_pics >= 2,
+            "the cold build placed {cold_pics} pictures as children"
+        );
+        assert_eq!(pics, 0, "edit {k}: {pics} pictures ran again");
+        assert_eq!(b.pages().len(), before.len());
+        if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+            panic!("edit {k} differs from a cold build: {d}");
+        }
+        b.edit(src);
+    }
 }
 
 /// Unchanged bytes change nothing (`r` in a watch: every file the build

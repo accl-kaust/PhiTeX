@@ -577,7 +577,6 @@ impl Fields {
         // refused picture child's appends once kept them), and no name
         // answers it: never kept, or the empty name's field would be
         // sent there by `loc_of` from then on, on this thread)
-        debug_assert!(loc < 1 << 31, "field of a spill location {loc}");
         if loc >= 1 << 31 {
             return v.field("\u{1}spill:gone");
         }
@@ -832,4 +831,29 @@ fn with_names<T>(v: &Values, epoch: u64, f: impl FnOnce(&mut Named) -> T) -> T {
         }
         f(&mut c)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Fields;
+    use phitex_defuse::Values;
+
+    /// A spill location asked of the build's fields (one of a table a run
+    /// dropped, a refused picture child's) is answered with no name's
+    /// field, and the empty control sequence's location stays its meaning
+    /// slot: kept for it, `\csname\endcsname` defined whatever field the
+    /// spill index held next on the thread (beamertheme-arguelles'
+    /// `\pdfprotrudechars`).
+    #[test]
+    fn a_spill_location_names_no_field_and_moves_none() {
+        let v = Values::new();
+        let fx = Fields::new(&v);
+        let e = v.epoch();
+        let empty = v.field("cs:");
+        let before = fx.loc_of(&v, e, empty);
+        let spill = 1usize << 31 | 1;
+        assert_ne!(fx.field_of(&v, e, spill), empty);
+        assert_eq!(fx.loc_of(&v, e, empty), before);
+        assert!(before.is_some_and(|l| l < 1 << 31));
+    }
 }

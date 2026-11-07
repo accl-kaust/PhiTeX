@@ -93,11 +93,7 @@ impl Run<'_, '_> {
             }
             // (`\begin{tikzpicture}`: the picture as a child node of this
             // run, its output taken here, `crate::pic`)
-            if self.pic_on
-                && (cmd::CALL..=cmd::LONG_OUTER_CALL).contains(&self.cur.cmd)
-                && self.cur.tok == crate::pic::begin_tok()
-                && self.pic_begin()
-            {
+            if self.pic_here() && self.pic_begin()? {
                 return self.ck();
             }
             if self.cur.cmd > cmd::MAX_COMMAND {
@@ -585,6 +581,12 @@ impl Run<'_, '_> {
                         if c <= cmd::MAX_COMMAND {
                             break;
                         }
+                        // (a picture: a child of this run, the command
+                        // its expansion's first command would end the
+                        // blanks at, §1045)
+                        if self.pic_here() && self.pic_begin()? {
+                            return self.ck();
+                        }
                         if (cmd::CALL..cmd::END_TEMPLATE).contains(&c) {
                             self.macro_call();
                             self.ck()?;
@@ -597,7 +599,26 @@ impl Run<'_, '_> {
                         self.ck()?;
                     }
                 } else {
-                    self.skip_blanks_x()?;
+                    // (a picture's `\begin`: a child of this run, else
+                    // expanded and the blanks after it skipped, as
+                    // `get_x_token` would)
+                    loop {
+                        self.pic_stop = true;
+                        self.get_x_token();
+                        self.pic_stop = false;
+                        self.ck()?;
+                        if self.cur.cmd != cmd::SPACER {
+                            break;
+                        }
+                    }
+                    if self.pic_here() {
+                        if self.pic_begin()? {
+                            return self.ck();
+                        }
+                        self.macro_call();
+                        self.ck()?;
+                        self.skip_blanks_x()?;
+                    }
                 }
                 // (a run that read past its text: the token found ends
                 // the command, put back, so that at the next command's
