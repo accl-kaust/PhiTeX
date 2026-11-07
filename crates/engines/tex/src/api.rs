@@ -6848,6 +6848,10 @@ impl Build {
         self.staged = false;
         let t_all = std::time::Instant::now();
         self.progress_offsets();
+        self.g
+            .watch
+            .progress
+            .keep_ships(|n| self.g.eng.is_live(NodeId::from_raw(n)));
         self.g.watch.progress.begin();
         *self
             .g
