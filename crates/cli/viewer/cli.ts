@@ -522,9 +522,17 @@ sock.onOpen = () => {
   panel.connection(true);
   if (started) return void session.resync();
   started = true;
-  // (a tab that joins after the first build: its time for the bars, and its first page not called one)
+  // (a tab that joins after the first build: its time for the bars, and its first page not called one;
+  // the last build's settled and stats as the live ones would have said them: the timing popover's
+  // build and Copy debug info's stats, without waiting for the next build. Not its keystroke timing:
+  // no change of this tab's is on its way)
   void sock.request({ op: "info", what: "built" }).then((r) => {
-    if (r.ok && Number(r.json?.builds) > 0) panel.joinedLate(typeof r.json?.first_ms === "number" ? r.json.first_ms : undefined, Number(r.json.builds));
+    if (!r.ok || !(Number(r.json?.builds) > 0)) return;
+    const st = r.json?.stats, se = r.json?.settled as Settled | null | undefined;
+    const last = se && typeof se.ms === "number" ? { ms: se.ms, cold: !!se.cold } : undefined;
+    panel.joinedLate(typeof r.json?.first_ms === "number" ? r.json.first_ms : undefined, Number(r.json.builds), last);
+    if (st && typeof st === "object" && !lastStats) lastStats = st as Stats;
+    if (se && typeof se.ms === "number") panel.latency(...timing(se));
   });
   void session.start();
 };

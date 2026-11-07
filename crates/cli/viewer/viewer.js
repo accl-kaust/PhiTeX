@@ -4181,7 +4181,7 @@ var Panel = class {
     if (!this.$("#m-time").hidden) this.timing();
     this.emit();
   }
-  /** The last build the host said (buildTime), painted or not. */
+  /** The last build the host said (buildTime), painted or not; `joined`: the one before this tab joined (joinedLate). */
   built;
   /**
    * What the status and the timing popover's head say: the newest of the
@@ -4190,14 +4190,24 @@ var Panel = class {
    */
   latest() {
     const s = this.speed, b = this.built;
-    if (b && (!s || b.at > s.at)) return { label: b.first ? "First build" : "Built, no page changed", ms: b.ms, first: b.first };
+    if (b && (!s || b.at > s.at)) return { label: b.first ? "First build" : b.joined ? "Last build" : "Built, no page changed", ms: b.ms, first: b.first };
     if (s) return { label: s.first ? "First page" : "Built", ms: s.ms, first: !!s.first };
     return void 0;
   }
-  /** This tab joined `builds` builds in: `first` the first build's time for the bars; the first build's paint was not this tab's, so its next is not called one. */
-  joinedLate(first, builds) {
+  /**
+   * This tab joined `builds` builds in: `first` the first build's time for
+   * the bars; the first build's paint was not this tab's, so its next is not
+   * called one; `last` the last build's time, for the status and the popover's
+   * head ("Last build", or "First build" if it was the only one).
+   */
+  joinedLate(first, builds, last) {
     if (first !== void 0 && this.times.first === void 0) this.times.first = first;
     if (builds >= 1) this.paints = Math.max(this.paints, 1);
+    if (last && !this.built) {
+      this.built = { ms: last.ms, at: performance.now(), first: last.cold, joined: true };
+      this.renderStatus();
+      if (!this.$("#m-time").hidden) this.timing();
+    }
   }
   /** The bars: the first build, the last edit, the edits' median, each as long as its time (the longest the full width; a short one at least a sliver). */
   timeBars() {
@@ -6806,7 +6816,12 @@ sock.onOpen = () => {
   if (started) return void session.resync();
   started = true;
   void sock.request({ op: "info", what: "built" }).then((r) => {
-    if (r.ok && Number(r.json?.builds) > 0) panel.joinedLate(typeof r.json?.first_ms === "number" ? r.json.first_ms : void 0, Number(r.json.builds));
+    if (!r.ok || !(Number(r.json?.builds) > 0)) return;
+    const st = r.json?.stats, se = r.json?.settled;
+    const last = se && typeof se.ms === "number" ? { ms: se.ms, cold: !!se.cold } : void 0;
+    panel.joinedLate(typeof r.json?.first_ms === "number" ? r.json.first_ms : void 0, Number(r.json.builds), last);
+    if (st && typeof st === "object" && !lastStats) lastStats = st;
+    if (se && typeof se.ms === "number") panel.latency(...timing(se));
   });
   void session.start();
 };
