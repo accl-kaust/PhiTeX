@@ -299,6 +299,10 @@ impl Run<'_, '_> {
             }
             return false;
         }
+        // (the `\begin` read from a token list it was put back in, a run
+        // of characters' next command: the list it emptied gone, the
+        // body read from the input below it)
+        self.input.pop_spent();
         let Some(body) = self.pic_find() else {
             if trace() {
                 let top = self.input.levels.last().map(|l| l.kind);
