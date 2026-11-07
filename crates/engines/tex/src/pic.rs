@@ -432,8 +432,15 @@ impl Run<'_, '_> {
         // (and one that has yet to run again on it, re-asked or running on
         // another thread: its output is of an older view as well, at -j4
         // taken and the run asked again for each new one, 2503 s)
+        // (on the run's first of an evaluation, an edit's, the old output
+        // is taken as it is, its child's commit asking again where it
+        // differs: the pictures it moves are few, and read inline each ran
+        // twice, here and in its child, Grail's deleted figure 8.0 -> 13.3 s)
         let peeked = self.cx.placed_output_peek(i);
-        if peeked.is_some() && !(view_held && self.cx.placed_output_settled(i).is_some()) {
+        if peeked.is_some()
+            && self.cx.ran_this_evaluation()
+            && !(view_held && self.cx.placed_output_settled(i).is_some())
+        {
             self.muts += 1;
             if trace() {
                 eprintln!(
