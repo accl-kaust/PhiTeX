@@ -428,7 +428,7 @@ impl Document {
             // its errors at once, the last warnings with them)
             diagnostics: if !r.diagnostics_pending {
                 Some(diagnostics(s, &r, &log))
-            } else if errors.is_empty() {
+            } else if r.out.errors.is_empty() {
                 None
             } else {
                 Some(crate::watch::with_last_warnings(
