@@ -40,19 +40,23 @@ use crate::val::{int_of, list_of};
 /// next is due that many times its length after it, at least [`every`].
 const SPACE: u64 = 4;
 
-/// The commands from a checkpoint to the next: `spacing` (`SPACE` times
-/// what the run's parts cost) apart at least, or `every` apart in a dense
-/// run (an edited one); doubling in a dense run gone on from a checkpoint
-/// before the edit (`resumed`): those it takes stand past the edit, of use
-/// only to a later edit further on. `taken`: the checkpoints this run has
-/// taken so far.
+/// The commands from a checkpoint to the next: `every` apart, and
+/// `spacing` (`SPACE` times what the run's parts cost) apart at least in
+/// every run, an edited one too: what its checkpoints cost stays a share
+/// of what it does, so a run again never costs more than its first run
+/// (an edited paragraph holding a 2400-circle TikZ picture took a
+/// checkpoint of its picture's state every 600 commands, whatever it
+/// cost: 5.8 s a one-word edit for its 1.7 s cold run, values 0.6 -> 3.2
+/// million); doubling in a dense run (an edited one) gone on from a
+/// checkpoint before the edit (`resumed`): those it takes stand past the
+/// edit, of use only to a later edit further on. `taken`: the checkpoints
+/// this run has taken so far.
 fn ck_gap(dense: bool, resumed: bool, taken: usize, every: u64, spacing: u64) -> u64 {
+    let least = every.max(SPACE * spacing);
     if dense && resumed {
-        every << (taken + 1).min(16)
-    } else if dense {
-        every
+        (every << (taken + 1).min(16)).max(least)
     } else {
-        every.max(SPACE * spacing)
+        least
     }
 }
 
@@ -1987,18 +1991,25 @@ fn cand_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::pages::CandMa
 mod tests {
     /// A dense run gone on from a checkpoint before its edit spaces its
     /// checkpoints doubling, capped; a dense run that did not go on, and a
-    /// run not dense, do not.
+    /// run not dense, do not; every run's are as far apart as what they
+    /// cost asks.
     #[test]
     fn checkpoints_double_apart_only_where_a_dense_run_went_on() {
         let gap = super::ck_gap;
         assert_eq!(
-            [0, 1, 2, 3].map(|k| gap(true, true, k, 600, 10_000)),
+            [0, 1, 2, 3].map(|k| gap(true, true, k, 600, 100)),
             [1200, 2400, 4800, 9600],
-            "doubling, whatever the parts cost"
+            "doubling"
         );
         assert_eq!(gap(true, true, 15, 600, 0), 600 << 16);
         assert_eq!(gap(true, true, 40, 600, 0), 600 << 16, "capped");
-        assert_eq!(gap(true, false, 5, 600, 10_000), 600, "dense: every");
+        assert_eq!(gap(true, true, 0, 600, 10_000), 40_000, "by what they cost");
+        assert_eq!(gap(true, false, 5, 600, 100), 600, "dense: every");
+        assert_eq!(
+            gap(true, false, 5, 600, 10_000),
+            40_000,
+            "dense: by what they cost too"
+        );
         assert_eq!(
             gap(false, true, 5, 600, 10_000),
             40_000,
