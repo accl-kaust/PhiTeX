@@ -1824,7 +1824,7 @@ impl<'a> Ctx<'a> {
             return k;
         }
         let moved = r.scope_moved(self.eng);
-        let mut memo = crate::read::FoldMemo::new();
+        let mut memo = crate::node::HoldMemo::default();
         let k = r
             .reads
             .iter()
@@ -1881,7 +1881,7 @@ impl<'a> Ctx<'a> {
             .last
             .as_ref()
             .filter(|r| !r.provisional && (r.state.is_none() || self.me.parked_on.lock().is_none()))?;
-        let mut memo = crate::read::FoldMemo::new();
+        let mut memo = crate::node::HoldMemo::default();
         let moved = r.scope_moved(self.eng);
         if let Some(i) = r
             .reads
@@ -1893,7 +1893,7 @@ impl<'a> Ctx<'a> {
             if crate::obs::enabled() && std::env::var_os("PHITEX_STANDS_TRACE").is_some() {
                 let rd = &r.reads[i];
                 let v = &self.eng.values;
-                let now = crate::read::answer_in(self.eng, self.me, &rd.kind, rd.path, &mut memo);
+                let now = crate::read::answer_in(self.eng, self.me, &rd.kind, rd.path, &mut memo.fold);
                 let show =
                     |x: Option<ValueId>| x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(200).collect());
                 eprintln!(
@@ -1930,7 +1930,7 @@ impl<'a> Ctx<'a> {
             return false;
         };
         let moved = r.scope_moved(self.eng);
-        let mut memo = crate::read::FoldMemo::new();
+        let mut memo = crate::node::HoldMemo::default();
         tail.iter().all(|rd| {
             !matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
                 && r.read_holds(self.eng, self.me, rd, moved, &mut memo)

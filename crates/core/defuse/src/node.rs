@@ -481,6 +481,14 @@ impl Node {
     }
 }
 
+/// A check of a record's reads ([`RunRecord::read_holds`]): the folds
+/// it made, and the reads it found holding.
+#[derive(Default)]
+pub(crate) struct HoldMemo {
+    pub(crate) fold: crate::read::FoldMemo,
+    held: crate::FxHashMap<(ReadKind, PathId, Option<ValueId>), ()>,
+}
+
 /// What a run produced, as the commit took it.
 pub(crate) struct RunRecord {
     pub(crate) serial: u32,
@@ -529,6 +537,29 @@ impl RunRecord {
     /// asked one by one, a check that found them all standing cost
     /// 70-140 ms (Grail, a deleted paragraph: 0.46 s of it).
     pub(crate) fn read_holds(
+        &self,
+        eng: &crate::Engine,
+        me: &Node,
+        rd: &ReadRec,
+        scope_moved: bool,
+        memo: &mut HoldMemo,
+    ) -> bool {
+        // (a read made again, as one before it found holding: a run asks
+        // one thing many times, a `TikZ` picture microtype's font list
+        // 20 592 times by 76 paths, each asked again at every check)
+        let key = (rd.kind.clone(), rd.path, rd.seen);
+        if memo.held.contains_key(&key) {
+            return true;
+        }
+        let ok = self.read_holds_once(eng, me, rd, scope_moved, &mut memo.fold);
+        if ok {
+            memo.held.insert(key, ());
+        }
+        ok
+    }
+
+    /// [`RunRecord::read_holds`] for one read.
+    fn read_holds_once(
         &self,
         eng: &crate::Engine,
         me: &Node,
