@@ -1180,13 +1180,15 @@ fn latex_a_rerun_costs_no_more_than_its_first_run() {
 
 /// Pictures in a paragraph are children of its run, after characters
 /// and after a display too (the frontends' document: its picture ran
-/// again at every word edit of its paragraph): a word edit before them
-/// runs no picture again, and the PDF is a cold build's.
+/// again at every word edit of its paragraph): a word edit on another
+/// line of the paragraph runs no picture again, and the PDF is a cold
+/// build's. (A word edit on the picture's own line runs it again: the
+/// line's text before the picture is in the child's text.)
 #[test]
 fn latex_pictures_in_a_paragraph_are_children() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-par-pics");
     let _ = std::fs::create_dir_all(&dir);
-    let src = "\\documentclass{article}\n\\usepackage{amsmath}\n\\usepackage{tikz}\n\\begin{document}\nSome words before it. \\begin{tikzpicture}\\draw (0,0) circle (1);\\end{tikzpicture} and after it.\n\nA paragraph with a display, most edits change one paragraph.\n\\begin{equation} t_{edit} = t_{par} + t_{page} \\end{equation}\n\\begin{tikzpicture}\\foreach \\i in {1,...,5}{\\draw (\\i*0.3,0) circle (0.05);}\\end{tikzpicture}\nAnd words after the picture.\n\\end{document}\n";
+    let src = "\\documentclass{article}\n\\usepackage{amsmath}\n\\usepackage{tikz}\n\\begin{document}\nSome words before it.\nMore words \\begin{tikzpicture}\\draw (0,0) circle (1);\\end{tikzpicture} and after it.\n\nA paragraph with a display, most edits change one paragraph.\n\\begin{equation} t_{edit} = t_{par} + t_{page} \\end{equation}\n\\begin{tikzpicture}\\foreach \\i in {1,...,5}{\\draw (\\i*0.3,0) circle (0.05);}\\end{tikzpicture}\nAnd words after the picture.\n\\end{document}\n";
     std::fs::write(dir.join("parpics.tex"), src).expect("write");
     let mut b = common::build(pdf_opts("parpics", &dir), Some(&prelude(true)), src);
     let before = b.pages();
