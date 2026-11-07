@@ -1841,7 +1841,7 @@ pub(crate) fn line_mark_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crat
 
 /// A nest level's `mode_place` as a value ([`place_of`]).
 pub(crate) fn place_value(v: &phitex_defuse::Values, p: Option<&crate::run::DiagPlace>) -> ValueId {
-    let Some((a, n, b, s, k)) = p else {
+    let Some((a, n, b, s, k, o)) = p else {
         return ValueId::UNIT;
     };
     v.list(vec![
@@ -1850,12 +1850,15 @@ pub(crate) fn place_value(v: &phitex_defuse::Values, p: Option<&crate::run::Diag
         *b,
         v.str(s),
         v.int(i64::try_from(*k).unwrap_or(0)),
+        o.map_or(ValueId::UNIT, |o| {
+            v.int(i64::from_ne_bytes(o.to_ne_bytes()))
+        }),
     ])
 }
 
 /// [`place_value`]'s place.
 pub(crate) fn place_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::run::DiagPlace> {
-    let [a, n, b, s, k] = list_of(v, x)[..] else {
+    let [a, n, b, s, k, o] = list_of(v, x)[..] else {
         return None;
     };
     Some((
@@ -1864,6 +1867,7 @@ pub(crate) fn place_of(v: &phitex_defuse::Values, x: ValueId) -> Option<crate::r
         b,
         crate::val::str_of(v, s),
         usize::try_from(int_of(v, k)).unwrap_or(0),
+        (o != ValueId::UNIT).then(|| u64::from_ne_bytes(int_of(v, o).to_ne_bytes())),
     ))
 }
 

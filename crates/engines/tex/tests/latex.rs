@@ -1887,6 +1887,45 @@ fn an_error_in_the_bbl_is_at_its_line() {
     assert!(d.context.starts_with("l.5 "), "{d:?}");
 }
 
+/// An error in an `\input` file after a series of edits of it is where
+/// a cold build of the last text places it (oracle/fixtures/latex/
+/// diagshift: five texts of the edit fuzz's two-column table document,
+/// the last with an extra `&` in a table's head). A run that reads on
+/// into the next piece's lines placed their errors by the running node's
+/// move since the edits, not by that piece's: the Overleaf extension's
+/// "Extra alignment tab" a line below its row, until a refresh.
+#[test]
+fn an_input_files_error_after_edits_is_where_a_cold_build_places_it() {
+    let fx = common::fixtures().join("latex/diagshift");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latex-diagshift");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("tex")).expect("a scratch directory");
+    let src = common::read(&fx.join("main.tex"));
+    std::fs::write(dir.join("main.tex"), &src).expect("the document");
+    let text = |k: u32| std::fs::read(fx.join(format!("s{k}.tex"))).expect("a text of the file");
+    std::fs::write(dir.join("tex/D-caching.tex"), text(30)).expect("the input file");
+    let errors = |b: &phitex_tex::Build| -> Vec<(String, usize, (usize, usize), String)> {
+        b.diagnostics()
+            .into_iter()
+            .filter(|d| d.severity == phitex_tex::Severity::Error)
+            .map(|d| (d.file, d.line, d.range, d.message))
+            .collect()
+    };
+    let mut b = common::build(pdf_opts("main", &dir), Some(&prelude(true)), &src);
+    for k in 31..=34 {
+        b.edit_file("tex/D-caching.tex", Some(&text(k)));
+    }
+    std::fs::write(dir.join("tex/D-caching.tex"), text(34)).expect("the input file");
+    let cold = common::build(pdf_opts("main", &dir), Some(&prelude(true)), &src);
+    let want = errors(&cold);
+    assert!(
+        want.iter()
+            .any(|e| e.3.starts_with("Extra alignment tab") && e.1 == 47),
+        "the cold build's error at line 47: {want:#?}"
+    );
+    assert_eq!(errors(&b), want, "the edits' errors, the cold build's");
+}
+
 /// A measure: amsldoc (`bench/amsldoc`) built as latexmk would, then
 /// one sentence added to a paragraph (its lines re-broken): the nodes
 /// that ran again and why (`PHITEX_EDIT_TEXT`: `OLD=>NEW` instead).

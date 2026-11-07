@@ -8633,6 +8633,13 @@ impl Build {
             let loc = usize::try_from(int(6)).unwrap_or(0);
             let before: String = seg.chars().take(loc).collect();
             let in_doc = xs.get(2).is_some_and(|&n| str_of(v, n) == DOC_NAME);
+            // (whose text the line is, [`crate::run::DiagPlace`]: a run
+            // reads on into the next node's or piece's lines, which move
+            // with that one, not with the running node)
+            let owner = xs
+                .get(8)
+                .filter(|&&o| o != ValueId::UNIT)
+                .map(|&o| u64::from_ne_bytes(int_of(v, o).to_ne_bytes()));
             let file_text: Arc<str>;
             // (the document's text node the line is in: where a culprit
             // is looked for past the line, [`culprit`])
@@ -8643,7 +8650,14 @@ impl Build {
                 // text node was sliced, moved by as much as an edit since
                 // moved that node (a node an edit left keeps its text, and
                 // the positions in it, [`apply_text`])
-                let node = u64::from_ne_bytes(int(4).to_ne_bytes());
+                let node = owner
+                    .filter(|&o| {
+                        self.g
+                            .eng
+                            .node_info(phitex_defuse::NodeId::from_raw(o))
+                            .is_some()
+                    })
+                    .unwrap_or_else(|| u64::from_ne_bytes(int(4).to_ne_bytes()));
                 let i = top(node);
                 let shift = *shifts.entry(i).or_insert_with(|| {
                     let n = self.nodes.get(i).map(|x| x.1);
@@ -8717,7 +8731,15 @@ impl Build {
                 // [`DocFile::shifts`])
                 let node =
                     phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int(4).to_ne_bytes()));
-                let shift = piece_shift(&self.g.eng, &doc_shifts, node);
+                // (the piece whose frames the line is of: its move, none
+                // where it has not moved since it was made)
+                let shift = match owner {
+                    Some(o) => doc_shifts
+                        .values()
+                        .find(|(fs, _)| fs.raw() == o)
+                        .map_or(0, |&(_, d)| d),
+                    None => piece_shift(&self.g.eng, &doc_shifts, node),
+                };
                 // (the line's place a byte of the file's text, one
                 // character per byte of the file: the column's characters
                 // as many of its bytes, [`crate::run::FileRest::line_at`])

@@ -692,9 +692,10 @@ impl Cur {
 pub(crate) type KindFields = (i64, i64, i64, i32, i64, Vec<ValueId>);
 
 /// Where a diagnostic is ([`Run::diag_place`]): the line's file, its
-/// start in that file (-1: not a document's line), its unit, its text and
-/// the column.
-pub(crate) type DiagPlace = (ValueId, i64, ValueId, String, usize);
+/// start in that file (-1: not a document's line), its unit, its text,
+/// the column, and whose text the line is ([`crate::input::Line::owner`]:
+/// a cut file's piece's frames, a document node).
+pub(crate) type DiagPlace = (ValueId, i64, ValueId, String, usize, Option<u64>);
 
 /// Whether `line`, the first of a text written to the log, begins a
 /// warning in the kernel's shapes ([`Run::written_warning`]): `LaTeX
@@ -5587,12 +5588,17 @@ impl<'c, 'a> Run<'c, 'a> {
                     .iter()
                     .map(|&c| char::from_u32(c).unwrap_or('?'))
                     .collect();
+                // (whose text the line is: a cut file's piece's frames, a
+                // document node's own; a run reads on into the next
+                // piece's lines, whose place moves with that piece, not
+                // with the running node's, [`crate::input::Line::owner`])
+                let owner = s.owner.map(|o| o.0);
                 match s.origin {
-                    Some((n, a, u)) => (n, i64::try_from(a).unwrap_or(0), u, seg, loc),
-                    None => (ValueId::UNIT, -1, ValueId::UNIT, seg, loc),
+                    Some((n, a, u)) => (n, i64::try_from(a).unwrap_or(0), u, seg, loc, owner),
+                    None => (ValueId::UNIT, -1, ValueId::UNIT, seg, loc, owner),
                 }
             }
-            None => (ValueId::UNIT, -1, ValueId::UNIT, String::new(), 0),
+            None => (ValueId::UNIT, -1, ValueId::UNIT, String::new(), 0, None),
         }
     }
 
@@ -5601,7 +5607,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// ([`Self::diag_place`]).
     pub(crate) fn diag_at(&mut self, kind: i64, msg: &str, p: DiagPlace) {
         let v = self.v;
-        let (file, at, unit, seg, loc) = p;
+        let (file, at, unit, seg, loc, owner) = p;
         let node = i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes());
         let e = v.list(vec![
             v.int(kind),
@@ -5612,6 +5618,9 @@ impl<'c, 'a> Run<'c, 'a> {
             v.str(&seg),
             v.int(i64::try_from(loc).unwrap_or(0)),
             unit,
+            owner.map_or(ValueId::UNIT, |o| {
+                v.int(i64::from_ne_bytes(o.to_ne_bytes()))
+            }),
         ]);
         let s = v.seq_unit(e);
         self.contribute("diags", s);
