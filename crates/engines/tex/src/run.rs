@@ -2902,6 +2902,24 @@ impl<'c, 'a> Run<'c, 'a> {
         }
     }
 
+    /// (`PHITEX_READS=<field>`, observe) a read of that field through a
+    /// projection (`what`), with its answer and the context.
+    fn trace_path_read(&self, f: Field, what: &str, x: Option<ValueId>) {
+        if crate::exec::obs_flag!("PHITEX_READS")
+            && let Some(want) = crate::exec::obs_str!("PHITEX_READS")
+            && want == crate::val::field_name(self.v, f)
+        {
+            let v = self.v;
+            eprintln!(
+                "reads: node {} {want} via {what} = {} at {} | {}",
+                self.cx.node().raw(),
+                x.map_or_else(|| "-".to_owned(), |x| v.render(x)),
+                v.render(self.cur.tok.encode(v)),
+                self.trace_context()
+            );
+        }
+    }
+
     /// Loop-back field `f` ([`crate::ops::lb_read`]): its last
     /// definition on the line, wherever this run is.
     pub(crate) fn lb(&mut self, f: Field) -> R<Option<ValueId>> {
@@ -5968,8 +5986,10 @@ impl<'c, 'a> Run<'c, 'a> {
             .cx
             .read_path(f, phitex_defuse::PathId::of_proj(self.ops.class_proj))?
         else {
+            self.trace_path_read(f, "class", None);
             return Ok(None);
         };
+        self.trace_path_read(f, "class", Some(x));
         let Ok(c) = u8::try_from(int_of(self.v, x)) else {
             return Ok(None);
         };
@@ -6008,8 +6028,10 @@ impl<'c, 'a> Run<'c, 'a> {
             .cx
             .read_path(f, phitex_defuse::PathId::of_proj(self.ops.step_proj))?
         else {
+            self.trace_path_read(f, "step", None);
             return Ok(None);
         };
+        self.trace_path_read(f, "step", Some(x));
         let k = int_of(self.v, x);
         let e = self.memos.entry(l);
         e.has |= crate::state::M_STEP;
