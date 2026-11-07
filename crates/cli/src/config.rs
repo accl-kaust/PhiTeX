@@ -603,7 +603,8 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
         "underline",
         "on",
         "the viewer underlines what each problem is about (yours only)",
-    ),    (
+    ),
+    (
         "latexmk",
         "find",
         "how much of a .latexmkrc applies: find (its search paths) or exact (its engine, output folder and options too)",

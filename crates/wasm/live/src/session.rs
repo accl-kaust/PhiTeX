@@ -1,6 +1,7 @@
 //! The open document and what the host's exports ([`crate::abi`]) call:
 //! each `ph_*` export's work, on slices and strings, safe.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 
@@ -9,6 +10,7 @@ use phitex_live::lsp::Server;
 use phitex_live::session::{Job, Session, Status};
 use phitex_live::view::Viewer;
 use phitex_shelf::{self as shelf, Fetch};
+
 use serde_json::{Value, json};
 
 use crate::files::Files;
@@ -168,7 +170,15 @@ pub(crate) fn open(req: &[u8]) -> i32 {
         .as_u64()
         .and_then(|t| usize::try_from(t).ok());
     let ini = req["ini"].as_bool().unwrap_or(false);
-    let engine = match phitex_live::tex::engine(req["engine"].as_str().unwrap_or("pdflatex")) {
+    // (the project's .latexmkrc, as Overleaf reads it: its search paths
+    // always, its engine and SyncTeX with `exact`, never -shell-escape)
+    let rc = latexmk(&req);
+    let engine_name = req["engine"]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| rc.engine.clone())
+        .unwrap_or_else(|| "pdflatex".to_owned());
+    let engine = match phitex_live::tex::engine(&engine_name) {
         Ok(e) => e,
         Err(e) => {
             *lock(&OUTPUT) = e.into_bytes();
@@ -187,7 +197,14 @@ pub(crate) fn open(req: &[u8]) -> i32 {
         shell: shell.then(|| Arc::clone(shell_hook()) as Arc<dyn phitex_tex::ShellHook>),
     });
     let sink = Arc::new(live::Memory::default());
-    let job = job(&main, engine, ini, threads);
+    let mut job = job(&main, engine, ini, threads);
+    if let Some(on) = rc.synctex {
+        job.synctex = on;
+    }
+    files().set_search(rc.search);
+    if !rc.notes.is_empty() {
+        event(&json!({"event": "latexmkrc", "notes": rc.notes}));
+    }
     let mut session = Session::new(
         job,
         Arc::from(phitex_live::watch::tex_text(body)),
@@ -270,6 +287,121 @@ pub(crate) fn open(req: &[u8]) -> i32 {
         output,
     });
     0
+}
+
+/// What a project's latexmk rc files give the open document.
+#[derive(Debug, Default)]
+struct Latexmk {
+    /// TEXINPUTS's search (none: the default).
+    search: Option<crate::files::Search>,
+    /// `exact`: the engine ($pdf_mode, $pdflatex) and SyncTeX.
+    engine: Option<String>,
+    synctex: Option<bool>,
+    /// What was not applied, each a line naming the file and the line.
+    notes: Vec<String>,
+}
+
+/// The working directory the rc files are read in: Overleaf's compile
+/// directory (latexmk runs there; `abs_path` answers under it). Folders
+/// under it are the project's.
+const COMPILE_DIR: &str = "/compile";
+
+/// The open request's `latexmk` (`{files: {path: text}, exact?}`: the
+/// project's rc files by path from its root, `latexmkrc` or `.latexmkrc`
+/// there read first, any file one of them `do`es given too) and
+/// `projectFiles` (every path of the project: a `//` folder's subfolders).
+fn latexmk(req: &Value) -> Latexmk {
+    use phitex_live::latexmkrc as rc;
+    struct Given<'a>(&'a serde_json::Map<String, Value>);
+    impl rc::RcFiles for Given<'_> {
+        fn read(&self, path: &str) -> Option<String> {
+            let rel = path.strip_prefix(COMPILE_DIR)?.strip_prefix('/')?;
+            self.0.get(rel)?.as_str().map(str::to_owned)
+        }
+    }
+    let Some(given) = req["latexmk"]["files"].as_object() else {
+        return Latexmk::default();
+    };
+    let exact = req["latexmk"]["exact"].as_bool().unwrap_or(false);
+    let w = rc::Where {
+        cwd: COMPILE_DIR.into(),
+        ..rc::Where::default()
+    };
+    let r = rc::read(&rc::order(&w), COMPILE_DIR, &BTreeMap::new(), &Given(given));
+    let mut out = Latexmk {
+        notes: r.notes.iter().map(ToString::to_string).collect(),
+        ..Latexmk::default()
+    };
+    if let Some((_, at)) = &r.default_files {
+        out.notes.push(format!(
+            "{at}: @default_files not applied: the project's main document is the one built"
+        ));
+    }
+    if exact {
+        let a = r.exact();
+        out.notes.extend(a.notes.iter().map(ToString::to_string));
+        out.engine = a.engine;
+        out.synctex = a.synctex;
+        if let Some((true, at)) = a.shell_escape {
+            out.notes.push(format!(
+                "{at}: -shell-escape not applied: never from a .latexmkrc in the browser"
+            ));
+        }
+        for (d, at) in [a.out_dir, a.aux_dir].into_iter().flatten() {
+            out.notes.push(format!(
+                "{at}: {d}: not applied: the browser keeps the outputs in memory"
+            ));
+        }
+    } else {
+        out.notes
+            .extend(r.not_applied(Some("the exact latexmk setting")));
+    }
+    if let Some(v) = r.var("TEXINPUTS") {
+        let project = req["projectFiles"].as_array().map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(|p| p.trim_start_matches("./").to_owned())
+                .collect::<Vec<_>>()
+        });
+        let mut elements = Vec::new();
+        for e in rc::elements(v) {
+            match e {
+                rc::Element::Default => elements.push(e),
+                rc::Element::Dir { path, sub } => {
+                    let rel = if path == COMPILE_DIR {
+                        Some(String::new())
+                    } else {
+                        path.strip_prefix(COMPILE_DIR)
+                            .and_then(|r| r.strip_prefix('/'))
+                            .map(str::to_owned)
+                    };
+                    match rel {
+                        Some(rel) => {
+                            if sub && project.is_none() {
+                                out.notes.push(format!(
+                                    "TEXINPUTS: {path}//: its subfolders not searched (the host \
+                                     gave no projectFiles)"
+                                ));
+                            }
+                            elements.push(rc::Element::Dir { path: rel, sub });
+                        }
+                        None => out.notes.push(format!(
+                            "TEXINPUTS: {path}: not searched: outside the project"
+                        )),
+                    }
+                }
+            }
+        }
+        out.search = Some(crate::files::Search { elements, project });
+    }
+    for v in ["BIBINPUTS", "BSTINPUTS"] {
+        if r.var(v).is_some() {
+            out.notes.push(format!(
+                "{v} not applied: the browser finds BibTeX's files in the project's root and Shelf"
+            ));
+        }
+    }
+    out
 }
 
 /// The job a document is opened with: the watch's, its outputs in memory.

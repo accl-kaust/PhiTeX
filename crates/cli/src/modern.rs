@@ -88,7 +88,11 @@ fn after_help() -> String {
   then `.latexmkrc` or `latexmkrc` in the folder phitex is run in), as data:
   no Perl runs. What helps the build find files applies: TEXINPUTS,
   BIBINPUTS and BSTINPUTS ($ENV{{...}}, ensure_path), and @default_files
-  when nothing names the file. Any other setting is said once, not applied.
+  when nothing names the file. Any other setting is said once, not applied;
+  --exact-latexmk (or `latexmk = \"exact\"`) applies its engine ($pdf_mode),
+  output folder ($out_dir) and options too (docs/latexmkrc.md).
+      inputs = [\"../common/tex//\"]   (folders TeX searches first, relative to
+                          phitex.toml; a .latexmkrc's TEXINPUTS is over them)
 
 {h}TeX's own command line:{h:#}
   run phitex as `pdflatex`, `latex`, `pdftex`, `etex` or `tex` (a link to
