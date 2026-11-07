@@ -996,3 +996,45 @@ fn a_name_built_from_a_stepped_counter_reads_through_the_name() {
         assert_eq!(b.output().0, want, "-j{threads}: reverted equals cold");
     }
 }
+
+/// A `\csname` built from a stepped counter, taken as a macro's argument
+/// (`\expandafter\take\csname pg@N\endcsname`, hyperref's
+/// `\hyperref[label]`), is the one control sequence it names: as an
+/// undelimited argument and inside a delimited one, never its expansion.
+/// At -j4 the derived name's token went through the argument matcher as a
+/// register's symbol does and was expanded, so the argument was the
+/// named macro's body (edichokey-ex's links went to labels named by page
+/// numbers). The PDF equals the one with the names written out, at 1 and
+/// 8 threads.
+#[test]
+fn a_name_built_from_a_stepped_counter_is_one_token_as_an_argument() {
+    let text = |lit: bool| {
+        let mut s = String::from("\\count200=5\n\\countdef\\cn=200\n");
+        for n in 1..=80 {
+            let _ = writeln!(s, "\\expandafter\\def\\csname pg@{n}\\endcsname{{same}}%");
+        }
+        s.push_str("\\def\\take#1#2{(#2)}\\def\\upto#1#2\\end{[#2]}\\def\\last#1\\end{<\\ifx#1\\relax r\\else d\\fi>}\n");
+        for i in 0..60 {
+            let num = if lit {
+                (5 + i + 1).to_string()
+            } else {
+                "\\number\\cn".to_owned()
+            };
+            let _ = write!(
+                s,
+                "\\global\\advance\\cn 1 Paragraph {i} \
+                 \\expandafter\\take\\csname pg@{num}\\endcsname{{x}} \
+                 \\expandafter\\upto\\csname pg@{num}\\endcsname y\\end{{}} \
+                 \\expandafter\\last\\csname pg@{num}\\endcsname\\end{{}}, long enough to make a line \
+                 or two when set in the plain format's ten point roman.\n\n"
+            );
+        }
+        s.push_str("\\bye\n");
+        s
+    };
+    let (want, _) = cold("dname-arg-lit", &text(true), 1);
+    for threads in [1, 8] {
+        let (got, _) = cold(&format!("dname-arg-{threads}"), &text(false), threads);
+        assert_eq!(got, want, "-j{threads}: equals the names written out");
+    }
+}
