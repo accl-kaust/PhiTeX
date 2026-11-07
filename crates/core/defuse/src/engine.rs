@@ -1793,6 +1793,11 @@ impl Engine {
                 for d in &r.defs {
                     keep(d.f.0);
                     keep(d.value);
+                    // (an append's items: what the value is made from
+                    // where the list it grows moves)
+                    if let Some(crate::Rel::Append(x)) = d.rel {
+                        keep(x);
+                    }
                 }
                 for &(f, x) in &r.contribs {
                     keep(f.0);
@@ -1818,7 +1823,12 @@ impl Engine {
             let inner = self.seg(sid).inner.read();
             for (f, m) in &inner.defs {
                 keep(f.0);
-                m.values().for_each(|d| keep(d.value));
+                m.values().for_each(|d| {
+                    keep(d.value);
+                    if let Some(crate::Rel::Append(x)) = d.rel {
+                        keep(x);
+                    }
+                });
             }
             for (f, rs) in &inner.readers {
                 keep(f.0);

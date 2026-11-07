@@ -1627,3 +1627,43 @@ fn an_append_chain_is_recomputed_in_place() {
         assert!(e.check_invariants().is_empty(), "-j{threads}");
     }
 }
+
+/// An append's items (`Rel::Append`, a list the appender made) are held
+/// by its record and its segment's definition: a collection between two
+/// evaluations keeps them, and the list grown again where it moves is
+/// made of them (circuitikz's `\MT@font@list` after a section added: a
+/// resume read an item collected, observe builds stopped "used after its
+/// collection").
+#[test]
+fn an_appends_items_outlive_a_collection() {
+    let e = Engine::new();
+    e.set_append(Arc::new(|input: Option<ValueId>, items: ValueId, v: &Values| {
+        let mut xs = input
+            .and_then(|x| v.with_list(x, <[ValueId]>::to_vec))
+            .unwrap_or_default();
+        xs.extend(v.with_list(items, <[ValueId]>::to_vec).unwrap_or_default());
+        v.list(xs)
+    }));
+    let def = e.register(Arc::new(Def));
+    let get = e.register(Arc::new(Get));
+    let ap = e.register(Arc::new(App(AtomicU64::new(0))));
+    let v = e.values();
+    let x = f(v, "x");
+    let u = e.new_unit();
+    let d = e.push(u, def, vec![x, v.list(vec![v.str("a")])]);
+    for s in ["b", "c"] {
+        e.push(u, ap, vec![x, v.str(s)]);
+    }
+    let end = e.push(u, get, vec![x]);
+    e.evaluate(1).unwrap();
+    e.collect();
+    e.replace(d, def, vec![x, v.list(vec![v.str("z")])]);
+    e.evaluate(1).unwrap();
+    let names: Vec<String> = v
+        .with_list(e.output(end).expect("ran"), <[ValueId]>::to_vec)
+        .unwrap_or_default()
+        .iter()
+        .map(|&s| v.as_str(s).unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(names, ["z", "b", "c"]);
+}
