@@ -841,6 +841,11 @@ fn a_refused_picture_child_leaves_the_empty_name_its_own() {
         let b = common::build(opts, Some(&prelude(true)), &src);
         let (_, log) = b.output();
         assert!(
+            log.contains("[counts 4 5 6]"),
+            "-j {threads}: the registers past 255 the picture's paragraph set keep their values: {}",
+            log.lines().find(|l| l.contains("[counts")).unwrap_or("no message")
+        );
+        assert!(
             log.contains("[counts 7 8 9]"),
             "-j {threads}: the registers past 255 the paragraph set keep their values: {}",
             log.lines().find(|l| l.contains("[counts")).unwrap_or("no message")

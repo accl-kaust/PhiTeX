@@ -9,6 +9,9 @@
 \parbox{4cm}{A paragraph set in a narrow box, so that its lines are
 stretched and shrunk with the font's expansion, more than once each.}
 \mbox{\begin{tikzpicture}\node{\immediate\pdfobj{<< /Refused true >>}x};\end{tikzpicture}}
+\count303=4 \count304=5 \count305=6 \csname\endcsname after the picture, in its paragraph:
+\message{[counts \the\count303 \space\the\count304 \space\the\count305 ]}%
+\the\count303, \the\count304, \the\count305.
 
 % (the empty name made \relax here, as TeX does, and seen so after)
 \count300=7 \count301=8 \count302=9 \csname\endcsname A paragraph that makes the empty control
