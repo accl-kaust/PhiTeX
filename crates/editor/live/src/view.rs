@@ -800,9 +800,21 @@ impl Viewer {
         let n = b.hashes.len();
         pages.hashes.clone_from(&b.hashes);
         drop(pages);
+        // (the viewers have them already where they are the last ones)
         let items = Value::from(b.diagnostics.clone());
-        self.emit(&json!({"event": "diagnostics", "items": items}).to_string());
-        *lock(&self.diagnostics) = items;
+        // (the lock let go before the event: an answer holds the events'
+        // turn and then reads them)
+        let fresh = {
+            let mut last = lock(&self.diagnostics);
+            let fresh = *last != items;
+            if fresh {
+                last.clone_from(&items);
+            }
+            fresh
+        };
+        if fresh {
+            self.emit(&json!({"event": "diagnostics", "items": items}).to_string());
+        }
         if let Some(c) = &b.changed {
             self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
         }

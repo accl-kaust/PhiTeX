@@ -1125,6 +1125,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     let mut account = o.report.map(|full| crate::report::Report::new(t, o, full));
     // (the last output written without errors, and its PDF for the viewer)
     let mut last_pdf = None;
+    let mut last_layout: Option<u64> = None;
+    // (the viewer's diagnostics and the evaluation they were made of,
+    // `Report::settled`)
+    let mut last_diags: Option<((u64, u64), Vec<serde_json::Value>)> = None;
     let mut last_hashes: Vec<u64> = Vec::new();
     // (`viewer = "zathura"`: --open starts it on the output, once)
     let open_cmd = t.viewer.clone().filter(|_| o.open);
@@ -1285,7 +1289,13 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             last.borrow_mut().good = Some(out.clone());
         }
         if view.is_some() || lsp.is_some() {
-            if view.is_some() {
+            // (the file the last build's viewer PDF was read from, the
+            // same chunks: that PDF kept, not read again from disk, a
+            // Grail-sized file each `r`)
+            let layout_hash = r.out.layout.as_ref().map(phitex_pdf::Layout::hash);
+            let kept = layout_hash.is_some() && layout_hash == last_layout && last_pdf.is_some();
+            if view.is_some() && !kept {
+                last_layout = layout_hash;
                 last_pdf = match phitex_live::watch::viewer_pdf(s, &r, || {
                     written.as_ref().and_then(|p| std::fs::read(p).ok())
                 }) {
@@ -1312,7 +1322,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 since_ms: since.map(|t| t.elapsed().as_secs_f64() * 1e3),
                 origins: None,
                 changed: None,
-                diagnostics: diagnostics(s, &r, &log),
+                diagnostics: match (&last_diags, r.settled) {
+                    // (the evaluation the last build's were made of: those)
+                    (Some((k, d)), Some(now)) if *k == now => d.clone(),
+                    _ => {
+                        let d = diagnostics(s, &r, &log);
+                        last_diags = r.settled.map(|k| (k, d.clone()));
+                        d
+                    }
+                },
                 parts: Built::parts_of(s, &r),
             };
             origins_due.set(true);
