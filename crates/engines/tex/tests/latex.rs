@@ -897,9 +897,9 @@ fn a_picture_after_a_page_fired_in_its_piece_sees_the_routines_values() {
 /// hyperref's `\hyperref[x]` is `\expandafter\label@@hyperref\csname
 /// r@x\endcsname{x}`): the argument is the one control sequence, as TeX
 /// takes it. At -j4 the derived name's token was expanded in the
-/// argument, so `\label@@hyperref` got `\r@x`'s body: "Hyper reference `3'
-/// undefined", the anchor's name typeset, the links lost (edichokey-ex in
-/// every -j4 build). The PDF is pdfTeX's at -j1, -j4 and -j8.
+/// argument, so `\label@@hyperref` got `\r@x`'s body: a hyper reference
+/// named by a page number undefined, the anchor's name typeset, the links
+/// lost (edichokey-ex in every -j4 build). The PDF is pdfTeX's at -j1, -j4 and -j8.
 #[test]
 fn a_name_built_from_a_counter_is_one_token_as_an_argument() {
     let dir = common::fixtures().join("latex/pdfdocs");
