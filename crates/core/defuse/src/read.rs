@@ -656,9 +656,10 @@ pub(crate) fn apply_path(eng: &Engine, v: Option<ValueId>, p: PathId) -> Option<
 pub(crate) fn client_path(eng: &Engine, p: PathId) -> bool {
     p != PathId::WHOLE
         && p != SITE
-        && eng
-            .path_steps(p)
-            .is_some_and(|s| s.iter().any(|x| matches!(x, Step::Proj(_) | Step::Derived(_))))
+        && eng.path_steps(p).is_some_and(|s| {
+            s.iter()
+                .any(|x| matches!(x, Step::Proj(_) | Step::Derived(_) | Step::Member(_)))
+        })
 }
 
 /// The spec of a derived path's first step (`Step::Derived`), if it has one.
@@ -688,6 +689,22 @@ pub(crate) fn member_spec(eng: &Engine, p: PathId) -> Option<ValueId> {
 /// cannot be told (the anchor gone, the list an alias or none, an anchor
 /// not at a node), which checks the read as any other.
 fn member_now(eng: &Engine, me: &Node, at: Anchor, spec: ValueId) -> bool {
+    match at {
+        Anchor::Me => member_at(eng, me.id, false, spec),
+        Anchor::Before(n) => member_at(eng, n, false, spec),
+        Anchor::AfterOwn(n) => member_at(eng, n, true, spec),
+        Anchor::End(_) | Anchor::Final => true,
+    }
+}
+
+/// Whether reader record `r`, a guarded read's (`Step::Member`), still
+/// matters where it reads ([`member_now`]); true for any other.
+pub(crate) fn member_reader(eng: &Engine, r: &Reader) -> bool {
+    member_spec(eng, r.path).is_none_or(|spec| on_one_layout(eng, || member_at(eng, r.anchor, r.inclusive, spec)))
+}
+
+/// [`member_now`] at node `at` (with its own definitions: `inclusive`).
+fn member_at(eng: &Engine, at: NodeId, inclusive: bool, spec: ValueId) -> bool {
     let vals = eng.values();
     let Some(parts) = vals.with_list(spec, <[ValueId]>::to_vec) else {
         return true;
@@ -698,12 +715,7 @@ fn member_now(eng: &Engine, me: &Node, at: Anchor, spec: ValueId) -> bool {
     let Some(names) = vals.as_int(names).and_then(|n| u32::try_from(n).ok()).map(PathId) else {
         return true;
     };
-    let r = match at {
-        Anchor::Me => reaching_at(eng, Field(list), me.id, false),
-        Anchor::Before(n) => reaching_at(eng, Field(list), n, false),
-        Anchor::AfterOwn(n) => reaching_at(eng, Field(list), n, true),
-        Anchor::End(_) | Anchor::Final => return true,
-    };
+    let r = reaching_at(eng, Field(list), at, inclusive);
     let Some(x) = r.and_then(|r| r.value) else {
         return true;
     };

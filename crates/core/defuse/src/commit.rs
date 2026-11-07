@@ -3518,6 +3518,11 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
         },
         None => Cause::Environment { field: f },
     };
+    // (a guarded read whose element has left its list where it reads:
+    // a run would not look at it, `read::member_reader`)
+    if !read::member_reader(eng, r) {
+        return;
+    }
     let now = reader_answer(eng, f, r);
     if now != r.seen {
         note_refute(eng, f, r.node, by, r.seen, now);

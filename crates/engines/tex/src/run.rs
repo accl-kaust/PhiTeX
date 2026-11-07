@@ -4353,7 +4353,11 @@ impl<'c, 'a> Run<'c, 'a> {
     /// append moved past it, or went) is not looked at by a run again,
     /// so its meaning there (none, its first definition moved with it)
     /// leaves this run standing.
-    fn does_not_expand(&mut self, tok: Tok, member: Option<(Field, phitex_defuse::PathId, ValueId)>) -> R<bool> {
+    fn does_not_expand(
+        &mut self,
+        tok: Tok,
+        member: Option<(Field, phitex_defuse::PathId, ValueId)>,
+    ) -> R<bool> {
         let v = self.v;
         if let Some(l) = self.mean_loc(tok)
             && self.st.is_loaded(l)

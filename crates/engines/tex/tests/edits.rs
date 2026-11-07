@@ -1051,9 +1051,7 @@ fn a_font_first_loaded_later_reruns_no_appender_between() {
         .stats
         .reruns
         .iter()
-        .filter(|(n, op, why)| {
-            *op == "exec" && why.contains("cs:Fa") && !b.stats.stood.contains(n)
-        })
+        .filter(|(n, op, why)| *op == "exec" && why.contains("cs:Fa") && !b.stats.stood.contains(n))
         .map(|(n, _, _)| *n)
         .collect();
     readers.sort_unstable();
