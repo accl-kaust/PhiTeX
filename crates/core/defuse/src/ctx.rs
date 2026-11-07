@@ -764,13 +764,19 @@ impl<'a> Ctx<'a> {
             return Ok(read::apply_path(self.eng, y, p));
         }
         let x = through(self.eng, r, p);
-        let v = self.values();
-        let spec = v.list(vec![list.0, v.int(i64::from(names.0)), elem]);
-        let mut steps = vec![Step::Member(spec)];
-        if p != PathId::WHOLE {
-            steps.extend_from_slice(self.eng.path_steps(p).unwrap_or_default());
-        }
-        let q = self.eng.path(&steps);
+        let key = (list, names, elem, p);
+        let known = self.eng.member_paths.read().get(&key).copied();
+        let q = known.unwrap_or_else(|| {
+            let v = self.values();
+            let spec = v.list(vec![list.0, v.int(i64::from(names.0)), elem]);
+            let mut steps = vec![Step::Member(spec)];
+            if p != PathId::WHOLE {
+                steps.extend_from_slice(self.eng.path_steps(p).unwrap_or_default());
+            }
+            let q = self.eng.path(&steps);
+            self.eng.member_paths.write().insert(key, q);
+            q
+        });
         self.record(ReadKind::Field { f, at: anchor }, q, x);
         Ok(x)
     }
