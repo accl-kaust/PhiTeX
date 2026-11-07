@@ -911,6 +911,7 @@ mod tests {
             fixpoint: false,
             cache_limit: None,
             edit_diagnostics: true,
+            inputs: Vec::new(),
         }
     }
 

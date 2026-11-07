@@ -139,10 +139,17 @@ fn an_include_by_file_relative_name() {
 #[test]
 fn include_cycles_and_missing_files_are_said() {
     let m = Mem::default()
-        .with("/r/a/.latexmkrc", "do './.latexmkrc';\ndo '../none';\ndo 'bare.rc';")
+        .with(
+            "/r/a/.latexmkrc",
+            "do './.latexmkrc';\ndo '../none';\ndo 'bare.rc';",
+        )
         .with("/r/x", "");
     let rc = here("/r/a", &m, &[]);
-    let whys: Vec<_> = rc.notes.iter().map(|n| (n.at.line, n.why.clone())).collect();
+    let whys: Vec<_> = rc
+        .notes
+        .iter()
+        .map(|n| (n.at.line, n.why.clone()))
+        .collect();
     assert_eq!(whys.len(), 3, "{whys:?}");
     assert!(whys[0].1.contains("cycle"), "{whys:?}");
     assert!(whys[1].1.contains("no such file"), "{whys:?}");
@@ -180,8 +187,14 @@ fn the_order_system_user_project_later_over_earlier() {
     );
     assert_eq!(levels[2], vec!["/p/.latexmkrc", "/p/latexmkrc"]);
     let m = Mem::default()
-        .with("/etc/latexmkrc", "$ENV{TEXINPUTS} = '/sys:';\n$pdf_mode = 1;")
-        .with("/h/.latexmkrc", "$ENV{TEXINPUTS} = '/user:' . $ENV{TEXINPUTS};")
+        .with(
+            "/etc/latexmkrc",
+            "$ENV{TEXINPUTS} = '/sys:';\n$pdf_mode = 1;",
+        )
+        .with(
+            "/h/.latexmkrc",
+            "$ENV{TEXINPUTS} = '/user:' . $ENV{TEXINPUTS};",
+        )
         // (only the first of the level: latexmkrc is not read beside .latexmkrc)
         .with("/p/.latexmkrc", "$pdf_mode = 5;")
         .with("/p/latexmkrc", "$ENV{TEXINPUTS} = '/never:';");
@@ -285,7 +298,7 @@ sub makeglossaries {
     let lines: Vec<usize> = rc.notes.iter().map(|n| n.at.line).collect();
     assert_eq!(lines, vec![10, 11, 12, 13], "{:#?}", rc.notes);
     assert!(rc.notes[3].why.contains("runs no"), "{}", rc.notes[3].why);
-    let said = rc.not_applied("--exact-latexmk");
+    let said = rc.not_applied(Some("--exact-latexmk"));
     assert_eq!(said.len(), 7);
     assert_eq!(
         said[2],
@@ -295,7 +308,10 @@ sub makeglossaries {
     let a = rc.exact();
     assert_eq!(a.engine.as_deref(), Some("xelatex"));
     assert_eq!(a.synctex, Some(false));
-    assert_eq!(a.shell_escape, None, "the xelatex command has no -shell-escape");
+    assert_eq!(
+        a.shell_escape, None,
+        "the xelatex command has no -shell-escape"
+    );
     assert_eq!(a.out_dir.as_ref().map(|d| d.0.as_str()), Some("build"));
     assert_eq!(a.max_repeat, Some(7));
     assert_eq!(a.notes.len(), 1, "{:#?}", a.notes);

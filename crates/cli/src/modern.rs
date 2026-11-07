@@ -508,8 +508,11 @@ pub struct Target {
     /// Where TeX's files come from (`--shelf`, `files`; TeX Live by
     /// default).
     pub files: tex::Files,
-    /// What reading `phitex.toml` warned of (unknown keys).
+    /// What reading `phitex.toml` and `.latexmkrc` warned of (unknown
+    /// keys, lines not applied).
     pub warnings: Vec<String>,
+    /// The search paths a `.latexmkrc` set (the job's `inputs`).
+    pub inputs: Vec<(String, String)>,
 }
 
 impl Target {
@@ -526,8 +529,17 @@ impl Target {
 /// (their twenty lines, [`config::magic_comments`]).
 const MAGIC_HEAD: u64 = 1 << 16;
 
+/// The directory phitex was started in (a watch resolves its target
+/// again after it entered the build's): where latexmk would be run.
+static STARTED_IN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
 pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let started = STARTED_IN.get_or_init(|| cwd.clone()).clone();
+    // (latexmk's rc files, as latexmk run here reads them: the system's,
+    // the user's, then this directory's, never a parent's; only what helps
+    // the build find files is applied, the rest said)
+    let rc = config::latexmkrc(&started);
     let found = config::find(&cwd)?;
     let user = config::user()?;
     let (root, cfg, configured) = match (&o.file, found) {
@@ -547,10 +559,37 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         (None, Some(c)) => copy_dir(c, &cwd, &root),
         (None, None) => None,
     };
-    let mut file =
-        o.file.clone().or_else(|| cfg.main.clone()).ok_or(
-            "no file given, and no phitex.toml names one (`main = \"paper.tex\"`)".to_owned(),
-        )?;
+    let mut rc_warnings: Vec<String> = rc.notes.iter().map(ToString::to_string).collect();
+    rc_warnings.extend(rc.not_applied(None));
+    // (`@default_files` names the main file when nothing else does: a
+    // phitex.toml's `main` is a file named, as one on the command line)
+    let from_rc = rc
+        .default_files
+        .as_ref()
+        .and_then(|(files, at)| {
+            let first = files.first()?;
+            if files.len() > 1 {
+                rc_warnings.push(format!(
+                    "{at}: @default_files names {} files: phitex builds the first, {first} \
+                     (latexmk builds each)",
+                    files.len()
+                ));
+            }
+            // (latexmk's are the directory it runs in's)
+            let p = started.join(first);
+            Some(if started == cwd {
+                first.clone()
+            } else {
+                p.to_string_lossy().into_owned()
+            })
+        })
+        .filter(|_| o.file.is_none() && cfg.main.is_none());
+    let mut file = o
+        .file
+        .clone()
+        .or_else(|| cfg.main.clone())
+        .or(from_rc)
+        .ok_or("no file given, and no phitex.toml names one (`main = \"paper.tex\"`)".to_owned())?;
     // (the magic comments are in the first lines: the whole file is read
     // only when no engine is named and its text decides)
     let read = |f: &str, whole: bool| {
@@ -676,7 +715,8 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         cache_limit: cfg.cache_limit,
         threads: cfg.threads.filter(|&n| n > 0),
         files,
-        warnings: cfg.warnings,
+        warnings: [cfg.warnings, rc_warnings].concat(),
+        inputs: rc.vars,
     })
 }
 
@@ -716,6 +756,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         cache_limit: t.cache_limit,
         edit_diagnostics: o.diagnostics || o.view || o.lsp,
         origins: o.view || o.lsp,
+        inputs: t.inputs.clone(),
     })
 }
 

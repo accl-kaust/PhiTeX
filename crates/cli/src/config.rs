@@ -788,6 +788,48 @@ fn project_warning(warnings: &mut Vec<String>, key: &str, why: &str) {
     ));
 }
 
+/// The rc files on disk, for [`phitex_live::latexmkrc`].
+struct Disk;
+
+impl phitex_live::latexmkrc::RcFiles for Disk {
+    fn read(&self, path: &str) -> Option<String> {
+        let p = Path::new(path);
+        if !p.is_file() {
+            return None;
+        }
+        std::fs::read(p)
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    }
+
+    fn canonical(&self, path: &str) -> String {
+        std::fs::canonicalize(path).map_or_else(
+            |_| phitex_live::latexmkrc::normalize(path),
+            |p| p.to_string_lossy().into_owned(),
+        )
+    }
+}
+
+/// latexmk's rc files as latexmk run in `dir` reads them (the system's,
+/// the user's, `dir`'s own), with this process's environment.
+pub fn latexmkrc(dir: &Path) -> phitex_live::latexmkrc::Rc {
+    use phitex_live::latexmkrc as rc;
+    let var = |n: &str| std::env::var(n).ok();
+    let home = var("HOME");
+    let w = rc::Where {
+        cwd: dir.to_string_lossy().into_owned(),
+        home_config_is_dir: home
+            .as_deref()
+            .is_some_and(|h| Path::new(h).join(".config").is_dir()),
+        home,
+        xdg_config_home: var("XDG_CONFIG_HOME"),
+        latexmkrcsys: var("LATEXMKRCSYS"),
+        system_and_user: true,
+    };
+    let env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    rc::read(&rc::order(&w), &w.cwd, &env, &Disk)
+}
+
 /// The project's `phitex.toml` at `dir` or above.
 fn find_file(dir: &Path) -> Option<PathBuf> {
     dir.ancestors().map(|d| d.join(FILE)).find(|p| p.is_file())

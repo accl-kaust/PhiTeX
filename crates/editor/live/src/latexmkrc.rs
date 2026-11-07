@@ -191,10 +191,7 @@ pub fn order(w: &Where) -> Vec<Vec<String>> {
             levels.push(user);
         }
     }
-    levels.push(vec![
-        join(&w.cwd, ".latexmkrc"),
-        join(&w.cwd, "latexmkrc"),
-    ]);
+    levels.push(vec![join(&w.cwd, ".latexmkrc"), join(&w.cwd, "latexmkrc")]);
     levels
 }
 
@@ -208,7 +205,10 @@ pub fn read(
 ) -> Rc {
     let mut r = Reader {
         cwd: cwd.to_owned(),
-        env: env.iter().map(|(k, v)| (k.clone(), Some(v.clone()))).collect(),
+        env: env
+            .iter()
+            .map(|(k, v)| (k.clone(), Some(v.clone())))
+            .collect(),
         start: env.clone(),
         files,
         vars: BTreeMap::new(),
@@ -249,16 +249,18 @@ impl Rc {
     }
 
     /// The lines said by default for the settings only `--exact-latexmk`
-    /// applies: one a setting (`how` names the way to turn it on).
-    pub fn not_applied(&self, how: &str) -> Vec<String> {
+    /// applies: one a setting (`how` names the way to turn it on, where
+    /// the host has one).
+    pub fn not_applied(&self, how: Option<&str>) -> Vec<String> {
         self.exact
             .iter()
-            .map(|(e, at)| {
-                format!(
+            .map(|(e, at)| match how {
+                Some(how) => format!(
                     "{at}: {} not applied ({}; {how} applies it)",
                     e.name(),
                     e.kept()
-                )
+                ),
+                None => format!("{at}: {} not applied ({})", e.name(), e.kept()),
             })
             .collect()
     }
@@ -515,7 +517,11 @@ pub fn normalize(p: &str) -> String {
 fn dirname(p: &str) -> String {
     let t = p.trim_end_matches('/');
     if t.is_empty() {
-        return if p.starts_with('/') { "/".into() } else { ".".into() };
+        return if p.starts_with('/') {
+            "/".into()
+        } else {
+            ".".into()
+        };
     }
     match t.rfind('/') {
         Some(i) => {
@@ -559,6 +565,39 @@ pub fn absolute_elements(value: &str, cwd: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(":")
+}
+
+/// An element of a search path, for a host without kpathsea (Shelf's,
+/// the browser's): a folder, its subfolders too after a trailing `//`;
+/// or the host's own search (an empty element: kpathsea's default path).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Element {
+    Dir { path: String, sub: bool },
+    Default,
+}
+
+/// The elements of search path `value` (`:` or `;` between them, `!!`
+/// dropped: there is no `ls-R` to keep to). A path with no empty element
+/// has no default search, as in kpathsea.
+pub fn elements(value: &str) -> Vec<Element> {
+    value
+        .split([':', ';'])
+        .map(|e| {
+            let e = e.strip_prefix("!!").unwrap_or(e);
+            if e.is_empty() {
+                return Element::Default;
+            }
+            let dir = e.trim_end_matches('/');
+            Element::Dir {
+                path: if dir.is_empty() {
+                    "/".into()
+                } else {
+                    dir.into()
+                },
+                sub: e.ends_with("//"),
+            }
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------
@@ -791,9 +830,7 @@ impl Reader<'_> {
                 }
                 p.end()?;
                 if name != "default_files" {
-                    return Err(format!(
-                        "`@{name}` not applied: phitex has no such setting"
-                    ));
+                    return Err(format!("`@{name}` not applied: phitex has no such setting"));
                 }
                 let mut files = self
                     .rc
@@ -817,9 +854,7 @@ impl Reader<'_> {
                 let list = p.list()?;
                 p.end()?;
                 if name != "default_files" {
-                    return Err(format!(
-                        "`@{name}` not applied: phitex has no such setting"
-                    ));
+                    return Err(format!("`@{name}` not applied: phitex has no such setting"));
                 }
                 self.rc.default_files = Some((list, at.clone()));
                 Ok(())
@@ -1292,11 +1327,7 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
         }
         if ch == '\'' || ch == '"' {
             let (v, k) = quoted(&c, i + 1, ch)?;
-            t.push(Tok::Str(if ch == '"' {
-                format!("\u{1}{v}")
-            } else {
-                v
-            }));
+            t.push(Tok::Str(if ch == '"' { format!("\u{1}{v}") } else { v }));
             i = k;
             continue;
         }
@@ -1704,7 +1735,9 @@ impl Parser<'_, '_, '_> {
                 match m.as_str() {
                     "catfile" | "catdir" | "join" => Ok(Some(parts.join("/"))),
                     "rel2abs" => Ok(Some(join(&cwd, parts.first().map_or("", |s| s)))),
-                    _ => Err(format!("File::Spec->{m}: a method PhiTeX does not evaluate")),
+                    _ => Err(format!(
+                        "File::Spec->{m}: a method PhiTeX does not evaluate"
+                    )),
                 }
             }
             "catfile" | "catdir" => {
