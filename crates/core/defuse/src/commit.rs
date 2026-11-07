@@ -2688,6 +2688,7 @@ fn walk_here(
         if let Some(e) = inner.defs.get_mut(&f).and_then(|m| m.get_mut(&p)) {
             e.value = nv;
         }
+        eng.node(d.by).restated.fetch_add(1, Ordering::AcqRel);
         eng.bump(f);
         st.relative_resolved += 1;
         by = d.by;
@@ -2735,6 +2736,7 @@ pub(crate) fn settle_rel(eng: &Engine, f: Field, by: NodeId, c: Rel) -> bool {
                 if e.value != nv {
                     e.value = nv;
                     changed = true;
+                    n.restated.fetch_add(1, Ordering::AcqRel);
                     eng.bump(f);
                 }
             }
@@ -3858,6 +3860,7 @@ pub(crate) fn learn_shape(eng: &Engine, w: Option<&Worker>, op: OpId, f: Field, 
                         if let Some(e) = m.get_mut(&dp) {
                             e.value = nv;
                         }
+                        eng.node(d.by).restated.fetch_add(1, Ordering::AcqRel);
                         eng.bump(f);
                         st.relative_resolved += 1;
                         to_walk.push((sid, d.by));

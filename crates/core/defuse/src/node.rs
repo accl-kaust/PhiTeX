@@ -153,9 +153,14 @@ pub(crate) struct Node {
     /// to run again (`sched::frontier_restore`).
     pub(crate) back_frontier: Mx<Option<(u64, u64, u64)>>,
     /// Its re-asks for fields changed by commits still going on: the
-    /// committing node, that commit's run serial and the field
-    /// (`sched::asked_before`).
-    pub(crate) asks: Mx<Vec<(NodeId, u32, Field)>>,
+    /// committing node, that commit's run serial, the node's `restated`
+    /// then and the field (`sched::asked_before`).
+    pub(crate) asks: Mx<Vec<(NodeId, u32, u32, Field)>>,
+    /// Counts the times a value it filed was put right in place after it
+    /// was filed (a relation counted again from its input,
+    /// `commit::settle_rel`, `commit::walk_here`): a re-ask for its change
+    /// made before carried the older value (`sched::asked_before`).
+    pub(crate) restated: AtomicU32,
     /// Placed as its placer's continuation (`Ctx::follow`,
     /// `Ctx::follow_after`), not as its child: a node placed after the
     /// placer and its children goes before it.
@@ -274,6 +279,7 @@ impl Node {
             held_frontier: AtomicBool::new(false),
             back_frontier: Mx::new(None),
             asks: Mx::new(Vec::new()),
+            restated: AtomicU32::new(0),
             follows: AtomicBool::new(false),
             anchor: AtomicU64::new(0),
             state_stale: AtomicBool::new(false),
