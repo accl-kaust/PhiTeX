@@ -253,6 +253,66 @@ fn hash_segs(segs: &[Seg]) -> u64 {
     h.finish()
 }
 
+/// Where the body's text starts in its file (its first line's origin's
+/// file and the byte at its column), when not at the file's start: the
+/// child's text gives its lines' places from there (one past it), so an
+/// edit before the picture that moves it leaves the child's arguments
+/// as they were and it runs no more (a typed word before a picture in
+/// its paragraph ran it again: its lines' bytes in the document moved).
+/// Its diagnostics' places are the file's again in the parent,
+/// [`rebase_diags`].
+fn pic_base(body: &Body) -> Option<(ValueId, i64)> {
+    let (name, at, l) = body.segs.iter().find_map(|s| match s {
+        Seg::Line(l) => l.origin.map(|(n, at, _)| (n, at, l)),
+        _ => None,
+    })?;
+    let at = i64::try_from(at + l.loc.min(l.buf.len())).ok()?;
+    (at > 0).then_some((name, at))
+}
+
+/// A line's frame ([`crate::pages::line_frame`]: `["s", text, state,
+/// -2, flags, file, at, ..]`) with its place `at` from `base`'s (one
+/// past it: a place 0 is a file's first line's, [`Run::xe_decode_top`]).
+fn rebase_frame(v: &phitex_defuse::Values, f: ValueId, base: Option<(ValueId, i64)>) -> ValueId {
+    let Some((name, base)) = base else {
+        return f;
+    };
+    let mut xs = list_of(v, f);
+    if xs.len() > 6 && xs[5] == name {
+        let at = int_of(v, xs[6]);
+        if at >= base {
+            xs[6] = v.int(at - base + 1);
+            return v.list(xs);
+        }
+    }
+    f
+}
+
+/// The child's diagnostics (`diags`' sequence of `[kind, message, file,
+/// at, ..]`, [`Run::diag_at`]) with the places in its body's text the
+/// file's again ([`rebase_frame`] undone).
+fn rebase_diags(v: &phitex_defuse::Values, x: ValueId, base: Option<(ValueId, i64)>) -> ValueId {
+    let Some((name, base)) = base else {
+        return x;
+    };
+    let es = v.seq_to_vec(x);
+    if es.is_empty() {
+        return x;
+    }
+    let mut out = ValueId::NIL;
+    for e in es {
+        let mut xs = list_of(v, e);
+        let e = if xs.len() > 3 && xs[2] == name && int_of(v, xs[3]) >= 1 {
+            xs[3] = v.int(int_of(v, xs[3]) + base - 1);
+            v.list(xs)
+        } else {
+            e
+        };
+        out = v.seq_concat(out, e);
+    }
+    out
+}
+
 fn some(x: ValueId) -> Option<ValueId> {
     (x != ValueId::UNIT).then_some(x)
 }
@@ -601,7 +661,9 @@ impl Run<'_, '_> {
                     x.extend(here.iter().copied());
                     frames.push(v.list(x));
                 }
-                Seg::Line(l) => frames.extend(crate::pages::line_frame(v, l)),
+                Seg::Line(l) => frames.extend(
+                    crate::pages::line_frame(v, l).map(|f| rebase_frame(v, f, pic_base(body))),
+                ),
                 Seg::File(_) => {}
             }
         }
@@ -727,8 +789,16 @@ impl Run<'_, '_> {
         // (what the child contributed, the parent's where the picture
         // stands: its log lines among the parent's, its font markers and
         // writes before the parent's later ones; the lines it began)
+        // (its diagnostics' places in the body's text made the file's
+        // again, [`pic_base`])
+        let diags = v.field("diags");
         for e in list_of(v, a(17)) {
             if let [f, x] = list_of(v, e)[..] {
+                let x = if Field(f) == diags {
+                    rebase_diags(v, x, pic_base(body))
+                } else {
+                    x
+                };
                 self.contribs.push((Field(f), x));
             }
         }
@@ -1386,6 +1456,37 @@ impl Operation for Pic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_diagnostics_place_in_a_body_is_the_files_again() {
+        let v = phitex_defuse::Values::new();
+        let (doc, other) = (v.str("doc"), v.str("other"));
+        let base = Some((doc, 100));
+        let frame = |f, at| {
+            v.list(vec![
+                v.str("s"),
+                v.str("x"),
+                v.int(0),
+                v.int(-2),
+                v.int(1),
+                f,
+                v.int(at),
+            ])
+        };
+        // (the body's lines from one past its start; another file's as they are)
+        let at = |f| int_of(&v, list_of(&v, f)[6]);
+        assert_eq!(at(rebase_frame(&v, frame(doc, 100), base)), 1);
+        assert_eq!(at(rebase_frame(&v, frame(doc, 140), base)), 41);
+        assert_eq!(at(rebase_frame(&v, frame(other, 140), base)), 140);
+        let diag = |f, at| v.list(vec![v.int(0), v.str("m"), f, v.int(at), v.int(7)]);
+        let ds = v.seq_concat(v.seq_unit(diag(doc, 41)), diag(other, 5));
+        let back: Vec<i64> = v
+            .seq_to_vec(rebase_diags(&v, ds, base))
+            .into_iter()
+            .map(|e| int_of(&v, list_of(&v, e)[3]))
+            .collect();
+        assert_eq!(back, [140, 5]);
+    }
 
     #[test]
     fn the_name_and_the_end_are_found_in_characters() {

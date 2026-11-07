@@ -1180,10 +1180,9 @@ fn latex_a_rerun_costs_no_more_than_its_first_run() {
 
 /// Pictures in a paragraph are children of its run, after characters
 /// and after a display too (the frontends' document: its picture ran
-/// again at every word edit of its paragraph): a word edit on another
-/// line of the paragraph runs no picture again, and the PDF is a cold
-/// build's. (A word edit on the picture's own line runs it again: the
-/// line's text before the picture is in the child's text.)
+/// again at every word edit of its paragraph): a word edit before them,
+/// on their own line too (a typed word moves their bytes in the file),
+/// runs no picture again, and the PDF is a cold build's.
 #[test]
 fn latex_pictures_in_a_paragraph_are_children() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-par-pics");
@@ -1195,6 +1194,7 @@ fn latex_pictures_in_a_paragraph_are_children() {
     let cold_pics = common::runs_of(&b, "pic");
     for (k, (a, z)) in [
         ("Some words", "Some other words"),
+        ("More words", "More of the words"),
         ("most edits", "many edits"),
     ]
     .into_iter()
