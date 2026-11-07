@@ -434,15 +434,20 @@ impl Run<'_, '_> {
         Ok(true)
     }
 
-    /// Whether the picture's `\begin{name}` ends its line's text here and
-    /// its body is in the siblings' text not claimed yet: the node's
-    /// text read to its end, one line on the input.
+    /// Whether the picture's `\begin{name}` may have its body in the
+    /// siblings' text not claimed yet: one line on the input, the node's
+    /// text after it lines only (the end not among them, [`Run::pic_find`]).
     fn pic_reads_on(&self) -> bool {
         let [top] = self.input.levels[..] else {
             return false;
         };
         top.kind == kind::LINE
-            && self.input.text_at >= self.input.text.len()
+            && self
+                .input
+                .text
+                .iter()
+                .skip(self.input.text_at)
+                .all(|s| matches!(s, Seg::Line(_)))
             && name_in_chars(&self.input.line(top).buf, self.input.line(top).loc).is_some()
     }
 
