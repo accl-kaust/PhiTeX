@@ -2938,11 +2938,14 @@ function glyphs(box, dark) {
 .phx-gl .cap .what { font-size: 5.2cqw; text-shadow: 0 0 1.2cqw ${dark ? PAPER.dark : "#fff"}, 0 0 .4cqw ${dark ? PAPER.dark : "#fff"}; }
 .phx-gl .cap .det { font-size: 2.7cqw; color: ${mute}; margin-top: 1cqw; min-height: 1.3em; }
 .phx-gl .cap .hint { font-size: 2.6cqw; font-style: italic; color: ${mute}; margin-top: 5cqw; line-height: 1.4; }
-.phx-gl .shelf { position: absolute; left: 8%; right: 8%; bottom: 9%; display: flex; flex-wrap: wrap-reverse; justify-content: center; align-content: flex-start; gap: .8cqw 1.4cqw; padding-bottom: 1.4cqw; border-bottom: .5cqw solid ${dark ? "#4a4e57" : "#c9ced8"}; transition: opacity .25s; }
-.phx-gl .shelf .more { font: 2.4cqw/1.4 "DM Mono", ui-monospace, monospace; padding: .2cqw 1.2cqw; color: ${mute}; animation: none !important; }
-.phx-gl .shelf span { font: 2.4cqw/1.4 "DM Mono", ui-monospace, monospace; padding: .2cqw 1.2cqw; border-radius: .6cqw; color: #fff; animation: phx-gl-land .7s cubic-bezier(.5,0,.7,.4) both, phx-gl-bounce .35s cubic-bezier(.3,1.8,.5,1) .7s; }
-@keyframes phx-gl-land { from { transform: translateY(-110cqw) rotate(var(--r)); } to { transform: translateY(0) rotate(0); } }
+.phx-gl .shelf { position: absolute; left: 8%; right: 8%; bottom: 9%; height: 3.8cqw; border-bottom: .5cqw solid ${dark ? "#4a4e57" : "#c9ced8"}; padding-bottom: 1.4cqw; box-sizing: content-box; transition: opacity .25s; }
+.phx-gl .shelf span { position: absolute; bottom: 1.4cqw; white-space: nowrap; font: 2.4cqw/1.4 "DM Mono", ui-monospace, monospace; padding: .2cqw 1.2cqw; border-radius: .6cqw; color: #fff; transition: left .32s cubic-bezier(.3,.7,.3,1) .2s; }
+.phx-gl .shelf span.in { animation: phx-gl-land .52s cubic-bezier(.5,0,.8,.45) both, phx-gl-bounce .32s cubic-bezier(.3,1.8,.5,1) .52s; }
+.phx-gl .shelf span.gone { animation: phx-gl-drop 1s cubic-bezier(.5,0,1,.6) .2s forwards; }
+.phx-gl .shelf .more { left: 0; color: ${mute}; padding-left: 0; }
+@keyframes phx-gl-land { from { transform: translateY(-110cqw) rotate(var(--r)); } to { transform: none; } }
 @keyframes phx-gl-bounce { 0% { transform: scaleY(.7) translateY(.6cqw); } 100% { transform: none; } }
+@keyframes phx-gl-drop { 0% { transform: none; } 14% { transform: translate(-.6cqw, -.8cqw) rotate(-10deg); } 85% { opacity: 1; } to { transform: translate(-4cqw, 24cqw) rotate(-40deg); opacity: 0; } }
 .phx-gl.out .cap, .phx-gl.out .shelf { opacity: 0; }`,
     `<canvas></canvas><div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div><div class="shelf"></div>`
   );
@@ -3007,23 +3010,46 @@ function glyphs(box, dark) {
     $(".what").textContent = what;
     $(".det").textContent = pct !== void 0 ? detail.split(" \xB7 ").slice(1).join(" \xB7 ") : detail;
     const pkg = pct !== void 0 ? detail.split(" \xB7 ")[0] : "";
-    if (pkg && !seen.has(pkg)) {
-      seen.add(pkg);
-      const w = document.createElement("span");
-      w.textContent = pkg;
-      w.style.background = [INK.light, ...RIBBON][seen.size % 5];
-      w.style.setProperty("--r", `${(Math.random() - 0.5) * 40}deg`);
-      const shelf = $(".shelf");
-      shelf.append(w);
-      const names = shelf.querySelectorAll("span:not(.more)");
-      if (names.length > 12) {
-        names[0].remove();
-        let more = shelf.querySelector(".more");
-        if (!more) more = document.createElement("span"), more.className = "more", shelf.prepend(more);
-        more.textContent = `+${seen.size - 12}`;
+    if (pkg && !seen.has(pkg)) seen.add(pkg), pending = pkg;
+  };
+  let pending = null, shown = 0;
+  const row = [];
+  const shelf = $(".shelf");
+  const more = document.createElement("span");
+  more.className = "more";
+  shelf.append(more);
+  const place4 = () => {
+    const W3 = shelf.clientWidth, gap = box.clientWidth * 0.014, from2 = (more.textContent ? more.offsetWidth : 0) + gap;
+    let x = W3;
+    for (let i = row.length - 1; i >= 0; i--) {
+      x -= row[i].offsetWidth;
+      if (x < from2) {
+        for (const e of row.splice(0, i + 1)) e.classList.add("gone"), setTimeout(() => e.remove(), 1300);
+        break;
       }
+      row[i].style.left = `${x}px`;
+      x -= gap;
     }
   };
+  const land = () => {
+    if (!pending) return;
+    const pkg = pending;
+    pending = null;
+    shown++;
+    const w = document.createElement("span");
+    w.textContent = pkg;
+    w.style.background = [INK.light, ...RIBBON][shown % 5];
+    w.style.setProperty("--r", `${(Math.random() - 0.5) * 40}deg`);
+    w.style.transition = "none";
+    shelf.append(w);
+    w.style.left = `${shelf.clientWidth - w.offsetWidth}px`;
+    w.classList.add("in");
+    row.push(w);
+    place4();
+    more.textContent = seen.size > row.length ? `+${seen.size - row.length}` : "";
+    requestAnimationFrame(() => w.style.transition = "");
+  };
+  const lander = window.setInterval(land, 400);
   const hint = (text) => $(".hint").textContent = `Did you know? ${text}`;
   return ending(el, () => {
     out = performance.now() - t0;
@@ -3031,7 +3057,7 @@ function glyphs(box, dark) {
     gs.forEach((g) => (g.tx = W2 * (0.115 + 0.77 * Math.random()), g.ty = H2 * 0.2 + Math.round(Math.random() * H2 * 0.65 / lh) * lh));
     el.classList.add("out");
     return 620;
-  }, stopLoop, { step, hint });
+  }, () => (stopLoop(), clearInterval(lander)), { step, hint });
 }
 
 // viewer/src/openings/kaust.ts
