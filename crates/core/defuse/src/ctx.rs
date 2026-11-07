@@ -1998,6 +1998,19 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// The value my last run defined `f` with, if it did (not a read: what
+    /// my own last run left, a peek).
+    #[must_use]
+    pub fn last_def(&self, f: Field) -> Option<ValueId> {
+        self.last
+            .as_ref()?
+            .defs
+            .iter()
+            .rev()
+            .find(|d| d.f == f && d.rel.is_none())
+            .map(|d| d.value)
+    }
+
     /// `PHITEX_RESUME_CHECK`: the fields my last run defined.
     pub fn last_def_fields(&self) -> Vec<Field> {
         self.last

@@ -401,6 +401,10 @@ impl Run<'_, '_> {
         let k = self.pic_mark_k(hash);
         let field = v.field(&format!("pic:{hash:x}:{k}"));
         let locals = self.pic_locals();
+        // (the parent's view the child has run on: this run's, where my
+        // last run gave the child the same one; another, and the child's
+        // output is of another state than this one)
+        let view_held = self.cx.last_def(field) == Some(locals);
         self.cx.define_with(field, locals, Locality::Global);
         let frames = self.pic_frames(&body);
         let params = self.pic_params();
@@ -412,7 +416,26 @@ impl Run<'_, '_> {
         ];
         let i = self.cx.child_once(self.ops.pic, args);
         self.muts += 1;
-        let Some(x) = self.cx.placed_output_peek(i) else {
+        // (a child whose view moved since its output: the picture read
+        // here, inline, as TeX reads it, its output not read now; the child
+        // runs on the view this run gave it, and the runs after take its
+        // output. Taken, the pictures after it were given a state made with
+        // that old output, their children ran again on it, and the run went
+        // again for each one's new output, one picture a pass: lie-hasse's
+        // page of diagrams after a page's routine moved TikZ's counter,
+        // a 45 s piece run once per picture, past 3000 s cold, accl 26269)
+        let peeked = self.cx.placed_output_peek(i);
+        if peeked.is_some() && !view_held {
+            self.muts += 1;
+            if trace() {
+                eprintln!(
+                    "pic: node {node} {} {hash:x}: its view moved, inline",
+                    body.name
+                );
+            }
+            return Ok(false);
+        }
+        let Some(x) = peeked else {
             // (no output yet: the run goes on on the output of the
             // picture its last run placed here, an edited picture's old
             // one, and the child's commit asks it again where its own
