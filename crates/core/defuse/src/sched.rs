@@ -205,6 +205,9 @@ pub(crate) struct Pool {
 #[derive(Default)]
 pub(crate) struct WorkerLog {
     pub(crate) runs_by_op: FxHashMap<OpId, u64>,
+    /// The nodes whose run stood (`Ctx::last_run_stands`): counted as
+    /// runs, nothing of their operation ran.
+    pub(crate) stood: Vec<NodeId>,
     /// Nodes the commits' placements made, by operation.
     pub(crate) placed_by_op: FxHashMap<OpId, u64>,
     /// Placements relocated instead of remade (`commit::relocate`), and
@@ -2455,6 +2458,9 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     {
         let mut log = w.log.lock();
         *log.runs_by_op.entry(node.op()).or_default() += 1;
+        if stands.is_some() {
+            log.stood.push(node.id);
+        }
         if crate::obs::enabled() {
             log.run_times.push((n, Duration::from_nanos(run_ns)));
         }
@@ -2550,7 +2556,11 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             // (commits under way at once, `Report::commits_at_once`)
             let at_once = eng.committing.fetch_add(1, Ordering::Relaxed) + 1;
             eng.commit_peak.fetch_max(at_once, Ordering::Relaxed);
-            let st = commit(eng, w, node, product);
+            let st = match product.stood.clone() {
+                Some(r) => crate::commit::commit_stood(eng, w, node, &r, product.scope_gen),
+                None => None,
+            }
+            .unwrap_or_else(|| commit(eng, w, node, product));
             eng.committing.fetch_sub(1, Ordering::Relaxed);
             // (the store past the collection's mark: the workers called to
             // its barrier as their runs end)

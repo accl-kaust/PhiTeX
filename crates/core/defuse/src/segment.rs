@@ -15,7 +15,7 @@ use crate::index::RangeKey;
 use crate::lock::Lock;
 use crate::node::State;
 use crate::order::{Pos, SEG_CAP, SegId};
-use crate::values::{Field, FxHashMap, ValueId};
+use crate::values::{Field, FxHashMap, FxHashSet, ValueId};
 
 pub(crate) struct Segment {
     pub(crate) id: SegId,
@@ -503,7 +503,7 @@ pub(crate) struct Made {
     ix_rooms: [Vec<crate::index::MadeRoom>; 3],
     by_op: Option<FxHashMap<OpId, Vec<NodeId>>>,
     op_lists: Vec<(OpId, Vec<NodeId>)>,
-    anchored: Vec<(NodeId, Vec<Field>)>,
+    anchored: Vec<(NodeId, FxHashSet<Field>)>,
     brackets: Vec<(Pos, (NodeId, Brackets))>,
     nodes: Vec<(Pos, NodeId)>,
     defs: Option<FxHashMap<Field, PosMap<Def>>>,
@@ -636,7 +636,11 @@ impl Grow {
                 m
             }),
             op_lists: self.op_lists.iter().map(|&(o, n)| (o, Vec::with_capacity(n))).collect(),
-            anchored: self.anchored.iter().map(|&(a, n)| (a, Vec::with_capacity(n))).collect(),
+            anchored: self
+                .anchored
+                .iter()
+                .map(|&(a, n)| (a, FxHashSet::with_capacity_and_hasher(n, Default::default())))
+                .collect(),
             defs: (self.defs > 0).then(|| touched_map(self.defs)),
             contribs: (self.contribs > 0).then(|| touched_map(self.contribs)),
             readers: (self.readers > 0).then(|| touched_map(self.readers)),
@@ -680,7 +684,7 @@ impl Made {
         for (a, list) in &mut self.anchored {
             let mut v = eng.node(*a).anchored.lock();
             if list.capacity() > v.len() {
-                list.append(&mut v);
+                list.extend(v.drain());
                 std::mem::swap(&mut *v, list);
             }
         }

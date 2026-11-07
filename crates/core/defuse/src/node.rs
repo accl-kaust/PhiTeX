@@ -229,7 +229,9 @@ pub(crate) struct Node {
     /// The fields other nodes' reads anchored at it read (`At::Before`,
     /// `At::AfterOwn`): its removal looks for those readers in its
     /// segment, under those fields alone.
-    pub(crate) anchored: Mx<Vec<Field>>,
+    /// A set: a picture's run files 144 000 reads at its parent, of
+    /// thousands of fields, each looked up here.
+    pub(crate) anchored: Mx<crate::values::FxHashSet<Field>>,
     /// Relocated since its last commit (`commit::relocate`): its next
     /// commit checks its placements where it stands now, though its run
     /// published nothing new (`Ctx::unchanged`).
@@ -295,7 +297,7 @@ impl Node {
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             bracket_gen: AtomicU64::new(0),
-            anchored: Mx::new(Vec::new()),
+            anchored: Mx::new(crate::values::FxHashSet::default()),
             moved: AtomicBool::new(false),
             claim_all: AtomicBool::new(false),
             id,
@@ -716,4 +718,7 @@ pub(crate) struct Product {
     /// `Ctx::set_frontier`: the settling layer's frontier this run moves
     /// (`Some(None)`: none, every reader free).
     pub(crate) frontier: Option<Option<NodeId>>,
+    /// `Ctx::last_run_stands`: the last run's record, every read of which
+    /// still holds; nothing ran ([`crate::commit::commit_stood`]).
+    pub(crate) stood: Option<Arc<RunRecord>>,
 }

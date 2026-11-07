@@ -2924,7 +2924,10 @@ impl Run<'_, '_> {
         // Grail's first page's routine, 3.8 s of hyperxmp, ran again for
         // each line deleted above it, accl 23788)
         let op = self.cx.op();
-        let piece = op == self.ops.exec || op == self.ops.resume || op == self.ops.finish;
+        let piece = op == self.ops.exec
+            || op == self.ops.resume
+            || op == self.ops.finish
+            || op == self.ops.pic;
         // (a number read into the log stands: the log is the run's
         // output, and a number taken back there is the one a run read
         // before the lines ahead of it were in, `D=1` for line 6 at -j8)
@@ -3073,6 +3076,47 @@ impl Run<'_, '_> {
             self.dline_reads.push(f);
         }
         self.note_lines_read();
+        // (observe, `PHITEX_DLINE_TRACE`: who reads a piece's line number)
+        if crate::exec::obs_flag!("PHITEX_DLINE_TRACE") {
+            let v = self.v;
+            let mut ctx = Vec::new();
+            for l in self.input.levels.iter().rev().take(8) {
+                if l.kind == crate::input::kind::TOKS {
+                    let toks: Vec<String> = self
+                        .input
+                        .arena
+                        .get(l.rest())
+                        .iter()
+                        .take(10)
+                        .map(|t| v.render(t.encode(v)))
+                        .collect();
+                    ctx.push(format!("t{}:{}", l.ty, toks.join(" ")));
+                } else {
+                    ctx.push(format!("k{}", l.kind));
+                }
+            }
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let frames: Vec<&str> = bt
+                .lines()
+                .map(str::trim)
+                .filter(|l| {
+                    l.split(':')
+                        .next()
+                        .is_some_and(|n| n.parse::<u32>().is_ok())
+                })
+                .skip(1)
+                .take(14)
+                .collect();
+            eprintln!(
+                "dline-trace: node {} op {:?} cur {} sink {:?} | {} | bt {}",
+                self.cx.node().raw(),
+                self.cx.op(),
+                v.render(self.cur.tok.encode(v)),
+                self.lt.sink,
+                ctx.join(" | "),
+                frames.join(" < ")
+            );
+        }
         Ok(Some(int_of(self.v, x) + i64::from(own.1)))
     }
 
@@ -3088,6 +3132,19 @@ impl Run<'_, '_> {
         m: crate::run::LineMark,
         marks: &mut Vec<i64>,
     ) -> R<String> {
+        // (a written line read back as its reader would, `Run::interpret_line`:
+        // an error's text there goes nowhere, and its line is read by no one;
+        // read, every page's finisher that wrote an `\indexentry` line ran
+        // again for each line inserted above its page, circuitikz)
+        if self.interp.is_some() {
+            return Ok("0".to_owned());
+        }
+        // (no file on the input stack: TeX's `line`, a finisher's the line its
+        // page fired at, `Run::fire_line`, marked as a piece's line is)
+        let m = match (m, self.fire_line) {
+            ((Some(0), 0, None, None), Some(fire)) if self.file_line_here().is_none() => fire,
+            _ => m,
+        };
         if let (None, _, Some(_), Some(own)) = m {
             let f = crate::run::dline_field(self.v, own.0);
             let given = self.cx.env(f)?.is_some();

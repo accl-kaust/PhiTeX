@@ -413,10 +413,19 @@ impl Run<'_, '_> {
         let i = self.cx.child_once(self.ops.pic, args);
         self.muts += 1;
         let Some(x) = self.cx.placed_output_peek(i) else {
-            // (no output yet: the run goes on as if the picture were
-            // empty, and the child's commit asks it again; its picture
-            // runs once, in the child, on another thread where one is
-            // free)
+            // (no output yet: the run goes on on the output of the
+            // picture its last run placed here, an edited picture's old
+            // one, and the child's commit asks it again where its own
+            // differs: the fonts, names and appends the picture made stand
+            // meanwhile, where empty they went and every later reader of
+            // them was asked again, then again when the child had run
+            // (Grail's changed drawing: 198 paragraphs checked, the first
+            // load of an 8 pt font gone for that while))
+            if self.pic_guess(i, &body) {
+                return Ok(true);
+            }
+            // (none: as if the picture were empty; its picture runs once,
+            // in the child, on another thread where one is free)
             self.cx.placed_output_or(i, ValueId::UNIT);
             self.pic_skip(&body.skip);
             self.muts += 1;
@@ -450,6 +459,30 @@ impl Run<'_, '_> {
             );
         }
         Ok(true)
+    }
+
+    /// [`Run::pic_begin`] for a child that has not run: the output of the
+    /// picture this node's last run placed at index `i` applied as the
+    /// guess, where there is one the child did not refuse. Whether it was.
+    fn pic_guess(&mut self, i: usize, body: &Body) -> bool {
+        let v = self.v;
+        let Some(g) = self.cx.last_placed_output(i, self.ops.pic).filter(|&g| {
+            let gs = list_of(v, g);
+            g != ValueId::UNIT && gs.first().is_some_and(|&t| int_of(v, t) == 0)
+        }) else {
+            return false;
+        };
+        let x = self.cx.placed_output_or(i, g);
+        self.pic_apply(body, x);
+        if trace() {
+            eprintln!(
+                "pic: node {} {} {:x}: placed, no output yet, its last run's picture here taken",
+                self.cx.node().raw(),
+                body.name,
+                body.hash
+            );
+        }
+        true
     }
 
     /// `PHITEX_PIC_TRACE`: why a `\\begin` found no picture body here.
@@ -1184,6 +1217,11 @@ impl Run<'_, '_> {
             self.pic_refuse(&w);
         } else {
             self.pic_out = Some(self.pic_output());
+            // (the lines read into bodies nothing looked at and nothing
+            // after it sees, `\begin`'s `\@currenvline` closed by its
+            // `\end`: taken back, as a piece's are; read, every picture
+            // ran again for each line inserted above it)
+            self.settle_lines();
         }
         Ok(())
     }
