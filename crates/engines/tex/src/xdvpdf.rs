@@ -423,8 +423,10 @@ type PackedOne = (i32, Arc<[u8]>, Arc<[u8]>, u64);
 
 thread_local! {
     /// A live file's end compressing ([`live`]): a stream compressed at
-    /// any level will do, and one compressed here is not kept (its level
-    /// is not the exact file's).
+    /// any level will do; one compressed here is kept at its own level
+    /// (the fast one), which an exact file's link never takes, and the
+    /// next live link finds it (an edit's end compresses the last one's
+    /// object streams, mostly the same).
     static PACK_ANY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -435,6 +437,18 @@ fn packed() -> &'static Mutex<Packed> {
 
 /// The streams the memo keeps: smaller ones are compressed again.
 const PACKED_MIN: usize = 4096;
+
+/// A live link's ([`PACK_ANY`]): its end's object streams are small, each
+/// a few hundred objects, and compressed at every edit.
+const PACKED_MIN_LIVE: usize = 256;
+
+fn packed_min() -> usize {
+    if PACK_ANY.with(std::cell::Cell::get) {
+        PACKED_MIN_LIVE
+    } else {
+        PACKED_MIN
+    }
+}
 
 /// A link that compresses streams begins: what the last two did not use
 /// is dropped.
@@ -452,7 +466,7 @@ fn packed_next() {
 
 /// `data` compressed at `level`, from the memo if it has it.
 fn packed_get(level: i32, data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() < PACKED_MIN {
+    if data.len() < packed_min() {
         return None;
     }
     let h = phitex_defuse::hash_bytes(0, data);
@@ -474,7 +488,7 @@ fn packed_put(level: i32, data: &[u8], out: &[u8]) {
     let mut p = packed().locked();
     p.made.0 += 1;
     p.made.1 += data.len();
-    if data.len() < PACKED_MIN || PACK_ANY.with(std::cell::Cell::get) {
+    if data.len() < packed_min() {
         return;
     }
     let h = phitex_defuse::hash_bytes(0, data);
