@@ -72,7 +72,15 @@ mod mem;
 #[cfg(all(target_arch = "wasm32", feature = "memstats"))]
 #[global_allocator]
 static GLOBAL: mem::Counted = mem::Counted;
-#[cfg(target_arch = "wasm32")]
+// (natively too under test: its frames' tests run with the workspace's)
+#[cfg(any(target_arch = "wasm32", test))]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    allow(
+        dead_code,
+        reason = "the hook is the wasm core's; its frames tested natively"
+    )
+)]
 mod shell;
 #[cfg(target_arch = "wasm32")]
 mod store;
@@ -84,7 +92,7 @@ mod session;
 /// memory, a worker a thread). Without (wasm32-wasip1, Firefox: no shared
 /// memory for an extension) the document has no session thread: the host
 /// steps it (`ph_step`), and answers every ask inside its call.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 pub const THREADED: bool = cfg!(target_feature = "atomics");
 
 // (natively an empty program: the crate is the wasm32 core, built by
