@@ -511,9 +511,49 @@ pub(crate) struct RunRecord {
     /// the node, whatever their output (`Ctx::placed_output_wait`). Not
     /// reads: nothing checks them, no run keeps them.
     pub(crate) waits: Box<[usize]>,
+    /// The engine's scope generation before its first read (a run that
+    /// kept reads of the one before, that one's when older): while it
+    /// stands, a read of a field whose change count is the one it read
+    /// at gives what it gave ([`RunRecord::read_holds`]).
+    pub(crate) scope_gen: u64,
 }
 
 impl RunRecord {
+    /// Whether its read `rd` still gives what it gave: unchecked where
+    /// nothing of its field changed since it read (the field's change
+    /// count as it was, no scope moved, not a contribution's search,
+    /// which a commit with none moves uncounted), as a commit's check
+    /// takes its reads (`commit::commit`'s refutation); else asked
+    /// (`read::holds`). A picture's child holds up to 144 000 reads:
+    /// asked one by one, a check that found them all standing cost
+    /// 70-140 ms (Grail, a deleted paragraph: 0.46 s of it).
+    pub(crate) fn read_holds(
+        &self,
+        eng: &crate::Engine,
+        me: &Node,
+        rd: &ReadRec,
+        scope_moved: bool,
+        memo: &mut crate::read::FoldMemo,
+    ) -> bool {
+        if !scope_moved
+            && rd.epoch != u64::MAX
+            && !matches!(
+                rd.kind,
+                ReadKind::Next { .. } | ReadKind::Placed { .. } | ReadKind::Hole
+            )
+            && rd.kind.field().is_some_and(|f| eng.field_epoch(f) == rd.epoch)
+        {
+            return true;
+        }
+        crate::read::holds(eng, me, rd, memo)
+    }
+
+    /// Whether the scope generation moved since its reads were made
+    /// ([`RunRecord::read_holds`]'s `scope_moved`).
+    pub(crate) fn scope_moved(&self, eng: &crate::Engine) -> bool {
+        crate::read::scoped(eng) && eng.scope_gen.load(std::sync::atomic::Ordering::Acquire) != self.scope_gen
+    }
+
     pub(crate) fn provisional(defs: Vec<DefRec>) -> RunRecord {
         RunRecord {
             serial: 0,
@@ -529,6 +569,7 @@ impl RunRecord {
             effect: Effect::None,
             provisional: true,
             waits: Box::default(),
+            scope_gen: 0,
         }
     }
 }

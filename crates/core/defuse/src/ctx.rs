@@ -38,6 +38,9 @@ pub struct Ctx<'a> {
     pub(crate) views: Vec<ViewRec>,
     /// Its last record, for `placed_output`.
     pub(crate) last: Option<Arc<RunRecord>>,
+    /// The index of that record's first read that moved, once found
+    /// ([`Ctx::last_reads_hold`]).
+    first_moved: std::cell::Cell<Option<usize>>,
     /// The change count the read in hand loaded ([`ReadRec::epoch`]).
     pub(crate) ep: u64,
     /// The last sibling `following` found, to go on from.
@@ -142,6 +145,7 @@ impl<'a> Ctx<'a> {
             woke_merged: me.woke_merged.swap(false, std::sync::atomic::Ordering::SeqCst),
             placed_keys: None,
             last: me.run_record(),
+            first_moved: std::cell::Cell::new(None),
             stuck: None,
             wait_on: None,
             wait_frontier: false,
@@ -1805,14 +1809,31 @@ impl<'a> Ctx<'a> {
         let Some(r) = self.last.as_ref().filter(|r| !r.provisional) else {
             return false;
         };
-        if k > r.reads.len() {
-            return false;
+        k <= r.reads.len() && k <= self.last_first_moved(r)
+    }
+
+    /// The index of my last run's first read that no longer gives what
+    /// it gave (a placement's output and a hole never do), its count of
+    /// reads if none: found once a run ([`Ctx::last_reads_hold`] for
+    /// each checkpoint a run asked again tries, from its last back,
+    /// asked each read before them again: a picture's 260 checkpoints
+    /// past a moved read 20 000 reads in).
+    fn last_first_moved(&self, r: &RunRecord) -> usize {
+        if let Some(k) = self.first_moved.get() {
+            return k;
         }
+        let moved = r.scope_moved(self.eng);
         let mut memo = crate::read::FoldMemo::new();
-        r.reads[..k].iter().all(|rd| {
-            !matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
-                && crate::read::holds(self.eng, self.me, rd, &mut memo)
-        })
+        let k = r
+            .reads
+            .iter()
+            .position(|rd| {
+                matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
+                    || !r.read_holds(self.eng, self.me, rd, moved, &mut memo)
+            })
+            .unwrap_or(r.reads.len());
+        self.first_moved.set(Some(k));
+        k
     }
 
     /// A run woken for a read that moved finds every read of my last run
@@ -1860,10 +1881,11 @@ impl<'a> Ctx<'a> {
             .as_ref()
             .filter(|r| !r.provisional && (r.state.is_none() || self.me.parked_on.lock().is_none()))?;
         let mut memo = crate::read::FoldMemo::new();
+        let moved = r.scope_moved(self.eng);
         if let Some(i) = r
             .reads
             .iter()
-            .position(|rd| !crate::read::holds(self.eng, self.me, rd, &mut memo))
+            .position(|rd| !r.read_holds(self.eng, self.me, rd, moved, &mut memo))
         {
             // (`PHITEX_STANDS_TRACE`, profile: the first read of the last
             // run that moved, with what it saw and what it would see now)
@@ -1906,10 +1928,11 @@ impl<'a> Ctx<'a> {
         let Some(tail) = r.reads.get(m..) else {
             return false;
         };
+        let moved = r.scope_moved(self.eng);
         let mut memo = crate::read::FoldMemo::new();
         tail.iter().all(|rd| {
             !matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
-                && crate::read::holds(self.eng, self.me, rd, &mut memo)
+                && r.read_holds(self.eng, self.me, rd, moved, &mut memo)
         })
     }
 

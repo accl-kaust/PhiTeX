@@ -1130,6 +1130,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         provisional: false,
         state: p.state,
         waits: std::mem::take(&mut p.waits).into_boxed_slice(),
+        // (its reads kept from the run before were made under that run's)
+        scope_gen: match node.record() {
+            Some(r) if p.unchanged || p.resumed.get() => p.scope_gen.min(r.scope_gen),
+            _ => p.scope_gen,
+        },
     });
     let mut spare_readers: Vec<Reader> = Vec::with_capacity(4);
     let fields_of = |r: &Option<Arc<RunRecord>>| -> (Vec<Field>, Vec<Field>) {
@@ -4812,6 +4817,7 @@ pub(crate) fn edit_placed(eng: &Engine, placer: NodeId, f: impl FnOnce(&mut Vec<
         provisional: r.provisional,
         state: r.state,
         waits: r.waits.clone(),
+        scope_gen: r.scope_gen,
     }));
 }
 
