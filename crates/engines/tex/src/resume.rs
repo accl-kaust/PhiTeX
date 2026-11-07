@@ -1533,6 +1533,10 @@ impl Run<'_, '_> {
         // (a resume's segments' file lines, as its continuation gave
         // them: the checkpoint's continuation holds those of its rest)
         let lines = std::mem::take(&mut self.cont_lines);
+        // (the checkpoint's nest is the whole nest: a picture's child
+        // pushed its base level before it went on from one, which stayed
+        // under the restored levels, its items left out of its output)
+        self.nest.clear();
         self.cont_load(c[6], ValueId::UNIT)?;
         self.st.with_base(v, base);
         if let Some(&ls) = c.get(15) {
