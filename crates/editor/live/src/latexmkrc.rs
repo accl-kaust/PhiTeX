@@ -160,22 +160,21 @@ pub struct Where {
 pub fn order(w: &Where) -> Vec<Vec<String>> {
     let mut levels = Vec::new();
     if w.system_and_user {
-        match &w.latexmkrcsys {
-            Some(f) => levels.push(vec![f.clone()]),
-            None => {
-                let mut sys = Vec::new();
-                for name in ["LatexMk", "latexmkrc"] {
-                    for d in [
-                        "/etc",
-                        "/opt/local/share/latexmk",
-                        "/usr/local/share/latexmk",
-                        "/usr/local/lib/latexmk",
-                    ] {
-                        sys.push(format!("{d}/{name}"));
-                    }
+        if let Some(f) = &w.latexmkrcsys {
+            levels.push(vec![f.clone()]);
+        } else {
+            let mut sys = Vec::new();
+            for name in ["LatexMk", "latexmkrc"] {
+                for d in [
+                    "/etc",
+                    "/opt/local/share/latexmk",
+                    "/usr/local/share/latexmk",
+                    "/usr/local/lib/latexmk",
+                ] {
+                    sys.push(format!("{d}/{name}"));
                 }
-                levels.push(sys);
             }
+            levels.push(sys);
         }
         if let Some(home) = w.home.as_deref().filter(|h| !h.is_empty()) {
             let xdg = match &w.xdg_config_home {
@@ -818,9 +817,8 @@ impl Reader<'_> {
             Tok::Word(w) if w == "push" || w == "unshift" => {
                 p.i = 1;
                 let parens = p.eat("(");
-                let name = match p.next() {
-                    Some(Tok::Array(n)) => n,
-                    _ => return Err(not_understood()),
+                let Some(Tok::Array(name)) = p.next() else {
+                    return Err(not_understood());
                 };
                 if !p.eat(",") {
                     return Err(not_understood());
@@ -1191,7 +1189,7 @@ fn statements(text: &str) -> Vec<(usize, Stmt)> {
                         || head.split_whitespace().next() == Some("sub"))
                     && !head.ends_with("->");
                 if block {
-                    let head_s = head.to_owned();
+                    let head_s = head.trim().to_owned();
                     let mut d = 1;
                     i += 1;
                     while i < c.len() && d > 0 {
@@ -1250,10 +1248,10 @@ fn statements(text: &str) -> Vec<(usize, Stmt)> {
         // (`else`/`elsif` after a block: part of it)
         if braced && cur.trim().is_empty() && ch.is_alphabetic() {
             let rest: String = c[i..c.len().min(i + 5)].iter().collect();
-            if rest.starts_with("else") {
-                if let Some((_, Stmt::Block(h))) = out.last_mut() {
-                    h.push_str(" ...");
-                }
+            if rest.starts_with("else")
+                && let Some((_, Stmt::Block(h))) = out.last_mut()
+            {
+                h.push_str(" ...");
             }
         }
         cur.push(ch);
@@ -1727,9 +1725,8 @@ impl Parser<'_, '_, '_> {
                 Ok(Some(cwd))
             }
             "File::Spec" if self.eat("->") => {
-                let m = match self.next() {
-                    Some(Tok::Word(m)) => m,
-                    _ => return Err("File::Spec-> without a method".into()),
+                let Some(Tok::Word(m)) = self.next() else {
+                    return Err("File::Spec-> without a method".into());
                 };
                 let args = self.call_args()?;
                 let parts: Vec<String> = args.into_iter().map(Option::unwrap_or_default).collect();

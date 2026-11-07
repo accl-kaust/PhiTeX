@@ -392,7 +392,7 @@ fn commands_read() {
     assert_eq!(c.program, "pdflatex");
     assert_eq!(c.shell_escape, Some(true));
     assert_eq!(c.synctex, Some(true));
-    assert!(c.others.is_empty());
+    assert_eq!(c.others, Vec::<String>::new());
     let c = command("pdflatex -jobname=x -enable-write18 %O %S");
     assert_eq!(c.others, vec!["-jobname=x", "-enable-write18"]);
 }
