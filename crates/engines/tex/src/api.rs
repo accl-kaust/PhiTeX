@@ -8693,7 +8693,7 @@ impl Build {
             // (whose text the line is, [`crate::run::DiagPlace`]: a run
             // reads on into the next node's or piece's lines, which move
             // with that one, not with the running node)
-            let owner = xs
+            let whose = xs
                 .get(8)
                 .filter(|&&o| o != ValueId::UNIT)
                 .map(|&o| u64::from_ne_bytes(int_of(v, o).to_ne_bytes()));
@@ -8707,7 +8707,7 @@ impl Build {
                 // text node was sliced, moved by as much as an edit since
                 // moved that node (a node an edit left keeps its text, and
                 // the positions in it, [`apply_text`])
-                let node = owner
+                let node = whose
                     .filter(|&o| {
                         self.g
                             .eng
@@ -8790,7 +8790,7 @@ impl Build {
                     phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(int(4).to_ne_bytes()));
                 // (the piece whose frames the line is of: its move, none
                 // where it has not moved since it was made)
-                let shift = match owner {
+                let shift = match whose {
                     Some(o) => doc_shifts
                         .values()
                         .find(|(fs, _)| fs.raw() == o)
