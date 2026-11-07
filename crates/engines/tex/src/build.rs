@@ -2802,7 +2802,12 @@ impl Run<'_, '_> {
                 }
                 self.flush_chars(md.lid, &mut out, std::mem::take(&mut raws));
                 self.chars_eff = SF_UNREAD;
+                // (a picture's `\begin` comes back unexpanded and ends the
+                // run of characters: the command loop places it as a
+                // child, or expands it as this would have, `crate::pic`)
+                self.pic_stop = true;
                 self.get_x_token();
+                self.pic_stop = false;
                 self.ck()?;
             }
             if !matches!(

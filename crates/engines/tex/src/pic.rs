@@ -255,6 +255,66 @@ fn hash_segs(segs: &[Seg]) -> u64 {
     h.finish()
 }
 
+/// Where the body's text starts in its file (its first line's origin's
+/// file and the byte at its column), when not at the file's start: the
+/// child's text gives its lines' places from there (one past it), so an
+/// edit before the picture that moves it leaves the child's arguments
+/// as they were and it runs no more (a typed word before a picture in
+/// its paragraph ran it again: its lines' bytes in the document moved).
+/// Its diagnostics' places are the file's again in the parent,
+/// [`rebase_diags`].
+fn pic_base(body: &Body) -> Option<(ValueId, i64)> {
+    let (name, at, l) = body.segs.iter().find_map(|s| match s {
+        Seg::Line(l) => l.origin.map(|(n, at, _)| (n, at, l)),
+        _ => None,
+    })?;
+    let at = i64::try_from(at + l.loc.min(l.buf.len())).ok()?;
+    (at > 0).then_some((name, at))
+}
+
+/// A line's frame ([`crate::pages::line_frame`]: `["s", text, state,
+/// -2, flags, file, at, ..]`) with its place `at` from `base`'s (one
+/// past it: a place 0 is a file's first line's, [`Run::xe_decode_top`]).
+fn rebase_frame(v: &phitex_defuse::Values, f: ValueId, base: Option<(ValueId, i64)>) -> ValueId {
+    let Some((name, base)) = base else {
+        return f;
+    };
+    let mut xs = list_of(v, f);
+    if xs.len() > 6 && xs[5] == name {
+        let at = int_of(v, xs[6]);
+        if at >= base {
+            xs[6] = v.int(at - base + 1);
+            return v.list(xs);
+        }
+    }
+    f
+}
+
+/// The child's diagnostics (`diags`' sequence of `[kind, message, file,
+/// at, ..]`, [`Run::diag_at`]) with the places in its body's text the
+/// file's again ([`rebase_frame`] undone).
+fn rebase_diags(v: &phitex_defuse::Values, x: ValueId, base: Option<(ValueId, i64)>) -> ValueId {
+    let Some((name, base)) = base else {
+        return x;
+    };
+    let es = v.seq_to_vec(x);
+    if es.is_empty() {
+        return x;
+    }
+    let mut out = ValueId::NIL;
+    for e in es {
+        let mut xs = list_of(v, e);
+        let e = if xs.len() > 3 && xs[2] == name && int_of(v, xs[3]) >= 1 {
+            xs[3] = v.int(int_of(v, xs[3]) + base - 1);
+            v.list(xs)
+        } else {
+            e
+        };
+        out = v.seq_concat(out, e);
+    }
+    out
+}
+
 fn some(x: ValueId) -> Option<ValueId> {
     (x != ValueId::UNIT).then_some(x)
 }
@@ -273,7 +333,15 @@ impl Run<'_, '_> {
     /// (true), or the run goes on inline (false: no picture here, a
     /// first run, a picture refused before, or no output yet; the child
     /// placed where it was not before).
-    pub(crate) fn pic_begin(&mut self) -> bool {
+    /// Whether `cur` is a picture's `\begin` this run places as a child
+    /// ([`Run::pic_begin`] says whether it does).
+    pub(crate) fn pic_here(&self) -> bool {
+        self.pic_on
+            && (crate::val::cmd::CALL..=crate::val::cmd::LONG_OUTER_CALL).contains(&self.cur.cmd)
+            && self.cur.tok == begin_tok()
+    }
+
+    pub(crate) fn pic_begin(&mut self) -> R<bool> {
         // (a list of the run's own to put the picture's items on: on the
         // engine's main list they are contributions, `Run::pic_shape`)
         if self.interp.is_some()
@@ -281,10 +349,40 @@ impl Run<'_, '_> {
             || self.mode_zero
             || !self.nest.iter().any(|l| l.owns)
         {
-            return false;
+            if trace() {
+                eprintln!(
+                    "pic: node {} at \\begin: not here (interp {}, skip {}, mode zero {}, a list of its own {})",
+                    self.cx.node().raw(),
+                    self.interp.is_some(),
+                    self.in_skip,
+                    self.mode_zero,
+                    self.nest.iter().any(|l| l.owns)
+                );
+            }
+            return Ok(false);
         }
-        let Some(body) = self.pic_find() else {
-            return false;
+        // (the `\begin` read from a token list it was put back in, a run
+        // of characters' next command: the list it emptied gone, the
+        // body read from the input below it)
+        self.input.pop_spent();
+        // (a body running on into the siblings' text (a paragraph that
+        // goes on past a display, the picture's text a slice of its own):
+        // their text claimed now, as reading the picture inline would
+        // claim it at once)
+        let mut found = self.pic_find();
+        let mut pulls = 0;
+        while found.is_none() && pulls < 64 && self.pic_reads_on() {
+            if !self.pull()? {
+                break;
+            }
+            pulls += 1;
+            found = self.pic_find();
+        }
+        let Some(body) = found else {
+            if trace() {
+                self.pic_no_body_trace();
+            }
+            return Ok(false);
         };
         let hash = body.hash;
         let node = self.cx.node().raw();
@@ -295,7 +393,7 @@ impl Run<'_, '_> {
                     body.name
                 );
             }
-            return false;
+            return Ok(false);
         }
         let v = self.v;
         // (the field's name: the body's text and its place among this
@@ -328,7 +426,7 @@ impl Run<'_, '_> {
                     body.name
                 );
             }
-            return true;
+            return Ok(true);
         };
         let xs = list_of(v, x);
         if x == ValueId::UNIT || xs.first().is_none_or(|&t| int_of(v, t) != 0) {
@@ -340,7 +438,7 @@ impl Run<'_, '_> {
                     xs.get(1).map(|&w| v.render(w)).unwrap_or_default()
                 );
             }
-            return false;
+            return Ok(false);
         }
         let x = self.cx.placed_output_or(i, ValueId::UNIT);
         self.pic_apply(&body, x);
@@ -351,7 +449,73 @@ impl Run<'_, '_> {
                 xs.get(1).map_or(0, |&l| list_of(v, l).len())
             );
         }
-        true
+        Ok(true)
+    }
+
+    /// `PHITEX_PIC_TRACE`: why a `\\begin` found no picture body here.
+    fn pic_no_body_trace(&self) {
+        let top = self.input.levels.last().map(|l| l.kind);
+        let here: String = self
+            .input
+            .levels
+            .last()
+            .filter(|l| l.kind == kind::LINE)
+            .map(|&l| {
+                let ln = self.input.line(l);
+                ln.buf
+                    .iter()
+                    .skip(ln.loc)
+                    .take(30)
+                    .filter_map(|&c| char::from_u32(c))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let segs: Vec<String> = self
+            .input
+            .text
+            .iter()
+            .skip(self.input.text_at)
+            .take(4)
+            .map(|s| match s {
+                Seg::Line(l) => format!(
+                    "line {:?}",
+                    l.buf
+                        .iter()
+                        .take(24)
+                        .filter_map(|&c| char::from_u32(c))
+                        .collect::<String>()
+                ),
+                Seg::Toks(t) => format!("toks {}", t.len()),
+                Seg::File(_) => "file".to_owned(),
+            })
+            .collect();
+        eprintln!(
+            "pic: node {} at \\begin: no picture body found (input top {top:?}, levels {}, next {here:?}, text after {segs:?}, pulled {}, rescanned {})",
+            self.cx.node().raw(),
+            self.input.levels.len(),
+            self.pulled,
+            self.input
+                .levels
+                .last()
+                .is_some_and(|&l| l.kind == kind::LINE && self.input.line(l).rescanned)
+        );
+    }
+
+    /// Whether the picture's `\begin{name}` may have its body in the
+    /// siblings' text not claimed yet: one line on the input, the node's
+    /// text after it lines only (the end not among them, [`Run::pic_find`]).
+    fn pic_reads_on(&self) -> bool {
+        let [top] = self.input.levels[..] else {
+            return false;
+        };
+        top.kind == kind::LINE
+            && self
+                .input
+                .text
+                .iter()
+                .skip(self.input.text_at)
+                .all(|s| matches!(s, Seg::Line(_)))
+            && name_in_chars(&self.input.line(top).buf, self.input.line(top).loc).is_some()
     }
 
     /// The ordinal of a picture of text `hash` among this run's.
@@ -499,7 +663,9 @@ impl Run<'_, '_> {
                     x.extend(here.iter().copied());
                     frames.push(v.list(x));
                 }
-                Seg::Line(l) => frames.extend(crate::pages::line_frame(v, l)),
+                Seg::Line(l) => frames.extend(
+                    crate::pages::line_frame(v, l).map(|f| rebase_frame(v, f, pic_base(body))),
+                ),
                 Seg::File(_) => {}
             }
         }
@@ -625,8 +791,16 @@ impl Run<'_, '_> {
         // (what the child contributed, the parent's where the picture
         // stands: its log lines among the parent's, its font markers and
         // writes before the parent's later ones; the lines it began)
+        // (its diagnostics' places in the body's text made the file's
+        // again, [`pic_base`])
+        let diags = v.field("diags");
         for e in list_of(v, a(17)) {
             if let [f, x] = list_of(v, e)[..] {
+                let x = if Field(f) == diags {
+                    rebase_diags(v, x, pic_base(body))
+                } else {
+                    x
+                };
                 self.contribs.push((Field(f), x));
             }
         }
@@ -1290,6 +1464,37 @@ impl Operation for Pic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_diagnostics_place_in_a_body_is_the_files_again() {
+        let v = phitex_defuse::Values::new();
+        let (doc, other) = (v.str("doc"), v.str("other"));
+        let base = Some((doc, 100));
+        let frame = |f, at| {
+            v.list(vec![
+                v.str("s"),
+                v.str("x"),
+                v.int(0),
+                v.int(-2),
+                v.int(1),
+                f,
+                v.int(at),
+            ])
+        };
+        // (the body's lines from one past its start; another file's as they are)
+        let at = |f| int_of(&v, list_of(&v, f)[6]);
+        assert_eq!(at(rebase_frame(&v, frame(doc, 100), base)), 1);
+        assert_eq!(at(rebase_frame(&v, frame(doc, 140), base)), 41);
+        assert_eq!(at(rebase_frame(&v, frame(other, 140), base)), 140);
+        let diag = |f, at| v.list(vec![v.int(0), v.str("m"), f, v.int(at), v.int(7)]);
+        let ds = v.seq_concat(v.seq_unit(diag(doc, 41)), diag(other, 5));
+        let back: Vec<i64> = v
+            .seq_to_vec(rebase_diags(&v, ds, base))
+            .into_iter()
+            .map(|e| int_of(&v, list_of(&v, e)[3]))
+            .collect();
+        assert_eq!(back, [140, 5]);
+    }
 
     #[test]
     fn the_name_and_the_end_are_found_in_characters() {
