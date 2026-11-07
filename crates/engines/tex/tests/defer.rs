@@ -355,7 +355,7 @@ fn a_symbol_read_by_another_run_is_of_the_same_register() {
     }
 }
 
-/// A counter that only counts (docs/note-relative-counters.md §2.1): each
+/// A counter that only counts (docs/spec-relative-counters.md §2.1): each
 /// paragraph steps it and carries its value, plus the steps it made, into
 /// a macro and a deferred `\write` without reading it; a step added before
 /// them moves the values in the file and in the last paragraph, which
@@ -405,6 +405,146 @@ fn a_counter_only_stepped_and_carried_is_no_read() {
                 + b.stats.refuted_by_op("resume", "count:200")
                 <= 1,
             "-j{threads}: only the paragraph typesetting it reads it: {:?}",
+            b.stats.refuted_by_field
+        );
+    }
+}
+
+/// A counter saved after a piece stepped it and set back to that saved
+/// value later in the piece (beamer's `\beamer@savecounter` and
+/// `\beamer@restorecounter` at every overlay of a frame: `\xdef\saved
+/// {\the\c@figure}`, then `\global\c@figure=\saved`) is the value
+/// reaching the piece plus its steps, a step again: no paragraph reads the
+/// counter, and a step added before them all asks none of them again.
+/// Without it each paragraph's set defined the counter by value, which the
+/// next one read: a chain through the document (beamer's delete-section
+/// edit, 14 frames one after another).
+#[test]
+fn a_counter_set_back_to_its_value_after_steps_is_a_step() {
+    let src = |extra: &str| {
+        let mut s = String::from("\\openout1=\\jobname.out\n\\count200=5\n");
+        s.push_str(extra);
+        for i in 0..80 {
+            let _ = write!(
+                s,
+                "\\global\\advance\\count200 1 \\xdef\\saved{{\\the\\count200}}\\global\\advance\\count200 7 \\global\\count200=\\saved\\relax \
+                 \\edef\\w{{\\write1{{n{i}=\\the\\count200.}}}}\\w \
+                 Paragraph {i} of the document, long enough to make a line or two when set in the \
+                 plain format's ten point roman.\n\n"
+            );
+        }
+        s.push_str("\\closeout1\n\\bye\n");
+        s
+    };
+    for threads in [1, 8] {
+        let dir = common::scratch(&format!("defer-restore-plus-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let first = src("");
+        let mut b = common::build(opts, Some(&common::plain()), &first);
+        let (want, out) = cold("restore-plus", &first, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: cold");
+        assert!(out.contains("n0=6.") && out.contains("n79=85."), "{out:?}");
+        let edited = src("\\global\\advance\\count200 1\n");
+        common::rebuild(&mut b, &edited);
+        let (want, out) = cold("restore-plus-edited", &edited, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: edited equals cold");
+        assert!(out.contains("n0=7.") && out.contains("n79=86."), "{out:?}");
+        let got: String = b
+            .writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(got, out, "-j{threads}: the file follows");
+        assert_eq!(
+            b.stats.refuted_by_op("exec", "count:200")
+                + b.stats.refuted_by_op("resume", "count:200"),
+            0,
+            "-j{threads}: no paragraph reads the counter: {:?}",
+            b.stats.refuted_by_field
+        );
+    }
+}
+
+/// A piece's `\immediate\write` of a counter it only steps (biblatex's
+/// citation order in the `.bcf`, `\blx@bibreq`) neither forces nor reads
+/// it: the line keeps the symbol, resolved where the file's text is read
+/// (the files node, the file read back at the next pass, the build's
+/// written files), docs/spec-relative-counters.md §2.7. A step added
+/// before them leaves the paragraphs standing, and the file, the text
+/// read back from it and the PDF are those of a cold build. A line whose
+/// read-back defines (`\def\v<i>{<n>}`) keeps its digits forced.
+#[test]
+fn an_immediate_write_of_a_stepped_counter_is_resolved_where_the_file_is_read() {
+    let src = |extra: &str| {
+        let mut s = String::from(
+            "\\count200=5\n\\openin2=d.out \\ifeof2 \\closein2 \\else\\closein2 Read back: \\input d.out \\par\\fi\n\
+             \\immediate\\openout1=d.out\n",
+        );
+        s.push_str(extra);
+        for i in 0..40 {
+            let def = if i % 10 == 3 {
+                format!("\\immediate\\write1{{\\string\\def\\string\\v{i}{{\\the\\count200}}}}")
+            } else {
+                String::new()
+            };
+            let _ = write!(
+                s,
+                "\\global\\advance\\count200 1 \\immediate\\write1{{n{i}=\\the\\count200.}}{def} \
+                 Paragraph {i} of the document, long enough to make a line or two when set in the \
+                 plain format's ten point roman.\n\n"
+            );
+        }
+        s.push_str("\\immediate\\closeout1\n\\bye\n");
+        s
+    };
+    for threads in [1, 8] {
+        let dir = common::scratch(&format!("defer-immediate-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let first = src("");
+        let mut b = common::build(opts, Some(&common::plain()), &first);
+        let (want, out) = cold("immediate", &first, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: cold");
+        assert!(
+            out.contains("n0=6.") && out.contains("n39=45.") && out.contains("\\def\\v13{19}"),
+            "{out:?}"
+        );
+        let edited = src("\\global\\advance\\count200 1\n");
+        common::rebuild(&mut b, &edited);
+        let (want, out) = cold("immediate-edited", &edited, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: edited equals cold");
+        assert!(
+            out.contains("n0=7.") && out.contains("n39=46.") && out.contains("\\def\\v13{20}"),
+            "{out:?}"
+        );
+        let got: String = b
+            .writes()
+            .into_iter()
+            .filter(|(k, _)| *k == 1)
+            .map(|(_, t)| t)
+            .collect();
+        assert_eq!(got, out, "-j{threads}: the stream's lines");
+        let file = b
+            .files()
+            .into_iter()
+            .find(|(n, _)| n == "d.out")
+            .map(|(_, t)| t.replace('\n', ""));
+        assert_eq!(
+            file.as_deref(),
+            Some(out.as_str()),
+            "-j{threads}: the written file"
+        );
+        let forced = b.stats.refuted_by_op("exec", "count:200")
+            + b.stats.refuted_by_op("resume", "count:200");
+        assert!(
+            forced <= 4,
+            "-j{threads}: only the four paragraphs whose line defines read the counter: {:?}",
             b.stats.refuted_by_field
         );
     }
@@ -727,5 +867,132 @@ fn an_outer_macro_an_edit_makes_stops_a_later_scan() {
         assert!(forbidden(&b), "-j{threads}: the edit");
         common::rebuild(&mut b, &doc(""));
         assert!(!forbidden(&b), "-j{threads}: the revert");
+    }
+}
+
+/// The text of [`a_name_built_from_a_stepped_counter_reads_through_the_name`]
+/// (`lit`: each name's number written out, the oracle; the counter's
+/// value reaching paragraph i is 5 + shift + i).
+fn dname_text(extra: &str, lit: Option<i32>) -> String {
+    let mut s = String::from("\\openout1=\\jobname.out\n\\count200=5\n\\countdef\\cn=200\n");
+    // (pg@1 to pg@329 the same, pg@330 to pg@340 another, none past 350)
+    for n in 1..=350 {
+        let body = if (330..=340).contains(&n) {
+            "other"
+        } else {
+            "same"
+        };
+        let _ = writeln!(s, "\\expandafter\\def\\csname pg@{n}\\endcsname{{{body}}}%");
+    }
+    s.push_str(extra);
+    for i in 0..60 {
+        let (num, less) = match lit {
+            Some(sh) => {
+                let v = 5 + sh + i + 1;
+                (v.to_string(), (v - 1).to_string())
+            }
+            None => (
+                "\\number\\cn".to_owned(),
+                "\\number\\numexpr\\cn-1".to_owned(),
+            ),
+        };
+        let cmp = match lit {
+            Some(sh) => (5 + sh + i).to_string(),
+            None => "\\numexpr\\cn-1".to_owned(),
+        };
+        let own = if i == 30 {
+            format!("\\expandafter\\def\\csname pg@{num}\\endcsname{{own}}")
+        } else {
+            String::new()
+        };
+        let _ = write!(
+            s,
+            "\\global\\advance\\cn 1 \\edef\\w{{\\write1{{n{i}=\\the\\count200.}}}}\\w{{}}{own}\
+             Paragraph {i} \\ifcsname pg@{num}\\endcsname has\\else lacks\\fi{{}} \
+             \\expandafter\\ifx\\csname pg@{less}\\endcsname\\relax relax\\else set\\fi{{}} \
+             [\\csname pg@{num}\\endcsname] \
+             \\ifnum{cmp}>100 late\\else early\\fi{{}}, long enough to make a line \
+             or two when set in the plain format's ten point roman.\n\n"
+        );
+    }
+    s.push_str("\\closeout1\n\\bye\n");
+    s
+}
+
+/// A name built from a counter a piece only steps is a relative name
+/// (docs/spec-relative-counters.md §2.2): `\ifcsname`, `\ifx` of the
+/// `\csname`, the `\csname` expanded, `\numexpr` of the counter plus a
+/// constant inside the name and `\ifnum` of that against a constant read
+/// through the derived name and the comparison, not the counter's digits
+/// (biblatex's `\blx@iffirstonpage` in every citation). A step added
+/// before every paragraph whose new names hold what the old ones held
+/// asks none of them again; one that moves the names onto others gives
+/// what a cold build gives, a name a paragraph defines itself and one
+/// `\csname` makes `\relax` included.
+#[test]
+fn a_name_built_from_a_stepped_counter_reads_through_the_name() {
+    let text = dname_text;
+    let src = |extra: &str| text(extra, None);
+    let oracle = |name: &str, extra: &str, sh: i32| {
+        let (want, _) = cold(name, &text(extra, Some(sh)), 1);
+        want
+    };
+    for threads in [1, 8] {
+        let dir = common::scratch(&format!("defer-dname-{threads}"));
+        let opts = Options {
+            threads: Some(threads),
+            ..common::options("./d.tex", "d", "", &dir)
+        };
+        let first = src("");
+        let mut b = common::build(opts, Some(&common::plain()), &first);
+        let (want, out) = cold("dname", &first, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: cold");
+        assert_eq!(
+            want,
+            oracle("dname-lit", "", 0),
+            "cold equals the names written out"
+        );
+        let log = b.output().1;
+        assert!(
+            out.contains("n0=6.") && out.contains("n59=65."),
+            "{out:?}\n{}",
+            log.lines().rev().take(60).collect::<Vec<_>>().join("\n")
+        );
+        let asked = |b: &phitex_tex::Build| {
+            b.stats.refuted_by_op("exec", "count:200")
+                + b.stats.refuted_by_op("resume", "count:200")
+        };
+        // (every name one on, holding what the one before held)
+        let near = src("\\global\\advance\\count200 1\n");
+        let r0 = asked(&b);
+        common::rebuild(&mut b, &near);
+        let (want, out) = cold("dname-near", &near, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: one on equals cold");
+        assert!(out.contains("n0=7."), "{out:?}");
+        assert_eq!(
+            want,
+            oracle("dname-near-lit", "\\global\\advance\\count200 1\n", 1),
+            "one on: cold equals the names written out"
+        );
+        // (p30 defines a name of that shape: its digits read; p31, p32 asked once and stand, no run)
+        assert!(
+            asked(&b) <= r0 + 3,
+            "-j{threads}: no paragraph asked again on the counter when no name's meaning moved: {:?}",
+            b.stats.refuted_by_field
+        );
+        // (names onto others, undefined ones, the comparison's outcome)
+        let far = src("\\global\\advance\\count200 300\n");
+        common::rebuild(&mut b, &far);
+        let (want, out) = cold("dname-far", &far, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: moved equals cold");
+        assert!(out.contains("n0=306."), "{out:?}");
+        assert_eq!(
+            want,
+            oracle("dname-far-lit", "\\global\\advance\\count200 300\n", 300),
+            "moved: cold equals the names written out"
+        );
+        common::rebuild(&mut b, &first);
+        let (want, _) = cold("dname", &first, 1);
+        assert_eq!(b.output().0, want, "-j{threads}: reverted equals cold");
     }
 }

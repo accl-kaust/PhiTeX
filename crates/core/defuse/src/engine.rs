@@ -1141,6 +1141,14 @@ impl Engine {
         reaching_at(self, f, n, false)?.by
     }
 
+    /// The value of `f` reaching `n` (None: none, the environment's),
+    /// its alias definitions followed as a read before each alias's node
+    /// gives them; nothing recorded (a client's question after an
+    /// evaluation: the value a symbol of `f` as of `n` stands for).
+    pub fn value_reaching(&self, n: NodeId, f: Field) -> Option<ValueId> {
+        read::through_aliases(self, reaching_at(self, f, n, false)?.value)
+    }
+
     /// `n`'s own definition of `f`.
     pub fn def_value(&self, n: NodeId, f: Field) -> Option<ValueId> {
         let node = self.node(n);
@@ -1785,6 +1793,11 @@ impl Engine {
                 for d in &r.defs {
                     keep(d.f.0);
                     keep(d.value);
+                    // (an append's items: what the value is made from
+                    // where the list it grows moves)
+                    if let Some(crate::Rel::Append(x)) = d.rel {
+                        keep(x);
+                    }
                 }
                 for &(f, x) in &r.contribs {
                     keep(f.0);
@@ -1810,7 +1823,12 @@ impl Engine {
             let inner = self.seg(sid).inner.read();
             for (f, m) in &inner.defs {
                 keep(f.0);
-                m.values().for_each(|d| keep(d.value));
+                m.values().for_each(|d| {
+                    keep(d.value);
+                    if let Some(crate::Rel::Append(x)) = d.rel {
+                        keep(x);
+                    }
+                });
             }
             for (f, rs) in &inner.readers {
                 keep(f.0);

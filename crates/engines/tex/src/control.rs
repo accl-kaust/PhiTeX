@@ -76,7 +76,11 @@ impl Run<'_, '_> {
             }
             self.no_pull = true;
             self.cmd_fetch = true;
+            // (a derived name's symbol is expanded through its name,
+            // [`Run::d_ok`])
+            self.d_ok = true;
             let got = self.get_next();
+            self.d_ok = false;
             self.cmd_fetch = false;
             self.no_pull = false;
             // (the command loop's one check of the token path's halt)
@@ -2308,8 +2312,19 @@ impl Run<'_, '_> {
             self.log_marks = Some(Vec::new());
             self.marks_depth = self.xpand_depth + 1;
         }
+        // (a piece's line to a file: its relative symbols marked, not
+        // forced, resolved where the file's text is read,
+        // docs/spec-relative-counters.md §2.7)
+        let marked = (op == self.ops.exec || op == self.ops.resume)
+            && !to_log
+            && k != 18
+            && self.interp.is_none();
         let was = self.lines_sink_begin(Sink::Log);
-        let s = self.expand_late(body);
+        let s = if marked {
+            self.expand_late_marked(body)
+        } else {
+            self.expand_late(body)
+        };
         let hit = self.lines_sink_end(was);
         let marks = self.log_marks.take().unwrap_or_default();
         (self.log_marks, self.marks_depth) = outer;
@@ -2381,39 +2396,18 @@ impl Run<'_, '_> {
                 .get(&format!("write:{k}"))?
                 .and_then(|x| list_of(v, x).first().map(|&n| str_of(v, n)))
                 .unwrap_or_default();
-            let nl = i64::from(self.ipar(Par::newlinechar)?);
-            let mut line: String = s
-                .chars()
-                .map(|c| {
-                    if i64::from(u32::from(c)) == nl {
-                        '\n'
-                    } else {
-                        c
-                    }
-                })
-                .collect();
+            let mut line = String::with_capacity(s.len() + 1);
+            // (a symbol's mark kept as it is between the characters made
+            // the file's)
+            let mut rest = s.as_str();
+            while let Some(i) = rest.find(crate::defer::WSYM) {
+                let e = rest[i..].find('\u{3}').map_or(rest.len(), |e| i + e + 1);
+                line.push_str(&self.file_chars(&rest[..i])?);
+                line.push_str(&rest[i..e]);
+                rest = &rest[e..];
+            }
+            line.push_str(&self.file_chars(rest)?);
             line.push('\n');
-            // (XeTeX writes UTF-8, controls in `^^` form; the line read
-            // back here is those bytes read as XeTeX reads them)
-            // (pdfTeX under a TCX: each character its `xchr` byte where
-            // printable, else in `^^` form; the line read back through
-            // `xord`)
-            let line = if self.xe {
-                crate::xetex::file_text(&line)
-            } else if let Some(t) = self.tcx()? {
-                let mut out = String::with_capacity(line.len());
-                for c in s.chars() {
-                    if i64::from(u32::from(c)) == nl {
-                        out.push('\n');
-                    } else {
-                        t.print_file_char(&mut out, u32::from(c));
-                    }
-                }
-                out.push('\n');
-                out
-            } else {
-                line
-            };
             // a file whose read-back only defines: the definitions this
             // line's read-back makes go with it (`wdef:<field>`); a line
             // that does more (contributes, typesets, opens a scope) makes
@@ -2428,22 +2422,25 @@ impl Run<'_, '_> {
             let e = if per_field {
                 // (a text the stream's earlier lines left open goes on
                 // with this one: the file is read back whole)
-                let text = match self.take_wpending(k)? {
+                let mut text = match self.take_wpending(k)? {
                     Some(mut t) => {
                         t.push_str(&line);
                         t
                     }
                     None => line.clone(),
                 };
-                self.interp_point = self.read_point_of(&name)?;
-                let r = if self.xe {
-                    self.interpret_line(&crate::xetex::reread(&text))
-                } else if let Some(t) = self.tcx()? {
-                    self.interpret_line(&t.reread(&text))
-                } else {
-                    self.interpret_line(&text)
-                };
-                self.interp_point = None;
+                // (a line holding symbols read back with each as 0: one
+                // that does more than define makes the file read back as
+                // its text, whatever the digits, and keeps its marks; one
+                // whose read-back defines, or needs the next line, has
+                // its symbols forced, the digits then in its definitions)
+                let mut r = self.interpret_written(&name, &text, true);
+                if crate::defer::has_marks(&text) && !matches!(r, Ok(Some(_)) if !self.interp_plain)
+                {
+                    text = crate::defer::resolve_marked_run(self, &text)?;
+                    line = crate::defer::resolve_marked_run(self, &line)?;
+                    r = self.interpret_written(&name, &text, false);
+                }
                 let r = r?;
                 if crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
                     eprintln!(
@@ -2587,6 +2584,85 @@ impl Run<'_, '_> {
     /// `\@setckpt{...}{` over several lines), continued by its next line:
     /// TeX state (`write:pend:<k>`, global like the stream), so a line written
     /// in another node goes on with it; taken (cleared) here.
+    /// A written line (with the stream's pending text before it) read
+    /// back as the file's reader would, at the file's read-back point;
+    /// with `zero`, each symbol's mark in it read as the digit 0
+    /// ([`Run::write_out`]).
+    fn interpret_written(&mut self, name: &str, text: &str, zero: bool) -> R<Option<ValueId>> {
+        let zeroed;
+        let text = if zero && crate::defer::has_marks(text) {
+            zeroed = crate::defer::resolve_marked(text, |_| Ok::<i32, std::convert::Infallible>(0))
+                .unwrap_or_else(|e| match e {});
+            zeroed.as_str()
+        } else {
+            text
+        };
+        self.interp_point = self.read_point_of(name)?;
+        let r = if self.xe {
+            self.interpret_line(&crate::xetex::reread(text))
+        } else if let Some(t) = self.tcx()? {
+            self.interpret_line(&t.reread(text))
+        } else {
+            self.interpret_line(text)
+        };
+        self.interp_point = None;
+        r
+    }
+
+    /// The characters of `s` as a `\write` puts them in its file
+    /// (§1370: `print`, `\newlinechar` a line's end): XeTeX writes UTF-8,
+    /// controls in `^^` form (the line read back is those bytes read as
+    /// XeTeX reads them); pdfTeX under a TCX each character's `xchr` byte
+    /// where printable, else in `^^` form (read back through `xord`).
+    fn file_chars(&mut self, s: &str) -> R<String> {
+        let nl = i64::from(self.ipar(Par::newlinechar)?);
+        let line: String = s
+            .chars()
+            .map(|c| {
+                if i64::from(u32::from(c)) == nl {
+                    '\n'
+                } else {
+                    c
+                }
+            })
+            .collect();
+        Ok(if self.xe {
+            crate::xetex::file_text(&line)
+        } else if let Some(t) = self.tcx()? {
+            let mut out = String::with_capacity(line.len());
+            for c in s.chars() {
+                if i64::from(u32::from(c)) == nl {
+                    out.push('\n');
+                } else {
+                    t.print_file_char(&mut out, u32::from(c));
+                }
+            }
+            out
+        } else {
+            line
+        })
+    }
+
+    /// [`Run::expand_late`] for a piece's line to a file: each relative
+    /// symbol of an integer register in the expanded text is its mark
+    /// ([`crate::defer::wsym_mark`]), neither forced nor read; any other
+    /// symbol prints its digits as `show_toks_into` gives them.
+    pub(crate) fn expand_late_marked(&mut self, body: &[Tok]) -> R<String> {
+        let expanded = self.expand_late_toks(body)?;
+        let mut s = String::new();
+        let mut from = 0;
+        for (i, &t) in expanded.iter().enumerate() {
+            let Some(sym) = crate::defer::reg_sym(t) else {
+                continue;
+            };
+            self.show_toks_into(&mut s, &expanded[from..i])?;
+            s.push_str(&crate::defer::wsym_mark(sym));
+            from = i + 1;
+        }
+        self.show_toks_into(&mut s, &expanded[from..])?;
+        Ok(s)
+    }
+
     fn take_wpending(&mut self, k: i32) -> R<Option<String>> {
         let v = self.v;
         let f = format!("write:pend:{k}");
@@ -2776,12 +2852,21 @@ impl Run<'_, '_> {
             .find(|(n, _)| n == key)
             .map(|(_, t)| t)
             .unwrap_or_default();
+        let text = crate::defer::resolve_marked_run(self, &text)?;
         Ok(Some(v.list(vec![v.str(&format!("./{key}")), v.str(&text)])))
     }
 
     /// §1371: a token list expanded as `\write` expands it at
     /// `\shipout` (also `\pdfliteral shipout`), shown as a string.
     pub(crate) fn expand_late(&mut self, body: &[Tok]) -> R<String> {
+        let expanded = self.expand_late_toks(body)?;
+        let mut s = String::new();
+        self.show_toks_into(&mut s, &expanded)?;
+        Ok(s)
+    }
+
+    /// [`Run::expand_late`]'s expanded token list, before it is shown.
+    fn expand_late_toks(&mut self, body: &[Tok]) -> R<Vec<Tok>> {
         let mut toks = vec![Tok::ch(1, u32::from(b'{'))];
         toks.extend(body.iter().copied());
         toks.push(Tok::ch(2, u32::from(b'}')));
@@ -2794,9 +2879,7 @@ impl Run<'_, '_> {
         self.ck()?;
         self.get_token();
         self.ck()?;
-        let mut s = String::new();
-        self.show_toks_into(&mut s, &expanded)?;
-        Ok(s)
+        Ok(expanded)
     }
 
     /// A font loaded as `f` by the text (not by a page step's output

@@ -447,6 +447,16 @@ impl Host for ShelfHost {
         }
     }
 
+    /// A pack's file: its release's, the same for the session; the
+    /// project's: as on disk ([`crate::session::disk_stamp`]).
+    fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+        let s = path.to_string_lossy();
+        if s.starts_with(phitex_shelf::TL) {
+            return self.files.read(&s).is_some().then(|| b"shelf".to_vec());
+        }
+        crate::session::disk_stamp(path)
+    }
+
     fn same_file(&self, a: &str, b: &str) -> bool {
         match (Path::new(a).canonicalize(), Path::new(b).canonicalize()) {
             (Ok(x), Ok(y)) => x == y,

@@ -201,6 +201,8 @@ header:active { cursor: grabbing; }
   background: var(--ph-menu); border-bottom: 1px solid var(--ph-border); font-weight: 600; }
 .diag { display: block; padding: 9px 14px 10px; border-left: 3px solid var(--sev, var(--ph-fg2)); border-bottom: 1px solid var(--ph-border); }
 .diag[data-line] { cursor: pointer; } .diag[data-line]:hover { background: var(--ph-hover); }
+.diag.more { display: flex; gap: 8px; }
+.diag.more button { font: inherit; color: var(--ph-accent, inherit); background: none; border: 1px solid var(--ph-border); border-radius: 5px; padding: 2px 8px; cursor: pointer; }
 .diag.error { --sev: var(--ph-danger); } .diag.warning { --sev: var(--ph-warning); } .diag.info { --sev: var(--ph-info); }
 .diag .where { float: right; margin-left: 10px; color: var(--ph-link); font-size: 12px; }
 .diag .text { font-weight: 600; overflow-wrap: anywhere; }
@@ -280,6 +282,8 @@ header:active { cursor: grabbing; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
+/* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
+.slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
@@ -332,7 +336,7 @@ header:active { cursor: grabbing; }
 /* before any page: the first page's sheet, the opening playing on it, the step under it */
 .opening { position: absolute; z-index: 3; pointer-events: none; left: 0; top: 0; width: 0; height: 0;
   transition: left .3s ease, top .3s ease, width .3s ease, height .3s ease; }
-.opening .sheet { position: absolute; inset: 0; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+.opening .sheet { position: absolute; inset: 0; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); container-type: inline-size; }
 .opening.in .sheet { background: none; box-shadow: none; }
 .win.dark-pdf .opening .sheet, .win.docked.pdf-dark .opening .sheet { background: ${DARK_PAGE}; }
 .win.dark-pdf .opening.in .sheet, .win.docked.pdf-dark .opening.in .sheet { background: none; }
@@ -349,6 +353,8 @@ header:active { cursor: grabbing; }
 .win.dark-pdf .steps .what, .win.docked.pdf-dark .steps .what { color: #e4e6ea; }
 .win.dark-pdf .steps .track, .win.docked.pdf-dark .steps .track { background: #3d4047; }
 .opening.in .steps { opacity: 0; }
+/* (an opening that says the steps itself, the animation's own part) */
+.opening.owns .steps { display: none; }
 /* a card in place of the pages (a build that stopped, an engine to choose): plain */
 .empty { padding: 40px 16px; color: var(--ph-fg2); }
 .card { max-width: 420px; margin: 0 auto; padding: 16px 18px; text-align: left; background: var(--ph-menu); color: var(--ph-fg);

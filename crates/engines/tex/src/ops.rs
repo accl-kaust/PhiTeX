@@ -1164,6 +1164,12 @@ fn stream_of(
         .into_iter()
         .find(|(n, _)| n == name)
         .map(|(_, t)| t);
+    // (a piece's relative symbols in its lines, resolved here:
+    // docs/spec-relative-counters.md §2.7)
+    let text = match text {
+        Some(t) => Some(crate::defer::resolve_marked_cx(cx, &t)?),
+        None => None,
+    };
     let defs = crate::api::written_defs(v, Some(acc))
         .into_iter()
         .find(|(n, _)| n == name)

@@ -218,6 +218,13 @@ impl<'a> Ctx<'a> {
     /// (`view_field`, `view`) stay mine: a field the placer defines for
     /// me is read there, and so is my scope depth (`depth`). A node with
     /// no placer reads at its position.
+    /// The node my reads of reaching definitions are made before
+    /// ([`Ctx::read_before_placer`]): my placer, if I read before it.
+    #[must_use]
+    pub fn reads_before(&self) -> Option<NodeId> {
+        self.before_placer
+    }
+
     pub fn read_before_placer(&mut self) {
         self.before_placer = self.me.parent;
     }
@@ -488,12 +495,19 @@ impl<'a> Ctx<'a> {
     /// ([`Ctx::define_alias`]).
     fn follow_aliases(&mut self, mut x: Option<ValueId>) -> Result<Option<ValueId>, Stop> {
         for _ in 0..32 {
-            let Some((g, at)) = x.and_then(|y| read::alias_of(self.values(), y)) else {
+            let Some((g, at, c)) = x.and_then(|y| read::alias_parts(self.values(), y)) else {
                 return Ok(x);
             };
-            x = match self.read_at_raw(g, At::Before(at))? {
+            let y = match self.read_at_raw(g, At::Before(at))? {
                 FieldAt::Def(y, _) => Some(y),
                 FieldAt::Unset | FieldAt::Gone => None,
+            };
+            // (an alias plus an offset, a relation on an alias: the
+            // target's integer plus it; an alias of one, the offset carried)
+            let v = self.values();
+            x = match y.and_then(|z| read::alias_parts(v, z)) {
+                Some((h, hat, k)) => Some(read::alias_value_plus(v, h, hat, k.wrapping_add(c))),
+                None => read::alias_target_plus(v, y, c),
             };
         }
         Ok(x)
@@ -1764,11 +1778,30 @@ impl<'a> Ctx<'a> {
             .as_ref()
             .filter(|r| !r.provisional && (r.state.is_none() || self.me.parked_on.lock().is_none()))?;
         let mut memo = crate::read::FoldMemo::new();
-        if !r
+        if let Some(i) = r
             .reads
             .iter()
-            .all(|rd| crate::read::holds(self.eng, self.me, rd, &mut memo))
+            .position(|rd| !crate::read::holds(self.eng, self.me, rd, &mut memo))
         {
+            // (`PHITEX_STANDS_TRACE`, profile: the first read of the last
+            // run that moved, with what it saw and what it would see now)
+            if crate::obs::enabled() && std::env::var_os("PHITEX_STANDS_TRACE").is_some() {
+                let rd = &r.reads[i];
+                let v = &self.eng.values;
+                let now = crate::read::answer_in(self.eng, self.me, &rd.kind, rd.path, &mut memo);
+                let show =
+                    |x: Option<ValueId>| x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(200).collect());
+                eprintln!(
+                    "stands: node {} woken by {:?} runs: read {i} of {}: {} {:?} seen {} now {}",
+                    self.me.id.raw(),
+                    self.woke,
+                    r.reads.len(),
+                    rd.kind.field().map(|f| v.render(f.0)).unwrap_or_default(),
+                    rd.kind,
+                    show(rd.seen),
+                    show(now)
+                );
+            }
             return None;
         }
         let output = r.output;

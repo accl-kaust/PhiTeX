@@ -313,6 +313,19 @@ impl Entry {
         }
     }
 
+    /// An alias definition's value as it is (an offset with it kept),
+    /// known as one ([`ALIAS`]).
+    pub(crate) fn alias_raw(x: ValueId) -> Entry {
+        Entry {
+            kind: K_RAW,
+            flags: HAS_ID | ALIAS,
+            cmd: 0,
+            chr: 0,
+            payload: 0,
+            id: Some(x),
+        }
+    }
+
     /// An entry holding engine value `x` as it is, an alias definition's
     /// value known as one ([`ALIAS`]).
     pub(crate) fn raw_seen(v: &Values, x: Option<ValueId>) -> Entry {
@@ -1396,12 +1409,18 @@ impl State {
 
     /// The field and piece of the alias definition `loc` holds, if it
     /// holds one unresolved ([`Entry::alias`]).
-    pub(crate) fn alias_at(&self, loc: Loc, v: &Values) -> Option<(Field, phitex_defuse::NodeId)> {
+    /// With the integer the alias adds to that value (a relation the
+    /// engine stacked on an alias, `phitex_defuse::alias_parts`).
+    pub(crate) fn alias_at(
+        &self,
+        loc: Loc,
+        v: &Values,
+    ) -> Option<(Field, phitex_defuse::NodeId, i64)> {
         let s = self.slot_ref(loc)?;
         if s.e.flags & ALIAS == 0 {
             return None;
         }
-        phitex_defuse::alias_of(v, s.e.id?)
+        phitex_defuse::alias_parts(v, s.e.id?)
     }
 
     /// `loc`'s alias definition resolved to `x` where the run uses it
@@ -1557,6 +1576,19 @@ impl State {
             return;
         }
         self.slot(loc).sym = true;
+    }
+
+    /// The locations the run defined, from its `from`th on, and how many
+    /// it defined (a checkpoint's undo may have taken some back since a
+    /// caller looked: then fewer), with the bindings a continuation
+    /// brought where `from` is 0 ([`crate::defer::binds_like`]).
+    pub(crate) fn defined_locs_from(&self, from: usize) -> (Vec<Loc>, usize) {
+        let n = self.metas.len();
+        let mut ls: Vec<Loc> = self.metas[from.min(n)..].iter().map(|m| m.loc).collect();
+        if from == 0 {
+            ls.extend_from_slice(&self.cont_locs);
+        }
+        (ls, n)
     }
 
     /// The steps the run holds of register `loc`, unread: what a symbol
@@ -2144,6 +2176,25 @@ impl State {
             s.base_unread = false;
         }
         self.muts += 1;
+    }
+
+    /// A set of `loc` to its own symbol plus `j` (`crate::defer::try_symbolic`,
+    /// docs/spec-relative-counters.md §2.5): the run's map of the register
+    /// made `+j` whatever it held, nothing read and nothing published; a
+    /// register the run loaded holds the value it loaded plus `j`. False,
+    /// nothing changed, where [`State::add`] would refuse a step.
+    pub(crate) fn restore_plus(&mut self, v: &Values, loc: Loc, j: i32, global: bool) -> bool {
+        let g = if global { MAP_GLOBAL } else { MAP_LOCAL };
+        if self.slot_ref(loc).is_some_and(|s| {
+            s.e.flags & PRELOADED != 0
+                || s.meta != 0
+                || s.lazy.is_some()
+                || (s.mapped != MAP_NONE && s.mapped != g)
+        }) {
+            return false;
+        }
+        self.restore(loc);
+        self.add(v, loc, j, global)
     }
 
     /// The integer registers whose steps the run publishes beneath a
@@ -3077,6 +3128,28 @@ impl State {
     /// group or not) with its binding now (`None`: absent): the run's
     /// state at this point where it is not the engine's (a picture
     /// child's view of its parent, `crate::pic`).
+    /// The registers the run has stepped without reading or defining
+    /// them (a map that adds, `State::add`): `(loc, steps, global)` each,
+    /// in the order touched. A child reading before the run
+    /// (`crate::pic`) starts from them, as TeX's picture starts from the
+    /// value the run left.
+    pub(crate) fn mapped_now(&self) -> Vec<(Loc, i32, bool)> {
+        let mut out = Vec::new();
+        for &l in &self.touched {
+            let Some(s) = self.slot_ref(l) else { continue };
+            if s.mapped == MAP_NONE
+                || s.meta != 0
+                || s.e.flags & LOADED != 0
+                || !s.map.keep
+                || s.map.add == 0
+            {
+                continue;
+            }
+            out.push((l, s.map.add, s.mapped == MAP_GLOBAL));
+        }
+        out
+    }
+
     pub(crate) fn defined_now(&self, v: &Values) -> Vec<(Loc, Option<ValueId>)> {
         let mut out = Vec::new();
         for &l in &self.touched {

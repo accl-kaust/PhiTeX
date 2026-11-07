@@ -23,7 +23,8 @@ import { PROBLEMS_CSS, problemHtml } from "./problems.ts";
 import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys, typing } from "./keys.ts";
 import { REPORT_TO } from "./report.ts";
-import { opening, retro, still, type Opening } from "./opening.ts";
+import type { Opening } from "./opening.ts";
+import { LOOKS, lookOf, play, type OpeningLook } from "./openings/index.ts";
 import { hintsFor } from "./hints.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
@@ -327,6 +328,15 @@ function framePart(json: string | undefined): string {
     `<div class="tbar">${split.map(([, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
     `<div class="legend">${split.map(([n, ms], i) => `<span><i class="c${i}"></i>${n} ${esc(dur(ms))}</span>`).join("")}</div>` +
     `<span class="note">${f.drawn} slice${f.drawn === 1 ? "" : "s"} of the page drawn, ${f.kept} kept from before</span></div>`
+  );
+}
+
+/** The last page drawn (Strips' `data-frame`) in words, for Copy debug info: framePart's numbers as a line. */
+function frameText(json: string): string {
+  const f = JSON.parse(json) as { page: number; inView: boolean; drawn: number; kept: number; probe: number; draw: number; watch: number; request: number; decode: number };
+  return (
+    `page ${f.page}${f.inView ? " (in view)" : ""} in ${dur(f.request + f.decode)}: finding what changed ${dur(f.probe)}, drawing ${dur(f.draw)}, ` +
+    `waiting for the engine ${dur(Math.max(0, f.request - f.watch))}, decoding ${dur(f.decode)}; ${f.drawn} slices drawn, ${f.kept} kept`
   );
 }
 
@@ -1198,7 +1208,9 @@ export class Panel {
       }
       list.append(f);
     }
-    this.listed = diags.filter((d) => !this.hiddenKinds.has(kindOf(d))).slice(0, 50);
+    // (the first `listedMax`; the rest a click away, 50 at a time or all)
+    const shown = diags.filter((d) => !this.hiddenKinds.has(kindOf(d)));
+    this.listed = shown.slice(0, this.listedMax);
     for (const [i, d] of this.listed.entries()) {
       // (each error and warning: its own Copy for an AI assistant)
       const copy = d.severity === "error" || d.severity === "warning" ? copyBtn(i) : "";
@@ -1237,10 +1249,22 @@ export class Panel {
       row.querySelector(".where")!.textContent = d.file ? `${d.file}${d.line ? `, line ${d.line}` : ""}` : "";
       list.append(row);
     }
-    if (diags.length > 50) {
+    if (shown.length > this.listed.length) {
+      const left = shown.length - this.listed.length;
       const more = document.createElement("div");
-      more.className = "diag info";
-      more.textContent = `… and ${diags.length - 50} more`;
+      more.className = "diag info more";
+      const next = document.createElement("button");
+      next.type = "button";
+      next.textContent = left > 50 ? `Show 50 more (${left} left)` : `Show the other ${left}`;
+      next.onclick = (e) => (e.stopPropagation(), this.listMore(50));
+      more.append(next);
+      if (left > 50) {
+        const all = document.createElement("button");
+        all.type = "button";
+        all.textContent = "Show all";
+        all.onclick = (e) => (e.stopPropagation(), this.listMore(Infinity));
+        more.append(all);
+      }
       list.append(more);
     }
     if (this.ev.onReport) {
@@ -1275,6 +1299,14 @@ export class Panel {
 
   /** The problems listed (by the rows' data-i). */
   private listed: Diagnostic[] = [];
+  /** How many problems the list shows (50, then more as asked: "Show 50 more", "Show all"). */
+  private listedMax = 50;
+
+  /** `n` more problems listed (Infinity: all), the list drawn again where it is. */
+  private listMore(n: number): void {
+    this.listedMax += n;
+    if (this.lastStatus) this.status(this.lastStatus);
+  }
 
   /**
    * Copy for an AI assistant: one problem with what an assistant needs to
@@ -1446,8 +1478,10 @@ export class Panel {
     if (this.hintTimer) return;
     const list = hintsFor(this.kind);
     const show = () => {
-      el.textContent = `Did you know? ${list[this.hintAt++ % list.length]}`;
-      el.hidden = false;
+      const text = list[this.hintAt++ % list.length];
+      // (an opening that says the steps itself says this too)
+      if (this.anim?.hint) this.anim.hint(text);
+      else (el.textContent = `Did you know? ${text}`), (el.hidden = false);
       this.hintTimer = setTimeout(show, 7000);
     };
     this.hintTimer = setTimeout(show, 2000);
@@ -1465,6 +1499,7 @@ export class Panel {
     const track = el.querySelector<HTMLElement>(".track")!;
     track.classList.toggle("unknown", pct === undefined);
     track.querySelector("i")!.style.width = pct === undefined ? "" : `${pct}%`;
+    this.anim?.step?.(what, pct, detail);
     this.renderStatus();
   }
 
@@ -1479,8 +1514,17 @@ export class Panel {
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
     this.fitSheet();
     const dark = this.win.classList.contains("dark-pdf") || (this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark"));
-    const sheet = el.querySelector<HTMLElement>(".sheet")!, look = this.look;
-    this.anim = look === "off" ? still() : look === "retro" ? retro(sheet) : opening(sheet, dark ? "#e4e6ea" : "#1d3e72", dark ? "#2c2e33" : "#ffffff");
+    const sheet = el.querySelector<HTMLElement>(".sheet")!;
+    // (the first opening ever is PhiTeX's: kept with the tips seen, the host's too)
+    const first = !this.seenIds.has("opening");
+    const { id, anim } = play(this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!);
+    this.anim = anim;
+    this.lastLook = id;
+    if (id !== "off") this.seen(["opening"]);
+    // (one that says the steps itself: the sheet's own not shown)
+    el.classList.toggle("owns", !!anim.step);
+    // (and the step the sheet says now, a rebuild's first: the watch says no other)
+    if (anim.step) anim.step(this.stepNow || this.words.steps[0], undefined, "");
     this.animSince = performance.now();
   }
 
@@ -1524,13 +1568,14 @@ export class Panel {
       follow();
       el.classList.add("in");
     });
-    // (the dive at once, whatever the opening's act; gone 650 ms on, and at most 900 ms on
-    // even where frames stall, a tab in the background: never left over the pages)
+    // (the dive at once, whatever the opening's act; gone 650 ms on (the longest, a window
+    // maximized, 1.3 s), and at most 1.6 s on even where frames stall, a tab in the
+    // background: never left over the pages)
     // (each its own sheet's: a later opening's sheet, up meanwhile, is never closed by this one's)
     const a = this.anim;
     const stop = () => this.anim === a && this.stopSheet();
     void a.done().then(stop);
-    setTimeout(stop, 900);
+    setTimeout(stop, 1600);
   }
 
   /** The sheet gone (played out, or a card in its place). */
@@ -2255,7 +2300,7 @@ export class Panel {
     const look: SettingRow[] = [];
     look.push(
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
-      { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset", kind: "choice", options: [["phitex", "PhiTeX"], ["retro", "Windows 98"], ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => (this.look = l)) },
+      { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset. Random: a different one each time", kind: "select", options: [["random", "Random"], ...LOOKS.map((l): [string, string] => [l.id, l.name]), ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => (this.look = lookOf(l))) },
     );
     if (ev.onBoxes) look.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     preview.push({ id: "problems", label: "Problems shown", help: "Which kinds: the filters at the top of the problems list", kind: "info", value: this.hiddenKinds.size ? `${this.hiddenKinds.size} kind${this.hiddenKinds.size === 1 ? "" : "s"} hidden` : "All" });
@@ -2277,7 +2322,7 @@ export class Panel {
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
   viewPrefs(p: Partial<ViewPrefs>): void {
     if (p["dark-pdf"]) this.darkPdf(p["dark-pdf"]);
-    if (p.opening) this.look = p.opening;
+    if (p.opening) this.look = lookOf(p.opening);
     if (p.underline !== undefined && p.underline !== this.culpritsOn) this.culpritsShown(p.underline);
   }
 
@@ -2318,7 +2363,9 @@ export class Panel {
   }
 
   /** The loading animation (the host keeps the choice: viewPrefs). */
-  private look: OpeningLook = "phitex";
+  private look: OpeningLook = "random";
+  /** The last one played (random plays another). */
+  private lastLook: string | null = null;
 
   /** The host page's own theme (theme()): undefined, never said. */
   private pageTheme: "dark" | "light" | null | undefined = undefined;
@@ -2627,6 +2674,31 @@ export class Panel {
     );
   }
 
+  /** The last build's parts as its host measured them (the watch's stats), in order, and work done alongside them (not in the build's time): [name, ms]. */
+  private phases: { parts: [string, number][]; beside: [string, number][] } | null = null;
+
+  /** The last build's parts (`parts` add up to its time; `beside`: done at the same time, said under the bar). */
+  buildParts(parts: [string, number][], beside: [string, number][] = []): void {
+    this.phases = { parts, beside };
+    if (!this.$("#m-time").hidden) this.timing();
+  }
+
+  /** The timing popover's "Where the last build's time went": its parts as a bar, like the opening's. */
+  private phasesPart(): string {
+    const p = this.phases;
+    if (!p) return "";
+    const parts = p.parts.filter(([, ms]) => ms >= 1);
+    if (!parts.length) return "";
+    const beside = p.beside.filter(([, ms]) => ms >= 1).map(([n, ms]) => `${n} ${dur(ms)}`).join(", ");
+    return (
+      `<div class="row"><span class="k">Where the last build's time went</span><span class="v"></span>` +
+      `<div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
+      `<div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc(n)} ${esc(dur(ms))}</span>`).join("")}</div>` +
+      (beside ? `<span class="note">${esc(`Alongside: ${beside}`)}</span>` : "") +
+      `</div>`
+    );
+  }
+
   /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
   private downloads: { n: number; bytes: number; ms: number; since?: number } = { n: 0, bytes: 0, ms: 0 };
 
@@ -2653,8 +2725,8 @@ export class Panel {
     this.emit();
   }
 
-  /** The last build the host said (buildTime), painted or not. */
-  private built?: { ms: number; at: number; first: boolean };
+  /** The last build the host said (buildTime), painted or not; `joined`: the one before this tab joined (joinedLate). */
+  private built?: { ms: number; at: number; first: boolean; joined?: boolean };
 
   /**
    * What the status and the timing popover's head say: the newest of the
@@ -2663,15 +2735,25 @@ export class Panel {
    */
   private latest(): { label: string; ms: number; first: boolean } | undefined {
     const s = this.speed, b = this.built;
-    if (b && (!s || b.at > s.at)) return { label: b.first ? "First build" : "Built, no page changed", ms: b.ms, first: b.first };
+    if (b && (!s || b.at > s.at)) return { label: b.first ? "First build" : b.joined ? "Last build" : "Built, no page changed", ms: b.ms, first: b.first };
     if (s) return { label: s.first ? "First page" : "Built", ms: s.ms, first: !!s.first };
     return undefined;
   }
 
-  /** This tab joined `builds` builds in: `first` the first build's time for the bars; the first build's paint was not this tab's, so its next is not called one. */
-  joinedLate(first: number | undefined, builds: number): void {
+  /**
+   * This tab joined `builds` builds in: `first` the first build's time for
+   * the bars; the first build's paint was not this tab's, so its next is not
+   * called one; `last` the last build's time, for the status and the popover's
+   * head ("Last build", or "First build" if it was the only one).
+   */
+  joinedLate(first: number | undefined, builds: number, last?: { ms: number; cold: boolean }): void {
     if (first !== undefined && this.times.first === undefined) this.times.first = first;
     if (builds >= 1) this.paints = Math.max(this.paints, 1);
+    if (last && !this.built) {
+      this.built = { ms: last.ms, at: performance.now(), first: last.cold, joined: true };
+      this.renderStatus();
+      if (!this.$("#m-time").hidden) this.timing();
+    }
   }
 
   /** The bars: the first build, the last edit, the edits' median, each as long as its time (the longest the full width; a short one at least a sliver). */
@@ -2723,6 +2805,7 @@ export class Panel {
     el.innerHTML =
       (head ? `<div class="head"><span>${esc(String(head[0]))}</span><b>${esc(dur(head[1] as number))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) +
       this.walkPart() +
+      this.phasesPart() +
       this.timeBars() +
       this.downloadsPart() +
       rows +
@@ -2760,7 +2843,7 @@ export class Panel {
     const t = this.times;
     if (t.first !== undefined) out.push(`first build ${dur(t.first)}${t.edits.length ? `; edits ${t.edits.length}, last ${dur(t.edits[t.edits.length - 1])}, median ${dur([...t.edits].sort((a, b) => a - b)[t.edits.length >> 1])}` : ""}`);
     const f = this.$("#stripsline").dataset.frame;
-    if (f) out.push(`last page drawn: ${f}`);
+    if (f) out.push(`last page drawn: ${frameText(f)}`);
     const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
     out.push(`machine: ${nav.hardwareConcurrency ?? "?"} cores, ${nav.userAgentData?.platform || nav.platform || "?"}; ${nav.userAgent}`);
     return out.join("\n") + "\n";
@@ -2824,6 +2907,12 @@ export class Panel {
     if (!this.$("#settings").hidden) void this.settings(true);
   }
   private mainFiles: { names: string[]; main: string | null } = { names: [], main: null };
+
+  /** The document's main file as the host names it, where it has no Main file to pick (the watch): the openings that show it (a prompt's, a title bar's). */
+  docName(name: string): void {
+    this.doc = name;
+  }
+  private doc: string | null = null;
 
   /** What's new (the host's news, `text` as plain lines), in a dialog over the pages, with the new features' tips a click away. */
   news(version: string, text: string): void {
@@ -2961,7 +3050,7 @@ export type DarkPdf = "off" | "on" | "theme";
 const downloaded = (n: number, bytes?: number) => (n ? `${n} package${n === 1 ? "" : "s"} downloaded${mb(bytes)}` : "");
 
 /** The loading animation: PhiTeX's opening, a Windows 98 setup dialog, or none. */
-export type OpeningLook = "phitex" | "retro" | "off";
+export type { OpeningLook } from "./openings/index.ts";
 
 /** A long detail (an engine's dump) folded under `label`, opened on a click. */
 function foldedDetail(text: string, label: string): HTMLElement {

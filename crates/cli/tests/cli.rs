@@ -1972,6 +1972,39 @@ fn exit_statuses() {
     assert_eq!(status(&["build", "--engine", "tex", "bad.tex"]), Some(1));
 }
 
+/// Builds' `stats` (the `build` events'): the fields the viewer's debug
+/// info reads, the same set in each (the first a cold build of `tex`).
+fn stats_alike(evs: &[&serde_json::Value]) {
+    let cold = evs[0];
+    let keys = |e: &serde_json::Value| -> Vec<String> {
+        e["stats"]
+            .as_object()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    for k in [
+        "nodes",
+        "runs",
+        "phases_ms",
+        "threads",
+        "cores_busy",
+        "resident_kb",
+        "engine",
+        "files",
+        "files_release",
+        "version",
+        "wall_ms",
+        "hints",
+    ] {
+        assert!(keys(cold).iter().any(|x| x == k), "no stats.{k}: {cold}");
+    }
+    assert_eq!(cold["stats"]["engine"], "tex", "{cold}");
+    assert!(cold["stats"]["phases_ms"].is_object(), "{cold}");
+    for e in &evs[1..] {
+        assert_eq!(keys(cold), keys(e), "{cold} {e}");
+    }
+}
+
 /// `phitex watch --json` on a plain document (`tex`): a word edited on
 /// disk is build 2, an edit of the line it is on, fewer nodes run than
 /// cold, and its DVI file is a cold build's of the edited text; an edit
@@ -2020,8 +2053,10 @@ fn watch_plain_edit() {
     let broken = edited.replacen(" thy ", " \\undefinedcs ", 1);
     std::thread::sleep(Duration::from_millis(50));
     std::fs::write(dir.join("story.tex"), &broken).expect("the broken edit");
+    let edit = ev;
     let ev = until(&mut lines, "build", &3.into(), &mut seen);
     assert_eq!(ev["ok"], false, "{ev}");
+    stats_alike(&[&cold, &edit, &ev]);
     let failed = std::fs::read(dir.join("story.dvi")).expect("the failed build's DVI");
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
@@ -2743,6 +2778,100 @@ fn xelatex_fontspec() {
         "fontspec: the PDF is not xelatex's: {} (ours in {})",
         first_difference(&got, &want),
         dir.display()
+    );
+}
+
+/// `r` in `phitex watch` reads again only the files whose key on disk
+/// moved (`Host::stamp`: size, modification and change times, inode): with
+/// nothing changed it runs no node; a file written again with the same
+/// bytes runs none either; a file rewritten to the same size with its
+/// modification time set back is read again (its change time moved), and
+/// the DVI is then a cold build's of the new text.
+#[test]
+fn watch_r_rereads_only_files_that_moved() {
+    let _one = one();
+    let dir = scratch("watch-r");
+    let chap = "Hello world, a first sentence of the chapter.\n";
+    std::fs::write(dir.join("main.tex"), "\\input chap\n\\bye\n").expect("main");
+    std::fs::write(dir.join("chap.tex"), chap).expect("chap");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--engine",
+            "tex",
+            "main.tex",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut stdin = child.stdin.take().expect("its input");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let mut r = |k: u64, what: &str| {
+        stdin.write_all(b"r\n").expect("r");
+        stdin.flush().expect("r");
+        let ev = until(&mut lines, "build", &k.into(), &mut seen);
+        assert_eq!(ev["ok"], true, "{what}: {ev}");
+        ev["nodes_run"].as_u64().unwrap_or(u64::MAX)
+    };
+    assert_eq!(
+        r(2, "nothing changed"),
+        0,
+        "r with nothing changed ran nodes"
+    );
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(dir.join("chap.tex"), chap).expect("the same bytes");
+    assert_eq!(
+        r(3, "the same bytes"),
+        0,
+        "r after the same bytes ran nodes"
+    );
+    let path = dir.join("chap.tex");
+    let mtime = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .expect("its time");
+    let new = chap.replacen("first", "other", 1);
+    assert_eq!(new.len(), chap.len());
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&path, &new).expect("same size");
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .and_then(|f| f.set_modified(mtime))
+        .expect("the time set back");
+    assert!(
+        r(4, "same size and time") > 0,
+        "the rewritten file was not read again"
+    );
+    let watched = std::fs::read(dir.join("main.dvi")).expect("the watch's DVI");
+    let _ = stdin.write_all(b"q\n");
+    drop(stdin);
+    let _ = child.wait();
+    let cold_dir = scratch("watch-r-cold");
+    std::fs::write(cold_dir.join("main.tex"), "\\input chap\n\\bye\n").expect("main");
+    std::fs::write(cold_dir.join("chap.tex"), &new).expect("chap");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
+        .args(["build", "--no-synctex", "--engine", "tex", "main.tex"])
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let cold_dvi = std::fs::read(cold_dir.join("main.dvi")).expect("the cold DVI");
+    assert!(
+        masked(&watched) == masked(&cold_dvi),
+        "the watch's DVI is not the cold build's: {}",
+        first_difference(&watched, &cold_dvi)
     );
 }
 
@@ -3605,9 +3734,14 @@ fn watch_open_starts_only_the_users_viewer() {
 /// macro its caption then `\xdef`s (TeX's picture sees the value before
 /// the caption's): the figure's run makes the picture's definitions its
 /// own where the picture stands, and the picture reads before the
-/// figure's run. Edits that move the floats (a figure deleted and put back, a paragraph
-/// before them deleted), a word before them and a picture's own text
-/// changed: each edit's PDF is `phitex build`'s of its text, byte for
+/// figure's run. The two pictures of one float show pgf's picture
+/// serial: a picture child's symbol of a register stands for the value
+/// reaching its figure plus the steps the figure made before it (the
+/// first picture's) and its own, so deleting a figure before them shifts
+/// the serial with no read of it. Edits that move the floats (a figure deleted and put back, a paragraph
+/// before them deleted), a word before them, a picture's own text and
+/// the text a picture follows in its float changed (the picture looks
+/// only at the item before it, `Run::pic_take_list`): each edit's PDF is `phitex build`'s of its text, byte for
 /// byte, at one thread and at four.
 #[test]
 #[ignore = "heavy: the pdflatex format and tikz; run on the cluster"]
@@ -3622,11 +3756,12 @@ fn picture_children_text(fig1: &str) -> String {
     format!(
         "\\documentclass{{article}}\n\\usepackage{{tikz}}\n\\newcount\\picn \\def\\capword{{before}}\n\\begin{{document}}\n\\section{{One}}\nAlpha words come first in this paragraph of the start.\n\nBeta words stand in the second paragraph, before the figures.\n{fig1}\
 Gamma text between the floats, see Figure~\\ref{{fig:a}}.\n\n\\begin{{figure}}[b]\\centering\n\\input{{pic2}}\n\\caption{{Second, after \\ref{{fig:a}}}}\n\\end{{figure}}\n\
-\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\draw[red] (0,0) circle (1);\n\\end{{tikzpicture}}\n\\begin{{tikzpicture}}\n\\fill[blue] (0,0) rectangle (1,1);\n\\end{{tikzpicture}}\n\\caption{{Two pictures}}\n\\end{{figure}}\n\
+\\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\draw[red] (0,0) circle (1);\\node {{\\expandafter\\the\\csname pgf@picture@serial@count\\endcsname}};\n\\end{{tikzpicture}}\n\\begin{{tikzpicture}}\n\\fill[blue] (0,0) rectangle (1,1);\\node {{\\expandafter\\the\\csname pgf@picture@serial@count\\endcsname}};\n\\end{{tikzpicture}}\n\\caption{{Two pictures}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\node {{x}};\\xdef\\picnote{{seen in the picture}}\n\\end{{tikzpicture}}\n\\caption{{Note: \\picnote}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\node {{\\fontsize{{13}}{{15}}\\selectfont big}};\n\\end{{tikzpicture}}\n\\caption{{\\fontsize{{13}}{{15}}\\selectfont A caption in the picture's size}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped \\the\\picn\\xdef\\capword{{after}}}}\n\\end{{figure}}\n\
 \\begin{{figure}}\\centering\n\\begin{{tikzpicture}}\n\\global\\advance\\picn by 1 \\node {{\\capword\\ \\the\\picn}};\n\\end{{tikzpicture}}\n\\caption{{Stepped again \\the\\picn}}\n\\end{{figure}}\n\
+\\begin{{figure}}[t]\\centering Inline words before \\unskip\\begin{{tikzpicture}}\\draw (0,0) -- (1,1);\\end{{tikzpicture}}\\hfil\\begin{{tikzpicture}}\\fill (0,0) circle (0.2);\\end{{tikzpicture}}\n\\caption{{Pictures after text}}\n\\end{{figure}}\n\
 Delta closes the section with a last paragraph.\n\n\\section{{Two}}\nEpsilon words in the next section.\n\\end{{document}}\n"
     )
 }
@@ -3679,6 +3814,7 @@ fn picture_children_exact(threads: &str) {
             )
         }),
         Box::new(|t| t.replacen("Gamma text", "Gamma words", 1)),
+        Box::new(|t| t.replacen("Inline words before", "Inline text set before", 1)),
     ];
     let mut now = text.clone();
     let mut texts = vec![(

@@ -382,26 +382,44 @@ pub(crate) fn if_test(r: &mut Run<'_, '_>, this_if: i32) -> R<bool> {
             // string grown per test)
             let mut name = crate::expand::NAME.with(std::cell::Cell::take);
             name.clear();
-            let t = loop {
-                r.get_x_token();
-                if let Err(e) = r.ck() {
+            let kept = match crate::defer::name_chars(r, &mut name) {
+                Ok(k) => k,
+                Err(e) => {
                     crate::expand::NAME.with(|c| c.set(name));
                     return Err(e);
                 }
-                if r.cur.is_cs() {
-                    break Tok::cs(&name);
-                }
-                // (XeTeX's names take every Unicode character)
-                let c = r.cur.tok.chr();
-                crate::print::push_code(&mut name, if r.xe { c } else { c & 0xFF });
             };
-            crate::expand::NAME.with(|c| c.set(name));
+            // (a relative name, docs/spec-relative-counters.md §2.2: of
+            // the meaning only whether it is defined, through the derived
+            // read; where that cannot stand, the name made concrete)
+            let (t, derived) = if let Some((at, s)) = kept {
+                let (pre, suf) = (name[..at].to_owned(), name[at..].to_owned());
+                crate::expand::NAME.with(|c| c.set(name));
+                let p = phitex_defuse::PathId::of_proj(r.ops.defined_proj);
+                match crate::defer::derived_read(r, s, &pre, &suf, p)? {
+                    Some(crate::defer::Answer(x)) => {
+                        (None, Some(x.is_some_and(|x| int_of(r.v, x) != 0)))
+                    }
+                    None => (
+                        Some(Tok::cs(&crate::defer::forced_name(r, s, &pre, &suf)?)),
+                        None,
+                    ),
+                }
+            } else {
+                let t = Tok::cs(&name);
+                crate::expand::NAME.with(|c| c.set(name));
+                (Some(t), None)
+            };
             if r.cur.cmd != cmd::END_CS_NAME {
                 // "Missing \endcsname inserted"
                 r.log("error", "Missing \\endcsname inserted")?;
                 r.back_cur();
             }
-            r.mean_of(t)? != Mean::Undefined
+            match (derived, t) {
+                (Some(d), _) => d,
+                (None, Some(t)) => r.mean_of(t)? != Mean::Undefined,
+                (None, None) => false,
+            }
         }
         IF_FONT_CHAR => {
             // pdfTeX §1762
@@ -679,7 +697,14 @@ fn normalize(g: &mut Glue) {
 pub(crate) fn scan_numexpr_num(run: &mut Run<'_, '_>) -> R<crate::scan::Num> {
     use crate::scan::Num;
     run.num_reads = true;
+    let defer = run.defer_allowed();
+    let was = if defer {
+        run.reg_stop.replace(run.expand_depth)
+    } else {
+        run.reg_stop
+    };
     let s = run.skip_blanks_x();
+    run.reg_stop = was;
     run.num_reads = false;
     s?;
     if run.cur.cmd == cmd::RELAX && run.cur.chr == crate::scan::NUM_CHR {
@@ -713,7 +738,76 @@ pub(crate) fn scan_numexpr_num(run: &mut Run<'_, '_>) -> R<crate::scan::Num> {
         return Ok(Num::Int(scan_expr(run, 0)?.int()));
     }
     run.back_cur();
-    Ok(Num::Int(scan_expr(run, 0)?.int()))
+    // (an expression of a register unread, or of its symbol, plus a
+    // constant: relative, [`Num::Reg`])
+    run.expr_defer = defer;
+    let x = scan_expr(run, 0);
+    run.expr_defer = false;
+    let x = x?;
+    if let Some((loc, j)) = run.defer_sym.take() {
+        return Ok(Num::Reg(loc, j));
+    }
+    Ok(Num::Int(x.int()))
+}
+
+/// A symbol kept by `scan_expr` forced where its expression needs the
+/// digits ([`crate::defer::force`]): its value, once (None after).
+fn fold_sym(run: &mut Run<'_, '_>, sym: &mut Option<crate::defer::Sym>) -> R<Option<i32>> {
+    match sym.take() {
+        Some(s) => Ok(Some(crate::defer::force(run, s)?)),
+        None => Ok(None),
+    }
+}
+
+/// The first factor of a deferring scan's integer expression, its first
+/// token current: a register's symbol of this piece (the number ending
+/// there, §444: no digit after it, one space taken), or an integer
+/// register alone unread (`Run::scan_int_deferring`), or an expression
+/// that is one, kept in `sym` with 0 for the factor; any other factor
+/// as `scan_int` scans it.
+fn sym_factor(run: &mut Run<'_, '_>, sym: &mut Option<crate::defer::Sym>) -> R<i32> {
+    let me = run.sym_node();
+    if run.cur.cmd == cmd::SYM
+        && let Some(s) = crate::defer::sym_of(run.cur.tok)
+        && s.node == me
+    {
+        let t0 = run.cur.tok;
+        run.get_x_token();
+        run.ck()?;
+        let u = run.cur.tok;
+        if !u.is_cs_or_active() && u.cat() == Some(12) && (48..=57).contains(&u.chr()) {
+            run.back_input(u);
+            run.back_input(t0);
+            return run.scan_int();
+        }
+        if run.cur.cmd != cmd::SPACER {
+            run.back_input(u);
+        }
+        *sym = Some(s);
+        return Ok(0);
+    }
+    run.back_cur();
+    let w = run.scan_int_deferring()?;
+    if let Some((loc, j)) = run.defer_sym.take() {
+        *sym = Some(crate::defer::Sym {
+            reg: run.count_reg(loc).unwrap_or(0),
+            node: me,
+            j,
+        });
+        return Ok(0);
+    }
+    if let Some(loc) = run.defer_hit.take() {
+        let j = run.st.steps_of(loc);
+        run.st.note_symbol(loc);
+        run.st.note_read(loc);
+        *sym = Some(crate::defer::Sym {
+            reg: run.count_reg(loc).unwrap_or(0),
+            node: me,
+            j,
+        });
+        return Ok(0);
+    }
+    Ok(w)
 }
 
 /// One saved level of the expression stack (pdfTeX §1669).
@@ -738,6 +832,14 @@ fn scan_expr(run: &mut Run<'_, '_>, l0: u8) -> R<IVal> {
     // (a glue result's spec: its own once an operator made one, else
     // its one factor's, as `scan_glue` gave it)
     let (mut any_op, mut factor_own) = (false, false);
+    // (a deferring scan's integer expression, [`Run::expr_defer`]: its
+    // first factor may be a register's symbol, kept while only constants
+    // are added to it, docs/spec-relative-counters.md §2.2; `at` says
+    // which of f, t, e holds it, 1-3, those holding its offset; any other
+    // operation forces it there first, [`fold_sym`])
+    let mut first = std::mem::take(&mut run.expr_defer) && l0 == 0;
+    let mut sym: Option<crate::defer::Sym> = None;
+    let mut at = 0u8;
     'restart: loop {
         r = EXPR_NONE;
         e = zero;
@@ -747,24 +849,44 @@ fn scan_expr(run: &mut Run<'_, '_>, l0: u8) -> R<IVal> {
         'cont: loop {
             let o_type = if s == EXPR_NONE { l } else { 0 };
             // §1667: a factor, or a subexpression
-            run.skip_blanks_x()?;
+            let sym_first = std::mem::take(&mut first) && stack.is_empty();
+            let was = if sym_first {
+                run.reg_stop.replace(run.expand_depth)
+            } else {
+                run.reg_stop
+            };
+            let sk = run.skip_blanks_x();
+            run.reg_stop = was;
+            sk?;
             if run.is_other(b'(') {
+                if let Some(x) = fold_sym(run, &mut sym)? {
+                    let w = if at == 3 { &mut e.width } else { &mut t.width };
+                    *w = add_or_sub(x, *w, INFINITY, false, &mut b);
+                }
                 stack.push(Level { l, s, r, e, t, n });
                 l = o_type;
                 continue 'restart;
             }
-            run.back_cur();
-            let mut f = match o_type {
-                0 => Glue {
-                    width: run.scan_int()?,
-                    ..zero
-                },
-                1 => Glue {
-                    width: run.scan_normal_dimen()?,
-                    ..zero
-                },
-                2 => run.scan_glue(2)?,
-                _ => run.scan_glue(3)?,
+            let mut f = if sym_first {
+                let w = sym_factor(run, &mut sym)?;
+                if sym.is_some() {
+                    at = 1;
+                }
+                Glue { width: w, ..zero }
+            } else {
+                run.back_cur();
+                match o_type {
+                    0 => Glue {
+                        width: run.scan_int()?,
+                        ..zero
+                    },
+                    1 => Glue {
+                        width: run.scan_normal_dimen()?,
+                        ..zero
+                    },
+                    2 => run.scan_glue(2)?,
+                    _ => run.scan_glue(3)?,
+                }
             };
             if o_type >= 2 {
                 factor_own = run.glue_own;
@@ -811,6 +933,13 @@ fn scan_expr(run: &mut Run<'_, '_>, l0: u8) -> R<IVal> {
                     any_op = true;
                 }
                 let mut o = o;
+                // (the symbol a factor multiplied or divided by: forced)
+                if at == 1
+                    && s != EXPR_NONE
+                    && let Some(x) = fold_sym(run, &mut sym)?
+                {
+                    f.width = x;
+                }
                 // §1672 and the others: the current term
                 match s {
                     EXPR_NONE => {
@@ -865,6 +994,25 @@ fn scan_expr(run: &mut Run<'_, '_>, l0: u8) -> R<IVal> {
                         }
                     }
                 }
+                if at == 1 && sym.is_some() {
+                    at = 2;
+                }
+                // (a term multiplied or divided on, or one added to or taken
+                // from another: its symbol forced; a sum kept relative only
+                // while its offset is small, far from TeX's bounds)
+                if at == 2
+                    && (o > EXPR_SUB || r != EXPR_NONE)
+                    && let Some(x) = fold_sym(run, &mut sym)?
+                {
+                    t.width = add_or_sub(x, t.width, INFINITY, false, &mut err);
+                }
+                if at == 3
+                    && sym.is_some()
+                    && (e.width.unsigned_abs() >= 1 << 16 || t.width.unsigned_abs() >= 1 << 16)
+                    && let Some(x) = fold_sym(run, &mut sym)?
+                {
+                    e.width = add_or_sub(x, e.width, INFINITY, false, &mut err);
+                }
                 if o > EXPR_SUB {
                     s = o;
                 } else {
@@ -872,6 +1020,9 @@ fn scan_expr(run: &mut Run<'_, '_>, l0: u8) -> R<IVal> {
                     s = EXPR_NONE;
                     if r == EXPR_NONE {
                         e = t;
+                        if at == 2 && sym.is_some() {
+                            at = 3;
+                        }
                     } else {
                         let neg = r == EXPR_SUB;
                         let max = if l == 0 { INFINITY } else { MAX_DIMEN };
@@ -918,8 +1069,16 @@ fn scan_expr(run: &mut Run<'_, '_>, l0: u8) -> R<IVal> {
     if b {
         run.log("error", "Arithmetic overflow")?;
         e = zero;
+        sym = None;
     }
     run.glue_fresh = any_op || factor_own;
+    // (the expression a register's symbol plus a constant: that symbol,
+    // its steps and the constant, for the deferring caller)
+    if let Some(sy) = sym {
+        let loc = sy.loc(run);
+        run.defer_sym = Some((loc, sy.j.wrapping_add(e.width)));
+        return Ok(IVal::Int(0));
+    }
     Ok(match l0 {
         0 => IVal::Int(e.width),
         1 => IVal::Dimen(e.width),
@@ -940,7 +1099,7 @@ pub(crate) fn the_toks(r: &mut Run<'_, '_>) -> R<Vec<Tok>> {
     }
     // (a file size's symbol stands for digits, which `\detokenize`
     // makes into the same digits: it is kept, its stretches between
-    // shown as they are, docs/note-relative-counters.md §2.4; a control
+    // shown as they are, docs/spec-relative-counters.md §2.4; a control
     // word's space after its name does not depend on what follows)
     if body.iter().any(|&t| crate::defer::is_size(t)) {
         let mut out = Vec::with_capacity(body.len());

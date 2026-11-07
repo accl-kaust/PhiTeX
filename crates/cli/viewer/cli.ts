@@ -130,23 +130,41 @@ function timing(s: Settled): [string, string] {
 type Stats = {
   build?: number; why?: string; version?: string; engine?: string; files?: "texlive" | "shelf"; files_release?: string | null;
   wall_ms?: number; phases_ms?: Record<string, number>; nodes?: { ran?: number; kept?: number; live?: number }; runs?: number; rounds?: number;
-  pages?: number; pages_changed?: number; threads?: number; cores_busy?: number | null; busy_ms?: number; engine_ms?: number; wasted_ms?: number;
+  pages?: number; pages_changed?: number[]; threads?: number; cores_busy?: number | null; busy_ms?: number; engine_ms?: number; wasted_ms?: number;
   resident_kb?: number; values_bytes?: number; hints?: Record<string, number>; ok?: boolean;
 };
 
 /** The last build's stats, for the timing popover's "Copy debug info". */
 let lastStats: Stats | undefined;
 
+/**
+ * A build's stats in: kept for Copy debug info, and its parts for the timing
+ * popover's "Where the last build's time went" (typesetting, the PDF, the
+ * files: one after another, the build's time; the viewer's pages drawn
+ * alongside them, said apart).
+ */
+function statsIn(s: Stats): void {
+  lastStats = s;
+  const ph = s.phases_ms ?? {};
+  const names: [string, string][] = [["typesetting", "Typesetting"], ["output", "Writing the PDF"], ["writing files", "Writing files"]];
+  const known = new Set([...names.map(([k]) => k), "viewer"]);
+  const parts: [string, number][] = [...names.filter(([k]) => typeof ph[k] === "number").map(([k, n]): [string, number] => [n, ph[k]]), ...Object.entries(ph).filter(([k]) => !known.has(k))];
+  panel.buildParts(parts, typeof ph.viewer === "number" ? [["pages for the viewer", ph.viewer]] : []);
+}
+
 /** `stats` as lines of plain text, the CLI's `s` stats' words. */
 function statsLines(s: Stats): string[] {
   const n = s.nodes ?? {};
-  const gb = (b: number) => `${(b / 1e9).toFixed(1)} GB`;
+  const size = (b: number) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`);
+  // (the pages changed: how many, and which when few)
+  const pc = s.pages_changed;
+  const changed = pc === undefined ? "?" : pc.length && pc.length <= 8 ? `${pc.length} (${pc.join(", ")})` : String(pc.length);
   return [
     `PhiTeX ${s.version ?? "?"} · ${s.engine ?? "?"} · files from ${s.files === "shelf" ? `Shelf ${s.files_release ?? "?"}` : s.files === "texlive" ? "TeX Live" : "?"}`,
     `build ${s.build ?? "?"} (${s.why ?? "?"}) ${s.ok === false ? "failed" : "ok"} in ${dur(s.wall_ms ?? 0)}: ${Object.entries(s.phases_ms ?? {}).map(([k, ms]) => `${k} ${dur(ms)}`).join(" · ")}`,
-    `nodes ${n.ran ?? "?"} ran, ${n.kept ?? "?"} kept of ${n.live ?? "?"} · ${s.runs ?? "?"} runs, ${s.rounds ?? "?"} rounds · pages ${s.pages_changed ?? "?"} of ${s.pages ?? "?"} changed`,
-    `parallel ${s.cores_busy == null ? "—" : s.cores_busy.toFixed(1)} of ${s.threads ?? "?"} threads busy · busy ${dur(s.busy_ms ?? 0)}, engine ${dur(s.engine_ms ?? 0)}, wasted ${dur(s.wasted_ms ?? 0)}`,
-    `memory ${s.resident_kb === undefined ? "?" : gb(s.resident_kb * 1024)} resident, values ${s.values_bytes === undefined ? "?" : gb(s.values_bytes)}`,
+    `nodes ${n.ran ?? "?"} ran, ${n.kept ?? "?"} kept of ${n.live ?? "?"} · ${s.runs ?? "?"} runs, ${s.rounds ?? "?"} rounds · pages ${changed} of ${s.pages ?? "?"} changed`,
+    `${s.cores_busy == null ? `threads ${s.threads ?? "?"}` : `parallel ${s.cores_busy.toFixed(1)} of ${s.threads ?? "?"} threads busy`} · busy ${dur(s.busy_ms ?? 0)}, engine ${dur(s.engine_ms ?? 0)}, wasted ${dur(s.wasted_ms ?? 0)}`,
+    `memory ${s.resident_kb === undefined ? "?" : size(s.resident_kb * 1024)} resident, values ${s.values_bytes === undefined ? "?" : size(s.values_bytes)}`,
     `hints ${Object.entries(s.hints ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "—"}`,
   ];
 }
@@ -161,7 +179,7 @@ class Pages implements CoreTransport {
   constructor(sock: Socket) {
     this.sock = sock;
     sock.onEvent((e) => {
-      if ((e.event as string) === "stats") return void (lastStats = e as unknown as Stats);
+      if ((e.event as string) === "stats") return void statsIn(e as unknown as Stats);
       if (e.event !== "settled") return;
       this.texts = null;
       const s = e as Settled;
@@ -169,8 +187,7 @@ class Pages implements CoreTransport {
       const since = typeof s.since_ms === "number" ? s.since_ms : s.cold && typeof s.ms === "number" ? s.ms : null;
       this.change = since === null ? null : { since, at: performance.now() };
       if (typeof s.ms === "number") panel.latency(...timing(s));
-      // (the bars: the first build's time, then each edit's)
-      if (typeof s.ms === "number") panel.buildTime(s.ms, !!s.cold);
+      // (the bars' times: the session's, from the same event)
     });
   }
 
@@ -519,9 +536,17 @@ sock.onOpen = () => {
   panel.connection(true);
   if (started) return void session.resync();
   started = true;
-  // (a tab that joins after the first build: its time for the bars, and its first page not called one)
+  // (a tab that joins after the first build: its time for the bars, and its first page not called one;
+  // the last build's settled and stats as the live ones would have said them: the timing popover's
+  // build and Copy debug info's stats, without waiting for the next build. Not its keystroke timing:
+  // no change of this tab's is on its way)
   void sock.request({ op: "info", what: "built" }).then((r) => {
-    if (r.ok && Number(r.json?.builds) > 0) panel.joinedLate(typeof r.json?.first_ms === "number" ? r.json.first_ms : undefined, Number(r.json.builds));
+    if (!r.ok || !(Number(r.json?.builds) > 0)) return;
+    const st = r.json?.stats, se = r.json?.settled as Settled | null | undefined;
+    const last = se && typeof se.ms === "number" ? { ms: se.ms, cold: !!se.cold } : undefined;
+    panel.joinedLate(typeof r.json?.first_ms === "number" ? r.json.first_ms : undefined, Number(r.json.builds), last);
+    if (st && typeof st === "object" && !lastStats) statsIn(st as Stats);
+    if (se && typeof se.ms === "number") panel.latency(...timing(se));
   });
   void session.start();
 };
@@ -633,6 +658,8 @@ const showTitle = () => {
           ? ["Built", "#2e9d63"]
           : ["Loading…", "#8a93a3"];
   document.title = connected && file !== "phitex watch" ? `${file} · ${what}` : `${what} · phitex watch`;
+  // (the openings that show it: a prompt's, a title bar's)
+  if (/\.(tex|ltx)$/.test(file)) panel.docName(file);
   favicon(colour);
 };
 

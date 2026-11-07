@@ -218,6 +218,8 @@ export interface PreviewSink {
   streaming?(s: { pages: number; phase: string } | null): void;
   /** A repaint is on screen, `ms` after the keystroke that made it. */
   painted?(ms: number): void;
+  /** A build finished in `ms` (`first`: the cold one): the timing popover's bars. A watch's host says it from its own socket. */
+  buildTime?(ms: number, first: boolean): void;
   /** Put the editor at `file`'s [from, to) (UTF-16 offsets), opening it if need be. */
   goto?(file: string, from: number, to: number, focus?: boolean): void;
   /** The editor's selection, highlighted on its pages until it changes ([] clears). */
@@ -420,6 +422,14 @@ export class PreviewSession {
     // held is gone, "no such handle". Reopened here, a few times at most,
     // since a panic a build always hits would loop)
     core.onEvent?.((e) => {
+      // (a queued edit's build over, as `send` waits for it: built, failed, or the core gone)
+      const ev = (e as { event?: string }).event ?? "";
+      if (this.ended.length && (ev === "settled" || ev === "failed" || ev === "trapped")) for (const f of this.ended.splice(0)) f(e as { event: string });
+      // (a build's time, from every core and the watch alike: the popover's first-build and edit bars; a pass while the job's files settle is not one)
+      if (ev === "settled") {
+        const b = e as { ms?: number; cold?: boolean; settling?: boolean };
+        if (typeof b.ms === "number" && !b.settling) this.sink.buildTime?.(b.ms, !!b.cold);
+      }
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
       // (the watch's build moved the sources of pages it did not draw again,
@@ -689,7 +699,9 @@ export class PreviewSession {
     this.noteError(r.json);
     this.status(r.json.pending, r.json.undefined_names);
     this.fetchPackages(r.json.missing);
-    this.sink.latency(`opened in ${r.json.build_ms.toFixed(1)} ms (round trip ${(this.now() - t).toFixed(1)} ms)`);
+    // (the open's answer: how long the engine took to answer it, and its own build's time when it built then)
+    const rt = this.now() - t, said = (ms: number) => (ms < 1000 ? `${ms.toFixed(0)} ms` : `${(ms / 1000).toFixed(1)} s`);
+    this.sink.latency(`opened: the engine answered in ${said(rt)}${r.json.build_ms >= 1 ? `, its build ${said(r.json.build_ms)}` : ""}`);
     await (this.sink.layout ? this.layout(Array.isArray(r.json.hashes) ? r.json.hashes : undefined) : this.showPage());
     // (the first build is in: nothing is building for the packages now)
     this.pkg.building = false;
@@ -1448,6 +1460,8 @@ export class PreviewSession {
 
   /** A send loop is running (it takes what is queued when each build ends). */
   private busy = false;
+  /** Waiting for a queued edit's build to end (`send`): its `settled`, else `failed` or `trapped`. */
+  private ended: ((e: { event: string }) => void)[] = [];
   /** Edits the host gave, and builds they took (the batching's effect). */
   keystrokes = 0;
   builds = 0;
@@ -1679,13 +1693,19 @@ export class PreviewSession {
     for (const [i, e] of edits.entries()) {
       const last = i === edits.length - 1;
       this.builds++;
+      // (the end of its build, if the core queues it: listened for before it is sent, so an early one is not missed)
+      let done: ((e: { event: string }) => void) | undefined;
+      const ended = last ? new Promise<{ event: string }>((res) => ((done = res), this.ended.push(res))) : null;
+      const unheard = () => (this.ended = this.ended.filter((f) => f !== done));
       const r = await this.core.request({ op: "edit", file, ...e, page: last ? this.page : -1, dpi: this.dpi() });
       if (!r.ok) {
+        unheard();
         this.sink.error((typeof r.json?.error === "string" ? r.json.error : undefined) ?? r.error ?? "edit failed");
         if (r.error?.includes("trapped")) await this.reopen();
         return false;
       }
       if (!last) continue;
+      if (!r.json?.queued) unheard();
       const tBack = this.now();
       const j = r.json;
       // (a core that queues the edit and says its build with `settled`:
@@ -1693,6 +1713,12 @@ export class PreviewSession {
       if (j.queued) {
         this.queued = { t0, tSend, tBack };
         this.setPages(j.pages);
+        // (its build waited for and its page drawn before the next round:
+        // sent at once, the next edit's build ran first, and the page's
+        // frame (core1 answers between builds) waited behind it, "waiting
+        // for the engine 1.2 s" while typing)
+        const end = await ended!;
+        if (end.event === "settled") (await this.layout(), this.queuedLatency(end as Extract<WatchEvent, { event: "settled" }>));
         continue;
       }
       this.setPages(j.pages);

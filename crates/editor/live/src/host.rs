@@ -51,6 +51,15 @@ pub trait Host: Send + Sync {
     /// as a diagnostic names it); none: not readable.
     fn read(&self, path: &Path) -> Option<Vec<u8>>;
 
+    /// A key of the file at `path` that changes when its bytes do, read
+    /// without reading them (the CLI's: its size, modification time and
+    /// inode, [`phitex_tex::file_stat_key`]); none: the host has none, and
+    /// a reread reads the file. `r` in a watch reads again only the files
+    /// whose key moved ([`crate::session::Session::reread_all`]).
+    fn stamp(&self, _path: &Path) -> Option<Vec<u8>> {
+        None
+    }
+
     /// Whether two names are one file (none of the host's own: names are
     /// compared as they are).
     fn same_file(&self, _a: &str, _b: &str) -> bool {
