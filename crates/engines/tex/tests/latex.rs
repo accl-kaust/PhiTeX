@@ -843,17 +843,51 @@ fn a_refused_picture_child_leaves_the_empty_name_its_own() {
         assert!(
             log.contains("[counts 4 5 6]"),
             "-j {threads}: the registers past 255 the picture's paragraph set keep their values: {}",
-            log.lines().find(|l| l.contains("[counts")).unwrap_or("no message")
+            log.lines()
+                .find(|l| l.contains("[counts"))
+                .unwrap_or("no message")
         );
         assert!(
             log.contains("[counts 7 8 9]"),
             "-j {threads}: the registers past 255 the paragraph set keep their values: {}",
-            log.lines().find(|l| l.contains("[counts")).unwrap_or("no message")
+            log.lines()
+                .find(|l| l.contains("[counts"))
+                .unwrap_or("no message")
         );
         assert!(
             log.contains("[empty defined]"),
             "-j {threads}: the empty name is defined after \\csname\\endcsname, as TeX has it"
         );
+    }
+}
+
+/// A picture after a page fired inside conditionals of its piece's own
+/// (`pdfdocs/picroutine.tex`: a heading's spacing and break inside
+/// `\ifnum`, the picture in the same expansion): the page's routine draws
+/// two pictures in the shipout hook, stepping the picture counter of `tikz`,
+/// and the piece goes on past the candidate with the routine's values put
+/// in force there. The picture child reads them as its parent holds them
+/// (it read the counter from before the routine: beautybook-en's
+/// `pgfid59` twice, its page 19 frame drawn from page 14's position). The
+/// PDF is pdfTeX's at -j1, -j4 and -j8.
+#[test]
+#[ignore = "heavy: the LaTeX format"]
+fn a_picture_after_a_page_fired_in_its_piece_sees_the_routines_values() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let name = "picroutine";
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+        .expect("the oracle");
+    for threads in [1usize, 4, 8] {
+        let opts = Options {
+            threads: Some(threads),
+            ..pdf_opts(name, &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), &src);
+        let (pdf, _) = b.output();
+        if let Some(d) = common::first_difference(&pdf, &want) {
+            panic!("{name} -j {threads}: pdf {d}");
+        }
     }
 }
 

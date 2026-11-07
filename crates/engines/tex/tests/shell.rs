@@ -20,7 +20,9 @@ use phitex_tex::{Options, ShellHook, ShellRan};
 ///   reads `IN`;
 /// - `hl IN OUT`: as minted's `highlight`: `OUT` (a cache file) from
 ///   `IN`'s text in brackets, `IN` removed; reads `IN`;
-/// - `sleep`: 2 s, noting the jobs the build finished meanwhile.
+/// - `sleep`: 2 s, noting the jobs the build finished meanwhile;
+/// - `gone`: not run, the host says why (status 127, nothing written);
+///   any other: status 127, no why (a command that ran and failed).
 #[derive(Default)]
 struct Fake {
     /// Each call: the command and the texts of the files it read.
@@ -76,7 +78,7 @@ impl ShellHook for Fake {
                     )],
                     removed: Vec::new(),
                     read: Some(vec![arg(2)]),
-                    stdout: Vec::new(),
+                    ..ShellRan::default()
                 }
             }
             "hl" => {
@@ -91,7 +93,7 @@ impl ShellHook for Fake {
                     wrote: vec![(arg(3), format!("\\gdef\\made{{[{t}]}}\n").into_bytes())],
                     removed: vec![arg(2)],
                     read: Some(vec![arg(2)]),
-                    stdout: Vec::new(),
+                    ..ShellRan::default()
                 }
             }
             "echo" => ShellRan {
@@ -113,6 +115,12 @@ impl ShellHook for Fake {
                     ..ShellRan::default()
                 }
             }
+            // (the host could not run it, and says why: a runner not loaded)
+            "gone" => ShellRan {
+                status: 127 << 8,
+                why: "the runner is not loaded".to_owned(),
+                ..ShellRan::default()
+            },
             _ => ShellRan {
                 status: 127 << 8,
                 ..ShellRan::default()
@@ -436,6 +444,44 @@ fn a_command_is_refused_without_a_hook() {
             .map(|d| &d.message)
             .collect::<Vec<_>>()
     );
+}
+
+/// A command the host could not run, and said why (status 127, nothing
+/// written: minted's runner not loaded in the browser), is one plain
+/// diagnostic naming the program and the why, the log's line as web2c
+/// writes it; a command that failed without a why (latexminted's own
+/// failure) adds none. At -j1 and -j8.
+#[test]
+fn a_command_the_host_could_not_run_is_said_once_with_why() {
+    let doc = r"\immediate\write18{fakecmd gone x.txt}
+\immediate\write18{fakecmd broke x.txt}
+\immediate\write16{GOT:done}
+\bye
+";
+    for threads in [1, 8] {
+        let b = common::build(
+            options("gone", Some(Arc::new(Fake::default())), threads),
+            Some(&common::plain()),
+            doc,
+        );
+        let (_, log) = b.output();
+        assert_eq!(got(&log), ["done"], "-j{threads}: {log}");
+        assert!(
+            log.contains("runsystem(fakecmd gone x.txt)...executed safely (allowed)."),
+            "-j{threads}: {log}"
+        );
+        let said: Vec<String> = b
+            .diagnostics()
+            .iter()
+            .filter(|d| d.message.contains("could not run"))
+            .map(|d| d.message.clone())
+            .collect();
+        assert_eq!(
+            said,
+            ["`fakecmd' could not run here: the runner is not loaded"],
+            "-j{threads}"
+        );
+    }
 }
 
 /// A command not in the restricted list is not run, hook or not.

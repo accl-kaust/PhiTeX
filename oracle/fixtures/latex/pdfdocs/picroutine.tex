@@ -1,0 +1,18 @@
+\documentclass{article}
+\usepackage{tikz}
+\AddToHook{shipout/background}{\put(1in,-1in){\begin{tikzpicture}\draw(0,0)--(1,0);\end{tikzpicture}\begin{tikzpicture}\draw(0,0)--(0,1);\end{tikzpicture}}}
+\newcommand\pic[1]{\begin{tikzpicture}\node{#1 \pgfpictureid};\end{tikzpicture}}
+\def\words{Words that fill the page so that it breaks between the pictures.}
+\newcount\n \newcount\m
+\def\head{\par\ifnum1=1 \vskip 2\baselineskip\penalty-50 \ifnum2=2 \noindent\pic{h}\par\fi\fi}
+\def\headB{\par\begingroup\vskip 2\baselineskip\penalty-50 \noindent\pic{g}\par\endgroup}
+\begin{document}
+\pic{first}\par
+\loop
+\head
+{\m=0 \loop \words\ \advance\m 1 \ifnum\m<\numexpr 2+\n*5-13*(\n*5/13)\relax\repeat}\par
+\headB
+{\m=0 \loop \words\ \advance\m 1 \ifnum\m<\numexpr 3+\n*7-11*(\n*7/11)\relax\repeat}\par
+\advance\n 1
+\ifnum\n<40 \repeat
+\end{document}

@@ -55,7 +55,7 @@ function scan(text) {
   return { openBraces: open, strayBraces: stray, openDollars: dollars };
 }
 var LATEX = /\\(documentclass|usepackage|begin\{[A-Za-z*]+\}|end\{[A-Za-z*]+\}|section|subsection|maketitle|cite|ref|label|emph|textbf|textit)\b/g;
-function diagnose(files, main, build) {
+function diagnose(files, main, build2) {
   const out = [];
   for (const [file, text] of Object.entries(files)) {
     if (!/\.(tex|sty|def)$/i.test(file)) continue;
@@ -85,7 +85,7 @@ function diagnose(files, main, build) {
       if (!(n in files) && !(`${n}.tex` in files) && !/\.(aux|bbl|ind|toc)$/.test(n) && !n.startsWith("\\"))
         out.push({ severity: "warning", code: "missing-file", message: `\\input ${n}: no such file in the project`, file, line: lineAt(text, m.index) });
     }
-    const latex = build?.latex ? [] : [...new Set(text.match(LATEX) ?? [])];
+    const latex = build2?.latex ? [] : [...new Set(text.match(LATEX) ?? [])];
     if (latex.length) {
       const first = text.search(LATEX);
       out.push({
@@ -103,40 +103,40 @@ function diagnose(files, main, build) {
         nonAscii++;
         if (firstNon < 0) firstNon = i;
       }
-    if (nonAscii && !build?.latex)
+    if (nonAscii && !build2?.latex)
       out.push({ severity: "info", code: "non-ascii", message: `${nonAscii} non-ASCII characters: PhiTeX's fonts may not typeset them`, file, line: lineAt(text, firstNon) });
   }
   if (main && files[main] !== void 0 && !/\\(bye|end|enddocument)\b/.test(files[main]))
     out.push({ severity: "info", code: "no-end", message: "no \\bye: the last page ships at the end of the file anyway", file: main });
-  for (const f of build?.packageErrors ?? [])
+  for (const f of build2?.packageErrors ?? [])
     out.push({ severity: "error", code: "package-download", message: `couldn't download ${f.name}: ${f.error}` });
-  if (build?.texError) {
-    const e = build.texError;
-    const stuck = e.missing && build.unavailable?.includes(e.missing);
-    const failed = e.missing && build.packageErrors?.some((f) => f.name === e.missing);
+  if (build2?.texError) {
+    const e = build2.texError;
+    const stuck = e.missing && build2.unavailable?.includes(e.missing);
+    const failed = e.missing && build2.packageErrors?.some((f) => f.name === e.missing);
     out.push({
       severity: "error",
       code: e.missing ? "tex-missing-file" : "tex-error",
-      message: e.missing ? `${e.missing} not found${stuck ? ` in the project or ${build.packageSource ?? "the package source"}` : failed ? " (its download failed, above)" : " (still downloading?)"}: the build stopped here` : e.message,
+      message: e.missing ? `${e.missing} not found${stuck ? ` in the project or ${build2.packageSource ?? "the package source"}` : failed ? " (its download failed, above)" : " (still downloading?)"}: the build stopped here` : e.message,
       file: e.file ?? void 0,
       line: e.line ?? void 0,
       detail: e.context
     });
   }
-  if (build) {
-    if (build.pending)
-      out.push({ severity: "warning", code: "pending", message: `${build.pending} part${build.pending === 1 ? "" : "s"} not read: out of fuel (a loop?) or unsupported` });
-    if (build.undefinedNames?.length) out.push({ severity: "warning", code: "undefined", message: `undefined: ${build.undefinedNames.join(" ")}` });
-    const optional = [...new Set(build.unavailable?.filter((n) => n !== build.texError?.missing).map((n) => n.replace(/(\.[a-z]+)\.tex$/, "$1")))];
+  if (build2) {
+    if (build2.pending)
+      out.push({ severity: "warning", code: "pending", message: `${build2.pending} part${build2.pending === 1 ? "" : "s"} not read: out of fuel (a loop?) or unsupported` });
+    if (build2.undefinedNames?.length) out.push({ severity: "warning", code: "undefined", message: `undefined: ${build2.undefinedNames.join(" ")}` });
+    const optional = [...new Set(build2.unavailable?.filter((n) => n !== build2.texError?.missing).map((n) => n.replace(/(\.[a-z]+)\.tex$/, "$1")))];
     if (optional.length) {
       const names = optional.slice(0, 6).join(" ") + (optional.length > 6 ? " \u2026" : "");
       out.push({
         severity: "info",
         code: "package-unavailable",
-        message: build.packageSource ? `looked for and not found in ${build.packageSource} (usually optional): ${names}` : `packages are not downloaded yet: ${names}`
+        message: build2.packageSource ? `looked for and not found in ${build2.packageSource} (usually optional): ${names}` : `packages are not downloaded yet: ${names}`
       });
     }
-    if (build.pages === 0) out.push({ severity: "warning", code: "no-pages", message: "no page shipped yet" });
+    if (build2.pages === 0) out.push({ severity: "warning", code: "no-pages", message: "no page shipped yet" });
   }
   const rank = { error: 0, warning: 1, info: 2 };
   return out.sort((a, b) => rank[a.severity] - rank[b.severity]);
@@ -1003,8 +1003,10 @@ header:active { cursor: grabbing; }
 .probs.error { color: var(--ph-danger); } .probs.warning { color: var(--ph-warning); }
 .progress { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; opacity: 0; transition: opacity .2s; pointer-events: none; }
 .progress.on { opacity: 1; }
-.progress::after { content: ""; position: absolute; top: 0; bottom: 0; width: 30%; background: var(--ph-progress); animation: phx-carriage 1.2s ease-in-out infinite; }
-@keyframes phx-carriage { from { left: -30%; } to { left: 100%; } }
+/* (the carriage runs only while the line shows, and by transform: a hidden one moving by left laid the page out every frame, scrolling included) */
+.progress::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 30%; background: var(--ph-progress); transform: translateX(-100%); }
+.progress.on::after { animation: phx-carriage 1.2s ease-in-out infinite; }
+@keyframes phx-carriage { from { transform: translateX(-100%); } to { transform: translateX(333.4%); } }
 .find { display: inline-flex; align-items: center; gap: 6px; }
 .find input { width: 170px; height: 24px; padding: 0 8px; font: inherit; color: var(--ph-fg); background: var(--ph-menu);
   border: 1px solid var(--ph-border); border-radius: var(--ph-radius); outline: none; }
@@ -1234,7 +1236,7 @@ header:active { cursor: grabbing; }
 .steps .track { position: relative; height: 3px; width: min(100%, 280px); margin: 8px auto; border-radius: 2px; overflow: hidden; background: #e7e9ee; }
 .steps .track i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: #f58f2d; transition: width .3s; }
 .steps .track.unknown i { width: 30% !important; animation: phx-slide 1.2s ease-in-out infinite; }
-@keyframes phx-slide { from { left: -30%; } to { left: 100%; } }
+@keyframes phx-slide { from { transform: translateX(-100%); } to { transform: translateX(333.4%); } }
 .win.dark-pdf .steps, .win.docked.pdf-dark .steps { color: #a3a9b4; }
 .win.dark-pdf .steps .what, .win.docked.pdf-dark .steps .what { color: #e4e6ea; }
 .win.dark-pdf .steps .track, .win.docked.pdf-dark .steps .track { background: #3d4047; }
@@ -1462,12 +1464,93 @@ var VIEWER_CSS = `
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
 ${PAGE_CSS}`;
 
-// viewer/src/problems.ts
-var esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-function place(file, line, col, text) {
-  return `<a href="#" class="phx-place" data-file="${esc(file)}" data-line="${Number(line) || 1}" data-col="${Number(col) || 1}">${esc(text ?? `${file}${line ? `:${line}` : ""}${col ? `:${col}` : ""}`)}</a>`;
+// viewer/src/html.ts
+var MARK = "phx-slot-";
+var parsed = /* @__PURE__ */ new WeakMap();
+var parsedSvg = /* @__PURE__ */ new WeakMap();
+function html(strings, ...values) {
+  return build(strings, values, false);
 }
-function problemHtml(p) {
+function svg(strings, ...values) {
+  return build(strings, values, true);
+}
+function build(strings, values, inSvg) {
+  const cache = inSvg ? parsedSvg : parsed;
+  let base = cache.get(strings);
+  if (!base) {
+    let src = "";
+    strings.forEach((s, i) => {
+      src += s;
+      if (i === values.length) return;
+      if (/<(style|textarea|title|script)\b[^>]*>(?![\s\S]*<\/\1>)[\s\S]*$/i.test(src)) throw new Error("html: no value inside <style>, <textarea>, <title> or <script>");
+      if (/<[a-zA-Z][^<>]*=\s*"[^"]*$/.test(src)) src += `${MARK}${i}`;
+      else if (/<[a-zA-Z][^<>]*$/.test(src)) throw new Error(`html: a value inside a tag must be in a quoted attribute (after ${JSON.stringify(s.slice(-40))})`);
+      else src += `<template ${MARK}${i}></template>`;
+    });
+    const t = new DOMParser().parseFromString(`<template>${inSvg ? `<svg>${src}</svg>` : src}</template>`, "text/html").querySelector("template").content;
+    if (inSvg) {
+      base = t.ownerDocument.createDocumentFragment();
+      base.append(...t.firstElementChild.childNodes);
+    } else base = t;
+    const drop = (n) => {
+      for (const k of [...n.childNodes]) {
+        if (k.nodeType === Node.TEXT_NODE && /^\s*$/.test(k.textContent) && k.textContent.includes("\n")) k.remove();
+        else drop(k instanceof HTMLTemplateElement ? k.content : k);
+      }
+    };
+    drop(base);
+    cache.set(strings, base);
+  }
+  const frag = base.cloneNode(true);
+  const nodes = (v) => v === null || v === void 0 || v === false ? [] : Array.isArray(v) ? v.flatMap(nodes) : [v instanceof Node ? v : String(v)];
+  const walk = (root) => {
+    for (const el of [...root.querySelectorAll("*")]) {
+      if (el.localName === "template" && el.attributes.length === 1 && el.attributes[0].name.startsWith(MARK)) {
+        el.replaceWith(...nodes(values[+el.attributes[0].name.slice(MARK.length)]));
+        continue;
+      }
+      for (const a of [...el.attributes]) {
+        if (!a.value.includes(MARK)) continue;
+        if (a.name.startsWith("on")) throw new Error(`html: no value in an event handler (${a.name})`);
+        const whole = new RegExp(`^${MARK}(\\d+)$`).exec(a.value), v = whole && values[+whole[1]];
+        if (whole && !/^(aria|data)-/.test(a.name) && (v === true || v === false || v === null || v === void 0)) {
+          if (v === true) el.setAttribute(a.name, "");
+          else el.removeAttribute(a.name);
+          continue;
+        }
+        el.setAttribute(a.name, a.value.replace(new RegExp(`${MARK}(\\d+)`, "g"), (_, n) => nodes(values[+n]).map((x) => typeof x === "string" ? x : x.textContent).join("")));
+      }
+      if (el instanceof HTMLTemplateElement) walk(el.content);
+    }
+  };
+  walk(frag);
+  return frag;
+}
+function rich(text) {
+  const f = document.createDocumentFragment();
+  const open = [f];
+  for (const part3 of text.split(/(<\/?(?:b|code|i|kbd)>)/)) {
+    const tag = /^<(\/?)(b|code|i|kbd)>$/.exec(part3);
+    if (!tag) part3 && open[open.length - 1].appendChild(document.createTextNode(part3));
+    else if (!tag[1]) open.push(open[open.length - 1].appendChild(document.createElement(tag[2])));
+    else if (open.length > 1) open.pop();
+  }
+  return f;
+}
+function svgArt(markup) {
+  if (/<script|\son[a-z]+\s*=/i.test(markup)) throw new Error("svgArt: art has no script or event handler");
+  const doc = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg">${markup}</svg>`, "image/svg+xml");
+  if (doc.querySelector("parsererror")) throw new Error("svgArt: not well-formed SVG");
+  const f = document.createDocumentFragment();
+  f.append(...[...doc.documentElement.childNodes].map((n) => document.importNode(n, true)));
+  return f;
+}
+
+// viewer/src/problems.ts
+function place(file, line, col, text) {
+  return html`<a href="#" class="phx-place" data-file="${file}" data-line="${Number(line) || 1}" data-col="${Number(col) || 1}">${text ?? `${file}${line ? `:${line}` : ""}${col ? `:${col}` : ""}`}</a>`;
+}
+function problemNode(p) {
   return item(p);
 }
 function asDiagnostic(p) {
@@ -1477,20 +1560,19 @@ function asDiagnostic(p) {
 }
 function item(p) {
   const sev = p.severity === "fatal" ? "error" : p.severity === "warning" || p.severity === "note" ? p.severity : "error";
-  const where = p.file ? place(p.file, p.line, p.col) : "";
   let ex = "";
   if (p.excerpt) {
     const chars = [...p.excerpt.text];
     const a = chars.slice(0, p.excerpt.start).join("");
     const b = chars.slice(p.excerpt.start, p.excerpt.start + p.excerpt.len).join("");
     const c = chars.slice(p.excerpt.start + p.excerpt.len).join("");
-    ex = `<pre class="phx-excerpt">${p.line ? `<span class="phx-ln">${Number(p.line)} \u2502 </span>` : ""}${esc(a)}<mark>${esc(b)}</mark>${esc(c)}</pre>`;
+    ex = html`<pre class="phx-excerpt">${p.line ? html`<span class="phx-ln">${Number(p.line)} │ </span>` : ""}${a}<mark>${b}</mark>${c}</pre>`;
   }
-  const ctx = p.context.length ? `<details class="phx-ctx"><summary>in ${p.context.map((m) => `<code>${esc(m.name)}</code>`).join(" \u2190 ")}</summary>${p.context.map((m) => `<pre><b>${esc(m.name)}</b> ${esc(m.before)}<mark>\u2038</mark>${esc(m.after)}</pre>`).join("")}</details>` : "";
-  const inc = p.included.length ? `<div class="phx-inc">included from ${p.included.map((i) => place(i.file, i.line, 1)).join(", ")}</div>` : "";
-  const box = p.box ? `<pre class="phx-excerpt">${esc(p.box.excerpt)}</pre>` : "";
-  const list = (cls, xs) => xs.length ? `<ul class="${cls}">${xs.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : "";
-  return `<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${esc(String(p.severity))}</span>${p.code ? `<code class="phx-code">${esc(p.code)}</code>` : ""}<span>${esc(p.message)}</span></div>${where ? `<div class="phx-where">${where}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help.length ? [p.help.join(" ").replace(/\s+/g, " ").trim()] : [], ...p.suggestions])}</li>`;
+  const ctx = p.context.length ? html`<details class="phx-ctx"><summary>in ${p.context.map((m, i) => [i ? " \u2190 " : "", html`<code>${m.name}</code>`])}</summary>${p.context.map((m) => html`<pre><b>${m.name}</b> ${m.before}<mark>‸</mark>${m.after}</pre>`)}</details>` : "";
+  const inc = p.included.length ? html`<div class="phx-inc">included from ${p.included.map((i, k) => [k ? ", " : "", place(i.file, i.line, 1)])}</div>` : "";
+  const box = p.box ? html`<pre class="phx-excerpt">${p.box.excerpt}</pre>` : "";
+  const list = (cls, xs) => xs.length ? html`<ul class="${cls}">${xs.map((x) => html`<li>${x}</li>`)}</ul>` : "";
+  return html`<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${String(p.severity)}</span>${p.code ? html`<code class="phx-code">${p.code}</code>` : ""}<span>${p.message}</span></div>${p.file ? html`<div class="phx-where">${place(p.file, p.line, p.col)}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help.length ? [p.help.join(" ").replace(/\s+/g, " ").trim()] : [], ...p.suggestions])}</li>`;
 }
 var PROBLEMS_CSS = `
 .phx-problems { position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / 45%); overflow: auto; padding: 48px 16px; }
@@ -1522,7 +1604,6 @@ var PROBLEMS_CSS = `
 `;
 
 // viewer/src/outline.ts
-var esc2 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 var Outline = class {
   el;
   /** The items in document order, flat, with their rows. */
@@ -1564,15 +1645,15 @@ var Outline = class {
       this.el.innerHTML = `<p class="phx-none">No contents: the PDF has no outline (hyperref makes one from the sections).</p>`;
       return;
     }
-    const list = (es, path, depth) => `<ul>${es.map((e) => {
+    const list = (es, path, depth) => html`<ul>${es.map((e) => {
       const i = this.flat.length;
       this.flat.push({ e, row: null });
       const p = `${path}/${e.t}`;
       const kids = e.k.length ? list(e.k, p, depth + 1) : "";
       const cls = [e.k.length ? "parent" : "", this.folded.has(p) ? "folded" : ""].filter(Boolean).join(" ");
-      return `<li data-i="${i}" data-path="${esc2(p)}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? `<span class="phx-fold" aria-hidden="true"></span>` : `<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${esc2(e.t)}">${esc2(e.t)}</a>${e.p != null ? `<span class="phx-p">${Number(e.p) + 1}</span>` : ""}</div>${kids}</li>`;
-    }).join("")}</ul>`;
-    this.el.innerHTML = list(items, "", 0);
+      return html`<li data-i="${i}" data-path="${p}" class="${cls}"><div class="phx-row" style="--d:${depth}">${e.k.length ? html`<span class="phx-fold" aria-hidden="true"></span>` : html`<span class="phx-dot"></span>`}<a href="#" class="phx-t" title="${e.t}">${e.t}</a>${e.p != null ? html`<span class="phx-p">${Number(e.p) + 1}</span>` : ""}</div>${kids}</li>`;
+    })}</ul>`;
+    this.el.replaceChildren(list(items, "", 0));
     for (const li of this.el.querySelectorAll("li")) {
       const f = this.flat[Number(li.dataset.i)];
       if (f) f.row = li.querySelector(":scope > .phx-row");
@@ -1768,8 +1849,8 @@ function anonymizer(paths) {
     if (stem.length >= 4 && stem !== base) pairs.push([stem, alias.replace(/\.[A-Za-z0-9]+$/, "")]);
   });
   pairs.sort((a, b) => b[0].length - a[0].length);
-  const esc6 = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = pairs.length ? new RegExp(pairs.map(([p]) => `(?<![A-Za-z0-9_])${esc6(p)}(?![A-Za-z0-9_])`).join("|"), "g") : null;
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = pairs.length ? new RegExp(pairs.map(([p]) => `(?<![A-Za-z0-9_])${esc(p)}(?![A-Za-z0-9_])`).join("|"), "g") : null;
   const map = new Map(pairs);
   return (s) => (re ? s.replace(re, (m) => map.get(m) ?? m) : s).replace(/`[^'\n]{1,80}'/g, "`\u2026'").replace(/\/home\/[^/\s]+\//g, "~/").replace(/\/Users\/[^/\s]+\//g, "~/");
 }
@@ -1821,7 +1902,7 @@ function report(r) {
 // viewer/src/opening-art.ts
 var WORD = { "size": 95.52238805970148, "letters": [{ "ch": "\u03A6", "x": -7, "y": 85, "l": 0, "r": 71, "t": 20, "b": 85 }, { "ch": "T", "x": 55.514207299075906, "y": 64, "l": 59.514207299075906, "r": 128.5142072990759, "t": 0, "b": 64 }, { "ch": "E", "x": 116.0032076069846, "y": 85, "l": 119.0032076069846, "r": 186.0032076069846, "t": 20, "b": 85 }, { "ch": "X", "x": 176.1772889823344, "y": 64, "l": 179.1772889823344, "r": 256.1772889823344, "t": -1, "b": 65 }] };
 var WOVEN = { "body": '<defs><clipPath id="\xA70" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA71" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA72" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA73" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA74" ><rect x="43.63" y="-870.22" width="35.34" height="1910.45" /></clipPath><clipPath id="\xA75" ><rect x="116" y="-870.22" width="57.31" height="1910.45" /></clipPath><clipPath id="\xA76" ><rect x="214.48" y="-891.22" width="47.67" height="1910.45" /></clipPath><mask id="\xA77" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA74)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g><g clip-path="url(#\xA75)"><path d="M39 0V-47H147V-633H39V-680H660L691 -439H644Q639 -480 632.5 -506.5Q626 -533 612 -559Q598 -585 577 -600Q556 -615 522 -624Q488 -633 441 -633H289V-376H344Q411 -376 430.5 -403Q450 -430 450 -493H497V-212H450Q450 -275 430.5 -302Q411 -329 344 -329H289V-47H441Q486 -47 520.5 -53.5Q555 -60 579 -75.5Q603 -91 619.5 -108.5Q636 -126 647 -154.5Q658 -183 664 -209Q670 -235 676 -274H723L677 0Z" transform="translate(116 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g><g clip-path="url(#\xA76)"><path d="M34 0V-47H63Q94 -47 124 -50Q147 -52 153.5 -55Q160 -58 167 -67L369 -332L147 -639H49V-686Q84 -683 211 -683Q351 -683 392 -686V-639H309L452 -442L584 -617Q585 -618 588 -622.5Q591 -627 592 -628Q557 -639 500 -639V-686Q536 -683 652 -683Q744 -683 786 -686V-639H757Q723 -639 699 -636Q673 -634 666.5 -631.5Q660 -629 652 -618L484 -397L737 -47H835V0Q800 -3 673 -3Q533 -3 492 0V-47H575L401 -288L236 -69Q235 -68 232 -63.5Q229 -59 228 -58Q263 -47 320 -47V0Q284 -3 168 -3Q76 -3 34 0Z" transform="translate(176.18 64) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g></mask><clipPath id="\xA78" ><rect x="20.7" y="44.88" width="22.93" height="32.48" /></clipPath><clipPath id="\xA79" ><rect x="79.39" y="-891.22" width="28.66" height="1910.45" /></clipPath><clipPath id="\xA710" ><rect x="176.18" y="-891.22" width="38.3" height="1910.45" /></clipPath><mask id="\xA711" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA78)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g><g clip-path="url(#\xA79)"><path d="M42 -434 63 -675H736L757 -434H710Q706 -476 703 -498.5Q700 -521 689.5 -550.5Q679 -580 663 -594Q647 -608 618 -618Q589 -628 547 -628H471V-47H624V0Q570 -3 400 -3Q230 -3 176 0V-47H329V-628H252Q210 -628 180.5 -617.5Q151 -607 135 -593Q119 -579 109 -550Q99 -521 95.5 -498.5Q92 -476 89 -434Z" transform="translate(55.51 64) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g><g clip-path="url(#\xA710)"><path d="M34 0V-47H63Q94 -47 124 -50Q147 -52 153.5 -55Q160 -58 167 -67L369 -332L147 -639H49V-686Q84 -683 211 -683Q351 -683 392 -686V-639H309L452 -442L584 -617Q585 -618 588 -622.5Q591 -627 592 -628Q557 -639 500 -639V-686Q536 -683 652 -683Q744 -683 786 -686V-639H757Q723 -639 699 -636Q673 -634 666.5 -631.5Q660 -629 652 -618L484 -397L737 -47H835V0Q800 -3 673 -3Q533 -3 492 0V-47H575L401 -288L236 -69Q235 -68 232 -63.5Q229 -59 228 -58Q263 -47 320 -47V0Q284 -3 168 -3Q76 -3 34 0Z" transform="translate(176.18 64) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g></mask><clipPath id="\xA712" ><rect x="27.96" y="-10.52" width="51.01" height="85.97" /></clipPath><clipPath id="\xA713" ><rect x="116" y="-870.22" width="57.31" height="1910.45" /></clipPath><clipPath id="\xA714" ><rect x="214.48" y="-891.22" width="47.67" height="1910.45" /></clipPath><mask id="\xA715" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA712)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g><g clip-path="url(#\xA713)"><path d="M39 0V-47H147V-633H39V-680H660L691 -439H644Q639 -480 632.5 -506.5Q626 -533 612 -559Q598 -585 577 -600Q556 -615 522 -624Q488 -633 441 -633H289V-376H344Q411 -376 430.5 -403Q450 -430 450 -493H497V-212H450Q450 -275 430.5 -302Q411 -329 344 -329H289V-47H441Q486 -47 520.5 -53.5Q555 -60 579 -75.5Q603 -91 619.5 -108.5Q636 -126 647 -154.5Q658 -183 664 -209Q670 -235 676 -274H723L677 0Z" transform="translate(116 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g><g clip-path="url(#\xA714)"><path d="M34 0V-47H63Q94 -47 124 -50Q147 -52 153.5 -55Q160 -58 167 -67L369 -332L147 -639H49V-686Q84 -683 211 -683Q351 -683 392 -686V-639H309L452 -442L584 -617Q585 -618 588 -622.5Q591 -627 592 -628Q557 -639 500 -639V-686Q536 -683 652 -683Q744 -683 786 -686V-639H757Q723 -639 699 -636Q673 -634 666.5 -631.5Q660 -629 652 -618L484 -397L737 -47H835V0Q800 -3 673 -3Q533 -3 492 0V-47H575L401 -288L236 -69Q235 -68 232 -63.5Q229 -59 228 -58Q263 -47 320 -47V0Q284 -3 168 -3Q76 -3 34 0Z" transform="translate(176.18 64) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g></mask><clipPath id="\xA716" ><rect x="12.1" y="56.34" width="13.37" height="19.1" /></clipPath><clipPath id="\xA717" ><rect x="79.39" y="-891.22" width="28.66" height="1910.45" /></clipPath><clipPath id="\xA718" ><rect x="176.18" y="-891.22" width="85.97" height="1910.45" /></clipPath><mask id="\xA719" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA716)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g><g clip-path="url(#\xA717)"><path d="M42 -434 63 -675H736L757 -434H710Q706 -476 703 -498.5Q700 -521 689.5 -550.5Q679 -580 663 -594Q647 -608 618 -618Q589 -628 547 -628H471V-47H624V0Q570 -3 400 -3Q230 -3 176 0V-47H329V-628H252Q210 -628 180.5 -617.5Q151 -607 135 -593Q119 -579 109 -550Q99 -521 95.5 -498.5Q92 -476 89 -434Z" transform="translate(55.51 64) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g><g clip-path="url(#\xA718)"><path d="M34 0V-47H63Q94 -47 124 -50Q147 -52 153.5 -55Q160 -58 167 -67L369 -332L147 -639H49V-686Q84 -683 211 -683Q351 -683 392 -686V-639H309L452 -442L584 -617Q585 -618 588 -622.5Q591 -627 592 -628Q557 -639 500 -639V-686Q536 -683 652 -683Q744 -683 786 -686V-639H757Q723 -639 699 -636Q673 -634 666.5 -631.5Q660 -629 652 -618L484 -397L737 -47H835V0Q800 -3 673 -3Q533 -3 492 0V-47H575L401 -288L236 -69Q235 -68 232 -63.5Q229 -59 228 -58Q263 -47 320 -47V0Q284 -3 168 -3Q76 -3 34 0Z" transform="translate(176.18 64) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g></mask><mask id="\xA720" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="43.63" y="-870.22" width="35.34" height="1910.45" fill="#000"/></mask><mask id="\xA721" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA720)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L262.18,51.56" fill="none" stroke="#000" stroke-width="8.58"/></g></mask><mask id="\xA722" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="20.7" y="44.88" width="22.93" height="32.48" fill="#000"/></mask><mask id="\xA723" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA722)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L262.18,45.24" fill="none" stroke="#000" stroke-width="7.37"/></g></mask><mask id="\xA724" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="27.96" y="-10.52" width="51.01" height="85.97" fill="#000"/></mask><mask id="\xA725" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA724)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L262.18,40.12" fill="none" stroke="#000" stroke-width="6.16"/></g></mask><mask id="\xA726" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="12.1" y="56.34" width="13.37" height="19.1" fill="#000"/></mask><mask id="\xA727" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA726)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L262.18,36.22" fill="none" stroke="#000" stroke-width="4.95"/></g></mask><mask id="\xA728" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L262.18,51.56" fill="none" stroke="#000" stroke-width="8.58"/></mask><mask id="\xA729" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="79.39" y="-891.22" width="28.66" height="1910.45" fill="#000"/></mask><mask id="\xA730" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA729)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L262.18,45.24" fill="none" stroke="#000" stroke-width="7.37"/></g></mask><mask id="\xA731" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L262.18,40.12" fill="none" stroke="#000" stroke-width="6.16"/></mask><mask id="\xA732" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="79.39" y="-891.22" width="28.66" height="1910.45" fill="#000"/></mask><mask id="\xA733" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA732)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L262.18,36.22" fill="none" stroke="#000" stroke-width="4.95"/></g></mask><mask id="\xA734" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="116" y="-870.22" width="57.31" height="1910.45" fill="#000"/></mask><mask id="\xA735" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA734)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L262.18,51.56" fill="none" stroke="#000" stroke-width="8.58"/></g></mask><mask id="\xA736" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L262.18,45.24" fill="none" stroke="#000" stroke-width="7.37"/></mask><mask id="\xA737" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="116" y="-870.22" width="57.31" height="1910.45" fill="#000"/></mask><mask id="\xA738" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA737)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L262.18,40.12" fill="none" stroke="#000" stroke-width="6.16"/></g></mask><mask id="\xA739" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L262.18,36.22" fill="none" stroke="#000" stroke-width="4.95"/></mask><mask id="\xA740" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="214.48" y="-891.22" width="47.67" height="1910.45" fill="#000"/></mask><mask id="\xA741" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA740)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L262.18,51.56" fill="none" stroke="#000" stroke-width="8.58"/></g></mask><mask id="\xA742" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="176.18" y="-891.22" width="38.3" height="1910.45" fill="#000"/></mask><mask id="\xA743" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA742)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L262.18,45.24" fill="none" stroke="#000" stroke-width="7.37"/></g></mask><mask id="\xA744" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="214.48" y="-891.22" width="47.67" height="1910.45" fill="#000"/></mask><mask id="\xA745" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA744)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L262.18,40.12" fill="none" stroke="#000" stroke-width="6.16"/></g></mask><mask id="\xA746" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="176.18" y="-891.22" width="85.97" height="1910.45" fill="#000"/></mask><mask id="\xA747" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA746)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L262.18,36.22" fill="none" stroke="#000" stroke-width="4.95"/></g></mask></defs><g mask="url(#\xA77)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L262.18,51.56" fill="none" stroke="#f58f2d" stroke-width="5.28"/></g><g mask="url(#\xA711)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L262.18,45.24" fill="none" stroke="#f0b225" stroke-width="4.07"/></g><g mask="url(#\xA715)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L262.18,40.12" fill="none" stroke="#d3c72a" stroke-width="2.86"/></g><g mask="url(#\xA719)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L262.18,36.22" fill="none" stroke="#00a8a4" stroke-width="1.65"/></g><g class="phx-l" data-ch="\u03A6"><g mask="url(#\xA727)"><g mask="url(#\xA725)"><g mask="url(#\xA723)"><g mask="url(#\xA721)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#FILL"/></g></g></g></g></g><g class="phx-l" data-ch="T"><g mask="url(#\xA733)"><g mask="url(#\xA731)"><g mask="url(#\xA730)"><g mask="url(#\xA728)"><path d="M42 -434 63 -675H736L757 -434H710Q706 -476 703 -498.5Q700 -521 689.5 -550.5Q679 -580 663 -594Q647 -608 618 -618Q589 -628 547 -628H471V-47H624V0Q570 -3 400 -3Q230 -3 176 0V-47H329V-628H252Q210 -628 180.5 -617.5Q151 -607 135 -593Q119 -579 109 -550Q99 -521 95.5 -498.5Q92 -476 89 -434Z" transform="translate(55.51 64) scale(0.09552)" fill="#FILL"/></g></g></g></g></g><g class="phx-l" data-ch="E"><g mask="url(#\xA739)"><g mask="url(#\xA738)"><g mask="url(#\xA736)"><g mask="url(#\xA735)"><path d="M39 0V-47H147V-633H39V-680H660L691 -439H644Q639 -480 632.5 -506.5Q626 -533 612 -559Q598 -585 577 -600Q556 -615 522 -624Q488 -633 441 -633H289V-376H344Q411 -376 430.5 -403Q450 -430 450 -493H497V-212H450Q450 -275 430.5 -302Q411 -329 344 -329H289V-47H441Q486 -47 520.5 -53.5Q555 -60 579 -75.5Q603 -91 619.5 -108.5Q636 -126 647 -154.5Q658 -183 664 -209Q670 -235 676 -274H723L677 0Z" transform="translate(116 85) scale(0.09552)" fill="#FILL"/></g></g></g></g></g><g class="phx-l" data-ch="X"><g mask="url(#\xA747)"><g mask="url(#\xA745)"><g mask="url(#\xA743)"><g mask="url(#\xA741)"><path d="M34 0V-47H63Q94 -47 124 -50Q147 -52 153.5 -55Q160 -58 167 -67L369 -332L147 -639H49V-686Q84 -683 211 -683Q351 -683 392 -686V-639H309L452 -442L584 -617Q585 -618 588 -622.5Q591 -627 592 -628Q557 -639 500 -639V-686Q536 -683 652 -683Q744 -683 786 -686V-639H757Q723 -639 699 -636Q673 -634 666.5 -631.5Q660 -629 652 -618L484 -397L737 -47H835V0Q800 -3 673 -3Q533 -3 492 0V-47H575L401 -288L236 -69Q235 -68 232 -63.5Q229 -59 228 -58Q263 -47 320 -47V0Q284 -3 168 -3Q76 -3 34 0Z" transform="translate(176.18 64) scale(0.09552)" fill="#FILL"/></g></g></g></g></g>', "x0": 0, "y0": -1, "x1": 262.1772889823344, "y1": 89 };
-var MARK = { "body": '<defs><clipPath id="\xA70" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA71" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA72" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA73" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA74" ><rect x="43.63" y="-870.22" width="35.34" height="1910.45" /></clipPath><mask id="\xA75" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA74)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g></mask><clipPath id="\xA76" ><rect x="20.7" y="44.88" width="22.93" height="32.48" /></clipPath><mask id="\xA77" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA76)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g></mask><clipPath id="\xA78" ><rect x="27.96" y="-10.52" width="51.01" height="85.97" /></clipPath><mask id="\xA79" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA78)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g></mask><clipPath id="\xA710" ><rect x="12.1" y="56.34" width="13.37" height="19.1" /></clipPath><mask id="\xA711" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA710)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g></mask><mask id="\xA712" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="43.63" y="-870.22" width="35.34" height="1910.45" fill="#000"/></mask><mask id="\xA713" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA712)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L71,51.56" fill="none" stroke="#000" stroke-width="8.58"/></g></mask><mask id="\xA714" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="20.7" y="44.88" width="22.93" height="32.48" fill="#000"/></mask><mask id="\xA715" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA714)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L71,45.24" fill="none" stroke="#000" stroke-width="7.37"/></g></mask><mask id="\xA716" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="27.96" y="-10.52" width="51.01" height="85.97" fill="#000"/></mask><mask id="\xA717" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA716)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L71,40.12" fill="none" stroke="#000" stroke-width="6.16"/></g></mask><mask id="\xA718" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="12.1" y="56.34" width="13.37" height="19.1" fill="#000"/></mask><mask id="\xA719" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA718)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L71,36.22" fill="none" stroke="#000" stroke-width="4.95"/></g></mask></defs><g mask="url(#\xA75)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L71,51.56" fill="none" stroke="#f58f2d" stroke-width="5.28"/></g><g mask="url(#\xA77)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L71,45.24" fill="none" stroke="#f0b225" stroke-width="4.07"/></g><g mask="url(#\xA79)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L71,40.12" fill="none" stroke="#d3c72a" stroke-width="2.86"/></g><g mask="url(#\xA711)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L71,36.22" fill="none" stroke="#00a8a4" stroke-width="1.65"/></g><g class="phx-l" data-ch="\u03A6"><g mask="url(#\xA719)"><g mask="url(#\xA717)"><g mask="url(#\xA715)"><g mask="url(#\xA713)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#FILL"/></g></g></g></g></g>', "x0": 0, "y0": 20, "x1": 71, "y1": 89 };
+var MARK2 = { "body": '<defs><clipPath id="\xA70" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA71" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA72" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA73" ><rect x="-500" y="-1000" width="2000" height="1089"/></clipPath><clipPath id="\xA74" ><rect x="43.63" y="-870.22" width="35.34" height="1910.45" /></clipPath><mask id="\xA75" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA74)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g></mask><clipPath id="\xA76" ><rect x="20.7" y="44.88" width="22.93" height="32.48" /></clipPath><mask id="\xA77" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA76)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g></mask><clipPath id="\xA78" ><rect x="27.96" y="-10.52" width="51.01" height="85.97" /></clipPath><mask id="\xA79" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA78)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g></mask><clipPath id="\xA710" ><rect x="12.1" y="56.34" width="13.37" height="19.1" /></clipPath><mask id="\xA711" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g clip-path="url(#\xA710)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#000" stroke="#000" stroke-width="34.55" stroke-linejoin="miter" stroke-miterlimit="4"/></g></mask><mask id="\xA712" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="43.63" y="-870.22" width="35.34" height="1910.45" fill="#000"/></mask><mask id="\xA713" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA712)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L71,51.56" fill="none" stroke="#000" stroke-width="8.58"/></g></mask><mask id="\xA714" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="20.7" y="44.88" width="22.93" height="32.48" fill="#000"/></mask><mask id="\xA715" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA714)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L71,45.24" fill="none" stroke="#000" stroke-width="7.37"/></g></mask><mask id="\xA716" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="27.96" y="-10.52" width="51.01" height="85.97" fill="#000"/></mask><mask id="\xA717" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA716)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L71,40.12" fill="none" stroke="#000" stroke-width="6.16"/></g></mask><mask id="\xA718" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><rect x="12.1" y="56.34" width="13.37" height="19.1" fill="#000"/></mask><mask id="\xA719" maskUnits="userSpaceOnUse" x="-500" y="-500" width="2000" height="1500"><rect x="-500" y="-500" width="2000" height="1500" fill="#fff"/><g mask="url(#\xA718)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L71,36.22" fill="none" stroke="#000" stroke-width="4.95"/></g></mask></defs><g mask="url(#\xA75)"><path class="phx-s0" pathLength="1" clip-path="url(#\xA70)" d="M21.2,89 L46.41,54.3 A6.64,6.64 0 0 1 51.78,51.56 L71,51.56" fill="none" stroke="#f58f2d" stroke-width="5.28"/></g><g mask="url(#\xA77)"><path class="phx-s1" pathLength="1" clip-path="url(#\xA71)" d="M13.38,89 L41.29,50.58 A12.97,12.97 0 0 1 51.78,45.24 L71,45.24" fill="none" stroke="#f0b225" stroke-width="4.07"/></g><g mask="url(#\xA79)"><path class="phx-s2" pathLength="1" clip-path="url(#\xA72)" d="M7.06,89 L37.16,47.58 A18.08,18.08 0 0 1 51.78,40.12 L71,40.12" fill="none" stroke="#d3c72a" stroke-width="2.86"/></g><g mask="url(#\xA711)"><path class="phx-s3" pathLength="1" clip-path="url(#\xA73)" d="M2.23,89 L34,45.28 A21.98,21.98 0 0 1 51.78,36.22 L71,36.22" fill="none" stroke="#00a8a4" stroke-width="1.65"/></g><g class="phx-l" data-ch="\u03A6"><g mask="url(#\xA719)"><g mask="url(#\xA717)"><g mask="url(#\xA715)"><g mask="url(#\xA713)"><path d="M80 -344Q80 -424 162 -473.5Q244 -523 375 -533V-638H240V-686Q345 -683 451 -683Q518 -683 642 -686V-638H506V-534Q634 -528 723 -476.5Q812 -425 812 -343Q812 -264 725 -211Q638 -158 506 -152V-48H642V0Q537 -3 432 -3Q364 -3 240 0V-48H375V-153Q231 -164 155.5 -218Q80 -272 80 -344ZM228 -344Q228 -316 233 -294Q238 -272 252.5 -249Q267 -226 298 -210.5Q329 -195 375 -190V-495Q288 -485 258 -444Q228 -403 228 -344ZM506 -189Q584 -198 624 -231.5Q664 -265 664 -341Q664 -411 630.5 -448.5Q597 -486 507 -497L506 -453Z" transform="translate(-7 85) scale(0.09552)" fill="#FILL"/></g></g></g></g></g>', "x0": 0, "y0": 20, "x1": 71, "y1": 89 };
 var LOCKUP = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="3.000 2.300 555.496 94.984" role="img" aria-label="ACCL \u2013 Accelerated Connected Computing Lab" xmlns:c2pa="http://c2pa.org/manifest"><title>ACCL \u2013 Accelerated Connected Computing Lab</title><path fill="#1D3E72" fill-rule="evenodd" d="M97.00,3.00 L83.49,3.00 L34.66,70.21 L53.25,70.21 L81.96,30.70 L81.96,97.00 L97.00,97.00 Z"></path><path fill="#1D3E72" fill-rule="evenodd" d="M46.17,80.08 L33.88,97.00 L74.15,97.00 L79.61,89.48 L67.32,89.48 L79.61,72.56 L70.31,72.56 L58.02,89.48 L48.64,89.48 L55.47,80.08 L61.95,80.08 L67.41,72.56 L32.96,72.56 L15.20,97.00 L30.97,97.00 L36.44,89.48 L29.96,89.48 L36.79,80.08 Z"></path><path fill="#F58F2D" fill-rule="evenodd" d="M80.59,3.00 L71.29,3.00 L3.00,97.00 L12.30,97.00 Z"></path><path fill="#F0B225" fill-rule="evenodd" d="M68.39,3.00 L61.23,3.00 L3.00,83.14 L3.00,93.00 Z"></path><path fill="#D3C72A" fill-rule="evenodd" d="M58.32,3.00 L53.29,3.00 L3.00,72.21 L3.00,79.14 Z"></path><path fill="#00A8A4" fill-rule="evenodd" d="M50.38,3.00 L47.48,3.00 L3.00,64.22 L3.00,68.21 Z"></path><path fill="#1D3E72" d="M127.75767441860464 63.859534883720926Q117.8767441860465 63.859534883720926 113.19860465116278 61.10511627906976Q108.52046511627906 58.3506976744186 106.99023255813952 52.05488372093023Q105.46 45.75906976744186 105.46 33.08Q105.46 20.57581395348837 107.03395348837208 14.236279069767441Q108.60790697674418 7.8967441860465115 113.28604651162789 5.098604651162791Q117.96418604651161 2.300465116279071 127.75767441860464 2.300465116279071Q131.16790697674418 2.300465116279071 134.7967441860465 2.7376744186046515Q138.42558139534881 3.1748837209302323 140.78651162790698 3.8744186046511615V14.367441860465114Q133.35395348837207 13.580465116279072 130.90558139534883 13.580465116279072Q124.95953488372092 13.580465116279072 122.72976744186045 14.760930232558142Q120.49999999999999 15.941395348837212 119.88790697674418 19.570232558139534Q119.27581395348835 23.199069767441856 119.27581395348835 33.08Q119.27581395348835 42.96093023255814 119.88790697674418 46.58976744186047Q120.49999999999999 50.21860465116279 122.72976744186045 51.39906976744186Q124.95953488372092 52.579534883720925 130.90558139534883 52.579534883720925Q135.97720930232558 52.579534883720925 141.04883720930232 51.79255813953488V62.37302325581395Q138.60046511627905 62.985116279069764 134.84046511627906 63.42232558139534Q131.08046511627907 63.859534883720926 127.75767441860464 63.859534883720926Z M170.60418604651161 63.859534883720926Q160.72325581395347 63.859534883720926 156.04511627906976 61.10511627906976Q151.36697674418602 58.3506976744186 149.83674418604647 52.05488372093023Q148.30651162790696 45.75906976744186 148.30651162790696 33.08Q148.30651162790696 20.57581395348837 149.88046511627905 14.236279069767441Q151.45441860465115 7.8967441860465115 156.13255813953486 5.098604651162791Q160.81069767441858 2.300465116279071 170.60418604651161 2.300465116279071Q174.01441860465113 2.300465116279071 177.64325581395346 2.7376744186046515Q181.2720930232558 3.1748837209302323 183.63302325581392 3.8744186046511615V14.367441860465114Q176.20046511627905 13.580465116279072 173.75209302325578 13.580465116279072Q167.80604651162787 13.580465116279072 165.5762790697674 14.760930232558142Q163.34651162790695 15.941395348837212 162.73441860465113 19.570232558139534Q162.12232558139533 23.199069767441856 162.12232558139533 33.08Q162.12232558139533 42.96093023255814 162.73441860465113 46.58976744186047Q163.34651162790695 50.21860465116279 165.5762790697674 51.39906976744186Q167.80604651162787 52.579534883720925 173.75209302325578 52.579534883720925Q178.82372093023253 52.579534883720925 183.89534883720927 51.79255813953488V62.37302325581395Q181.44697674418603 62.985116279069764 177.68697674418604 63.42232558139534Q173.92697674418602 63.859534883720926 170.60418604651161 63.859534883720926Z M192.6395348837209 63.16V3.0H228.84046511627903V14.280000000000001H206.19302325581393V27.133953488372093H225.60511627906973V38.41395348837209H206.19302325581393V51.879999999999995H228.84046511627903V63.16Z M238.45906976744186 63.16V3.0H252.0125581395349V51.44279069767442H271.9493023255814V63.16Z M279.206976744186 63.16V3.0H315.4079069767442V14.280000000000001H292.7604651162791V27.133953488372093H312.1725581395349V38.41395348837209H292.7604651162791V51.879999999999995H315.4079069767442V63.16Z M354.3195348837209 63.16 347.3241860465116 42.08651162790697H338.58V63.16H325.0265116279069V3.0H349.77255813953485Q357.2051162790697 3.0 360.9651162790697 5.229767441860464Q364.7251162790697 7.459534883720927 365.9930232558139 11.569302325581393Q367.2609302325581 15.67906976744186 367.2609302325581 22.499534883720926Q367.2609302325581 28.882790697674416 365.86186046511625 33.38604651162791Q364.4627906976744 37.8893023255814 360.17813953488366 39.987906976744185L368.57255813953486 63.16ZM353.53255813953484 22.586976744186046Q353.53255813953484 18.652093023255816 353.0516279069767 17.03441860465116Q352.57069767441857 15.416744186046508 350.95302325581395 14.848372093023254Q349.33534883720927 14.280000000000001 345.48790697674417 14.280000000000001H338.58V30.89395348837209H345.400465116279Q349.24790697674416 30.89395348837209 350.86558139534884 30.281860465116278Q352.48325581395346 29.669767441860465 353.00790697674415 28.052093023255814Q353.53255813953484 26.434418604651164 353.53255813953484 22.586976744186046Z M409.2330232558139 63.16 406.17255813953483 51.09302325581395H388.4218604651162L385.5362790697674 63.16H371.89534883720927L387.9846511627906 3.0H407.046976744186L423.0488372093023 63.16ZM397.5158139534883 15.241860465116275H396.9911627906976L391.1325581395348 39.900465116279065H403.4618604651162Z M435.7279069767441 63.16V14.717209302325578H421.56232558139527V3.0H463.62186046511624V14.717209302325578H449.3688372093023V63.16Z M470.35488372093016 63.16V3.0H506.5558139534883V14.280000000000001H483.9083720930232V27.133953488372093H503.320465116279V38.41395348837209H483.9083720930232V51.879999999999995H506.5558139534883V63.16Z M516.1744186046511 3.0H535.0618604651163Q546.4293023255814 3.0 551.2823255813953 5.623255813953488Q556.1353488372092 8.246511627906976 557.3158139534883 14.01767441860465Q558.4962790697674 19.788837209302322 558.4962790697674 33.08Q558.4962790697674 46.37116279069767 557.3158139534883 52.14232558139534Q556.1353488372092 57.91348837209302 551.2823255813953 60.536744186046505Q546.4293023255814 63.16 535.0618604651163 63.16H516.1744186046511ZM534.7120930232558 51.879999999999995Q540.133488372093 51.879999999999995 541.9697674418604 51.005581395348834Q543.8060465116279 50.13116279069767 544.286976744186 46.67720930232558Q544.7679069767441 43.223255813953486 544.7679069767441 33.08Q544.7679069767441 22.93674418604651 544.2432558139535 19.482790697674417Q543.7186046511628 16.028837209302324 541.9260465116279 15.154418604651163Q540.133488372093 14.280000000000001 534.7120930232558 14.280000000000001H529.7279069767442V51.879999999999995Z"></path><path fill="#1D3E72" d="M114.30529069767441 97.28418604651162Q110.36220930232557 97.28418604651162 108.53276162790696 96.21848837209302Q106.70331395348836 95.15279069767442 106.08165697674417 92.59511627906977Q105.46 90.03744186046512 105.46 84.78Q105.46 79.52255813953488 106.08165697674417 76.98264534883721Q106.70331395348836 74.44273255813954 108.55052325581394 73.35927325581395Q110.39773255813952 72.27581395348837 114.30529069767441 72.27581395348837Q115.65517441860464 72.27581395348837 117.07610465116278 72.45343023255813Q118.49703488372091 72.6310465116279 119.3495930232558 72.87970930232558V76.50308139534883Q116.64982558139533 76.18337209302325 115.33546511627907 76.18337209302325Q112.67122093023255 76.18337209302325 111.6410465116279 76.69845930232557Q110.61087209302325 77.2135465116279 110.30892441860465 78.86537790697673Q110.00697674418603 80.51720930232558 110.00697674418603 84.78Q110.00697674418603 89.04279069767442 110.30892441860465 90.69462209302326Q110.61087209302325 92.34645348837209 111.6410465116279 92.86154069767443Q112.67122093023255 93.37662790697675 115.33546511627907 93.37662790697675Q117.39581395348836 93.37662790697675 119.45616279069766 93.05691860465116V96.71581395348838Q118.49703488372091 96.96447674418604 117.04058139534882 97.12433139534883Q115.58412790697673 97.28418604651162 114.30529069767441 97.28418604651162Z M124.0164297040169 84.78Q124.0164297040169 79.2028488372093 124.49599365750527 76.78726744186046Q124.97555761099363 74.37168604651163 126.82276691331921 73.32374999999999Q128.6699762156448 72.27581395348837 132.96829016913318 72.27581395348837Q137.26660412262154 72.27581395348837 139.1315750528541 73.32374999999999Q140.99654598308666 74.37168604651163 141.47610993657503 76.78726744186046Q141.9556738900634 79.2028488372093 141.9556738900634 84.78Q141.9556738900634 90.3571511627907 141.47610993657503 92.77273255813954Q140.99654598308666 95.18831395348838 139.1315750528541 96.23625Q137.26660412262154 97.28418604651162 132.96829016913318 97.28418604651162Q128.6699762156448 97.28418604651162 126.82276691331921 96.23625Q124.97555761099363 95.18831395348838 124.49599365750527 92.77273255813954Q124.0164297040169 90.3571511627907 124.0164297040169 84.78ZM137.40869714587737 84.78Q137.40869714587737 80.2685465116279 137.17779598308667 78.65223837209302Q136.94689482029597 77.03593023255814 136.11209830866807 76.6096511627907Q135.27730179704014 76.18337209302325 132.96829016913318 76.18337209302325Q130.6592785412262 76.18337209302325 129.84224365750526 76.6096511627907Q129.02520877378433 77.03593023255814 128.79430761099366 78.63447674418605Q128.56340644820295 80.23302325581395 128.56340644820295 84.78Q128.56340644820295 89.32697674418604 128.79430761099366 90.92552325581394Q129.02520877378433 92.52406976744186 129.84224365750526 92.9503488372093Q130.6592785412262 93.37662790697675 132.96829016913318 93.37662790697675Q135.27730179704014 93.37662790697675 136.11209830866807 92.9503488372093Q136.94689482029597 92.52406976744186 137.17779598308667 90.90776162790698Q137.40869714587737 89.2914534883721 137.40869714587737 84.78Z M160.58315010570823 97.0 152.1286152219873 81.54738372093023H151.98652219873148V97.0H147.6171617336152V72.56H152.23518498942917L160.37001057082452 87.2311046511628H160.51210359408032V72.56H164.88146405919662V97.0Z M184.11283562367862 97.0 175.6583007399577 81.54738372093023H175.51620771670187V97.0H171.1468472515856V72.56H175.76487050739956L183.8996960887949 87.2311046511628H184.0417891120507V72.56H188.411149577167V97.0Z M194.71205602536995 97.0V72.56H208.99240486257926V76.46755813953489H199.22350951374204V82.68412790697674H207.642521141649V86.62720930232558H199.22350951374204V93.09244186046512H208.99240486257926V97.0Z M222.6111020084566 97.28418604651162Q218.66802061310779 97.28418604651162 216.83857293868917 96.21848837209302Q215.00912526427055 95.15279069767442 214.38746828752636 92.59511627906977Q213.7658113107822 90.03744186046512 213.7658113107822 84.78Q213.7658113107822 79.52255813953488 214.38746828752636 76.98264534883721Q215.00912526427055 74.44273255813954 216.85633456659616 73.35927325581395Q218.70354386892174 72.27581395348837 222.6111020084566 72.27581395348837Q223.96098572938683 72.27581395348837 225.38191596194497 72.45343023255813Q226.80284619450313 72.6310465116279 227.655404334038 72.87970930232558V76.50308139534883Q224.95563689217755 76.18337209302325 223.64127642706126 76.18337209302325Q220.97703224101474 76.18337209302325 219.9468578224101 76.69845930232557Q218.91668340380545 77.2135465116279 218.61473572938684 78.86537790697673Q218.31278805496825 80.51720930232558 218.31278805496825 84.78Q218.31278805496825 89.04279069767442 218.61473572938684 90.69462209302326Q218.91668340380545 92.34645348837209 219.9468578224101 92.86154069767443Q220.97703224101474 93.37662790697675 223.64127642706126 93.37662790697675Q225.70162526427058 93.37662790697675 227.76197410147986 93.05691860465116V96.71581395348838Q226.80284619450313 96.96447674418604 225.34639270613104 97.12433139534883Q223.88993921775895 97.28418604651162 222.6111020084566 97.28418604651162Z M237.04683403805493 97.0V76.6096511627907H230.97235729386887V72.56H247.63276427061308V76.6096511627907H241.55828752642702V97.0Z M251.97989164904854 97.0V72.56H266.2602404862578V76.46755813953489H256.49134513742064V82.68412790697674H264.9103567653276V86.62720930232558H256.49134513742064V93.09244186046512H266.2602404862578V97.0Z M271.67306553911203 72.56H279.02637949260037Q283.5378329809725 72.56 285.438327167019 73.57241279069768Q287.3388213530655 74.58482558139535 287.81838530655386 76.91159883720931Q288.29794926004223 79.23837209302326 288.29794926004223 84.78Q288.29794926004223 90.32162790697674 287.81838530655386 92.64840116279069Q287.3388213530655 94.97517441860465 285.438327167019 95.98758720930232Q283.5378329809725 97.0 279.02637949260037 97.0H271.67306553911203ZM278.81323995771663 93.09244186046512Q281.40643763213524 93.09244186046512 282.3122806553911 92.70168604651163Q283.21812367864686 92.31093023255814 283.4845480972515 90.74790697674419Q283.7509725158562 89.18488372093023 283.7509725158562 84.78Q283.7509725158562 80.37511627906977 283.4845480972515 78.81209302325581Q283.21812367864686 77.24906976744185 282.3122806553911 76.85831395348836Q281.40643763213524 76.46755813953489 278.81323995771663 76.46755813953489H276.1845190274841V93.09244186046512Z  M311.09493657505277 97.28418604651162Q307.15185517970394 97.28418604651162 305.32240750528536 96.21848837209302Q303.4929598308667 95.15279069767442 302.8713028541225 92.59511627906977Q302.2496458773783 90.03744186046512 302.2496458773783 84.78Q302.2496458773783 79.52255813953488 302.8713028541225 76.98264534883721Q303.4929598308667 74.44273255813954 305.34016913319226 73.35927325581395Q307.18737843551787 72.27581395348837 311.09493657505277 72.27581395348837Q312.444820295983 72.27581395348837 313.8657505285411 72.45343023255813Q315.28668076109926 72.6310465116279 316.13923890063415 72.87970930232558V76.50308139534883Q313.4394714587737 76.18337209302325 312.1251109936574 76.18337209302325Q309.4608668076109 76.18337209302325 308.43069238900625 76.69845930232557Q307.4005179704016 77.2135465116279 307.098570295983 78.86537790697673Q306.7966226215644 80.51720930232558 306.7966226215644 84.78Q306.7966226215644 89.04279069767442 307.098570295983 90.69462209302326Q307.4005179704016 92.34645348837209 308.43069238900625 92.86154069767443Q309.4608668076109 93.37662790697675 312.1251109936574 93.37662790697675Q314.1854598308667 93.37662790697675 316.24580866807605 93.05691860465116V96.71581395348838Q315.28668076109926 96.96447674418604 313.83022727272714 97.12433139534883Q312.3737737843551 97.28418604651162 311.09493657505277 97.28418604651162Z M320.80607558139525 84.78Q320.80607558139525 79.2028488372093 321.28563953488367 76.78726744186046Q321.76520348837204 74.37168604651163 323.6124127906976 73.32374999999999Q325.4596220930232 72.27581395348837 329.75793604651153 72.27581395348837Q334.0562499999999 72.27581395348837 335.9212209302325 73.32374999999999Q337.78619186046507 74.37168604651163 338.26575581395343 76.78726744186046Q338.7453197674418 79.2028488372093 338.7453197674418 84.78Q338.7453197674418 90.3571511627907 338.26575581395343 92.77273255813954Q337.78619186046507 95.18831395348838 335.9212209302325 96.23625Q334.0562499999999 97.28418604651162 329.75793604651153 97.28418604651162Q325.4596220930232 97.28418604651162 323.6124127906976 96.23625Q321.76520348837204 95.18831395348838 321.28563953488367 92.77273255813954Q320.80607558139525 90.3571511627907 320.80607558139525 84.78ZM334.19834302325575 84.78Q334.19834302325575 80.2685465116279 333.96744186046504 78.65223837209302Q333.73654069767434 77.03593023255814 332.90174418604647 76.6096511627907Q332.06694767441854 76.18337209302325 329.75793604651153 76.18337209302325Q327.4489244186046 76.18337209302325 326.6318895348836 76.6096511627907Q325.8148546511627 77.03593023255814 325.583953488372 78.63447674418605Q325.3530523255813 80.23302325581395 325.3530523255813 84.78Q325.3530523255813 89.32697674418604 325.583953488372 90.92552325581394Q325.8148546511627 92.52406976744186 326.6318895348836 92.9503488372093Q327.4489244186046 93.37662790697675 329.75793604651153 93.37662790697675Q332.06694767441854 93.37662790697675 332.90174418604647 92.9503488372093Q333.73654069767434 92.52406976744186 333.96744186046504 90.90776162790698Q334.19834302325575 89.2914534883721 334.19834302325575 84.78Z M363.37622621564475 97.0V79.13180232558139H363.19860993657494L357.8701215644819 97.0H354.17570295983074L348.8827378435517 79.13180232558139H348.70512156448194V97.0H344.40680761099355V72.56H350.97860993657497L356.02291226215635 89.61116279069768H356.2360517970401L361.2803541226215 72.56H367.745586680761V97.0Z M374.08201638477794 72.56H383.60224894291747Q386.3730628964058 72.56 387.8472780126849 73.50136627906977Q389.321493128964 74.44273255813954 389.83658033826634 76.16561046511629Q390.35166754756864 77.88848837209302 390.35166754756864 80.6593023255814Q390.35166754756864 83.32354651162791 389.85434196617325 85.04642441860466Q389.3570163847779 86.76930232558139 387.8650396405919 87.78171511627906Q386.3730628964058 88.79412790697674 383.53120243128956 88.79412790697674H378.59346987315V97.0H374.08201638477794ZM382.0392256871035 84.88656976744186Q383.81538847780115 84.88656976744186 384.57913847780117 84.5490988372093Q385.3428884778012 84.21162790697674 385.5737896405919 83.37683139534883Q385.8046908033826 82.54203488372093 385.8046908033826 80.6593023255814Q385.8046908033826 78.77656976744186 385.5737896405919 77.94177325581396Q385.3428884778012 77.10697674418604 384.5969001057082 76.78726744186046Q383.85091173361513 76.46755813953489 382.1102721987314 76.46755813953489H378.59346987315V84.88656976744186Z M411.9986205073995 72.56V86.16540697674418Q411.9986205073995 90.99656976744185 411.4657716701902 93.21677325581395Q410.93292283298086 95.43697674418604 409.19228329809715 96.36058139534883Q407.45164376321344 97.28418604651162 403.57960887949247 97.28418604651162Q399.70757399577155 97.28418604651162 397.9491728329808 96.36058139534883Q396.19077167019014 95.43697674418604 395.65792283298083 93.19901162790697Q395.1250739957716 90.96104651162791 395.1250739957716 86.16540697674418V72.56H399.6720507399576V87.58633720930233Q399.6720507399576 90.39267441860466 399.8851902748413 91.49389534883721Q400.09832980972504 92.59511627906977 400.86207980972506 92.98587209302326Q401.6258298097251 93.37662790697675 403.57960887949247 93.37662790697675Q405.5333879492599 93.37662790697675 406.29713794925993 92.98587209302326Q407.06088794925995 92.59511627906977 407.2562658562367 91.51165697674418Q407.45164376321344 90.4281976744186 407.45164376321344 87.58633720930233V72.56Z M422.20708509513736 97.0V76.6096511627907H416.1326083509513V72.56H432.79301532769546V76.6096511627907H426.7185385835094V97.0Z M437.14014270613103 97.0V72.56H441.687119450317V97.0Z M460.954014270613 97.0 452.4994793868921 81.54738372093023H452.3573863636363V97.0H447.98802589852V72.56H452.60604915433396L460.7408747357293 87.2311046511628H460.8829677589851V72.56H465.2523282241014V97.0Z M479.6525369978858 86.9113953488372V83.11040697674419H487.39660676532765V96.5381976744186Q485.8691067653277 96.85790697674419 483.8442811839323 97.07104651162791Q481.81945560253695 97.28418604651162 480.22090909090906 97.28418604651162Q476.27782769556023 97.28418604651162 474.3240486257928 96.25401162790698Q472.37026955602533 95.22383720930233 471.64204281183925 92.63063953488373Q470.9138160676532 90.03744186046512 470.9138160676532 84.78Q470.9138160676532 79.59360465116279 471.65980443974627 76.98264534883721Q472.40579281183926 74.37168604651163 474.39509513742064 73.32374999999999Q476.3843974630021 72.27581395348837 480.3630021141649 72.27581395348837Q481.99707188160676 72.27581395348837 483.96861257928117 72.48895348837209Q485.9401532769556 72.70209302325581 487.2900369978858 73.02180232558139V76.68069767441861Q483.73771141649047 76.18337209302325 481.99707188160676 76.18337209302325Q478.7999788583509 76.18337209302325 477.5744265327695 76.6096511627907Q476.34887420718815 77.03593023255814 475.9048335095137 78.7410465116279Q475.46079281183927 80.44616279069767 475.46079281183927 84.78Q475.46079281183927 88.75860465116278 475.78050211416485 90.49924418604651Q476.1002114164904 92.23988372093024 477.09486257928114 92.86154069767443Q478.08951374207186 93.4831976744186 480.3274788583509 93.4831976744186Q481.85497885835093 93.4831976744186 483.0272463002114 93.30558139534884V86.9113953488372Z "></path><path fill="#F58F2D" d="M502.84028012684985 97.0V72.56H505.6821405919661V94.4068023255814H515.3444661733615V97.0Z M534.6468842494714 97.0 532.4799656448203 90.32162790697674H523.2439191331923L521.1125237843552 97.0H518.2351400634249L526.0502563424947 72.56H529.7801982029598L537.5953144820296 97.0ZM527.9685121564481 75.68604651162791H527.7908958773784L523.9543842494714 87.79947674418605H531.7339772727272Z M542.723953488372 72.56H552.2086627906976Q555.4412790697673 72.56 556.8444476744185 74.12302325581396Q558.2476162790697 75.68604651162791 558.2476162790697 78.67Q558.2476162790697 81.15662790697674 557.3417732558139 82.57755813953489Q556.4359302325581 83.99848837209302 554.4111046511628 84.42476744186047V84.56686046511628Q556.7556395348837 85.02866279069767 557.6259593023256 86.53840116279069Q558.4962790697674 88.04813953488372 558.4962790697674 90.57029069767442Q558.4962790697674 93.55424418604652 557.1108720930232 95.27712209302325Q555.725465116279 97.0 552.0665697674418 97.0H542.723953488372ZM555.4057558139534 79.23837209302326Q555.4057558139534 77.6753488372093 555.0682848837209 76.78726744186046Q554.7308139534883 75.89918604651163 553.8604941860465 75.49066860465116Q552.9901744186046 75.0821511627907 551.3916279069767 75.0821511627907H545.5658139534884V83.35906976744187H551.3916279069767Q553.416453488372 83.35906976744187 554.4111046511628 82.36441860465116Q555.4057558139534 81.36976744186046 555.4057558139534 79.23837209302326ZM555.6188953488372 90.21505813953489Q555.6188953488372 87.835 554.7130523255814 86.85811046511628Q553.8072093023255 85.88122093023256 551.5337209302326 85.88122093023256H545.5658139534884V94.51337209302325H551.5337209302326Q553.8782558139534 94.51337209302325 554.7485755813952 93.5542441860465Q555.6188953488372 92.59511627906977 555.6188953488372 90.21505813953489Z"></path></svg>';
 var SEEDS = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="22.23 15.5 58.14 55.96" role="img" aria-label="KAUST"><g id="seeds"><path fill="#f09021" d="M60.56,49.15c.87-1.19,1.3-2.73,1.3-4.62,0-1.14-.16-2.14-.43-3.03-.98.94-1.61,2.1-1.61,3.51,0,1.15.24,2.62.75,4.14Z"></path><path fill="#f09021" d="M71.49,38.22c.3,1.66.45,3.34.45,4.98,0,6.18-1.2,10.6-3.04,13.76.31.03.62.06.95.06,8.65,0,10.52-8.05,10.52-11.55,0-5.6-5.73-7.1-8.88-7.25Z"></path><path fill="#f09021" d="M62.79,44.53c0,2.35-.66,4.2-1.87,5.6.33.81.74,1.61,1.22,2.37,1.7-1.95,2.56-4.75,2.56-8.41,0-1.54-.25-2.97-.71-4.28-.65.3-1.26.65-1.8,1.05.37,1.06.6,2.27.6,3.68Z"></path><path fill="#f09021" d="M65.79,44.08c0,4.42-1.2,7.37-3,9.32.46.58.97,1.12,1.54,1.6,1.91-2.4,3.18-6,3.18-11.37,0-1.64-.22-3.29-.64-4.86-.62.16-1.25.36-1.87.59.5,1.45.79,3.02.79,4.71Z"></path><path fill="#f09021" d="M68.87,43.64c0,5.74-1.4,9.58-3.43,12.16.57.34,1.19.62,1.86.83,1.88-3,3.08-7.31,3.08-13.43,0-.86-.07-2.73-.49-4.94-.53.04-1.11.12-1.71.23.46,1.68.7,3.43.7,5.15Z"></path><path fill="#efb51d" d="M51.58,30.65c4.8,0,8.75,1.82,11.27,4.86.53-.71.96-1.48,1.32-2.23-2.28-2.86-5.77-4.77-10.6-4.77-2.54,0-7.24.61-11.38,2.18.07.5.24,1,.49,1.49,2.94-1.06,6.25-1.53,8.9-1.53Z"></path><path fill="#efb51d" d="M65.45,26.99c-.33-4.34-2.63-11.49-10.61-11.49-6.17,0-9.89,5.83-11.59,10.24,4.7-1.47,9.52-2.06,12.33-2.06,4.18,0,7.41,1.28,9.87,3.31Z"></path><path fill="#efb51d" d="M44.69,34.61c1.45-.33,3.1-.51,4.91-.51,2.7,0,7.83.48,10.83,3.74.63-.42,1.2-.91,1.7-1.45-2.31-2.9-6.02-4.65-10.54-4.65-2.48,0-5.57.42-8.32,1.36.39.53.87,1.04,1.42,1.52Z"></path><path fill="#efb51d" d="M59.57,38.34c-2.8-2.88-7.48-3.31-9.96-3.31-1.45,0-2.78.12-3.97.34,3.06,2.26,7.45,3.8,10.29,3.8,1.39,0,2.6-.32,3.64-.83Z"></path><path fill="#efb51d" d="M53.58,27.15c4.98,0,8.66,1.93,11.17,4.79.41-1.14.64-2.17.72-2.91-2.19-2.22-5.33-3.79-9.88-3.79-2.81,0-8.08.68-12.95,2.36-.18.61-.3,1.14-.38,1.6,4.02-1.45,8.44-2.05,11.33-2.05Z"></path><path fill="#cccd2b" d="M32.77,39.19c0-3.61,2.3-6.24,5.46-8.12-.46-.3-.95-.55-1.45-.72-2.97,1.94-5.05,4.51-5.05,7.85,0,2.97,1.1,6.79,3.07,10.54.33-.03.64-.09.94-.18-1.9-3.33-2.97-6.73-2.97-9.36Z"></path><path fill="#cccd2b" d="M35.35,40.19c0-3.12,2.01-5.35,4.8-6.88-.23-.49-.5-.94-.82-1.3-2.98,1.65-5.19,3.98-5.19,7.18,0,2.46,1,5.65,2.78,8.76.29-.21.57-.45.81-.73-1.52-2.5-2.38-5.05-2.38-7.03Z"></path><path fill="#cccd2b" d="M34.71,29.92c-.4-.04-.77-.05-1.11-.05-3.62,0-11.37,2.99-11.37,8.5,0,5.91,6.57,9.56,10.85,10.27-1.86-3.74-2.9-7.5-2.9-10.45,0-3.46,1.82-6.18,4.53-8.27Z"></path><path fill="#cccd2b" d="M37.81,41.19c0-2.07,1.08-3.79,3-5.02-.04-.69-.14-1.31-.29-1.86-2.39,1.34-4.08,3.26-4.08,5.88,0,1.74.7,3.94,1.97,6.14.25-.38.46-.8.67-1.23-.81-1.41-1.27-2.79-1.27-3.92Z"></path><path fill="#cccd2b" d="M38.74,41.19c0,.83.28,1.82.78,2.85.94-2.55,1.27-5.44,1.33-6.77-1.35,1.02-2.1,2.35-2.1,3.92Z"></path><path fill="#00a6aa" d="M52.58,53.09c-4.28,0-7.93-1.88-10.53-4.29-.48.19-.96.41-1.43.64,2.99,3.49,7.4,6.35,12.65,6.35,2.54,0,4.65-.45,6.34-1.33-.34-.93-.79-1.73-1.34-2.43-1.53.68-3.42,1.05-5.7,1.05Z"></path><path fill="#00a6aa" d="M35.62,52.96c-1.83,1.82-3.02,3.92-3.02,5.97,0,8.02,12.48,12.53,17.32,12.53,5.73,0,8.41-3.63,9.57-7.48-1.73.43-3.41.58-4.88.58-7.99,0-14.66-5.3-18.99-11.6Z"></path><path fill="#00a6aa" d="M47.98,47.54c-1.61,0-3.32.34-4.98.91,2.42,2.1,5.72,3.71,9.58,3.71,2.03,0,3.69-.31,5.06-.86-3.02-3.14-7.79-3.76-9.66-3.76Z"></path><path fill="#00a6aa" d="M53.27,56.89c-5.66,0-10.4-3.14-13.58-6.94-.37.2-.72.41-1.08.63,3.52,4.79,8.89,8.8,15.33,8.8,2.08,0,4.3-.32,6.32-1.23-.02-.96-.13-1.83-.33-2.62-2.08,1.02-4.46,1.37-6.67,1.37Z"></path><path fill="#00a6aa" d="M53.95,60.75c-6.9,0-12.65-4.31-16.41-9.43-.28.21-.53.42-.79.64,4.06,5.98,10.33,11.04,17.87,11.04,1.73,0,3.54-.21,5.29-.74.18-.91.28-1.81.33-2.64-2.2.87-4.45,1.12-6.29,1.12Z"></path></g></svg>';
 
@@ -1840,12 +1921,8 @@ var BY = { h: 18, faint: "#8d96a5", kaust: "#80715e" };
 var SANS = `"Noto Sans", system-ui, sans-serif`;
 var uid = 0;
 var art = (a, fill, tag) => a.body.replace(/§/g, `phx${tag}-`).replace(/#FILL/g, fill);
-var svgOf = (markup) => {
-  const t = document.createElement("template");
-  t.innerHTML = markup;
-  return t.content.firstElementChild;
-};
-function byline(svg, word) {
+var svgOf = (markup) => svgArt(markup).firstElementChild;
+function byline(svg2, word) {
   const h = BY.h;
   const ctx = document.createElement("canvas").getContext("2d");
   const sans = (px, wt) => (ctx.font = `${wt} ${px}px ${SANS}`, (s) => ctx.measureText(s).width);
@@ -1857,22 +1934,22 @@ function byline(svg, word) {
   const width = byW + gap + lw + sep * 2 + sw + gap * 0.6 + adv.reduce((a, b) => a + b, 0);
   const x0 = (word.x0 + word.x1) / 2 - width / 2, top = word.y1 + 0.9 * h, mid = top + h / 2;
   const g = document.createElementNS(NS, "g"), wid = `phx-by${uid++}`;
-  svg.append(g);
+  svg2.append(g);
   let x = x0;
-  g.insertAdjacentHTML("beforeend", `<text x="${f2(x)}" y="${f2(mid + 0.19 * h)}" fill="${BY.faint}" style="font: 400 ${f2(0.55 * h)}px ${SANS}">by</text>`);
+  g.append(svg`<text x="${f2(x)}" y="${f2(mid + 0.19 * h)}" fill="${BY.faint}" style="font: 400 ${f2(0.55 * h)}px ${SANS}">by</text>`);
   const byT = g.lastElementChild;
   x += byW + gap;
   for (const [k, v] of [["x", x], ["y", top], ["width", lw], ["height", h]]) lockup.setAttribute(k, String(f2(v)));
   g.append(lockup);
   x += lw + sep;
-  g.insertAdjacentHTML("beforeend", `<rect x="${f2(x)}" y="${f2(top)}" width="${f2(0.1 * h)}" height="${f2(h)}" fill="${BY.faint}"/>`);
+  g.append(svg`<rect x="${f2(x)}" y="${f2(top)}" width="${f2(0.1 * h)}" height="${f2(h)}" fill="${BY.faint}"/>`);
   const rule = g.lastElementChild;
   x += sep;
   for (const [k, v] of [["x", x], ["y", mid - sh / 2], ["width", sw], ["height", sh]]) seeds.setAttribute(k, String(f2(v)));
   g.append(seeds);
   x += sw + gap * 0.6;
   const ks = letters.map((c, i) => {
-    g.insertAdjacentHTML("beforeend", `<text x="${f2(x)}" y="${f2(mid + 0.26 * h)}" fill="${BY.kaust}" style="font: 700 ${f2(0.72 * h)}px ${SANS}">${c}</text>`);
+    g.append(svg`<text x="${f2(x)}" y="${f2(mid + 0.26 * h)}" fill="${BY.kaust}" style="font: 700 ${f2(0.72 * h)}px ${SANS}">${c}</text>`);
     x += adv[i];
     return g.lastElementChild;
   });
@@ -1895,7 +1972,7 @@ function byline(svg, word) {
   const wg = document.createElementNS(NS, "g");
   words2[0]?.before(wg);
   words2.forEach((w) => wg.append(w));
-  lockup.insertAdjacentHTML("afterbegin", `<defs><clipPath id="${wid}"><rect x="97.5" y="-50" width="1000" height="200"/></clipPath></defs>`);
+  lockup.prepend(svg`<defs><clipPath id="${wid}"><rect x="97.5" y="-50" width="1000" height="200"/></clipPath></defs>`);
   const clipped = document.createElementNS(NS, "g");
   wg.before(clipped);
   clipped.append(wg);
@@ -1935,12 +2012,11 @@ function byline(svg, word) {
 function opening(box, fill, bg) {
   const tag = String(uid++);
   const w = WORD, size = w.size, phi = w.letters[0];
-  box.insertAdjacentHTML(
-    "beforeend",
-    `<svg class="phx-open" preserveAspectRatio="none" aria-hidden="true">
+  box.append(
+    html`<svg class="phx-open" preserveAspectRatio="none" aria-hidden="true">
     <defs><mask id="phx-hole${tag}" maskUnits="userSpaceOnUse" x="-1e5" y="-1e5" width="2e5" height="2e5"><rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="#fff"/>
       <path class="phx-hole" d="${PHI_COUNTER}" fill="#000" opacity="0" transform="translate(${f2(phi.x)} ${f2(phi.y)}) scale(${size / 1e3} ${-size / 1e3})"/></mask></defs>
-    <rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="${bg}" mask="url(#phx-hole${tag})"/>${art(WOVEN, fill, tag)}</svg>`
+    <rect x="-1e5" y="-1e5" width="2e5" height="2e5" fill="${bg}" mask="url(#phx-hole${tag})"/>${svgArt(art(WOVEN, fill, tag))}</svg>`
   );
   const el = box.lastElementChild, hole2 = el.querySelector(".phx-hole");
   const by = byline(el, WOVEN);
@@ -1949,7 +2025,7 @@ function opening(box, fill, bg) {
   const tmp = document.createElementNS(NS, "svg");
   tmp.style.cssText = "position:absolute;width:0;height:0;visibility:hidden";
   document.body.append(tmp);
-  tmp.innerHTML = art(MARK, fill, `${tag}m`);
+  tmp.replaceChildren(svgArt(art(MARK2, fill, `${tag}m`)));
   const S = [0, 1, 2, 3].map((j) => {
     const ps = [...el.querySelectorAll(`.phx-s${j}`)];
     const full = ps[0].getTotalLength(), part3 = tmp.querySelector(`.phx-s${j}`).getTotalLength();
@@ -1978,7 +2054,7 @@ function opening(box, fill, bg) {
     return v < 0.5 ? -OFF * easeIO(v * 2) : OFF * (1 - easeIO(v * 2 - 1));
   };
   const cam = (t) => {
-    const cm = fit(MARK, 0.45, 0.3), cw = fit(word, 0.84, 0.4);
+    const cm = fit(MARK2, 0.45, 0.3), cw = fit(word, 0.84, 0.4);
     const k0 = easeIO((t - T1 - 200) / (0.75 * OPEN.sweep));
     return t < T1 + 200 ? cm : { cx: cm.cx + (cw.cx - cm.cx) * k0, cy: cm.cy + (cw.cy - cm.cy) * k0, s: cm.s + (cw.s - cm.s) * k0 };
   };
@@ -2035,7 +2111,6 @@ function still() {
 // viewer/src/openings/kit.ts
 var INK = { light: "#1d3e72", dark: "#e4e6ea" };
 var PAPER = { light: "#ffffff", dark: "#2c2e33" };
-var esc3 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 var RIBBON = ["#00a8a4", "#d3c72a", "#f0b225", "#f58f2d"];
 var reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 var registered = false;
@@ -2056,13 +2131,15 @@ var SHARED = `
 .phx-o.wipe { -webkit-mask: linear-gradient(var(--phx-ongle, 115deg), transparent calc(var(--phx-o-r) - 12%), #000 var(--phx-o-r));
                       mask: linear-gradient(var(--phx-ongle, 115deg), transparent calc(var(--phx-o-r) - 12%), #000 var(--phx-o-r)); }
 .phx-o.wipe.open { --phx-o-r: 115%; transition: --phx-o-r var(--phx-o-t, 600ms) cubic-bezier(.6, 0, .25, 1); }`;
-function layer(box, cls, css, html) {
+function layer(box, cls, css, markup) {
   register();
   const host2 = document.createElement("div");
   host2.style.cssText = "position: absolute; inset: 0; pointer-events: none;";
   host2.setAttribute("aria-hidden", "true");
   const root = host2.attachShadow({ mode: "open" });
-  root.innerHTML = `<style>${SHARED}${css}</style><div class="phx-o ${cls}">${html}</div>`;
+  const style = document.createElement("style");
+  style.textContent = SHARED + css;
+  root.replaceChildren(style, html`<div class="phx-o ${cls}">${markup}</div>`);
   box.append(host2);
   return root.lastElementChild;
 }
@@ -2149,7 +2226,7 @@ function crtOff(el) {
 // viewer/src/openings/win98.ts
 var RESTORED = { left: 9, top: 15, width: 82, height: 66 };
 function win98(box, doc = "document.tex") {
-  const pdf = esc3(doc.replace(/\.tex$/i, "") + ".pdf");
+  const pdf = doc.replace(/\.tex$/i, "") + ".pdf";
   const el = layer(
     box,
     "phx-w98",
@@ -2194,10 +2271,10 @@ function win98(box, doc = "document.tex") {
 .phx-w98.desk .pdfw { display: block; }
 .phx-w98.max .pdfw { left: 0; top: 0; width: 100%; height: 100%; }
 .phx-w98.max .task { transform: translateY(110%); }`,
-    `<div class="w bev"><div class="t"><span>PhiTeX Setup</span><i>_</i><i>\u25A1</i><i>\xD7</i></div><div class="b"><div class="fl"><div class="fold f1"></div><div class="pg"></div><div class="fold f2"></div></div>
-       <p class="msg">Starting\u2026</p><p class="det"></p><div class="bar march"><span></span></div></div></div>
-     <div class="pdfw"><div class="chrome"><div class="t"><span>${pdf} - PhiTeX</span><i>_</i><i class="mx">\u25A1</i><i>\xD7</i></div><div class="menu"><span><u>F</u>ile</span><span><u>E</u>dit</span><span><u>V</u>iew</span><span><u>W</u>indow</span><span><u>H</u>elp</span></div></div></div>
-     <div class="task"><div class="start">\u229E Start</div><div class="btn on">PhiTeX Setup</div><div class="clock"></div></div>
+    html`<div class="w bev"><div class="t"><span>PhiTeX Setup</span><i>_</i><i>□</i><i>×</i></div><div class="b"><div class="fl"><div class="fold f1"></div><div class="pg"></div><div class="fold f2"></div></div>
+       <p class="msg">Starting…</p><p class="det"></p><div class="bar march"><span></span></div></div></div>
+     <div class="pdfw"><div class="chrome"><div class="t"><span>${pdf} - PhiTeX</span><i>_</i><i class="mx">□</i><i>×</i></div><div class="menu"><span><u>F</u>ile</span><span><u>E</u>dit</span><span><u>V</u>iew</span><span><u>W</u>indow</span><span><u>H</u>elp</span></div></div></div>
+     <div class="task"><div class="start">⊞ Start</div><div class="btn on">PhiTeX Setup</div><div class="clock"></div></div>
      <div class="tip"><b>Did you know?</b><span></span></div>
      <div class="fly">${pdf} - PhiTeX</div>`
   );
@@ -2246,7 +2323,7 @@ function win98(box, doc = "document.tex") {
 var RESTORED2 = { left: 8, top: 17, width: 84, height: 66 };
 var DESK = "#6a6fb3";
 function mac9(box, doc = "document.tex") {
-  const pdf = esc3(doc.replace(/\.tex$/i, "") + ".pdf");
+  const pdf = doc.replace(/\.tex$/i, "") + ".pdf";
   const el = layer(
     box,
     "phx-m9",
@@ -2289,9 +2366,9 @@ function mac9(box, doc = "document.tex") {
 .phx-m9.max .mb { transform: translateY(-110%); }
 /* (the window is the page seen through it: the icon behind would show through as it grows) */
 .phx-m9.max .ic { opacity: 0; transition: opacity .12s; }`,
-    `<div class="mb"><span class="ap"></span><span>File</span><span>Edit</span><span>View</span><span>Special</span><span>Help</span><span class="ck"></span></div>
+    html`<div class="mb"><span class="ap"></span><span>File</span><span>Edit</span><span>View</span><span>Special</span><span>Help</span><span class="ck"></span></div>
      <div class="ic"><i></i><span>${pdf}</span></div>
-     <div class="w"><div class="t"><i class="cl"></i><b>Typesetting</b><i class="zm"></i><i class="co"></i></div><div class="b"><div class="doc"></div><div class="msg">Starting\u2026</div><div class="det"></div><div class="bar pole"><span></span></div></div></div>
+     <div class="w"><div class="t"><i class="cl"></i><b>Typesetting</b><i class="zm"></i><i class="co"></i></div><div class="b"><div class="doc"></div><div class="msg">Starting…</div><div class="det"></div><div class="bar pole"><span></span></div></div></div>
      <div class="bal"><b>Did you know?</b><span></span></div>
      <div class="pdfw"><div class="t"><i class="cl"></i><b>${pdf}</b><i class="zm"></i><i class="co"></i></div></div>
      <div class="z"></div><div class="z"></div><div class="z"></div><div class="z"></div><div class="z"></div>`
@@ -2353,23 +2430,22 @@ function terminal(box, doc = "document.tex") {
 .phx-term .dim { color: #6f8f7c; }
 .phx-term .cur { display: inline-block; width: .6em; height: 1.1em; vertical-align: -.2em; background: #7dffa0; animation: phx-term-blink 1s steps(1) infinite; }
 @keyframes phx-term-blink { 50% { opacity: 0; } }`,
-    `<div class="scr"><div class="txt"></div><div class="band"></div></div><div class="led"></div><div class="brand">PHITEX</div>`
+    html`<div class="scr"><div class="txt"></div><div class="band"></div></div><div class="led"></div><div class="brand">PHITEX</div>`
   );
   const txt = el.querySelector(".txt");
   const cursor = document.createElement("span");
   cursor.className = "cur";
   const t0 = performance.now();
-  const line = (html, cls = "") => {
+  const line = (content, cls = "") => {
     const l = document.createElement("div");
     l.className = `l ${cls}`;
-    l.innerHTML = html;
+    l.replaceChildren(html`${content}`);
     txt.append(l);
     l.append(cursor);
     while (txt.scrollHeight > txt.clientHeight + 2 && txt.children.length > 1) txt.firstElementChild.remove();
     return l;
   };
-  const esc6 = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
-  const cmd = `phitex watch ${doc}`, prompt = line(`<span class="p">$ </span>`);
+  const cmd = `phitex watch ${doc}`, prompt = line(html`<span class="p">$ </span>`);
   let typed = 0, timer = 0;
   const key = () => {
     prompt.insertBefore(document.createTextNode(cmd[typed++]), cursor);
@@ -2380,14 +2456,14 @@ function terminal(box, doc = "document.tex") {
   let queue = [];
   const later = (f) => timer || typed < cmd.length ? queue.push(f) : f();
   const flush = () => {
-    line(`<span class="d">PhiTeX</span>`);
+    line(html`<span class="d">PhiTeX</span>`);
     queue.forEach((f) => f());
     queue = [];
   };
   let cur = null, spin = 0, spinner = 0;
   const step = (what, pct, detail) => later(() => {
     if (cur?.what !== what) {
-      if (cur) cur.el.innerHTML = `<span class="ok">\u2713</span> ${esc6(cur.what.toLowerCase())}`;
+      if (cur) cur.el.replaceChildren(html`<span class="ok">✓</span> ${cur.what.toLowerCase()}`);
       cur = { what, el: line(""), seen: /* @__PURE__ */ new Set() };
     }
     const name = what.toLowerCase();
@@ -2398,8 +2474,8 @@ function terminal(box, doc = "document.tex") {
         cur.el.before(Object.assign(document.createElement("div"), { className: "l dim", textContent: `  + ${pkg}` }));
       }
       const n = Math.round(pct / 100 * BAR);
-      cur.el.innerHTML = `<span class="f">${name}</span> [${"\u2588".repeat(n)}${"\u2591".repeat(BAR - n)}] ${esc6(detail.split(" \xB7 ").slice(1).join("  "))}`;
-    } else cur.el.innerHTML = `<span class="f">${SPIN[spin % SPIN.length]}</span> ${name}  <span class="dim">${esc6(detail)}</span>`;
+      cur.el.replaceChildren(html`<span class="f">${name}</span> [${"\u2588".repeat(n)}${"\u2591".repeat(BAR - n)}] ${detail.split(" \xB7 ").slice(1).join("  ")}`);
+    } else cur.el.replaceChildren(html`<span class="f">${SPIN[spin % SPIN.length]}</span> ${name}  <span class="dim">${detail}</span>`);
     cur.el.append(cursor);
     clearInterval(spinner);
     if (pct === void 0)
@@ -2414,8 +2490,8 @@ function terminal(box, doc = "document.tex") {
     el,
     () => {
       cleanup();
-      if (cur) cur.el.innerHTML = `<span class="ok">\u2713</span> ${esc6(cur.what.toLowerCase())}`;
-      line(`<span class="ok">\u2713 page 1 in ${((performance.now() - t0) / 1e3).toFixed(1)} s</span>`);
+      if (cur) cur.el.replaceChildren(html`<span class="ok">✓</span> ${cur.what.toLowerCase()}`);
+      line(html`<span class="ok">✓ page 1 in ${((performance.now() - t0) / 1e3).toFixed(1)} s</span>`);
       setTimeout(() => crtOff(el), 180);
       return 700;
     },
@@ -2447,9 +2523,9 @@ function dos(box) {
 .phx-dos.clear .led, .phx-dos.clear .brand { opacity: 0; transition: opacity .2s; }
 .phx-dos.clear .scr { box-shadow: none; animation: phx-dos-clear .5s steps(14, end) forwards; }
 @keyframes phx-dos-clear { from { clip-path: inset(0 0 0 0); } to { clip-path: inset(100% 0 0 0); } }`,
-    `<div class="scr"><div class="txt"><div class="top">PhiTeX Setup</div>
+    html`<div class="scr"><div class="txt"><div class="top">PhiTeX Setup</div>
      <div class="main"><p>Please wait while Setup typesets your document.</p>
-     <div class="box"><div class="now">Starting\u2026</div><div class="bar"></div><div class="pct">&nbsp;</div><div class="file">&nbsp;</div></div>
+     <div class="box"><div class="now">Starting…</div><div class="bar"></div><div class="pct">&nbsp;</div><div class="file">&nbsp;</div></div>
      <div class="tip"><b>Did you know?</b> <span></span></div></div>
      <div class="bot">  ENTER=Continue   F1=Help   F3=Exit</div></div><div class="band"></div></div>
      <div class="led"></div><div class="brand">PHITEX</div>`
@@ -2512,7 +2588,7 @@ function typewriter(box, dark, doc = "document.tex") {
 .phx-tw.out { background: transparent; }
 .phx-tw.out .roll { filter: blur(.35cqw); opacity: 0; transition: filter .45s ease-in, opacity .5s ease-in; }
 .phx-tw.out .cur, .phx-tw.out .ding { display: none; }`,
-    `<div class="roll"></div><div class="ding">ding</div>`
+    html`<div class="roll"></div><div class="ding">ding</div>`
   );
   const roll = el.querySelector(".roll"), ding = el.querySelector(".ding");
   const cursor = document.createElement("span");
@@ -2604,7 +2680,7 @@ function ink(box, dark) {
 .phx-ink.out .flood { animation: phx-ink-flood .38s cubic-bezier(.5,0,.7,1) forwards; }
 .phx-ink.out .cap { opacity: 0; transition: opacity .2s; }
 @keyframes phx-ink-flood { to { transform: scale(10); } }`,
-    `<div class="blot"></div><div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div><div class="flood"></div>`
+    html`<div class="blot"></div><div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div><div class="flood"></div>`
   );
   const $ = (s) => el.querySelector(s);
   const blot = $(".blot");
@@ -2687,7 +2763,7 @@ function tetris(box, dark) {
 @keyframes phx-tet-tick { to { transform: translateX(-100%); } }
 .phx-tet.out { background: transparent; }
 .phx-tet.out .hud, .phx-tet.out .tick { opacity: 0; }`,
-    `<canvas></canvas><div class="hud"><div><b>Stage</b><div class="v st">Ready</div></div><div><b>Packages</b><div class="meter">${"<i></i>".repeat(8)}</div></div><div><b>Page</b><div class="v pg">\u2013</div></div><div><b>Next</b><div class="next"></div></div></div>
+    html`<canvas></canvas><div class="hud"><div><b>Stage</b><div class="v st">Ready</div></div><div><b>Packages</b><div class="meter">${Array.from({ length: 8 }, () => html`<i></i>`)}</div></div><div><b>Page</b><div class="v pg">–</div></div><div><b>Next</b><div class="next"></div></div></div>
      <div class="tick"><span></span></div>`
   );
   const $ = (s) => el.querySelector(s);
@@ -2820,7 +2896,7 @@ function plane(box, dark) {
 .phx-pl .cap .det { font-size: 2.4cqw; color: ${mute}; margin: .8cqw 0 0 6cqw; min-height: 1.4em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .phx-pl .cap .hint { font-size: 2.3cqw; color: ${mute}; margin: 3cqw 0 0 6cqw; line-height: 1.45; }
 .phx-pl.out .cap { opacity: 0; }`,
-    `<svg viewBox="0 0 85 110" preserveAspectRatio="xMidYMid meet">
+    html`<svg viewBox="0 0 85 110" preserveAspectRatio="xMidYMid meet">
       <defs>
         <pattern id="phx-pl-grid" width="5" height="5" patternUnits="userSpaceOnUse"><path d="M5 0H0V5" fill="none" stroke="${grid}" stroke-width=".25"/></pattern>
         <mask id="phx-pl-m" maskUnits="userSpaceOnUse" x="-50" y="-50" width="185" height="210"><rect x="-50" y="-50" width="185" height="210" fill="#fff"/><polygon class="hole" points="" fill="#000"/></mask>
@@ -2947,7 +3023,7 @@ function glyphs(box, dark) {
 @keyframes phx-gl-bounce { 0% { transform: scaleY(.7) translateY(.6cqw); } 100% { transform: none; } }
 @keyframes phx-gl-drop { 0% { transform: none; } 14% { transform: translate(-.6cqw, -.8cqw) rotate(-10deg); } 85% { opacity: 1; } to { transform: translate(-4cqw, 24cqw) rotate(-40deg); opacity: 0; } }
 .phx-gl.out .cap, .phx-gl.out .shelf { opacity: 0; }`,
-    `<canvas></canvas><div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div><div class="shelf"></div>`
+    html`<canvas></canvas><div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div><div class="shelf"></div>`
   );
   const cv = el.querySelector("canvas"), ctx = cv.getContext("2d"), dpr = devicePixelRatio || 1;
   const W2 = cv.width = box.clientWidth * dpr, H2 = cv.height = box.clientHeight * dpr;
@@ -3061,6 +3137,12 @@ function glyphs(box, dark) {
 }
 
 // viewer/src/openings/kaust.ts
+var art2 = (markup, cls) => {
+  const s = svgArt(markup).firstElementChild;
+  s.setAttribute("class", cls);
+  s.setAttribute("aria-hidden", "true");
+  return s;
+};
 var STEPS2 = ["Reading the project", "Fetching packages", "Typesetting"];
 function kaust(box, dark) {
   const ink0 = dark ? "#e4e6ea" : "#1b222c", mute = dark ? "#a3a9b4" : "#5d6778";
@@ -3095,16 +3177,16 @@ function kaust(box, dark) {
 .phx-ka.sweep .st { animation: none; opacity: 1; height: 16cqw; transition: transform .62s cubic-bezier(.55,0,.35,1); }
 .phx-ka.sweep .st:nth-of-type(2) { transition-delay: .05s; } .phx-ka.sweep .st:nth-of-type(3) { transition-delay: .1s; } .phx-ka.sweep .st:nth-of-type(4) { transition-delay: .15s; }
 .phx-ka.sweep.go .st { transform: rotate(-50.5deg) translateY(150cqw); }`,
-    `<div class="st"></div><div class="st"></div><div class="st"></div><div class="st"></div>
-     <div class="row">${LOCKUP.replace("<svg ", `<svg class="lk" aria-hidden="true" `).replace(/#1D3E72/gi, dark ? "#e4e6ea" : "#1D3E72")}<div class="rule"></div>${SEEDS.replace("<svg ", `<svg class="sd" aria-hidden="true" `)}</div>
-     <div class="prog">${RIBBON.map((c) => `<i style="--c:${c}"><b></b></i>`).join("")}</div>
+    html`<div class="st"></div><div class="st"></div><div class="st"></div><div class="st"></div>
+     <div class="row">${art2(LOCKUP.replace(/#1D3E72/gi, dark ? "#e4e6ea" : "#1D3E72"), "lk")}<div class="rule"></div>${art2(SEEDS, "sd")}</div>
+     <div class="prog">${RIBBON.map((c) => html`<i style="--c:${c}"><b></b></i>`)}</div>
      <div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div>`
   );
   const $ = (s) => el.querySelector(s);
-  const bars = [...el.querySelectorAll(".prog i")];
+  const bars2 = [...el.querySelectorAll(".prog i")];
   const fill = (i, w) => {
-    bars[i].classList.toggle("run", w === "run");
-    bars[i].querySelector("b").style.width = w === "run" ? "" : `${w}%`;
+    bars2[i].classList.toggle("run", w === "run");
+    bars2[i].querySelector("b").style.width = w === "run" ? "" : `${w}%`;
   };
   const step = (what, pct, detail) => {
     $(".what").textContent = what;
@@ -3117,7 +3199,7 @@ function kaust(box, dark) {
   return ending(
     el,
     () => {
-      bars.forEach((_, i) => fill(i, 100));
+      bars2.forEach((_, i) => fill(i, 100));
       setTimeout(() => {
         el.classList.add("out", "sweep");
         el.querySelectorAll(".st").forEach((s) => (s.style.transition = "none", s.style.transform = "rotate(-50.5deg) translateY(-70cqw)"));
@@ -3190,8 +3272,8 @@ function badapple(box, dark) {
 .phx-ba.out { background: transparent; }
 .phx-ba.out .sub, .phx-ba.out .cr { opacity: 0; }
 .phx-ba.out .scr { left: 0; right: 0; top: 0; aspect-ratio: auto; height: 100%; box-shadow: none; background: transparent; }`,
-    `<div class="scr"><canvas></canvas></div><div class="sub"><div class="what"></div><div class="det"></div><div class="hint"></div></div>
-     <div class="cr">Bad Apple!! \xB7 Alstroemeria Records feat. nomico \xB7 PV: Anira \xB7 original: ZUN</div>`
+    html`<div class="scr"><canvas></canvas></div><div class="sub"><div class="what"></div><div class="det"></div><div class="hint"></div></div>
+     <div class="cr">Bad Apple!! · Alstroemeria Records feat. nomico · PV: Anira · original: ZUN</div>`
   );
   const $ = (s) => el.querySelector(s);
   const cv = el.querySelector("canvas"), ctx = cv.getContext("2d"), dpr = devicePixelRatio || 1;
@@ -3295,12 +3377,15 @@ var OVERLEAF_WORDS = {
   badge: "Unofficial \xB7 experimental",
   badgeTitle: "An unofficial extension, not part of Overleaf. PhiTeX runs LaTeX (pdfTeX) in your browser; Overleaf's PDF is the real one.",
   byline: "Unofficial PhiTeX extension \xB7 experimental",
-  about: `<b>\u26A1 Instant is not part of Overleaf.</b> It is added by the <b>unofficial PhiTeX</b> browser extension, not made,
+  // (made when a panel reads it, not when this module loads: nothing of the DOM before a page)
+  get about() {
+    return html`<b>⚡ Instant is not part of Overleaf.</b> It is added by the <b>unofficial PhiTeX</b> browser extension, not made,
       endorsed or supported by Overleaf: an experimental incremental TeX engine that runs entirely in your browser. Nothing is
       sent anywhere; Overleaf's own PDF is on the <b>PDF</b> tab.
       <div class="about-foot">LaTeX, with TeX Live's packages fetched as needed. Free software (AGPL-3.0-only,
       <a id="license" target="_blank" rel="noopener">full license</a>), provided as is, without any warranty.
-      To turn it off: <code>chrome://extensions</code>.</div>`,
+      To turn it off: <code>chrome://extensions</code>.</div>`;
+  },
   preparing: "Getting ready for instant edits\u2026 {s} s (pages still scroll)",
   license: "LICENSE.txt",
   realPdf: "Overleaf's PDF is the real one.",
@@ -3319,7 +3404,6 @@ function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.floor(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
 }
-var esc4 = (t) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 var PATHS = {
   preview: "M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z",
   chevron_left: "M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z",
@@ -3346,16 +3430,17 @@ var PATHS = {
   bolt: "M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z",
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z"
 };
-var copyBtn = (i) => `<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
-var icon = (name, size = 18) => `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
+var copyBtn = (i) => html`<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
+var icon = (name, size = 18) => html`<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`.firstElementChild;
 var ZOOMS = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
 var mb = (b) => b ? ` \xB7 ${b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`}` : "";
 var dur = (ms) => ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1e3 ? `${Math.round(ms)} ms` : `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s`;
+var bars = (parts, cycle = Infinity) => html`<div class="tbar">${parts.map(([, ms], i) => html`<i class="c${i % cycle}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`)}</div><div class="legend">${parts.map(([n, ms], i) => html`<span><i class="c${i % cycle}"></i>${n} ${dur(ms)}</span>`)}</div>`;
 function framePart(json) {
   if (!json) return "";
   const f = JSON.parse(json);
   const split = [["finding what changed", f.probe], ["drawing", f.draw], ["waiting for the engine", Math.max(0, f.request - f.watch)], ["decoding", f.decode]];
-  return `<div class="row"><span class="k">Drawing page ${f.page}${f.inView ? " (in view)" : ""}</span><span class="v">${esc4(dur(f.request + f.decode))}</span><div class="tbar">${split.map(([, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${split.map(([n, ms], i) => `<span><i class="c${i}"></i>${n} ${esc4(dur(ms))}</span>`).join("")}</div><span class="note">${f.drawn} slice${f.drawn === 1 ? "" : "s"} of the page drawn, ${f.kept} kept from before</span></div>`;
+  return html`<div class="row"><span class="k">Drawing page ${f.page}${f.inView ? " (in view)" : ""}</span><span class="v">${dur(f.request + f.decode)}</span>${bars(split)}<span class="note">${f.drawn} slice${f.drawn === 1 ? "" : "s"} of the page drawn, ${f.kept} kept from before</span></div>`;
 }
 function frameText(json) {
   const f = JSON.parse(json);
@@ -3397,7 +3482,7 @@ function part2(key, raw) {
   const extra = rest.replace(/^·\s*/, "");
   return { key, label, value: dur(ms), ms, split, note: [key in PART_NOTES ? PART_NOTES[key] : note, extra].filter(Boolean).join(" \xB7 ") || void 0 };
 }
-var lines = (...w) => w.map((x) => `<i style="width:${x}%"></i>`).join("");
+var lines = (...w) => w.map((x) => html`<i style="width:${x}%"></i>`);
 var TIPS = [
   {
     id: "live",
@@ -3405,7 +3490,7 @@ var TIPS = [
     title: "Typeset as you type",
     text: "No compile button: change the source and only what you touched is typeset again. The page follows in milliseconds.",
     // (a heading typed in the editor, the page's heading following it letter by letter, the time it took)
-    demo: `<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon("bolt", 11)}12 ms</span></div>`
+    demo: () => html`<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon("bolt", 11)}12 ms</span></div>`
   },
   {
     id: "compare",
@@ -3414,28 +3499,28 @@ var TIPS = [
     fresh: true,
     text: "See what changed since an earlier version, marked as latexdiff marks it: additions in blue, deletions struck out.",
     // (a sentence changes, then the change marked, then the navigator; Overleaf's compare tip had it first)
-    demo: `<div class="demo cmp" aria-hidden="true">The results are <span class="del">good</span><span class="add">&nbsp;excellent</span>.<span class="ver"><i class="v0">Submitted v1</i><i class="v1">Now vs Submitted v1</i></span><span class="tag">\u2039 1 / 1 \u203A</span></div>`
+    demo: () => html`<div class="demo cmp" aria-hidden="true">The results are <span class="del">good</span><span class="add">&nbsp;excellent</span>.<span class="ver"><i class="v0">Submitted v1</i><i class="v1">Now vs Submitted v1</i></span><span class="tag">‹ 1 / 1 ›</span></div>`
   },
   {
     id: "timing",
     at: "#st",
     title: "How long it took",
     text: "Click the status for the last build's times and how long a keystroke takes to reach the page.",
-    demo: `<div class="demo tim" aria-hidden="true"><div class="mbar"><span class="mst">Built \xB7 42 ms</span></div><div class="mpop"><b>Keystroke to page</b><p><span>edit</span><i style="--w:30%"></i><em>11 ms</em></p><p><span>typeset</span><i style="--w:55%"></i><em>25 ms</em></p><p><span>paint</span><i style="--w:18%"></i><em>6 ms</em></p></div></div>`
+    demo: () => html`<div class="demo tim" aria-hidden="true"><div class="mbar"><span class="mst">Built · 42 ms</span></div><div class="mpop"><b>Keystroke to page</b><p><span>edit</span><i style="--w:30%"></i><em>11 ms</em></p><p><span>typeset</span><i style="--w:55%"></i><em>25 ms</em></p><p><span>paint</span><i style="--w:18%"></i><em>6 ms</em></p></div></div>`
   },
   {
     id: "rebuild",
     at: "#b-rec",
     title: "Clean rebuild",
     text: "Builds run by themselves as you type. Start over from a clean slate here, or clear what PhiTeX keeps.",
-    demo: `<div class="demo reb" aria-hidden="true"><div class="mbar"><span class="msplit"><span class="go">${icon("refresh", 12)}Rebuild</span><span class="dd">${icon("expand_more", 12)}</span></span></div><div class="mmenu"><span>Rebuild</span><span class="pick">Clean rebuild</span></div><div class="pg">${lines(60, 95, 90, 70, 92, 50)}</div></div>`
+    demo: () => html`<div class="demo reb" aria-hidden="true"><div class="mbar"><span class="msplit"><span class="go">${icon("refresh", 12)}Rebuild</span><span class="dd">${icon("expand_more", 12)}</span></span></div><div class="mmenu"><span>Rebuild</span><span class="pick">Clean rebuild</span></div><div class="pg">${lines(60, 95, 90, 70, 92, 50)}</div></div>`
   },
   {
     id: "more",
     at: "#b-more",
     title: "Dark PDF and more",
     text: "The pages in dark mode, the log, the contents and the keys are in this menu.",
-    demo: `<div class="demo drk" aria-hidden="true"><div class="mbar"><span class="dots">${icon("more_horiz", 14)}</span></div><div class="mmenu"><span class="pick">${icon("dark", 11)}Dark PDF<b>\u2713</b></span><span>View log</span></div><div class="pg">${lines(55, 95, 88, 92, 60, 85)}</div></div>`
+    demo: () => html`<div class="demo drk" aria-hidden="true"><div class="mbar"><span class="dots">${icon("more_horiz", 14)}</span></div><div class="mmenu"><span class="pick">${icon("dark", 11)}Dark PDF<b>✓</b></span><span>View log</span></div><div class="pg">${lines(55, 95, 88, 92, 60, 85)}</div></div>`
   },
   {
     id: "contents",
@@ -3443,7 +3528,7 @@ var TIPS = [
     title: "Contents",
     fresh: true,
     text: "The document's sections beside the pages: click one to go there. This button (or t) shows or hides them.",
-    demo: `<div class="demo toc" aria-hidden="true"><div class="col"><span>1 Introduction</span><span>2 Method</span><span>3 Results</span><i class="at"></i></div><div class="pg"><div class="roll">${lines(45, 95, 90, 70)}<s></s>${lines(40, 92, 85, 60)}<s></s>${lines(42, 90, 94, 75)}</div></div></div>`
+    demo: () => html`<div class="demo toc" aria-hidden="true"><div class="col"><span>1 Introduction</span><span>2 Method</span><span>3 Results</span><i class="at"></i></div><div class="pg"><div class="roll">${lines(45, 95, 90, 70)}<s></s>${lines(40, 92, 85, 60)}<s></s>${lines(42, 90, 94, 75)}</div></div></div>`
   }
 ];
 var Panel = class {
@@ -3455,6 +3540,12 @@ var Panel = class {
   store;
   at = 0;
   last = null;
+  /** A page drawn in this page's life: the engine is up, a rebuild's opening starts past loading it. */
+  drewOnce = false;
+  /** The step an opening says first: the one now, else loading the engine (or, once it ran here, the packages). */
+  firstStep() {
+    return this.stepNow || this.words.steps[this.drewOnce ? 1 : 0];
+  }
   url = null;
   lastStatus = null;
   listeners = [];
@@ -3477,20 +3568,21 @@ var Panel = class {
     this.ownBar = !!opts.header;
     const host2 = document.createElement("phitex-preview");
     this.root = host2.attachShadow({ mode: "open" });
-    const item2 = (id, name, label, sub = "", cls = "") => `<button type="button" role="menuitem" id="${id}"${cls ? ` class="${cls}"` : ""}>${name ? `<span class="icon">${name}</span>` : '<span class="check"></span>'}<span>${label}</span>${sub ? `<span class="sub">${sub}</span>` : ""}</button>`;
-    this.root.innerHTML = `<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${PRINT_CSS}</style>
-<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
+    const item2 = (id, name, label, sub = "", cls = "") => html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
+    const style = document.createElement("style");
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS;
+    const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
     <button type="button" class="ib" id="b-side" title="Contents (t)" aria-label="Contents" aria-pressed="false"><span class="icon">toc</span></button>
     <span class="split" id="split"><button type="button" class="go" id="go" title="Build again with the files as they are (builds run by themselves as you type)"><span class="icon">refresh</span><span class="wide">Rebuild</span></button><button type="button" class="more" id="b-rec" aria-haspopup="menu" aria-expanded="false" title="More ways to build" aria-label="More ways to build"><span class="icon">expand_more</span></button></span>
-    <button type="button" class="status" id="st" aria-haspopup="dialog" aria-expanded="false" title="The last build's times"><b id="sttext">Starting\u2026</b><span id="stmore"></span></button>
+    <button type="button" class="status" id="st" aria-haspopup="dialog" aria-expanded="false" title="The last build's times"><b id="sttext">Starting…</b><span id="stmore"></span></button>
     <span class="grow"></span>
     <span class="find" id="find" hidden><input id="findq" type="search" placeholder="Find" spellcheck="false" aria-label="Find in the pages"><span id="findn"></span></span>
     <button type="button" class="ib wide" id="b-find" title="Find in the pages (Ctrl+F)" aria-label="Find"><span class="icon">search</span></button>
     <button type="button" class="ib wide" id="b-compare" title="Compare with an earlier version (latexdiff)" aria-label="Compare"><span class="icon">compare</span></button>
     <button type="button" class="ib wide" id="pdf" title="Download the PDF" aria-label="Download the PDF"><span class="icon">download</span></button>
-    <span class="pageno"><input id="pgin" value="\u2013" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
+    <span class="pageno"><input id="pgin" value="–" aria-label="Page" inputmode="numeric" autocomplete="off"><span>/&nbsp;<span id="pgn">0</span></span></span>
     <button type="button" class="ib zoomb wide" id="b-zoom" aria-haspopup="menu" aria-expanded="false" title="Zoom"><span id="zl">Page width</span><span id="zs">Fit</span><span class="icon">expand_more</span></button>
     <button type="button" class="ib probs" id="b-probs" aria-haspopup="dialog" aria-expanded="false" title="Problems" hidden><span id="psev"></span><span id="pcount"></span></button>
     <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
@@ -3498,12 +3590,12 @@ var Panel = class {
     <div class="menu" id="m-rec" role="menu" hidden style="left:6px;top:calc(100% + 4px)">
       ${item2("r-rebuild", "", "Rebuild")}
       <button type="button" role="menuitem" id="r-clean"><span class="check"></span><span>Clean rebuild<span class="desc">Start over: the project read again, built from the start</span></span></button>
-      <hr class="if-compare"><button type="button" role="menuitem" id="r-compare" class="if-compare"><span class="check"></span><span>Compare with an earlier version\u2026<span class="desc">latexdiff against a saved version</span></span></button>
-      <hr class="if-cache"><button type="button" role="menuitem" id="r-cache" class="if-cache"><span class="check"></span><span>Clear cache\u2026<span class="desc">The packages and formats PhiTeX keeps</span></span></button>
+      <hr class="if-compare"><button type="button" role="menuitem" id="r-compare" class="if-compare"><span class="check"></span><span>Compare with an earlier version…<span class="desc">latexdiff against a saved version</span></span></button>
+      <hr class="if-cache"><button type="button" role="menuitem" id="r-cache" class="if-cache"><span class="check"></span><span>Clear cache…<span class="desc">The packages and formats PhiTeX keeps</span></span></button>
     </div>
     <div class="menu timing" id="m-time" role="dialog" aria-label="Timing" hidden style="left:6px;top:calc(100% + 4px)"></div>
     <div class="menu" id="m-zoom" role="menu" hidden style="right:60px;top:calc(100% + 4px);min-width:170px">
-      ${ZOOMS.map(([z, t], i) => `${i === 2 ? "<hr>" : ""}<button type="button" role="menuitemradio" data-zoom="${z}"><span class="check"></span>${t}</button>`).join("")}
+      ${ZOOMS.map(([z, t], i) => [i === 2 ? html`<hr>` : "", html`<button type="button" role="menuitemradio" data-zoom="${z}"><span class="check"></span>${t}</button>`])}
     </div>
     <div class="menu" id="m-more" role="menu" hidden style="right:6px;top:calc(100% + 4px);min-width:250px">
       ${item2("x-pdf", "download", "Download PDF")}
@@ -3522,25 +3614,28 @@ var Panel = class {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">\u2715</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
     <div class="dialog settings" id="settings" role="dialog" aria-label="Settings" hidden></div>
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <div class="dialog keys" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
-    <div class="dialog small about" id="about" role="dialog" aria-label="About the PhiTeX preview" hidden><header>About PhiTeX<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><div>${w.about}</div></div>
+    <div class="dialog small about" id="about" role="dialog" aria-label="About the PhiTeX preview" hidden><header>About PhiTeX<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><div>${typeof w.about === "string" ? rich(w.about) : w.about.cloneNode(true)}</div></div>
     <div class="dialog" id="logview" role="dialog" aria-label="The build's log" hidden><header>The last build's log<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><pre id="logtext"></pre></div>
     <div class="dialog" id="report" role="dialog" aria-label="Debug report" hidden>
       <header>Debug report</header>
-      <p>Anonymized: no document text, nothing you typed, no file names (file1.tex, \u2026), no project id. Read it before you send it.</p>
+      <p>Anonymized: no document text, nothing you typed, no file names (file1.tex, …), no project id. Read it before you send it.</p>
       <textarea id="reporttext" readonly spellcheck="false"></textarea>
       <div class="btns"><button type="button" class="btn" id="reportcopy">Copy</button><button type="button" class="btn" id="reportmail">Email</button><button type="button" class="btn" id="reportclose">Close</button></div>
     </div>
     <div class="offpill" id="offpill">Disconnected</div>
     <button type="button" class="byline" id="byline" title="About this preview">${w.byline}</button>
   </div>
-</div>`.replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g, (_, n) => icon(n, n === "expand_more" || n === "refresh" ? 16 : 18));
+</div>`;
+    for (const ic of skeleton.querySelectorAll("span.icon"))
+      if (ic.className === "icon" && /^\w+$/.test(ic.textContent ?? "")) ic.replaceWith(icon(ic.textContent, ic.textContent === "expand_more" || ic.textContent === "refresh" ? 16 : 18));
+    this.root.replaceChildren(style, skeleton);
     this.host = host2;
     host2.style.display = "none";
     (document.body ?? document.documentElement).append(host2);
@@ -3790,7 +3885,7 @@ var Panel = class {
     this.wasShown = on;
     this.host.style.display = display;
     if (on && !was) this.redraw();
-    if (on && !this.last) this.step(this.stepNow || this.words.steps[0], void 0, "");
+    if (on && !this.last) this.step(this.firstStep(), void 0, "");
   }
   wasShown;
   save() {
@@ -3810,7 +3905,7 @@ var Panel = class {
     this.win.classList.toggle("collapsed", on);
     const b = this.$("#min");
     b.title = on ? "Expand (Alt+Shift+P)" : "Collapse (Alt+Shift+P)";
-    b.innerHTML = icon(on ? "open_in_full" : "close_fullscreen");
+    b.replaceChildren(icon(on ? "open_in_full" : "close_fullscreen"));
     this.win.style.width = on ? "" : `${this.prefs.w}px`;
     this.win.style.height = on ? "" : `${this.prefs.h}px`;
     if (!on) this.redraw();
@@ -4084,7 +4179,7 @@ var Panel = class {
     if (tip.hidden || tip.dataset.i !== hit.dataset.i) {
       tip.dataset.i = hit.dataset.i;
       tip.className = `ctip ${p.severity}`;
-      tip.innerHTML = `${icon(p.severity, 14)}<span></span>`;
+      tip.replaceChildren(icon(p.severity, 14), document.createElement("span"));
       tip.querySelector("span").textContent = p.message;
       tip.hidden = false;
     }
@@ -4131,13 +4226,13 @@ var Panel = class {
     const shown = diags.filter((d) => !this.hiddenKinds.has(kindOf(d)));
     this.listed = shown.slice(0, this.listedMax);
     for (const [i, d] of this.listed.entries()) {
-      const copy = d.severity === "error" || d.severity === "warning" ? copyBtn(i) : "";
+      const copy = d.severity === "error" || d.severity === "warning" ? copyBtn(i) : null;
       if (d.problem) {
         const card = document.createElement("ol");
         card.className = "phx-card phx-inline";
         card.setAttribute("role", "listitem");
-        card.innerHTML = problemHtml(d.problem);
-        card.firstElementChild.insertAdjacentHTML("afterbegin", copy);
+        card.replaceChildren(problemNode(d.problem));
+        if (copy) card.firstElementChild.prepend(copy);
         if (d.problem.file && d.problem.range) {
           card.dataset.key = `${d.problem.file}\0${d.problem.range[0]}`;
           card.title = "Show it on the page (its file:line opens it in the editor)";
@@ -4153,7 +4248,7 @@ var Panel = class {
         row.dataset.line = String(d.line);
         row.title = `Go to ${d.file}:${d.line}`;
       }
-      row.innerHTML = `${copy}<span class="where"></span><div class="text"></div>`;
+      row.replaceChildren(html`${copy}<span class="where"></span><div class="text"></div>`);
       row.querySelector(".text").textContent = d.message;
       if (d.detail && d.code === "engine") row.append(foldedDetail(d.detail, "Engine details"));
       else if (d.detail) {
@@ -4196,7 +4291,7 @@ var Panel = class {
     pb.hidden = !errors && !warnings;
     pb.className = `ib probs ${errors ? "error" : "warning"}`;
     pb.title = `${errors} error${errors === 1 ? "" : "s"}, ${warnings} warning${warnings === 1 ? "" : "s"}`;
-    this.$("#psev").innerHTML = icon(errors ? "error" : "warning", 16);
+    this.$("#psev").replaceChildren(icon(errors ? "error" : "warning", 16));
     this.$("#pcount").textContent = String(errors || warnings);
     this.$("#logshead").textContent = diags.length ? [errors && `${errors} error${errors === 1 ? "" : "s"}`, warnings && `${warnings} warning${warnings === 1 ? "" : "s"}`].filter(Boolean).join(", ") || "Notes" : "No problems";
     const nopages = s.pages === 0 && !this.last;
@@ -4404,7 +4499,7 @@ var Panel = class {
     this.lastLook = id;
     if (id !== "off") this.seen(["opening"]);
     el.classList.toggle("owns", !!anim.step);
-    if (anim.step) anim.step(this.stepNow || this.words.steps[0], void 0, "");
+    if (anim.step) anim.step(this.firstStep(), void 0, "");
     this.animSince = performance.now();
   }
   /** When the opening began: a page there within 400 ms (a project already built) is shown at once, no opening. */
@@ -4491,7 +4586,7 @@ var Panel = class {
     this.toastKind = kind;
     el.className = `toast ${kind}${t.err ? " err" : ""}`;
     el.hidden = false;
-    el.innerHTML = `<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>` + (t.pct === null ? "" : `<div class="track"><i style="width:${t.pct}%"></i></div>`);
+    el.replaceChildren(html`<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
     el.querySelector(".t span").textContent = t.title;
     el.querySelector(".d").textContent = t.detail ?? "";
     if (t.ms) this.toastTimer = setTimeout(() => this.toast(kind, null), t.ms);
@@ -4687,7 +4782,7 @@ var Panel = class {
     if (!opts.keys) return;
     const help = this.$("#keyhelp");
     const extra = [["e", "the build's errors and warnings"], ...opts.outline ? [["t", "the contents beside the pages"]] : []];
-    help.innerHTML = `<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => `<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`).join("")}</table>`;
+    help.replaceChildren(html`<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => html`<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`)}</table>`);
     addEventListener(
       "keydown",
       (e) => {
@@ -5005,7 +5100,7 @@ var Panel = class {
     this.settingRows.clear();
     const shown = groups.filter((g) => g.rows.length);
     const at = Math.max(0, shown.findIndex((g) => g.title === this.settingsTab));
-    el.innerHTML = `<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><nav class="stabs" role="tablist">${shown.map((g, i) => `<button type="button" role="tab" data-tab="${i}" data-group="${esc4(g.title)}" aria-selected="${i === at}">${esc4(g.title)}</button>`).join("")}</nav><div class="sbody"></div>`;
+    el.replaceChildren(html`<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><nav class="stabs" role="tablist">${shown.map((g, i) => html`<button type="button" role="tab" data-tab="${i}" data-group="${g.title}" aria-selected="${i === at}">${g.title}</button>`)}</nav><div class="sbody"></div>`);
     const body = el.querySelector(".sbody");
     shown.forEach((g, i) => {
       const sec = document.createElement("section");
@@ -5037,17 +5132,17 @@ var Panel = class {
     row.querySelector("b").textContent = r.label;
     row.querySelector("small").textContent = r.disabled ?? r.help ?? "";
     const ctl = row.querySelector(".ctl");
-    const dis = r.disabled || !r.set ? " disabled" : "";
-    if (r.kind === "toggle") ctl.innerHTML = `<button type="button" role="switch" class="switch" aria-checked="${r.value === true}" aria-label="${esc4(r.label)}"${dis}><i></i></button>`;
+    const off = !!(r.disabled || !r.set);
+    if (r.kind === "toggle") ctl.replaceChildren(html`<button type="button" role="switch" class="switch" aria-checked="${r.value === true}" aria-label="${r.label}" disabled="${off}"><i></i></button>`);
     else if (r.kind === "choice")
-      ctl.innerHTML = `<div class="seg" role="group" aria-label="${esc4(r.label)}">${(r.options ?? []).map(([v, l]) => `<button type="button" data-v="${esc4(v)}" aria-pressed="${r.value === v}"${dis}>${esc4(l)}</button>`).join("")}</div>`;
+      ctl.replaceChildren(html`<div class="seg" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}">${l}</button>`)}</div>`);
     else if (r.kind === "select") {
       const s = document.createElement("select");
       s.setAttribute("aria-label", r.label);
-      s.disabled = !!dis;
+      s.disabled = off;
       for (const [v, l] of r.options ?? []) s.append(new Option(l, v, v === r.value, v === r.value));
       ctl.append(s);
-    } else if (r.kind === "action") ctl.innerHTML = `<button type="button" class="btn"${dis}>${esc4(r.button ?? r.label)}</button>`;
+    } else if (r.kind === "action") ctl.replaceChildren(html`<button type="button" class="btn" disabled="${off}">${r.button ?? r.label}</button>`);
     else ctl.innerHTML = `<span class="val"></span>`, ctl.querySelector(".val").textContent = String(r.value ?? "");
     return row;
   }
@@ -5092,16 +5187,16 @@ var Panel = class {
     );
     if (ev.onBoxes) look2.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     preview.push({ id: "problems", label: "Problems shown", help: "Which kinds: the filters at the top of the problems list", kind: "info", value: this.hiddenKinds.size ? `${this.hiddenKinds.size} kind${this.hiddenKinds.size === 1 ? "" : "s"} hidden` : "All" });
-    const build = [];
-    if (ev.onDebug) build.push({ id: "debug", label: "Debug check", help: "Compare with a fresh build every 5 s (this session only)", kind: "toggle", value: this.debugOn, set: () => this.toggleDebug() });
-    build.push({ id: "reload", label: "Reload the files", help: "Read the project's files again", kind: "action", button: "Reload", set: () => (this.settings(false), void ev.onReload()) });
+    const build2 = [];
+    if (ev.onDebug) build2.push({ id: "debug", label: "Debug check", help: "Compare with a fresh build every 5 s (this session only)", kind: "toggle", value: this.debugOn, set: () => this.toggleDebug() });
+    build2.push({ id: "reload", label: "Reload the files", help: "Read the project's files again", kind: "action", button: "Reload", set: () => (this.settings(false), void ev.onReload()) });
     const tips = [{ id: "tips", label: "Feature tips", help: "Shown again, from the start", kind: "action", button: "Show again", set: () => (this.tipsReset(), this.settings(false)) }];
     if (ev.onTour) tips.push({ id: "tour", label: "The tour", kind: "action", button: "Take the tour", set: () => (this.settings(false), ev.onTour()) });
     if (ev.onNews) tips.push({ id: "news", label: "What's new", kind: "action", button: "Show", set: () => (this.settings(false), ev.onNews()) });
     return [
       { title: "Preview", rows: preview },
       { title: "Appearance", rows: look2 },
-      { title: "Build", rows: build },
+      { title: "Build", rows: build2 },
       { title: "Packages", rows: [] },
       { title: "Updates and tips", rows: tips }
     ];
@@ -5231,7 +5326,7 @@ var Panel = class {
     let target = this.$(t.at);
     if (!target || !target.offsetParent) target = this.$("#b-more");
     target.classList.add("ringed");
-    el.innerHTML = `<h4>${t.fresh ? '<span class="new">New</span>' : ""}${esc4(t.title)}</h4>${t.demo}<p>${esc4(t.text)}</p><div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`;
+    el.replaceChildren(html`<h4>${t.fresh ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`);
     el.hidden = false;
     const bar2 = this.$(".bar").getBoundingClientRect(), r = target.getBoundingClientRect(), w = el.offsetWidth;
     const cx = r.left + r.width / 2 - bar2.left, left = Math.max(8, Math.min(bar2.width - w - 8, cx - w / 2));
@@ -5256,9 +5351,9 @@ var Panel = class {
       el.innerHTML = "";
       return;
     }
-    const esc6 = (t) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
-    const n = d.busy ? `<span class="n busy">${esc6(d.busy)}</span>` : `<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
-    el.innerHTML = `<span class="what" title="${esc6(d.title)} against the current version">${esc6(d.title)} vs current <small>${esc6(d.when)}</small></span><button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>\u2039</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>\u203A</button><span class="sep"></span><span class="seg" role="group" aria-label="Pages shown (D)"><button data-a="${d.showing === "diff" ? "settings" : "toggle"}" class="on-diff" aria-pressed="${d.showing === "diff"}" title="${d.showing === "diff" ? "The diff is shown: its style (colors, markup, change bars)" : "Show the diff (D)"}">Diff${d.showing === "diff" ? ` <span class="chev" aria-label="Diff style">\u25BE</span>` : ""}</button><button data-a="${d.showing === "current" ? "" : "toggle"}" class="on-current" aria-pressed="${d.showing === "current"}" title="${d.showing === "current" ? "The current version is shown" : "Show the current version (D)"}">Current</button></span><button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>\u2B07 PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>\u2B07 .tex</button><button data-a="settings" title="Diff style: colors, markup, change bars" aria-label="Diff style">\u2699</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">\u2715</button>`;
+    const n = d.busy ? html`<span class="n busy">${d.busy}</span>` : html`<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
+    const stuck = !!d.busy || !d.changes;
+    el.replaceChildren(html`<span class="what" title="${d.title} against the current version">${d.title} vs current <small>${d.when}</small></span><button data-a="prev" title="Previous change (Shift+N)" disabled="${stuck}">‹</button>${n}<button data-a="next" title="Next change (N)" disabled="${stuck}">›</button><span class="sep"></span><span class="seg" role="group" aria-label="Pages shown (D)"><button data-a="${d.showing === "diff" ? "settings" : "toggle"}" class="on-diff" aria-pressed="${d.showing === "diff"}" title="${d.showing === "diff" ? "The diff is shown: its style (colors, markup, change bars)" : "Show the diff (D)"}">Diff${d.showing === "diff" ? html` <span class="chev" aria-label="Diff style">▾</span>` : ""}</button><button data-a="${d.showing === "current" ? "" : "toggle"}" class="on-current" aria-pressed="${d.showing === "current"}" title="${d.showing === "current" ? "The current version is shown" : "Show the current version (D)"}">Current</button></span><button data-a="pdf" title="Download the diff PDF" disabled="${!!d.busy}">⬇ PDF</button><button data-a="tex" title="Download diff.tex" disabled="${!!d.busy}">⬇ .tex</button><button data-a="settings" title="Diff style: colors, markup, change bars" aria-label="Diff style">⚙</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">✕</button>`);
     el.className = "diffbar on";
     el.onclick = (e) => {
       const a = e.target.closest("button[data-a]")?.dataset.a;
@@ -5288,7 +5383,7 @@ var Panel = class {
     const WITH_BARS = { underline: "culinechbar", cfont: "cfontchbar", invisible: "changebar", ctraditional: "cchangebar" };
     const BASE2 = Object.fromEntries(Object.entries(WITH_BARS).map(([a, b]) => [b, a]));
     const base = BASE2[look2.markup] ?? look2.markup;
-    const bars = look2.markup in BASE2;
+    const bars2 = look2.markup in BASE2;
     const SUB = [["safe", "Plain"], ["color", "Colored"], ["marker", "Margin marks"]];
     const PAIRS = [
       ["#0000ff", "#ff0000", "Blue / red"],
@@ -5296,7 +5391,7 @@ var Panel = class {
       ["#0072b2", "#d55e00", "Colorblind-safe"],
       ["#7e22ce", "#6b7280", "Purple / gray"]
     ];
-    const seg = (key, opts) => `<div class="opts">${opts.map(([v, t]) => `<button data-k="${key}" data-v="${v}" aria-pressed="${(key === "markup" ? base : look2[key]) === v}">${t}</button>`).join("")}</div>`;
+    const seg = (key, opts) => html`<div class="opts">${opts.map(([v, t]) => html`<button data-k="${key}" data-v="${v}" aria-pressed="${(key === "markup" ? base : look2[key]) === v}">${t}</button>`)}</div>`;
     const canBars = base in WITH_BARS;
     const deco = (add) => {
       const c = add ? look2.add_color : look2.del_color;
@@ -5305,7 +5400,7 @@ var Panel = class {
       const line = add && /^(underline|culinechbar)$/.test(look2.markup) ? `text-decoration: underline wavy ${c}; text-underline-offset: 3px;` : "";
       return `color:${c};${strike ? `text-decoration: line-through ${c};` : ""}${line}${look2.markup === "bold" && add ? "font-weight:700;" : ""}`;
     };
-    el.innerHTML = `<h4>Style</h4>${seg("markup", MARKUP)}<div class="row bars"><span>Change bars in the margin</span><button data-bars="1" role="switch" aria-checked="${bars}" aria-pressed="${bars}" ${canBars ? "" : 'disabled title="Not with this style"'}>${bars ? "On" : "Off"}</button></div><h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => `<button class="pair" data-pair="${a},${d}" aria-pressed="${look2.add_color === a && look2.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`).join("")}</div><div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look2.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look2.del_color}"></div><h4>Mode</h4>${seg("subtype", SUB)}<div class="sample"${bars ? ` style="box-shadow: inset 3px 0 0 ${look2.add_color}; padding-left: 12px"` : ""}>The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div><div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`;
+    el.replaceChildren(html`<h4>Style</h4>${seg("markup", MARKUP)}<div class="row bars"><span>Change bars in the margin</span><button data-bars="1" role="switch" aria-checked="${bars2}" aria-pressed="${bars2}" disabled="${!canBars}" title="${canBars ? null : "Not with this style"}">${bars2 ? "On" : "Off"}</button></div><h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => html`<button class="pair" data-pair="${a},${d}" aria-pressed="${look2.add_color === a && look2.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`)}</div><div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look2.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look2.del_color}"></div><h4>Mode</h4>${seg("subtype", SUB)}<div class="sample" style="${bars2 ? `box-shadow: inset 3px 0 0 ${look2.add_color}; padding-left: 12px` : null}">The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div><div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`);
     el.className = "menu diffset on";
     const set = (l) => {
       const next = { ...look2, ...l };
@@ -5320,8 +5415,8 @@ var Panel = class {
         const [a, d] = b.dataset.pair.split(",");
         return set({ add_color: a, del_color: d });
       }
-      if (b.dataset.bars) return canBars && set({ markup: bars ? base : WITH_BARS[base] });
-      if (b.dataset.k === "markup") return set({ markup: bars && b.dataset.v in WITH_BARS ? WITH_BARS[b.dataset.v] : b.dataset.v });
+      if (b.dataset.bars) return canBars && set({ markup: bars2 ? base : WITH_BARS[base] });
+      if (b.dataset.k === "markup") return set({ markup: bars2 && b.dataset.v in WITH_BARS ? WITH_BARS[b.dataset.v] : b.dataset.v });
       if (b.dataset.k) set({ [b.dataset.k]: b.dataset.v });
     };
     el.onchange = (e) => {
@@ -5396,10 +5491,7 @@ var Panel = class {
     const w = this.walk;
     if (!w || w.ms === void 0 || !this.speed?.first) return "";
     const parts = w.parts.filter(([, ms]) => ms >= 1);
-    return (
-      // (its total is the head's, "First page · 124 s": said once)
-      `<div class="row"><span class="k">Where the time went</span><span class="v"></span><div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc4(n)} ${esc4(dur(ms))}</span>`).join("")}</div></div>`
-    );
+    return html`<div class="row"><span class="k">Where the time went</span><span class="v"></span>${bars(parts, 4)}</div>`;
   }
   /** The last build's parts as its host measured them (the watch's stats), in order, and work done alongside them (not in the build's time): [name, ms]. */
   phases = null;
@@ -5415,7 +5507,7 @@ var Panel = class {
     const parts = p.parts.filter(([, ms]) => ms >= 1);
     if (!parts.length) return "";
     const beside = p.beside.filter(([, ms]) => ms >= 1).map(([n, ms]) => `${n} ${dur(ms)}`).join(", ");
-    return `<div class="row"><span class="k">Where the last build's time went</span><span class="v"></span><div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc4(n)} ${esc4(dur(ms))}</span>`).join("")}</div>` + (beside ? `<span class="note">${esc4(`Alongside: ${beside}`)}</span>` : "") + `</div>`;
+    return html`<div class="row"><span class="k">Where the last build's time went</span><span class="v"></span>${bars(parts, 4)}${beside ? html`<span class="note">Alongside: ${beside}</span>` : ""}</div>`;
   }
   /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
   downloads = { n: 0, bytes: 0, ms: 0 };
@@ -5425,7 +5517,7 @@ var Panel = class {
     if (!d.n && d.since === void 0) return "";
     const ms = d.ms + (d.since === void 0 ? 0 : performance.now() - d.since);
     const size = d.bytes ? ` \xB7 ${d.bytes < 1e6 ? `${Math.max(1, Math.round(d.bytes / 1e3))} kB` : `${(d.bytes / 1e6).toFixed(1)} MB`}` : "";
-    return `<div class="row"><span class="k">Downloads</span><span class="v">${esc4(dur(ms))}</span><span class="note">${d.n} package${d.n === 1 ? "" : "s"}${size}${d.since === void 0 ? "" : ", more on the way"}</span></div>`;
+    return html`<div class="row"><span class="k">Downloads</span><span class="v">${dur(ms)}</span><span class="note">${d.n} package${d.n === 1 ? "" : "s"}${size}${d.since === void 0 ? "" : ", more on the way"}</span></div>`;
   }
   /** The first build's time and the edits' since (the watch's), for the popover's bars. */
   times = { edits: [] };
@@ -5478,7 +5570,7 @@ var Panel = class {
     ];
     const max = Math.max(...rows.map((r) => r[1]), 1e-3);
     const x = t.first / Math.max(t.edits[t.edits.length - 1], 1e-3);
-    return `<div class="tbars" role="img" aria-label="First build ${esc4(dur(t.first))}, this edit ${esc4(dur(t.edits[t.edits.length - 1]))}">` + rows.map(([k, ms, c]) => `<div class="tb"><span class="k">${k}</span><span class="track"><i class="${c}" style="width:${Math.max(0.6, 100 * ms / max).toFixed(2)}%"></i></span><span class="v">${esc4(dur(ms))}</span></div>`).join("") + (x >= 1.5 ? `<div class="tb x">${x < 10 ? x.toFixed(1) : Math.round(x)}\xD7 faster than the first build</div>` : "") + `</div>`;
+    return html`<div class="tbars" role="img" aria-label="First build ${dur(t.first)}, this edit ${dur(t.edits[t.edits.length - 1])}">${rows.map(([k, ms, c]) => html`<div class="tb"><span class="k">${k}</span><span class="track"><i class="${c}" style="width:${Math.max(0.6, 100 * ms / max).toFixed(2)}%"></i></span><span class="v">${dur(ms)}</span></div>`)}${x >= 1.5 ? html`<div class="tb x">${x < 10 ? x.toFixed(1) : Math.round(x)}× faster than the first build</div>` : ""}</div>`;
   }
   /** The last build's parts as the session lists them: [what, how long]. */
   timingParts() {
@@ -5491,12 +5583,9 @@ var Panel = class {
     const l = this.latest();
     const e2e = parts.find((p) => p.key === "keystroke\u2192page")?.ms ?? l?.ms;
     const head = !l ? e2e !== void 0 ? ["Keystroke to page", e2e] : null : l.first || l.label !== "Built" ? [l.label, l.ms] : ["Keystroke to page", e2e ?? l.ms];
-    const rows = parts.map((p) => {
-      const bar2 = p.split?.length ? `<div class="tbar">${p.split.map(([n, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div><div class="legend">${p.split.map(([n, ms], i) => `<span><i class="c${i}"></i>${esc4(n)} ${esc4(dur(ms))}</span>`).join("")}</div>` : "";
-      return `<div class="row"><span class="k">${esc4(p.label)}</span><span class="v">${esc4(p.value)}</span>${bar2}${p.note ? `<span class="note">${esc4(p.note)}</span>` : ""}</div>`;
-    }).join("");
+    const rows = parts.map((p) => html`<div class="row"><span class="k">${p.label}</span><span class="v">${p.value}</span>${p.split?.length ? bars(p.split) : ""}${p.note ? html`<span class="note">${p.note}</span>` : ""}</div>`);
     const strips2 = framePart(this.$("#stripsline").dataset.frame);
-    el.innerHTML = (head ? `<div class="head"><span>${esc4(String(head[0]))}</span><b>${esc4(dur(head[1]))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) + this.walkPart() + this.phasesPart() + this.timeBars() + this.downloadsPart() + rows + strips2 + `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div><button type="button" class="reportbtn copydbg">Copy debug info</button>`;
+    el.replaceChildren(html`${head ? html`<div class="head"><span>${String(head[0])}</span><b>${dur(head[1])}</b></div>` : html`<div class="head"><span>No build yet</span></div>`}${this.walkPart()}${this.phasesPart()}${this.timeBars()}${this.downloadsPart()}${rows}${strips2}<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div><button type="button" class="reportbtn copydbg">Copy debug info</button>`);
     el.querySelector(".copydbg").onclick = (e) => {
       e.stopPropagation();
       const b = e.currentTarget;
@@ -5683,6 +5772,7 @@ var Panel = class {
       return;
     }
     this.last = img;
+    this.drewOnce = true;
     this.walkEnd();
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
@@ -7366,10 +7456,10 @@ function pagewise(px) {
 }
 var SVG = "http://www.w3.org/2000/svg";
 function textLayer(lines2, w, h) {
-  const svg = document.createElementNS(SVG, "svg");
-  svg.setAttribute("class", "phx-text");
-  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
-  svg.setAttribute("preserveAspectRatio", "none");
+  const svg2 = document.createElementNS(SVG, "svg");
+  svg2.setAttribute("class", "phx-text");
+  svg2.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  svg2.setAttribute("preserveAspectRatio", "none");
   for (const l of lines2) {
     const t = document.createElementNS(SVG, "text");
     t.setAttribute("x", l.xs ? l.xs.map((x) => x.toFixed(2)).join(" ") : String(l.x));
@@ -7377,9 +7467,9 @@ function textLayer(lines2, w, h) {
     t.setAttribute("font-size", String(l.size));
     t.textContent = l.text;
     LAYER_LINES.set(t, l);
-    svg.append(t);
+    svg2.append(t);
   }
-  return svg;
+  return svg2;
 }
 
 // viewer/src/compare.ts
@@ -7529,7 +7619,6 @@ function ago(t, now = Date.now() / 1e3) {
     }
   return "just now";
 }
-var esc5 = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 var ROW = 24;
 var LANE = 12;
 var COLORS = ["#3e63dd", "#e5484d", "#30a46c", "#f5a524", "#8e4ec6", "#12a594", "#d6409f", "#978365"];
@@ -7643,35 +7732,35 @@ var Commits = class {
   }
   render() {
     const scroll = this.el.scrollTop;
-    this.el.innerHTML = this.html();
+    this.el.replaceChildren(this.html());
     this.el.scrollTop = scroll;
   }
   html() {
-    if (this.error) return `<div class="note err">${esc5(this.error)}</div>`;
-    if (!this.commits.length) return `<div class="note">${this.loading ? "reading the history\u2026" : "no commits"}</div>`;
+    if (this.error) return html`<div class="note err">${this.error}</div>`;
+    if (!this.commits.length) return html`<div class="note">${this.loading ? "reading the history\u2026" : "no commits"}</div>`;
     const { rows, width } = layout(this.commits);
     const W2 = (width + 1) * LANE;
     const x = (l) => LANE / 2 + l * LANE + 2;
     const fi = this.find(this.from);
     const ti = this.to ? this.find(this.to) : -1;
     const tree = this.from !== null && !this.to;
-    const top = `<div class="row${tree ? " to" : ""}" title="Shift-click: diff the working tree"><svg width="${W2}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 4}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${tree ? '<span class="end">TO</span>' : ""}<i>the working tree</i></span></div>`;
+    const top = html`<div class="row${tree ? " to" : ""}" title="Shift-click: diff the working tree"><svg width="${W2}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 4}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${tree ? html`<span class="end">TO</span>` : ""}<i>the working tree</i></span></div>`;
     const lines2 = this.commits.map((c, i) => {
       const r = rows[i];
       const col = COLORS[r.lane % COLORS.length];
-      const svg = r.down.map(([a, b]) => `<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
-      svg.push(c.parents.length > 1 ? `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
-      const pills = c.refs.map((f) => `<span class="pill ${KINDS2.has(f.kind) ? f.kind : "branch"}">${esc5(f.name)}</span>`).join("");
+      const marks = r.down.map(([a, b]) => svg`<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
+      marks.push(c.parents.length > 1 ? svg`<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : svg`<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
+      const pills = c.refs.map((f) => html`<span class="pill ${KINDS2.has(f.kind) ? f.kind : "branch"}">${f.name}</span>`);
       const lo = this.to ? ti : -1;
       const cls = i === fi ? " from" : i === ti ? " to" : fi >= 0 && i > lo && i < fi ? " inrange" : "";
-      const end = i === fi ? '<span class="end">FROM</span>' : i === ti ? '<span class="end">TO</span>' : "";
+      const end = i === fi ? html`<span class="end">FROM</span>` : i === ti ? html`<span class="end">TO</span>` : "";
       const title = `${c.subject}
 ${c.author}, ${new Date(c.time * 1e3).toLocaleString()}
 click: From \xB7 shift-click: To \xB7 double-click: against its first parent`;
-      return `<div class="row${cls}" data-i="${i}" title="${esc5(title)}"><svg width="${W2}" height="${ROW}">${svg.join("")}</svg><span class="txt">${end}<span class="sha">${esc5(c.short)}</span>${pills}${c.parents.length > 1 ? "<i>merge:</i> " : ""}${esc5(c.subject)}<span class="who">${esc5(c.author)}, ${ago(c.time)}</span></span></div>`;
+      return html`<div class="row${cls}" data-i="${i}" title="${title}"><svg width="${W2}" height="${ROW}">${marks}</svg><span class="txt">${end}<span class="sha">${c.short}</span>${pills}${c.parents.length > 1 ? html`<i>merge:</i> ` : ""}${c.subject}<span class="who">${c.author}, ${ago(c.time)}</span></span></div>`;
     });
-    const more = this.more ? `<div class="note"><button type="button" data-more>${this.loading ? "reading\u2026" : "more\u2026"}</button></div>` : "";
-    return top + lines2.join("") + more;
+    const more = this.more ? html`<div class="note"><button type="button" data-more>${this.loading ? "reading\u2026" : "more\u2026"}</button></div>` : "";
+    return html`${top}${lines2}${more}`;
   }
 };
 
@@ -7947,7 +8036,7 @@ var panel = new Panel(
       badge: "watch",
       badgeTitle: "phitex watch: built from the files on disk, again at each save",
       byline: "phitex watch",
-      about: `<b>phitex watch</b>: the document built from the files on disk, again at each save, its pages here as
+      about: html`<b>phitex watch</b>: the document built from the files on disk, again at each save, its pages here as
         they are shipped. Nothing leaves this machine.
         <div class="about-foot">Free software (AGPL-3.0-only), provided as is, without any warranty.</div>`,
       openFailed: "Restart phitex watch, then reload this page.",
