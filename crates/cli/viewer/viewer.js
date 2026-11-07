@@ -6003,6 +6003,38 @@ function referenced(text) {
   return [...out];
 }
 
+// viewer/src/latexmkrc.ts
+function latexmkFiles(files) {
+  const get = typeof files === "function" ? files : (p) => Object.hasOwn(files, p) ? files[p] : void 0;
+  const out = {};
+  const read2 = (path) => {
+    const text = Object.hasOwn(out, path) ? void 0 : get(path);
+    if (text === void 0) return;
+    out[path] = text;
+    for (const m of text.matchAll(/^[^#\n]*?\b(?:do|require)\s*\(?\s*(["'])(\.\.?\/[^"'\n]+)\1/gm)) {
+      const p = normal(m[2]);
+      if (p) read2(p);
+    }
+  };
+  read2(get(".latexmkrc") !== void 0 ? ".latexmkrc" : "latexmkrc");
+  return Object.keys(out).length ? out : void 0;
+}
+function normal(path) {
+  const parts = [];
+  for (const p of path.split("/")) {
+    if (p === "" || p === ".") continue;
+    if (p !== "..") parts.push(p);
+    else if (!parts.pop()) return void 0;
+  }
+  return parts.join("/") || void 0;
+}
+function latexmkNotes(notes) {
+  return notes.map((n) => {
+    const m = /^(?:\/compile\/|\.\/)?([^\s:][^:]*):(\d+): ([\s\S]*)$/.exec(n);
+    return m ? { severity: "info", code: "latexmkrc", file: m[1], line: +m[2], message: `latexmkrc: ${m[3]}` } : { severity: "info", code: "latexmkrc", message: `latexmkrc: ${n}` };
+  });
+}
+
 // viewer/src/session.ts
 var preambleOf = (t) => {
   const end = t?.indexOf("\\begin{document}") ?? -1;
@@ -6180,6 +6212,7 @@ var PreviewSession = class {
         return;
       }
       if (e.event === "pack") return this.onPack(e);
+      if (e.event === "latexmkrc") return void (this.rcNotes = latexmkNotes(e.notes), this.statusSoon());
       if (e.event === "page" || e.event === "progress" || e.event === "done") this.onStream(e);
     });
     this.core = {
@@ -6358,7 +6391,11 @@ var PreviewSession = class {
     }
     await this.prefetch(["pdftex.map", ...Object.values(this.files).flatMap(referenced)]);
     this.minted = Object.values(this.files).some(usesMinted);
-    const r = await this.core.request({ op: "open", main: this.main, files: { ...this.pkgFiles, ...shims, ...this.files }, fuel: this.o.fuel, engine, workers: this.o.workers });
+    const rc = latexmkFiles(this.files);
+    this.rcFiles = new Set(Object.keys(rc ?? {}));
+    this.rcNotes = [];
+    const latexmk = rc && { files: rc, exact: false };
+    const r = await this.core.request({ op: "open", main: this.main, files: { ...this.pkgFiles, ...shims, ...this.files }, fuel: this.o.fuel, engine, workers: this.o.workers, latexmk, projectFiles: rc && Object.keys(this.files) });
     if (!r.ok) return this.sink.error((typeof r.json?.error === "string" ? r.json.error : void 0) ?? r.error ?? "open failed");
     this.sink.connection?.(true);
     if (r.json.building) {
@@ -6435,6 +6472,10 @@ var PreviewSession = class {
   /** The core runs LaTeX (the open reply's `engine`; until it says, as phitex's, the default build). */
   latex = true;
   diags = [];
+  /** The open's rc files (latexmkrc.ts): an edit to one reopens. */
+  rcFiles = /* @__PURE__ */ new Set();
+  /** What the open's rc files set that was not applied (the core's `latexmkrc` event). */
+  rcNotes = [];
   /** The last build's first TeX error (the core's status), if it had one. */
   texError;
   noteError(j) {
@@ -6463,7 +6504,7 @@ var PreviewSession = class {
       });
       this.lastWarned = this.now();
     }
-    this.sink.status({ pages: this.pages, pending, main: this.main, file: this.open, diagnostics: this.diags });
+    this.sink.status({ pages: this.pages, pending, main: this.main, file: this.open, diagnostics: this.rcNotes.length ? [...this.diags, ...this.rcNotes] : this.diags });
   }
   /** Packages the core was given (kept apart from the project's files: never diagnosed, never a main). */
   pkgFiles = {};
@@ -7030,6 +7071,7 @@ var PreviewSession = class {
     if (old === void 0) {
       this.files[file] = text;
       if (this.opened) this.chain = this.chain.then(() => this.core.request({ op: "set_file", file, text }).then(() => void 0));
+      this.rcChanged(file);
       return;
     }
     const e = diff(old, text);
@@ -7043,12 +7085,20 @@ var PreviewSession = class {
     if (!b.size) this.since.set(file, this.now());
     for (const e of edits) b.push(e);
     this.keystrokes += edits.length;
+    this.rcChanged(file);
     if (!this.scheduled) {
       this.scheduled = true;
       const f = () => this.flush();
       if (this.o.schedule) this.o.schedule(f);
       else setTimeout(f, 0);
     }
+  }
+  rcTimer;
+  /** `file` changed: one of the open's rc files, or a new root one, reopens (once typing pauses): the core reads them at an open only. */
+  rcChanged(file) {
+    if (!this.opened || !(this.rcFiles.has(file) || file === "latexmkrc" || file === ".latexmkrc")) return;
+    clearTimeout(this.rcTimer);
+    this.rcTimer = setTimeout(() => this.chain = this.chain.then(() => this.reopen()), 800);
   }
   /** A send loop is running (it takes what is queued when each build ends). */
   busy = false;
