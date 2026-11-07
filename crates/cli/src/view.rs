@@ -571,11 +571,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         std::thread::sleep(Duration::from_millis(50));
-        let t = std::time::Instant::now();
+        // (each sent apart, as a build's events are: none waits for a read)
+        let mut sent = Duration::ZERO;
         for _ in 0..10 {
+            let t = std::time::Instant::now();
             v.shared.viewer.written_exact();
+            sent = sent.max(t.elapsed());
+            std::thread::sleep(Duration::from_millis(3));
         }
-        let sent = t.elapsed();
         let mut got = 0;
         while got < 10 {
             if let Ok(Message::Text(_)) = ws.read() {
@@ -583,8 +586,8 @@ mod tests {
             }
         }
         assert!(
-            sent < Duration::from_millis(50),
-            "ten events took {sent:?} to send to a quiet viewer"
+            sent < Duration::from_millis(8),
+            "an event took {sent:?} to send to a quiet viewer"
         );
     }
 
