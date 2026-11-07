@@ -864,7 +864,7 @@ fn a_refused_picture_child_leaves_the_empty_name_its_own() {
 /// A picture after a page fired inside conditionals of its piece's own
 /// (`pdfdocs/picroutine.tex`: a heading's spacing and break inside
 /// `\ifnum`, the picture in the same expansion): the page's routine draws
-/// two pictures in the shipout hook, stepping TikZ's picture counter,
+/// two pictures in the shipout hook, stepping the picture counter of `tikz`,
 /// and the piece goes on past the candidate with the routine's values put
 /// in force there. The picture child reads them as its parent holds them
 /// (it read the counter from before the routine: beautybook-en's
