@@ -5114,6 +5114,7 @@ fn link(
         chunks_of.push(cs);
     }
     let t_parts = t_parts.elapsed();
+    let t_after = std::time::Instant::now();
     let mut resynced = 0usize;
     if let Some((i, j)) = resync
         && let Some(mut m) = old.take()
@@ -5155,10 +5156,13 @@ fn link(
             st.add_used_chars(c);
         }
     }
+    let t_resync = t_after.elapsed();
     for c in chunks_of.iter().flatten() {
         bytes.push(c.clone());
     }
+    let t_bytes = t_after.elapsed();
     st.refresh_digests();
+    let t_digests = t_after.elapsed();
     let end = LinkSnap {
         at: xpages.len(),
         digests: None,
@@ -5171,6 +5175,7 @@ fn link(
         placed,
         shipped,
     };
+    let t_end = t_after.elapsed();
     if memo {
         *link_memo().locked() = Some(LinkMemo {
             head,
@@ -5190,6 +5195,20 @@ fn link(
         note(
             "link: linked: after them (the tail, the xref, the bytes)",
             t0.elapsed().saturating_sub(t_loop),
+        );
+        note("link: after: the last link's taken (resync)", t_resync);
+        note("link: after: the chunks", t_bytes.saturating_sub(t_resync));
+        note(
+            "link: after: the state's digests",
+            t_digests.saturating_sub(t_bytes),
+        );
+        note(
+            "link: after: the end's snapshot",
+            t_end.saturating_sub(t_digests),
+        );
+        note(
+            "link: after: kept for the next link",
+            t_after.elapsed().saturating_sub(t_end),
         );
     }
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {

@@ -1278,6 +1278,73 @@ mod tests {
         }
     }
 
+    /// A viewer's PDF kept as update sections where no file is written
+    /// (`Session::view_layout`): an edit's file is the last one's bytes
+    /// and the objects that changed, and the file made exact when idle
+    /// is the one a build from nothing writes.
+    #[test]
+    fn a_viewers_file_is_updated_then_made_exact() {
+        let doc = |w: usize| {
+            let mut t =
+                "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\pdfcompresslevel=0\n".to_owned();
+            for k in 0..3 {
+                t.push_str(&format!(
+                    "\\shipout\\hbox{{\\vrule width {}pt height 5pt}}\n",
+                    10 + k + w
+                ));
+            }
+            t.push_str("\\end\n");
+            t
+        };
+        let session = |text: &str| {
+            Session::new(
+                Job {
+                    engine: crate::tex::engine("pdftex").unwrap(),
+                    ..job()
+                },
+                Arc::from(text),
+                Arc::new(Nothing),
+                None,
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            )
+        };
+        let mut s = session(&doc(0));
+        s.view_layout = true;
+        let mut vf = crate::watch::ViewFile::default();
+        let r = s.build();
+        assert!(r.out.layout.is_some(), "a layout, not bytes");
+        let first = crate::watch::viewer_pdf(&s, &r, Some(&mut vf), || None)
+            .unwrap()
+            .unwrap();
+        assert!(first.starts_with(b"%PDF"));
+        s.set_text(doc(7));
+        let r = s.build();
+        let second = crate::watch::viewer_pdf(&s, &r, Some(&mut vf), || None)
+            .unwrap()
+            .unwrap();
+        assert!(
+            second.len() > first.len() && second.starts_with(&first),
+            "an update section after the last bytes"
+        );
+        assert!(vf.to_compact().is_some());
+        let exact = vf.compact().unwrap().expect("not exact before");
+        assert!(vf.compact().unwrap().is_none(), "exact now");
+        let mut cold = session(&doc(7));
+        let r = cold.build();
+        assert_eq!(
+            &*exact,
+            r.out.pdf.as_slice(),
+            "the exact file a cold build writes"
+        );
+        // (the same build again: the same bytes, shared)
+        let r = s.build();
+        let again = crate::watch::viewer_pdf(&s, &r, Some(&mut vf), || None)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&again, &exact));
+    }
+
     /// A font with no map entry: pdfTeX's fatal error at the end of the
     /// job (`pdftex_fail`), given the viewer and the language server as a
     /// diagnostic at the document's last line, its words exactly; the
