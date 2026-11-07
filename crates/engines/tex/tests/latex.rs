@@ -1319,6 +1319,49 @@ fn latex_pictures_in_a_paragraph_are_children() {
     }
 }
 
+/// A picture asked again for a read late in its run goes on from its
+/// last checkpoint before that read, not from its start (Grail: the
+/// figures after a deleted one that had first defined pgf's arrow cache,
+/// first loaded a font or stepped pgf's arrow count ran whole, 0.7-1.3 s
+/// each): the definition of `\mymark` before it deleted (the picture,
+/// in a figure of its own file, defines it at its end now, as a first
+/// use does), put back, its value changed and put back: the picture runs
+/// again from a checkpoint each time, and the PDF is a cold build's.
+#[test]
+fn latex_a_picture_asked_again_goes_on_from_a_checkpoint() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pic-ck");
+    let _ = std::fs::create_dir_all(&dir);
+    let src = "\\documentclass{article}\n\\usepackage{tikz}\n\\begin{document}\nFirst words.\n\n\\gdef\\mymark{marked}Second words.\n\nThird words.\n\n\\input{picfig}\n\nLast words \\mymark.\n\\end{document}\n";
+    let fig = "\\begin{figure}\n\\centering\n\\begin{tikzpicture}\n\\foreach \\i in {1,...,40}{\\foreach \\j in {1,...,30}{\\draw (\\i*0.3,\\j*0.2) circle (0.05);}}\n\\node at (0,-1) {\\ifdefined\\mymark\\else\\gdef\\mymark{marked}\\fi\\mymark};\n\\end{tikzpicture}\n\\caption{A picture.}\n\\end{figure}\n";
+    std::fs::write(dir.join("picck.tex"), src).expect("write");
+    std::fs::write(dir.join("picfig.tex"), fig).expect("write");
+    let mut b = common::build(pdf_opts("picck", &dir), Some(&prelude(true)), src);
+    let before = b.pages();
+    let cold_pics = common::runs_of(&b, "pic");
+    assert!(
+        cold_pics >= 1,
+        "the cold build placed no picture as a child"
+    );
+    let gone = src.replace("\\gdef\\mymark{marked}", "");
+    let other = src.replace("\\gdef\\mymark{marked}", "\\gdef\\mymark{market}");
+    for (k, text) in [&gone, src, &other, src].into_iter().enumerate() {
+        b.edit(text);
+        let pics = common::runs_of(&b, "pic");
+        assert!(pics >= 1, "edit {k}: the picture did not run again");
+        assert!(
+            b.stats.resumed_at_mark >= 1,
+            "edit {k}: the picture ran again from its start ({pics} runs)"
+        );
+        std::fs::write(dir.join("picck.tex"), text).expect("write");
+        let cold = common::build(pdf_opts("picck", &dir), Some(&prelude(true)), text);
+        assert_eq!(b.pages().len(), before.len());
+        if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+            panic!("edit {k} differs from a cold build: {d}");
+        }
+    }
+    let _ = std::fs::write(dir.join("picck.tex"), src);
+}
+
 /// Unchanged bytes change nothing (`r` in a watch: every file the build
 /// read staged again from disk, the main text sent again; an editor
 /// saving a file unchanged): with `pdfdocs/inputs.tex`, its cut
@@ -2028,6 +2071,8 @@ fn inputlineno_in_a_resumed_piece_is_the_file_line_below_it() {
 }
 
 /// The native runner of `\write18`'s commands, as the CLI has it.
+/// (the tests use part of it: what only the CLI calls is not dead code)
+#[allow(dead_code)]
 #[path = "../../../cli/src/shell.rs"]
 mod process_hook;
 

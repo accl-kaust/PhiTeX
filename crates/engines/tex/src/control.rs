@@ -223,6 +223,9 @@ impl Run<'_, '_> {
         }
         let still = cmds - w.cmds_at;
         let since = now.duration_since(at);
+        // (at this step: earlier work waiting for a worker gets mine
+        // where I am the run furthest ahead, `Ctx::yield_to_prefix`)
+        self.cx.yield_to_prefix().map_err(crate::run::Halt::Stop)?;
         let why = if let Some(t) = lim.time
             && self.cx.elapsed().is_some_and(|e| e > t)
         {

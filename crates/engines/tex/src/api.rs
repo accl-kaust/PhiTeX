@@ -3673,6 +3673,25 @@ impl Graph {
         }
     }
 
+    /// Where the tools' searches found their files: each `tfile:` value's
+    /// name asked for and path, as the client's lookup gave it.
+    fn tool_paths(&self) -> Vec<(String, String)> {
+        let v = self.eng.values();
+        let mut out: Vec<(String, String)> = Vec::new();
+        for &(g, x) in &self.files {
+            let fname = field_name(v, g);
+            if let Some((_, name)) = fname.strip_prefix("tfile:").and_then(|r| r.split_once(':'))
+                && let [p, _] = list_of(v, x)[..]
+            {
+                let e = (name.to_owned(), str_of(v, p));
+                if !out.contains(&e) {
+                    out.push(e);
+                }
+            }
+        }
+        out
+    }
+
     /// A file's whole text as the build holds it: its `file:` value (by
     /// its name or its path), else a cut file's ([`DocFile`]).
     fn file_text(&self, name: &str) -> Option<Arc<str>> {
@@ -7334,6 +7353,33 @@ impl Build {
                 changed = true;
             }
         }
+        // (`name` as the search found it, by its path: a `.bib` or `.bst`
+        // found in a folder of BIBINPUTS or BSTINPUTS, a name asked for
+        // as `refs` and found as `../common/refs.bib`)
+        let plain = name.trim_start_matches("./");
+        for k in 0..self.g.files.len() {
+            let (g, x) = self.g.files[k];
+            let fname = field_name(v, g);
+            let Some(rest) = fname.strip_prefix("tfile:") else {
+                continue;
+            };
+            // (asked for by this name: taken above)
+            if rest.split_once(':').is_some_and(|(_, n)| n == name) {
+                continue;
+            }
+            let xs = list_of(v, x);
+            let [p, t] = xs[..] else { continue };
+            if str_of(v, p).trim_start_matches("./") != plain {
+                continue;
+            }
+            // (gone: the search's answer stands until a build asks again)
+            let Some(b) = read(self) else { continue };
+            if v.with_str(t, |s| latin1_is(s, &b)) == Some(true) {
+                continue;
+            }
+            self.g.files[k].1 = v.list(vec![p, v.str(&latin1(&b))]);
+            changed = true;
+        }
         changed
     }
 
@@ -7639,6 +7685,15 @@ impl Build {
     #[must_use]
     pub fn tool_reads(&self) -> Vec<(String, bool)> {
         self.g.tool_reads.clone()
+    }
+
+    /// Where the tools' searches of [`Build::tool_reads`] found their
+    /// files: each name asked for with its path, as the client's lookup
+    /// named it (a watch watches them:
+    /// a `.bib` or `.bst` found through BIBINPUTS or BSTINPUTS).
+    #[must_use]
+    pub fn tool_paths(&self) -> Vec<(String, String)> {
+        self.g.tool_paths()
     }
 
     /// The document's files read back still changing after

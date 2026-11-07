@@ -49,6 +49,31 @@ impl ProcessHook {
         env.push(("TEXINPUTS".into(), inputs));
         ProcessHook { env }
     }
+
+    /// The commands' search variables `vars` (a `.latexmkrc`'s, as latexmk
+    /// exports them to the engine and so to its commands): TEXINPUTS's
+    /// after the document's directory.
+    #[must_use]
+    pub fn with_vars(mut self, vars: &[(String, String)]) -> ProcessHook {
+        for (name, value) in vars {
+            let value: std::ffi::OsString = if name == "TEXINPUTS" {
+                let dir = self
+                    .env
+                    .iter()
+                    .find(|(k, _)| k == "TEXINPUTS")
+                    .and_then(|(_, v)| v.to_str())
+                    .and_then(|v| v.split(':').next())
+                    .unwrap_or("")
+                    .to_owned();
+                format!("{dir}:{value}").into()
+            } else {
+                value.into()
+            };
+            self.env.retain(|(k, _)| k != name.as_str());
+            self.env.push((name.into(), value));
+        }
+        self
+    }
 }
 
 /// A scratch directory of its own per call.

@@ -84,6 +84,16 @@ pub struct Config {
     pub opening: Option<String>,
     /// Whether the viewer underlines what each problem is about (yours only).
     pub underline: Option<bool>,
+    /// How much of latexmk's rc files applies: `find` (the default: only
+    /// what helps the build find files) or `exact` (latexmk's engine,
+    /// output folder and options too; docs/latexmkrc.md).
+    pub latexmk: Option<String>,
+    /// Folders TeX searches before TeX Live's tree (kpathsea's syntax: a
+    /// trailing `//` searches the subfolders too), relative to the
+    /// phitex.toml's folder: `inputs = ["../common/tex//"]` (one folder:
+    /// a string).
+    #[serde(default, deserialize_with = "string_or_list")]
+    pub inputs: Option<Vec<String>>,
     /// What reading the files warned of (unknown keys).
     #[serde(skip)]
     pub warnings: Vec<String>,
@@ -116,6 +126,8 @@ const KEYS: &[&str] = &[
     "dark-pdf",
     "opening",
     "underline",
+    "latexmk",
+    "inputs",
 ];
 
 /// The viewer's settings that are one of a few names: each key, its names.
@@ -173,6 +185,20 @@ fn copy_pdf<'de, D: Deserializer<'de>>(d: D) -> Result<Option<CopyPdf>, D::Error
     }))
 }
 
+/// `inputs = "dir" | ["dir", ...]`.
+fn string_or_list<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum V {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(Some(match V::deserialize(d)? {
+        V::One(s) => vec![s],
+        V::Many(v) => v,
+    }))
+}
+
 /// `cache-limit = "4GB" | bytes`.
 fn size<'de, D: Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
     #[derive(Deserialize)]
@@ -220,6 +246,12 @@ fn parse_named(text: &str, name: &str) -> Result<Config, String> {
         {
             return Err(format!("{name}: `{k}` is one of {}", names.join(", ")));
         }
+    }
+    // (not one of the viewer's CHOICES: a page never sets it)
+    if let Some(v) = table.get("latexmk")
+        && !v.as_str().is_some_and(|v| v == "find" || v == "exact")
+    {
+        return Err(format!("{name}: `latexmk` is find or exact"));
     }
     let mut c: Config = table.try_into().map_err(|e| said(&e))?;
     if let Some(req) = &c.phitex {
@@ -572,6 +604,16 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
         "on",
         "the viewer underlines what each problem is about (yours only)",
     ),
+    (
+        "latexmk",
+        "find",
+        "how much of a .latexmkrc applies: find (its search paths) or exact (its engine, output folder and options too)",
+    ),
+    (
+        "inputs",
+        "none",
+        "folders TeX searches first, relative to phitex.toml (\"../common/tex//\": with subfolders)",
+    ),
 ];
 
 /// `phitex config` (no key: every setting; a key: that one): each with
@@ -696,11 +738,13 @@ const PROJECTS_TOO: &[&str] = &[
     "files",
     "phitex",
     "watch-write",
+    "latexmk",
+    "inputs",
 ];
 
 /// Whether `dir` (relative to `root`) stays in `root`, as written and on
 /// disk: a symbolic link in a project may point anywhere.
-fn inside(root: &Path, dir: &str) -> bool {
+pub fn inside(root: &Path, dir: &str) -> bool {
     let p = Path::new(dir);
     if p.is_absolute()
         || dir.starts_with('~')
@@ -788,6 +832,60 @@ fn project_warning(warnings: &mut Vec<String>, key: &str, why: &str) {
     ));
 }
 
+/// The rc files on disk, for [`phitex_live::latexmkrc`].
+struct Disk;
+
+impl phitex_live::latexmkrc::RcFiles for Disk {
+    fn read(&self, path: &str) -> Option<String> {
+        let p = Path::new(path);
+        if !p.is_file() {
+            return None;
+        }
+        std::fs::read(p)
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    }
+
+    /// Perl's `abs_path`: symbolic links resolved; a last part that does
+    /// not exist (`(eval 1)`, latexmk's `__FILE__`) kept on its resolved
+    /// folder.
+    fn canonical(&self, path: &str) -> String {
+        let plain = phitex_live::latexmkrc::normalize(path);
+        if let Ok(p) = std::fs::canonicalize(&plain) {
+            return p.to_string_lossy().into_owned();
+        }
+        let p = Path::new(&plain);
+        match (p.parent().map(std::fs::canonicalize), p.file_name()) {
+            (Some(Ok(dir)), Some(name)) => dir.join(name).to_string_lossy().into_owned(),
+            _ => plain,
+        }
+    }
+}
+
+/// latexmk's rc files as latexmk run in `dir` reads them (the system's,
+/// the user's, `dir`'s own), with this process's environment (its
+/// TEXINPUTS `texinputs`, where given: phitex.toml's `inputs` before it).
+pub fn latexmkrc(dir: &Path, texinputs: Option<&str>) -> phitex_live::latexmkrc::Rc {
+    use phitex_live::latexmkrc as rc;
+    let var = |n: &str| std::env::var(n).ok();
+    let home = var("HOME");
+    let w = rc::Where {
+        cwd: dir.to_string_lossy().into_owned(),
+        home_config_is_dir: home
+            .as_deref()
+            .is_some_and(|h| Path::new(h).join(".config").is_dir()),
+        home,
+        xdg_config_home: var("XDG_CONFIG_HOME"),
+        latexmkrcsys: var("LATEXMKRCSYS"),
+        system_and_user: true,
+    };
+    let mut env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    if let Some(t) = texinputs {
+        env.insert("TEXINPUTS".into(), t.to_owned());
+    }
+    rc::read(&rc::order(&w), &w.cwd, &env, &Disk)
+}
+
 /// The project's `phitex.toml` at `dir` or above.
 fn find_file(dir: &Path) -> Option<PathBuf> {
     dir.ancestors().map(|d| d.join(FILE)).find(|p| p.is_file())
@@ -838,6 +936,8 @@ impl Config {
             dark_pdf: self.dark_pdf.or(under.dark_pdf),
             opening: self.opening.or(under.opening),
             underline: self.underline.or(under.underline),
+            latexmk: self.latexmk.or(under.latexmk),
+            inputs: self.inputs.or(under.inputs),
             warnings: [self.warnings, under.warnings].concat(),
         }
     }
@@ -1171,10 +1271,25 @@ mod tests {
                 dark_pdf: None,
                 opening: None,
                 underline: None,
+                latexmk: None,
+                inputs: None,
                 warnings: vec![],
             }
         );
         assert_eq!(parse("synctex = false").unwrap().synctex, Some(false));
+        assert_eq!(
+            parse("latexmk = \"exact\"").unwrap().latexmk.as_deref(),
+            Some("exact")
+        );
+        assert!(parse("latexmk = \"all\"").is_err());
+        assert_eq!(
+            parse("inputs = \"../common/tex//\"").unwrap().inputs,
+            Some(vec!["../common/tex//".to_owned()])
+        );
+        assert_eq!(
+            parse("inputs = [\"a\", \"b//\"]").unwrap().inputs,
+            Some(vec!["a".to_owned(), "b//".to_owned()])
+        );
         assert_eq!(
             parse("files = \"shelf\"").unwrap().files.as_deref(),
             Some("shelf")

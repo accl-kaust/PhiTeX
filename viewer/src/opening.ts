@@ -136,8 +136,8 @@ function byline(svg: SVGSVGElement, word: Box) {
 }
 
 export interface Opening {
-  /** The document is in: dive into the page at once, resolve once only the page is left (the logo gone, 650 ms on). */
-  done(): Promise<void>;
+  /** The document is in: dive into the page at once, resolve once only the page is left (the logo gone, 650 ms on). `page`, the first page as drawn, for an exit that becomes it. */
+  done(page?: HTMLCanvasElement): Promise<void>;
   /** Gone at once. */
   stop(): void;
   /**

@@ -84,6 +84,15 @@ fn after_help() -> String {
   ~/.config/phitex/phitex.toml holds your own defaults; a project's
   phitex.toml wins over it key by key.
   A `% !TEX program = …` or `% !TEX root = …` comment in the file is honoured.
+  latexmk's rc files are read as latexmk reads them (the system's, yours,
+  then `.latexmkrc` or `latexmkrc` in the folder phitex is run in), as data:
+  no Perl runs. What helps the build find files applies: TEXINPUTS,
+  BIBINPUTS and BSTINPUTS ($ENV{{...}}, ensure_path), and @default_files
+  when nothing names the file. Any other setting is said once, not applied;
+  --exact-latexmk (or `latexmk = \"exact\"`) applies its engine ($pdf_mode),
+  output folder ($out_dir) and options too (docs/latexmkrc.md).
+      inputs = [\"../common/tex//\"]   (folders TeX searches first, relative to
+                          phitex.toml; a .latexmkrc's TEXINPUTS is over them)
 
 {h}TeX's own command line:{h:#}
   run phitex as `pdflatex`, `latex`, `pdftex`, `etex` or `tex` (a link to
@@ -260,6 +269,13 @@ struct Opts {
     /// tools run in process; no other command runs either way
     #[arg(long, global = true, hide_short_help = true)]
     shell_escape: bool,
+    /// Apply all of latexmk's rc files that PhiTeX reads: their engine
+    /// ($pdf_mode, $pdflatex), output folder ($out_dir), SyncTeX and
+    /// -shell-escape, not only their search paths (`latexmk = "exact"` in
+    /// phitex.toml, or `phitex config latexmk exact`; -shell-escape only
+    /// from this flag)
+    #[arg(long, global = true, hide_short_help = true)]
+    exact_latexmk: bool,
     /// watch: open the viewer
     ///
     /// watch: open the viewer in the browser (or start phitex.toml's
@@ -373,6 +389,8 @@ pub struct Options {
     pub quiet: bool,
     pub json: bool,
     pub shell_escape: bool,
+    /// `--exact-latexmk`.
+    pub exact_latexmk: bool,
     pub open: bool,
     pub view: bool,
     /// watch: the files written into the folder (`--write`).
@@ -436,6 +454,7 @@ impl Cli {
             quiet: o.quiet,
             json: o.json,
             shell_escape: o.shell_escape,
+            exact_latexmk: o.exact_latexmk,
             open: o.open,
             view: !o.no_view,
             write: o.write,
@@ -508,8 +527,16 @@ pub struct Target {
     /// Where TeX's files come from (`--shelf`, `files`; TeX Live by
     /// default).
     pub files: tex::Files,
-    /// What reading `phitex.toml` warned of (unknown keys).
+    /// What reading `phitex.toml` and `.latexmkrc` warned of (unknown
+    /// keys, lines not applied).
     pub warnings: Vec<String>,
+    /// The search paths a `.latexmkrc` set (the job's `inputs`).
+    pub inputs: Vec<(String, String)>,
+    /// The settings' files read, and those looked for and not there
+    /// (absolute): `phitex.toml`, the user's, the `.latexmkrc` files and
+    /// those they `do`. A watch resolves its target again when one
+    /// changes.
+    pub config_files: Vec<PathBuf>,
 }
 
 impl Target {
@@ -526,8 +553,32 @@ impl Target {
 /// (their twenty lines, [`config::magic_comments`]).
 const MAGIC_HEAD: u64 = 1 << 16;
 
+/// The directory phitex was started in (a watch resolves its target
+/// again after it entered the build's): where latexmk would be run.
+static STARTED_IN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// [`resolve`] again, from the directory phitex was started in (where
+/// `o`'s file is named from, and latexmk's rc files are read), as the
+/// first time: the target (its job made), and the directory its build
+/// runs in. The
+/// current directory is left as it was (a watch's session runs on until
+/// the next begins there).
+pub(crate) fn resolve_again(o: &Options) -> Result<(Target, PathBuf), String> {
+    let here = std::env::current_dir().map_err(|e| e.to_string())?;
+    if let Some(started) = STARTED_IN.get() {
+        std::env::set_current_dir(started)
+            .map_err(|e| format!("can't enter {}: {e}", started.display()))?;
+    }
+    // (its job made there, where its file is named from)
+    let t = resolve(o).and_then(|t| job(&t, o).map(|_| t));
+    let dir = std::env::current_dir().map_err(|e| e.to_string());
+    std::env::set_current_dir(&here).map_err(|e| format!("can't enter {}: {e}", here.display()))?;
+    Ok((t?, dir?))
+}
+
 pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let started = STARTED_IN.get_or_init(|| cwd.clone()).clone();
     let found = config::find(&cwd)?;
     let user = config::user()?;
     let (root, cfg, configured) = match (&o.file, found) {
@@ -541,16 +592,120 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     };
     // (the project's settings over the user's, key by key; but anything that
     // runs is the user's to allow: a project someone sent can't ask for it)
+    // (`inputs`: the project's folders, relative to its phitex.toml, else
+    // yours, relative to your file's folder)
+    let toml_inputs = match (&cfg.inputs, &user.inputs) {
+        (Some(i), _) => Some((i.clone(), root.clone())),
+        (None, Some(i)) => config::user_file()
+            .and_then(|f| f.parent().map(Path::to_path_buf))
+            .map(|d| (i.clone(), d)),
+        (None, None) => None,
+    };
     let cfg = config::without_permissions(cfg, &root).over(user);
+    // (latexmk's rc files, as latexmk run here reads them: the system's,
+    // the user's, then this directory's, never a parent's; by default only
+    // what helps the build find files applies, the rest is said;
+    // `--exact-latexmk` or `latexmk = "exact"` applies the rest too.
+    // phitex.toml's `inputs` come first on TEXINPUTS as the rc files see
+    // it: a .latexmkrc that sets TEXINPUTS outright is over them)
+    let exact = o.exact_latexmk || cfg.latexmk.as_deref() == Some("exact");
+    let start = toml_inputs.map(|(dirs, base)| {
+        let base = base.to_string_lossy();
+        let mut v: Vec<String> = dirs
+            .iter()
+            .map(|d| phitex_live::latexmkrc::absolute_elements(d, &base))
+            .collect();
+        v.push(std::env::var("TEXINPUTS").unwrap_or_default());
+        v.join(":")
+    });
+    let rc = config::latexmkrc(&started, start.as_deref());
+    // (what a change of rereads: the rc files read, those latexmk run here
+    // would read if they were there, phitex.toml, the user's)
+    let mut config_files: Vec<PathBuf> = rc.read.iter().map(|f| started.join(f)).collect();
+    config_files.extend([".latexmkrc", "latexmkrc"].map(|f| started.join(f)));
+    config_files.push(if configured {
+        root.join(config::FILE)
+    } else {
+        started.join(config::FILE)
+    });
+    config_files.extend(config::user_file());
+    config_files.sort();
+    config_files.dedup();
+    let mut inputs = rc.vars.clone();
+    if let Some(start) = start
+        && rc.var("TEXINPUTS").is_none()
+    {
+        inputs.push(("TEXINPUTS".into(), start));
+    }
+    let applied = exact.then(|| rc.exact());
     let copy_pdf = match (&o.copy_pdf, &cfg.copy_pdf) {
         (Some(c), _) => copy_dir(c, &cwd, &cwd),
         (None, Some(c)) => copy_dir(c, &cwd, &root),
         (None, None) => None,
     };
-    let mut file =
-        o.file.clone().or_else(|| cfg.main.clone()).ok_or(
-            "no file given, and no phitex.toml names one (`main = \"paper.tex\"`)".to_owned(),
-        )?;
+    let mut rc_warnings: Vec<String> = rc.notes.iter().map(ToString::to_string).collect();
+    match &applied {
+        None => rc_warnings.extend(rc.not_applied(Some("--exact-latexmk"))),
+        Some(a) => rc_warnings.extend(a.notes.iter().map(ToString::to_string)),
+    }
+    // (with --exact-latexmk: a .latexmkrc's engine, output folder, SyncTeX
+    // and -shell-escape, each under the command line's own option)
+    let rc_engine = applied.as_ref().and_then(|a| a.engine.clone());
+    let rc_synctex = applied.as_ref().and_then(|a| a.synctex);
+    let rc_out_dir = applied.as_ref().and_then(|a| {
+        let (d, at) = a.out_dir.as_ref()?;
+        // (a project's folder may be anyone's: outside it, only when you
+        // asked on the command line)
+        let inside = config::inside(&started, d);
+        if !inside && !o.exact_latexmk {
+            rc_warnings.push(format!(
+                "{at}: $out_dir not applied: it is outside the folder; --exact-latexmk on \
+                 the command line applies it"
+            ));
+            return None;
+        }
+        Some(started.join(d).to_string_lossy().into_owned())
+    });
+    let rc_shell_escape = match applied.as_ref().and_then(|a| a.shell_escape.clone()) {
+        Some((true, at)) if !o.exact_latexmk => {
+            rc_warnings.push(format!(
+                "{at}: -shell-escape not applied: a .latexmkrc may be anyone's; \
+                 --exact-latexmk on the command line (or --shell-escape) applies it"
+            ));
+            false
+        }
+        Some((on, _)) => on,
+        None => false,
+    };
+    // (`@default_files` names the main file when nothing else does: a
+    // phitex.toml's `main` is a file named, as one on the command line)
+    let from_rc = rc
+        .default_files
+        .as_ref()
+        .and_then(|(files, at)| {
+            let first = files.first()?;
+            if files.len() > 1 {
+                rc_warnings.push(format!(
+                    "{at}: @default_files names {} files: phitex builds the first, {first} \
+                     (latexmk builds each)",
+                    files.len()
+                ));
+            }
+            // (latexmk's are the directory it runs in's)
+            let p = started.join(first);
+            Some(if started == cwd {
+                first.clone()
+            } else {
+                p.to_string_lossy().into_owned()
+            })
+        })
+        .filter(|_| o.file.is_none() && cfg.main.is_none());
+    let mut file = o
+        .file
+        .clone()
+        .or_else(|| cfg.main.clone())
+        .or(from_rc)
+        .ok_or("no file given, and no phitex.toml names one (`main = \"paper.tex\"`)".to_owned())?;
     // (the magic comments are in the first lines: the whole file is read
     // only when no engine is named and its text decides)
     let read = |f: &str, whole: bool| {
@@ -582,7 +737,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         text = read(&file, false)?;
         program = config::magic_comments(&text).0.or(program);
     }
-    let named = o.engine.clone().or(cfg.engine).or(program);
+    let named = o.engine.clone().or(rc_engine).or(cfg.engine).or(program);
     let mut engine = if let Some(e) = named {
         tex::engine(&e)?
     } else {
@@ -631,7 +786,7 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     if let Some(out) = o.output {
         engine = engine.with_output(out)?;
     }
-    let mut output_dir = o.output_dir.clone().or(cfg.output_dir);
+    let mut output_dir = o.output_dir.clone().or(rc_out_dir).or(cfg.output_dir);
     if !configured
         && let Some(dir) = Path::new(&file)
             .parent()
@@ -667,16 +822,18 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         copy_pdf,
         // (off unless asked for: the pages' glyph origins it is made
         // from cost the build a little)
-        synctex: o.synctex.or(cfg.synctex).unwrap_or(false),
-        synctex_said: o.synctex.or(cfg.synctex).is_some(),
+        synctex: o.synctex.or(rc_synctex).or(cfg.synctex).unwrap_or(false),
+        synctex_said: o.synctex.or(rc_synctex).or(cfg.synctex).is_some(),
         watch_write: cfg.watch_write.unwrap_or(false),
-        shell_escape: o.shell_escape || cfg.shell_escape.unwrap_or(false),
+        shell_escape: o.shell_escape || rc_shell_escape || cfg.shell_escape.unwrap_or(false),
         editor: o.editor.clone().or(cfg.editor),
         viewer: cfg.viewer,
         cache_limit: cfg.cache_limit,
         threads: cfg.threads.filter(|&n| n > 0),
         files,
-        warnings: cfg.warnings,
+        warnings: [cfg.warnings, rc_warnings].concat(),
+        inputs,
+        config_files,
     })
 }
 
@@ -716,6 +873,7 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         cache_limit: t.cache_limit,
         edit_diagnostics: o.diagnostics || o.view || o.lsp,
         origins: o.view || o.lsp,
+        inputs: t.inputs.clone(),
     })
 }
 

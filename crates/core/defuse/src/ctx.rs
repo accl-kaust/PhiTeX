@@ -38,6 +38,9 @@ pub struct Ctx<'a> {
     pub(crate) views: Vec<ViewRec>,
     /// Its last record, for `placed_output`.
     pub(crate) last: Option<Arc<RunRecord>>,
+    /// The index of that record's first read that moved, once found
+    /// ([`Ctx::last_reads_hold`]).
+    first_moved: std::cell::Cell<Option<usize>>,
     /// The change count the read in hand loaded ([`ReadRec::epoch`]).
     pub(crate) ep: u64,
     /// The last sibling `following` found, to go on from.
@@ -117,6 +120,7 @@ impl<'a> Ctx<'a> {
                 effect: None,
                 place_effects: Vec::new(),
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
+                moves_gen: eng.moves_gen.load(std::sync::atomic::Ordering::Acquire),
                 unchanged: false,
                 own_claim: false,
                 at_hole: false,
@@ -142,6 +146,7 @@ impl<'a> Ctx<'a> {
             woke_merged: me.woke_merged.swap(false, std::sync::atomic::Ordering::SeqCst),
             placed_keys: None,
             last: me.run_record(),
+            first_moved: std::cell::Cell::new(None),
             stuck: None,
             wait_on: None,
             wait_frontier: false,
@@ -1364,6 +1369,19 @@ impl<'a> Ctx<'a> {
         self.placed_child_output(i)
     }
 
+    /// [`Ctx::placed_output_peek`] where that node has committed its last
+    /// run and nothing has asked it again since (clean, not a guess of a
+    /// run in flight): its output is of the inputs it has now. Not
+    /// recorded, a peek.
+    pub fn placed_output_settled(&mut self, i: usize) -> Option<ValueId> {
+        self.placed_child_output(i)?;
+        let (op, args) = self.product.placements.get(i)?.key();
+        let c = *self.placed_keys.as_ref()?.get(&(op, Arc::from(args)))?;
+        let n = self.eng.node(c);
+        let r = n.run_record()?;
+        (n.state() == State::Clean && !r.provisional).then_some(r.output)
+    }
+
     /// The node my `i`-th placement of this run stands for re-asks me at
     /// its next commit, whatever its output (a loop that stops for a
     /// child's result, not going on on a guess of it, nor on the output
@@ -1532,6 +1550,27 @@ impl<'a> Ctx<'a> {
     pub fn wait_text_before(&mut self) -> Result<(), Stop> {
         self.check()?;
         if let Some(x) = read::on_one_layout(self.eng, || read::text_to_run_before(self.eng, self.me)) {
+            self.wait_on = Some(x);
+            return Err(stop());
+        }
+        Ok(())
+    }
+
+    /// At a step of my run (the client's: TeX's every few thousand
+    /// commands): where every worker is at work, I am the run of my unit
+    /// furthest ahead, and a node of my unit before me waits for a worker
+    /// ([`crate::sched::starved_by`]), I give my worker to it: I stop,
+    /// nothing filed, my last run's products standing, and run again when
+    /// that node commits. A run past a node still to run rests on a guess
+    /// of its answer, which may loop where TeX's input does not; so the
+    /// earliest work waiting is never kept from a worker by runs on
+    /// guesses after it, whatever the speed of the machine.
+    pub fn yield_to_prefix(&mut self) -> Result<(), Stop> {
+        self.check()?;
+        let Some(w) = self.worker else {
+            return Ok(());
+        };
+        if let Some(x) = crate::sched::starved_by(self.eng, w, self.me) {
             self.wait_on = Some(x);
             return Err(stop());
         }
@@ -1805,14 +1844,31 @@ impl<'a> Ctx<'a> {
         let Some(r) = self.last.as_ref().filter(|r| !r.provisional) else {
             return false;
         };
-        if k > r.reads.len() {
-            return false;
+        k <= r.reads.len() && k <= self.last_first_moved(r)
+    }
+
+    /// The index of my last run's first read that no longer gives what
+    /// it gave (a placement's output and a hole never do), its count of
+    /// reads if none: found once a run ([`Ctx::last_reads_hold`] for
+    /// each checkpoint a run asked again tries, from its last back,
+    /// asked each read before them again: a picture's 260 checkpoints
+    /// past a moved read 20 000 reads in).
+    fn last_first_moved(&self, r: &RunRecord) -> usize {
+        if let Some(k) = self.first_moved.get() {
+            return k;
         }
-        let mut memo = crate::read::FoldMemo::new();
-        r.reads[..k].iter().all(|rd| {
-            !matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
-                && crate::read::holds(self.eng, self.me, rd, &mut memo)
-        })
+        let moved = r.scope_moved(self.eng);
+        let mut memo = crate::node::HoldMemo::default();
+        let k = r
+            .reads
+            .iter()
+            .position(|rd| {
+                matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
+                    || !r.read_holds(self.eng, self.me, rd, moved, &mut memo)
+            })
+            .unwrap_or(r.reads.len());
+        self.first_moved.set(Some(k));
+        k
     }
 
     /// A run woken for a read that moved finds every read of my last run
@@ -1859,18 +1915,19 @@ impl<'a> Ctx<'a> {
             .last
             .as_ref()
             .filter(|r| !r.provisional && (r.state.is_none() || self.me.parked_on.lock().is_none()))?;
-        let mut memo = crate::read::FoldMemo::new();
+        let mut memo = crate::node::HoldMemo::default();
+        let moved = r.scope_moved(self.eng);
         if let Some(i) = r
             .reads
             .iter()
-            .position(|rd| !crate::read::holds(self.eng, self.me, rd, &mut memo))
+            .position(|rd| !r.read_holds(self.eng, self.me, rd, moved, &mut memo))
         {
             // (`PHITEX_STANDS_TRACE`, profile: the first read of the last
             // run that moved, with what it saw and what it would see now)
             if crate::obs::enabled() && std::env::var_os("PHITEX_STANDS_TRACE").is_some() {
                 let rd = &r.reads[i];
                 let v = &self.eng.values;
-                let now = crate::read::answer_in(self.eng, self.me, &rd.kind, rd.path, &mut memo);
+                let now = crate::read::answer_in(self.eng, self.me, &rd.kind, rd.path, &mut memo.fold);
                 let show =
                     |x: Option<ValueId>| x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(200).collect());
                 eprintln!(
@@ -1906,10 +1963,11 @@ impl<'a> Ctx<'a> {
         let Some(tail) = r.reads.get(m..) else {
             return false;
         };
-        let mut memo = crate::read::FoldMemo::new();
+        let moved = r.scope_moved(self.eng);
+        let mut memo = crate::node::HoldMemo::default();
         tail.iter().all(|rd| {
             !matches!(rd.kind, ReadKind::Placed { .. } | ReadKind::Hole)
-                && crate::read::holds(self.eng, self.me, rd, &mut memo)
+                && r.read_holds(self.eng, self.me, rd, moved, &mut memo)
         })
     }
 
@@ -1996,6 +2054,19 @@ impl<'a> Ctx<'a> {
             return Err(format!("defs: this run's {only_a:?} last run's {only_b:?}"));
         }
         Ok(())
+    }
+
+    /// The value my last run defined `f` with, if it did (not a read: what
+    /// my own last run left, a peek).
+    #[must_use]
+    pub fn last_def(&self, f: Field) -> Option<ValueId> {
+        self.last
+            .as_ref()?
+            .defs
+            .iter()
+            .rev()
+            .find(|d| d.f == f && d.rel.is_none())
+            .map(|d| d.value)
     }
 
     /// `PHITEX_RESUME_CHECK`: the fields my last run defined.
@@ -2153,10 +2224,11 @@ impl<'a> Ctx<'a> {
     /// run that went on from a checkpoint (`PHITEX_RESUME_CHECK`), so the
     /// whole run's product is what is committed.
     pub fn begin_again(&mut self) {
-        let scope_gen = self.product.scope_gen;
+        let (scope_gen, moves_gen) = (self.product.scope_gen, self.product.moves_gen);
         let fresh = Ctx::new(self.eng, self.worker, self.me);
         self.product = fresh.product;
         self.product.scope_gen = scope_gen;
+        self.product.moves_gen = moves_gen;
         self.views.clear();
         self.follow_at = None;
         self.seen.clear();

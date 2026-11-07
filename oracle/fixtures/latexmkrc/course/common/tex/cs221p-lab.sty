@@ -1,0 +1,10 @@
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{cs221p-lab}[2026/11/01 CS221P lab handouts]
+\RequirePackage{graphicx}
+\RequirePackage{xcolor}
+\definecolor{kaustorange}{RGB}{241,143,0}
+\newcommand{\labtitle}[2]{%
+  \noindent\includegraphics[height=1cm]{kaust-logo}\hfill
+  {\Large\bfseries\color{kaustorange}Lab #1: #2}\par\medskip\hrule\bigskip}
+\newcommand{\task}[1]{\paragraph{Task #1.}}
+\endinput

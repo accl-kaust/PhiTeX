@@ -188,6 +188,11 @@ pub struct Job {
     /// An edit's diagnostics at their places (a viewer's, `--diagnostics`);
     /// else an edit reports the engine's own, at no place, only.
     pub edit_diagnostics: bool,
+    /// The search paths set over the host's (a `.latexmkrc`'s
+    /// `$ENV{TEXINPUTS}`, `BIBINPUTS`, `BSTINPUTS`, [`crate::latexmkrc`]):
+    /// each variable's value in kpathsea's syntax, its relative elements
+    /// absolute. Empty: the host's own.
+    pub inputs: Vec<(String, String)>,
 }
 
 /// One run of a build.
@@ -1801,15 +1806,24 @@ impl Session {
         // (the main file: never asked of the finder, it is what the build begins with)
         w.names.push(plain_name(&self.job.path.to_string_lossy()));
         w.paths.push(self.job.path.clone());
+        // (wherever found, in any folder, but the distribution's files:
+        // TeX Live's or Shelf's, which no one edits)
+        let ours = |p: &Path| !self.host.distribution(p);
         for (n, _, p) in &self.inputs {
             w.names.push(plain_name(n));
-            if let Some(p) = p {
+            if let Some(p) = p.as_ref().filter(|p| ours(p)) {
                 w.paths.push(p.clone());
             }
         }
         if let Some(b) = &self.build {
             w.names
                 .extend(b.tool_reads().into_iter().map(|(n, _)| plain_name(&n)));
+            w.paths.extend(
+                b.tool_paths()
+                    .into_iter()
+                    .map(|(_, p)| PathBuf::from(p))
+                    .filter(|p| ours(p)),
+            );
         }
         w.built = self.build.is_some();
         w
@@ -1847,6 +1861,12 @@ impl Session {
         // read it, BibTeX's `.bib`, a `.bst`, makeindex's `.ist`; the
         // engine stages only what one of its runs read, else nothing)
         let mut tools: Vec<String> = Vec::new();
+        let tool_paths: Vec<String> = self
+            .build
+            .as_ref()
+            .map(|b| b.tool_paths().into_iter().map(|(_, p)| p).collect())
+            .unwrap_or_default();
+        let base_is = |p: &str, base: Option<&std::ffi::OsStr>| Path::new(p).file_name() == base;
         for c in changed {
             let mut any = false;
             for &i in by_name.get(c).into_iter().flatten() {
@@ -1866,6 +1886,12 @@ impl Session {
                     any = true;
                 }
             }
+            // (a tool's file by where its search found it: staged under
+            // that path, `../common/refs.bib` for a `.bib` of BIBINPUTS)
+            let found_as = tool_paths
+                .iter()
+                .find(|p| plain_name(p) == *c || (base_is(p, base) && self.host.same_file(p, c)));
+            let c = found_as.unwrap_or(c);
             if !any && !tools.contains(c) {
                 tools.push(c.clone());
             }

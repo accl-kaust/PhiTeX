@@ -335,6 +335,49 @@ fn trace() -> bool {
 }
 
 impl Run<'_, '_> {
+    /// A picture's child's own state as a checkpoint carries it
+    /// ([`Run::pic_ck_restore`]): the parent's items it took, its
+    /// streams and the parent's steps it started from; unit in another
+    /// run.
+    pub(crate) fn pic_ck(&self) -> ValueId {
+        let v = self.v;
+        let Some(p) = self.pic_child.as_ref() else {
+            return ValueId::UNIT;
+        };
+        v.list(vec![
+            v.int(i64::try_from(p.took).unwrap_or(0)),
+            v.list(p.streams.clone()),
+            v.list(
+                p.base_steps
+                    .iter()
+                    .map(|&(f, c)| v.list(vec![f.0, v.int(i64::from(c))]))
+                    .collect(),
+            ),
+        ])
+    }
+
+    /// [`Run::pic_ck`]'s state put back in a child going on from a
+    /// checkpoint (its appends pending come back with the run's,
+    /// `Run::ck_run_restore`).
+    pub(crate) fn pic_ck_restore(&mut self, x: ValueId) {
+        let v = self.v;
+        let Some(p) = self.pic_child.as_mut() else {
+            return;
+        };
+        let [took, streams, steps] = list_of(v, x)[..] else {
+            return;
+        };
+        p.took = usize::try_from(int_of(v, took)).unwrap_or(0);
+        p.streams = list_of(v, streams);
+        p.base_steps = list_of(v, steps)
+            .into_iter()
+            .filter_map(|e| match list_of(v, e)[..] {
+                [f, c] => Some((Field(f), i32::try_from(int_of(v, c)).unwrap_or(0))),
+                _ => None,
+            })
+            .collect();
+    }
+
     /// At `\begin` read by the command loop: whether the picture's body
     /// was taken from the input and the child's output put in its place
     /// (true), or the run goes on inline (false: no picture here, a
@@ -348,24 +391,29 @@ impl Run<'_, '_> {
             && self.cur.tok == begin_tok()
     }
 
-    pub(crate) fn pic_begin(&mut self) -> R<bool> {
-        // (a list of the run's own to put the picture's items on: on the
-        // engine's main list they are contributions, `Run::pic_shape`)
-        if self.interp.is_some()
+    /// Whether a picture at this `\\begin` is read inline whatever its
+    /// body: a list of the run's own to put its items on is wanted (on the
+    /// engine's main list they are contributions, `Run::pic_shape`).
+    fn pic_not_here(&self) -> bool {
+        let not = self.interp.is_some()
             || self.in_skip
             || self.mode_zero
-            || !self.nest.iter().any(|l| l.owns)
-        {
-            if trace() {
-                eprintln!(
-                    "pic: node {} at \\begin: not here (interp {}, skip {}, mode zero {}, a list of its own {})",
-                    self.cx.node().raw(),
-                    self.interp.is_some(),
-                    self.in_skip,
-                    self.mode_zero,
-                    self.nest.iter().any(|l| l.owns)
-                );
-            }
+            || !self.nest.iter().any(|l| l.owns);
+        if not && trace() {
+            eprintln!(
+                "pic: node {} at \\begin: not here (interp {}, skip {}, mode zero {}, a list of its own {})",
+                self.cx.node().raw(),
+                self.interp.is_some(),
+                self.in_skip,
+                self.mode_zero,
+                self.nest.iter().any(|l| l.owns)
+            );
+        }
+        not
+    }
+
+    pub(crate) fn pic_begin(&mut self) -> R<bool> {
+        if self.pic_not_here() {
             return Ok(false);
         }
         // (the `\begin` read from a token list it was put back in, a run
@@ -408,6 +456,10 @@ impl Run<'_, '_> {
         let k = self.pic_mark_k(hash);
         let field = v.field(&format!("pic:{hash:x}:{k}"));
         let locals = self.pic_locals();
+        // (the parent's view the child has run on: this run's, where my
+        // last run gave the child the same one; another, and the child's
+        // output is of another state than this one)
+        let view_held = self.cx.last_def(field) == Some(locals);
         self.cx.define_with(field, locals, Locality::Global);
         let frames = self.pic_frames(&body);
         let params = self.pic_params();
@@ -419,7 +471,29 @@ impl Run<'_, '_> {
         ];
         let i = self.cx.child_once(self.ops.pic, args);
         self.muts += 1;
-        let Some(x) = self.cx.placed_output_peek(i) else {
+        // (a child whose view moved since its output: the picture read
+        // here, inline, as TeX reads it, its output not read now; the child
+        // runs on the view this run gave it, and the runs after take its
+        // output. Taken, the pictures after it were given a state made with
+        // that old output, their children ran again on it, and the run went
+        // again for each one's new output, one picture a pass: lie-hasse's
+        // page of diagrams after a page's routine moved TikZ's counter,
+        // a 45 s piece run once per picture, past 3000 s cold, accl 26269)
+        // (and one that has yet to run again on it, re-asked or running on
+        // another thread: its output is of an older view as well, at -j4
+        // taken and the run asked again for each new one, 2503 s)
+        let peeked = self.cx.placed_output_peek(i);
+        if peeked.is_some() && !(view_held && self.cx.placed_output_settled(i).is_some()) {
+            self.muts += 1;
+            if trace() {
+                eprintln!(
+                    "pic: node {node} {} {hash:x}: its view moved, inline",
+                    body.name
+                );
+            }
+            return Ok(false);
+        }
+        let Some(x) = peeked else {
             // (no output yet: the run goes on on the output of the
             // picture its last run placed here, an edited picture's old
             // one, and the child's commit asks it again where its own
@@ -431,18 +505,22 @@ impl Run<'_, '_> {
             if self.pic_guess(i, &body) {
                 return Ok(true);
             }
-            // (none: as if the picture were empty; its picture runs once,
-            // in the child, on another thread where one is free)
-            self.cx.placed_output_or(i, ValueId::UNIT);
-            self.pic_skip(&body.skip);
+            // (none: the picture read here, inline, as TeX reads it, and
+            // the child placed for the runs after this one, its output not
+            // read now (exact by construction, it is this one; the edits
+            // after take it). Gone on as if empty, the pictures after it
+            // were given the state without this one's work, their children
+            // ran on it, and the run went again for each one's output, one
+            // more right each time: lie-hasse's page of 24 diagrams, a 55 s
+            // piece run 24 times, past 3000 s cold where 1073 s, accl 26269)
             self.muts += 1;
             if trace() {
                 eprintln!(
-                    "pic: node {node} {} {hash:x}: placed, no output yet, empty",
+                    "pic: node {node} {} {hash:x}: placed, no output yet, inline",
                     body.name
                 );
             }
-            return Ok(true);
+            return Ok(false);
         };
         let xs = list_of(v, x);
         if x == ValueId::UNIT || xs.first().is_none_or(|&t| int_of(v, t) != 0) {
@@ -1170,7 +1248,6 @@ impl Run<'_, '_> {
         self.ic_prev = i32::try_from(n(11)).unwrap_or(self.ic_prev);
         self.depth_add = n(12);
         self.eof = true;
-        self.no_resume = true;
         self.pic_child = Some(PicChild {
             field: Field(a(1)),
             view: None,
@@ -1179,37 +1256,26 @@ impl Run<'_, '_> {
             streams: Vec::new(),
             base_steps: Vec::new(),
         });
-        // (the parent's appends to lists it never read, pending at the
-        // picture: the child's to make or go on with, `Run::append_def`)
-        let view = self.pic_view()?;
-        let pending = self.cx.get(view, Step::Key(v.str(APPENDING)));
-        for e in pending.map(|x| list_of(v, x)).unwrap_or_default() {
-            if let [f, t] = list_of(v, e)[..] {
-                let loc = self.loc_of(Field(f));
-                self.appending.push((loc, toks_of(v, Some(t))));
-            }
-        }
-        let base = self.cx.get(view, Step::Key(v.str(PARENT_STEPS)));
-        for e in base.map(|x| list_of(v, x)).unwrap_or_default() {
-            if let [f, c, g] = list_of(v, e)[..] {
-                let loc = self.loc_of(Field(f));
-                let c = i32::try_from(int_of(v, c)).unwrap_or(0);
-                if self.st.add(v, loc, c, int_of(v, g) != 0)
+        let (appending, steps, appending_vals) = self.pic_pending()?;
+        let conds0 = (self.conds.clone(), self.if_codes.clone());
+        self.input.append_text(fs);
+        // (asked again for a read that moved, its text the same: on from
+        // its last run's last checkpoint before that read, as a piece's
+        // run goes on, `crate::resume`; the checkpoint holds the steps it
+        // started from, the parent's items it took, its streams and its
+        // appends pending)
+        if !self.resume_edit()? {
+            self.appending = appending;
+            self.appending_vals = appending_vals;
+            for (loc, f, c, g) in steps {
+                if self.st.add(v, loc, c, g)
                     && let Some(p) = self.pic_child.as_mut()
                 {
-                    p.base_steps.push((Field(f), c));
+                    p.base_steps.push((f, c));
                 }
             }
         }
-        let pending = self.cx.get(view, Step::Key(v.str(APPENDING_VALS)));
-        for e in pending.map(|x| list_of(v, x)).unwrap_or_default() {
-            if let [f, xs] = list_of(v, e)[..] {
-                let loc = self.loc_of(Field(f));
-                self.appending_vals.push((loc, list_of(v, xs)));
-            }
-        }
-        let conds0 = (self.conds.clone(), self.if_codes.clone());
-        self.input.append_text(fs);
+        self.ck_begin();
         let res = self.run_all();
         let why = match res {
             Err(Halt::Stop(s)) => return Err(Halt::Stop(s)),
@@ -1217,7 +1283,9 @@ impl Run<'_, '_> {
             Err(Halt::Hole) => Some("a hole".to_owned()),
             Err(Halt::Fatal) => Some("a fatal error".to_owned()),
             Err(Halt::Cut | Halt::Recut(_)) => Some("a cut".to_owned()),
-            Err(Halt::Same) => Some("a cutoff".to_owned()),
+            // (cut off: its state met its last run's at a checkpoint, the
+            // reads after it holding; that run's output stands)
+            Err(Halt::Same) => return Err(Halt::Same),
             Ok(()) => self.pic_shape(lid, &conds0),
         };
         if let Some(w) = why {
@@ -1231,6 +1299,53 @@ impl Run<'_, '_> {
             self.settle_lines();
         }
         Ok(())
+    }
+
+    /// What the parent left pending at the picture, from its locals'
+    /// field: its appends to lists it never read (the child's to make or
+    /// go on with, `Run::append_def`), the registers it stepped unread
+    /// (by location, field, steps, whether global) and its values
+    /// appended pending.
+    #[allow(clippy::type_complexity)]
+    fn pic_pending(
+        &mut self,
+    ) -> R<(
+        Vec<(crate::state::Loc, Vec<Tok>)>,
+        Vec<(crate::state::Loc, Field, i32, bool)>,
+        Vec<(crate::state::Loc, Vec<ValueId>)>,
+    )> {
+        let v = self.v;
+        let view = self.pic_view()?;
+        let pending = self.cx.get(view, Step::Key(v.str(APPENDING)));
+        let mut appending = Vec::new();
+        for e in pending.map(|x| list_of(v, x)).unwrap_or_default() {
+            if let [f, t] = list_of(v, e)[..] {
+                let loc = self.loc_of(Field(f));
+                appending.push((loc, toks_of(v, Some(t))));
+            }
+        }
+        let base = self.cx.get(view, Step::Key(v.str(PARENT_STEPS)));
+        let mut steps = Vec::new();
+        for e in base.map(|x| list_of(v, x)).unwrap_or_default() {
+            if let [f, c, g] = list_of(v, e)[..] {
+                let loc = self.loc_of(Field(f));
+                steps.push((
+                    loc,
+                    Field(f),
+                    i32::try_from(int_of(v, c)).unwrap_or(0),
+                    int_of(v, g) != 0,
+                ));
+            }
+        }
+        let pending = self.cx.get(view, Step::Key(v.str(APPENDING_VALS)));
+        let mut appending_vals = Vec::new();
+        for e in pending.map(|x| list_of(v, x)).unwrap_or_default() {
+            if let [f, xs] = list_of(v, e)[..] {
+                let loc = self.loc_of(Field(f));
+                appending_vals.push((loc, list_of(v, xs)));
+            }
+        }
+        Ok((appending, steps, appending_vals))
     }
 
     /// Why the child's run cannot stand as a picture's: anything of it
@@ -1333,6 +1448,8 @@ impl Run<'_, '_> {
         if let Some(p) = self.pic_child.as_mut() {
             p.streams.clear();
         }
+        // (no checkpoint of a refused run stands for the next)
+        self.ck = None;
         self.pic_out = Some(v.list(vec![v.int(1), v.str(why)]));
     }
 

@@ -1589,7 +1589,8 @@ export class Panel {
     // (each its own sheet's: a later opening's sheet, up meanwhile, is never closed by this one's)
     const a = this.anim;
     const stop = () => this.anim === a && this.stopSheet();
-    void a.done().then(stop);
+    // (the first page as drawn, for an exit that becomes it: Bad Apple's morph)
+    void a.done(this.$("#viewer").querySelector<HTMLCanvasElement>(".slot canvas") ?? undefined).then(stop);
     setTimeout(stop, 1600);
   }
 

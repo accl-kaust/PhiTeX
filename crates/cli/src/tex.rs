@@ -116,10 +116,16 @@ pub struct Tree {
 
 impl Tree {
     /// The tree for engine `e`: kpathsea as its program, made once (its
-    /// `texmf.cnf` and `ls-R` read at the first lookup).
-    pub fn open(e: &Engine) -> Tree {
+    /// `texmf.cnf` and `ls-R` read at the first lookup), with the search
+    /// variables `vars` set over the environment's (a `.latexmkrc`'s
+    /// TEXINPUTS, as latexmk sets it for the engine it runs).
+    pub fn open(e: &Engine, vars: &[(String, String)]) -> Tree {
+        let mut k = kpse(e.name, e.kpse_engine);
+        for (name, value) in vars {
+            k.set_var(name, value);
+        }
         Tree {
-            kpse: Mutex::new(kpse(e.name, e.kpse_engine)),
+            kpse: Mutex::new(k),
             glyph: Mutex::new(None),
         }
     }
@@ -181,6 +187,47 @@ impl Tree {
         let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
         k.find_file(name.as_bytes(), format, false)
             .map(|b| os(&b).to_path_buf())
+    }
+}
+
+/// kpathsea's variables naming the trees TeX Live installed, or made
+/// itself (its formats, its maps, its configuration): the distribution, as
+/// a watch knows it ([`Tree::distribution`]). TEXMFHOME, the user's own
+/// files, is not among them.
+const DISTRIBUTION_VARS: [&str; 8] = [
+    "TEXMFROOT",
+    "TEXMFDIST",
+    "TEXMFMAIN",
+    "TEXMFLOCAL",
+    "TEXMFSYSVAR",
+    "TEXMFSYSCONFIG",
+    "TEXMFVAR",
+    "TEXMFCONFIG",
+];
+
+impl Tree {
+    /// The folders of the distribution's trees ([`DISTRIBUTION_VARS`]),
+    /// as named and canonical, and the cache's (the fonts the engine
+    /// made).
+    pub fn distribution(&self) -> Vec<PathBuf> {
+        let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut out: Vec<PathBuf> = vec![cache_dir()];
+        for var in DISTRIBUTION_VARS {
+            let Some(v) = k.var_value(var) else { continue };
+            let v = String::from_utf8_lossy(&v).replace("!!", "");
+            for d in v.split([',', ':', ';', '{', '}']) {
+                if d.starts_with('/') {
+                    out.push(PathBuf::from(d));
+                }
+            }
+        }
+        // (each as named and canonical: a path kpathsea found is under the
+        // first, one a link led to under the second)
+        let canon: Vec<PathBuf> = out.iter().filter_map(|d| d.canonicalize().ok()).collect();
+        out.extend(canon);
+        out.sort();
+        out.dedup();
+        out
     }
 }
 

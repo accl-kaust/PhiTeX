@@ -56,7 +56,7 @@ impl Session {
         // (kpathsea opened for the job and for the format on threads of
         // their own while the main file is read)
         let (text, tree, format_tree) = std::thread::scope(|s| {
-            let tree = s.spawn(|| Arc::new(tex::Tree::open(&job.engine)));
+            let tree = s.spawn(|| Arc::new(tex::Tree::open(&job.engine, &job.inputs)));
             let format_tree = s.spawn(|| Arc::new(tex::Tree::open_format(&job.engine)));
             let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()));
             phitex_tex::timeline::lap("session: the main file read");
@@ -69,7 +69,11 @@ impl Session {
         });
         let text = text?;
         let (store, out) = Self::store_and_out(&job, note);
-        let host = Arc::new(Machine { tree, format_tree });
+        let host = Arc::new(Machine {
+            tree,
+            format_tree,
+            distribution: std::sync::OnceLock::new(),
+        });
         Ok(Session {
             live: phitex_live::session::Session::new(job, text, host, store, out.clone(), status),
             out,
@@ -93,7 +97,7 @@ impl Session {
             crate::shelf::font_index(&files)?;
         }
         let (store, out) = Self::store_and_out(&job, note);
-        let host = Arc::new(crate::shelf::ShelfHost { files });
+        let host = Arc::new(crate::shelf::ShelfHost::new(files, &job.inputs));
         Ok(Session {
             live: phitex_live::session::Session::new(job, text, host, store, out.clone(), status),
             out,
@@ -157,6 +161,9 @@ impl Session {
 struct Machine {
     tree: Arc<tex::Tree>,
     format_tree: Arc<tex::Tree>,
+    /// The distribution's folders ([`tex::Tree::distribution`]), once
+    /// asked.
+    distribution: std::sync::OnceLock<Vec<PathBuf>>,
 }
 
 impl Host for Machine {
@@ -188,6 +195,14 @@ impl Host for Machine {
 
     fn canonical(&self, path: &Path) -> PathBuf {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    /// Under one of TeX Live's trees, or the cache's fonts: as found (no
+    /// call to the system), else canonical.
+    fn distribution(&self, path: &Path) -> bool {
+        let dirs = self.distribution.get_or_init(|| self.tree.distribution());
+        let under = |p: &Path| dirs.iter().any(|d| p.starts_with(d));
+        under(path) || (path.is_absolute() && std::fs::canonicalize(path).is_ok_and(|p| under(&p)))
     }
 
     fn has_format_file(&self, name: &str) -> bool {
@@ -251,13 +266,16 @@ impl Host for Machine {
     /// The commands neither in process nor refused: run as processes,
     /// each in a scratch directory of its own.
     fn shell_hook(&self, job: &Job) -> Option<Arc<dyn phitex_tex::ShellHook>> {
-        Some(Arc::new(crate::shell::ProcessHook::new(
-            job.path
-                .parent()
-                .filter(|d| !d.as_os_str().is_empty())
-                .unwrap_or(Path::new(".")),
-            crate::tex::kpse("pdftex", "pdftex").exported(),
-        )))
+        Some(Arc::new(
+            crate::shell::ProcessHook::new(
+                job.path
+                    .parent()
+                    .filter(|d| !d.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+                crate::tex::kpse("pdftex", "pdftex").exported(),
+            )
+            .with_vars(&job.inputs),
+        ))
     }
 
     fn xdv_files(&self, dir: &Path) -> Option<phitex_live::dvipdf::FilesFor> {

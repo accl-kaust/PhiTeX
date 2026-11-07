@@ -248,6 +248,8 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         fixpoint: false,
         cache_limit: None,
         edit_diagnostics: true,
+        // (TeX's command line: no .latexmkrc, as pdflatex reads none)
+        inputs: Vec::new(),
         origins: false,
     };
     for n in session::waiting_notes(&job) {
