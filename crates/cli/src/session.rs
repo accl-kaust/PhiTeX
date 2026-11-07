@@ -172,10 +172,10 @@ impl Host for Machine {
         std::fs::read(path).ok()
     }
 
-    /// Its size, modification time and inode.
+    /// Its size, modification and change times and inode
+    /// ([`disk_stamp`]).
     fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
-        let k = phitex_tex::file_stat_key(&path.to_string_lossy());
-        (!k.is_empty()).then_some(k)
+        disk_stamp(path)
     }
 
     /// Whether two names are one file on disk.
@@ -547,6 +547,28 @@ impl UpdateFile {
 ///
 /// # Errors
 /// The file system's.
+/// A file's key on disk for `r` in a watch ([`phitex_live::host::Host::stamp`]):
+/// its size, modification time and inode ([`phitex_tex::file_stat_key`]),
+/// and its change time. The change time moves at every write and no
+/// program sets it back: a file rewritten to the same size with its
+/// modification time restored (`touch -d`, an archive extracted, a
+/// checkout) keeps its other fields, not this one. None where there is
+/// no metadata.
+pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
+    let mut k = phitex_tex::file_stat_key(&path.to_string_lossy());
+    if k.is_empty() {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(path).ok()?;
+        k.extend(m.ctime().to_le_bytes());
+        k.extend(m.ctime_nsec().to_le_bytes());
+    }
+    Some(k)
+}
+
 pub fn compact(f: &Mutex<UpdateFile>) -> Result<bool, String> {
     let (p, layout, writes) = {
         let g = f.lock().unwrap_or_else(PoisonError::into_inner);
