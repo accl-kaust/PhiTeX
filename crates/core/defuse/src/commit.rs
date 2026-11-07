@@ -2559,8 +2559,8 @@ pub(crate) fn commit_stood(
     if node.moved.load(Ordering::Acquire) || !node.record().is_some_and(|x| Arc::ptr_eq(&x, r)) {
         return None;
     }
-    let stops = {
-        let (_, mut inner) = own_write(eng, node)?;
+    {
+        let (_, inner) = own_write(eng, node)?;
         // (set before `asked` is read, as a commit sets it: a re-ask from
         // here on marks the node to run again, `sched::mark_stale_now`)
         node.committing.store(true, Ordering::SeqCst);
@@ -2569,6 +2569,46 @@ pub(crate) fn commit_stood(
         {
             return None;
         }
+        drop(inner);
+    }
+    // (a derived read's witness: filed on the field its name gives now,
+    // as a commit files it, so a change of that field asks the node again
+    // (there already where the name did not move, `file_witness`); then
+    // the read checked again, for a change of that field whose walk
+    // passed before the witness was there)
+    let mut memo = read::FoldMemo::new();
+    for rd in &r.reads {
+        if let ReadKind::Field { f, at } = rd.kind
+            && let Some((anchor, inclusive)) = match at {
+                Anchor::Me => Some((node.id, false)),
+                Anchor::Before(n) => Some((n, false)),
+                Anchor::AfterOwn(n) => Some((n, true)),
+                Anchor::End(_) | Anchor::Final => None,
+            }
+            && let Some(spec) = read::derived_spec(eng, rd.path)
+            && read::derived_base(eng.values(), spec) != Some(f)
+            && let Some(g) = read::derived_field_at(eng, spec, anchor, inclusive)
+            && g != f
+        {
+            file_witness(
+                eng,
+                g,
+                &Reader {
+                    node: node.id,
+                    serial: r.serial,
+                    anchor,
+                    inclusive,
+                    path: rd.path,
+                    seen: rd.seen,
+                },
+            );
+            if !read::holds(eng, node, rd, &mut memo) {
+                return None;
+            }
+        }
+    }
+    let stops = {
+        let (_, mut inner) = own_write(eng, node)?;
         take_stops(&mut inner, node.id)
     };
     let mut st = CommitStats::default();
