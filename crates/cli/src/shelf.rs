@@ -598,6 +598,13 @@ impl Host for ShelfHost {
                         .find(&p)
                         .map(|(_, b)| Arc::from(b.as_slice()))
                 })
+            })
+            .with_stamp({
+                let f4 = self.files.clone();
+                Box::new(move |path| {
+                    let p = std::str::from_utf8(path).ok()?;
+                    ShelfHost { files: f4.clone() }.stamp(Path::new(p))
+                })
             }),
         ))
     }

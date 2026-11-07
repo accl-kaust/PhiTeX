@@ -25,6 +25,10 @@ pub type Read = Box<dyn Fn(&[u8]) -> Option<Arc<[u8]>> + Send + Sync>;
 /// ([`crate::host::Host::xdv_files`], [`phitex_tex::XdvPdf::files`]).
 pub type FilesFor = Arc<dyn Fn() -> Arc<dyn Files> + Send + Sync>;
 
+/// A stamp: a key of the file at a path [`Find`] gave that changes when
+/// its bytes do, read without reading them ([`Files::stamp`]).
+pub type Stamp = Box<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
+
 /// A host's files for dvipdfmx ([`crate::host::Host::dpx_finder`]).
 pub struct DpxFinder {
     pub find: Find,
@@ -32,6 +36,9 @@ pub struct DpxFinder {
     /// Ghostscript's fonts by file name, for the `D` line's built-in
     /// distiller (`Files::gs_font`).
     pub gs_font: Option<Read>,
+    /// The files' stamps (`Files::stamp`): a link that kept what it made
+    /// of them reads none whose stamp is the same. None: read again.
+    pub stamp: Option<Stamp>,
 }
 
 impl DpxFinder {
@@ -40,7 +47,15 @@ impl DpxFinder {
             find,
             read,
             gs_font: None,
+            stamp: None,
         }
+    }
+
+    /// With the files' stamps from `stamp` ([`Files::stamp`]).
+    #[must_use]
+    pub fn with_stamp(mut self, stamp: Stamp) -> DpxFinder {
+        self.stamp = Some(stamp);
+        self
     }
 
     /// With Ghostscript's fonts from `gs_font` ([`Files::gs_font`]).
@@ -102,6 +117,10 @@ impl Files for Cached {
             .or_insert_with(|| g(name))
             .clone()
     }
+
+    fn stamp(&self, path: &[u8]) -> Option<Vec<u8>> {
+        self.finder.stamp.as_ref()?(path)
+    }
 }
 
 /// `files` with the job's own files before them, as kpathsea searches
@@ -140,6 +159,12 @@ impl Files for JobFiles {
         let n = String::from_utf8_lossy(name);
         if !n.starts_with('/') {
             let p = self.dir.join(n.trim_start_matches("./"));
+            // (a file the host stamps is there: found without reading it,
+            // read when asked; a link that kept its file checks the stamp,
+            // `phitex_tex`'s `xdvpdf::still`, and reads nothing unmoved)
+            if self.host.stamp(&p).is_some() {
+                return Some(p.to_string_lossy().into_owned().into_bytes());
+            }
             if let Some(b) = self.host.read(&p) {
                 let key = p.to_string_lossy().into_owned().into_bytes();
                 self.read
@@ -159,7 +184,25 @@ impl Files for JobFiles {
             .unwrap_or_else(PoisonError::into_inner)
             .get(path)
             .cloned();
-        kept.or_else(|| self.files.read(path))
+        kept.or_else(|| {
+            let p = std::path::Path::new(std::str::from_utf8(path).ok()?);
+            if p.starts_with(&self.dir) {
+                self.host.read(p).map(Arc::from)
+            } else {
+                None
+            }
+        })
+        .or_else(|| self.files.read(path))
+    }
+
+    /// The job's files' stamps the host's ([`crate::host::Host::stamp`]),
+    /// the others the finder's.
+    fn stamp(&self, path: &[u8]) -> Option<Vec<u8>> {
+        let p = std::path::Path::new(std::str::from_utf8(path).ok()?);
+        if p.starts_with(&self.dir) {
+            return self.host.stamp(p);
+        }
+        self.files.stamp(path)
     }
 
     fn apply_filter(&self, template: &[u8], input: &[u8], version: i32) -> Option<Arc<[u8]>> {
@@ -263,5 +306,53 @@ mod tests {
             (&b"/tl/cmr10.pfb"[..], Some(&b"pfb"[..]))
         );
         assert_eq!(f.find(b"nothing.pdf", Format::Pict, b"dvipdfmx"), None);
+    }
+
+    /// A project whose files the host stamps, its reads counted.
+    struct Stamped(std::sync::atomic::AtomicUsize);
+
+    impl crate::host::Host for Stamped {
+        fn locate(&self, _name: &str) -> Option<PathBuf> {
+            None
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            (path == Path::new("/p/fonts/A.otf")).then(|| b"otf".to_vec())
+        }
+        fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+            (path == Path::new("/p/fonts/A.otf")).then(|| b"stamp".to_vec())
+        }
+    }
+
+    /// A job's file the host stamps is found without reading it, read
+    /// once when asked, and its stamp is the host's: a link checking that
+    /// its files are the same reads none of them
+    /// (`phitex_tex`'s `xdvpdf::still`).
+    #[test]
+    fn a_stamped_jobs_file_is_found_without_reading_it() {
+        let finder = Arc::new(
+            DpxFinder::new(Box::new(|_, _, _| None), Box::new(|_| None))
+                .with_stamp(Box::new(|p| (p == b"/tl/x").then(|| b"tree".to_vec()))),
+        );
+        let host = Arc::new(Stamped(std::sync::atomic::AtomicUsize::new(0)));
+        let f = with_job_files(
+            Arc::new(move || finder.files()),
+            host.clone(),
+            PathBuf::from("/p"),
+        )();
+        let reads = || host.0.load(std::sync::atomic::Ordering::Relaxed);
+        let p = f
+            .find(b"fonts/A.otf", Format::OpenType, b"dvipdfmx")
+            .expect("found");
+        assert_eq!((p.as_slice(), reads()), (&b"/p/fonts/A.otf"[..], 0));
+        assert_eq!(f.stamp(&p).as_deref(), Some(&b"stamp"[..]));
+        assert_eq!(reads(), 0);
+        assert_eq!(f.read(&p).as_deref(), Some(&b"otf"[..]));
+        assert_eq!(reads(), 1);
+        assert_eq!(
+            f.stamp(b"/tl/x").as_deref(),
+            Some(&b"tree"[..]),
+            "the finder's"
+        );
     }
 }

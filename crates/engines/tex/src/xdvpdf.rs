@@ -92,22 +92,26 @@ enum Asked {
     GsFont(Vec<u8>),
 }
 
-/// Its answer.
+/// Its answer; a file read, with its stamp taken before it was read
+/// ([`Files::stamp`]; none: the host has none).
 #[derive(Clone)]
 enum Answer {
     Path(Option<Vec<u8>>),
     Bytes(Option<Arc<[u8]>>),
+    Read(Option<Arc<[u8]>>, Option<Vec<u8>>),
 }
 
 impl Answer {
     fn same(&self, o: &Answer) -> bool {
         match (self, o) {
             (Answer::Path(a), Answer::Path(b)) => a == b,
-            (Answer::Bytes(a), Answer::Bytes(b)) => match (a, b) {
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
-                (None, None) => true,
-                _ => false,
-            },
+            (Answer::Bytes(a) | Answer::Read(a, _), Answer::Bytes(b) | Answer::Read(b, _)) => {
+                match (a, b) {
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+                    (None, None) => true,
+                    _ => false,
+                }
+            }
             _ => false,
         }
     }
@@ -134,11 +138,18 @@ impl Files for Logged {
     }
 
     fn read(&self, path: &[u8]) -> Option<Arc<[u8]>> {
+        // (the stamp before the bytes: a change between the two moves the
+        // stamp the next link compares, never hides behind it)
+        let stamp = self.files.stamp(path);
         let r = self.files.read(path);
         self.log
             .locked()
-            .insert(Asked::Read(path.to_vec()), Answer::Bytes(r.clone()));
+            .insert(Asked::Read(path.to_vec()), Answer::Read(r.clone(), stamp));
         r
+    }
+
+    fn stamp(&self, path: &[u8]) -> Option<Vec<u8>> {
+        self.files.stamp(path)
     }
 
     fn apply_filter(&self, template: &[u8], input: &[u8], version: i32) -> Option<Arc<[u8]>> {
@@ -159,22 +170,47 @@ impl Files for Logged {
     }
 }
 
-/// Whether every logged question has the same answer from `files`.
+/// Whether every logged question has the same answer from `files`. A
+/// file read whose stamp ([`Files::stamp`]) is the one it had when read
+/// is the same file, not read again; one whose stamp moved is read and
+/// compared, and its new stamp logged when its bytes are the same.
 fn still(log: &Log, files: &dyn Files) -> bool {
     let asked: Vec<(Asked, Answer)> = log
         .locked()
         .iter()
         .map(|(q, a)| (q.clone(), a.clone()))
         .collect();
-    asked.iter().all(|(q, a)| {
-        let now = match q {
-            Asked::Find(n, f, p) => Answer::Path(files.find(n, *f, p)),
-            Asked::Read(p) => Answer::Bytes(files.read(p)),
-            Asked::Filter(t, i, v) => Answer::Bytes(files.apply_filter(t, i, *v)),
-            Asked::GsFont(n) => Answer::Bytes(files.gs_font(n)),
+    let mut restamped = Vec::new();
+    let same = asked.iter().all(|(q, a)| {
+        let now = match (q, a) {
+            (Asked::Read(p), Answer::Read(_, Some(was))) => {
+                let stamp = files.stamp(p);
+                if stamp.as_ref() == Some(was) {
+                    return true;
+                }
+                let r = files.read(p);
+                let same = Answer::Bytes(r).same(a);
+                if same && let Some(s) = stamp {
+                    restamped.push((q.clone(), a.clone(), s));
+                }
+                return same;
+            }
+            (Asked::Find(n, f, p), _) => Answer::Path(files.find(n, *f, p)),
+            (Asked::Read(p), _) => Answer::Bytes(files.read(p)),
+            (Asked::Filter(t, i, v), _) => Answer::Bytes(files.apply_filter(t, i, *v)),
+            (Asked::GsFont(n), _) => Answer::Bytes(files.gs_font(n)),
         };
         now.same(a)
-    })
+    });
+    if same {
+        let mut l = log.locked();
+        for (q, a, s) in restamped {
+            if let Answer::Read(b, _) = a {
+                l.insert(q, Answer::Read(b, Some(s)));
+            }
+        }
+    }
+    same
 }
 
 /// A page as the walk ships it, decoded from its value once and kept
@@ -1611,4 +1647,82 @@ fn diff(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One file whose bytes and stamp the test sets, its reads counted.
+    struct One {
+        bytes: Mutex<Arc<[u8]>>,
+        stamp: Mutex<Option<Vec<u8>>>,
+        reads: AtomicUsize,
+    }
+
+    impl Files for One {
+        fn find(&self, _: &[u8], _: Format, _: &[u8]) -> Option<Vec<u8>> {
+            Some(b"/doc/font.otf".to_vec())
+        }
+        fn read(&self, _: &[u8]) -> Option<Arc<[u8]>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            // (a fresh copy each time, as a host reading the disk gives)
+            Some(Arc::from(&**self.bytes.locked()))
+        }
+        fn stamp(&self, _: &[u8]) -> Option<Vec<u8>> {
+            self.stamp.locked().clone()
+        }
+    }
+
+    /// A link's files checked again read no file whose stamp is the one
+    /// it had when read: a font of the document's own is not read again
+    /// at every edit; a stamp that moved reads it, the same bytes keep
+    /// the link (and the new stamp, read no more), other bytes drop it.
+    #[test]
+    fn no_file_read_again_while_its_stamp_is_the_same() {
+        let f = Arc::new(One {
+            bytes: Mutex::new(Arc::from(&b"font"[..])),
+            stamp: Mutex::new(Some(b"s1".to_vec())),
+            reads: AtomicUsize::new(0),
+        });
+        let log = Log::default();
+        let logged = Logged {
+            files: f.clone(),
+            log: log.clone(),
+        };
+        let p = logged
+            .find(b"font.otf", Format::OpenType, b"dvipdfmx")
+            .unwrap();
+        logged.read(&p);
+        assert_eq!(f.reads.load(Ordering::Relaxed), 1);
+        for _ in 0..3 {
+            assert!(still(&log, &*f));
+        }
+        assert_eq!(
+            f.reads.load(Ordering::Relaxed),
+            1,
+            "read again, stamp unmoved"
+        );
+        // (touched, same bytes: read once, then known by its new stamp)
+        *f.stamp.locked() = Some(b"s2".to_vec());
+        assert!(still(&log, &*f));
+        assert!(still(&log, &*f));
+        assert_eq!(f.reads.load(Ordering::Relaxed), 2);
+        // (changed: the link's files are not the same)
+        *f.stamp.locked() = Some(b"s3".to_vec());
+        *f.bytes.locked() = Arc::from(&b"other"[..]);
+        assert!(!still(&log, &*f));
+        // (a host with no stamps: read and compared each time)
+        *f.stamp.locked() = None;
+        let log2 = Log::default();
+        let logged = Logged {
+            files: f.clone(),
+            log: log2.clone(),
+        };
+        logged.read(b"/doc/font.otf");
+        let before = f.reads.load(Ordering::Relaxed);
+        assert!(still(&log2, &*f));
+        assert_eq!(f.reads.load(Ordering::Relaxed), before + 1);
+    }
 }

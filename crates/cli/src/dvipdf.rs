@@ -180,6 +180,19 @@ impl Files for XdvFiles {
         let p = crate::tex::gs_font(std::str::from_utf8(name).ok()?)?;
         std::fs::read(p).ok().map(Arc::from)
     }
+
+    /// The document's own files' stamps ([`crate::session::disk_stamp`]),
+    /// as they are read again each time; the tree's are read once a
+    /// process and need none.
+    fn stamp(&self, path: &[u8]) -> Option<Vec<u8>> {
+        let p = std::path::Path::new(
+            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path),
+        );
+        if p.is_relative() || p.starts_with(&self.dir) {
+            return crate::session::disk_stamp(&self.dir.join(p));
+        }
+        None
+    }
 }
 
 /// The files XeTeX's PDF reads, its pictures named from `dir`: a fresh

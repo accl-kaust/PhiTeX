@@ -555,17 +555,24 @@ impl UpdateFile {
 /// checkout) keeps its other fields, not this one. None where there is
 /// no metadata.
 pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
-    let mut k = phitex_tex::file_stat_key(&path.to_string_lossy());
-    if k.is_empty() {
+    use std::os::unix::fs::MetadataExt;
+    // (one stat; a file's: a folder or nothing at the name has none, and
+    // is told by reading it)
+    let m = std::fs::metadata(path).ok()?;
+    if !m.is_file() {
         return None;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let m = std::fs::metadata(path).ok()?;
-        k.extend(m.ctime().to_le_bytes());
-        k.extend(m.ctime_nsec().to_le_bytes());
-    }
+    // ([`phitex_tex::file_stat_key`]'s fields, then the change time)
+    let ns = u64::try_from(m.mtime())
+        .unwrap_or(0)
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(u64::try_from(m.mtime_nsec()).unwrap_or(0));
+    let mut k: Vec<u8> = [m.len(), ns, m.ino()]
+        .iter()
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    k.extend(m.ctime().to_le_bytes());
+    k.extend(m.ctime_nsec().to_le_bytes());
     Some(k)
 }
 
