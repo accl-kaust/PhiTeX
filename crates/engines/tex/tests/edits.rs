@@ -1004,7 +1004,7 @@ fn a_box_voided_globally_and_deleted_reruns_no_reader_of_it() {
 /// A paragraph between them, which appended another font and so checked
 /// the names in the list (the moved one among them) not to expand, does
 /// not run again: the list it appends to no longer holds the name there.
-/// Only the new first loader runs for the font.
+/// Only the new first loader runs for the font (one thread).
 #[test]
 fn a_font_first_loaded_later_reruns_no_appender_between() {
     use std::fmt::Write as _;
@@ -1025,7 +1025,12 @@ fn a_font_first_loaded_later_reruns_no_appender_between() {
     }
     src.push_str("Last words.\n\\bye\n");
     let prelude = common::plain();
-    let opts = || common::options("./fl.tex", "fl", "", &fx);
+    // (one thread: the runs in the text's order, the new first loader
+    // before the later users, which then find the font where it was)
+    let opts = || phitex_tex::Options {
+        threads: Some(1),
+        ..common::options("./fl.tex", "fl", "", &fx)
+    };
     let mut b = common::build(opts(), Some(&prelude), &src);
     let text = src.replace("Paragraph one \\load{a}{11} loads a first.\n\n", "");
     assert_ne!(text, src);
