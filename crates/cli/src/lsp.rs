@@ -85,6 +85,9 @@ pub enum Pdf {
     File(PathBuf),
     /// A DVI build's PDF made for the viewer.
     Bytes(Arc<[u8]>),
+    /// A PDF no file holds (a watch writing none): its exact file made
+    /// when asked.
+    Layout(phitex_pdf::Layout),
 }
 
 /// The watch, as the server's host: its asks queued and the watch woken.
@@ -170,6 +173,7 @@ impl Watch {
         let bytes: Vec<u8> = match lock(&self.pdf).clone() {
             Some(Pdf::File(p)) => std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?,
             Some(Pdf::Bytes(b)) => b.to_vec(),
+            Some(Pdf::Layout(l)) => l.exact().map_err(|e| format!("{e}"))?.to_vec(),
             None => return Err("no PDF yet (a DVI build's is made for the viewer only)".to_owned()),
         };
         std::fs::write(&to, &bytes).map_err(|e| format!("{}: {e}", to.display()))?;
@@ -583,6 +587,12 @@ impl Lsp {
     /// A build is in ([`Server::built`]).
     pub fn built(&self, b: &Built) {
         self.server.built(b);
+    }
+
+    /// The diagnostics a build left for later, made now
+    /// ([`Server::diagnostics`]).
+    pub fn diagnostics(&self, d: &[serde_json::Value]) {
+        self.server.diagnostics(d);
     }
 
     /// The editor shows `file` (the watch's name) at `line` and character

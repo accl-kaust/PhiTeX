@@ -350,6 +350,16 @@ struct Facts {
     warnings: usize,
 }
 
+/// What published diagnostics said ([`Server::publish`]).
+#[derive(Default)]
+struct Published {
+    errors: usize,
+    warnings: usize,
+    engine_failed: bool,
+    engine: Option<String>,
+    format: Option<String>,
+}
+
 /// The build under way.
 struct Run {
     began: Instant,
@@ -375,6 +385,9 @@ struct State {
     run: Option<Run>,
     builds: u64,
     last: Facts,
+    /// The last build left its diagnostics for later: the warnings
+    /// counted are the build before's ([`Server::diagnostics`]).
+    warnings_updating: bool,
     /// The last `phitex/status` state sent.
     state: &'static str,
     viewer: Option<String>,
@@ -641,10 +654,15 @@ impl Server {
 
     /// `phitex/status` with `state` and the last build's facts.
     fn status(&self, state: &'static str) {
-        let (last, root, main) = {
+        let (last, root, main, updating) = {
             let mut st = lock(&self.st);
             st.state = state;
-            (st.last, st.root.base.clone(), st.main.clone())
+            (
+                st.last,
+                st.root.base.clone(),
+                st.main.clone(),
+                st.warnings_updating,
+            )
         };
         self.notify(
             "phitex/status",
@@ -654,6 +672,9 @@ impl Server {
                 "pages": last.pages,
                 "errors": last.errors,
                 "warnings": last.warnings,
+                // (the last build's warnings not made yet: the count is the
+                // build before's, made again when the editing pauses)
+                "warnings_updating": updating,
                 "engine": self.host.engine(),
                 // (the folder the watch runs in and its main file: an
                 // editor opening another file of that folder uses this
@@ -785,62 +806,28 @@ impl Server {
     /// do cleared, the main file's always; its progress ended and
     /// `phitex/status` told.
     pub fn built(&self, b: &Built) {
-        let main = lock(&self.st).main.clone();
-        let mut by: HashMap<String, Vec<Value>> = HashMap::new();
-        by.insert(self.uri(&main), Vec::new());
         let mut facts = Facts {
             ms: b.ms,
             pages: b.hashes.len(),
             ..Facts::default()
         };
-        let mut engine_failed = false;
-        let (mut engine, mut format) = (None, None);
-        let hidden = self.host.hidden();
-        for d in &b.diagnostics {
-            match d["severity"].as_str() {
-                Some("error") => facts.errors += 1,
-                Some("warning") => facts.warnings += 1,
-                _ => {}
+        // (diagnostics made later, when the editing pauses: the last ones
+        // stand meanwhile, their warnings said to be updating,
+        // `Server::diagnostics`)
+        let (engine_failed, engine, format) = match &b.diagnostics {
+            Some(d) => {
+                let p = self.publish(d);
+                lock(&self.st).warnings_updating = false;
+                (facts.errors, facts.warnings) = (p.errors, p.warnings);
+                (p.engine_failed, p.engine, p.format)
             }
-            let message = d["message"].as_str().unwrap_or("").to_owned();
-            if d["code"] == "engine" {
-                engine_failed = true;
-                engine.get_or_insert(message);
-            } else if d["code"] == "format" {
-                format.get_or_insert(message);
+            None => {
+                let mut st = lock(&self.st);
+                facts.warnings = st.last.warnings;
+                st.warnings_updating = true;
+                (false, None, None)
             }
-            // (a kind the user hid in the viewer is not published: counted
-            // in the status, not shown as the editor's problem)
-            if d["kind"]
-                .as_str()
-                .is_some_and(|k| hidden.iter().any(|h| h == k))
-            {
-                continue;
-            }
-            let file = d["file"].as_str().unwrap_or(&main);
-            by.entry(self.uri(file))
-                .or_default()
-                .push(lsp_diagnostic(d));
-        }
-        let gone: Vec<String> = {
-            let mut st = lock(&self.st);
-            let g = st.published.drain().collect();
-            for (uri, ds) in &by {
-                if !ds.is_empty() {
-                    st.published.insert(uri.clone());
-                }
-            }
-            g
         };
-        for g in gone {
-            by.entry(g).or_default();
-        }
-        for (uri, ds) in by {
-            self.notify(
-                "textDocument/publishDiagnostics",
-                json!({"uri": uri, "diagnostics": ds}),
-            );
-        }
         let token = {
             let mut st = lock(&self.st);
             st.last = facts;
@@ -875,6 +862,76 @@ impl Server {
                 None => self.trouble_over(t),
             }
         }
+    }
+
+    /// The diagnostics a build left for later, made now (the editing
+    /// paused): published, and the status's counts with them.
+    pub fn diagnostics(&self, d: &[Value]) {
+        let p = self.publish(d);
+        let state = {
+            let mut st = lock(&self.st);
+            st.last.errors = p.errors;
+            st.last.warnings = p.warnings;
+            st.warnings_updating = false;
+            st.state
+        };
+        self.status(state);
+    }
+
+    /// Diagnostics `d` published by file (a file that had some and has
+    /// none now told so), and what they say.
+    fn publish(&self, d: &[Value]) -> Published {
+        let main = lock(&self.st).main.clone();
+        let mut by: HashMap<String, Vec<Value>> = HashMap::new();
+        by.insert(self.uri(&main), Vec::new());
+        let mut p = Published::default();
+        let hidden = self.host.hidden();
+        for d in d {
+            match d["severity"].as_str() {
+                Some("error") => p.errors += 1,
+                Some("warning") => p.warnings += 1,
+                _ => {}
+            }
+            let message = d["message"].as_str().unwrap_or("").to_owned();
+            if d["code"] == "engine" {
+                p.engine_failed = true;
+                p.engine.get_or_insert(message);
+            } else if d["code"] == "format" {
+                p.format.get_or_insert(message);
+            }
+            // (a kind the user hid in the viewer is not published: counted
+            // in the status, not shown as the editor's problem)
+            if d["kind"]
+                .as_str()
+                .is_some_and(|k| hidden.iter().any(|h| h == k))
+            {
+                continue;
+            }
+            let file = d["file"].as_str().unwrap_or(&main);
+            by.entry(self.uri(file))
+                .or_default()
+                .push(lsp_diagnostic(d));
+        }
+        let gone: Vec<String> = {
+            let mut st = lock(&self.st);
+            let g = st.published.drain().collect();
+            for (uri, ds) in &by {
+                if !ds.is_empty() {
+                    st.published.insert(uri.clone());
+                }
+            }
+            g
+        };
+        for g in gone {
+            by.entry(g).or_default();
+        }
+        for (uri, ds) in by {
+            self.notify(
+                "textDocument/publishDiagnostics",
+                json!({"uri": uri, "diagnostics": ds}),
+            );
+        }
+        p
     }
 
     /// The editor shows `file` (from the root) at `line` and character
@@ -1599,9 +1656,11 @@ mod tests {
             hashes: vec![0; pages],
             history: if errors > 0 { 2 } else { 0 },
             ms: 67.4,
-            diagnostics: (0..errors)
-                .map(|_| json!({"severity": "error", "message": "Undefined control sequence", "line": 3}))
-                .collect(),
+            diagnostics: Some(
+                (0..errors)
+                    .map(|_| json!({"severity": "error", "message": "Undefined control sequence", "line": 3}))
+                    .collect(),
+            ),
             since_ms: None,
             origins: None,
             changed: None,
@@ -1917,9 +1976,9 @@ mod tests {
         s.handle(&json!({"jsonrpc": "2.0", "id": got[0]["id"], "result": {"title": "Retry"}}));
         assert_eq!(*lock(&host.asks), [Ask::Rebuild]);
         let mut b = built(0, 1);
-        b.diagnostics = vec![
+        b.diagnostics = Some(vec![
             json!({"severity": "error", "code": "engine", "message": "it ran past its time limit"}),
-        ];
+        ]);
         lock(&sent).clear();
         s.building();
         s.built(&b);
@@ -1969,10 +2028,10 @@ mod tests {
         s.set_main("main.tex");
         lock(&sent).clear();
         let mut b = built(1, 0);
-        b.diagnostics = vec![
+        b.diagnostics = Some(vec![
             json!({"severity": "warning", "kind": "underfull", "message": "Underfull \\hbox (badness 10000)", "line": 2}),
             json!({"severity": "warning", "kind": "reference", "message": "Reference `x' on page 1 undefined", "line": 5}),
-        ];
+        ]);
         s.built(&b);
         let got = lock(&sent).clone();
         let published: Vec<&Value> = got

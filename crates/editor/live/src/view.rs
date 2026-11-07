@@ -75,8 +75,10 @@ pub struct Built {
     /// TeX's history (0 spotless … 2 errors).
     pub history: i32,
     pub ms: f64,
-    /// Its errors and warnings, each a JSON object.
-    pub diagnostics: Vec<Value>,
+    /// Its errors and warnings, each a JSON object; none: made later,
+    /// when the editing pauses ([`crate::session::Report::diagnostics_pending`],
+    /// [`Viewer::set_diagnostics`]), the last ones shown meanwhile.
+    pub diagnostics: Option<Vec<Value>>,
     /// The time from the change (a save, an editor's keystroke) to now
     /// (none: no change, a cold build): the viewer adds its drawing to it
     /// for the ⚡ chip.
@@ -776,6 +778,26 @@ impl Viewer {
         self.emit(&json!({"event": "written", "exact": true}).to_string());
     }
 
+    /// The last build's diagnostics, each a JSON object, given to the
+    /// viewers (a build's own, or made after it, when the editing paused):
+    /// sent only where they are not the last ones.
+    pub fn set_diagnostics(&self, d: &[Value]) {
+        let items = Value::from(d.to_vec());
+        // (the lock let go before the event: an answer holds the events'
+        // turn and then reads them)
+        let fresh = {
+            let mut last = lock(&self.diagnostics);
+            let fresh = *last != items;
+            if fresh {
+                last.clone_from(&items);
+            }
+            fresh
+        };
+        if fresh {
+            self.emit(&json!({"event": "diagnostics", "items": items}).to_string());
+        }
+    }
+
     /// A build is in: its PDF and pages' hashes kept, the viewers told
     /// (they draw the pages that changed). The pages (from 1) whose hashes
     /// changed, and how many there are.
@@ -800,20 +822,8 @@ impl Viewer {
         let n = b.hashes.len();
         pages.hashes.clone_from(&b.hashes);
         drop(pages);
-        // (the viewers have them already where they are the last ones)
-        let items = Value::from(b.diagnostics.clone());
-        // (the lock let go before the event: an answer holds the events'
-        // turn and then reads them)
-        let fresh = {
-            let mut last = lock(&self.diagnostics);
-            let fresh = *last != items;
-            if fresh {
-                last.clone_from(&items);
-            }
-            fresh
-        };
-        if fresh {
-            self.emit(&json!({"event": "diagnostics", "items": items}).to_string());
+        if let Some(d) = &b.diagnostics {
+            self.set_diagnostics(d);
         }
         if let Some(c) = &b.changed {
             self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
@@ -1370,7 +1380,7 @@ mod tests {
             hashes: Vec::new(),
             history: 0,
             ms: 0.0,
-            diagnostics: Vec::new(),
+            diagnostics: Some(Vec::new()),
             since_ms: None,
             origins: None,
             changed: None,

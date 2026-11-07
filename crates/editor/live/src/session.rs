@@ -331,6 +331,11 @@ pub struct Report {
     /// key are of the same evaluation (`r` with nothing changed), their
     /// diagnostics the same. None: a failed build.
     pub settled: Option<(u64, u64)>,
+    /// An edit's diagnostics at their places are made after the build,
+    /// when the editing pauses ([`Session::diagnostics_now`]): the build
+    /// reports the engine's own at no place, its errors (TeX's included)
+    /// at once; a build with errors has them all at their places now.
+    pub diagnostics_pending: bool,
 }
 
 /// Whether `e`, one of a build's errors ([`Output::errors`]), is a line of
@@ -511,6 +516,12 @@ pub struct Session {
     /// A watch's session: no log laid out after a build (`--log`: with
     /// the exact file when idle, [`Session::write_log`]).
     pub watching: bool,
+    /// The build gives its PDF as the link's layout, written live
+    /// (XeTeX's pages that changed written again after the base's, not
+    /// folded again), for a viewer that keeps it as update sections in
+    /// memory ([`crate::watch::ViewFile`]) where the sink writes none (a
+    /// watch writing no files); the exact file is made when idle.
+    pub view_layout: bool,
     /// `JOB.synctex.gz`'s members made last (`-synctex`).
     synctex: Mutex<crate::synctex::Writer>,
     /// The main text's lines counted by block ([`LineMarks`]).
@@ -640,6 +651,7 @@ impl Session {
             absorb: Absorb::default(),
             absorbed_at: None,
             watching: false,
+            view_layout: false,
             synctex: Mutex::default(),
             lines: LineMarks::default(),
         }
@@ -778,6 +790,7 @@ impl Session {
             diagnostics: Vec::new(),
             format_failed: false,
             settled: None,
+            diagnostics_pending: false,
         };
         let mut text = self.text_now();
         phitex_tex::timeline::lap("session: the text now (copied)");
@@ -1153,7 +1166,9 @@ impl Session {
         let b = self.build.as_ref().expect("built above");
         // (a watch lays no log out; a file written as update sections
         // takes the link's layout, not the exact bytes)
-        let layout = self.sink.updates().then(|| b.pdf_layout()).flatten();
+        let layout = (self.sink.updates() || self.view_layout)
+            .then(|| b.pdf_layout())
+            .flatten();
         let (bytes, log) = if layout.is_some() {
             (Arc::default(), String::new())
         } else if self.watching {
@@ -1164,7 +1179,10 @@ impl Session {
         lap(&mut phases, "output");
         let pdf = layout.is_some() || b.is_pdf();
         let s = &b.stats;
-        let diagnostics = if why == "edit" && !self.job.edit_diagnostics {
+        // (an edit's at no place only: those at their places are low
+        // priority, made off the typing path when it pauses,
+        // `Session::diagnostics_now`, unless the build has errors)
+        let mut diagnostics = if why == "edit" {
             b.unplaced_diagnostics()
         } else {
             b.diagnostics()
@@ -1239,6 +1257,13 @@ impl Session {
                     .collect()
             })
             .collect();
+        // (an edit with errors: its diagnostics at their places at once,
+        // the errors' underlines with them; else made when asked)
+        let defer = why == "edit" && self.job.edit_diagnostics;
+        let diagnostics_pending = defer && errors.is_empty() && internal.is_none();
+        if defer && !diagnostics_pending {
+            diagnostics = b.diagnostics();
+        }
         // (a PDF file's pages: not known until the engine reports them;
         // the viewer counts the PDF's itself and draws each page again)
         lap(&mut phases, "errors");
@@ -1351,6 +1376,7 @@ impl Session {
             warnings,
             format_failed: false,
             settled: Some(b.settled_key()),
+            diagnostics_pending,
             notes: std::iter::once(format!(
                 "{} nodes run of {} live, {} runs, {} cutoffs, {} loop rounds (runs by pass {:?}), realised cp {} nodes; guesses refuted: {} claims, {} effects, {} claim siblings, {} definitions; {} nodes placed, {} freed",
                 s.nodes_run,
@@ -1458,6 +1484,16 @@ impl Session {
     }
 
     /// The main text with the editor's buffer for it, if there is one.
+    /// The last build's diagnostics at their places (TeX's errors and
+    /// warnings, the engine's), made now: an edit's report leaves them
+    /// for when the editing pauses ([`Report::diagnostics_pending`]).
+    pub fn diagnostics_now(&self) -> Vec<phitex_tex::Diagnostic> {
+        self.build
+            .as_ref()
+            .map(phitex_tex::Build::diagnostics)
+            .unwrap_or_default()
+    }
+
     fn text_now(&self) -> Arc<str> {
         let name = plain_name(&self.job.path.to_string_lossy());
         self.buffers
@@ -1491,7 +1527,7 @@ impl Session {
                 self.host.clone(),
                 dir.clone(),
             ),
-            live: self.sink.updates(),
+            live: self.sink.updates() || self.view_layout,
         })
     }
 

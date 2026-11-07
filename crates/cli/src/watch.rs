@@ -501,6 +501,9 @@ struct Last {
     pin_warnings: bool,
 }
 
+/// The status line's word for warnings left for when the editing pauses.
+const WARNINGS_UPDATING: &str = "warnings updating";
+
 /// The last build's warnings, as `w` shows them: at their places where
 /// the diagnostics have them, else summarised from the log by kind.
 fn show_warnings(ui: &crate::ui::Ui, st: crate::ui::Style, s: &Session, l: &Last) {
@@ -776,12 +779,22 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     if writing && !o.exact_file {
         s.set_updates(Some(Arc::default()));
     }
+    // (writing no file, the viewer's PDF kept as update sections in
+    // memory, `ViewFile`: an edit's pages linked live, not folded again
+    // from the first one changed to the end; the exact file made when idle)
+    if !writing && (o.view || lsp.is_some()) {
+        s.view_layout = true;
+    }
     // (since when the PDF file is not the exact one: written when the
     // editor has been idle for `o.idle`)
     let idle_since: std::cell::Cell<Option<Instant>> = std::cell::Cell::new(None);
     // (the last build's origins still to be made: after it is announced,
     // once no event waits; never on the typing path)
     let origins_due = std::cell::Cell::new(false);
+    // (the last build's diagnostics at their places still to be made, and
+    // its evaluation's key: low priority, after the build is announced,
+    // once no event waits; an edit before then drops them)
+    let diags_due: std::cell::Cell<Option<Option<(u64, u64)>>> = std::cell::Cell::new(None);
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let main_file = root.join(&s.job.path);
     let main_rel = s
@@ -1068,6 +1081,16 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             ui.answered(yes.map(|y| if y { "y" } else { "n" }));
             let yes = yes == Some(true);
             if yes {
+                // (a layout no file holds, the viewer's: its exact file)
+                let mut r = r;
+                if r.out.pdf.is_empty()
+                    && let Some(l) = r.out.layout.take()
+                {
+                    match l.exact() {
+                        Ok(b) => r.out.pdf = b,
+                        Err(e) => ui.error(&format!("{e}")),
+                    }
+                }
                 match s.write(&r, true) {
                     Ok(w) => {
                         for (p, _) in &w.files {
@@ -1125,10 +1148,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     let mut account = o.report.map(|full| crate::report::Report::new(t, o, full));
     // (the last output written without errors, and its PDF for the viewer)
     let mut last_pdf = None;
-    let mut last_layout: Option<u64> = None;
+    // (the viewer's PDF as update sections, its exact file made when idle)
+    let view_file = RefCell::new(phitex_live::watch::ViewFile::default());
     // (the viewer's diagnostics and the evaluation they were made of,
     // `Report::settled`)
-    let mut last_diags: Option<((u64, u64), Vec<serde_json::Value>)> = None;
+    let last_diags: RefCell<Option<((u64, u64), Vec<serde_json::Value>)>> = RefCell::new(None);
     let mut last_hashes: Vec<u64> = Vec::new();
     // (`viewer = "zathura"`: --open starts it on the output, once)
     let open_cmd = t.viewer.clone().filter(|_| o.open);
@@ -1211,9 +1235,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     since_ms: None,
                     origins: None,
                     changed: None,
-                    diagnostics: vec![
+                    diagnostics: Some(vec![
                         json!({"severity": "error", "code": "engine", "message": first}),
-                    ],
+                    ]),
                     parts: serde_json::Map::new(),
                 };
                 if let Some(v) = &view {
@@ -1231,6 +1255,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         };
         phitex_tex::timeline::lap("watch: the build's thread joined");
         let failed = !r.out.errors.is_empty();
+        // (an edit's diagnostics at their places left for when the editing
+        // pauses, unless they are the last build's, of the same evaluation)
+        let same_eval =
+            matches!((&*last_diags.borrow(), r.settled), (Some((k, _)), Some(now)) if *k == now);
+        let pending = r.diagnostics_pending && !same_eval;
+        diags_due.set(pending.then_some(r.settled));
         // (`PHITEX_TEX_TIME`: the watch's own time after the build)
         let tw = std::time::Instant::now();
         status.set("writing files");
@@ -1289,22 +1319,20 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             last.borrow_mut().good = Some(out.clone());
         }
         if view.is_some() || lsp.is_some() {
-            // (the file the last build's viewer PDF was read from, the
-            // same chunks: that PDF kept, not read again from disk, a
-            // Grail-sized file each `r`)
-            let layout_hash = r.out.layout.as_ref().map(phitex_pdf::Layout::hash);
-            let kept = layout_hash.is_some() && layout_hash == last_layout && last_pdf.is_some();
-            if view.is_some() && !kept {
-                last_layout = layout_hash;
-                last_pdf = match phitex_live::watch::viewer_pdf(s, &r, || {
+            // (a layout: the viewer's file brought to it, its last bytes
+            // and the objects that changed, nothing read from disk; the
+            // same: that PDF kept)
+            if view.is_some() {
+                let mut vf = view_file.borrow_mut();
+                match phitex_live::watch::viewer_pdf(s, &r, Some(&mut vf), || {
                     written.as_ref().and_then(|p| std::fs::read(p).ok())
                 }) {
-                    Ok(p) => p,
+                    Ok(p) => last_pdf = p,
                     Err(e) => {
-                        ui.warning(&format!("the viewer's PDF of the DVI file: {e}"));
-                        None
+                        ui.warning(&format!("the viewer's PDF: {e}"));
+                        last_pdf = None;
                     }
-                };
+                }
             }
             let log = s
                 .job
@@ -1322,13 +1350,16 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 since_ms: since.map(|t| t.elapsed().as_secs_f64() * 1e3),
                 origins: None,
                 changed: None,
-                diagnostics: match (&last_diags, r.settled) {
+                diagnostics: match (&*last_diags.borrow(), r.settled) {
                     // (the evaluation the last build's were made of: those)
-                    (Some((k, d)), Some(now)) if *k == now => d.clone(),
+                    (Some((k, d)), Some(now)) if *k == now => Some(d.clone()),
+                    // (made when the editing pauses: the last ones shown
+                    // meanwhile)
+                    _ if pending => None,
                     _ => {
                         let d = diagnostics(s, &r, &log);
-                        last_diags = r.settled.map(|k| (k, d.clone()));
-                        d
+                        *last_diags.borrow_mut() = r.settled.map(|k| (k, d.clone()));
+                        Some(d)
                     }
                 },
                 parts: Built::parts_of(s, &r),
@@ -1349,7 +1380,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     Some(p) if p.extension().is_some_and(|e| e == "pdf") => {
                         Some(crate::lsp::Pdf::File(p.clone()))
                     }
-                    _ => last_pdf.clone().map(crate::lsp::Pdf::Bytes),
+                    // (no file written: the exact file of the layout, made
+                    // when asked, not the viewer's update sections)
+                    _ => match &r.out.layout {
+                        Some(l) => Some(crate::lsp::Pdf::Layout(l.clone())),
+                        None => last_pdf.clone().map(crate::lsp::Pdf::Bytes),
+                    },
                 };
                 if pdf.is_some() {
                     l.set_pdf(pdf);
@@ -1382,15 +1418,25 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // keeps the last change's time to the screen)
         let noop = !failed && builds > 1 && nodes == 0 && changed.is_empty();
         let tpl = std::time::Instant::now();
-        let placed = (
-            crate::problems::shown_count(&r.diagnostics, false),
-            crate::problems::shown_count(&r.diagnostics, true),
-        );
+        // (pending: no errors, and the last warnings counted until they
+        // are made again, said to be updating)
+        let placed = if pending {
+            (0, last.borrow().placed.1)
+        } else if same_eval && r.diagnostics_pending {
+            last.borrow().placed
+        } else {
+            (
+                crate::problems::shown_count(&r.diagnostics, false),
+                crate::problems::shown_count(&r.diagnostics, true),
+            )
+        };
         phitex_tex::timeline::lap("watch: problems placed");
         if phitex_tex::tex_time() {
             eprintln!("watch phases: problems placed {:?}", tpl.elapsed());
         }
-        let warnings: usize = if r.diagnostics.is_empty() {
+        let warnings: usize = if pending || (same_eval && r.diagnostics_pending) {
+            placed.1
+        } else if r.diagnostics.is_empty() {
             crate::warnings::summarize(&r.log_text())
                 .iter()
                 .map(|w| w.1)
@@ -1457,7 +1503,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         {
             tail.push(st.cyan(&format!("{p:.1}× parallel")));
         }
-        if warnings > 0 {
+        if warnings > 0 && !pending {
             tail.push(st.yellow(&format!(
                 "{warnings} warning{} (w)",
                 if warnings == 1 { "" } else { "s" }
@@ -1609,7 +1655,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     ui.line(line);
                 }
             }
-            if l.pin_warnings {
+            if l.pin_warnings && !pending {
                 show_warnings(ui, st, s, &l);
             }
         }
@@ -1658,7 +1704,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             "wall_ms": r.wall.as_secs_f64() * 1e3,
             "stats": build_info,
             "errors": r.out.errors,
-            "diagnostics": r.engine_diagnostics(),
+            // (none yet: the `diagnostics` event says them when made)
+            "diagnostics": (!pending).then(|| r.engine_diagnostics()),
         }));
         phitex_tex::timeline::lap("watch: the build event written");
         let trep = std::time::Instant::now();
@@ -1701,7 +1748,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             brief.push(format!("{n} page{}", if n == 1 { "" } else { "s" }));
         }
         brief.push(ms(r.wall));
-        if warnings > 0 {
+        if pending {
+            brief.push(WARNINGS_UPDATING.to_owned());
+        } else if warnings > 0 {
             brief.push(format!(
                 "{warnings} warning{}",
                 if warnings == 1 { "" } else { "s" }
@@ -1728,7 +1777,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if phitex_tex::tex_time() {
             eprintln!("watch phases: after the event {:?}", tevent.elapsed());
         }
-        last.borrow_mut().diags = std::mem::take(&mut r.diagnostics);
+        // (pending, or the same evaluation's: the last ones kept until made)
+        if !pending && !(same_eval && r.diagnostics_pending) {
+            last.borrow_mut().diags = std::mem::take(&mut r.diagnostics);
+        }
         // (nothing written: the last build kept, for the way out's question)
         if writing {
             drop(r);
@@ -1769,6 +1821,65 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (the diff against a past version, and what the viewer asked of it)
     let mut comparing: Option<crate::compare::Compare> = None;
     let mut diff_asks: Vec<Ask> = Vec::new();
+    // (the diagnostics the last build left for later, made now: given to
+    // the viewers and the editor, counted, said as an event)
+    let late_diagnostics = |s: &Session| {
+        let Some(key) = diags_due.take() else {
+            return;
+        };
+        let ds = s.diagnostics_now();
+        let placed = (
+            crate::problems::shown_count(&ds, false),
+            crate::problems::shown_count(&ds, true),
+        );
+        let engine = ds
+            .iter()
+            .filter(|d| d.severity == phitex_tex::Severity::Diagnostic)
+            .count();
+        if view.is_some() || lsp.is_some() {
+            let d = phitex_live::watch::late_diagnostics(s, &ds);
+            if let Some(v) = &view {
+                v.set_diagnostics(&d);
+            }
+            if let Some(l) = &lsp {
+                l.diagnostics(&d);
+            }
+            *last_diags.borrow_mut() = key.map(|k| (k, d));
+        }
+        let builds = {
+            let mut l = last.borrow_mut();
+            l.placed = placed;
+            l.diags = ds;
+            if let Some((b, _)) = l.build.as_mut() {
+                let n = placed.1;
+                let now = if n == 0 {
+                    String::new()
+                } else {
+                    format!("{n} warning{}", if n == 1 { "" } else { "s" })
+                };
+                *b = b.replace(
+                    &format!(" · {WARNINGS_UPDATING}"),
+                    &if now.is_empty() {
+                        now
+                    } else {
+                        format!(" · {now}")
+                    },
+                );
+            }
+            show(ui, &l);
+            if l.pin_warnings {
+                show_warnings(ui, st, s, &l);
+            }
+            l.builds
+        };
+        ui.event(&json!({
+            "event": "diagnostics",
+            "build": builds,
+            "diagnostics": engine,
+            "warnings": placed.1,
+            "errors": placed.0,
+        }));
+    };
     // (no event for a while: the session is idle, the exact PDF file and,
     // with `--log`, the log written then; the records are stored as each
     // build settles)
@@ -1789,6 +1900,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         }
                     }
                 }
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        // (then, nothing waiting still, the diagnostics left for later)
+        if diags_due.get().is_some() && !origins_due.get() && held.is_empty() {
+            match rx.try_recv() {
+                Ok(e) => held.push_back(e),
+                Err(mpsc::TryRecvError::Empty) => late_diagnostics(&s),
                 Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
@@ -1820,8 +1939,25 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 })
                                 .expect("a thread");
                         }
-                        // (exact already: said all the same)
-                        _ => held.push_back((Instant::now(), Event::Compacted(b, Ok(false)))),
+                        // (no file, or exact already: the viewer's file made
+                        // exact on a thread of its own where it is not,
+                        // then said all the same)
+                        _ => match view_file.borrow().to_compact() {
+                            Some(l) => {
+                                let tx = compacted.clone();
+                                std::thread::Builder::new()
+                                    .name("phitex-watch-exact".into())
+                                    .spawn(move || {
+                                        let r =
+                                            l.exact().map(|_| false).map_err(|e| format!("{e}"));
+                                        let _ = tx.send((Instant::now(), Event::Compacted(b, r)));
+                                    })
+                                    .expect("a thread");
+                            }
+                            None => {
+                                held.push_back((Instant::now(), Event::Compacted(b, Ok(false))))
+                            }
+                        },
                     }
                     continue;
                 }
@@ -1903,6 +2039,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                             ui.line(&e);
                         }
                     }
+                    // (asked while they wait: made now)
+                    Key::Problems | Key::Warnings
+                        if diags_due.get().is_some() && {
+                            late_diagnostics(&s);
+                            false
+                        } => {}
                     Key::Problems if last.borrow().placed.0 > 0 => {
                         let l = last.borrow();
                         for p in crate::problems::rendered_of(
@@ -2016,7 +2158,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 // (the file on disk is exact: written now (true), or
                 // already (false: nothing to compact, or a build since,
                 // which leaves it not exact and says nothing))
-                Event::Compacted(b, Ok(wrote)) => {
+                Event::Compacted(b, Ok(_)) => {
                     let exact = s.updates().is_none_or(|u| {
                         u.lock().unwrap_or_else(PoisonError::into_inner).is_exact()
                     });
@@ -2028,15 +2170,18 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                             "build": b,
                             "output": out.as_ref().map(|p| p.display().to_string()),
                         }));
-                        if let Some(v) = &view {
-                            match &out {
-                                Some(p) if wrote => {
-                                    if let Ok(b) = std::fs::read(p) {
-                                        v.pdf_replaced(Some(session::shared(&b)));
-                                    }
-                                }
-                                _ => v.written_exact(),
-                            }
+                    }
+                    // (the viewer's file made exact too, from the layout's
+                    // exact file the compaction made: nothing read from
+                    // disk; a build since has its own)
+                    if exact
+                        && b == last.borrow().builds
+                        && let Some(v) = &view
+                    {
+                        match view_file.borrow_mut().compact() {
+                            Ok(Some(pdf)) => v.pdf_replaced(Some(pdf)),
+                            Ok(None) => v.written_exact(),
+                            Err(e) => ui.error(&e),
                         }
                     }
                 }

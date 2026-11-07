@@ -45,6 +45,9 @@ pub struct Document {
     output: Option<(&'static str, Arc<Vec<u8>>)>,
     /// Whether the last build's origins are still to be made.
     origins_due: bool,
+    /// Whether the last build's diagnostics are still to be made
+    /// ([`crate::session::Report::diagnostics_pending`]).
+    diagnostics_due: bool,
     /// The language server attached ([`Document::lsp`]): told each
     /// build's start, progress and end.
     lsp: Lsp,
@@ -182,6 +185,7 @@ impl Document {
             builds: 0,
             output: None,
             origins_due: false,
+            diagnostics_due: false,
             lsp,
         }
     }
@@ -302,6 +306,11 @@ impl Document {
             // the pages asked after the build before them, not after
             // them, Grail's 21 ms a keystroke)
             self.origins_now();
+        } else if self.diagnostics_due && !self.viewer.has_asks() {
+            // (then, in a step of their own, the diagnostics the build
+            // left for later: low priority, never on the typing path; an
+            // edit before them drops them, its build has its own)
+            self.diagnostics_now();
         }
         std::mem::take(&mut *lock(&self.events))
     }
@@ -310,7 +319,21 @@ impl Document {
     /// [`Document::step`] does it when nothing is asked; a host that
     /// steps the document steps it again, after what waits.
     pub fn pending(&self) -> bool {
-        self.origins_due
+        self.origins_due || self.diagnostics_due
+    }
+
+    /// The diagnostics the last build left for later, made and given to
+    /// the viewer and the language server; [`Document::step`] makes them
+    /// once no ask waits and the origins are made.
+    pub fn diagnostics_now(&mut self) {
+        if !std::mem::take(&mut self.diagnostics_due) {
+            return;
+        }
+        let d = crate::watch::late_diagnostics(&self.session, &self.session.diagnostics_now());
+        self.viewer.set_diagnostics(&d);
+        if let Some(l) = self.lsp_server() {
+            l.diagnostics(&d);
+        }
     }
 
     /// The pages' origins (glyph to source, SyncTeX's) of the last build,
@@ -346,9 +369,9 @@ impl Document {
                     since_ms: None,
                     origins: None,
                     changed: None,
-                    diagnostics: vec![
+                    diagnostics: Some(vec![
                         json!({"severity": "error", "code": "engine", "kind": "error", "message": first}),
-                    ],
+                    ]),
                     parts: serde_json::Map::new(),
                 };
                 v.built(&failed);
@@ -366,7 +389,7 @@ impl Document {
             s.write(&r, true)
         };
         let main = written.as_ref().ok().and_then(|w| w.main.clone());
-        let pdf = viewer_pdf(s, &r, || {
+        let pdf = viewer_pdf(s, &r, None, || {
             main.as_deref().and_then(|p: &Path| s.host().read(p))
         });
         let mut errors = r.out.errors.clone();
@@ -401,9 +424,11 @@ impl Document {
             // typing path, `Document::origins_now`)
             origins: None,
             changed: None,
-            diagnostics: diagnostics(s, &r, &log),
+            // (an edit's at their places later, `Document::diagnostics_now`)
+            diagnostics: (!r.diagnostics_pending).then(|| diagnostics(s, &r, &log)),
             parts: Built::parts_of(s, &r),
         };
+        self.diagnostics_due = r.diagnostics_pending;
         v.built(&built);
         if let Some(l) = &lsp {
             l.built(&built);
@@ -919,6 +944,109 @@ mod tests {
         assert_eq!(built["why"], "doc.tex (editor)", "{ev:?}");
         let p = d.request(&json!({"id": 8, "op": "pages"}));
         assert_eq!(p["json"]["pages"].as_array().map(Vec::len), Some(3), "{p}");
+    }
+
+    /// An edit's warnings at their places are made after its build, in a
+    /// step of their own once nothing is asked (never on the typing
+    /// path), and reach the viewer and the language server then; an
+    /// edit with an error has its diagnostics at once.
+    #[test]
+    fn an_edits_warnings_come_after_its_build() {
+        let doc = |boxes: usize, error: bool| {
+            let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 \\hsize=100pt \\vsize=100pt \\output={\\shipout\\box255} ".to_owned();
+            for _ in 0..boxes {
+                t.push_str("\\hbox to 10pt{\\vrule width 50pt}\n");
+            }
+            if error {
+                t.push_str("\\undefinedcs\n");
+            }
+            t.push_str("\\end\n");
+            t
+        };
+        let mut d = Document::new(
+            session(&doc(1, false), Arc::new(Memory::default())),
+            "doc.tex",
+        );
+        let sent: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let s = sent.clone();
+        let server = d.lsp(Box::new(move |v| lock(&s).push(v.clone())), None);
+        server.handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": "file:///p"}}));
+        server.handle(&json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}));
+        let warnings = |e: &Value| {
+            e["items"].as_array().map_or(0, |v| {
+                v.iter().filter(|d| d["severity"] == "warning").count()
+            })
+        };
+        let ev = d.step();
+        let cold = ev
+            .iter()
+            .find(|e| e["event"] == "diagnostics")
+            .expect("the cold build's");
+        assert_eq!(warnings(cold), 1, "{ev:?}");
+        while d.pending() {
+            d.step();
+        }
+        lock(&sent).clear();
+        d.request(&json!({"id": 2, "op": "set_file", "file": "doc.tex", "text": doc(3, false)}));
+        let ev = d.step();
+        assert!(ev.iter().any(|e| e["event"] == "build"), "{ev:?}");
+        assert!(
+            ev.iter().all(|e| e["event"] != "diagnostics"),
+            "not on the typing path: {ev:?}"
+        );
+        let status = lock(&sent)
+            .iter()
+            .rev()
+            .find(|m| m["method"] == "phitex/status")
+            .cloned();
+        assert_eq!(
+            status
+                .as_ref()
+                .map(|m| m["params"]["warnings_updating"].clone()),
+            Some(json!(true)),
+            "{status:?}"
+        );
+        assert!(d.pending());
+        let mut later = Vec::new();
+        while d.pending() {
+            later.extend(d.step());
+        }
+        let late = later
+            .iter()
+            .find(|e| e["event"] == "diagnostics")
+            .expect("made once idle");
+        assert_eq!(warnings(late), 3, "{later:?}");
+        let got = lock(&sent).clone();
+        let published = got
+            .iter()
+            .rev()
+            .find(|m| m["method"] == "textDocument/publishDiagnostics")
+            .expect("published");
+        assert_eq!(
+            published["params"]["diagnostics"].as_array().map(Vec::len),
+            Some(3),
+            "{published}"
+        );
+        let status = got
+            .iter()
+            .rev()
+            .find(|m| m["method"] == "phitex/status")
+            .expect("a status");
+        assert_eq!(status["params"]["warnings"], 3, "{status}");
+        assert_eq!(status["params"]["warnings_updating"], false, "{status}");
+        // (an error: at once, at its place)
+        d.request(&json!({"id": 3, "op": "set_file", "file": "doc.tex", "text": doc(1, true)}));
+        let ev = d.step();
+        let now = ev
+            .iter()
+            .find(|e| e["event"] == "diagnostics")
+            .expect("with the build");
+        assert!(
+            now["items"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|d| d["severity"] == "error" && d["line"] == 2)),
+            "{now}"
+        );
     }
 
     /// A document's language server (the wasm core's): told the cold
