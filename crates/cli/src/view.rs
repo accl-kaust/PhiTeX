@@ -546,6 +546,47 @@ pub fn open_browser(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    /// Events reach a connected viewer as they are made, while it sends
+    /// nothing: the socket is waited on without its lock. Each event
+    /// waited for the reader's poll to give up (20 ms), `r` with nothing
+    /// changed 33 ms to the viewer for its six events.
+    #[test]
+    fn events_reach_a_quiet_viewer_at_once() {
+        let v = View::start(None, Some(0), std::path::Path::new("/x/quiet/main.tex"))
+            .expect("the viewer");
+        let url = v.url.replace("http://", "ws://") + "ws";
+        let host = url
+            .trim_start_matches("ws://")
+            .split('/')
+            .next()
+            .expect("host")
+            .to_owned();
+        let tcp = TcpStream::connect(&host).expect("connect");
+        let (mut ws, _) = tungstenite::client(url.as_str(), tcp).expect("upgrade");
+        // (the server has the client: its first broadcast reaches it)
+        let t = std::time::Instant::now();
+        while lock(&v.shared.clients).is_empty() && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        let t = std::time::Instant::now();
+        for _ in 0..10 {
+            v.shared.viewer.written_exact();
+        }
+        let sent = t.elapsed();
+        let mut got = 0;
+        while got < 10 {
+            if let Ok(Message::Text(_)) = ws.read() {
+                got += 1;
+            }
+        }
+        assert!(
+            sent < Duration::from_millis(50),
+            "ten events took {sent:?} to send to a quiet viewer"
+        );
+    }
 
     #[test]
     fn a_documents_port_is_its_own_and_in_range() {
