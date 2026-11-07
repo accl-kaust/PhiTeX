@@ -1145,7 +1145,7 @@ fn latex_input_in_picture_first_edit() {
 }
 
 /// A run again costs no more than its first run: a one-word edit of a
-/// paragraph holding a TikZ picture of many circles (the frontends'
+/// paragraph holding a `TikZ` picture of many circles (the frontends'
 /// 12-line document: 16 s an edit for a 5.8 s cold build) makes fewer
 /// values than the cold build made. The edited node's run took a
 /// checkpoint of the picture's state every 600 commands, whatever it
