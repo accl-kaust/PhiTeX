@@ -330,6 +330,15 @@ function framePart(json: string | undefined): string {
   );
 }
 
+/** The last page drawn (Strips' `data-frame`) in words, for Copy debug info: framePart's numbers as a line. */
+function frameText(json: string): string {
+  const f = JSON.parse(json) as { page: number; inView: boolean; drawn: number; kept: number; probe: number; draw: number; watch: number; request: number; decode: number };
+  return (
+    `page ${f.page}${f.inView ? " (in view)" : ""} in ${dur(f.request + f.decode)}: finding what changed ${dur(f.probe)}, drawing ${dur(f.draw)}, ` +
+    `waiting for the engine ${dur(Math.max(0, f.request - f.watch))}, decoding ${dur(f.decode)}; ${f.drawn} slices drawn, ${f.kept} kept`
+  );
+}
+
 /** The session's names for a build's parts, as the popover says them. */
 const PART_NAMES: Record<string, string> = {
   "first paint": "Typesetting this page",
@@ -2627,6 +2636,31 @@ export class Panel {
     );
   }
 
+  /** The last build's parts as its host measured them (the watch's stats), in order, and work done alongside them (not in the build's time): [name, ms]. */
+  private phases: { parts: [string, number][]; beside: [string, number][] } | null = null;
+
+  /** The last build's parts (`parts` add up to its time; `beside`: done at the same time, said under the bar). */
+  buildParts(parts: [string, number][], beside: [string, number][] = []): void {
+    this.phases = { parts, beside };
+    if (!this.$("#m-time").hidden) this.timing();
+  }
+
+  /** The timing popover's "Where the last build's time went": its parts as a bar, like the opening's. */
+  private phasesPart(): string {
+    const p = this.phases;
+    if (!p) return "";
+    const parts = p.parts.filter(([, ms]) => ms >= 1);
+    if (!parts.length) return "";
+    const beside = p.beside.filter(([, ms]) => ms >= 1).map(([n, ms]) => `${n} ${dur(ms)}`).join(", ");
+    return (
+      `<div class="row"><span class="k">Where the last build's time went</span><span class="v"></span>` +
+      `<div class="tbar">${parts.map(([, ms], i) => `<i class="c${i % 4}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
+      `<div class="legend">${parts.map(([n, ms], i) => `<span><i class="c${i % 4}"></i>${esc(n)} ${esc(dur(ms))}</span>`).join("")}</div>` +
+      (beside ? `<span class="note">${esc(`Alongside: ${beside}`)}</span>` : "") +
+      `</div>`
+    );
+  }
+
   /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
   private downloads: { n: number; bytes: number; ms: number; since?: number } = { n: 0, bytes: 0, ms: 0 };
 
@@ -2733,6 +2767,7 @@ export class Panel {
     el.innerHTML =
       (head ? `<div class="head"><span>${esc(String(head[0]))}</span><b>${esc(dur(head[1] as number))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) +
       this.walkPart() +
+      this.phasesPart() +
       this.timeBars() +
       this.downloadsPart() +
       rows +
@@ -2770,7 +2805,7 @@ export class Panel {
     const t = this.times;
     if (t.first !== undefined) out.push(`first build ${dur(t.first)}${t.edits.length ? `; edits ${t.edits.length}, last ${dur(t.edits[t.edits.length - 1])}, median ${dur([...t.edits].sort((a, b) => a - b)[t.edits.length >> 1])}` : ""}`);
     const f = this.$("#stripsline").dataset.frame;
-    if (f) out.push(`last page drawn: ${f}`);
+    if (f) out.push(`last page drawn: ${frameText(f)}`);
     const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
     out.push(`machine: ${nav.hardwareConcurrency ?? "?"} cores, ${nav.userAgentData?.platform || nav.platform || "?"}; ${nav.userAgent}`);
     return out.join("\n") + "\n";
