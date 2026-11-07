@@ -3071,12 +3071,22 @@ impl Run<'_, '_> {
                     ctx.push(format!("k{}", l.kind));
                 }
             }
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let frames: Vec<&str> = bt
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.split(':').next().is_some_and(|n| n.parse::<u32>().is_ok()))
+                .skip(1)
+                .take(14)
+                .collect();
             eprintln!(
-                "dline-trace: node {} op {:?} cur {} | {}",
+                "dline-trace: node {} op {:?} cur {} sink {:?} | {} | bt {}",
                 self.cx.node().raw(),
                 self.cx.op(),
                 v.render(self.cur.tok.encode(v)),
-                ctx.join(" | ")
+                self.lt.sink,
+                ctx.join(" | "),
+                frames.join(" < ")
             );
         }
         Ok(Some(int_of(self.v, x) + i64::from(own.1)))
