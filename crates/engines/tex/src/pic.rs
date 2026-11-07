@@ -452,7 +452,13 @@ impl Run<'_, '_> {
             // them was asked again, then again when the child had run
             // (Grail's changed drawing: 198 paragraphs checked, the first
             // load of an 8 pt font gone for that while))
-            if self.pic_guess(i, &body) {
+            // (a guess only on my first run of an evaluation, an edit's: run
+            // again in it, the old output is one this evaluation has moved
+            // already, and pictures guessed on, one after another, were
+            // each placed anew and asked the run again with their real
+            // output, one a pass: lie-hasse -j4, its piece of diagrams run
+            // 25 times on new children 671, 701, 712, ...)
+            if !self.cx.ran_this_evaluation() && self.pic_guess(i, &body) {
                 return Ok(true);
             }
             // (none: the picture read here, inline, as TeX reads it, and
