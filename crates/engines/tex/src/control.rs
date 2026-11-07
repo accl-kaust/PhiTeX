@@ -3052,6 +3052,33 @@ impl Run<'_, '_> {
             self.dline_reads.push(f);
         }
         self.note_lines_read();
+        // (observe, `PHITEX_DLINE_TRACE`: who reads a piece's line number)
+        if crate::exec::obs_flag!("PHITEX_DLINE_TRACE") {
+            let v = self.v;
+            let mut ctx = Vec::new();
+            for l in self.input.levels.iter().rev().take(8) {
+                if l.kind == crate::input::kind::TOKS {
+                    let toks: Vec<String> = self
+                        .input
+                        .arena
+                        .get(l.rest())
+                        .iter()
+                        .take(10)
+                        .map(|t| v.render(t.encode(v)))
+                        .collect();
+                    ctx.push(format!("t{}:{}", l.ty, toks.join(" ")));
+                } else {
+                    ctx.push(format!("k{}", l.kind));
+                }
+            }
+            eprintln!(
+                "dline-trace: node {} op {:?} cur {} | {}",
+                self.cx.node().raw(),
+                self.cx.op(),
+                v.render(self.cur.tok.encode(v)),
+                ctx.join(" | ")
+            );
+        }
         Ok(Some(int_of(self.v, x) + i64::from(own.1)))
     }
 
