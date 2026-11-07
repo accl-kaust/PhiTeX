@@ -123,7 +123,9 @@ pub(crate) struct PicChild {
     /// them ([`Run::contribute_stream`]).
     pub streams: Vec<ValueId>,
     /// The parent's steps it started from ([`PARENT_STEPS`]).
-    base_steps: Vec<(crate::state::Loc, i32)>,
+    /// By field: a location past the fixed ones is the state's spill's,
+    /// which a rollback renumbers.
+    base_steps: Vec<(Field, i32)>,
 }
 
 /// How the parent's input skips the body once the child's output is taken.
@@ -981,7 +983,7 @@ impl Run<'_, '_> {
                 if self.st.add(v, loc, c, int_of(v, g) != 0)
                     && let Some(p) = self.pic_child.as_mut()
                 {
-                    p.base_steps.push((loc, c));
+                    p.base_steps.push((Field(f), c));
                 }
             }
         }
@@ -1121,7 +1123,7 @@ impl Run<'_, '_> {
             .map(|p| p.base_steps.clone())
             .unwrap_or_default()
             .into_iter()
-            .map(|(l, c)| (self.loc_field(l), i64::from(c)))
+            .map(|(f, c)| (f, i64::from(c)))
             .collect();
         self.publication()
             .into_iter()
