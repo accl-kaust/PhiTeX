@@ -1350,17 +1350,17 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 since_ms: since.map(|t| t.elapsed().as_secs_f64() * 1e3),
                 origins: None,
                 changed: None,
-                diagnostics: match (&*last_diags.borrow(), r.settled) {
+                diagnostics: if same_eval {
                     // (the evaluation the last build's were made of: those)
-                    (Some((k, d)), Some(now)) if *k == now => Some(d.clone()),
+                    last_diags.borrow().as_ref().map(|x| x.1.clone())
+                } else if pending {
                     // (made when the editing pauses: the last ones shown
                     // meanwhile)
-                    _ if pending => None,
-                    _ => {
-                        let d = diagnostics(s, &r, &log);
-                        *last_diags.borrow_mut() = r.settled.map(|k| (k, d.clone()));
-                        Some(d)
-                    }
+                    None
+                } else {
+                    let d = diagnostics(s, &r, &log);
+                    *last_diags.borrow_mut() = r.settled.map(|k| (k, d.clone()));
+                    Some(d)
                 },
                 parts: Built::parts_of(s, &r),
             };
