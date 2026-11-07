@@ -143,6 +143,24 @@ fn tree(root: &Path) -> (Vec<String>, Vec<PathBuf>) {
     (files, dirs)
 }
 
+/// Why the shell did not run the command at all: its own 127 (not
+/// found) and 126 (found but not runnable), its message the why; any
+/// other status is the command's own, which says its errors (empty).
+fn shell_why(status: i32, stderr: &[u8]) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    match std::process::ExitStatus::from_raw(status).code() {
+        Some(c @ (126 | 127)) => {
+            let said = String::from_utf8_lossy(stderr);
+            let said = said.lines().rev().find(|l| !l.trim().is_empty());
+            said.map_or_else(
+                || format!("the shell could not run it (status {c})"),
+                |l| l.trim().to_owned(),
+            )
+        }
+        _ => String::new(),
+    }
+}
+
 /// A name the engine hands that stays inside the scratch directory.
 fn inside(name: &str) -> bool {
     let p = Path::new(name);
@@ -208,20 +226,7 @@ impl ShellHook for ProcessHook {
                 return fail(format!("/bin/sh could not start: {e}"));
             }
         };
-        // (the shell's own 127, not found, and 126, found but not
-        // runnable: the command never ran, the shell's message the why;
-        // any other status is the command's own, which says its errors)
-        let why = match std::process::ExitStatus::from_raw(status).code() {
-            Some(c @ (126 | 127)) => {
-                let said = String::from_utf8_lossy(&stderr);
-                let said = said.lines().rev().find(|l| !l.trim().is_empty());
-                said.map_or_else(
-                    || format!("the shell could not run it (status {c})"),
-                    |l| l.trim().to_owned(),
-                )
-            }
-            _ => String::new(),
-        };
+        let why = shell_why(status, &stderr);
         // (what it read, before this reads anything back: a directory
         // listed, all of it)
         let read = if track && !dirs.iter().any(|d| d.is_dir() && was_read(d)) {
