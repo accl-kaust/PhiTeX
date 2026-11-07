@@ -1040,16 +1040,23 @@ fn a_font_first_loaded_later_reruns_no_appender_between() {
         common::first_difference(&out, &cold_out).is_none(),
         "the output is a cold build's"
     );
-    let readers: Vec<String> = b
+    // (made to run again for the font, and not standing on the reads of
+    // their run before: their text typeset again)
+    let mut readers: Vec<u64> = b
         .stats
         .reruns
         .iter()
-        .filter(|(_, op, why)| *op == "exec" && why.contains("cs:Fa"))
-        .map(|(n, _, _)| b.describe_node(*n))
+        .filter(|(n, op, why)| {
+            *op == "exec" && why.contains("cs:Fa") && !b.stats.stood.contains(n)
+        })
+        .map(|(n, _, _)| *n)
         .collect();
+    readers.sort_unstable();
+    readers.dedup();
+    let shown: Vec<String> = readers.iter().map(|&n| b.describe_node(n)).collect();
     assert!(
-        readers.len() <= 1,
-        "only the new first loader of the font runs for it: {readers:?}"
+        readers.len() == 1 && shown[0].contains("Paragraph three"),
+        "only the new first loader of the font runs for it: {shown:?}"
     );
 }
 

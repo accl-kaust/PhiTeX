@@ -1609,6 +1609,7 @@ impl Engine {
                 e.1 += k;
             }
             rep.rerun_causes.append(&mut log.causes);
+            rep.stood.append(&mut log.stood);
             rep.capped.append(&mut log.capped);
             for (f, k) in log.refuted_by_field.drain() {
                 *rbf.entry(f).or_default() += k;

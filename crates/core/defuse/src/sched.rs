@@ -205,6 +205,9 @@ pub(crate) struct Pool {
 #[derive(Default)]
 pub(crate) struct WorkerLog {
     pub(crate) runs_by_op: FxHashMap<OpId, u64>,
+    /// The nodes whose run stood (`Ctx::last_run_stands`): counted as
+    /// runs, nothing of their operation ran.
+    pub(crate) stood: Vec<NodeId>,
     /// Nodes the commits' placements made, by operation.
     pub(crate) placed_by_op: FxHashMap<OpId, u64>,
     /// Placements relocated instead of remade (`commit::relocate`), and
@@ -2432,6 +2435,9 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     {
         let mut log = w.log.lock();
         *log.runs_by_op.entry(node.op()).or_default() += 1;
+        if stands.is_some() {
+            log.stood.push(node.id);
+        }
         if crate::obs::enabled() {
             log.run_times.push((n, Duration::from_nanos(run_ns)));
         }
