@@ -1914,6 +1914,8 @@ fn inputlineno_in_a_resumed_piece_is_the_file_line_below_it() {
 }
 
 /// The native runner of `\write18`'s commands, as the CLI has it.
+/// (the tests use part of it: what only the CLI calls is not dead code)
+#[allow(dead_code)]
 #[path = "../../../cli/src/shell.rs"]
 mod process_hook;
 
