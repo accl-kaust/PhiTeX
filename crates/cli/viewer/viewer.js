@@ -6481,13 +6481,15 @@ function timing(s) {
 var lastStats;
 function statsLines(s) {
   const n = s.nodes ?? {};
-  const gb = (b) => `${(b / 1e9).toFixed(1)} GB`;
+  const size = (b) => b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`;
+  const pc = s.pages_changed;
+  const changed = pc === void 0 ? "?" : pc.length && pc.length <= 8 ? `${pc.length} (${pc.join(", ")})` : String(pc.length);
   return [
     `PhiTeX ${s.version ?? "?"} \xB7 ${s.engine ?? "?"} \xB7 files from ${s.files === "shelf" ? `Shelf ${s.files_release ?? "?"}` : s.files === "texlive" ? "TeX Live" : "?"}`,
     `build ${s.build ?? "?"} (${s.why ?? "?"}) ${s.ok === false ? "failed" : "ok"} in ${dur2(s.wall_ms ?? 0)}: ${Object.entries(s.phases_ms ?? {}).map(([k, ms]) => `${k} ${dur2(ms)}`).join(" \xB7 ")}`,
-    `nodes ${n.ran ?? "?"} ran, ${n.kept ?? "?"} kept of ${n.live ?? "?"} \xB7 ${s.runs ?? "?"} runs, ${s.rounds ?? "?"} rounds \xB7 pages ${s.pages_changed ?? "?"} of ${s.pages ?? "?"} changed`,
-    `parallel ${s.cores_busy == null ? "\u2014" : s.cores_busy.toFixed(1)} of ${s.threads ?? "?"} threads busy \xB7 busy ${dur2(s.busy_ms ?? 0)}, engine ${dur2(s.engine_ms ?? 0)}, wasted ${dur2(s.wasted_ms ?? 0)}`,
-    `memory ${s.resident_kb === void 0 ? "?" : gb(s.resident_kb * 1024)} resident, values ${s.values_bytes === void 0 ? "?" : gb(s.values_bytes)}`,
+    `nodes ${n.ran ?? "?"} ran, ${n.kept ?? "?"} kept of ${n.live ?? "?"} \xB7 ${s.runs ?? "?"} runs, ${s.rounds ?? "?"} rounds \xB7 pages ${changed} of ${s.pages ?? "?"} changed`,
+    `${s.cores_busy == null ? `threads ${s.threads ?? "?"}` : `parallel ${s.cores_busy.toFixed(1)} of ${s.threads ?? "?"} threads busy`} \xB7 busy ${dur2(s.busy_ms ?? 0)}, engine ${dur2(s.engine_ms ?? 0)}, wasted ${dur2(s.wasted_ms ?? 0)}`,
+    `memory ${s.resident_kb === void 0 ? "?" : size(s.resident_kb * 1024)} resident, values ${s.values_bytes === void 0 ? "?" : size(s.values_bytes)}`,
     `hints ${Object.entries(s.hints ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "\u2014"}`
   ];
 }

@@ -130,7 +130,7 @@ function timing(s: Settled): [string, string] {
 type Stats = {
   build?: number; why?: string; version?: string; engine?: string; files?: "texlive" | "shelf"; files_release?: string | null;
   wall_ms?: number; phases_ms?: Record<string, number>; nodes?: { ran?: number; kept?: number; live?: number }; runs?: number; rounds?: number;
-  pages?: number; pages_changed?: number; threads?: number; cores_busy?: number | null; busy_ms?: number; engine_ms?: number; wasted_ms?: number;
+  pages?: number; pages_changed?: number[]; threads?: number; cores_busy?: number | null; busy_ms?: number; engine_ms?: number; wasted_ms?: number;
   resident_kb?: number; values_bytes?: number; hints?: Record<string, number>; ok?: boolean;
 };
 
@@ -140,13 +140,16 @@ let lastStats: Stats | undefined;
 /** `stats` as lines of plain text, the CLI's `s` stats' words. */
 function statsLines(s: Stats): string[] {
   const n = s.nodes ?? {};
-  const gb = (b: number) => `${(b / 1e9).toFixed(1)} GB`;
+  const size = (b: number) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : `${Math.round(b / 1e6)} MB`);
+  // (the pages changed: how many, and which when few)
+  const pc = s.pages_changed;
+  const changed = pc === undefined ? "?" : pc.length && pc.length <= 8 ? `${pc.length} (${pc.join(", ")})` : String(pc.length);
   return [
     `PhiTeX ${s.version ?? "?"} · ${s.engine ?? "?"} · files from ${s.files === "shelf" ? `Shelf ${s.files_release ?? "?"}` : s.files === "texlive" ? "TeX Live" : "?"}`,
     `build ${s.build ?? "?"} (${s.why ?? "?"}) ${s.ok === false ? "failed" : "ok"} in ${dur(s.wall_ms ?? 0)}: ${Object.entries(s.phases_ms ?? {}).map(([k, ms]) => `${k} ${dur(ms)}`).join(" · ")}`,
-    `nodes ${n.ran ?? "?"} ran, ${n.kept ?? "?"} kept of ${n.live ?? "?"} · ${s.runs ?? "?"} runs, ${s.rounds ?? "?"} rounds · pages ${s.pages_changed ?? "?"} of ${s.pages ?? "?"} changed`,
-    `parallel ${s.cores_busy == null ? "—" : s.cores_busy.toFixed(1)} of ${s.threads ?? "?"} threads busy · busy ${dur(s.busy_ms ?? 0)}, engine ${dur(s.engine_ms ?? 0)}, wasted ${dur(s.wasted_ms ?? 0)}`,
-    `memory ${s.resident_kb === undefined ? "?" : gb(s.resident_kb * 1024)} resident, values ${s.values_bytes === undefined ? "?" : gb(s.values_bytes)}`,
+    `nodes ${n.ran ?? "?"} ran, ${n.kept ?? "?"} kept of ${n.live ?? "?"} · ${s.runs ?? "?"} runs, ${s.rounds ?? "?"} rounds · pages ${changed} of ${s.pages ?? "?"} changed`,
+    `${s.cores_busy == null ? `threads ${s.threads ?? "?"}` : `parallel ${s.cores_busy.toFixed(1)} of ${s.threads ?? "?"} threads busy`} · busy ${dur(s.busy_ms ?? 0)}, engine ${dur(s.engine_ms ?? 0)}, wasted ${dur(s.wasted_ms ?? 0)}`,
+    `memory ${s.resident_kb === undefined ? "?" : size(s.resident_kb * 1024)} resident, values ${s.values_bytes === undefined ? "?" : size(s.values_bytes)}`,
     `hints ${Object.entries(s.hints ?? {}).map(([k, v]) => `${k} ${v}`).join(", ") || "—"}`,
   ];
 }
