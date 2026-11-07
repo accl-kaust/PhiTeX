@@ -1097,9 +1097,14 @@ impl Run<'_, '_> {
                 self.ck()?;
                 let tok = self.cur.tok;
                 // (a deferred read's symbol among the delimiters: TeX has
-                // its digits there, matched one by one, `Run::sym_arg`)
+                // its digits there, matched one by one, `Run::sym_arg`; a
+                // derived name is the one control sequence it names)
                 if self.cur.cmd == cmd::SYM {
-                    crate::defer::expand_any(self, tok)?;
+                    if crate::defer::is_dname(tok) {
+                        params.push(crate::defer::dname_concrete(self, tok)?);
+                    } else {
+                        crate::defer::expand_any(self, tok)?;
+                    }
                     continue;
                 }
                 if !tok.is_cs_or_active() && matches!(tok.cat(), Some(1 | 2)) {

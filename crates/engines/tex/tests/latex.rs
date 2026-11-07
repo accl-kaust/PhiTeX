@@ -891,6 +891,36 @@ fn a_picture_after_a_page_fired_in_its_piece_sees_the_routines_values() {
     }
 }
 
+/// A `\csname` built from a stepped counter taken as a macro's argument
+/// (`pdfdocs/dnamearg.tex`: an `edichokey` key with hyperref, each lead
+/// linked by `\hyperref[name]`, the name built from the couplet counter;
+/// hyperref's `\hyperref[x]` is `\expandafter\label@@hyperref\csname
+/// r@x\endcsname{x}`): the argument is the one control sequence, as TeX
+/// takes it. At -j4 the derived name's token was expanded in the
+/// argument, so `\label@@hyperref` got `\r@x`'s body: a hyper reference
+/// named by a page number undefined, the anchor's name typeset, the links
+/// lost (edichokey-ex in every -j4 build). The PDF is pdfTeX's at -j1, -j4 and -j8.
+#[test]
+fn a_name_built_from_a_counter_is_one_token_as_an_argument() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let name = "dnamearg";
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+        .expect("the oracle");
+    for threads in [1usize, 4, 8] {
+        let opts = Options {
+            threads: Some(threads),
+            fixpoint: true,
+            ..pdf_opts(name, &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), &src);
+        let (pdf, _) = b.output();
+        if let Some(d) = common::first_difference(&pdf, &want) {
+            panic!("{name} -j {threads}: pdf {d}");
+        }
+    }
+}
+
 /// The page layer's work, by the engine's counters, on floats2col (the
 /// document of [`latex_twocol_floats_runs`]: twocolumn, 194 routine
 /// fires, floats and marginpars whose routines hand back `\@freelist`,

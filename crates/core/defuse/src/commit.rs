@@ -2577,7 +2577,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
 /// each time it stood, Grail's deleted paragraph 224 such commits, 1.2 s
 /// of its 5.8 s). None, to commit in full: a re-ask came while it was
 /// checked (`Node::asked`), a bracket moved meanwhile, a `next` read in
-/// the record (filed where its search stops now), or it moved or went.
+/// the record (filed where its search stops now), a record that parks a
+/// state (`Ctx::park`: its reads are filed for the runs that go on from
+/// that state, kept or stood by the serial the commit moves (`FILED`),
+/// and the state's staleness is the commit's to say; kept as they were,
+/// cursolatex's pages' writers ran at -j1 before every page had finished
+/// and the build made no PDF), or it moved or went.
 pub(crate) fn commit_stood(
     eng: &Engine,
     w: &Worker,
@@ -2591,6 +2596,7 @@ pub(crate) fn commit_stood(
     // the record does not hold: a commit files it again, `file_ranges`)
     if node.moved.load(Ordering::Acquire)
         || !node.record().is_some_and(|x| Arc::ptr_eq(&x, r))
+        || r.state.is_some()
         || r.reads
             .iter()
             .any(|x| matches!(x.kind, ReadKind::Next { .. } | ReadKind::Hole))
