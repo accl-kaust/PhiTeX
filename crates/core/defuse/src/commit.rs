@@ -3102,14 +3102,34 @@ pub(crate) fn reask_from(
                         let mut top: Vec<(u64, usize)> = by_node.into_iter().collect();
                         top.sort_by_key(|x| std::cmp::Reverse(x.1));
                         top.truncate(5);
+                        let mut paths: Vec<PathId> = rs
+                            .iter()
+                            .filter(|r| top.first().is_some_and(|t| r.node.raw() == t.0))
+                            .map(|r| r.path)
+                            .collect();
+                        paths.sort_unstable_by_key(|p| p.0);
+                        paths.dedup();
                         eprintln!(
-                            "reask-trace: {} seg {cur:?}: {} readers, by node {top:?}, live of the top {:?}",
+                            "reask-trace: {} seg {cur:?}: {} readers, by node {top:?}, live of the top {:?}, its paths {}: {:?}",
                             eng.values().render(f.0),
                             rs.len(),
                             top.first().map(|t| rs
                                 .iter()
                                 .filter(|r| r.node.raw() == t.0 && live(eng, r.node, r.serial))
-                                .count())
+                                .count()),
+                            paths.len(),
+                            paths
+                                .iter()
+                                .take(3)
+                                .map(|&p| eng.path_steps(p).map(|s| s
+                                    .iter()
+                                    .map(|x| match x {
+                                        crate::Step::Member(m) | crate::Step::Derived(m) =>
+                                            eng.values().render(*m).chars().take(80).collect(),
+                                        other => format!("{other:?}"),
+                                    })
+                                    .collect::<Vec<String>>()))
+                                .collect::<Vec<_>>()
                         );
                     }
                     rs.iter()
