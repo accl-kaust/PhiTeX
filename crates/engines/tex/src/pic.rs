@@ -341,24 +341,29 @@ impl Run<'_, '_> {
             && self.cur.tok == begin_tok()
     }
 
-    pub(crate) fn pic_begin(&mut self) -> R<bool> {
-        // (a list of the run's own to put the picture's items on: on the
-        // engine's main list they are contributions, `Run::pic_shape`)
-        if self.interp.is_some()
+    /// Whether a picture at this `\\begin` is read inline whatever its
+    /// body: a list of the run's own to put its items on is wanted (on the
+    /// engine's main list they are contributions, `Run::pic_shape`).
+    fn pic_not_here(&self) -> bool {
+        let not = self.interp.is_some()
             || self.in_skip
             || self.mode_zero
-            || !self.nest.iter().any(|l| l.owns)
-        {
-            if trace() {
-                eprintln!(
-                    "pic: node {} at \\begin: not here (interp {}, skip {}, mode zero {}, a list of its own {})",
-                    self.cx.node().raw(),
-                    self.interp.is_some(),
-                    self.in_skip,
-                    self.mode_zero,
-                    self.nest.iter().any(|l| l.owns)
-                );
-            }
+            || !self.nest.iter().any(|l| l.owns);
+        if not && trace() {
+            eprintln!(
+                "pic: node {} at \\begin: not here (interp {}, skip {}, mode zero {}, a list of its own {})",
+                self.cx.node().raw(),
+                self.interp.is_some(),
+                self.in_skip,
+                self.mode_zero,
+                self.nest.iter().any(|l| l.owns)
+            );
+        }
+        not
+    }
+
+    pub(crate) fn pic_begin(&mut self) -> R<bool> {
+        if self.pic_not_here() {
             return Ok(false);
         }
         // (the `\begin` read from a token list it was put back in, a run
