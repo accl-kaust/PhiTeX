@@ -412,9 +412,18 @@ impl<'a> Device<'a> for Probe<'_> {
     }
 
     fn draw_image(&mut self, image: Image<'a, '_>, props: ImageDrawProps<'a>) {
-        let bbox = props
-            .transform
-            .transform_rect_bbox(Rect::new(0.0, 0.0, 1.0, 1.0));
+        // (the image's transform takes its samples, `w` by `h`, to the
+        // page: hayro puts the `1/w`, `-1/h` scale of the unit square in
+        // front of the CTM. As the unit square, an image's box was its
+        // corner sample, a pixel or less: no band held its place, and
+        // every raster figure, PNG or JPEG, and every bitmap glyph a
+        // Type 3 font draws as an image mask, was left blank)
+        let bbox = props.transform.transform_rect_bbox(Rect::new(
+            0.0,
+            0.0,
+            f64::from(image.width()),
+            f64::from(image.height()),
+        ));
         let id = hash_of(|h| {
             self.around.hash(h);
             image.cache_key().hash(h);

@@ -535,3 +535,319 @@ fn word_spaces_are_read_from_the_gaps() {
         .collect();
     assert_eq!(lines, ["alpha betagamma", "ab ab", "ab ba"]);
 }
+
+/// `data` as a zlib stream of stored (uncompressed) deflate blocks: a
+/// `/FlateDecode` stream without a compressor.
+fn zlib_stored(data: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x78, 0x01];
+    let mut chunks = data.chunks(0xffff).peekable();
+    if chunks.peek().is_none() {
+        out.extend_from_slice(&[1, 0, 0, 0xff, 0xff]);
+    }
+    while let Some(c) = chunks.next() {
+        out.push(u8::from(chunks.peek().is_none()));
+        let n = u16::try_from(c.len()).unwrap();
+        out.extend_from_slice(&n.to_le_bytes());
+        out.extend_from_slice(&(!n).to_le_bytes());
+        out.extend_from_slice(c);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in data {
+        a = (a + u32::from(x)) % 65521;
+        b = (b + a) % 65521;
+    }
+    out.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    out
+}
+
+/// Rows of `stride` bytes PNG-predicted (`/Predictor` 10 to 15), each row
+/// its filter byte first: None, Sub and Up in turn, `bpp` bytes a pixel
+/// (at least one), as a PNG's IDAT that pdfTeX copies holds them.
+fn png_predicted(raw: &[u8], stride: usize, bpp: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut above = vec![0u8; stride];
+    for (y, row) in raw.chunks(stride).enumerate() {
+        let kind = u8::try_from(y % 3).unwrap();
+        out.push(kind);
+        for (i, &x) in row.iter().enumerate() {
+            out.push(match kind {
+                0 => x,
+                1 => x.wrapping_sub(if i >= bpp { row[i - bpp] } else { 0 }),
+                _ => x.wrapping_sub(above[i]),
+            });
+        }
+        above.copy_from_slice(row);
+    }
+    out
+}
+
+/// Objects (1 the catalog) as a PDF, each its bytes: streams binary.
+fn pdf_of_bytes(objs: &[Vec<u8>]) -> Arc<[u8]> {
+    let mut out = b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    let mut at = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        at.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        out.extend_from_slice(o);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for a in at {
+        out.extend_from_slice(format!("{a:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objs.len() + 1
+        )
+        .as_bytes(),
+    );
+    Arc::from(out)
+}
+
+/// A stream object: `dict`'s entries, its `/Length`, its bytes.
+fn stream(dict: &str, data: &[u8]) -> Vec<u8> {
+    let mut o = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+    o.extend_from_slice(data);
+    o.extend_from_slice(b"\nendstream");
+    o
+}
+
+/// An image's place on the page (left, bottom, points) and its
+/// quadrants' colours.
+type Placed = ((f64, f64), [[u8; 3]; 4]);
+
+/// `b` in hex, two digits a byte.
+fn hex(b: &[u8]) -> String {
+    b.iter().fold(String::new(), |mut s, v| {
+        let _ = write!(s, "{v:02x}");
+        s
+    })
+}
+
+/// The four colours of the test images' quadrants: top left, top right,
+/// bottom left, bottom right (`testdata/quads.jpg` holds them too).
+const QUADS: [[u8; 3]; 4] = [[200, 30, 30], [30, 160, 60], [40, 60, 200], [230, 200, 40]];
+
+/// Image samples 32 by 32, each quadrant its value of `q`.
+fn quads<const N: usize>(q: [[u8; N]; 4]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for y in 0..32 {
+        for x in 0..32 {
+            out.extend_from_slice(&q[usize::from(y >= 16) * 2 + usize::from(x >= 16)]);
+        }
+    }
+    out
+}
+
+/// A page of every kind of image pdfTeX and XeTeX write, each 64 points
+/// square at its place (left, bottom) on the page, and each one's
+/// quadrants' colours composed on white: an RGB PNG's samples as pdfTeX
+/// copies them (PNG predictors), a JPEG (`/DCTDecode`), a PNG with alpha
+/// (an `/SMask`), a palette PNG (`/Indexed`, 4 bits a sample), a grey
+/// one with a `/Decode` array and `/Interpolate`, an `/ICCBased` RGB one,
+/// an image mask (`/ImageMask`, filled with the fill colour), an inline
+/// image, and a Type 3 font's bitmap glyph (pdfTeX's PK fonts: an inline
+/// image mask in the glyph's procedure).
+fn images_pdf() -> (Arc<[u8]>, Vec<Placed>) {
+    let rgb = quads(QUADS);
+    let half =
+        |c: [u8; 3]| c.map(|v| u8::try_from((u32::from(v) * 128 + 255 * 127 + 127) / 255).unwrap());
+    let alpha = quads([[255], [255], [128], [128]]);
+    // (4-bit palette indices 0 to 3 by quadrant: two samples a byte)
+    let indexed: Vec<u8> = quads([[0], [1], [2], [3]])
+        .chunks(2)
+        .map(|p| (p[0] << 4) | p[1])
+        .collect();
+    let palette = hex(QUADS.as_flattened());
+    let grey = quads([[0], [64], [128], [255]]);
+    // (mask bits: 0 paints; the top left and bottom right painted)
+    let mask: Vec<u8> = (0..32)
+        .flat_map(|y| {
+            let top = y < 16;
+            if top {
+                [0x00, 0x00, 0xff, 0xff]
+            } else {
+                [0xff, 0xff, 0x00, 0x00]
+            }
+        })
+        .collect();
+    let white = [255, 255, 255];
+    let red = QUADS[0];
+    let places: Vec<Placed> = vec![
+        ((72.0, 600.0), QUADS),
+        ((172.0, 600.0), QUADS),
+        (
+            (272.0, 600.0),
+            [QUADS[0], QUADS[1], half(QUADS[2]), half(QUADS[3])],
+        ),
+        ((372.0, 600.0), QUADS),
+        ((72.0, 450.0), [white, [191; 3], [127; 3], [0; 3]]),
+        ((172.0, 450.0), QUADS),
+        ((272.0, 450.0), [red, white, white, red]),
+        ((372.0, 450.0), [red, white, white, red]),
+        ((72.0, 300.0), [red; 4]),
+    ];
+    let mut content = String::from("BT /F1 12 Tf 72 720 Td (Images) Tj ET\n");
+    for (i, ((x, y), _)) in places.iter().take(6).enumerate() {
+        let _ = writeln!(content, "q 64 0 0 64 {x} {y} cm /I{i} Do Q");
+    }
+    let _ = writeln!(
+        content,
+        "q 0.784 0.118 0.118 rg 64 0 0 64 272 450 cm /I6 Do Q"
+    );
+    let _ = writeln!(
+        content,
+        "q 0.784 0.118 0.118 rg 64 0 0 64 372 450 cm BI /W 32 /H 32 /IM true /BPC 1 /F /AHx ID {}> EI Q",
+        hex(&mask)
+    );
+    // (the glyph is 1000 units square: 64 points at a size of 64)
+    content.push_str("BT 0.784 0.118 0.118 rg /F2 64 Tf 72 300 Td (a) Tj ET\n");
+    let glyph = format!(
+        "1000 0 0 0 1000 1000 d1 q 1000 0 0 1000 0 0 cm BI /W 8 /H 8 /IM true /BPC 1 /F /AHx ID {}> EI Q",
+        hex(&[0; 8])
+    );
+    let common = "/Type /XObject /Subtype /Image /Width 32 /Height 32";
+    let objs = vec![
+        b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec(),
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R /F2 6 0 R >> /XObject << /I0 8 0 R /I1 9 0 R /I2 10 0 R /I3 11 0 R /I4 12 0 R /I5 13 0 R /I6 14 0 R >> >> /Contents 4 0 R >>".to_vec(),
+        stream("", content.as_bytes()),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_vec(),
+        b"<< /Type /Font /Subtype /Type3 /FontMatrix [0.001 0 0 0.001 0 0] /FontBBox [0 0 1000 1000] /CharProcs << /a 7 0 R >> /Encoding << /Type /Encoding /Differences [97 /a] >> /FirstChar 97 /LastChar 97 /Widths [1000] /Resources << >> >>".to_vec(),
+        stream("", glyph.as_bytes()),
+        stream(
+            &format!("{common} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns 32 >>"),
+            &zlib_stored(&png_predicted(&rgb, 96, 3)),
+        ),
+        stream(
+            &format!("{common} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode"),
+            include_bytes!("testdata/quads.jpg"),
+        ),
+        stream(
+            &format!("{common} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /SMask 15 0 R"),
+            &zlib_stored(&rgb),
+        ),
+        stream(
+            &format!("{common} /ColorSpace [/Indexed /DeviceRGB 3 <{palette}>] /BitsPerComponent 4 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 1 /BitsPerComponent 4 /Columns 32 >>"),
+            &zlib_stored(&png_predicted(&indexed, 16, 1)),
+        ),
+        stream(
+            &format!("{common} /ColorSpace /DeviceGray /BitsPerComponent 8 /Decode [1 0] /Interpolate true /Filter /FlateDecode"),
+            &zlib_stored(&grey),
+        ),
+        stream(
+            &format!("{common} /ColorSpace [/ICCBased 16 0 R] /BitsPerComponent 8 /Filter /FlateDecode"),
+            &zlib_stored(&rgb),
+        ),
+        stream(
+            &format!("{common} /ImageMask true /BitsPerComponent 1"),
+            &mask,
+        ),
+        stream(
+            &format!("{common} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode"),
+            &zlib_stored(&alpha),
+        ),
+        stream("/N 3 /Alternate /DeviceRGB", b""),
+    ];
+    (pdf_of_bytes(&objs), places)
+}
+
+/// Every kind of image drawn in the strips, as poppler draws it: each
+/// image's quadrants their colours (a JPEG's within its loss), the bands
+/// composed the page hayro draws whole, and, where poppler's `pdftoppm`
+/// is installed, the page it draws. (An image's box was its transform's
+/// unit square, its corner sample: no band held a raster image, and every
+/// PNG and JPEG figure was blank in the viewer.)
+#[test]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a page's pixels at 72 dpi: points are pixels"
+)]
+fn every_kind_of_image_is_drawn() {
+    let (doc, places) = images_pdf();
+    let mut r = Renderer::new();
+    let f = r.frame(&doc, 0, 1.0).expect("the page");
+    assert_eq!((f.pw, f.ph), (612, 792));
+    let page = compose(&r, &f);
+    let at = |p: &[u8], x: f64, y: f64| -> [u8; 3] {
+        let i = ((792.0 - y) as usize * 612 + x as usize) * 3;
+        [p[i], p[i + 1], p[i + 2]]
+    };
+    let mut bad = Vec::new();
+    for (k, ((x, y), want)) in places.iter().enumerate() {
+        // (the JPEG's loss: a few levels a channel)
+        let tol = if k == 1 { 16 } else { 4 };
+        for (q, w) in want.iter().enumerate() {
+            let (dx, dy) = (
+                if q % 2 == 0 { 16.0 } else { 48.0 },
+                if q < 2 { 48.0 } else { 16.0 },
+            );
+            let got = at(&page, x + dx, y + dy);
+            if got.iter().zip(w).any(|(g, w)| g.abs_diff(*w) > tol) {
+                bad.push(format!("image {k} quadrant {q}: {got:?}, not {w:?}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}\nbands {:?}", f.bands);
+    let whole = whole(&doc, 1.0);
+    let diff: u64 = page
+        .iter()
+        .zip(&whole)
+        .map(|(x, y)| u64::from(x.abs_diff(*y)))
+        .sum();
+    let ink: u64 = whole.iter().map(|x| u64::from(255 - x)).sum();
+    assert!(
+        ink > 0 && diff * 50 < ink,
+        "composed differs: {diff} against ink {ink}"
+    );
+    let dir = std::env::temp_dir().join(format!("phitex-render-images-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("images.pdf"), &doc[..]).unwrap();
+    let run = std::process::Command::new("pdftoppm")
+        .args(["-r", "72", "-singlefile"])
+        .arg(dir.join("images.pdf"))
+        .arg(dir.join("poppler"))
+        .status();
+    if !run.is_ok_and(|s| s.success()) {
+        eprintln!("pdftoppm not run: the quadrants checked alone");
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let ppm = std::fs::read(dir.join("poppler.ppm")).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    let head = b"P6\n612 792\n255\n";
+    assert!(ppm.starts_with(head), "{:?}", &ppm[..16]);
+    let pop = &ppm[head.len()..];
+    for (k, ((x, y), _)) in places.iter().enumerate() {
+        // (each image's inside but its edges and its quadrants' edges:
+        // poppler smooths an image it draws larger, two pixels a sample
+        // here, where hayro takes the nearest sample; elsewhere the same
+        // pixels, a JPEG's decoders a few levels apart)
+        let tol = if k == 1 { 32 } else { 4 };
+        let top = (792.0 - y - 64.0) as usize;
+        let left = *x as usize;
+        let mut worst = (0, 0, 0);
+        for py in top + 2..top + 62 {
+            for px in left + 2..left + 62 {
+                if py.abs_diff(top + 32) < 3 || px.abs_diff(left + 32) < 3 {
+                    continue;
+                }
+                let i = (py * 612 + px) * 3;
+                let d = (0..3)
+                    .map(|c| page[i + c].abs_diff(pop[i + c]))
+                    .max()
+                    .unwrap();
+                worst = worst.max((d, px, py));
+            }
+        }
+        assert!(
+            worst.0 <= tol,
+            "image {k} differs from poppler's by {} at {:?}",
+            worst.0,
+            (worst.1, worst.2)
+        );
+    }
+}
