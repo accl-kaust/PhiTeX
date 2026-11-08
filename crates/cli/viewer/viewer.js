@@ -5931,12 +5931,9 @@ function merge(before, a, b) {
 }
 var Batch = class {
   edits = [];
-  /** The text before the first queued edit. */
-  base;
   /** The text after all of them. */
   text;
   constructor(text) {
-    this.base = text;
     this.text = text;
   }
   get size() {
@@ -5958,18 +5955,11 @@ var Batch = class {
     this.text = apply(this.text, e);
   }
   befores = [];
-  /** The queued edits in bytes, in order, each against the text before it. */
+  /** The queued edits as the core takes them (UTF-16), in order, each against the text before it. */
   take() {
-    const out = [];
-    let s = this.base;
-    for (const e of this.edits) {
-      const start = byteOffset(s, e.from);
-      out.push({ start, end: start + utf8Len(s, e.from, e.to), text: e.text });
-      s = apply(s, e);
-    }
+    const out = this.edits.map((e) => ({ start: e.from, end: e.to, text: e.text }));
     this.edits = [];
     this.befores = [];
-    this.base = this.text;
     return out;
   }
 };

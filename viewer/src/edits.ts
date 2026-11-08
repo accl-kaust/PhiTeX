@@ -1,5 +1,7 @@
-// Edits as CodeMirror gives them (UTF-16 offsets) and as PhiTeX takes them
-// (UTF-8 byte offsets), and the batching of rapid ones. Pure: no DOM.
+// Edits as CodeMirror gives them and as the core's `edit` takes them, both
+// in UTF-16 offsets (phitex-live's watch.rs `splice_utf16`, as LSP's
+// didChange), the batching of rapid ones, and the byte offsets of the
+// glyph origins' space. Pure: no DOM.
 
 /** A replacement in UTF-16 code units, in the text as it is just before it. */
 export interface Edit {
@@ -8,8 +10,13 @@ export interface Edit {
   text: string;
 }
 
-/** The same, in UTF-8 bytes. */
-export interface ByteEdit {
+/**
+ * The same as the core's `edit` request takes it: `start..end` in UTF-16
+ * code units of the text just before it (never bytes: an edit after a
+ * character past U+007F sent in bytes landed that many units later, the
+ * Arabic word typed into the next paragraph's `\textlang{hindi}`).
+ */
+export interface CoreEdit {
   start: number;
   end: number;
   text: string;
@@ -85,13 +92,10 @@ export function merge(before: string, a: Edit, b: Edit): Edit | null {
 /** Edits of one file, queued between flushes, merged as they come. */
 export class Batch {
   private edits: Edit[] = [];
-  /** The text before the first queued edit. */
-  private base: string;
   /** The text after all of them. */
   text: string;
 
   constructor(text: string) {
-    this.base = text;
     this.text = text;
   }
 
@@ -119,18 +123,11 @@ export class Batch {
 
   private befores: string[] = [];
 
-  /** The queued edits in bytes, in order, each against the text before it. */
-  take(): ByteEdit[] {
-    const out: ByteEdit[] = [];
-    let s = this.base;
-    for (const e of this.edits) {
-      const start = byteOffset(s, e.from);
-      out.push({ start, end: start + utf8Len(s, e.from, e.to), text: e.text });
-      s = apply(s, e);
-    }
+  /** The queued edits as the core takes them (UTF-16), in order, each against the text before it. */
+  take(): CoreEdit[] {
+    const out = this.edits.map((e) => ({ start: e.from, end: e.to, text: e.text }));
     this.edits = [];
     this.befores = [];
-    this.base = this.text;
     return out;
   }
 }

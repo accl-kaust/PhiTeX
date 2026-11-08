@@ -1275,6 +1275,70 @@ mod tests {
         assert_eq!(built["pages"], 3, "{ev:?}");
     }
 
+    /// The viewer's `edit` counts UTF-16 code units of the buffer, as the
+    /// editors give them (LSP's didChange too): a keystroke after Arabic
+    /// text is placed there, the next paragraph's macro argument read as
+    /// it is written, and the output a cold build's of the editor's text,
+    /// in pdfTeX's byte input and XeTeX's characters alike. Sent in UTF-8
+    /// bytes (the viewer did), " " went 12 units later, after the next
+    /// paragraph's `\lang`, and the "س" typed then was its first argument:
+    /// "The language س is not loaded" (the frontends' xe-multi scenario).
+    #[test]
+    fn an_edit_after_wide_characters_is_placed_in_utf16_units() {
+        let doc = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6 \
+            \\def\\lang#1#2{\\expandafter\\ifx\\csname l@#1\\endcsname\\relax \
+            \\errmessage{The language #1 is not loaded}\\fi\\setbox0\\hbox{#2}}\n\
+            \\expandafter\\def\\csname l@arabic\\endcsname{}\\expandafter\\def\\csname l@hindi\\endcsname{}\n\
+            \\lang{arabic}{مرحبا بالعالم}\n\n\\lang{hindi}{नमस्ते दुनिया}\n\n\\shipout\\hbox{}\\end\n";
+        let u16 = |s: &str, byte: usize| s[..byte].encode_utf16().count();
+        for engine in ["etex", "xetex"] {
+            let session = |text: &str| {
+                let job = Job {
+                    engine: crate::tex::engine(engine).unwrap(),
+                    ..job()
+                };
+                Session::new(
+                    job,
+                    Arc::from(text),
+                    Arc::new(Nothing),
+                    None,
+                    Arc::new(Memory::default()),
+                    Arc::new(Status::default()),
+                )
+            };
+            let mut d = Document::new(session(doc), "doc.tex");
+            d.step();
+            let mut text = doc.to_owned();
+            let at = text.find("}\n\n\\lang{hindi}").unwrap();
+            for (k, ch) in [" ", "س", "لام"].into_iter().enumerate() {
+                // (typed before the Arabic paragraph's closing brace)
+                let byte = at + text[at..].find('}').unwrap();
+                let u = u16(&text, byte);
+                let r = d.request(&json!({"id": k, "op": "edit", "file": "doc.tex", "start": u, "end": u, "text": ch}));
+                assert_eq!(r["ok"], true, "{engine} edit {k}: {r}");
+                text.insert_str(byte, ch);
+                let ev = d.step();
+                let built = ev
+                    .iter()
+                    .find(|e| e["event"] == "build")
+                    .unwrap_or_else(|| panic!("{engine} edit {k}: built: {ev:?}"));
+                assert_eq!(built["errors"], json!([]), "{engine} edit {k}: {built}");
+                assert_eq!(built["pages"], 1, "{engine} edit {k}: {built}");
+                let mut cold = Document::new(session(&text), "doc.tex");
+                cold.step();
+                assert_eq!(
+                    d.output().map(|o| o.1),
+                    cold.output().map(|o| o.1),
+                    "{engine} edit {k}: the cold build's output"
+                );
+            }
+            assert!(
+                text.contains("{مرحبا بالعالم سلام}\n\n\\lang{hindi}{"),
+                "{text}"
+            );
+        }
+    }
+
     /// A TFM no font map has an entry for (`oracle/fixtures/pdf`'s
     /// nomap10.tfm, cmr10's metrics), and no other file.
     struct NoMap;
