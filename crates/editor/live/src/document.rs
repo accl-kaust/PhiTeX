@@ -1278,65 +1278,82 @@ mod tests {
     /// The viewer's `edit` counts UTF-16 code units of the buffer, as the
     /// editors give them (LSP's didChange too): a keystroke after Arabic
     /// text is placed there, the next paragraph's macro argument read as
-    /// it is written, and the output a cold build's of the editor's text,
-    /// in pdfTeX's byte input and XeTeX's characters alike. Sent in UTF-8
-    /// bytes (the viewer did), " " went 12 units later, after the next
-    /// paragraph's `\lang`, and the "س" typed then was its first argument:
-    /// "The language س is not loaded" (the frontends' xe-multi scenario).
+    /// it is written, and the output a cold build's of the editor's text.
+    /// Sent in UTF-8 bytes (the viewer did), each keystroke went 12 units
+    /// later, into the next paragraph's `\lang{hindi}`, its language
+    /// argument then a name no language has: "The language ... is not
+    /// loaded" (the frontends' xe-multi scenario, polyglossia's
+    /// `\textlang`). The Arabic is a comment here: the edit's place is
+    /// the core's, before any engine reads the text.
     #[test]
     fn an_edit_after_wide_characters_is_placed_in_utf16_units() {
         let doc = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6 \
+            \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255}\n\
             \\def\\lang#1#2{\\expandafter\\ifx\\csname l@#1\\endcsname\\relax \
-            \\errmessage{The language #1 is not loaded}\\fi\\setbox0\\hbox{#2}}\n\
+            \\errmessage{The language #1 is not loaded}\\fi\\hbox{#2}}\n\
             \\expandafter\\def\\csname l@arabic\\endcsname{}\\expandafter\\def\\csname l@hindi\\endcsname{}\n\
-            \\lang{arabic}{مرحبا بالعالم}\n\n\\lang{hindi}{नमस्ते दुनिया}\n\n\\shipout\\hbox{}\\end\n";
+            % مرحبا بالعالم\n\\lang{arabic}{abc}\n\n\\lang{hindi}{def}\n\n\\penalty-10000 \\end\n";
         let u16 = |s: &str, byte: usize| s[..byte].encode_utf16().count();
-        for engine in ["etex", "xetex"] {
-            let session = |text: &str| {
-                let job = Job {
-                    engine: crate::tex::engine(engine).unwrap(),
-                    ..job()
-                };
-                Session::new(
-                    job,
-                    Arc::from(text),
-                    Arc::new(Nothing),
-                    None,
-                    Arc::new(Memory::default()),
-                    Arc::new(Status::default()),
-                )
-            };
-            let mut d = Document::new(session(doc), "doc.tex");
-            d.step();
-            let mut text = doc.to_owned();
-            let at = text.find("}\n\n\\lang{hindi}").unwrap();
-            for (k, ch) in [" ", "س", "لام"].into_iter().enumerate() {
-                // (typed before the Arabic paragraph's closing brace)
-                let byte = at + text[at..].find('}').unwrap();
-                let u = u16(&text, byte);
-                let r = d.request(&json!({"id": k, "op": "edit", "file": "doc.tex", "start": u, "end": u, "text": ch}));
-                assert_eq!(r["ok"], true, "{engine} edit {k}: {r}");
-                text.insert_str(byte, ch);
-                let ev = d.step();
-                let built = ev
-                    .iter()
-                    .find(|e| e["event"] == "build")
-                    .unwrap_or_else(|| panic!("{engine} edit {k}: built: {ev:?}"));
-                assert_eq!(built["errors"], json!([]), "{engine} edit {k}: {built}");
-                assert_eq!(built["pages"], 1, "{engine} edit {k}: {built}");
-                let mut cold = Document::new(session(&text), "doc.tex");
-                cold.step();
-                assert_eq!(
-                    d.output().map(|o| o.1),
-                    cold.output().map(|o| o.1),
-                    "{engine} edit {k}: the cold build's output"
-                );
-            }
-            assert!(
-                text.contains("{مرحبا بالعالم سلام}\n\n\\lang{hindi}{"),
-                "{text}"
+        let session = |text: &str| {
+            Session::new(
+                job(),
+                Arc::from(text),
+                Arc::new(Nothing),
+                None,
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            )
+        };
+        // (TeX's errors: the build's other lines are the host's, "no
+        // dvipdfmx here")
+        let tex_errors = |b: &Value| -> Vec<Value> {
+            b["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|e| e.as_str().is_some_and(|e| e.starts_with('!')))
+                .cloned()
+                .collect()
+        };
+        let mut d = Document::new(session(doc), "doc.tex");
+        d.step();
+        // (the editor's buffer, as an open gives it: the edits apply to it)
+        d.push(Ask::SetFile {
+            file: "doc.tex".into(),
+            text: doc.into(),
+        });
+        let mut text = doc.to_owned();
+        for (k, ch) in [" ", "x", "yz"].into_iter().enumerate() {
+            // (typed before the first paragraph's closing brace)
+            let byte = text.find("}\n\n\\lang{hindi}").unwrap();
+            let u = u16(&text, byte);
+            let r = d.request(&json!({"id": k, "op": "edit", "file": "doc.tex", "start": u, "end": u, "text": ch}));
+            assert_eq!(r["ok"], true, "edit {k}: {r}");
+            text.insert_str(byte, ch);
+            let ev = d.step();
+            let built = ev
+                .iter()
+                .find(|e| e["event"] == "build")
+                .unwrap_or_else(|| panic!("edit {k}: built: {ev:?}"));
+            assert_eq!(tex_errors(built), Vec::<Value>::new(), "edit {k}: {built}");
+            let mut cold = Document::new(session(&text), "doc.tex");
+            let cev = cold.step();
+            let cb = cev.iter().find(|e| e["event"] == "build").expect("cold");
+            assert_eq!(
+                tex_errors(cb),
+                Vec::<Value>::new(),
+                "edit {k}: the cold build: {cb}"
+            );
+            assert_eq!(
+                d.output().map(|o| o.1),
+                cold.output().map(|o| o.1),
+                "edit {k}: the cold build's output"
             );
         }
+        assert!(
+            text.contains("\\lang{arabic}{abc xyz}\n\n\\lang{hindi}{def}"),
+            "{text}"
+        );
     }
 
     /// A TFM no font map has an entry for (`oracle/fixtures/pdf`'s
