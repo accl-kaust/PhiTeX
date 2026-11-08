@@ -8,7 +8,7 @@
 // corehost.ts), and the preview is drawn by a PreviewSink (the shadow-DOM
 // panel; in VS Code the same panel in a webview, told over messages).
 
-import { Batch, byteOffset, charOffset, type Edit } from "./edits.ts";
+import { Batch, byteOffset, charOffset, textSum, type Edit } from "./edits.ts";
 import type { DiffReq } from "./diff.ts";
 import { ENGINES, type Engine } from "./engines.ts";
 import { report } from "./report.ts";
@@ -39,10 +39,11 @@ export interface EditorHost {
   onOpen(cb: (file: string, text: string) => void): void;
   /**
    * The editor's changes to `file`; `len`, its text's length after them
-   * (UTF-16 units, as a JS string's): the session checks its own copy
-   * against it and asks for the whole text again when they differ.
+   * (UTF-16 units, as a JS string's), and `sum`, its textSum (edits.ts),
+   * given when typing pauses (no edits then): the session checks its own
+   * copy against them and asks for the whole text again when they differ.
    */
-  onChanges(cb: (file: string, edits: Edit[], len?: number) => void): void;
+  onChanges(cb: (file: string, edits: Edit[], len?: number, sum?: number) => void): void;
   /** Announce `file`'s whole text again (onOpen): the session's copy drifted from the editor's. */
   resend?(file: string): void;
   /** Called once the session is ready for onOpen (the host may re-announce the open file). */
@@ -533,10 +534,10 @@ export class PreviewSession {
       this.sync(f, t);
       this.status();
     });
-    host.onChanges((f0, es, len) => {
+    host.onChanges((f0, es, len, sum) => {
       const f = this.known(f0);
       this.queue(f, es);
-      if (len !== undefined) this.agree(f, len, es);
+      if (len !== undefined) this.agree(f, len, es, sum);
     });
     core.onLost?.(() => {
       this.opened = false;
@@ -551,15 +552,18 @@ export class PreviewSession {
 
   /**
    * The session's copy of `file` (its queued edits in) against the
-   * editor's length after `edits`: on a difference the copy has drifted
-   * (edits lost or applied twice, as an Overleaf history restore's were),
+   * editor's length after `edits`, and its sum when it gives one (as typing
+   * pauses: a same-length paste misapplied keeps the length): on a
+   * difference the copy has drifted (edits lost or applied twice, as an
+   * Overleaf history restore's were),
    * so it is said and the whole text asked for again, sync() diffing it in.
    * Once until it comes.
    */
-  private agree(file: string, len: number, edits: Edit[]): void {
-    const have = this.text(file)?.length ?? 0;
-    if (have === len || this.resending.has(file)) return;
-    this.tr("editor and session disagree", { file, editor: len, session: have, edits: edits.slice(-5) });
+  private agree(file: string, len: number, edits: Edit[], sum?: number): void {
+    const text = this.text(file) ?? "";
+    // (the length at each change; the content too, when the editor gives its sum)
+    if ((text.length === len && (sum === undefined || textSum(text) === sum)) || this.resending.has(file)) return;
+    this.tr("editor and session disagree", { file, editor: len, session: text.length, sum: sum !== undefined, edits: edits.slice(-5) });
     if (!this.host.resend) return;
     this.resending.add(file);
     this.host.resend(file);

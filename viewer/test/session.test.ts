@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PreviewSession, type EditorHost } from "../src/session.ts";
-import type { Edit } from "../src/edits.ts";
+import { textSum, type Edit } from "../src/edits.ts";
 
 test("a change whose length is not the session's asks the editor for its text again", () => {
   let open!: (f: string, t: string) => void;
@@ -39,6 +39,26 @@ test("a change whose length is not the session's asks the editor for its text ag
   assert.equal(s.text("main.tex"), "!Oh, hello, world there");
   change("main.tex", [{ from: 23, to: 23, text: "." }], 24);
   assert.deepEqual(asked, ["main.tex"]);
+});
+
+// A change that kept the length but not the text (a same-length paste
+// misapplied): the length agrees, the sum given as typing pauses does not,
+// and the editor's text is asked for again.
+test("a same-length difference is found by the editor's sum", () => {
+  let open!: (f: string, t: string) => void;
+  let change!: (f: string, es: Edit[], len?: number, sum?: number) => void;
+  const asked: string[] = [];
+  const host: EditorHost = { loadProject: async () => ({}), onOpen: (cb) => (open = cb), onChanges: (cb) => (change = cb), resend: (f) => asked.push(f) };
+  const core = { request: async () => ({ ok: true, json: {} }) };
+  const sink = new Proxy({}, { get: () => () => undefined });
+  new PreviewSession(host, core as never, sink as never, { schedule: () => undefined });
+  open("t.tex", "alpha & 1.25");
+  // (the session given a change the editor never made, the same length)
+  change("t.tex", [{ from: 0, to: 5, text: "ALPHA" }], 12);
+  assert.deepEqual(asked, []);
+  // (the editor's pause: its length and sum, its text still "alpha & 1.25")
+  change("t.tex", [], 12, textSum("alpha & 1.25"));
+  assert.deepEqual(asked, ["t.tex"]);
 });
 
 // Collaborators' cursors (Overleaf's): each the word at its place marked on
