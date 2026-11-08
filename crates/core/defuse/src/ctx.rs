@@ -2056,6 +2056,14 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// Whether I ran before in this evaluation (this run is not my first
+    /// of it): what my last run left is of this evaluation's inputs, not
+    /// of the build before an edit.
+    #[must_use]
+    pub fn ran_this_evaluation(&self) -> bool {
+        self.me.runs.load(std::sync::atomic::Ordering::Relaxed) > 1
+    }
+
     /// The value my last run defined `f` with, if it did (not a read: what
     /// my own last run left, a peek).
     #[must_use]
