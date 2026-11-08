@@ -90,6 +90,18 @@ export function merge(before: string, a: Edit, b: Edit): Edit | null {
 }
 
 /** Edits of one file, queued between flushes, merged as they come. */
+/**
+ * A text's sum (FNV-1a over its UTF-16 code units, 32 bits): the editor's and
+ * the session's copies of a file compared by it as well as by length, so an
+ * edit lost or misapplied that keeps the length (a same-length paste) is
+ * found too.
+ */
+export function textSum(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+  return h >>> 0;
+}
+
 export class Batch {
   private edits: Edit[] = [];
   /** The text after all of them. */

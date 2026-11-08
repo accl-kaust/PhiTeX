@@ -5929,6 +5929,11 @@ function merge(before, a, b) {
   const text = apply(afterA, { from: b.from - from2, to: b.to - from2, text: b.text });
   return { from: from2, to, text };
 }
+function textSum(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
 var Batch = class {
   edits = [];
   /** The text after all of them. */
@@ -6355,10 +6360,10 @@ var PreviewSession = class {
       this.sync(f, t);
       this.status();
     });
-    host2.onChanges((f0, es, len) => {
+    host2.onChanges((f0, es, len, sum) => {
       const f = this.known(f0);
       this.queue(f, es);
-      if (len !== void 0) this.agree(f, len, es);
+      if (len !== void 0) this.agree(f, len, es, sum);
     });
     core.onLost?.(() => {
       this.opened = false;
@@ -6371,15 +6376,17 @@ var PreviewSession = class {
   resending = /* @__PURE__ */ new Set();
   /**
    * The session's copy of `file` (its queued edits in) against the
-   * editor's length after `edits`: on a difference the copy has drifted
-   * (edits lost or applied twice, as an Overleaf history restore's were),
+   * editor's length after `edits`, and its sum when it gives one (as typing
+   * pauses: a same-length paste misapplied keeps the length): on a
+   * difference the copy has drifted (edits lost or applied twice, as an
+   * Overleaf history restore's were),
    * so it is said and the whole text asked for again, sync() diffing it in.
    * Once until it comes.
    */
-  agree(file, len, edits) {
-    const have = this.text(file)?.length ?? 0;
-    if (have === len || this.resending.has(file)) return;
-    this.tr("editor and session disagree", { file, editor: len, session: have, edits: edits.slice(-5) });
+  agree(file, len, edits, sum) {
+    const text = this.text(file) ?? "";
+    if (text.length === len && (sum === void 0 || textSum(text) === sum) || this.resending.has(file)) return;
+    this.tr("editor and session disagree", { file, editor: len, session: text.length, sum: sum !== void 0, edits: edits.slice(-5) });
     if (!this.host.resend) return;
     this.resending.add(file);
     this.host.resend(file);
