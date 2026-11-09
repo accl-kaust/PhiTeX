@@ -250,6 +250,8 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw 'an upgrade signed by another key went ahead' }
           if ((Get-FileHash $exe).Hash -eq $want) { throw 'an upgrade signed by another key was installed' }
           Stop-Process -Id $srv.Id
+          # (the refused upgrade's status, 1, is not this step's)
+          exit 0
       - uses: actions/upload-artifact@v4
         with:
           name: e2e-${{ runner.os }}
