@@ -1,0 +1,4 @@
+# Every file checked out byte for byte as committed, on every system:
+# the fixtures, oracles and documents are bytes a TeX engine reads, and
+# Git for Windows (core.autocrlf) would turn their LF into CRLF.
+* -text
