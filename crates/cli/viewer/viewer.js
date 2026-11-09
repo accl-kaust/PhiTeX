@@ -1,5 +1,17 @@
 // phitex's live viewer: viewer/src and crates/cli/viewer/cli.ts; made by scripts/viewer-bundle.sh (AGPL-3.0-only)
 
+// viewer/src/words.ts
+function plainWhy(e) {
+  const m = /^core trapped \([^)]*\):\s*([\s\S]*)$/.exec(e);
+  if (!m) return sentence(e);
+  const t = m[1].trim();
+  return /[.!?]$/.test(t) ? t : `The engine crashed (${t || "no reason given"}).`;
+}
+function sentence(s) {
+  const t = s.trim();
+  return !t || /[.!?…]$/.test(t) ? t : `${t}.`;
+}
+
 // viewer/src/diagnostics.ts
 var KINDS = [
   ["error", "Errors"],
@@ -625,8 +637,14 @@ var Viewer = class {
   get page() {
     return this.current;
   }
-  /** The pages there are now, by hash: slots added or removed, changed ones drawn again when seen. */
-  layout(hashes) {
+  /** The pages streamed drawn without some of what they draw with, by hash (a preview's mark). */
+  previews = /* @__PURE__ */ new Set();
+  /**
+   * The pages there are now, by hash: slots added or removed, changed ones drawn again when seen;
+   * those of `previews` marked as previews (streamed, drawn without some of what they draw with).
+   */
+  layout(hashes, previews) {
+    this.previews = previews ?? /* @__PURE__ */ new Set();
     while (this.slots.length > hashes.length) {
       const s = this.slots.pop();
       this.io.unobserve(s.el);
@@ -648,11 +666,14 @@ var Viewer = class {
   /**
    * A page the build has not shipped alone (no hash yet: a streamed page
    * after it came first) says it comes at the build's end, not a blank
-   * sheet: one with images, shadings or transparency is never streamed
-   * (PhiTeX's stream1), only drawn once the whole build is in.
+   * sheet (a page the engine could not write alone: there are few). A page
+   * streamed without some of what it draws with (an object made at the
+   * document's end: pgf's transparency, shadings, patterns) says it is a
+   * preview, until the build's page replaces it.
    */
   waits(s) {
     s.el.classList.toggle("later", !s.hash && !s.img);
+    s.el.classList.toggle("preview", !!s.hash && this.previews.has(s.hash));
   }
   /** Page `k`'s slot, made (with those before it) if there is none yet. */
   slotAt(k) {
@@ -947,7 +968,7 @@ var Viewer = class {
    */
   ask(k) {
     const s = this.slots[k];
-    if (!s) return;
+    if (!s || !s.hash) return;
     const key = `${k}:${s.hash}`;
     if (this.asked.has(key)) return;
     this.asked.add(key);
@@ -1242,6 +1263,8 @@ header:active { cursor: grabbing; }
 /* (a page the build has not shipped alone yet: it comes at the build's end, said, not a blank sheet) */
 .slot.later::before { content: "Drawn when the build ends"; position: absolute; inset: 0; display: grid; place-items: center; color: #8a8f98; font: 500 clamp(9px, 2.6cqw, 18px)/1.3 var(--ph-font); }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
+/* (a page streamed while the build runs and drawn without some of what it draws with: a quiet mark, gone when the build's page replaces it) */
+.slot.preview::after { content: "Preview: final colours and shading when the build ends"; position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 999px; background: rgb(20 24 31 / 55%); color: #fff; font: 500 clamp(8px, 1.7cqw, 12px)/1.5 var(--ph-font); pointer-events: none; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
@@ -1265,7 +1288,10 @@ header:active { cursor: grabbing; }
 /* (the marks along the pages' scrollbar: the problems' places and the diff's changes) */
 .smarks { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
 .smarks[hidden] { display: none; }
-.smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); }
+.smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); transition: transform .1s; }
+/* (a target larger than the tick: it is 3 px tall) */
+.smarks i::before { content: ""; position: absolute; inset: -4px -3px; }
+.smarks i:hover { transform: scale(1.5, 2); }
 .smarks i.error { background: var(--ph-danger, #d93025); }
 .smarks i.change { background: var(--ph-accent, #1d3e72); }
 .phx-card[data-key] { cursor: pointer; }
@@ -1298,11 +1324,14 @@ header:active { cursor: grabbing; }
 .slot .peer-tag[data-file]:hover { background: hsl(var(--hue) 70% 34%); }
 
 /* strips over the pages: plain, in the host's colours */
-.strip { position: sticky; top: 0; z-index: 2; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
+/* (over the pages' scroll, not in it: in it, a strip went with the pages when they scrolled sideways) */
+.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.strips { position: absolute; top: 0; left: 0; right: 0; z-index: 2; pointer-events: none; }
+.strip { pointer-events: auto; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
   background: var(--ph-menu); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-warning)); }
-.stage.stale .banner, .approx.on { display: block; }
+.stage.stale ~ .strips .banner, .approx.on { display: block; }
 .gone { --sev: var(--ph-danger); font-weight: 600; }
-.stage.offline .gone { display: flex; align-items: baseline; gap: 8px; }
+.stage.offline ~ .strips .gone { display: flex; align-items: baseline; gap: 8px; }
 .gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; padding: 0 2px; }
 .offpill { display: none; position: absolute; top: 8px; right: 14px; z-index: 3; padding: 1px 8px; border-radius: var(--ph-pill); font-size: 12px;
   background: var(--ph-menu); color: var(--ph-danger); border: 1px solid var(--ph-border); pointer-events: none; }
@@ -1497,7 +1526,8 @@ header:active { cursor: grabbing; }
 /* Settings: the panel's own rows and the host's, one dialog in every host, a tab per group */
 .settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; }
 .settings > header { padding: 12px 14px 0; }
-.settings .stabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); overflow-x: auto; scrollbar-width: none; }
+/* (the tabs wrap onto a second line when they don't fit: scrolled sideways, with no scrollbar, the last ones were out of reach) */
+.settings .stabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); }
 .settings .stabs button { all: unset; cursor: pointer; white-space: nowrap; padding: 6px 8px 7px; font-size: 13px; color: var(--ph-fg2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .settings .stabs button:hover { color: var(--ph-fg); }
 .settings .stabs button[aria-selected="true"] { color: var(--ph-fg); font-weight: 600; border-bottom-color: var(--ph-accent); }
@@ -3678,6 +3708,14 @@ function hintsFor(host2) {
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
 var MAKING = "Making the format, once per PhiTeX update";
+var KIND_HELP = {
+  error: "LaTeX errors and files not found",
+  overfull: "Lines that stick out into the margin",
+  underfull: "Lines spread too far apart",
+  reference: "Undefined references and citations",
+  font: "Missing characters and substituted fonts",
+  other: "Every other warning"
+};
 var OVERLEAF_WORDS = {
   badge: "Unofficial \xB7 experimental",
   badgeTitle: "An unofficial extension, not part of Overleaf. PhiTeX runs LaTeX (pdfTeX) in your browser; Overleaf's PDF is the real one.",
@@ -3893,8 +3931,8 @@ var Panel = class {
     <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
     <span class="progress" id="prog"></span>
     <div class="menu" id="m-rec" role="menu" hidden style="left:6px;top:calc(100% + 4px)">
-      ${item2("r-rebuild", "", "Rebuild")}
-      <button type="button" role="menuitem" id="r-clean"><span class="check"></span><span>Clean rebuild<span class="desc">Start over: the project read again, built from the start</span></span></button>
+      <button type="button" role="menuitem" id="r-rebuild"><span class="check"></span><span>Rebuild<span class="desc">Build again with the files as they are</span></span></button>
+      <hr><button type="button" role="menuitem" id="r-clean"><span class="check"></span><span>Clean rebuild<span class="desc">Start over: the project read again, built from the start</span></span></button>
       <hr class="if-compare"><button type="button" role="menuitem" id="r-compare" class="if-compare"><span class="check"></span><span>Compare with an earlier version…<span class="desc">latexdiff against a saved version</span></span></button>
       <hr class="if-cache"><button type="button" role="menuitem" id="r-cache" class="if-cache"><span class="check"></span><span>Clear cache…<span class="desc">The packages and formats PhiTeX keeps</span></span></button>
     </div>
@@ -3919,7 +3957,7 @@ var Panel = class {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -4373,6 +4411,7 @@ var Panel = class {
     this.approx = !!e.approx;
     const a = this.$("#approx");
     a.classList.toggle("on", this.approx);
+    this.placeStrips();
     a.textContent = `Approximate: needs ${ENGINES[e.engine].label}, shown with pdfLaTeX (fonts substituted, breaks may differ). ${this.words.realPdf}`;
     if (!e.ready) this.stopped();
     else if (this.$("#empty").querySelector(".engine")) this.$("#empty").hidden = true;
@@ -4417,7 +4456,7 @@ var Panel = class {
   async underline(diags) {
     if (!this.ev.onBoxes) return;
     this.culpritDiags = diags;
-    if (!this.culpritsOn) return void (++this.culpritsSeq, this.culpritsOf = "", this.viewer.culprits([]), this.$("#ctip").hidden = true);
+    if (!this.culpritsOn) return void (++this.culpritsSeq, this.culpritsOf = "", this.viewer.culprits([]), this.$("#ctip").hidden = true, this.problemMarks = [], this.drawScrollMarks());
     const want = diags.filter((d) => !!d.problem?.file && !!d.problem.range && d.problem.severity !== "note").filter((d) => !this.hiddenKinds.has(kindOf(d))).map((d) => {
       const k = kindOf(d);
       const amount = Number(/\(([\d.]+)pt too (?:wide|high)\)/.exec(d.message)?.[1]) || void 0;
@@ -4432,7 +4471,7 @@ var Panel = class {
     this.culpritsDrawn = want;
     this.viewer.culprits(found.flat());
     this.culpritPlaces = new Map(want.map((w, i) => [`${w.file}\0${w.range[0]}`, found[i][0] ? { k: found[i][0].k, box: found[i][0].boxes[0] } : null]));
-    this.problemMarks = want.flatMap((w, i) => found[i][0]?.boxes[0] ? [{ k: found[i][0].k, y: found[i][0].boxes[0][1], cls: w.severity, title: w.message }] : []);
+    this.problemMarks = want.flatMap((w, i) => found[i][0]?.boxes[0] ? [{ k: found[i][0].k, y: found[i][0].boxes[0][1], cls: w.severity, title: w.message, p: w, box: found[i][0].boxes[0] }] : []);
     this.drawScrollMarks();
   }
   /** Each problem's first place on the pages, by its file and byte (a card's "on the page"). */
@@ -4445,7 +4484,12 @@ var Panel = class {
     this.changeMarks = changes.map((c) => ({ ...c, cls: "change" }));
     this.drawScrollMarks();
   }
-  /** The marks along the pages' scrollbar, each where its place is in the whole scroll; a click goes there. */
+  /**
+   * The marks along the pages' scrollbar, each where its place is in the
+   * whole scroll: hovered, what it is (a problem: the underline's tip, its
+   * line and file:line; a change: its title) beside it; clicked, the pages
+   * there, a problem's place flashed.
+   */
   drawScrollMarks() {
     const el = this.$("#smarks");
     const marks = [...this.problemMarks, ...this.changeMarks];
@@ -4457,11 +4501,29 @@ var Panel = class {
       if (fr[i] < 0) return;
       const t = document.createElement("i");
       t.className = m.cls;
-      t.title = m.title;
+      t.setAttribute("aria-label", m.title);
       t.style.top = `${(fr[i] * 100).toFixed(3)}%`;
-      t.onclick = () => this.viewer.scrollToPlace(m.k, m.y);
+      t.onmouseenter = () => this.markTip(t, m);
+      t.onmouseleave = () => this.$("#ctip").hidden = true;
+      t.onclick = () => {
+        this.$("#ctip").hidden = true;
+        this.viewer.scrollToPlace(m.k, m.y);
+        if (m.box) this.viewer.mark(m.k, [m.box], false);
+      };
       el.append(t);
     });
+  }
+  /** A scrollbar mark's tip, left of the mark, at its height. */
+  markTip(t, m) {
+    const tip = this.$("#ctip");
+    tip.dataset.i = "";
+    tip.className = `ctip ${m.p?.severity ?? "change"}`;
+    if (m.p) tip.replaceChildren(icon(m.p.severity, 14), culpritTip(m.p, "click to see it on the page"));
+    else tip.replaceChildren(html`<div class="txt"><div>${m.title}</div></div>`);
+    tip.hidden = false;
+    const body = this.$(".body").getBoundingClientRect(), r = t.getBoundingClientRect();
+    tip.style.left = `${Math.max(8, r.left - body.left - tip.offsetWidth - 10)}px`;
+    tip.style.top = `${Math.max(8, Math.min(body.height - tip.offsetHeight - 8, r.top - body.top - tip.offsetHeight / 2))}px`;
   }
   /** The underlines on or off. */
   culpritsShown(on) {
@@ -4950,6 +5012,7 @@ var Panel = class {
       return;
     }
     stage.classList.add("stale");
+    this.placeStrips();
     const why = s.diagnostics?.find((d) => d.severity !== "info" && d.code !== "no-pages");
     this.$("#banner").textContent = `Showing the last complete render: ${why ? why.message + (why.line ? ` (${why.file}:${why.line})` : "") : "this build shipped no page"}.`;
   }
@@ -4967,7 +5030,8 @@ var Panel = class {
       this.win.classList.remove("offline-quiet");
       return;
     }
-    const text = `Disconnected from the engine: the pages are the last ones built${why ? ` (${why})` : ""}.`;
+    const text = `${why ? sentence(why) : "Lost the connection to PhiTeX's engine."} The pages shown are from the last build.`;
+    this.placeStrips();
     this.$("#gonewhy").textContent = text;
     this.$("#offpill").title = text;
     if (!was || !this.win.classList.contains("offline-quiet")) this.$("#stage").classList.add("offline");
@@ -4981,6 +5045,11 @@ var Panel = class {
     this.$("#offpill").style.right = `${Math.max(0, v.offsetWidth - v.clientWidth) + 8}px`;
   }
   offline = false;
+  /** The strips over the pages (engine lost, stale, approximate) clear of the pages' scrollbar, whatever its width. */
+  placeStrips() {
+    const v = this.$("#stage");
+    this.$("#strips").style.right = `${Math.max(0, v.offsetWidth - v.clientWidth)}px`;
+  }
   /** Follow what the panel shows (a host toolbar's controls). */
   onState(cb) {
     this.listeners.push(cb);
@@ -5519,8 +5588,16 @@ var Panel = class {
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
       { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset. Random: a different one each time", kind: "select", options: [["random", "Random"], ...LOOKS.map((l) => [l.id, l.name]), ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => this.look = lookOf(l)) }
     );
-    if (ev.onBoxes) look2.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
-    preview.push({ id: "problems", label: "Problems shown", help: "Which kinds: the filters at the top of the problems list", kind: "info", value: this.hiddenKinds.size ? `${this.hiddenKinds.size} kind${this.hiddenKinds.size === 1 ? "" : "s"} hidden` : "All" });
+    if (ev.onBoxes) look2.push({ id: "underline", label: "Show them on the PDF", help: "A wavy line under each one, and a mark beside the scrollbar", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
+    const problems = KINDS.map(([k, name]) => ({
+      id: `kind-${k}`,
+      label: name,
+      help: KIND_HELP[k],
+      kind: "toggle",
+      value: !this.hiddenKinds.has(k),
+      set: (on) => void (!!on === this.hiddenKinds.has(k) && this.toggleKind(k))
+    }));
+    if (ev.onBoxes) problems.push(look2.splice(look2.findIndex((r) => r.id === "underline"), 1)[0]);
     const build2 = [];
     if (ev.onDebug) build2.push({ id: "debug", label: "Debug check", help: "Compare with a fresh build every 5 s (this session only)", kind: "toggle", value: this.debugOn, set: () => this.toggleDebug() });
     build2.push({ id: "reload", label: "Reload the files", help: "Read the project's files again", kind: "action", button: "Reload", set: () => (this.settings(false), void ev.onReload()) });
@@ -5530,6 +5607,7 @@ var Panel = class {
     return [
       { title: "Preview", rows: preview },
       { title: "Appearance", rows: look2 },
+      { title: "Warnings/Errors", rows: problems },
       { title: "Build", rows: build2 },
       { title: "Packages", rows: [] },
       { title: "Updates and tips", rows: tips }
@@ -6053,11 +6131,11 @@ var Panel = class {
     queueMicrotask(() => this.emit());
   }
   /** The pages there are, by hash (the viewer draws the changed ones it shows). */
-  layout(hashes) {
+  layout(hashes, previews) {
     this.pageHashes = hashes;
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
-    this.viewer.layout(hashes);
+    this.viewer.layout(hashes, previews);
     if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
     if (hashes.length) this.sheetDown();
     this.nav();
@@ -6134,7 +6212,7 @@ function known(source2) {
   return !!source2 && source2 !== "none";
 }
 var TIP_AROUND = 36;
-function culpritTip(p) {
+function culpritTip(p, click = "click to go there") {
   const ex = p.excerpt;
   const chars = ex ? [...ex.text] : [];
   const culprit = ex ? chars.slice(ex.start, ex.start + ex.len).join("").trim() : "";
@@ -6148,7 +6226,7 @@ function culpritTip(p) {
     excerpt = html`<pre class="ex">${a}<mark>${b}</mark>${c}</pre>`;
   }
   const where = `${p.file.split("/").pop()}${p.line ? `:${p.line}` : ""}`;
-  return html`<div class="txt"><div>${p.message}${named ? html` <code>${culprit}</code>` : ""}</div>${excerpt}<div class="at">${where} · click to go there</div></div>`.firstElementChild;
+  return html`<div class="txt"><div>${p.message}${named ? html` <code>${culprit}</code>` : ""}</div>${excerpt}<div class="at">${where} · ${click}</div></div>`.firstElementChild;
 }
 
 // viewer/src/sync.ts
@@ -6498,21 +6576,21 @@ var PreviewSession = class {
         if (res.ok && (r.op === "edit" || r.op === "status")) this.traps = 0;
         if (lost && this.opened && /needs more than the [\d.]+ GiB of memory/.test(res.error ?? "")) {
           this.opened = false;
-          this.sink.error(res.error);
-          this.sink.connection?.(false, res.error);
+          this.sink.error(plainWhy(res.error));
+          this.sink.connection?.(false, plainWhy(res.error));
           return res;
         }
         if (lost && this.opened && r.op !== "open") {
           this.opened = false;
           this.traps++;
-          const why = res.error ?? "the core restarted";
+          const why = plainWhy(res.error ?? "The engine restarted.");
           if (this.traps <= 1) {
-            this.sink.error(`${why}; reopening`);
-            this.sink.connection?.(false, `${why}; reopening`);
+            this.sink.error(`${why} Restarting it.`);
+            this.sink.connection?.(false, `${why} Restarting it.`);
             this.chain = this.chain.then(() => this.reopen());
           } else {
-            this.sink.error(`${why}, again: the preview stops here (reload the page to retry)`);
-            this.sink.connection?.(false, `${why}, again: reload the page to retry`);
+            this.sink.error(`${why} It happened again, so the preview has stopped. Reload the page to try again.`);
+            this.sink.connection?.(false, `${why} It happened again, so the preview has stopped. Reload the page to try again.`);
           }
         }
         return res;
@@ -6535,8 +6613,8 @@ var PreviewSession = class {
     });
     core.onLost?.(() => {
       this.opened = false;
-      this.sink.error("core lost; reopening");
-      this.sink.connection?.(false, "the engine stopped; reopening");
+      this.sink.error("The engine stopped. Restarting it.");
+      this.sink.connection?.(false, "The engine stopped. Restarting it.");
       this.reopen();
     });
   }
@@ -6888,6 +6966,8 @@ var PreviewSession = class {
   hashes = [];
   /** Tell the view which pages there are (by hash). */
   /** `given`: the hashes a reply carried (the open's), else asked for. */
+  /** The pages streamed not exact, by hash (`{"event":"page","exact":false}`, the pages answer's `inexact`). */
+  previews = /* @__PURE__ */ new Set();
   async layout(given) {
     if (!this.sink.layout) return;
     if (given) this.hashes = given;
@@ -6895,10 +6975,12 @@ var PreviewSession = class {
       const r = await this.core.request({ op: "pages" });
       if (!r.ok || !r.json?.pages) return;
       this.hashes = r.json.pages;
+      const ix = r.json.inexact;
+      this.previews = new Set(Array.isArray(ix) ? ix.map((k) => this.hashes[k]).filter((h) => !!h) : []);
     }
     this.tr("layout", { pages: this.hashes.length });
     this.setPages(this.hashes.length);
-    if (this.hashes.length) this.sink.layout(this.hashes);
+    if (this.hashes.length) this.sink.layout(this.hashes, this.previews);
     this.drawPeers();
     void this.peerPages();
     if (this.sink.goto && !this.noOriginsPrefetch) this.glyphsAll();
@@ -7441,8 +7523,10 @@ var PreviewSession = class {
         while (hs.length < Math.max(e.k + 1, e.pages ?? 0)) hs.push("");
         hs[e.k] = e.hash;
         this.hashes = hs;
+        if (e.exact === false) this.previews.add(e.hash);
+        else this.previews.delete(e.hash);
         this.setPages(hs.length);
-        this.sink.layout?.(hs);
+        this.sink.layout?.(hs, this.previews);
         this.drawPeers();
         void this.peerPages();
         return;
@@ -8522,7 +8606,7 @@ var unreached = async () => {
 sock.onClose = () => {
   if (!started) return void unreached();
   panel.msg("not connected to phitex watch (retrying)", true);
-  panel.connection(false, "phitex watch stopped or the connection was lost; reconnecting");
+  panel.connection(false, "phitex watch stopped, or the connection dropped. Reconnecting\u2026");
   status = { kind: "status", text: "not connected to phitex watch" };
   busy = "";
   showBar();

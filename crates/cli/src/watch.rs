@@ -1032,7 +1032,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     if let Some(v) = view.as_ref().map(View::viewer) {
         status.meter().on_streamed(Box::new(move |p, pages| {
             if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
-                v.stream_page(k, p.hash, p.pdf.clone(), pages);
+                v.stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
             }
         }));
     }
@@ -1138,24 +1138,27 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // way out writes nothing)
         if let (Some(rx), Some(r)) = (rx.filter(|_| raw), unwritten.borrow_mut().take()) {
             ui.finish();
-            asking.store(true, Ordering::Relaxed);
-            // (the cursor after the question, where the key is typed; the
-            // key said after it and the line ended, so what follows, the
-            // files written or the shell's prompt, starts a line)
-            ui.ask(&format!(
-                "write {}.pdf and its .synctex.gz here? [y/N]",
-                s.job.jobname
-            ));
-            let yes = loop {
-                match rx.recv() {
-                    Ok((_, Event::Key(Key::Other('y' | 'Y')))) => break Some(true),
-                    Ok((_, Event::Key(_))) => break Some(false),
-                    Err(_) => break None,
-                    Ok(_) => {}
-                }
+            // (`--no-confirm`: yes, unasked)
+            let yes = o.no_confirm || {
+                asking.store(true, Ordering::Relaxed);
+                // (the cursor after the question, where the key is typed; the
+                // key said after it and the line ended, so what follows, the
+                // files written or the shell's prompt, starts a line)
+                ui.ask(&format!(
+                    "write {}.pdf and its .synctex.gz here? [y/N]",
+                    s.job.jobname
+                ));
+                let yes = loop {
+                    match rx.recv() {
+                        Ok((_, Event::Key(Key::Other('y' | 'Y')))) => break Some(true),
+                        Ok((_, Event::Key(_))) => break Some(false),
+                        Err(_) => break None,
+                        Ok(_) => {}
+                    }
+                };
+                ui.answered(yes.map(|y| if y { "y" } else { "n" }));
+                yes == Some(true)
             };
-            ui.answered(yes.map(|y| if y { "y" } else { "n" }));
-            let yes = yes == Some(true);
             if yes {
                 // (a layout no file holds, the viewer's: its exact file)
                 let mut r = r;

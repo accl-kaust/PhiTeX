@@ -20,6 +20,9 @@ struct ColorStack {
     page_start: bool,
 }
 
+/// A color stack's page stack and current page value ([`Stacks::page_state`]).
+pub(crate) type StackState = (Vec<Option<Vec<u8>>>, Option<Vec<u8>>);
+
 /// The color stacks and the position and matrix stacks.
 #[derive(Clone, Default)]
 pub(crate) struct Stacks {
@@ -204,6 +207,15 @@ impl Stacks {
     /// Each color stack's page stack.
     pub(crate) fn page_stacks(&self) -> Vec<Vec<Option<Vec<u8>>>> {
         self.list.iter().map(|c| c.page_stack.clone()).collect()
+    }
+
+    /// Each color stack's page stack and current page value: what a page
+    /// leaves the next one of the stacks.
+    pub(crate) fn page_state(&self) -> Vec<StackState> {
+        self.list
+            .iter()
+            .map(|c| (c.page_stack.clone(), c.page_current.clone()))
+            .collect()
     }
 
     /// Each color stack's page stack depth.

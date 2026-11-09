@@ -280,6 +280,8 @@ header:active { cursor: grabbing; }
 /* (a page the build has not shipped alone yet: it comes at the build's end, said, not a blank sheet) */
 .slot.later::before { content: "Drawn when the build ends"; position: absolute; inset: 0; display: grid; place-items: center; color: #8a8f98; font: 500 clamp(9px, 2.6cqw, 18px)/1.3 var(--ph-font); }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
+/* (a page streamed while the build runs and drawn without some of what it draws with: a quiet mark, gone when the build's page replaces it) */
+.slot.preview::after { content: "Preview: final colours and shading when the build ends"; position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 999px; background: rgb(20 24 31 / 55%); color: #fff; font: 500 clamp(8px, 1.7cqw, 12px)/1.5 var(--ph-font); pointer-events: none; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
@@ -303,7 +305,10 @@ header:active { cursor: grabbing; }
 /* (the marks along the pages' scrollbar: the problems' places and the diff's changes) */
 .smarks { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
 .smarks[hidden] { display: none; }
-.smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); }
+.smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); transition: transform .1s; }
+/* (a target larger than the tick: it is 3 px tall) */
+.smarks i::before { content: ""; position: absolute; inset: -4px -3px; }
+.smarks i:hover { transform: scale(1.5, 2); }
 .smarks i.error { background: var(--ph-danger, #d93025); }
 .smarks i.change { background: var(--ph-accent, #1d3e72); }
 .phx-card[data-key] { cursor: pointer; }
@@ -336,11 +341,14 @@ header:active { cursor: grabbing; }
 .slot .peer-tag[data-file]:hover { background: hsl(var(--hue) 70% 34%); }
 
 /* strips over the pages: plain, in the host's colours */
-.strip { position: sticky; top: 0; z-index: 2; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
+/* (over the pages' scroll, not in it: in it, a strip went with the pages when they scrolled sideways) */
+.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.strips { position: absolute; top: 0; left: 0; right: 0; z-index: 2; pointer-events: none; }
+.strip { pointer-events: auto; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
   background: var(--ph-menu); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-warning)); }
-.stage.stale .banner, .approx.on { display: block; }
+.stage.stale ~ .strips .banner, .approx.on { display: block; }
 .gone { --sev: var(--ph-danger); font-weight: 600; }
-.stage.offline .gone { display: flex; align-items: baseline; gap: 8px; }
+.stage.offline ~ .strips .gone { display: flex; align-items: baseline; gap: 8px; }
 .gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; padding: 0 2px; }
 .offpill { display: none; position: absolute; top: 8px; right: 14px; z-index: 3; padding: 1px 8px; border-radius: var(--ph-pill); font-size: 12px;
   background: var(--ph-menu); color: var(--ph-danger); border: 1px solid var(--ph-border); pointer-events: none; }
@@ -535,7 +543,8 @@ header:active { cursor: grabbing; }
 /* Settings: the panel's own rows and the host's, one dialog in every host, a tab per group */
 .settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; }
 .settings > header { padding: 12px 14px 0; }
-.settings .stabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); overflow-x: auto; scrollbar-width: none; }
+/* (the tabs wrap onto a second line when they don't fit: scrolled sideways, with no scrollbar, the last ones were out of reach) */
+.settings .stabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); }
 .settings .stabs button { all: unset; cursor: pointer; white-space: nowrap; padding: 6px 8px 7px; font-size: 13px; color: var(--ph-fg2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .settings .stabs button:hover { color: var(--ph-fg); }
 .settings .stabs button[aria-selected="true"] { color: var(--ph-fg); font-weight: 600; border-bottom-color: var(--ph-accent); }

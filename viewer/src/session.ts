@@ -22,6 +22,7 @@ const preambleOf = (t: string | undefined) => {
 const usesMinted = (t: string) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
 import { boxes, from, glyphNear, glyphs, lineAt, nearest, wordBytes, wordNear, type Glyph } from "./sync.ts";
 import { diagnose, type Diagnostic, type TexError } from "./diagnostics.ts";
+import { plainWhy } from "./words.ts";
 import { DELIVERED, isPackageFile, referenced, noPackages, type PackageSource, type PackageState } from "./packages.ts";
 import { asDiagnostic, type Problem } from "./problems.ts";
 import { latexmkFiles, latexmkNotes } from "./latexmkrc.ts";
@@ -147,7 +148,7 @@ export type StreamEvent =
  * newer save superseding it, and a forward search's place.
  */
 export type WatchEvent =
-  | { event: "page"; k: number; hash: string; pages?: number }
+  | { event: "page"; k: number; hash: string; pages?: number; exact?: boolean }
   | { event: "progress"; pass?: number; pages?: number; phase?: string; ms?: number; name?: string; pack?: string; done?: number; total?: number }
   | { event: "diagnostics"; items: Problem[] }
   | { event: "settled"; settling?: boolean; pass?: number; ms?: number; since_ms?: number | null; cold?: boolean; passes?: number; ran?: number; kept?: number; threads?: number; fetched?: number }
@@ -193,8 +194,11 @@ export interface Status {
 export interface PreviewSink {
   /** Page `k` of `n` drawn (`hash`: its box's, if known). */
   page(img: PageImage | null, k: number, n: number, hash?: string | null): void;
-  /** The pages there are, by their boxes' hashes (a continuous view draws the changed ones it shows). */
-  layout?(hashes: string[]): void;
+  /**
+   * The pages there are, by their boxes' hashes (a continuous view draws the changed ones it shows);
+   * `previews` those streamed while the build runs and drawn without some of what they draw with.
+   */
+  layout?(hashes: string[], previews?: ReadonlySet<string>): void;
   /** Another document's pages from here (a compare's diff): the last one's gone, the opening until this one's first page. */
   opening?(): void;
   status(s: Status): void;
@@ -501,8 +505,8 @@ export class PreviewSession {
         // naming the size and what to close)
         if (lost && this.opened && /needs more than the [\d.]+ GiB of memory/.test(res.error ?? "")) {
           this.opened = false;
-          this.sink.error(res.error!);
-          this.sink.connection?.(false, res.error!);
+          this.sink.error(plainWhy(res.error!));
+          this.sink.connection?.(false, plainWhy(res.error!));
           return res;
         }
         if (lost && this.opened && r.op !== "open") {
@@ -511,14 +515,14 @@ export class PreviewSession {
           // same input to the same engine: reopened once, then stopped, however
           // long each takes; counted by time, a slow one would loop forever)
           this.traps++;
-          const why = res.error ?? "the core restarted";
+          const why = plainWhy(res.error ?? "The engine restarted.");
           if (this.traps <= 1) {
-            this.sink.error(`${why}; reopening`);
-            this.sink.connection?.(false, `${why}; reopening`);
+            this.sink.error(`${why} Restarting it.`);
+            this.sink.connection?.(false, `${why} Restarting it.`);
             this.chain = this.chain.then(() => this.reopen());
           } else {
-            this.sink.error(`${why}, again: the preview stops here (reload the page to retry)`);
-            this.sink.connection?.(false, `${why}, again: reload the page to retry`);
+            this.sink.error(`${why} It happened again, so the preview has stopped. Reload the page to try again.`);
+            this.sink.connection?.(false, `${why} It happened again, so the preview has stopped. Reload the page to try again.`);
           }
         }
         return res;
@@ -541,8 +545,8 @@ export class PreviewSession {
     });
     core.onLost?.(() => {
       this.opened = false;
-      this.sink.error("core lost; reopening");
-      this.sink.connection?.(false, "the engine stopped; reopening");
+      this.sink.error("The engine stopped. Restarting it.");
+      this.sink.connection?.(false, "The engine stopped. Restarting it.");
       this.reopen();
     });
   }
@@ -951,6 +955,9 @@ export class PreviewSession {
 
   /** Tell the view which pages there are (by hash). */
   /** `given`: the hashes a reply carried (the open's), else asked for. */
+  /** The pages streamed not exact, by hash (`{"event":"page","exact":false}`, the pages answer's `inexact`). */
+  private previews = new Set<string>();
+
   private async layout(given?: string[]): Promise<void> {
     if (!this.sink.layout) return;
     if (given) this.hashes = given;
@@ -958,11 +965,14 @@ export class PreviewSession {
       const r = await this.core.request({ op: "pages" });
       if (!r.ok || !r.json?.pages) return;
       this.hashes = r.json.pages;
+      // (the pages streamed not exact, by place: their hashes marked)
+      const ix: unknown = r.json.inexact;
+      this.previews = new Set(Array.isArray(ix) ? ix.map((k) => this.hashes[k as number]).filter((h): h is string => !!h) : []);
     }
     this.tr("layout", { pages: this.hashes.length });
     this.setPages(this.hashes.length);
     // (no page shipped: the view keeps what it shows, dimmed; see the sink)
-    if (this.hashes.length) this.sink.layout(this.hashes);
+    if (this.hashes.length) this.sink.layout(this.hashes, this.previews);
     // (the collaborators on the new pages)
     this.drawPeers();
     void this.peerPages();
@@ -1585,8 +1595,12 @@ export class PreviewSession {
         while (hs.length < Math.max(e.k + 1, e.pages ?? 0)) hs.push("");
         hs[e.k] = e.hash;
         this.hashes = hs;
+        // (not exact: drawn without some of what it draws with, marked; told
+        // again exact once the pages before it are known, the mark gone)
+        if (e.exact === false) this.previews.add(e.hash);
+        else this.previews.delete(e.hash);
         this.setPages(hs.length);
-        this.sink.layout?.(hs);
+        this.sink.layout?.(hs, this.previews);
         this.drawPeers();
         void this.peerPages();
         return;

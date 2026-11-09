@@ -921,3 +921,58 @@ fn a_frames_kept_bands_outlive_the_ones_drawn_before_it() {
         );
     }
 }
+
+/// A page naming resources its file lacks (a page streamed before the
+/// objects it draws with are written: its resources' references name no
+/// object, or a free one) is drawn all the same, never refused: a missing
+/// graphics state leaves the drawing opaque, a missing shading and a
+/// fill with a missing pattern draw nothing (a flat fill would cover
+/// what lies under a shaded background), a missing colour space falls
+/// back to gray, a missing external object draws nothing.
+#[test]
+fn missing_resources_never_fail_a_frame() {
+    let content = "/G1 gs 1 0 0 rg 10 10 20 20 re f \
+                   q 40 10 20 20 re W n /S1 sh Q \
+                   /Pattern cs /P1 scn 70 10 20 20 re f \
+                   /C1 cs 0.5 scn 100 10 20 20 re f \
+                   q 20 0 0 20 130 10 cm /X1 Do Q \
+                   /Nope gs /Nope cs 0 0 1 scn 160 10 20 20 re f";
+    let objs = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+        // (6 a free entry, 40 past the cross-reference section)
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /ExtGState 40 0 R /Shading 6 0 R /Pattern 40 0 R /ColorSpace << /C1 41 0 R >> /XObject << /X1 6 0 R >> >> /Contents 4 0 R >>".to_owned(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len() + 1),
+        "<< >>".to_owned(),
+    ];
+    let mut bytes = pdf_of(&objs).to_vec();
+    // (object 6 named in the cross-reference section as free)
+    let s = String::from_utf8_lossy(&bytes).into_owned();
+    let s = s.replace("xref\n0 6\n", "xref\n0 7\n").replacen(
+        "trailer\n<< /Size 6",
+        "0000000000 00001 f \ntrailer\n<< /Size 7",
+        1,
+    );
+    bytes = s.into_bytes();
+    let pdf: Arc<[u8]> = Arc::from(bytes);
+    let mut r = Renderer::new();
+    let f = r.frame(&pdf, 0, 1.0).expect("the page drawn");
+    assert_ne!(f.bands.len(), 0, "no band drawn");
+    let px = compose(&r, &f);
+    let at = |x: usize, y: usize| {
+        let i = (y * f.pw as usize + x) * 3;
+        [px[i], px[i + 1], px[i + 2]]
+    };
+    // (points to pixels: the page's top left)
+    assert_eq!(at(20, 180), [255, 0, 0], "opaque red");
+    assert_eq!(at(50, 180), [255, 255, 255], "no shading");
+    assert_eq!(at(80, 180), [255, 255, 255], "no pattern");
+    let g = at(110, 180);
+    assert!(
+        g[0] == g[1] && g[1] == g[2] && (100..160).contains(&g[0]),
+        "gray: {g:?}"
+    );
+    assert_eq!(at(140, 180), [255, 255, 255], "no external object");
+    // (and the whole page as hayro draws it, the same)
+    assert_eq!(px, whole(&pdf, 1.0));
+}

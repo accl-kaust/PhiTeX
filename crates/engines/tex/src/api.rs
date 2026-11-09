@@ -3305,11 +3305,13 @@ impl Graph {
         let toolnode = eng.register(Arc::new(crate::tools::ToolNode(shared.clone())));
         let origins_on: Arc<std::sync::atomic::AtomicBool> = Arc::default();
         let stream_on: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let stream_objs: Arc<std::sync::Mutex<crate::pdfout::StreamObjs>> = Arc::default();
         let watch: Arc<std::sync::RwLock<Option<crate::exec::Watch>>> = Arc::default();
         let pdfpage = eng.register(Arc::new(crate::pdfout::PdfPage {
             origins: origins_on.clone(),
             stream: stream_on.clone(),
             watch: watch.clone(),
+            objs: stream_objs.clone(),
         }));
         let readback = eng.register(Arc::new(crate::ops::ReadBack(shared.clone())));
         let pic = eng.register(Arc::new(crate::pic::Pic(shared.clone())));
@@ -3358,6 +3360,7 @@ impl Graph {
             edit_stall_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             origins: origins_on,
             stream: stream_on,
+            stream_objs,
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             text_cuts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cut_min: Arc::new(std::sync::atomic::AtomicU64::new(crate::cut::CUT_MIN)),
@@ -6912,10 +6915,22 @@ impl Build {
         self.g.watch.progress.begin();
         // (the pages streamed in this evaluation or not: the pages' PDF
         // sides run as their pages ship, or once the loop-backs settle)
-        self.g.ops.stream.store(
-            self.g.watch.progress.streaming(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        let streaming = self.g.watch.progress.streaming();
+        self.g
+            .ops
+            .stream
+            .store(streaming, std::sync::atomic::Ordering::Relaxed);
+        // (the commands' objects kept for the pages streamed only while
+        // they are: an evaluation that streams none keeps none)
+        if !streaming {
+            *self
+                .g
+                .ops
+                .stream_objs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                crate::pdfout::StreamObjs::default();
+        }
         *self
             .g
             .ops

@@ -174,7 +174,7 @@ impl Document {
                 .meter()
                 .on_streamed(Box::new(move |p, pages| {
                     if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
-                        v.stream_page(k, p.hash, p.pdf.clone(), pages);
+                        v.stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
                     }
                 }));
             let l = lsp.clone();
@@ -2086,61 +2086,354 @@ mod tests {
         }
     }
 
-    /// A page whose resources name an object written at the document's
-    /// end (pgf's `\\pdfpageresources` on every page) is streamed where
-    /// it does not draw with them, drawn as the build's file draws it; a
-    /// page that draws with a graphics state (`gs`) is not streamed.
-    #[test]
-    fn pages_naming_later_objects_stream_unless_they_draw_with_them() {
-        let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\pdfcompresslevel=0 \\vsize=100pt \\hsize=100pt \\pdfpagewidth=120pt \\pdfpageheight=120pt \\output={\\shipout\\box255} \\def\\space{ } \\pdfobj reserveobjnum \\edef\\o{\\the\\pdflastobj} \\pdfpageresources{/ExtGState \\o\\space 0 R} ".to_owned();
-        for i in 0..4 {
-            let gs = if i == 2 { "\\pdfliteral{/G1 gs}" } else { "" };
-            t.push_str(&format!(
-                "\\hbox{{{gs}\\vrule width {}pt height 5pt}}\\penalty-10000 ",
-                10 + i
-            ));
+    /// Files by name, as a job reads them.
+    struct Files(HashMap<String, Vec<u8>>);
+
+    impl Host for Files {
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            self.0.contains_key(name).then(|| PathBuf::from(name))
         }
-        t.push_str("\\pdfobj useobjnum \\o {<< /G1 << /CA 0.5 >> >>}\\end\n");
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            self.0.get(path.to_str()?).cloned()
+        }
+    }
+
+    /// A `w` by `h` PNG, RGBA, each pixel's colour and alpha from `px`
+    /// (stored, not compressed, deflate blocks).
+    fn png(w: u32, h: u32, px: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
+        fn crc(b: &[u8]) -> u32 {
+            let mut c = 0xffff_ffffu32;
+            for &x in b {
+                c ^= u32::from(x);
+                for _ in 0..8 {
+                    c = if c & 1 == 1 {
+                        0xedb8_8320 ^ (c >> 1)
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+            !c
+        }
+        fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+            out.extend(u32::try_from(data.len()).unwrap().to_be_bytes());
+            let mut c = kind.to_vec();
+            c.extend(data);
+            out.extend(&c);
+            out.extend(crc(&c).to_be_bytes());
+        }
+        let mut raw = Vec::new();
+        for y in 0..h {
+            raw.push(0);
+            for x in 0..w {
+                raw.extend(px(x, y));
+            }
+        }
+        let (mut a, mut b) = (1u32, 0u32);
+        for &x in &raw {
+            a = (a + u32::from(x)) % 65521;
+            b = (b + a) % 65521;
+        }
+        let mut z = vec![0x78, 0x01];
+        let blocks: Vec<&[u8]> = raw.chunks(65535).collect();
+        for (i, blk) in blocks.iter().enumerate() {
+            z.push(u8::from(i + 1 == blocks.len()));
+            let n = u16::try_from(blk.len()).unwrap();
+            z.extend(n.to_le_bytes());
+            z.extend((!n).to_le_bytes());
+            z.extend(*blk);
+        }
+        z.extend(((b << 16) | a).to_be_bytes());
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = w.to_be_bytes().to_vec();
+        ihdr.extend(h.to_be_bytes());
+        ihdr.extend([8, 6, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, b"IDAT", &z);
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    /// Page `k` of `pdf` as its pixels at `scale`: its size and RGBA,
+    /// the frame's bands put in place.
+    fn pixels(pdf: &[u8], k: usize, scale: f32) -> (u32, u32, Vec<u8>) {
+        let pdf: Arc<[u8]> = Arc::from(pdf);
+        let mut r = phitex_render::Renderer::new();
+        let f = r.frame(&pdf, k, scale).expect("the page drawn");
+        let (w, h) = (f.pw, f.ph);
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        for b in &f.bands {
+            let s = r.strip(b.key).expect("its strip");
+            for y in 0..s.h {
+                let py = b.y + i32::try_from(y).unwrap();
+                if py < 0 || py >= i32::try_from(h).unwrap() {
+                    continue;
+                }
+                for x in 0..s.w {
+                    let px = b.x + i32::try_from(x).unwrap();
+                    if px < 0 || px >= i32::try_from(w).unwrap() {
+                        continue;
+                    }
+                    let from = ((y * s.w + x) * 4) as usize;
+                    let to = ((u32::try_from(py).unwrap() * w + u32::try_from(px).unwrap()) * 4)
+                        as usize;
+                    if s.rgba[from + 3] != 0 {
+                        out[to..to + 4].copy_from_slice(&s.rgba[from..from + 4]);
+                    }
+                }
+            }
+        }
+        (w, h, out)
+    }
+
+    /// What a streaming build of `text` told: each page's last file
+    /// streamed and whether it was exact (by page from 0), the events,
+    /// and the document once settled.
+    #[allow(clippy::type_complexity)]
+    fn streamed_build(
+        text: &str,
+        host: Arc<dyn Host>,
+        threads: usize,
+    ) -> (Document, Vec<Value>, HashMap<usize, (Vec<u8>, bool)>) {
         let session = Session::new(
             Job {
                 engine: crate::tex::engine("pdftex").unwrap(),
+                threads: Some(threads),
                 ..job()
             },
-            Arc::from(t.as_str()),
-            Arc::new(Nothing),
+            Arc::from(text),
+            host,
             None,
             Arc::new(Memory::default()),
             Arc::new(Status::default()),
         );
+        let files: Arc<Mutex<HashMap<usize, (Vec<u8>, bool)>>> = Arc::default();
+        let fs = files.clone();
+        session.status().meter().on_streamed(Box::new(move |p, _| {
+            let k = usize::try_from(p.page - 1).unwrap();
+            let mut fs = lock(&fs);
+            if p.pdf.is_empty() {
+                if let Some(e) = fs.get_mut(&k) {
+                    e.1 |= p.exact;
+                }
+            } else {
+                fs.insert(k, (p.pdf.clone(), p.exact));
+            }
+        }));
         let events: Arc<Mutex<Vec<Value>>> = Arc::default();
-        let frames: Arc<Mutex<HashMap<u64, Value>>> = Arc::default();
         let viewer: Arc<std::sync::OnceLock<Arc<Viewer>>> = Arc::default();
-        let (ev, fr, vw) = (events.clone(), frames.clone(), viewer.clone());
+        let (ev, vw) = (events.clone(), viewer.clone());
         let mut d = Document::new_with_emit(session, "doc.tex", move |e| {
             if e["event"] == "page"
                 && let (Some(v), Some(k)) = (vw.get(), e["k"].as_u64())
             {
+                // (drawn while the build runs, as a viewer asks: never
+                // refused, whatever the page lacks)
                 let r = v.answer(&json!({"id": 1, "op": "frame", "page": k, "scale": 1.0}));
                 let r: Value = serde_json::from_str(&r).unwrap();
-                lock(&fr).insert(k, r["json"].clone());
+                assert_eq!(r["ok"], true, "page {k} streamed, its frame: {r}");
             }
             lock(&ev).push(e);
         });
         let _ = viewer.set(d.viewer().clone());
         d.step();
         let ev = lock(&events).clone();
-        let mut ks: Vec<u64> = ev
-            .iter()
+        let files = lock(&files).clone();
+        (d, ev, files)
+    }
+
+    /// The page events' `exact`, by page (the last told).
+    fn exact_told(ev: &[Value]) -> HashMap<u64, bool> {
+        ev.iter()
             .filter(|e| e["event"] == "page")
-            .filter_map(|e| e["k"].as_u64())
-            .collect();
-        ks.sort_unstable();
-        ks.dedup();
-        assert_eq!(ks, [0, 1, 3], "{ev:?}");
-        let same = |f: &Value| json!([f["w"], f["h"], f["bands"], f["text"]]);
-        for (k, f) in lock(&frames).iter() {
-            let r = d.request(&json!({"id": 3, "op": "frame", "page": k, "scale": 1.0}));
-            assert_eq!(same(f), same(&r["json"]), "page {k}");
+            .map(|e| (e["k"].as_u64().unwrap(), e["exact"].as_bool().unwrap()))
+            .collect()
+    }
+
+    const PDF_HEAD: &str = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\pdfcompresslevel=0 \\vsize=100pt \\hsize=100pt \\pdfpagewidth=120pt \\pdfpageheight=120pt \\output={\\shipout\\box255} \\def\\space{ } \\count1=0 \\def\\l{\\advance\\count1 by1 \\ifnum\\count1<20000 \\expandafter\\l\\fi}\\l ";
+
+    /// Pages with images (a PNG with an alpha channel, its soft mask; a
+    /// PDF page included), a form showing an image, an object a page's
+    /// resources name, written before the pages: each streamed exact, and
+    /// its file drawn pixel for pixel as the build's file draws the page.
+    /// The build's file the one a build that streams nothing writes. At
+    /// one thread and two.
+    #[test]
+    fn image_and_form_pages_stream_exact() {
+        // (the PDF page included: a red square and a black rule)
+        let inc = {
+            let t = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\pdfcompresslevel=0 \\pdfpagewidth=40pt \\pdfpageheight=40pt \\hsize=40pt \\vsize=40pt \\output={\\shipout\\box255} \\hbox{\\pdfliteral{1 0 0 rg}\\vrule width 30pt height 30pt}\\end\n";
+            let mut q = Session::new(
+                Job {
+                    engine: crate::tex::engine("pdftex").unwrap(),
+                    ..job()
+                },
+                Arc::from(t),
+                Arc::new(Nothing),
+                None,
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            );
+            q.build().out.pdf.to_vec()
+        };
+        assert!(inc.starts_with(b"%PDF"), "the included page built");
+        let a = png(8, 8, |x, y| {
+            [
+                u8::try_from(x * 30).unwrap(),
+                0,
+                u8::try_from(y * 30).unwrap(),
+                u8::try_from(40 + x * 25).unwrap(),
+            ]
+        });
+        let host: Arc<dyn Host> = Arc::new(Files(HashMap::from([
+            ("a.png".to_owned(), a),
+            ("b.pdf".to_owned(), inc),
+        ])));
+        let mut t = PDF_HEAD.to_owned();
+        t.push_str("\\pdfximage width 40pt {a.png}\\edef\\i{\\the\\pdflastximage} \\pdfximage width 30pt {b.pdf}\\edef\\j{\\the\\pdflastximage} \\setbox0\\hbox{\\pdfrefximage\\j\\vrule width 3pt height 30pt}\\pdfxform 0 \\edef\\f{\\the\\pdflastxform} \\immediate\\pdfobj{<< /G1 << /ca 0.5 /CA 0.5 >> >>}\\edef\\g{\\the\\pdflastobj} \\edef\\r{/ExtGState \\g\\space 0 R}\\pdfpageresources\\expandafter{\\r} ");
+        for p in [
+            "\\pdfrefximage\\i",
+            "\\vrule width 10pt height 5pt",
+            "\\pdfrefximage\\j",
+            "\\pdfrefxform\\f",
+            "\\pdfliteral{/G1 gs 0 0 1 rg}\\vrule width 30pt height 30pt",
+            "\\pdfrefximage\\i\\pdfrefxform\\f",
+        ] {
+            t.push_str(&format!("\\hbox{{{p}}}\\penalty-10000 "));
+        }
+        t.push_str("\\end\n");
+        for threads in [1, 2] {
+            let (d, ev, files) = streamed_build(&t, host.clone(), threads);
+            let told = exact_told(&ev);
+            assert_eq!(
+                told.len(),
+                6,
+                "threads {threads}: every page streamed: {ev:?}"
+            );
+            assert!(
+                told.values().all(|&e| e),
+                "threads {threads}: every page exact: {told:?}"
+            );
+            let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+            for (k, (pdf, exact)) in &files {
+                assert!(exact, "threads {threads}: page {k}");
+                assert_eq!(
+                    pixels(pdf, 0, 2.0),
+                    pixels(&out, *k, 2.0),
+                    "threads {threads}: page {k} streamed is not drawn as the build's"
+                );
+            }
+            let mut quiet = Session::new(
+                Job {
+                    engine: crate::tex::engine("pdftex").unwrap(),
+                    threads: Some(threads),
+                    ..job()
+                },
+                Arc::from(t.as_str()),
+                host.clone(),
+                None,
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            );
+            assert_eq!(
+                Some(out),
+                Some(quiet.build().out.pdf.to_vec()),
+                "threads {threads}: the streaming build's file"
+            );
+        }
+    }
+
+    /// Pages drawing with what is not made when they ship (pgf's way:
+    /// `\\pdfpageresources` naming reserved objects filled by `\\pdfobj
+    /// useobjnum` at the end): a graphics state, a shading, a pattern, a
+    /// colour space, an external object. Each page streams all the same,
+    /// not exact, and is drawn without what it lacks; a page that draws
+    /// with none of them (its resources name them all the same) is exact,
+    /// drawn as the build's file draws it.
+    #[test]
+    fn pages_drawing_with_later_objects_stream_inexact() {
+        let mut t = PDF_HEAD.to_owned();
+        let names = ["gs", "sh", "pat", "cs", "xo"];
+        for n in names {
+            t.push_str(&format!(
+                "\\pdfobj reserveobjnum \\edef\\{n}{{\\the\\pdflastobj}} "
+            ));
+        }
+        // (its text as pgf gives it: the numbers in it, not the macros)
+        t.push_str("\\edef\\r{/ExtGState \\gs\\space 0 R /Shading \\sh\\space 0 R /Pattern \\pat\\space 0 R /ColorSpace \\cs\\space 0 R /XObject \\xo\\space 0 R}\\pdfpageresources\\expandafter{\\r} ");
+        for p in [
+            "\\vrule width 10pt height 5pt",
+            "\\pdfliteral{/G1 gs}\\vrule width 30pt height 30pt",
+            "\\pdfliteral{q 0 0 30 30 re W n /S1 sh Q}\\vrule width 1pt height 1pt",
+            "\\pdfliteral{/Pattern cs /P1 scn 0 0 30 30 re f}\\vrule width 1pt height 1pt",
+            "\\pdfliteral{/C1 cs 0.5 scn 0 0 30 30 re f}\\vrule width 1pt height 1pt",
+            "\\pdfliteral{q 30 0 0 30 0 0 cm /X1 Do Q}\\vrule width 1pt height 1pt",
+        ] {
+            t.push_str(&format!("\\hbox{{{p}}}\\penalty-10000 "));
+        }
+        // (never filled here: in a document, filled at its end, after the
+        // pages; a small one's end may come before a page's file is made)
+        t.push_str("\\end\n");
+        let (d, ev, files) = streamed_build(&t, Arc::new(Nothing), 1);
+        let told = exact_told(&ev);
+        // (the first draws with none of what its resources name: exact)
+        assert_eq!(told.get(&0), Some(&true), "page 0: {ev:?}");
+        for k in 1..6u64 {
+            assert_eq!(told.get(&k), Some(&false), "page {k}: {ev:?}");
+        }
+        let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+        // (drawn without them: the page drawing with none is the build's)
+        for (k, (pdf, _)) in &files {
+            let (w, h, px) = pixels(pdf, 0, 1.0);
+            assert!(w > 0 && h > 0 && !px.is_empty(), "page {k}");
+        }
+        assert_eq!(pixels(&files[&0].0, 0, 1.0), pixels(&out, 0, 1.0));
+        // (the status answer lists them, until the build is in)
+        let r = d.request(&json!({"id": 2, "op": "pages"}));
+        assert_eq!(r["json"]["inexact"], json!([]), "{r}");
+    }
+
+    /// A colour pushed on one page and popped on a later one colours the
+    /// pages between: those pages, and every one after, are not told
+    /// exact; those before are.
+    #[test]
+    fn a_colour_carried_across_pages_is_not_exact() {
+        let mut t = PDF_HEAD.to_owned();
+        for i in 0..5 {
+            let c = match i {
+                1 => "\\pdfcolorstack0 push{1 0 0 rg}",
+                3 => "\\pdfcolorstack0 pop",
+                _ => "",
+            };
+            t.push_str(&format!(
+                "\\hbox{{{c}\\vrule width {}pt height 30pt}}\\penalty-10000 ",
+                10 + i
+            ));
+        }
+        t.push_str("\\end\n");
+        for threads in [1, 2] {
+            let (d, ev, files) = streamed_build(&t, Arc::new(Nothing), threads);
+            let told = exact_told(&ev);
+            assert_eq!(told.get(&0), Some(&true), "threads {threads}: {ev:?}");
+            assert_eq!(told.get(&1), Some(&true), "threads {threads}: {ev:?}");
+            for k in 2..5 {
+                assert_eq!(
+                    told.get(&k),
+                    Some(&false),
+                    "threads {threads}: page {k}: {ev:?}"
+                );
+            }
+            let out = d.output().map(|o| o.1.to_vec()).unwrap();
+            for k in [0usize, 1] {
+                assert_eq!(
+                    pixels(&files[&k].0, 0, 1.0),
+                    pixels(&out, k, 1.0),
+                    "page {k}"
+                );
+            }
+            // (page 2 drawn in the colour carried in the build's file: not
+            // in its own, which is why it is not exact)
+            assert_ne!(pixels(&files[&2].0, 0, 1.0), pixels(&out, 2, 1.0));
         }
     }
 }

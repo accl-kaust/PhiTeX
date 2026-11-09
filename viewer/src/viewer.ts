@@ -488,8 +488,15 @@ export class Viewer {
     return this.current;
   }
 
-  /** The pages there are now, by hash: slots added or removed, changed ones drawn again when seen. */
-  layout(hashes: string[]): void {
+  /** The pages streamed drawn without some of what they draw with, by hash (a preview's mark). */
+  private previews: ReadonlySet<string> = new Set();
+
+  /**
+   * The pages there are now, by hash: slots added or removed, changed ones drawn again when seen;
+   * those of `previews` marked as previews (streamed, drawn without some of what they draw with).
+   */
+  layout(hashes: string[], previews?: ReadonlySet<string>): void {
+    this.previews = previews ?? new Set();
     while (this.slots.length > hashes.length) {
       const s = this.slots.pop()!;
       this.io.unobserve(s.el);
@@ -514,11 +521,14 @@ export class Viewer {
   /**
    * A page the build has not shipped alone (no hash yet: a streamed page
    * after it came first) says it comes at the build's end, not a blank
-   * sheet: one with images, shadings or transparency is never streamed
-   * (PhiTeX's stream1), only drawn once the whole build is in.
+   * sheet (a page the engine could not write alone: there are few). A page
+   * streamed without some of what it draws with (an object made at the
+   * document's end: pgf's transparency, shadings, patterns) says it is a
+   * preview, until the build's page replaces it.
    */
   private waits(s: Slot): void {
     s.el.classList.toggle("later", !s.hash && !s.img);
+    s.el.classList.toggle("preview", !!s.hash && this.previews.has(s.hash));
   }
 
   /** Page `k`'s slot, made (with those before it) if there is none yet. */
@@ -862,7 +872,12 @@ export class Viewer {
    */
   private ask(k: number): void {
     const s = this.slots[k];
-    if (!s) return;
+    // (a page the build has not shipped (no hash: a streamed page after it
+    // came first) has nothing to draw: asked, it failed, and was asked again
+    // at every zoom's frame, each a turn of the core's mid-build, ahead of
+    // the pages it can draw (the TikZ manual zoomed while streaming: 62 of
+    // 94 asks failed). Asked once its hash comes (shipped, layout))
+    if (!s || !s.hash) return;
     const key = `${k}:${s.hash}`;
     if (this.asked.has(key)) return;
     this.asked.add(key);

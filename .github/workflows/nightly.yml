@@ -43,8 +43,11 @@ jobs:
           runs() { gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=$1" -q '[.check_runs[].conclusion] | join(" ")'; }
           checks=$(runs checks) gate=$(runs gate)
           echo "dev $sha: checks [$checks] gate [$gate]"
-          case " $checks " in *" success "*) ;; *) echo "dev's checks are not green: no nightly"; exit 0 ;; esac
-          case " $gate " in *" failure "*) echo "dev's gate failed: no nightly"; exit 0 ;; esac
+          # (a scheduled nightly waits for green; one started by hand builds dev as it is)
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            case " $checks " in *" success "*) ;; *) echo "dev's checks are not green: no nightly"; exit 0 ;; esac
+            case " $gate " in *" failure "*) echo "dev's gate failed: no nightly"; exit 0 ;; esac
+          fi
           built=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" -q .object.sha 2>/dev/null || true)
           if [ "$built" = "$sha" ] && [ "$GITHUB_EVENT_NAME" = schedule ]; then echo "nightly is $sha already"; exit 0; fi
           v=$(gh api "repos/$GITHUB_REPOSITORY/contents/crates/cli/Cargo.toml?ref=$sha" -q .content | base64 -d | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
@@ -64,7 +67,10 @@ jobs:
           - { os: ubuntu-22.04, asset: x86_64-linux }
           - { os: ubuntu-22.04-arm, asset: aarch64-linux }
           - { os: macos-15, asset: aarch64-macos }
-          - { os: macos-15-intel, asset: x86_64-macos }
+          # (Intel Macs' binary made on Apple silicon: Xcode carries both
+          # SDKs, and Rosetta runs it for the check; GitHub's Intel runners
+          # took 39 min a build against 13)
+          - { os: macos-15, asset: x86_64-macos, target: x86_64-apple-darwin }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -75,6 +81,10 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq clang mold
       - run: rustup show active-toolchain || rustup toolchain install
+      - if: matrix.target != ''
+        run: |
+          rustup target add ${{ matrix.target }}
+          softwareupdate --install-rosetta --agree-to-license
       # (the nightly's version in the CLI's manifest and the lock, so
       # `phitex --version` names it)
       - run: |
@@ -86,14 +96,19 @@ jobs:
       # the version written above changes phitex-cli alone. Not in
       # release.yml: a signed release is built from nothing but its source)
       - uses: mozilla-actions/sccache-action@v0.0.10
-      - run: cargo build --release --locked -p phitex-cli
+      - run: |
+          t="${{ matrix.target }}"
+          PHITEX_BUILT_BY=nightly cargo build --release --locked -p phitex-cli ${t:+--target $t}
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
       - run: |
-          ./target/release/phitex --version
-          ./target/release/phitex --version | grep -qF "${{ needs.which.outputs.version }}"
-          tar -czf "phitex-${{ matrix.asset }}.tar.gz" -C target/release phitex
+          t="${{ matrix.target }}"
+          out=target/${t:+$t/}release
+          file "$out/phitex"
+          "$out/phitex" --version
+          "$out/phitex" --version | grep -qF "${{ needs.which.outputs.version }}"
+          tar -czf "phitex-${{ matrix.asset }}.tar.gz" -C "$out" phitex
       - uses: actions/upload-artifact@v4
         with:
           name: phitex-${{ matrix.asset }}

@@ -378,7 +378,8 @@ mod tests {
             evaluation: 1,
             page: k,
             hash: k,
-            pdf: Vec::new(),
+            pdf: vec![0],
+            exact: true,
         };
         for k in 1..=STREAM_FIRST {
             assert!(m.wants(k));

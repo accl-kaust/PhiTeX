@@ -107,7 +107,7 @@ where `STEM.ist` exists.
 phitex build paper.tex                    # the finished PDF, like latexmk -pdf
 phitex watch paper.tex                    # live in the browser, rebuilt on save
 phitex --compat=pdflatex paper.tex        # one run, exactly as pdflatex
-phitex upgrade                            # the latest release; phitex news says what it brings
+phitex upgrade                            # the latest release, after a [Y/n] (-y: no question); phitex news says what it brings
 ```
 
 ## Works where you write

@@ -70,6 +70,15 @@ pub fn version() -> &'static str {
     }
 }
 
+/// Built from source rather than by release.yml or nightly.yml (they
+/// set `PHITEX_BUILT_BY` to `release` or `nightly`): such a build carries
+/// the version of the manifest it was built from, which names the
+/// release it leads to, not one it is. `phitex upgrade` offers it any
+/// release or nightly, and `--version` says it.
+pub fn source_build() -> bool {
+    option_env!("PHITEX_BUILT_BY").is_none()
+}
+
 #[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;

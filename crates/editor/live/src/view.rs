@@ -292,6 +292,9 @@ pub struct Viewer {
 struct Streamed {
     hashes: Vec<Option<u64>>,
     pdfs: std::collections::HashMap<usize, Arc<[u8]>>,
+    /// The pages whose files draw them otherwise than the build's file will
+    /// ([`phitex_tex::StreamedPage::exact`]: what they lack left out).
+    inexact: std::collections::BTreeSet<usize>,
     /// The bytes of the files kept ([`STREAM_KEEP`]).
     bytes: usize,
 }
@@ -774,31 +777,45 @@ impl Viewer {
     /// Page `k` (from 0) made while the build runs, `hash` its identity
     /// as the build would name it, `pdf` a file of that page alone
     /// ([`phitex_tex::StreamedPage`]), `pages` the pages shipped so far:
-    /// kept until the build is in and the viewers told,
-    /// `{"event":"page","k":K,"hash":H,"pages":N}` (`H` as [`STREAMED`]
-    /// says). The same page again tells nothing.
-    pub fn stream_page(&self, k: usize, hash: u64, pdf: Vec<u8>, pages: u64) {
+    /// `exact` whether it draws the page as the build's file will: kept
+    /// until the build is in and the viewers told,
+    /// `{"event":"page","k":K,"hash":H,"pages":N,"exact":E}` (`H` as
+    /// [`STREAMED`] says). The same page again tells nothing, but where it
+    /// was not exact and now is (`pdf` empty: the page told before, now
+    /// known exact): told again, exact.
+    pub fn stream_page(&self, k: usize, hash: u64, pdf: Vec<u8>, pages: u64, exact: bool) {
         let h = hash ^ STREAMED;
         {
             let mut st = lock(&self.streamed);
             if st.hashes.get(k) == Some(&Some(h)) {
+                if !(exact && st.inexact.remove(&k)) {
+                    return;
+                }
+            } else if pdf.is_empty() {
                 return;
+            } else {
+                let old = st.pdfs.get(&k).map_or(0, |p| p.len());
+                let first = u64::try_from(k).is_ok_and(|k| k < crate::progress::STREAM_FIRST);
+                if !first && st.bytes - old + pdf.len() > STREAM_KEEP {
+                    return;
+                }
+                if st.hashes.len() <= k {
+                    st.hashes.resize(k + 1, None);
+                }
+                st.hashes[k] = Some(h);
+                st.bytes = st.bytes - old + pdf.len();
+                st.pdfs.insert(k, Arc::from(pdf));
+                if exact {
+                    st.inexact.remove(&k);
+                } else {
+                    st.inexact.insert(k);
+                }
             }
-            let old = st.pdfs.get(&k).map_or(0, |p| p.len());
-            let first = u64::try_from(k).is_ok_and(|k| k < crate::progress::STREAM_FIRST);
-            if !first && st.bytes - old + pdf.len() > STREAM_KEEP {
-                return;
-            }
-            if st.hashes.len() <= k {
-                st.hashes.resize(k + 1, None);
-            }
-            st.hashes[k] = Some(h);
-            st.bytes = st.bytes - old + pdf.len();
-            st.pdfs.insert(k, Arc::from(pdf));
         }
         let n = pages.max(u64::try_from(k).unwrap_or(u64::MAX).saturating_add(1));
         self.emit(
-            &json!({"event": "page", "k": k, "hash": format!("{h:016x}"), "pages": n}).to_string(),
+            &json!({"event": "page", "k": k, "hash": format!("{h:016x}"), "pages": n, "exact": exact})
+                .to_string(),
         );
     }
 
@@ -1034,16 +1051,23 @@ impl Viewer {
                     }
                 }
             }
-            (hashes, p.history, p.ms)
+            // (those streamed drawn otherwise than the build's file will)
+            let inexact: Vec<usize> = if d.shown {
+                Vec::new()
+            } else {
+                lock(&s.streamed).inexact.iter().copied().collect()
+            };
+            (hashes, p.history, p.ms, inexact)
         };
         let ok = |json: Value| json!({"id": id, "ok": true, "json": json});
         let fail = |e: &str| json!({"id": id, "ok": false, "error": e});
         let reply = match op {
             "open" | "status" => {
-                let (hs, history, ms) = state();
+                let (hs, history, ms, inexact) = state();
                 ok(json!({
                     "pages": hs.len(),
                     "hashes": hashes_json(&hs),
+                    "inexact": inexact,
                     "history": history,
                     "build_ms": ms,
                     "engine": "phitex",
@@ -1057,7 +1081,10 @@ impl Viewer {
                     "undefined_names": [],
                 }))
             }
-            "pages" => ok(json!({"pages": hashes_json(&state().0)})),
+            "pages" => {
+                let (hs, _, _, inexact) = state();
+                ok(json!({"pages": hashes_json(&hs), "inexact": inexact}))
+            }
             "png" => fail("the pages are drawn as strips: frame and strips"),
             "frame" => {
                 #[allow(clippy::cast_possible_truncation, reason = "a scale: pixels a point")]
@@ -1098,7 +1125,7 @@ impl Viewer {
                 // queued: its build's time and parts come with `settled`
                 // when it is in; the last build's were said as this
                 // keystroke's, a reopen's 7.8 s as a letter's)
-                let (hs, history, _) = state();
+                let (hs, history, _, _) = state();
                 ok(json!({
                     "ok": true,
                     "queued": true,

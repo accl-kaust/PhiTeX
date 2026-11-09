@@ -105,11 +105,16 @@ fn after_help() -> String {
 pub fn version_text() -> &'static str {
     static TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         format!(
-            "{}\n\
+            "{}{}\n\
              Copyright 2026 Ammar Seliaman (https://github.com/Flinner, flinner <at> nand <dot> sh)\n\
              AGPL-3.0-only: free software, without any warranty. https://phitex.org\n\
              engine {:016x}, records {}, Shelf schema {} (release {}), editor protocol {}",
             crate::version(),
+            if crate::source_build() {
+                " (source build)"
+            } else {
+                ""
+            },
             phitex_tex::engine_id(),
             phitex_live::host::RECORDS_VERSION,
             phitex_shelf::SCHEMAS.map(|s| s.to_string()).join(", "),
@@ -260,6 +265,10 @@ struct Opts {
     /// Only problems and the result
     #[arg(short, long, global = true)]
     quiet: bool,
+    /// Yes to every question: upgrade's, and watch's whether to write
+    /// the PDF on quitting
+    #[arg(short = 'y', long = "no-confirm", visible_alias = "yes", global = true)]
+    no_confirm: bool,
     /// The build's events on standard output, one JSON object a line
     /// (nothing else is printed)
     #[arg(long, global = true, hide_short_help = true)]
@@ -387,6 +396,8 @@ pub struct Options {
     pub node_records: bool,
     pub verbose: u8,
     pub quiet: bool,
+    /// `--no-confirm`: every question answered yes, none asked.
+    pub no_confirm: bool,
     pub json: bool,
     pub shell_escape: bool,
     /// `--exact-latexmk`.
@@ -452,6 +463,7 @@ impl Cli {
             node_records: o.node_records,
             verbose: o.verbose,
             quiet: o.quiet,
+            no_confirm: o.no_confirm,
             json: o.json,
             shell_escape: o.shell_escape,
             exact_latexmk: o.exact_latexmk,
@@ -1285,7 +1297,7 @@ pub fn main(args: &[String]) -> ! {
         std::process::exit(0);
     }
     if command == Command::Upgrade {
-        std::process::exit(crate::upgrade::upgrade(&ui));
+        std::process::exit(crate::upgrade::upgrade(&ui, o.no_confirm));
     }
     if !o.lsp && !o.json && !o.quiet {
         crate::news::once(&ui);
