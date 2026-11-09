@@ -1,5 +1,8 @@
 # Cheap checks on GitHub's runners (docs/ci.md): formatting, clippy, the
-# wasm32 build of the pure crates, the unit tests. Everything that needs TeX
+# wasm32 build of the pure crates, the unit tests, and Windows's clippy and
+# unit tests (job windows). Started by hand (`gh workflow run checks.yml
+# --ref BRANCH`), also TeX Live end to end on Windows and Linux, their PDFs
+# compared byte for byte (jobs texlive, texlive-same). Everything that needs TeX
 # Live or the manual corpus runs in the gate (gate.yml, in the CI image). No secrets, read-only token, and no
 # pull_request_target: a pull request's code never runs with privileges.
 name: checks
@@ -60,3 +63,81 @@ jobs:
       # most of which build documents on TeX Live, and phitex-live's unit
       # tests run in the gate's tests shard, in the CI image)
       - run: cargo test --workspace --exclude phitex-live --lib --bins --no-fail-fast --quiet
+  # (Windows, x86_64-pc-windows-msvc: the workspace's lint, and the unit
+  # tests of the CLI, the engine and kpathsea, which need no TeX Live)
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - run: cargo clippy --workspace --exclude phitex-defuse --all-targets -- -D warnings
+      - run: cargo test -p phitex-cli -p phitex-tex -p phitex-kpse --lib --bins --no-fail-fast --quiet
+  # (by hand: phitex on TeX Live 2025's frozen tlnet-final, the same
+  # files on both systems, scripts/ci/e2e.ps1: build, watch, an edit, q)
+  texlive:
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      TL_REPO: https://ftp.math.utah.edu/pub/tex/historic/systems/texlive/2025/tlnet-final
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mold
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: texlive-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - uses: actions/cache@v4
+        id: tl
+        with:
+          path: ~/texlive
+          key: tl2025-basic-${{ runner.os }}-1
+      - if: steps.tl.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: scripts/ci/install-tl.ps1 -Root ~/texlive -Repo $env:TL_REPO
+      - run: cargo build --profile fastdev --locked -p phitex-cli
+      - shell: pwsh
+        run: |
+          $bin = if ($IsWindows) { '~/texlive/tl/bin/windows' } else { '~/texlive/tl/bin/x86_64-linux' }
+          $exe = if ($IsWindows) { 'target/fastdev/phitex.exe' } else { 'target/fastdev/phitex' }
+          scripts/ci/e2e.ps1 -Phitex $exe -TexBin $bin -Out e2e
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ runner.os }}
+          path: e2e/doc.pdf
+          retention-days: 7
+  # (the two systems' PDFs of the same document on the same TeX Live:
+  # the same bytes)
+  texlive-same:
+    needs: texlive
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: e2e-*
+      - run: |
+          ls -l e2e-*/doc.pdf
+          sha256sum e2e-*/doc.pdf
+          cmp e2e-Linux/doc.pdf e2e-Windows/doc.pdf || { cmp -l e2e-Linux/doc.pdf e2e-Windows/doc.pdf | head -20; exit 1; }
+          echo "Windows's PDF is Linux's, byte for byte"
