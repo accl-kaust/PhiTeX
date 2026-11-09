@@ -6765,8 +6765,24 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             // (lists of its own open, at rest: left to the following
             // nodes, `crate::boxscope`)
+            if crate::boxscope::on()
+                && !self.eof
+                && !self.nest.is_empty()
+                && crate::exec::prof_flag!("PHITEX_BOXSCOPE_TRACE")
+                && let Some(why) = self.leave_refusal()
+            {
+                eprintln!(
+                    "boxscope: node {} stays: {why}, nest {:?}, input left {}",
+                    self.cx.node().raw(),
+                    self.nest
+                        .iter()
+                        .map(|l| (l.mode, l.group, l.owns))
+                        .collect::<Vec<_>>(),
+                    self.has_input()
+                );
+            }
             if crate::boxscope::on() && !self.eof && self.can_leave_lists() {
-                if crate::exec::obs_flag!("PHITEX_BOXSCOPE_TRACE") {
+                if crate::exec::prof_flag!("PHITEX_BOXSCOPE_TRACE") {
                     eprintln!(
                         "boxscope: node {} leaves {:?}",
                         self.cx.node().raw(),

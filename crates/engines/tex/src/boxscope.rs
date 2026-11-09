@@ -78,24 +78,34 @@ impl Run<'_, '_> {
     /// group; each level a group sharing the list below, a box's group, or
     /// a paragraph with a group above it.
     pub(crate) fn can_leave_lists(&self) -> bool {
+        self.leave_refusal().is_none()
+    }
+
+    /// Why the run's open levels cannot be left ([`Self::can_leave_lists`]).
+    pub(crate) fn leave_refusal(&self) -> Option<&'static str> {
         let op = self.cx.op();
-        if !((op == self.ops.exec || op == self.ops.resume)
-            && !self.nest.is_empty()
-            && self.nest.len() < usize::from(u8::MAX - 2)
-            && self.conds.is_empty()
-            && self.effect == phitex_defuse::Effect::None
-            && self.aopen == 0
-            && self.pic_child.is_none()
-            && self.chars_live.is_none()
-            && self.appending.is_empty()
-            && self.appending_vals.is_empty()
-            && self.nest.last().is_some_and(|l| l.group != 0)
-            && self.nest.iter().any(|l| l.owns))
-        {
-            return false;
-        }
-        self.nest.iter().enumerate().all(|(k, l)| {
-            if !l.owns {
+        let why = if !(op == self.ops.exec || op == self.ops.resume) {
+            "not a text's run"
+        } else if self.nest.is_empty() || !self.nest.iter().any(|l| l.owns) {
+            "no list open"
+        } else if self.nest.len() >= usize::from(u8::MAX - 2) {
+            "too deep"
+        } else if !self.conds.is_empty() {
+            "a conditional open"
+        } else if self.effect != phitex_defuse::Effect::None {
+            "a scope effect"
+        } else if self.aopen != 0 {
+            "an alignment"
+        } else if self.pic_child.is_some() {
+            "a picture child"
+        } else if self.chars_live.is_some() {
+            "a character run"
+        } else if !self.appending.is_empty() || !self.appending_vals.is_empty() {
+            "appends pending"
+        } else if self.nest.last().is_some_and(|l| l.group == 0) {
+            "the innermost level a paragraph"
+        } else if let Some(k) = self.nest.iter().enumerate().position(|(k, l)| {
+            !if !l.owns {
                 l.group != 0
             } else if l.group == 0 {
                 l.mode == 102
@@ -104,7 +114,17 @@ impl Run<'_, '_> {
             } else {
                 is_box_group(l.group) && l.par.is_none() && l.prev_graf == 0
             }
-        })
+        }) {
+            let l = &self.nest[k];
+            if l.owns && l.group != 0 && !is_box_group(l.group) {
+                "a list of a group not a box's (math, insert, …)"
+            } else {
+                "a level that cannot be left"
+            }
+        } else {
+            return None;
+        };
+        Some(why)
     }
 
     /// Leaves the run's open levels to the following nodes: each list's
