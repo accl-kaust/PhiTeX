@@ -345,7 +345,6 @@ pub(crate) struct FileRest {
 }
 
 impl FileRest {
-
     pub(crate) fn new(v: &Values, id: ValueId, off: usize, name: ValueId) -> FileRest {
         // (a line ends at a carriage return alone too, as web2c's
         // `input_line` reads: a file with old Mac line ends, coursepaper.cls)

@@ -108,11 +108,7 @@ impl Run<'_, '_> {
                 "not a document's piece",
             ),
             (
-                self.cmds
-                    < self
-                        .ops
-                        .cut_min
-                        .load(std::sync::atomic::Ordering::Relaxed),
+                self.cmds < self.ops.cut_min.load(std::sync::atomic::Ordering::Relaxed),
                 "few commands",
             ),
             (self.stop_at.is_some(), "a second pass"),
@@ -122,9 +118,9 @@ impl Run<'_, '_> {
                 "the scope closed",
             ),
             (
-                self.kids.iter().any(|k| {
-                    ![self.ops.put, self.ops.toolnode, self.ops.pdfpage].contains(&k.0)
-                }),
+                self.kids
+                    .iter()
+                    .any(|k| ![self.ops.put, self.ops.toolnode, self.ops.pdfpage].contains(&k.0)),
                 "children",
             ),
             (self.claim_rest || self.fatal_hit || self.eof, "the end"),
@@ -323,4 +319,3 @@ pub(crate) fn diff_path(v: &phitex_defuse::Values, at: &str, a: ValueId, b: Valu
     }
     format!("{at}: resumed {} whole {}", short(v, a), short(v, b))
 }
-

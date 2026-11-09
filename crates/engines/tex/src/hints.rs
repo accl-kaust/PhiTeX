@@ -1077,7 +1077,11 @@ pub fn paragraph_units(text: &str) -> Vec<(usize, usize)> {
 // loop walks the commands and braces only or jumps over the ranges: a
 // paragraph's plain text is never visited atom by atom)
 #[allow(clippy::too_many_lines)]
-fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usize)>, Vec<bool>, Vec<bool>) {
+fn slices_of(
+    text: &str,
+    an: &Analysis<'_>,
+    kind: FileKind,
+) -> (Vec<(usize, usize)>, Vec<bool>, Vec<bool>) {
     if kind != FileKind::Document {
         return if text.is_empty() {
             (Vec::new(), Vec::new(), Vec::new())
@@ -1522,8 +1526,7 @@ fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usiz
                 && !commands.has(k)
                 && !claimed.has(k)
                 && !operand.has(k)
-                && p
-                    .tokens
+                && p.tokens
                     .get(a.tok)
                     .is_none_or(|t| t.tz != pass::Status::Pending)
         };

@@ -393,7 +393,6 @@ pub(crate) const SKIP_BLANKS: u8 = 1;
 pub(crate) const NEW_LINE: u8 = 2;
 
 impl Line {
-
     /// Whether characters are left, or the line's end is still to come.
     #[inline]
     pub(crate) fn has_more(&self) -> bool {
