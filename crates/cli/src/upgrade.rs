@@ -716,6 +716,29 @@ mod tests {
         assert_eq!(windows_asset("aarch64"), None);
     }
 
+    /// Windows: the program replaced by renaming the old aside (a running
+    /// program's file can be renamed, not replaced), the one left aside
+    /// by the upgrade before removed now.
+    #[test]
+    #[cfg(windows)]
+    fn replaced_aside() {
+        let dir = std::env::temp_dir().join(format!("phitex-replace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("phitex.exe");
+        std::fs::write(&exe, b"one").unwrap();
+        replace(&exe, b"two").unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"two");
+        replace(&exe, b"three").unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"three");
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left.len(), 2, "{left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_key_built_in_reads() {
         assert!(minisign_verify::PublicKey::decode(PUBKEY).is_ok());
