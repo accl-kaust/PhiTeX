@@ -415,7 +415,12 @@ impl PdfState {
         let pre = self.pre_key();
         let pre_bare = self.pre_key_with(true);
         let depths = self.stacks.page_depths();
-        let colors_before = self.stacks.page_state();
+        // (as the walk finds them: the stacks made at their first use)
+        let colors_before = {
+            let mut s = self.stacks.clone();
+            s.used();
+            s.page_state()
+        };
         let shared = self.sys_obj_ptr();
         // (a link running across the page's start: its objects are the
         // page before's, numbered where that page was placed)
