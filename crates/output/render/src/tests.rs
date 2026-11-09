@@ -851,3 +851,73 @@ fn every_kind_of_image_is_drawn() {
         );
     }
 }
+
+/// Identical lines are one band key: drawn once a frame, and counted once
+/// against the strips' budget. Each drawn and kept, the count grew by
+/// every repeat at every zoom, past [`KEEP_BYTES`] for good, and the
+/// watch then dropped every strip as soon as it drew it: the viewer's
+/// pages came blank (16 of a page's 17 strips, after some zooming).
+#[test]
+fn repeated_lines_are_counted_once_and_kept() {
+    let lines: Vec<(f64, &str)> = (0..12)
+        .map(|i| (700.0 - 40.0 * f64::from(i), "The same line"))
+        .collect();
+    let doc = pdf(&lines);
+    let mut r = Renderer::new();
+    for scale in [1.0, 1.5, 2.0, 1.5, 3.0, 1.0] {
+        let f = r.frame(&doc, 0, scale).expect("the page");
+        let keys: std::collections::HashSet<u64> = f.bands.iter().map(|b| b.key).collect();
+        assert!(
+            keys.len() < f.bands.len(),
+            "the lines share a key: {:?}",
+            f.bands
+        );
+        assert!(
+            f.drawn <= keys.len(),
+            "a key drawn once: {} drawn of {} keys",
+            f.drawn,
+            keys.len()
+        );
+        for b in &f.bands {
+            assert!(r.strip(b.key).is_some(), "band {b:?} kept at {scale}");
+        }
+    }
+    let held: usize = r.strips.values().map(|(s, _)| s.rgba.len()).sum();
+    assert_eq!(r.bytes, held, "the budget counts each strip once");
+}
+
+/// A frame's bands are the newest strips: drawing past the budget drops
+/// the oldest, never a band a frame just listed (kept from before), which
+/// the viewer fetches next.
+#[test]
+fn a_frames_kept_bands_outlive_the_ones_drawn_before_it() {
+    let a = pdf(&[(700.0, "Kept line"), (600.0, "Another")]);
+    let big = pdf(&[(700.0, "A wide line drawn at many scales")]);
+    let mut r = Renderer::new();
+    let listed = r.frame(&a, 0, 1.0).expect("the page");
+    // (other strips drawn after them, to three quarters of the budget)
+    let mut scale = 20.0;
+    let mut older = Vec::new();
+    while r.bytes < KEEP_BYTES / 4 * 3 {
+        older.extend(r.frame(&big, 0, scale).unwrap().bands.iter().map(|b| b.key));
+        scale += 1.0;
+    }
+    // (the page asked for again: its bands kept, listed)
+    assert_eq!(r.frame(&a, 0, 1.0).unwrap().drawn, 0);
+    // (then drawn past the budget, until the first of those is dropped)
+    while older.iter().all(|k| r.strip(*k).is_some()) {
+        assert!(scale < 400.0, "the budget never passed");
+        r.frame(&big, 0, scale).unwrap();
+        scale += 1.0;
+    }
+    assert!(
+        older.iter().any(|k| r.strip(*k).is_none()),
+        "the budget passed: the oldest dropped"
+    );
+    for b in &listed.bands {
+        assert!(
+            r.strip(b.key).is_some(),
+            "a band the frame listed dropped before older ones: {b:?}"
+        );
+    }
+}
