@@ -1786,7 +1786,6 @@ impl State {
                     Ok(ix) => ix.post,
                     Err(ix) => ix.post.clone(),
                 })
-                .filter(|_| !crate::exec::env_flag!("PHITEX_ORIGINS_FRESH"))
                 .unwrap_or_default();
             let ix = Arc::new(Index::update(nodes, post));
             *self.index.locked() = Some((key, ix.clone()));
