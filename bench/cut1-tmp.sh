@@ -76,7 +76,8 @@ for l in "${bins[@]}"; do
       python3 -I -c '
 import json, sys
 r = json.load(open(sys.argv[1])); x = sorted(r["edit_walls_s"])
-print(f"amsedit {sys.argv[2]} -j{sys.argv[3]}: {r[\"verdict\"]} median {1000*x[len(x)//2]:.1f} ms p90 {1000*x[int(len(x)*0.9)]:.1f} ms n {len(x)}")' "$r/amsedit-$l-j$j.json" $l $j | tee -a "$r/rows.txt"
+v = r["verdict"]
+print(f"amsedit {sys.argv[2]} -j{sys.argv[3]}: {v} median {1000*x[len(x)//2]:.1f} ms p90 {1000*x[int(len(x)*0.9)]:.1f} ms n {len(x)}")' "$r/amsedit-$l-j$j.json" $l $j | tee -a "$r/rows.txt"
     done ;;
   esac
   case " $B " in *" tikzedit "*)
