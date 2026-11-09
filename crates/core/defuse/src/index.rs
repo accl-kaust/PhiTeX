@@ -636,8 +636,8 @@ impl RangeIndex {
                         r.seen.iter().for_each(|&(_, x)| x.into_iter().for_each(&mut *keep));
                     }
                 }
-                for r in rs.finals.iter().filter(|r| live(r.node, r.serial)) {
-                    r.seen.into_iter().for_each(&mut *keep);
+                for r in rs.finals.iter().filter(|r| live(r.node(), r.serial)) {
+                    r.seen().into_iter().for_each(&mut *keep);
                 }
                 if let Some(x) = rs.published.and_then(|r| r.value) {
                     keep(x);
@@ -645,8 +645,8 @@ impl RangeIndex {
                 for r in rs.envs.iter().filter(|r| live(r.node, r.serial)) {
                     r.seen.into_iter().for_each(&mut *keep);
                 }
-                for (_, r) in rs.ends_of.iter().filter(|(_, r)| live(r.node, r.serial)) {
-                    r.seen.into_iter().for_each(&mut *keep);
+                for (_, r) in rs.ends_of.iter().filter(|(_, r)| live(r.node(), r.serial)) {
+                    r.seen().into_iter().for_each(&mut *keep);
                 }
             }
         }
@@ -803,7 +803,7 @@ impl RangeIndex {
                 m.ends_of
                     .iter()
                     .filter(|(v, r)| *v == u && live(r))
-                    .map(|(_, r)| r.clone())
+                    .map(|(_, r)| *r)
                     .collect()
             })
             .unwrap_or_default()

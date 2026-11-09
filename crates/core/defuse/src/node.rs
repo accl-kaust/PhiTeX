@@ -486,7 +486,7 @@ impl Node {
 #[derive(Default)]
 pub(crate) struct HoldMemo {
     pub(crate) fold: crate::read::FoldMemo,
-    held: crate::FxHashMap<(ReadKind, PathId, Option<ValueId>), ()>,
+    held: crate::FxHashMap<(u32, Option<ValueId>), ()>,
 }
 
 /// What a run produced, as the commit took it.
@@ -547,7 +547,7 @@ impl RunRecord {
         // (a read made again, as one before it found holding: a run asks
         // one thing many times, a `TikZ` picture microtype's font list
         // 20 592 times by 76 paths, each asked again at every check)
-        let key = (rd.kind.clone(), rd.path, rd.seen);
+        let key = (rd.key(), rd.seen());
         if memo.held.contains_key(&key) {
             return true;
         }
@@ -577,7 +577,7 @@ impl RunRecord {
             let a = eng.node(n);
             a.state() != State::Gone && !a.moved.load(Ordering::Acquire)
         };
-        let placed = match &rd.kind {
+        let placed = match rd.kind(&eng.read_keys) {
             ReadKind::Field { at: Anchor::Me, .. } => at_place(me.id),
             ReadKind::Field {
                 at: Anchor::Before(n) | Anchor::AfterOwn(n),
@@ -589,7 +589,10 @@ impl RunRecord {
         if placed
             && !scope_moved
             && rd.epoch != u64::MAX
-            && rd.kind.field().is_some_and(|f| eng.field_epoch(f) == rd.epoch)
+            && rd
+                .kind(&eng.read_keys)
+                .field()
+                .is_some_and(|f| eng.field_epoch(f) == rd.epoch)
         {
             return true;
         }
@@ -686,21 +689,115 @@ pub(crate) enum ReadKind {
 }
 
 /// One read: validated by recomputing its answer and comparing to `seen`.
-#[derive(Clone, Debug)]
+/// Its kind and path are one key interned in the engine
+/// ([`ReadKeys`]): a record holds 27 million reads in a book (the `TikZ`
+/// manual), 80 bytes each with the kind inline, 24 so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ReadRec {
-    pub(crate) kind: ReadKind,
-    pub(crate) path: PathId,
-    pub(crate) seen: Option<ValueId>,
+    /// The key ([`ReadKeys`]), and [`ReadRec::FILED`].
+    key: u32,
     /// Its field's change count before it read ([`crate::Engine`]'s
     /// `field_epoch`; `u64::MAX` for a read of none).
     pub(crate) epoch: u64,
+    /// What it saw, [`NO_VALUE`] for none.
+    seen: u64,
+}
+
+/// A read's `seen` when it saw no value: no id has this tag (7).
+const NO_VALUE: u64 = u64::MAX;
+
+impl ReadRec {
     /// Kept by a run going on from a commit before, which filed it: its
     /// reader stands ([`Node::filed_floor`]), and a commit neither files nor
     /// checks it again. A page loop parked on a long page keeps every
     /// read since the page began, and files and checks them all at every
     /// contributor otherwise (knowledge's manual: 6440 commits of up to
     /// 35 000 reads, half its build).
-    pub(crate) filed: bool,
+    const FILED: u32 = 1 << 31;
+
+    pub(crate) fn new(keys: &ReadKeys, kind: ReadKind, path: PathId, seen: Option<ValueId>, epoch: u64) -> ReadRec {
+        ReadRec {
+            key: keys.key(kind, path),
+            epoch,
+            seen: seen.map_or(NO_VALUE, ValueId::raw),
+        }
+    }
+
+    /// Its kind and path's key: equal keys, equal kinds and paths.
+    pub(crate) fn key(&self) -> u32 {
+        self.key & !Self::FILED
+    }
+
+    pub(crate) fn kind<'k>(&self, keys: &'k ReadKeys) -> &'k ReadKind {
+        &keys.get(self.key()).0
+    }
+
+    pub(crate) fn path(&self, keys: &ReadKeys) -> PathId {
+        keys.get(self.key()).1
+    }
+
+    pub(crate) fn seen(&self) -> Option<ValueId> {
+        (self.seen != NO_VALUE).then(|| ValueId::from_raw(self.seen))
+    }
+
+    pub(crate) fn filed(&self) -> bool {
+        self.key & Self::FILED != 0
+    }
+
+    pub(crate) fn set_filed(&mut self, on: bool) {
+        if on {
+            self.key |= Self::FILED;
+        } else {
+            self.key &= !Self::FILED;
+        }
+    }
+}
+
+/// The reads' kinds and paths, each once, by key ([`ReadRec`]): sharded by
+/// hash, so runs on many threads intern without meeting (a key seen
+/// before is a read lock of its shard); a key's entry never moves.
+pub(crate) struct ReadKeys {
+    shards: Box<[KeyShard]>,
+    all: crate::table::Table<(ReadKind, PathId)>,
+}
+
+const KEY_SHARDS: usize = 64;
+
+/// A shard of [`ReadKeys`]' index.
+type KeyShard = Lock<crate::FxHashMap<(ReadKind, PathId), u32>>;
+
+impl ReadKeys {
+    pub(crate) fn new() -> ReadKeys {
+        ReadKeys {
+            shards: (0..KEY_SHARDS)
+                .map(|_| Lock::new(crate::FxHashMap::default()))
+                .collect(),
+            all: crate::table::Table::new(),
+        }
+    }
+
+    pub(crate) fn key(&self, kind: ReadKind, path: PathId) -> u32 {
+        use std::hash::{Hash, Hasher};
+        let mut h = crate::FxHasher::default();
+        (&kind, path).hash(&mut h);
+        let shard = &self.shards[usize::try_from(h.finish() >> 58).unwrap_or(0) % KEY_SHARDS];
+        let k = (kind, path);
+        if let Some(&i) = shard.read().get(&k) {
+            return i;
+        }
+        let mut w = shard.write();
+        if let Some(&i) = w.get(&k) {
+            return i;
+        }
+        let i = u32::try_from(self.all.push(k.clone())).expect("read keys");
+        assert!(i < ReadRec::FILED, "read keys");
+        w.insert(k, i);
+        i
+    }
+
+    pub(crate) fn get(&self, key: u32) -> &(ReadKind, PathId) {
+        self.all.get(key as usize).expect("an interned read key")
+    }
 }
 
 impl ReadKind {

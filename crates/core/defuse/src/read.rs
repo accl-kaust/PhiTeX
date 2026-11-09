@@ -710,7 +710,7 @@ fn member_now(eng: &Engine, me: &Node, at: Anchor, spec: ValueId) -> bool {
 /// Whether reader record `r`, a guarded read's (`Step::Member`), still
 /// matters where it reads ([`member_now`]); true for any other.
 pub(crate) fn member_reader(eng: &Engine, r: &Reader) -> bool {
-    member_spec(eng, r.path).is_none_or(|spec| on_one_layout(eng, || member_at(eng, r.anchor, r.inclusive, spec)))
+    member_spec(eng, r.path()).is_none_or(|spec| on_one_layout(eng, || member_at(eng, r.anchor(), r.inclusive(), spec)))
 }
 
 /// [`member_now`] at node `at` (with its own definitions: `inclusive`).
@@ -1039,13 +1039,13 @@ pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut Fol
 /// (no placement of a run before stands for it: a run again is answered
 /// the guess again).
 pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &mut FoldMemo) -> bool {
-    if let ReadKind::Field { at, .. } = rd.kind
-        && let Some(spec) = member_spec(eng, rd.path)
+    if let ReadKind::Field { at, .. } = *rd.kind(&eng.read_keys)
+        && let Some(spec) = member_spec(eng, rd.path(&eng.read_keys))
         && !member_now(eng, me, at, spec)
     {
         return true;
     }
-    if let ReadKind::Placed { i, guess: true } = rd.kind {
+    if let ReadKind::Placed { i, guess: true } = *rd.kind(&eng.read_keys) {
         let Some(r) = me.run_record() else {
             return true;
         };
@@ -1056,7 +1056,7 @@ pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &m
             return true;
         }
     }
-    answer_in(eng, me, &rd.kind, rd.path, memo) == rd.seen
+    answer_in(eng, me, rd.kind(&eng.read_keys), rd.path(&eng.read_keys), memo) == rd.seen()
 }
 
 /// [`answer`], its folds from `memo`, on one layout ([`on_one_layout`]).
@@ -1474,10 +1474,10 @@ pub(crate) fn open_definer_before(eng: &Engine, me: &Node, r: &crate::node::RunR
 pub(crate) fn derived_target_open(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
     on_one_layout(eng, || {
         r.reads.iter().find_map(|rd| {
-            let ReadKind::Field { at, .. } = &rd.kind else {
+            let ReadKind::Field { at, .. } = &rd.kind(&eng.read_keys) else {
                 return None;
             };
-            let spec = derived_spec(eng, rd.path)?;
+            let spec = derived_spec(eng, rd.path(&eng.read_keys))?;
             let (anchor, incl) = match *at {
                 Anchor::Me => (me.id, false),
                 Anchor::Before(n) => (n, false),
@@ -1509,11 +1509,11 @@ pub(crate) fn hole_value(eng: &Engine, h: Option<NodeId>) -> Option<ValueId> {
 pub(crate) fn reader_answer(eng: &Engine, f: Field, r: &Reader) -> Option<ValueId> {
     on_one_layout(eng, || {
         if f == eng.depth_field {
-            let d = depth_of(eng, r.anchor)?;
-            return apply_path(eng, Some(eng.values().int(i64::from(d))), r.path);
+            let d = depth_of(eng, r.anchor())?;
+            return apply_path(eng, Some(eng.values().int(i64::from(d))), r.path());
         }
-        let rc = reaching_at(eng, f, r.anchor, r.inclusive)?;
-        through_at(eng, rc, r.path, r.anchor, r.inclusive)
+        let rc = reaching_at(eng, f, r.anchor(), r.inclusive())?;
+        through_at(eng, rc, r.path(), r.anchor(), r.inclusive())
     })
 }
 

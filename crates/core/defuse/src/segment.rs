@@ -533,12 +533,11 @@ const DUMMY_DEF: Def = Def {
 };
 
 const DUMMY_READER: Reader = Reader {
-    node: NodeId(0),
+    seen: NO_VALUE,
+    node: 0,
     serial: 0,
-    anchor: NodeId(0),
-    inclusive: false,
-    path: PathId::WHOLE,
-    seen: None,
+    anchor: 0,
+    path: 0,
 };
 
 impl Grow {
@@ -919,7 +918,7 @@ impl Inner {
                 g.ix_shards[2].push(FieldIndex::shard_of(f));
             }
             if v.capacity() - v.len() < k {
-                v.retain(|r| live(eng, r.node, r.serial));
+                v.retain(|r| live(eng, r.node(), r.serial));
                 if v.len() + k > v.capacity() / 2 {
                     g.reader_lists.push((f, (v.len() * 2).max(v.len() + k)));
                 }
@@ -1015,17 +1014,65 @@ impl Def {
 /// `Def::depth` of a global definition: it reaches every later position.
 pub(crate) const GLOBAL: u16 = u16::MAX;
 
-#[derive(Clone, Debug)]
+/// A read filed under its field in its anchor's segment: 24 bytes (a
+/// book files 23 million: the `TikZ` manual), its node and anchor by
+/// their 32-bit indices, `inclusive` in its path's top bit.
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Reader {
-    pub(crate) node: NodeId,
+    seen: u64,
+    node: u32,
     pub(crate) serial: u32,
     /// Whose position the read is at (the reader itself, or the node an
     /// `At` names).
-    pub(crate) anchor: NodeId,
-    /// `At::AfterOwn`: the anchor's own definition counts.
-    pub(crate) inclusive: bool,
-    pub(crate) path: PathId,
-    pub(crate) seen: Option<ValueId>,
+    anchor: u32,
+    /// The path, and `At::AfterOwn` (the anchor's own definition counts)
+    /// in its top bit.
+    path: u32,
+}
+
+/// A reader's `seen` when it saw no value: no id has this tag (7).
+const NO_VALUE: u64 = u64::MAX;
+const INCLUSIVE: u32 = 1 << 31;
+
+impl Reader {
+    pub(crate) fn new(
+        node: NodeId,
+        serial: u32,
+        anchor: NodeId,
+        inclusive: bool,
+        path: PathId,
+        seen: Option<ValueId>,
+    ) -> Reader {
+        let ix = |n: NodeId| u32::try_from(n.raw()).expect("a node index");
+        assert!(path.0 & INCLUSIVE == 0, "a path id");
+        Reader {
+            seen: seen.map_or(NO_VALUE, ValueId::raw),
+            node: ix(node),
+            serial,
+            anchor: ix(anchor),
+            path: path.0 | if inclusive { INCLUSIVE } else { 0 },
+        }
+    }
+
+    pub(crate) fn node(&self) -> NodeId {
+        NodeId::from_raw(u64::from(self.node))
+    }
+
+    pub(crate) fn anchor(&self) -> NodeId {
+        NodeId::from_raw(u64::from(self.anchor))
+    }
+
+    pub(crate) fn inclusive(&self) -> bool {
+        self.path & INCLUSIVE != 0
+    }
+
+    pub(crate) fn path(&self) -> PathId {
+        PathId(self.path & !INCLUSIVE)
+    }
+
+    pub(crate) fn seen(&self) -> Option<ValueId> {
+        (self.seen != NO_VALUE).then(|| ValueId::from_raw(self.seen))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1317,7 +1364,7 @@ impl Segment {
         let keys: Vec<Field> = inner.readers.keys().copied().collect();
         for f in keys {
             let v = inner.readers.get_mut(&f).expect("a key");
-            let (out, keep): (Vec<Reader>, Vec<Reader>) = v.drain(..).partition(|r| mine.contains_key(&r.anchor));
+            let (out, keep): (Vec<Reader>, Vec<Reader>) = v.drain(..).partition(|r| mine.contains_key(&r.anchor()));
             *v = keep;
             if v.is_empty() {
                 inner.readers.remove(&f);
@@ -1444,7 +1491,8 @@ impl Segment {
         let mut readers: FxHashMap<Field, Vec<Reader>> = FxHashMap::default();
         let mut gone_readers = Vec::new();
         for (f, v) in &mut inner.readers {
-            let (up, down): (Vec<Reader>, Vec<Reader>) = v.drain(..).partition(|r| eng.node(r.anchor).pos_hint() >= at);
+            let (up, down): (Vec<Reader>, Vec<Reader>) =
+                v.drain(..).partition(|r| eng.node(r.anchor()).pos_hint() >= at);
             *v = down;
             if !up.is_empty() {
                 readers.insert(*f, up);
