@@ -486,7 +486,7 @@ impl Node {
 #[derive(Default)]
 pub(crate) struct HoldMemo {
     pub(crate) fold: crate::read::FoldMemo,
-    held: crate::FxHashMap<(u32, Option<ValueId>), ()>,
+    held: crate::FxHashMap<(u64, Option<ValueId>), ()>,
 }
 
 /// What a run produced, as the commit took it.
@@ -577,7 +577,7 @@ impl RunRecord {
             let a = eng.node(n);
             a.state() != State::Gone && !a.moved.load(Ordering::Acquire)
         };
-        let placed = match rd.kind(&eng.read_keys) {
+        let placed = match &*rd.kind(&eng.read_keys) {
             ReadKind::Field { at: Anchor::Me, .. } => at_place(me.id),
             ReadKind::Field {
                 at: Anchor::Before(n) | Anchor::AfterOwn(n),
@@ -689,13 +689,16 @@ pub(crate) enum ReadKind {
 }
 
 /// One read: validated by recomputing its answer and comparing to `seen`.
-/// Its kind and path are one key interned in the engine
-/// ([`ReadKeys`]): a record holds 27 million reads in a book (the `TikZ`
-/// manual), 80 bytes each with the kind inline, 24 so.
+/// 24 bytes (a record holds 27 million reads in a book, the `TikZ`
+/// manual: 80 each with the kind inline). Its kind and path in one word:
+/// the common read, a whole field named by a string read at the reader,
+/// is that field's id itself (its tag a string's, or [`ReadRec::DIRECT_FILED`]'s
+/// filed); any other is a key interned in the engine ([`ReadKeys`]), under
+/// [`ReadRec::KEYED`]. A read needs no hashing to be recorded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ReadRec {
-    /// The key ([`ReadKeys`]), and [`ReadRec::FILED`].
-    key: u32,
+    /// Its kind and path, and whether filed.
+    k: u64,
     /// Its field's change count before it read ([`crate::Engine`]'s
     /// `field_epoch`; `u64::MAX` for a read of none).
     pub(crate) epoch: u64,
@@ -707,33 +710,56 @@ pub(crate) struct ReadRec {
 const NO_VALUE: u64 = u64::MAX;
 
 impl ReadRec {
-    /// Kept by a run going on from a commit before, which filed it: its
-    /// reader stands ([`Node::filed_floor`]), and a commit neither files nor
-    /// checks it again. A page loop parked on a long page keeps every
-    /// read since the page began, and files and checks them all at every
-    /// contributor otherwise (knowledge's manual: 6440 commits of up to
-    /// 35 000 reads, half its build).
-    const FILED: u32 = 1 << 31;
+    /// The top three bits of `k`: a string's tag, a direct read of the
+    /// field with that id.
+    const DIRECT: u64 = 4;
+    /// The same, filed ([`ReadRec::filed`]).
+    const DIRECT_FILED: u64 = 5;
+    /// An interned key in the low 32 bits ([`ReadKeys`]), and bit 60 filed.
+    const KEYED: u64 = 7;
+    const KEYED_FILED: u64 = 1 << 60;
+    const LOW: u64 = (1 << 61) - 1;
 
     pub(crate) fn new(keys: &ReadKeys, kind: ReadKind, path: PathId, seen: Option<ValueId>, epoch: u64) -> ReadRec {
+        let k = match kind {
+            ReadKind::Field { f, at: Anchor::Me } if path == PathId::WHOLE && f.0.raw() >> 61 == Self::DIRECT => {
+                f.0.raw()
+            }
+            _ => (Self::KEYED << 61) | u64::from(keys.key(kind, path)),
+        };
         ReadRec {
-            key: keys.key(kind, path),
+            k,
             epoch,
             seen: seen.map_or(NO_VALUE, ValueId::raw),
         }
     }
 
-    /// Its kind and path's key: equal keys, equal kinds and paths.
-    pub(crate) fn key(&self) -> u32 {
-        self.key & !Self::FILED
+    /// Its kind and path, as one word: equal words, equal kinds and paths.
+    pub(crate) fn key(&self) -> u64 {
+        match self.k >> 61 {
+            Self::DIRECT_FILED => (self.k & Self::LOW) | (Self::DIRECT << 61),
+            Self::KEYED => self.k & !Self::KEYED_FILED,
+            _ => self.k,
+        }
     }
 
-    pub(crate) fn kind<'k>(&self, keys: &'k ReadKeys) -> &'k ReadKind {
-        &keys.get(self.key()).0
+    pub(crate) fn kind<'k>(&self, keys: &'k ReadKeys) -> std::borrow::Cow<'k, ReadKind> {
+        match self.k >> 61 {
+            Self::KEYED => {
+                std::borrow::Cow::Borrowed(&keys.get(u32::try_from(self.k & 0xffff_ffff).unwrap_or(u32::MAX)).0)
+            }
+            _ => std::borrow::Cow::Owned(ReadKind::Field {
+                f: Field(ValueId::from_raw(self.key())),
+                at: Anchor::Me,
+            }),
+        }
     }
 
     pub(crate) fn path(&self, keys: &ReadKeys) -> PathId {
-        keys.get(self.key()).1
+        match self.k >> 61 {
+            Self::KEYED => keys.get(u32::try_from(self.k & 0xffff_ffff).unwrap_or(u32::MAX)).1,
+            _ => PathId::WHOLE,
+        }
     }
 
     pub(crate) fn seen(&self) -> Option<ValueId> {
@@ -741,14 +767,20 @@ impl ReadRec {
     }
 
     pub(crate) fn filed(&self) -> bool {
-        self.key & Self::FILED != 0
+        match self.k >> 61 {
+            Self::DIRECT_FILED => true,
+            Self::KEYED => self.k & Self::KEYED_FILED != 0,
+            _ => false,
+        }
     }
 
     pub(crate) fn set_filed(&mut self, on: bool) {
-        if on {
-            self.key |= Self::FILED;
-        } else {
-            self.key &= !Self::FILED;
+        match self.k >> 61 {
+            Self::DIRECT | Self::DIRECT_FILED => {
+                self.k = (self.k & Self::LOW) | ((if on { Self::DIRECT_FILED } else { Self::DIRECT }) << 61);
+            }
+            _ if on => self.k |= Self::KEYED_FILED,
+            _ => self.k &= !Self::KEYED_FILED,
         }
     }
 }
@@ -816,7 +848,6 @@ impl ReadKeys {
             return i;
         }
         let i = u32::try_from(self.all.push(k.clone())).expect("read keys");
-        assert!(i < ReadRec::FILED, "read keys");
         w.insert(k, i);
         KEY_CACHE_TLS.with(|c| c.borrow_mut()[slot] = (self.id, h, i));
         i
