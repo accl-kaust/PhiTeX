@@ -2832,9 +2832,19 @@ function tetris(box, dark) {
   const cv = el.querySelector("canvas"), ctx = cv.getContext("2d");
   const colors = [dark ? "#9fb7e0" : INK.light, ...RIBBON];
   const dpr = devicePixelRatio || 1;
-  const W2 = cv.width = box.clientWidth * dpr, H2 = cv.height = box.clientHeight * dpr;
-  const cell = W2 * 0.56 / COLS2, ROWS = Math.floor(H2 * 0.8 / cell), ox = W2 * 0.05, oy = W2 * 0.06;
-  let grid = Array.from({ length: ROWS }, () => Array(COLS2).fill(null));
+  let W2 = 0, H2 = 0, cell = 0, ROWS = 0, ox = 0, oy = 0;
+  let grid = [];
+  const fit = () => {
+    const w = Math.round(box.clientWidth * dpr), h = Math.round(box.clientHeight * dpr);
+    if (!w || !h) return false;
+    if (w === W2 && h === H2) return true;
+    [W2, H2] = [cv.width = w, cv.height = h];
+    [cell, ox, oy] = [W2 * 0.56 / COLS2, W2 * 0.05, W2 * 0.06];
+    const rows = Math.max(4, Math.floor(H2 * 0.8 / cell));
+    grid = rows >= grid.length ? [...Array.from({ length: rows - grid.length }, () => Array(COLS2).fill(null)), ...grid] : grid.slice(grid.length - rows);
+    ROWS = rows;
+    return true;
+  };
   const make = () => {
     const cells = SHAPES[Math.floor(Math.random() * SHAPES.length)];
     return { cells, x: 0, y: -2, c: colors[Math.floor(Math.random() * colors.length)] };
@@ -2853,6 +2863,7 @@ function tetris(box, dark) {
     }
     return best;
   };
+  fit();
   let piece = make(), next = make(), target = aim(piece), acc = 0, clearing = [], flash = 0, out = -1, speed = 45;
   const block = (x, y, s, c, k = 0) => {
     const g = s * 0.08, h = (s - 2 * g) * (1 - 0.8 * k);
@@ -2868,6 +2879,12 @@ function tetris(box, dark) {
   };
   const t0 = performance.now();
   const stopLoop = loop((t, dt) => {
+    const rows = ROWS;
+    if (!fit()) return;
+    if (rows !== ROWS) {
+      if (!fits(piece, piece.x, piece.y)) piece.y = -2;
+      target = aim(piece);
+    }
     ctx.clearRect(0, 0, W2, H2);
     ctx.fillStyle = dark ? "#3d4047" : "#e7e9ee";
     if (out < 0) ctx.fillRect(ox - 2 * dpr, oy + ROWS * cell + dpr, COLS2 * cell + 4 * dpr, 2 * dpr);
@@ -2913,12 +2930,19 @@ function tetris(box, dark) {
     if (/^Page \d+/.test(detail)) $(".pg").textContent = detail.slice(5);
     speed = what === "Typesetting" ? 28 : 45;
   };
+  const tick = $(".tick span");
+  let ticking = false, waiting = null;
+  tick.addEventListener("animationiteration", () => {
+    if (waiting) tick.textContent = waiting, waiting = null;
+  });
   const hint = (text) => {
-    const s = $(".tick span");
-    s.textContent = `Did you know? ${text}`;
-    s.style.animation = "none";
-    void s.offsetWidth;
-    s.style.animation = "";
+    const t = `Did you know? ${text}`;
+    if (ticking) return void (waiting = t);
+    ticking = true;
+    tick.textContent = t;
+    tick.style.animation = "none";
+    void tick.offsetWidth;
+    tick.style.animation = "";
   };
   return ending(el, () => (out = performance.now() - t0, el.classList.add("out"), 560), stopLoop, { step, hint });
 }
@@ -3088,13 +3112,23 @@ function glyphs(box, dark) {
     html`<canvas></canvas><div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div><div class="shelf"></div>`
   );
   const cv = el.querySelector("canvas"), ctx = cv.getContext("2d"), dpr = devicePixelRatio || 1;
-  const W2 = cv.width = box.clientWidth * dpr, H2 = cv.height = box.clientHeight * dpr;
+  let W2 = 0, H2 = 0;
   const ink2 = dark ? "#c9d4ea" : INK.light;
   const make = (y = Math.random() * H2) => {
     const z = [0.45, 0.7, 1][Math.floor(Math.random() * 3)];
     return { x: Math.random() * W2, y, z, v: (0.04 + Math.random() * 0.03) * z * H2, ch: GLYPHS[Math.floor(Math.random() * GLYPHS.length)], rot: Math.random() * 6, spin: (Math.random() - 0.5) * 1.5, c: Math.random() < 0.12 ? RIBBON[Math.floor(Math.random() * 4)] : ink2 };
   };
-  const gs = Array.from({ length: 60 }, () => make());
+  let gs = [];
+  const fit = () => {
+    const w = Math.round(box.clientWidth * dpr), h = Math.round(box.clientHeight * dpr);
+    if (!w || !h) return false;
+    if (w === W2 && h === H2) return true;
+    const [kx, ky] = [W2 ? w / W2 : 1, H2 ? h / H2 : 1];
+    [W2, H2] = [cv.width = w, cv.height = h];
+    if (!gs.length) gs = Array.from({ length: 60 }, () => make());
+    else for (const g of gs) g.x *= kx, g.y *= ky, g.v *= ky;
+    return true;
+  };
   let out = -1;
   let clear = [], clearAt = -1e9;
   const places = () => {
@@ -3112,6 +3146,7 @@ function glyphs(box, dark) {
     return Math.max(0, Math.min(1, a));
   };
   const stopLoop = loop((t, dt) => {
+    if (!fit()) return;
     ctx.clearRect(0, 0, W2, H2);
     if (t - clearAt > 250) places(), clearAt = t;
     const s = dt / 1e3;
