@@ -757,18 +757,31 @@ impl ReadRec {
 /// hash, so runs on many threads intern without meeting (a key seen
 /// before is a read lock of its shard); a key's entry never moves.
 pub(crate) struct ReadKeys {
+    /// Distinct per engine: a thread's cache holds keys of one at a time.
+    id: u64,
     shards: Box<[KeyShard]>,
     all: crate::table::Table<(ReadKind, PathId)>,
 }
 
 const KEY_SHARDS: usize = 64;
 
+/// The slots of a thread's cache of read keys ([`ReadKeys::key`]).
+const KEY_CACHE: usize = 4096;
+
+thread_local! {
+    /// A thread's last read keys, by hash: (engine, hash, key).
+    static KEY_CACHE_TLS: std::cell::RefCell<Box<[(u64, u64, u32)]>> =
+        std::cell::RefCell::new(vec![(0, 0, 0); KEY_CACHE].into_boxed_slice());
+}
+
 /// A shard of [`ReadKeys`]' index.
 type KeyShard = Lock<crate::FxHashMap<(ReadKind, PathId), u32>>;
 
 impl ReadKeys {
     pub(crate) fn new() -> ReadKeys {
+        static IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         ReadKeys {
+            id: IDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             shards: (0..KEY_SHARDS)
                 .map(|_| Lock::new(crate::FxHashMap::default()))
                 .collect(),
@@ -780,9 +793,22 @@ impl ReadKeys {
         use std::hash::{Hash, Hasher};
         let mut h = crate::FxHasher::default();
         (&kind, path).hash(&mut h);
-        let shard = &self.shards[usize::try_from(h.finish() >> 58).unwrap_or(0) % KEY_SHARDS];
+        let h = h.finish();
         let k = (kind, path);
+        // (this thread's last keys first, checked against the table, which
+        // takes no lock: every read of a run interns its key, and the
+        // shards' read locks, taken by every thread at every read, cost a
+        // twelfth of amsldoc's build at -j16)
+        let slot = usize::try_from(h).unwrap_or(0) % KEY_CACHE;
+        if let Some(i) = KEY_CACHE_TLS.with(|c| {
+            let (owner, hh, i) = c.borrow()[slot];
+            (owner == self.id && hh == h && self.all.get(i as usize).is_some_and(|x| *x == k)).then_some(i)
+        }) {
+            return i;
+        }
+        let shard = &self.shards[usize::try_from(h >> 58).unwrap_or(0) % KEY_SHARDS];
         if let Some(&i) = shard.read().get(&k) {
+            KEY_CACHE_TLS.with(|c| c.borrow_mut()[slot] = (self.id, h, i));
             return i;
         }
         let mut w = shard.write();
@@ -792,6 +818,7 @@ impl ReadKeys {
         let i = u32::try_from(self.all.push(k.clone())).expect("read keys");
         assert!(i < ReadRec::FILED, "read keys");
         w.insert(k, i);
+        KEY_CACHE_TLS.with(|c| c.borrow_mut()[slot] = (self.id, h, i));
         i
     }
 
