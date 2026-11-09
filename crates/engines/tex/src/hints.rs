@@ -6096,10 +6096,11 @@ mod tests {
     /// (`mids`); an edit in one line moves the cuts next to it only.
     #[test]
     fn a_long_paragraph_is_cut_at_content_defined_lines() {
+        use std::fmt::Write as _;
         let doc = |w: &str| {
             let mut t = String::from("\\hsize=300pt\n");
             for k in 0..700 {
-                t.push_str(&format!("w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17));
+                let _ = write!(t, "w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
                 t.push(if k % 10 == 9 { '\n' } else { ' ' });
             }
             t.push_str(w);

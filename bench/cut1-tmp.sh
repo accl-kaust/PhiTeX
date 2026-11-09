@@ -106,6 +106,13 @@ EOF
       PHITEX_CACHE_DIR=$w/cache-$l timeout 1800 python3 -I bench/cut1-edits.py "$w/bins/$l/phitex" "$w/tzr" tz.tex $j "$w/tzr/edits.json" "$r/tzedit-$l-j$j.json" --exact-pdf 2>&1 | sed "s|^|tzedit $l -j$j: |" | tee -a "$r/rows.txt"
     done ;;
   esac
+  case " $B " in *" paraedit "*)
+    for j in 8 16; do
+      rm -rf "$w/pe" "$w/pe-cold" && mkdir -p "$w/pe" && cp bench/para4000.tex "$w/pe/"
+      python3 -I bench/cut1-paraedit.py "$w/pe/para4000.tex" 6 > "$w/pe/edits.json"
+      PHITEX_CACHE_DIR=$w/cache-$l timeout 1800 python3 -I bench/cut1-edits.py "$w/bins/$l/phitex" "$w/pe" para4000.tex $j "$w/pe/edits.json" "$r/paraedit-$l-j$j.json" --exact-pdf 2>&1 | sed "s|^|paraedit $l -j$j: |" | tee -a "$r/rows.txt"
+    done ;;
+  esac
   case " $B " in *" grail "*)
     if [ -d "$w/bin/grail-src" ]; then
       ln=${EDIT_LINE:-260}
