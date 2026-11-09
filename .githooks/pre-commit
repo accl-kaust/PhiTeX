@@ -1,0 +1,42 @@
+#!/bin/sh
+# Rust is committed formatted, as checks.yml checks it (`cargo fmt --all
+# --check`: the toolchain rust-toolchain.toml pins, rustfmt.toml's
+# `ignore`), so no commit waits for CI to find it.
+#
+# A commit with Rust files staged: every staged file `cargo fmt` would
+# change is formatted and staged again. A file that also has changes not
+# staged stops the commit instead: formatting it here would stage those
+# too. Format it (cargo fmt) and add what you mean to commit.
+#
+# Every worktree has it once the repository's git says
+# `git config core.hooksPath .githooks` (a worktree's config is the
+# repository's). `git commit --no-verify` skips it.
+set -eu
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
+[ -n "$staged" ] || exit 0
+top=$(git rev-parse --show-toplevel)
+cd "$top"
+# (the files cargo fmt would change, the worktree's text: relative paths)
+off=$(cargo fmt --all -- --check -l 2>/dev/null | sed -n "s|^$top/||p" | sort -u) || true
+[ -n "$off" ] || exit 0
+fixed=""
+stuck=""
+for f in $staged; do
+    printf '%s\n' "$off" | grep -qxF "$f" || continue
+    if git diff --quiet -- "$f"; then
+        fixed="$fixed $f"
+    else
+        stuck="$stuck $f"
+    fi
+done
+if [ -n "$stuck" ]; then
+    echo "pre-commit: not formatted, and with changes not staged:$stuck" >&2
+    echo "pre-commit: run cargo fmt, add what you mean to commit, and commit again" >&2
+    exit 1
+fi
+[ -n "$fixed" ] || exit 0
+# shellcheck disable=SC2086 # (the paths, one word each)
+rustfmt --edition 2024 $fixed
+# shellcheck disable=SC2086
+git add -- $fixed
+echo "pre-commit: formatted$fixed" >&2
