@@ -1121,7 +1121,14 @@ impl Pool {
                 let stood = collected
                     .as_ref()
                     .map_or_else(|| eng.values().payload_bytes(), |c| c.bytes_after);
-                let next = floor.max(stood.saturating_mul(2));
+                // (the next once dead values match half of what stood (a
+                // wasm core, its memory fixed at 4 GiB) or all of it)
+                let grown = if cfg!(target_family = "wasm") {
+                    stood.saturating_add(stood / 2)
+                } else {
+                    stood.saturating_mul(2)
+                };
+                let next = floor.max(grown);
                 sh.collect_next.store(next, Ordering::SeqCst);
                 eng.collect_mark.store(next, Ordering::SeqCst);
                 if let Some(c) = collected {

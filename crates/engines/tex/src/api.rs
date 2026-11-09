@@ -3264,6 +3264,9 @@ impl Graph {
             match crate::exec::env_str!("PHITEX_COLLECT_MB").and_then(|x| x.parse::<u64>().ok()) {
                 Some(0) => None,
                 Some(mb) => Some(mb << 20),
+                // (a wasm core's whole memory is 4 GiB: a quarter of it in
+                // dead values before the first collection is too much)
+                None if cfg!(target_family = "wasm") => Some(256u64 << 20),
                 None => Some(1u64 << 30),
             };
         // (`PHITEX_RUNS_PER_NODE`: a node run more often in one evaluation

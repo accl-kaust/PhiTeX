@@ -139,6 +139,10 @@ struct Padded<T>(T);
 
 type Shard<V> = Padded<Lock<FxHashMap<u64, V>>>;
 
+/// What gives a collection its roots ([`Values::collect`]): called once,
+/// it hands each root to the function it is given.
+pub(crate) type Roots<'a> = dyn FnMut(&mut dyn FnMut(ValueId)) + 'a;
+
 /// Many, each a cache line apart: an intern meets another's lock only when
 /// their hashes share a shard ([`shard_of`]).
 const SHARDS: usize = 1024;
@@ -551,7 +555,7 @@ impl Values {
     /// that chain stays whole. The hash index is made anew from what
     /// stays, its probe chains whole.
     #[allow(unsafe_code)]
-    pub(crate) fn collect(&self, roots: impl IntoIterator<Item = ValueId>) -> Collected {
+    pub(crate) fn collect(&self, roots: &mut Roots<'_>) -> Collected {
         let counting = self.counting.load(Ordering::SeqCst);
         let before = if counting {
             self.payload_bytes()
@@ -562,45 +566,28 @@ impl Values {
         let n = self.plain.len();
         let mut plain_mark = vec![0u64; n.div_ceil(64)];
         let mut rope_mark: FxHashSet<u64> = FxHashSet::default();
-        let mut stack: Vec<ValueId> = roots.into_iter().collect();
-        while let Some(x) = stack.pop() {
-            match x.tag() {
-                T_SEQ if x != ValueId::NIL => {
-                    let p = x.payload();
-                    if !rope_mark.insert(p) {
-                        continue;
-                    }
-                    if let Some(SeqSlot::Node(r)) = self.seqs[shard_of(p)].0.read().get(&p).copied() {
-                        if !r.unit {
-                            stack.push(r.left);
-                        }
-                        stack.push(r.right);
-                    }
-                }
-                T_STR | T_LIST | T_BIG => {
-                    let i = self.plain_index(x);
-                    if i >= n || plain_mark[i / 64] & (1 << (i % 64)) != 0 {
-                        continue;
-                    }
-                    plain_mark[i / 64] |= 1 << (i % 64);
-                    if x.tag() == T_LIST {
-                        self.at(i, |v| {
-                            if let Some(Value::List(xs)) = v {
-                                stack.extend(xs.iter().copied());
-                            }
-                        });
-                    }
-                }
-                _ => {}
-            }
-        }
+        // (each root marked as it is given, through a stack of what it
+        // reaches: a list of every root at once was 8 bytes a read of
+        // every record, its doubling to 512 MiB what the `TikZ` manual's
+        // wasm core could not allocate)
+        let mut stack: Vec<ValueId> = Vec::new();
+        roots(&mut |root| {
+            stack.push(root);
+            self.mark_from(&mut stack, n, &mut plain_mark, &mut rope_mark);
+        });
         let mut out = Collected {
             bytes_before: before,
             ..Collected::default()
         };
         let mut kept = 0u64;
-        let mut ix: Vec<(u64, ValueId)> = Vec::new();
         let mut taken: Vec<Arc<Value>> = Vec::new();
+        // (the hash index made anew as the slots are scanned, not from a
+        // list of every value kept: 16 bytes a value at once, 400 MB for
+        // the `TikZ` manual's 26 million, which its wasm core's last
+        // collection could not allocate)
+        for sh in &*self.plain_ix {
+            sh.0.write().clear();
+        }
         for i in 0..n {
             let Some(slot) = self.plain.get(i) else { continue };
             if slot.list && plain_mark[i / 64] & (1 << (i % 64)) == 0 {
@@ -626,7 +613,18 @@ impl Values {
                 continue;
             };
             kept += w;
-            ix.push((h, ValueId::make(tag, self.base + i as u64)));
+            let id = ValueId::make(tag, self.base + i as u64);
+            let mut h = h;
+            loop {
+                let mut w = self.plain_ix[shard_of(h)].0.write();
+                if w.contains_key(&h) {
+                    drop(w);
+                    h = hash_words(h, &[1]);
+                    continue;
+                }
+                w.insert(h, id);
+                break;
+            }
         }
         // (a reader outside a task pinned before its load: seen here, it
         // may hold what was taken, which waits for a collection that sees
@@ -674,22 +672,6 @@ impl Values {
             kept += live as u64 * Self::ROPE_BYTES;
         }
         for sh in &*self.plain_ix {
-            sh.0.write().clear();
-        }
-        for (h0, id) in ix {
-            let mut h = h0;
-            loop {
-                let mut w = self.plain_ix[shard_of(h)].0.write();
-                if w.contains_key(&h) {
-                    drop(w);
-                    h = hash_words(h, &[1]);
-                    continue;
-                }
-                w.insert(h, id);
-                break;
-            }
-        }
-        for sh in &*self.plain_ix {
             sh.0.write().shrink_to_fit();
         }
         if counting {
@@ -700,6 +682,41 @@ impl Values {
         self.collections.fetch_add(1, Ordering::SeqCst);
         out.bytes_after = kept;
         out
+    }
+
+    /// Marks what `stack`'s values reach ([`Values::collect`]).
+    fn mark_from(&self, stack: &mut Vec<ValueId>, n: usize, plain_mark: &mut [u64], rope_mark: &mut FxHashSet<u64>) {
+        while let Some(x) = stack.pop() {
+            match x.tag() {
+                T_SEQ if x != ValueId::NIL => {
+                    let p = x.payload();
+                    if !rope_mark.insert(p) {
+                        continue;
+                    }
+                    if let Some(SeqSlot::Node(r)) = self.seqs[shard_of(p)].0.read().get(&p).copied() {
+                        if !r.unit {
+                            stack.push(r.left);
+                        }
+                        stack.push(r.right);
+                    }
+                }
+                T_STR | T_LIST | T_BIG => {
+                    let i = self.plain_index(x);
+                    if i >= n || plain_mark[i / 64] & (1 << (i % 64)) != 0 {
+                        continue;
+                    }
+                    plain_mark[i / 64] |= 1 << (i % 64);
+                    if x.tag() == T_LIST {
+                        self.at(i, |v| {
+                            if let Some(Value::List(xs)) = v {
+                                stack.extend(xs.iter().copied());
+                            }
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// The collections made so far.
@@ -1522,7 +1539,7 @@ mod tests {
         let b = v.seq_unit(x2);
         assert_ne!(a, b);
         assert_eq!(a.payload(), 1, "the content hash's slot");
-        let c = v.collect([b]);
+        let c = v.collect(&mut |k: &mut dyn FnMut(ValueId)| k(b));
         assert_eq!(c.ropes, 1, "a collected");
         assert!(v.rope(a).is_none());
         assert_eq!(v.seq_unit(x2), b, "made again across the tombstone: its id");
@@ -1533,7 +1550,7 @@ mod tests {
         assert_eq!(v.seq_to_vec(a2), vec![x1]);
         // (b collected too: a2's chain passes both slots, both tombstones,
         // and a2 made again is a2)
-        let c = v.collect([a2]);
+        let c = v.collect(&mut |k: &mut dyn FnMut(ValueId)| k(a2));
         assert_eq!(c.ropes, 1, "b collected");
         assert_eq!(v.footprint().2, 1);
         assert_eq!(v.seq_unit(x1), a2);
