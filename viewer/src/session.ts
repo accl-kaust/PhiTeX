@@ -1124,6 +1124,12 @@ export class PreviewSession {
     // (the origins came while this was asked, the answer made before
     // them: the page asked again, as the event's lookups do)
     if (seen !== this.originsSeen) return this.glyphsOf(k);
+    // (a page's origins are made when asked, that page alone: asked again
+    // once they are, as the log is)
+    if (r.ok && (r.json as { pending?: boolean } | undefined)?.pending) {
+      await new Promise((ok) => setTimeout(ok, 4));
+      return this.glyphsFetch(k, key);
+    }
     if (!r.ok || !r.json) return [];
     // (the job's names: "main" for main.tex, "ch/intro.tex", "article.cls")
     const path = (n: string) => {

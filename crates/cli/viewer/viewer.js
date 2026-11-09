@@ -7108,6 +7108,10 @@ var PreviewSession = class {
     const seen = this.originsSeen;
     const r = await this.core.request({ op: "origins", page: k });
     if (seen !== this.originsSeen) return this.glyphsOf(k);
+    if (r.ok && r.json?.pending) {
+      await new Promise((ok) => setTimeout(ok, 4));
+      return this.glyphsFetch(k, key);
+    }
     if (!r.ok || !r.json) return [];
     const path = (n) => {
       n = n.replace(/^\.\//, "");

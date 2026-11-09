@@ -1526,6 +1526,23 @@ impl Session {
         ))
     }
 
+    /// Page `k`'s glyph origins (0 the first), made for that page alone
+    /// (its answer kept while its nodes are, shifted where they only
+    /// moved), and the files origins name: none without origins or a
+    /// build.
+    #[must_use]
+    pub fn page_origins(
+        &self,
+        k: usize,
+    ) -> Option<(Vec<String>, Option<Arc<phitex_tex::PageOrigins>>)> {
+        let b = self
+            .build
+            .as_ref()
+            .filter(|_| self.job.origins || self.job.synctex)?;
+        let page = b.page_origins(k);
+        Some((b.origin_files(), page))
+    }
+
     /// The main text with the editor's buffer for it, if there is one.
     /// The last build's diagnostics at their places (TeX's errors and
     /// warnings, the engine's), made now: an edit's report leaves them

@@ -173,6 +173,21 @@ A clean build sends each page as it ships, before the build settles
   (`hashes`/`pages`) and, as `"inexact": [k, …]`, those not exact. The
   list is empty once the build is in.
 
+### 2.1d Glyph origins: made per page, when asked
+
+A build makes no glyph origins. The `origins` op (`{"op":"origins","page":K}`)
+answers page K's from those made for the current build; a page not made yet
+answers `{"pending": true}` and is made then, for that page alone, by the
+session's owner (watch loop, or the core's next step): the viewer asks
+again shortly, as for `log`. A page's answer is kept while its nodes are,
+and shifted, not made again, where an edit only moved them. After every
+build the viewer gets `{"event":"origins","pages":[],"edits":[]}`: the
+answers it keeps by page are asked again when next needed (a page the build
+did not draw again may have moved in its file). `Viewer::set_origins` still
+sets every page's at once; nothing calls it after a build any more.
+`JOB.synctex.gz` (`--synctex`, or a watch writing its PDF) is written at
+idle or on quit, from the same per-page answers.
+
 ### 2.2 LSP `$/progress`
 
 Only where the client said `window.workDoneProgress`. A build's token is

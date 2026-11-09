@@ -44,7 +44,6 @@ pub struct Document {
     /// The last build's main output: its extension and bytes.
     output: Option<(&'static str, Arc<Vec<u8>>)>,
     /// Whether the last build's origins are still to be made.
-    origins_due: bool,
     /// Whether the last build's diagnostics are still to be made
     /// ([`crate::session::Report::diagnostics_pending`]).
     diagnostics_due: bool,
@@ -195,7 +194,6 @@ impl Document {
             emit,
             builds: 0,
             output: None,
-            origins_due: false,
             diagnostics_due: false,
             lsp,
         }
@@ -310,13 +308,6 @@ impl Document {
         }
         if again {
             self.build(&why.join(", "), came);
-        } else if self.origins_due && !self.viewer.has_asks() {
-            // (nothing waits: the origins the last build changed, made
-            // now, in a step of their own: a host that answers its
-            // requests between steps, the single-threaded core, answers
-            // the pages asked after the build before them, not after
-            // them, Grail's 21 ms a keystroke)
-            self.origins_now();
         } else if self.session.synctex_due() && !self.viewer.has_asks() {
             // (then the SyncTeX file, from those origins, off the typing
             // path too)
@@ -336,7 +327,7 @@ impl Document {
     /// [`Document::step`] does it when nothing is asked; a host that
     /// steps the document steps it again, after what waits.
     pub fn pending(&self) -> bool {
-        self.origins_due || self.session.synctex_due() || self.diagnostics_due
+        self.session.synctex_due() || self.diagnostics_due
     }
 
     /// The diagnostics the last build left for later, made and given to
@@ -358,7 +349,6 @@ impl Document {
     /// no ask waits, a host that needs them at once (a double-click while
     /// edits come) calls this.
     pub fn origins_now(&mut self) {
-        self.origins_due = false;
         if let Some((o, changed)) = self.session.origins_update() {
             self.viewer.set_origins(Some(o), Some(changed));
         }
@@ -460,7 +450,6 @@ impl Document {
         if let Some(l) = &lsp {
             l.built(&built);
         }
-        self.origins_due = true;
         v.building(false);
         // (the records the build changed, stored now: only when a load
         // changed them, compared with what is stored first; no idle timer)

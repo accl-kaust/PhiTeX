@@ -843,9 +843,6 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (since when the PDF file is not the exact one: written when the
     // editor has been idle for `o.idle`)
     let idle_since: std::cell::Cell<Option<Instant>> = std::cell::Cell::new(None);
-    // (the last build's origins still to be made: after it is announced,
-    // once no event waits; never on the typing path)
-    let origins_due = std::cell::Cell::new(false);
     // (the last build's diagnostics at their places still to be made, and
     // its evaluation's key: low priority, after the build is announced,
     // once no event waits; an edit before then drops them)
@@ -1460,7 +1457,6 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 parts: Built::parts_of(s, &r),
             };
             phitex_tex::timeline::lap("watch: the viewer's build (its diagnostics, parts)");
-            origins_due.set(true);
             if let Some(v) = &view {
                 v.built(&b);
                 v.building(false);
@@ -1989,28 +1985,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // with `--log`, the log written then; the records are stored as each
     // build settles)
     loop {
-        // (nothing waits: the last build's origins, made now)
-        if origins_due.get() && held.is_empty() {
-            match rx.try_recv() {
-                Ok(e) => held.push_back(e),
-                Err(mpsc::TryRecvError::Empty) => {
-                    origins_due.set(false);
-                    if let Some(v) = &view {
-                        // (the viewers told which pages' origins changed and how
-                        // far an edit moved the rest: a page no build drew again
-                        // keeps its origins, shifted, not those of the old text)
-                        match s.origins_update() {
-                            Some((o, changed)) => v.set_origins(Some(o), Some(changed)),
-                            None => v.set_origins(None, None),
-                        }
-                    }
-                }
-                Err(mpsc::TryRecvError::Disconnected) => break,
-            }
-        }
-        // (then the SyncTeX file, from those origins: never on the typing
+        // (nothing waits: the SyncTeX file, the pages' origins made for
+        // it (each page's kept answer reused): never on the typing
         // path, dropped for the next build's when an edit comes first)
-        if s.synctex_due() && !origins_due.get() && held.is_empty() {
+        if s.synctex_due() && held.is_empty() {
             match rx.try_recv() {
                 Ok(e) => held.push_back(e),
                 Err(mpsc::TryRecvError::Empty) => {
@@ -2028,7 +2006,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             }
         }
         // (then, nothing waiting still, the diagnostics left for later)
-        if diags_due.get().is_some() && !origins_due.get() && !s.synctex_due() && held.is_empty() {
+        if diags_due.get().is_some() && !s.synctex_due() && held.is_empty() {
             match rx.try_recv() {
                 Ok(e) => held.push_back(e),
                 Err(mpsc::TryRecvError::Empty) => late_diagnostics(&s),

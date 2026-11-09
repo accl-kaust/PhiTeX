@@ -154,6 +154,10 @@ pub enum Ask {
     /// The last build's transcript wanted (the `log` op): made by the
     /// session's owner and given back with [`Viewer::set_transcript`].
     Transcript,
+    /// Page `.0`'s glyph origins wanted (the `origins` op): made by the
+    /// session's owner, for that page alone, and given back with
+    /// [`Viewer::put_origins`]; a build makes none.
+    Origins(usize),
     /// Build again from nothing: the session's build dropped, its format
     /// kept (the editor's `phitex.rebuild`).
     Cold,
@@ -228,7 +232,12 @@ struct Pages {
     hashes: Vec<u64>,
     history: i32,
     ms: f64,
+    /// The pages' origins made so far for this build, each when asked
+    /// ([`Ask::Origins`]): none made after a build.
     origins: Option<Origins>,
+    /// The pages asked whose answer is made: `origins.pages[k]` none
+    /// among them is a page without origins, not one to come.
+    made: std::collections::HashSet<usize>,
 }
 
 /// A viewer's state and its requests' answers.
@@ -764,10 +773,36 @@ impl Viewer {
     /// announced (off the typing path: when no ask waits, or when asked),
     /// and the viewers told which pages' origins changed.
     pub fn set_origins(&self, origins: Option<Origins>, changed: Option<OriginsChanged>) {
-        lock(&self.pages).origins = origins;
+        {
+            let mut p = lock(&self.pages);
+            p.made = origins
+                .as_ref()
+                .map(|o| (0..o.pages.len()).collect())
+                .unwrap_or_default();
+            p.origins = origins;
+        }
         if let Some(c) = &changed {
             self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
         }
+    }
+
+    /// Page `k`'s origins, made when asked ([`Ask::Origins`]), `files`
+    /// the files they name (all the build's so far), for the `origins`
+    /// op; none: the page has none.
+    pub fn put_origins(
+        &self,
+        k: usize,
+        files: Vec<String>,
+        page: Option<Arc<phitex_tex::PageOrigins>>,
+    ) {
+        let mut p = lock(&self.pages);
+        let o = p.origins.get_or_insert_with(Origins::default);
+        o.files = files;
+        if o.pages.len() <= k {
+            o.pages.resize(k + 1, None);
+        }
+        o.pages[k] = page;
+        p.made.insert(k);
     }
 
     pub fn take_asks(&self) -> Vec<Ask> {
@@ -907,11 +942,14 @@ impl Viewer {
             .map(|(k, _)| k + 1)
             .collect();
         pages.pdf.clone_from(&b.pdf);
-        // (a build announced without origins keeps the last ones until
-        // they are made, `Viewer::set_origins`: never on the typing path)
-        if b.origins.is_some() {
-            pages.origins.clone_from(&b.origins);
-        }
+        // (a build's origins: none made, each page's when it is asked,
+        // the `origins` op; never on the typing path)
+        pages.origins.clone_from(&b.origins);
+        pages.made = b
+            .origins
+            .as_ref()
+            .map(|o| (0..o.pages.len()).collect())
+            .unwrap_or_default();
         pages.history = b.history;
         pages.ms = b.ms;
         let n = b.hashes.len();
@@ -920,9 +958,10 @@ impl Viewer {
         if let Some(d) = &b.diagnostics {
             self.set_diagnostics(d);
         }
-        if let Some(c) = &b.changed {
-            self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
-        }
+        // (the pages' origins asked again: a page this build did not draw
+        // again may have moved in its file)
+        let c = b.changed.clone().unwrap_or_default();
+        self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
         {
             let mut t = lock(&self.built_times);
             t.1 += 1;
@@ -1330,10 +1369,23 @@ fn origins(s: &Viewer, k: usize, files_from: usize) -> Result<Value, String> {
         }
     }
     let p = lock(&s.pages);
-    match &p.origins {
-        Some(o) => origins_json(o, k, files_from),
-        None => Err("the pages' origins are not made yet".into()),
+    if p.made.contains(&k)
+        && let Some(o) = &p.origins
+    {
+        return origins_json(o, k, files_from);
     }
+    let n = p.hashes.len();
+    drop(p);
+    // (made when asked, by the session's owner, that page alone: the
+    // viewer asks again, as for the `log` op)
+    if k < n {
+        let queued = lock(&s.asks).contains(&Ask::Origins(k));
+        if !queued {
+            s.ask(Ask::Origins(k));
+        }
+        return Ok(json!({"pending": true}));
+    }
+    Err(format!("page {k}'s origins are not made yet"))
 }
 
 /// [`origins`]'s answer from the pages' origins `o`: page `k`'s, or not

@@ -112,6 +112,14 @@ impl Edits {
                 }
                 return Applied::Nothing;
             }
+            // (a page's origins, made for that page alone, when asked)
+            Ask::Origins(k) => {
+                if let Some(v) = viewer {
+                    let (files, page) = s.page_origins(k).unwrap_or_default();
+                    v.put_origins(k, files, page);
+                }
+                return Applied::Nothing;
+            }
             Ask::Cold => {
                 s.forget_build();
                 return Applied::Cold;

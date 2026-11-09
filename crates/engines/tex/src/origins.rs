@@ -1624,13 +1624,24 @@ pub(crate) struct State {
     scans: Mutex<FxHashMap<u64, Arc<NodeScan>>>,
     index: Mutex<Option<(u64, Arc<Index>)>>,
     matches: Mutex<FxHashMap<u64, Arc<Matched>>>,
-    /// The pages' answers, by page and what they were placed from.
-    answers: Mutex<FxHashMap<u64, (u64, Arc<PageOrigins>)>>,
+    /// The pages' answers, by page and what they were made from.
+    answers: Mutex<FxHashMap<u64, Ans>>,
     files: Mutex<Vec<String>>,
     last: Mutex<Last>,
     /// The PDF a DVI or XDV build's file became, as its client made it
     /// ([`crate::Build::set_origins_pdf`]): its forms' codes.
     pdf: Mutex<Option<Arc<Vec<u8>>>>,
+}
+
+/// A page's answer ([`answer`]) and what it was made from: its match
+/// and its nodes' texts (`key`), where each node of the match stood in
+/// its file (`at`: its placed start and end, `u32::MAX` for a node gone),
+/// and per code the node it came from (`of`, `u32::MAX` none).
+struct Ans {
+    key: u64,
+    at: Vec<(u32, u32)>,
+    of: Arc<[u32]>,
+    out: Arc<PageOrigins>,
 }
 
 /// The answers [`crate::Build::origins_changed`] gave last, and the
@@ -1900,33 +1911,115 @@ fn answer(
         .iter()
         .map(|(raw, _)| cx.spans.get(raw).map(|&sp| (sp, sp.doc)))
         .collect();
-    // (the answer kept while its match is the same and its nodes are
-    // placed where they were: their ends in their files)
+    // (the answer kept while its match is the same, its nodes' texts are
+    // and they stand where they stood; where they only moved, each code's
+    // bytes moved with its node: the answer shifted, not made anew (an
+    // edit moves every node after it in its file, and every page after
+    // it was answered again: para4000, 350 of 692 pages, 130 ms))
     let key = nodes.iter().fold(
         hash_words(id, &[Arc::as_ptr(&m) as usize as u64]),
         |h, n| match n {
-            Some((sp, doc)) => hash_words(
-                h,
-                &[
-                    u64::from(sp.file),
-                    u64::from(cx.place(sp.file, *doc, sp.s)),
-                    u64::from(cx.place(sp.file, *doc, sp.s + sp.len)),
-                ],
-            ),
+            Some((sp, doc)) => hash_words(h, &[u64::from(sp.file), sp.hash, u64::from(*doc)]),
             None => hash_words(h, &[u64::MAX]),
         },
     );
-    if let Some((k0, a)) = st.answers.locked().get(&id)
-        && *k0 == key
-    {
-        return Some(a.clone());
+    let at: Vec<(u32, u32)> = nodes
+        .iter()
+        .map(|n| match n {
+            Some((sp, doc)) => (
+                cx.place(sp.file, *doc, sp.s),
+                cx.place(sp.file, *doc, sp.s + sp.len),
+            ),
+            None => (u32::MAX, u32::MAX),
+        })
+        .collect();
+    let kept = st
+        .answers
+        .locked()
+        .get(&id)
+        .filter(|a| a.key == key)
+        .map(|a| (a.at.clone(), a.of.clone(), a.out.clone()));
+    if let Some((old, of, out)) = kept {
+        if old == at {
+            return Some(out);
+        }
+        // (each node moved whole: its start and end by one distance)
+        let d: Option<Vec<i64>> = old
+            .iter()
+            .zip(&at)
+            .map(|(&(a0, b0), &(a1, b1))| {
+                if a0 == u32::MAX || a1 == u32::MAX {
+                    return (a0 == a1).then_some(0);
+                }
+                let d = i64::from(a1) - i64::from(a0);
+                (i64::from(b1) - i64::from(b0) == d).then_some(d)
+            })
+            .collect();
+        if let Some(d) = d {
+            let mut o = (*out).clone();
+            for (i, &n) in of.iter().enumerate() {
+                if let Some(&dn) = d.get(n as usize)
+                    && dn != 0
+                {
+                    o.start[i] = u32::try_from(i64::from(o.start[i]) + dn).unwrap_or(u32::MAX);
+                    o.end[i] = u32::try_from(i64::from(o.end[i]) + dn).unwrap_or(u32::MAX);
+                }
+            }
+            let o = Arc::new(o);
+            if crate::exec::env_flag!("PHITEX_ORIGINS_CHECK") {
+                let fresh = answer_fresh(cx, k, &g, &m, &nodes, pdf);
+                eprintln!(
+                    "origins check: page {k} shifted: {}",
+                    if fresh.0 == *o { "same" } else { "DIFFERENT" }
+                );
+            }
+            st.answers.locked().insert(
+                id,
+                Ans {
+                    key,
+                    at,
+                    of,
+                    out: o.clone(),
+                },
+            );
+            return Some(o);
+        }
     }
+    let (out, of) = answer_fresh(cx, k, &g, &m, &nodes, pdf);
+    let out = Arc::new(out);
+    let mut all = st.answers.locked();
+    if all.len() > 1 << 16 {
+        all.clear();
+    }
+    all.insert(
+        id,
+        Ans {
+            key,
+            at,
+            of: of.into(),
+            out: out.clone(),
+        },
+    );
+    Some(out)
+}
+
+/// Page `k`'s answer made from its glyphs `g` and match `m`, its nodes
+/// placed as `nodes` says, with per code the node it came from.
+fn answer_fresh(
+    cx: &Ctx<'_>,
+    k: usize,
+    g: &PageGlyphs,
+    m: &Matched,
+    nodes: &[Option<(Span, bool)>],
+    pdf: &dyn Fn() -> Arc<Vec<u8>>,
+) -> (PageOrigins, Vec<u32>) {
     let counts = if g.codes.iter().any(|c| c.kind == XOBJECT) {
         xobject_counts(&pdf(), k)
     } else {
         Vec::new()
     };
     let mut out = PageOrigins::default();
+    let mut of: Vec<u32> = Vec::new();
     let (mut x, mut y) = (0.0, 0.0);
     let mut forms = counts.iter();
     for (c, o) in g.codes.iter().zip(&m.orgs) {
@@ -1934,30 +2027,29 @@ fn answer(
             GLYPH => {
                 (x, y) = (bp(c.h), bp(c.v));
                 let (w, z) = (bp(c.w), bp(c.size));
-                match nodes.get(o.node as usize).copied().flatten() {
-                    Some((sp, doc)) => {
-                        let a = cx.place(sp.file, doc, sp.s + o.from);
-                        let b = cx.place(sp.file, doc, sp.s + o.to);
-                        out.push(sp.file, a, b, o.synth, x, y, w, z);
-                    }
-                    None => out.push(u32::MAX, 0, 0, false, x, y, w, z),
+                if let Some((sp, doc)) = nodes.get(o.node as usize).copied().flatten() {
+                    let a = cx.place(sp.file, doc, sp.s + o.from);
+                    let b = cx.place(sp.file, doc, sp.s + o.to);
+                    out.push(sp.file, a, b, o.synth, x, y, w, z);
+                    of.push(o.node);
+                } else {
+                    out.push(u32::MAX, 0, 0, false, x, y, w, z);
+                    of.push(u32::MAX);
                 }
             }
             XOBJECT => {
                 for _ in 0..forms.next().copied().unwrap_or(0) {
                     out.push(u32::MAX, 0, 0, false, x, y, 0.0, 0.0);
+                    of.push(u32::MAX);
                 }
             }
-            _ => out.push(u32::MAX, 0, 0, false, x, y, 0.0, 0.0),
+            _ => {
+                out.push(u32::MAX, 0, 0, false, x, y, 0.0, 0.0);
+                of.push(u32::MAX);
+            }
         }
     }
-    let out = Arc::new(out);
-    let mut all = st.answers.locked();
-    if all.len() > 1 << 16 {
-        all.clear();
-    }
-    all.insert(id, (key, out.clone()));
-    Some(out)
+    (out, of)
 }
 
 impl crate::Build {
@@ -2085,13 +2177,34 @@ impl crate::Build {
         Vec<usize>,
         Vec<(u32, u32, i64)>,
     ) {
+        self.origins_update_until(&|| false).unwrap_or_default()
+    }
+
+    /// [`Self::origins_update`], given up between two pages once `stop`
+    /// says so (an event waits: the watch's next keystroke is not held
+    /// behind the rematch of every page): `None`, nothing told; the
+    /// pages answered so far are kept, the next call goes on from them.
+    #[allow(clippy::type_complexity)]
+    pub fn origins_update_until(
+        &self,
+        stop: &dyn Fn() -> bool,
+    ) -> Option<(
+        Vec<Option<Arc<PageOrigins>>>,
+        Vec<usize>,
+        Vec<(u32, u32, i64)>,
+    )> {
         let st = self.origins_state();
         let cx = st.ctx(self.origins_input());
         let pdf: OnceLock<Arc<Vec<u8>>> = OnceLock::new();
         let get = || pdf.get_or_init(|| self.origins_pdf()).clone();
-        let pages: Vec<Option<Arc<PageOrigins>>> = (0..cx.inp.shown.len())
-            .map(|k| answer(st, &cx, k, &get))
-            .collect();
+        let mut pages: Vec<Option<Arc<PageOrigins>>> = Vec::with_capacity(cx.inp.shown.len());
+        for k in 0..cx.inp.shown.len() {
+            // (a page at least each call: a call always gets on)
+            if k > 0 && stop() {
+                return None;
+            }
+            pages.push(answer(st, &cx, k, &get));
+        }
         let cx_texts: Vec<(u32, Arc<[u8]>)> = {
             let inp = &cx.inp;
             let mut ts: Vec<(u32, Arc<[u8]>)> = vec![(
@@ -2163,7 +2276,7 @@ impl crate::Build {
         }
         last.pages.clone_from(&pages);
         last.texts = cx_texts.into_iter().collect();
-        (pages, changed, deltas)
+        Some((pages, changed, deltas))
     }
 
     /// The glyph with a source nearest point (`x`, `y`) of page `k` (PDF
