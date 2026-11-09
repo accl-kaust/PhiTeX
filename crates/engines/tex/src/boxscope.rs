@@ -71,6 +71,27 @@ fn items_field(lid: i64) -> String {
 /// The head of a list's start entry.
 const START: &str = "\u{0}bstart";
 
+/// A left list's accumulator folded (a sequence) projected to its
+/// entries from the last start entry on, as a list (none: empty): what
+/// a reader of the list depends on, not the lists of the same id that
+/// ended before it.
+pub(crate) fn left_projection(x: ValueId, v: &phitex_defuse::Values) -> ValueId {
+    let start = v.str(START);
+    let n = v.seq_len(x);
+    let mut out = Vec::new();
+    let mut i = n;
+    while i > 0 {
+        i -= 1;
+        let Some(e) = v.seq_nth(x, i) else { break };
+        out.push(e);
+        if list_of(v, e).first() == Some(&start) {
+            out.reverse();
+            return v.list(out);
+        }
+    }
+    v.list(Vec::new())
+}
+
 fn is_box_group(g: i64) -> bool {
     matches!(
         g,
@@ -207,43 +228,26 @@ impl Run<'_, '_> {
         let v = self.v;
         let name = items_field(lid);
         let f = v.field(&name);
-        let all = self.cx.fold(f, None, None)?;
+        // (read through the projection to its last start: lists of the
+        // same id before it, ended, are not this reader's)
+        let path = phitex_defuse::PathId::of_proj(self.ops.left_proj);
+        let tail = self.cx.fold_path(f, None, None, path)?;
         let own: Vec<ValueId> = self
             .contribs
             .iter()
             .filter(|(g, _)| *g == f)
             .flat_map(|&(_, x)| v.seq_to_vec(x))
             .collect();
-        // (from the end back to the last start: this list's entries only,
-        // whatever lists of the same id came before)
-        let n = v.seq_len(all);
-        let mut entries = Vec::new();
-        let mut i = n;
         let start = v.str(START);
-        let mut found = false;
-        while i > 0 {
-            i -= 1;
-            let Some(x) = v.seq_nth(all, i) else { break };
-            if list_of(v, x).first() == Some(&start) {
-                entries.push(x);
-                found = true;
-                break;
-            }
-            entries.push(x);
-        }
+        let mut entries = tail.map(|t| list_of(v, t)).unwrap_or_default();
         // (this run's own start, if it left the list and reads it again)
         let own_start = own
             .iter()
             .rposition(|&x| list_of(v, x).first() == Some(&start));
-        let (entries, own) = if let Some(k) = own_start {
-            (Vec::new(), &own[k..])
-        } else {
-            if !found {
-                entries.clear();
-            }
-            entries.reverse();
-            (entries, &own[..])
-        };
+        if own_start.is_some() {
+            entries.clear();
+        }
+        let own = &own[own_start.unwrap_or(0)..];
         for x in entries.into_iter().chain(own.iter().copied()) {
             let xs = list_of(v, x);
             if xs.first() == Some(&start) {

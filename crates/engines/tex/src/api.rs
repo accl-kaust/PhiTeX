@@ -3360,6 +3360,7 @@ impl Graph {
         let defined_proj = eng.register_projection(Arc::new(crate::val::defined_projection));
         let mean_class_proj = eng.register_projection(Arc::new(crate::val::mean_class_projection));
         let tail_proj = eng.register_projection(Arc::new(crate::val::tail_projection));
+        let left_proj = eng.register_projection(Arc::new(crate::boxscope::left_projection));
         let forced_proj = eng.register_projection(Arc::new(crate::val::forced_projection));
         let num_proj = eng.register_projection(Arc::new(crate::val::num_projection));
         let clist_proj = eng.register_projection(Arc::new(crate::val::clist_projection));
@@ -3421,6 +3422,7 @@ impl Graph {
             defined_proj,
             mean_class_proj,
             tail_proj,
+            left_proj,
             forced_proj,
             num_proj,
             clist_proj,
