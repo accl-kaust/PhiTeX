@@ -2788,6 +2788,7 @@ fn xelatex_fontspec() {
 /// modification time set back is read again (its change time moved), and
 /// the DVI is then a cold build's of the new text.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn watch_r_rereads_only_files_that_moved() {
     let _one = one();
     let dir = scratch("watch-r");
@@ -2832,18 +2833,10 @@ fn watch_r_rereads_only_files_that_moved() {
             }
         }
     };
-    assert_eq!(
-        r("nothing changed"),
-        0,
-        "r with nothing changed ran nodes"
-    );
+    assert_eq!(r("nothing changed"), 0, "r with nothing changed ran nodes");
     std::thread::sleep(Duration::from_millis(20));
     std::fs::write(dir.join("chap.tex"), chap).expect("the same bytes");
-    assert_eq!(
-        r("the same bytes"),
-        0,
-        "r after the same bytes ran nodes"
-    );
+    assert_eq!(r("the same bytes"), 0, "r after the same bytes ran nodes");
     let path = dir.join("chap.tex");
     // (the file's fields as `r`'s key sees them, said if the test fails)
     let fields = |p: &Path| {
@@ -4377,6 +4370,122 @@ fn watch_finds_a_file_made_after_a_build_missed_it() {
     std::fs::write(clean.join("main.tex"), main).expect("main");
     std::fs::write(clean.join("late.tex"), late).expect("late");
     let out = phitex(&clean, &["build", "--engine", "pdflatex", "main.tex"])
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "the clean build: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let want = std::fs::read(clean.join("main.pdf")).expect("the clean PDF");
+    assert!(
+        watched == want,
+        "the watch's PDF is not the clean build's: {}",
+        first_difference(&watched, &want)
+    );
+}
+
+/// The viewer's Clean rebuild ("start over: the project read again"): a
+/// file made in a folder that did not exist when
+/// the last build searched, under a `TEXINPUTS` element with `//` (its
+/// subfolders listed once, as kpathsea lists them), is found, and the PDF
+/// is a clean build's.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn watch_clean_rebuild_finds_a_file_in_a_folder_made_since() {
+    let _one = one();
+    let d = scratch("watch-clean-subfolder");
+    let home = d.join("home");
+    std::fs::create_dir_all(&home).expect("a home");
+    let main =
+        "\\documentclass{article}\n\\begin{document}\nBefore.\n\\input{late}\n\\end{document}\n";
+    let late = "Late words.\n";
+    let root = d.join("project");
+    std::fs::create_dir_all(root.join("inc")).expect("the project");
+    // (first built without the file: kpathsea lists inc's subfolders then)
+    std::fs::write(root.join("main.tex"), main.replace("\\input{late}\n", "")).expect("main");
+    let texinputs = format!("{}//:", root.join("inc").display());
+    let phitex = |dir: &Path, args: &[&str]| {
+        let mut c = command(Path::new(env!("CARGO_BIN_EXE_phitex")), dir);
+        c.args(args)
+            .env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env("XDG_RUNTIME_DIR", &d)
+            .env("TEXINPUTS", &texinputs)
+            .env("LATEXMKRCSYS", home.join("no-system-latexmkrc"));
+        c
+    };
+    let mut child = phitex(
+        &root,
+        &[
+            "watch",
+            "--write",
+            "--json",
+            "--exact-pdf",
+            "--engine",
+            "pdflatex",
+            "main.tex",
+        ],
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit())
+    .spawn()
+    .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+        .as_str()
+        .expect("the viewer's url")
+        .to_owned();
+    let cold = next_build(&mut lines, &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let sub = root.join("inc").join("chapters");
+    std::fs::create_dir_all(&sub).expect("a folder made since");
+    std::fs::write(sub.join("late.tex"), late).expect("late.tex made");
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(root.join("main.tex"), main).expect("main inputs it");
+    // (the edit's build may miss it: kpathsea's `//` subfolders are
+    // listed once per watch; Clean rebuild lists them again)
+    let _edit = next_build(&mut lines, &mut seen);
+    let mut viewer = Viewer::connect(&url);
+    viewer
+        .ws
+        .send(tungstenite::Message::text(
+            serde_json::json!({"id": 1, "op": "cold"}).to_string(),
+        ))
+        .expect("Clean rebuild asked");
+    // (the builds that come: any the folder's change made, then the clean
+    // rebuild's, which finds late.tex)
+    let ev = loop {
+        let ev = next_build(&mut lines, &mut seen);
+        if ev["ok"] == true {
+            break ev;
+        }
+        assert!(
+            seen.len() < 400,
+            "no build found late.tex after Clean rebuild: {}",
+            seen.join("\n")
+        );
+    };
+    assert_eq!(ev["ok"], true, "{ev}");
+    std::thread::sleep(Duration::from_millis(300));
+    let watched = std::fs::read(root.join("main.pdf")).expect("the watch's PDF");
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    let clean = d.join("clean");
+    std::fs::create_dir_all(clean.join("inc").join("chapters")).expect("the clean one");
+    std::fs::write(clean.join("main.tex"), main).expect("main");
+    std::fs::write(clean.join("inc").join("chapters").join("late.tex"), late).expect("late");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &clean)
+        .args(["build", "--engine", "pdflatex", "main.tex"])
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env("TEXINPUTS", format!("{}//:", clean.join("inc").display()))
+        .env("LATEXMKRCSYS", home.join("no-system-latexmkrc"))
         .output()
         .expect("phitex build runs");
     assert!(
