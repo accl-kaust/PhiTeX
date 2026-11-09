@@ -203,7 +203,56 @@ pub struct Progress {
     /// ([`Progress::format`]).
     format: AtomicU64,
     on_format: OnceLock<FormatHook>,
+    /// The pages streamed: each page's PDF made as its writer runs, not
+    /// only once the loop-backs settle ([`Progress::set_streaming`]).
+    streaming: std::sync::atomic::AtomicBool,
+    on_stream: OnceLock<StreamHook>,
+    /// Told every [`TICK_JOBS`] jobs begun ([`Progress::on_tick`]).
+    on_tick: OnceLock<TickHook>,
 }
+
+/// A page made while the build runs ([`Progress::on_stream`]): a PDF
+/// file of that page alone, as the build's own file shows it, the fonts
+/// it uses embedded. It is the page as this pass of the build made it:
+/// a later pass, or the build's settling, may make it otherwise.
+#[derive(Clone, Debug)]
+pub struct StreamedPage {
+    /// The evaluation it was made in ([`Progress::evaluation`]).
+    pub evaluation: u64,
+    /// Its place among the pages shipped, from 1.
+    pub page: u64,
+    /// The page's identity as [`crate::Build::pages`] gives it, were the
+    /// build to settle with it.
+    pub hash: u64,
+    /// The one-page PDF file.
+    pub pdf: Vec<u8>,
+}
+
+/// What is told of the pages streamed ([`Progress::on_stream`]): whether
+/// page `k` (from 1) is wanted, asked before its PDF is made, and the
+/// page made.
+pub struct StreamHook {
+    pub want: Box<dyn Fn(u64) -> bool + Send + Sync>,
+    pub page: Box<dyn Fn(StreamedPage) + Send + Sync>,
+}
+
+impl std::fmt::Debug for StreamHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StreamHook")
+    }
+}
+
+/// What is told as the build goes on ([`Progress::on_tick`]).
+pub struct TickHook(Box<dyn Fn() + Send + Sync>);
+
+impl std::fmt::Debug for TickHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TickHook")
+    }
+}
+
+/// The jobs begun between two ticks ([`Progress::on_tick`]).
+pub const TICK_JOBS: u64 = 256;
 
 /// What is told of the format ([`Progress::on_format`]).
 pub struct FormatHook(Box<dyn Fn(bool) + Send + Sync>);
@@ -243,7 +292,83 @@ impl Progress {
             on_page: OnceLock::new(),
             format: AtomicU64::new(0),
             on_format: OnceLock::new(),
+            streaming: std::sync::atomic::AtomicBool::new(false),
+            on_stream: OnceLock::new(),
+            on_tick: OnceLock::new(),
         }
+    }
+
+    /// `hook` told of each page made while the build runs, once
+    /// [`Progress::set_streaming`] is on (once per progress: whether it
+    /// was set). Its `want` is asked on the writer's thread before the
+    /// page's PDF is made; its `page` given the page there.
+    pub fn on_stream(&self, hook: StreamHook) -> bool {
+        self.on_stream.set(hook).is_ok()
+    }
+
+    /// The evaluations begun from now on stream their pages (`on`) or do
+    /// not: a page's PDF side runs as soon as its page is shipped, not
+    /// once the loop-backs settle, and each page wanted is told
+    /// ([`Progress::on_stream`]). The output is the same either way.
+    pub fn set_streaming(&self, on: bool) {
+        self.streaming.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether the evaluations stream their pages.
+    #[must_use]
+    pub fn streaming(&self) -> bool {
+        self.streaming.load(Ordering::Relaxed)
+    }
+
+    /// Page `k` (from 1) made in this evaluation, told if it is wanted:
+    /// `make` gives its identity and its PDF (none: not streamed).
+    pub(crate) fn stream_page(&self, k: u64, make: impl FnOnce() -> Option<(u64, Vec<u8>)>) {
+        let Some(h) = self.on_stream.get() else {
+            return;
+        };
+        if !(h.want)(k) {
+            return;
+        }
+        if let Some((hash, pdf)) = make() {
+            (h.page)(StreamedPage {
+                evaluation: self.evaluation(),
+                page: k,
+                hash,
+                pdf,
+            });
+        }
+    }
+
+    /// Whether a page streamed would be told ([`Progress::on_stream`]).
+    pub(crate) fn streams(&self) -> bool {
+        self.on_stream.get().is_some()
+    }
+
+    /// `hook` called on the thread that begins a job, every
+    /// [`TICK_JOBS`] jobs (once per progress: whether it was set): a
+    /// host with one thread lets its other work in there.
+    pub fn on_tick(&self, hook: Box<dyn Fn() + Send + Sync>) -> bool {
+        self.on_tick.set(TickHook(hook)).is_ok()
+    }
+
+    /// The place (from 1) of page `i` (from 0) of those finisher `node`
+    /// shipped, as [`Progress::note_ships`] counts the pages: the pages
+    /// shipped by the firings before its own, then its own up to `i`.
+    pub(crate) fn page_of(&self, node: u64, i: u32) -> Option<u64> {
+        let s = self
+            .ships
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let &(p, special, n) = s.get(&node)?;
+        if i >= n {
+            return None;
+        }
+        let before: u64 = s
+            .values()
+            .filter(|e| (e.0, e.1) < (p, special))
+            .map(|e| u64::from(e.2))
+            .sum();
+        Some(before + u64::from(i) + 1)
     }
 
     /// `hook(ready)` called on the building thread when the format is
@@ -423,9 +548,18 @@ impl Busy {
         };
         let i = WORKER.with(|x| *x) % w.progress.slots.len();
         let off = w.offsets.get(&node).copied().unwrap_or(Progress::INSIDE);
-        w.progress.total.fetch_add(1, Ordering::Relaxed);
+        let t = w.progress.total.fetch_add(1, Ordering::Relaxed);
         w.progress.slots[i].store(Progress::pack(op, off), Ordering::Relaxed);
-        Busy(Some((w.progress.clone(), i)))
+        let p = w.progress.clone();
+        drop(g);
+        // (the tick told with no lock of the build's held here: a host
+        // may answer its own requests inside it)
+        if t % TICK_JOBS == 0
+            && let Some(h) = p.on_tick.get()
+        {
+            (h.0)();
+        }
+        Busy(Some((p, i)))
     }
 }
 

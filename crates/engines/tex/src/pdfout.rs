@@ -2681,7 +2681,16 @@ fn write_page_with(
 /// record is not made yet itself: it never waits for these). Final
 /// (`Operation::final_only`): it runs once the loop-backs settle, and
 /// nothing it does feeds one.
-pub(crate) struct PdfPage(pub(crate) Arc<std::sync::atomic::AtomicBool>);
+pub(crate) struct PdfPage {
+    /// Origins are made: each page's glyphs kept by its identity.
+    pub(crate) origins: Arc<std::sync::atomic::AtomicBool>,
+    /// The evaluation streams its pages (`crate::exec::Progress::set_streaming`):
+    /// a page's PDF side runs as soon as its page is shipped, and the page
+    /// wanted is told as a PDF of its own ([`page_alone`]).
+    pub(crate) stream: Arc<std::sync::atomic::AtomicBool>,
+    /// The progress the build watches now (`Ops::watch`): the pages told.
+    pub(crate) watch: Arc<std::sync::RwLock<Option<crate::exec::Watch>>>,
+}
 
 /// The keys of the pages a run shipped ([`PagePiece`]s, in its shipouts'
 /// order), defined by that run and read by its [`PdfPage`] children,
@@ -2693,9 +2702,10 @@ impl phitex_defuse::Operation for PdfPage {
     fn name(&self) -> &'static str {
         "pdfpage"
     }
-    /// A pass's writer: runs once the line is quiet, once a pass.
+    /// A pass's writer: runs once the line is quiet, once a pass; while
+    /// the evaluation streams its pages, as soon as its page is shipped.
     fn final_only(&self) -> bool {
-        true
+        !self.stream.load(std::sync::atomic::Ordering::Relaxed)
     }
     fn contributes(
         &self,
@@ -2740,14 +2750,111 @@ impl phitex_defuse::Operation for PdfPage {
             // (origins on: kept by the page's identity in the link,
             // `Linked::shown`)
             let glyphs = self
-                .0
+                .origins
                 .load(std::sync::atomic::Ordering::Relaxed)
                 .then(|| shown_id(kx.raw(), Some(&h)));
-            record_of(v, key, &pc, &h, &mut line, glyphs);
+            let made = record_of(v, key, &pc, &h, &mut line, glyphs);
+            // (streamed: the page told, as `Build::pages` would name it,
+            // with its PDF alone, where it is wanted)
+            if self.stream.load(std::sync::atomic::Ordering::Relaxed) {
+                let progress = self
+                    .watch
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .map(|w| w.progress.clone());
+                if let Some(p) = progress.filter(|p| p.streams())
+                    && let Some(k) = u32::try_from(i)
+                        .ok()
+                        .and_then(|i| p.page_of(pc.node.cast_unsigned(), i))
+                {
+                    p.stream_page(k, || {
+                        let shown = v.int(shown_id(kx.raw(), Some(&h)).cast_signed());
+                        let hash = phitex_defuse::hash_words(0x7061_6765, &[v.digest(shown)]);
+                        let content = made.get().map(|m| m.0.content())?;
+                        Some((hash, page_alone(v, kx, &pc, &units, content)?))
+                    });
+                }
+            }
         }
 
         Ok(ValueId::UNIT)
     }
+}
+
+/// Page `kx` (its key, as the line holds it: [`XPAGES`]) as a PDF file
+/// of its own: the link of a line of that page alone ([`link`]), its
+/// fonts embedded. None where the page draws with what the pages and
+/// commands before it made, which a file of its own lacks (an object, a
+/// form or an image by number, a colour stack but the first; a resource
+/// other than its fonts: a graphics state, a colour space or pattern, a
+/// shading, an XObject, marked content's properties), or the writer could
+/// not write it alone: a page that is drawn as the build's file draws it,
+/// or none. A page whose resources name objects it does not draw with (a
+/// document's `\pdfpageresources`, pgf's on every page, its objects
+/// written at the end) is drawn all the same, those names left dangling.
+pub(crate) fn page_alone(
+    v: &Values,
+    kx: ValueId,
+    pc: &PagePiece,
+    units: &FxHashMap<i64, ValueId>,
+    content: &[u8],
+) -> Option<Vec<u8>> {
+    if content.is_empty() || draws_with_resources(content) {
+        return None;
+    }
+    let named = pc.whats.values().any(|w| {
+        what_objnum(w).is_some()
+            || matches!(w, Whatsit::ColorStack(n, _) if *n != 0)
+            || matches!(w, Whatsit::Special(t) | Whatsit::Literal(_, t) if names_object(t))
+    });
+    if named {
+        return None;
+    }
+    let mut params = PdfParams::default();
+    page_params(v, &mut params, &pc.params);
+    let f = EndFields {
+        date: phitex_pdf::pdf_date(0),
+        jobname: String::new(),
+        g2u: None,
+        fonts: Vec::new(),
+        seed: Vec::new(),
+        info_omit_date: 0,
+        omit_charset: 0,
+        omit_info_dict: 0,
+        suppress_ptex_info: 0,
+        ptex_use_underscore: 0,
+        pk_resolution: params.pk_resolution,
+    };
+    let l = link(v, &f, &[kx], units, None, &CmdMemo::default(), false);
+    if !l.errors.is_empty() || l.fail.is_some() {
+        return None;
+    }
+    l.layout?.exact().ok().map(|b| b.as_ref().clone())
+}
+
+/// Whether content stream `c` draws with a named resource other than a
+/// font: an operator that takes one (`gs`, `cs`, `CS`, `scn`, `SCN`, `sh`,
+/// `Do`, `BDC`, `DP`). A string's text may look like one: then it says yes.
+fn draws_with_resources(c: &[u8]) -> bool {
+    c.split(|b| b.is_ascii_whitespace() || b"[]<>()/".contains(b))
+        .any(|w| {
+            matches!(
+                w,
+                b"gs" | b"cs" | b"CS" | b"scn" | b"SCN" | b"sh" | b"Do" | b"BDC" | b"DP"
+            )
+        })
+}
+
+/// Whether PDF text `t` names an object by reference (`12 0 R`).
+fn names_object(t: &[u8]) -> bool {
+    let w: Vec<&[u8]> = t
+        .split(|c| c.is_ascii_whitespace() || b"[]<>/()".contains(c))
+        .filter(|w| !w.is_empty())
+        .collect();
+    w.windows(3).any(|x| {
+        x[2] == b"R" && x[0].iter().all(u8::is_ascii_digit) && x[1].iter().all(u8::is_ascii_digit)
+    })
 }
 
 /// The items of the pieces page `pc`'s sealed lines are in
@@ -5243,7 +5350,9 @@ fn link(
         Some(t) => Ok(Some(t)),
         None => st.tail().map(|t| {
             let t = t.map(Arc::new);
-            if let Some(t) = &t {
+            // (a page's file of its own, [`page_alone`], keeps none: one
+            // a page would be kept for every page streamed)
+            if memo && let Some(t) = &t {
                 tails().locked().insert(key, t.clone());
             }
             t

@@ -958,7 +958,16 @@ impl Viewer {
 
     /// The next message `what` says is the one (events kept).
     fn until(&mut self, what: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
-        let end = Instant::now() + Duration::from_secs(120);
+        self.until_within(Duration::from_secs(120), what)
+    }
+
+    /// [`Viewer::until`] within `bound`.
+    fn until_within(
+        &mut self,
+        bound: Duration,
+        what: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let end = Instant::now() + bound;
         while Instant::now() < end {
             match self.ws.read() {
                 Ok(tungstenite::Message::Text(t)) => {
@@ -4468,4 +4477,292 @@ fn watch_follows_what_the_build_read_anywhere() {
         let _ = i.write_all(b"q\n");
     }
     let _ = child.wait();
+}
+
+/// `phitex watch` streams a cold build's pages to its viewer as they
+/// ship: `page` events before `settled`, each page drawn while the build
+/// runs (its frame asked then) as the build's file draws it once it is
+/// in, each streamed identity replaced by the settled one, and the file
+/// written the one `phitex build` writes. At one thread and four. The
+/// time to the first page and to `settled` said.
+#[test]
+fn watch_streams_pages_before_it_settles() {
+    use serde_json::json;
+    let _one = one();
+    let story = std::fs::read_to_string(fixtures().join("plain/story.tex")).expect("a body");
+    let story = story.trim_end().strip_suffix("\\bye").expect("\\bye");
+    // (a while before the first page: the viewer joins before it ships)
+    let slow = "\\count255=0 \\def\\slow{\\advance\\count255 by1 \\ifnum\\count255<2000000 \\expandafter\\slow\\fi}\\slow\n";
+    let text = "\\pdfoutput=1\n".to_string() + &plain() + slow + &story.repeat(30) + "\\bye\n";
+    for j in ["1", "4"] {
+        let dir = scratch(&format!("watch-stream-j{j}"));
+        std::fs::write(dir.join("story.tex"), &text).expect("the document");
+        let t0 = Instant::now();
+        let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+            .args([
+                "watch",
+                "--write",
+                "--json",
+                "--ini",
+                "--etex",
+                "-j",
+                j,
+                "story.tex",
+            ])
+            .env("XDG_RUNTIME_DIR", &dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("phitex watch runs");
+        let stdout = child.stdout.take().expect("its output");
+        let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+        let mut seen = Vec::new();
+        let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+            .as_str()
+            .expect("the viewer's url")
+            .to_owned();
+        let mut viewer = Viewer::connect(&url);
+        // (the events in order: a frame asked at the first page streamed)
+        let mut events: Vec<serde_json::Value> = Vec::new();
+        let mut first: Option<(u64, serde_json::Value, Duration)> = None;
+        let settled_at;
+        loop {
+            let e = viewer.until(|v| v["event"] == "page" || v["event"] == "settled");
+            let mut got = vec![e];
+            if got[0]["event"] == "page" && first.is_none() {
+                let k = got[0]["k"].as_u64().expect("k");
+                let at = t0.elapsed();
+                let f = viewer.ask(&json!({"id": 10, "op": "frame", "page": k, "scale": 1.0}));
+                assert_eq!(f["ok"], true, "j{j}: page {k} streamed, its frame: {f}");
+                first = Some((k, f["json"].clone(), at));
+                got.extend(
+                    std::mem::take(&mut viewer.events)
+                        .into_iter()
+                        .filter(|v| v["event"] == "page" || v["event"] == "settled"),
+                );
+            }
+            let done = got.iter().any(|v| v["event"] == "settled");
+            events.extend(got);
+            if done {
+                settled_at = t0.elapsed();
+                break;
+            }
+        }
+        let settled = events
+            .iter()
+            .position(|e| e["event"] == "settled")
+            .expect("settled");
+        let pages: Vec<&serde_json::Value> = events[..settled]
+            .iter()
+            .filter(|e| e["event"] == "page")
+            .collect();
+        let (k, streamed, first_at) =
+            first.unwrap_or_else(|| panic!("j{j}: no page streamed before settled: {events:?}"));
+        let hashes = viewer.ask(&json!({"id": 11, "op": "pages"}))["json"]["pages"]
+            .as_array()
+            .cloned()
+            .expect("the pages");
+        assert!(hashes.len() > 3, "j{j}: {} pages", hashes.len());
+        for e in &pages {
+            let i = usize::try_from(e["k"].as_u64().expect("k")).expect("k");
+            assert_ne!(
+                e["hash"], hashes[i],
+                "j{j}: page {i} streamed named as settled"
+            );
+        }
+        let after = viewer.ask(&json!({"id": 12, "op": "frame", "page": k, "scale": 1.0}));
+        let same = |f: &serde_json::Value| {
+            json!([
+                f["pw"], f["ph"], f["w"], f["h"], f["bands"], f["text"], f["links"]
+            ])
+        };
+        assert_eq!(
+            same(&streamed),
+            same(&after["json"]),
+            "j{j}: page {k} streamed is not drawn as the build's file draws it"
+        );
+        eprintln!(
+            "watch j{j}: {} pages streamed before settled; the first (page {}) at {:.0} ms, settled at {:.0} ms",
+            pages.len(),
+            k + 1,
+            first_at.as_secs_f64() * 1e3,
+            settled_at.as_secs_f64() * 1e3
+        );
+        until(&mut lines, "build", &1.into(), &mut seen);
+        let watched = std::fs::read(dir.join("story.pdf")).expect("the watch's PDF");
+        if let Some(mut i) = child.stdin.take() {
+            let _ = i.write_all(b"q\n");
+        }
+        let _ = child.wait();
+        let cold_dir = scratch(&format!("watch-stream-cold-j{j}"));
+        std::fs::write(cold_dir.join("story.tex"), &text).expect("the document");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &cold_dir)
+            .args(["build", "--ini", "--etex", "-j", j, "story.tex"])
+            .output()
+            .expect("phitex build runs");
+        assert!(
+            out.status.success(),
+            "the cold build failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let cold_pdf = std::fs::read(cold_dir.join("story.pdf")).expect("the cold PDF");
+        assert!(
+            watched == cold_pdf,
+            "j{j}: the streaming watch's file is not the cold build's: {}",
+            first_difference(&watched, &cold_pdf)
+        );
+    }
+}
+
+/// A measurement, not a check (`--ignored`): `phitex watch` on the
+/// document `PHITEX_TTFP_MAIN` in the folder `PHITEX_TTFP_DIR` (copied to a
+/// scratch folder first), with the arguments `PHITEX_TTFP_ARGS` (split at
+/// spaces): the time from its start to the first page streamed to its
+/// viewer and to `settled`, and the pages streamed before it.
+#[test]
+#[ignore = "a measurement: PHITEX_TTFP_DIR, PHITEX_TTFP_MAIN, PHITEX_TTFP_ARGS"]
+fn watch_time_to_first_page() {
+    let src = PathBuf::from(std::env::var("PHITEX_TTFP_DIR").expect("PHITEX_TTFP_DIR"));
+    let main = std::env::var("PHITEX_TTFP_MAIN").expect("PHITEX_TTFP_MAIN");
+    let args = std::env::var("PHITEX_TTFP_ARGS").unwrap_or_default();
+    let dir = scratch("ttfp");
+    let st = Command::new("cp")
+        .arg("-r")
+        .arg(format!("{}/.", src.display()))
+        .arg(&dir)
+        .status()
+        .expect("cp");
+    assert!(st.success());
+    let t0 = Instant::now();
+    // (as `command`, with an hour's bound: a manual's clean build at one
+    // thread takes minutes)
+    let mut child = Command::new("timeout")
+        .arg("3600")
+        .arg(env!("CARGO_BIN_EXE_phitex"))
+        .current_dir(&dir)
+        .env("PHITEX_CACHE_DIR", cache())
+        .env("SOURCE_DATE_EPOCH", "0")
+        .env("FORCE_SOURCE_DATE", "1")
+        .env_remove("PHITEX_COMPAT")
+        .arg("watch")
+        .arg("--json")
+        .args(args.split_whitespace())
+        .arg(&main)
+        .env("XDG_RUNTIME_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+        .as_str()
+        .expect("the viewer's url")
+        .to_owned();
+    let joined = t0.elapsed();
+    let mut viewer = Viewer::connect(&url);
+    let (mut first, mut pages) = (None, 0usize);
+    let settled = loop {
+        let e = viewer.until_within(Duration::from_secs(3600), |v| {
+            v["event"] == "page" || v["event"] == "settled"
+        });
+        if e["event"] == "settled" {
+            break t0.elapsed();
+        }
+        pages += 1;
+        if first.is_none() {
+            first = Some((e["k"].as_u64().unwrap_or(0) + 1, t0.elapsed()));
+        }
+    };
+    let n = viewer.ask(&serde_json::json!({"id": 1, "op": "pages"}))["json"]["pages"]
+        .as_array()
+        .map_or(0, Vec::len);
+    eprintln!(
+        "ttfp {main} {args}: viewer joined at {:.0} ms; first page streamed: {}; settled at {:.0} ms, {n} pages, {pages} page events before it",
+        joined.as_secs_f64() * 1e3,
+        first.map_or_else(
+            || "none".to_owned(),
+            |(k, t)| format!("page {k} at {:.0} ms", t.as_secs_f64() * 1e3)
+        ),
+        settled.as_secs_f64() * 1e3
+    );
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+}
+
+/// The PDF documents (`tests/latex/pdfdocs`: hyperref, graphicx, xcolor's
+/// colour stack, `TikZ`, objects and forms, virtual fonts, floats, marks)
+/// built by `phitex watch` with its viewer, whose cold build streams its
+/// pages: each file written the one `phitex build` writes (`--ignored`: a
+/// few minutes).
+#[test]
+#[ignore = "slow: every pdfdocs document twice"]
+fn watch_streaming_writes_the_clean_builds_file() {
+    let _one = one();
+    let mut differ = Vec::new();
+    let mut names: Vec<String> = std::fs::read_dir(pdfdocs_dir())
+        .expect("pdfdocs")
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter_map(|n| n.strip_suffix(".tex").map(str::to_owned))
+        .collect();
+    names.sort();
+    for name in names {
+        let text = std::fs::read_to_string(pdfdocs_dir().join(format!("{name}.tex"))).expect("doc");
+        if !text.contains("\\documentclass") {
+            continue;
+        }
+        let pdf = |watch: bool| -> Option<Vec<u8>> {
+            let dir = scratch(&format!("stream-{name}-{watch}"));
+            for e in std::fs::read_dir(pdfdocs_dir()).expect("pdfdocs").flatten() {
+                let _ = std::fs::copy(e.path(), dir.join(e.file_name()));
+            }
+            let common = ["--exact-pdf", "--engine", "pdflatex", "-j", "4"];
+            if watch {
+                let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+                    .args(["watch", "--write", "--json"])
+                    .args(common)
+                    .arg(format!("{name}.tex"))
+                    .env("XDG_RUNTIME_DIR", &dir)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .expect("phitex watch runs");
+                let stdout = child.stdout.take().expect("its output");
+                let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+                let mut seen = Vec::new();
+                until(&mut lines, "build", &1.into(), &mut seen);
+                if let Some(mut i) = child.stdin.take() {
+                    let _ = i.write_all(b"q\n");
+                }
+                let _ = child.wait();
+            } else {
+                let _ = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+                    .arg("build")
+                    .args(common)
+                    .arg(format!("{name}.tex"))
+                    .output();
+            }
+            std::fs::read(dir.join(format!("{name}.pdf"))).ok()
+        };
+        let (w, b) = (pdf(true), pdf(false));
+        eprintln!(
+            "{name}: watch {} bytes, build {} bytes, {}",
+            w.as_ref().map_or(0, Vec::len),
+            b.as_ref().map_or(0, Vec::len),
+            if w == b { "the same" } else { "DIFFER" }
+        );
+        if w != b {
+            differ.push(name);
+        }
+    }
+    assert!(
+        differ.is_empty(),
+        "the streaming watch's file differs: {differ:?}"
+    );
 }

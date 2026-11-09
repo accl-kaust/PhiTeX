@@ -166,6 +166,17 @@ impl Document {
                     s.progress(p);
                 }
             }));
+            // (the pages a cold build streams: the viewer's `page` event,
+            // each drawn from its own file until the build is in)
+            let v = viewer.clone();
+            session
+                .status()
+                .meter()
+                .on_streamed(Box::new(move |p, pages| {
+                    if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
+                        v.stream_page(k, p.hash, p.pdf.clone(), pages);
+                    }
+                }));
             let l = lsp.clone();
             session
                 .status()
@@ -1658,5 +1669,186 @@ mod tests {
         );
         let (built, _) = run(None);
         assert_eq!(built["ok"], false, "{built}");
+    }
+
+    /// `n` pages of a PDF, each fired by the page builder and a rule of
+    /// its own width, after a loop of `k` steps (a build that takes a
+    /// while before its pages).
+    fn pdf_pages(k: u32, n: usize) -> String {
+        let mut t = format!(
+            "\\catcode`\\{{=1 \\catcode`\\}}=2 \\pdfoutput=1 \\pdfcompresslevel=0 \\vsize=100pt \\hsize=100pt \\pdfpagewidth=120pt \\pdfpageheight=120pt \\output={{\\shipout\\box255}} \\count1=0 \\def\\l{{\\advance\\count1 by1 \\ifnum\\count1<{k} \\expandafter\\l\\fi}}\\l "
+        );
+        for i in 0..n {
+            t.push_str(&format!(
+                "\\hbox{{\\vrule width {}pt height 5pt}}\\penalty-10000 ",
+                10 + i
+            ));
+        }
+        t.push_str("\\end\n");
+        t
+    }
+
+    /// A cold build streams its pages as they ship, through the viewer's
+    /// protocol: `page` events before `settled`, each page drawn from its
+    /// file of its own while the build runs exactly as the build's file
+    /// draws it when it is in (the same bands, text and links), each
+    /// streamed identity replaced by the settled one, and the build's
+    /// file the one a build that streams nothing writes. At one thread
+    /// and two.
+    #[test]
+    fn a_cold_build_streams_its_pages_before_it_settles() {
+        let n = 12;
+        let text = pdf_pages(20_000, n);
+        for threads in [1, 2] {
+            let session = |text: &str| {
+                Session::new(
+                    Job {
+                        engine: crate::tex::engine("pdftex").unwrap(),
+                        threads: Some(threads),
+                        ..job()
+                    },
+                    Arc::from(text),
+                    Arc::new(Nothing),
+                    None,
+                    Arc::new(Memory::default()),
+                    Arc::new(Status::default()),
+                )
+            };
+            let events: Arc<Mutex<Vec<Value>>> = Arc::default();
+            let frames: Arc<Mutex<HashMap<u64, Value>>> = Arc::default();
+            let viewer: Arc<std::sync::OnceLock<Arc<Viewer>>> = Arc::default();
+            let (ev, fr, vw) = (events.clone(), frames.clone(), viewer.clone());
+            let mut d = Document::new_with_emit(session(&text), "doc.tex", move |e| {
+                if e["event"] == "page"
+                    && let (Some(v), Some(k)) = (vw.get(), e["k"].as_u64())
+                {
+                    // (drawn while the build runs, as a viewer asks)
+                    let r = v.answer(&json!({"id": 1, "op": "frame", "page": k, "scale": 1.0}));
+                    let r: Value = serde_json::from_str(&r).unwrap();
+                    assert_eq!(r["ok"], true, "page {k} streamed, its frame: {r}");
+                    lock(&fr).insert(k, r["json"].clone());
+                }
+                lock(&ev).push(e);
+            });
+            let _ = viewer.set(d.viewer().clone());
+            d.step();
+            let ev = lock(&events).clone();
+            let at = |what: &str| ev.iter().position(|e| e["event"] == what);
+            let settled = at("settled").expect("settled");
+            let pages: Vec<&Value> = ev.iter().filter(|e| e["event"] == "page").collect();
+            assert!(
+                !pages.is_empty() && at("page").is_some_and(|p| p < settled),
+                "threads {threads}: no page streamed before settled: {ev:?}"
+            );
+            assert!(
+                ev[settled..].iter().all(|e| e["event"] != "page"),
+                "threads {threads}: a page streamed after settled: {ev:?}"
+            );
+            // (every page streamed: the first ones always are)
+            let mut ks: Vec<u64> = pages.iter().filter_map(|e| e["k"].as_u64()).collect();
+            ks.sort_unstable();
+            ks.dedup();
+            assert_eq!(
+                ks,
+                (0..u64::try_from(n).unwrap()).collect::<Vec<_>>(),
+                "threads {threads}: {ev:?}"
+            );
+            let settled_hashes = d.request(&json!({"id": 2, "op": "pages"}))["json"]["pages"]
+                .as_array()
+                .cloned()
+                .unwrap();
+            assert_eq!(settled_hashes.len(), n);
+            for e in &pages {
+                let k = usize::try_from(e["k"].as_u64().unwrap()).unwrap();
+                assert_ne!(
+                    e["hash"], settled_hashes[k],
+                    "threads {threads}: a streamed page named as a settled one"
+                );
+                assert!(e["pages"].as_u64().unwrap() > u64::try_from(k).unwrap());
+            }
+            // (each streamed page drawn as the build's file draws it)
+            let same = |f: &Value| {
+                json!([
+                    f["pw"], f["ph"], f["w"], f["h"], f["bands"], f["text"], f["links"]
+                ])
+            };
+            for (k, f) in lock(&frames).iter() {
+                let r = d.request(&json!({"id": 3, "op": "frame", "page": k, "scale": 1.0}));
+                assert_eq!(r["ok"], true, "{r}");
+                assert_eq!(
+                    same(f),
+                    same(&r["json"]),
+                    "threads {threads}: page {k} streamed is not the build's"
+                );
+            }
+            // (nothing streamed once the build is in)
+            assert!(d.viewer().streamed_hashes().is_empty());
+            // (the file a build that streams nothing writes)
+            let mut quiet = session(&text);
+            let r = quiet.build();
+            assert_eq!(
+                d.output().map(|o| o.1.to_vec()),
+                Some(r.out.pdf.to_vec()),
+                "threads {threads}: the streaming build's file"
+            );
+        }
+    }
+
+    /// A page whose resources name an object written at the document's
+    /// end (pgf's `\\pdfpageresources` on every page) is streamed where
+    /// it does not draw with them, drawn as the build's file draws it; a
+    /// page that draws with a graphics state (`gs`) is not streamed.
+    #[test]
+    fn pages_naming_later_objects_stream_unless_they_draw_with_them() {
+        let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\pdfcompresslevel=0 \\vsize=100pt \\hsize=100pt \\pdfpagewidth=120pt \\pdfpageheight=120pt \\output={\\shipout\\box255} \\def\\space{ } \\pdfobj reserveobjnum \\edef\\o{\\the\\pdflastobj} \\pdfpageresources{/ExtGState \\o\\space 0 R} ".to_owned();
+        for i in 0..4 {
+            let gs = if i == 2 { "\\pdfliteral{/G1 gs}" } else { "" };
+            t.push_str(&format!(
+                "\\hbox{{{gs}\\vrule width {}pt height 5pt}}\\penalty-10000 ",
+                10 + i
+            ));
+        }
+        t.push_str("\\pdfobj useobjnum \\o {<< /G1 << /CA 0.5 >> >>}\\end\n");
+        let session = Session::new(
+            Job {
+                engine: crate::tex::engine("pdftex").unwrap(),
+                ..job()
+            },
+            Arc::from(t.as_str()),
+            Arc::new(Nothing),
+            None,
+            Arc::new(Memory::default()),
+            Arc::new(Status::default()),
+        );
+        let events: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let frames: Arc<Mutex<HashMap<u64, Value>>> = Arc::default();
+        let viewer: Arc<std::sync::OnceLock<Arc<Viewer>>> = Arc::default();
+        let (ev, fr, vw) = (events.clone(), frames.clone(), viewer.clone());
+        let mut d = Document::new_with_emit(session, "doc.tex", move |e| {
+            if e["event"] == "page"
+                && let (Some(v), Some(k)) = (vw.get(), e["k"].as_u64())
+            {
+                let r = v.answer(&json!({"id": 1, "op": "frame", "page": k, "scale": 1.0}));
+                let r: Value = serde_json::from_str(&r).unwrap();
+                lock(&fr).insert(k, r["json"].clone());
+            }
+            lock(&ev).push(e);
+        });
+        let _ = viewer.set(d.viewer().clone());
+        d.step();
+        let ev = lock(&events).clone();
+        let mut ks: Vec<u64> = ev
+            .iter()
+            .filter(|e| e["event"] == "page")
+            .filter_map(|e| e["k"].as_u64())
+            .collect();
+        ks.sort_unstable();
+        ks.dedup();
+        assert_eq!(ks, [0, 1, 3], "{ev:?}");
+        let same = |f: &Value| json!([f["w"], f["h"], f["bands"], f["text"]]);
+        for (k, f) in lock(&frames).iter() {
+            let r = d.request(&json!({"id": 3, "op": "frame", "page": k, "scale": 1.0}));
+            assert_eq!(same(f), same(&r["json"]), "page {k}");
+        }
     }
 }

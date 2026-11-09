@@ -3300,7 +3300,13 @@ impl Graph {
         let tool = eng.register(Arc::new(crate::tools::ToolRun(shared.clone())));
         let toolnode = eng.register(Arc::new(crate::tools::ToolNode(shared.clone())));
         let origins_on: Arc<std::sync::atomic::AtomicBool> = Arc::default();
-        let pdfpage = eng.register(Arc::new(crate::pdfout::PdfPage(origins_on.clone())));
+        let stream_on: Arc<std::sync::atomic::AtomicBool> = Arc::default();
+        let watch: Arc<std::sync::RwLock<Option<crate::exec::Watch>>> = Arc::default();
+        let pdfpage = eng.register(Arc::new(crate::pdfout::PdfPage {
+            origins: origins_on.clone(),
+            stream: stream_on.clone(),
+            watch: watch.clone(),
+        }));
         let readback = eng.register(Arc::new(crate::ops::ReadBack(shared.clone())));
         let pic = eng.register(Arc::new(crate::pic::Pic(shared.clone())));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
@@ -3347,6 +3353,7 @@ impl Graph {
             fin_predict: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             edit_stall_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             origins: origins_on,
+            stream: stream_on,
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             resumed_edits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cut_offs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -3354,7 +3361,7 @@ impl Graph {
             siblings_pulled: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
             scope_learned: Arc::default(),
-            watch: Arc::default(),
+            watch,
             fmt_made: Arc::default(),
             held: Arc::default(),
             node_rec: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -6897,6 +6904,12 @@ impl Build {
             .progress
             .keep_ships(|n| self.g.eng.is_live(NodeId::from_raw(n)));
         self.g.watch.progress.begin();
+        // (the pages streamed in this evaluation or not: the pages' PDF
+        // sides run as their pages ship, or once the loop-backs settle)
+        self.g.ops.stream.store(
+            self.g.watch.progress.streaming(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         *self
             .g
             .ops

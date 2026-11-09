@@ -81,7 +81,9 @@ pub use api::{
     Mktex, Options, PageSettled, PkgrecSource, PreludeSource, RunReport as Report, Severity,
     Speculation, Stats, ToolFinder, ToolSearch, byte_ends, engine_id, file_stat_key, font_name,
 };
-pub use exec::{Progress, SpawnWorker, cpus as exec_cpus, set_spawn_worker};
+pub use exec::{
+    Progress, SpawnWorker, StreamHook, StreamedPage, TICK_JOBS, cpus as exec_cpus, set_spawn_worker,
+};
 pub use native::NativeFonts;
 pub use origins::{OriginsSnapshot, PageOrigins};
 pub use phitex_otf::index::FontIndex;
