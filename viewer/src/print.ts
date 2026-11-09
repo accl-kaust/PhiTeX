@@ -303,7 +303,10 @@ header:active { cursor: grabbing; }
 /* (the marks along the pages' scrollbar: the problems' places and the diff's changes) */
 .smarks { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
 .smarks[hidden] { display: none; }
-.smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); }
+.smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); transition: transform .1s; }
+/* (a target larger than the tick: it is 3 px tall) */
+.smarks i::before { content: ""; position: absolute; inset: -4px -3px; }
+.smarks i:hover { transform: scale(1.5, 2); }
 .smarks i.error { background: var(--ph-danger, #d93025); }
 .smarks i.change { background: var(--ph-accent, #1d3e72); }
 .phx-card[data-key] { cursor: pointer; }

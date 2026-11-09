@@ -82,6 +82,9 @@ export interface ViewState {
   timing: { summary: string; parts: [string, string][]; message: string };
 }
 
+/** A mark along the pages' scrollbar: a problem's place (`p`, its first box `box`) or a diff's change. */
+type ScrollMark = { k: number; y: number; cls: string; title: string; p?: { file: string; message: string; line: number | null; excerpt: Problem["excerpt"]; severity: "error" | "warning" }; box?: [number, number, number, number] };
+
 /** What each kind of problem is, under its switch in Settings. */
 const KIND_HELP: Record<Kind, string> = {
   error: "LaTeX errors and files not found",
@@ -1138,15 +1141,15 @@ export class Panel {
     this.viewer.culprits(found.flat());
     // (each problem's place on the pages, for its card's link and the scrollbar)
     this.culpritPlaces = new Map(want.map((w, i) => [`${w.file}\0${w.range[0]}`, found[i][0] ? { k: found[i][0].k, box: found[i][0].boxes[0] } : null]));
-    this.problemMarks = want.flatMap((w, i) => (found[i][0]?.boxes[0] ? [{ k: found[i][0].k, y: found[i][0].boxes[0][1], cls: w.severity, title: w.message }] : []));
+    this.problemMarks = want.flatMap((w, i) => (found[i][0]?.boxes[0] ? [{ k: found[i][0].k, y: found[i][0].boxes[0][1], cls: w.severity, title: w.message, p: w, box: found[i][0].boxes[0] }] : []));
     this.drawScrollMarks();
   }
 
   /** Each problem's first place on the pages, by its file and byte (a card's "on the page"). */
   private culpritPlaces = new Map<string, { k: number; box: [number, number, number, number] } | null>();
   /** The scrollbar's marks: the problems' places, and the diff's changes (diffMarks). */
-  private problemMarks: { k: number; y: number; cls: string; title: string }[] = [];
-  private changeMarks: { k: number; y: number; cls: string; title: string }[] = [];
+  private problemMarks: ScrollMark[] = [];
+  private changeMarks: ScrollMark[] = [];
 
   /** The diff's changes' places (page from 0, height in PDF points), marked along the scrollbar; none: gone. */
   diffMarks(changes: { k: number; y: number; title: string }[]): void {
@@ -1154,7 +1157,12 @@ export class Panel {
     this.drawScrollMarks();
   }
 
-  /** The marks along the pages' scrollbar, each where its place is in the whole scroll; a click goes there. */
+  /**
+   * The marks along the pages' scrollbar, each where its place is in the
+   * whole scroll: hovered, what it is (a problem: the underline's tip, its
+   * line and file:line; a change: its title) beside it; clicked, the pages
+   * there, a problem's place flashed.
+   */
   private drawScrollMarks(): void {
     const el = this.$("#smarks");
     const marks = [...this.problemMarks, ...this.changeMarks];
@@ -1166,11 +1174,30 @@ export class Panel {
       if (fr[i] < 0) return;
       const t = document.createElement("i");
       t.className = m.cls;
-      t.title = m.title;
+      t.setAttribute("aria-label", m.title);
       t.style.top = `${(fr[i] * 100).toFixed(3)}%`;
-      t.onclick = () => this.viewer.scrollToPlace(m.k, m.y);
+      t.onmouseenter = () => this.markTip(t, m);
+      t.onmouseleave = () => (this.$("#ctip").hidden = true);
+      t.onclick = () => {
+        this.$("#ctip").hidden = true;
+        this.viewer.scrollToPlace(m.k, m.y);
+        if (m.box) this.viewer.mark(m.k, [m.box], false);
+      };
       el.append(t);
     });
+  }
+
+  /** A scrollbar mark's tip, left of the mark, at its height. */
+  private markTip(t: HTMLElement, m: ScrollMark): void {
+    const tip = this.$("#ctip");
+    tip.dataset.i = "";
+    tip.className = `ctip ${m.p?.severity ?? "change"}`;
+    if (m.p) tip.replaceChildren(icon(m.p.severity, 14), culpritTip(m.p, "click to see it on the page"));
+    else tip.replaceChildren(html`<div class="txt"><div>${m.title}</div></div>`);
+    tip.hidden = false;
+    const body = this.$(".body").getBoundingClientRect(), r = t.getBoundingClientRect();
+    tip.style.left = `${Math.max(8, r.left - body.left - tip.offsetWidth - 10)}px`;
+    tip.style.top = `${Math.max(8, Math.min(body.height - tip.offsetHeight - 8, r.top - body.top - tip.offsetHeight / 2))}px`;
   }
 
   /** The underlines on or off. */
@@ -3118,7 +3145,7 @@ const TIP_AROUND = 36;
  * then the line as TeX read it, the culprit marked (cut round it when
  * long), and file:line.
  */
-function culpritTip(p: { file: string; message: string; line: number | null; excerpt: Problem["excerpt"] }): HTMLElement {
+function culpritTip(p: { file: string; message: string; line: number | null; excerpt: Problem["excerpt"] }, click = "click to go there"): HTMLElement {
   const ex = p.excerpt;
   const chars = ex ? [...ex.text] : [];
   const culprit = ex ? chars.slice(ex.start, ex.start + ex.len).join("").trim() : "";
@@ -3132,5 +3159,5 @@ function culpritTip(p: { file: string; message: string; line: number | null; exc
     excerpt = html`<pre class="ex">${a}<mark>${b}</mark>${c}</pre>`;
   }
   const where = `${p.file.split("/").pop()}${p.line ? `:${p.line}` : ""}`;
-  return html`<div class="txt"><div>${p.message}${named ? html` <code>${culprit}</code>` : ""}</div>${excerpt}<div class="at">${where} · click to go there</div></div>`.firstElementChild as HTMLElement;
+  return html`<div class="txt"><div>${p.message}${named ? html` <code>${culprit}</code>` : ""}</div>${excerpt}<div class="at">${where} · ${click}</div></div>`.firstElementChild as HTMLElement;
 }
