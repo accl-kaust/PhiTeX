@@ -84,6 +84,7 @@
 
 mod cffstd;
 mod color;
+pub use color::PageColor;
 mod digest;
 pub mod enc;
 mod finish;

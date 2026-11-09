@@ -3330,6 +3330,12 @@ impl Graph {
             watch: watch.clone(),
             objs: stream_objs.clone(),
         }));
+        let xe: Arc<std::sync::OnceLock<crate::xetex::XeTeX>> = Arc::default();
+        let xdvpage = eng.register(Arc::new(crate::xdvpdf::XdvPage {
+            stream: stream_on.clone(),
+            watch: watch.clone(),
+            xe: xe.clone(),
+        }));
         let readback = eng.register(Arc::new(crate::ops::ReadBack(shared.clone())));
         let pic = eng.register(Arc::new(crate::pic::Pic(shared.clone())));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
@@ -3358,6 +3364,7 @@ impl Graph {
             tool,
             toolnode,
             pdfpage,
+            xdvpage,
             readback,
             pic,
             tool_opts: Arc::default(),
@@ -3390,7 +3397,7 @@ impl Graph {
             held: Arc::default(),
             node_rec: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pdf_cmds: Arc::default(),
-            xe: Arc::default(),
+            xe,
             tcx: Arc::default(),
             rel_keys: Arc::default(),
             class_proj,

@@ -156,13 +156,15 @@ A clean build sends each page as it ships, before the build settles
   what each of them names in turn; of the objects its
   `\pdfpageresources` names, those of the kinds its content draws with:
   a page drawing with no graphics state does not need pgf's). The pages
-  before it also left the
-  colour stacks as they found them. `false` when the page draws with
+  before it are known, and its
+  file begins from the colours they leave it (a colour pushed on one
+  page and popped on a later one is carried into the pages between, as
+  the build's file carries it). `false` when the page draws with
   something not complete yet (a `\pdfobj reserveobjnum` filled later,
   objects written at `\AtEndDocument`, such as pgf's shared ExtGState,
   Pattern and ColorSpace dictionaries named through
-  `\pdfpageresources`), or a colour may carry into it from an earlier
-  page. The page is still drawn, without what it lacks:
+  `\pdfpageresources`), or the colours carried into it are not known
+  yet (pages shipped out of order). The page is still drawn, without what it lacks:
   - a missing graphics state is drawn opaque;
   - a missing shading, or a fill with a missing pattern, draws nothing
     (a flat fill would hide what lies under a shaded background);
@@ -171,9 +173,17 @@ A clean build sends each page as it ships, before the build settles
 
   A viewer marks such a page quietly, "Preview: final colours and
   shading when the build ends", until the settled page replaces it.
+- A XeTeX build streams its pages too: each page's file is
+  xdvipdfmx's of that page alone. It is exact where no colour is carried
+  into it and it draws with nothing another page makes (no `pdf:` special
+  but annotations, links, destinations, outlines and the document's
+  information, and literal code naming no resource).
+- A page whose file cannot be written with the objects it names is
+  written without them (its text, rules and colours), `exact: false`.
 - A page sent with `exact: false` only because the pages before it were
   not known yet (pages ship out of order at more than one thread) is
-  sent again with the same `hash` and `exact: true` once they are.
+  sent again with the same `hash` and `exact: true` once they are, where
+  they carry no colour into it.
   Treat it as an update of that page's mark only.
 - The `status` and `pages` answers list the pages streamed so far
   (`hashes`/`pages`) and, as `"inexact": [k, …]`, those not exact. The
