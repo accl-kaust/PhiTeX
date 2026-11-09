@@ -69,7 +69,7 @@ def main():
         os.replace(tmp, path)
         ev, w = next_build()
         ms = round(w * 1000, 1)
-        res["edits"].append({"old": a[:40], "new": b[:40], "ms": ms, "wall_ms": (ev or {}).get("wall_ms")})
+        res["edits"].append({"old": a[:40], "new": b[:40], "ms": ms, "wall_ms": (ev or {}).get("wall_ms"), "event": ev})
         print(f"edit {a[:30]!r} -> {b[:30]!r}: {ms} ms (wall_ms {(ev or {}).get('wall_ms')})", flush=True)
     res["watch_hwm_mb"] = hwm(p.pid)
     pdf = os.path.join(d, os.path.splitext(main_)[0] + ".pdf")

@@ -37,9 +37,10 @@ Last words.
 TEX
 echo '[["s.tex","Most edits","Many edits",2]]' > "$w/edits.json"
 for m in off box; do
-  e=(); [ $m = off ] || e=(PHITEX_BOXSCOPE=1)
+  e=(); [ $m = off ] || e=(PHITEX_BOXSCOPE=1 PHITEX_BOXSCOPE_TRACE=1 PHITEX_RUN_TIMES=1)
   echo "== $m: the one-word edit under watch -j1, each run's time"; rm -rf "$w/e" "$w/e-cold" "$w/cache-$m"; cp -a "$d" "$w/e"
   env F52_ERR=$r/watch-$m.txt PHITEX_TEX_TIME=1 PHITEX_CACHE_DIR=$w/cache-$m "${e[@]}" timeout 900 python3 -I bench/f52-edits-tmp.py "$bin" "$w/e" s.tex 1 "$w/edits.json" "$r/edits-$m.json" --exact-pdf 2>&1 | tail -4
   # (the runs after the clean build: the lines after its 'finished')
-  awk '/^finished:/ {n++; next} n>=1 && /^nodetime:/' "$r/watch-$m.txt" | head -40
+  echo "-- stderr after the clean build's report"; awk '/^finished:/ {n++; next} n>=1' "$r/watch-$m.txt" | grep -v "^ \\|^acct\\|^timeline\\|^  clock" | cut -c1-200 | head -60
+  python3 -I -c "import json,sys; d=json.load(open(sys.argv[1])); [print(json.dumps(e.get('event'))[:1500]) for e in d['edits']]" "$r/edits-$m.json"
 done

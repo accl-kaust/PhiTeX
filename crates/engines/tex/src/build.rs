@@ -2423,6 +2423,16 @@ impl Run<'_, '_> {
                 };
                 let depth_limit = self.ipar(Par::boxmaxdepth)?;
                 let items = self.list_own_items(md.lid)?;
+                if crate::boxscope::is_global(md.lid)
+                    && crate::exec::prof_flag!("PHITEX_BOXSCOPE_TRACE")
+                {
+                    eprintln!(
+                        "boxscope: node {} closes list {} ({} items)",
+                        self.cx.node().raw(),
+                        md.lid,
+                        items.len()
+                    );
+                }
                 let mut side = Side::default();
                 let mut kept = Vec::with_capacity(items.len());
                 let list: List = items
