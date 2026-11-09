@@ -2189,9 +2189,28 @@ impl Session {
         s
     }
 
-    /// What the terminal shows of the document's job (TeX's own output).
-    pub fn terminal(r: &Report) -> String {
-        r.out.log.clone()
+    /// What the terminal shows of the document's job, as TeX's own
+    /// terminal with it on (`nonstop_mode`): `head`, the events less the
+    /// log's alone, the end and `Transcript written on JOB.log.`
+    /// ([`phitex_tex::Build::terminal`]); the log's text where the build
+    /// is gone (the engine failed).
+    #[must_use]
+    pub fn terminal(&self, r: &Report, head: &str) -> String {
+        let log = format!("{}.log", self.job.jobname);
+        let log = print_file_name(&self.job.out_dir.join(&log).to_string_lossy());
+        match &self.build {
+            Some(b) => b.terminal(head, log.trim_start_matches("./")),
+            None => r.out.log.clone(),
+        }
+    }
+}
+
+/// A file's name as TeX prints it: in quotes when it has a space.
+fn print_file_name(name: &str) -> String {
+    if name.contains(' ') {
+        format!("\"{}\"", name.replace('"', ""))
+    } else {
+        name.to_owned()
     }
 }
 
