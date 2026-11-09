@@ -633,3 +633,62 @@ fn options_only_where_they_mean_something() {
         "{watch}"
     );
 }
+
+/// `phitex config` checks a value before it keeps it, the error naming
+/// the key and what it takes; `--unset` takes a key out; a project's
+/// value of a key that is yours alone is listed as ignored.
+#[test]
+fn config_checks_values() {
+    let dir = scratch("config-checks");
+    for (k, v, says) in [
+        ("engine", "banana", "pdflatex"),
+        ("update-channel", "beta", "stable, nightly"),
+        ("update-check", "maybe", "on or off"),
+        ("threads", "lots", "a number"),
+        ("dark-pdf", "dim", "off, on, theme"),
+        ("cache-limit", "huge", "a size"),
+    ] {
+        let out = run(&dir, &["config", k, v]);
+        let err = text(&out.stderr);
+        assert!(!out.status.success(), "{k} = {v} kept");
+        assert!(
+            err.contains(k) && err.contains(says) && err.contains(v),
+            "{k}: {err}"
+        );
+    }
+    let user = dir.join(".home/config/phitex/phitex.toml");
+    assert!(!user.exists() || !std::fs::read_to_string(&user).unwrap().contains("banana"));
+    assert!(run(&dir, &["config", "engine", "xelatex"]).status.success());
+    assert!(run(&dir, &["config", "synctex", "on"]).status.success());
+    assert!(run(&dir, &["config", "--unset", "engine"]).status.success());
+    let kept = std::fs::read_to_string(&user).expect("your settings");
+    assert!(
+        !kept.contains("engine") && kept.contains("synctex"),
+        "{kept}"
+    );
+    std::fs::write(user, "engine = \"banana\"\n").expect("a value set by hand");
+    std::fs::write(dir.join("doc.tex"), TINY).expect("the document");
+    let err = text(&run(&dir, &["build", "doc.tex"]).stderr);
+    assert!(
+        err.contains("banana") && err.contains("phitex.toml"),
+        "{err}"
+    );
+    std::fs::write(dir.join(".home/config/phitex/phitex.toml"), "").expect("empty");
+    std::fs::write(
+        dir.join("phitex.toml"),
+        "shell-escape = true\nsynctex = true\n",
+    )
+    .expect("a project");
+    let v: Value = serde_json::from_slice(&run(&dir, &["config", "--json"]).stdout).expect("JSON");
+    let row = |k: &str| {
+        v["settings"]
+            .as_array()
+            .and_then(|a| a.iter().find(|s| s["key"] == k))
+            .expect("listed")
+            .clone()
+    };
+    assert_eq!(row("shell-escape")["project_ignored"], true);
+    assert_eq!(row("shell-escape")["from"], "default");
+    assert_eq!(row("synctex")["from"], "project");
+    assert!(text(&run(&dir, &["config"]).stdout).contains("ignored"));
+}

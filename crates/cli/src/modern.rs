@@ -185,6 +185,9 @@ enum Sub {
         key: Option<String>,
         #[arg(value_name = "VALUE")]
         value: Option<String>,
+        /// Take KEY out of your settings (its default holds again)
+        #[arg(long, value_name = "KEY", conflicts_with_all = ["key", "value"])]
+        unset: Option<String>,
     },
     /// Remove a build's files (--all: the whole cache)
     Clean {
@@ -441,6 +444,8 @@ pub struct Options {
     pub report: Option<bool>,
     /// `--color`: always (true), never (false), else by the stream.
     pub color: Option<bool>,
+    /// `config --unset KEY`.
+    pub unset: Option<String>,
 }
 
 impl Cli {
@@ -485,9 +490,10 @@ impl Cli {
             }
             Some(Sub::News) => o.command = Some(Command::News),
             Some(Sub::Upgrade) => o.command = Some(Command::Upgrade),
-            Some(Sub::Config { key, value }) => {
+            Some(Sub::Config { key, value, unset }) => {
                 o.command = Some(Command::Config);
                 o.set = Some((key, value));
+                o.unset = unset;
             }
             None => {}
         }
@@ -582,8 +588,8 @@ pub struct Target {
     pub viewer: Option<String>,
     /// The cache's limit (`cache-limit`; none: the default).
     pub cache_limit: Option<u64>,
-    /// The engine's threads (`threads` in the user's file; none or 0: one
-    /// per core), under `-j`.
+    /// The engine's threads (`threads` in the user's file; none or 0: the default, one
+    /// thread), under `-j`.
     pub threads: Option<usize>,
     /// Where TeX's files come from (`--shelf`, `files`; TeX Live by
     /// default).
@@ -798,9 +804,21 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
         text = read(&file, false)?;
         program = config::magic_comments(&text).0.or(program);
     }
-    let named = o.engine.clone().or(rc_engine).or(cfg.engine).or(program);
-    let mut engine = if let Some(e) = named {
-        tex::engine(&e)?
+    // (where the engine was named, for an error that says which to fix)
+    let named = o
+        .engine
+        .clone()
+        .map(|e| (e, "--engine".to_owned()))
+        .or(rc_engine.map(|e| (e, "the .latexmkrc's $pdf_mode".to_owned())))
+        .or(cfg.engine.map(|e| {
+            (
+                e,
+                "engine in phitex.toml (yours or the project's)".to_owned(),
+            )
+        }))
+        .or(program.map(|e| (e, format!("{file}'s % !TEX program"))));
+    let mut engine = if let Some((e, at)) = named {
+        tex::engine(&e).map_err(|err| format!("{err} (from {at})"))?
     } else {
         // (the main file, the files it inputs by name, and the classes and
         // packages of those beside them: a file that inputs a LaTeX
@@ -1336,6 +1354,22 @@ pub fn main(args: &[String]) -> ! {
         std::process::exit(0);
     }
     if command == Command::Config {
+        if let Some(k) = &o.unset {
+            match crate::config::unset_user(k) {
+                Ok(p) => {
+                    ui.line(&format!(
+                        "{k} taken out of {}",
+                        crate::cache::home_relative(&p)
+                    ));
+                    ui.event(&json!({"event": "config", "key": k, "value": null, "file": p.display().to_string()}));
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    ui.error(&e);
+                    std::process::exit(crate::EXIT_FAILED);
+                }
+            }
+        }
         let (k, v) = o.set.clone().unwrap_or_default();
         let (Some(k), Some(v)) = (k.clone(), v) else {
             // (the listing is the command's answer: standard output, as

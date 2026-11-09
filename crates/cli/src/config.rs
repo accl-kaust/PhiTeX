@@ -345,9 +345,10 @@ fn with_key(text: &str, key: &str, value: &str) -> Result<String, String> {
     if !KEYS.contains(&key) {
         return Err(match nearest(key) {
             Some(n) => format!("no setting '{key}': did you mean '{n}'?"),
-            None => format!("no setting '{key}' (phitex --help-all lists them)"),
+            None => format!("no setting '{key}' (phitex config lists them)"),
         });
     }
+    check(canonical(key), value)?;
     // (a choice's names are names, `off` too: never a boolean)
     let choice = CHOICES.iter().any(|(c, _)| *c == key);
     let v = match value {
@@ -394,6 +395,87 @@ fn with_line(text: &str, key: &str, v: &str) -> Result<String, String> {
     let text = out.join("\n") + "\n";
     parse_named(&text, "phitex.toml")?;
     Ok(text)
+}
+
+/// The names `key` takes, when it takes one of a few.
+fn names_of(key: &str) -> Option<&'static [&'static str]> {
+    const ENGINES: &[&str] = &[
+        "pdflatex", "xelatex", "latex", "pdftex", "xetex", "etex", "tex",
+    ];
+    match key {
+        "engine" => Some(ENGINES),
+        "update-channel" => Some(&["stable", "nightly"]),
+        "files" => Some(&["texlive", "shelf"]),
+        "latexmk" => Some(&["find", "exact"]),
+        k => CHOICES.iter().find(|(c, _)| *c == k).map(|(_, n)| *n),
+    }
+}
+
+/// `value` checked for `key` (its own name): the error names the key
+/// and what it takes.
+fn check(key: &str, value: &str) -> Result<(), String> {
+    let switch = SWITCHES.contains(&key) || key == "shell-escape";
+    if switch && !matches!(value, "on" | "off" | "true" | "false") {
+        return Err(format!("{key} is on or off, not '{value}'"));
+    }
+    if let Some(names) = names_of(key)
+        && !names.contains(&value)
+    {
+        return Err(format!(
+            "{key} is one of {}, not '{value}'",
+            names.join(", ")
+        ));
+    }
+    match key {
+        "threads" if value.parse::<usize>().is_err() => Err(format!(
+            "threads is a number (0 or 1: one thread), not '{value}'"
+        )),
+        "cache-limit" if parse_size(value).is_none() => Err(format!(
+            "cache-limit is a size (500MB, 4GB; 0: no cache), not '{value}'"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// `key` taken out of your `phitex.toml` (`phitex config --unset KEY`):
+/// its line gone, the rest kept; the file's path.
+pub fn unset_user(key: &str) -> Result<PathBuf, String> {
+    if !KEYS.contains(&key) {
+        return Err(match nearest(key) {
+            Some(n) => format!("no setting '{key}': did you mean '{n}'?"),
+            None => format!("no setting '{key}' (phitex config lists them)"),
+        });
+    }
+    let p = user_file().ok_or("no home directory for ~/.config/phitex/phitex.toml")?;
+    let old = std::fs::read_to_string(&p).unwrap_or_default();
+    let mut top = true;
+    let kept: Vec<&str> = old
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            if t.starts_with('[') {
+                top = false;
+            }
+            !(top
+                && t.split_once('=')
+                    .is_some_and(|(k, _)| canonical(k.trim().trim_matches('"')) == canonical(key)))
+        })
+        .collect();
+    let text = if kept.is_empty() {
+        String::new()
+    } else {
+        kept.join("\n") + "\n"
+    };
+    if text != old {
+        std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    Ok(p)
+}
+
+/// Whether a project's `phitex.toml` may set `key` (a key alone a
+/// user's is ignored there, [`without_permissions`]).
+pub fn projects_may(key: &str) -> bool {
+    !USERS_ALONE.contains(&canonical(key))
 }
 
 /// The viewer's preferences the user's `phitex.toml` keeps (the `prefs`
@@ -695,10 +777,16 @@ pub fn listed(key: Option<&str>, dir: &Path) -> Result<Listing, String> {
 }
 
 impl Row {
+    /// Whether the project sets a key that is yours alone (ignored there).
+    pub fn project_ignored(&self) -> bool {
+        self.project.is_some() && !projects_may(self.key)
+    }
+
     /// The value that holds, and where it comes from: `project`, `yours`
-    /// or `default`.
+    /// or `default` (a project's value of a key it may not set never).
     pub fn holds(&self) -> (String, &'static str) {
-        match (&self.project, &self.user) {
+        let project = self.project.as_ref().filter(|_| !self.project_ignored());
+        match (project, &self.user) {
             (Some(p), _) => (p.clone(), "project"),
             (None, Some(u)) => (u.clone(), "yours"),
             (None, None) => (self.default.to_owned(), "default"),
@@ -722,6 +810,7 @@ pub fn listing_json(key: Option<&str>, dir: &Path) -> Result<serde_json::Value, 
                 "default": r.default,
                 "yours": r.user,
                 "project": r.project,
+                "project_ignored": r.project_ignored(),
                 "description": r.what,
             })
         })
@@ -757,6 +846,13 @@ pub fn listing(key: Option<&str>, dir: &Path, st: crate::ui::Style) -> Result<Ve
             "yours" => format!("{} {}", st.cyan(&v), st.dim("(yours)")),
             _ => st.dim(&format!("{v} (default)")),
         };
+        let now = match (&r.project, r.project_ignored()) {
+            (Some(p), true) => format!(
+                "{now} {}",
+                st.yellow(&format!("(the project's {p} is ignored: yours alone)"))
+            ),
+            _ => now,
+        };
         out.push(format!(
             "  {}  {now}",
             st.bold(&crate::ui::pad(r.key, w, false))
@@ -764,7 +860,9 @@ pub fn listing(key: Option<&str>, dir: &Path, st: crate::ui::Style) -> Result<Ve
         out.push(format!("  {}  {}", " ".repeat(w), st.dim(r.what)));
     }
     if key.is_none() {
-        out.push(st.dim("phitex config KEY VALUE sets one in yours (on, off, a number or text)"));
+        out.push(st.dim(
+            "phitex config KEY VALUE sets one in yours (on, off, a number or text); phitex config --unset KEY takes it out",
+        ));
     }
     Ok(out)
 }
