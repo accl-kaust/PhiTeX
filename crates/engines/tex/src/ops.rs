@@ -51,6 +51,11 @@ pub(crate) static COMMANDS: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 pub(crate) static COMMANDS_BY: [std::sync::atomic::AtomicU64; 4] =
     [const { std::sync::atomic::AtomicU64::new(0) }; 4];
 
+/// The second passes (`Halt::Recut`) and the commands their first
+/// passes ran, run again from the start.
+pub(crate) static RECUTS: [std::sync::atomic::AtomicU64; 2] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 2];
+
 /// `PHITEX_HINT_LOG` (observe): each run's hint, bounded or why not,
 /// with its text; the scaling report's count of the unbounded nodes by
 /// cause.
@@ -160,6 +165,8 @@ pub(crate) fn run_node(
         // (from the start again: the first pass's state at the candidate
         // is not kept, the runs are short, every content-defined cut a
         // node's start, `crate::cut`)
+        RECUTS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        RECUTS[1].fetch_add(r.cmds, std::sync::atomic::Ordering::Relaxed);
         let cx = r.cx;
         r = Run::new(cx, o);
         r.stop_at = Some(k);
