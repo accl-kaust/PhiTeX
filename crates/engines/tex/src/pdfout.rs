@@ -463,10 +463,15 @@ impl PageBox {
 /// its own ([`write_page_with`]).
 type Made = (phitex_pdf::PageRecord, BTreeSet<FontId>, usize);
 
-/// The pages written, by their piece's key and their sealed lines (their
-/// boxes as their pieces made them, `crate::pages::seal`): the piece is
-/// the page's shape, the lines what it holds besides.
-type RecordMemo = Mutex<FxHashMap<(u64, Lines), Arc<OnceLock<Made>>>>;
+/// The pages written, by their piece's key, with the sealed lines each
+/// was written with (their boxes as their pieces made them,
+/// `crate::pages::seal`): the piece is the page's shape, the lines what
+/// it holds besides. One a piece, the last asked: a piece whose lines
+/// moved is written again, and its earlier record (its content bytes)
+/// is dropped then, not kept to the next collection beside every other
+/// version (the `TikZ` manual's pages, written as they shipped for the
+/// viewer at each pass).
+type RecordMemo = Mutex<FxHashMap<u64, (Lines, Arc<OnceLock<Made>>)>>;
 
 fn records() -> &'static RecordMemo {
     static P: OnceLock<RecordMemo> = OnceLock::new();
@@ -552,7 +557,6 @@ fn record_of(
     line: &mut dyn FnMut(&crate::nodes::Sealed) -> Option<ValueId>,
     glyphs: Option<u64>,
 ) -> Arc<OnceLock<Made>> {
-    let k = (key, h.clone());
     let m = {
         let mut all = records().locked();
         // (the records of builds gone: dropped wholesale past a bound,
@@ -560,7 +564,13 @@ fn record_of(
         if all.len() > 1 << 14 {
             all.clear();
         }
-        all.entry(k).or_default().clone()
+        let e = all
+            .entry(key)
+            .or_insert_with(|| (h.clone(), Arc::default()));
+        if e.0 != *h {
+            *e = (h.clone(), Arc::default());
+        }
+        e.1.clone()
     };
     // (origins on: the page's glyphs as the writer shows them, kept by
     // its identity in the link, `crate::origins`)
@@ -596,8 +606,8 @@ fn record_of(
 fn record_made(key: u64, h: &Lines) -> bool {
     records()
         .locked()
-        .get(&(key, h.clone()))
-        .is_some_and(|m| m.get().is_some())
+        .get(&key)
+        .is_some_and(|(l, m)| l == h && m.get().is_some())
 }
 
 /// The pages by key: a pure function's memo.
@@ -2152,7 +2162,7 @@ pub(crate) fn collect_pieces(v: &Values, live: &FxHashSet<u64>, keep: &mut dyn F
             .for_each(&mut *keep);
     }
     let mut rs = records().locked();
-    rs.retain(|(k, _), _| m.contains_key(k));
+    rs.retain(|k, _| m.contains_key(k));
 }
 
 /// At a collection: the link's memos of the last link dropped (the line,
@@ -2181,7 +2191,7 @@ pub(crate) fn prune_pieces(v: &Values, line: &[ValueId]) {
     let mut m = pieces().locked();
     m.retain(|k, pc| pc.inst != inst || keep.contains(k));
     let mut rs = records().locked();
-    rs.retain(|(k, _), _| m.contains_key(k));
+    rs.retain(|k, _| m.contains_key(k));
 }
 
 /// The commands no record on the line names dropped ([`CmdMemo`]):
