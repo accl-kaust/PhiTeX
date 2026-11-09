@@ -463,6 +463,15 @@ fn setting() -> Setting {
     {
         return Setting::Mute;
     }
+    chosen()
+}
+
+/// The user's `update-check` (CI and `PHITEX_NO_UPDATE_CHECK` mute it;
+/// no terminal is needed: an editor shows it).
+fn chosen() -> Setting {
+    if std::env::var_os("CI").is_some() || std::env::var_os("PHITEX_NO_UPDATE_CHECK").is_some() {
+        return Setting::Mute;
+    }
     match crate::config::user().ok().and_then(|c| c.update_check) {
         None => Setting::Unset,
         Some(false) => Setting::Off,
@@ -478,9 +487,21 @@ fn kept() -> PathBuf {
 /// background when the kept one is a day old and the check is on (the
 /// run never waits for it; [`check`] reads what is kept when it speaks).
 pub fn begin() {
-    if setting() != Setting::On {
-        return;
+    if setting() == Setting::On {
+        fetch();
     }
+}
+
+/// [`begin`] for an editor's watch (`--lsp`): no terminal needed, the
+/// notice is the editor's (`phitex/status`).
+pub fn begin_for_editor() {
+    if chosen() == Setting::On {
+        fetch();
+    }
+}
+
+/// `news.json` fetched in the background when the kept one is a day old.
+fn fetch() {
     let kept = kept();
     let age = std::fs::metadata(&kept)
         .and_then(|m| m.modified())
@@ -541,6 +562,39 @@ pub fn check(ui: &Ui) {
             }
         }
     }
+}
+
+/// The update notice for an editor (`phitex/status`'s `update`,
+/// docs/spec-editor-protocol.md §2.3): with the check on, what the kept
+/// `news.json` says for this version, `{latest, advisory, lines}`; none:
+/// the check is off or unset, or there is nothing to say. Its fetch
+/// started ([`begin`], in the background) as the watch starts.
+pub fn notice() -> Option<Value> {
+    if chosen() != Setting::On {
+        return None;
+    }
+    let n = std::fs::read(kept())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())?;
+    notice_of(
+        &n,
+        crate::version(),
+        install_record().is_some_and(|r| r["method"] == "script"),
+    )
+}
+
+/// [`notice`] of news `n` for version `v`.
+fn notice_of(n: &Value, v: &str, by_script: bool) -> Option<Value> {
+    let lines = said(n, v, by_script);
+    if lines.is_empty() {
+        return None;
+    }
+    let latest = n["latest"].as_str().filter(|l| later(l, v));
+    Some(serde_json::json!({
+        "latest": latest,
+        "advisory": lines.iter().any(|l| l.trim_start().starts_with('⚠')),
+        "lines": lines,
+    }))
 }
 
 /// Whether the update check's question was put to version `v` already
@@ -614,6 +668,21 @@ fn said(n: &Value, v: &str, by_script: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The editor's update notice: the releases after the running one and
+    /// the advisories for it; none when it is current and unadvised.
+    #[test]
+    fn the_editors_notice() {
+        let n = serde_json::json!({"schema": 1, "latest": "1.1", "entries": [
+            {"version": "1.1", "kind": "release", "summary": "Faster."},
+            {"affects": "<1.0.1", "kind": "advisory", "summary": "1.0 can write a wrong PDF."}]});
+        let got = notice_of(&n, "1.0", true).expect("a notice");
+        assert_eq!(got["latest"], "1.1");
+        assert_eq!(got["advisory"], true);
+        assert_eq!(got["lines"][0], "phitex 1.1 is out (you have 1.0):");
+        assert_eq!(got["lines"].as_array().map(Vec::len), Some(4), "{got}");
+        assert!(notice_of(&n, "1.1", true).is_none());
+    }
 
     #[test]
     fn answers() {

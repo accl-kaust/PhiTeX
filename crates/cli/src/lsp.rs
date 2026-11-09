@@ -42,6 +42,16 @@ use serde_json::{Value, json};
 
 use crate::view::{Ask, Built};
 
+/// The process's exit status when the watch ends: 1 once the stdio
+/// editor ended the session without `shutdown` (`exit` alone, or its
+/// input's end), as the LSP says; else 0.
+static EXIT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// The status the watch exits with when it ends as `q` ends it.
+pub fn exit_status() -> i32 {
+    EXIT.load(Ordering::Relaxed)
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -583,6 +593,7 @@ impl Lsp {
     /// before it as the protocol says), enter its root, and name the main
     /// file in `file` if nothing has (`phitex.toml` may yet).
     pub fn begin(file: &mut Option<String>) -> Lsp {
+        crate::upgrade::begin_for_editor();
         let out = Arc::new(Mutex::new(std::io::stdout()));
         let mut input = BufReader::new(std::io::stdin());
         let watch = Watch::new();
@@ -671,12 +682,6 @@ impl Lsp {
         self.server.is_some()
     }
 
-    /// Whether any editor is connected now (the stdio one or one
-    /// attached): the work only an editor reads is worth doing.
-    pub fn served(&self) -> bool {
-        !lock(&self.watch.servers).is_empty()
-    }
-
     /// The watch cannot run: with an editor on standard input,
     /// `initialize` answered with why, or, answered already, the editor
     /// shown it, and the watch ends; else nothing (the terminal says it).
@@ -735,7 +740,9 @@ impl Lsp {
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         root.clone_into(&mut lock(&self.watch.root));
         *lock(&self.watch.main) = Some(main.to_owned());
+        let update = crate::upgrade::notice();
         for (id, s) in self.watch.servers() {
+            s.set_update(update.clone());
             if id == 0 {
                 s.accept(&root, main);
             } else {
@@ -844,7 +851,10 @@ impl Lsp {
     /// ([`Server::diagnostics`]).
     pub fn diagnostics(&self, d: &[serde_json::Value]) {
         d.clone_into(&mut lock(&self.watch.diags));
+        // (the update check's news, fetched meanwhile: read at idle)
+        let update = crate::upgrade::notice();
         for (_, s) in self.watch.servers() {
+            s.set_update(update.clone());
             s.diagnostics(d);
         }
     }
@@ -891,10 +901,16 @@ impl Lsp {
         std::thread::Builder::new()
             .name("phitex-lsp".into())
             .spawn(move || {
+                let end = |s: &Server| {
+                    if !s.shut_down() {
+                        EXIT.store(crate::EXIT_FAILED, Ordering::Relaxed);
+                    }
+                    quit();
+                };
                 // (what came while the main file was waited for first)
                 for m in &pending {
                     if !s.handle(m) {
-                        quit();
+                        end(&s);
                         return;
                     }
                 }
@@ -904,7 +920,7 @@ impl Lsp {
                         break;
                     }
                 }
-                quit();
+                end(&s);
             })
             .expect("a thread");
     }
@@ -979,6 +995,7 @@ fn attached(watch: &Arc<Watch>, first: &Value, mut input: impl BufRead, out: std
     }
     server.initialize(first);
     server.set_attached();
+    server.set_update(crate::upgrade::notice());
     let root = lock(&watch.root).clone();
     let main = lock(&watch.main).clone().unwrap_or_default();
     server.accept(&root, &main);
