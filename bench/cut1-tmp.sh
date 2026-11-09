@@ -119,7 +119,7 @@ while " the " not in t[k] or t[k].lstrip().startswith(("%", "\\")): k += 1
 s = t[k]; i = s.index(" the ")
 a = s[max(0, i - 12): i + 12]
 print(json.dumps([["grail.tex", a, a.replace(" the ", " the typed ", 1), 4]]))' "$w/gr/grail.tex" $ln > "$w/gr-edits.json"
-        PHITEX_CACHE_DIR=$w/cache-$l timeout 3000 python3 -I bench/cut1-edits.py "$w/bins/$l/phitex" "$w/gr" grail.tex $j "$w/gr-edits.json" "$r/grail-$l-j$j.json" 2>&1 | sed "s|^|grail $l -j$j: |" | tee -a "$r/rows.txt"
+        PHITEX_CACHE_DIR=$w/cache-$l timeout 3000 python3 -I bench/cut1-edits.py "$w/bins/$l/phitex" "$w/gr" grail.tex $j "$w/gr-edits.json" "$r/grail-$l-j$j.json" --exact-pdf 2>&1 | sed "s|^|grail $l -j$j: |" | tee -a "$r/rows.txt"
       done
     fi ;;
   esac
