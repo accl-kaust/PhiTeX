@@ -1942,10 +1942,17 @@ fn note_trail(trail: &mut Option<Vec<Bytes>>, file: &[u8]) {
 mod tests {
     use super::*;
 
+    /// `s` with its `:`s the system's separator ([`ENV_SEP`]).
+    fn sep(s: &str) -> Vec<u8> {
+        s.bytes()
+            .map(|c| if c == b':' { ENV_SEP } else { c })
+            .collect()
+    }
+
     #[test]
     fn brace_expansion() {
         let mut pos = 0;
-        let r = brace_expand_list(b"a{b,c}d:e", &mut pos);
+        let r = brace_expand_list(&sep("a{b,c}d:e"), &mut pos);
         assert_eq!(r, vec![b"abd".to_vec(), b"acd".to_vec(), b"e".to_vec()]);
         let mut pos = 0;
         let r = brace_expand_list(b"x/{p,g,}//", &mut pos);
@@ -1957,9 +1964,9 @@ mod tests {
 
     #[test]
     fn default_splicing() {
-        assert_eq!(expand_default(b"a::b", b"D"), b"a:D:b");
-        assert_eq!(expand_default(b":a", b"D"), b"D:a");
-        assert_eq!(expand_default(b"a:", b"D"), b"a:D");
+        assert_eq!(expand_default(&sep("a::b"), b"D"), sep("a:D:b"));
+        assert_eq!(expand_default(&sep(":a"), b"D"), sep("D:a"));
+        assert_eq!(expand_default(&sep("a:"), b"D"), sep("a:D"));
         assert_eq!(expand_default(b"a", b"D"), b"a");
     }
 
@@ -1967,7 +1974,7 @@ mod tests {
     fn cnf_lines() {
         assert_eq!(
             do_line(b"TEXINPUTS.tex = $A;$B  % comment"),
-            Some((b"TEXINPUTS.tex".to_vec(), b"$A:$B".to_vec()))
+            Some((b"TEXINPUTS.tex".to_vec(), sep("$A:$B")))
         );
         assert_eq!(
             do_line(b"foo = a#b  %c"),
@@ -2040,6 +2047,7 @@ mod tests {
     /// file": `/dev/null` is readable (thuthesis and ctex tell Unix by
     /// `\IfFileExists{/dev/null}`), a directory is not.
     #[test]
+    #[cfg(unix)]
     fn a_device_is_readable_a_directory_not() {
         assert!(readable_file(b"/dev/null"));
         assert!(!readable_file(b"/dev"));
@@ -2061,5 +2069,44 @@ mod tests {
         assert_eq!(casefold_readable_file(&name("texgyre.fontspe")), None);
         assert_eq!(casefold_readable_file(&name("none/texgyre.fontspec")), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Windows: `;` alone separates (a drive's `C:` does not), a drive
+    /// letter or `\` makes a name absolute, and a canonical path's
+    /// verbatim prefix and backslashes are kept as kpathsea's `/`.
+    #[test]
+    #[cfg(windows)]
+    fn windows_paths() {
+        assert_eq!(
+            path_elements(b"C:/texlive/2025/texmf-dist;.;D:/x//"),
+            [
+                b"C:/texlive/2025/texmf-dist".to_vec(),
+                b".".to_vec(),
+                b"D:/x//".to_vec()
+            ]
+        );
+        assert!(absolute_p(b"C:/x", false));
+        assert!(absolute_p(b"c:x", false));
+        assert!(absolute_p(b"\\x", false));
+        assert!(!absolute_p(b"x/y", false));
+        assert_eq!(
+            path_bytes(Path::new(r"\\?\C:\texlive\2025\bin\windows")),
+            b"C:/texlive/2025/bin/windows"
+        );
+        assert_eq!(
+            path_bytes(Path::new(r"\\?\UNC\srv\share\t")),
+            b"//srv/share/t"
+        );
+        let k = Kpse::new(
+            Path::new(r"C:\texlive\2025\bin\windows"),
+            "pdftex",
+            "pdftex",
+        );
+        assert_eq!(
+            k.env_overlay
+                .get(b"SELFAUTOPARENT".as_slice())
+                .map(Vec::as_slice),
+            Some(b"C:/texlive/2025".as_slice())
+        );
     }
 }
