@@ -355,6 +355,9 @@ pub(crate) fn note_read_time(r: &mut Run<'_, '_>, n: i64) {
             .with_list(r.contribs[i].1, |xs| xs[1])
             .unwrap_or(ValueId::UNIT);
         r.contribs[i].1 = v.list(vec![cmd, key, s, v.int(n)]);
+        if r.ops.stream.load(std::sync::atomic::Ordering::Relaxed) {
+            r.ops.stream_objs.locked().numbered(int_of(v, key), n);
+        }
     }
 }
 
@@ -1082,6 +1085,25 @@ pub(crate) struct BaseIn {
 /// written, the version fixed).
 fn base_fold(v: &Values, b: &BaseIn, fonts: &Fonts, params: &[ValueId], wparams: WParams) -> Fold {
     let mut st = fresh(v, b.date.clone(), &b.jobname, b.g2u);
+    base_tables(v, b, fonts, &mut st);
+    if !b.first {
+        set_writer_params(&mut st, wparams);
+        page_params(v, st.params_mut(), params);
+        let empty = BoxNode::default();
+        let mut wh = |_: u32, _: bool| -> Option<Whatsit> { None };
+        let _ = st.ship_out_with(&empty, &Fonts::default(), &mut wh);
+        let _ = st.flush_chunk();
+    }
+    Fold {
+        st,
+        forms: Forms::default(),
+    }
+}
+
+/// The map files and lines, and the color stacks, read and made before
+/// the page `b` is of, on writer `st` ([`base_fold`], a page's file of its
+/// own: [`page_alone`]).
+fn base_tables(v: &Values, b: &BaseIn, fonts: &Fonts, st: &mut PdfState) {
     // (the map files and lines read before the page, as the link's writer
     // has read them there (`process_map_item`): a font the page loads has
     // their entry, as there; the files from the page's fonts,
@@ -1108,18 +1130,6 @@ fn base_fold(v: &Values, b: &BaseIn, fonts: &Fonts, params: &[ValueId], wparams:
             .map(|&t| bytes_of(&str_of(v, t)))
             .unwrap_or_default();
         let _ = st.colorstack_init(num(0) != 0, num(1) == 2, &text);
-    }
-    if !b.first {
-        set_writer_params(&mut st, wparams);
-        page_params(v, st.params_mut(), params);
-        let empty = BoxNode::default();
-        let mut wh = |_: u32, _: bool| -> Option<Whatsit> { None };
-        let _ = st.ship_out_with(&empty, &Fonts::default(), &mut wh);
-        let _ = st.flush_chunk();
-    }
-    Fold {
-        st,
-        forms: Forms::default(),
     }
 }
 
@@ -2102,9 +2112,19 @@ fn command_with(
         },
     );
     r.pdf_cmd = serial;
+    let key = i64::from_ne_bytes(key.to_ne_bytes());
+    // (while the evaluation streams its pages: the command kept for the
+    // pages drawn alone that name what it makes, [`StreamObjs`])
+    if r.ops.stream.load(std::sync::atomic::Ordering::Relaxed) {
+        let cmd = r.ops.pdf_cmds.locked().get(&serial).cloned();
+        if let Some(cmd) = cmd {
+            let c = Claim::of(v, input, serial, cmd);
+            r.ops.stream_objs.locked().claim(key, c);
+        }
+    }
     let e = v.list(vec![
         v.str("cmd"),
-        v.int(i64::from_ne_bytes(key.to_ne_bytes())),
+        v.int(key),
         v.int(i64::from_ne_bytes(serial.to_ne_bytes())),
     ]);
     line_push(r, e);
@@ -2690,6 +2710,8 @@ pub(crate) struct PdfPage {
     pub(crate) stream: Arc<std::sync::atomic::AtomicBool>,
     /// The progress the build watches now (`Ops::watch`): the pages told.
     pub(crate) watch: Arc<std::sync::RwLock<Option<crate::exec::Watch>>>,
+    /// The read-time commands kept for the pages streamed (`Ops::stream_objs`).
+    pub(crate) objs: Arc<Mutex<StreamObjs>>,
 }
 
 /// The keys of the pages a run shipped ([`PagePiece`]s, in its shipouts'
@@ -2768,11 +2790,24 @@ impl phitex_defuse::Operation for PdfPage {
                         .ok()
                         .and_then(|i| p.page_of(pc.node.cast_unsigned(), i))
                 {
+                    // (the colors it leaves the next page: a page is exact
+                    // only where every page before it left them as found)
+                    if let Some(m) = made.get() {
+                        p.page_colors(k, m.0.keeps_colors());
+                    }
                     p.stream_page(k, || {
                         let shown = v.int(shown_id(kx.raw(), Some(&h)).cast_signed());
                         let hash = phitex_defuse::hash_words(0x7061_6765, &[v.digest(shown)]);
                         let content = made.get().map(|m| m.0.content())?;
-                        Some((hash, page_alone(v, kx, &pc, &units, content)?))
+                        let (pdf, exact) = page_alone(v, kx, &pc, &units, &self.objs, content)?;
+                        if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                            eprintln!(
+                                "stream: page {k} exact {exact}, {} bytes, {} commands kept",
+                                pdf.len(),
+                                self.objs.locked().len()
+                            );
+                        }
+                        Some((hash, pdf, exact))
                     });
                 }
             }
@@ -2783,36 +2818,104 @@ impl phitex_defuse::Operation for PdfPage {
 }
 
 /// Page `kx` (its key, as the line holds it: [`XPAGES`]) as a PDF file
-/// of its own: the link of a line of that page alone ([`link`]), its
-/// fonts embedded. None where the page draws with what the pages and
-/// commands before it made, which a file of its own lacks (an object, a
-/// form or an image by number, a colour stack but the first; a resource
-/// other than its fonts: a graphics state, a colour space or pattern, a
-/// shading, an external object (`Do`), marked content's properties), or the writer could
-/// not write it alone: a page that is drawn as the build's file draws it,
-/// or none. A page whose resources name objects it does not draw with (a
-/// document's `\pdfpageresources`, pgf's on every page, its objects
-/// written at the end) is drawn all the same, those names left dangling.
+/// of its own, and whether it draws the page exactly as the build's file
+/// will: the link ([`link`]) of a line of the read-time commands whose
+/// objects the page names, followed through what those objects name in
+/// turn ([`StreamObjs`]), then the page; each command's object numbered
+/// as TeX numbered it, and the page's own objects past every number it
+/// names, so that a number in its bytes (`\pdfpageresources`' `12 0 R`)
+/// names the object it names in the build's file or none. Exact where
+/// every object it draws with (an image, a form, an object its resources
+/// name, followed) was made and complete when it shipped, each on its
+/// number. Not exact (a `\pdfobj reserveobjnum` filled later, pgf's
+/// graphics states, patterns and shadings written at the document's
+/// end): drawn all the same, the names of what it lacks left without an
+/// object (a viewer draws without them: `phitex_render`). None where the
+/// writer could not write it alone.
 pub(crate) fn page_alone(
     v: &Values,
     kx: ValueId,
     pc: &PagePiece,
     units: &FxHashMap<i64, ValueId>,
+    objs: &Mutex<StreamObjs>,
     content: &[u8],
-) -> Option<Vec<u8>> {
-    if content.is_empty() || draws_with_resources(content) {
-        return None;
-    }
-    let named = pc.whats.values().any(|w| {
-        what_objnum(w).is_some()
-            || matches!(w, Whatsit::ColorStack(n, _) if *n != 0)
-            || matches!(w, Whatsit::Special(t) | Whatsit::Literal(_, t) if names_object(t))
-    });
-    if named {
-        return None;
-    }
+) -> Option<(Vec<u8>, bool)> {
     let mut params = PdfParams::default();
     page_params(v, &mut params, &pc.params);
+    // (the numbers it draws with, and those it only names: in its
+    // literals, its links' and annotations' texts, its attributes)
+    let mut need: Vec<i64> = Vec::new();
+    let mut named: Vec<i64> = Vec::new();
+    let mut rels: Vec<i64> = Vec::new();
+    for w in pc.whats.values() {
+        match w {
+            Whatsit::RefObj(n) | Whatsit::RefXForm(n) | Whatsit::RefXImage(n) => {
+                need.push(i64::try_from(*n).unwrap_or(i64::MAX));
+            }
+            Whatsit::StartLink { objnum, attr, .. } => {
+                let n = objnum.cast_signed();
+                if is_rel(*objnum) {
+                    rels.push(n)
+                } else {
+                    named.push(n)
+                }
+                refs_in(attr.as_deref().unwrap_or_default(), &mut named);
+            }
+            Whatsit::Annot { objnum, data, .. } => {
+                let n = objnum.cast_signed();
+                if is_rel(*objnum) {
+                    rels.push(n)
+                } else {
+                    named.push(n)
+                }
+                refs_in(data, &mut named);
+            }
+            Whatsit::Special(t) | Whatsit::Literal(_, t) => refs_in(t, &mut named),
+            _ => {}
+        }
+    }
+    // (of the objects its resources name, those of the kinds its content
+    // draws with: pgf names its graphics states, patterns and shadings on
+    // every page, a page drawing with none of them does not need them)
+    if let Some(t) = &params.page_resources {
+        resource_refs(t, content, &mut need, &mut named);
+    }
+    for t in [&params.page_attr, &params.pages_attr]
+        .into_iter()
+        .flatten()
+    {
+        refs_in(t, &mut named);
+    }
+    let found = objs.locked().closure(&need, &rels);
+    named.extend(&need);
+    named.extend(&found.named);
+    let floor = named
+        .iter()
+        .copied()
+        .filter(|&n| n > 0 && n & crate::pdfprim::REL == 0)
+        .max()
+        .map_or(0, |n| usize::try_from(n).unwrap_or(0));
+    if floor > STREAM_FLOOR_MAX {
+        return None;
+    }
+    let mut line: Vec<ValueId> = Vec::with_capacity(found.cmds.len() + 1);
+    let cmds: CmdMemo = Mutex::default();
+    {
+        let mut m = cmds.locked();
+        for (key, serial, rt, cmd) in &found.cmds {
+            let mut e = vec![
+                v.str("cmd"),
+                v.int(*key),
+                v.int(i64::from_ne_bytes(serial.to_ne_bytes())),
+            ];
+            if let Some(rt) = rt {
+                e.push(v.int(*rt));
+            }
+            line.push(v.list(e));
+            m.insert(*serial, cmd.clone());
+        }
+    }
+    line.push(kx);
     let f = EndFields {
         date: phitex_pdf::pdf_date(0),
         jobname: String::new(),
@@ -2826,35 +2929,356 @@ pub(crate) fn page_alone(
         ptex_use_underscore: 0,
         pk_resolution: params.pk_resolution,
     };
-    let l = link(v, &f, &[kx], units, None, &CmdMemo::default(), false);
+    let alone = Alone {
+        base: &pc.base_in,
+        fonts: &pc.fonts,
+        floor,
+        landed: std::cell::Cell::new(true),
+    };
+    let l = link(v, &f, &line, units, None, &cmds, false, Some(&alone));
     if !l.errors.is_empty() || l.fail.is_some() {
         return None;
     }
-    l.layout?.exact().ok().map(|b| b.as_ref().clone())
+    let pdf = l.layout?.exact().ok().map(|b| b.as_ref().clone())?;
+    Some((pdf, found.complete && alone.landed.get()))
 }
 
-/// Whether content stream `c` draws with a named resource other than a
-/// font: an operator that takes one (`gs`, `cs`, `CS`, `scn`, `SCN`, `sh`,
-/// `Do`, `BDC`, `DP`). A string's text may look like one: then it says yes.
-fn draws_with_resources(c: &[u8]) -> bool {
-    c.split(|b| b.is_ascii_whitespace() || b"[]<>()/".contains(b))
-        .any(|w| {
-            matches!(
-                w,
-                b"gs" | b"cs" | b"CS" | b"scn" | b"SCN" | b"sh" | b"Do" | b"BDC" | b"DP"
-            )
-        })
+/// The highest object number a page's file of its own is numbered up to
+/// ([`page_alone`]): one past it, the page is not streamed (its file's
+/// cross-reference section would hold that many entries).
+const STREAM_FLOOR_MAX: usize = 1 << 20;
+
+/// How a page's file of its own is linked ([`page_alone`]): the writer
+/// starts from the page's tables ([`base_tables`]), each command's object
+/// is given TeX's number, the page's own numbered past `floor`.
+struct Alone<'a> {
+    base: &'a BaseIn,
+    fonts: &'a Fonts,
+    floor: usize,
+    /// Every command's object got TeX's number.
+    landed: std::cell::Cell<bool>,
 }
 
-/// Whether PDF text `t` names an object by reference (`12 0 R`).
-fn names_object(t: &[u8]) -> bool {
+/// Objects numbered on `st`, none written, up to `n`.
+fn pad_objects(st: &mut PdfState, n: usize) {
+    while st.objects_numbered() < n.min(STREAM_FLOOR_MAX) {
+        st.new_objnum();
+    }
+}
+
+/// The objects resource dictionary text `t` (`\pdfpageresources`, the
+/// inside of the page's `/Resources`) names, by the kind of resource
+/// they are under (`/ExtGState`, `/Pattern`, ...): those of a kind content
+/// stream `c` draws with added to `need` (an operator that takes one:
+/// `gs`, `sh`, `scn`, `cs`, `Do`, `BDC`, `Tf`; a string's text that looks
+/// like one counts too), the others to `named`.
+fn resource_refs(t: &[u8], c: &[u8], need: &mut Vec<i64>, named: &mut Vec<i64>) {
+    let ops: FxHashSet<&[u8]> = c
+        .split(|b| b.is_ascii_whitespace() || b"[]<>()/".contains(b))
+        .filter(|w| !w.is_empty())
+        .collect();
+    // (a page whose content was not kept, one not written as plain text
+    // and rules: every kind drawn with, to be safe)
+    let all = c.is_empty();
+    let uses = |kind: &[u8]| -> bool {
+        let has = |o: &[u8]| all || ops.contains(o);
+        match kind {
+            b"ExtGState" => has(b"gs"),
+            b"Shading" => has(b"sh") || has(b"scn") || has(b"SCN"),
+            b"Pattern" => has(b"scn") || has(b"SCN"),
+            b"ColorSpace" => has(b"cs") || has(b"CS"),
+            b"XObject" => has(b"Do"),
+            b"Properties" => has(b"BDC") || has(b"DP"),
+            b"Font" => has(b"Tf"),
+            // (an entry of no kind a content stream names: drawn with, to be safe)
+            _ => true,
+        }
+    };
+    // (the words, the dictionaries' and arrays' brackets apart)
+    let mut words: Vec<&[u8]> = Vec::new();
+    let mut i = 0;
+    while i < t.len() {
+        let b = t[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+        } else if t[i..].starts_with(b"<<") || t[i..].starts_with(b">>") {
+            words.push(&t[i..i + 2]);
+            i += 2;
+        } else if b"[]".contains(&b) {
+            words.push(&t[i..=i]);
+            i += 1;
+        } else {
+            let j = t[i + 1..]
+                .iter()
+                .position(|&c| c.is_ascii_whitespace() || b"[]<>/()".contains(&c))
+                .map_or(t.len(), |k| i + 1 + k);
+            words.push(&t[i..j]);
+            i = j;
+        }
+    }
+    let (mut depth, mut kind): (i32, &[u8]) = (0, b"");
+    for (k, w) in words.iter().enumerate() {
+        match *w {
+            b"<<" | b"[" => depth += 1,
+            b">>" | b"]" => depth -= 1,
+            _ if depth == 0 && w.first() == Some(&b'/') => kind = &w[1..],
+            b"R" if k >= 2
+                && words[k - 1].iter().all(u8::is_ascii_digit)
+                && let Some(n) = std::str::from_utf8(words[k - 2])
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok()) =>
+            {
+                if uses(kind) {
+                    need.push(n);
+                } else {
+                    named.push(n);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The objects PDF text `t` names by reference (`12 0 R`), added to `out`.
+fn refs_in(t: &[u8], out: &mut Vec<i64>) {
     let w: Vec<&[u8]> = t
         .split(|c| c.is_ascii_whitespace() || b"[]<>/()".contains(c))
         .filter(|w| !w.is_empty())
         .collect();
-    w.windows(3).any(|x| {
-        x[2] == b"R" && x[0].iter().all(u8::is_ascii_digit) && x[1].iter().all(u8::is_ascii_digit)
-    })
+    for x in w.windows(3) {
+        if x[2] == b"R"
+            && x[1].iter().all(u8::is_ascii_digit)
+            && let Ok(s) = std::str::from_utf8(x[0])
+            && let Ok(n) = s.parse::<i64>()
+        {
+            out.push(n);
+        }
+    }
+}
+
+/// A read-time command kept while the evaluation streams its pages
+/// ([`StreamObjs`]): its serial and step, the number TeX read back for
+/// its object, and what that object is.
+#[derive(Clone)]
+pub(crate) struct Claim {
+    serial: u64,
+    rt: Option<i64>,
+    cmd: Arc<Cmd>,
+    /// Its object has its body once the command ran (an image, a form, an
+    /// object with its text); not a reserved number, not a link's.
+    body: bool,
+    /// `\pdfobj useobjnum n`: the body of object `n`.
+    fill: Option<i64>,
+    /// The objects it draws with: the images, forms and objects a form's
+    /// box names, those a form's resources or an object's text names.
+    needs: Vec<i64>,
+    /// Those it only names (in a form's literals, its attributes).
+    names: Vec<i64>,
+}
+
+impl Claim {
+    /// The claim of the command of `input` ([`command_with`]).
+    pub(crate) fn of(v: &Values, input: ValueId, serial: u64, cmd: Arc<Cmd>) -> Claim {
+        let xs = list_of(v, input);
+        let text = |k: usize| {
+            xs.get(k)
+                .and_then(|&t| v.with_str(t, |s| crate::pdfprim::bytes(s)))
+                .unwrap_or_default()
+        };
+        let int = |k: usize| xs.get(k).map_or(0, |&n| int_of(v, n));
+        let mut c = Claim {
+            serial,
+            rt: None,
+            cmd,
+            body: false,
+            fill: None,
+            needs: Vec::new(),
+            names: Vec::new(),
+        };
+        match xs.first().map(|&k| str_of(v, k)).as_deref() {
+            Some("ximage") => {
+                c.body = true;
+                refs_in(&text(4), &mut c.names);
+            }
+            Some("xform") => {
+                c.body = true;
+                refs_in(&text(1), &mut c.names);
+                refs_in(&text(2), &mut c.needs);
+                let mut side = Side::default();
+                if let Some(&b) = xs.get(3)
+                    && crate::nodes::decode(v, b, &mut side).is_some()
+                {
+                    for w in side.whats {
+                        let ys = list_of(v, w);
+                        match ys.first().map(|&k| str_of(v, k)).as_deref() {
+                            Some("pdf:refximage" | "pdf:refxform" | "pdf:refobj") => {
+                                c.needs.push(ys.get(1).map_or(0, |&n| int_of(v, n)));
+                            }
+                            _ => {
+                                for &y in &ys {
+                                    if let Some(t) = v.with_str(y, |s| crate::pdfprim::bytes(s)) {
+                                        refs_in(&t, &mut c.names);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Some("obj") => {
+                let n = int(1);
+                if n > 0 {
+                    c.fill = Some(n);
+                } else {
+                    c.body = true;
+                }
+                // (a `file` object's text is its file's bytes: not read)
+                if int(4) == 0 {
+                    refs_in(&text(5), &mut c.needs);
+                }
+                refs_in(&text(3), &mut c.needs);
+            }
+            _ => {}
+        }
+        c
+    }
+}
+
+/// The read-time commands of the evaluation that streams its pages
+/// (`crate::run::Ops::stream_objs`), by their key (their node and place,
+/// [`command_with`]: a run made again replaces its own), by the number
+/// TeX read back for their objects ([`note_read_time`]), and those that
+/// give a reserved object its body (`\pdfobj useobjnum`). A page drawn
+/// alone ([`page_alone`]) takes the commands of the objects it names.
+/// A number two commands claim is no one's: the pages that name it are
+/// not exact.
+#[derive(Default)]
+pub(crate) struct StreamObjs {
+    by_key: FxHashMap<i64, Claim>,
+    by_num: FxHashMap<i64, Vec<i64>>,
+    fills: FxHashMap<i64, Vec<i64>>,
+}
+
+/// What a page drawn alone takes ([`StreamObjs::closure`]).
+struct Found {
+    /// The commands, in their objects' order: key, serial, number, step.
+    cmds: Vec<(i64, u64, Option<i64>, Arc<Cmd>)>,
+    /// Every object it draws with was found complete.
+    complete: bool,
+    /// The numbers the commands taken name.
+    named: Vec<i64>,
+}
+
+impl StreamObjs {
+    fn unindex(&mut self, key: i64) {
+        let Some(c) = self.by_key.get(&key) else {
+            return;
+        };
+        if let Some(n) = c.rt
+            && let Some(ks) = self.by_num.get_mut(&n)
+        {
+            ks.retain(|&k| k != key);
+        }
+        if let Some(n) = c.fill
+            && let Some(ks) = self.fills.get_mut(&n)
+        {
+            ks.retain(|&k| k != key);
+        }
+    }
+
+    /// The command of key `key` made (again).
+    pub(crate) fn claim(&mut self, key: i64, c: Claim) {
+        self.unindex(key);
+        if let Some(n) = c.fill {
+            self.fills.entry(n).or_default().push(key);
+        }
+        self.by_key.insert(key, c);
+    }
+
+    /// The command of key `key` numbered `n` by TeX.
+    pub(crate) fn numbered(&mut self, key: i64, n: i64) {
+        if let Some(old) = self.by_key.get(&key).and_then(|c| c.rt)
+            && let Some(ks) = self.by_num.get_mut(&old)
+        {
+            ks.retain(|&k| k != key);
+        }
+        if let Some(c) = self.by_key.get_mut(&key) {
+            c.rt = Some(n);
+            self.by_num.entry(n).or_default().push(key);
+        }
+    }
+
+    /// How many commands are kept.
+    pub(crate) fn len(&self) -> usize {
+        self.by_key.len()
+    }
+
+    /// The one command `ks` holds.
+    fn one(&self, ks: Option<&Vec<i64>>) -> Option<(i64, &Claim)> {
+        match ks.map(Vec::as_slice) {
+            Some(&[k]) => self.by_key.get(&k).map(|c| (k, c)),
+            _ => None,
+        }
+    }
+
+    /// The commands of the objects `need` names, followed through what
+    /// theirs need in turn, and those of the link numbers `rels`.
+    fn closure(&self, need: &[i64], rels: &[i64]) -> Found {
+        let mut out = Found {
+            cmds: Vec::new(),
+            complete: true,
+            named: Vec::new(),
+        };
+        let mut taken: FxHashSet<i64> = FxHashSet::default();
+        let mut order: Vec<((i64, u8), i64)> = Vec::new();
+        let mut todo: Vec<i64> = need.to_vec();
+        let mut seen: FxHashSet<i64> = FxHashSet::default();
+        while let Some(n) = todo.pop() {
+            if !seen.insert(n) {
+                continue;
+            }
+            let Some((k, c)) = self.one(self.by_num.get(&n)) else {
+                out.complete = false;
+                continue;
+            };
+            let mut take = vec![(k, c, 0u8)];
+            if !c.body {
+                match self.one(self.fills.get(&n)) {
+                    Some((fk, f)) => take.push((fk, f, 1)),
+                    None => out.complete = false,
+                }
+            }
+            for (k, c, at) in take {
+                if taken.insert(k) {
+                    order.push(((n, at), k));
+                    todo.extend(&c.needs);
+                    out.named.extend(&c.needs);
+                    out.named.extend(&c.names);
+                }
+            }
+        }
+        // (a link's or an annotation's number: its command, which the
+        // link numbers it by, after the objects)
+        for &t in rels {
+            if let Some((k, _)) = self.one(self.by_num.get(&t))
+                && taken.insert(k)
+            {
+                order.push(((i64::MAX, 0), k));
+            }
+        }
+        order.sort_unstable();
+        for (_, k) in order {
+            if let Some(c) = self.by_key.get(&k) {
+                out.cmds.push((
+                    k,
+                    c.serial,
+                    c.rt.filter(|_| c.fill.is_none()),
+                    c.cmd.clone(),
+                ));
+            }
+        }
+        out
+    }
 }
 
 /// The items of the pieces page `pc`'s sealed lines are in
@@ -4728,11 +5152,11 @@ pub(crate) fn finish_exact(
     changed: Option<&FxHashSet<i64>>,
     cmds: &CmdMemo,
 ) -> Linked {
-    let out = link(v, f, xpages, units, changed, cmds, true);
+    let out = link(v, f, xpages, units, changed, cmds, true, None);
     if crate::exec::obs_flag!("PHITEX_LINK_CHECK") {
         // (the file linked from the last link's records, and from the
         // start: the same bytes)
-        let full = link(v, f, xpages, units, None, cmds, false);
+        let full = link(v, f, xpages, units, None, cmds, false, None);
         let bytes = |l: &Linked| {
             l.layout
                 .as_ref()
@@ -4768,6 +5192,7 @@ fn link(
     changed: Option<&FxHashSet<i64>>,
     cmds: &CmdMemo,
     memo: bool,
+    alone: Option<&Alone<'_>>,
 ) -> Linked {
     let none = Linked {
         layout: None,
@@ -4783,6 +5208,9 @@ fn link(
     }
     let t0 = std::time::Instant::now();
     let mut st = fresh(v, f.date.clone(), &f.jobname, f.g2u);
+    if let Some(a) = alone {
+        base_tables(v, a.base, a.fonts, &mut st);
+    }
     let mut forms = Forms::default();
     let mut reloc = Reloc::new();
     let mut nums = FontNums::default();
@@ -5043,6 +5471,11 @@ fn link(
             let src = Mapped::new(&pc.fonts, &nums, &fwd);
             let fmap = |g: FontId| fwd.get(&g).copied().unwrap_or(g);
             set_page_params(v, &mut st, &pc.params, pc.margins);
+            // (a page alone: its own objects numbered past every number
+            // it names, so that none names one of them)
+            if let Some(a) = alone {
+                pad_objects(&mut st, a.floor);
+            }
             let n0 = st.objects_numbered();
             // (a page naming an object the link numbered otherwise than
             // TeX read it is shipped with the link's number)
@@ -5120,11 +5553,22 @@ fn link(
                     set_writer_params(&mut st, c.wparams);
                     let fwd = nums.resolve(&c.fonts, None);
                     let src = Mapped::new(&c.fonts, &nums, &fwd);
+                    let rt = xs.get(3).map_or(0, |&n| int_of(v, n));
+                    // (a page alone: the command's object given the number
+                    // TeX gave it, as the build's file has it)
+                    let own = alone.filter(|_| rt > 0 && rt & crate::pdfprim::REL == 0);
+                    if own.is_some() {
+                        pad_objects(&mut st, usize::try_from(rt - 1).unwrap_or(0));
+                    }
                     let out = {
                         let mut g = c.f.locked();
                         (*g)(&mut st, &mut forms, &src, &reloc)
                     };
-                    let rt = xs.get(3).map_or(0, |&n| int_of(v, n));
+                    if let Some(a) = own
+                        && out.nums.first() != Some(&rt)
+                    {
+                        a.landed.set(false);
+                    }
                     if let (rt @ 1.., Some(&m)) = (rt, out.nums.first())
                         && let Ok(m) = usize::try_from(m)
                         && i64::try_from(m).ok() != Some(rt)
@@ -5416,6 +5860,33 @@ fn link(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Of the objects a page's resources name, those of a kind its
+    /// content draws with are needed; the rest only named. Pgf's on every
+    /// page: a page drawing with no graphics state needs none.
+    #[test]
+    fn resources_needed_by_the_kinds_drawn_with() {
+        let res = b"/ExtGState 5 0 R /Pattern 6 0 R /ColorSpace << /pgfprgb [/Pattern /DeviceRGB] /X 9 0 R >> /Shading << /S1 7 0 R >> /Foo 8 0 R";
+        let run = |c: &[u8]| {
+            let (mut need, mut named) = (Vec::new(), Vec::new());
+            resource_refs(res, c, &mut need, &mut named);
+            need.sort_unstable();
+            named.sort_unstable();
+            (need, named)
+        };
+        assert_eq!(
+            run(b"BT /F1 10 Tf (gs) Tj ET 0 0 m 1 1 l S"),
+            (vec![5, 8], vec![6, 7, 9])
+        );
+        assert_eq!(run(b"0 0 m 1 1 l S"), (vec![8], vec![5, 6, 7, 9]));
+        assert_eq!(
+            run(b"/Pattern cs /P1 scn 0 0 1 1 re f"),
+            (vec![6, 7, 8, 9], vec![5])
+        );
+        assert_eq!(run(b"/S1 sh /G gs"), (vec![5, 7, 8], vec![6, 9]));
+        // (no content kept: every kind)
+        assert_eq!(run(b""), (vec![5, 6, 7, 8, 9], vec![]));
+    }
 
     /// A file's text as bytes is one shared copy (every `\pdfximage` of
     /// a page of one PDF keeps it in its record): the same allocation

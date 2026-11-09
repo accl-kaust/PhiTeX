@@ -280,6 +280,8 @@ header:active { cursor: grabbing; }
 /* (a page the build has not shipped alone yet: it comes at the build's end, said, not a blank sheet) */
 .slot.later::before { content: "Drawn when the build ends"; position: absolute; inset: 0; display: grid; place-items: center; color: #8a8f98; font: 500 clamp(9px, 2.6cqw, 18px)/1.3 var(--ph-font); }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
+/* (a page streamed while the build runs and drawn without some of what it draws with: a quiet mark, gone when the build's page replaces it) */
+.slot.preview::after { content: "Preview: final colours and shading when the build ends"; position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 999px; background: rgb(20 24 31 / 55%); color: #fff; font: 500 clamp(8px, 1.7cqw, 12px)/1.5 var(--ph-font); pointer-events: none; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }

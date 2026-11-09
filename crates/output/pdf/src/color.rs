@@ -206,6 +206,15 @@ impl Stacks {
         self.list.iter().map(|c| c.page_stack.clone()).collect()
     }
 
+    /// Each color stack's page stack and current page value: what a page
+    /// leaves the next one of the stacks.
+    pub(crate) fn page_state(&self) -> Vec<(Vec<Option<Vec<u8>>>, Option<Vec<u8>>)> {
+        self.list
+            .iter()
+            .map(|c| (c.page_stack.clone(), c.page_current.clone()))
+            .collect()
+    }
+
     /// Each color stack's page stack depth.
     pub(crate) fn page_depths(&self) -> Vec<usize> {
         self.list.iter().map(|c| c.page_stack.len()).collect()

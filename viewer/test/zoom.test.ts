@@ -146,3 +146,15 @@ test("a page drawn at the zoom is shown at its own pixels, with no transform", a
   assert.equal(wrap.style.height, `${Math.ceil(A4.h * s) / 2}px`);
   assert.ok(!wrap.style.transform, "no transform");
 });
+
+test("a page streamed not exact is marked a preview until the build's page replaces it; one not shipped says it comes at the end", () => {
+  const { v, root } = setup(3);
+  const cls = (k: number) => [...root.children][k].classList;
+  v.layout(["a", "", "c"], new Set(["c"]));
+  assert.ok(cls(2).contains("preview"));
+  assert.ok(!cls(0).contains("preview") && !cls(0).contains("later"));
+  assert.ok(cls(1).contains("later") && !cls(1).contains("preview"));
+  // (the settled page: another hash, the mark gone)
+  v.layout(["a", "b", "c2"], new Set(["c"]));
+  assert.ok(!cls(2).contains("preview") && !cls(1).contains("later"));
+});

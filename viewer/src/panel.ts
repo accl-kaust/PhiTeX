@@ -3031,11 +3031,11 @@ export class Panel {
   }
 
   /** The pages there are, by hash (the viewer draws the changed ones it shows). */
-  layout(hashes: string[]): void {
+  layout(hashes: string[], previews?: ReadonlySet<string>): void {
     this.pageHashes = hashes;
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
-    this.viewer.layout(hashes);
+    this.viewer.layout(hashes, previews);
     if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
     if (hashes.length) this.sheetDown();
     this.nav();

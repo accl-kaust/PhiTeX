@@ -637,8 +637,14 @@ var Viewer = class {
   get page() {
     return this.current;
   }
-  /** The pages there are now, by hash: slots added or removed, changed ones drawn again when seen. */
-  layout(hashes) {
+  /** The pages streamed drawn without some of what they draw with, by hash (a preview's mark). */
+  previews = /* @__PURE__ */ new Set();
+  /**
+   * The pages there are now, by hash: slots added or removed, changed ones drawn again when seen;
+   * those of `previews` marked as previews (streamed, drawn without some of what they draw with).
+   */
+  layout(hashes, previews) {
+    this.previews = previews ?? /* @__PURE__ */ new Set();
     while (this.slots.length > hashes.length) {
       const s = this.slots.pop();
       this.io.unobserve(s.el);
@@ -660,11 +666,14 @@ var Viewer = class {
   /**
    * A page the build has not shipped alone (no hash yet: a streamed page
    * after it came first) says it comes at the build's end, not a blank
-   * sheet: one with images, shadings or transparency is never streamed
-   * (PhiTeX's stream1), only drawn once the whole build is in.
+   * sheet (a page the engine could not write alone: there are few). A page
+   * streamed without some of what it draws with (an object made at the
+   * document's end: pgf's transparency, shadings, patterns) says it is a
+   * preview, until the build's page replaces it.
    */
   waits(s) {
     s.el.classList.toggle("later", !s.hash && !s.img);
+    s.el.classList.toggle("preview", !!s.hash && this.previews.has(s.hash));
   }
   /** Page `k`'s slot, made (with those before it) if there is none yet. */
   slotAt(k) {
@@ -1254,6 +1263,8 @@ header:active { cursor: grabbing; }
 /* (a page the build has not shipped alone yet: it comes at the build's end, said, not a blank sheet) */
 .slot.later::before { content: "Drawn when the build ends"; position: absolute; inset: 0; display: grid; place-items: center; color: #8a8f98; font: 500 clamp(9px, 2.6cqw, 18px)/1.3 var(--ph-font); }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
+/* (a page streamed while the build runs and drawn without some of what it draws with: a quiet mark, gone when the build's page replaces it) */
+.slot.preview::after { content: "Preview: final colours and shading when the build ends"; position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 999px; background: rgb(20 24 31 / 55%); color: #fff; font: 500 clamp(8px, 1.7cqw, 12px)/1.5 var(--ph-font); pointer-events: none; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
@@ -6119,11 +6130,11 @@ var Panel = class {
     queueMicrotask(() => this.emit());
   }
   /** The pages there are, by hash (the viewer draws the changed ones it shows). */
-  layout(hashes) {
+  layout(hashes, previews) {
     this.pageHashes = hashes;
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
-    this.viewer.layout(hashes);
+    this.viewer.layout(hashes, previews);
     if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
     if (hashes.length) this.sheetDown();
     this.nav();
@@ -6954,6 +6965,8 @@ var PreviewSession = class {
   hashes = [];
   /** Tell the view which pages there are (by hash). */
   /** `given`: the hashes a reply carried (the open's), else asked for. */
+  /** The pages streamed not exact, by hash (`{"event":"page","exact":false}`, the pages answer's `inexact`). */
+  previews = /* @__PURE__ */ new Set();
   async layout(given) {
     if (!this.sink.layout) return;
     if (given) this.hashes = given;
@@ -6961,10 +6974,12 @@ var PreviewSession = class {
       const r = await this.core.request({ op: "pages" });
       if (!r.ok || !r.json?.pages) return;
       this.hashes = r.json.pages;
+      const ix = r.json.inexact;
+      this.previews = new Set(Array.isArray(ix) ? ix.map((k) => this.hashes[k]).filter((h) => !!h) : []);
     }
     this.tr("layout", { pages: this.hashes.length });
     this.setPages(this.hashes.length);
-    if (this.hashes.length) this.sink.layout(this.hashes);
+    if (this.hashes.length) this.sink.layout(this.hashes, this.previews);
     this.drawPeers();
     void this.peerPages();
     if (this.sink.goto && !this.noOriginsPrefetch) this.glyphsAll();
@@ -7507,8 +7522,10 @@ var PreviewSession = class {
         while (hs.length < Math.max(e.k + 1, e.pages ?? 0)) hs.push("");
         hs[e.k] = e.hash;
         this.hashes = hs;
+        if (e.exact === false) this.previews.add(e.hash);
+        else this.previews.delete(e.hash);
         this.setPages(hs.length);
-        this.sink.layout?.(hs);
+        this.sink.layout?.(hs, this.previews);
         this.drawPeers();
         void this.peerPages();
         return;

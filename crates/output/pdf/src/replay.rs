@@ -257,6 +257,9 @@ pub struct PageRecord {
     pre_bare: String,
     depths: Vec<usize>,
     below: bool,
+    /// Whether the page left the color stacks' page values as it found
+    /// them ([`PageRecord::keeps_colors`]).
+    keeps_colors: bool,
     pre_p: Option<crate::PdfParams>,
     post_key: String,
     /// ... and after the page.
@@ -317,6 +320,15 @@ impl PageRecord {
             .as_deref()
             .filter(|p| p.link_stack.is_empty())
             .map(|_| self.post_key.as_str())
+    }
+
+    /// Whether the page left the color stacks' page values (each stack's
+    /// page stack and its current value) as they were where it began: a
+    /// page after it begins with the colors this one began with. A page
+    /// that pushes a color it pops on a later page does not.
+    #[must_use]
+    pub fn keeps_colors(&self) -> bool {
+        self.keeps_colors
     }
 
     /// Whether the page can be replayed.
@@ -403,6 +415,7 @@ impl PdfState {
         let pre = self.pre_key();
         let pre_bare = self.pre_key_with(true);
         let depths = self.stacks.page_depths();
+        let colors_before = self.stacks.page_state();
         let shared = self.sys_obj_ptr();
         // (a link running across the page's start: its objects are the
         // page before's, numbered where that page was placed)
@@ -438,11 +451,13 @@ impl PdfState {
         let rec = self.rec.take().unwrap_or_default();
         let pre_p = Some(self.p.clone());
         let below = self.stacks.below;
+        let keeps_colors = r.is_ok() && self.stacks.page_state() == colors_before;
         let mut pr = PageRecord {
             pre,
             pre_bare,
             depths,
             below,
+            keeps_colors,
             pre_p,
             shared,
             pre_nums: rec.pre_nums,

@@ -187,6 +187,9 @@ pub(crate) struct Ops {
     pub origins: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The evaluation streams its pages (`crate::pdfout::PdfPage::stream`).
     pub stream: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The read-time commands' objects while the evaluation streams its
+    /// pages (`crate::pdfout::StreamObjs`): what a page drawn alone needs.
+    pub stream_objs: std::sync::Arc<std::sync::Mutex<crate::pdfout::StreamObjs>>,
     /// The profile units the page loop folded over all its runs
     /// (`crate::pages::Run::fold_unit`; `Stats::units_folded`).
     pub units_folded: std::sync::Arc<std::sync::atomic::AtomicU64>,
