@@ -170,15 +170,12 @@ fn inline(s: &str, st: Style) -> String {
         } else {
             None
         };
-        match done {
-            Some((text, used)) => {
-                out.push_str(&text);
-                rest = &r[used..];
-            }
-            None => {
-                out.push_str(&r[..1]);
-                rest = &r[1..];
-            }
+        if let Some((text, used)) = done {
+            out.push_str(&text);
+            rest = &r[used..];
+        } else {
+            out.push_str(&r[..1]);
+            rest = &r[1..];
         }
     }
     out.push_str(rest);
