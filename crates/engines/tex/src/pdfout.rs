@@ -2788,7 +2788,7 @@ impl phitex_defuse::Operation for PdfPage {
 /// commands before it made, which a file of its own lacks (an object, a
 /// form or an image by number, a colour stack but the first; a resource
 /// other than its fonts: a graphics state, a colour space or pattern, a
-/// shading, an XObject, marked content's properties), or the writer could
+/// shading, an external object (`Do`), marked content's properties), or the writer could
 /// not write it alone: a page that is drawn as the build's file draws it,
 /// or none. A page whose resources name objects it does not draw with (a
 /// document's `\pdfpageresources`, pgf's on every page, its objects
