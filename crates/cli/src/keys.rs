@@ -138,8 +138,15 @@ extern "C" fn on_signal(sig: libc::c_int) {
                 set_mode(was);
             }
             // SAFETY: signal and raise are async-signal-safe.
+            // (SIGTSTP is blocked while its handler runs: unblocked, so
+            // the raise stops the process here, not after the handler
+            // returns to find its own handler back)
             unsafe {
                 libc::signal(libc::SIGTSTP, libc::SIG_DFL);
+                let mut set: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&raw mut set);
+                libc::sigaddset(&raw mut set, libc::SIGTSTP);
+                libc::pthread_sigmask(libc::SIG_UNBLOCK, &raw const set, std::ptr::null_mut());
                 libc::raise(libc::SIGTSTP);
                 // (stopped here until `fg`)
                 libc::signal(libc::SIGTSTP, on_signal as *const () as libc::sighandler_t);
