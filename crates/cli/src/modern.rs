@@ -987,7 +987,9 @@ pub fn job(t: &Target, o: &Options) -> Result<Job, String> {
         // (the files the job reads back, .aux and .toc, to their fixpoint)
         fixpoint: true,
         cache_limit: t.cache_limit,
-        edit_diagnostics: o.diagnostics || o.view || o.lsp,
+        // (every watch: editors may attach to any, `attach.rs`, and its
+        // terminal says an edit's errors at their places too)
+        edit_diagnostics: o.diagnostics || o.view || o.lsp || o.command == Some(Command::Watch),
         origins: o.view || o.lsp,
         inputs: t.inputs.clone(),
     })
