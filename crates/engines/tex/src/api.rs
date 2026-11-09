@@ -8522,10 +8522,24 @@ impl Build {
         // (pdfTeX's files said by their paths, as kpathsea found them)
         let path =
             |n: &str| (self.opts.finder)(&font_key(n)).map_or_else(|| n.to_owned(), |(p, _)| p);
-        let files = self
-            .pdf_layout()
-            .map(|l| l.font_files())
+        let layout = self.pdf_layout();
+        let files = layout
+            .as_ref()
+            .map(phitex_pdf::Layout::font_files)
             .unwrap_or_default();
+        let reads = layout
+            .as_ref()
+            .map(phitex_pdf::Layout::font_reads)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(page, name)| {
+                let n = name.map_or_else(
+                    || "pdftex.map".to_owned(),
+                    |n| String::from_utf8_lossy(&n).into_owned(),
+                );
+                (page, path(&n))
+            })
+            .collect();
         let fonts: String = files
             .iter()
             .map(|(n, subset)| {
@@ -8537,7 +8551,6 @@ impl Build {
                 }
             })
             .collect();
-        let map = (!files.is_empty()).then(|| path("pdftex.map"));
         crate::log::terminal(
             v,
             &self.opts.name,
@@ -8552,7 +8565,7 @@ impl Build {
                 head,
                 end: &end,
                 log_name,
-                map,
+                reads,
                 fonts,
             },
         )

@@ -924,6 +924,12 @@ pub struct PdfState {
     /// (`<cmr10.pfb>`, `<<x.pfb>>`); written by [`PdfState::tail`], read
     /// by [`Layout::font_files`], never part of the digest.
     pub(crate) font_files: Vec<(Vec<u8>, bool)>,
+    /// The files pdfTeX reads when a font is first used, by the page
+    /// being written (0 the first): the font map (`None`), then each
+    /// encoding file once (`{PATH}` on the terminal and in the log, in
+    /// that page's `[N...]`); read by [`Layout::font_reads`], never part
+    /// of the digest.
+    pub(crate) font_reads: Vec<(i64, Option<Vec<u8>>)>,
     last_arg_other_subr3: i32,
     // `\pdfinfo` and friends, concatenated
     info_toks: Option<digest::Toks>,
@@ -1058,6 +1064,7 @@ impl PdfState {
             fixed_gen_tounicode: 0,
             subset_tags: BTreeSet::new(),
             font_files: Vec::new(),
+            font_reads: Vec::new(),
             last_arg_other_subr3: 3,
             info_toks: None,
             catalog_toks: None,

@@ -791,7 +791,8 @@ fn clean_without_texlive() {
 /// output what pdflatex prints on its terminal, byte for byte: the head,
 /// the log's lines less those the log alone has (`\wlog`, the
 /// `\openout` lines, error help, diagnostics with `\tracingonline` not
-/// positive), the font map and files, `(see the transcript file ...)`,
+/// positive), the font map and encoding files where a font first needs
+/// them, the font files, `(see the transcript file ...)`,
 /// `Transcript written on doc.log.` (where TeX Live's pdflatex is here).
 #[test]
 fn compat_terminal_is_pdflatexs() {
@@ -812,6 +813,22 @@ fn compat_terminal_is_pdflatexs() {
         (
             "tracing",
             "\\documentclass{article}\n\\tracingonline=1\n\\begin{document}\n\\showbox0\n\\hbox to 1cm{overfull overfull overfull overfull}\nText \\showthe\\baselineskip.\n\\end{document}\n".to_owned(),
+        ),
+        // (a T1-encoded Type 1 font: its encoding file read with the map
+        // at the first page)
+        (
+            "t1",
+            "\\documentclass{article}\n\\usepackage[T1]{fontenc}\n\\usepackage{lmodern}\n\\begin{document}\nHello, ``quotes'' and \\textbf{bold} \\textit{italic}.\n\\end{document}\n".to_owned(),
+        ),
+        // (a first page with no font: the map read at the second)
+        (
+            "late",
+            "\\documentclass{article}\n\\pagestyle{empty}\n\\begin{document}\n\\null\\newpage\nText on the second page.\n\\end{document}\n".to_owned(),
+        ),
+        // (the T1 encoding first needed on the second page, once)
+        (
+            "latet1",
+            "\\documentclass{article}\n\\usepackage[T1]{fontenc}\n\\pagestyle{empty}\n\\begin{document}\n\\fontencoding{OT1}\\selectfont Plain page.\n\\newpage\n\\fontencoding{T1}\\selectfont \\\"Umlaut page. \\newpage \\textsc{Caps}.\n\\end{document}\n".to_owned(),
         ),
     ];
     for (name, doc) in docs {
