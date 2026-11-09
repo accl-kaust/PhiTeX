@@ -35,6 +35,9 @@ const PAGE: usize = 65536;
 const MAX_PAGES: usize = 65535;
 
 static SEALED: AtomicBool = AtomicBool::new(false);
+/// [`ph_grow`] probing the size: a growth refused there is expected (the
+/// host asks 4 GiB, then 3), not the document outgrowing the memory.
+static PROBING: AtomicBool = AtomicBool::new(false);
 
 /// wasi-libc's `sbrk` (`libc-bottom-half/sources/sbrk.c`), refusing to grow
 /// once [`ph_seal`]ed (dlmalloc's allocation then fails: NULL).
@@ -54,13 +57,19 @@ pub extern "C" fn sbrk(increment: isize) -> *mut u8 {
     }
     let old = wasm32::memory_grow::<0>(increment.unsigned_abs() / PAGE);
     if old == usize::MAX {
+        // (the single-threaded core is never sealed: it grows until the
+        // browser or the 4 GiB ceiling refuses, and that refusal is its
+        // document outgrowing the memory, told as the sealed one is)
+        if !PROBING.load(Ordering::Acquire) {
+            out_of_memory();
+        }
         return FAIL;
     }
     (old * PAGE) as *mut u8
 }
 
-/// The document outgrew the memory (sealed: dlmalloc's allocation fails
-/// next, and the core aborts, "memory allocation of N bytes failed"):
+/// The document outgrew the memory (sealed, or a growth refused outside
+/// [`ph_grow`]: dlmalloc's allocation fails next, and the core aborts, "memory allocation of N bytes failed"):
 /// told to the host first, once, as the event `{"event":"lost",...}`
 /// ([`crate::session::LOST_MEMORY`]), so that a host whose threads' trap
 /// never reaches it still says why the document is gone. Inside dlmalloc,
@@ -82,6 +91,7 @@ pub extern "C" fn ph_grow(pages: usize) -> usize {
     let want = pages.min(MAX_PAGES) * PAGE;
     let mut held = [(std::ptr::null_mut::<u8>(), 0usize); 16];
     let mut n = 0;
+    PROBING.store(true, Ordering::Release);
     while n < held.len() && !SEALED.load(Ordering::Acquire) {
         let size = wasm32::memory_size::<0>() * PAGE;
         if size + 3 * PAGE >= want {
@@ -101,6 +111,7 @@ pub extern "C" fn ph_grow(pages: usize) -> usize {
         held[n] = (p, ask);
         n += 1;
     }
+    PROBING.store(false, Ordering::Release);
     for &(p, ask) in &held[..n] {
         // SAFETY: `p` was allocated by `System` with this layout above.
         unsafe { System.dealloc(p, Layout::from_size_align_unchecked(ask, 16)) };
