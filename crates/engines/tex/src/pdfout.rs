@@ -2802,7 +2802,7 @@ impl phitex_defuse::Operation for PdfPage {
                         if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
                             eprintln!("stream: page {k} colour commands {}", ops.len());
                         }
-                        p.page_colors(k, ops);
+                        p.page_colors(k, ops, v);
                     }
                     p.stream_page(k, |start| {
                         let shown = v.int(shown_id(kx.raw(), Some(&h)).cast_signed());
@@ -2825,7 +2825,20 @@ impl phitex_defuse::Operation for PdfPage {
                                 self.objs.locked().len()
                             );
                         }
-                        Some((hash, pdf, exact))
+                        // (made before the pages before it are known: made
+                        // again from the colours they carry in, once known,
+                        // on these values, `Progress::page_colors`)
+                        let remake: Option<crate::exec::Remake> = start.is_none().then(|| {
+                            let (pc, units, objs) = (pc.clone(), units.clone(), self.objs.clone());
+                            let (content, epoch) = (content.to_vec(), v.epoch());
+                            Box::new(move |v: &Values, start: &crate::exec::ColorStart| {
+                                if v.epoch() != epoch {
+                                    return None;
+                                }
+                                page_alone(v, kx, &pc, &units, &objs, &content, start)
+                            }) as crate::exec::Remake
+                        });
+                        Some((hash, pdf, exact, remake))
                     });
                 }
             }
