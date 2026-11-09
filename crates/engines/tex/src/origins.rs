@@ -1623,7 +1623,8 @@ struct Ctx<'a> {
 pub(crate) struct State {
     scans: Mutex<FxHashMap<u64, Arc<NodeScan>>>,
     index: Mutex<Option<(u64, Arc<Index>)>>,
-    matches: Mutex<FxHashMap<u64, Arc<Matched>>>,
+    /// The pages' matches, by page and the glyphs they were made from.
+    matches: Mutex<FxHashMap<u64, MatchKept>>,
     /// The pages' answers, by page and what they were made from.
     answers: Mutex<FxHashMap<u64, Ans>>,
     files: Mutex<Vec<String>>,
@@ -1633,12 +1634,20 @@ pub(crate) struct State {
     pdf: Mutex<Option<Arc<Vec<u8>>>>,
 }
 
+/// A page's match and the glyphs it was made from.
+type MatchKept = (Arc<PageGlyphs>, Arc<Matched>);
+
 /// A page's answer ([`answer`]) and what it was made from: its match
 /// and its nodes' texts (`key`), where each node of the match stood in
 /// its file (`at`: its placed start and end, `u32::MAX` for a node gone),
 /// and per code the node it came from (`of`, `u32::MAX` none).
 struct Ans {
     key: u64,
+    /// The glyphs and the match it was made from, held: compared by
+    /// identity (a pointer in the key alone named a match freed and its
+    /// memory given to another: a page's stale answer kept, para4000).
+    g: Arc<PageGlyphs>,
+    m: Arc<Matched>,
     at: Vec<(u32, u32)>,
     of: Arc<[u32]>,
     out: Arc<PageOrigins>,
@@ -1796,9 +1805,12 @@ impl State {
 
     /// Page `k`'s match, kept while its glyphs are the same and every
     /// node it names is there with the same text.
-    fn matched(&self, cx: &Ctx<'_>, id: u64, g: &PageGlyphs) -> Arc<Matched> {
+    fn matched(&self, cx: &Ctx<'_>, id: u64, g: &Arc<PageGlyphs>) -> Arc<Matched> {
+        // (kept while the page's glyphs are the same, held, and its
+        // nodes' texts are)
         let kept = self.matches.locked().get(&id).cloned();
-        if let Some(m) = kept
+        if let Some((g0, m)) = kept
+            && Arc::ptr_eq(&g0, g)
             && m.nodes
                 .iter()
                 .all(|&(raw, h)| cx.spans.get(&raw).is_some_and(|sp| sp.hash == h))
@@ -1810,7 +1822,7 @@ impl State {
         if all.len() > 1 << 16 {
             all.clear();
         }
-        all.insert(id, m.clone());
+        all.insert(id, (g.clone(), m.clone()));
         m
     }
 }
@@ -1897,6 +1909,7 @@ fn xobject_counts(pdf: &[u8], k: usize) -> Vec<usize> {
 }
 
 /// Page `k`'s answer.
+#[allow(clippy::too_many_lines)]
 fn answer(
     st: &State,
     cx: &Ctx<'_>,
@@ -1916,13 +1929,10 @@ fn answer(
     // bytes moved with its node: the answer shifted, not made anew (an
     // edit moves every node after it in its file, and every page after
     // it was answered again: para4000, 350 of 692 pages, 130 ms))
-    let key = nodes.iter().fold(
-        hash_words(id, &[Arc::as_ptr(&m) as usize as u64]),
-        |h, n| match n {
-            Some((sp, doc)) => hash_words(h, &[u64::from(sp.file), sp.hash, u64::from(*doc)]),
-            None => hash_words(h, &[u64::MAX]),
-        },
-    );
+    let key = nodes.iter().fold(hash_words(id, &[]), |h, n| match n {
+        Some((sp, doc)) => hash_words(h, &[u64::from(sp.file), sp.hash, u64::from(*doc)]),
+        None => hash_words(h, &[u64::MAX]),
+    });
     let at: Vec<(u32, u32)> = nodes
         .iter()
         .map(|n| match n {
@@ -1937,10 +1947,28 @@ fn answer(
         .answers
         .locked()
         .get(&id)
-        .filter(|a| a.key == key)
+        .filter(|a| a.key == key && Arc::ptr_eq(&a.g, &g) && Arc::ptr_eq(&a.m, &m))
         .map(|a| (a.at.clone(), a.of.clone(), a.out.clone()));
+    // (`PHITEX_ORIGINS_CHECK`: an answer kept or shifted compared with
+    // one made from nothing kept, the page matched again)
+    let check = |how: &str, o: &PageOrigins| {
+        if crate::exec::env_flag!("PHITEX_ORIGINS_CHECK") {
+            let m = match_page(&g, &cx.index);
+            let nodes: Vec<Option<(Span, bool)>> = m
+                .nodes
+                .iter()
+                .map(|(raw, _)| cx.spans.get(raw).map(|&sp| (sp, sp.doc)))
+                .collect();
+            let fresh = answer_fresh(cx, k, &g, &m, &nodes, pdf);
+            eprintln!(
+                "origins check: page {k} {how}: {}",
+                if fresh.0 == *o { "same" } else { "DIFFERENT" }
+            );
+        }
+    };
     if let Some((old, of, out)) = kept {
         if old == at {
+            check("kept", &out);
             return Some(out);
         }
         // (each node moved whole: its start and end by one distance)
@@ -1966,17 +1994,13 @@ fn answer(
                 }
             }
             let o = Arc::new(o);
-            if crate::exec::env_flag!("PHITEX_ORIGINS_CHECK") {
-                let fresh = answer_fresh(cx, k, &g, &m, &nodes, pdf);
-                eprintln!(
-                    "origins check: page {k} shifted: {}",
-                    if fresh.0 == *o { "same" } else { "DIFFERENT" }
-                );
-            }
+            check("shifted", &o);
             st.answers.locked().insert(
                 id,
                 Ans {
                     key,
+                    g: g.clone(),
+                    m: m.clone(),
                     at,
                     of,
                     out: o.clone(),
@@ -1995,6 +2019,8 @@ fn answer(
         id,
         Ans {
             key,
+            g: g.clone(),
+            m: m.clone(),
             at,
             of: of.into(),
             out: out.clone(),

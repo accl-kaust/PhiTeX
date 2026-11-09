@@ -172,8 +172,14 @@ impl Run<'_, '_> {
         let forced_par = par_start
             && (self.forced_since(self.cand_marks.last().map_or(0, |m| m.contribs))
                 || (self.cand_marks.is_empty() && self.forced_pending_before()?));
+        // (inside a group or a conditional of the run's own too, where a
+        // continuation can carry them (`open_cut`, `par_cut`): every
+        // paragraph end is a cut. Run on through them, a page firing at
+        // one was a second pass from the run's start to it (amsldoc -j1:
+        // 11 such, their first passes 1.36 M commands, half the build's,
+        // 3.37 s where resuming at a checkpoint made 2.95 s))
         let cuttable = fresh
-            && (((can || forced_par) && !self.rest_blank()?)
+            && (((can || forced_par || open_cut || par_cut) && !self.rest_blank()?)
                 || ((restartable || open_cut || par_cut || forced_par) && self.stop_at == Some(k)));
         self.cand_marks.push(CandMark {
             k,
@@ -203,9 +209,9 @@ impl Run<'_, '_> {
         // which reads the state there forward and what a routine leaves.
         // Nothing decides it after the piece: no page's finisher reaches
         // back into the piece it fires in)
-        // (inside a group or a conditional of the run's own, only where
-        // the page is made to fire, above: elsewhere the piece runs on
-        // through the candidate, and a page firing there has its
+        // (inside a group or a conditional of the run's own as well, where
+        // the continuation carries them, above; where it cannot, the piece
+        // runs on through the candidate, and a page firing there has its
         // finisher run on the piece's state there, [`Run::preload_candidate`])
         if cuttable {
             if self.open_span() && crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
