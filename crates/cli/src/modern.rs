@@ -176,6 +176,12 @@ enum Sub {
         #[command(flatten)]
         watch: WatchArgs,
     },
+    /// The running watches an editor can attach to (--json: as JSON)
+    ///
+    /// Each `phitex watch` serves its language server on 127.0.0.1 and
+    /// says so in a file of its own (docs/spec-editor-protocol.md §8):
+    /// its main file, its viewer, its port and token.
+    Sessions,
     /// What is new in this version
     News,
     /// Shell completions: phitex completions bash > ~/.local/share/bash-completion/completions/phitex
@@ -406,6 +412,7 @@ pub enum Command {
     News,
     Upgrade,
     Config,
+    Sessions,
 }
 
 /// The modern command line's options, as the rest of the program reads
@@ -504,6 +511,7 @@ impl Cli {
                 o.output_dir = output_dir;
             }
             Some(Sub::News) => o.command = Some(Command::News),
+            Some(Sub::Sessions) => o.command = Some(Command::Sessions),
             Some(Sub::Completions { shell }) => {
                 let mut cmd = <Cli as clap::CommandFactory>::command();
                 clap_complete::generate(shell, &mut cmd, "phitex", &mut std::io::stdout());
@@ -1387,6 +1395,9 @@ pub fn main(args: &[String]) -> ! {
         crate::news::print(o.json);
         std::process::exit(0);
     }
+    if command == Command::Sessions {
+        std::process::exit(crate::attach::sessions(&ui, o.json));
+    }
     if command == Command::Config {
         if let Some(k) = &o.unset {
             match crate::config::unset_user(k) {
@@ -1502,7 +1513,7 @@ pub fn main(args: &[String]) -> ! {
         Command::Clean => std::process::exit(clean(&t, &ui)),
         Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
         // (answered before the target)
-        Command::News | Command::Upgrade | Command::Config => unreachable!(),
+        Command::News | Command::Upgrade | Command::Config | Command::Sessions => unreachable!(),
     }
 }
 

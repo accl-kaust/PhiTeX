@@ -190,7 +190,7 @@ for each version tag.
   ```
   The fetch starts as the run starts, so a short build reads it on its
   next run.
-- **Never** under `CI`, with no TTY, under `phitex lsp`, or with
+- **Never** under `CI`, with no TTY, under `phitex watch --lsp`, or with
   `PHITEX_NO_UPDATE_CHECK=1`. The editor extension shows the same news
   through `phitex/status` (§7).
 - **The request** is one GET of `https://phitex.org/news.json` (then
@@ -238,10 +238,10 @@ for each version tag.
 ## 7. Editors
 
 - **Each side sends its version in LSP `initialize`.** The extension sends
-  its own in `initializationOptions.client`; `phitex lsp` answers
+  its own in `initializationOptions.client`; `phitex watch --lsp` answers
   `serverInfo.version` and `capabilities.experimental.phitex.protocol`
   (an integer).
-- **The extension needs a minimum PhiTeX.** If `phitex lsp` is older, it
+- **The extension needs a minimum PhiTeX.** If `phitex watch --lsp` is older, it
   says `PhiTeX 1.6 is older than this extension needs (1.61): run phitex
   upgrade`.
 - **Shelf's `min_extension`** (already in release.json) is read the same

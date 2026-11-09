@@ -28,6 +28,7 @@
     clippy::needless_pass_by_value
 )]
 
+mod attach;
 mod cache;
 mod compare;
 mod compat;
