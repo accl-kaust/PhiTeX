@@ -2792,8 +2792,17 @@ impl phitex_defuse::Operation for PdfPage {
                 {
                     // (the colors it leaves the next page: a page is exact
                     // only where every page before it left them as found)
-                    if let Some(m) = made.get() {
-                        p.page_colors(k, m.0.keeps_colors());
+                    // (from the page's colour stack commands in the order
+                    // its walk meets them: its record's stacks are those a
+                    // walk left that stopped at an object the page's own
+                    // writer lacks, an image named before them)
+                    if let Some(keeps) = with_page_box(v, &pc, &h, &mut line, |bx| {
+                        keeps_colors(&pc.whats, &bx.list)
+                    }) {
+                        p.page_colors(k, keeps);
+                        if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                            eprintln!("stream: page {k} keeps colours {keeps}");
+                        }
                     }
                     p.stream_page(k, || {
                         let shown = v.int(shown_id(kx.raw(), Some(&h)).cast_signed());
@@ -2842,50 +2851,7 @@ pub(crate) fn page_alone(
 ) -> Option<(Vec<u8>, bool)> {
     let mut params = PdfParams::default();
     page_params(v, &mut params, &pc.params);
-    // (the numbers it draws with, and those it only names: in its
-    // literals, its links' and annotations' texts, its attributes)
-    let mut need: Vec<i64> = Vec::new();
-    let mut named: Vec<i64> = Vec::new();
-    let mut rels: Vec<i64> = Vec::new();
-    for w in pc.whats.values() {
-        match w {
-            Whatsit::RefObj(n) | Whatsit::RefXForm(n) | Whatsit::RefXImage(n) => {
-                need.push(i64::try_from(*n).unwrap_or(i64::MAX));
-            }
-            Whatsit::StartLink { objnum, attr, .. } => {
-                let n = objnum.cast_signed();
-                if is_rel(*objnum) {
-                    rels.push(n);
-                } else {
-                    named.push(n);
-                }
-                refs_in(attr.as_deref().unwrap_or_default(), &mut named);
-            }
-            Whatsit::Annot { objnum, data, .. } => {
-                let n = objnum.cast_signed();
-                if is_rel(*objnum) {
-                    rels.push(n);
-                } else {
-                    named.push(n);
-                }
-                refs_in(data, &mut named);
-            }
-            Whatsit::Special(t) | Whatsit::Literal(_, t) => refs_in(t, &mut named),
-            _ => {}
-        }
-    }
-    // (of the objects its resources name, those of the kinds its content
-    // draws with: pgf names its graphics states, patterns and shadings on
-    // every page, a page drawing with none of them does not need them)
-    if let Some(t) = &params.page_resources {
-        resource_refs(t, content, &mut need, &mut named);
-    }
-    for t in [&params.page_attr, &params.pages_attr]
-        .into_iter()
-        .flatten()
-    {
-        refs_in(t, &mut named);
-    }
+    let (need, mut named, rels) = page_names(pc, &params, content);
     let found = objs.locked().closure(&need, &rels);
     named.extend(&need);
     named.extend(&found.named);
@@ -2933,14 +2899,133 @@ pub(crate) fn page_alone(
         base: &pc.base_in,
         fonts: &pc.fonts,
         floor,
+        missing: found
+            .missing
+            .iter()
+            .filter_map(|&n| usize::try_from(n).ok())
+            .collect(),
         landed: std::cell::Cell::new(true),
     };
     let l = link(v, &f, &line, units, None, &cmds, false, Some(&alone));
     if !l.errors.is_empty() || l.fail.is_some() {
+        if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+            eprintln!(
+                "stream: page {} not written alone: {:?} {:?}",
+                pc.pj,
+                l.errors.iter().map(|e| e.0.to_string()).collect::<Vec<_>>(),
+                l.fail.as_ref().map(ToString::to_string)
+            );
+        }
         return None;
     }
     let pdf = l.layout?.exact().ok().map(|b| b.as_ref().clone())?;
     Some((pdf, found.complete && alone.landed.get()))
+}
+
+/// The object numbers page `pc` (its parameters `params`, its content
+/// `content`) names: those it draws with (its images, forms and objects;
+/// of those its resources name, the kinds its content draws with), those
+/// it only names (its literals', links' and annotations' texts, its
+/// attributes), and its links' and annotations' read-time ones
+/// ([`crate::pdfprim::REL`]).
+fn page_names(
+    pc: &PagePiece,
+    params: &PdfParams,
+    content: &[u8],
+) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
+    let mut need: Vec<i64> = Vec::new();
+    let mut named: Vec<i64> = Vec::new();
+    let mut rels: Vec<i64> = Vec::new();
+    for w in pc.whats.values() {
+        match w {
+            Whatsit::RefObj(n) | Whatsit::RefXForm(n) | Whatsit::RefXImage(n) => {
+                need.push(i64::try_from(*n).unwrap_or(i64::MAX));
+            }
+            Whatsit::StartLink { objnum, attr, .. } => {
+                let n = objnum.cast_signed();
+                if is_rel(*objnum) {
+                    rels.push(n);
+                } else {
+                    named.push(n);
+                }
+                refs_in(attr.as_deref().unwrap_or_default(), &mut named);
+            }
+            Whatsit::Annot { objnum, data, .. } => {
+                let n = objnum.cast_signed();
+                if is_rel(*objnum) {
+                    rels.push(n);
+                } else {
+                    named.push(n);
+                }
+                refs_in(data, &mut named);
+            }
+            Whatsit::Special(t) | Whatsit::Literal(_, t) => refs_in(t, &mut named),
+            _ => {}
+        }
+    }
+    // (of the objects its resources name, those of the kinds its content
+    // draws with: pgf names its graphics states, patterns and shadings on
+    // every page, a page drawing with none of them does not need them)
+    if let Some(t) = &params.page_resources {
+        resource_refs(t, content, &mut need, &mut named);
+    }
+    for t in [&params.page_attr, &params.pages_attr]
+        .into_iter()
+        .flatten()
+    {
+        refs_in(t, &mut named);
+    }
+    (need, named, rels)
+}
+
+/// Whether a page of `list` (its whatsits `whats`) leaves the colour
+/// stacks' page values as it finds them: its colour stack commands, in the
+/// order its walk meets them, pop no entry pushed before it and set no
+/// value at its start's depth (each then colours the pages after it), and
+/// leave none pushed. A form's commands are the form stacks' (`\pdfrefxform`
+/// is not followed).
+fn keeps_colors(whats: &BTreeMap<u32, Whatsit>, list: &[Node]) -> bool {
+    fn walk(
+        whats: &BTreeMap<u32, Whatsit>,
+        list: &[Node],
+        depth: &mut FxHashMap<usize, usize>,
+    ) -> bool {
+        for n in list {
+            let ok = match n {
+                Node::Box(b) => walk(whats, &b.list, depth),
+                Node::Glue(g) => g
+                    .leader
+                    .as_deref()
+                    .is_none_or(|x| walk(whats, std::slice::from_ref(x), depth)),
+                Node::Whatsit(h, _) => match whats.get(h) {
+                    Some(Whatsit::ColorStack(s, c)) => {
+                        let d = depth.entry(*s).or_insert(0);
+                        match c {
+                            phitex_pdf::ColorStackCmd::Push(_) => {
+                                *d += 1;
+                                true
+                            }
+                            phitex_pdf::ColorStackCmd::Pop => {
+                                let below = *d == 0;
+                                *d = d.saturating_sub(1);
+                                !below
+                            }
+                            phitex_pdf::ColorStackCmd::Set(_) => *d > 0,
+                            phitex_pdf::ColorStackCmd::Current => true,
+                        }
+                    }
+                    _ => true,
+                },
+                _ => true,
+            };
+            if !ok {
+                return false;
+            }
+        }
+        true
+    }
+    let mut depth = FxHashMap::default();
+    walk(whats, list, &mut depth) && depth.values().all(|&d| d == 0)
 }
 
 /// The highest object number a page's file of its own is numbered up to
@@ -2955,6 +3040,9 @@ struct Alone<'a> {
     base: &'a BaseIn,
     fonts: &'a Fonts,
     floor: usize,
+    /// The images and forms it names that the file lacks: left out (a
+    /// form or image the writer cannot find stops the page).
+    missing: FxHashSet<usize>,
     /// Every command's object got TeX's number.
     landed: std::cell::Cell<bool>,
 }
@@ -3167,6 +3255,8 @@ struct Found {
     complete: bool,
     /// The numbers the commands taken name.
     named: Vec<i64>,
+    /// The objects drawn with that were not found complete.
+    missing: Vec<i64>,
 }
 
 impl StreamObjs {
@@ -3228,6 +3318,7 @@ impl StreamObjs {
             cmds: Vec::new(),
             complete: true,
             named: Vec::new(),
+            missing: Vec::new(),
         };
         let mut taken: FxHashSet<i64> = FxHashSet::default();
         let mut order: Vec<((i64, u8), i64)> = Vec::new();
@@ -3239,13 +3330,16 @@ impl StreamObjs {
             }
             let Some((k, c)) = self.one(self.by_num.get(&n)) else {
                 out.complete = false;
+                out.missing.push(n);
                 continue;
             };
             let mut take = vec![(k, c, 0u8)];
             if !c.body {
-                match self.one(self.fills.get(&n)) {
-                    Some((fk, f)) => take.push((fk, f, 1)),
-                    None => out.complete = false,
+                if let Some((fk, f)) = self.one(self.fills.get(&n)) {
+                    take.push((fk, f, 1));
+                } else {
+                    out.complete = false;
+                    out.missing.push(n);
                 }
             }
             for (k, c, at) in take {
@@ -5497,6 +5591,8 @@ fn link(
             let ts = std::time::Instant::now();
             let res = if moved {
                 Err("an object numbered otherwise at read time".to_owned())
+            } else if alone.is_some_and(|a| !a.missing.is_empty()) {
+                Err("an image or form the file lacks".to_owned())
             } else if tex.len() != aliases.len() {
                 Err("an object the line does not number".to_owned())
             } else {
@@ -5508,7 +5604,12 @@ fn link(
                 // (the node that wrote the page logged the writer's
                 // error when it wrote it)
                 let mut wh = |h: u32, _leaders: bool| {
-                    page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &reloc))
+                    page_whatsit(&forms, &pc.whats, h)
+                        .filter(|w| {
+                            !matches!((w, alone), (Whatsit::RefXImage(n) | Whatsit::RefXForm(n), Some(a))
+                                if a.missing.contains(n))
+                        })
+                        .map(|w| relocated(w, &reloc))
                 };
                 if let Some(Err(e)) = with_page_box(v, pc, &h, &mut line, |bx| {
                     st.ship_out_with(bx, &src, &mut wh)
