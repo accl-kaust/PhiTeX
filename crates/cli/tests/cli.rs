@@ -4284,7 +4284,7 @@ fn next_build(
 
 /// `phitex watch` looks again for a file its build looked for and did
 /// not find once one of that name is made: `\input{late}` before
-/// `late.tex` exists fails ("File `late.tex' not found"), and the
+/// `late.tex` exists fails (LaTeX's "File not found" error), and the
 /// file's creation rebuilds with it found, the PDF a clean build's.
 #[test]
 fn watch_finds_a_file_made_after_a_build_missed_it() {
