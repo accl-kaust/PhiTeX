@@ -2211,8 +2211,8 @@ fn tiny() -> &'static str {
     "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x Hi\\end\n"
 }
 
-/// Every option is accepted before the command, after it and after the
-/// file: `-o DIR` and `-j N` in the three positions, the output where
+/// A build's options are accepted after the command, before and after
+/// the file: `-o DIR` and `-j N` in those positions, the output where
 /// `-o` says.
 #[test]
 fn options_in_any_position() {
@@ -2220,7 +2220,7 @@ fn options_in_any_position() {
     let dir = scratch("options");
     std::fs::write(dir.join("t.tex"), tiny()).expect("the document");
     let lines: [&[&str]; 3] = [
-        &["-o", "out1", "-j", "2", "build", "--ini", "--etex", "t.tex"],
+        &["build", "-o", "out1", "-j", "2", "--ini", "--etex", "t.tex"],
         &["build", "-o", "out2", "-j", "2", "--ini", "--etex", "t.tex"],
         &["build", "--ini", "--etex", "t.tex", "-o", "out3", "-j", "2"],
     ];
@@ -2256,7 +2256,7 @@ fn unknown_option_is_named() {
     assert!(err.contains("--help"), "--help is not suggested:\n{err}");
     assert!(err.lines().count() <= 8, "more than a few lines:\n{err}");
     let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["-o", "out", "--frob", "build", "t.tex"])
+        .args(["--frob", "build", "t.tex"])
         .output()
         .expect("phitex runs");
     let err = String::from_utf8_lossy(&out.stderr);
@@ -2322,7 +2322,7 @@ fn help_is_sectioned() {
     };
     let short = help("--help");
     assert!(
-        short.lines().count() <= 35 && short.contains("--help-all") && short.contains("--jobs"),
+        short.lines().count() <= 35 && short.contains("--help-all") && short.contains("build"),
         "--help is not the short help:\n{short}"
     );
     assert!(
@@ -2340,14 +2340,27 @@ fn help_is_sectioned() {
         "Examples:",
         "build",
         "watch",
-        "--write",
         "clean",
         "--json",
+        "Exit status",
+    ] {
+        assert!(
+            text.contains(section),
+            "`{section}` is not in the help:\n{text}"
+        );
+    }
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--help-all"])
+        .output()
+        .expect("phitex runs");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    for section in [
+        "--write",
         "--no-view",
         "--shell-escape",
-        "Exit status",
         "--output-dir",
         "--jobs",
+        "--lsp",
     ] {
         assert!(
             text.contains(section),

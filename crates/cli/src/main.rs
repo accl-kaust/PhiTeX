@@ -102,8 +102,7 @@ fn main() {
             compat::Selection::Compat { progname, args } => compat::main(&progname, &args),
             compat::Selection::Modern(args) => modern::main(&args),
         });
-    if let Err(p) = run {
-        keys::restore();
-        std::panic::resume_unwind(p);
-    }
+    let Err(p) = run;
+    keys::restore();
+    std::panic::resume_unwind(p);
 }

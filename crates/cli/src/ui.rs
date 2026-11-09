@@ -17,6 +17,14 @@ pub use phitex_live::panics::{capture_panics, catch};
 
 use crate::session::Status;
 
+/// `--color`: always (true) or never (false); none, by the stream.
+static COLOR: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+
+/// `--color`'s choice, for every [`Style`] from now on.
+pub fn set_color(c: Option<bool>) {
+    let _ = COLOR.set(c);
+}
+
 /// Colours on standard error, unless it is no terminal or `NO_COLOR`.
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
@@ -35,9 +43,12 @@ impl Style {
         Style::on(std::io::stdout().is_terminal())
     }
 
-    /// For a stream that is a terminal (`tty`) or not: colours on a
-    /// terminal, or forced by `CLICOLOR_FORCE`.
+    /// For a stream that is a terminal (`tty`) or not: `--color`'s
+    /// choice, else colours on a terminal, or forced by `CLICOLOR_FORCE`.
     fn on(tty: bool) -> Style {
+        if let Some(&Some(color)) = COLOR.get() {
+            return Style { color, tty };
+        }
         let set = |v: &str| std::env::var_os(v).is_some_and(|x| !x.is_empty() && x != "0");
         Style {
             color: set("CLICOLOR_FORCE") || (tty && std::env::var_os("NO_COLOR").is_none()),

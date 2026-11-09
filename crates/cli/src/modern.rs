@@ -139,7 +139,7 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Sub>,
     #[command(flatten)]
-    opts: Opts,
+    global: Global,
 }
 
 #[derive(Subcommand, Debug)]
@@ -149,8 +149,11 @@ enum Sub {
     /// The document is built to its fixpoint as latexmk builds it, the
     /// tools run in process.
     Build {
+        /// The main .tex file (default: phitex.toml's `main`)
         #[arg(value_name = "FILE")]
         file: Option<String>,
+        #[command(flatten)]
+        build: BuildArgs,
     },
     /// Rebuild on every change, the pages live in the browser
     ///
@@ -158,8 +161,14 @@ enum Sub {
     /// keys on a terminal: r rebuild, q quit, h the rest (with --lsp:
     /// an editor's language client on standard input and output).
     Watch {
+        /// The main .tex file (default: phitex.toml's `main`; with --lsp,
+        /// the editor's)
         #[arg(value_name = "FILE")]
         file: Option<String>,
+        #[command(flatten)]
+        build: BuildArgs,
+        #[command(flatten)]
+        watch: WatchArgs,
     },
     /// What is new in this version
     News,
@@ -179,77 +188,28 @@ enum Sub {
     },
     /// Remove a build's files (--all: the whole cache)
     Clean {
-        /// The whole cache, every document's (no file needed)
-        #[arg(long)]
+        /// The whole cache, every document's (no file then)
+        #[arg(long, conflicts_with = "file")]
         all: bool,
+        /// Where the build's outputs are (TeX's -output-directory)
+        #[arg(
+            short = 'o',
+            long = "output-dir",
+            alias = "output-directory",
+            alias = "out-dir",
+            value_name = "DIR"
+        )]
+        output_dir: Option<String>,
+        /// The main .tex file (default: phitex.toml's `main`)
         #[arg(value_name = "FILE")]
         file: Option<String>,
     },
 }
 
-/// The options, accepted anywhere on the line.
+/// The options of every command: how much is said, how, and whether
+/// questions are asked.
 #[derive(Args, Debug, Default)]
-#[allow(clippy::struct_excessive_bools)]
-struct Opts {
-    /// Where the outputs go (TeX's -output-directory)
-    #[arg(
-        short = 'o',
-        long = "output-dir",
-        alias = "output-directory",
-        alias = "out-dir",
-        value_name = "DIR",
-        global = true
-    )]
-    output_dir: Option<String>,
-    /// pdflatex (default), xelatex, latex, pdftex, …
-    ///
-    /// pdflatex (default for LaTeX), latex, xelatex, pdftex (default
-    /// otherwise), xetex, etex, tex (lualatex is not supported yet)
-    #[arg(long, alias = "program", value_name = "NAME", global = true)]
-    engine: Option<String>,
-    /// dvi or pdf (xdv: XeTeX's XDV file, not made a PDF)
-    #[arg(long, value_name = "FORMAT", value_parser = ["dvi", "pdf", "xdv"], global = true, hide_short_help = true)]
-    output_format: Option<String>,
-    /// The file is the whole job: no format (TeX's -ini)
-    #[arg(long, global = true, hide_short_help = true)]
-    ini: bool,
-    /// With --ini: e-TeX's extended mode
-    #[arg(long, global = true, hide_short_help = true)]
-    etex: bool,
-    /// Threads (default: 1); the output is the same at any count
-    ///
-    /// The engine's threads (default: PHITEX_THREADS, else 1); the output
-    /// is the same at any count
-    #[arg(
-        short = 'j',
-        long = "jobs",
-        alias = "threads",
-        value_name = "N",
-        global = true
-    )]
-    jobs: Option<usize>,
-    /// watch: every edit writes the exact PDF file too (else an edit
-    /// appends an update section to it, and the exact file is written
-    /// once the editor is idle)
-    #[arg(long, global = true, hide_short_help = true)]
-    exact: bool,
-    /// (the same as --exact)
-    #[arg(long = "exact-pdf", global = true, hide = true)]
-    exact_pdf: bool,
-    /// Whether the engine runs steps ahead of their inputs: on those an
-    /// earlier run predicts (the default), never, or on any (not usable
-    /// yet). The output is the same either way.
-    #[arg(long = "spec", value_name = "WHEN", value_parser = ["off", "predicted", "all"], global = true, hide_short_help = true)]
-    spec: Option<String>,
-    /// A long piece's readers do not wait for it on the fields an earlier
-    /// build learned it defines last before them (they do by default: kept
-    /// beside the format). The output is the same either way.
-    #[arg(long = "no-wait-long", global = true, hide = true)]
-    no_wait_long: bool,
-    /// The document nodes' records read and stored (off by default; kept
-    /// per document in the cache). The output is the same either way.
-    #[arg(long = "node-records", global = true, hide = true)]
-    node_records: bool,
+struct Global {
     /// More detail: each pass, each warning, the cache (-vv: the engine's counters)
     ///
     /// Each pass over the document and why it ran, each warning's first
@@ -258,7 +218,7 @@ struct Opts {
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
     /// Only problems and the result
-    #[arg(short, long, global = true)]
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
     quiet: bool,
     /// Yes to every question: upgrade's, and watch's whether to write
     /// the PDF on quitting
@@ -268,99 +228,156 @@ struct Opts {
     /// (nothing else is printed)
     #[arg(long, global = true, hide_short_help = true)]
     json: bool,
-    /// \pdfshellescape 1 instead of TeX Live's restricted default (where
-    /// \write18 may name bibtex and makeindex): biber is allowed too. The
-    /// tools run in process; no other command runs either way
-    #[arg(long, global = true, hide_short_help = true)]
-    shell_escape: bool,
-    /// Apply all of latexmk's rc files that PhiTeX reads: their engine
-    /// ($pdf_mode, $pdflatex), output folder ($out_dir), SyncTeX and
-    /// -shell-escape, not only their search paths (`latexmk = "exact"` in
-    /// phitex.toml, or `phitex config latexmk exact`; -shell-escape only
-    /// from this flag)
-    #[arg(long, global = true, hide_short_help = true)]
-    exact_latexmk: bool,
-    /// watch: open the viewer
-    ///
-    /// watch: open the viewer in the browser (or start phitex.toml's
-    /// `viewer`, zathura or the like, on the output)
-    #[arg(long, global = true)]
-    open: bool,
-    /// watch: no live viewer (the PDF and its files are then written, as by --write)
-    #[arg(long, global = true, hide_short_help = true)]
-    no_view: bool,
-    /// watch: write the PDF (with its .synctex.gz), the log and the aux
-    /// files into the folder after each build, as build does; without it
-    /// a watch writes nothing there (the pages are in the viewer;
-    /// `watch-write = true` in phitex.toml always writes)
-    #[arg(long, global = true, hide_short_help = true)]
-    write: bool,
-    /// watch: the diagnostics at their places after every edit too (the
-    /// viewer asks for them; else an edit reports the engine's own only)
-    #[arg(long, global = true, hide_short_help = true)]
-    diagnostics: bool,
-    /// watch: the time without an edit after which the exact PDF file is
-    /// written over the updated one (default 300)
-    #[arg(long, value_name = "MS", global = true, hide_short_help = true)]
-    idle: Option<u64>,
-    /// watch: also write the .log file, each time the watch goes idle
-    /// (beside the exact PDF). Without it a watch writes no .log; build
-    /// always writes one
-    #[arg(long, global = true, hide_short_help = true)]
-    log: bool,
-    /// watch: be an editor's language server on standard input and
-    /// output (LSP): its unsaved buffers built as you type, the problems
-    /// shown in it, a double-click on a page opening it there, its cursor
-    /// shown on the page (`phitex/cursor`); nothing else on standard output
-    #[arg(long, global = true, hide_short_help = true)]
-    lsp: bool,
-    /// watch: the viewer's port (default: a free one)
-    #[arg(long, value_name = "N", global = true, hide_short_help = true)]
-    port: Option<u16>,
-    /// watch: where a double-click on a page opens its source (code,
-    /// emacsclient, nvim, … or a command with {file} {line} {col}; else
-    /// PHITEX_EDITOR, VISUAL, EDITOR)
-    #[arg(long, value_name = "CMD", global = true, hide_short_help = true)]
-    editor: Option<String>,
-    /// Copy the PDF after each successful build into DIR (default: where
-    /// phitex was run)
-    #[arg(long, value_name = "DIR", num_args = 0..=1, require_equals = true, default_missing_value = "", global = true, hide_short_help = true)]
-    copy_pdf: Option<String>,
-    #[arg(long, global = true, hide = true)]
-    no_copy_pdf: bool,
-    /// Write <job>.synctex.gz, for a PDF viewer's jumps between source
-    /// and pages (`synctex = true` in `phitex.toml`)
-    #[arg(
-        long,
-        global = true,
-        overrides_with = "no_synctex",
-        hide_short_help = true
-    )]
-    synctex: bool,
-    /// Write <job>.phitex-report.txt beside the outputs, for a bug report
-    /// (no text of the document; `--report=full` adds the .log and the
-    /// project's sources)
-    #[arg(long, value_name = "full", num_args = 0..=1, require_equals = true, default_missing_value = "", value_parser = ["", "full"], global = true, hide_short_help = true)]
-    report: Option<String>,
-    /// No <job>.synctex.gz (the default)
-    #[arg(
-        long,
-        global = true,
-        overrides_with = "synctex",
-        hide_short_help = true
-    )]
-    no_synctex: bool,
-    /// TeX's files from Shelf's packs (fetched once, kept in the cache's
-    /// `shelf/`; v1.shelf.phitex.org the server, PHITEX_SHELF_URL another) instead of TeX Live's
-    /// (`files = "shelf"` in `phitex.toml`)
-    #[arg(long, global = true, hide_short_help = true)]
-    shelf: bool,
     /// Print help (--help-all: every option)
     #[arg(short = 'h', long = "help", action = clap::ArgAction::HelpShort, global = true)]
     help: Option<bool>,
     /// Print every option, with the details
     #[arg(long = "help-all", action = clap::ArgAction::HelpLong, global = true, hide_short_help = true)]
     help_all: Option<bool>,
+    /// When to use colours: auto (on a terminal, unless NO_COLOR), always, never
+    #[arg(long, value_name = "WHEN", value_parser = ["auto", "always", "never"], global = true, hide_short_help = true)]
+    color: Option<String>,
+}
+
+/// What to build and how: `build`'s and `watch`'s options.
+#[derive(Args, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
+struct BuildArgs {
+    /// Where the outputs go (TeX's -output-directory)
+    #[arg(
+        short = 'o',
+        long = "output-dir",
+        alias = "output-directory",
+        alias = "out-dir",
+        value_name = "DIR"
+    )]
+    output_dir: Option<String>,
+    /// pdflatex (default), xelatex, latex, pdftex, …
+    ///
+    /// pdflatex (default for LaTeX), latex, xelatex, pdftex (default
+    /// otherwise), xetex, etex, tex (lualatex is not supported yet)
+    #[arg(long, alias = "program", value_name = "NAME")]
+    engine: Option<String>,
+    /// dvi or pdf (xdv: XeTeX's XDV file, not made a PDF)
+    #[arg(long, value_name = "FORMAT", value_parser = ["dvi", "pdf", "xdv"], hide_short_help = true)]
+    output_format: Option<String>,
+    /// The file is the whole job: no format (TeX's -ini)
+    #[arg(long, hide_short_help = true)]
+    ini: bool,
+    /// With --ini: e-TeX's extended mode
+    #[arg(long, hide_short_help = true)]
+    etex: bool,
+    /// Threads (default: 1); the output is the same at any count
+    ///
+    /// The engine's threads (default: PHITEX_THREADS, else 1); the output
+    /// is the same at any count
+    #[arg(short = 'j', long = "jobs", alias = "threads", value_name = "N")]
+    jobs: Option<usize>,
+    /// Whether the engine runs steps ahead of their inputs: on those an
+    /// earlier run predicts (the default), never, or on any (not usable
+    /// yet). The output is the same either way.
+    #[arg(long = "spec", value_name = "WHEN", value_parser = ["off", "predicted", "all"], hide_short_help = true)]
+    spec: Option<String>,
+    /// A long piece's readers do not wait for it on the fields an earlier
+    /// build learned it defines last before them (they do by default: kept
+    /// beside the format). The output is the same either way.
+    #[arg(long = "no-wait-long", hide = true)]
+    no_wait_long: bool,
+    /// The document nodes' records read and stored (off by default; kept
+    /// per document in the cache). The output is the same either way.
+    #[arg(long = "node-records", hide = true)]
+    node_records: bool,
+    /// \pdfshellescape 1 instead of TeX Live's restricted default (where
+    /// \write18 may name bibtex and makeindex): biber is allowed too. The
+    /// tools run in process; no other command runs either way
+    #[arg(long, hide_short_help = true)]
+    shell_escape: bool,
+    /// Apply all of latexmk's rc files that PhiTeX reads: their engine
+    /// ($pdf_mode, $pdflatex), output folder ($out_dir), SyncTeX and
+    /// -shell-escape, not only their search paths (`latexmk = "exact"` in
+    /// phitex.toml, or `phitex config latexmk exact`; -shell-escape only
+    /// from this flag)
+    #[arg(long, hide_short_help = true)]
+    exact_latexmk: bool,
+    /// Copy the PDF after each successful build into DIR (default: where
+    /// phitex was run)
+    #[arg(long, value_name = "DIR", num_args = 0..=1, require_equals = true, default_missing_value = "", hide_short_help = true)]
+    copy_pdf: Option<String>,
+    #[arg(long, hide = true)]
+    no_copy_pdf: bool,
+    /// Write <job>.synctex.gz, for a PDF viewer's jumps between source
+    /// and pages (`synctex = true` in `phitex.toml`)
+    #[arg(long, overrides_with = "no_synctex", hide_short_help = true)]
+    synctex: bool,
+    /// Write <job>.phitex-report.txt beside the outputs, for a bug report
+    /// (no text of the document; `--report=full` adds the .log and the
+    /// project's sources)
+    #[arg(long, value_name = "full", num_args = 0..=1, require_equals = true, default_missing_value = "", value_parser = ["", "full"], hide_short_help = true)]
+    report: Option<String>,
+    /// No <job>.synctex.gz (the default)
+    #[arg(long, overrides_with = "synctex", hide_short_help = true)]
+    no_synctex: bool,
+    /// TeX's files from Shelf's packs (fetched once, kept in the cache's
+    /// `shelf/`; v1.shelf.phitex.org the server, PHITEX_SHELF_URL another) instead of TeX Live's
+    /// (`files = "shelf"` in `phitex.toml`)
+    #[arg(long, hide_short_help = true)]
+    shelf: bool,
+}
+
+/// `watch`'s own options: the viewer, the editor, what is written.
+#[derive(Args, Debug, Default)]
+#[allow(clippy::struct_excessive_bools)]
+struct WatchArgs {
+    /// watch: every edit writes the exact PDF file too (else an edit
+    /// appends an update section to it, and the exact file is written
+    /// once the editor is idle)
+    #[arg(long, hide_short_help = true)]
+    exact: bool,
+    /// (the same as --exact)
+    #[arg(long = "exact-pdf", hide = true)]
+    exact_pdf: bool,
+    /// watch: open the viewer
+    ///
+    /// watch: open the viewer in the browser (or start phitex.toml's
+    /// `viewer`, zathura or the like, on the output)
+    #[arg(long)]
+    open: bool,
+    /// watch: no live viewer (the PDF and its files are then written, as by --write)
+    #[arg(long, hide_short_help = true)]
+    no_view: bool,
+    /// watch: write the PDF (with its .synctex.gz), the log and the aux
+    /// files into the folder after each build, as build does; without it
+    /// a watch writes nothing there (the pages are in the viewer;
+    /// `watch-write = true` in phitex.toml always writes)
+    #[arg(long, hide_short_help = true)]
+    write: bool,
+    /// watch: the diagnostics at their places after every edit too (the
+    /// viewer asks for them; else an edit reports the engine's own only)
+    #[arg(long, hide_short_help = true)]
+    diagnostics: bool,
+    /// watch: the time without an edit after which the exact PDF file is
+    /// written over the updated one (default 300)
+    #[arg(long, value_name = "MS", hide_short_help = true)]
+    idle: Option<u64>,
+    /// watch: also write the .log file, each time the watch goes idle
+    /// (beside the exact PDF). Without it a watch writes no .log; build
+    /// always writes one
+    #[arg(long, hide_short_help = true)]
+    log: bool,
+    /// watch: be an editor's language server on standard input and
+    /// output (LSP): its unsaved buffers built as you type, the problems
+    /// shown in it, a double-click on a page opening it there, its cursor
+    /// shown on the page (`phitex/cursor`); nothing else on standard output
+    #[arg(long, hide_short_help = true)]
+    lsp: bool,
+    /// watch: the viewer's port (default: a free one)
+    #[arg(long, value_name = "N", hide_short_help = true)]
+    port: Option<u16>,
+    /// watch: where a double-click on a page opens its source (code,
+    /// emacsclient, nvim, … or a command with {file} {line} {col}; else
+    /// PHITEX_EDITOR, VISUAL, EDITOR)
+    #[arg(long, value_name = "CMD", hide_short_help = true)]
+    editor: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -422,77 +439,114 @@ pub struct Options {
     pub set: Option<(Option<String>, Option<String>)>,
     /// `--report` (true: `=full`).
     pub report: Option<bool>,
+    /// `--color`: always (true), never (false), else by the stream.
+    pub color: Option<bool>,
 }
 
 impl Cli {
     fn into_options(self) -> Options {
-        let set = match &self.command {
-            Some(Sub::Config { key, value }) => Some((key.clone(), value.clone())),
-            _ => None,
-        };
-        let (command, file, all) = match self.command {
-            Some(Sub::Build { file }) => (Some(Command::Build), file, false),
-            Some(Sub::Watch { file }) => (Some(Command::Watch), file, false),
-            Some(Sub::Clean { all, file }) => (Some(Command::Clean), file, all),
-            Some(Sub::News) => (Some(Command::News), None, false),
-            Some(Sub::Upgrade) => (Some(Command::Upgrade), None, false),
-            Some(Sub::Config { .. }) => (Some(Command::Config), None, false),
-            None => (None, None, false),
-        };
-        let o = self.opts;
-        Options {
-            command,
-            file,
-            engine: o.engine,
-            output: o.output_format.as_deref().map(|f| match f {
-                "dvi" => Output::Dvi,
-                "xdv" => Output::XdvFile,
-                _ => Output::Pdf,
+        let g = self.global;
+        let mut o = Options {
+            verbose: g.verbose,
+            quiet: g.quiet,
+            no_confirm: g.no_confirm,
+            json: g.json,
+            color: g.color.as_deref().and_then(|c| match c {
+                "always" => Some(true),
+                "never" => Some(false),
+                _ => None,
             }),
-            ini: o.ini,
-            etex: o.etex,
-            output_dir: o.output_dir,
-            threads: o.jobs,
-            spec: o.spec,
-            wait_long: !o.no_wait_long,
-            node_records: o.node_records,
-            verbose: o.verbose,
-            quiet: o.quiet,
-            no_confirm: o.no_confirm,
-            json: o.json,
-            shell_escape: o.shell_escape,
-            exact_latexmk: o.exact_latexmk,
-            open: o.open,
-            view: !o.no_view,
-            write: o.write,
-            diagnostics: o.diagnostics,
-            exact_file: o.exact || o.exact_pdf,
-            idle: Duration::from_millis(o.idle.unwrap_or(300)),
-            log: o.log,
-            port: o.port,
-            lsp: o.lsp,
-            editor: o.editor,
-            copy_pdf: if o.no_copy_pdf {
-                Some(config::CopyPdf::Off)
-            } else {
-                o.copy_pdf.map(|d| {
-                    if d.is_empty() {
-                        config::CopyPdf::Invocation
-                    } else {
-                        config::CopyPdf::Dir(d)
-                    }
-                })
-            },
-            synctex: if o.synctex {
-                Some(true)
-            } else {
-                o.no_synctex.then_some(false)
-            },
-            all,
-            files: o.shelf.then_some(tex::Files::Shelf),
-            set,
-            report: o.report.map(|v| v == "full"),
+            view: true,
+            wait_long: true,
+            idle: Duration::from_millis(300),
+            ..Options::default()
+        };
+        match self.command {
+            Some(Sub::Build { file, build }) => {
+                o.command = Some(Command::Build);
+                o.file = file;
+                build.apply(&mut o);
+            }
+            Some(Sub::Watch { file, build, watch }) => {
+                o.command = Some(Command::Watch);
+                o.file = file;
+                build.apply(&mut o);
+                watch.apply(&mut o);
+            }
+            Some(Sub::Clean {
+                all,
+                output_dir,
+                file,
+            }) => {
+                o.command = Some(Command::Clean);
+                o.file = file;
+                o.all = all;
+                o.output_dir = output_dir;
+            }
+            Some(Sub::News) => o.command = Some(Command::News),
+            Some(Sub::Upgrade) => o.command = Some(Command::Upgrade),
+            Some(Sub::Config { key, value }) => {
+                o.command = Some(Command::Config);
+                o.set = Some((key, value));
+            }
+            None => {}
         }
+        o
+    }
+}
+
+impl BuildArgs {
+    fn apply(self, o: &mut Options) {
+        let b = self;
+        o.engine = b.engine;
+        o.output = b.output_format.as_deref().map(|f| match f {
+            "dvi" => Output::Dvi,
+            "xdv" => Output::XdvFile,
+            _ => Output::Pdf,
+        });
+        o.ini = b.ini;
+        o.etex = b.etex;
+        o.output_dir = b.output_dir;
+        o.threads = b.jobs;
+        o.spec = b.spec;
+        o.wait_long = !b.no_wait_long;
+        o.node_records = b.node_records;
+        o.shell_escape = b.shell_escape;
+        o.exact_latexmk = b.exact_latexmk;
+        o.copy_pdf = if b.no_copy_pdf {
+            Some(config::CopyPdf::Off)
+        } else {
+            b.copy_pdf.map(|d| {
+                if d.is_empty() {
+                    config::CopyPdf::Invocation
+                } else {
+                    config::CopyPdf::Dir(d)
+                }
+            })
+        };
+        o.synctex = if b.synctex {
+            Some(true)
+        } else {
+            b.no_synctex.then_some(false)
+        };
+        o.files = b.shelf.then_some(tex::Files::Shelf);
+        o.report = b.report.map(|v| v == "full");
+    }
+}
+
+impl WatchArgs {
+    fn apply(self, o: &mut Options) {
+        let w = self;
+        o.open = w.open;
+        o.view = !w.no_view;
+        o.write = w.write;
+        o.diagnostics = w.diagnostics;
+        o.exact_file = w.exact || w.exact_pdf;
+        o.idle = Duration::from_millis(w.idle.unwrap_or(300));
+        o.log = w.log;
+        o.port = w.port;
+        o.lsp = w.lsp;
+        o.editor = w.editor;
     }
 }
 
@@ -1259,6 +1313,7 @@ pub fn main(args: &[String]) -> ! {
             });
         }
     };
+    crate::ui::set_color(o.color);
     let ui = Ui::new(Style::detect(), o.verbose, o.quiet, o.json);
     crate::ui::capture_panics(o.verbose > 0);
     if o.all {
@@ -1271,7 +1326,9 @@ pub fn main(args: &[String]) -> ! {
         phitex_tex::timeline::begin_at(t0);
     }
     let Some(command) = o.command else {
-        ui.error("no command given: build, watch or clean (`phitex --help`)");
+        ui.error(
+            "no command given: build, watch, clean, config, news or upgrade (`phitex --help`)",
+        );
         std::process::exit(crate::EXIT_FAILED);
     };
     if command == Command::News {
@@ -1415,10 +1472,13 @@ mod tests {
         }
     }
 
+    /// Each option where it means something: a build's after `build` or
+    /// `watch` (before or after the file), the watch's after `watch`
+    /// alone; one where it means nothing is refused, not ignored. -v,
+    /// -q, -y, --json and --color anywhere.
     #[test]
-    fn options_anywhere() {
+    fn options_where_they_mean_something() {
         for line in [
-            ["-o", "out", "-j", "2", "watch", "f.tex"],
             ["watch", "-o", "out", "-j", "2", "f.tex"],
             ["watch", "f.tex", "-o", "out", "-j", "2"],
         ] {
@@ -1427,6 +1487,16 @@ mod tests {
             assert_eq!(o.output_dir.as_deref(), Some("out"), "{line:?}");
             assert_eq!(o.threads, Some(2), "{line:?}");
             assert_eq!(o.file.as_deref(), Some("f.tex"), "{line:?}");
+        }
+        // (the editors' lines: VS Code's, Neovim's and Emacs's, the file after)
+        for line in [
+            &["watch", "paper.tex", "--lsp"][..],
+            &["watch", "--lsp"],
+            &["watch", "--lsp", "paper.tex"],
+        ] {
+            let o = parse(&v(line)).unwrap();
+            assert!(o.lsp, "{line:?}");
+            assert_eq!(o.file.is_some(), line.contains(&"paper.tex"), "{line:?}");
         }
         let o = parse(&v(&["build", "--copy-pdf", "--no-synctex", "-vv", "x.tex"])).unwrap();
         assert_eq!(o.verbose, 2);
@@ -1439,5 +1509,21 @@ mod tests {
             .to_string();
         assert!(e.contains("--frob"), "{e}");
         assert!(parse(&v(&["clean", "--all"])).unwrap().all);
+        assert!(parse(&v(&["-y", "upgrade"])).unwrap().no_confirm);
+        assert!(parse(&v(&["news", "--json"])).unwrap().json);
+        for meaningless in [
+            &["build", "--lsp", "x.tex"][..],
+            &["build", "--open", "x.tex"],
+            &["build", "--port", "1", "x.tex"],
+            &["news", "--shelf"],
+            &["news", "-j", "9"],
+            &["config", "--engine", "tex"],
+            &["upgrade", "-o", "out"],
+            &["clean", "--all", "x.tex"],
+            &["-o", "out", "build", "x.tex"],
+            &["build", "-q", "-v", "x.tex"],
+        ] {
+            assert!(parse(&v(meaningless)).is_err(), "{meaningless:?} accepted");
+        }
     }
 }

@@ -2113,6 +2113,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 }
                 Event::Key(k) => match k {
                     Key::Quit => quit(ui, &mut s, Some(&mut rx)),
+                    // (taken by the key reader itself: `keys::suspend`)
+                    Key::Suspend => {}
                     Key::Rebuild => {
                         // (every input read again from disk: a change made
                         // outside that no event told)

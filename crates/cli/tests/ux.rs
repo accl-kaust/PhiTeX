@@ -595,3 +595,41 @@ fn reader_text_says_clean_build() {
     let help = text(&run(&dir, &["--help-all"]).stdout);
     assert!(!help.contains("cold") && !help.contains("graph"), "{help}");
 }
+
+/// An option where it means nothing is an error naming it, not ignored:
+/// a watch's option on `build`, a build's on `news`; each command's help
+/// lists only its own options.
+#[test]
+fn options_only_where_they_mean_something() {
+    let dir = scratch("scoped");
+    for (args, opt) in [
+        (&["build", "--lsp", "x.tex"][..], "--lsp"),
+        (&["build", "--open", "x.tex"], "--open"),
+        (&["news", "--shelf"], "--shelf"),
+        (&["config", "--engine", "tex"], "--engine"),
+        (&["clean", "--all", "x.tex"], "--all"),
+    ] {
+        let out = run(&dir, args);
+        assert!(!out.status.success(), "{args:?} accepted");
+        assert!(
+            text(&out.stderr).contains(opt),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+    let news = text(&run(&dir, &["news", "--help"]).stdout);
+    assert!(
+        !news.contains("--engine") && !news.contains("--open"),
+        "{news}"
+    );
+    let build = text(&run(&dir, &["build", "--help"]).stdout);
+    assert!(
+        build.contains("--engine") && !build.contains("--open"),
+        "{build}"
+    );
+    let watch = text(&run(&dir, &["watch", "--help"]).stdout);
+    assert!(
+        watch.contains("--engine") && watch.contains("--open"),
+        "{watch}"
+    );
+}

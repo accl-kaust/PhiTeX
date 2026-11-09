@@ -93,7 +93,7 @@ pub fn raw() -> bool {
 fn handle(sig: libc::c_int) {
     // SAFETY: the handler only makes async-signal-safe calls.
     unsafe {
-        libc::signal(sig, on_signal as libc::sighandler_t);
+        libc::signal(sig, on_signal as *const () as libc::sighandler_t);
     }
 }
 
@@ -142,7 +142,7 @@ extern "C" fn on_signal(sig: libc::c_int) {
                 libc::signal(libc::SIGTSTP, libc::SIG_DFL);
                 libc::raise(libc::SIGTSTP);
                 // (stopped here until `fg`)
-                libc::signal(libc::SIGTSTP, on_signal as libc::sighandler_t);
+                libc::signal(libc::SIGTSTP, on_signal as *const () as libc::sighandler_t);
             }
             if active {
                 set_mode(raw);
