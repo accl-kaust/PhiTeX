@@ -5550,7 +5550,7 @@ var Panel = class {
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
       { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset. Random: a different one each time", kind: "select", options: [["random", "Random"], ...LOOKS.map((l) => [l.id, l.name]), ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => this.look = lookOf(l)) }
     );
-    if (ev.onBoxes) look2.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
+    if (ev.onBoxes) look2.push({ id: "underline", label: "Underline warnings and errors", help: "A wavy line under what each one is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     const problems = KINDS.map(([k, name]) => ({
       id: `kind-${k}`,
       label: name,
@@ -5569,7 +5569,7 @@ var Panel = class {
     return [
       { title: "Preview", rows: preview },
       { title: "Appearance", rows: look2 },
-      { title: "Problems", rows: problems },
+      { title: "Warnings/Errors", rows: problems },
       { title: "Build", rows: build2 },
       { title: "Packages", rows: [] },
       { title: "Updates and tips", rows: tips }
