@@ -222,6 +222,17 @@ impl Layout {
         }
     }
 
+    /// The files pdfTeX reads as fonts are first used, each by the page
+    /// being written (0 the first): the font map (`None`), then each
+    /// encoding file; none for a file another writer made.
+    #[must_use]
+    pub fn font_reads(&self) -> Vec<(i64, Option<Vec<u8>>)> {
+        match &self.tail {
+            End::Tail(t) => t.st.font_reads.clone(),
+            End::Linked(_) => Vec::new(),
+        }
+    }
+
     /// The font files the file embeds, in the order written, each with
     /// whether a subset of it is (pdfTeX's `<NAME>`, else `<<NAME>>`);
     /// none for a file another writer made.

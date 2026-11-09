@@ -554,8 +554,10 @@ pub(crate) struct TermParts<'a> {
     pub end: &'a str,
     /// The log's name, as `Transcript written on` says it.
     pub log_name: &'a str,
-    /// pdfTeX's font map, read at the first page shipped (`{PATH}`).
-    pub map: Option<String>,
+    /// What pdfTeX reads as fonts are first used, each by the page
+    /// (0 the first) whose shipping reads it: the font map, an encoding
+    /// file (`{PATH}`, said before the page's `]`).
+    pub reads: Vec<(i64, String)>,
     /// The font files embedded, as pdfTeX says them when it writes them
     /// at the end (`<PATH>`, a whole one's `<<PATH>>`), one after another.
     pub fonts: String,
@@ -565,8 +567,8 @@ pub(crate) struct TermParts<'a> {
 /// (`nonstop_mode`, `scroll_mode`): the head, the events laid out on the
 /// log and the terminal at once (a line's start on either depends on
 /// both columns: `print_nl`, `\message`, a file's open, a page shipped;
-/// the log's alone not on the terminal), the font map at the first
-/// page's end, ` )`, `(see the transcript file for additional
+/// the log's alone not on the terminal), the font map and encoding files
+/// in the page where a font first needs them, ` )`, `(see the transcript file for additional
 /// information)` when the job's history is not spotless (§1335: an error,
 /// or a diagnostic the terminal did not show), the font files, the end,
 /// then `Transcript written on LOG.` (§1333).
@@ -580,7 +582,7 @@ pub(crate) fn terminal(
     let mut log = Log::with_terminal();
     log.raw('(');
     log.print(name, -1);
-    let mut map = t.map.clone();
+    let mut page = 0i64;
     let mut spotless = true;
     for x in events.map(|e| v.seq_to_vec(e)).unwrap_or_default() {
         let (kind, text, nl, _) = event_parts(v, x, name, dline);
@@ -595,10 +597,11 @@ pub(crate) fn terminal(
         {
             spotless = false;
         }
-        if bare == "shipend"
-            && let Some(m) = map.take()
-        {
-            log.print(&format!("{{{m}}}"), -1);
+        if bare == "shipend" {
+            for (_, r) in t.reads.iter().filter(|(p, _)| *p == page) {
+                log.print(&format!("{{{r}}}"), -1);
+            }
+            page += 1;
         }
         log.event(&kind, &text, nl);
     }

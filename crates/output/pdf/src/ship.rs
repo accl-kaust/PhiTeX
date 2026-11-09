@@ -335,6 +335,31 @@ impl PdfState {
             .is_some_and(|g| g[32].as_deref() == Some(b"space"))
     }
 
+    /// What pdfTeX reads, and says, as font `f` is first used: the font
+    /// map at the first font (`fm_read_info`), the encoding file of a
+    /// reencoded one the first time it is named (`load_enc_file`), each
+    /// by the page being written ([`PdfState::font_reads`]).
+    fn said_reads(&mut self, f: FontId) {
+        let page = self.total_pages;
+        if self.font_reads.is_empty() {
+            self.font_reads.push((page, None));
+        }
+        let enc = self
+            .font(f)
+            .map
+            .as_ref()
+            .filter(|m| m.is_reencoded())
+            .and_then(|m| m.encname.clone());
+        if let Some(e) = enc
+            && !self
+                .font_reads
+                .iter()
+                .any(|(_, n)| n.as_deref() == Some(&e[..]))
+        {
+            self.font_reads.push((page, Some(e)));
+        }
+    }
+
     /// `pdf_init_font`.
     pub(crate) fn init_font(&mut self, f: FontId, src: &dyn FontSource) {
         self.rec_font(crate::replay::FontEv::Init(f));
@@ -344,6 +369,7 @@ impl PdfState {
     }
 
     fn init_font_(&mut self, f: FontId, src: &dyn FontSource) {
+        self.said_reads(f);
         let x = self.font(f).expand.filter(|x| x.auto && x.base != 0);
         if let Some(x) = x {
             self.load_font(x.base, src);
