@@ -872,7 +872,12 @@ export class Viewer {
    */
   private ask(k: number): void {
     const s = this.slots[k];
-    if (!s) return;
+    // (a page the build has not shipped (no hash: a streamed page after it
+    // came first) has nothing to draw: asked, it failed, and was asked again
+    // at every zoom's frame, each a turn of the core's mid-build, ahead of
+    // the pages it can draw (the TikZ manual zoomed while streaming: 62 of
+    // 94 asks failed). Asked once its hash comes (shipped, layout))
+    if (!s || !s.hash) return;
     const key = `${k}:${s.hash}`;
     if (this.asked.has(key)) return;
     this.asked.add(key);
