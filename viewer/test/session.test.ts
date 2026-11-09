@@ -250,6 +250,7 @@ test("a core that outgrew its memory is said, not reopened", async () => {
   await w.core.request({ op: "status" });
   await w.chain;
   assert.deepEqual(ops, ["status"], "no reopen");
-  assert.deepEqual(said, [why]);
+  // (the host's "core trapped (…):" tag detects it, and is not said)
+  assert.deepEqual(said, [why.replace(/^core trapped \([^)]*\): /, "")]);
   assert.equal(w.opened, false);
 });
