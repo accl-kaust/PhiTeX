@@ -35,7 +35,7 @@
 //! only a split of sequential work: the output is the same wherever the
 //! cuts are, and none at all (`cut_min` = `u64::MAX`).
 //!
-//! `PHITEX_CUT_CHECK=1` (observe): a continuation, once loaded, is
+//! `PHITEX_CUT_CHECK=1`: a continuation, once loaded, is
 //! encoded again and compared with the one it was given; a difference
 //! is printed (`cut check: ... DIFFERENT`): the state did not go across
 //! the cut whole.
@@ -211,9 +211,9 @@ impl Run<'_, '_> {
     }
 }
 
-/// Whether `PHITEX_CUT_CHECK` is set (`observe`).
+/// Whether `PHITEX_CUT_CHECK` is set (any build: the tests' check).
 pub(crate) fn check() -> bool {
-    crate::exec::obs_flag!("PHITEX_CUT_CHECK")
+    crate::exec::env_flag!("PHITEX_CUT_CHECK")
 }
 
 /// A nest level's `mode_line` as a value ([`line_mark_of`]).

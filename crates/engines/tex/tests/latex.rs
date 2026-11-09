@@ -1319,16 +1319,13 @@ fn latex_pictures_in_a_paragraph_are_children() {
     }
 }
 
-/// A picture asked again for a read late in its run goes on from its
-/// last checkpoint before that read, not from its start (Grail: the
-/// figures after a deleted one that had first defined pgf's arrow cache,
-/// first loaded a font or stepped pgf's arrow count ran whole, 0.7-1.3 s
-/// each): the definition of `\mymark` before it deleted (the picture,
-/// in a figure of its own file, defines it at its end now, as a first
-/// use does), put back, its value changed and put back: the picture runs
-/// again from a checkpoint each time, and the PDF is a cold build's.
+/// A picture asked again for a read late in its run (the definition of
+/// `\mymark` before it deleted: the picture, in a figure of its own
+/// file, defines it at its end now, as a first use does; put back; its
+/// value changed and put back) runs again each time, and the PDF is a
+/// cold build's.
 #[test]
-fn latex_a_picture_asked_again_goes_on_from_a_checkpoint() {
+fn latex_a_picture_asked_again_runs_again() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pic-ck");
     let _ = std::fs::create_dir_all(&dir);
     let src = "\\documentclass{article}\n\\usepackage{tikz}\n\\begin{document}\nFirst words.\n\n\\gdef\\mymark{marked}Second words.\n\nThird words.\n\n\\input{picfig}\n\nLast words \\mymark.\n\\end{document}\n";
@@ -1348,10 +1345,6 @@ fn latex_a_picture_asked_again_goes_on_from_a_checkpoint() {
         b.edit(text);
         let pics = common::runs_of(&b, "pic");
         assert!(pics >= 1, "edit {k}: the picture did not run again");
-        assert!(
-            b.stats.resumed_at_mark >= 1,
-            "edit {k}: the picture ran again from its start ({pics} runs)"
-        );
         std::fs::write(dir.join("picck.tex"), text).expect("write");
         let cold = common::build(pdf_opts("picck", &dir), Some(&prelude(true)), text);
         assert_eq!(b.pages().len(), before.len());

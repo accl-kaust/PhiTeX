@@ -1851,6 +1851,11 @@ impl Run<'_, '_> {
                     }),
                     toks_value(v, &l.ag),
                     v.int(l.clang),
+                    // (the line and place the level began at, for the
+                    // reports that name them, §816: a cut inside a
+                    // paragraph, `crate::cut`)
+                    crate::cut::line_mark_value(v, l.mode_line),
+                    crate::cut::place_value(v, l.mode_place.as_ref()),
                 ])
             })
             .collect();
@@ -2205,6 +2210,10 @@ impl Run<'_, '_> {
             l.open_stamp = u(ys[15]);
             l.ag = toks_of(v, Some(ys[16]));
             l.clang = ys.get(17).map_or(0, |&x| int_of(v, x));
+            l.mode_line = ys
+                .get(18)
+                .and_then(|&x| crate::cut::line_mark_of(v, x));
+            l.mode_place = ys.get(19).and_then(|&x| crate::cut::place_of(v, x));
             self.nest.push(l);
         }
         self.conds = list_of(v, a(2))
