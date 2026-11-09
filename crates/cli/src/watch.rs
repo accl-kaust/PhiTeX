@@ -1993,7 +1993,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 Ok(e) => held.push_back(e),
                 Err(mpsc::TryRecvError::Empty) => {
                     let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
-                    match s.write_synctex() {
+                    // (written whole, a quit meanwhile taken after it: a
+                    // quit that dropped it left the last build's PDF beside
+                    // the SyncTeX file of the build before, a page's
+                    // records off)
+                    at_wait.store(true, Ordering::Relaxed);
+                    let w = s.write_synctex();
+                    at_wait.store(false, Ordering::Relaxed);
+                    match w {
                         Ok(Some((p, h))) => {
                             let p = p.canonicalize().unwrap_or_else(|_| root.join(&p));
                             mine.insert(p, h);
