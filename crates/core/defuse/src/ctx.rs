@@ -1842,7 +1842,7 @@ impl<'a> Ctx<'a> {
                 let now = crate::read::answer_in(
                     self.eng,
                     self.me,
-                    rd.kind(&self.eng.read_keys),
+                    &rd.kind(&self.eng.read_keys),
                     rd.path(&self.eng.read_keys),
                     &mut memo.fold,
                 );
@@ -1857,7 +1857,7 @@ impl<'a> Ctx<'a> {
                         .field()
                         .map(|f| v.render(f.0))
                         .unwrap_or_default(),
-                    rd.kind(&self.eng.read_keys),
+                    *rd.kind(&self.eng.read_keys),
                     show(rd.seen()),
                     show(now)
                 );
@@ -1904,7 +1904,7 @@ impl<'a> Ctx<'a> {
                 .map(|(i, r)| {
                     format!(
                         "#{i} {:?} {:?}",
-                        r.kind(&self.eng.read_keys),
+                        *r.kind(&self.eng.read_keys),
                         r.seen().map(|x| v.render(x))
                     )
                 })
@@ -1999,7 +1999,7 @@ impl<'a> Ctx<'a> {
         let mut i = 0;
         let log = &mut self.unread_log;
         self.product.reads.retain(|r| {
-            let keep = match r.kind(&self.eng.read_keys) {
+            let keep = match &*r.kind(&self.eng.read_keys) {
                 ReadKind::Field { f: g, .. }
                 | ReadKind::Env { f: g }
                 | ReadKind::Fold { f: g, .. }
@@ -2022,7 +2022,7 @@ impl<'a> Ctx<'a> {
     pub fn own_reads_hold(&self) -> bool {
         let mut memo = crate::read::FoldMemo::new();
         self.product.reads.iter().all(|rd| {
-            matches!(rd.kind(&self.eng.read_keys), ReadKind::Placed { .. } | ReadKind::Hole)
+            matches!(&*rd.kind(&self.eng.read_keys), ReadKind::Placed { .. } | ReadKind::Hole)
                 || (crate::read::holds(self.eng, self.me, rd, &mut memo)
                     && rd
                         .kind(&self.eng.read_keys)
@@ -2099,10 +2099,10 @@ impl<'a> Ctx<'a> {
             }
         }
         let moved = self.product.reads.iter().any(|rd| {
-            if matches!(rd.kind(&self.eng.read_keys), ReadKind::Following { .. }) {
+            if matches!(&*rd.kind(&self.eng.read_keys), ReadKind::Following { .. }) {
                 return false;
             }
-            if let ReadKind::Placed { i, guess } = rd.kind(&self.eng.read_keys) {
+            if let ReadKind::Placed { i, guess } = &*rd.kind(&self.eng.read_keys) {
                 return match outs.get(i).copied().flatten() {
                     Some(o) => read::apply_path(self.eng, Some(o), rd.path(&self.eng.read_keys)) != rd.seen(),
                     // (no child of that key has run: a guess holds until
@@ -2111,7 +2111,7 @@ impl<'a> Ctx<'a> {
                 };
             }
             if !scope_moved
-                && !matches!(rd.kind(&self.eng.read_keys), ReadKind::Next { .. })
+                && !matches!(&*rd.kind(&self.eng.read_keys), ReadKind::Next { .. })
                 && rd
                     .kind(&self.eng.read_keys)
                     .field()
