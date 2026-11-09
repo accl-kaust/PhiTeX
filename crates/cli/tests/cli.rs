@@ -5373,11 +5373,35 @@ fn watch_time_to_first_page() {
     let stdout = child.stdout.take().expect("its output");
     let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
     let mut seen = Vec::new();
+    if args.split_whitespace().any(|a| a == "--no-view") {
+        // (no viewer: the same run, timed to the same line)
+        until(&mut lines, "event", &"build".into(), &mut seen);
+        eprintln!(
+            "ttfp {main} {args}: built at {:.0} ms",
+            t0.elapsed().as_secs_f64() * 1e3
+        );
+        if let Some(mut i) = child.stdin.take() {
+            let _ = i.write_all(b"q\n");
+        }
+        let _ = child.wait();
+        return;
+    }
     let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
         .as_str()
         .expect("the viewer's url")
         .to_owned();
     let joined = t0.elapsed();
+    // (the build's own line on the output, written after its PDF: the
+    // end point `--no-view` is timed to as well)
+    let (tx, built) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for l in lines {
+            if serde_json::from_str::<serde_json::Value>(&l).is_ok_and(|v| v["event"] == "build") {
+                let _ = tx.send(t0.elapsed());
+                break;
+            }
+        }
+    });
     let mut viewer = Viewer::connect(&url);
     let (mut first, mut pages) = (None, 0usize);
     // (each page streamed: whether it was last told exact)
@@ -5414,6 +5438,13 @@ fn watch_time_to_first_page() {
             |(k, t)| format!("page {k} at {:.0} ms", t.as_secs_f64() * 1e3)
         ),
         settled.as_secs_f64() * 1e3
+    );
+    let built = built
+        .recv_timeout(Duration::from_secs(3600))
+        .expect("the build's line");
+    eprintln!(
+        "ttfp {main} {args}: built at {:.0} ms",
+        built.as_secs_f64() * 1e3
     );
     if let Some(mut i) = child.stdin.take() {
         let _ = i.write_all(b"q\n");
