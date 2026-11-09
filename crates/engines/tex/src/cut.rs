@@ -112,7 +112,14 @@ impl Run<'_, '_> {
                 "few commands",
             ),
             (self.stop_at.is_some(), "a second pass"),
-            (!self.input.levels.is_empty(), "input left"),
+            (
+                self.input.levels.iter().any(|l| match l.kind {
+                    crate::input::kind::TOKS => l.a < l.b,
+                    crate::input::kind::LINE => self.input.line(*l).has_more(),
+                    _ => true,
+                }),
+                "input left",
+            ),
             (
                 self.effect != phitex_defuse::Effect::None,
                 "the scope closed",
