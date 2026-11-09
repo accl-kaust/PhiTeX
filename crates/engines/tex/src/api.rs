@@ -38,6 +38,15 @@ pub type Finder = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 /// encoding of ENCFONTS's: two lookups, two keys.
 pub const FONT_KEY: &str = "\u{1}font:";
 
+/// pdfTeX's banner as its terminal's first line begins: `\pdftexbanner`
+/// without kpathsea's version.
+#[must_use]
+pub fn terminal_banner() -> &'static str {
+    crate::pdfout::BANNER
+        .split_once(" kpathsea version")
+        .map_or(crate::pdfout::BANNER, |(b, _)| b)
+}
+
 /// The key of the font side's lookup of file `name` ([`FONT_KEY`]).
 pub(crate) fn font_key(name: &str) -> String {
     format!("{FONT_KEY}{name}")
@@ -5065,6 +5074,9 @@ struct OutMemo {
     )>,
     pages: Option<(Option<ValueId>, Vec<u64>)>,
     log: crate::log::LayoutMemo,
+    /// The log's end the last output was made with (§642's line, or a
+    /// fatal error's), for [`Build::terminal`].
+    end: String,
     /// The files' texts ([`Build::files`]) by the `streams` value.
     #[allow(clippy::type_complexity)]
     files: Option<(Option<ValueId>, Arc<Vec<(String, String)>>)>,
@@ -8489,7 +8501,59 @@ impl Build {
             )
         };
         let log = memo.log.finish(&end);
+        memo.end = end;
         (dvi, log)
+    }
+
+    /// The terminal of a job run with it on (`nonstop_mode`,
+    /// `scroll_mode`), as pdfTeX prints it: `head` (the banner and what
+    /// is said before the log opens), the events less those the log
+    /// alone has (`\wlog`, and with `\tracingonline` not positive the
+    /// diagnostics, shown boxes and `\openout` lines), laid out at the
+    /// terminal's own columns, the end, `Transcript written on
+    /// LOG_NAME.` ([`crate::log::terminal`]).
+    #[must_use]
+    pub fn terminal(&self, head: &str, log_name: &str) -> String {
+        let _ = self.output_shared();
+        let v = self.g.eng.values();
+        let end = self.memo.locked().end.clone();
+        // (pdfTeX's files said by their paths, as kpathsea found them)
+        let path =
+            |n: &str| (self.opts.finder)(&font_key(n)).map_or_else(|| n.to_owned(), |(p, _)| p);
+        let files = self
+            .pdf_layout()
+            .map(|l| l.font_files())
+            .unwrap_or_default();
+        let fonts: String = files
+            .iter()
+            .map(|(n, subset)| {
+                let p = path(&String::from_utf8_lossy(n));
+                if *subset {
+                    format!("<{p}>")
+                } else {
+                    format!("<<{p}>>")
+                }
+            })
+            .collect();
+        let map = (!files.is_empty()).then(|| path("pdftex.map"));
+        crate::log::terminal(
+            v,
+            &self.opts.name,
+            self.g.eng.acc_value(self.unit, v.field("log")),
+            &|n| {
+                self.dlines
+                    .get(&n)
+                    .copied()
+                    .or_else(|| doc_file_line(&self.g.ops.docs, n))
+            },
+            &crate::log::TermParts {
+                head,
+                end: &end,
+                log_name,
+                map,
+                fonts,
+            },
+        )
     }
 
     /// A node by its raw id ([`Stats::reruns`]): its operation and

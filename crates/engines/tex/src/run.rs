@@ -5230,12 +5230,38 @@ impl<'c, 'a> Run<'c, 'a> {
         if marks.is_empty() {
             return self.log(kind, text);
         }
+        let kind = self.online_kind(kind)?;
         let v = self.v;
         let nl = i64::from(self.ipar(Par::newlinechar)?);
         let marks = v.list(marks.into_iter().map(|x| v.int(x)).collect());
-        let e = v.list(vec![v.str(kind), v.str(text), v.int(nl), marks]);
+        let e = v.list(vec![v.str(&kind), v.str(text), v.int(nl), marks]);
         self.contribute("log", v.seq_unit(e));
         Ok(())
+    }
+
+    /// An event's kind as the terminal needs it: what TeX prints between
+    /// `begin_diagnostic` and `end_diagnostic` (§245: a diagnostic, a
+    /// shown box, a box's report's display) and web2c's `\openout` line
+    /// go to the log alone unless `\tracingonline` is positive, which
+    /// the kind then says ([`crate::log::ONLINE`]); the log is laid out
+    /// the same either way.
+    fn online_kind(&mut self, kind: &str) -> R<String> {
+        const TRACING_ONLINE: i32 = 5292;
+        let gated = matches!(kind, "diag" | "box" | "openout")
+            || kind == crate::log::HREPORT
+            || kind == crate::log::VREPORT;
+        // (`\tracingonline`, by its primitive's code: `prims.rs`)
+        let online = if gated {
+            let l = self.quantity_loc(crate::val::cmd::ASSIGN_INT, TRACING_ONLINE);
+            self.int_loc(l)? > 0
+        } else {
+            false
+        };
+        Ok(if online {
+            format!("{kind}{}", crate::log::ONLINE)
+        } else {
+            kind.to_owned()
+        })
     }
 
     pub(crate) fn log(&mut self, kind: &str, text: &str) -> R<()> {
@@ -5332,10 +5358,11 @@ impl<'c, 'a> Run<'c, 'a> {
         if kind == "error" {
             self.error_count += 1;
         }
+        let stored = self.online_kind(kind)?;
         let nl = i64::from(self.ipar(Par::newlinechar)?);
         let e = self
             .v
-            .list(vec![self.v.str(kind), self.v.str(text), self.v.int(nl)]);
+            .list(vec![self.v.str(&stored), self.v.str(text), self.v.int(nl)]);
         let s = self.v.seq_unit(e);
         self.contribute("log", s);
         if kind == "error" || kind == "errmsg" {
@@ -5369,6 +5396,21 @@ impl<'c, 'a> Run<'c, 'a> {
         let one = self.v.int(1);
         self.contribute(LOG_ERRORS, one);
         // (§1298's `error`: the context, `help0`)
+        self.log_help0_context()
+    }
+
+    /// `\show`'s, `\showthe`'s, `\showtokens`' shown text, `> TEXT.`,
+    /// then §1298's `common_ending`: `error` with `help0`, its context
+    /// after it (the place of the command, as `\showbox`'s `OK` has).
+    pub(crate) fn log_shown(&mut self, text: &str) -> R<()> {
+        self.show_ended();
+        self.log("show", text)?;
+        self.log_help0_context()
+    }
+
+    /// An `error`'s context with no help lines (`help0`), after its
+    /// message.
+    fn log_help0_context(&mut self) -> R<()> {
         let mut marks = Vec::new();
         let tail = self.error_tail(&[], &mut marks)?;
         self.log_lines_any(crate::log::CONTEXT, &tail, marks)

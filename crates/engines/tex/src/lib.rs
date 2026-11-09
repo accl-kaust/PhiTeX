@@ -80,6 +80,7 @@ pub use api::{
     AnalysisStore, Build, ContentKey, Diagnostic, EditSender, FAIL_END, FONT_KEY, Finder, Hint,
     Mktex, Options, PageSettled, PkgrecSource, PreludeSource, RunReport as Report, Severity,
     Speculation, Stats, ToolFinder, ToolSearch, byte_ends, engine_id, file_stat_key, font_name,
+    terminal_banner,
 };
 pub use exec::{
     Progress, SpawnWorker, StreamHook, StreamedPage, cpus as exec_cpus, set_spawn_worker,

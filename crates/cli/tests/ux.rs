@@ -786,3 +786,59 @@ fn clean_without_texlive() {
         .expect("phitex runs");
     assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
 }
+
+/// `phitex --compat=pdflatex -interaction=nonstopmode` prints on standard
+/// output what pdflatex prints on its terminal, byte for byte: the head,
+/// the log's lines less those the log alone has (`\wlog`, the
+/// `\openout` lines, error help, diagnostics with `\tracingonline` not
+/// positive), the font map and files, `(see the transcript file ...)`,
+/// `Transcript written on doc.log.` (where TeX Live's pdflatex is here).
+#[test]
+fn compat_terminal_is_pdflatexs() {
+    if Command::new("pdflatex").arg("-version").output().is_err() {
+        eprintln!("no pdflatex here: skipped");
+        return;
+    }
+    let docs = [
+        ("plain", ARTICLE.to_owned()),
+        (
+            "warn",
+            "\\documentclass{article}\n\\begin{document}\nSee~\\ref{nowhere} and \\cite{nobody}.\n\\hbox to 1cm{overfull overfull overfull overfull}\n\\end{document}\n".to_owned(),
+        ),
+        (
+            "error",
+            "\\documentclass{article}\n\\begin{document}\nHello \\undefinedmacro{} world.\n\\end{document}\n".to_owned(),
+        ),
+        (
+            "tracing",
+            "\\documentclass{article}\n\\tracingonline=1\n\\begin{document}\n\\showbox0\n\\hbox to 1cm{overfull overfull overfull overfull}\nText \\showthe\\baselineskip.\n\\end{document}\n".to_owned(),
+        ),
+    ];
+    for (name, doc) in docs {
+        let dir = scratch(&format!("compat-term-{name}"));
+        let (tl, px) = (dir.join("tl"), dir.join("px"));
+        for d in [&tl, &px] {
+            std::fs::create_dir_all(d).expect("a folder");
+            std::fs::write(d.join("doc.tex"), &doc).expect("the document");
+        }
+        let theirs = Command::new("pdflatex")
+            .args(["-interaction=nonstopmode", "doc.tex"])
+            .current_dir(&tl)
+            .env("SOURCE_DATE_EPOCH", "0")
+            .env("FORCE_SOURCE_DATE", "1")
+            .stdin(Stdio::null())
+            .output()
+            .expect("pdflatex runs");
+        let ours = phitex(&px)
+            .args(["--compat=pdflatex", "-interaction=nonstopmode", "doc.tex"])
+            .stdin(Stdio::null())
+            .output()
+            .expect("phitex runs");
+        assert_eq!(
+            text(&ours.stdout),
+            text(&theirs.stdout),
+            "{name}: phitex's terminal (left) against pdflatex's (right)"
+        );
+        assert_eq!(ours.status.code(), theirs.status.code(), "{name}");
+    }
+}

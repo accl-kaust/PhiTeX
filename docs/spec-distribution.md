@@ -206,9 +206,12 @@ trees are not kpathsea's and are not read; with MiKTeX alone, use
 - **The user chooses** (the user, 2026-10-30): `update-check = true` or
   `false` in the *user's* `phitex.toml` (`~/.config/phitex/`), never a
   project's; `phitex config update-check on|off` writes it. Until it is
-  set, every build (after its result) and every watch (as it starts) says
-  one dim line: `update checks are not set: phitex config update-check on
-  (off: never ask again)`. No request is made until it is on
+  set, the first build (after its result) or watch (as it starts) of
+  each version, on a terminal, says one dim line: `Check daily for new
+  PhiTeX releases? phitex config update-check on (or off; this note shows
+  once per version)`; the version asked is kept in
+  `$XDG_STATE_HOME/phitex/update-asked`, so a later run of the same
+  version says nothing. No request is made until it is on
   (`crates/cli/src/upgrade.rs`).
 - **At most once a day**, in the background, never delaying a build: the
   fetch the run starts is what the next run reads. The result is kept in
