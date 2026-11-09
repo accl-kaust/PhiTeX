@@ -1114,7 +1114,8 @@ export class Panel {
   private async underline(diags: Diagnostic[]): Promise<void> {
     if (!this.ev.onBoxes) return;
     this.culpritDiags = diags;
-    if (!this.culpritsOn) return void (++this.culpritsSeq, (this.culpritsOf = ""), this.viewer.culprits([]), (this.$("#ctip").hidden = true));
+    // (off: nothing of them on the pages, neither the lines nor their marks beside the scrollbar)
+    if (!this.culpritsOn) return void (++this.culpritsSeq, (this.culpritsOf = ""), this.viewer.culprits([]), (this.$("#ctip").hidden = true), (this.problemMarks = []), this.drawScrollMarks());
     const want = diags
       .filter((d): d is Diagnostic & { problem: { severity: string; file: string; range: [number, number] } } => !!d.problem?.file && !!d.problem.range && d.problem.severity !== "note")
       .filter((d) => !this.hiddenKinds.has(kindOf(d)))
@@ -2376,7 +2377,7 @@ export class Panel {
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
       { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset. Random: a different one each time", kind: "select", options: [["random", "Random"], ...LOOKS.map((l): [string, string] => [l.id, l.name]), ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => (this.look = lookOf(l))) },
     );
-    if (ev.onBoxes) look.push({ id: "underline", label: "Underline warnings and errors", help: "A wavy line under what each one is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
+    if (ev.onBoxes) look.push({ id: "underline", label: "Show them on the PDF", help: "A wavy line under each one, and a mark beside the scrollbar", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     // (the problems' filters, the same as the buttons at the top of the problems list)
     const problems: SettingRow[] = KINDS.map(([k, name]) => ({
       id: `kind-${k}`,
