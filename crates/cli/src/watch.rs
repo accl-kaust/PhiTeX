@@ -7,7 +7,7 @@
 //! keys (`keys.rs`: `r` rebuilds, `o` opens the viewer, `p` shows the
 //! errors again, `w` the warnings, `s` how the build went, `h` lists
 //! them, `q` quits; a live tree of the build's phases while it runs) and a status line below
-//! what is printed; on a pipe, the same as lines (its end quits). Every
+//! what is printed; on a pipe, the same as lines (its end is no quit). Every
 //! message the terminal shows is the viewer's too (its console). With
 //! `--lsp`, standard input and output are an editor's language client's
 //! instead (`lsp.rs`): its buffers are asked as the viewer's are, its
@@ -478,7 +478,7 @@ impl Here {
 
 /// Standard input's keys (a terminal's, one at a time; escape sequences,
 /// the arrows', dropped) or lines, to `tx` (those not answered `here`);
-/// its end quits.
+/// a terminal's end quits, a pipe's or a file's does not.
 fn read_keys(tx: &mpsc::Sender<(Instant, Event)>, raw: bool, here: &Here) {
     if raw {
         let mut bytes = std::io::stdin().lock().bytes();
@@ -526,7 +526,13 @@ fn read_keys(tx: &mpsc::Sender<(Instant, Event)>, raw: bool, here: &Here) {
                 return;
             }
         }
+        // (standard input not a terminal, at its end: no more keys, not
+        // a quit. `phitex watch &`, nohup, a service or a Makefile has
+        // it at its end from the start; such a watch runs until a
+        // signal, as latexmk -pvc does)
+        return;
     }
+    // (a terminal's end: it hung up)
     let _ = tx.send((Instant::now(), Event::Key(Key::Quit)));
 }
 

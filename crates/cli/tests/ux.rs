@@ -396,3 +396,52 @@ fn watch_puts_the_terminal_back() {
         "the terminal after a SIGTERM:\n{after}"
     );
 }
+
+/// A watch whose standard input is at its end from the start (`phitex
+/// watch &`, nohup, a service) keeps watching: an edit is built after
+/// it, and it ends at a signal, not at the end of its input.
+#[test]
+fn watch_outlives_the_end_of_its_input() {
+    let dir = scratch("eof");
+    std::fs::write(dir.join("doc.tex"), TINY).expect("the document");
+    let mut child = phitex(&dir)
+        .args(["watch", "--json", "--no-view", "--ini", "--etex", "doc.tex"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("phitex watch runs");
+    let (tx, rx) = std::sync::mpsc::channel::<Value>();
+    let out = child.stdout.take().expect("its output");
+    std::thread::spawn(move || {
+        for l in BufReader::new(out).lines().map_while(Result::ok) {
+            if let Ok(v) = serde_json::from_str(&l) {
+                let _ = tx.send(v);
+            }
+        }
+    });
+    let build = |n: u64| {
+        let end = Instant::now() + Duration::from_secs(300);
+        loop {
+            let v = rx
+                .recv_timeout(end.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|e| panic!("no build {n}: {e}"));
+            if v["event"] == "build" && v["build"] == n {
+                return v;
+            }
+        }
+    };
+    build(1);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        child.try_wait().expect("the watch").is_none(),
+        "the watch quit at its input's end"
+    );
+    std::fs::write(dir.join("doc.tex"), TINY.replace("Hi", "Hello")).expect("an edit");
+    build(2);
+    Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("kill");
+    wait(&mut child, 60);
+}

@@ -3892,7 +3892,9 @@ fn watch_open_starts_only_the_users_viewer() {
         let _ = until(&mut lines, "build", &1.into(), &mut seen);
         // (a viewer started is not waited for)
         std::thread::sleep(Duration::from_millis(500));
-        drop(child.stdin.take());
+        if let Some(mut i) = child.stdin.take() {
+            let _ = i.write_all(b"q\n");
+        }
         let _ = child.wait();
         assert_eq!(dir.join("ran").exists(), runs, "{name}");
     }
