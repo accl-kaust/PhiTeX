@@ -4,12 +4,15 @@
 set -u
 T="cargo test -q --profile fastdev -p phitex-tex"
 t0=$(date +%s)
-$T --test edits --test latex --test cuts --test plain --test chain --test hints --no-run 2>&1 | tail -3
+$T --test edits --test latex --test cuts --test plain --test chain --test hints --test auxloop --test diagnostics --test page_steps --test inputs --no-run 2>&1 | tail -3
 echo "built in $(( $(date +%s) - t0 )) s"
 export PHITEX_CUT_CHECK=1
 run() { local n=$1; shift; ( $T "$@" > $r/t-$n.txt 2>&1; echo "EXIT $? $n" >> $r/t-$n.txt ) & }
 run edits --test edits -- --test-threads 8 ${EDITS_FILTER:-}
-run latex --test latex -- --test-threads 8 ${LATEX_FILTER:-paragraph environments picture rerun latex_input}
+run latex --test latex -- --test-threads 8 ${LATEX_FILTER:-}
+run auxloop --test auxloop -- --test-threads 8
+run diag --test diagnostics -- --test-threads 8
+run inputs --test inputs -- --test-threads 8
 run cuts --test cuts -- --test-threads 8
 run plain --test plain -- --test-threads 8
 run hints --test hints -- --test-threads 8
