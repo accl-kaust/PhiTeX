@@ -739,6 +739,11 @@ impl Session {
             .map(|(n, ..)| plain_name(n))
             .collect();
         drop(stamps);
+        // (a name not found: the host's lookup made again, not its last
+        // answer taken, a file the host has since given found)
+        for (n, ..) in self.inputs.iter().filter(|(_, found, _)| !found) {
+            self.host.look_again(n);
+        }
         self.changed.extend(stale);
     }
 
@@ -1940,7 +1945,30 @@ impl Session {
         let buffers = self.buffers.clone();
         let stamps = self.stamps.clone();
         Arc::new(move |name: &str| {
-            let p = host.locate_key(name)?;
+            let Some(p) = host.locate_key(name) else {
+                // (a file the host does not have, but the editor has a
+                // buffer of: a project's file all the same, one made in
+                // the editor and not given to the host or saved yet
+                // (Overleaf's new `late.tex`, its `set_file` the first
+                // word of it). Found by the name as kpathsea finds TeX's
+                // in the project's folder: with `.tex` first where the
+                // name has not that suffix. The font side's names are
+                // never an editor's.)
+                if phitex_tex::font_name(name).is_some() {
+                    return None;
+                }
+                let plain = plain_name(name);
+                let mut names = Vec::with_capacity(2);
+                if !plain.ends_with(".tex") {
+                    names.push(format!("{plain}.tex"));
+                }
+                names.push(plain);
+                let bufs = buffers.lock().unwrap_or_else(PoisonError::into_inner);
+                return names.into_iter().find_map(|n| {
+                    let t = bufs.iter().rev().find(|(b, _)| *b == n)?.1.as_ref()?;
+                    Some((format!("./{n}"), tex::bytes(t)))
+                });
+            };
             let shown = p.to_string_lossy().into_owned();
             let key = plain_name(&shown);
             let buffered = buffers
