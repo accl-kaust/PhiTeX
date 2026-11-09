@@ -22,29 +22,11 @@ const preambleOf = (t: string | undefined) => {
 const usesMinted = (t: string) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
 import { boxes, from, glyphNear, glyphs, lineAt, nearest, wordBytes, wordNear, type Glyph } from "./sync.ts";
 import { diagnose, type Diagnostic, type TexError } from "./diagnostics.ts";
+import { plainWhy } from "./words.ts";
 import { DELIVERED, isPackageFile, referenced, noPackages, type PackageSource, type PackageState } from "./packages.ts";
 import { asDiagnostic, type Problem } from "./problems.ts";
 import { latexmkFiles, latexmkNotes } from "./latexmkrc.ts";
 import type { Entry } from "./outline.ts";
-
-/**
- * A core's error as a person reads it: the hosts' "core trapped (…):" tag
- * (what the session tells a lost core by) dropped; a host's own sentence
- * kept, an engine's raw error said as a crash.
- */
-export function plainWhy(e: string): string {
-  const m = /^core trapped \([^)]*\):\s*([\s\S]*)$/.exec(e);
-  if (!m) return sentence(e);
-  const t = m[1].trim();
-  return /[.!?]$/.test(t) ? t : `The engine crashed (${t || "no reason given"}).`;
-}
-
-/** `s` as a sentence: its first letter capital, a full stop at its end. */
-export function sentence(s: string): string {
-  const t = s.trim();
-  if (!t) return t;
-  return t[0].toUpperCase() + t.slice(1) + (/[.!?…]$/.test(t) ? "" : ".");
-}
 
 /** The events Options.remote's host tells (WatchEvent), routed to onWatch. */
 const WATCH = new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);

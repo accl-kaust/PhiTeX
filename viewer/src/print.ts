@@ -336,11 +336,14 @@ header:active { cursor: grabbing; }
 .slot .peer-tag[data-file]:hover { background: hsl(var(--hue) 70% 34%); }
 
 /* strips over the pages: plain, in the host's colours */
-.strip { position: sticky; top: 0; z-index: 2; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
+/* (over the pages' scroll, not in it: in it, a strip went with the pages when they scrolled sideways) */
+.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.strips { position: absolute; top: 0; left: 0; right: 0; z-index: 2; pointer-events: none; }
+.strip { pointer-events: auto; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
   background: var(--ph-menu); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-warning)); }
-.stage.stale .banner, .approx.on { display: block; }
+.stage.stale ~ .strips .banner, .approx.on { display: block; }
 .gone { --sev: var(--ph-danger); font-weight: 600; }
-.stage.offline .gone { display: flex; align-items: baseline; gap: 8px; }
+.stage.offline ~ .strips .gone { display: flex; align-items: baseline; gap: 8px; }
 .gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; padding: 0 2px; }
 .offpill { display: none; position: absolute; top: 8px; right: 14px; z-index: 3; padding: 1px 8px; border-radius: var(--ph-pill); font-size: 12px;
   background: var(--ph-menu); color: var(--ph-danger); border: 1px solid var(--ph-border); pointer-events: none; }
