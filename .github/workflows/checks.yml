@@ -215,7 +215,8 @@ jobs:
           $t = $env:RUNNER_TEMP
           gh release download 0.12 -R jedisct1/minisign -p '*win64.zip' -D "$t\ms"
           Expand-Archive (Get-ChildItem "$t\ms" -Filter *.zip | Select-Object -First 1).FullName "$t\ms\x"
-          $ms = (Get-ChildItem "$t\ms\x" -Recurse -Filter minisign.exe | Select-Object -First 1).FullName
+          # (the zip holds a build per machine: this runner's, x86_64)
+          $ms = (Get-ChildItem "$t\ms\x" -Recurse -Filter minisign.exe | Where-Object { $_.FullName -match 'x86_64' } | Select-Object -First 1).FullName
           & $ms -G -W -p "$t\test.pub" -s "$t\test.key"
           if ($LASTEXITCODE -ne 0) { throw 'no test key' }
           $env:PHITEX_UPGRADE_TEST_KEY = (Get-Content "$t\test.pub")[1]
