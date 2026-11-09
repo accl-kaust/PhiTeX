@@ -541,7 +541,8 @@ header:active { cursor: grabbing; }
 /* Settings: the panel's own rows and the host's, one dialog in every host, a tab per group */
 .settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; }
 .settings > header { padding: 12px 14px 0; }
-.settings .stabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); overflow-x: auto; scrollbar-width: none; }
+/* (the tabs wrap onto a second line when they don't fit: scrolled sideways, with no scrollbar, the last ones were out of reach) */
+.settings .stabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); }
 .settings .stabs button { all: unset; cursor: pointer; white-space: nowrap; padding: 6px 8px 7px; font-size: 13px; color: var(--ph-fg2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
 .settings .stabs button:hover { color: var(--ph-fg); }
 .settings .stabs button[aria-selected="true"] { color: var(--ph-fg); font-weight: 600; border-bottom-color: var(--ph-accent); }
