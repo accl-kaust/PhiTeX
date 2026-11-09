@@ -2027,7 +2027,19 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     // the next try. The files' lock taken only to write it:
                     // the watcher's events reach the loop meanwhile)
                     let came: RefCell<Option<(Instant, Event)>> = RefCell::new(None);
+                    let gaps: RefCell<(Instant, Vec<(usize, Duration)>, usize)> =
+                        RefCell::new((Instant::now(), Vec::new(), 0));
                     let stop = || {
+                        {
+                            let mut g = gaps.borrow_mut();
+                            let d = g.0.elapsed();
+                            let n = g.2;
+                            if d >= Duration::from_millis(2) {
+                                g.1.push((n, d));
+                            }
+                            g.2 += 1;
+                            g.0 = Instant::now();
+                        }
                         if came.borrow().is_some() {
                             return true;
                         }
@@ -2047,10 +2059,13 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     if let Some(e) = came.into_inner() {
                         // (`PHITEX_TEX_TIME`: how long the event waited on it)
                         if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+                            let g = gaps.borrow();
                             eprintln!(
-                                "synctex: given up for an event after {:?}, the event waited {:?}",
+                                "synctex: given up for an event after {:?}, the event waited {:?}; {} checks, gaps of 2 ms or more {:?}",
                                 t0.elapsed(),
-                                e.0.elapsed()
+                                e.0.elapsed(),
+                                g.2,
+                                g.1
                             );
                         }
                         held.push_back(e);
