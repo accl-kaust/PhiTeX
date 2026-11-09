@@ -941,7 +941,7 @@ impl Run<'_, '_> {
     }
 
     /// The fields this finisher defined globally, for the resume after
-    /// it ([`Run::cont_load`]): a group-local value the resume carries
+    /// it ([`Run::cont_state`]): a group-local value the resume carries
     /// is replaced by a global definition even of an equal value.
     pub(crate) fn contribute_global_defs(&mut self) -> ValueId {
         let v = self.v;
@@ -951,7 +951,7 @@ impl Run<'_, '_> {
             .filter(|d| d.2 == Locality::Global)
             .map(|d| d.0.0)
             // (a text's box binding the routine used up replaces that
-            // binding as a global replaces a local, [`Run::cont_load`])
+            // binding as a global replaces a local, [`Run::cont_state`])
             .chain(self.fin_boxes.iter().map(|b| b.0.0))
             .collect();
         // (none given as nothing, as the declared guess says it,

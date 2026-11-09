@@ -102,7 +102,7 @@ jobs:
       - shell: bash
         run: |
           t="${{ matrix.target }}"
-          cargo build --release --locked -p phitex-cli ${t:+--target $t}
+          PHITEX_BUILT_BY=release cargo build --release --locked -p phitex-cli ${t:+--target $t}
       - if: runner.os != 'Windows'
         run: |
           t="${{ matrix.target }}"

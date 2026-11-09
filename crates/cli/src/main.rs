@@ -71,14 +71,33 @@ pub fn version() -> &'static str {
     }
 }
 
+/// Built from source rather than by release.yml or nightly.yml (they
+/// set `PHITEX_BUILT_BY` to `release` or `nightly`): such a build carries
+/// the version of the manifest it was built from, which names the
+/// release it leads to, not one it is. `phitex upgrade` offers it any
+/// release or nightly, and `--version` says it.
+pub fn source_build() -> bool {
+    option_env!("PHITEX_BUILT_BY").is_none()
+}
+
 #[cfg(all(feature = "jemalloc", not(any(target_family = "wasm", windows))))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-/// The exit status of any failure, as pdflatex's (web2c exits 0 or 1):
-/// TeX's errors, a usage, configuration or file error, PhiTeX's own
-/// failure. Which one it was is on standard error.
+/// The exit status of any failure under an engine's name (`pdflatex`,
+/// `--compat`) and of `bibtex`, `makeindex`, as web2c's: 1. The modern
+/// command line's statuses: 0 done, 1 the document has errors
+/// ([`EXIT_FAILED`] too), 2 PhiTeX could not start ([`EXIT_USAGE`]),
+/// 3 PhiTeX failed ([`EXIT_INTERNAL`]); `phitex --help-all` says so.
 pub const EXIT_FAILED: i32 = 1;
+
+/// `phitex`: a usage error (an unknown option, a missing argument), a
+/// setting that is wrong, a file that is not there, no TeX Live.
+pub const EXIT_USAGE: i32 = 2;
+
+/// `phitex`: PhiTeX itself failed (the engine stopped, a file it could
+/// not write, the network for `upgrade` and Shelf).
+pub const EXIT_INTERNAL: i32 = 3;
 
 /// When the process reached `main` (the cold build's timeline begins
 /// here, `PHITEX_TEX_TIME`).
@@ -98,8 +117,14 @@ fn main() {
         tools::makeindex_main(&args);
     }
     let env = std::env::var("PHITEX_COMPAT").ok();
-    match compat::select(&argv0, args, env.as_deref()) {
-        compat::Selection::Compat { progname, args } => compat::main(&progname, &args),
-        compat::Selection::Modern(args) => modern::main(&args),
-    }
+    // (a panic that ends the process puts the terminal back first, as
+    // every other way out does: `keys.rs`)
+    let run =
+        std::panic::catch_unwind(move || match compat::select(&argv0, args, env.as_deref()) {
+            compat::Selection::Compat { progname, args } => compat::main(&progname, &args),
+            compat::Selection::Modern(args) => modern::main(&args),
+        });
+    let Err(p) = run;
+    keys::restore();
+    std::panic::resume_unwind(p);
 }

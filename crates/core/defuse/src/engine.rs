@@ -105,6 +105,8 @@ pub struct Engine {
     pub(crate) monoids: Lock<Monoids>,
     pub(crate) env: Env,
     pub(crate) paths: Paths,
+    /// The reads' kinds and paths, interned ([`crate::node::ReadKeys`]).
+    pub(crate) read_keys: crate::node::ReadKeys,
     pub(crate) projections: Table<Projection>,
     /// The client's append for [`Rel::Append`] ([`Engine::set_append`]).
     append: std::sync::OnceLock<AppendFn>,
@@ -372,6 +374,7 @@ impl Engine {
                 provider: Lock::new(None),
             },
             paths,
+            read_keys: crate::node::ReadKeys::new(),
             projections,
             append: std::sync::OnceLock::new(),
             shapes: Lock::new(FxHashMap::default()),
@@ -1718,7 +1721,7 @@ impl Engine {
                     };
                     let moved = r.reads.iter().any(|rd| {
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            answer(self, node, &rd.kind, rd.path) != rd.seen
+                            answer(self, node, rd.kind(&self.read_keys), rd.path(&self.read_keys)) != rd.seen()
                         }))
                         .unwrap_or(true)
                     });
@@ -1823,10 +1826,10 @@ impl Engine {
                     keep(x);
                 }
                 for rd in &r.reads {
-                    if let Some(f) = rd.kind.field() {
+                    if let Some(f) = rd.kind(&self.read_keys).field() {
                         keep(f.0);
                     }
-                    rd.seen.into_iter().for_each(&mut *keep);
+                    rd.seen().into_iter().for_each(&mut *keep);
                 }
             }
             for (f, _, r) in n.bounded.lock().iter() {
@@ -1851,7 +1854,7 @@ impl Engine {
             }
             for (f, rs) in &inner.readers {
                 keep(f.0);
-                rs.iter().for_each(|r| r.seen.into_iter().for_each(&mut *keep));
+                rs.iter().for_each(|r| r.seen().into_iter().for_each(&mut *keep));
             }
             for (f, m) in &inner.contribs {
                 keep(f.0);
@@ -1963,7 +1966,7 @@ impl Engine {
             let mut inner = s.inner.write();
             inner.readers.retain(|_, rs| {
                 let n = rs.len();
-                rs.retain(|r| crate::segment::live(self, r.node, r.serial));
+                rs.retain(|r| crate::segment::live(self, r.node(), r.serial));
                 dropped += n - rs.len();
                 if rs.capacity() > 2 * rs.len() + 4 {
                     rs.shrink_to(rs.len());
@@ -1991,7 +1994,7 @@ impl Engine {
                 filed += rs.len();
                 standing += rs
                     .iter()
-                    .filter(|r| crate::segment::live(self, r.node, r.serial))
+                    .filter(|r| crate::segment::live(self, r.node(), r.serial))
                     .count();
             }
         }
@@ -2099,10 +2102,10 @@ impl Engine {
         let v = self.values();
         let mut out = String::new();
         for rd in &r.reads {
-            let now = answer(self, node, &rd.kind, rd.path);
+            let now = answer(self, node, rd.kind(&self.read_keys), rd.path(&self.read_keys));
             let show = |x: Option<ValueId>| x.map_or("none".to_owned(), |x| v.render(x));
             // (a field read: its name and the node whose definition reaches)
-            let site = match &rd.kind {
+            let site = match rd.kind(&self.read_keys) {
                 crate::node::ReadKind::Field {
                     f,
                     at: crate::node::Anchor::Me,
@@ -2117,11 +2120,11 @@ impl Engine {
             };
             out.push_str(&format!(
                 "{:?} path {} seen {} now {}{}{site}\n",
-                rd.kind,
-                rd.path.0,
-                show(rd.seen),
+                rd.kind(&self.read_keys),
+                rd.path(&self.read_keys).0,
+                show(rd.seen()),
                 show(now),
-                if now == rd.seen { "" } else { " STALE" }
+                if now == rd.seen() { "" } else { " STALE" }
             ));
         }
         out
@@ -2280,16 +2283,19 @@ impl Engine {
                     r.map_or_else(
                         || "none".to_owned(),
                         |r| {
-                            let f = r.kind.field().map_or(String::new(), |f| v.render(f.0));
+                            let f = r.kind(&self.read_keys).field().map_or(String::new(), |f| v.render(f.0));
                             let s = r
-                                .seen
+                                .seen()
                                 .map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(120).collect::<String>());
-                            format!("{f} {:?} seen {s}", r.kind)
+                            format!("{f} {:?} seen {s}", r.kind(&self.read_keys))
                         },
                     )
                 };
                 let k = (0..p.reads.len().max(rec.reads.len())).find(|&k| match (p.reads.get(k), rec.reads.get(k)) {
-                    (Some(a), Some(b)) => a.seen != b.seen || format!("{:?}", a.kind) != format!("{:?}", b.kind),
+                    (Some(a), Some(b)) => {
+                        a.seen() != b.seen()
+                            || format!("{:?}", a.kind(&self.read_keys)) != format!("{:?}", b.kind(&self.read_keys))
+                    }
                     _ => true,
                 });
                 if let Some(k) = k {
@@ -2303,29 +2309,30 @@ impl Engine {
                 }
                 // (as sets by kind: what only one of them read, or read
                 // otherwise)
-                let key = |r: &crate::node::ReadRec| format!("{:?}", r.kind);
-                let recd: FxHashMap<String, Option<ValueId>> = rec.reads.iter().map(|r| (key(r), r.seen)).collect();
+                let key = |r: &crate::node::ReadRec| format!("{:?}", r.kind(&self.read_keys));
+                let recd: FxHashMap<String, Option<ValueId>> = rec.reads.iter().map(|r| (key(r), r.seen())).collect();
                 let recr: FxHashMap<String, &crate::node::ReadRec> = rec.reads.iter().map(|r| (key(r), r)).collect();
-                let nowd: FxHashMap<String, Option<ValueId>> = p.reads.iter().map(|r| (key(r), r.seen)).collect();
+                let nowd: FxHashMap<String, Option<ValueId>> = p.reads.iter().map(|r| (key(r), r.seen())).collect();
                 for r in &p.reads {
                     match recd.get(&key(r)) {
                         None => why.push(format!("only now: {}", show(Some(r)))),
-                        Some(s) if *s != r.seen => why.push(format!(
+                        Some(s) if *s != r.seen() => why.push(format!(
                             "read otherwise: {} | answer {} filed {} epoch {} now-epoch {} | recorded {}",
                             show(Some(r)),
                             recr.get(&key(r)).map_or("?", |x| {
-                                let a = crate::read::answer(self, node, &x.kind, x.path);
-                                if a == r.seen {
+                                let a =
+                                    crate::read::answer(self, node, x.kind(&self.read_keys), x.path(&self.read_keys));
+                                if a == r.seen() {
                                     "as now"
-                                } else if a == x.seen {
+                                } else if a == x.seen() {
                                     "as recorded"
                                 } else {
                                     "neither"
                                 }
                             }),
-                            recr.get(&key(r)).is_some_and(|x| x.filed),
+                            recr.get(&key(r)).is_some_and(|x| x.filed()),
                             recr.get(&key(r)).map_or(0, |x| x.epoch),
-                            r.kind.field().map_or(0, |f| self.field_epoch(f)),
+                            r.kind(&self.read_keys).field().map_or(0, |f| self.field_epoch(f)),
                             s.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(120).collect())
                         )),
                         _ => {}
@@ -2423,9 +2430,9 @@ impl Engine {
                 continue;
             };
             for rd in &r.reads {
-                let now = answer(self, node, &rd.kind, rd.path);
-                if now != rd.seen {
-                    let site = match &rd.kind {
+                let now = answer(self, node, rd.kind(&self.read_keys), rd.path(&self.read_keys));
+                if now != rd.seen() {
+                    let site = match rd.kind(&self.read_keys) {
                         crate::node::ReadKind::Field {
                             f,
                             at: crate::node::Anchor::Me,
@@ -2462,15 +2469,15 @@ impl Engine {
                                 to.map_or("-".to_owned(), head)
                             )
                         }
-                        _ => rd.kind.field().map_or(String::new(), |f| format!(" (field {})", v.render(f.0))),
+                        _ => rd.kind(&self.read_keys).field().map_or(String::new(), |f| format!(" (field {})", v.render(f.0))),
                     };
                     out.push(format!(
                         "node {} ({}) read {:?} path {} saw {} but now {}{site}",
                         n.raw(),
                         self.op(node.op()).name(),
-                        rd.kind,
-                        rd.path.0,
-                        rd.seen.map_or("none".to_owned(), |x| v.render(x)),
+                        rd.kind(&self.read_keys),
+                        rd.path(&self.read_keys).0,
+                        rd.seen().map_or("none".to_owned(), |x| v.render(x)),
                         now.map_or("none".to_owned(), |x| v.render(x))
                     ));
                 }

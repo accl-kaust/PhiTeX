@@ -20,6 +20,9 @@ struct ColorStack {
     page_start: bool,
 }
 
+/// A color stack's page stack and current page value ([`Stacks::page_state`]).
+pub(crate) type StackState = (Vec<Option<Vec<u8>>>, Option<Vec<u8>>);
+
 /// The color stacks and the position and matrix stacks.
 #[derive(Clone, Default)]
 pub(crate) struct Stacks {
@@ -59,10 +62,6 @@ impl std::fmt::Debug for Stacks {
 fn nonempty(s: &[u8]) -> Option<Vec<u8>> {
     (!s.is_empty()).then(|| s.to_vec())
 }
-
-/// A color stack's page stack and its current page value
-/// ([`Stacks::page_state`]).
-pub(crate) type StackState = (Vec<Option<Vec<u8>>>, Option<Vec<u8>>);
 
 impl Stacks {
     /// `colstacks_first_init`.

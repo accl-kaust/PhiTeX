@@ -456,7 +456,9 @@ impl PdfState {
         let rec = self.rec.take().unwrap_or_default();
         let pre_p = Some(self.p.clone());
         let below = self.stacks.below;
-        let keeps_colors = r.is_ok() && self.stacks.page_state() == colors_before;
+        // (an error met on the way, an image or form a page written apart
+        // has not: the walk went on past it, its colours as they are)
+        let keeps_colors = self.stacks.page_state() == colors_before;
         let mut pr = PageRecord {
             pre,
             pre_bare,

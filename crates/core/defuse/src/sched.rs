@@ -1416,9 +1416,12 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
                                 .iter()
                                 .filter(|rd| !crate::read::holds(eng, node, rd, &mut memo))
                                 .map(|rd| {
-                                    let f = rd.kind.field().map_or_else(|| "-".to_owned(), |f| v.render(f.0));
+                                    let f = rd
+                                        .kind(&eng.read_keys)
+                                        .field()
+                                        .map_or_else(|| "-".to_owned(), |f| v.render(f.0));
                                     let seen = rd
-                                        .seen
+                                        .seen()
                                         .map_or_else(String::new, |x| v.render(x).chars().take(160).collect());
                                     format!("{f} (seen {seen})")
                                 })
@@ -2473,7 +2476,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             pool.shared
                 .panicked_roots
                 .lock()
-                .extend(reads.iter().filter_map(|r| r.seen));
+                .extend(reads.iter().filter_map(|r| r.seen()));
             w.log.lock().panicked.push((n, reads, op.name(), message));
             pool.shared.done_one();
             Ok(())

@@ -44,7 +44,7 @@ Change a word and only what it touches is rebuilt. A 60-page paper in ⟨~5 ms�
 <td width="33%" valign="top">
 <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/exact-dark.png"><img src="assets/readme/exact.png" alt="Exactly as {pdf,Xe}LaTeX" width="100%"></picture><br>
 <b>Exactly as {pdf,Xe}LaTeX</b><br>
-Byte for byte, cold or after a thousand edits. Nothing changes but the wait. <!-- TODO(claim): XeLaTeX across the corpus (last full sweep 2026-10-28: 83 of 131 identical; fixes since, no fresh sweep) · Phi -->
+Byte for byte, from a clean build or after a thousand edits. Nothing changes but the wait. <!-- TODO(claim): XeLaTeX across the corpus (last full sweep 2026-10-28: 83 of 131 identical; fixes since, no fresh sweep) · Phi -->
 </td>
 <td width="33%" valign="top">
 <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/editors-dark.png"><img src="assets/readme/editors.png" alt="Any editor, Overleaf included" width="100%"></picture><br>
@@ -97,7 +97,7 @@ phitex watch paper.tex
 rebuilds on every save. Double-click the page to jump to the source.
 
 <p align="center">
-  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/cli-dark.gif"><img src="assets/readme/cli.gif" alt="phitex watch in a terminal: a cold build, then an edit rebuilt, and the page live in the browser" width="100%"></picture>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/cli-dark.gif"><img src="assets/readme/cli.gif" alt="phitex watch in a terminal: a clean build, then an edit rebuilt, and the page live in the browser" width="100%"></picture>
   <!-- TODO(number): the CLI GIF's figures (assets/cli.html's CONFIG and LIVE) from a real run, then scripts/readme-gifs.sh cli -->
 </p>
 
@@ -174,7 +174,7 @@ commits, only the nodes that read a changed value rerun. Commits are
 partitioned by position range, with no global lock and no merge step, so
 the only serial work is TeX's true dependency chain. Line breaking, page
 breaking, the output routines and the PDF writer are layers on that graph,
-and a cold build is an edit from nothing: one code path, compared byte for
+and a clean build is an edit from nothing: one code path, compared byte for
 byte with pdfTeX 1.40.29 at every thread count.
 
 ## Status

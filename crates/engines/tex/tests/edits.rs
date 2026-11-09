@@ -1063,25 +1063,60 @@ fn a_font_first_loaded_later_reruns_no_appender_between() {
     );
 }
 
-/// A long paragraph edited near its end: the first edit's run (from the
-/// start) takes checkpoints, the next ones go on from one; an edit at its
-/// start runs from the start (taking them again); each output is the
-/// cold build's of its text.
+/// The runs of the text's pieces and their continuations in the last
+/// evaluation.
+fn text_runs(b: &phitex_tex::Build) -> u64 {
+    common::runs_of(b, "exec") + common::runs_of(b, "resume")
+}
+
+/// Options whose runs are cut at the content-defined slice ends after
+/// a hundred commands (`crate::cut`): a test's small text is cut often.
+fn cutting(o: phitex_tex::Options) -> phitex_tex::Options {
+    phitex_tex::Options {
+        cut_min: Some(100),
+        ..o
+    }
+}
+
+/// A long paragraph over many lines is cut at its content-defined slice
+/// ends, each rest a continuation node: an edit near its end runs only
+/// the continuations from the one holding it on, not the paragraph from
+/// its start; an edit at its start runs every one again (the paragraph's
+/// list so far is in each); each output is the cold build's of its text,
+/// and a build that cuts nowhere makes the same output.
 #[test]
-fn an_edited_paragraph_goes_on_from_a_checkpoint() {
+fn an_edited_long_paragraph_runs_only_its_continuations_after_the_edit() {
     let fx = common::fixtures().join("plain");
     let prelude = common::plain();
-    let opts = || common::options("./long.tex", "long", "", &fx);
+    let opts = || cutting(common::options("./long.tex", "long", "", &fx));
     // (each word followed by a command: commands, as a real paragraph's
-    // citations and acronyms make them)
+    // citations and acronyms make them; ten words a line)
     let words: Vec<String> = (0..700)
         .map(|k| format!("w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17))
         .collect();
-    let par = |ws: &[String]| format!("\\hsize=300pt\n{}\n\n\\bye\n", ws.join(" "));
+    let par = |ws: &[String]| {
+        let lines: Vec<String> = ws.chunks(10).map(|c| c.join(" ")).collect();
+        format!("\\hsize=300pt\n{}\n\n\\bye\n", lines.join("\n"))
+    };
     let mut ws = words.clone();
     let mut b = common::build(opts(), Some(&prelude), &par(&ws));
-    for (k, at, resumes) in [
-        (0, 650, false),
+    let cuts = b.stats.text_cuts;
+    assert!(cuts >= 2, "the paragraph was cut {cuts} times");
+    let uncut = common::build(
+        phitex_tex::Options {
+            cut_min: Some(u64::MAX),
+            ..opts()
+        },
+        Some(&prelude),
+        &par(&ws),
+    );
+    assert_eq!(uncut.stats.text_cuts, 0, "a build that cuts nowhere");
+    assert!(
+        common::first_difference(&b.output().0, &uncut.output().0).is_none(),
+        "the cut build's output is the uncut one's"
+    );
+    for (k, at, late) in [
+        (0, 650, true),
         (1, 680, true),
         (2, 3, false),
         (3, 690, true),
@@ -1095,27 +1130,27 @@ fn an_edited_paragraph_goes_on_from_a_checkpoint() {
             common::first_difference(&b.output().0, &cold.output().0).is_none(),
             "edit {k} at word {at}: the output is not the cold build's"
         );
-        assert_eq!(
-            b.stats.resumed_at_mark > 0,
-            resumes,
-            "edit {k} at word {at}: {} runs went on from a checkpoint",
-            b.stats.resumed_at_mark
-        );
+        if late {
+            assert!(
+                text_runs(&b) < cuts,
+                "edit {k} at word {at}: {} text runs, the paragraph's {cuts} cuts",
+                text_runs(&b)
+            );
+        }
     }
 }
 
 /// A long paragraph over many lines edited near its end, an overfull
-/// line after the edit: the edit's run goes on from its last run's last
-/// checkpoint before the edit, and its log (the overfull box's report of
-/// the lines the paragraph began and ended on) and output are a cold
-/// build's. The report named the checkpoint's line as the paragraph's
-/// first: the nest's lines were not in a checkpoint.
+/// line after the edit: the edit runs the continuation holding it, and
+/// its log (the overfull box's report of the lines the paragraph began
+/// and ended on) and output are a cold build's: the nest's lines go
+/// across a cut with the paragraph (`Run::cont_encode`).
 #[test]
-fn an_edit_resumed_paragraph_reports_the_lines_it_began_on() {
+fn a_cut_paragraph_reports_the_lines_it_began_on() {
     use std::fmt::Write as _;
     let fx = common::fixtures().join("plain");
     let prelude = common::plain();
-    let opts = || common::options("./lines.tex", "lines", "", &fx);
+    let opts = || cutting(common::options("./lines.tex", "lines", "", &fx));
     let doc = |w: &str| {
         let mut s = String::from("\\hsize=300pt\nSet.\n\n");
         for k in 0..700 {
@@ -1145,25 +1180,27 @@ fn an_edit_resumed_paragraph_reports_the_lines_it_began_on() {
             "edit {k}: the overfull box names the paragraph's lines: {}",
             common::log_excerpt(&log)
         );
-        // (every exec run takes checkpoints, the cold build's too: every
-        // edit goes on from one, its log the cold build's)
+        // (the paragraph is cut, the cold build's too: the continuation
+        // the edit runs reports the paragraph's first line, carried)
         assert!(
-            b.stats.resumed_at_mark > 0,
-            "edit {k}: went on from a checkpoint"
+            cold.stats.text_cuts > 0 && text_runs(&b) < cold.stats.text_cuts,
+            "edit {k}: {} text runs, {} cuts",
+            text_runs(&b),
+            cold.stats.text_cuts
         );
     }
 }
 
-/// A paragraph resumed after an edit rests on the reads its last run
-/// made before the checkpoint: a register set before the paragraph and
-/// used at its start, set again, asks it again, and the output is a cold
-/// build's; edits after that go on from checkpoints again.
+/// A cut paragraph's first part rests on its reads: a register set
+/// before the paragraph and used at its start, set again, runs it again,
+/// and its continuations where what they carry changed; the output is a
+/// cold build's.
 #[test]
-fn an_edit_resumed_paragraph_is_asked_again_for_a_read_before_its_checkpoint() {
+fn a_cut_paragraph_is_asked_again_for_a_read_at_its_start() {
     use std::fmt::Write as _;
     let fx = common::fixtures().join("plain");
     let prelude = common::plain();
-    let opts = || common::options("./early.tex", "early", "", &fx);
+    let opts = || cutting(common::options("./early.tex", "early", "", &fx));
     let doc = |d: &str, w: &str| {
         let mut s = format!("\\hsize=300pt\n\\dimen5={d}\\relax Set.\n\n\\kern\\dimen5 ");
         for k in 0..700 {
@@ -1194,15 +1231,15 @@ fn an_edit_resumed_paragraph_is_asked_again_for_a_read_before_its_checkpoint() {
 }
 
 /// A long box whose run reads on into the paragraphs after its node
-/// (siblings pulled) and into a file `\input` inside it, a group of its
-/// own open throughout, reading a macro only at its end: an edit of that
-/// macro's definition before the box asks the box's run again, which
-/// goes on from its last checkpoint before the read (taken in the group,
-/// the box, the file and the pulled siblings), and the output is a cold
-/// build's. Checkpoints were taken only in a paragraph of a node's own
-/// text: Grail's figures ran again whole (accl 23178).
+/// and into a file `\input` inside it, a group of its own open
+/// throughout, reading a macro only at its end: the box is cut at slice
+/// ends (in the group and the box, its lists carried), and an edit of
+/// that macro's definition before it runs the last continuation, not the
+/// box from its start; the output and log are a cold build's.
 #[test]
-fn a_box_over_paragraphs_and_a_file_goes_on_from_a_checkpoint_inside() {
+// (the box opened by `\bgroup`, as an environment's is: a brace group
+// of the text is one slice, never cut, `hints::cdc_starts`)
+fn a_box_over_paragraphs_and_a_file_is_cut_inside() {
     use std::fmt::Write as _;
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-anywhere");
     let _ = std::fs::create_dir_all(&dir);
@@ -1218,14 +1255,16 @@ fn a_box_over_paragraphs_and_a_file_goes_on_from_a_checkpoint_inside() {
     let prelude = common::plain();
     let doc = |m: &str| {
         format!(
-            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{\\begingroup\\count1=7 {}\n\n{}\n\n\\input inner\n\n{}\n\nend \\late.\\endgroup}}\n\\box1\n\n\\bye\n",
+            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox\\bgroup \\begingroup\\count1=7 {}\n\n{}\n\n\\input inner\n\n{}\n\nend \\late.\\endgroup\\egroup\n\\box1\n\n\\bye\n",
             words(700, "w"),
             words(700, "v"),
             words(900, "u")
         )
     };
-    let opts = || common::options("./ck.tex", "ck", "", &dir);
+    let opts = || cutting(common::options("./ck.tex", "ck", "", &dir));
     let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+    let cuts = b.stats.text_cuts;
+    assert!(cuts >= 2, "the box was cut {cuts} times");
     for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
         let text = doc(m);
         b.edit(&text);
@@ -1238,24 +1277,22 @@ fn a_box_over_paragraphs_and_a_file_goes_on_from_a_checkpoint_inside() {
         );
         assert_eq!(log, cold_log, "edit {k}: the log is the cold build's");
         assert!(
-            b.stats.resumed_at_mark > 0,
-            "edit {k}: the box's run went on from a checkpoint"
+            text_runs(&b) < cuts,
+            "edit {k}: {} text runs, the box's {cuts} cuts",
+            text_runs(&b)
         );
     }
 }
 
-/// A run asked again for a read near its end goes on from a checkpoint
-/// taken inside a conditional of its own, open from near its start to
-/// past the read (`\ifnum ... \else ... \fi` around the box's material,
-/// in a group and a file too): the conditionals open there come back
-/// with the checkpoint, so the `\else` after the read skips to its `\fi`
-/// as in a whole run, and the output and log are a cold build's, at 1
-/// and 8 threads. Checkpoints were refused while a conditional of the
-/// run's own was open: Grail's figures (`TikZ`, inside its
-/// conditionals) went on from their first checkpoint only, 2 s of a
-/// \cite edit's figure rerun.
+/// A box cut inside a conditional of its own, open from near its start
+/// to past a read near its end (`\ifnum ... \else ... \fi` around the
+/// box's material, in a group and a file too): the conditionals go to
+/// the continuation, so the `\else` after the read skips to its `\fi` as
+/// in an uncut run; an edit of what the read reads runs a continuation,
+/// not the box from its start, and the output and log are a cold
+/// build's, at 1 and 8 threads.
 #[test]
-fn a_run_goes_on_from_a_checkpoint_inside_its_own_conditional() {
+fn a_run_is_cut_inside_its_own_conditional() {
     use std::fmt::Write as _;
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-in-if");
     let _ = std::fs::create_dir_all(&dir);
@@ -1271,7 +1308,7 @@ fn a_run_goes_on_from_a_checkpoint_inside_its_own_conditional() {
     let prelude = common::plain();
     let doc = |m: &str| {
         format!(
-            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{\\begingroup\\count1=7 \\ifnum\\count1=7 {}\n\n{}\n\n\\ifodd\\count1 \\input inner\n\n{}\n\nend \\late.\\else odd never\\fi\\else never\\fi\\endgroup}}\n\\box1\n\n\\bye\n",
+            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox\\bgroup \\begingroup\\count1=7 \\ifnum\\count1=7 {}\n\n{}\n\n\\ifodd\\count1 \\input inner\n\n{}\n\nend \\late.\\else odd never\\fi\\else never\\fi\\endgroup\\egroup\n\\box1\n\n\\bye\n",
             words(700, "w"),
             words(700, "v"),
             words(900, "u")
@@ -1280,9 +1317,11 @@ fn a_run_goes_on_from_a_checkpoint_inside_its_own_conditional() {
     for t in [1, 8] {
         let opts = || phitex_tex::Options {
             threads: Some(t),
-            ..common::options("./ck.tex", "ck", "", &dir)
+            ..cutting(common::options("./ck.tex", "ck", "", &dir))
         };
         let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        let cuts = b.stats.text_cuts;
+        assert!(cuts >= 1, "{t} threads: the box was cut {cuts} times");
         for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
             let text = doc(m);
             b.edit(&text);
@@ -1298,22 +1337,20 @@ fn a_run_goes_on_from_a_checkpoint_inside_its_own_conditional() {
                 "{t} threads, edit {k}: the log is the cold build's"
             );
             assert!(
-                b.stats.resumed_at_mark > 0,
-                "{t} threads, edit {k}: the box's run went on from a checkpoint inside its conditionals"
+                text_runs(&b) <= cuts + 2,
+                "{t} threads, edit {k}: {} text runs, the box's {cuts} cuts (the definition's node, the last continuation and the box's reader)",
+                text_runs(&b)
             );
         }
     }
 }
 
 /// A run asked again for a read in the last row of a long `\halign`
-/// goes on from a checkpoint taken inside the alignment (in its cells,
-/// with `align_state` and the alignments open carried, the templates on
-/// the input, the rows so far in the nest), and the output and log are a
-/// cold build's, at 1 and 8 threads. Checkpoints were refused while an
-/// alignment was open: Grail's floats (tables) went on from their start,
-/// 4 s of a \cite edit.
+/// (no cut inside an alignment: its templates are no text of the run's)
+/// runs again, and the output and log are a cold build's, at 1 and 8
+/// threads.
 #[test]
-fn a_run_goes_on_from_a_checkpoint_inside_an_alignment() {
+fn a_run_asked_again_inside_an_alignment() {
     use std::fmt::Write as _;
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-in-align");
     let _ = std::fs::create_dir_all(&dir);
@@ -1354,27 +1391,18 @@ fn a_run_goes_on_from_a_checkpoint_inside_an_alignment() {
                 log, cold_log,
                 "{t} threads, edit {k}: the log is the cold build's"
             );
-            assert!(
-                b.stats.resumed_at_mark > 0,
-                "{t} threads, edit {k}: the box's run went on from a checkpoint inside the alignment"
-            );
         }
     }
 }
 
 /// A macro that reads two job-written files back with much work between
-/// (on a few locations: a table that grows spaces checkpoints further)
 /// (LaTeX's `\document`: the `.aux`, the packages' hooks, then the
 /// `.out`), and at its end a macro an earlier node defines: an edit of
-/// that definition wakes the macro's run for its last read, and the run
-/// goes on from a checkpoint taken while the read-back's macro runs,
-/// with the read-back's state carried (its macro's level marked on the
-/// input, the values noted at the point), not from its start; the output and log are a
-/// cold build's, at 1 and 8 threads. Checkpoints were refused while a
-/// read-back's macro ran: Grail's heading edit ran `\begin{document}`'s
-/// node whole again for its `.out` (140 ms).
+/// that definition runs the macro's run again (one command: no cut
+/// inside it), and the output and log are a cold build's, at 1 and 8
+/// threads.
 #[test]
-fn a_run_goes_on_from_a_checkpoint_between_two_read_backs() {
+fn a_run_between_two_read_backs_asked_again() {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-read-back");
     let _ = std::fs::create_dir_all(&dir);
     let prelude = common::plain();
@@ -1403,21 +1431,16 @@ fn a_run_goes_on_from_a_checkpoint_between_two_read_backs() {
                 log, cold_log,
                 "{t} threads, edit {k}: the log is the cold build's"
             );
-            assert!(
-                b.stats.resumed_at_mark > 0,
-                "{t} threads, edit {k}: the macro's run went on from a checkpoint after the first read-back"
-            );
         }
     }
 }
 
-/// A run that made a child before the read it is asked again for (a page
-/// it shipped out: its PDF side) goes on from a checkpoint after the
-/// child, which it still places, and the output and log are a cold
-/// build's, at 1 and 8 threads. Checkpoints were refused once a run
-/// had a child pending: the rest of the run ran again whole.
+/// A run that made a child before a cut (a page it shipped out: its PDF
+/// side) places it as it ends at the cut; the read the box is asked
+/// again for, at its end, runs a continuation, not the box from its
+/// start, and the output and log are a cold build's, at 1 and 8 threads.
 #[test]
-fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
+fn a_run_is_cut_after_a_child_it_made() {
     use std::fmt::Write as _;
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-after-kid");
     let _ = std::fs::create_dir_all(&dir);
@@ -1437,7 +1460,7 @@ fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
     let prelude = common::plain();
     let doc = |m: &str| {
         format!(
-            "\\pdfoutput=1 \\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{{}\n\n\\shipout\\hbox{{early page}}\n\n{}\n\nend \\late.}}\n\\box1\n\n\\bye\n",
+            "\\pdfoutput=1 \\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox\\bgroup {}\n\n\\shipout\\hbox{{early page}}\n\n{}\n\nend \\late.\\egroup\n\\box1\n\n\\bye\n",
             words(300, "w"),
             words(1500, "v")
         )
@@ -1445,9 +1468,11 @@ fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
     for t in [1, 8] {
         let opts = || phitex_tex::Options {
             threads: Some(t),
-            ..common::options("./ck.tex", "ck", "", &dir)
+            ..cutting(common::options("./ck.tex", "ck", "", &dir))
         };
         let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        let cuts = b.stats.text_cuts;
+        assert!(cuts >= 2, "{t} threads: the box was cut {cuts} times");
         for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
             let text = doc(m);
             b.edit(&text);
@@ -1463,51 +1488,11 @@ fn a_run_goes_on_from_a_checkpoint_after_a_child_it_made() {
                 "{t} threads, edit {k}: the log is the cold build's"
             );
             assert!(
-                b.stats.resumed_at_mark > 0,
-                "{t} threads, edit {k}: the box's run went on from a checkpoint after the page it shipped"
+                text_runs(&b) < cuts,
+                "{t} threads, edit {k}: {} text runs, the box's {cuts} cuts",
+                text_runs(&b)
             );
         }
-    }
-}
-
-/// A run gone on from a checkpoint before its edit takes its later
-/// checkpoints doubling apart (`resume::ck_gap`): a later edit further on
-/// in the same paragraph, past those it took sparsely, still goes on from
-/// one, and the output is a cold build's.
-#[test]
-fn a_run_with_doubled_checkpoints_serves_a_later_edit_further_on() {
-    let fx = common::fixtures().join("plain");
-    let prelude = common::plain();
-    let opts = || common::options("./long.tex", "long", "", &fx);
-    let words: Vec<String> = (0..6000)
-        .map(|k| format!("w{}rd{}\\kern0pt\\penalty0", ["o", "a", "e"][k % 3], k % 17))
-        .collect();
-    let par = |ws: &[String]| format!("\\hsize=300pt\n{}\n\n\\bye\n", ws.join(" "));
-    let mut ws = words.clone();
-    let mut b = common::build(opts(), Some(&prelude), &par(&ws));
-    // (the first, dense, leaves checkpoints all along; the second goes on
-    // from one and takes those after it doubling; the rest are past them)
-    for (k, at, resumes) in [
-        (0, 5990, false),
-        (1, 2000, true),
-        (2, 4000, true),
-        (3, 5900, true),
-        (4, 5950, true),
-    ] {
-        ws[at] = format!("edit{k}\\kern0pt\\penalty0");
-        let text = par(&ws);
-        b.edit(&text);
-        let cold = common::build(opts(), Some(&prelude), &text);
-        assert!(
-            common::first_difference(&b.output().0, &cold.output().0).is_none(),
-            "edit {k} at word {at}: the output is not the cold build's"
-        );
-        assert_eq!(
-            b.stats.resumed_at_mark > 0,
-            resumes,
-            "edit {k} at word {at}: {} runs went on from a checkpoint",
-            b.stats.resumed_at_mark
-        );
     }
 }
 
@@ -1696,16 +1681,14 @@ fn a_file_the_run_opened_reads_nothing_before_it() {
     }
 }
 
-/// A paragraph that reads `\pagetotal` before its first checkpoint and
-/// again after it, the first read leaving no trace in its state. An edit
-/// on an earlier page moves the page start reaching it (not the items
-/// between the old start and the paragraph), so it runs again and reaches
-/// the checkpoint in the same state; the page start read before the
-/// checkpoint was answered again from the run's memo after it, so it was
-/// among neither the state compared nor the reads the cutoff checks: the
-/// cutoff kept the old run's `\the\pagetotal` (ribbonproofs' framed.sty).
+/// A paragraph that reads `\pagetotal` early and again after much work,
+/// the first read leaving no trace in its state. An edit on an earlier
+/// page moves the page start reaching it (not the items between the old
+/// start and the paragraph): it runs again and reads the new page start
+/// (ribbonproofs' framed.sty: a cutoff once kept the old run's
+/// `\the\pagetotal`).
 #[test]
-fn cutoff_sees_the_page_start_read_before_its_checkpoint() {
+fn a_rerun_sees_the_page_start_read_early() {
     use std::fmt::Write as _;
     let fx = common::fixtures().join("dvi");
     let mut src = String::from(
@@ -1728,14 +1711,11 @@ fn cutoff_sees_the_page_start_read_before_its_checkpoint() {
     assert!(d.is_none(), "edit differs from cold: {d:?}");
 }
 
-/// A long line with an overfull box before the run's checkpoint on it and
-/// a paragraph overfull after it, edited past the checkpoint: the run goes
-/// on from there, and its diagnostics hold what a cold build's do. A place
-/// held the whole line: the box's report made before the checkpoint and
-/// the paragraph's start held the line without the new word (Grail, under
-/// `PHITEX_RESUME_CHECK`). What a diagnostic shows comes from the text.
+/// A long line with an overfull box early on it and a paragraph overfull
+/// after it, edited near its end: the edit's diagnostics hold what a
+/// cold build's do. What a diagnostic shows comes from the text.
 #[test]
-fn a_run_gone_on_holds_the_places_of_a_cold_build() {
+fn an_edited_run_holds_the_places_of_a_cold_build() {
     let fx = common::fixtures().join("dvi");
     let src = "\\hsize=1in \\parindent=0pt\n\
          Reader \\setbox0\\hbox to 1pt{wide words} \\count1=0 \\loop\\advance\\count1 by 1 \
@@ -1746,10 +1726,6 @@ fn a_run_gone_on_holds_the_places_of_a_cold_build() {
     let mut b = common::build(opts(), Some(&prelude), &src);
     let text = src.replacen(". Tail", ". Tail typed", 1);
     b.edit(&text);
-    assert!(
-        b.stats.resumed_at_mark > 0,
-        "the edit went on from no checkpoint"
-    );
     let cold = common::build(opts(), Some(&prelude), &text);
     let (x, y) = (b.diagnostic_places(), cold.diagnostic_places());
     assert!(y.len() >= 2, "{y:?}");
@@ -1800,18 +1776,16 @@ fn a_gobbled_call_is_read_for_its_shape_only() {
 /// Pages fired inside a group of a piece's own (one command's text, as
 /// `\printindex`'s), and the piece read `\pagetotal` after them: the run
 /// ends at a candidate a page fired at in a second pass (`Halt::Recut`),
-/// which goes on from the first pass's last checkpoint before it, not
-/// from the piece's start (the first pass ran to there as the second
-/// does). The output and the value read are those of the same text
-/// outside the group, where the piece is cut at every candidate.
+/// from the piece's start again. The output and the value read are those
+/// of the same text outside the group, where the piece is cut at every
+/// candidate.
 #[test]
-fn a_second_pass_goes_on_from_the_first_pass_checkpoint() {
+fn a_second_pass_ends_at_the_page_read_after() {
     let fx = common::fixtures().join("plain");
     let prelude = common::plain();
     let opts = |name: &str| common::options(&format!("./{name}.tex"), name, "", &fx);
     // (lines as boxes on the main vertical list: a candidate after each,
-    // no paragraph to end at; a checkpoint every 600 commands, 50 a
-    // line, so some before the first page's candidate)
+    // no paragraph to end at)
     let words = (0..400).fold(String::new(), |mut s, k| {
         let _ = std::fmt::Write::write_fmt(
             &mut s,
@@ -1856,11 +1830,6 @@ fn a_second_pass_goes_on_from_the_first_pass_checkpoint() {
         read(&bl),
         read(&pl),
         "\\pagetotal as the ungrouped text reads it"
-    );
-    assert!(
-        b.stats.resumed_at_mark > 0,
-        "the second pass went on from a checkpoint ({} runs did)",
-        b.stats.resumed_at_mark
     );
 }
 

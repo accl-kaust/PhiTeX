@@ -61,17 +61,21 @@ pub fn latest() -> Option<(String, String)> {
     entry(CHANGELOG, v2).map(|e| (v2.to_owned(), e.to_owned()))
 }
 
-/// `phitex news`: this version's entry, whole, its Markdown drawn for
+/// `phitex news` (`--json`: one `news` event): this version's entry, whole, its Markdown drawn for
 /// the terminal (colours when standard output is one, as [`Style`] says
 /// for standard error).
-pub fn print() {
+pub fn print(json: bool) {
     let v = crate::version();
-    let out = std::io::stdout().is_terminal();
-    let set = |k: &str| std::env::var_os(k).is_some_and(|x| !x.is_empty() && x != "0");
-    let st = Style {
-        color: set("CLICOLOR_FORCE") || (out && std::env::var_os("NO_COLOR").is_none()),
-        tty: out,
-    };
+    if json {
+        // (`--json`: the entry as it is written, Markdown, for a client
+        // to draw)
+        println!(
+            "{}",
+            serde_json::json!({"event": "news", "version": v, "markdown": entry(CHANGELOG, v)})
+        );
+        return;
+    }
+    let st = Style::stdout();
     let width = std::env::var("COLUMNS")
         .ok()
         .and_then(|c| c.parse::<usize>().ok())

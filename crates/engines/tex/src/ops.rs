@@ -157,13 +157,12 @@ pub(crate) fn run_node(
     // (a second pass from the start, ending at the candidate the first
     // asked for: deterministic, one at most, `Halt::Recut`)
     if let Err(Halt::Recut(k)) = res {
-        // (from the first pass's last checkpoint before that candidate,
-        // `Run::resume_recut`)
-        let cks = r.ck_taken();
+        // (from the start again: the first pass's state at the candidate
+        // is not kept, the runs are short, every content-defined cut a
+        // node's start, `crate::cut`)
         let cx = r.cx;
         r = Run::new(cx, o);
         r.stop_at = Some(k);
-        r.recut_cks = cks;
         // (a second pass to a candidate takes no marks)
         res = pass(&mut r, &mut body);
     }
@@ -263,7 +262,6 @@ pub(crate) fn run_node(
                 Err(Halt::Fatal) => "fatal",
                 Err(Halt::Cut) => "cut",
                 Err(Halt::Recut(_)) => "recut",
-                Err(Halt::Same) => "same",
             },
             r.cx.is_speculative(),
             crate::api::mem_mb()
@@ -280,7 +278,6 @@ pub(crate) fn run_node(
                 Err(Halt::Fatal) => "fatal".to_owned(),
                 Err(Halt::Cut) => "cut".to_owned(),
                 Err(Halt::Recut(k)) => format!("recut at {k}"),
-                Err(Halt::Same) => "same as the last run (cut off)".to_owned(),
             }
         );
     }
@@ -298,94 +295,6 @@ pub(crate) fn run_node(
                 return Err(s);
             }
             r.settle_lines();
-            // (`PHITEX_RESUME_CHECK=1`: a run that went on from a
-            // checkpoint run again from its start, the two products
-            // compared; the full run's stands)
-            if r.resumed_at.is_some() && crate::resume::check() {
-                let resumed = r.product_signature();
-                let at = r.resumed_at.unwrap_or(0);
-                let node = r.cx.node().raw();
-                let rck = r.resumed_ck;
-                let cx = r.cx;
-                cx.stash_reads();
-                let held = cx.stashed_hold();
-                cx.begin_again();
-                r = Run::new(cx, o);
-                r.no_resume = true;
-                let mut res = pass(&mut r, &mut body);
-                if let Some(ck) = rck {
-                    let made = crate::val::list_of(r.v, ck)
-                        .get(14)
-                        .and_then(|&x| usize::try_from(int_of(r.v, x)).ok())
-                        .unwrap_or(0);
-                    eprintln!(
-                        "resume check: node {node} checkpoint at {at}: {} | reads before it: {}",
-                        r.ck_compare(ck),
-                        r.cx.first_read_apart(made)
-                            .unwrap_or_else(|| "the same".to_owned())
-                    );
-                }
-                if let Err(Halt::Recut(k)) = res {
-                    let cx = r.cx;
-                    cx.begin_again();
-                    r = Run::new(cx, o);
-                    r.no_resume = true;
-                    r.stop_at = Some(k);
-                    res = pass(&mut r, &mut body);
-                }
-                if matches!(res, Ok(()) | Err(Halt::Cut)) {
-                    res = r.page_fold();
-                }
-                match res {
-                    Ok(()) | Err(Halt::Cut) => {}
-                    Err(Halt::Stop(s)) => return Err(s),
-                    Err(h) => {
-                        let how = match h {
-                            Halt::Starve => "starve",
-                            Halt::Hole => "hole",
-                            _ => "fatal",
-                        };
-                        eprintln!(
-                            "resume check: node {node} went on at command {at}: INCOMPLETE, the whole run met what is not there yet ({how})"
-                        );
-                        return Ok(r.stall(how, ValueId::UNIT));
-                    }
-                }
-                if r.cut.is_none() && r.close_cont.is_none() {
-                    r.end_open();
-                }
-                if let Err(Halt::Stop(s)) = r.prepare_publication() {
-                    return Err(s);
-                }
-                r.settle_lines();
-                let whole = r.product_signature();
-                // (at -j8 what the resumed run read may have moved while
-                // the two ran: then they may differ, and the commit
-                // refutes the run)
-                let moved = if held && r.cx.stashed_hold() {
-                    ""
-                } else {
-                    " (its reads moved meanwhile)"
-                };
-                if resumed == whole {
-                    eprintln!(
-                        "resume check: node {node} went on at command {at} of {}: same",
-                        r.cmds
-                    );
-                } else {
-                    eprintln!(
-                        "resume check: node {node} went on at command {at} of {}: DIFFERENT{moved} {}",
-                        r.cmds,
-                        crate::resume::first_difference(&resumed, &whole)
-                    );
-                    // (`PHITEX_RESUME_DUMP=<dir>`: both signatures whole)
-                    if let Some(d) = crate::exec::obs_str!("PHITEX_RESUME_DUMP") {
-                        let _ = std::fs::write(format!("{d}/{node}-{at}-resumed.txt"), &resumed);
-                        let _ = std::fs::write(format!("{d}/{node}-{at}-whole.txt"), &whole);
-                    }
-                }
-            }
-            r.ck_park();
             // (observe, `PHITEX_MARK_TRACE=1`: a finisher's or exec run's
             // outputs, to compare a run resumed at a mark with a full one)
             if crate::exec::obs_flag!("PHITEX_MARK_TRACE") {
@@ -433,9 +342,6 @@ pub(crate) fn run_node(
             Ok(x)
         }
         Err(Halt::Stop(s)) => Err(s),
-        // (the cutoff: the last run's products stand, its checkpoints
-        // parked with this run's, `crate::resume`)
-        Err(Halt::Same) => Ok(ValueId::UNIT),
         // (a second pass ends at its candidate, before the read that
         // asked for it)
         Err(Halt::Recut(k)) => unreachable!("a second pass passed its candidate {k}"),
@@ -662,13 +568,6 @@ impl Operation for Exec {
                     r.engine_diag(&format!("hint regime violated: {m}"));
                     crate::hints::count(r, 2);
                     r.hint_void = true;
-                }
-                // (an edited node's run: on from its last run's last
-                // checkpoint the edit left in place, `crate::resume`;
-                // checkpoints taken as it goes)
-                if !load {
-                    r.resume_edit()?;
-                    r.ck_begin();
                 }
             }
             // the whole slice runs here: a paragraph region to its end,

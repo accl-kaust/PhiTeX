@@ -45,11 +45,6 @@ pub(crate) enum Halt {
     /// (`Ctx::hole_before`), ending with nothing new said: its last
     /// run's products stand (`Ctx::keep_last_at_hole`).
     Hole,
-    /// The run reached a checkpoint of its last run in the state that
-    /// run had there, that run's reads after it holding: what that run
-    /// made stands, and the run ends (the cutoff, `crate::resume`,
-    /// `Ctx::goes_on_as_last`).
-    Same,
 }
 
 impl From<Stop> for Halt {
@@ -193,13 +188,12 @@ pub(crate) struct Ops {
     /// The profile units the page loop folded over all its runs
     /// (`crate::pages::Run::fold_unit`; `Stats::units_folded`).
     pub units_folded: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// Runs of an edited node that went on from a checkpoint of their
-    /// last run (`crate::resume`; `Stats::resumed_at_mark`).
-    pub resumed_edits: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    /// Runs that ended at a checkpoint of their last run reached in its
-    /// state, that run's products standing (`crate::resume`'s cutoff;
-    /// `Stats::cut_offs`).
-    pub cut_offs: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Runs that ended at their text's end with a continuation
+    /// (`crate::cut`; `Stats::text_cuts`).
+    pub text_cuts: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The commands a run does before it may be cut at its text's end
+    /// ([`crate::Options::cut_min`], `crate::cut`).
+    pub cut_min: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// The node whose run claimed the rest of the input at a fatal error
     /// ([`Run::fatal_hit`]), and the runs of text pieces after it begun
     /// since: none begins once it has, whatever had begun before (§93;
@@ -354,84 +348,6 @@ pub(crate) struct FileRest {
 }
 
 impl FileRest {
-    /// Whether two are the same file at the same place
-    /// ([`crate::input::Seg::same`]).
-    pub(crate) fn same(&self, o: &FileRest) -> bool {
-        (
-            self.id,
-            self.off,
-            self.name,
-            self.pos,
-            self.line,
-            self.sliceable,
-            self.cut,
-        ) == (o.id, o.off, o.name, o.pos, o.line, o.sliceable, o.cut)
-            && match (&self.units, &o.units) {
-                (None, None) => true,
-                (Some(a), Some(b)) => a[..] == b[..],
-                _ => false,
-            }
-    }
-
-    /// The file's rest exactly, as a value ([`FileRest::of_value`]): a
-    /// checkpoint's input levels and text (`crate::resume`). Its text
-    /// is the value `id` (read before the checkpoint, a read kept).
-    pub(crate) fn to_value(&self, v: &Values) -> ValueId {
-        let usz = |x: usize| v.int(i64::try_from(x).unwrap_or(i64::MAX));
-        let units = self.units.as_ref().map_or_else(
-            || v.list(Vec::new()),
-            |u| {
-                v.list(vec![
-                    v.list(
-                        u.iter()
-                            .map(|&(k, st)| v.list(vec![k, v.int(i64::from(st))]))
-                            .collect(),
-                    ),
-                ])
-            },
-        );
-        v.list(vec![
-            self.id,
-            usz(self.off),
-            self.name,
-            usz(self.pos),
-            v.int(i64::from(self.line)),
-            units,
-            v.int(i64::from(self.sliceable) | i64::from(self.loaded) << 1),
-            v.list(self.cut.into_iter().collect()),
-        ])
-    }
-
-    /// [`FileRest::to_value`]'s file.
-    pub(crate) fn of_value(v: &Values, x: ValueId) -> Option<FileRest> {
-        let [id, off, name, pos, line, units, flags, cut] = list_of(v, x)[..] else {
-            return None;
-        };
-        let units = list_of(v, units).first().map(|&l| {
-            list_of(v, l)
-                .iter()
-                .filter_map(|&e| match list_of(v, e)[..] {
-                    [k, st] => Some((k, int_of(v, st) != 0)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .into()
-        });
-        let f = int_of(v, flags);
-        Some(FileRest {
-            id,
-            text: v.get(id),
-            off: usize::try_from(int_of(v, off)).ok()?,
-            name,
-            pos: usize::try_from(int_of(v, pos)).ok()?,
-            line: u32::try_from(int_of(v, line)).ok()?,
-            units,
-            sliceable: f & 1 != 0,
-            cut: list_of(v, cut).first().copied(),
-            loaded: f & 2 != 0,
-        })
-    }
-
     pub(crate) fn new(v: &Values, id: ValueId, off: usize, name: ValueId) -> FileRest {
         // (a line ends at a carriage return alone too, as web2c's
         // `input_line` reads: a file with old Mac line ends, coursepaper.cls)
@@ -1170,7 +1086,7 @@ pub(crate) struct Run<'c, 'a> {
     /// from the text the client gave for them ([`Run::seed_written`]).
     pub seeded: Vec<Seeded>,
     /// Where each segment of a resumed piece's text was read
-    /// ([`Run::cont_load`], by its index in the text): a token level's
+    /// ([`Run::cont_state`], by its index in the text): a token level's
     /// file line, for `\inputlineno` ([`Run::file_line_here`]).
     pub cont_lines: Vec<Option<FileLine>>,
     /// A resume's continuation and claim guess, read from the field its
@@ -1271,24 +1187,6 @@ pub(crate) struct Run<'c, 'a> {
     pub(crate) rest_on_guess: bool,
     /// The piece of the page a page loop's rest began after.
     pub(crate) rest_begun_at: Option<phitex_defuse::NodeId>,
-    /// An edited node's run: its checkpoints ([`crate::resume`]).
-    pub(crate) ck: Option<Box<crate::resume::Checkpoints>>,
-    /// The run goes on from no checkpoint (a check's run from the start).
-    pub(crate) no_resume: bool,
-    /// The command count the run went on from a checkpoint at.
-    pub(crate) resumed_at: Option<u64>,
-    /// `PHITEX_RESUME_CHECK`: the checkpoint the run went on from, to
-    /// compare with the whole run's at the same command
-    /// ([`Run::ck_compare`]).
-    pub(crate) resumed_ck: Option<ValueId>,
-    /// The checkpoints of the node's last run on the same text (not an
-    /// edit's), to end at one reached in its state (the cutoff,
-    /// [`Run::ck_take`]).
-    pub(crate) last_cks: Option<Vec<ValueId>>,
-    /// `PHITEX_RESUME_CHECK`: the command a cutoff would have ended the
-    /// run at; the run goes on, and its products are compared with the
-    /// last run's.
-    pub(crate) would_cut: Option<(u64, usize)>,
     /// A halt raised on the token path ([`Run::raise`]), returned by the
     /// next `get_next` of the command in progress.
     pub(crate) halt: Option<Halt>,
@@ -1352,12 +1250,11 @@ pub(crate) struct Run<'c, 'a> {
     /// The page loop's keys for this run ([`crate::pages::LoopKeys`]).
     pub loop_keys: crate::pages::LoopKeys,
     pub cut: Option<u32>,
+    /// The cut is at the run's text's end, at no candidate
+    /// ([`Run::text_cut`]).
+    pub(crate) text_cut: bool,
     /// The candidate a second pass ends at ([`Halt::Recut`]).
     pub stop_at: Option<u32>,
-    /// A second pass's first pass's checkpoints, with the indices of those
-    /// it took itself and their counts of `unread`
-    /// (`Run::resume_recut`).
-    pub(crate) recut_cks: Option<crate::resume::RecutCks>,
     /// While a character run's lookahead expands (§1038): its list and
     /// its effect on the space factor so far, its nodes not on the list
     /// yet; the tail is its last character ([`Run::space_factor`],
@@ -1589,12 +1486,6 @@ impl<'c, 'a> Run<'c, 'a> {
             mprof: crate::exec::prof_flag!("PHITEX_MACRO_PROF").then(crate::FxHashMap::default),
             rest_on_guess: false,
             rest_begun_at: None,
-            ck: None,
-            no_resume: false,
-            resumed_at: None,
-            resumed_ck: None,
-            last_cks: None,
-            would_cut: None,
             halt: None,
             cand: 0,
             cand_marks: Vec::new(),
@@ -1613,8 +1504,8 @@ impl<'c, 'a> Run<'c, 'a> {
             ins_fold: None,
             loop_keys: crate::pages::LoopKeys::default(),
             cut: None,
+            text_cut: false,
             stop_at: None,
-            recut_cks: None,
             chars_live: None,
             chars_eff: i32::MIN,
             tool_cut: None,
@@ -6780,9 +6671,6 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.begin_command();
                 self.command()?;
                 self.mark.active = false;
-                if self.ck.is_some() {
-                    self.ck_maybe()?;
-                }
                 if self.claim_rest || self.closed_scope() {
                     return self.end_at_close();
                 }
@@ -6825,6 +6713,11 @@ impl<'c, 'a> Run<'c, 'a> {
                     self.effect,
                     self.st.sig().0
                 );
+            }
+            // (or ends here, its rest a continuation of its own, where the
+            // state is nameable and the cut pays, `crate::cut`)
+            if self.open_span() && !self.eof && self.text_cut() {
+                return Ok(());
             }
             if self.open_span() && !self.eof && self.pull()? {
                 continue;
@@ -7466,44 +7359,6 @@ impl<'c, 'a> Run<'c, 'a> {
                 self.effect
             );
         }
-        // (`PHITEX_RESUME_CHECK`: a run the cutoff would have ended made
-        // what its last run made, `crate::resume`)
-        if let Some((at, m)) = self.would_cut {
-            // (at -j8 what either run read after the point may have moved
-            // since: then they may differ, and the commit refutes this run)
-            let moved = if self.cx.last_reads_hold_from(m) && self.cx.own_reads_hold() {
-                ""
-            } else {
-                " (reads moved meanwhile)"
-            };
-            if moved.is_empty() && self.cx.same_as_last(out).is_err() {
-                let mine: Vec<Field> = self.publication().into_iter().map(|d| d.0).collect();
-                let last = self.cx.last_def_fields();
-                for f in mine
-                    .iter()
-                    .filter(|f| !last.contains(f))
-                    .chain(last.iter().filter(|f| !mine.contains(f)))
-                {
-                    let loc = self.loc_of(*f);
-                    eprintln!(
-                        "cutoff apart: node {} {}: state {} | {}",
-                        self.cx.node().raw(),
-                        crate::val::field_name(self.v, *f),
-                        self.st.debug_marks(loc),
-                        self.cx.reads_of(*f)
-                    );
-                }
-            }
-            eprintln!(
-                "cutoff check: node {} at command {at} of {}: {}",
-                self.cx.node().raw(),
-                self.cmds,
-                match self.cx.same_as_last(out) {
-                    Ok(()) => "same".to_owned(),
-                    Err(e) => format!("DIFFERENT{moved} {e}"),
-                }
-            );
-        }
         self.pic_out.unwrap_or(out)
     }
 
@@ -7999,7 +7854,7 @@ impl Run<'_, '_> {
             }
         }
         // (a resumed piece's: where the segment it reads now, the last it
-        // took up, was read, [`Run::cont_load`])
+        // took up, was read, [`Run::cont_state`])
         if let Some(&Some(c)) = self
             .input
             .text_at

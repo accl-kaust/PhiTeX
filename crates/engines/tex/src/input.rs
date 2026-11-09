@@ -393,83 +393,6 @@ pub(crate) const SKIP_BLANKS: u8 = 1;
 pub(crate) const NEW_LINE: u8 = 2;
 
 impl Line {
-    /// The line exactly, as a value ([`Line::of_value`]): a checkpoint's
-    /// input levels and text (`crate::resume`).
-    pub(crate) fn to_value(&self, v: &phitex_defuse::Values) -> phitex_defuse::ValueId {
-        let int = |x: i64| v.int(x);
-        // (a buffer of characters as a string; one holding a code no
-        // character has, as its codes)
-        let buf = match self
-            .buf
-            .iter()
-            .map(|&c| char::from_u32(c))
-            .collect::<Option<String>>()
-        {
-            Some(s) => v.str(&s),
-            None => v.list(self.buf.iter().map(|&c| int(i64::from(c))).collect()),
-        };
-        let usz = |x: usize| int(i64::try_from(x).unwrap_or(i64::MAX));
-        v.list(vec![
-            buf,
-            usz(self.loc),
-            int(i64::from(self.state)),
-            int(self.endch),
-            int(i64::from(self.starts)
-                | i64::from(self.ends) << 1
-                | i64::from(self.rescanned) << 2
-                | i64::from(self.chars) << 3),
-            v.list(
-                self.origin
-                    .map(|(n, at, u)| vec![n, usz(at), u])
-                    .unwrap_or_default(),
-            ),
-            int(i64::from(self.lineno)),
-            v.list(
-                self.owner
-                    .map(|(n, k)| vec![int(i64::from_ne_bytes(n.to_ne_bytes())), int(i64::from(k))])
-                    .unwrap_or_default(),
-            ),
-        ])
-    }
-
-    /// [`Line::to_value`]'s line.
-    pub(crate) fn of_value(v: &phitex_defuse::Values, x: phitex_defuse::ValueId) -> Option<Line> {
-        use crate::val::{int_of, list_of};
-        let [buf, loc, state, endch, flags, origin, lineno, owner] = list_of(v, x)[..] else {
-            return None;
-        };
-        let buf: Vec<u32> = match &*v.get(buf) {
-            phitex_defuse::Value::Str(s) => s.chars().map(u32::from).collect(),
-            _ => list_of(v, buf)
-                .iter()
-                .map(|&c| u32::try_from(int_of(v, c)).unwrap_or(0))
-                .collect(),
-        };
-        let f = int_of(v, flags);
-        Some(Line {
-            buf,
-            loc: usize::try_from(int_of(v, loc)).ok()?,
-            state: u8::try_from(int_of(v, state)).ok()?,
-            endch: int_of(v, endch),
-            starts: f & 1 != 0,
-            ends: f & 2 != 0,
-            rescanned: f & 4 != 0,
-            chars: f & 8 != 0,
-            origin: match list_of(v, origin)[..] {
-                [n, at, u] => Some((n, usize::try_from(int_of(v, at)).ok()?, u)),
-                _ => None,
-            },
-            lineno: u32::try_from(int_of(v, lineno)).ok()?,
-            owner: match list_of(v, owner)[..] {
-                [n, k] => Some((
-                    u64::from_ne_bytes(int_of(v, n).to_ne_bytes()),
-                    u32::try_from(int_of(v, k)).ok()?,
-                )),
-                _ => None,
-            },
-        })
-    }
-
     /// Whether characters are left, or the line's end is still to come.
     #[inline]
     pub(crate) fn has_more(&self) -> bool {
@@ -514,50 +437,6 @@ pub(crate) enum Seg {
     File(crate::run::FileRest),
 }
 
-impl Seg {
-    /// Whether two segments are the same text, read alike: an edited
-    /// node's last text against its new one ([`crate::resume`]).
-    pub(crate) fn same(&self, o: &Seg) -> bool {
-        match (self, o) {
-            (Seg::Line(a), Seg::Line(b)) => {
-                a.buf == b.buf
-                    && (
-                        a.loc,
-                        a.state,
-                        a.endch,
-                        a.starts,
-                        a.ends,
-                        a.lineno,
-                        a.rescanned,
-                        a.chars,
-                    ) == (
-                        b.loc,
-                        b.state,
-                        b.endch,
-                        b.starts,
-                        b.ends,
-                        b.lineno,
-                        b.rescanned,
-                        b.chars,
-                    )
-                    && a.origin == b.origin
-            }
-            (Seg::Toks(a), Seg::Toks(b)) => a == b,
-            (Seg::File(a), Seg::File(b)) => a.same(b),
-            _ => false,
-        }
-    }
-}
-
-/// A node's segments as a run's text holds them ([`Input::append_text`]
-/// on an empty text): a line segment continuing the one before joined to
-/// it.
-pub(crate) fn joined(segs: Vec<Seg>) -> Vec<Seg> {
-    let mut i = Input::new();
-    i.append_text(segs);
-    i.text
-}
-
 /// The input stack.
 #[derive(Default)]
 pub(crate) struct Input {
@@ -588,8 +467,7 @@ pub(crate) struct Input {
     pub compact_at: usize,
     /// The arena's identity: a token list level's range names the same
     /// tokens while it stays (the arena only grows until it is replaced,
-    /// by a compaction or another input); a checkpoint's encoding of it
-    /// is kept by this and the range (`crate::resume`).
+    /// by a compaction or another input).
     pub arena_id: u64,
     /// The levels as the command in progress found them, saved as they
     /// come on top ([`Input::snapshot`]).
@@ -759,16 +637,6 @@ impl Input {
             return true;
         }
         false
-    }
-
-    /// Pushes a token list as a checkpoint holds it (`crate::resume`):
-    /// all its tokens, `read` of them read, even when read to its end
-    /// (a level's place in the stack is kept).
-    pub(crate) fn push_toks_at(&mut self, toks: &[Tok], read: usize, ty: u8) {
-        let r = self.arena.alloc(toks);
-        let mut l = Level::toks(r, ty);
-        l.a = l.c + u32::try_from(read.min(toks.len())).unwrap_or(0);
-        self.levels.push(l);
     }
 
     /// Pushes a line on top.
