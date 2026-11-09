@@ -29,6 +29,13 @@ const PUBKEY: &str = include_str!("../../../ci/minisign.pub");
 /// The nightly's key (nightly.yml signs with it): a nightly is never
 /// checked against the release key, nor a release against this one.
 const NIGHTLY_PUBKEY: &str = include_str!("../../../ci/nightly.pub");
+/// CI's test of `phitex upgrade` (checks.yml's texlive job, on Windows): a
+/// copy of a release served from the runner (`BASE/latest.json`,
+/// `BASE/download/TAG/…`), signed with a key made there (its base64
+/// line). Compiled in only by that test's build: a release's and a
+/// nightly's set neither, and nothing at run time can.
+const TEST_BASE: Option<&str> = option_env!("PHITEX_UPGRADE_TEST_BASE");
+const TEST_KEY: Option<&str> = option_env!("PHITEX_UPGRADE_TEST_KEY");
 const NEWS: [&str; 2] = [
     "https://phitex.org/news.json",
     "https://phitex-org.pages.dev/news.json",
@@ -186,14 +193,15 @@ fn get(url: &str) -> Result<Vec<u8>, String> {
 struct Release {
     version: String,
     tag: String,
-    key: &'static str,
+    key: std::borrow::Cow<'static, str>,
 }
 
 /// The latest release (GitHub's `releases/latest`: the newest not marked
 /// a pre-release).
 fn latest() -> Result<Release, String> {
-    let b = get(&format!(
-        "https://api.github.com/repos/{REPO}/releases/latest"
+    let b = get(&TEST_BASE.map_or_else(
+        || format!("https://api.github.com/repos/{REPO}/releases/latest"),
+        |b| format!("{b}/latest.json"),
     ))?;
     let v: Value = serde_json::from_slice(&b).map_err(|e| format!("GitHub's answer: {e}"))?;
     let tag = v["tag_name"]
@@ -202,7 +210,9 @@ fn latest() -> Result<Release, String> {
     Ok(Release {
         version: tag.trim_start_matches('v').to_owned(),
         tag: tag.to_owned(),
-        key: PUBKEY,
+        key: TEST_KEY.map_or(std::borrow::Cow::Borrowed(PUBKEY), |k| {
+            std::borrow::Cow::Owned(format!("untrusted comment: test key\n{k}\n"))
+        }),
     })
 }
 
@@ -221,7 +231,7 @@ fn nightly() -> Result<Release, String> {
     Ok(Release {
         version: version.to_owned(),
         tag: "nightly".to_owned(),
-        key: NIGHTLY_PUBKEY,
+        key: std::borrow::Cow::Borrowed(NIGHTLY_PUBKEY),
     })
 }
 
@@ -281,11 +291,14 @@ fn untar<'a>(tar: &'a [u8], name: &str) -> Option<&'a [u8]> {
 /// Release `r`'s binary for this machine, verified: `SHA256SUMS` signed
 /// by its channel's key built in, the tarball's hash in it.
 fn fetch(r: &Release, asset: &str) -> Result<Vec<u8>, String> {
-    let base = format!("https://github.com/{REPO}/releases/download/{}", r.tag);
+    let base = TEST_BASE.map_or_else(
+        || format!("https://github.com/{REPO}/releases/download/{}", r.tag),
+        |b| format!("{b}/download/{}", r.tag),
+    );
     let sums = get(&format!("{base}/SHA256SUMS"))?;
     let sig = get(&format!("{base}/SHA256SUMS.minisig"))?;
     let pk =
-        minisign_verify::PublicKey::decode(r.key).map_err(|e| format!("the key built in: {e}"))?;
+        minisign_verify::PublicKey::decode(&r.key).map_err(|e| format!("the key built in: {e}"))?;
     let sig = minisign_verify::Signature::decode(&String::from_utf8_lossy(&sig))
         .map_err(|e| format!("SHA256SUMS.minisig: {e}"))?;
     pk.verify(&sums, &sig, false)

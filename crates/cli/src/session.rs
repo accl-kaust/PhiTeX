@@ -595,10 +595,53 @@ pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
     Some(k)
 }
 
-/// Windows: [`phitex_tex::file_stat_key`]'s fields alone (`std` has no
-/// change time there; NTFS moves the modification time, in 100 ns, at
-/// every write).
-#[cfg(not(unix))]
+/// Windows: [`phitex_tex::file_stat_key`]'s fields, then the change time
+/// as Unix's (NTFS's `ChangeTime`, `GetFileInformationByHandleEx`'s
+/// `FileBasicInfo`, in 100 ns: every write and every time set moves it).
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "the file's change time: Windows's API, which std does not give"
+)]
+pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx,
+    };
+    let f = std::fs::File::open(path).ok()?;
+    if !f.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut info = FILE_BASIC_INFO {
+        CreationTime: 0,
+        LastAccessTime: 0,
+        LastWriteTime: 0,
+        ChangeTime: 0,
+        FileAttributes: 0,
+    };
+    // SAFETY: `f`'s handle is open for the call; `info` is a
+    // FILE_BASIC_INFO of the size given.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            f.as_raw_handle(),
+            FileBasicInfo,
+            (&raw mut info).cast(),
+            u32::try_from(std::mem::size_of::<FILE_BASIC_INFO>()).ok()?,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    drop(f);
+    let mut k = phitex_tex::file_stat_key(&path.to_string_lossy());
+    if k.is_empty() {
+        return None;
+    }
+    k.extend(info.ChangeTime.to_le_bytes());
+    Some(k)
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
     if !std::fs::metadata(path).ok()?.is_file() {
         return None;
@@ -717,7 +760,6 @@ mod tests {
     /// A file rewritten to the same size with its modification time set
     /// back has another key: its change time moved (`r` reads it again).
     #[test]
-    #[cfg(unix)]
     fn a_rewrite_with_its_time_set_back_has_another_stamp() {
         let dir = std::env::temp_dir().join(format!("phitex-stamp-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);

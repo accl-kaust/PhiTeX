@@ -299,14 +299,15 @@ pub fn forget() {
     }
 }
 
-/// Whether the watch a discovery file names runs: its process (where the
-/// system lists them, `/proc`; Windows's `tasklist`) and its socket,
-/// which answers a connection.
+/// Whether the watch a discovery file names runs: its process (Unix's
+/// `kill(pid, 0)`, macOS's as Linux's; Windows's `tasklist`) and its
+/// socket, which answers a connection.
 pub fn alive(v: &Value) -> bool {
     let Some(pid) = v["pid"].as_u64() else {
         return false;
     };
-    if Path::new("/proc/self").exists() && !Path::new(&format!("/proc/{pid}")).exists() {
+    #[cfg(unix)]
+    if !unix_runs(pid) {
         return false;
     }
     #[cfg(windows)]
@@ -326,11 +327,38 @@ pub fn alive(v: &Value) -> bool {
     .is_ok()
 }
 
+/// Unix: whether process `pid` runs: `kill(pid, 0)` sends nothing and
+/// says whether it could (`EPERM`: it runs, another user's). A pid out
+/// of `pid_t`'s positive range names none (`-1` would mean every
+/// process).
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "kill(pid, 0): libc's, no safe wrapper in std or rustix's features here"
+)]
+fn unix_runs(pid: u64) -> bool {
+    let Ok(p) = libc::pid_t::try_from(pid) else {
+        return false;
+    };
+    if p <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 is no signal: kill only checks that `p` exists
+    // and may be signalled.
+    if unsafe { libc::kill(p, 0) } == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
 /// Windows: whether process `pid` runs, as `tasklist` lists it (its CSV
 /// names a process's id in quotes, in every language; none when the
 /// list could not be had).
 #[cfg(windows)]
 fn windows_runs(pid: u64) -> Option<bool> {
+    if u32::try_from(pid).is_err() {
+        return Some(false);
+    }
     let out = std::process::Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
         .stdin(std::process::Stdio::null())
@@ -494,10 +522,19 @@ mod tests {
         let live = live_in(&d);
         assert_eq!(live, [running]);
         assert!(d.join("1.json").exists());
-        if Path::new("/proc/self").exists() {
-            assert!(!d.join("2.json").exists(), "a dead process's file removed");
-        }
+        assert!(!d.join("2.json").exists(), "a dead process's file removed");
         assert!(!d.join("3.json").exists(), "a closed socket's file removed");
+        // (a process that ran and ended, its port another's: not live)
+        let mut child = std::process::Command::new(std::env::current_exe().expect("this test"))
+            .arg("--list")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("a process");
+        let ended = child.id();
+        child.wait().expect("it ends");
+        let v = json!({"pid": ended, "main": "/p/d.tex",
+            "lsp": {"host": "127.0.0.1", "port": port, "token": "t"}});
+        assert!(!alive(&v), "an ended process counted as running");
         let _ = std::fs::remove_dir_all(&d);
     }
 
