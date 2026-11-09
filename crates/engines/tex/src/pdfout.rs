@@ -2855,18 +2855,18 @@ pub(crate) fn page_alone(
             Whatsit::StartLink { objnum, attr, .. } => {
                 let n = objnum.cast_signed();
                 if is_rel(*objnum) {
-                    rels.push(n)
+                    rels.push(n);
                 } else {
-                    named.push(n)
+                    named.push(n);
                 }
                 refs_in(attr.as_deref().unwrap_or_default(), &mut named);
             }
             Whatsit::Annot { objnum, data, .. } => {
                 let n = objnum.cast_signed();
                 if is_rel(*objnum) {
-                    rels.push(n)
+                    rels.push(n);
                 } else {
-                    named.push(n)
+                    named.push(n);
                 }
                 refs_in(data, &mut named);
             }
