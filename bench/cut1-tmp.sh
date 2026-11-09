@@ -10,7 +10,7 @@ set -u
 B=${BENCH:-pgf ams para edits tikzedit}
 REPS=${REPS:-2}
 here=$PWD
-export SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1
+export SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1 PHITEX_TIME_LIMIT_SECS=0
 t0=$(date +%s)
 bins=()
 build() { # label dir features
