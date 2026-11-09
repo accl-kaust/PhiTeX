@@ -4,7 +4,7 @@ set -u
 export SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1
 ( cargo build -q --release -p phitex-cli > $r/build.txt 2>&1 ) || { echo BUILD FAILED; tail $r/build.txt; exit 1; }
 B=$PWD/target/release/phitex
-for v in plain PHITEX_SYNCTEX_FRESH PHITEX_ORIGINS_FRESH; do
+for v in PHITEX_SYNCTEX_NOW PHITEX_ORIGINS_FRESH; do
   rm -rf $w/pe $w/pe-cold $w/cold && mkdir -p $w/pe $w/cold && cp bench/para4000.tex $w/pe/
   python3 -I bench/cut1-paraedit.py $w/pe/para4000.tex 6 > $w/edits.json
   env $v=1 PHITEX_CACHE_DIR=$w/cache timeout 900 python3 -I bench/cut1-edits.py $B $w/pe para4000.tex 8 $w/edits.json $r/pe-$v.json --exact-pdf 2>&1 | grep verdict | sed "s|^|$v: |"

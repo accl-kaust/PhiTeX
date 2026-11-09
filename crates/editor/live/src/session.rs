@@ -2139,7 +2139,7 @@ impl Session {
         // (a watch's at idle, [`Session::write_synctex`]: the pages'
         // origins matched off the typing path)
         if self.job.synctex && self.build.is_some() {
-            if self.watching {
+            if self.watching && std::env::var_os("PHITEX_SYNCTEX_NOW").is_none() {
                 self.synctex_due
                     .store(true, std::sync::atomic::Ordering::Relaxed);
             } else if let Some(gz) = self.synctex_bytes() {
