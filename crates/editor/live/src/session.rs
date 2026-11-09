@@ -2153,7 +2153,7 @@ impl Session {
             if self.watching {
                 self.synctex_due
                     .store(true, std::sync::atomic::Ordering::Relaxed);
-            } else if let Some(Some(gz)) = self.synctex_bytes(&|| false) {
+            } else if let Some(Some(gz)) = self.synctex_bytes(&|_| false) {
                 put(&format!("{}.synctex.gz", self.job.jobname), &gz)?;
                 phitex_tex::timeline::lap("write: the SyncTeX file");
             }
@@ -2165,7 +2165,7 @@ impl Session {
     /// `JOB.synctex.gz`'s bytes for the build as it is now (none when
     /// unchanged since the last made).
     #[allow(clippy::option_option)]
-    fn synctex_bytes(&self, stop: &dyn Fn() -> bool) -> Option<Option<Vec<u8>>> {
+    fn synctex_bytes(&self, stop: &dyn Fn(bool) -> bool) -> Option<Option<Vec<u8>>> {
         let Some(b) = self.build.as_ref() else {
             return Some(None);
         };
@@ -2193,7 +2193,7 @@ impl Session {
     /// # Errors
     /// The sink's.
     pub fn write_synctex(&self) -> Result<Option<(PathBuf, u64)>, String> {
-        self.write_synctex_until(&|| false)
+        self.write_synctex_until(&|_| false)
     }
 
     /// [`Session::write_synctex`], given up between two pages once `stop`
@@ -2204,7 +2204,7 @@ impl Session {
     /// The sink's.
     pub fn write_synctex_until(
         &self,
-        stop: &dyn Fn() -> bool,
+        stop: &dyn Fn(bool) -> bool,
     ) -> Result<Option<(PathBuf, u64)>, String> {
         match self.synctex_made_until(stop) {
             Some(Some(gz)) => self.put_synctex(&gz).map(Some),
@@ -2217,7 +2217,7 @@ impl Session {
     /// (`None`: still due, the pages made so far kept for the next call;
     /// `Some(None)`: none due or none to write).
     #[allow(clippy::option_option)]
-    pub fn synctex_made_until(&self, stop: &dyn Fn() -> bool) -> Option<Option<Vec<u8>>> {
+    pub fn synctex_made_until(&self, stop: &dyn Fn(bool) -> bool) -> Option<Option<Vec<u8>>> {
         use std::sync::atomic::Ordering::Relaxed;
         if !self.synctex_due.load(Relaxed) {
             return Some(None);
