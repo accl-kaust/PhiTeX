@@ -217,10 +217,10 @@ struct Opts {
     /// With --ini: e-TeX's extended mode
     #[arg(long, global = true, hide_short_help = true)]
     etex: bool,
-    /// Threads (default: every core); the output is the same at any count
+    /// Threads (default: 1); the output is the same at any count
     ///
-    /// The engine's threads (default: PHITEX_THREADS, else every logical
-    /// CPU, hyperthreads included); the output is the same at any count
+    /// The engine's threads (default: PHITEX_THREADS, else 1); the output
+    /// is the same at any count
     #[arg(
         short = 'j',
         long = "jobs",

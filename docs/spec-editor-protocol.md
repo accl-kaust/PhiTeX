@@ -294,7 +294,7 @@ stays the viewer's `outline` op: it has pages, not source places.)
 ### 3.5 Settings (section `phitex`)
 
 ```
-{threads: n | null,                         // the engine's threads (null: every core)
+{threads: n | null,                         // the engine's threads (null: one)
  main: string | null,                       // the main file, from the root
  follow: "cursor" | "selection" | "dblclick",   // when the client sends phitex/cursor: the client's
  files: "texlive" | "shelf"}                // where TeX's files come from (§5)
