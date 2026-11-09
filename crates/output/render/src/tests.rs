@@ -957,9 +957,7 @@ fn missing_resources_never_fail_a_frame() {
     let pdf: Arc<[u8]> = Arc::from(bytes);
     let mut r = Renderer::new();
     let f = r.frame(&pdf, 0, 1.0).expect("the page drawn");
-    let Some(_) = f.bands.first() else {
-        panic!("the page drawn with no bands");
-    };
+    assert_ne!(f.bands.len(), 0, "no band drawn");
     let px = compose(&r, &f);
     let at = |x: usize, y: usize| {
         let i = (y * f.pw as usize + x) * 3;
