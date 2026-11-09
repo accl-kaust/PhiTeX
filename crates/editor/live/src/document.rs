@@ -318,7 +318,10 @@ impl Document {
             // step has had `SYNCTEX_SLICE`, the rest the next step's)
             let t = Instant::now();
             let viewer = &self.viewer;
-            let stop = || viewer.has_asks() || t.elapsed() >= SYNCTEX_SLICE;
+            // (an ask stops it anywhere, the slice only between pages: a
+            // page's match longer than a slice is made whole)
+            let stop =
+                |between: bool| viewer.has_asks() || (between && t.elapsed() >= SYNCTEX_SLICE);
             if let Err(e) = self.session.write_synctex_until(&stop) {
                 eprintln!("phitex: {e}");
             }

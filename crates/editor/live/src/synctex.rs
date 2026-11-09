@@ -196,7 +196,7 @@ impl Writer {
     /// `JOB.synctex.gz` of build `b`, its files named from directory
     /// `dir`; `None` where the build kept no origins.
     pub fn write(&mut self, b: &Build, dir: &Path) -> Option<Vec<u8>> {
-        self.write_until(b, dir, &|| false).flatten()
+        self.write_until(b, dir, &|_| false).flatten()
     }
 
     /// [`Writer::write`], given up between two pages once `stop` says so
@@ -207,7 +207,7 @@ impl Writer {
         &mut self,
         b: &Build,
         dir: &Path,
-        stop: &dyn Fn() -> bool,
+        stop: &dyn Fn(bool) -> bool,
     ) -> Option<Option<Vec<u8>>> {
         let t0 = std::time::Instant::now();
         let snap = b.origins_snapshot_until(stop)?;
@@ -251,7 +251,7 @@ impl Writer {
         let (mut fresh, mut made) = (0, 0);
         self.pages.truncate(pages.len());
         for (k, p) in pages.iter().enumerate() {
-            if k > 0 && stop() {
+            if stop(true) {
                 return None;
             }
             let h = p.as_ref().map_or(0, |p| sheet_key(k, p, &lines));

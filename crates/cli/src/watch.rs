@@ -2029,7 +2029,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     let came: RefCell<Option<(Instant, Event)>> = RefCell::new(None);
                     let gaps: RefCell<(Instant, Vec<(usize, Duration)>, usize)> =
                         RefCell::new((Instant::now(), Vec::new(), 0));
-                    let stop = || {
+                    let stop = |_between: bool| {
                         {
                             let mut g = gaps.borrow_mut();
                             let d = g.0.elapsed();
