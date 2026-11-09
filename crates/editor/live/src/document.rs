@@ -2290,7 +2290,7 @@ mod tests {
             ("b.pdf".to_owned(), inc),
         ])));
         let mut t = PDF_HEAD.to_owned();
-        t.push_str("\\pdfximage width 40pt {a.png}\\edef\\i{\\the\\pdflastximage} \\pdfximage width 30pt {b.pdf}\\edef\\j{\\the\\pdflastximage} \\setbox0\\hbox{\\pdfrefximage\\j\\vrule width 3pt height 30pt}\\pdfxform 0 \\edef\\f{\\the\\pdflastxform} \\immediate\\pdfobj{<< /G1 << /ca 0.5 /CA 0.5 >> >>}\\edef\\g{\\the\\pdflastobj} \\pdfpageresources{/ExtGState \\g\\space 0 R} ");
+        t.push_str("\\pdfximage width 40pt {a.png}\\edef\\i{\\the\\pdflastximage} \\pdfximage width 30pt {b.pdf}\\edef\\j{\\the\\pdflastximage} \\setbox0\\hbox{\\pdfrefximage\\j\\vrule width 3pt height 30pt}\\pdfxform 0 \\edef\\f{\\the\\pdflastxform} \\immediate\\pdfobj{<< /G1 << /ca 0.5 /CA 0.5 >> >>}\\edef\\g{\\the\\pdflastobj} \\edef\\r{/ExtGState \\g\\space 0 R}\\pdfpageresources\\expandafter{\\r} ");
         for p in [
             "\\pdfrefximage\\i",
             "\\vrule width 10pt height 5pt",
@@ -2359,7 +2359,8 @@ mod tests {
                 "\\pdfobj reserveobjnum \\edef\\{n}{{\\the\\pdflastobj}} "
             ));
         }
-        t.push_str("\\pdfpageresources{/ExtGState \\gs\\space 0 R /Shading \\sh\\space 0 R /Pattern \\pat\\space 0 R /ColorSpace \\cs\\space 0 R /XObject \\xo\\space 0 R} ");
+        // (its text as pgf gives it: the numbers in it, not the macros)
+        t.push_str("\\edef\\r{/ExtGState \\gs\\space 0 R /Shading \\sh\\space 0 R /Pattern \\pat\\space 0 R /ColorSpace \\cs\\space 0 R /XObject \\xo\\space 0 R}\\pdfpageresources\\expandafter{\\r} ");
         for p in [
             "\\vrule width 10pt height 5pt",
             "\\pdfliteral{/G1 gs}\\vrule width 30pt height 30pt",
