@@ -127,8 +127,8 @@ phitex upgrade                            # the latest release, after a [Y/n] (-
 |---|---|---|
 | **Overleaf** | A browser extension adds a **PDF \| ⚡ Instant** switch to Overleaf's toolbar. The page follows your typing. It compiles inside your browser: your document is never sent anywhere. | [Chrome](https://chromewebstore.google.com/detail/phitex-instant-for-overle/joimneigjammmhdbgaonlepnlllceajl) · [Firefox](https://addons.mozilla.org/en-US/firefox/addon/phitex-for-overleaf-unofficial/) · [Edge](https://microsoftedge.microsoft.com/addons/detail/phitex-instant-for-overle/gkcnpagkdjaefnnpkoogdpacdmgpihpd) |
 | **VS Code** | A live page beside your editor, errors in the Problems panel, click-to-source both ways. | Marketplace <!-- TODO(link): Marketplace and Open VSX; today from source or a .vsix · Phi Frontends --> |
-| **Neovim** | `phitex.lua` (Neovim 0.11+): the page follows your cursor, diagnostics inline. | [editors/nvim](https://github.com/accl-kaust/PhiTeX-frontends/blob/dev/editors/nvim/phitex.lua) <!-- TODO(link): editors/ is on dev only, not main · Phi Frontends --> |
-| **Emacs** | `phitex.el` (Emacs 29+): the same, beside eglot or lsp-mode. | [editors/emacs](https://github.com/accl-kaust/PhiTeX-frontends/blob/dev/editors/emacs/phitex.el) |
+| **Neovim** | `phitex.lua` (Neovim 0.11+): the page follows your cursor, diagnostics inline. | [apps/editors/nvim](https://github.com/accl-kaust/PhiTeX-frontends/blob/main/apps/editors/nvim/phitex.lua) |
+| **Emacs** | `phitex.el` (Emacs 29+): the same, beside eglot or lsp-mode. | [apps/editors/emacs](https://github.com/accl-kaust/PhiTeX-frontends/blob/main/apps/editors/emacs/phitex.el) |
 | **Any LSP editor** | `phitex watch --lsp` is a language server: your buffers are built as you type, problems published, your cursor shown on the page. | built in |
 | **Any browser** | `phitex watch` serves the live page at `http://127.0.0.1`. | built in |
 | **latexmk, scripts, CI** | Under the name `pdflatex` (or `--compat=pdflatex`), PhiTeX takes pdflatex's command line and makes one run, as pdflatex would. | built in |

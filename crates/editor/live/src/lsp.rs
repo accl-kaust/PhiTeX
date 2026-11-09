@@ -387,6 +387,11 @@ struct State {
     /// or one seen): `textDocument/documentHighlight` no longer moves the
     /// pages, or each cursor move would be two forward searches.
     own_cursor: bool,
+    /// `shutdown` came: an `exit` after it is the session's proper end.
+    shut_down: bool,
+    /// The update notice `phitex/status` carries (the host's: native, the
+    /// update check's `news.json`), none: nothing to say.
+    update: Option<Value>,
     /// The client attached to a watch another program started (its
     /// terminal's): `experimental.phitex.attached` in the answer.
     attached: bool,
@@ -518,6 +523,29 @@ impl Server {
     /// open.
     pub fn text(&self, name: &str) -> Option<String> {
         lock(&self.st).docs.get(name).cloned()
+    }
+
+    /// The update notice `phitex/status` carries from now on
+    /// (`{latest, advisory, lines}`; none: nothing to say), and a status
+    /// sent with it once the session has one.
+    pub fn set_update(&self, update: Option<Value>) {
+        let state = {
+            let mut st = lock(&self.st);
+            if st.update == update {
+                return;
+            }
+            st.update = update;
+            st.state
+        };
+        if !state.is_empty() {
+            self.status(state);
+        }
+    }
+
+    /// Whether the client sent `shutdown` (an `exit` without it ends the
+    /// process with status 1, the LSP's rule).
+    pub fn shut_down(&self) -> bool {
+        lock(&self.st).shut_down
     }
 
     /// The files the client has open (the watch's names).
@@ -692,7 +720,7 @@ impl Server {
 
     /// `phitex/status` with `state` and the last build's facts.
     fn status(&self, state: &'static str) {
-        let (last, root, main, updating) = {
+        let (last, root, main, updating, update) = {
             let mut st = lock(&self.st);
             st.state = state;
             (
@@ -700,6 +728,7 @@ impl Server {
                 st.root.base.clone(),
                 st.main.clone(),
                 st.warnings_updating,
+                st.update.clone(),
             )
         };
         self.notify(
@@ -719,6 +748,9 @@ impl Server {
                 // watch, not a second one, whatever its own root guess)
                 "root": root,
                 "main": main,
+                // (a newer release or an advisory, with the user's update
+                // check on: docs/spec-distribution.md §7)
+                "update": update,
             }),
         );
     }
@@ -1166,6 +1198,7 @@ impl Server {
             }
             "exit" => return false,
             "shutdown" => {
+                lock(&self.st).shut_down = true;
                 if let Some(id) = id {
                     self.reply(id, Value::Null);
                 }
@@ -1853,7 +1886,7 @@ mod tests {
         );
         assert_eq!(
             got[8]["params"],
-            json!({"state": "ready", "ms": 67.4, "pages": 3, "errors": 0, "warnings": 0, "warnings_updating": false, "engine": "wasm", "root": "/p", "main": "main.tex"})
+            json!({"state": "ready", "ms": 67.4, "pages": 3, "errors": 0, "warnings": 0, "warnings_updating": false, "engine": "wasm", "root": "/p", "main": "main.tex", "update": null})
         );
         // (a keystroke's build: no progress, the status after it)
         lock(&sent).clear();

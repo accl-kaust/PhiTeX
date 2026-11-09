@@ -282,7 +282,8 @@ trees are not kpathsea's and are not read; with MiKTeX alone, use
 - **Shelf's `min_extension`** (already in release.json) is read the same
   way.
 - **`phitex/status`** carries the update line and any advisory, when the
-  user has turned the check on.
+  user has turned the check on: its `update` field
+  (docs/spec-editor-protocol.md §2.3).
 
 ## 8. What the user provides
 

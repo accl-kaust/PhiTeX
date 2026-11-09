@@ -77,10 +77,11 @@ same records, so they cannot drift.
   (`{items: [{section: "phitex"}]}`) where the client can answer it, and
   sends `phitex/status {state: "starting"}`.
 - `shutdown` answered `null`; `exit` (or the transport's end) ends the
-  server: natively the watch exits 0, as `q` does. A native server still
+  server: natively the watch ends as `q` ends it, with status 0 after
+  `shutdown` and 1 without it (an `exit` alone, or the input's end: the
+  LSP's rule); `phitex.stop` ends it with 0. A native server still
   waiting for the first `.tex` document to name the main file ends at
-  once: status 0 after `shutdown`, 1 after an `exit` without it (the
-  LSP's rule).
+  once, with the same statuses.
 - The server's own requests have string ids `phitex-N`; their answers
   are read (`workspace/configuration`, `window/showMessageRequest`) or
   ignored.
@@ -203,8 +204,19 @@ and used at once (the client's answer is not waited for).
 ```json
 {"state": "starting" | "fetching" | "typesetting" | "ready" | "failed" | "stopped",
  "ms": 67.2, "pages": 3, "errors": 0, "warnings": 2, "engine": "native" | "wasm",
- "root": "/home/me/paper", "main": "paper.tex"}
+ "root": "/home/me/paper", "main": "paper.tex",
+ "update": null | {"latest": "1.1" | null, "advisory": false,
+                   "lines": ["phitex 1.1 is out (you have 1.0):", "  1.1     Faster.", "update: phitex upgrade"]}}
 ```
+
+- `update`: what the update check says to this version, natively, when
+  the user turned the check on (`update-check = true`; never under CI or
+  `PHITEX_NO_UPDATE_CHECK`): the releases after it, the advisories for it
+  (`advisory: true` when there is one) and how to update, the lines the
+  terminal prints (docs/spec-distribution.md §4). `null`: the check is
+  off or unset, or there is nothing to say. Read from the kept
+  `news.json` as the watch starts and at each idle point; fetched at most
+  once a day in the background. The wasm core sends `null`.
 
 - `root`, `main`: the folder the watch runs in and its main file, named
   from there. The watch may run above the editor's root (a chapter opened

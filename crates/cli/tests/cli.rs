@@ -1473,6 +1473,125 @@ fn watch_attach() {
     assert!(!file.exists(), "the discovery file is left");
 }
 
+/// `phitex watch --lsp` ended by `exit` without `shutdown` exits with
+/// status 1, as the LSP says (with `shutdown` first: 0, `watch_lsp`).
+#[test]
+fn watch_lsp_exit_without_shutdown() {
+    use serde_json::json;
+    let _one = one();
+    let dir = scratch("watch-lsp-exit");
+    std::fs::write(dir.join("doc.tex"), plain() + "Alpha.\n\\bye\n").expect("the document");
+    let root = dir.canonicalize().expect("the directory");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--lsp", "--no-view", "--ini", "--etex", "doc.tex"])
+        .env("XDG_RUNTIME_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut to = child.stdin.take().expect("its input");
+    let rx = lsp_messages(child.stdout.take().expect("its output"));
+    let mut seen = Vec::new();
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null, "rootUri": format!("file://{}", root.display()), "capabilities": {}}}),
+    );
+    lsp_until(&rx, &mut seen, |m| m["id"] == 1);
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    );
+    let end = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("the watch") {
+            break s;
+        }
+        assert!(Instant::now() < end, "the watch did not end after exit");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(1), "the watch ended with {status}");
+}
+
+/// A terminal's watch keeps its last build's problems with no editor
+/// connected, and an editor that attaches is given them at once: the
+/// first `publishDiagnostics` it gets has the document's error.
+#[cfg(unix)]
+#[test]
+fn watch_attach_replays_the_problems() {
+    use serde_json::json;
+    let _one = one();
+    let text = plain() + "Alpha \\undefinedmacro bravo.\n\\bye\n";
+    let line = text[..text.find("Alpha").expect("the words")]
+        .matches('\n')
+        .count();
+    let dir = scratch("watch-attach-replay");
+    std::fs::write(dir.join("doc.tex"), &text).expect("the document");
+    let run = dir.join("run");
+    std::fs::create_dir_all(&run).expect("a runtime folder");
+    let root = dir.canonicalize().expect("the directory");
+    let uri = format!("file://{}/doc.tex", root.display());
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--json",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "4",
+            "doc.tex",
+        ])
+        .env("XDG_RUNTIME_DIR", &run)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut keys = child.stdin.take().expect("its input");
+    let mut lines = BufReader::new(child.stdout.take().expect("its output"))
+        .lines()
+        .map_while(Result::ok);
+    let mut seen = Vec::new();
+    let built = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(built["ok"], false, "{built}");
+    let info = std::fs::read_dir(run.join("phitex"))
+        .expect("the sessions folder")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .and_then(|p| serde_json::from_slice::<serde_json::Value>(&std::fs::read(p).ok()?).ok())
+        .expect("a discovery file");
+    let port = u16::try_from(info["lsp"]["port"].as_u64().expect("a port")).expect("a port");
+    let s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("its socket");
+    let rx = lsp_messages(s.try_clone().expect("the socket"));
+    let mut to = s;
+    let mut got = Vec::new();
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null, "rootUri": format!("file://{}", root.display()),
+            "capabilities": {}, "initializationOptions": {"token": info["lsp"]["token"]},
+        }}),
+    );
+    let first = lsp_until(&rx, &mut got, |m| {
+        m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri.as_str()
+    });
+    let errors: Vec<&serde_json::Value> = first["params"]["diagnostics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|d| d["severity"] == 1)
+        .collect();
+    assert_eq!(errors.len(), 1, "{first}");
+    assert_eq!(errors[0]["range"]["start"]["line"], line, "{first}");
+    keys.write_all(b"q\n").expect("the watch reads");
+    keys.flush().expect("the watch reads");
+    drop(lines);
+    let _ = child.wait();
+}
+
 /// `phitex watch --lsp`'s progress (docs/spec-editor-protocol.md §2):
 /// the cold build's `$/progress` (a token made, begun with the title
 /// `PhiTeX`, ended with what it made) and `phitex/status` (`starting`, then

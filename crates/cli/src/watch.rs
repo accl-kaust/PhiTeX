@@ -459,7 +459,7 @@ impl Here {
                 ui.line(&ui.st.dim("stopped while working"));
                 modern::cache_summary(&self.target, ui);
                 crate::attach::forget();
-                std::process::exit(0);
+                std::process::exit(crate::lsp::exit_status());
             }
             Key::Rebuild | Key::Problems | Key::Warnings | Key::Summary if busy => {
                 // (said once a build: a held key says nothing more)
@@ -1217,7 +1217,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         }
         modern::cache_summary(t, ui);
         crate::attach::forget();
-        std::process::exit(0);
+        std::process::exit(crate::lsp::exit_status());
     };
     // (the status line: the last build and the browsers watching)
     let show = |ui: &Ui, l: &Last| {
@@ -1421,7 +1421,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if let Some(out) = &written {
             last.borrow_mut().good = Some(out.clone());
         }
-        if view.is_some() || lsp.as_ref().is_some_and(|l| l.served()) {
+        // (the build's problems and PDF kept for the editors whether or not
+        // one is connected: one that attaches later is given them at once)
+        if view.is_some() || lsp.is_some() {
             // (a layout: the viewer's file brought to it, its last bytes
             // and the objects that changed, nothing read from disk; the
             // same: that PDF kept)
