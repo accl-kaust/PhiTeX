@@ -43,13 +43,10 @@ fn summary(entry: &str) -> String {
 }
 
 /// Where the last version whose news was shown is kept:
-/// `$XDG_STATE_HOME/phitex/news`, else `~/.local/state/phitex/news`.
+/// `$XDG_STATE_HOME/phitex/news`, else `~/.local/state/phitex/news`
+/// (Windows: [`crate::dirs`]).
 fn seen_file() -> Option<PathBuf> {
-    let env = |k| std::env::var_os(k).filter(|d| !d.is_empty());
-    let d = env("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".local").join("state")))?;
-    Some(d.join("phitex").join("news"))
+    Some(crate::dirs::phitex(crate::dirs::Kind::State)?.join("news"))
 }
 
 /// This version's entry, else the newest one (a nightly's version has

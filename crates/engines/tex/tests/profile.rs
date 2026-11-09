@@ -11,10 +11,10 @@ mod common;
 // contend in it and the measures do not show the binary's scaling
 // (with `profile`, counting what commits allocate under their segment's
 // lock: `Times::commit_allocs`)
-#[cfg(all(not(target_family = "wasm"), not(feature = "profile")))]
+#[cfg(all(not(any(target_family = "wasm", windows)), not(feature = "profile")))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
-#[cfg(all(not(target_family = "wasm"), feature = "profile"))]
+#[cfg(all(not(any(target_family = "wasm", windows)), feature = "profile"))]
 #[global_allocator]
 static GLOBAL: phitex_defuse::obs::CountingAlloc<tikv_jemallocator::Jemalloc> =
     phitex_defuse::obs::CountingAlloc(tikv_jemallocator::Jemalloc);

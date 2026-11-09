@@ -33,6 +33,7 @@ mod cache;
 mod compare;
 mod compat;
 mod config;
+mod dirs;
 mod dvipdf;
 mod editor;
 mod failure;
@@ -80,7 +81,7 @@ pub fn source_build() -> bool {
     option_env!("PHITEX_BUILT_BY").is_none()
 }
 
-#[cfg(all(feature = "jemalloc", not(target_family = "wasm")))]
+#[cfg(all(feature = "jemalloc", not(any(target_family = "wasm", windows))))]
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
@@ -105,6 +106,8 @@ pub static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock:
 
 fn main() {
     START.get_or_init(std::time::Instant::now);
+    #[cfg(windows)]
+    keys::console();
     let mut raw = std::env::args();
     let argv0 = raw.next().unwrap_or_default();
     let args: Vec<String> = raw.collect();

@@ -313,9 +313,13 @@ pub fn job_of(file: &str) -> String {
     let found = find_main(file).map(|p| p.to_string_lossy().into_owned());
     let name = found.as_deref().unwrap_or(file);
     // (as TeX scans a file name, §516-§517 with web2c's change: the area
-    // ends at the last `/`, the extension starts at the last `.` after
-    // it, whatever follows; §537: the job is the name without either)
-    let base = name.rsplit('/').next().unwrap_or(name);
+    // ends at the last `/` (`IS_DIR_SEP`: on Windows `\\` too), the
+    // extension starts at the last `.` after it, whatever follows; §537:
+    // the job is the name without either)
+    let base = name
+        .rsplit(|c| c == '/' || cfg!(windows) && c == '\\')
+        .next()
+        .unwrap_or(name);
     base.rfind('.').map_or(base, |k| &base[..k]).to_owned()
 }
 

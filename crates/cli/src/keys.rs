@@ -4,6 +4,7 @@
 //! terminal is known for the status line. Elsewhere (a pipe: an editor's
 //! extension) a line at a time, as before.
 
+#[cfg(any(unix, windows))]
 use std::io::IsTerminal as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -79,7 +80,22 @@ pub fn raw() -> bool {
     true
 }
 
-#[cfg(not(unix))]
+/// Windows: the console's input without line editing, echo or Ctrl-C's
+/// signal (`ENABLE_LINE_INPUT`, `ENABLE_ECHO_INPUT`,
+/// `ENABLE_PROCESSED_INPUT` off): a key at a time, Ctrl-C as `\x03`.
+#[cfg(windows)]
+pub fn raw() -> bool {
+    if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
+        return false;
+    }
+    if crossterm::terminal::enable_raw_mode().is_err() {
+        return false;
+    }
+    ACTIVE.store(true, Ordering::SeqCst);
+    true
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn raw() -> bool {
     false
 }
@@ -202,6 +218,21 @@ pub fn restore() {
     {
         set_mode(was);
     }
+    #[cfg(windows)]
+    if ACTIVE.swap(false, Ordering::SeqCst) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+/// Windows: escape sequences (colours, the status line) drawn by the
+/// console, not printed (`ENABLE_VIRTUAL_TERMINAL_PROCESSING`; Windows
+/// Terminal has it on already, the older console does not).
+#[cfg(windows)]
+pub fn console() {
+    use std::io::IsTerminal as _;
+    if std::io::stderr().is_terminal() || std::io::stdout().is_terminal() {
+        let _ = crossterm::ansi_support::supports_ansi();
+    }
 }
 
 /// The columns of the terminal on standard error.
@@ -211,6 +242,13 @@ pub fn width() -> Option<usize> {
         && w.ws_col > 0
     {
         return Some(usize::from(w.ws_col));
+    }
+    #[cfg(windows)]
+    if std::io::stderr().is_terminal()
+        && let Ok((w, _)) = crossterm::terminal::size()
+        && w > 0
+    {
+        return Some(usize::from(w));
     }
     None
 }
