@@ -233,7 +233,9 @@ jobs:
           "$h  phitex-x86_64-windows.zip" | Set-Content -Encoding ascii "$dl\SHA256SUMS"
           & $ms -S -s "$t\test.key" -m "$dl\SHA256SUMS"
           if ($LASTEXITCODE -ne 0) { throw 'not signed' }
-          $srv = Start-Process python -ArgumentList '-m', 'http.server', '8766', '--bind', '127.0.0.1', '--directory', $rel -PassThru
+          # (HTTP/1.1, keep-alive answered as GitHub's servers answer it: under
+          # HTTP/1.0 the server closed a connection the client then reused)
+          $srv = Start-Process python -ArgumentList '-m', 'http.server', '8766', '--bind', '127.0.0.1', '--protocol', 'HTTP/1.1', '--directory', $rel -PassThru
           Start-Sleep 3
           $exe = Join-Path $t 'my programs\phitex\phitex.exe'
           Copy-Item target/upgrade-test/fastdev/phitex.exe $exe -Force
