@@ -33,7 +33,8 @@ def main():
     flags = sys.argv[7:]
     edits = json.load(open(edits_json))
     p = subprocess.Popen([binary, "watch", "--no-view", "--json", *flags, "-j", j, main_], cwd=d,
-                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=open(os.environ["EDITS_STDERR"], "w") if os.environ.get("EDITS_STDERR") else subprocess.DEVNULL)
 
     def next_build():
         t = time.monotonic()

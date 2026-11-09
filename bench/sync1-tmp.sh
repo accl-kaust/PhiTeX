@@ -16,7 +16,8 @@ for l in "${bins[@]}"; do
       f=(); [ $mode = nosync ] && f=(--no-synctex)
       rm -rf $w/pe $w/pe-cold && mkdir -p $w/pe && cp bench/para4000.tex $w/pe/
       python3 -I bench/cut1-paraedit.py $w/pe/para4000.tex 6 > $w/pe/edits.json
-      PHITEX_ORIGINS_TIME=1 PHITEX_CACHE_DIR=$w/cache-$l timeout 900 python3 -I bench/cut1-edits.py $w/bins/$l/phitex $w/pe para4000.tex $j $w/pe/edits.json $r/pe-$l-$mode-j$j.json --exact-pdf "${f[@]}" 2>&1 | grep -E "verdict|edit" | sed "s|^|para $l $mode -j$j: |" | tail -3
+      EDITS_STDERR=$r/pe-$l-$mode-j$j.err PHITEX_TEX_TIME=1 PHITEX_ORIGINS_TIME=1 PHITEX_CACHE_DIR=$w/cache-$l timeout 900 python3 -I bench/cut1-edits.py $w/bins/$l/phitex $w/pe para4000.tex $j $w/pe/edits.json $r/pe-$l-$mode-j$j.json --exact-pdf "${f[@]}" 2>&1 | grep -E "verdict|edit" | sed "s|^|para $l $mode -j$j: |" | tail -3
+      grep -E "^(origins|synctex|watch phases)" $r/pe-$l-$mode-j$j.err | tail -4 | sed "s|^|para $l $mode -j$j: |"
       [ -f $w/pe/para4000.synctex.gz ] && md5sum < $w/pe/para4000.synctex.gz | sed "s|^|para $l $mode -j$j synctex md5 |"
     done
   done
