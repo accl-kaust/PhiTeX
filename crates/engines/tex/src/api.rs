@@ -1192,11 +1192,28 @@ fn file_digest(f: Option<&(String, Vec<u8>)>) -> [u8; 32] {
 type Read = (String, [u8; 32], String, Vec<u8>);
 
 /// The native content key of the file at `path`: its length,
-/// modification time (ns) and inode, little-endian; empty where the
-/// metadata is not there. What a native host's [`ContentKey`] gives
+/// modification time (ns) and inode, little-endian (Windows, which has
+/// no inode in `std`: its creation time, in 100 ns, in the inode's
+/// place: a file put over another is a new one there too); empty where
+/// the metadata is not there. What a native host's [`ContentKey`] gives
 /// with the path its lookup finds.
 #[must_use]
 pub fn file_stat_key(path: &str) -> Vec<u8> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if let Ok(m) = std::fs::metadata(path) {
+            let ns = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+            return [m.len(), ns, m.creation_time()]
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect();
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

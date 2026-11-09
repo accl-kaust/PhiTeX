@@ -8,10 +8,15 @@
 //! path search itself (`pathsearch.c`).
 //!
 //! Not ported (not reachable from `tex` with TeX Live's configuration):
-//! the `aliases` database, `mktex*` file generation, Windows path syntax,
-//! and the compile-time defaults for paths that `texmf.cnf` always sets
+//! the `aliases` database, `mktex*` file generation, and the compile-time defaults for paths that `texmf.cnf` always sets
 //! (only `TEXMFCNF`'s default is needed to find `texmf.cnf` in the first
 //! place, and the program formats', which name the program).
+//!
+//! On Windows, kpathsea's `WIN32` rules: `;` alone separates path
+//! elements (`C:` is a drive), `\` is a directory separator as `/` is
+//! (paths are kept with `/`, as `kpathsea_normalize_path` keeps them), a
+//! name with a drive letter is absolute, and `~` is `USERPROFILE` when
+//! `HOME` is unset.
 
 use std::collections::HashMap;
 #[cfg(unix)]
@@ -22,6 +27,9 @@ use std::os::wasi::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
 type Bytes = Vec<u8>;
+
+/// `c-pathch.h`, `ENV_SEP`: what joins a search path's elements.
+const ENV_SEP: u8 = if cfg!(windows) { b';' } else { b':' };
 
 /// The file formats `tex` and xdvipdfmx ask for (`kpse_file_format_type`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -304,9 +312,15 @@ pub fn pk_settings(file: &str) -> Option<(u32, Option<&str>)> {
     Some((bdpi.parse().ok()?, mode))
 }
 
-/// `c-pathch.h`: `IS_KPSE_SEP` (Unix accepts `;` too).
+/// `c-pathch.h`: `IS_KPSE_SEP` (Unix accepts `;` too; Windows `;`
+/// alone, `C:` being a drive).
 fn is_kpse_sep(c: u8) -> bool {
-    c == b':' || c == b';'
+    c == ENV_SEP || c == b';'
+}
+
+/// `c-pathch.h`, `IS_DIR_SEP`: `/`, and on Windows `\` too.
+fn is_dir_sep(c: u8) -> bool {
+    c == b'/' || cfg!(windows) && c == b'\\'
 }
 
 /// `kpse_cnf_p`: a true-ish configuration value.
@@ -317,7 +331,9 @@ fn cnf_p(v: Option<&[u8]>) -> bool {
 
 /// `absolute.c`, `kpathsea_absolute_p`.
 fn absolute_p(name: &[u8], relative_ok: bool) -> bool {
-    name.first() == Some(&b'/')
+    name.first().is_some_and(|&c| is_dir_sep(c))
+        // (`IS_DEVICE_SEP`: `C:` on Windows)
+        || cfg!(windows) && name.len() >= 2 && name[0].is_ascii_alphabetic() && name[1] == b':'
         || (relative_ok
             && (name.starts_with(b"./")
                 || name.starts_with(b"../")
@@ -325,8 +341,46 @@ fn absolute_p(name: &[u8], relative_ok: bool) -> bool {
                 || name == b".."))
 }
 
-fn os(b: &[u8]) -> &Path {
-    Path::new(std::ffi::OsStr::from_bytes(b))
+/// The path whose bytes are `b`, as the searches give them.
+#[cfg(not(windows))]
+#[must_use]
+pub fn path_of(b: &[u8]) -> std::borrow::Cow<'_, Path> {
+    std::borrow::Cow::Borrowed(Path::new(std::ffi::OsStr::from_bytes(b)))
+}
+
+/// Windows: a path's bytes are its UTF-8 (`/` or `\` alike).
+#[cfg(windows)]
+#[must_use]
+pub fn path_of(b: &[u8]) -> std::borrow::Cow<'_, Path> {
+    match String::from_utf8_lossy(b) {
+        std::borrow::Cow::Borrowed(s) => std::borrow::Cow::Borrowed(Path::new(s)),
+        std::borrow::Cow::Owned(s) => std::borrow::Cow::Owned(s.into()),
+    }
+}
+
+/// The bytes of an operating-system string, as the searches keep them.
+#[cfg(not(windows))]
+fn bytes_of(s: &std::ffi::OsStr) -> Bytes {
+    s.as_bytes().to_vec()
+}
+
+/// Windows: UTF-8, `\` as `/` (`kpathsea_normalize_path`), and the
+/// verbatim prefix `\\?\` of a canonical path dropped (`\\?\UNC\`
+/// as `//`), which kpathsea's paths never carry.
+#[cfg(windows)]
+fn bytes_of(s: &std::ffi::OsStr) -> Bytes {
+    let s = s.to_string_lossy();
+    let s = match s.strip_prefix(r"\\?\UNC\") {
+        Some(rest) => format!(r"\\{rest}"),
+        None => s.strip_prefix(r"\\?\").unwrap_or(&s).to_owned(),
+    };
+    s.replace('\\', "/").into_bytes()
+}
+
+/// [`bytes_of`] of a path.
+#[must_use]
+pub fn path_bytes(p: &Path) -> Bytes {
+    bytes_of(p.as_os_str())
 }
 
 /// `readable.c`, `READABLE`: a name that is readable and not a
@@ -334,7 +388,8 @@ fn os(b: &[u8]) -> &Path {
 /// !S_ISDIR (st.st_mode)`): a device such as `/dev/null` is one, which
 /// LaTeX's `\IfFileExists{/dev/null}` tests to tell Unix from Windows.
 fn readable_file(name: &[u8]) -> bool {
-    std::fs::metadata(os(name)).is_ok_and(|m| !m.is_dir()) && std::fs::File::open(os(name)).is_ok()
+    std::fs::metadata(path_of(name)).is_ok_and(|m| !m.is_dir())
+        && std::fs::File::open(path_of(name)).is_ok()
 }
 
 /// `path-elt.c`, `element`: split `path` at separators outside braces.
@@ -362,15 +417,15 @@ fn path_elements(path: &[u8]) -> Vec<Bytes> {
 fn expand_default(path: &[u8], fallback: &[u8]) -> Bytes {
     if path.is_empty() {
         fallback.to_vec()
-    } else if path[0] == b':' {
+    } else if path[0] == ENV_SEP {
         if path.len() == 1 {
             fallback.to_vec()
         } else {
             [fallback, path].concat()
         }
-    } else if path.ends_with(b":") {
+    } else if path.ends_with(&[ENV_SEP]) {
         [path, fallback].concat()
-    } else if let Some(i) = path.windows(2).position(|w| w == b"::") {
+    } else if let Some(i) = path.windows(2).position(|w| w == [ENV_SEP, ENV_SEP]) {
         [&path[..=i], fallback, &path[i + 1..]].concat()
     } else {
         path.to_vec()
@@ -401,7 +456,7 @@ fn brace_expand_list(text: &[u8], pos: &mut usize) -> Vec<Bytes> {
     };
     while p < text.len() && text[p] != b'}' {
         let c = text[p];
-        if c == b':' || c == b',' {
+        if c == ENV_SEP || c == b',' {
             cross(&mut partial, &[text[start..p].to_vec()]);
             result.append(&mut partial);
             partial = vec![Vec::new()];
@@ -556,7 +611,7 @@ impl Db {
     /// `db.c`, `db_build`: add the `ls-R` file `db_filename` (the index
     /// is put in order by [`Db::finish`]).
     fn build(&mut self, db_filename: &[u8]) -> bool {
-        let Ok(text) = std::fs::read(os(db_filename)) else {
+        let Ok(text) = std::fs::read(path_of(db_filename)) else {
             return false;
         };
         let base = self.text.len();
@@ -778,7 +833,7 @@ impl Kpse {
     #[must_use]
     pub fn new(selfdir: &Path, progname: &str, engine: &str) -> Self {
         let mut env_overlay = HashMap::new();
-        let loc = selfdir.as_os_str().as_bytes().to_vec();
+        let loc = bytes_of(selfdir.as_os_str());
         let dir = dirname(&loc);
         let parent = dirname(&dir);
         let grandparent = dirname(&parent);
@@ -846,9 +901,16 @@ impl Kpse {
         if let Some(v) = self.env_overlay.get(name) {
             return Some(v.clone()).filter(|v| !v.is_empty());
         }
-        std::env::var_os(std::ffi::OsStr::from_bytes(name))
-            .map(OsStringExt::into_vec)
-            .filter(|v| !v.is_empty())
+        let name = String::from_utf8_lossy(name);
+        let v = std::env::var_os(&*name).map(|v| bytes_of(&v));
+        // (`tilde.c`: Windows's home when `HOME` is unset)
+        #[cfg(windows)]
+        let v = v.or_else(|| {
+            (name == "HOME")
+                .then(|| std::env::var_os("USERPROFILE").map(|v| bytes_of(&v)))
+                .flatten()
+        });
+        v.filter(|v| !v.is_empty())
     }
 
     fn dotted(&self, var: &[u8], sep: u8) -> Bytes {
@@ -879,7 +941,7 @@ impl Kpse {
         let files = self.search_list(&cnf_path, &[b"texmf.cnf".to_vec()], true, true);
         let mut table = HashMap::new();
         for f in files {
-            let Ok(text) = std::fs::read(os(&f)) else {
+            let Ok(text) = std::fs::read(path_of(&f)) else {
                 continue;
             };
             let mut lines = text.split(|&c| c == b'\n');
@@ -1018,7 +1080,7 @@ impl Kpse {
             }
             ret.push(x);
         }
-        ret.join(&b':')
+        ret.join(&ENV_SEP)
     }
 
     /// `expand.c`, `kpathsea_brace_expand` (with `KPSE_DOT` handling).
@@ -1028,7 +1090,7 @@ impl Kpse {
             .into_iter()
             .map(|e| self.brace_expand_element(&e))
             .collect();
-        let ret = parts.join(&b':');
+        let ret = parts.join(&ENV_SEP);
         match self.getenv(b"KPSE_DOT") {
             None => ret,
             Some(dot) => {
@@ -1044,7 +1106,7 @@ impl Kpse {
                         out.push([dot.as_slice(), b"/", &elt].concat());
                     }
                 }
-                out.join(&b':')
+                out.join(&ENV_SEP)
             }
         }
     }
@@ -1066,7 +1128,7 @@ impl Kpse {
                 let prog = &self.program_name;
                 (
                     vec![[prog.to_ascii_uppercase().as_slice(), b"INPUTS"].concat()],
-                    [b".:$TEXMF/", prog.as_slice(), b"//"].concat(),
+                    [b".".as_slice(), &[ENV_SEP], b"$TEXMF/", prog, b"//"].concat(),
                 )
             } else {
                 (
@@ -1099,7 +1161,7 @@ impl Kpse {
         if let Some(mut e) = env_value {
             for c in &mut e {
                 if *c == b';' {
-                    *c = b':';
+                    *c = ENV_SEP;
                 }
             }
             path = expand_default(&e, &path);
@@ -1111,7 +1173,7 @@ impl Kpse {
                 .into_iter()
                 .map(|e| e.strip_prefix(b"!!").map_or(e.clone(), <[u8]>::to_vec))
                 .collect::<Vec<_>>()
-                .join(&b':');
+                .join(&ENV_SEP);
         }
         self.paths.insert(format, path.clone());
         self.made
@@ -1131,7 +1193,7 @@ impl Kpse {
         let key: Vec<(Bytes, u64, u128)> = files
             .iter()
             .map(|f| {
-                let m = std::fs::metadata(os(f)).ok();
+                let m = std::fs::metadata(path_of(f)).ok();
                 let len = m.as_ref().map_or(0, std::fs::Metadata::len);
                 let at = m
                     .and_then(|m| m.modified().ok())
@@ -1382,7 +1444,7 @@ impl Kpse {
         if matches!(choice[0], b'r' | b'n' | b'0') {
             return Ok(());
         }
-        if expanded.first() == Some(&b'/') {
+        if absolute_p(&expanded, false) {
             // (`abs_fname_ok`: inside TEXMF_OUTPUT_DIRECTORY, from the
             // environment only, or TEXMFOUTPUT)
             let inside = |dir: Option<Bytes>| {
@@ -1391,7 +1453,7 @@ impl Kpse {
                         && (expanded.get(d.len()) == Some(&b'/') || expanded.len() == d.len())
                 })
             };
-            let outdir = std::env::var_os("TEXMF_OUTPUT_DIRECTORY").map(OsStringExt::into_vec);
+            let outdir = std::env::var_os("TEXMF_OUTPUT_DIRECTORY").map(|d| bytes_of(&d));
             if !inside(outdir) && !inside(self.var_value("TEXMFOUTPUT")) {
                 return Err(choice);
             }
@@ -1427,7 +1489,7 @@ impl Kpse {
             .into_iter()
             .filter(|e| !matches!(e.as_slice(), b"." | b"./"))
             .collect();
-        self.paths.insert(format, kept.join(&b':'));
+        self.paths.insert(format, kept.join(&ENV_SEP));
     }
 
     /// Every directory the search path of `format` covers, in the order
@@ -1671,7 +1733,7 @@ fn do_line(line: &[u8]) -> Option<(Bytes, Bytes)> {
     }
     for c in &mut value {
         if *c == b';' {
-            *c = b':';
+            *c = ENV_SEP;
         }
     }
     let lhs = match prog {
@@ -1700,16 +1762,28 @@ fn dirname(p: &[u8]) -> Bytes {
 #[cfg(unix)]
 fn same_file(a: &[u8], b: &[u8]) -> bool {
     use std::os::unix::fs::MetadataExt;
-    match (std::fs::metadata(os(a)), std::fs::metadata(os(b))) {
+    match (std::fs::metadata(path_of(a)), std::fs::metadata(path_of(b))) {
         (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
         _ => false,
     }
 }
 
 /// WASI has no device and inode numbers: the same path is the same file.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn same_file(a: &[u8], b: &[u8]) -> bool {
     a == b
+}
+
+/// Windows: the same canonical path (no stable file index in `std`).
+#[cfg(windows)]
+fn same_file(a: &[u8], b: &[u8]) -> bool {
+    match (
+        std::fs::canonicalize(path_of(a)),
+        std::fs::canonicalize(path_of(b)),
+    ) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
 }
 
 /// `elt-dirs.c`, `kpathsea_normalize_path` (Unix): collapse leading
@@ -1737,7 +1811,7 @@ fn expand_elt(out: &mut Vec<Bytes>, elt: &[u8], start: usize) {
         d += 1;
     }
     // `checked_dir_list_add`
-    if std::fs::metadata(os(elt)).is_ok_and(|m| m.is_dir()) && !out.iter().any(|o| o == elt) {
+    if std::fs::metadata(path_of(elt)).is_ok_and(|m| m.is_dir()) && !out.iter().any(|o| o == elt) {
         out.push(elt.to_vec());
     }
 }
@@ -1746,7 +1820,7 @@ fn expand_elt(out: &mut Vec<Bytes>, elt: &[u8], start: usize) {
 /// subdirectories, matching `post`. Entries come in `readdir` order,
 /// like kpathsea.
 fn do_subdir(out: &mut Vec<Bytes>, name: &[u8], post: &[u8]) {
-    let Ok(rd) = std::fs::read_dir(os(name)) else {
+    let Ok(rd) = std::fs::read_dir(path_of(name)) else {
         return;
     };
     if post.is_empty() {
@@ -1757,14 +1831,14 @@ fn do_subdir(out: &mut Vec<Bytes>, name: &[u8], post: &[u8]) {
         expand_elt(out, &[name, post].concat(), name.len());
     }
     for e in rd.flatten() {
-        let fname = e.file_name();
-        let fname = fname.as_bytes();
+        let fname = bytes_of(&e.file_name());
+        let fname = fname.as_slice();
         if fname.first() == Some(&b'.') {
             continue;
         }
         let potential = [name, fname].concat();
         // `kpathsea_dir_links`: only directories (following symlinks).
-        if !std::fs::metadata(os(&potential)).is_ok_and(|m| m.is_dir()) {
+        if !std::fs::metadata(path_of(&potential)).is_ok_and(|m| m.is_dir()) {
             continue;
         }
         let mut sub = potential.clone();
@@ -1833,7 +1907,7 @@ fn dir_names(dir: &[u8]) -> Option<std::rc::Rc<[Bytes]>> {
     thread_local! {
         static LISTED: std::cell::RefCell<Listed> = std::cell::RefCell::new(HashMap::new());
     }
-    let mtime = std::fs::metadata(os(dir)).ok()?.modified().ok()?;
+    let mtime = std::fs::metadata(path_of(dir)).ok()?.modified().ok()?;
     if let Some(names) = LISTED.with_borrow(|m| {
         m.get(dir)
             .filter(|(t, _)| *t == mtime)
@@ -1842,10 +1916,10 @@ fn dir_names(dir: &[u8]) -> Option<std::rc::Rc<[Bytes]>> {
         return Some(names);
     }
     let now = SystemTime::now();
-    let names: std::rc::Rc<[Bytes]> = std::fs::read_dir(os(dir))
+    let names: std::rc::Rc<[Bytes]> = std::fs::read_dir(path_of(dir))
         .ok()?
         .flatten()
-        .map(|e| e.file_name().into_vec())
+        .map(|e| bytes_of(&e.file_name()))
         .collect();
     LISTED.with_borrow_mut(|m| {
         if mtime + Duration::from_secs(2) < now {
@@ -1908,12 +1982,12 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let ls = dir.join("ls-R");
         std::fs::write(&ls, b"% ls-R\n./a:\nx.sty\ny.tex\n\n./b:\nx.sty\nz\n").expect("write");
-        let f = ls.as_os_str().as_bytes().to_vec();
+        let f = path_bytes(&ls);
         let mut db = Db::default();
         assert!(db.build(&f));
         db.finish();
         let dirs = |db: &Db, n: &[u8]| db.lookup(n).map(<[u8]>::to_vec).collect::<Vec<_>>();
-        let top = dir.as_os_str().as_bytes().to_vec();
+        let top = path_bytes(&dir);
         let d = |s: &str| [top.as_slice(), b"/", s.as_bytes()].concat();
         assert_eq!(dirs(&db, b"x.sty"), [d("a/"), d("b/")]);
         assert_eq!(dirs(&db, b"z"), [d("b/")]);
@@ -1977,7 +2051,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("phitex-kpse-casefold-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("TeXGyre.fontspec"), b"").unwrap();
-        let d = dir.as_os_str().as_bytes();
+        let d = path_bytes(&dir);
+        let d = d.as_slice();
         let name = |n: &str| [d, b"/", n.as_bytes()].concat();
         assert_eq!(
             casefold_readable_file(&name("texgyre.FONTSPEC")),

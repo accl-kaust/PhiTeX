@@ -7,7 +7,10 @@
 //!   signature against the key built in (`ci/minisign.pub`), always, then
 //!   the tarball against `SHA256SUMS`. The binary is replaced by rename
 //!   (written beside it first: a running phitex keeps its file). Another
-//!   install method gets the command for it instead.
+//!   install method gets the command for it instead. On Windows the
+//!   same for phitex.org/install.ps1's install, its zip's `phitex.exe`,
+//!   the running `.exe` renamed aside (Windows renames a running program's
+//!   file but does not replace it) before the new one takes its name.
 //! - **The update check**: off unless the user's own `phitex.toml` says
 //!   `update-check = true`. At most once a day, in the background (never
 //!   delaying a build), one GET of `news.json` (phitex.org, then its
@@ -31,11 +34,26 @@ const NEWS: [&str; 2] = [
     "https://phitex-org.pages.dev/news.json",
 ];
 
-/// This machine's release tarball, as install.sh names it.
+/// The installer of this system's builds, the command that runs it.
+const INSTALLER: (&str, &str) = if cfg!(windows) {
+    (
+        "phitex.org/install.ps1",
+        "irm https://phitex.org/install.ps1 | iex",
+    )
+} else {
+    (
+        "phitex.org/install.sh",
+        "curl -fsSL https://phitex.org/install.sh | sh",
+    )
+};
+
+/// This machine's release tarball, as install.sh names it (Windows's
+/// zip, as install.ps1 does).
 fn asset() -> Option<String> {
     let os = match std::env::consts::OS {
         "linux" => "linux",
         "macos" => "macos",
+        "windows" => return windows_asset(std::env::consts::ARCH),
         _ => return None,
     };
     let arch = match std::env::consts::ARCH {
@@ -44,6 +62,58 @@ fn asset() -> Option<String> {
         _ => return None,
     };
     Some(format!("phitex-{arch}-{os}.tar.gz"))
+}
+
+/// Windows's release zip for `arch` (x86-64's alone, for now).
+fn windows_asset(arch: &str) -> Option<String> {
+    (arch == "x86_64").then(|| format!("phitex-{arch}-windows.zip"))
+}
+
+/// The file named `name` in zip archive `zip` (stored or deflated), by
+/// its central directory.
+fn unzip(zip: &[u8], name: &str) -> Option<Vec<u8>> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes(zip.get(at..at + 2)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(zip.get(at..at + 4)?.try_into().ok()?));
+    let n = |x: u32| usize::try_from(x).ok();
+    // (the end record: the last signature with its comment running to the end)
+    let end = (0..=zip.len().checked_sub(22)?)
+        .rev()
+        .find(|&i| u32_at(i) == Some(0x0605_4b50))?;
+    let entries = u16_at(end + 10)?;
+    let mut at = n(u32_at(end + 16)?)?;
+    for _ in 0..entries {
+        if u32_at(at)? != 0x0201_4b50 {
+            return None;
+        }
+        let method = u16_at(at + 10)?;
+        let packed = n(u32_at(at + 20)?)?;
+        let size = n(u32_at(at + 24)?)?;
+        let name_len = usize::from(u16_at(at + 28)?);
+        let skip = name_len + usize::from(u16_at(at + 30)?) + usize::from(u16_at(at + 32)?);
+        let local = n(u32_at(at + 42)?)?;
+        if zip.get(at + 46..at + 46 + name_len)? == name.as_bytes() {
+            if u32_at(local)? != 0x0403_4b50 {
+                return None;
+            }
+            let data =
+                local + 30 + usize::from(u16_at(local + 26)?) + usize::from(u16_at(local + 28)?);
+            let body = zip.get(data..data.checked_add(packed)?)?;
+            let out = match method {
+                0 => body.to_vec(),
+                8 => {
+                    let mut out = Vec::with_capacity(size);
+                    if !phitex_codecs::inflate::inflate_raw(body, &mut out) {
+                        return None;
+                    }
+                    out
+                }
+                _ => return None,
+            };
+            return (out.len() == size).then_some(out);
+        }
+        at += 46 + skip;
+    }
+    None
 }
 
 /// `a` is a later version than `b` (`1.61` after `1.6.9`: φ's digits,
@@ -233,19 +303,20 @@ fn fetch(r: &Release, asset: &str) -> Result<Vec<u8>, String> {
             "{asset} does not match SHA256SUMS: nothing installed"
         ));
     }
+    if asset.ends_with(".zip") {
+        return unzip(&tgz, "phitex.exe").ok_or_else(|| format!("{asset} has no phitex.exe"));
+    }
     let tar = phitex_shelf::gunzip(&tgz).ok_or_else(|| format!("{asset}: not gzip"))?;
     untar(&tar, "phitex")
         .map(<[u8]>::to_vec)
         .ok_or_else(|| format!("{asset} has no phitex binary"))
 }
 
-/// Where install.sh says it installed (`$XDG_DATA_HOME/phitex/install.json`).
+/// Where install.sh says it installed (`$XDG_DATA_HOME/phitex/install.json`;
+/// install.ps1: `%LOCALAPPDATA%\phitex\install.json`, [`crate::dirs`]).
 fn install_record() -> Option<Value> {
-    let env = |k| std::env::var_os(k).filter(|d| !d.is_empty());
-    let d = env("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))?;
-    serde_json::from_slice(&std::fs::read(d.join("phitex").join("install.json")).ok()?).ok()
+    let d = crate::dirs::phitex(crate::dirs::Kind::Data)?;
+    serde_json::from_slice(&std::fs::read(d.join("install.json")).ok()?).ok()
 }
 
 /// `bytes` as the executable `exe`, by rename from beside it.
@@ -258,6 +329,29 @@ fn replace(exe: &Path, bytes: &[u8]) -> Result<(), String> {
         std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("{}: {e}", new.display()))?;
     }
+    #[cfg(windows)]
+    {
+        // (the running program's file renamed aside, never removed while
+        // it runs; earlier upgrades' removed now, those still running kept)
+        let dir = exe.parent().unwrap_or(Path::new("."));
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                if n.starts_with(".phitex-") && n.ends_with(".old") {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+        let old = exe.with_file_name(format!(".phitex-{}.old", std::process::id()));
+        std::fs::rename(exe, &old).map_err(|e| format!("{}: {e}", exe.display()))?;
+        if let Err(e) = std::fs::rename(&new, exe) {
+            let _ = std::fs::rename(&old, exe);
+            return Err(format!("{}: {e}", exe.display()));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
     std::fs::rename(&new, exe).map_err(|e| format!("{}: {e}", exe.display()))
 }
 
@@ -290,9 +384,9 @@ pub fn upgrade(ui: &Ui, no_confirm: bool) -> i32 {
     let by_script = install_record().is_some_and(|r| r["method"] == "script");
     let (Some(exe), true, Some(asset)) = (exe, by_script, asset()) else {
         ui.error(&format!(
-            "phitex {v} is out (you have {have}); this phitex was not installed by phitex.org/install.sh: \
-             update it the way it was installed (curl -fsSL https://phitex.org/install.sh | sh, \
-             cargo install, or your package manager)"
+            "phitex {v} is out (you have {have}); this phitex was not installed by {}: \
+             update it the way it was installed ({}, cargo install, or your package manager)",
+            INSTALLER.0, INSTALLER.1
         ));
         return crate::EXIT_FAILED;
     };
@@ -479,7 +573,10 @@ fn said(n: &Value, v: &str, by_script: bool) -> Vec<String> {
         out.push(if by_script {
             "update: phitex upgrade".to_owned()
         } else {
-            "update: the way you installed phitex (curl -fsSL https://phitex.org/install.sh | sh for the script's)".to_owned()
+            format!(
+                "update: the way you installed phitex ({} for the script's)",
+                INSTALLER.1
+            )
         });
     }
     out
@@ -563,6 +660,60 @@ mod tests {
         tar.resize(1024 + 1024, 0);
         assert_eq!(untar(&tar, "phitex"), Some(&b"hello"[..]));
         assert_eq!(untar(&tar, "other"), None);
+    }
+
+    /// A zip's file read by its central directory, stored or deflated
+    /// (a fixed deflate block of `hello`), and Windows's asset name.
+    #[test]
+    fn zip() {
+        let entry = |name: &str, method: u16, body: &[u8], size: u32, at: u32| {
+            let mut local = vec![0x50, 0x4b, 3, 4, 20, 0, 0, 0];
+            local.extend(method.to_le_bytes());
+            local.extend([0; 8]); // (time, date, crc: not read)
+            local.extend(u32::try_from(body.len()).unwrap().to_le_bytes());
+            local.extend(size.to_le_bytes());
+            local.extend(u16::try_from(name.len()).unwrap().to_le_bytes());
+            local.extend([0, 0]);
+            local.extend(name.as_bytes());
+            local.extend(body);
+            let mut central = vec![0x50, 0x4b, 1, 2, 20, 0, 20, 0, 0, 0];
+            central.extend(method.to_le_bytes());
+            central.extend([0; 8]);
+            central.extend(u32::try_from(body.len()).unwrap().to_le_bytes());
+            central.extend(size.to_le_bytes());
+            central.extend(u16::try_from(name.len()).unwrap().to_le_bytes());
+            central.extend([0; 12]);
+            central.extend(at.to_le_bytes());
+            central.extend(name.as_bytes());
+            (local, central)
+        };
+        // (`hello`, deflated: one fixed-Huffman block)
+        let deflated = [0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00];
+        let (l1, c1) = entry("README", 0, b"stored", 6, 0);
+        let (l2, c2) = entry(
+            "phitex.exe",
+            8,
+            &deflated,
+            5,
+            u32::try_from(l1.len()).unwrap(),
+        );
+        let mut z = [l1.as_slice(), &l2].concat();
+        let cd = u32::try_from(z.len()).unwrap();
+        z.extend(&c1);
+        z.extend(&c2);
+        z.extend([0x50, 0x4b, 5, 6, 0, 0, 0, 0, 2, 0, 2, 0]);
+        z.extend(u32::try_from(c1.len() + c2.len()).unwrap().to_le_bytes());
+        z.extend(cd.to_le_bytes());
+        z.extend([0, 0]);
+        assert_eq!(unzip(&z, "phitex.exe").as_deref(), Some(&b"hello"[..]));
+        assert_eq!(unzip(&z, "README").as_deref(), Some(&b"stored"[..]));
+        assert_eq!(unzip(&z, "other"), None);
+        assert_eq!(unzip(&z[..z.len() - 3], "phitex.exe"), None);
+        assert_eq!(
+            windows_asset("x86_64").as_deref(),
+            Some("phitex-x86_64-windows.zip")
+        );
+        assert_eq!(windows_asset("aarch64"), None);
     }
 
     #[test]

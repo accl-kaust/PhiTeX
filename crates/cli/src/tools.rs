@@ -5,7 +5,6 @@
 //! job wrote, their support files found by [`crate::tex::Tree::tool_input`].
 
 use std::io::{Read as _, Write as _};
-use std::os::unix::ffi::OsStrExt as _;
 use std::path::{Path, PathBuf};
 
 use phitex_kpse::{Format, Kpse};
@@ -26,11 +25,11 @@ fn read_path(p: &Path) -> Option<Vec<u8>> {
 
 impl ToolFiles<'_> {
     fn at(&self, name: &[u8]) -> PathBuf {
-        let n = Path::new(std::ffi::OsStr::from_bytes(name));
+        let n = phitex_kpse::path_of(name);
         if n.is_absolute() {
             n.to_path_buf()
         } else {
-            self.dir.join(n)
+            self.dir.join(&n)
         }
     }
 
@@ -40,7 +39,7 @@ impl ToolFiles<'_> {
 
     fn find(&mut self, name: &[u8], format: Format) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
         let found = self.kpse.find_file(name, format, true)?;
-        let data = read_path(Path::new(std::ffi::OsStr::from_bytes(&found)));
+        let data = read_path(&phitex_kpse::path_of(&found));
         Some((found, data))
     }
 }

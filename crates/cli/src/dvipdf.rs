@@ -61,10 +61,7 @@ impl DpxFiles {
                 let (font, dpi) = phitex_kpse::pk_name(&request)?;
                 let (bdpi, mode) = phitex_kpse::pk_settings(&request)?;
                 let p = crate::mkfont::mktexpk(font, dpi, bdpi, mode)?;
-                Some(
-                    <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::as_bytes(p.as_os_str())
-                        .to_vec(),
-                )
+                Some(phitex_kpse::path_bytes(&p))
             })
         } else {
             self.kpse.find_file(name, kpse_format(format), false)
@@ -73,10 +70,8 @@ impl DpxFiles {
         let r = match (r, format) {
             (None, Format::Tfm) => {
                 let n = String::from_utf8_lossy(name);
-                crate::mkfont::mktextfm(n.strip_suffix(".tfm").unwrap_or(&n)).map(|p| {
-                    <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::as_bytes(p.as_os_str())
-                        .to_vec()
-                })
+                crate::mkfont::mktextfm(n.strip_suffix(".tfm").unwrap_or(&n))
+                    .map(|p| phitex_kpse::path_bytes(&p))
             }
             (r, _) => r,
         };
@@ -89,9 +84,7 @@ impl DpxFiles {
         self.read
             .entry(path.to_vec())
             .or_insert_with(|| {
-                let p = std::path::Path::new(
-                    <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path),
-                );
+                let p = phitex_kpse::path_of(path);
                 std::fs::read(p).ok().map(Arc::from)
             })
             .clone()
@@ -146,17 +139,12 @@ struct XdvFiles {
 
 impl Files for XdvFiles {
     fn find(&self, name: &[u8], format: Format, progname: &[u8]) -> Option<Vec<u8>> {
-        let rel = std::path::Path::new(
-            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(name),
-        );
+        let rel = phitex_kpse::path_of(name);
         if rel.is_relative() && matches!(format, Format::Pict | Format::Tex | Format::ProgramBinary)
         {
             let p = self.dir.join(rel);
             if p.is_file() {
-                return Some(
-                    <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::as_bytes(p.as_os_str())
-                        .to_vec(),
-                );
+                return Some(phitex_kpse::path_bytes(&p));
             }
         }
         let mut d = self.dpx.lock().unwrap_or_else(PoisonError::into_inner);
@@ -166,9 +154,7 @@ impl Files for XdvFiles {
     fn read(&self, path: &[u8]) -> Option<Arc<[u8]>> {
         // (the document's own files read again each time: they change
         // between a watch's builds)
-        let p = std::path::Path::new(
-            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path),
-        );
+        let p = phitex_kpse::path_of(path);
         if p.is_relative() || p.starts_with(&self.dir) {
             return std::fs::read(self.dir.join(p)).ok().map(Arc::from);
         }
@@ -185,9 +171,7 @@ impl Files for XdvFiles {
     /// as they are read again each time; the tree's are read once a
     /// process and need none.
     fn stamp(&self, path: &[u8]) -> Option<Vec<u8>> {
-        let p = std::path::Path::new(
-            <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(path),
-        );
+        let p = phitex_kpse::path_of(path);
         if p.is_relative() || p.starts_with(&self.dir) {
             return crate::session::disk_stamp(&self.dir.join(p));
         }

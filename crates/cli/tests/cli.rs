@@ -1,3 +1,8 @@
+// (Unix's: the programs these tests run under other names are symbolic
+// links, the ones they run are shell scripts, `timeout` bounds them, and
+// their builds need TeX Live; Windows CI runs the unit tests and builds
+// a document end to end instead, checks.yml)
+#![cfg(unix)]
 //! The `phitex` binary, end to end. The tests whose builds need what
 //! `phitex-tex` does not do yet (LaTeX's format, PDF output) are ignored
 //! with what they wait for; they are the gate it must pass, against the pdfTeX oracles under

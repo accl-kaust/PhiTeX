@@ -404,8 +404,8 @@ impl Cache {
 
 /// `p` with the home directory as `~`.
 pub fn home_relative(p: &Path) -> String {
-    match std::env::var_os("HOME").map(PathBuf::from) {
-        Some(h) if !h.as_os_str().is_empty() && p.starts_with(&h) => {
+    match crate::dirs::home() {
+        Some(h) if p.starts_with(&h) => {
             format!("~/{}", p.strip_prefix(&h).unwrap_or(p).display())
         }
         _ => p.display().to_string(),

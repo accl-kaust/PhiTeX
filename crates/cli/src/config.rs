@@ -323,18 +323,11 @@ pub fn parse_size(s: &str) -> Option<u64> {
 }
 
 /// The user's settings file: `$XDG_CONFIG_HOME/phitex/phitex.toml`, else
-/// `~/.config/phitex/phitex.toml`.
+/// `~/.config/phitex/phitex.toml` (Windows: `%APPDATA%\phitex\phitex.toml`,
+/// [`crate::dirs`]).
 #[must_use]
 pub fn user_file() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|h| !h.is_empty())
-                .map(|h| PathBuf::from(h).join(".config"))
-        })?;
-    Some(base.join("phitex").join(FILE))
+    Some(crate::dirs::phitex(crate::dirs::Kind::Config)?.join(FILE))
 }
 
 /// `text` (a `phitex.toml`) with `key` set to `value`: its line
@@ -870,7 +863,8 @@ impl phitex_live::latexmkrc::RcFiles for Disk {
 pub fn latexmkrc(dir: &Path, texinputs: Option<&str>) -> phitex_live::latexmkrc::Rc {
     use phitex_live::latexmkrc as rc;
     let var = |n: &str| std::env::var(n).ok();
-    let home = var("HOME");
+    // (latexmk's `$HOME`: Windows's `USERPROFILE` where it is unset)
+    let home = crate::dirs::home().map(|h| h.to_string_lossy().into_owned());
     let w = rc::Where {
         cwd: dir.to_string_lossy().into_owned(),
         home_config_is_dir: home

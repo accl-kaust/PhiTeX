@@ -572,6 +572,7 @@ impl UpdateFile {
 /// modification time restored (`touch -d`, an archive extracted, a
 /// checkout) keeps its other fields, not this one. None where there is
 /// no metadata.
+#[cfg(unix)]
 pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
     use std::os::unix::fs::MetadataExt;
     // (one stat; a file's: a folder or nothing at the name has none, and
@@ -592,6 +593,18 @@ pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
     k.extend(m.ctime().to_le_bytes());
     k.extend(m.ctime_nsec().to_le_bytes());
     Some(k)
+}
+
+/// Windows: [`phitex_tex::file_stat_key`]'s fields alone (`std` has no
+/// change time there; NTFS moves the modification time, in 100 ns, at
+/// every write).
+#[cfg(not(unix))]
+pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let k = phitex_tex::file_stat_key(&path.to_string_lossy());
+    (!k.is_empty()).then_some(k)
 }
 
 pub fn compact(f: &Mutex<UpdateFile>) -> Result<bool, String> {

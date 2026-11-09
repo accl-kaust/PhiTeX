@@ -166,7 +166,8 @@ enum Sub {
     News,
     /// Install the latest release
     ///
-    /// Its signature checked, for an install made by phitex.org/install.sh.
+    /// Its signature checked, for an install made by phitex.org/install.sh
+    /// (Windows: install.ps1).
     Upgrade,
     /// Your settings: all of them (phitex config), one (phitex config
     /// synctex), or change one (phitex config update-check on)
