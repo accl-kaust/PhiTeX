@@ -173,13 +173,17 @@ impl Run<'_, '_> {
             && (self.forced_since(self.cand_marks.last().map_or(0, |m| m.contribs))
                 || (self.cand_marks.is_empty() && self.forced_pending_before()?));
         // (inside a group or a conditional of the run's own too, where a
-        // continuation can carry them (`open_cut`, `par_cut`): every
-        // paragraph end is a cut. Run on through them, a page firing at
-        // one was a second pass from the run's start to it (amsldoc -j1:
-        // 11 such, their first passes 1.36 M commands, half the build's,
-        // 3.37 s where resuming at a checkpoint made 2.95 s))
+        // continuation can carry them (`open_cut`, `par_cut`), once the
+        // run has done `cut_min` commands, as at its text's end
+        // (`crate::cut`): a page firing at a candidate the run went on
+        // through is a second pass from the run's start to it, which is
+        // so kept short (amsldoc -j1: 11 such, their first passes 1.36 M
+        // commands, half the build's, 3.37 s where resuming at a
+        // checkpoint made 2.95 s); at every such candidate, the nodes'
+        // overhead was more than that (4.4 s))
+        let long = self.cmds >= self.ops.cut_min.load(std::sync::atomic::Ordering::Relaxed);
         let cuttable = fresh
-            && (((can || forced_par || open_cut || par_cut) && !self.rest_blank()?)
+            && (((can || forced_par || (long && (open_cut || par_cut))) && !self.rest_blank()?)
                 || ((restartable || open_cut || par_cut || forced_par) && self.stop_at == Some(k)));
         self.cand_marks.push(CandMark {
             k,
