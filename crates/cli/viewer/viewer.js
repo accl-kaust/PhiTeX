@@ -1,253 +1,15 @@
 // phitex's live viewer: viewer/src and crates/cli/viewer/cli.ts; made by scripts/viewer-bundle.sh (AGPL-3.0-only)
 
-// viewer/src/edits.ts
-function utf8Len(s, from2 = 0, to = s.length) {
-  let n = 0;
-  for (let i = from2; i < to; i++) {
-    const c = s.charCodeAt(i);
-    if (c < 128) n += 1;
-    else if (c < 2048) n += 2;
-    else if (c >= 55296 && c <= 56319 && i + 1 < to) {
-      const d = s.charCodeAt(i + 1);
-      if (d >= 56320 && d <= 57343) {
-        n += 4;
-        i++;
-      } else n += 3;
-    } else n += 3;
-  }
-  return n;
+// viewer/src/words.ts
+function plainWhy(e) {
+  const m = /^core trapped \([^)]*\):\s*([\s\S]*)$/.exec(e);
+  if (!m) return sentence(e);
+  const t = m[1].trim();
+  return /[.!?]$/.test(t) ? t : `The engine crashed (${t || "no reason given"}).`;
 }
-function byteOffset(s, pos) {
-  if (pos > 0 && pos < s.length) {
-    const c = s.charCodeAt(pos);
-    const p = s.charCodeAt(pos - 1);
-    if (c >= 56320 && c <= 57343 && p >= 55296 && p <= 56319) pos--;
-  }
-  return utf8Len(s, 0, pos);
-}
-function apply(s, e) {
-  return s.slice(0, e.from) + e.text + s.slice(e.to);
-}
-function merge(before, a, b) {
-  const aEnd = a.from + a.text.length;
-  if (b.to < a.from || b.from > aEnd) return null;
-  const from2 = Math.min(a.from, b.from);
-  const endAfterA = Math.max(aEnd, b.to);
-  const to = endAfterA <= aEnd ? a.to : endAfterA - (a.text.length - (a.to - a.from));
-  const afterA = apply(before.slice(from2, to), { from: a.from - from2, to: a.to - from2, text: a.text });
-  const text = apply(afterA, { from: b.from - from2, to: b.to - from2, text: b.text });
-  return { from: from2, to, text };
-}
-function textSum(s) {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
-  return h >>> 0;
-}
-var Batch = class {
-  edits = [];
-  /** The text after all of them. */
-  text;
-  constructor(text) {
-    this.text = text;
-  }
-  get size() {
-    return this.edits.length;
-  }
-  push(e) {
-    const last = this.edits.at(-1);
-    if (last) {
-      const before = this.befores.at(-1);
-      const m = merge(before, last, e);
-      if (m) {
-        this.edits[this.edits.length - 1] = m;
-        this.text = apply(this.text, e);
-        return;
-      }
-    }
-    this.befores.push(this.text);
-    this.edits.push(e);
-    this.text = apply(this.text, e);
-  }
-  befores = [];
-  /** The queued edits as the core takes them (UTF-16), in order, each against the text before it. */
-  take() {
-    const out = this.edits.map((e) => ({ start: e.from, end: e.to, text: e.text }));
-    this.edits = [];
-    this.befores = [];
-    return out;
-  }
-};
-function charOffset(s, byte) {
-  let n = 0;
-  for (let i = 0; i < s.length; i++) {
-    if (n >= byte) return i;
-    const c = s.charCodeAt(i);
-    if (c < 128) n += 1;
-    else if (c < 2048) n += 2;
-    else if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
-      n += 4;
-      i++;
-    } else n += 3;
-  }
-  return s.length;
-}
-
-// viewer/src/engines.ts
-var ENGINES = {
-  pdflatex: { label: "pdfLaTeX", ready: true },
-  xelatex: { label: "XeLaTeX", ready: true },
-  lualatex: { label: "LuaLaTeX", ready: false }
-};
-function errorNeeds(message) {
-  if (/LuaTeX is required|requires LuaTeX/i.test(message)) return "lualatex";
-  if (/requires either XeTeX or|XeTeX or LuaTeX|(fontspec|unicode-math|polyglossia)\b.*(XeTeX|LuaTeX)/i.test(message)) return "xelatex";
-  return null;
-}
-
-// viewer/src/report.ts
-var REPORT_TO = "flinner@nand.sh";
-function anonymizer(paths) {
-  const pairs = [];
-  paths.forEach((p, i) => {
-    const ext = p.match(/\.[A-Za-z0-9]+$/)?.[0] ?? "";
-    const alias = `file${i + 1}${ext}`;
-    pairs.push([p, alias]);
-    const base = p.replace(/^.*\//, "");
-    if (base !== p) pairs.push([base, alias]);
-    const stem = base.replace(/\.[A-Za-z0-9]+$/, "");
-    if (stem.length >= 4 && stem !== base) pairs.push([stem, alias.replace(/\.[A-Za-z0-9]+$/, "")]);
-  });
-  pairs.sort((a, b) => b[0].length - a[0].length);
-  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = pairs.length ? new RegExp(pairs.map(([p]) => `(?<![A-Za-z0-9_])${esc(p)}(?![A-Za-z0-9_])`).join("|"), "g") : null;
-  const map = new Map(pairs);
-  return (s) => (re ? s.replace(re, (m) => map.get(m) ?? m) : s).replace(/`[^'\n]{1,80}'/g, "`\u2026'").replace(/\/home\/[^/\s]+\//g, "~/").replace(/\/Users\/[^/\s]+\//g, "~/");
-}
-var CONTENT = /* @__PURE__ */ new Set(["text", "files", "binaries", "expect", "detail", "glyphs", "g"]);
-function clean(v, anon, depth = 0) {
-  if (typeof v === "string") return anon(v.length > 400 ? v.slice(0, 400) + "\u2026" : v);
-  if (typeof v !== "object" || v === null || depth > 4) return v;
-  if (Array.isArray(v)) return v.slice(0, 40).map((x) => clean(x, anon, depth + 1));
-  const out = {};
-  for (const [k, x] of Object.entries(v)) {
-    if (CONTENT.has(k)) out[k] = typeof x === "string" ? `(${x.length} chars, not included)` : "(not included)";
-    else out[k] = clean(x, anon, depth + 1);
-  }
-  return out;
-}
-function report(r) {
-  const anon = anonymizer(r.paths);
-  const line = (e) => `${String(e.t).padStart(8)} ms  ${e.k.padEnd(16)} ${e.d === void 0 ? "" : JSON.stringify(clean(e.d, anon))}`;
-  const exts = /* @__PURE__ */ new Map();
-  for (const p of r.paths) {
-    const x = p.match(/\.[A-Za-z0-9]+$/)?.[0] ?? "(none)";
-    exts.set(x, (exts.get(x) ?? 0) + 1);
-  }
-  return [
-    "PhiTeX Instant debug report (anonymized: no document text, no file names, no project id)",
-    `extension ${r.version} \xB7 engine ${r.engine}`,
-    `browser ${r.userAgent}`,
-    `project: ${r.paths.length} files (${[...exts].map(([x, n]) => `${n} ${x}`).join(", ")})`,
-    "",
-    "errors:",
-    ...r.errors.length ? r.errors.map((e) => "  " + anon(e)) : ["  (none)"],
-    "",
-    "status:",
-    "  " + JSON.stringify(clean(r.status ?? {}, anon)),
-    "",
-    "diagnostics:",
-    ...r.diagnostics.length ? r.diagnostics.slice(0, 40).map((d) => `  ${d.severity} ${d.code ?? ""}: ${anon(d.message)}${d.file ? ` (${anon(d.file)}${d.line ? `:${d.line}` : ""})` : ""}`) : ["  (none)"],
-    "",
-    "packages (TeX Live):",
-    `  fetched: ${(r.packages?.done ?? []).join(", ") || "(none)"}`,
-    `  failed: ${(r.packages?.failed ?? []).map((f) => `${f.name}${f.error ? ` (${anon(f.error)})` : ""}`).join(", ") || "(none)"}`,
-    `  not in TeX Live: ${(r.packages?.unavailable ?? []).length}`,
-    "",
-    "trace (last 300 events):",
-    ...r.trace.slice(-300).map(line)
-  ].join("\n");
-}
-
-// viewer/src/sync.ts
-function glyphs(json, path) {
-  if (!json?.n || !json.file || !json.start || !json.end || !json.synth || !json.x || !json.y) return [];
-  const files = json.files.map(path);
-  const words2 = (b64) => {
-    const b = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-    return new DataView(b.buffer);
-  };
-  const [file, start, end, synth, x, y] = [json.file, json.start, json.end, json.synth, json.x, json.y].map(words2);
-  const out = [];
-  for (let i = 0; i < json.n; i++) {
-    const f = file.getUint32(4 * i, true);
-    const s = 4 * (i >> 5) < synth.byteLength ? synth.getUint32(4 * (i >> 5), true) >>> (i & 31) & 1 : 0;
-    out.push({ x: x.getFloat32(4 * i, true), y: y.getFloat32(4 * i, true), file: f === 4294967295 ? null : files[f] ?? null, start: start.getUint32(4 * i, true), end: end.getUint32(4 * i, true), synth: s === 1 });
-  }
-  return out;
-}
-function nearest(gs, x, y) {
-  let best = null, d = Infinity;
-  for (const g of gs) {
-    if (!g.file) continue;
-    const dy = g.y - 3 - y, dx = g.x + 2.5 - x;
-    const e = dx * dx + 9 * dy * dy + (g.synth ? 400 : 0);
-    if (e < d) d = e, best = g;
-  }
-  return best;
-}
-function from(gs, file, lo, hi) {
-  return gs.filter((g) => g.file === file && !g.synth && g.start < hi && g.end > lo);
-}
-var widthsOf = /* @__PURE__ */ new WeakMap();
-function widths(all) {
-  let next = widthsOf.get(all);
-  if (next) return next;
-  next = /* @__PURE__ */ new Map();
-  for (let i = 0; i < all.length; i++) {
-    const n = all[i + 1];
-    next.set(all[i], n && Math.abs(n.y - all[i].y) < 0.5 && n.x > all[i].x && n.x - all[i].x < 15 ? n.x - all[i].x : 5);
-  }
-  widthsOf.set(all, next);
-  return next;
-}
-function boxes(gs, all) {
-  const next = widths(all);
-  const lines2 = /* @__PURE__ */ new Map();
-  for (const g of gs) {
-    const k = Math.round(g.y * 2) / 2;
-    const r = lines2.get(k), e = g.x + (next.get(g) ?? 5);
-    lines2.set(k, r ? [Math.min(r[0], g.x), Math.max(r[1], e)] : [g.x, e]);
-  }
-  return [...lines2].map(([y, [a, b]]) => [a - 1, y - 8, b - a + 2, 11]);
-}
-function lineAt(hits, at) {
-  let best = null;
-  for (const g of hits) if (!best || Math.abs(g.start - at) < Math.abs(best.start - at)) best = g;
-  return best ? hits.filter((g) => Math.abs(g.y - best.y) < 0.5) : [];
-}
-function wordNear(text, at, lo, hi) {
-  const here = wordBytes(text, at);
-  if (here) return here;
-  const w = (c) => c >= 128 || c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122 || c === 39 || c === 45;
-  for (let i = Math.min(at, text.length) - 1; i >= lo; i--) if (w(text[i])) return wordBytes(text, i);
-  for (let i = at; i < Math.min(hi, text.length); i++) if (w(text[i])) return wordBytes(text, i);
-  return null;
-}
-function glyphNear(hits, at) {
-  let before = null, after = null;
-  for (const g of hits) {
-    if (g.start <= at) {
-      if (!before || g.start > before.start) before = g;
-    } else if (!after || g.start < after.start) after = g;
-  }
-  return before ?? after;
-}
-function wordBytes(text, at) {
-  const w = (c) => c >= 128 || c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122 || c === 39 || c === 45;
-  let lo = at, hi = at;
-  while (lo > 0 && w(text[lo - 1])) lo--;
-  while (hi < text.length && w(text[hi])) hi++;
-  return lo < hi ? [lo, hi] : null;
+function sentence(s) {
+  const t = s.trim();
+  return !t || /[.!?…]$/.test(t) ? t : `${t}.`;
 }
 
 // viewer/src/diagnostics.ts
@@ -269,7 +31,7 @@ function kindOf(d) {
   if (/[Ff]ont|Missing character/.test(m)) return "font";
   return "other";
 }
-function lineAt2(text, i) {
+function lineAt(text, i) {
   let n = 1;
   for (let k = 0; k < i; k++) if (text.charCodeAt(k) === 10) n++;
   return n;
@@ -317,23 +79,23 @@ function diagnose(files, main, build2) {
         code: "unclosed-brace",
         message: `{ never closed${s.openBraces.length > 1 ? ` (${s.openBraces.length} open)` : ""}: the group runs to the end of the file`,
         file,
-        line: lineAt2(text, at)
+        line: lineAt(text, at)
       });
     }
     for (const at of s.strayBraces.slice(0, 3))
-      out.push({ severity: "warning", code: "stray-brace", message: "} with no { to close", file, line: lineAt2(text, at) });
+      out.push({ severity: "warning", code: "stray-brace", message: "} with no { to close", file, line: lineAt(text, at) });
     for (const at of s.openDollars.slice(0, 3))
-      out.push({ severity: "warning", code: "unclosed-math", message: "$ never closed in this paragraph", file, line: lineAt2(text, at) });
+      out.push({ severity: "warning", code: "unclosed-math", message: "$ never closed in this paragraph", file, line: lineAt(text, at) });
     for (const m of text.matchAll(/(^|[^\\])\\[gex]?def\s*\\([A-Za-z@]+)([^{\n%]*)$/gm))
-      out.push({ severity: "warning", code: "def-no-body", message: `\\${m[2]} is defined with no { body } on its line`, file, line: lineAt2(text, m.index + m[1].length) });
+      out.push({ severity: "warning", code: "def-no-body", message: `\\${m[2]} is defined with no { body } on its line`, file, line: lineAt(text, m.index + m[1].length) });
     const ifs = [...text.matchAll(/\\if[a-z]*\b/g)];
     const fis = (text.match(/\\fi\b/g) ?? []).length;
     if (ifs.length > fis && !/\\[gex]?def/.test(text))
-      out.push({ severity: "info", code: "unclosed-if", message: `${ifs.length - fis} \\if\u2026 without \\fi`, file, line: lineAt2(text, ifs.at(-1).index) });
+      out.push({ severity: "info", code: "unclosed-if", message: `${ifs.length - fis} \\if\u2026 without \\fi`, file, line: lineAt(text, ifs.at(-1).index) });
     for (const m of text.matchAll(/\\input\s*\{?([^\s}\\%]+)/g)) {
       const n = m[1];
       if (!(n in files) && !(`${n}.tex` in files) && !/\.(aux|bbl|ind|toc)$/.test(n) && !n.startsWith("\\"))
-        out.push({ severity: "warning", code: "missing-file", message: `\\input ${n}: no such file in the project`, file, line: lineAt2(text, m.index) });
+        out.push({ severity: "warning", code: "missing-file", message: `\\input ${n}: no such file in the project`, file, line: lineAt(text, m.index) });
     }
     const latex = build2?.latex ? [] : [...new Set(text.match(LATEX) ?? [])];
     if (latex.length) {
@@ -343,7 +105,7 @@ function diagnose(files, main, build2) {
         code: "latex",
         message: `LaTeX is not supported yet (dropped): ${latex.slice(0, 5).join(" ")}${latex.length > 5 ? " \u2026" : ""}`,
         file,
-        line: lineAt2(text, first)
+        line: lineAt(text, first)
       });
     }
     let nonAscii = 0;
@@ -354,7 +116,7 @@ function diagnose(files, main, build2) {
         if (firstNon < 0) firstNon = i;
       }
     if (nonAscii && !build2?.latex)
-      out.push({ severity: "info", code: "non-ascii", message: `${nonAscii} non-ASCII characters: PhiTeX's fonts may not typeset them`, file, line: lineAt2(text, firstNon) });
+      out.push({ severity: "info", code: "non-ascii", message: `${nonAscii} non-ASCII characters: PhiTeX's fonts may not typeset them`, file, line: lineAt(text, firstNon) });
   }
   if (main && files[main] !== void 0 && !/\\(bye|end|enddocument)\b/.test(files[main]))
     out.push({ severity: "info", code: "no-end", message: "no \\bye: the last page ships at the end of the file anyway", file: main });
@@ -392,1538 +154,17 @@ function diagnose(files, main, build2) {
   return out.sort((a, b) => rank[a.severity] - rank[b.severity]);
 }
 
-// viewer/src/packages.ts
-var DELIVERED = "\0delivered";
-var noPackages = { label: "none", resolve: async () => null };
-function isPackageFile(name) {
-  return /\.(sty|cls|clo|def|cfg|fd|ldf|ltx|tex|dfu|sto|lbx|bbx|cbx|dbx|mld|tikz|pgf|code\.tex|lua|ini|cmap|fontspec|tfm|vf|pfb|enc|map)$/i.test(name) && !name.includes("/");
-}
-function referenced(text) {
-  const out = /* @__PURE__ */ new Set();
-  const body = text.replace(/(^|[^\\])%.*$/gm, "$1");
-  for (const m of body.matchAll(/\\(documentclass|LoadClass(?:WithOptions)?|usepackage|RequirePackage(?:WithOptions)?)\s*(?:\[[^\]]*\]\s*)?\{([^}]*)\}/g)) {
-    const ext = /class/i.test(m[1]) ? ".cls" : ".sty";
-    for (const n of m[2].split(",")) {
-      const name = n.trim();
-      if (/^[A-Za-z0-9@_.-]+$/.test(name)) out.add(name + ext);
-    }
-  }
-  if (/\\DeclareFontShape/.test(body)) {
-    for (const m of body.matchAll(/<[^>]*>\s*(?:\\[A-Za-z@]+\s*|s\*\s*(?:\[[^\]]*\]\s*)?)*([A-Za-z][A-Za-z0-9-]*)(?![A-Za-z0-9-]*\/)/g))
-      if (!/^(s?sub|gen|genb|sgen|fixed|sfixed|error|serror|warning)$/.test(m[1])) out.add(m[1] + ".tfm");
-  }
-  for (const m of body.matchAll(/\\(?:input|InputIfFileExists|@input)\s*\{?([A-Za-z0-9@_-]+\.(?:sty|cls|clo|def|cfg|fd|ldf|tex|dfu))\}?/g)) out.add(m[1]);
-  return [...out];
-}
-
-// viewer/src/html.ts
-var MARK = "phx-slot-";
-var parsed = /* @__PURE__ */ new WeakMap();
-var parsedSvg = /* @__PURE__ */ new WeakMap();
-function html(strings, ...values) {
-  return build(strings, values, false);
-}
-function svg(strings, ...values) {
-  return build(strings, values, true);
-}
-function build(strings, values, inSvg) {
-  const cache = inSvg ? parsedSvg : parsed;
-  let base = cache.get(strings);
-  if (!base) {
-    let src = "";
-    strings.forEach((s, i) => {
-      src += s;
-      if (i === values.length) return;
-      if (/<(style|textarea|title|script)\b[^>]*>(?![\s\S]*<\/\1>)[\s\S]*$/i.test(src)) throw new Error("html: no value inside <style>, <textarea>, <title> or <script>");
-      if (/<[a-zA-Z][^<>]*=\s*"[^"]*$/.test(src)) src += `${MARK}${i}`;
-      else if (/<[a-zA-Z][^<>]*$/.test(src)) throw new Error(`html: a value inside a tag must be in a quoted attribute (after ${JSON.stringify(s.slice(-40))})`);
-      else src += `<template ${MARK}${i}></template>`;
-    });
-    const t = new DOMParser().parseFromString(`<template>${inSvg ? `<svg>${src}</svg>` : src}</template>`, "text/html").querySelector("template").content;
-    if (inSvg) {
-      base = t.ownerDocument.createDocumentFragment();
-      base.append(...t.firstElementChild.childNodes);
-    } else base = t;
-    const drop = (n) => {
-      for (const k of [...n.childNodes]) {
-        if (k.nodeType === Node.TEXT_NODE && /^\s*$/.test(k.textContent) && k.textContent.includes("\n")) k.remove();
-        else drop(k instanceof HTMLTemplateElement ? k.content : k);
-      }
-    };
-    drop(base);
-    cache.set(strings, base);
-  }
-  const frag = base.cloneNode(true);
-  const nodes = (v) => v === null || v === void 0 || v === false ? [] : Array.isArray(v) ? v.flatMap(nodes) : [v instanceof Node ? v : String(v)];
-  const walk = (root) => {
-    for (const el of [...root.querySelectorAll("*")]) {
-      if (el.localName === "template" && el.attributes.length === 1 && el.attributes[0].name.startsWith(MARK)) {
-        el.replaceWith(...nodes(values[+el.attributes[0].name.slice(MARK.length)]));
-        continue;
-      }
-      for (const a of [...el.attributes]) {
-        if (!a.value.includes(MARK)) continue;
-        if (a.name.startsWith("on")) throw new Error(`html: no value in an event handler (${a.name})`);
-        const whole = new RegExp(`^${MARK}(\\d+)$`).exec(a.value), v = whole && values[+whole[1]];
-        if (whole && !/^(aria|data)-/.test(a.name) && (v === true || v === false || v === null || v === void 0)) {
-          if (v === true) el.setAttribute(a.name, "");
-          else el.removeAttribute(a.name);
-          continue;
-        }
-        el.setAttribute(a.name, a.value.replace(new RegExp(`${MARK}(\\d+)`, "g"), (_, n) => nodes(values[+n]).map((x) => typeof x === "string" ? x : x.textContent).join("")));
-      }
-      if (el instanceof HTMLTemplateElement) walk(el.content);
-    }
-  };
-  walk(frag);
-  return frag;
-}
-function rich(text) {
-  const f = document.createDocumentFragment();
-  const open = [f];
-  for (const part3 of text.split(/(<\/?(?:b|code|i|kbd)>)/)) {
-    const tag = /^<(\/?)(b|code|i|kbd)>$/.exec(part3);
-    if (!tag) part3 && open[open.length - 1].appendChild(document.createTextNode(part3));
-    else if (!tag[1]) open.push(open[open.length - 1].appendChild(document.createElement(tag[2])));
-    else if (open.length > 1) open.pop();
-  }
-  return f;
-}
-function svgArt(markup) {
-  if (/<script|\son[a-z]+\s*=/i.test(markup)) throw new Error("svgArt: art has no script or event handler");
-  const doc = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg">${markup}</svg>`, "image/svg+xml");
-  if (doc.querySelector("parsererror")) throw new Error("svgArt: not well-formed SVG");
-  const f = document.createDocumentFragment();
-  f.append(...[...doc.documentElement.childNodes].map((n) => document.importNode(n, true)));
-  return f;
-}
-
-// viewer/src/problems.ts
-function place(file, line, col, text) {
-  return html`<a href="#" class="phx-place" data-file="${file}" data-line="${Number(line) || 1}" data-col="${Number(col) || 1}">${text ?? `${file}${line ? `:${line}` : ""}${col ? `:${col}` : ""}`}</a>`;
-}
-function problemNode(p) {
-  return item(p);
-}
-function asDiagnostic(p) {
-  p = Object.assign({ notes: [], help: [], suggestions: [], file: null, line: null, col: null, excerpt: null, context: [], included: [], box: null }, p);
-  const severity = p.severity === "fatal" || p.severity === "error" ? "error" : p.severity === "warning" ? "warning" : "info";
-  return { severity, code: p.code, message: p.message, file: p.file ?? void 0, line: p.line ?? void 0, problem: p };
-}
-function item(p) {
-  const sev = p.severity === "fatal" ? "error" : p.severity === "warning" || p.severity === "note" ? p.severity : "error";
-  let ex = "";
-  if (p.excerpt) {
-    const chars = [...p.excerpt.text];
-    const a = chars.slice(0, p.excerpt.start).join("");
-    const b = chars.slice(p.excerpt.start, p.excerpt.start + p.excerpt.len).join("");
-    const c = chars.slice(p.excerpt.start + p.excerpt.len).join("");
-    ex = html`<pre class="phx-excerpt">${p.line ? html`<span class="phx-ln">${Number(p.line)} │ </span>` : ""}${a}<mark>${b}</mark>${c}</pre>`;
-  }
-  const ctx = p.context.length ? html`<details class="phx-ctx"><summary>in ${p.context.map((m, i) => [i ? " \u2190 " : "", html`<code>${m.name}</code>`])}</summary>${p.context.map((m) => html`<pre><b>${m.name}</b> ${m.before}<mark>‸</mark>${m.after}</pre>`)}</details>` : "";
-  const inc = p.included.length ? html`<div class="phx-inc">included from ${p.included.map((i, k) => [k ? ", " : "", place(i.file, i.line, 1)])}</div>` : "";
-  const box = p.box ? html`<pre class="phx-excerpt">${p.box.excerpt}</pre>` : "";
-  const list = (cls, xs) => xs.length ? html`<ul class="${cls}">${xs.map((x) => html`<li>${x}</li>`)}</ul>` : "";
-  return html`<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${String(p.severity)}</span>${p.code ? html`<code class="phx-code">${p.code}</code>` : ""}<span>${p.message}</span></div>${p.file ? html`<div class="phx-where">${place(p.file, p.line, p.col)}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help.length ? [p.help.join(" ").replace(/\s+/g, " ").trim()] : [], ...p.suggestions])}</li>`;
-}
-var PROBLEMS_CSS = `
-.phx-problems { position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / 45%); overflow: auto; padding: 48px 16px; }
-.phx-card { max-width: 900px; margin: 0 auto; background: var(--ph-menu, #fff); color: var(--ph-fg, #1b222c); border-radius: var(--ph-radius, 4px);
-  font: 13px/1.45 var(--ph-font, "Noto Sans", system-ui, sans-serif); }
-.phx-card header { display: flex; align-items: baseline; gap: 10px; padding: 12px 16px 10px; border-bottom: 1px solid var(--ph-border, #e7e9ee); font-weight: 600; }
-.phx-close { margin-left: auto; background: none; color: var(--ph-fg2, #495365); border: 1px solid var(--ph-border, #e7e9ee); border-radius: var(--ph-radius, 4px);
-  padding: 1px 8px; font: inherit; font-size: 12px; cursor: pointer; }
-.phx-card ol { list-style: none; margin: 0; padding: 0; }
-.phx-card li { padding: 9px 14px 10px; border-bottom: 1px solid var(--ph-border, #e7e9ee); border-left: 3px solid var(--sev, var(--ph-fg2, #495365)); }
-.phx-card li.phx-error { --sev: var(--ph-danger, #b83a33); }
-.phx-card li.phx-warning { --sev: var(--ph-warning, #8f5514); }
-.phx-card li.phx-note { --sev: var(--ph-info, #366cbf); }
-.phx-msg { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-weight: 600; }
-.phx-sev { display: none; }
-.phx-code { color: var(--ph-fg2, #495365); font: 400 12px ui-monospace, monospace; }
-.phx-where { margin-top: 2px; font-size: 12px; }
-.phx-place { color: var(--ph-link, #366cbf); text-decoration: none; }
-.phx-place:hover { text-decoration: underline; }
-.phx-excerpt, .phx-ctx pre { margin: 6px 0 0; padding: 0; overflow-x: auto; font: 12px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre;
-  color: var(--ph-fg2, #495365); background: none; }
-.phx-excerpt mark, .phx-ctx mark { background: none; color: var(--sev, var(--ph-danger, #b83a33)); text-decoration: underline wavy; text-underline-offset: 3px; }
-.phx-ln { opacity: .6; }
-.phx-notes, .phx-help { margin: 6px 0 0; padding-left: 16px; color: var(--ph-fg2, #495365); }
-.phx-ctx { margin-top: 6px; color: var(--ph-fg2, #495365); }
-.phx-ctx summary { cursor: pointer; }
-.phx-inc { margin-top: 6px; color: var(--ph-fg2, #495365); font-size: 12px; }
-.phx-card footer { padding: 10px 16px; color: var(--ph-fg2, #495365); font-size: 12px; }
-`;
-
-// viewer/src/latexmkrc.ts
-function latexmkFiles(files) {
-  const get = typeof files === "function" ? files : (p) => Object.hasOwn(files, p) ? files[p] : void 0;
-  const out = {};
-  const read2 = (path) => {
-    const text = Object.hasOwn(out, path) ? void 0 : get(path);
-    if (text === void 0) return;
-    out[path] = text;
-    for (const m of text.matchAll(/^[^#\n]*?\b(?:do|require)\s*\(?\s*(["'])(\.\.?\/[^"'\n]+)\1/gm)) {
-      const p = normal(m[2]);
-      if (p) read2(p);
-    }
-  };
-  read2(get(".latexmkrc") !== void 0 ? ".latexmkrc" : "latexmkrc");
-  return Object.keys(out).length ? out : void 0;
-}
-function normal(path) {
-  const parts = [];
-  for (const p of path.split("/")) {
-    if (p === "" || p === ".") continue;
-    if (p !== "..") parts.push(p);
-    else if (!parts.pop()) return void 0;
-  }
-  return parts.join("/") || void 0;
-}
-function latexmkNotes(notes) {
-  return notes.map((n) => {
-    const m = /^(?:\/compile\/|\.\/)?([^\s:][^:]*):(\d+): ([\s\S]*)$/.exec(n);
-    return m ? { severity: "info", code: "latexmkrc", file: m[1], line: +m[2], message: `latexmkrc: ${m[3]}` } : { severity: "info", code: "latexmkrc", message: `latexmkrc: ${n}` };
-  });
-}
-
-// viewer/src/session.ts
-var preambleOf = (t) => {
-  const end = t?.indexOf("\\begin{document}") ?? -1;
-  return end < 0 ? t ?? "" : t.slice(0, end);
+// viewer/src/engines.ts
+var ENGINES = {
+  pdflatex: { label: "pdfLaTeX", ready: true },
+  xelatex: { label: "XeLaTeX", ready: true },
+  lualatex: { label: "LuaLaTeX", ready: false }
 };
-var usesMinted = (t) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
-function plainWhy(e) {
-  const m = /^core trapped \([^)]*\):\s*([\s\S]*)$/.exec(e);
-  if (!m) return sentence(e);
-  const t = m[1].trim();
-  return /[.!?]$/.test(t) ? t : `The engine crashed (${t || "no reason given"}).`;
+function errorNeeds(message) {
+  if (/LuaTeX is required|requires LuaTeX/i.test(message)) return "lualatex";
+  if (/requires either XeTeX or|XeTeX or LuaTeX|(fontspec|unicode-math|polyglossia)\b.*(XeTeX|LuaTeX)/i.test(message)) return "xelatex";
+  return null;
 }
-function sentence(s) {
-  const t = s.trim();
-  if (!t) return t;
-  return t[0].toUpperCase() + t.slice(1) + (/[.!?…]$/.test(t) ? "" : ".");
-}
-var WATCH = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
-var NEAR_CULPRIT = 64;
-function place2(t, pos) {
-  const at = byteOffset(t, pos);
-  const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
-  const line = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
-  return { at, word: wordNear(new TextEncoder().encode(t), at, line[0], line[1]), line };
-}
-function traceReq(r) {
-  const o = {};
-  for (const [k, v] of Object.entries(r)) {
-    if (k === "op" || k === "id") continue;
-    o[k] = typeof v === "string" && v.length > 40 ? `${v.length} chars` : v && typeof v === "object" ? `${Object.keys(v).length} keys` : v;
-  }
-  return o;
-}
-function traceRes(r) {
-  const j = r.json ?? {};
-  return {
-    ok: r.ok,
-    ...r.error ? { error: r.error } : {},
-    ...typeof j.how === "string" ? { how: j.how.split("\n")[0].slice(0, 140) } : {},
-    ...j.pages !== void 0 ? { pages: Array.isArray(j.pages) ? j.pages.length : j.pages } : {},
-    ...j.history !== void 0 ? { history: j.history } : {},
-    ...Array.isArray(j.missing) && j.missing.length ? { missing: j.missing.length } : {},
-    ...j.error ? { texError: typeof j.error === "string" ? j.error : j.error.message } : {},
-    ...j.build_ms !== void 0 ? { build_ms: Math.round(j.build_ms) } : {},
-    ...r.pdf ? { pdf: r.pdf.length } : {},
-    // (a page from the draw worker: its draw time, and whether it was drawn ahead)
-    ...j.draw_ms !== void 0 ? { drawer: true, draw_ms: Math.round(j.draw_ms), kept: j.kept } : {}
-  };
-}
-var defaults = { fuel: 1e5, dpi: 96, checkEveryMs: 5e3 };
-var image = (r) => r.canvas && r.size ? { canvas: r.canvas, w: r.size[0], h: r.size[1], links: r.links } : null;
-function guessMain(files) {
-  const names = Object.keys(files).filter((n) => /\.tex$/i.test(n));
-  const strip = (t) => t.replace(/(^|[^\\])%.*$/gm, "$1");
-  const inputs = /* @__PURE__ */ new Map();
-  for (const n of names) {
-    const dir = n.includes("/") ? n.slice(0, n.lastIndexOf("/") + 1) : "";
-    const got = [];
-    for (const m of strip(files[n]).matchAll(/\\(?:input|include|subfile|subfileinclude|includestandalone)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}/g)) {
-      const f = m[1].trim().replace(/^\.\//, "");
-      const tex = /\.tex$/i.test(f) ? f : `${f}.tex`;
-      got.push(tex, dir + tex);
-    }
-    inputs.set(n, got);
-  }
-  const inputted = /* @__PURE__ */ new Set();
-  for (const [n, got] of inputs) for (const f of got) if (f !== n) inputted.add(f);
-  const score = (n) => {
-    const t = strip(files[n]);
-    let s = 0;
-    if (inputted.has(n)) s -= 16;
-    if (inputs.get(n).some((f) => f !== n && f in files)) s += 8;
-    if (/(^|\n)[^%\n]*\\(bye|end\{document\})/.test(t)) s += 4;
-    if (/(^|\n)\s*\\documentclass/.test(t)) s += 2;
-    if (/^main\.tex$/i.test(n)) s += 1;
-    if (!n.includes("/")) s += 1;
-    return s;
-  };
-  return names.sort((a, b) => score(b) - score(a))[0] ?? null;
-}
-function diff(old, text) {
-  if (old === text) return null;
-  let a = 0;
-  while (a < old.length && a < text.length && old[a] === text[a]) a++;
-  let z = 0;
-  while (z < old.length - a && z < text.length - a && old[old.length - 1 - z] === text[text.length - 1 - z]) z++;
-  if (a > 0 && /[\udc00-\udfff]/.test(old[a] ?? "")) a--;
-  if (z > 0 && /[\udc00-\udfff]/.test(old[old.length - z] ?? "")) z--;
-  return { from: a, to: old.length - z, text: text.slice(a, text.length - z) };
-}
-var PreviewSession = class {
-  o;
-  /** Each file's text as sent to the core (queued edits: in `batches`). */
-  files = {};
-  batches = /* @__PURE__ */ new Map();
-  main = null;
-  open = null;
-  page = 0;
-  pages = 0;
-  opened = false;
-  debug = false;
-  /** When each file's queued edits began (the oldest keystroke not sent). */
-  since = /* @__PURE__ */ new Map();
-  scheduled = false;
-  /** Sends are chained: the core gets the edits in the order they were made. */
-  chain = Promise.resolve();
-  host;
-  core;
-  sink;
-  /**
-   * What happened, in order (dev: scripts/mock-run.mjs reads it): each core
-   * request and its reply, package fetches, layouts. A ring of the last 3000,
-   * times in ms since the session began; never document text, only sizes.
-   */
-  trace = [];
-  /** The core fetches what it lacks from Shelf itself (its open reply says so). */
-  coreFetches = false;
-  /** Shelf packs the core fetched in the build under way (shown as loading until it ends). */
-  inBuild = [];
-  tellPackages() {
-    this.sink.packages?.({ ...this.pkg, loading: [...this.pkg.loading], unavailable: [...this.pkg.unavailable], done: [...this.pkg.done ?? []], failed: [...this.pkg.failed ?? []] });
-  }
-  /**
-   * The core fetches a pack mid-build (the job goes on with it), as its
-   * progress says (`phase: "fetching"`): the view says which. (A pack it
-   * could not get is the build's trouble, said by the host, not here.)
-   */
-  onFetching(e) {
-    this.tr("package: core fetches", e);
-    this.pkg.source = this.source.label;
-    const prev = this.inBuild.at(-1);
-    if (prev) this.pkg.loading = this.pkg.loading.filter((n) => n !== prev);
-    if (prev) this.pkg.done = [...this.pkg.done ?? [], prev];
-    this.inBuild.push(e.pack);
-    this.pkg.loading = [...this.pkg.loading, e.pack];
-    this.tellPackages();
-  }
-  /**
-   * A pack the host fetches for the core (a core that fetches its own: the
-   * panel had said "0 package files" all through a cold build's downloads):
-   * loading while it comes, then done with its bytes counted, or failed.
-   */
-  onPack(e) {
-    this.tr("package: host fetches for the core", { id: e.id, state: e.state, bytes: e.bytes });
-    this.pkg.source = this.source.label || "Shelf";
-    const p = this.pkg;
-    p.loading = p.loading.filter((n) => n !== e.id);
-    if (e.state === "fetching") {
-      if (!p.done?.includes(e.id)) p.loading = [...p.loading, e.id];
-    } else if (e.state === "done") {
-      if (!p.done?.includes(e.id)) p.done = [...p.done ?? [], e.id], p.bytes = (p.bytes ?? 0) + (e.bytes ?? 0);
-    } else p.failed = [...(p.failed ?? []).filter((f) => f.name !== e.id), { name: e.id, error: "could not be fetched" }];
-    this.tellPackages();
-  }
-  /** Core requests sent and not answered yet; of them, ones that may build. */
-  inflight = 0;
-  building = 0;
-  t0 = 0;
-  tr(k, d) {
-    this.t0 ||= this.now();
-    this.trace.push({ t: Math.round(this.now() - this.t0), k, d });
-    if (this.trace.length > 3e3) this.trace.shift();
-  }
-  constructor(host2, core, sink, opts = {}) {
-    this.host = host2;
-    core.onEvent?.((e) => {
-      const ev = e.event ?? "";
-      if (this.ended.length && (ev === "settled" || ev === "failed" || ev === "trapped")) for (const f of this.ended.splice(0)) f(e);
-      if (ev === "settled") {
-        const b = e;
-        if (typeof b.ms === "number" && !b.settling) this.sink.buildTime?.(b.ms, !!b.cold);
-      }
-      if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
-      if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
-      if (this.o.remote && e.event === "origins") return void (this.originsSeen++, this.glyphsAsked.clear(), this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
-      if (this.o.remote && "event" in e && WATCH.has(e.event)) return this.onWatch(e);
-      if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);
-      if (e.event === "switched") {
-        this.tr("core: the SSA worker took over", {});
-        this.glyphCache.clear();
-        if (this.opened) this.chain = this.chain.then(() => this.layout()).then(() => this.statusSoon());
-        return;
-      }
-      if (e.event === "settled") {
-        if (this.opened && !this.busy) this.chain = this.chain.then(() => this.layout()).then(() => this.queuedLatency(e)).then(() => this.statusSoon());
-        return;
-      }
-      if (e.event === "pack") return this.onPack(e);
-      if (e.event === "latexmkrc") return void (this.rcNotes = latexmkNotes(e.notes), this.statusSoon());
-      if (e.event === "page" || e.event === "progress" || e.event === "done") this.onStream(e);
-    });
-    this.core = {
-      request: async (r) => {
-        const t0 = this.now();
-        this.tr(`\u2192 ${r.op}`, traceReq(r));
-        this.inflight++;
-        const builds = r.op === "edit" || r.op === "status" || r.op === "open";
-        if (builds && this.building++ === 0) this.sink.busy?.(true);
-        if (r.op === "open" || r.op === "set_file") this.glyphCache.clear();
-        if (r.op === "edit") {
-          const len = new TextEncoder().encode(r.text).length;
-          this.mapCulprits(r.file, r.start, r.end, len);
-          this.mapGlyphs(r.file, r.start, r.end, len);
-        }
-        const res = await core.request(r).finally(() => {
-          this.inflight--;
-          if (builds && --this.building === 0) this.sink.busy?.(false);
-          if (builds && this.inBuild.length) {
-            this.pkg.done = [...this.pkg.done ?? [], ...this.inBuild.filter((n) => this.pkg.loading.includes(n))];
-            this.pkg.loading = this.pkg.loading.filter((n) => !this.inBuild.includes(n));
-            this.inBuild = [];
-            this.tellPackages();
-          }
-        });
-        this.tr(`\u2190 ${r.op}`, { ms: Math.round(this.now() - t0), ...traceRes(res) });
-        if (res.error) this.errorsSeen = [...this.errorsSeen.slice(-19), `${r.op}: ${res.error}`];
-        const lost = res.json?.error === "no such handle" || /^(core trapped|PDF driver failed)/.test(res.error ?? "");
-        if (res.ok && (r.op === "edit" || r.op === "status")) this.traps = 0;
-        if (lost && this.opened && /needs more than the [\d.]+ GiB of memory/.test(res.error ?? "")) {
-          this.opened = false;
-          this.sink.error(plainWhy(res.error));
-          this.sink.connection?.(false, plainWhy(res.error));
-          return res;
-        }
-        if (lost && this.opened && r.op !== "open") {
-          this.opened = false;
-          this.traps++;
-          const why = plainWhy(res.error ?? "The engine restarted.");
-          if (this.traps <= 1) {
-            this.sink.error(`${why} Restarting it.`);
-            this.sink.connection?.(false, `${why} Restarting it.`);
-            this.chain = this.chain.then(() => this.reopen());
-          } else {
-            this.sink.error(`${why} It happened again, so the preview has stopped. Reload the page to try again.`);
-            this.sink.connection?.(false, `${why} It happened again, so the preview has stopped. Reload the page to try again.`);
-          }
-        }
-        return res;
-      },
-      onLost: core.onLost?.bind(core)
-    };
-    this.sink = sink;
-    this.o = { ...defaults, ...opts };
-    host2.onOpen((f0, t) => {
-      const f = this.known(f0);
-      this.open = f;
-      this.resending.delete(f);
-      this.sync(f, t);
-      this.status();
-    });
-    host2.onChanges((f0, es, len, sum) => {
-      const f = this.known(f0);
-      this.queue(f, es);
-      if (len !== void 0) this.agree(f, len, es, sum);
-    });
-    core.onLost?.(() => {
-      this.opened = false;
-      this.sink.error("The engine stopped. Restarting it.");
-      this.sink.connection?.(false, "The engine stopped. Restarting it.");
-      this.reopen();
-    });
-  }
-  /** Files whose whole text was asked for again (host.resend), until it comes (onOpen). */
-  resending = /* @__PURE__ */ new Set();
-  /**
-   * The session's copy of `file` (its queued edits in) against the
-   * editor's length after `edits`, and its sum when it gives one (as typing
-   * pauses: a same-length paste misapplied keeps the length): on a
-   * difference the copy has drifted (edits lost or applied twice, as an
-   * Overleaf history restore's were),
-   * so it is said and the whole text asked for again, sync() diffing it in.
-   * Once until it comes.
-   */
-  agree(file, len, edits, sum) {
-    const text = this.text(file) ?? "";
-    if (text.length === len && (sum === void 0 || textSum(text) === sum) || this.resending.has(file)) return;
-    this.tr("editor and session disagree", { file, editor: len, session: text.length, sum: sum !== void 0, edits: edits.slice(-5) });
-    if (!this.host.resend) return;
-    this.resending.add(file);
-    this.host.resend(file);
-  }
-  /**
-   * The project's file the editor's name is: itself, else the one file
-   * whose path ends with it (a name read from Overleaf's page without its
-   * folders: edits to a new, empty file the build never reads, the page
-   * never changing while the chip said they were built).
-   */
-  known(f) {
-    if (f in this.files) return f;
-    const like = Object.keys(this.files).filter((p) => p.endsWith("/" + f));
-    if (like.length === 1) {
-      this.tr("file: named by its path", { from: f, to: like[0] });
-      return like[0];
-    }
-    return f;
-  }
-  /** The pages' request: -1, the PDF (the host draws its pages with MuPDF). */
-  dpi() {
-    return -1;
-  }
-  now() {
-    return (this.o.now ?? (() => performance.now()))();
-  }
-  async start() {
-    if (this.o.remote) {
-      this.opened = true;
-      return this.watchJoined();
-    }
-    const files = await this.host.loadProject();
-    for (const [f, t] of Object.entries(files)) if (!(f in this.files)) this.files[f] = t;
-    this.main = this.host.mainFile?.(this.files) ?? guessMain(this.files);
-    this.sink.mains?.(Object.keys(this.files).filter((f) => f.endsWith(".tex")), this.main);
-    await this.reopen();
-    this.host.ready?.();
-    if (this.o.checkEveryMs > 0) this.checkTimer = setInterval(() => this.debug && this.check(), this.o.checkEveryMs);
-  }
-  checkTimer;
-  /** The session ends (its view closed): its timers stop and it sends nothing more; the core's side is its transport's to close. */
-  stop() {
-    clearInterval(this.checkTimer);
-    if (this.statusTimer) clearTimeout(this.statusTimer);
-    this.opened = false;
-    this.paused = true;
-  }
-  /** Files changed outside the editor (e.g. a project reloaded): each diffed in. */
-  refresh(files) {
-    for (const [f, t] of Object.entries(files)) if (f !== this.open) this.sync(f, t);
-  }
-  setMain(m) {
-    this.main = m;
-    return this.reopen();
-  }
-  /**
-   * Clean recompile: the project's files as Overleaf has them now, packages
-   * that failed or were not found asked for again, and a fresh core session
-   * (discovery, first paint, then the incremental program), nothing kept from
-   * the last job but the packages already fetched.
-   */
-  async clean(files) {
-    for (const [f, t] of Object.entries(files)) if (f !== this.open) this.files[f] = t;
-    for (const n of [...this.pkg.unavailable, ...(this.pkg.failed ?? []).map((f) => f.name)]) this.asked.delete(n);
-    this.pkg.unavailable = [];
-    this.pkg.failed = [];
-    this.texError = void 0;
-    this.hashes = [];
-    return this.reopen();
-  }
-  /** Whether the open's sources used minted (the worker then has its runner). */
-  minted = false;
-  /** A fresh core session from the texts with every queued edit in. */
-  async reopen() {
-    if (!this.main) return this.sink.error("no main .tex file found");
-    for (const [f, b] of this.batches) this.files[f] = b.text;
-    this.batches.clear();
-    const t = this.now();
-    const want = this.o.engine?.(this.files[this.main]) ?? "pdflatex";
-    const shims = !ENGINES[want].ready && want === "xelatex" ? await this.o.shims?.(this.files[this.main]) : null;
-    const engine = shims ? "pdflatex" : want;
-    this.engine = engine;
-    this.wanted = want;
-    this.preamble = preambleOf(this.files[this.main]);
-    this.sink.engine?.({ engine: want, ready: ENGINES[engine].ready, approx: !!shims });
-    if (!ENGINES[engine].ready) {
-      this.opened = false;
-      this.tr("engine", { engine, ready: false });
-      return;
-    }
-    await this.prefetch(["pdftex.map", ...Object.values(this.files).flatMap(referenced)]);
-    this.minted = Object.values(this.files).some(usesMinted);
-    const rc = latexmkFiles(this.files);
-    this.rcFiles = new Set(Object.keys(rc ?? {}));
-    this.rcNotes = [];
-    const latexmk = rc && { files: rc, exact: false };
-    const r = await this.core.request({ op: "open", main: this.main, files: { ...this.pkgFiles, ...shims, ...this.files }, fuel: this.o.fuel, engine, workers: this.o.workers, latexmk, projectFiles: rc && Object.keys(this.files) });
-    if (!r.ok) return this.sink.error((typeof r.json?.error === "string" ? r.json.error : void 0) ?? r.error ?? "open failed");
-    this.sink.connection?.(true);
-    if (r.json.building) {
-      this.tr("open: streaming", {});
-      this.opened = true;
-      this.sink.busy?.(true);
-      this.sink.streaming?.({ pages: 0, phase: r.json.phase ?? "typesetting" });
-      const d = await new Promise((res) => this.streamEnd = res);
-      this.sink.busy?.(false);
-      this.sink.streaming?.(null);
-      if (!d.ok || !d.json) return this.sink.error(d.error ?? "the build stopped");
-      r.json = d.json;
-    }
-    this.opened = true;
-    const latex = r.json.engine === "phitex";
-    if (latex !== this.latex) this.lastWarned = 0;
-    this.latex = latex;
-    this.coreFetches = !!r.json.fetches;
-    this.warming = typeof r.json.how === "string" && r.json.how.startsWith("plain") ? this.now() : 0;
-    this.warmSlow = false;
-    if (this.warming) this.sink.warmup?.({ state: "preparing", since: Date.now() });
-    this.setPages(r.json.pages);
-    this.noteError(r.json);
-    this.status(r.json.pending, r.json.undefined_names);
-    this.fetchPackages(r.json.missing);
-    const rt = this.now() - t, said2 = (ms) => ms < 1e3 ? `${ms.toFixed(0)} ms` : `${(ms / 1e3).toFixed(1)} s`;
-    this.sink.latency(`opened: the engine answered in ${said2(rt)}${r.json.build_ms >= 1 ? `, its build ${said2(r.json.build_ms)}` : ""}`);
-    await (this.sink.layout ? this.layout(Array.isArray(r.json.hashes) ? r.json.hashes : void 0) : this.showPage());
-    this.pkg.building = false;
-    this.tellPackages();
-    this.statusSoon();
-  }
-  /** A streamed open's end, awaited by `open`. */
-  streamEnd;
-  /** The streamed open's first page was traced. */
-  streamFirst = false;
-  onStream(e) {
-    if (e.event === "done") {
-      this.tr("open: streamed", { ok: e.ok });
-      this.streamFirst = false;
-      this.streamEnd?.(e);
-      this.streamEnd = void 0;
-      return;
-    }
-    if (!this.streamEnd) return;
-    if (e.event === "progress") return this.sink.streaming?.({ pages: e.pages, phase: e.phase });
-    if (!this.streamFirst) {
-      this.streamFirst = true;
-      this.tr("open: first page", { pages: e.pages });
-    }
-    this.setPages(e.pages);
-    this.sink.streaming?.({ pages: e.pages, phase: "typesetting" });
-    if (this.sink.layout) this.chain = this.chain.then(() => this.layout(e.hashes));
-  }
-  /** When the plain first paint came, while the SSA program is still to come (0: not warming). */
-  warming = 0;
-  warmSlow = false;
-  /** A status said how the last build was: past a plain one, the SSA program is there. */
-  warmCheck(how) {
-    if (!this.warming || typeof how !== "string" || how.startsWith("plain")) return;
-    this.tr("warmup: ready", { ms: Math.round(this.now() - this.warming) });
-    this.warming = 0;
-    this.sink.warmup?.({ state: "ready" });
-  }
-  lastWarned = 0;
-  /** When the core trapped, in the last minute. */
-  /** Traps since the last build that came back whole. */
-  traps = 0;
-  /** The engine the project runs with (its packages are resolved for it: which tree's file). */
-  engine = "pdflatex";
-  /** The engine the main file asked for at the last open (before the shims' choice), and its preamble then. */
-  wanted;
-  preamble;
-  /** The core runs LaTeX (the open reply's `engine`; until it says, as phitex's, the default build). */
-  latex = true;
-  diags = [];
-  /** The open's rc files (latexmkrc.ts): an edit to one reopens. */
-  rcFiles = /* @__PURE__ */ new Set();
-  /** What the open's rc files set that was not applied (the core's `latexmkrc` event). */
-  rcNotes = [];
-  /** The last build's first TeX error (the core's status), if it had one. */
-  texError;
-  noteError(j) {
-    if (j.history === void 0) return;
-    this.texError = j.error && typeof j.error === "object" ? j.error : void 0;
-  }
-  undefinedNames = [];
-  /** The last status scan's pending count (edits keep it until the next scan). */
-  pending;
-  status(pending, undefinedNames) {
-    if (this.o.remote) return this.sink.status({ pages: this.pages, main: this.main, file: null, diagnostics: this.watchDiags });
-    this.pending = pending;
-    if (undefinedNames) this.undefinedNames = undefinedNames;
-    if (this.now() - this.lastWarned > 250 || undefinedNames) {
-      const texts = {};
-      for (const f of Object.keys(this.files)) texts[f] = this.text(f);
-      this.diags = diagnose(texts, this.main, {
-        pages: this.pages,
-        pending,
-        undefinedNames: this.undefinedNames,
-        unavailable: this.pkg.unavailable,
-        packageSource: this.source === noPackages ? void 0 : this.source.label,
-        latex: this.latex,
-        texError: this.texError,
-        packageErrors: this.pkg.failed
-      });
-      this.lastWarned = this.now();
-    }
-    this.sink.status({ pages: this.pages, pending, main: this.main, file: this.open, diagnostics: this.rcNotes.length ? [...this.diags, ...this.rcNotes] : this.diags });
-  }
-  /** Packages the core was given (kept apart from the project's files: never diagnosed, never a main). */
-  pkgFiles = {};
-  /** Every package name asked for once: not asked again. */
-  asked = /* @__PURE__ */ new Set();
-  pkg = { loading: [], unavailable: [], source: "", done: [], building: false };
-  get source() {
-    return this.o.packages ?? noPackages;
-  }
-  /**
-   * The core read `missing` and found nothing: each package among them
-   * fetched (once), then set as a file (a rebuild each: the core never
-   * looks for a missing file again). What they read in turn shows up in
-   * the next status, and is fetched then.
-   */
-  fetchPackages(missing, guessed = []) {
-    if (this.coreFetches) {
-      const none = (missing ?? []).filter((n) => isPackageFile(n) && !this.pkg.unavailable.includes(n));
-      if (none.length) this.pkg.unavailable.push(...none), this.tellPackages();
-      return;
-    }
-    const wanted = new Set(missing ?? []);
-    missing = [...wanted, ...guessed];
-    const want = [...new Set(missing ?? [])].filter((n) => isPackageFile(n) && !(n in this.files) && !this.asked.has(n));
-    if (!want.length) return;
-    for (const n of want) this.asked.add(n);
-    const src = this.source;
-    this.pkg.source = src.label;
-    const tell = () => this.sink.packages?.({ ...this.pkg, loading: [...this.pkg.loading], unavailable: [...this.pkg.unavailable], done: [...this.pkg.done ?? []], failed: [...this.pkg.failed ?? []] });
-    if (src === noPackages) {
-      this.pkg.unavailable.push(...want);
-      tell();
-      return this.status(this.pending, this.undefinedNames);
-    }
-    this.pkg.loading.push(...want);
-    tell();
-    const got = [];
-    this.tr("packages: want", want);
-    const fetchOne = async (n) => {
-      const t = await src.resolve(n, this.engine).catch((e) => this.failed(n, e));
-      this.tr(t === null ? "package: none" : "package: got", n);
-      got.push([n, t]);
-      this.pkg.loading = this.pkg.loading.filter((m) => m !== n);
-      if (t !== null) {
-        this.pkg.done.push(n);
-        this.pkg.failed = this.pkg.failed?.filter((f) => f.name !== n);
-      }
-      const more = t === null || t === DELIVERED ? [] : referenced(t).filter((m) => isPackageFile(m) && !(m in this.files) && !this.asked.has(m));
-      for (const m of more) this.asked.add(m);
-      this.pkg.loading.push(...more);
-      tell();
-      await Promise.all(more.map(fetchOne));
-    };
-    void Promise.all(want.map(fetchOne)).then(() => {
-      for (const [n, t] of got) {
-        if (t === null) {
-          if (wanted.has(n) && !this.pkg.failed?.some((f) => f.name === n)) this.pkg.unavailable.push(n);
-          continue;
-        }
-        if (t === DELIVERED) continue;
-        this.pkgFiles[n] = t;
-        if (this.opened) this.chain = this.chain.then(() => this.core.request({ op: "set_file", file: n, text: t }).then(() => void 0));
-      }
-      const any = got.some(([, t]) => t !== null);
-      this.pkg.building = any;
-      tell();
-      this.status(this.pending, this.undefinedNames);
-      if (any)
-        this.chain = this.chain.then(() => this.layout()).then(() => {
-          this.pkg.building = false;
-          tell();
-          this.statusSoon();
-        });
-    });
-  }
-  /** After the core's discovery pass: what it asked for is here (or nowhere), so the first paint may build. Once per open. */
-  /** A fetch that failed: kept with why (shown), and askable again. */
-  failed(n, e) {
-    this.asked.delete(n);
-    const error = e instanceof Error ? e.message : String(e);
-    this.pkg.failed = [...(this.pkg.failed ?? []).filter((f) => f.name !== n), { name: n, error }];
-    return null;
-  }
-  /** Fetch `names` (and what they load, by the scan) into pkgFiles, before a session opens. */
-  async prefetch(names) {
-    const src = this.source;
-    const want = [...new Set(names)].filter((n) => isPackageFile(n) && !(n in this.files) && !this.asked.has(n));
-    if (src === noPackages || !want.length) return;
-    this.pkg.source = src.label;
-    const tell = () => this.sink.packages?.({ ...this.pkg, loading: [...this.pkg.loading], unavailable: [...this.pkg.unavailable], done: [...this.pkg.done ?? []], failed: [...this.pkg.failed ?? []] });
-    for (const n of want) this.asked.add(n);
-    this.pkg.loading.push(...want);
-    tell();
-    const one = async (n) => {
-      const t = await src.resolve(n, this.engine).catch((e) => this.failed(n, e));
-      this.pkg.loading = this.pkg.loading.filter((m) => m !== n);
-      if (t !== null) this.pkg.done.push(n);
-      if (t !== null && t !== DELIVERED) this.pkgFiles[n] = t;
-      const more = t === null || t === DELIVERED ? [] : referenced(t).filter((m) => isPackageFile(m) && !(m in this.files) && !this.asked.has(m));
-      for (const m of more) this.asked.add(m);
-      this.pkg.loading.push(...more);
-      tell();
-      await Promise.all(more.map(one));
-    };
-    const t0 = this.now();
-    this.tr("prefetch: start", want.length);
-    await Promise.all(want.map(one));
-    this.tr("prefetch: done", { files: this.pkg.done?.length ?? 0, ms: Math.round(this.now() - t0) });
-    this.pkg.building = true;
-    tell();
-  }
-  /** The page count of the last build; the page in view kept inside it
-   * (a build with no page, an error, keeps the page: it comes back). */
-  setPages(n) {
-    this.pages = n;
-    if (n > 0 && this.page >= n) this.page = n - 1;
-  }
-  /** The page in view (the one an edit paints first). */
-  setPage(p) {
-    this.page = Math.max(0, Math.min(p, Math.max(this.pages - 1, 0)));
-    void this.peerPages();
-    return this.sink.layout ? Promise.resolve() : this.showPage();
-  }
-  /** The pages' hashes, as the core has them now. */
-  hashes = [];
-  /** Tell the view which pages there are (by hash). */
-  /** `given`: the hashes a reply carried (the open's), else asked for. */
-  async layout(given) {
-    if (!this.sink.layout) return;
-    if (given) this.hashes = given;
-    else {
-      const r = await this.core.request({ op: "pages" });
-      if (!r.ok || !r.json?.pages) return;
-      this.hashes = r.json.pages;
-    }
-    this.tr("layout", { pages: this.hashes.length });
-    this.setPages(this.hashes.length);
-    if (this.hashes.length) this.sink.layout(this.hashes);
-    this.drawPeers();
-    void this.peerPages();
-    if (this.sink.goto && !this.noOriginsPrefetch) this.glyphsAll();
-  }
-  /** Everything again, for a view that just joined (a detached PDF tab). */
-  async resync() {
-    if (!this.opened) return;
-    if (this.o.remote) return this.watchJoined();
-    this.sink.mains?.(Object.keys(this.files).filter((f) => f.endsWith(".tex")), this.main);
-    this.status(this.pending);
-    await (this.sink.layout ? this.layout() : this.showPage());
-  }
-  /** Page `k`, for a view that wants it. */
-  async fetch(k) {
-    if (!this.opened) return;
-    const r = await this.core.request({ op: "png", page: k, dpi: this.dpi() });
-    const img = image(r);
-    if (img) this.sink.page(img, k, this.pages, r.json?.hash ?? this.hashes[k] ?? null);
-  }
-  async showPage() {
-    if (!this.opened) return;
-    if (this.sink.layout) return this.layout();
-    const r = await this.core.request({ op: "png", page: this.page, dpi: this.dpi() });
-    this.sink.page(image(r), this.page, this.pages);
-  }
-  /** (debugging: no glyph-origin requests after layouts) */
-  noOriginsPrefetch = false;
-  /** The errors replies carried (traps, panics), the last 20. */
-  errorsSeen = [];
-  /** An anonymized debug report (report.ts) for the user to send. */
-  report(env) {
-    const st = this.trace.filter((e) => e.k === "\u2190 status").at(-1)?.d;
-    return report({
-      ...env,
-      paths: Object.keys(this.files),
-      trace: this.trace,
-      diagnostics: this.diags ?? [],
-      status: st,
-      packages: this.pkg,
-      // (TeX's error by its message only: its context is the document's lines)
-      errors: [...this.errorsSeen, ...this.texError ? [`TeX: ${this.texError.message}`] : []]
-    });
-  }
-  /** Page `k`'s glyphs with their sources, as the core has them now (kept by the page's hash). */
-  glyphCache = /* @__PURE__ */ new Map();
-  /**
-   * An edit replaced bytes [start, end) of `file` with `len` bytes: every
-   * cached glyph's source range moved with it. A page the edit changed has a
-   * new hash, so its glyphs are asked again (the cache is by page hash).
-   */
-  mapGlyphs(file, start, end, len) {
-    const map = (p) => p < start ? p : p >= end ? p + len - (end - start) : start + len;
-    for (const [key, gs] of this.glyphCache) {
-      if (end > start && gs.some((g) => g.file === file && g.start < end && g.end > start)) {
-        this.glyphCache.delete(key);
-        continue;
-      }
-      for (const g of gs) {
-        if (g.file !== file) continue;
-        const [a, b] = [map(g.start), map(g.end)];
-        g.start = a;
-        g.end = Math.max(a, b);
-      }
-    }
-  }
-  /**
-   * boxesOf's answers, by page (its glyph list: a page changed has a new
-   * one) and range (`file\0start\0end`): the range's boxes there and the
-   * page's glyph nearest it. Mapped through edits as the glyphs are, so a
-   * build's problems are looked up only on the pages it changed.
-   */
-  culprits = /* @__PURE__ */ new Map();
-  /** The culprits' answers moved with an edit (before the glyphs are): one the edit touches, between its range and its nearest glyph, dropped. */
-  mapCulprits(file, start, end, len) {
-    const live = new Set(this.glyphCache.values());
-    for (const [all, memo] of this.culprits) {
-      if (!live.has(all)) {
-        this.culprits.delete(all);
-        continue;
-      }
-      const moved = [];
-      for (const [id, m] of memo) {
-        const [f, a, b] = id.split("\0");
-        if (f !== file) continue;
-        const lo = Math.min(+a, m.g?.start ?? +a), hi = Math.max(+b, m.g?.end ?? +b);
-        if (start > hi) continue;
-        memo.delete(id);
-        if (end < lo) moved.push([`${f}\0${+a + len - (end - start)}\0${+b + len - (end - start)}`, m]);
-      }
-      for (const [id, m] of moved) memo.set(id, m);
-    }
-  }
-  /** Page `k`'s glyphs if they are here, at once (no request, no waiting on a build). */
-  cached(k) {
-    return this.glyphCache.get(`${k}:${this.hashes[k] ?? ""}`);
-  }
-  /** Every page's glyphs asked for, the one read first, one at a time: after each build, so lookups are local. */
-  glyphsAll() {
-    const gen = ++this.glyphGen;
-    const n = this.hashes.length;
-    const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
-    void (async () => {
-      for (const k of order) {
-        if (gen !== this.glyphGen) return;
-        if (k >= 0 && k < n && !this.cached(k)) await this.glyphsOf(k);
-      }
-    })();
-  }
-  glyphGen = 0;
-  glyphsOf(k) {
-    const key = `${k}:${this.hashes[k] ?? ""}`;
-    const have = this.glyphCache.get(key);
-    if (have) return Promise.resolve(have);
-    let p = this.glyphsAsked.get(key);
-    if (!p) {
-      const mine = this.glyphsFetch(k, key).finally(() => this.glyphsAsked.get(key) === mine && this.glyphsAsked.delete(key));
-      this.glyphsAsked.set(key, p = mine);
-    }
-    return p;
-  }
-  glyphsAsked = /* @__PURE__ */ new Map();
-  /** The watch's `origins` events seen: a page's answer asked before the latest is of the origins before it. */
-  originsSeen = 0;
-  async glyphsFetch(k, key) {
-    const seen = this.originsSeen;
-    const r = await this.core.request({ op: "origins", page: k });
-    if (seen !== this.originsSeen) return this.glyphsOf(k);
-    if (!r.ok || !r.json) return [];
-    const path = (n) => {
-      n = n.replace(/^\.\//, "");
-      if (this.o.remote) return n;
-      return n in this.files ? n : n + ".tex" in this.files ? n + ".tex" : null;
-    };
-    const gs = glyphs(r.json, path);
-    if (!gs.length) return gs;
-    if (this.glyphCache.size > 4 * Math.max(this.hashes.length, 100)) this.glyphCache.clear();
-    this.glyphCache.set(key, gs);
-    if (this.peers.length) this.drawPeers();
-    return gs;
-  }
-  /** A double-click at (x, y) on page `k` (PDF points from its top left): the editor to its source. */
-  async toSource(k, x, y) {
-    if (!this.opened) return;
-    const g = nearest(this.cached(k) ?? await this.glyphsOf(k), x, y);
-    this.tr("sync\u2192source", { k, x, y, g });
-    if (!g?.file) return;
-    if (this.o.remote) return this.o.remote.source(g.file, g.start, g.end);
-    const t = this.files[g.file];
-    this.sink.goto?.(g.file, charOffset(t, g.start), charOffset(t, g.end));
-  }
-  /**
-   * The editor selected [from, to) of `file` (UTF-16): the glyphs that came
-   * from it, on every page, highlighted (an empty selection clears them).
-   */
-  async selectSource(file, from2, to) {
-    if (!this.opened || !(file in this.files)) return;
-    const t = this.files[file];
-    return this.selectBytes(file, byteOffset(t, from2), byteOffset(t, to));
-  }
-  /**
-   * Bytes [a, b) of `file`'s text selected (the glyph origins' offsets):
-   * the glyphs that came from them, on every page, highlighted (an empty
-   * selection clears them). [`selectSource`]'s, and an LSP editor's
-   * (`{event: "select"}`).
-   */
-  async selectBytes(file, a, b) {
-    if (!this.opened) return;
-    if (a === b) return this.sink.marks?.([]);
-    const out = [];
-    for (let k = 0; k < Math.max(this.hashes.length, this.pages); k++) {
-      const all = this.cached(k) ?? await this.glyphsOf(k);
-      const hit = all.filter((g) => g.file === file && !g.synth && g.start < b && g.end > a);
-      if (hit.length) out.push({ k, boxes: boxes(hit, all) });
-    }
-    this.tr("select\u2192page", { file, a, b, pages: out.map((m) => m.k) });
-    this.sink.marks?.(out);
-  }
-  /**
-   * Text selected on the pages ([x, y top, w, h] boxes in PDF points, by
-   * page): the editor selects the source it came from (the file most of it
-   * came from, from its first glyph's start to its last's end).
-   */
-  async selectPage(sel) {
-    if (!this.opened || !sel.length) return;
-    const by = /* @__PURE__ */ new Map();
-    for (const { k, rects } of sel) {
-      for (const g of this.cached(k) ?? await this.glyphsOf(k)) {
-        if (!g.file || g.synth) continue;
-        const [gx, gy] = [g.x + 1, g.y - 2];
-        if (!rects.some(([x, y, w, h]) => gx >= x && gx <= x + w && gy >= y && gy <= y + h)) continue;
-        const r = by.get(g.file) ?? { lo: Infinity, hi: -Infinity, n: 0 };
-        by.set(g.file, { lo: Math.min(r.lo, g.start), hi: Math.max(r.hi, g.end), n: r.n + 1 });
-      }
-    }
-    const best = [...by].sort((x, y) => y[1].n - x[1].n)[0];
-    this.tr("select\u2192source", { pages: sel.map((s) => s.k), file: best?.[0], glyphs: best?.[1].n ?? 0 });
-    if (!best) return;
-    const [file, { lo, hi }] = best;
-    if (this.o.remote) return void this.o.remote.select?.(file, lo, hi);
-    const t = this.files[file];
-    if (t === void 0) return;
-    this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
-  }
-  /**
-   * The editor's cursor at `pos` (UTF-16) in `file`, as it moves: the word it
-   * is in highlighted on the page, at once, from the glyphs already here
-   * (none asked for: a page not yet here is skipped); scrolled to only when
-   * the cursor changed line.
-   */
-  follow(file, pos) {
-    if (!this.opened || !(file in this.files) || !this.sink.mark) return;
-    const { at, word, line } = place2(this.files[file], pos);
-    this.followBytes(file, at, word, line);
-  }
-  /**
-   * Collaborators' cursors (the host's, Overleaf's: never the user's own),
-   * each at `pos` (UTF-16) in `file`: the word there marked on its page,
-   * by follow's rule, in the collaborator's hue with their label, never
-   * scrolling, apart from the user's own mark. From the glyphs here; a
-   * cursor on a page without them is shown once they come (the pages
-   * around the one in view asked for). Each call is the whole set: []
-   * clears.
-   */
-  others(file, others) {
-    this.peers = others.map((o) => ({ file, ...o }));
-    this.drawPeers();
-    void this.peerPages();
-  }
-  peers = [];
-  /**
-   * The collaborators' marks, from the glyphs already here. A collaborator
-   * not found whose last mark is on a page made again, its glyphs not here
-   * yet (a build: the page's new hash), keeps that mark until they come
-   * ([`peerPages`] asks for them): dropped and drawn again a round trip
-   * later, it blinked at every build.
-   */
-  drawPeers() {
-    if (!this.sink.others || !this.opened) return;
-    const out = [];
-    const drawn = /* @__PURE__ */ new Map();
-    for (const p of this.peers) {
-      const t = this.files[p.file];
-      if (t === void 0) continue;
-      const id = `${p.label}\0${p.hue}`;
-      const { at, word, line } = place2(t, p.pos);
-      let e;
-      for (let k = 0; k < this.hashes.length; k++) {
-        const all = this.cached(k);
-        const hit = all ? this.wordOn(all, p.file, at, word, line) : [];
-        if (!all || !hit.length) continue;
-        e = { k, boxes: boxes(hit, all), label: p.label, hue: p.hue, file: p.file, pos: p.pos };
-        break;
-      }
-      const was = this.peersDrawn.get(id);
-      if (!e && was && was.k < this.hashes.length && !this.cached(was.k)) e = { ...was, file: p.file, pos: p.pos };
-      if (!e) continue;
-      out.push(e);
-      drawn.set(id, e);
-    }
-    this.peersDrawn = drawn;
-    this.sink.others(out);
-  }
-  /** The collaborators' marks last drawn, by label and hue. */
-  peersDrawn = /* @__PURE__ */ new Map();
-  /** The glyphs of the pages around the one in view, and of those a collaborator's kept mark is on, asked for, then the collaborators drawn again. */
-  async peerPages() {
-    if (!this.peers.length || !this.sink.others) return;
-    const near = [this.page, this.page + 1, this.page - 1, ...[...this.peersDrawn.values()].map((e) => e.k)];
-    const ks = [...new Set(near)].filter((k) => k >= 0 && k < this.hashes.length && !this.cached(k));
-    if (!ks.length) return;
-    await Promise.all(ks.map((k) => this.glyphsOf(k)));
-    this.drawPeers();
-  }
-  /**
-   * The glyphs to mark for a cursor at byte `at` of `file`, in word `w`
-   * (bytes, none: not in a word) of line `line` (bytes), among a page's
-   * glyphs `all` (none: not on that page): a word, never the whole line,
-   * while typing: the cursor's word, else, not typeset yet (just typed),
-   * the typeset word nearest it on its line, the glyph's own; the line
-   * only with no word near at all.
-   */
-  wordOn(all, file, at, w, line) {
-    const onLine = from(all, file, line[0], line[1]);
-    if (!onLine.length) return [];
-    let word = w ? from(onLine, file, w[0], w[1]) : [];
-    if (!word.length) {
-      const g = glyphNear(onLine, at);
-      const t = this.files[file];
-      const gw = g && t !== void 0 ? wordBytes(new TextEncoder().encode(t), g.start) : null;
-      word = gw ? from(onLine, file, gw[0], gw[1]) : g ? onLine.filter((x) => x.start === g.start) : [];
-    }
-    return word.length ? word : lineAt(onLine, at);
-  }
-  /**
-   * The cursor at byte `at` of `file`'s text (the glyph origins' offsets),
-   * in word `w` (bytes, none: not in a word) of line `line` (bytes): the
-   * word highlighted on the page, else the line's glyphs nearest it, from
-   * the glyphs already here (a page not yet here asked for, then shown if
-   * the cursor is still there); scrolled to only when the cursor changed
-   * line. [`follow`]'s, and an LSP editor's (`{event: "follow"}`).
-   */
-  followBytes(file, at, w, line) {
-    if (!this.opened || !this.sink.mark) return;
-    const [a, b] = line;
-    const key = `${file}:${a}`;
-    const scroll = key !== this.followLine;
-    this.followLine = key;
-    const n = Math.max(this.hashes.length, this.pages, 1);
-    const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
-    for (const k of order) {
-      const all = this.cached(k);
-      if (!all) continue;
-      const hit = this.wordOn(all, file, at, w, line);
-      if (!hit.length) continue;
-      this.followWant = "";
-      this.sink.mark(k, boxes(hit, all), scroll);
-      return;
-    }
-    const want = `${file}:${at}`;
-    this.followWant = want;
-    void (async () => {
-      for (const k of order) {
-        if (this.followWant !== want) return;
-        if (k >= this.hashes.length || this.cached(k)) continue;
-        const all = await this.glyphsOf(k);
-        if (from(all, file, a, b).length) {
-          if (this.followWant === want) {
-            this.followLine = "";
-            this.followBytes(file, at, w, line);
-          }
-          return;
-        }
-      }
-    })();
-  }
-  followLine = "";
-  followWant = "";
-  /** The last build's transcript, the job's `.log` (the viewer's "View log"; none: the core has none yet). */
-  async log() {
-    if (!this.opened) return null;
-    for (let i = 0; i < 50; i++) {
-      const r = await this.core.request({ op: "log" });
-      if (!r.ok) return null;
-      if (r.json?.pending) {
-        await new Promise((go) => setTimeout(go, 100));
-        continue;
-      }
-      const t = r.json?.text;
-      return typeof t === "string" && t ? t : null;
-    }
-    return null;
-  }
-  /**
-   * The boxes of [`start`, `end`) (bytes, as a problem's range) of `file` on
-   * the pages: the culprit under a problem's wavy underline. From the pages'
-   * glyphs, the page in view first and the rest asked for as needed; [] where
-   * none of it is typeset.
-   */
-  async boxesOf(file, start, end) {
-    if (!this.opened) return [];
-    file = file.replace(/^\.\//, "");
-    const n = Math.max(this.hashes.length, this.pages, 1);
-    const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
-    const out = [];
-    let near = null;
-    for (const k of order) {
-      if (k >= this.hashes.length) continue;
-      const all = this.cached(k) ?? await this.glyphsOf(k);
-      const memo = this.culprits.get(all) ?? this.culprits.set(all, /* @__PURE__ */ new Map()).get(all);
-      const id = `${file}\0${start}\0${end}`;
-      let m = memo.get(id);
-      if (!m) {
-        const hi = Math.max(end, start + 1), hit = [];
-        m = { boxes: null, g: null, d: Infinity };
-        for (const g of all) {
-          if (g.file !== file || g.synth) continue;
-          if (g.start < hi && g.end > start) hit.push(g);
-          const d = g.start >= end ? g.start - end : start - g.end;
-          if (d >= 0 && d < m.d) m.g = g, m.d = d;
-        }
-        if (hit.length) m.boxes = boxes(hit, all);
-        memo.set(id, m);
-      }
-      if (m.boxes) out.push({ k, boxes: m.boxes });
-      if (m.g && (!near || m.d < near.d)) near = { k, g: m.g, d: m.d, all };
-    }
-    if (!out.length && near && near.d <= NEAR_CULPRIT) {
-      const mine = near.all.filter((x) => x.file === file && !x.synth).sort((x, y) => x.start - y.start);
-      let i = mine.indexOf(near.g), j = i;
-      while (i > 0 && mine[i - 1].end >= mine[i].start) i--;
-      while (j + 1 < mine.length && mine[j].end >= mine[j + 1].start) j++;
-      out.push({ k: near.k, boxes: boxes(mine.slice(i, j + 1), near.all) });
-    }
-    return out.sort((x, y) => x.k - y.k);
-  }
-  /** The place `pos` (UTF-16) in `file`: its line's glyphs highlighted on the page (the page in view first). */
-  async toPage(file, pos) {
-    if (!this.opened || !(file in this.files)) return;
-    const t = this.files[file];
-    const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
-    const [a, b] = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
-    const n = Math.max(this.hashes.length, this.pages, 1);
-    const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
-    for (const k of order) {
-      const all = this.cached(k) ?? await this.glyphsOf(k);
-      const hit = lineAt(from(all, file, a, b), byteOffset(t, pos));
-      if (hit.length) {
-        this.tr("sync\u2192page", { file, pos, k, glyphs: hit.length });
-        this.sink.mark?.(k, boxes(hit, all));
-        return;
-      }
-    }
-    this.tr("sync\u2192page", { file, pos, k: -1 });
-  }
-  async pdf() {
-    this.flush();
-    await this.chain;
-    const t = this.now();
-    const r = await this.core.request({ op: "pdf" });
-    this.sink.latency(`PDF made in ${(this.now() - t).toFixed(1)} ms`);
-    return r.pdf;
-  }
-  /** `file` is now `text`: only the differing middle is sent. */
-  sync(file, text) {
-    const old = this.batches.get(file)?.text ?? this.files[file];
-    if (old === void 0) {
-      this.files[file] = text;
-      if (this.opened) this.chain = this.chain.then(() => this.core.request({ op: "set_file", file, text }).then(() => void 0));
-      this.rcChanged(file);
-      return;
-    }
-    const e = diff(old, text);
-    if (e) this.queue(file, [e]);
-  }
-  queue(file, edits) {
-    if (!edits.length) return;
-    let b = this.batches.get(file);
-    if (!b) this.batches.set(file, b = new Batch(this.files[file] ?? ""));
-    if (!(file in this.files)) this.files[file] = "";
-    if (!b.size) this.since.set(file, this.now());
-    for (const e of edits) b.push(e);
-    this.keystrokes += edits.length;
-    this.rcChanged(file);
-    if (!this.scheduled) {
-      this.scheduled = true;
-      const f = () => this.flush();
-      if (this.o.schedule) this.o.schedule(f);
-      else setTimeout(f, 0);
-    }
-  }
-  rcTimer;
-  /** `file` changed: one of the open's rc files, or a new root one, reopens (once typing pauses): the core reads them at an open only. */
-  rcChanged(file) {
-    if (!this.opened || !(this.rcFiles.has(file) || file === "latexmkrc" || file === ".latexmkrc")) return;
-    clearTimeout(this.rcTimer);
-    this.rcTimer = setTimeout(() => this.chain = this.chain.then(() => this.reopen()), 800);
-  }
-  /** A send loop is running (it takes what is queued when each build ends). */
-  busy = false;
-  /** Waiting for a queued edit's build to end (`send`): its `settled`, else `failed` or `trapped`. */
-  ended = [];
-  /** Edits the host gave, and builds they took (the batching's effect). */
-  keystrokes = 0;
-  builds = 0;
-  /**
-   * Send the queued edits, in order; the last of a round painted first
-   * (edit_view). Backpressure: at most one round in flight. What is typed
-   * meanwhile merges into the batches, and goes as one edit when the core
-   * is free: a fast core builds every keystroke, a slow one the last N
-   * together, never a state already stale.
-   */
-  /** Paused (the extension turned off): edits keep merging in their batches, sent on resume. */
-  paused = false;
-  pause(on) {
-    this.paused = on;
-    if (!on) void this.flush();
-  }
-  flush() {
-    this.scheduled = false;
-    if (!this.opened || this.busy || this.paused) return this.chain;
-    this.busy = true;
-    this.sink.busy?.(true);
-    this.chain = this.chain.then(async () => {
-      try {
-        for (; ; ) {
-          const round = [...this.batches].filter(([, b]) => b.size);
-          if (!round.length) break;
-          for (const [file, b] of round) if (!await this.send(file, b)) return;
-        }
-        await this.layout();
-        this.statusSoon();
-      } finally {
-        this.busy = false;
-        this.sink.busy?.(false);
-        if ([...this.batches.values()].some((b) => b.size)) setTimeout(() => void this.flush(), 0);
-      }
-    });
-    return this.chain;
-  }
-  statusTimer = null;
-  /**
-   * The pending/undefined scan flattens the whole program (3 ms at 180 KB,
-   * ten times an edit): once the edits have settled, at most every 300 ms.
-   */
-  /** `phitex watch`'s last build's problems (Options.remote), as diagnostics. */
-  watchDiags = [];
-  /** A build of the watch's under way (its progress told, not yet settled). */
-  watchBuilding = false;
-  watchBusy(on) {
-    if (on === this.watchBuilding) return;
-    this.watchBuilding = on;
-    this.sink.busy?.(on);
-    if (!on) this.sink.streaming?.(null);
-  }
-  /** The watch joined (or joined again): its pages, outline and last problems. */
-  async watchJoined() {
-    await this.layout();
-    this.status();
-    void this.watchOutline();
-    const r = await this.core.request({ op: "diagnostics" });
-    if (r.ok) this.onWatch({ event: "diagnostics", items: r.json?.items ?? [] });
-  }
-  /** The document's outline asked for now and given to the view (it shows the contents). */
-  async outline() {
-    if (!this.sink.outline) return;
-    const r = await this.core.request({ op: "outline" });
-    if (r.ok) this.sink.outline(r.json?.items ?? []);
-  }
-  /** After a build: the outline, only while the view shows it (else asked when it does). */
-  async watchOutline() {
-    if (!this.sink.outline || this.sink.outlineWanted?.() === false) return;
-    const r = await this.core.request({ op: "outline" });
-    if (r.ok) this.sink.outline(r.json?.items ?? []);
-  }
-  onWatch(e) {
-    switch (e.event) {
-      case "page": {
-        this.watchBusy(true);
-        const hs = [...this.hashes];
-        while (hs.length < Math.max(e.k + 1, e.pages ?? 0)) hs.push("");
-        hs[e.k] = e.hash;
-        this.hashes = hs;
-        this.setPages(hs.length);
-        this.sink.layout?.(hs);
-        this.drawPeers();
-        void this.peerPages();
-        return;
-      }
-      case "progress":
-        this.watchBusy(true);
-        if (e.phase === "fetching" && e.pack) return this.onFetching({ pack: e.name ?? e.pack, name: e.pack });
-        if (!this.hashes.length && (this.pkg.loading.length || !this.pkg.building)) {
-          this.pkg.done = [...this.pkg.done ?? [], ...this.pkg.loading];
-          this.pkg.loading = [];
-          this.inBuild = [];
-          this.pkg.building = true;
-          this.tellPackages();
-        }
-        this.sink.streaming?.({ pages: e.pages ?? 0, phase: e.phase ?? "typesetting" });
-        return;
-      case "superseded":
-        this.watchBusy(true);
-        return;
-      case "diagnostics":
-        this.watchDiags = e.items.map(asDiagnostic);
-        this.status();
-        return;
-      case "settled":
-        if (!e.settling) {
-          this.watchBusy(false);
-          this.sink.preparing?.(false);
-          if (this.pkg.building) this.pkg.building = false, this.tellPackages();
-        }
-        this.chain = this.chain.then(() => this.layout()).then(() => (this.status(), this.watchOutline()));
-        return;
-      case "sync":
-        void this.syncTo(e.file, e.lo, e.hi, e.at, e.page);
-        return;
-    }
-  }
-  /** Forward search: bytes [lo, hi) of `file` (a line), the glyphs from it nearest `at`'s highlighted, the page in view tried first. */
-  async syncTo(file, lo, hi, at, hint) {
-    const n = this.hashes.length;
-    const first = hint ?? this.page;
-    for (const k of [first, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== first)]) {
-      const all = this.cached(k) ?? await this.glyphsOf(k);
-      const hit = lineAt(from(all, file, lo, hi), at);
-      if (hit.length) return this.sink.mark?.(k, boxes(hit, all), true);
-    }
-  }
-  /** The last keystroke a core queued (its build said by `settled`): when it was typed, sent, answered. */
-  queued = null;
-  /** A queued keystroke's build in and drawn: its time from the keystroke, and the build's own, said. */
-  queuedLatency(e) {
-    const q = this.queued;
-    if (!q || e.ms === void 0) return;
-    this.queued = null;
-    const e2e = this.now() - q.t0;
-    this.sink.painted?.(e2e);
-    const ran = e.ran ?? 0, kept = e.kept ?? 0, passes = e.passes ?? 1;
-    this.sink.latency(
-      `${e2e.toFixed(0)} ms keystroke\u2192page \xB7 build ${e.ms.toFixed(1)} ms \xB7 ${this.keystrokes} edits \u2192 ${this.builds} builds`,
-      [
-        `build            ${e.ms.toFixed(2)} ms (in the core: the edit's steps, every page, the .aux/.bbl loops)`,
-        `keystroke\u2192page   ${e2e.toFixed(1)} ms = queued ${(q.tSend - q.t0).toFixed(1)} + round trip ${(q.tBack - q.tSend).toFixed(1)} + build and paint ${(this.now() - q.tBack).toFixed(1)}`,
-        `rebuilt          ${ran} of ${ran + kept} steps, ${passes} pass${passes === 1 ? "" : "es"}`,
-        `batching         ${this.keystrokes} edits \u2192 ${this.builds} builds (one in flight; the rest merged)`
-      ].join("\n")
-    );
-  }
-  statusSoon() {
-    if (this.statusTimer) return;
-    this.statusTimer = setTimeout(async () => {
-      this.statusTimer = null;
-      if (this.busy || !this.opened) return this.statusSoon();
-      const r = await this.core.request({ op: "status" });
-      if (r.ok && r.json) {
-        this.warmCheck(r.json.how);
-        this.setPages(r.json.pages);
-        this.noteError(r.json);
-        this.status(r.json.pending, r.json.undefined_names);
-        this.fetchPackages(r.json.missing);
-      }
-    }, 300);
-  }
-  async send(file, b) {
-    if (this.warming && !this.warmSlow) {
-      this.warmSlow = true;
-      this.sink.warmup?.({ state: "preparing", since: Date.now() - (this.now() - this.warming), slow: true });
-    }
-    const t0 = this.since.get(file) ?? this.now();
-    const tSend = this.now();
-    const edits = b.take();
-    this.files[file] = b.text;
-    if (!this.minted && usesMinted(b.text)) {
-      this.tr("minted: open again, with its runner", {});
-      await this.reopen();
-      return false;
-    }
-    if (file === this.main && this.o.engine) {
-      const pre = preambleOf(b.text);
-      if (pre !== this.preamble) {
-        this.preamble = pre;
-        const want = this.o.engine(b.text);
-        if (want !== this.wanted) {
-          this.tr("engine: open again", { from: this.wanted, to: want });
-          await this.reopen();
-          return false;
-        }
-      }
-    }
-    for (const [i, e] of edits.entries()) {
-      const last = i === edits.length - 1;
-      this.builds++;
-      let done;
-      const ended = last ? new Promise((res) => (done = res, this.ended.push(res))) : null;
-      const unheard = () => this.ended = this.ended.filter((f) => f !== done);
-      const r = await this.core.request({ op: "edit", file, ...e, page: last ? this.page : -1, dpi: this.dpi() });
-      if (!r.ok) {
-        unheard();
-        this.sink.error((typeof r.json?.error === "string" ? r.json.error : void 0) ?? r.error ?? "edit failed");
-        if (r.error?.includes("trapped")) await this.reopen();
-        return false;
-      }
-      if (!last) continue;
-      if (!r.json?.queued) unheard();
-      const tBack = this.now();
-      const j = r.json;
-      if (j.queued) {
-        this.queued = { t0, tSend, tBack };
-        this.setPages(j.pages);
-        const end = await ended;
-        if (end.event === "settled") await this.layout(), this.queuedLatency(end);
-        continue;
-      }
-      this.setPages(j.pages);
-      this.noteError(j);
-      this.status(this.pending);
-      const img = image(r);
-      if (img) this.sink.page(img, this.page, this.pages, j.painted_hash ?? null);
-      else if (!this.sink.layout) await this.showPage();
-      const e2e = this.now() - t0;
-      this.sink.painted?.(e2e);
-      this.sink.latency(
-        `${e2e.toFixed(0)} ms keystroke\u2192page \xB7 core ${j.paint_ms.toFixed(1)} ms \xB7 ${this.keystrokes} edits \u2192 ${this.builds} builds`,
-        [
-          `first paint      ${j.paint_ms.toFixed(2)} ms (in the core: edit_view, the page painted)`,
-          `fixed point      ${j.total_ms.toFixed(2)} ms (every page, the .aux/.bbl loops)${j.wrong ? " \xB7 first paint was superseded" : ""}`,
-          `keystroke\u2192page   ${e2e.toFixed(1)} ms = queued ${(tSend - t0).toFixed(1)} + round trip ${(tBack - tSend).toFixed(1)} + paint ${(this.now() - tBack).toFixed(1)}`,
-          `rebuilt          ${j.stats.rebuilt} of ${j.stats.rebuilt + j.stats.reused} chunks, ${j.stats.passes} pass${j.stats.passes === 1 ? "" : "es"}`,
-          `batching         ${this.keystrokes} edits \u2192 ${this.builds} builds (one in flight; the rest merged)`
-        ].filter(Boolean).join("\n")
-      );
-    }
-    return true;
-  }
-  /** PhiTeX's invariant: the incremental state = a fresh build of the same text. */
-  async check() {
-    if (!this.opened) return;
-    await this.flush();
-    const file = this.open ?? this.main;
-    const r = await this.core.request({ op: "check", file, expect: this.files[file] });
-    this.sink.check?.(r.json);
-    return r.json;
-  }
-  /** The texts the session has sent (tests). */
-  text(file) {
-    return this.batches.get(file)?.text ?? this.files[file];
-  }
-  /** Every project file's text as it is now (queued edits in): a compare's new side. */
-  texts() {
-    const out = {};
-    for (const f of Object.keys(this.files)) out[f] = this.text(f);
-    return out;
-  }
-};
 
 // viewer/src/text.ts
 var LAYER_LINES = /* @__PURE__ */ new WeakMap();
@@ -2776,7 +1017,7 @@ var VSCODE = `
   --ph-progress: var(--vscode-progressBar-background, #0078d4);
   --ph-radius: 2px; --ph-pill: 2px; --ph-font: var(--vscode-font-family, system-ui, sans-serif); --ph-size: var(--vscode-font-size, 13px); --ph-bar-h: 35px;
 `;
-var WATCH2 = `
+var WATCH = `
   --ph-bar: #ffffff; --ph-fg: #1b222c; --ph-fg2: #5d6778; --ph-border: #e3e6ec; --ph-hover: #eef1f6; --ph-stage: #eceef2;
   --ph-menu: #ffffff; --ph-accent: #1d3e72; --ph-accent-hover: #16325d; --ph-accent-fg: #fff;
   --ph-danger: #c23a2f; --ph-warning: #a3620a; --ph-info: #1d3e72; --ph-link: #1d3e72; --ph-progress: #f58f2d;
@@ -2796,7 +1037,7 @@ var PRINT_CSS = `
 .win { ${OVERLEAF} }
 .win.light { ${OVERLEAF_LIGHT} }
 .win.vscode { ${VSCODE} }
-.win.watch { ${WATCH2} }
+.win.watch { ${WATCH} }
 @media (prefers-color-scheme: dark) { .win.watch:not(.light) { ${WATCH_DARK} color-scheme: dark; } }
 .win.watch.dark { ${WATCH_DARK} color-scheme: dark; }
 
@@ -3069,11 +1310,14 @@ header:active { cursor: grabbing; }
 .slot .peer-tag[data-file]:hover { background: hsl(var(--hue) 70% 34%); }
 
 /* strips over the pages: plain, in the host's colours */
-.strip { position: sticky; top: 0; z-index: 2; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
+/* (over the pages' scroll, not in it: in it, a strip went with the pages when they scrolled sideways) */
+.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.strips { position: absolute; top: 0; left: 0; right: 0; z-index: 2; pointer-events: none; }
+.strip { pointer-events: auto; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
   background: var(--ph-menu); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-warning)); }
-.stage.stale .banner, .approx.on { display: block; }
+.stage.stale ~ .strips .banner, .approx.on { display: block; }
 .gone { --sev: var(--ph-danger); font-weight: 600; }
-.stage.offline .gone { display: flex; align-items: baseline; gap: 8px; }
+.stage.offline ~ .strips .gone { display: flex; align-items: baseline; gap: 8px; }
 .gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; padding: 0 2px; }
 .offpill { display: none; position: absolute; top: 8px; right: 14px; z-index: 3; padding: 1px 8px; border-radius: var(--ph-pill); font-size: 12px;
   background: var(--ph-menu); color: var(--ph-danger); border: 1px solid var(--ph-border); pointer-events: none; }
@@ -3322,6 +1566,237 @@ var VIEWER_CSS = `
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
 ${PAGE_CSS}`;
 
+// viewer/src/html.ts
+var MARK = "phx-slot-";
+var parsed = /* @__PURE__ */ new WeakMap();
+var parsedSvg = /* @__PURE__ */ new WeakMap();
+function html(strings, ...values) {
+  return build(strings, values, false);
+}
+function svg(strings, ...values) {
+  return build(strings, values, true);
+}
+function build(strings, values, inSvg) {
+  const cache = inSvg ? parsedSvg : parsed;
+  let base = cache.get(strings);
+  if (!base) {
+    let src = "";
+    strings.forEach((s, i) => {
+      src += s;
+      if (i === values.length) return;
+      if (/<(style|textarea|title|script)\b[^>]*>(?![\s\S]*<\/\1>)[\s\S]*$/i.test(src)) throw new Error("html: no value inside <style>, <textarea>, <title> or <script>");
+      if (/<[a-zA-Z][^<>]*=\s*"[^"]*$/.test(src)) src += `${MARK}${i}`;
+      else if (/<[a-zA-Z][^<>]*$/.test(src)) throw new Error(`html: a value inside a tag must be in a quoted attribute (after ${JSON.stringify(s.slice(-40))})`);
+      else src += `<template ${MARK}${i}></template>`;
+    });
+    const t = new DOMParser().parseFromString(`<template>${inSvg ? `<svg>${src}</svg>` : src}</template>`, "text/html").querySelector("template").content;
+    if (inSvg) {
+      base = t.ownerDocument.createDocumentFragment();
+      base.append(...t.firstElementChild.childNodes);
+    } else base = t;
+    const drop = (n) => {
+      for (const k of [...n.childNodes]) {
+        if (k.nodeType === Node.TEXT_NODE && /^\s*$/.test(k.textContent) && k.textContent.includes("\n")) k.remove();
+        else drop(k instanceof HTMLTemplateElement ? k.content : k);
+      }
+    };
+    drop(base);
+    cache.set(strings, base);
+  }
+  const frag = base.cloneNode(true);
+  const nodes = (v) => v === null || v === void 0 || v === false ? [] : Array.isArray(v) ? v.flatMap(nodes) : [v instanceof Node ? v : String(v)];
+  const walk = (root) => {
+    for (const el of [...root.querySelectorAll("*")]) {
+      if (el.localName === "template" && el.attributes.length === 1 && el.attributes[0].name.startsWith(MARK)) {
+        el.replaceWith(...nodes(values[+el.attributes[0].name.slice(MARK.length)]));
+        continue;
+      }
+      for (const a of [...el.attributes]) {
+        if (!a.value.includes(MARK)) continue;
+        if (a.name.startsWith("on")) throw new Error(`html: no value in an event handler (${a.name})`);
+        const whole = new RegExp(`^${MARK}(\\d+)$`).exec(a.value), v = whole && values[+whole[1]];
+        if (whole && !/^(aria|data)-/.test(a.name) && (v === true || v === false || v === null || v === void 0)) {
+          if (v === true) el.setAttribute(a.name, "");
+          else el.removeAttribute(a.name);
+          continue;
+        }
+        el.setAttribute(a.name, a.value.replace(new RegExp(`${MARK}(\\d+)`, "g"), (_, n) => nodes(values[+n]).map((x) => typeof x === "string" ? x : x.textContent).join("")));
+      }
+      if (el instanceof HTMLTemplateElement) walk(el.content);
+    }
+  };
+  walk(frag);
+  return frag;
+}
+function rich(text) {
+  const f = document.createDocumentFragment();
+  const open = [f];
+  for (const part3 of text.split(/(<\/?(?:b|code|i|kbd)>)/)) {
+    const tag = /^<(\/?)(b|code|i|kbd)>$/.exec(part3);
+    if (!tag) part3 && open[open.length - 1].appendChild(document.createTextNode(part3));
+    else if (!tag[1]) open.push(open[open.length - 1].appendChild(document.createElement(tag[2])));
+    else if (open.length > 1) open.pop();
+  }
+  return f;
+}
+function svgArt(markup) {
+  if (/<script|\son[a-z]+\s*=/i.test(markup)) throw new Error("svgArt: art has no script or event handler");
+  const doc = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg">${markup}</svg>`, "image/svg+xml");
+  if (doc.querySelector("parsererror")) throw new Error("svgArt: not well-formed SVG");
+  const f = document.createDocumentFragment();
+  f.append(...[...doc.documentElement.childNodes].map((n) => document.importNode(n, true)));
+  return f;
+}
+
+// viewer/src/problems.ts
+function place(file, line, col, text) {
+  return html`<a href="#" class="phx-place" data-file="${file}" data-line="${Number(line) || 1}" data-col="${Number(col) || 1}">${text ?? `${file}${line ? `:${line}` : ""}${col ? `:${col}` : ""}`}</a>`;
+}
+function problemNode(p) {
+  return item(p);
+}
+function asDiagnostic(p) {
+  p = Object.assign({ notes: [], help: [], suggestions: [], file: null, line: null, col: null, excerpt: null, context: [], included: [], box: null }, p);
+  const severity = p.severity === "fatal" || p.severity === "error" ? "error" : p.severity === "warning" ? "warning" : "info";
+  return { severity, code: p.code, message: p.message, file: p.file ?? void 0, line: p.line ?? void 0, problem: p };
+}
+function item(p) {
+  const sev = p.severity === "fatal" ? "error" : p.severity === "warning" || p.severity === "note" ? p.severity : "error";
+  let ex = "";
+  if (p.excerpt) {
+    const chars = [...p.excerpt.text];
+    const a = chars.slice(0, p.excerpt.start).join("");
+    const b = chars.slice(p.excerpt.start, p.excerpt.start + p.excerpt.len).join("");
+    const c = chars.slice(p.excerpt.start + p.excerpt.len).join("");
+    ex = html`<pre class="phx-excerpt">${p.line ? html`<span class="phx-ln">${Number(p.line)} │ </span>` : ""}${a}<mark>${b}</mark>${c}</pre>`;
+  }
+  const ctx = p.context.length ? html`<details class="phx-ctx"><summary>in ${p.context.map((m, i) => [i ? " \u2190 " : "", html`<code>${m.name}</code>`])}</summary>${p.context.map((m) => html`<pre><b>${m.name}</b> ${m.before}<mark>‸</mark>${m.after}</pre>`)}</details>` : "";
+  const inc = p.included.length ? html`<div class="phx-inc">included from ${p.included.map((i, k) => [k ? ", " : "", place(i.file, i.line, 1)])}</div>` : "";
+  const box = p.box ? html`<pre class="phx-excerpt">${p.box.excerpt}</pre>` : "";
+  const list = (cls, xs) => xs.length ? html`<ul class="${cls}">${xs.map((x) => html`<li>${x}</li>`)}</ul>` : "";
+  return html`<li class="phx-${sev}"><div class="phx-msg"><span class="phx-sev">${String(p.severity)}</span>${p.code ? html`<code class="phx-code">${p.code}</code>` : ""}<span>${p.message}</span></div>${p.file ? html`<div class="phx-where">${place(p.file, p.line, p.col)}</div>` : ""}${ex}${box}${list("phx-notes", p.notes)}${ctx}${inc}${list("phx-help", [...p.help.length ? [p.help.join(" ").replace(/\s+/g, " ").trim()] : [], ...p.suggestions])}</li>`;
+}
+var PROBLEMS_CSS = `
+.phx-problems { position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / 45%); overflow: auto; padding: 48px 16px; }
+.phx-card { max-width: 900px; margin: 0 auto; background: var(--ph-menu, #fff); color: var(--ph-fg, #1b222c); border-radius: var(--ph-radius, 4px);
+  font: 13px/1.45 var(--ph-font, "Noto Sans", system-ui, sans-serif); }
+.phx-card header { display: flex; align-items: baseline; gap: 10px; padding: 12px 16px 10px; border-bottom: 1px solid var(--ph-border, #e7e9ee); font-weight: 600; }
+.phx-close { margin-left: auto; background: none; color: var(--ph-fg2, #495365); border: 1px solid var(--ph-border, #e7e9ee); border-radius: var(--ph-radius, 4px);
+  padding: 1px 8px; font: inherit; font-size: 12px; cursor: pointer; }
+.phx-card ol { list-style: none; margin: 0; padding: 0; }
+.phx-card li { padding: 9px 14px 10px; border-bottom: 1px solid var(--ph-border, #e7e9ee); border-left: 3px solid var(--sev, var(--ph-fg2, #495365)); }
+.phx-card li.phx-error { --sev: var(--ph-danger, #b83a33); }
+.phx-card li.phx-warning { --sev: var(--ph-warning, #8f5514); }
+.phx-card li.phx-note { --sev: var(--ph-info, #366cbf); }
+.phx-msg { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; font-weight: 600; }
+.phx-sev { display: none; }
+.phx-code { color: var(--ph-fg2, #495365); font: 400 12px ui-monospace, monospace; }
+.phx-where { margin-top: 2px; font-size: 12px; }
+.phx-place { color: var(--ph-link, #366cbf); text-decoration: none; }
+.phx-place:hover { text-decoration: underline; }
+.phx-excerpt, .phx-ctx pre { margin: 6px 0 0; padding: 0; overflow-x: auto; font: 12px/1.45 ui-monospace, "DejaVu Sans Mono", monospace; white-space: pre;
+  color: var(--ph-fg2, #495365); background: none; }
+.phx-excerpt mark, .phx-ctx mark { background: none; color: var(--sev, var(--ph-danger, #b83a33)); text-decoration: underline wavy; text-underline-offset: 3px; }
+.phx-ln { opacity: .6; }
+.phx-notes, .phx-help { margin: 6px 0 0; padding-left: 16px; color: var(--ph-fg2, #495365); }
+.phx-ctx { margin-top: 6px; color: var(--ph-fg2, #495365); }
+.phx-ctx summary { cursor: pointer; }
+.phx-inc { margin-top: 6px; color: var(--ph-fg2, #495365); font-size: 12px; }
+.phx-card footer { padding: 10px 16px; color: var(--ph-fg2, #495365); font-size: 12px; }
+`;
+
+// viewer/src/edits.ts
+function utf8Len(s, from2 = 0, to = s.length) {
+  let n = 0;
+  for (let i = from2; i < to; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 128) n += 1;
+    else if (c < 2048) n += 2;
+    else if (c >= 55296 && c <= 56319 && i + 1 < to) {
+      const d = s.charCodeAt(i + 1);
+      if (d >= 56320 && d <= 57343) {
+        n += 4;
+        i++;
+      } else n += 3;
+    } else n += 3;
+  }
+  return n;
+}
+function byteOffset(s, pos) {
+  if (pos > 0 && pos < s.length) {
+    const c = s.charCodeAt(pos);
+    const p = s.charCodeAt(pos - 1);
+    if (c >= 56320 && c <= 57343 && p >= 55296 && p <= 56319) pos--;
+  }
+  return utf8Len(s, 0, pos);
+}
+function apply(s, e) {
+  return s.slice(0, e.from) + e.text + s.slice(e.to);
+}
+function merge(before, a, b) {
+  const aEnd = a.from + a.text.length;
+  if (b.to < a.from || b.from > aEnd) return null;
+  const from2 = Math.min(a.from, b.from);
+  const endAfterA = Math.max(aEnd, b.to);
+  const to = endAfterA <= aEnd ? a.to : endAfterA - (a.text.length - (a.to - a.from));
+  const afterA = apply(before.slice(from2, to), { from: a.from - from2, to: a.to - from2, text: a.text });
+  const text = apply(afterA, { from: b.from - from2, to: b.to - from2, text: b.text });
+  return { from: from2, to, text };
+}
+function textSum(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+var Batch = class {
+  edits = [];
+  /** The text after all of them. */
+  text;
+  constructor(text) {
+    this.text = text;
+  }
+  get size() {
+    return this.edits.length;
+  }
+  push(e) {
+    const last = this.edits.at(-1);
+    if (last) {
+      const before = this.befores.at(-1);
+      const m = merge(before, last, e);
+      if (m) {
+        this.edits[this.edits.length - 1] = m;
+        this.text = apply(this.text, e);
+        return;
+      }
+    }
+    this.befores.push(this.text);
+    this.edits.push(e);
+    this.text = apply(this.text, e);
+  }
+  befores = [];
+  /** The queued edits as the core takes them (UTF-16), in order, each against the text before it. */
+  take() {
+    const out = this.edits.map((e) => ({ start: e.from, end: e.to, text: e.text }));
+    this.edits = [];
+    this.befores = [];
+    return out;
+  }
+};
+function charOffset(s, byte) {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (n >= byte) return i;
+    const c = s.charCodeAt(i);
+    if (c < 128) n += 1;
+    else if (c < 2048) n += 2;
+    else if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return s.length;
+}
+
 // viewer/src/outline.ts
 var Outline = class {
   el;
@@ -3552,6 +2027,70 @@ function bindKeys(on, t) {
   };
   on.addEventListener("keydown", handler);
   return () => on.removeEventListener("keydown", handler);
+}
+
+// viewer/src/report.ts
+var REPORT_TO = "flinner@nand.sh";
+function anonymizer(paths) {
+  const pairs = [];
+  paths.forEach((p, i) => {
+    const ext = p.match(/\.[A-Za-z0-9]+$/)?.[0] ?? "";
+    const alias = `file${i + 1}${ext}`;
+    pairs.push([p, alias]);
+    const base = p.replace(/^.*\//, "");
+    if (base !== p) pairs.push([base, alias]);
+    const stem = base.replace(/\.[A-Za-z0-9]+$/, "");
+    if (stem.length >= 4 && stem !== base) pairs.push([stem, alias.replace(/\.[A-Za-z0-9]+$/, "")]);
+  });
+  pairs.sort((a, b) => b[0].length - a[0].length);
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = pairs.length ? new RegExp(pairs.map(([p]) => `(?<![A-Za-z0-9_])${esc(p)}(?![A-Za-z0-9_])`).join("|"), "g") : null;
+  const map = new Map(pairs);
+  return (s) => (re ? s.replace(re, (m) => map.get(m) ?? m) : s).replace(/`[^'\n]{1,80}'/g, "`\u2026'").replace(/\/home\/[^/\s]+\//g, "~/").replace(/\/Users\/[^/\s]+\//g, "~/");
+}
+var CONTENT = /* @__PURE__ */ new Set(["text", "files", "binaries", "expect", "detail", "glyphs", "g"]);
+function clean(v, anon, depth = 0) {
+  if (typeof v === "string") return anon(v.length > 400 ? v.slice(0, 400) + "\u2026" : v);
+  if (typeof v !== "object" || v === null || depth > 4) return v;
+  if (Array.isArray(v)) return v.slice(0, 40).map((x) => clean(x, anon, depth + 1));
+  const out = {};
+  for (const [k, x] of Object.entries(v)) {
+    if (CONTENT.has(k)) out[k] = typeof x === "string" ? `(${x.length} chars, not included)` : "(not included)";
+    else out[k] = clean(x, anon, depth + 1);
+  }
+  return out;
+}
+function report(r) {
+  const anon = anonymizer(r.paths);
+  const line = (e) => `${String(e.t).padStart(8)} ms  ${e.k.padEnd(16)} ${e.d === void 0 ? "" : JSON.stringify(clean(e.d, anon))}`;
+  const exts = /* @__PURE__ */ new Map();
+  for (const p of r.paths) {
+    const x = p.match(/\.[A-Za-z0-9]+$/)?.[0] ?? "(none)";
+    exts.set(x, (exts.get(x) ?? 0) + 1);
+  }
+  return [
+    "PhiTeX Instant debug report (anonymized: no document text, no file names, no project id)",
+    `extension ${r.version} \xB7 engine ${r.engine}`,
+    `browser ${r.userAgent}`,
+    `project: ${r.paths.length} files (${[...exts].map(([x, n]) => `${n} ${x}`).join(", ")})`,
+    "",
+    "errors:",
+    ...r.errors.length ? r.errors.map((e) => "  " + anon(e)) : ["  (none)"],
+    "",
+    "status:",
+    "  " + JSON.stringify(clean(r.status ?? {}, anon)),
+    "",
+    "diagnostics:",
+    ...r.diagnostics.length ? r.diagnostics.slice(0, 40).map((d) => `  ${d.severity} ${d.code ?? ""}: ${anon(d.message)}${d.file ? ` (${anon(d.file)}${d.line ? `:${d.line}` : ""})` : ""}`) : ["  (none)"],
+    "",
+    "packages (TeX Live):",
+    `  fetched: ${(r.packages?.done ?? []).join(", ") || "(none)"}`,
+    `  failed: ${(r.packages?.failed ?? []).map((f) => `${f.name}${f.error ? ` (${anon(f.error)})` : ""}`).join(", ") || "(none)"}`,
+    `  not in TeX Live: ${(r.packages?.unavailable ?? []).length}`,
+    "",
+    "trace (last 300 events):",
+    ...r.trace.slice(-300).map(line)
+  ].join("\n");
 }
 
 // viewer/src/opening-art.ts
@@ -4555,7 +3094,7 @@ var STEPS = ["Reading the project", "Fetching packages", "Typesetting"];
 var ease = (u) => (u = Math.min(1, Math.max(0, u)), u < 0.5 ? 4 * u * u * u : 1 - (-2 * u + 2) ** 3 / 2);
 var lerp = (a, b, u) => a + (b - a) * u;
 var mix = (a, b, u) => a.map((p, i) => [lerp(p[0], b[i][0], u), lerp(p[1], b[i][1], u)]);
-var place3 = (pts, o) => pts.map(([x, y]) => [o.x + o.s * (x * Math.cos(o.r) - y * Math.sin(o.r)), o.y + o.s * (x * Math.sin(o.r) + y * Math.cos(o.r))]);
+var place2 = (pts, o) => pts.map(([x, y]) => [o.x + o.s * (x * Math.cos(o.r) - y * Math.sin(o.r)), o.y + o.s * (x * Math.sin(o.r) + y * Math.cos(o.r))]);
 var str = (pts) => pts.map((p) => p.map((v) => v.toFixed(2)).join(",")).join(" ");
 var folded = (f) => {
   const i = Math.min(2, Math.floor(f));
@@ -4602,9 +3141,9 @@ function plane(box, dark) {
     return { x: a.x, y: a.y, r: Math.atan2(b.y - a.y, b.x - a.x) + Math.PI / 2, s: FLY };
   };
   const draw = (pts, pose, lift) => {
-    const w = place3(pts, pose);
+    const w = place2(pts, pose);
     sheet.setAttribute("points", str(w));
-    shadow.setAttribute("points", str(place3(pts, { ...pose, x: pose.x + 1.2 + 3 * lift, y: pose.y + 1.6 + 5 * lift })));
+    shadow.setAttribute("points", str(place2(pts, { ...pose, x: pose.x + 1.2 + 3 * lift, y: pose.y + 1.6 + 5 * lift })));
     return w;
   };
   const frame = (now) => {
@@ -4616,7 +3155,7 @@ function plane(box, dark) {
       dr = ((dr + Math.PI) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI) - Math.PI;
       const pose2 = { x: lerp(from2.pose.x, 42.5, a), y: lerp(from2.pose.y, 52, a), r: from2.pose.r + dr * a, s: lerp(from2.pose.s, 1, a) };
       const u = Math.max(0, (t - SWING) / 480);
-      const flown = place3(from2.shape, pose2);
+      const flown = place2(from2.shape, pose2);
       const p = flown.map(([fx, fy], i2) => {
         const k = ease((u - (i2 === 1 || i2 === 5 ? 0 : i2 === 0 ? 0.05 : 0.18)) / 0.82);
         return [lerp(fx, PAGE[i2][0], k), lerp(fy, PAGE[i2][1], k)];
@@ -4657,7 +3196,7 @@ function plane(box, dark) {
     shL.setAttribute("points", f > 2 ? str([w[0], w[3], w[4], w[5]]) : "");
     shL.setAttribute("opacity", String(0.12 * Math.max(0, f - 2)));
     const i = Math.floor(f + 1e-6);
-    next.setAttribute("d", i < 3 && Math.abs(f - i) < 0.02 ? NEXT[i].reduce((d, q, j) => d + `${j % 2 ? "L" : "M"}${place3([q], pose)[0]} `, "") : "");
+    next.setAttribute("d", i < 3 && Math.abs(f - i) < 0.02 ? NEXT[i].reduce((d, q, j) => d + `${j % 2 ? "L" : "M"}${place2([q], pose)[0]} `, "") : "");
     raf = requestAnimationFrame(frame);
   };
   raf = requestAnimationFrame(frame);
@@ -4683,7 +3222,7 @@ function plane(box, dark) {
 
 // viewer/src/openings/glyphs.ts
 var GLYPHS = [..."\u2211\u222B\u2202\u2207\u03C0\u03C6\u03A6\u03B1\u03B2\u03B3\u03BB\u03BC\u03C3\u03B8\u221A\u221E\u2248\u2260\u2264\u2265\xA7\xB6{}[]\\$&^_#%\uFB01\uFB02"];
-function glyphs2(box, dark) {
+function glyphs(box, dark) {
   const ink0 = dark ? "#e4e6ea" : "#1b222c", mute = dark ? "#a3a9b4" : "#5d6778";
   const el = layer(
     box,
@@ -5117,7 +3656,7 @@ var LOOKS = [
   { id: "plane", name: "Paper plane", make: (s, dark) => plane(s, dark) },
   { id: "ink", name: "Ink drop", make: (s, dark) => ink(s, dark) },
   { id: "tetris", name: "Tetris", make: (s, dark) => tetris(s, dark) },
-  { id: "glyphs", name: "Glyph rain", make: (s, dark) => glyphs2(s, dark) },
+  { id: "glyphs", name: "Glyph rain", make: (s, dark) => glyphs(s, dark) },
   { id: "kaust", name: "ACCL | KAUST", make: (s, dark) => kaust(s, dark) },
   { id: "badapple", name: "Bad Apple!!", make: (s, dark) => badapple(s, dark) }
 ];
@@ -5154,6 +3693,14 @@ function hintsFor(host2) {
 // viewer/src/panel.ts
 var STALE_GRACE_MS = 1e3;
 var MAKING = "Making the format, once per PhiTeX update";
+var KIND_HELP = {
+  error: "LaTeX errors and files not found",
+  overfull: "Lines that stick out into the margin",
+  underfull: "Lines spread too far apart",
+  reference: "Undefined references and citations",
+  font: "Missing characters and substituted fonts",
+  other: "Every other warning"
+};
 var OVERLEAF_WORDS = {
   badge: "Unofficial \xB7 experimental",
   badgeTitle: "An unofficial extension, not part of Overleaf. PhiTeX runs LaTeX (pdfTeX) in your browser; Overleaf's PDF is the real one.",
@@ -5369,8 +3916,8 @@ var Panel = class {
     <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
     <span class="progress" id="prog"></span>
     <div class="menu" id="m-rec" role="menu" hidden style="left:6px;top:calc(100% + 4px)">
-      ${item2("r-rebuild", "", "Rebuild")}
-      <button type="button" role="menuitem" id="r-clean"><span class="check"></span><span>Clean rebuild<span class="desc">Start over: the project read again, built from the start</span></span></button>
+      <button type="button" role="menuitem" id="r-rebuild"><span class="check"></span><span>Rebuild<span class="desc">Build again with the files as they are</span></span></button>
+      <hr><button type="button" role="menuitem" id="r-clean"><span class="check"></span><span>Clean rebuild<span class="desc">Start over: the project read again, built from the start</span></span></button>
       <hr class="if-compare"><button type="button" role="menuitem" id="r-compare" class="if-compare"><span class="check"></span><span>Compare with an earlier version…<span class="desc">latexdiff against a saved version</span></span></button>
       <hr class="if-cache"><button type="button" role="menuitem" id="r-cache" class="if-cache"><span class="check"></span><span>Clear cache…<span class="desc">The packages and formats PhiTeX keeps</span></span></button>
     </div>
@@ -5395,7 +3942,7 @@ var Panel = class {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -5849,6 +4396,7 @@ var Panel = class {
     this.approx = !!e.approx;
     const a = this.$("#approx");
     a.classList.toggle("on", this.approx);
+    this.placeStrips();
     a.textContent = `Approximate: needs ${ENGINES[e.engine].label}, shown with pdfLaTeX (fonts substituted, breaks may differ). ${this.words.realPdf}`;
     if (!e.ready) this.stopped();
     else if (this.$("#empty").querySelector(".engine")) this.$("#empty").hidden = true;
@@ -6426,6 +4974,7 @@ var Panel = class {
       return;
     }
     stage.classList.add("stale");
+    this.placeStrips();
     const why = s.diagnostics?.find((d) => d.severity !== "info" && d.code !== "no-pages");
     this.$("#banner").textContent = `Showing the last complete render: ${why ? why.message + (why.line ? ` (${why.file}:${why.line})` : "") : "this build shipped no page"}.`;
   }
@@ -6444,6 +4993,7 @@ var Panel = class {
       return;
     }
     const text = `${why ? sentence(why) : "Lost the connection to PhiTeX's engine."} The pages shown are from the last build.`;
+    this.placeStrips();
     this.$("#gonewhy").textContent = text;
     this.$("#offpill").title = text;
     if (!was || !this.win.classList.contains("offline-quiet")) this.$("#stage").classList.add("offline");
@@ -6457,6 +5007,11 @@ var Panel = class {
     this.$("#offpill").style.right = `${Math.max(0, v.offsetWidth - v.clientWidth) + 8}px`;
   }
   offline = false;
+  /** The strips over the pages (engine lost, stale, approximate) clear of the pages' scrollbar, whatever its width. */
+  placeStrips() {
+    const v = this.$("#stage");
+    this.$("#strips").style.right = `${Math.max(0, v.offsetWidth - v.clientWidth)}px`;
+  }
   /** Follow what the panel shows (a host toolbar's controls). */
   onState(cb) {
     this.listeners.push(cb);
@@ -6996,7 +5551,15 @@ var Panel = class {
       { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset. Random: a different one each time", kind: "select", options: [["random", "Random"], ...LOOKS.map((l) => [l.id, l.name]), ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => this.look = lookOf(l)) }
     );
     if (ev.onBoxes) look2.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
-    preview.push({ id: "problems", label: "Problems shown", help: "Which kinds: the filters at the top of the problems list", kind: "info", value: this.hiddenKinds.size ? `${this.hiddenKinds.size} kind${this.hiddenKinds.size === 1 ? "" : "s"} hidden` : "All" });
+    const problems = KINDS.map(([k, name]) => ({
+      id: `kind-${k}`,
+      label: name,
+      help: KIND_HELP[k],
+      kind: "toggle",
+      value: !this.hiddenKinds.has(k),
+      set: (on) => void (!!on === this.hiddenKinds.has(k) && this.toggleKind(k))
+    }));
+    if (ev.onBoxes) problems.push(look2.splice(look2.findIndex((r) => r.id === "underline"), 1)[0]);
     const build2 = [];
     if (ev.onDebug) build2.push({ id: "debug", label: "Debug check", help: "Compare with a fresh build every 5 s (this session only)", kind: "toggle", value: this.debugOn, set: () => this.toggleDebug() });
     build2.push({ id: "reload", label: "Reload the files", help: "Read the project's files again", kind: "action", button: "Reload", set: () => (this.settings(false), void ev.onReload()) });
@@ -7006,6 +5569,7 @@ var Panel = class {
     return [
       { title: "Preview", rows: preview },
       { title: "Appearance", rows: look2 },
+      { title: "Problems", rows: problems },
       { title: "Build", rows: build2 },
       { title: "Packages", rows: [] },
       { title: "Updates and tips", rows: tips }
@@ -7626,6 +6190,1471 @@ function culpritTip(p) {
   const where = `${p.file.split("/").pop()}${p.line ? `:${p.line}` : ""}`;
   return html`<div class="txt"><div>${p.message}${named ? html` <code>${culprit}</code>` : ""}</div>${excerpt}<div class="at">${where} · click to go there</div></div>`.firstElementChild;
 }
+
+// viewer/src/sync.ts
+function glyphs2(json, path) {
+  if (!json?.n || !json.file || !json.start || !json.end || !json.synth || !json.x || !json.y) return [];
+  const files = json.files.map(path);
+  const words2 = (b64) => {
+    const b = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    return new DataView(b.buffer);
+  };
+  const [file, start, end, synth, x, y] = [json.file, json.start, json.end, json.synth, json.x, json.y].map(words2);
+  const out = [];
+  for (let i = 0; i < json.n; i++) {
+    const f = file.getUint32(4 * i, true);
+    const s = 4 * (i >> 5) < synth.byteLength ? synth.getUint32(4 * (i >> 5), true) >>> (i & 31) & 1 : 0;
+    out.push({ x: x.getFloat32(4 * i, true), y: y.getFloat32(4 * i, true), file: f === 4294967295 ? null : files[f] ?? null, start: start.getUint32(4 * i, true), end: end.getUint32(4 * i, true), synth: s === 1 });
+  }
+  return out;
+}
+function nearest(gs, x, y) {
+  let best = null, d = Infinity;
+  for (const g of gs) {
+    if (!g.file) continue;
+    const dy = g.y - 3 - y, dx = g.x + 2.5 - x;
+    const e = dx * dx + 9 * dy * dy + (g.synth ? 400 : 0);
+    if (e < d) d = e, best = g;
+  }
+  return best;
+}
+function from(gs, file, lo, hi) {
+  return gs.filter((g) => g.file === file && !g.synth && g.start < hi && g.end > lo);
+}
+var widthsOf = /* @__PURE__ */ new WeakMap();
+function widths(all) {
+  let next = widthsOf.get(all);
+  if (next) return next;
+  next = /* @__PURE__ */ new Map();
+  for (let i = 0; i < all.length; i++) {
+    const n = all[i + 1];
+    next.set(all[i], n && Math.abs(n.y - all[i].y) < 0.5 && n.x > all[i].x && n.x - all[i].x < 15 ? n.x - all[i].x : 5);
+  }
+  widthsOf.set(all, next);
+  return next;
+}
+function boxes(gs, all) {
+  const next = widths(all);
+  const lines2 = /* @__PURE__ */ new Map();
+  for (const g of gs) {
+    const k = Math.round(g.y * 2) / 2;
+    const r = lines2.get(k), e = g.x + (next.get(g) ?? 5);
+    lines2.set(k, r ? [Math.min(r[0], g.x), Math.max(r[1], e)] : [g.x, e]);
+  }
+  return [...lines2].map(([y, [a, b]]) => [a - 1, y - 8, b - a + 2, 11]);
+}
+function lineAt2(hits, at) {
+  let best = null;
+  for (const g of hits) if (!best || Math.abs(g.start - at) < Math.abs(best.start - at)) best = g;
+  return best ? hits.filter((g) => Math.abs(g.y - best.y) < 0.5) : [];
+}
+function wordNear(text, at, lo, hi) {
+  const here = wordBytes(text, at);
+  if (here) return here;
+  const w = (c) => c >= 128 || c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122 || c === 39 || c === 45;
+  for (let i = Math.min(at, text.length) - 1; i >= lo; i--) if (w(text[i])) return wordBytes(text, i);
+  for (let i = at; i < Math.min(hi, text.length); i++) if (w(text[i])) return wordBytes(text, i);
+  return null;
+}
+function glyphNear(hits, at) {
+  let before = null, after = null;
+  for (const g of hits) {
+    if (g.start <= at) {
+      if (!before || g.start > before.start) before = g;
+    } else if (!after || g.start < after.start) after = g;
+  }
+  return before ?? after;
+}
+function wordBytes(text, at) {
+  const w = (c) => c >= 128 || c >= 48 && c <= 57 || c >= 65 && c <= 90 || c >= 97 && c <= 122 || c === 39 || c === 45;
+  let lo = at, hi = at;
+  while (lo > 0 && w(text[lo - 1])) lo--;
+  while (hi < text.length && w(text[hi])) hi++;
+  return lo < hi ? [lo, hi] : null;
+}
+
+// viewer/src/packages.ts
+var DELIVERED = "\0delivered";
+var noPackages = { label: "none", resolve: async () => null };
+function isPackageFile(name) {
+  return /\.(sty|cls|clo|def|cfg|fd|ldf|ltx|tex|dfu|sto|lbx|bbx|cbx|dbx|mld|tikz|pgf|code\.tex|lua|ini|cmap|fontspec|tfm|vf|pfb|enc|map)$/i.test(name) && !name.includes("/");
+}
+function referenced(text) {
+  const out = /* @__PURE__ */ new Set();
+  const body = text.replace(/(^|[^\\])%.*$/gm, "$1");
+  for (const m of body.matchAll(/\\(documentclass|LoadClass(?:WithOptions)?|usepackage|RequirePackage(?:WithOptions)?)\s*(?:\[[^\]]*\]\s*)?\{([^}]*)\}/g)) {
+    const ext = /class/i.test(m[1]) ? ".cls" : ".sty";
+    for (const n of m[2].split(",")) {
+      const name = n.trim();
+      if (/^[A-Za-z0-9@_.-]+$/.test(name)) out.add(name + ext);
+    }
+  }
+  if (/\\DeclareFontShape/.test(body)) {
+    for (const m of body.matchAll(/<[^>]*>\s*(?:\\[A-Za-z@]+\s*|s\*\s*(?:\[[^\]]*\]\s*)?)*([A-Za-z][A-Za-z0-9-]*)(?![A-Za-z0-9-]*\/)/g))
+      if (!/^(s?sub|gen|genb|sgen|fixed|sfixed|error|serror|warning)$/.test(m[1])) out.add(m[1] + ".tfm");
+  }
+  for (const m of body.matchAll(/\\(?:input|InputIfFileExists|@input)\s*\{?([A-Za-z0-9@_-]+\.(?:sty|cls|clo|def|cfg|fd|ldf|tex|dfu))\}?/g)) out.add(m[1]);
+  return [...out];
+}
+
+// viewer/src/latexmkrc.ts
+function latexmkFiles(files) {
+  const get = typeof files === "function" ? files : (p) => Object.hasOwn(files, p) ? files[p] : void 0;
+  const out = {};
+  const read2 = (path) => {
+    const text = Object.hasOwn(out, path) ? void 0 : get(path);
+    if (text === void 0) return;
+    out[path] = text;
+    for (const m of text.matchAll(/^[^#\n]*?\b(?:do|require)\s*\(?\s*(["'])(\.\.?\/[^"'\n]+)\1/gm)) {
+      const p = normal(m[2]);
+      if (p) read2(p);
+    }
+  };
+  read2(get(".latexmkrc") !== void 0 ? ".latexmkrc" : "latexmkrc");
+  return Object.keys(out).length ? out : void 0;
+}
+function normal(path) {
+  const parts = [];
+  for (const p of path.split("/")) {
+    if (p === "" || p === ".") continue;
+    if (p !== "..") parts.push(p);
+    else if (!parts.pop()) return void 0;
+  }
+  return parts.join("/") || void 0;
+}
+function latexmkNotes(notes) {
+  return notes.map((n) => {
+    const m = /^(?:\/compile\/|\.\/)?([^\s:][^:]*):(\d+): ([\s\S]*)$/.exec(n);
+    return m ? { severity: "info", code: "latexmkrc", file: m[1], line: +m[2], message: `latexmkrc: ${m[3]}` } : { severity: "info", code: "latexmkrc", message: `latexmkrc: ${n}` };
+  });
+}
+
+// viewer/src/session.ts
+var preambleOf = (t) => {
+  const end = t?.indexOf("\\begin{document}") ?? -1;
+  return end < 0 ? t ?? "" : t.slice(0, end);
+};
+var usesMinted = (t) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
+var WATCH2 = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
+var NEAR_CULPRIT = 64;
+function place3(t, pos) {
+  const at = byteOffset(t, pos);
+  const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
+  const line = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
+  return { at, word: wordNear(new TextEncoder().encode(t), at, line[0], line[1]), line };
+}
+function traceReq(r) {
+  const o = {};
+  for (const [k, v] of Object.entries(r)) {
+    if (k === "op" || k === "id") continue;
+    o[k] = typeof v === "string" && v.length > 40 ? `${v.length} chars` : v && typeof v === "object" ? `${Object.keys(v).length} keys` : v;
+  }
+  return o;
+}
+function traceRes(r) {
+  const j = r.json ?? {};
+  return {
+    ok: r.ok,
+    ...r.error ? { error: r.error } : {},
+    ...typeof j.how === "string" ? { how: j.how.split("\n")[0].slice(0, 140) } : {},
+    ...j.pages !== void 0 ? { pages: Array.isArray(j.pages) ? j.pages.length : j.pages } : {},
+    ...j.history !== void 0 ? { history: j.history } : {},
+    ...Array.isArray(j.missing) && j.missing.length ? { missing: j.missing.length } : {},
+    ...j.error ? { texError: typeof j.error === "string" ? j.error : j.error.message } : {},
+    ...j.build_ms !== void 0 ? { build_ms: Math.round(j.build_ms) } : {},
+    ...r.pdf ? { pdf: r.pdf.length } : {},
+    // (a page from the draw worker: its draw time, and whether it was drawn ahead)
+    ...j.draw_ms !== void 0 ? { drawer: true, draw_ms: Math.round(j.draw_ms), kept: j.kept } : {}
+  };
+}
+var defaults = { fuel: 1e5, dpi: 96, checkEveryMs: 5e3 };
+var image = (r) => r.canvas && r.size ? { canvas: r.canvas, w: r.size[0], h: r.size[1], links: r.links } : null;
+function guessMain(files) {
+  const names = Object.keys(files).filter((n) => /\.tex$/i.test(n));
+  const strip = (t) => t.replace(/(^|[^\\])%.*$/gm, "$1");
+  const inputs = /* @__PURE__ */ new Map();
+  for (const n of names) {
+    const dir = n.includes("/") ? n.slice(0, n.lastIndexOf("/") + 1) : "";
+    const got = [];
+    for (const m of strip(files[n]).matchAll(/\\(?:input|include|subfile|subfileinclude|includestandalone)\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}/g)) {
+      const f = m[1].trim().replace(/^\.\//, "");
+      const tex = /\.tex$/i.test(f) ? f : `${f}.tex`;
+      got.push(tex, dir + tex);
+    }
+    inputs.set(n, got);
+  }
+  const inputted = /* @__PURE__ */ new Set();
+  for (const [n, got] of inputs) for (const f of got) if (f !== n) inputted.add(f);
+  const score = (n) => {
+    const t = strip(files[n]);
+    let s = 0;
+    if (inputted.has(n)) s -= 16;
+    if (inputs.get(n).some((f) => f !== n && f in files)) s += 8;
+    if (/(^|\n)[^%\n]*\\(bye|end\{document\})/.test(t)) s += 4;
+    if (/(^|\n)\s*\\documentclass/.test(t)) s += 2;
+    if (/^main\.tex$/i.test(n)) s += 1;
+    if (!n.includes("/")) s += 1;
+    return s;
+  };
+  return names.sort((a, b) => score(b) - score(a))[0] ?? null;
+}
+function diff(old, text) {
+  if (old === text) return null;
+  let a = 0;
+  while (a < old.length && a < text.length && old[a] === text[a]) a++;
+  let z = 0;
+  while (z < old.length - a && z < text.length - a && old[old.length - 1 - z] === text[text.length - 1 - z]) z++;
+  if (a > 0 && /[\udc00-\udfff]/.test(old[a] ?? "")) a--;
+  if (z > 0 && /[\udc00-\udfff]/.test(old[old.length - z] ?? "")) z--;
+  return { from: a, to: old.length - z, text: text.slice(a, text.length - z) };
+}
+var PreviewSession = class {
+  o;
+  /** Each file's text as sent to the core (queued edits: in `batches`). */
+  files = {};
+  batches = /* @__PURE__ */ new Map();
+  main = null;
+  open = null;
+  page = 0;
+  pages = 0;
+  opened = false;
+  debug = false;
+  /** When each file's queued edits began (the oldest keystroke not sent). */
+  since = /* @__PURE__ */ new Map();
+  scheduled = false;
+  /** Sends are chained: the core gets the edits in the order they were made. */
+  chain = Promise.resolve();
+  host;
+  core;
+  sink;
+  /**
+   * What happened, in order (dev: scripts/mock-run.mjs reads it): each core
+   * request and its reply, package fetches, layouts. A ring of the last 3000,
+   * times in ms since the session began; never document text, only sizes.
+   */
+  trace = [];
+  /** The core fetches what it lacks from Shelf itself (its open reply says so). */
+  coreFetches = false;
+  /** Shelf packs the core fetched in the build under way (shown as loading until it ends). */
+  inBuild = [];
+  tellPackages() {
+    this.sink.packages?.({ ...this.pkg, loading: [...this.pkg.loading], unavailable: [...this.pkg.unavailable], done: [...this.pkg.done ?? []], failed: [...this.pkg.failed ?? []] });
+  }
+  /**
+   * The core fetches a pack mid-build (the job goes on with it), as its
+   * progress says (`phase: "fetching"`): the view says which. (A pack it
+   * could not get is the build's trouble, said by the host, not here.)
+   */
+  onFetching(e) {
+    this.tr("package: core fetches", e);
+    this.pkg.source = this.source.label;
+    const prev = this.inBuild.at(-1);
+    if (prev) this.pkg.loading = this.pkg.loading.filter((n) => n !== prev);
+    if (prev) this.pkg.done = [...this.pkg.done ?? [], prev];
+    this.inBuild.push(e.pack);
+    this.pkg.loading = [...this.pkg.loading, e.pack];
+    this.tellPackages();
+  }
+  /**
+   * A pack the host fetches for the core (a core that fetches its own: the
+   * panel had said "0 package files" all through a cold build's downloads):
+   * loading while it comes, then done with its bytes counted, or failed.
+   */
+  onPack(e) {
+    this.tr("package: host fetches for the core", { id: e.id, state: e.state, bytes: e.bytes });
+    this.pkg.source = this.source.label || "Shelf";
+    const p = this.pkg;
+    p.loading = p.loading.filter((n) => n !== e.id);
+    if (e.state === "fetching") {
+      if (!p.done?.includes(e.id)) p.loading = [...p.loading, e.id];
+    } else if (e.state === "done") {
+      if (!p.done?.includes(e.id)) p.done = [...p.done ?? [], e.id], p.bytes = (p.bytes ?? 0) + (e.bytes ?? 0);
+    } else p.failed = [...(p.failed ?? []).filter((f) => f.name !== e.id), { name: e.id, error: "could not be fetched" }];
+    this.tellPackages();
+  }
+  /** Core requests sent and not answered yet; of them, ones that may build. */
+  inflight = 0;
+  building = 0;
+  t0 = 0;
+  tr(k, d) {
+    this.t0 ||= this.now();
+    this.trace.push({ t: Math.round(this.now() - this.t0), k, d });
+    if (this.trace.length > 3e3) this.trace.shift();
+  }
+  constructor(host2, core, sink, opts = {}) {
+    this.host = host2;
+    core.onEvent?.((e) => {
+      const ev = e.event ?? "";
+      if (this.ended.length && (ev === "settled" || ev === "failed" || ev === "trapped")) for (const f of this.ended.splice(0)) f(e);
+      if (ev === "settled") {
+        const b = e;
+        if (typeof b.ms === "number" && !b.settling) this.sink.buildTime?.(b.ms, !!b.cold);
+      }
+      if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
+      if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
+      if (this.o.remote && e.event === "origins") return void (this.originsSeen++, this.glyphsAsked.clear(), this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
+      if (this.o.remote && "event" in e && WATCH2.has(e.event)) return this.onWatch(e);
+      if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);
+      if (e.event === "switched") {
+        this.tr("core: the SSA worker took over", {});
+        this.glyphCache.clear();
+        if (this.opened) this.chain = this.chain.then(() => this.layout()).then(() => this.statusSoon());
+        return;
+      }
+      if (e.event === "settled") {
+        if (this.opened && !this.busy) this.chain = this.chain.then(() => this.layout()).then(() => this.queuedLatency(e)).then(() => this.statusSoon());
+        return;
+      }
+      if (e.event === "pack") return this.onPack(e);
+      if (e.event === "latexmkrc") return void (this.rcNotes = latexmkNotes(e.notes), this.statusSoon());
+      if (e.event === "page" || e.event === "progress" || e.event === "done") this.onStream(e);
+    });
+    this.core = {
+      request: async (r) => {
+        const t0 = this.now();
+        this.tr(`\u2192 ${r.op}`, traceReq(r));
+        this.inflight++;
+        const builds = r.op === "edit" || r.op === "status" || r.op === "open";
+        if (builds && this.building++ === 0) this.sink.busy?.(true);
+        if (r.op === "open" || r.op === "set_file") this.glyphCache.clear();
+        if (r.op === "edit") {
+          const len = new TextEncoder().encode(r.text).length;
+          this.mapCulprits(r.file, r.start, r.end, len);
+          this.mapGlyphs(r.file, r.start, r.end, len);
+        }
+        const res = await core.request(r).finally(() => {
+          this.inflight--;
+          if (builds && --this.building === 0) this.sink.busy?.(false);
+          if (builds && this.inBuild.length) {
+            this.pkg.done = [...this.pkg.done ?? [], ...this.inBuild.filter((n) => this.pkg.loading.includes(n))];
+            this.pkg.loading = this.pkg.loading.filter((n) => !this.inBuild.includes(n));
+            this.inBuild = [];
+            this.tellPackages();
+          }
+        });
+        this.tr(`\u2190 ${r.op}`, { ms: Math.round(this.now() - t0), ...traceRes(res) });
+        if (res.error) this.errorsSeen = [...this.errorsSeen.slice(-19), `${r.op}: ${res.error}`];
+        const lost = res.json?.error === "no such handle" || /^(core trapped|PDF driver failed)/.test(res.error ?? "");
+        if (res.ok && (r.op === "edit" || r.op === "status")) this.traps = 0;
+        if (lost && this.opened && /needs more than the [\d.]+ GiB of memory/.test(res.error ?? "")) {
+          this.opened = false;
+          this.sink.error(plainWhy(res.error));
+          this.sink.connection?.(false, plainWhy(res.error));
+          return res;
+        }
+        if (lost && this.opened && r.op !== "open") {
+          this.opened = false;
+          this.traps++;
+          const why = plainWhy(res.error ?? "The engine restarted.");
+          if (this.traps <= 1) {
+            this.sink.error(`${why} Restarting it.`);
+            this.sink.connection?.(false, `${why} Restarting it.`);
+            this.chain = this.chain.then(() => this.reopen());
+          } else {
+            this.sink.error(`${why} It happened again, so the preview has stopped. Reload the page to try again.`);
+            this.sink.connection?.(false, `${why} It happened again, so the preview has stopped. Reload the page to try again.`);
+          }
+        }
+        return res;
+      },
+      onLost: core.onLost?.bind(core)
+    };
+    this.sink = sink;
+    this.o = { ...defaults, ...opts };
+    host2.onOpen((f0, t) => {
+      const f = this.known(f0);
+      this.open = f;
+      this.resending.delete(f);
+      this.sync(f, t);
+      this.status();
+    });
+    host2.onChanges((f0, es, len, sum) => {
+      const f = this.known(f0);
+      this.queue(f, es);
+      if (len !== void 0) this.agree(f, len, es, sum);
+    });
+    core.onLost?.(() => {
+      this.opened = false;
+      this.sink.error("The engine stopped. Restarting it.");
+      this.sink.connection?.(false, "The engine stopped. Restarting it.");
+      this.reopen();
+    });
+  }
+  /** Files whose whole text was asked for again (host.resend), until it comes (onOpen). */
+  resending = /* @__PURE__ */ new Set();
+  /**
+   * The session's copy of `file` (its queued edits in) against the
+   * editor's length after `edits`, and its sum when it gives one (as typing
+   * pauses: a same-length paste misapplied keeps the length): on a
+   * difference the copy has drifted (edits lost or applied twice, as an
+   * Overleaf history restore's were),
+   * so it is said and the whole text asked for again, sync() diffing it in.
+   * Once until it comes.
+   */
+  agree(file, len, edits, sum) {
+    const text = this.text(file) ?? "";
+    if (text.length === len && (sum === void 0 || textSum(text) === sum) || this.resending.has(file)) return;
+    this.tr("editor and session disagree", { file, editor: len, session: text.length, sum: sum !== void 0, edits: edits.slice(-5) });
+    if (!this.host.resend) return;
+    this.resending.add(file);
+    this.host.resend(file);
+  }
+  /**
+   * The project's file the editor's name is: itself, else the one file
+   * whose path ends with it (a name read from Overleaf's page without its
+   * folders: edits to a new, empty file the build never reads, the page
+   * never changing while the chip said they were built).
+   */
+  known(f) {
+    if (f in this.files) return f;
+    const like = Object.keys(this.files).filter((p) => p.endsWith("/" + f));
+    if (like.length === 1) {
+      this.tr("file: named by its path", { from: f, to: like[0] });
+      return like[0];
+    }
+    return f;
+  }
+  /** The pages' request: -1, the PDF (the host draws its pages with MuPDF). */
+  dpi() {
+    return -1;
+  }
+  now() {
+    return (this.o.now ?? (() => performance.now()))();
+  }
+  async start() {
+    if (this.o.remote) {
+      this.opened = true;
+      return this.watchJoined();
+    }
+    const files = await this.host.loadProject();
+    for (const [f, t] of Object.entries(files)) if (!(f in this.files)) this.files[f] = t;
+    this.main = this.host.mainFile?.(this.files) ?? guessMain(this.files);
+    this.sink.mains?.(Object.keys(this.files).filter((f) => f.endsWith(".tex")), this.main);
+    await this.reopen();
+    this.host.ready?.();
+    if (this.o.checkEveryMs > 0) this.checkTimer = setInterval(() => this.debug && this.check(), this.o.checkEveryMs);
+  }
+  checkTimer;
+  /** The session ends (its view closed): its timers stop and it sends nothing more; the core's side is its transport's to close. */
+  stop() {
+    clearInterval(this.checkTimer);
+    if (this.statusTimer) clearTimeout(this.statusTimer);
+    this.opened = false;
+    this.paused = true;
+  }
+  /** Files changed outside the editor (e.g. a project reloaded): each diffed in. */
+  refresh(files) {
+    for (const [f, t] of Object.entries(files)) if (f !== this.open) this.sync(f, t);
+  }
+  setMain(m) {
+    this.main = m;
+    return this.reopen();
+  }
+  /**
+   * Clean recompile: the project's files as Overleaf has them now, packages
+   * that failed or were not found asked for again, and a fresh core session
+   * (discovery, first paint, then the incremental program), nothing kept from
+   * the last job but the packages already fetched.
+   */
+  async clean(files) {
+    for (const [f, t] of Object.entries(files)) if (f !== this.open) this.files[f] = t;
+    for (const n of [...this.pkg.unavailable, ...(this.pkg.failed ?? []).map((f) => f.name)]) this.asked.delete(n);
+    this.pkg.unavailable = [];
+    this.pkg.failed = [];
+    this.texError = void 0;
+    this.hashes = [];
+    return this.reopen();
+  }
+  /** Whether the open's sources used minted (the worker then has its runner). */
+  minted = false;
+  /** A fresh core session from the texts with every queued edit in. */
+  async reopen() {
+    if (!this.main) return this.sink.error("no main .tex file found");
+    for (const [f, b] of this.batches) this.files[f] = b.text;
+    this.batches.clear();
+    const t = this.now();
+    const want = this.o.engine?.(this.files[this.main]) ?? "pdflatex";
+    const shims = !ENGINES[want].ready && want === "xelatex" ? await this.o.shims?.(this.files[this.main]) : null;
+    const engine = shims ? "pdflatex" : want;
+    this.engine = engine;
+    this.wanted = want;
+    this.preamble = preambleOf(this.files[this.main]);
+    this.sink.engine?.({ engine: want, ready: ENGINES[engine].ready, approx: !!shims });
+    if (!ENGINES[engine].ready) {
+      this.opened = false;
+      this.tr("engine", { engine, ready: false });
+      return;
+    }
+    await this.prefetch(["pdftex.map", ...Object.values(this.files).flatMap(referenced)]);
+    this.minted = Object.values(this.files).some(usesMinted);
+    const rc = latexmkFiles(this.files);
+    this.rcFiles = new Set(Object.keys(rc ?? {}));
+    this.rcNotes = [];
+    const latexmk = rc && { files: rc, exact: false };
+    const r = await this.core.request({ op: "open", main: this.main, files: { ...this.pkgFiles, ...shims, ...this.files }, fuel: this.o.fuel, engine, workers: this.o.workers, latexmk, projectFiles: rc && Object.keys(this.files) });
+    if (!r.ok) return this.sink.error((typeof r.json?.error === "string" ? r.json.error : void 0) ?? r.error ?? "open failed");
+    this.sink.connection?.(true);
+    if (r.json.building) {
+      this.tr("open: streaming", {});
+      this.opened = true;
+      this.sink.busy?.(true);
+      this.sink.streaming?.({ pages: 0, phase: r.json.phase ?? "typesetting" });
+      const d = await new Promise((res) => this.streamEnd = res);
+      this.sink.busy?.(false);
+      this.sink.streaming?.(null);
+      if (!d.ok || !d.json) return this.sink.error(d.error ?? "the build stopped");
+      r.json = d.json;
+    }
+    this.opened = true;
+    const latex = r.json.engine === "phitex";
+    if (latex !== this.latex) this.lastWarned = 0;
+    this.latex = latex;
+    this.coreFetches = !!r.json.fetches;
+    this.warming = typeof r.json.how === "string" && r.json.how.startsWith("plain") ? this.now() : 0;
+    this.warmSlow = false;
+    if (this.warming) this.sink.warmup?.({ state: "preparing", since: Date.now() });
+    this.setPages(r.json.pages);
+    this.noteError(r.json);
+    this.status(r.json.pending, r.json.undefined_names);
+    this.fetchPackages(r.json.missing);
+    const rt = this.now() - t, said2 = (ms) => ms < 1e3 ? `${ms.toFixed(0)} ms` : `${(ms / 1e3).toFixed(1)} s`;
+    this.sink.latency(`opened: the engine answered in ${said2(rt)}${r.json.build_ms >= 1 ? `, its build ${said2(r.json.build_ms)}` : ""}`);
+    await (this.sink.layout ? this.layout(Array.isArray(r.json.hashes) ? r.json.hashes : void 0) : this.showPage());
+    this.pkg.building = false;
+    this.tellPackages();
+    this.statusSoon();
+  }
+  /** A streamed open's end, awaited by `open`. */
+  streamEnd;
+  /** The streamed open's first page was traced. */
+  streamFirst = false;
+  onStream(e) {
+    if (e.event === "done") {
+      this.tr("open: streamed", { ok: e.ok });
+      this.streamFirst = false;
+      this.streamEnd?.(e);
+      this.streamEnd = void 0;
+      return;
+    }
+    if (!this.streamEnd) return;
+    if (e.event === "progress") return this.sink.streaming?.({ pages: e.pages, phase: e.phase });
+    if (!this.streamFirst) {
+      this.streamFirst = true;
+      this.tr("open: first page", { pages: e.pages });
+    }
+    this.setPages(e.pages);
+    this.sink.streaming?.({ pages: e.pages, phase: "typesetting" });
+    if (this.sink.layout) this.chain = this.chain.then(() => this.layout(e.hashes));
+  }
+  /** When the plain first paint came, while the SSA program is still to come (0: not warming). */
+  warming = 0;
+  warmSlow = false;
+  /** A status said how the last build was: past a plain one, the SSA program is there. */
+  warmCheck(how) {
+    if (!this.warming || typeof how !== "string" || how.startsWith("plain")) return;
+    this.tr("warmup: ready", { ms: Math.round(this.now() - this.warming) });
+    this.warming = 0;
+    this.sink.warmup?.({ state: "ready" });
+  }
+  lastWarned = 0;
+  /** When the core trapped, in the last minute. */
+  /** Traps since the last build that came back whole. */
+  traps = 0;
+  /** The engine the project runs with (its packages are resolved for it: which tree's file). */
+  engine = "pdflatex";
+  /** The engine the main file asked for at the last open (before the shims' choice), and its preamble then. */
+  wanted;
+  preamble;
+  /** The core runs LaTeX (the open reply's `engine`; until it says, as phitex's, the default build). */
+  latex = true;
+  diags = [];
+  /** The open's rc files (latexmkrc.ts): an edit to one reopens. */
+  rcFiles = /* @__PURE__ */ new Set();
+  /** What the open's rc files set that was not applied (the core's `latexmkrc` event). */
+  rcNotes = [];
+  /** The last build's first TeX error (the core's status), if it had one. */
+  texError;
+  noteError(j) {
+    if (j.history === void 0) return;
+    this.texError = j.error && typeof j.error === "object" ? j.error : void 0;
+  }
+  undefinedNames = [];
+  /** The last status scan's pending count (edits keep it until the next scan). */
+  pending;
+  status(pending, undefinedNames) {
+    if (this.o.remote) return this.sink.status({ pages: this.pages, main: this.main, file: null, diagnostics: this.watchDiags });
+    this.pending = pending;
+    if (undefinedNames) this.undefinedNames = undefinedNames;
+    if (this.now() - this.lastWarned > 250 || undefinedNames) {
+      const texts = {};
+      for (const f of Object.keys(this.files)) texts[f] = this.text(f);
+      this.diags = diagnose(texts, this.main, {
+        pages: this.pages,
+        pending,
+        undefinedNames: this.undefinedNames,
+        unavailable: this.pkg.unavailable,
+        packageSource: this.source === noPackages ? void 0 : this.source.label,
+        latex: this.latex,
+        texError: this.texError,
+        packageErrors: this.pkg.failed
+      });
+      this.lastWarned = this.now();
+    }
+    this.sink.status({ pages: this.pages, pending, main: this.main, file: this.open, diagnostics: this.rcNotes.length ? [...this.diags, ...this.rcNotes] : this.diags });
+  }
+  /** Packages the core was given (kept apart from the project's files: never diagnosed, never a main). */
+  pkgFiles = {};
+  /** Every package name asked for once: not asked again. */
+  asked = /* @__PURE__ */ new Set();
+  pkg = { loading: [], unavailable: [], source: "", done: [], building: false };
+  get source() {
+    return this.o.packages ?? noPackages;
+  }
+  /**
+   * The core read `missing` and found nothing: each package among them
+   * fetched (once), then set as a file (a rebuild each: the core never
+   * looks for a missing file again). What they read in turn shows up in
+   * the next status, and is fetched then.
+   */
+  fetchPackages(missing, guessed = []) {
+    if (this.coreFetches) {
+      const none = (missing ?? []).filter((n) => isPackageFile(n) && !this.pkg.unavailable.includes(n));
+      if (none.length) this.pkg.unavailable.push(...none), this.tellPackages();
+      return;
+    }
+    const wanted = new Set(missing ?? []);
+    missing = [...wanted, ...guessed];
+    const want = [...new Set(missing ?? [])].filter((n) => isPackageFile(n) && !(n in this.files) && !this.asked.has(n));
+    if (!want.length) return;
+    for (const n of want) this.asked.add(n);
+    const src = this.source;
+    this.pkg.source = src.label;
+    const tell = () => this.sink.packages?.({ ...this.pkg, loading: [...this.pkg.loading], unavailable: [...this.pkg.unavailable], done: [...this.pkg.done ?? []], failed: [...this.pkg.failed ?? []] });
+    if (src === noPackages) {
+      this.pkg.unavailable.push(...want);
+      tell();
+      return this.status(this.pending, this.undefinedNames);
+    }
+    this.pkg.loading.push(...want);
+    tell();
+    const got = [];
+    this.tr("packages: want", want);
+    const fetchOne = async (n) => {
+      const t = await src.resolve(n, this.engine).catch((e) => this.failed(n, e));
+      this.tr(t === null ? "package: none" : "package: got", n);
+      got.push([n, t]);
+      this.pkg.loading = this.pkg.loading.filter((m) => m !== n);
+      if (t !== null) {
+        this.pkg.done.push(n);
+        this.pkg.failed = this.pkg.failed?.filter((f) => f.name !== n);
+      }
+      const more = t === null || t === DELIVERED ? [] : referenced(t).filter((m) => isPackageFile(m) && !(m in this.files) && !this.asked.has(m));
+      for (const m of more) this.asked.add(m);
+      this.pkg.loading.push(...more);
+      tell();
+      await Promise.all(more.map(fetchOne));
+    };
+    void Promise.all(want.map(fetchOne)).then(() => {
+      for (const [n, t] of got) {
+        if (t === null) {
+          if (wanted.has(n) && !this.pkg.failed?.some((f) => f.name === n)) this.pkg.unavailable.push(n);
+          continue;
+        }
+        if (t === DELIVERED) continue;
+        this.pkgFiles[n] = t;
+        if (this.opened) this.chain = this.chain.then(() => this.core.request({ op: "set_file", file: n, text: t }).then(() => void 0));
+      }
+      const any = got.some(([, t]) => t !== null);
+      this.pkg.building = any;
+      tell();
+      this.status(this.pending, this.undefinedNames);
+      if (any)
+        this.chain = this.chain.then(() => this.layout()).then(() => {
+          this.pkg.building = false;
+          tell();
+          this.statusSoon();
+        });
+    });
+  }
+  /** After the core's discovery pass: what it asked for is here (or nowhere), so the first paint may build. Once per open. */
+  /** A fetch that failed: kept with why (shown), and askable again. */
+  failed(n, e) {
+    this.asked.delete(n);
+    const error = e instanceof Error ? e.message : String(e);
+    this.pkg.failed = [...(this.pkg.failed ?? []).filter((f) => f.name !== n), { name: n, error }];
+    return null;
+  }
+  /** Fetch `names` (and what they load, by the scan) into pkgFiles, before a session opens. */
+  async prefetch(names) {
+    const src = this.source;
+    const want = [...new Set(names)].filter((n) => isPackageFile(n) && !(n in this.files) && !this.asked.has(n));
+    if (src === noPackages || !want.length) return;
+    this.pkg.source = src.label;
+    const tell = () => this.sink.packages?.({ ...this.pkg, loading: [...this.pkg.loading], unavailable: [...this.pkg.unavailable], done: [...this.pkg.done ?? []], failed: [...this.pkg.failed ?? []] });
+    for (const n of want) this.asked.add(n);
+    this.pkg.loading.push(...want);
+    tell();
+    const one = async (n) => {
+      const t = await src.resolve(n, this.engine).catch((e) => this.failed(n, e));
+      this.pkg.loading = this.pkg.loading.filter((m) => m !== n);
+      if (t !== null) this.pkg.done.push(n);
+      if (t !== null && t !== DELIVERED) this.pkgFiles[n] = t;
+      const more = t === null || t === DELIVERED ? [] : referenced(t).filter((m) => isPackageFile(m) && !(m in this.files) && !this.asked.has(m));
+      for (const m of more) this.asked.add(m);
+      this.pkg.loading.push(...more);
+      tell();
+      await Promise.all(more.map(one));
+    };
+    const t0 = this.now();
+    this.tr("prefetch: start", want.length);
+    await Promise.all(want.map(one));
+    this.tr("prefetch: done", { files: this.pkg.done?.length ?? 0, ms: Math.round(this.now() - t0) });
+    this.pkg.building = true;
+    tell();
+  }
+  /** The page count of the last build; the page in view kept inside it
+   * (a build with no page, an error, keeps the page: it comes back). */
+  setPages(n) {
+    this.pages = n;
+    if (n > 0 && this.page >= n) this.page = n - 1;
+  }
+  /** The page in view (the one an edit paints first). */
+  setPage(p) {
+    this.page = Math.max(0, Math.min(p, Math.max(this.pages - 1, 0)));
+    void this.peerPages();
+    return this.sink.layout ? Promise.resolve() : this.showPage();
+  }
+  /** The pages' hashes, as the core has them now. */
+  hashes = [];
+  /** Tell the view which pages there are (by hash). */
+  /** `given`: the hashes a reply carried (the open's), else asked for. */
+  async layout(given) {
+    if (!this.sink.layout) return;
+    if (given) this.hashes = given;
+    else {
+      const r = await this.core.request({ op: "pages" });
+      if (!r.ok || !r.json?.pages) return;
+      this.hashes = r.json.pages;
+    }
+    this.tr("layout", { pages: this.hashes.length });
+    this.setPages(this.hashes.length);
+    if (this.hashes.length) this.sink.layout(this.hashes);
+    this.drawPeers();
+    void this.peerPages();
+    if (this.sink.goto && !this.noOriginsPrefetch) this.glyphsAll();
+  }
+  /** Everything again, for a view that just joined (a detached PDF tab). */
+  async resync() {
+    if (!this.opened) return;
+    if (this.o.remote) return this.watchJoined();
+    this.sink.mains?.(Object.keys(this.files).filter((f) => f.endsWith(".tex")), this.main);
+    this.status(this.pending);
+    await (this.sink.layout ? this.layout() : this.showPage());
+  }
+  /** Page `k`, for a view that wants it. */
+  async fetch(k) {
+    if (!this.opened) return;
+    const r = await this.core.request({ op: "png", page: k, dpi: this.dpi() });
+    const img = image(r);
+    if (img) this.sink.page(img, k, this.pages, r.json?.hash ?? this.hashes[k] ?? null);
+  }
+  async showPage() {
+    if (!this.opened) return;
+    if (this.sink.layout) return this.layout();
+    const r = await this.core.request({ op: "png", page: this.page, dpi: this.dpi() });
+    this.sink.page(image(r), this.page, this.pages);
+  }
+  /** (debugging: no glyph-origin requests after layouts) */
+  noOriginsPrefetch = false;
+  /** The errors replies carried (traps, panics), the last 20. */
+  errorsSeen = [];
+  /** An anonymized debug report (report.ts) for the user to send. */
+  report(env) {
+    const st = this.trace.filter((e) => e.k === "\u2190 status").at(-1)?.d;
+    return report({
+      ...env,
+      paths: Object.keys(this.files),
+      trace: this.trace,
+      diagnostics: this.diags ?? [],
+      status: st,
+      packages: this.pkg,
+      // (TeX's error by its message only: its context is the document's lines)
+      errors: [...this.errorsSeen, ...this.texError ? [`TeX: ${this.texError.message}`] : []]
+    });
+  }
+  /** Page `k`'s glyphs with their sources, as the core has them now (kept by the page's hash). */
+  glyphCache = /* @__PURE__ */ new Map();
+  /**
+   * An edit replaced bytes [start, end) of `file` with `len` bytes: every
+   * cached glyph's source range moved with it. A page the edit changed has a
+   * new hash, so its glyphs are asked again (the cache is by page hash).
+   */
+  mapGlyphs(file, start, end, len) {
+    const map = (p) => p < start ? p : p >= end ? p + len - (end - start) : start + len;
+    for (const [key, gs] of this.glyphCache) {
+      if (end > start && gs.some((g) => g.file === file && g.start < end && g.end > start)) {
+        this.glyphCache.delete(key);
+        continue;
+      }
+      for (const g of gs) {
+        if (g.file !== file) continue;
+        const [a, b] = [map(g.start), map(g.end)];
+        g.start = a;
+        g.end = Math.max(a, b);
+      }
+    }
+  }
+  /**
+   * boxesOf's answers, by page (its glyph list: a page changed has a new
+   * one) and range (`file\0start\0end`): the range's boxes there and the
+   * page's glyph nearest it. Mapped through edits as the glyphs are, so a
+   * build's problems are looked up only on the pages it changed.
+   */
+  culprits = /* @__PURE__ */ new Map();
+  /** The culprits' answers moved with an edit (before the glyphs are): one the edit touches, between its range and its nearest glyph, dropped. */
+  mapCulprits(file, start, end, len) {
+    const live = new Set(this.glyphCache.values());
+    for (const [all, memo] of this.culprits) {
+      if (!live.has(all)) {
+        this.culprits.delete(all);
+        continue;
+      }
+      const moved = [];
+      for (const [id, m] of memo) {
+        const [f, a, b] = id.split("\0");
+        if (f !== file) continue;
+        const lo = Math.min(+a, m.g?.start ?? +a), hi = Math.max(+b, m.g?.end ?? +b);
+        if (start > hi) continue;
+        memo.delete(id);
+        if (end < lo) moved.push([`${f}\0${+a + len - (end - start)}\0${+b + len - (end - start)}`, m]);
+      }
+      for (const [id, m] of moved) memo.set(id, m);
+    }
+  }
+  /** Page `k`'s glyphs if they are here, at once (no request, no waiting on a build). */
+  cached(k) {
+    return this.glyphCache.get(`${k}:${this.hashes[k] ?? ""}`);
+  }
+  /** Every page's glyphs asked for, the one read first, one at a time: after each build, so lookups are local. */
+  glyphsAll() {
+    const gen = ++this.glyphGen;
+    const n = this.hashes.length;
+    const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
+    void (async () => {
+      for (const k of order) {
+        if (gen !== this.glyphGen) return;
+        if (k >= 0 && k < n && !this.cached(k)) await this.glyphsOf(k);
+      }
+    })();
+  }
+  glyphGen = 0;
+  glyphsOf(k) {
+    const key = `${k}:${this.hashes[k] ?? ""}`;
+    const have = this.glyphCache.get(key);
+    if (have) return Promise.resolve(have);
+    let p = this.glyphsAsked.get(key);
+    if (!p) {
+      const mine = this.glyphsFetch(k, key).finally(() => this.glyphsAsked.get(key) === mine && this.glyphsAsked.delete(key));
+      this.glyphsAsked.set(key, p = mine);
+    }
+    return p;
+  }
+  glyphsAsked = /* @__PURE__ */ new Map();
+  /** The watch's `origins` events seen: a page's answer asked before the latest is of the origins before it. */
+  originsSeen = 0;
+  async glyphsFetch(k, key) {
+    const seen = this.originsSeen;
+    const r = await this.core.request({ op: "origins", page: k });
+    if (seen !== this.originsSeen) return this.glyphsOf(k);
+    if (!r.ok || !r.json) return [];
+    const path = (n) => {
+      n = n.replace(/^\.\//, "");
+      if (this.o.remote) return n;
+      return n in this.files ? n : n + ".tex" in this.files ? n + ".tex" : null;
+    };
+    const gs = glyphs2(r.json, path);
+    if (!gs.length) return gs;
+    if (this.glyphCache.size > 4 * Math.max(this.hashes.length, 100)) this.glyphCache.clear();
+    this.glyphCache.set(key, gs);
+    if (this.peers.length) this.drawPeers();
+    return gs;
+  }
+  /** A double-click at (x, y) on page `k` (PDF points from its top left): the editor to its source. */
+  async toSource(k, x, y) {
+    if (!this.opened) return;
+    const g = nearest(this.cached(k) ?? await this.glyphsOf(k), x, y);
+    this.tr("sync\u2192source", { k, x, y, g });
+    if (!g?.file) return;
+    if (this.o.remote) return this.o.remote.source(g.file, g.start, g.end);
+    const t = this.files[g.file];
+    this.sink.goto?.(g.file, charOffset(t, g.start), charOffset(t, g.end));
+  }
+  /**
+   * The editor selected [from, to) of `file` (UTF-16): the glyphs that came
+   * from it, on every page, highlighted (an empty selection clears them).
+   */
+  async selectSource(file, from2, to) {
+    if (!this.opened || !(file in this.files)) return;
+    const t = this.files[file];
+    return this.selectBytes(file, byteOffset(t, from2), byteOffset(t, to));
+  }
+  /**
+   * Bytes [a, b) of `file`'s text selected (the glyph origins' offsets):
+   * the glyphs that came from them, on every page, highlighted (an empty
+   * selection clears them). [`selectSource`]'s, and an LSP editor's
+   * (`{event: "select"}`).
+   */
+  async selectBytes(file, a, b) {
+    if (!this.opened) return;
+    if (a === b) return this.sink.marks?.([]);
+    const out = [];
+    for (let k = 0; k < Math.max(this.hashes.length, this.pages); k++) {
+      const all = this.cached(k) ?? await this.glyphsOf(k);
+      const hit = all.filter((g) => g.file === file && !g.synth && g.start < b && g.end > a);
+      if (hit.length) out.push({ k, boxes: boxes(hit, all) });
+    }
+    this.tr("select\u2192page", { file, a, b, pages: out.map((m) => m.k) });
+    this.sink.marks?.(out);
+  }
+  /**
+   * Text selected on the pages ([x, y top, w, h] boxes in PDF points, by
+   * page): the editor selects the source it came from (the file most of it
+   * came from, from its first glyph's start to its last's end).
+   */
+  async selectPage(sel) {
+    if (!this.opened || !sel.length) return;
+    const by = /* @__PURE__ */ new Map();
+    for (const { k, rects } of sel) {
+      for (const g of this.cached(k) ?? await this.glyphsOf(k)) {
+        if (!g.file || g.synth) continue;
+        const [gx, gy] = [g.x + 1, g.y - 2];
+        if (!rects.some(([x, y, w, h]) => gx >= x && gx <= x + w && gy >= y && gy <= y + h)) continue;
+        const r = by.get(g.file) ?? { lo: Infinity, hi: -Infinity, n: 0 };
+        by.set(g.file, { lo: Math.min(r.lo, g.start), hi: Math.max(r.hi, g.end), n: r.n + 1 });
+      }
+    }
+    const best = [...by].sort((x, y) => y[1].n - x[1].n)[0];
+    this.tr("select\u2192source", { pages: sel.map((s) => s.k), file: best?.[0], glyphs: best?.[1].n ?? 0 });
+    if (!best) return;
+    const [file, { lo, hi }] = best;
+    if (this.o.remote) return void this.o.remote.select?.(file, lo, hi);
+    const t = this.files[file];
+    if (t === void 0) return;
+    this.sink.goto?.(file, charOffset(t, lo), charOffset(t, hi), false);
+  }
+  /**
+   * The editor's cursor at `pos` (UTF-16) in `file`, as it moves: the word it
+   * is in highlighted on the page, at once, from the glyphs already here
+   * (none asked for: a page not yet here is skipped); scrolled to only when
+   * the cursor changed line.
+   */
+  follow(file, pos) {
+    if (!this.opened || !(file in this.files) || !this.sink.mark) return;
+    const { at, word, line } = place3(this.files[file], pos);
+    this.followBytes(file, at, word, line);
+  }
+  /**
+   * Collaborators' cursors (the host's, Overleaf's: never the user's own),
+   * each at `pos` (UTF-16) in `file`: the word there marked on its page,
+   * by follow's rule, in the collaborator's hue with their label, never
+   * scrolling, apart from the user's own mark. From the glyphs here; a
+   * cursor on a page without them is shown once they come (the pages
+   * around the one in view asked for). Each call is the whole set: []
+   * clears.
+   */
+  others(file, others) {
+    this.peers = others.map((o) => ({ file, ...o }));
+    this.drawPeers();
+    void this.peerPages();
+  }
+  peers = [];
+  /**
+   * The collaborators' marks, from the glyphs already here. A collaborator
+   * not found whose last mark is on a page made again, its glyphs not here
+   * yet (a build: the page's new hash), keeps that mark until they come
+   * ([`peerPages`] asks for them): dropped and drawn again a round trip
+   * later, it blinked at every build.
+   */
+  drawPeers() {
+    if (!this.sink.others || !this.opened) return;
+    const out = [];
+    const drawn = /* @__PURE__ */ new Map();
+    for (const p of this.peers) {
+      const t = this.files[p.file];
+      if (t === void 0) continue;
+      const id = `${p.label}\0${p.hue}`;
+      const { at, word, line } = place3(t, p.pos);
+      let e;
+      for (let k = 0; k < this.hashes.length; k++) {
+        const all = this.cached(k);
+        const hit = all ? this.wordOn(all, p.file, at, word, line) : [];
+        if (!all || !hit.length) continue;
+        e = { k, boxes: boxes(hit, all), label: p.label, hue: p.hue, file: p.file, pos: p.pos };
+        break;
+      }
+      const was = this.peersDrawn.get(id);
+      if (!e && was && was.k < this.hashes.length && !this.cached(was.k)) e = { ...was, file: p.file, pos: p.pos };
+      if (!e) continue;
+      out.push(e);
+      drawn.set(id, e);
+    }
+    this.peersDrawn = drawn;
+    this.sink.others(out);
+  }
+  /** The collaborators' marks last drawn, by label and hue. */
+  peersDrawn = /* @__PURE__ */ new Map();
+  /** The glyphs of the pages around the one in view, and of those a collaborator's kept mark is on, asked for, then the collaborators drawn again. */
+  async peerPages() {
+    if (!this.peers.length || !this.sink.others) return;
+    const near = [this.page, this.page + 1, this.page - 1, ...[...this.peersDrawn.values()].map((e) => e.k)];
+    const ks = [...new Set(near)].filter((k) => k >= 0 && k < this.hashes.length && !this.cached(k));
+    if (!ks.length) return;
+    await Promise.all(ks.map((k) => this.glyphsOf(k)));
+    this.drawPeers();
+  }
+  /**
+   * The glyphs to mark for a cursor at byte `at` of `file`, in word `w`
+   * (bytes, none: not in a word) of line `line` (bytes), among a page's
+   * glyphs `all` (none: not on that page): a word, never the whole line,
+   * while typing: the cursor's word, else, not typeset yet (just typed),
+   * the typeset word nearest it on its line, the glyph's own; the line
+   * only with no word near at all.
+   */
+  wordOn(all, file, at, w, line) {
+    const onLine = from(all, file, line[0], line[1]);
+    if (!onLine.length) return [];
+    let word = w ? from(onLine, file, w[0], w[1]) : [];
+    if (!word.length) {
+      const g = glyphNear(onLine, at);
+      const t = this.files[file];
+      const gw = g && t !== void 0 ? wordBytes(new TextEncoder().encode(t), g.start) : null;
+      word = gw ? from(onLine, file, gw[0], gw[1]) : g ? onLine.filter((x) => x.start === g.start) : [];
+    }
+    return word.length ? word : lineAt2(onLine, at);
+  }
+  /**
+   * The cursor at byte `at` of `file`'s text (the glyph origins' offsets),
+   * in word `w` (bytes, none: not in a word) of line `line` (bytes): the
+   * word highlighted on the page, else the line's glyphs nearest it, from
+   * the glyphs already here (a page not yet here asked for, then shown if
+   * the cursor is still there); scrolled to only when the cursor changed
+   * line. [`follow`]'s, and an LSP editor's (`{event: "follow"}`).
+   */
+  followBytes(file, at, w, line) {
+    if (!this.opened || !this.sink.mark) return;
+    const [a, b] = line;
+    const key = `${file}:${a}`;
+    const scroll = key !== this.followLine;
+    this.followLine = key;
+    const n = Math.max(this.hashes.length, this.pages, 1);
+    const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
+    for (const k of order) {
+      const all = this.cached(k);
+      if (!all) continue;
+      const hit = this.wordOn(all, file, at, w, line);
+      if (!hit.length) continue;
+      this.followWant = "";
+      this.sink.mark(k, boxes(hit, all), scroll);
+      return;
+    }
+    const want = `${file}:${at}`;
+    this.followWant = want;
+    void (async () => {
+      for (const k of order) {
+        if (this.followWant !== want) return;
+        if (k >= this.hashes.length || this.cached(k)) continue;
+        const all = await this.glyphsOf(k);
+        if (from(all, file, a, b).length) {
+          if (this.followWant === want) {
+            this.followLine = "";
+            this.followBytes(file, at, w, line);
+          }
+          return;
+        }
+      }
+    })();
+  }
+  followLine = "";
+  followWant = "";
+  /** The last build's transcript, the job's `.log` (the viewer's "View log"; none: the core has none yet). */
+  async log() {
+    if (!this.opened) return null;
+    for (let i = 0; i < 50; i++) {
+      const r = await this.core.request({ op: "log" });
+      if (!r.ok) return null;
+      if (r.json?.pending) {
+        await new Promise((go) => setTimeout(go, 100));
+        continue;
+      }
+      const t = r.json?.text;
+      return typeof t === "string" && t ? t : null;
+    }
+    return null;
+  }
+  /**
+   * The boxes of [`start`, `end`) (bytes, as a problem's range) of `file` on
+   * the pages: the culprit under a problem's wavy underline. From the pages'
+   * glyphs, the page in view first and the rest asked for as needed; [] where
+   * none of it is typeset.
+   */
+  async boxesOf(file, start, end) {
+    if (!this.opened) return [];
+    file = file.replace(/^\.\//, "");
+    const n = Math.max(this.hashes.length, this.pages, 1);
+    const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
+    const out = [];
+    let near = null;
+    for (const k of order) {
+      if (k >= this.hashes.length) continue;
+      const all = this.cached(k) ?? await this.glyphsOf(k);
+      const memo = this.culprits.get(all) ?? this.culprits.set(all, /* @__PURE__ */ new Map()).get(all);
+      const id = `${file}\0${start}\0${end}`;
+      let m = memo.get(id);
+      if (!m) {
+        const hi = Math.max(end, start + 1), hit = [];
+        m = { boxes: null, g: null, d: Infinity };
+        for (const g of all) {
+          if (g.file !== file || g.synth) continue;
+          if (g.start < hi && g.end > start) hit.push(g);
+          const d = g.start >= end ? g.start - end : start - g.end;
+          if (d >= 0 && d < m.d) m.g = g, m.d = d;
+        }
+        if (hit.length) m.boxes = boxes(hit, all);
+        memo.set(id, m);
+      }
+      if (m.boxes) out.push({ k, boxes: m.boxes });
+      if (m.g && (!near || m.d < near.d)) near = { k, g: m.g, d: m.d, all };
+    }
+    if (!out.length && near && near.d <= NEAR_CULPRIT) {
+      const mine = near.all.filter((x) => x.file === file && !x.synth).sort((x, y) => x.start - y.start);
+      let i = mine.indexOf(near.g), j = i;
+      while (i > 0 && mine[i - 1].end >= mine[i].start) i--;
+      while (j + 1 < mine.length && mine[j].end >= mine[j + 1].start) j++;
+      out.push({ k: near.k, boxes: boxes(mine.slice(i, j + 1), near.all) });
+    }
+    return out.sort((x, y) => x.k - y.k);
+  }
+  /** The place `pos` (UTF-16) in `file`: its line's glyphs highlighted on the page (the page in view first). */
+  async toPage(file, pos) {
+    if (!this.opened || !(file in this.files)) return;
+    const t = this.files[file];
+    const lo = t.lastIndexOf("\n", pos - 1) + 1, hiC = t.indexOf("\n", pos);
+    const [a, b] = [byteOffset(t, lo), byteOffset(t, hiC < 0 ? t.length : hiC)];
+    const n = Math.max(this.hashes.length, this.pages, 1);
+    const order = [this.page, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== this.page)];
+    for (const k of order) {
+      const all = this.cached(k) ?? await this.glyphsOf(k);
+      const hit = lineAt2(from(all, file, a, b), byteOffset(t, pos));
+      if (hit.length) {
+        this.tr("sync\u2192page", { file, pos, k, glyphs: hit.length });
+        this.sink.mark?.(k, boxes(hit, all));
+        return;
+      }
+    }
+    this.tr("sync\u2192page", { file, pos, k: -1 });
+  }
+  async pdf() {
+    this.flush();
+    await this.chain;
+    const t = this.now();
+    const r = await this.core.request({ op: "pdf" });
+    this.sink.latency(`PDF made in ${(this.now() - t).toFixed(1)} ms`);
+    return r.pdf;
+  }
+  /** `file` is now `text`: only the differing middle is sent. */
+  sync(file, text) {
+    const old = this.batches.get(file)?.text ?? this.files[file];
+    if (old === void 0) {
+      this.files[file] = text;
+      if (this.opened) this.chain = this.chain.then(() => this.core.request({ op: "set_file", file, text }).then(() => void 0));
+      this.rcChanged(file);
+      return;
+    }
+    const e = diff(old, text);
+    if (e) this.queue(file, [e]);
+  }
+  queue(file, edits) {
+    if (!edits.length) return;
+    let b = this.batches.get(file);
+    if (!b) this.batches.set(file, b = new Batch(this.files[file] ?? ""));
+    if (!(file in this.files)) this.files[file] = "";
+    if (!b.size) this.since.set(file, this.now());
+    for (const e of edits) b.push(e);
+    this.keystrokes += edits.length;
+    this.rcChanged(file);
+    if (!this.scheduled) {
+      this.scheduled = true;
+      const f = () => this.flush();
+      if (this.o.schedule) this.o.schedule(f);
+      else setTimeout(f, 0);
+    }
+  }
+  rcTimer;
+  /** `file` changed: one of the open's rc files, or a new root one, reopens (once typing pauses): the core reads them at an open only. */
+  rcChanged(file) {
+    if (!this.opened || !(this.rcFiles.has(file) || file === "latexmkrc" || file === ".latexmkrc")) return;
+    clearTimeout(this.rcTimer);
+    this.rcTimer = setTimeout(() => this.chain = this.chain.then(() => this.reopen()), 800);
+  }
+  /** A send loop is running (it takes what is queued when each build ends). */
+  busy = false;
+  /** Waiting for a queued edit's build to end (`send`): its `settled`, else `failed` or `trapped`. */
+  ended = [];
+  /** Edits the host gave, and builds they took (the batching's effect). */
+  keystrokes = 0;
+  builds = 0;
+  /**
+   * Send the queued edits, in order; the last of a round painted first
+   * (edit_view). Backpressure: at most one round in flight. What is typed
+   * meanwhile merges into the batches, and goes as one edit when the core
+   * is free: a fast core builds every keystroke, a slow one the last N
+   * together, never a state already stale.
+   */
+  /** Paused (the extension turned off): edits keep merging in their batches, sent on resume. */
+  paused = false;
+  pause(on) {
+    this.paused = on;
+    if (!on) void this.flush();
+  }
+  flush() {
+    this.scheduled = false;
+    if (!this.opened || this.busy || this.paused) return this.chain;
+    this.busy = true;
+    this.sink.busy?.(true);
+    this.chain = this.chain.then(async () => {
+      try {
+        for (; ; ) {
+          const round = [...this.batches].filter(([, b]) => b.size);
+          if (!round.length) break;
+          for (const [file, b] of round) if (!await this.send(file, b)) return;
+        }
+        await this.layout();
+        this.statusSoon();
+      } finally {
+        this.busy = false;
+        this.sink.busy?.(false);
+        if ([...this.batches.values()].some((b) => b.size)) setTimeout(() => void this.flush(), 0);
+      }
+    });
+    return this.chain;
+  }
+  statusTimer = null;
+  /**
+   * The pending/undefined scan flattens the whole program (3 ms at 180 KB,
+   * ten times an edit): once the edits have settled, at most every 300 ms.
+   */
+  /** `phitex watch`'s last build's problems (Options.remote), as diagnostics. */
+  watchDiags = [];
+  /** A build of the watch's under way (its progress told, not yet settled). */
+  watchBuilding = false;
+  watchBusy(on) {
+    if (on === this.watchBuilding) return;
+    this.watchBuilding = on;
+    this.sink.busy?.(on);
+    if (!on) this.sink.streaming?.(null);
+  }
+  /** The watch joined (or joined again): its pages, outline and last problems. */
+  async watchJoined() {
+    await this.layout();
+    this.status();
+    void this.watchOutline();
+    const r = await this.core.request({ op: "diagnostics" });
+    if (r.ok) this.onWatch({ event: "diagnostics", items: r.json?.items ?? [] });
+  }
+  /** The document's outline asked for now and given to the view (it shows the contents). */
+  async outline() {
+    if (!this.sink.outline) return;
+    const r = await this.core.request({ op: "outline" });
+    if (r.ok) this.sink.outline(r.json?.items ?? []);
+  }
+  /** After a build: the outline, only while the view shows it (else asked when it does). */
+  async watchOutline() {
+    if (!this.sink.outline || this.sink.outlineWanted?.() === false) return;
+    const r = await this.core.request({ op: "outline" });
+    if (r.ok) this.sink.outline(r.json?.items ?? []);
+  }
+  onWatch(e) {
+    switch (e.event) {
+      case "page": {
+        this.watchBusy(true);
+        const hs = [...this.hashes];
+        while (hs.length < Math.max(e.k + 1, e.pages ?? 0)) hs.push("");
+        hs[e.k] = e.hash;
+        this.hashes = hs;
+        this.setPages(hs.length);
+        this.sink.layout?.(hs);
+        this.drawPeers();
+        void this.peerPages();
+        return;
+      }
+      case "progress":
+        this.watchBusy(true);
+        if (e.phase === "fetching" && e.pack) return this.onFetching({ pack: e.name ?? e.pack, name: e.pack });
+        if (!this.hashes.length && (this.pkg.loading.length || !this.pkg.building)) {
+          this.pkg.done = [...this.pkg.done ?? [], ...this.pkg.loading];
+          this.pkg.loading = [];
+          this.inBuild = [];
+          this.pkg.building = true;
+          this.tellPackages();
+        }
+        this.sink.streaming?.({ pages: e.pages ?? 0, phase: e.phase ?? "typesetting" });
+        return;
+      case "superseded":
+        this.watchBusy(true);
+        return;
+      case "diagnostics":
+        this.watchDiags = e.items.map(asDiagnostic);
+        this.status();
+        return;
+      case "settled":
+        if (!e.settling) {
+          this.watchBusy(false);
+          this.sink.preparing?.(false);
+          if (this.pkg.building) this.pkg.building = false, this.tellPackages();
+        }
+        this.chain = this.chain.then(() => this.layout()).then(() => (this.status(), this.watchOutline()));
+        return;
+      case "sync":
+        void this.syncTo(e.file, e.lo, e.hi, e.at, e.page);
+        return;
+    }
+  }
+  /** Forward search: bytes [lo, hi) of `file` (a line), the glyphs from it nearest `at`'s highlighted, the page in view tried first. */
+  async syncTo(file, lo, hi, at, hint) {
+    const n = this.hashes.length;
+    const first = hint ?? this.page;
+    for (const k of [first, ...Array.from({ length: n }, (_, i) => i).filter((i) => i !== first)]) {
+      const all = this.cached(k) ?? await this.glyphsOf(k);
+      const hit = lineAt2(from(all, file, lo, hi), at);
+      if (hit.length) return this.sink.mark?.(k, boxes(hit, all), true);
+    }
+  }
+  /** The last keystroke a core queued (its build said by `settled`): when it was typed, sent, answered. */
+  queued = null;
+  /** A queued keystroke's build in and drawn: its time from the keystroke, and the build's own, said. */
+  queuedLatency(e) {
+    const q = this.queued;
+    if (!q || e.ms === void 0) return;
+    this.queued = null;
+    const e2e = this.now() - q.t0;
+    this.sink.painted?.(e2e);
+    const ran = e.ran ?? 0, kept = e.kept ?? 0, passes = e.passes ?? 1;
+    this.sink.latency(
+      `${e2e.toFixed(0)} ms keystroke\u2192page \xB7 build ${e.ms.toFixed(1)} ms \xB7 ${this.keystrokes} edits \u2192 ${this.builds} builds`,
+      [
+        `build            ${e.ms.toFixed(2)} ms (in the core: the edit's steps, every page, the .aux/.bbl loops)`,
+        `keystroke\u2192page   ${e2e.toFixed(1)} ms = queued ${(q.tSend - q.t0).toFixed(1)} + round trip ${(q.tBack - q.tSend).toFixed(1)} + build and paint ${(this.now() - q.tBack).toFixed(1)}`,
+        `rebuilt          ${ran} of ${ran + kept} steps, ${passes} pass${passes === 1 ? "" : "es"}`,
+        `batching         ${this.keystrokes} edits \u2192 ${this.builds} builds (one in flight; the rest merged)`
+      ].join("\n")
+    );
+  }
+  statusSoon() {
+    if (this.statusTimer) return;
+    this.statusTimer = setTimeout(async () => {
+      this.statusTimer = null;
+      if (this.busy || !this.opened) return this.statusSoon();
+      const r = await this.core.request({ op: "status" });
+      if (r.ok && r.json) {
+        this.warmCheck(r.json.how);
+        this.setPages(r.json.pages);
+        this.noteError(r.json);
+        this.status(r.json.pending, r.json.undefined_names);
+        this.fetchPackages(r.json.missing);
+      }
+    }, 300);
+  }
+  async send(file, b) {
+    if (this.warming && !this.warmSlow) {
+      this.warmSlow = true;
+      this.sink.warmup?.({ state: "preparing", since: Date.now() - (this.now() - this.warming), slow: true });
+    }
+    const t0 = this.since.get(file) ?? this.now();
+    const tSend = this.now();
+    const edits = b.take();
+    this.files[file] = b.text;
+    if (!this.minted && usesMinted(b.text)) {
+      this.tr("minted: open again, with its runner", {});
+      await this.reopen();
+      return false;
+    }
+    if (file === this.main && this.o.engine) {
+      const pre = preambleOf(b.text);
+      if (pre !== this.preamble) {
+        this.preamble = pre;
+        const want = this.o.engine(b.text);
+        if (want !== this.wanted) {
+          this.tr("engine: open again", { from: this.wanted, to: want });
+          await this.reopen();
+          return false;
+        }
+      }
+    }
+    for (const [i, e] of edits.entries()) {
+      const last = i === edits.length - 1;
+      this.builds++;
+      let done;
+      const ended = last ? new Promise((res) => (done = res, this.ended.push(res))) : null;
+      const unheard = () => this.ended = this.ended.filter((f) => f !== done);
+      const r = await this.core.request({ op: "edit", file, ...e, page: last ? this.page : -1, dpi: this.dpi() });
+      if (!r.ok) {
+        unheard();
+        this.sink.error((typeof r.json?.error === "string" ? r.json.error : void 0) ?? r.error ?? "edit failed");
+        if (r.error?.includes("trapped")) await this.reopen();
+        return false;
+      }
+      if (!last) continue;
+      if (!r.json?.queued) unheard();
+      const tBack = this.now();
+      const j = r.json;
+      if (j.queued) {
+        this.queued = { t0, tSend, tBack };
+        this.setPages(j.pages);
+        const end = await ended;
+        if (end.event === "settled") await this.layout(), this.queuedLatency(end);
+        continue;
+      }
+      this.setPages(j.pages);
+      this.noteError(j);
+      this.status(this.pending);
+      const img = image(r);
+      if (img) this.sink.page(img, this.page, this.pages, j.painted_hash ?? null);
+      else if (!this.sink.layout) await this.showPage();
+      const e2e = this.now() - t0;
+      this.sink.painted?.(e2e);
+      this.sink.latency(
+        `${e2e.toFixed(0)} ms keystroke\u2192page \xB7 core ${j.paint_ms.toFixed(1)} ms \xB7 ${this.keystrokes} edits \u2192 ${this.builds} builds`,
+        [
+          `first paint      ${j.paint_ms.toFixed(2)} ms (in the core: edit_view, the page painted)`,
+          `fixed point      ${j.total_ms.toFixed(2)} ms (every page, the .aux/.bbl loops)${j.wrong ? " \xB7 first paint was superseded" : ""}`,
+          `keystroke\u2192page   ${e2e.toFixed(1)} ms = queued ${(tSend - t0).toFixed(1)} + round trip ${(tBack - tSend).toFixed(1)} + paint ${(this.now() - tBack).toFixed(1)}`,
+          `rebuilt          ${j.stats.rebuilt} of ${j.stats.rebuilt + j.stats.reused} chunks, ${j.stats.passes} pass${j.stats.passes === 1 ? "" : "es"}`,
+          `batching         ${this.keystrokes} edits \u2192 ${this.builds} builds (one in flight; the rest merged)`
+        ].filter(Boolean).join("\n")
+      );
+    }
+    return true;
+  }
+  /** PhiTeX's invariant: the incremental state = a fresh build of the same text. */
+  async check() {
+    if (!this.opened) return;
+    await this.flush();
+    const file = this.open ?? this.main;
+    const r = await this.core.request({ op: "check", file, expect: this.files[file] });
+    this.sink.check?.(r.json);
+    return r.json;
+  }
+  /** The texts the session has sent (tests). */
+  text(file) {
+    return this.batches.get(file)?.text ?? this.files[file];
+  }
+  /** Every project file's text as it is now (queued edits in): a compare's new side. */
+  texts() {
+    const out = {};
+    for (const f of Object.keys(this.files)) out[f] = this.text(f);
+    return out;
+  }
+};
 
 // viewer/src/strips.ts
 var BUDGET = 16e6;

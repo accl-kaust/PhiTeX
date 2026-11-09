@@ -6,6 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PreviewSession, type EditorHost } from "../src/session.ts";
 import { textSum, type Edit } from "../src/edits.ts";
+import { plainWhy } from "../src/words.ts";
 
 test("a change whose length is not the session's asks the editor for its text again", () => {
   let open!: (f: string, t: string) => void;
@@ -250,6 +251,13 @@ test("a core that outgrew its memory is said, not reopened", async () => {
   await w.core.request({ op: "status" });
   await w.chain;
   assert.deepEqual(ops, ["status"], "no reopen");
-  assert.deepEqual(said, [why]);
+  // (said in plain words: the hosts' "core trapped (…):" tag dropped)
+  assert.deepEqual(said, ["This document needs more than the 2 GiB of memory PhiTeX's engine got in this tab: close them."]);
   assert.equal(w.opened, false);
+});
+
+test("a core's error in plain words: its tag dropped, a raw error a crash", () => {
+  assert.equal(plainWhy("core trapped (thread 0): RuntimeError: unreachable"), "The engine crashed (RuntimeError: unreachable).");
+  assert.equal(plainWhy("core trapped (lost): This document needs more than the 4 GiB of memory PhiTeX can use in a browser."), "This document needs more than the 4 GiB of memory PhiTeX can use in a browser.");
+  assert.equal(plainWhy("phitex watch exited"), "phitex watch exited.");
 });

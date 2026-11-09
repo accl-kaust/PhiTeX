@@ -12,7 +12,8 @@
 // and zoom remembered; a build that ships nothing keeps the last good page,
 // dimmed, with why; problems jump to their line.
 
-import { sentence, type PageImage, type Status } from "./session.ts";
+import type { PageImage, Status } from "./session.ts";
+import { sentence } from "./words.ts";
 import { KINDS, kindOf, type Diagnostic, type Kind } from "./diagnostics.ts";
 import type { PackageState } from "./packages.ts";
 import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
@@ -80,6 +81,16 @@ export interface ViewState {
   /** The timing popover's content: the last build's summary, its parts [what, how long], the last message. */
   timing: { summary: string; parts: [string, string][]; message: string };
 }
+
+/** What each kind of problem is, under its switch in Settings. */
+const KIND_HELP: Record<Kind, string> = {
+  error: "LaTeX errors and files not found",
+  overfull: "Lines that stick out into the margin",
+  underfull: "Lines spread too far apart",
+  reference: "Undefined references and citations",
+  font: "Missing characters and substituted fonts",
+  other: "Every other warning",
+};
 
 /** A row of the Settings dialog: the panel's own, or a host's (PanelEvents.settings). */
 export interface SettingRow {
@@ -506,8 +517,8 @@ export class Panel {
     <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
     <span class="progress" id="prog"></span>
     <div class="menu" id="m-rec" role="menu" hidden style="left:6px;top:calc(100% + 4px)">
-      ${item("r-rebuild", "", "Rebuild")}
-      <button type="button" role="menuitem" id="r-clean"><span class="check"></span><span>Clean rebuild<span class="desc">Start over: the project read again, built from the start</span></span></button>
+      <button type="button" role="menuitem" id="r-rebuild"><span class="check"></span><span>Rebuild<span class="desc">Build again with the files as they are</span></span></button>
+      <hr><button type="button" role="menuitem" id="r-clean"><span class="check"></span><span>Clean rebuild<span class="desc">Start over: the project read again, built from the start</span></span></button>
       <hr class="if-compare"><button type="button" role="menuitem" id="r-compare" class="if-compare"><span class="check"></span><span>Compare with an earlier version…<span class="desc">latexdiff against a saved version</span></span></button>
       <hr class="if-cache"><button type="button" role="menuitem" id="r-cache" class="if-cache"><span class="check"></span><span>Clear cache…<span class="desc">The packages and formats PhiTeX keeps</span></span></button>
     </div>
@@ -532,7 +543,7 @@ export class Panel {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
     <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
@@ -1050,6 +1061,7 @@ export class Panel {
     this.approx = !!e.approx;
     const a = this.$("#approx");
     a.classList.toggle("on", this.approx);
+    this.placeStrips();
     a.textContent = `Approximate: needs ${ENGINES[e.engine].label}, shown with pdfLaTeX (fonts substituted, breaks may differ). ${this.words.realPdf}`;
     if (!e.ready) this.stopped();
     else if (this.$("#empty").querySelector(".engine")) this.$("#empty").hidden = true;
@@ -1715,6 +1727,7 @@ export class Panel {
       return;
     }
     stage.classList.add("stale");
+    this.placeStrips();
     const why = s.diagnostics?.find((d) => d.severity !== "info" && d.code !== "no-pages");
     this.$("#banner").textContent = `Showing the last complete render: ${why ? why.message + (why.line ? ` (${why.file}:${why.line})` : "") : "this build shipped no page"}.`;
   }
@@ -1734,6 +1747,7 @@ export class Panel {
       return;
     }
     const text = `${why ? sentence(why) : "Lost the connection to PhiTeX's engine."} The pages shown are from the last build.`;
+    this.placeStrips();
     this.$("#gonewhy").textContent = text;
     this.$("#offpill").title = text;
     // (dismissed once: it stays dismissed until the connection comes back)
@@ -1751,6 +1765,12 @@ export class Panel {
   }
 
   private offline = false;
+
+  /** The strips over the pages (engine lost, stale, approximate) clear of the pages' scrollbar, whatever its width. */
+  private placeStrips(): void {
+    const v = this.$("#stage");
+    this.$("#strips").style.right = `${Math.max(0, v.offsetWidth - v.clientWidth)}px`;
+  }
 
   /** Follow what the panel shows (a host toolbar's controls). */
   onState(cb: (s: ViewState) => void): void {
@@ -2357,7 +2377,16 @@ export class Panel {
       { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset. Random: a different one each time", kind: "select", options: [["random", "Random"], ...LOOKS.map((l): [string, string] => [l.id, l.name]), ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => (this.look = lookOf(l))) },
     );
     if (ev.onBoxes) look.push({ id: "underline", label: "Underline problems", help: "A wavy line under what each error and warning is about", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
-    preview.push({ id: "problems", label: "Problems shown", help: "Which kinds: the filters at the top of the problems list", kind: "info", value: this.hiddenKinds.size ? `${this.hiddenKinds.size} kind${this.hiddenKinds.size === 1 ? "" : "s"} hidden` : "All" });
+    // (the problems' filters, the same as the buttons at the top of the problems list)
+    const problems: SettingRow[] = KINDS.map(([k, name]) => ({
+      id: `kind-${k}`,
+      label: name,
+      help: KIND_HELP[k],
+      kind: "toggle",
+      value: !this.hiddenKinds.has(k),
+      set: (on) => void (!!on === this.hiddenKinds.has(k) && this.toggleKind(k)),
+    }));
+    if (ev.onBoxes) problems.push(look.splice(look.findIndex((r) => r.id === "underline"), 1)[0]);
     const build: SettingRow[] = [];
     if (ev.onDebug) build.push({ id: "debug", label: "Debug check", help: "Compare with a fresh build every 5 s (this session only)", kind: "toggle", value: this.debugOn, set: () => this.toggleDebug() });
     build.push({ id: "reload", label: "Reload the files", help: "Read the project's files again", kind: "action", button: "Reload", set: () => (this.settings(false), void ev.onReload()) });
@@ -2367,6 +2396,7 @@ export class Panel {
     return [
       { title: "Preview", rows: preview },
       { title: "Appearance", rows: look },
+      { title: "Problems", rows: problems },
       { title: "Build", rows: build },
       { title: "Packages", rows: [] },
       { title: "Updates and tips", rows: tips },
