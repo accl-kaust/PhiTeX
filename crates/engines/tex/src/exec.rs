@@ -207,6 +207,8 @@ pub struct Progress {
     /// only once the loop-backs settle ([`Progress::set_streaming`]).
     streaming: std::sync::atomic::AtomicBool,
     on_stream: OnceLock<StreamHook>,
+    /// The pages streamed' colors ([`Colors`]).
+    colors: std::sync::Mutex<Colors>,
     /// Told at every job's start ([`Progress::on_tick`]).
     on_tick: OnceLock<TickHook>,
 }
@@ -224,8 +226,45 @@ pub struct StreamedPage {
     /// The page's identity as [`crate::Build::pages`] gives it, were the
     /// build to settle with it.
     pub hash: u64,
-    /// The one-page PDF file.
+    /// The one-page PDF file. Empty: page `page` told before as not
+    /// [`StreamedPage::exact`], with the same `hash`, is now known exact
+    /// (the pages before it found to leave the colors as they found them).
     pub pdf: Vec<u8>,
+    /// Whether the file draws the page as the build's file will: every
+    /// object it draws with was complete, in it, and the pages before it
+    /// left the color stacks as they found them. Not exact: drawn with
+    /// what it has, those it lacks left out (a graphics state, a shading
+    /// or pattern, a color space, an external object made later).
+    pub exact: bool,
+}
+
+/// The color stacks the pages streamed leave the next page
+/// ([`Progress::page_colors`]): a page is drawn exactly alone only where
+/// every page before it left them as it found them (a color pushed on
+/// one page and popped on a later one colors the pages between).
+#[derive(Debug, Default)]
+struct Colors {
+    evaluation: u64,
+    /// Whether page `k` (from 1) left them as it found them.
+    keeps: std::collections::BTreeMap<u64, bool>,
+    /// The pages 1 to `upto` all did.
+    upto: u64,
+    /// The pages told not exact only for want of the pages before them
+    /// known: page, identity.
+    waiting: std::collections::BTreeMap<u64, u64>,
+}
+
+impl Colors {
+    /// Made for evaluation `e`: a new one's pages known afresh.
+    fn of(&mut self, e: u64) -> &mut Colors {
+        if self.evaluation != e {
+            *self = Colors {
+                evaluation: e,
+                ..Colors::default()
+            };
+        }
+        self
+    }
 }
 
 /// What is told of the pages streamed ([`Progress::on_stream`]): whether
@@ -291,6 +330,7 @@ impl Progress {
             on_format: OnceLock::new(),
             streaming: std::sync::atomic::AtomicBool::new(false),
             on_stream: OnceLock::new(),
+            colors: std::sync::Mutex::default(),
             on_tick: OnceLock::new(),
         }
     }
@@ -318,21 +358,82 @@ impl Progress {
     }
 
     /// Page `k` (from 1) made in this evaluation, told if it is wanted:
-    /// `make` gives its identity and its PDF (none: not streamed).
-    pub(crate) fn stream_page(&self, k: u64, make: impl FnOnce() -> Option<(u64, Vec<u8>)>) {
+    /// `make` gives its identity, its PDF and whether that draws every
+    /// object as the build's file will (none: not streamed). It is told
+    /// exact where that is so and the pages before it are known to leave
+    /// the colors as they found them ([`Progress::page_colors`]); where
+    /// they are not known yet, told again once they are.
+    pub(crate) fn stream_page(&self, k: u64, make: impl FnOnce() -> Option<(u64, Vec<u8>, bool)>) {
         let Some(h) = self.on_stream.get() else {
             return;
         };
         if !(h.want)(k) {
             return;
         }
-        if let Some((hash, pdf)) = make() {
-            (h.page)(StreamedPage {
-                evaluation: self.evaluation(),
-                page: k,
-                hash,
-                pdf,
-            });
+        let Some((hash, pdf, objects)) = make() else {
+            return;
+        };
+        let e = self.evaluation();
+        let exact = {
+            let mut c = self
+                .colors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let c = c.of(e);
+            let before = c.upto + 1 >= k;
+            // (not known yet, none known to color it: told again once known)
+            let unknown = (c.upto + 1..k).all(|j| c.keeps.get(&j) != Some(&false));
+            if objects && !before && unknown {
+                c.waiting.insert(k, hash);
+            } else {
+                c.waiting.remove(&k);
+            }
+            objects && before
+        };
+        (h.page)(StreamedPage {
+            evaluation: e,
+            page: k,
+            hash,
+            pdf,
+            exact,
+        });
+    }
+
+    /// Page `k` (from 1) of this evaluation left the color stacks as it
+    /// found them (`keeps`) or not: the pages after it waiting for it
+    /// told exact where all before them now are ([`Progress::stream_page`]).
+    pub(crate) fn page_colors(&self, k: u64, keeps: bool) {
+        let e = self.evaluation();
+        let told: Vec<(u64, u64)> = {
+            let mut c = self
+                .colors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let c = c.of(e);
+            c.keeps.insert(k, keeps);
+            if !keeps {
+                c.upto = c.upto.min(k.saturating_sub(1));
+                // (a page after it can no more be told exact)
+                let _ = c.waiting.split_off(&(k + 1));
+            }
+            while c.keeps.get(&(c.upto + 1)) == Some(&true) {
+                c.upto += 1;
+            }
+            let rest = c.waiting.split_off(&(c.upto + 2));
+            std::mem::replace(&mut c.waiting, rest)
+                .into_iter()
+                .collect()
+        };
+        if let Some(h) = self.on_stream.get() {
+            for (page, hash) in told {
+                (h.page)(StreamedPage {
+                    evaluation: e,
+                    page,
+                    hash,
+                    pdf: Vec::new(),
+                    exact: true,
+                });
+            }
         }
     }
 

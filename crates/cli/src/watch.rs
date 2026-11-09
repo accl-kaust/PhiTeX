@@ -1032,7 +1032,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     if let Some(v) = view.as_ref().map(View::viewer) {
         status.meter().on_streamed(Box::new(move |p, pages| {
             if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
-                v.stream_page(k, p.hash, p.pdf.clone(), pages);
+                v.stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
             }
         }));
     }

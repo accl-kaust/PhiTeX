@@ -127,6 +127,49 @@ file, `--exact`, a build that wrote it whole): a client waiting for the
 exact file never waits for an event that does not come. Not said when a
 build came meanwhile (its own idle point says it).
 
+### 2.1c Pages streamed: `page`
+
+A clean build sends each page as it ships, before the build settles
+(an edit's build never streams; its pages come in at once):
+
+```json
+{"event": "page", "k": 4, "hash": "5354…", "pages": 12, "exact": true}
+```
+
+- `k`: the page, from 0. `pages`: the pages shipped so far (at least
+  `k + 1`). `hash`: the page's identity while the build runs. It is
+  never a settled page's hash, so a streamed page is always drawn again
+  from the build's file once the build settles.
+- Until `settled`, the viewer's `frame` and `strips` for page `k` draw
+  the streamed page from a PDF file of that page alone.
+- `exact`: `true` when that file draws the page as the build's file
+  will. Every object the page draws with existed and was complete when
+  the page shipped, and is in the file under the number the build's file
+  gives it (images from `\pdfximage`, with their soft masks and an
+  included page's resources; `\pdfxform` forms; `\pdfobj` objects, and
+  what each of them names in turn). The pages before it also left the
+  colour stacks as they found them. `false` when the page draws with
+  something not complete yet (a `\pdfobj reserveobjnum` filled later,
+  objects written at `\AtEndDocument`, such as pgf's shared ExtGState,
+  Pattern and ColorSpace dictionaries named through
+  `\pdfpageresources`), or a colour may carry into it from an earlier
+  page. The page is still drawn, without what it lacks:
+  - a missing graphics state is drawn opaque;
+  - a missing shading, or a fill with a missing pattern, draws nothing
+    (a flat fill would hide what lies under a shaded background);
+  - a missing colour space falls back to gray;
+  - a missing external object draws nothing.
+
+  A viewer marks such a page quietly, "Preview: final colours and
+  shading when the build ends", until the settled page replaces it.
+- A page sent with `exact: false` only because the pages before it were
+  not known yet (pages ship out of order at more than one thread) is
+  sent again with the same `hash` and `exact: true` once they are.
+  Treat it as an update of that page's mark only.
+- The `status` and `pages` answers list the pages streamed so far
+  (`hashes`/`pages`) and, as `"inexact": [k, …]`, those not exact. The
+  list is empty once the build is in.
+
 ### 2.2 LSP `$/progress`
 
 Only where the client said `window.workDoneProgress`. A build's token is
