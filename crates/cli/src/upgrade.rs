@@ -308,7 +308,7 @@ pub fn upgrade(ui: &Ui, no_confirm: bool) -> i32 {
         let mut a = String::new();
         let read = std::io::stdin().read_line(&mut a);
         // (the line typed ended it already; an end of input did not)
-        if read.is_ok_and(|n| n == 0) {
+        if matches!(read, Ok(0)) {
             ui.answered(None);
         }
         if read.is_err() || !yes(&a, true) {
