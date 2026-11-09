@@ -2343,7 +2343,7 @@ mod tests {
         }
     }
 
-    /// Pages drawing with what is made at the document's end (pgf's way:
+    /// Pages drawing with what is not made when they ship (pgf's way:
     /// `\\pdfpageresources` naming reserved objects filled by `\\pdfobj
     /// useobjnum` at the end): a graphics state, a shading, a pattern, a
     /// colour space, an external object. Each page streams all the same,
@@ -2370,13 +2370,9 @@ mod tests {
         ] {
             t.push_str(&format!("\\hbox{{{p}}}\\penalty-10000 "));
         }
-        t.push_str("\\pdfobj useobjnum \\gs {<< /G1 << /CA 0.5 /ca 0.5 >> >>}");
-        t.push_str("\\pdfobj useobjnum \\sh {<< /S1 << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 30 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [1 0 0] /C1 [0 0 1] /N 1 >> >> >>}");
-        t.push_str("\\pdfobj useobjnum \\pat {<< /P1 << /PatternType 2 /Shading << /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 30 0] /Function << /FunctionType 2 /Domain [0 1] /C0 [0 1 0] /C1 [1 0 1] /N 1 >> >> >> >>}");
-        t.push_str("\\pdfobj useobjnum \\cs {<< /C1 [/Separation /Spot /DeviceRGB << /FunctionType 2 /Domain [0 1] /C0 [1 1 1] /C1 [0 1 0] /N 1 >>] >>}");
-        t.push_str("\\pdfobj useobjnum \\xo {<< /X1 << >> >>}");
-        // (each written: named by a page's reference)
-        t.push_str("\\setbox0\\hbox{\\pdfrefobj\\gs\\pdfrefobj\\sh\\pdfrefobj\\pat\\pdfrefobj\\cs\\pdfrefobj\\xo}\\shipout\\box0 \\end\n");
+        // (never filled here: in a document, filled at its end, after the
+        // pages; a small one's end may come before a page's file is made)
+        t.push_str("\\end\n");
         let (d, ev, files) = streamed_build(&t, Arc::new(Nothing), 1);
         let told = exact_told(&ev);
         // (the first draws with none of what its resources name: exact)
