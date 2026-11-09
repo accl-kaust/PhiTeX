@@ -8,12 +8,12 @@ run of that version, `phitex news` prints the whole entry, and the
 GitHub release's notes are the entry. The entries before 1.0 name
 milestones, not versions.
 
-## 1.0 (unreleased)
+## 1.0 (2026-11-09)
 
-The first build of PhiTeX meant for use: pdfTeX's plain TeX and LaTeX,
-and XeLaTeX, built by graph reduction, with exact output.
-`docs/alpha-checklist.md` lists what has to be green before it reaches
-`main`.
+The first release of PhiTeX: pdfLaTeX and XeLaTeX (and plain TeX),
+built by graph reduction, with PDFs byte-identical to pdflatex's and
+xelatex's, and edits rebuilt in milliseconds (`phitex watch`). It runs
+on one thread unless asked (`-j N`).
 
 ### What works
 
@@ -58,10 +58,10 @@ and XeLaTeX, built by graph reduction, with exact output.
   browser. On the gate's edit histories each rebuild equals a cold build
   of the same text; since the engine starts each round from the
   previous build's (2026-10-18), that is checked, not promised.
-- **Parallel.** The engine's steps run on every logical CPU by default
-  (hyperthreads included; `-j N` or `PHITEX_THREADS` to change that).
-  The output is the same at any thread count, and so is the number of
-  rounds.
+- **Parallel.** The engine's steps run on `-j N` threads
+  (`PHITEX_THREADS`, or `threads` in `phitex config`); 1.0 runs on one
+  thread unless asked (the multi-thread speed reds below). The output is
+  the same at any thread count, and so is the number of rounds.
 - **WebAssembly with threads.** `phitex-wasm` builds the engine for
   `wasm32-wasip1-threads`, with no `unsafe` code. Its threads are Node
   workers on shared memory. `scripts/wasm.sh check` makes the plain TeX
@@ -155,6 +155,18 @@ and XeLaTeX, built by graph reduction, with exact output.
   apart on each page, so a letter rebuilds its page. Each edit's PDF
   equals a cold build of the edited file (80 of 80, mc 77010). Its cold
   build takes 41 s at 16 threads against latexmk -xelatex's 37 s.
+- **More than one thread** (the user's decision of 2026-11-07: 1.0
+  runs on one thread by default): the output is the same, but some
+  documents rerun far more at 4 or 8 threads, and a few become slow
+  enough to time out: two-column floats (`floats2col`: 1 497 finisher
+  runs for 194 float fires at 8 threads), lie-hasse's TikZ pictures (916 s
+  at 1 thread, over 2 500 s at 4). `scripts/accl/gate-known-reds.txt`
+  names the gated test with its cause.
+- **A TikZ picture asked again after an edit** (a definition it reads
+  deleted or changed before it) runs whole inside its paragraph, not
+  from its last checkpoint: the PDF is a clean build's, but on Grail
+  each figure after a deleted one takes its full time again
+  (`latex_a_picture_asked_again_goes_on_from_a_checkpoint`, a known red).
 - **Tests recorded red for 1.61** (the user's decision of 2026-10-31):
   tests that ran in no CI until the alpha's gate ran every test binary,
   red before the alpha's work as well (mc 77044): four count runs, the

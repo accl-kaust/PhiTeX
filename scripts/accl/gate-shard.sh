@@ -99,6 +99,41 @@ echo "$shard $*" > "$r/shard.txt"
 : > "$r/red.txt"
 status=green
 red() { echo "$1" >> "$r/red.txt"; status=red; }
+# known_reds WALLPRE: the waived reds, scripts/accl/gate-known-reds.txt by
+# exact name (the red line's first word; WALLPRE put before a
+# test-walls.txt name to make it): reported apart with their cause
+# (known-red.txt, added to), not red; one that passes is said. Then the
+# status is the red file's. (Issue #3's intermittents, the 1.61 speed
+# tests, and the multi-thread reds the user waived for v1.0, 2026-11-07:
+# v1.0 runs on one thread by default)
+known_reds() {
+  [ -f scripts/accl/gate-known-reds.txt ] || return 0
+  python3 -I - scripts/accl/gate-known-reds.txt "$r/red.txt" "$r/test-walls.txt" "$r/known-red.txt" "$1" <<'PY'
+import os, sys
+known = {}
+for l in open(sys.argv[1]):
+    if l.strip() and not l.startswith("#"):
+        name, _, cause = l.rstrip("\n").partition("\t")
+        known[name] = cause
+reds, out = [], []
+for l in open(sys.argv[2]) if os.path.exists(sys.argv[2]) else []:
+    name = l.split(" ", 1)[0].strip()
+    if name in known:
+        out.append(f"{name}: {cause}" if (cause := known[name]) else name)
+    else:
+        reds.append(l)
+for l in open(sys.argv[3]) if os.path.exists(sys.argv[3]) else []:
+    f = l.split()
+    if f and sys.argv[5] + f[0] in known and f[-1] == "ok":
+        n = sys.argv[5] + f[0]
+        out.append(f"{n} (passes now; known red: {known[n]})")
+open(sys.argv[2], "w").write("".join(reds))
+open(sys.argv[4], "a").write("".join(x + "\n" for x in out))
+PY
+  status=green
+  grep -q . "$r/red.txt" && status=red
+  return 0
+}
 built() { echo "build_s $(( $(date +%s) - t0 ))" >> "$r/times.txt"; }
 # all NAME:CPUS:SHARD[,ARG...] ...: the whole gate in this one job, as
 # gate-fast submits it where the cluster caps a user's submitted jobs
@@ -516,34 +551,7 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
       ( GATE_TEST_PAR=1 GATE_TEST_TIMEOUT=${GATE_CLI_TIMEOUT:-900} lane < <(awk -F'\t' '$2 == "phitex-cli"' "$d/list.txt") ) &
       ( lane < <(awk -F'\t' '$2 != "phitex-cli"' "$d/list.txt") ) &
       wait
-      # (issue #3's waived intermittents, scripts/accl/gate-known-reds.txt
-      # by exact name: reported apart with their cause, not red; one that
-      # passes is said)
-      k=scripts/accl/gate-known-reds.txt
-      if [ -f "$k" ]; then
-        python3 -I - "$k" "$r/red.txt" "$r/test-walls.txt" "$r/known-red.txt" <<'PY'
-import sys
-known = {}
-for l in open(sys.argv[1]):
-    if l.strip() and not l.startswith("#"):
-        name, _, cause = l.rstrip("\n").partition("\t")
-        known[name] = cause
-reds, out = [], []
-for l in open(sys.argv[2]):
-    name = l.split(" ", 1)[0].strip()
-    if name in known:
-        out.append(f"{name}: {cause}" if (cause := known[name]) else name)
-    else:
-        reds.append(l)
-for l in open(sys.argv[3]):
-    f = l.split()
-    if f and f[0] in known and f[-1] == "ok":
-        out.append(f"{f[0]} (passes now; known red: {known[f[0]]})")
-open(sys.argv[2], "w").write("".join(reds))
-open(sys.argv[4], "w").write("".join(x + "\n" for x in out))
-PY
-      fi
-      grep -q . "$r/red.txt" && status=red
+      known_reds ""
     fi
     ;;
   latex)
@@ -578,6 +586,7 @@ PY
       cp "$w/red.keep" "$r/red.txt"
       status=$s
     fi
+    known_reds "latex::"
     ;;
   edits)
     # edits K N: shard K of N of ci/research.json under the watch, a word

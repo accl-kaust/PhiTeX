@@ -606,10 +606,8 @@ impl Absorb {
     }
 }
 
-/// The engine's threads: `-j N`, else `PHITEX_THREADS`, else every
-/// logical CPU this process may run on (hyperthreads included: Linux's
-/// affinity mask and cgroup quota, `available_parallelism`), as the
-/// engine itself counts them.
+/// The engine's threads: `-j N`, else `PHITEX_THREADS`, else 1, as the
+/// engine itself defaults (v1.0 runs on one thread unless asked).
 pub fn threads(given: Option<usize>) -> usize {
     given
         .filter(|&n| n > 0)
@@ -620,7 +618,7 @@ pub fn threads(given: Option<usize>) -> usize {
                 .ok()
                 .filter(|&n| n > 0)
         })
-        .unwrap_or_else(phitex_tex::exec_cpus)
+        .unwrap_or(1)
 }
 
 impl Session {

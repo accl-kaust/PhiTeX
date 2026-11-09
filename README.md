@@ -66,7 +66,7 @@ Without it, each package your paper uses is downloaded once, on first use, and k
 <td width="33%" valign="top">
 <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/cores-dark.png"><img src="assets/readme/cores.png" alt="Multi-threaded" width="100%"></picture><br>
 <b>Multi-threaded</b><br>
-Paragraphs, pages and the PDF are built in parallel on every core, identical at any thread count.
+Paragraphs, pages and the PDF are built in parallel with <code>-j N</code> (v1.0 runs on one thread unless asked), identical at any thread count.
 </td>
 </tr>
 </table>

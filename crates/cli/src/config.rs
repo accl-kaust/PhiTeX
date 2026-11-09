@@ -70,7 +70,7 @@ pub struct Config {
     /// the viewer's filters).
     pub problems_hidden: Option<Vec<String>>,
     /// The engine's threads (yours only: a machine's, not a document's; 0:
-    /// one per core), `-j` over it; read when the build starts.
+    /// the default, one), `-j` over it; read when the build starts.
     pub threads: Option<usize>,
     /// When the viewer's page follows an editor's place (yours only):
     /// `cursor` as it moves, `selection` what is selected, `dblclick` a
@@ -434,7 +434,7 @@ pub fn prefs(
                     .as_u64()
                     .and_then(|n| usize::try_from(n).ok())
                     .filter(|&n| n <= most)
-                    .ok_or(format!("threads: 0 (one per core) to {most}"))?;
+                    .ok_or(format!("threads: 0 (the default, one thread) to {most}"))?;
                 text = with_line(&text, k, &n.to_string())?;
                 continue;
             }
@@ -581,7 +581,7 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ),
     (
         "threads",
-        "0: one per core",
+        "0: one thread",
         "the engine's threads, -j over it (yours only)",
     ),
     (

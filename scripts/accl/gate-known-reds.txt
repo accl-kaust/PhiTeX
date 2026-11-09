@@ -1,12 +1,17 @@
-# The tests shard's known reds (gate-shard.sh tests): a test named here
-# that fails is reported apart (known-red.txt), not red. Only reds the
-# user waived for the alpha (docs/alpha-checklist.md §0): the
-# intermittents of issue #3 (2026-10-29), and the reds of the tests that
-# ran in no CI before the tests shard, found red before the alpha's work
-# (768878f5a, mc 77044) and recorded for 1.61 (2026-10-31); each by its
-# exact name as the shard names it (PACKAGE--TARGET::TEST), a tab, and
-# its cause. CHANGELOG.md's "Known not to work" lists them too.
+# The tests and latex shards' known reds (gate-shard.sh known_reds): a
+# test named here that fails is reported apart (known-red.txt), not red.
+# Only reds the user waived: for the alpha (docs/alpha-checklist.md §0)
+# the intermittents of issue #3 (2026-10-29), and the reds of the tests
+# that ran in no CI before the tests shard, found red before the alpha's
+# work (768878f5a, mc 77044) and recorded for 1.61 (2026-10-31); for
+# v1.0 the multi-thread reds (2026-11-07: v1.0 runs on one thread by
+# default). Each by its exact name as the shard names it
+# (PACKAGE--TARGET::TEST in the tests shard, latex::TEST in the latex
+# shard), a tab, and its cause. CHANGELOG.md's "Known not to work" lists
+# them too.
 phitex-tex--chain::chains	1.61, speed (recorded, not gated: the user's 2026-10-29 decision): runs per node above the 1.1 bar (display: 21 runs for 15 nodes), red before the alpha (77044)
 phitex-tex--chain::census_plain	1.61, speed: runs per node and critical-path bars, red before the alpha (77044)
 phitex-tex--fatal::a_read_on_waits_for_the_text_before_it	1.61, speed: at -j8, 64 siblings read on where -j1 reads 3 (speculation), red before the alpha (77044)
 phitex-defuse--block_heads::a_blocks_definers_run_before_the_readers_they_re_ask	speed (recorded, not gated: the user's 2026-10-31 decision): wasted reader runs at -j8 on a 4-core runner, 421 for 200 readers against the bound 400 (GitHub gate run 41201269355); every result exact
+latex::floats2col_routines_run_once_per_fire	v1.0, multi-thread speed (the user waived multi-thread reds for v1.0, 2026-11-07; v1.0 runs on one thread by default): at -j8 the float finisher runs 1497 times for 194 fires (GitHub gate run 42433015869), every result exact
+latex::latex_a_picture_asked_again_goes_on_from_a_checkpoint	v1.0, speed (one thread): since the lie-hasse fix (f36aa0f74) the picture re-asked after an edit runs inside its parent, not as its own child resumed from a checkpoint, so the test sees no picture run; every edit's PDF equals a clean build (mc 83096). Grail figures after a deleted one run whole again
