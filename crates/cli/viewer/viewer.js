@@ -327,6 +327,8 @@ var Viewer = class {
       host2.dbl?.(k, (e.clientX - r.left) / r.width * this.size.w, (e.clientY - r.top) / r.height * this.size.h);
     });
     root.addEventListener("click", (e) => {
+      const tag = e.target.closest(".peer-tag[data-file]");
+      if (tag && this.host.peer) return void (e.preventDefault(), this.host.peer(tag.dataset.file, Number(tag.dataset.pos)));
       const hit = this.linkAt(e);
       if (!hit) {
         const el = e.target.closest(".slot");
@@ -441,7 +443,7 @@ var Viewer = class {
     for (const m of this.root.querySelectorAll(".peer")) m.remove();
     const { w, h } = this.size;
     const at = (m, x, y) => Object.assign(m.style, { left: `${x / w * 100}%`, top: `${y / h * 100}%` });
-    for (const { k, boxes: boxes2, label, hue } of marks) {
+    for (const { k, boxes: boxes2, label, hue, file, pos } of marks) {
       const s = this.slots[k];
       if (!s || !boxes2.length) continue;
       for (const [x, y, bw, bh] of boxes2) {
@@ -456,6 +458,7 @@ var Viewer = class {
       tag.className = "peer peer-tag";
       tag.style.setProperty("--hue", String(hue));
       tag.textContent = label;
+      if (file !== void 0 && pos !== void 0) Object.assign(tag.dataset, { file, pos: String(pos) }), tag.title = `Go to ${label}'s cursor`;
       tag.style.setProperty("--fs", String(boxes2[0][3] * 0.72 / w));
       at(tag, boxes2[0][0], boxes2[0][1]);
       s.el.append(tag);
@@ -1264,6 +1267,13 @@ header:active { cursor: grabbing; }
   box-shadow: 0 3px 12px rgb(0 0 0 / 25%); font-size: 12px; line-height: 1.35; pointer-events: none; overflow-wrap: anywhere; }
 .ctip .icon { margin-top: 1px; }
 .ctip.error .icon { color: var(--ph-danger); } .ctip.warning .icon { color: var(--ph-warning); }
+.ctip .txt { min-width: 0; text-align: left; }
+.ctip code, .ctip .ex { font: 11.5px/1.4 ui-monospace, "DejaVu Sans Mono", monospace; }
+.ctip .ex { margin: 3px 0 0; white-space: pre; overflow: hidden; text-overflow: ellipsis; opacity: .85; }
+.ctip .ex mark { background: none; color: inherit; font-weight: 600; text-decoration: underline wavy var(--ph-danger); text-underline-offset: 3px; }
+.ctip.warning .ex mark { text-decoration-color: var(--ph-warning); }
+.ctip .at { margin-top: 2px; font-size: 11px; color: var(--ph-fg2); }
+.stage.onculprit, .stage.onculprit * { cursor: pointer !important; }
 /* (a problem's culprit: a wavy line along its glyphs' foot, as an editor underlines one; no fill, the text stays readable) */
 .slot .culprit::after { content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 3px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23d93025' stroke-width='1'/%3E%3C/svg%3E") repeat-x left bottom / 6px 3px; }
 .slot .culprit.warning::after { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23c77700' stroke-width='1'/%3E%3C/svg%3E"); }
@@ -1271,6 +1281,8 @@ header:active { cursor: grabbing; }
 /* (the name as large as the line it marks, so it zooms with the page; readable when far out, never a headline when close) */
 .slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 .4em; border-radius: .25em .25em .25em 0; background: hsl(var(--hue) 70% 42%);
   box-shadow: none; color: #fff; font: 600 clamp(7px, calc(var(--fs, .012) * 100cqw), 22px)/1.35 var(--ph-font); white-space: nowrap; z-index: 2; }
+.slot .peer-tag[data-file] { pointer-events: auto; cursor: pointer; }
+.slot .peer-tag[data-file]:hover { background: hsl(var(--hue) 70% 34%); }
 
 /* strips over the pages: plain, in the host's colours */
 .strip { position: sticky; top: 0; z-index: 2; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
@@ -1664,6 +1676,98 @@ var PROBLEMS_CSS = `
 .phx-inc { margin-top: 6px; color: var(--ph-fg2, #495365); font-size: 12px; }
 .phx-card footer { padding: 10px 16px; color: var(--ph-fg2, #495365); font-size: 12px; }
 `;
+
+// viewer/src/edits.ts
+function utf8Len(s, from2 = 0, to = s.length) {
+  let n = 0;
+  for (let i = from2; i < to; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 128) n += 1;
+    else if (c < 2048) n += 2;
+    else if (c >= 55296 && c <= 56319 && i + 1 < to) {
+      const d = s.charCodeAt(i + 1);
+      if (d >= 56320 && d <= 57343) {
+        n += 4;
+        i++;
+      } else n += 3;
+    } else n += 3;
+  }
+  return n;
+}
+function byteOffset(s, pos) {
+  if (pos > 0 && pos < s.length) {
+    const c = s.charCodeAt(pos);
+    const p = s.charCodeAt(pos - 1);
+    if (c >= 56320 && c <= 57343 && p >= 55296 && p <= 56319) pos--;
+  }
+  return utf8Len(s, 0, pos);
+}
+function apply(s, e) {
+  return s.slice(0, e.from) + e.text + s.slice(e.to);
+}
+function merge(before, a, b) {
+  const aEnd = a.from + a.text.length;
+  if (b.to < a.from || b.from > aEnd) return null;
+  const from2 = Math.min(a.from, b.from);
+  const endAfterA = Math.max(aEnd, b.to);
+  const to = endAfterA <= aEnd ? a.to : endAfterA - (a.text.length - (a.to - a.from));
+  const afterA = apply(before.slice(from2, to), { from: a.from - from2, to: a.to - from2, text: a.text });
+  const text = apply(afterA, { from: b.from - from2, to: b.to - from2, text: b.text });
+  return { from: from2, to, text };
+}
+function textSum(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return h >>> 0;
+}
+var Batch = class {
+  edits = [];
+  /** The text after all of them. */
+  text;
+  constructor(text) {
+    this.text = text;
+  }
+  get size() {
+    return this.edits.length;
+  }
+  push(e) {
+    const last = this.edits.at(-1);
+    if (last) {
+      const before = this.befores.at(-1);
+      const m = merge(before, last, e);
+      if (m) {
+        this.edits[this.edits.length - 1] = m;
+        this.text = apply(this.text, e);
+        return;
+      }
+    }
+    this.befores.push(this.text);
+    this.edits.push(e);
+    this.text = apply(this.text, e);
+  }
+  befores = [];
+  /** The queued edits as the core takes them (UTF-16), in order, each against the text before it. */
+  take() {
+    const out = this.edits.map((e) => ({ start: e.from, end: e.to, text: e.text }));
+    this.edits = [];
+    this.befores = [];
+    return out;
+  }
+};
+function charOffset(s, byte) {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (n >= byte) return i;
+    const c = s.charCodeAt(i);
+    if (c < 128) n += 1;
+    else if (c < 2048) n += 2;
+    else if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return s.length;
+}
 
 // viewer/src/outline.ts
 var Outline = class {
@@ -3883,7 +3987,8 @@ var Panel = class {
     };
     pg.onblur = () => this.nav();
     this.$("#stage").addEventListener("pointermove", (e) => this.culpritAt(e), { passive: true });
-    this.$("#stage").addEventListener("pointerleave", () => this.$("#ctip").hidden = true);
+    this.$("#stage").addEventListener("pointerleave", () => (this.$("#ctip").hidden = true, this.$("#stage").classList.remove("onculprit")));
+    this.$("#stage").addEventListener("click", (e) => void this.culpritClicked(e));
     const license = this.$("#license");
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
     this.$("#settings").onclick = (e) => void this.settingClicked(e);
@@ -3938,6 +4043,7 @@ var Panel = class {
       scale: () => this.scale(),
       box: (d, w2) => pageBox(d, w2),
       dbl: (k, x, y) => ev.onSyncSource?.(k, x, y),
+      peer: ev.onGotoRange ? (file, pos) => ev.onGotoRange(file, pos, pos, true) : void 0,
       selected: (sel) => ev.onSelectPage?.(sel),
       link: ev.onLink ? (u) => ev.onLink(u) : void 0
     });
@@ -4302,7 +4408,7 @@ var Panel = class {
     const want = diags.filter((d) => !!d.problem?.file && !!d.problem.range && d.problem.severity !== "note").filter((d) => !this.hiddenKinds.has(kindOf(d))).map((d) => {
       const k = kindOf(d);
       const amount = Number(/\(([\d.]+)pt too (?:wide|high)\)/.exec(d.message)?.[1]) || void 0;
-      return { file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? "warning" : "error", message: d.message, rule: k === "overfull" || k === "underfull" ? k : void 0, amount };
+      return { file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? "warning" : "error", message: d.message, rule: k === "overfull" || k === "underfull" ? k : void 0, amount, line: d.problem.line ?? d.line ?? null, excerpt: d.problem.excerpt ?? null };
     }).sort((a, b) => a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1).slice(0, 20);
     const of = JSON.stringify([want, this.pageHashes, [...this.hiddenKinds]]);
     if (of === this.culpritsOf) return;
@@ -4354,28 +4460,51 @@ var Panel = class {
     this.culpritsOf = "";
     void this.underline(this.culpritDiags);
   }
-  /** The pointer over an underline: its problem's message, under it. */
+  /** The underline under the pointer (a few pixels round it: the line is thin), and its problem. */
+  culpritHit(e) {
+    if (!this.culpritsDrawn.length) return null;
+    const el = [...this.root.querySelectorAll(".slot .culprit")].find((m) => {
+      const r = m.getBoundingClientRect();
+      return e.clientX >= r.left - 2 && e.clientX <= r.right + 2 && e.clientY >= r.top - 2 && e.clientY <= r.bottom + 5;
+    });
+    const p = el && this.culpritsDrawn[Number(el.dataset.i)];
+    return el && p ? { el, p } : null;
+  }
+  /**
+   * The pointer over an underline: its problem under it, what it is about
+   * (an undefined command's name, the message alone does not say it), its
+   * line as TeX read it, the culprit marked, and where (file:line); a click
+   * goes there.
+   */
   culpritAt(e) {
     const tip = this.$("#ctip");
-    if (!this.culpritsDrawn.length || e.buttons) return void (tip.hidden = true);
-    const hit = [...this.root.querySelectorAll(".slot .culprit")].find((m) => {
-      const r2 = m.getBoundingClientRect();
-      return e.clientX >= r2.left - 2 && e.clientX <= r2.right + 2 && e.clientY >= r2.top - 2 && e.clientY <= r2.bottom + 5;
-    });
-    const p = hit && this.culpritsDrawn[Number(hit.dataset.i)];
-    if (!hit || !p) return void (tip.hidden = true);
-    if (tip.hidden || tip.dataset.i !== hit.dataset.i) {
-      tip.dataset.i = hit.dataset.i;
+    const hit = e.buttons ? null : this.culpritHit(e);
+    this.$("#stage").classList.toggle("onculprit", !!hit);
+    if (!hit) return void (tip.hidden = true);
+    const { el, p } = hit;
+    if (tip.hidden || tip.dataset.i !== el.dataset.i) {
+      tip.dataset.i = el.dataset.i;
       tip.className = `ctip ${p.severity}`;
-      tip.replaceChildren(icon(p.severity, 14), document.createElement("span"));
-      tip.querySelector("span").textContent = p.message;
+      tip.replaceChildren(icon(p.severity, 14), culpritTip(p));
       tip.hidden = false;
     }
-    const body = this.$(".body").getBoundingClientRect(), r = hit.getBoundingClientRect();
+    const body = this.$(".body").getBoundingClientRect(), r = el.getBoundingClientRect();
     const left = Math.max(8, Math.min(body.width - tip.offsetWidth - 8, e.clientX - body.left - 12));
     const below = r.bottom - body.top + 8;
     tip.style.left = `${left}px`;
     tip.style.top = `${below + tip.offsetHeight > body.height - 8 ? r.top - body.top - tip.offsetHeight - 6 : below}px`;
+  }
+  /** A click on an underline (not a drag's end, nothing selected): the editor to its culprit, selected; a host with no ranges, to its line. */
+  async culpritClicked(e) {
+    if (e.detail !== 1 || e.button !== 0) return;
+    const sel = this.root.ownerDocument.getSelection();
+    if (sel && !sel.isCollapsed) return;
+    const hit = this.culpritHit(e);
+    if (!hit) return;
+    const { file, range, line } = hit.p;
+    const text = this.ev.onGotoRange ? await this.ev.onSource(file).catch(() => null) : null;
+    if (text != null) this.ev.onGotoRange(file, charOffset(text, range[0]), charOffset(text, range[1]), true);
+    else this.ev.onGoto(file, line ?? 1);
   }
   status(s) {
     this.lastStatus = s;
@@ -5991,97 +6120,22 @@ function foldedDetail(text, label) {
 function known(source2) {
   return !!source2 && source2 !== "none";
 }
-
-// viewer/src/edits.ts
-function utf8Len(s, from2 = 0, to = s.length) {
-  let n = 0;
-  for (let i = from2; i < to; i++) {
-    const c = s.charCodeAt(i);
-    if (c < 128) n += 1;
-    else if (c < 2048) n += 2;
-    else if (c >= 55296 && c <= 56319 && i + 1 < to) {
-      const d = s.charCodeAt(i + 1);
-      if (d >= 56320 && d <= 57343) {
-        n += 4;
-        i++;
-      } else n += 3;
-    } else n += 3;
+var TIP_AROUND = 36;
+function culpritTip(p) {
+  const ex = p.excerpt;
+  const chars = ex ? [...ex.text] : [];
+  const culprit = ex ? chars.slice(ex.start, ex.start + ex.len).join("").trim() : "";
+  const named = /^\\[A-Za-z@]+\*?$|^\\.$/.test(culprit) && !p.message.includes(culprit);
+  let excerpt = "";
+  if (ex && culprit) {
+    const from2 = Math.max(0, ex.start - TIP_AROUND), to = Math.min(chars.length, ex.start + ex.len + TIP_AROUND);
+    const a = (from2 > 0 ? "\u2026" : "") + chars.slice(from2, ex.start).join("").trimStart();
+    const b = chars.slice(ex.start, ex.start + ex.len).join("");
+    const c = chars.slice(ex.start + ex.len, to).join("").trimEnd() + (to < chars.length ? "\u2026" : "");
+    excerpt = html`<pre class="ex">${a}<mark>${b}</mark>${c}</pre>`;
   }
-  return n;
-}
-function byteOffset(s, pos) {
-  if (pos > 0 && pos < s.length) {
-    const c = s.charCodeAt(pos);
-    const p = s.charCodeAt(pos - 1);
-    if (c >= 56320 && c <= 57343 && p >= 55296 && p <= 56319) pos--;
-  }
-  return utf8Len(s, 0, pos);
-}
-function apply(s, e) {
-  return s.slice(0, e.from) + e.text + s.slice(e.to);
-}
-function merge(before, a, b) {
-  const aEnd = a.from + a.text.length;
-  if (b.to < a.from || b.from > aEnd) return null;
-  const from2 = Math.min(a.from, b.from);
-  const endAfterA = Math.max(aEnd, b.to);
-  const to = endAfterA <= aEnd ? a.to : endAfterA - (a.text.length - (a.to - a.from));
-  const afterA = apply(before.slice(from2, to), { from: a.from - from2, to: a.to - from2, text: a.text });
-  const text = apply(afterA, { from: b.from - from2, to: b.to - from2, text: b.text });
-  return { from: from2, to, text };
-}
-function textSum(s) {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
-  return h >>> 0;
-}
-var Batch = class {
-  edits = [];
-  /** The text after all of them. */
-  text;
-  constructor(text) {
-    this.text = text;
-  }
-  get size() {
-    return this.edits.length;
-  }
-  push(e) {
-    const last = this.edits.at(-1);
-    if (last) {
-      const before = this.befores.at(-1);
-      const m = merge(before, last, e);
-      if (m) {
-        this.edits[this.edits.length - 1] = m;
-        this.text = apply(this.text, e);
-        return;
-      }
-    }
-    this.befores.push(this.text);
-    this.edits.push(e);
-    this.text = apply(this.text, e);
-  }
-  befores = [];
-  /** The queued edits as the core takes them (UTF-16), in order, each against the text before it. */
-  take() {
-    const out = this.edits.map((e) => ({ start: e.from, end: e.to, text: e.text }));
-    this.edits = [];
-    this.befores = [];
-    return out;
-  }
-};
-function charOffset(s, byte) {
-  let n = 0;
-  for (let i = 0; i < s.length; i++) {
-    if (n >= byte) return i;
-    const c = s.charCodeAt(i);
-    if (c < 128) n += 1;
-    else if (c < 2048) n += 2;
-    else if (c >= 55296 && c <= 56319 && i + 1 < s.length) {
-      n += 4;
-      i++;
-    } else n += 3;
-  }
-  return s.length;
+  const where = `${p.file.split("/").pop()}${p.line ? `:${p.line}` : ""}`;
+  return html`<div class="txt"><div>${p.message}${named ? html` <code>${culprit}</code>` : ""}</div>${excerpt}<div class="at">${where} · click to go there</div></div>`.firstElementChild;
 }
 
 // viewer/src/sync.ts
@@ -7082,11 +7136,11 @@ var PreviewSession = class {
         const all = this.cached(k);
         const hit = all ? this.wordOn(all, p.file, at, word, line) : [];
         if (!all || !hit.length) continue;
-        e = { k, boxes: boxes(hit, all), label: p.label, hue: p.hue };
+        e = { k, boxes: boxes(hit, all), label: p.label, hue: p.hue, file: p.file, pos: p.pos };
         break;
       }
       const was = this.peersDrawn.get(id);
-      if (!e && was && was.k < this.hashes.length && !this.cached(was.k)) e = was;
+      if (!e && was && was.k < this.hashes.length && !this.cached(was.k)) e = { ...was, file: p.file, pos: p.pos };
       if (!e) continue;
       out.push(e);
       drawn.set(id, e);

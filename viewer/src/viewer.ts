@@ -21,6 +21,8 @@ export interface ViewerHost {
   selected?(sel: { k: number; rects: [number, number, number, number][] }[]): void;
   /** A double-click at (x, y) on page `k`, in PDF points from its top left. */
   dbl?(k: number, x: number, y: number): void;
+  /** A click on a collaborator's name: their cursor, at `pos` (UTF-16) in `file`. */
+  peer?(file: string, pos: number): void;
   /** A click on a link to a web address (http, https or mailto): opened by the host (absent: in a new tab). */
   link?(uri: string): void;
   /** A page box's CSS size at `cssWidth` (on whole device pixels). */
@@ -147,6 +149,8 @@ export class Viewer {
     // address given to the host, or opened in a new tab: http, https and
     // mailto only, a PDF's javascript: and the like never followed)
     root.addEventListener("click", (e) => {
+      const tag = (e.target as Element).closest<HTMLElement>(".peer-tag[data-file]");
+      if (tag && this.host.peer) return void (e.preventDefault(), this.host.peer(tag.dataset.file!, Number(tag.dataset.pos)));
       const hit = this.linkAt(e);
       if (!hit) {
         // (a single click on a page: the place spot() gives; a drag's
@@ -268,11 +272,11 @@ export class Viewer {
    * one's replaced. Never scrolls, never asks for a page: a page not drawn
    * yet shows them when it is (paint keeps them).
    */
-  others(marks: { k: number; boxes: [number, number, number, number][]; label: string; hue: number }[]): void {
+  others(marks: { k: number; boxes: [number, number, number, number][]; label: string; hue: number; file?: string; pos?: number }[]): void {
     for (const m of this.root.querySelectorAll(".peer")) m.remove();
     const { w, h } = this.size;
     const at = (m: HTMLElement, x: number, y: number) => Object.assign(m.style, { left: `${(x / w) * 100}%`, top: `${(y / h) * 100}%` });
-    for (const { k, boxes, label, hue } of marks) {
+    for (const { k, boxes, label, hue, file, pos } of marks) {
       const s = this.slots[k];
       if (!s || !boxes.length) continue;
       for (const [x, y, bw, bh] of boxes) {
@@ -287,6 +291,8 @@ export class Viewer {
       tag.className = "peer peer-tag";
       tag.style.setProperty("--hue", String(hue));
       tag.textContent = label;
+      // (a click on it: the editor to their cursor, as Overleaf's avatar does)
+      if (file !== undefined && pos !== undefined) Object.assign(tag.dataset, { file, pos: String(pos) }), (tag.title = `Go to ${label}'s cursor`);
       // (its size the line's, as a part of the page's width: it zooms with the page, CSS's cqw on .slot)
       tag.style.setProperty("--fs", String((boxes[0][3] * 0.72) / w));
       at(tag, boxes[0][0], boxes[0][1]);

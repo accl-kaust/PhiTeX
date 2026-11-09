@@ -316,6 +316,13 @@ header:active { cursor: grabbing; }
   box-shadow: 0 3px 12px rgb(0 0 0 / 25%); font-size: 12px; line-height: 1.35; pointer-events: none; overflow-wrap: anywhere; }
 .ctip .icon { margin-top: 1px; }
 .ctip.error .icon { color: var(--ph-danger); } .ctip.warning .icon { color: var(--ph-warning); }
+.ctip .txt { min-width: 0; text-align: left; }
+.ctip code, .ctip .ex { font: 11.5px/1.4 ui-monospace, "DejaVu Sans Mono", monospace; }
+.ctip .ex { margin: 3px 0 0; white-space: pre; overflow: hidden; text-overflow: ellipsis; opacity: .85; }
+.ctip .ex mark { background: none; color: inherit; font-weight: 600; text-decoration: underline wavy var(--ph-danger); text-underline-offset: 3px; }
+.ctip.warning .ex mark { text-decoration-color: var(--ph-warning); }
+.ctip .at { margin-top: 2px; font-size: 11px; color: var(--ph-fg2); }
+.stage.onculprit, .stage.onculprit * { cursor: pointer !important; }
 /* (a problem's culprit: a wavy line along its glyphs' foot, as an editor underlines one; no fill, the text stays readable) */
 .slot .culprit::after { content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 3px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23d93025' stroke-width='1'/%3E%3C/svg%3E") repeat-x left bottom / 6px 3px; }
 .slot .culprit.warning::after { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23c77700' stroke-width='1'/%3E%3C/svg%3E"); }
@@ -323,6 +330,8 @@ header:active { cursor: grabbing; }
 /* (the name as large as the line it marks, so it zooms with the page; readable when far out, never a headline when close) */
 .slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 .4em; border-radius: .25em .25em .25em 0; background: hsl(var(--hue) 70% 42%);
   box-shadow: none; color: #fff; font: 600 clamp(7px, calc(var(--fs, .012) * 100cqw), 22px)/1.35 var(--ph-font); white-space: nowrap; z-index: 2; }
+.slot .peer-tag[data-file] { pointer-events: auto; cursor: pointer; }
+.slot .peer-tag[data-file]:hover { background: hsl(var(--hue) 70% 34%); }
 
 /* strips over the pages: plain, in the host's colours */
 .strip { position: sticky; top: 0; z-index: 2; display: none; padding: 6px 12px; text-align: left; font-size: 12px;

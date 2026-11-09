@@ -19,7 +19,8 @@ import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
 import { Viewer } from "./viewer.ts";
 import { VIEWER_CSS } from "./css.ts";
 import { PRINT_CSS } from "./print.ts";
-import { PROBLEMS_CSS, problemNode } from "./problems.ts";
+import { PROBLEMS_CSS, problemNode, type Problem } from "./problems.ts";
+import { charOffset } from "./edits.ts";
 import { html, rich } from "./html.ts";
 import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys, typing } from "./keys.ts";
@@ -618,7 +619,8 @@ export class Panel {
     };
     pg.onblur = () => this.nav();
     this.$("#stage").addEventListener("pointermove", (e) => this.culpritAt(e), { passive: true });
-    this.$("#stage").addEventListener("pointerleave", () => (this.$("#ctip").hidden = true));
+    this.$("#stage").addEventListener("pointerleave", () => ((this.$("#ctip").hidden = true), this.$("#stage").classList.remove("onculprit")));
+    this.$("#stage").addEventListener("click", (e) => void this.culpritClicked(e));
     const license = this.$("#license") as HTMLAnchorElement | null;
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
     this.$("#settings").onclick = (e) => void this.settingClicked(e);
@@ -676,6 +678,7 @@ export class Panel {
       scale: () => this.scale(),
       box: (d, w) => pageBox(d, w),
       dbl: (k, x, y) => ev.onSyncSource?.(k, x, y),
+      peer: ev.onGotoRange ? (file, pos) => ev.onGotoRange!(file, pos, pos, true) : undefined,
       selected: (sel) => ev.onSelectPage?.(sel),
       link: ev.onLink ? (u) => ev.onLink!(u) : undefined,
     });
@@ -1091,7 +1094,7 @@ export class Panel {
   /** Whether they are (the ⋯ menu's Underline problems, remembered on this machine); the last status's problems, and those drawn (by data-i). */
   private culpritsOn = true;
   private culpritDiags: Diagnostic[] = [];
-  private culpritsDrawn: { severity: "error" | "warning"; message: string }[] = [];
+  private culpritsDrawn: { file: string; range: [number, number]; severity: "error" | "warning"; message: string; line: number | null; excerpt: Problem["excerpt"] }[] = [];
   /** What the underlines drawn (or being looked up) are of: the problems and the pages' hashes. A build's every status repeats them. */
   private culpritsOf = "";
   /** The pages' hashes as last laid out. */
@@ -1106,7 +1109,7 @@ export class Panel {
       .map((d) => {
         const k = kindOf(d);
         const amount = Number(/\(([\d.]+)pt too (?:wide|high)\)/.exec(d.message)?.[1]) || undefined;
-        return { file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? ("warning" as const) : ("error" as const), message: d.message, rule: k === "overfull" || k === "underfull" ? k : undefined, amount };
+        return { file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? ("warning" as const) : ("error" as const), message: d.message, rule: k === "overfull" || k === "underfull" ? k : undefined, amount, line: d.problem.line ?? d.line ?? null, excerpt: d.problem.excerpt ?? null };
       })
       .sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1))
       .slice(0, 20);
@@ -1169,29 +1172,53 @@ export class Panel {
     void this.underline(this.culpritDiags);
   }
 
-  /** The pointer over an underline: its problem's message, under it. */
-  private culpritAt(e: PointerEvent): void {
-    const tip = this.$("#ctip");
-    if (!this.culpritsDrawn.length || e.buttons) return void (tip.hidden = true);
-    // (a few pixels round the line: it is thin)
-    const hit = [...this.root.querySelectorAll<HTMLElement>(".slot .culprit")].find((m) => {
+  /** The underline under the pointer (a few pixels round it: the line is thin), and its problem. */
+  private culpritHit(e: MouseEvent): { el: HTMLElement; p: Panel["culpritsDrawn"][number] } | null {
+    if (!this.culpritsDrawn.length) return null;
+    const el = [...this.root.querySelectorAll<HTMLElement>(".slot .culprit")].find((m) => {
       const r = m.getBoundingClientRect();
       return e.clientX >= r.left - 2 && e.clientX <= r.right + 2 && e.clientY >= r.top - 2 && e.clientY <= r.bottom + 5;
     });
-    const p = hit && this.culpritsDrawn[Number(hit.dataset.i)];
-    if (!hit || !p) return void (tip.hidden = true);
-    if (tip.hidden || tip.dataset.i !== hit.dataset.i) {
-      tip.dataset.i = hit.dataset.i;
+    const p = el && this.culpritsDrawn[Number(el.dataset.i)];
+    return el && p ? { el, p } : null;
+  }
+
+  /**
+   * The pointer over an underline: its problem under it, what it is about
+   * (an undefined command's name, the message alone does not say it), its
+   * line as TeX read it, the culprit marked, and where (file:line); a click
+   * goes there.
+   */
+  private culpritAt(e: PointerEvent): void {
+    const tip = this.$("#ctip");
+    const hit = e.buttons ? null : this.culpritHit(e);
+    this.$("#stage").classList.toggle("onculprit", !!hit);
+    if (!hit) return void (tip.hidden = true);
+    const { el, p } = hit;
+    if (tip.hidden || tip.dataset.i !== el.dataset.i) {
+      tip.dataset.i = el.dataset.i;
       tip.className = `ctip ${p.severity}`;
-      tip.replaceChildren(icon(p.severity, 14), document.createElement("span"));
-      tip.querySelector("span")!.textContent = p.message;
+      tip.replaceChildren(icon(p.severity, 14), culpritTip(p));
       tip.hidden = false;
     }
-    const body = this.$(".body").getBoundingClientRect(), r = hit.getBoundingClientRect();
+    const body = this.$(".body").getBoundingClientRect(), r = el.getBoundingClientRect();
     const left = Math.max(8, Math.min(body.width - tip.offsetWidth - 8, e.clientX - body.left - 12));
     const below = r.bottom - body.top + 8;
     tip.style.left = `${left}px`;
     tip.style.top = `${below + tip.offsetHeight > body.height - 8 ? r.top - body.top - tip.offsetHeight - 6 : below}px`;
+  }
+
+  /** A click on an underline (not a drag's end, nothing selected): the editor to its culprit, selected; a host with no ranges, to its line. */
+  private async culpritClicked(e: MouseEvent): Promise<void> {
+    if (e.detail !== 1 || e.button !== 0) return;
+    const sel = this.root.ownerDocument.getSelection();
+    if (sel && !sel.isCollapsed) return;
+    const hit = this.culpritHit(e);
+    if (!hit) return;
+    const { file, range, line } = hit.p;
+    const text = this.ev.onGotoRange ? await this.ev.onSource(file).catch(() => null) : null;
+    if (text != null) this.ev.onGotoRange!(file, charOffset(text, range[0]), charOffset(text, range[1]), true);
+    else this.ev.onGoto(file, line ?? 1);
   }
 
   status(s: Status): void {
@@ -2971,7 +2998,7 @@ export class Panel {
   }
 
   /** Collaborators' cursors on the pages ([] clears). */
-  others(marks: { k: number; boxes: [number, number, number, number][]; label: string; hue: number }[]): void {
+  others(marks: { k: number; boxes: [number, number, number, number][]; label: string; hue: number; file?: string; pos?: number }[]): void {
     this.viewer.others(marks);
   }
 
@@ -3049,4 +3076,30 @@ function foldedDetail(text: string, label: string): HTMLElement {
 /** A package source worth naming: not empty, nor a placeholder. */
 function known(source: string | undefined): boolean {
   return !!source && source !== "none";
+}
+
+/** How much of a long line the tip shows each side of its culprit (characters). */
+const TIP_AROUND = 36;
+
+/**
+ * An underline's tip: the message, with the culprit after it when it is a
+ * command the message does not name ("Undefined control sequence \pau");
+ * then the line as TeX read it, the culprit marked (cut round it when
+ * long), and file:line.
+ */
+function culpritTip(p: { file: string; message: string; line: number | null; excerpt: Problem["excerpt"] }): HTMLElement {
+  const ex = p.excerpt;
+  const chars = ex ? [...ex.text] : [];
+  const culprit = ex ? chars.slice(ex.start, ex.start + ex.len).join("").trim() : "";
+  const named = /^\\[A-Za-z@]+\*?$|^\\.$/.test(culprit) && !p.message.includes(culprit);
+  let excerpt: DocumentFragment | string = "";
+  if (ex && culprit) {
+    const from = Math.max(0, ex.start - TIP_AROUND), to = Math.min(chars.length, ex.start + ex.len + TIP_AROUND);
+    const a = (from > 0 ? "…" : "") + chars.slice(from, ex.start).join("").trimStart();
+    const b = chars.slice(ex.start, ex.start + ex.len).join("");
+    const c = chars.slice(ex.start + ex.len, to).join("").trimEnd() + (to < chars.length ? "…" : "");
+    excerpt = html`<pre class="ex">${a}<mark>${b}</mark>${c}</pre>`;
+  }
+  const where = `${p.file.split("/").pop()}${p.line ? `:${p.line}` : ""}`;
+  return html`<div class="txt"><div>${p.message}${named ? html` <code>${culprit}</code>` : ""}</div>${excerpt}<div class="at">${where} · click to go there</div></div>`.firstElementChild as HTMLElement;
 }
