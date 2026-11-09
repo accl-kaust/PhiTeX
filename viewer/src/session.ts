@@ -170,7 +170,7 @@ export type PackEvent = { event: "pack"; id: string; state: "fetching" | "done" 
 
 export type CoreEvent = StreamEvent | WatchEvent | CursorEvent | PackEvent | { event: "building"; on: boolean } | { event: "preparing"; on: boolean } | { event: "switched" } | { event: "latexmkrc"; notes: string[] } | { event: "release"; release?: { release: string; min_extension?: string; notice?: string | null } };
 /** A collaborator's mark: its page, its glyphs' boxes, their label and hue. */
-type Peer = { k: number; boxes: [number, number, number, number][]; label: string; hue: number };
+type Peer = { k: number; boxes: [number, number, number, number][]; label: string; hue: number; file?: string; pos?: number };
 
 export interface CoreTransport {
   request(req: CoreReq): Promise<CoreRes>;
@@ -240,7 +240,7 @@ export interface PreviewSink {
    * Collaborators' cursors on the pages, each its word's boxes in its hue
    * (0-360) with its label; the whole set ([] clears). Never scrolls.
    */
-  others?(marks: { k: number; boxes: [number, number, number, number][]; label: string; hue: number }[]): void;
+  others?(marks: { k: number; boxes: [number, number, number, number][]; label: string; hue: number; file?: string; pos?: number }[]): void;
   /**
    * The engine the project runs with: `ready` false, ⚡ Instant can't run it
    * (yet); `needed` the engine a build error asked for, if any.
@@ -1252,11 +1252,11 @@ export class PreviewSession {
         const all = this.cached(k);
         const hit = all ? this.wordOn(all, p.file, at, word, line) : [];
         if (!all || !hit.length) continue;
-        e = { k, boxes: boxes(hit, all), label: p.label, hue: p.hue };
+        e = { k, boxes: boxes(hit, all), label: p.label, hue: p.hue, file: p.file, pos: p.pos };
         break;
       }
       const was = this.peersDrawn.get(id);
-      if (!e && was && was.k < this.hashes.length && !this.cached(was.k)) e = was;
+      if (!e && was && was.k < this.hashes.length && !this.cached(was.k)) e = { ...was, file: p.file, pos: p.pos };
       if (!e) continue;
       out.push(e);
       drawn.set(id, e);

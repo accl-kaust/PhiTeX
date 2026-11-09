@@ -33,14 +33,29 @@ export function glyphs(box: HTMLElement, dark: boolean): Opening {
     html`<canvas></canvas><div class="cap"><div class="what"></div><div class="det"></div><div class="hint"></div></div><div class="shelf"></div>`,
   );
   const cv = el.querySelector("canvas")!, ctx = cv.getContext("2d")!, dpr = devicePixelRatio || 1;
-  const W = (cv.width = box.clientWidth * dpr), H = (cv.height = box.clientHeight * dpr);
+  // (the canvas the sheet's size as it is each frame: the sheet may have none
+  // yet when the opening starts (Overleaf's pane laid out after it), and eases
+  // to the page's aspect; read once, a sheet of no size kept every glyph at 0,
+  // still, and none fell)
+  let W = 0, H = 0;
   const ink = dark ? "#c9d4ea" : INK.light;
   type G = { x: number; y: number; z: number; v: number; ch: string; rot: number; spin: number; c: string; tx?: number; ty?: number };
   const make = (y = Math.random() * H): G => {
     const z = [0.45, 0.7, 1][Math.floor(Math.random() * 3)];
     return { x: Math.random() * W, y, z, v: (0.04 + Math.random() * 0.03) * z * H, ch: GLYPHS[Math.floor(Math.random() * GLYPHS.length)], rot: Math.random() * 6, spin: (Math.random() - 0.5) * 1.5, c: Math.random() < 0.12 ? RIBBON[Math.floor(Math.random() * 4)] : ink };
   };
-  const gs = Array.from({ length: 60 }, () => make());
+  let gs: G[] = [];
+  /** The canvas fitted to the sheet (false: it has no size yet); the glyphs scattered over it the first time, moved with it after. */
+  const fit = (): boolean => {
+    const w = Math.round(box.clientWidth * dpr), h = Math.round(box.clientHeight * dpr);
+    if (!w || !h) return false;
+    if (w === W && h === H) return true;
+    const [kx, ky] = [W ? w / W : 1, H ? h / H : 1];
+    [W, H] = [(cv.width = w), (cv.height = h)];
+    if (!gs.length) gs = Array.from({ length: 60 }, () => make());
+    else for (const g of gs) (g.x *= kx), (g.y *= ky), (g.v *= ky);
+    return true;
+  };
   let out = -1;
   // (the words' places, in the canvas's pixels, a margin round each: glyphs passing them fade, so the words stay clear)
   let clear: DOMRect[] = [], clearAt = -1e9;
@@ -63,6 +78,7 @@ export function glyphs(box: HTMLElement, dark: boolean): Opening {
     return Math.max(0, Math.min(1, a));
   };
   const stopLoop = loop((t, dt) => {
+    if (!fit()) return;
     ctx.clearRect(0, 0, W, H);
     if (t - clearAt > 250) (places(), (clearAt = t));
     const s = dt / 1000;

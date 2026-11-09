@@ -2797,6 +2797,7 @@ fn xelatex_fontspec() {
 /// modification time set back is read again (its change time moved), and
 /// the DVI is then a cold build's of the new text.
 #[test]
+#[allow(clippy::too_many_lines)]
 fn watch_r_rereads_only_files_that_moved() {
     let _one = one();
     let dir = scratch("watch-r");
@@ -2841,18 +2842,10 @@ fn watch_r_rereads_only_files_that_moved() {
             }
         }
     };
-    assert_eq!(
-        r("nothing changed"),
-        0,
-        "r with nothing changed ran nodes"
-    );
+    assert_eq!(r("nothing changed"), 0, "r with nothing changed ran nodes");
     std::thread::sleep(Duration::from_millis(20));
     std::fs::write(dir.join("chap.tex"), chap).expect("the same bytes");
-    assert_eq!(
-        r("the same bytes"),
-        0,
-        "r after the same bytes ran nodes"
-    );
+    assert_eq!(r("the same bytes"), 0, "r after the same bytes ran nodes");
     let path = dir.join("chap.tex");
     // (the file's fields as `r`'s key sees them, said if the test fails)
     let fields = |p: &Path| {
@@ -3649,6 +3642,145 @@ fn watch_reads_a_changed_bst_and_bib() {
     let _ = child.wait();
 }
 
+/// Waits for build `n`'s output written as the exact file (when the
+/// watch idles, `--idle`).
+fn exact_written(lines: &mut impl Iterator<Item = String>, n: u64, seen: &mut Vec<String>) {
+    loop {
+        let w = until(lines, "event", &"written".into(), seen);
+        if w["build"] == n && w["exact"] == true {
+            return;
+        }
+    }
+}
+
+/// A `.bib` edited while watching, through each way a change comes (the
+/// file on disk, the editor's buffer over the viewer's `edit` and
+/// `set_file`), is the bibliography tool's input at the next build: each
+/// build's PDF a clean build's of the same files (BibTeX and biber). The
+/// frontends' report: an entry's title replaced, the PDF kept the old
+/// one until the session was opened again.
+fn watch_bib_edits(name: &str, preamble: &str, back: &str) {
+    let _one = one();
+    let dir = scratch(name);
+    let bib =
+        |t: &str| format!("@book{{x, author = {{Ann Author}}, title = {{{t}}}, year = 2001}}\n");
+    let doc = format!(
+        "\\documentclass{{article}}\n{preamble}\\begin{{document}}\nSee \\cite{{x}}.\n{back}\\end{{document}}\n"
+    );
+    std::fs::write(dir.join("refs.bib"), bib("Tea")).expect("the database");
+    std::fs::write(dir.join("doc.tex"), &doc).expect("the document");
+    let clean = |title: &str| {
+        let d = scratch(&format!("{name}-clean"));
+        std::fs::write(d.join("refs.bib"), bib(title)).expect("the database");
+        std::fs::write(d.join("doc.tex"), &doc).expect("the document");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &d)
+            .args(["build", "doc.tex"])
+            .output()
+            .expect("phitex build runs");
+        assert!(
+            out.status.success(),
+            "the clean build failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read(d.join("doc.pdf")).expect("the clean PDF")
+    };
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--write", "--json", "--idle", "200", "doc.tex"])
+        .env("XDG_RUNTIME_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+        .as_str()
+        .expect("the viewer's url")
+        .to_owned();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let pdf = || std::fs::read(dir.join("doc.pdf")).expect("the watch's PDF");
+    exact_written(&mut lines, 1, &mut seen);
+    let tea = clean("Tea");
+    assert!(
+        pdf() == tea,
+        "the cold build: {}",
+        first_difference(&pdf(), &tea)
+    );
+    // (the file on disk changed)
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("refs.bib"), bib("Juice")).expect("the edit");
+    let ev = until(&mut lines, "build", &2.into(), &mut seen);
+    assert_eq!(ev["ok"], true, "{ev}");
+    exact_written(&mut lines, 2, &mut seen);
+    let want = clean("Juice");
+    assert!(want != tea, "the title is in the PDF");
+    assert!(
+        pdf() == want,
+        "the file on disk: {}",
+        first_difference(&pdf(), &want)
+    );
+    // (the viewer's edit: the title replaced in the editor's buffer)
+    let at = bib("Juice").find("Juice").expect("the title");
+    let _s1 = ws_send(
+        &url,
+        &format!(
+            "{{\"id\":1,\"op\":\"edit\",\"file\":\"refs.bib\",\"start\":{at},\"end\":{},\"text\":\"Coffee\"}}",
+            at + 5
+        ),
+    );
+    let ev = until(&mut lines, "build", &3.into(), &mut seen);
+    assert_eq!(ev["ok"], true, "{ev}");
+    exact_written(&mut lines, 3, &mut seen);
+    let want = clean("Coffee");
+    assert!(
+        pdf() == want,
+        "the viewer's edit: {}",
+        first_difference(&pdf(), &want)
+    );
+    // (the editor's whole buffer)
+    let _s2 = ws_send(
+        &url,
+        &format!(
+            "{{\"id\":2,\"op\":\"set_file\",\"file\":\"refs.bib\",\"text\":{}}}",
+            json_string(&bib("Milk"))
+        ),
+    );
+    let ev = until(&mut lines, "build", &4.into(), &mut seen);
+    assert_eq!(ev["ok"], true, "{ev}");
+    exact_written(&mut lines, 4, &mut seen);
+    let want = clean("Milk");
+    assert!(
+        pdf() == want,
+        "the editor's buffer: {}",
+        first_difference(&pdf(), &want)
+    );
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+}
+
+#[test]
+fn watch_bib_edits_bibtex() {
+    watch_bib_edits(
+        "watch-bib-bibtex",
+        "",
+        "\\bibliographystyle{plain}\n\\bibliography{refs}\n",
+    );
+}
+
+#[test]
+fn watch_bib_edits_biber() {
+    watch_bib_edits(
+        "watch-bib-biber",
+        "\\usepackage[backend=biber]{biblatex}\n\\addbibresource{refs.bib}\n",
+        "\\printbibliography\n",
+    );
+}
+
 /// A project's `phitex.toml` runs nothing, whatever it names: `\\write18`'s
 /// any command only with `--shell-escape` or the user's own setting; the
 /// viewer `--open` starts only the user's; each key ignored is said.
@@ -4321,6 +4453,200 @@ fn next_build(
         }
     }
     panic!("the watch ended before a build: {seen:?}");
+}
+
+/// `phitex watch` looks again for a file its build looked for and did
+/// not find once one of that name is made: `\input{late}` before
+/// `late.tex` exists fails (LaTeX's "File not found" error), and the
+/// file's creation rebuilds with it found, the PDF a clean build's.
+#[test]
+fn watch_finds_a_file_made_after_a_build_missed_it() {
+    let _one = one();
+    let d = scratch("watch-late");
+    let home = d.join("home");
+    std::fs::create_dir_all(&home).expect("a home");
+    let main =
+        "\\documentclass{article}\n\\begin{document}\nBefore.\n\\input{late}\n\\end{document}\n";
+    let late = "Late words.\n";
+    let root = d.join("project");
+    std::fs::create_dir_all(&root).expect("the project");
+    std::fs::write(root.join("main.tex"), main).expect("main");
+    let phitex = |dir: &Path, args: &[&str]| {
+        let mut c = command(Path::new(env!("CARGO_BIN_EXE_phitex")), dir);
+        c.args(args)
+            .env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("TEXINPUTS")
+            .env("LATEXMKRCSYS", home.join("no-system-latexmkrc"));
+        c
+    };
+    let mut child = phitex(
+        &root,
+        &[
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--exact-pdf",
+            "--engine",
+            "pdflatex",
+            "main.tex",
+        ],
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit())
+    .spawn()
+    .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = next_build(&mut lines, &mut seen);
+    assert_eq!(cold["ok"], false, "late.tex is missing: {cold}");
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(root.join("late.tex"), late).expect("late.tex made");
+    let ev = next_build(&mut lines, &mut seen);
+    assert_eq!(ev["ok"], true, "late.tex made: {ev}");
+    std::thread::sleep(Duration::from_millis(300));
+    let watched = std::fs::read(root.join("main.pdf")).expect("the watch's PDF");
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    let clean = d.join("clean");
+    std::fs::create_dir_all(&clean).expect("the clean one");
+    std::fs::write(clean.join("main.tex"), main).expect("main");
+    std::fs::write(clean.join("late.tex"), late).expect("late");
+    let out = phitex(&clean, &["build", "--engine", "pdflatex", "main.tex"])
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "the clean build: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let want = std::fs::read(clean.join("main.pdf")).expect("the clean PDF");
+    assert!(
+        watched == want,
+        "the watch's PDF is not the clean build's: {}",
+        first_difference(&watched, &want)
+    );
+}
+
+/// The viewer's Clean rebuild ("start over: the project read again"): a
+/// file made in a folder that did not exist when
+/// the last build searched, under a `TEXINPUTS` element with `//` (its
+/// subfolders listed once, as kpathsea lists them), is found, and the PDF
+/// is a clean build's.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn watch_clean_rebuild_finds_a_file_in_a_folder_made_since() {
+    let _one = one();
+    let d = scratch("watch-clean-subfolder");
+    let home = d.join("home");
+    std::fs::create_dir_all(&home).expect("a home");
+    let main =
+        "\\documentclass{article}\n\\begin{document}\nBefore.\n\\input{late}\n\\end{document}\n";
+    let late = "Late words.\n";
+    let root = d.join("project");
+    std::fs::create_dir_all(root.join("inc")).expect("the project");
+    // (first built without the file: kpathsea lists inc's subfolders then)
+    std::fs::write(root.join("main.tex"), main.replace("\\input{late}\n", "")).expect("main");
+    let texinputs = format!("{}//:", root.join("inc").display());
+    let phitex = |dir: &Path, args: &[&str]| {
+        let mut c = command(Path::new(env!("CARGO_BIN_EXE_phitex")), dir);
+        c.args(args)
+            .env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env("XDG_RUNTIME_DIR", &d)
+            .env("TEXINPUTS", &texinputs)
+            .env("LATEXMKRCSYS", home.join("no-system-latexmkrc"));
+        c
+    };
+    let mut child = phitex(
+        &root,
+        &[
+            "watch",
+            "--write",
+            "--json",
+            "--exact-pdf",
+            "--engine",
+            "pdflatex",
+            "main.tex",
+        ],
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit())
+    .spawn()
+    .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+        .as_str()
+        .expect("the viewer's url")
+        .to_owned();
+    let cold = next_build(&mut lines, &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let sub = root.join("inc").join("chapters");
+    std::fs::create_dir_all(&sub).expect("a folder made since");
+    std::fs::write(sub.join("late.tex"), late).expect("late.tex made");
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(root.join("main.tex"), main).expect("main inputs it");
+    // (the edit's build may miss it: kpathsea's `//` subfolders are
+    // listed once per watch; Clean rebuild lists them again)
+    let _edit = next_build(&mut lines, &mut seen);
+    let mut viewer = Viewer::connect(&url);
+    viewer
+        .ws
+        .send(tungstenite::Message::text(
+            serde_json::json!({"id": 1, "op": "cold"}).to_string(),
+        ))
+        .expect("Clean rebuild asked");
+    // (the builds that come: any the folder's change made, then the clean
+    // rebuild's, which finds late.tex)
+    let ev = loop {
+        let ev = next_build(&mut lines, &mut seen);
+        if ev["ok"] == true {
+            break ev;
+        }
+        assert!(
+            seen.len() < 400,
+            "no build found late.tex after Clean rebuild: {}",
+            seen.join("\n")
+        );
+    };
+    assert_eq!(ev["ok"], true, "{ev}");
+    std::thread::sleep(Duration::from_millis(300));
+    let watched = std::fs::read(root.join("main.pdf")).expect("the watch's PDF");
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    let clean = d.join("clean");
+    std::fs::create_dir_all(clean.join("inc").join("chapters")).expect("the clean one");
+    std::fs::write(clean.join("main.tex"), main).expect("main");
+    std::fs::write(clean.join("inc").join("chapters").join("late.tex"), late).expect("late");
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &clean)
+        .args(["build", "--engine", "pdflatex", "main.tex"])
+        .env("HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env("TEXINPUTS", format!("{}//:", clean.join("inc").display()))
+        .env("LATEXMKRCSYS", home.join("no-system-latexmkrc"))
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "the clean build: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let want = std::fs::read(clean.join("main.pdf")).expect("the clean PDF");
+    assert!(
+        watched == want,
+        "the watch's PDF is not the clean build's: {}",
+        first_difference(&watched, &want)
+    );
 }
 
 /// `phitex watch` rebuilds on a change of any file the build read from

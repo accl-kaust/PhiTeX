@@ -397,6 +397,18 @@ impl Files {
         self.answered.notify_all();
     }
 
+    /// `name` (as TeX names it), which the host said was nowhere, may be
+    /// there now (a Rebuild): that answer dropped, the host asked again
+    /// at the next lookup, under the name and under each TEXINPUTS
+    /// folder's (`dir/name`). A file given stays as given.
+    pub fn look_again(&self, name: &str) {
+        let name = name.strip_prefix("./").unwrap_or(name);
+        let under = format!("/{name}");
+        self.lock().by_name.retain(|n, e| {
+            !(matches!(e, Entry::Given(None)) && (n == name || n.ends_with(&under)))
+        });
+    }
+
     /// The host's answer for pack `id`: its bytes as Shelf serves them, or
     /// none (it could not be had).
     pub fn pack(&self, id: &str, raw: Option<&[u8]>) {
@@ -478,6 +490,58 @@ mod tests {
         f.provide("a.png", None);
         assert_eq!(f.stamp("./a.png"), None);
         assert_eq!(f.read("./a.png"), None);
+    }
+
+    /// A host that answers within the call, from the names it has now.
+    struct Now {
+        files: OnceLock<Arc<Files>>,
+        has: Mutex<Vec<String>>,
+    }
+
+    impl Host for Now {
+        fn want(&self, name: &str) {
+            let has = self
+                .has
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .iter()
+                .any(|n| n == name);
+            if let Some(f) = self.files.get() {
+                f.provide(name, has.then(|| (format!("./{name}"), b"x".to_vec())));
+            }
+        }
+        fn fetch(&self, _pack: &str) {}
+    }
+
+    /// A name the host said was nowhere is kept so (TeX probes many),
+    /// until it may be there: [`Files::look_again`] (a Rebuild) asks the
+    /// host again, and the file it has since is found.
+    #[test]
+    fn a_name_found_nowhere_is_asked_again_when_it_may_be_there() {
+        let host: &'static Now = Box::leak(Box::new(Now {
+            files: OnceLock::new(),
+            has: Mutex::new(Vec::new()),
+        }));
+        let f = Arc::new(Files::default());
+        let _ = host.files.set(f.clone());
+        f.set_host(host);
+        assert_eq!(f.locate("late.tex", "pdftex"), None);
+        host.has
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push("late.tex".to_owned());
+        assert_eq!(f.locate("late.tex", "pdftex"), None, "the answer kept");
+        f.look_again("./late.tex");
+        assert_eq!(
+            f.locate("late.tex", "pdftex").as_deref(),
+            Some("./late.tex")
+        );
+        // (a file given stays given)
+        f.look_again("late.tex");
+        assert_eq!(
+            f.read("./late.tex").as_deref().map(Vec::as_slice),
+            Some(&b"x"[..])
+        );
     }
 }
 

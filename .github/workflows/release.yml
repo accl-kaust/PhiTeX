@@ -33,6 +33,7 @@ jobs:
     permissions:
       contents: read
       checks: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,8 +46,22 @@ jobs:
           sha=$GITHUB_SHA tag=${GITHUB_REF_NAME#v}
           st=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" -q .status)
           case $st in identical | behind) ;; *) echo "$GITHUB_REF_NAME is not on main ($st)"; exit 1 ;; esac
-          gate=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=gate" -q '[.check_runs[].conclusion] | map(select(. == "success")) | length')
-          [ "$gate" -gt 0 ] || { echo "no green gate on $sha"; exit 1; }
+          # (the gate runs on pull requests, and GitHub puts a pull request's
+          # checks on its head, so the commit merging it has none: a tag on
+          # main's merge commit passes through the merged pull request's
+          # head when the two hold the same files, any way it was merged)
+          green() { n=$(gh api "repos/$GITHUB_REPOSITORY/commits/$1/check-runs?check_name=gate" -q '[.check_runs[].conclusion] | map(select(. == "success")) | length') || exit 1; [ "$n" -gt 0 ]; }
+          tree() { gh api "repos/$GITHUB_REPOSITORY/commits/$1" -q .commit.tree.sha || exit 1; }
+          gated=
+          if green "$sha"; then gated=$sha
+          else
+            heads=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/pulls" -q '.[] | select(.merged_at != null and .base.ref == "main") | .head.sha') || exit 1
+            for head in $heads; do
+              if [ "$(tree "$head")" = "$(tree "$sha")" ] && green "$head"; then gated=$head; break; fi
+            done
+          fi
+          [ -n "$gated" ] || { echo "no green gate on $sha, nor on a pull request merged as it with the same files"; exit 1; }
+          echo "gated: $gated"
           # (a milestone's .0 left out: Cargo's 1.61.0 is tagged 1.61, an
           # update's kept: 1.6.1 is tagged 1.6.1)
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/cli/Cargo.toml | head -1)

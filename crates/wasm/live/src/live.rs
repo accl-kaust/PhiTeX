@@ -133,6 +133,12 @@ impl Host for Shelf {
         }
     }
 
+    /// [`Files::look_again`]: a name the host said was nowhere asked of
+    /// it again at its next lookup.
+    fn look_again(&self, name: &str) {
+        self.files.look_again(name);
+    }
+
     /// [`Files::stamp`]: a Rebuild reads again only what the host gave
     /// since, as `r` in the watch reads only what changed on disk.
     fn stamp(&self, path: &Path) -> Option<Vec<u8>> {

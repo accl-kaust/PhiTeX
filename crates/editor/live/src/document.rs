@@ -1671,6 +1671,298 @@ mod tests {
         assert_eq!(built["ok"], false, "{built}");
     }
 
+    /// The project's files as a browser host has them: those given
+    /// (`ph_provide`) and no other, each with the number of its giving
+    /// as its stamp.
+    #[derive(Default)]
+    struct Given(Mutex<(HashMap<String, Vec<u8>>, u64, HashMap<String, u64>)>);
+
+    impl Given {
+        fn give(&self, name: &str, bytes: &[u8]) {
+            let mut g = lock(&self.0);
+            g.1 += 1;
+            let n = g.1;
+            g.0.insert(name.to_owned(), bytes.to_vec());
+            g.2.insert(name.to_owned(), n);
+        }
+    }
+
+    impl Host for Given {
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            let g = lock(&self.0);
+            let name = name.strip_prefix("./").unwrap_or(name);
+            [format!("{name}.tex"), name.to_owned()]
+                .into_iter()
+                .find(|n| g.0.contains_key(n))
+                .map(|n| PathBuf::from(format!("./{n}")))
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            let p = path.to_string_lossy();
+            lock(&self.0)
+                .0
+                .get(p.strip_prefix("./").unwrap_or(&p))
+                .cloned()
+        }
+        fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+            let p = path.to_string_lossy();
+            lock(&self.0)
+                .2
+                .get(p.strip_prefix("./").unwrap_or(&p))
+                .map(|n| n.to_le_bytes().to_vec())
+        }
+    }
+
+    /// A file the build looked for and did not find is looked for again
+    /// once it may exist: one the editor then opens (`set_file` of a path
+    /// new to the session, which the host never gave: Overleaf's new
+    /// `late.tex`) is read from its buffer at the next build, and one the
+    /// host gives later is read at a `rebuild`; each build as a clean
+    /// build of the files then gives it (no error kept, its pages there).
+    #[test]
+    fn a_file_missing_then_made_is_found() {
+        let main = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255} \\hbox{}\\penalty-10000 \\input NAME \\end\n";
+        let page = "\\hbox{}\\penalty-10000 \n";
+        let run = |name: &str, host: Arc<Given>| {
+            Document::new(
+                Session::new(
+                    job(),
+                    Arc::from(main.replace("NAME", name).as_str()),
+                    host,
+                    None,
+                    Arc::new(Memory::default()),
+                    Arc::new(Status::default()),
+                ),
+                "doc.tex",
+            )
+        };
+        let build = |d: &mut Document| {
+            let ev = d.step();
+            ev.iter()
+                .find(|e| e["event"] == "build")
+                .cloned()
+                .unwrap_or_else(|| panic!("no build: {ev:?}"))
+        };
+        // (the editor's buffer of a file the host never gave)
+        let mut d = run("late", Arc::new(Given::default()));
+        let cold = build(&mut d);
+        assert_eq!(cold["ok"], false, "late.tex is missing: {cold}");
+        d.request(&json!({"id": 2, "op": "set_file", "file": "late.tex", "text": page}));
+        let b = build(&mut d);
+        assert_eq!(b["ok"], true, "late.tex opened in the editor: {b}");
+        assert_eq!(b["pages"], 2, "{b}");
+        // (a file the host gives after the build missed it, then a rebuild)
+        let host = Arc::new(Given::default());
+        let mut d = run("pic", host.clone());
+        let cold = build(&mut d);
+        assert_eq!(cold["ok"], false, "pic.tex is missing: {cold}");
+        host.give("pic.tex", page.as_bytes());
+        d.request(&json!({"id": 3, "op": "rebuild"}));
+        let b = build(&mut d);
+        assert_eq!(b["ok"], true, "pic.tex given, then a rebuild: {b}");
+        assert_eq!(b["pages"], 2, "{b}");
+    }
+
+    /// A project's files as a host gives them, at their paths (`dir`
+    /// and the name: as given, `./`, a compile directory), found by
+    /// their names and read by their paths, BibTeX's searches answered
+    /// from the same copies, as the browser core's and the CLI's
+    /// `tool_finder` answer them: the host's file, never the editor's
+    /// buffer of it.
+    struct Project {
+        dir: &'static str,
+        files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    }
+
+    impl Project {
+        fn new(dir: &'static str, files: &[(&str, &str)]) -> Project {
+            Project {
+                dir,
+                files: Arc::new(Mutex::new(
+                    files
+                        .iter()
+                        .map(|(n, t)| ((*n).to_owned(), t.as_bytes().to_vec()))
+                        .collect(),
+                )),
+            }
+        }
+    }
+
+    /// `name` as a project's file is kept (no directory).
+    fn kept_name<'a>(dir: &str, name: &'a str) -> &'a str {
+        let n = name.strip_prefix(dir).unwrap_or(name);
+        n.strip_prefix("./").unwrap_or(n)
+    }
+
+    impl Host for Project {
+        // (by the name as given, the browser core's lookup: a path, the
+        // host's own name for the file, is no name it was given)
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            lock(&self.files)
+                .contains_key(name)
+                .then(|| PathBuf::from(format!("{}{name}", self.dir)))
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            lock(&self.files)
+                .get(kept_name(self.dir, &path.to_string_lossy()))
+                .cloned()
+        }
+        fn same_file(&self, a: &str, b: &str) -> bool {
+            kept_name(self.dir, a) == kept_name(self.dir, b)
+        }
+        fn tool_finder(&self) -> Option<phitex_tex::ToolFinder> {
+            let (dir, files) = (self.dir, self.files.clone());
+            Some(Arc::new(
+                move |search: phitex_tex::ToolSearch, name: &str| {
+                    let ext = match search {
+                        phitex_tex::ToolSearch::BibStyle => ".bst",
+                        phitex_tex::ToolSearch::BibData => ".bib",
+                        _ => "",
+                    };
+                    let n = kept_name(dir, name);
+                    let n = if n.ends_with(ext) {
+                        n.to_owned()
+                    } else {
+                        format!("{n}{ext}")
+                    };
+                    let b = lock(&files).get(&n).cloned()?;
+                    Some((format!("{dir}{n}"), b))
+                },
+            ))
+        }
+    }
+
+    /// The bibliography's text in the DVI: BibTeX's `.bbl` read in a
+    /// box, each entry's title a `\special`.
+    fn bib_title(dvi: &[u8]) -> Option<String> {
+        let at = dvi.windows(2).position(|w| w == b"T:")?;
+        let rest = &dvi[at + 2..];
+        let end = rest.iter().position(|&c| c == b'!')?;
+        Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+    }
+
+    /// A `.bib` edited in the editor (the viewer's `edit` and `set_file`,
+    /// the browser's upload of a file over its old copy, diffed in) is
+    /// BibTeX's input at the next build: the entry's new title in the
+    /// pages, each build's output a clean build's of the same files,
+    /// whatever path the host keeps the file at. The tools' searches
+    /// answered from the host's copy, the BibTeX run kept the old title
+    /// until the session was opened again (the frontends' report).
+    #[test]
+    fn an_edited_bib_is_bibtexs_input() {
+        let bst = "ENTRY { title } {} {}\n\
+                   FUNCTION {book} { \"\\special{T:\" title * \"!}\" * write$ newline$ }\n\
+                   READ\nITERATE {call.type$}\n";
+        let bib = |t: &str| format!("@book{{x, title = {{{t}}}}}\n");
+        let doc = "\\catcode`\\{=1 \\catcode`\\}=2 \
+                   \\immediate\\openout1=\\jobname.aux \
+                   \\immediate\\write1{\\string\\citation{x}}\
+                   \\immediate\\write1{\\string\\bibstyle{mine}}\
+                   \\immediate\\write1{\\string\\bibdata{refs}}\
+                   \\immediate\\closeout1 \
+                   \\setbox0\\hbox{\\openin2=\\jobname.bbl \\ifeof2 \\special{none}\\else\\closein2 \\input\\jobname.bbl \\fi}\
+                   \\shipout\\box0 \\end\n";
+        let dvi_of = |d: &Document| d.output().map(|(_, b)| b.to_vec()).expect("the DVI");
+        let built = |ev: &[Value]| {
+            let b = ev
+                .iter()
+                .find(|e| e["event"] == "build")
+                .cloned()
+                .expect("a build");
+            assert_eq!(b["ok"], true, "{ev:?}");
+            b
+        };
+        let open_in = |dir: &'static str, title: &str, kept: Option<(Arc<Kept>, Arc<Memory>)>| {
+            let host = Project::new(dir, &[("mine.bst", bst), ("refs.bib", &bib(title))]);
+            let (store, sink) = kept.unzip();
+            Document::new(
+                Session::new(
+                    Job {
+                        fixpoint: true,
+                        ..job()
+                    },
+                    Arc::from(doc),
+                    Arc::new(host),
+                    store.map(|s| s as Arc<dyn crate::host::Store>),
+                    sink.unwrap_or_default(),
+                    Arc::new(Status::default()),
+                ),
+                "doc.tex",
+            )
+        };
+        let clean = |dir: &'static str, title: &str| {
+            let mut d = open_in(dir, title, None);
+            built(&d.step());
+            dvi_of(&d)
+        };
+        // (each as a first session, and as a session opened again on the
+        // records and files the first left, as a browser's reopen)
+        for (dir, again) in [
+            ("", false),
+            ("./", false),
+            ("/compile/", false),
+            ("./", true),
+        ] {
+            let kept = again.then(|| (Arc::new(Kept::default()), Arc::new(Memory::default())));
+            let open = |dir, title| open_in(dir, title, kept.clone());
+            if again {
+                let mut d = open(dir, "Tea");
+                built(&d.step());
+            }
+            let mut d = open(dir, "Tea");
+            built(&d.step());
+            assert_eq!(
+                bib_title(&dvi_of(&d)).as_deref(),
+                Some("Tea"),
+                "{dir} {again}: cold: {}",
+                d.session().transcript()
+            );
+            // (the title replaced, as the browser diffs an upload in)
+            let old = bib("Tea");
+            let at = old.find("Tea").expect("the title");
+            let r = d.request(&json!({"id": 1, "op": "edit", "file": "refs.bib",
+                "start": at, "end": at + 3, "text": "Coffee"}));
+            assert_eq!(r["json"]["queued"], true, "{r}");
+            built(&d.step());
+            let dvi = dvi_of(&d);
+            assert_eq!(
+                bib_title(&dvi).as_deref(),
+                Some("Coffee"),
+                "{dir} {again}: the edit"
+            );
+            assert!(
+                dvi == clean(dir, "Coffee"),
+                "{dir} {again}: the edit's DVI a clean build's"
+            );
+            // (the whole file given, the editor's `set_file`)
+            d.request(&json!({"id": 2, "op": "set_file", "file": "refs.bib", "text": bib("Milk")}));
+            built(&d.step());
+            let dvi = dvi_of(&d);
+            assert_eq!(
+                bib_title(&dvi).as_deref(),
+                Some("Milk"),
+                "{dir} {again}: set_file"
+            );
+            assert!(
+                dvi == clean(dir, "Milk"),
+                "{dir} {again}: set_file's DVI a clean build's"
+            );
+            // (a Clean rebuild, the editor's buffer kept: read by the tool
+            // as by TeX, not the host's copy)
+            d.request(&json!({"id": 3, "op": "cold"}));
+            built(&d.step());
+            let dvi = dvi_of(&d);
+            assert_eq!(
+                bib_title(&dvi).as_deref(),
+                Some("Milk"),
+                "{dir} {again}: a Clean rebuild"
+            );
+            assert!(
+                dvi == clean(dir, "Milk"),
+                "{dir} {again}: the Clean rebuild's DVI a clean build's"
+            );
+        }
+    }
+
     /// `n` pages of a PDF, each fired by the page builder and a rule of
     /// its own width, after a loop of `k` steps (a build that takes a
     /// while before its pages).

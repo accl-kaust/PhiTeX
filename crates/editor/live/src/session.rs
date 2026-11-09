@@ -739,6 +739,11 @@ impl Session {
             .map(|(n, ..)| plain_name(n))
             .collect();
         drop(stamps);
+        // (a name not found: the host's lookup made again, not its last
+        // answer taken, a file the host has since given found)
+        for (n, ..) in self.inputs.iter().filter(|(_, found, _)| !found) {
+            self.host.look_again(n);
+        }
         self.changed.extend(stale);
     }
 
@@ -814,10 +819,10 @@ impl Session {
         });
         phitex_tex::timeline::lap("session: the first changed line (texts compared)");
         let changed = std::mem::take(&mut self.changed);
-        let reread = if self.build.is_some() {
+        let (reread, tool_reread) = if self.build.is_some() {
             self.reads_of(&changed)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let cold = self.build.is_none();
         // (an evaluation error panics, naming the nodes: the build is
@@ -857,6 +862,22 @@ impl Session {
                 }
                 for name in &reread {
                     b.stage_file(name, None);
+                }
+                // (a tool's file by the path its search found it at, staged
+                // with its text as the session has it: the editor's buffer,
+                // else the host's file at that path. Looked up by the job's
+                // finder, a path is no name a browser host was given,
+                // `./refs.bib`: no file, and the tool's run kept the text it
+                // read first, the old entry until the session was opened
+                // again)
+                let found = b.tool_paths();
+                for name in &tool_reread {
+                    let now = found
+                        .iter()
+                        .any(|(_, p)| p == name)
+                        .then(|| tool_file(&self.host, &self.buffers, name))
+                        .flatten();
+                    b.stage_file(name, now.as_deref());
                 }
                 // (sent as a version of its own: what another thread sends
                 // while it runs is taken between the engine's steps)
@@ -932,7 +953,7 @@ impl Session {
                 phitex_tex::timeline::lap("session: the finders");
                 let (content_key, tool_finder, bibtex) = (
                     self.host.content_key(),
-                    self.host.tool_finder(),
+                    self.tool_finder(),
                     self.host.bibtex(),
                 );
                 phitex_tex::timeline::lap("session: the content key, tools, bibtex");
@@ -1841,10 +1862,12 @@ impl Session {
     /// The names the builds asked the finder for (`inputs`)
     /// that stand for one of `changed` (as found, or as named): by the
     /// names and the files kept, no lookup; a changed name equal to
-    /// none is one of the files of its file name on disk.
-    fn reads_of(&self, changed: &[String]) -> Vec<String> {
+    /// none is one of the files of its file name on disk. Then the
+    /// changed files TeX did not read, for the tools that read them, each
+    /// by the path their search found it at where one did.
+    fn reads_of(&self, changed: &[String]) -> (Vec<String>, Vec<String>) {
         if changed.is_empty() {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         let found: Vec<Option<String>> = self
             .inputs
@@ -1905,15 +1928,15 @@ impl Session {
                 tools.push(c.clone());
             }
         }
-        let mut out: Vec<String> = self
+        let out: Vec<String> = self
             .inputs
             .iter()
             .zip(hit)
             .filter(|(_, h)| *h)
             .map(|((n, ..), _)| n.clone())
             .collect();
-        out.extend(tools);
-        out
+        tools.retain(|t| !out.contains(t));
+        (out, tools)
     }
 
     /// The main file's name as TeX prints it (`./story.tex`).
@@ -1946,17 +1969,32 @@ impl Session {
         let buffers = self.buffers.clone();
         let stamps = self.stamps.clone();
         Arc::new(move |name: &str| {
-            let p = host.locate_key(name)?;
+            let Some(p) = host.locate_key(name) else {
+                // (a file the host does not have, but the editor has a
+                // buffer of: a project's file all the same, one made in
+                // the editor and not given to the host or saved yet
+                // (Overleaf's new `late.tex`, its `set_file` the first
+                // word of it). Found by the name as kpathsea finds TeX's
+                // in the project's folder: with `.tex` first where the
+                // name has not that suffix. The font side's names are
+                // never an editor's.)
+                if phitex_tex::font_name(name).is_some() {
+                    return None;
+                }
+                let plain = plain_name(name);
+                let mut names = Vec::with_capacity(2);
+                if !plain.ends_with(".tex") {
+                    names.push(format!("{plain}.tex"));
+                }
+                names.push(plain);
+                let bufs = buffers.lock().unwrap_or_else(PoisonError::into_inner);
+                return names.into_iter().find_map(|n| {
+                    let t = bufs.iter().rev().find(|(b, _)| *b == n)?.1.as_ref()?;
+                    Some((format!("./{n}"), tex::bytes(t)))
+                });
+            };
             let shown = p.to_string_lossy().into_owned();
-            let key = plain_name(&shown);
-            let buffered = buffers
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .iter()
-                .rev()
-                .find(|(n, _)| *n == key || host.same_file(n, &key))
-                .and_then(|(_, t)| t.clone());
-            let bytes = if let Some(t) = buffered {
+            let bytes = if let Some(t) = buffered(&*host, &buffers, &shown) {
                 // (an editor's text: no key of the disk's holds for it)
                 stamps
                     .lock()
@@ -1980,6 +2018,22 @@ impl Session {
             };
             Some((shown, bytes))
         })
+    }
+
+    /// The tools' files by the host's searches, an editor's buffer for
+    /// one first, as [`Session::finder`] gives TeX's: a tool reads the
+    /// text TeX would (BibTeX's `.bib` as the editor has it, at a cold
+    /// build too, a Clean rebuild's).
+    fn tool_finder(&self) -> Option<phitex_tex::ToolFinder> {
+        let search = self.host.tool_finder()?;
+        let (host, buffers) = (self.host.clone(), self.buffers.clone());
+        Some(Arc::new(move |s: phitex_tex::ToolSearch, name: &str| {
+            let (p, bytes) = search(s, name)?;
+            match buffered(&*host, &buffers, &p) {
+                Some(t) => Some((p, tex::bytes(&t))),
+                None => Some((p, bytes)),
+            }
+        }))
     }
 
     /// Writes what the build made: `JOB.pdf` or `JOB.dvi` (with `main_too`),
@@ -2183,6 +2237,37 @@ fn out_name_ok(name: &str) -> bool {
 /// A file's name without a leading `./`.
 fn plain_name(n: &str) -> String {
     n.strip_prefix("./").unwrap_or(n).to_owned()
+}
+
+/// An editor's text of the file at `path` (as the host found it), if it
+/// has one: its latest buffer, by name or as the same file.
+fn buffered(
+    host: &dyn Host,
+    buffers: &Mutex<Vec<(String, Option<String>)>>,
+    path: &str,
+) -> Option<String> {
+    let key = plain_name(path);
+    buffers
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .rev()
+        .find(|(n, _)| *n == key || host.same_file(n, &key))
+        .and_then(|(_, t)| t.clone())
+}
+
+/// A tool's file at `path` (where its search found it) as the session
+/// has it now: the editor's buffer, else the host's file there; none: the
+/// job's finder looks it up.
+fn tool_file(
+    host: &Arc<dyn Host>,
+    buffers: &Mutex<Vec<(String, Option<String>)>>,
+    path: &str,
+) -> Option<Vec<u8>> {
+    match buffered(&**host, buffers, path) {
+        Some(t) => Some(tex::bytes(&t)),
+        None => host.read(Path::new(path)),
+    }
 }
 
 /// Shared bytes of a report's output, for the viewer.

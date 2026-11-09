@@ -2332,8 +2332,27 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 again = true;
                             }
                             Applied::Cold => {
-                                why.push("asked: a cold build".to_owned());
-                                again = true;
+                                // (Clean rebuild, "start over": a new
+                                // session on the target resolved again,
+                                // so the host's lookups go too: kpathsea's
+                                // `//` subfolders and a `.latexmkrc`'s
+                                // folders, listed when the session began,
+                                // are listed again and a folder made since
+                                // is searched. If the target can't be had
+                                // again, this session builds cold)
+                                match modern::resolve_again(o) {
+                                    Ok((t2, dir)) => {
+                                        next = Some((
+                                            (t2, o.clone(), dir),
+                                            "a clean rebuild was asked",
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        ui.error(&e);
+                                        why.push("asked: a cold build".to_owned());
+                                        again = true;
+                                    }
+                                }
                             }
                             Applied::Diff(a) => diff_asks.push(a),
                             Applied::Edited(file) => {
