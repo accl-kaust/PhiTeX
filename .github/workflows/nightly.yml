@@ -64,7 +64,10 @@ jobs:
           - { os: ubuntu-22.04, asset: x86_64-linux }
           - { os: ubuntu-22.04-arm, asset: aarch64-linux }
           - { os: macos-15, asset: aarch64-macos }
-          - { os: macos-15-intel, asset: x86_64-macos }
+          # (Intel Macs' binary made on Apple silicon: Xcode carries both
+          # SDKs, and Rosetta runs it for the check; GitHub's Intel runners
+          # took 39 min a build against 13)
+          - { os: macos-15, asset: x86_64-macos, target: x86_64-apple-darwin }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -75,6 +78,10 @@ jobs:
       - if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq clang mold
       - run: rustup show active-toolchain || rustup toolchain install
+      - if: matrix.target != ''
+        run: |
+          rustup target add ${{ matrix.target }}
+          softwareupdate --install-rosetta --agree-to-license
       # (the nightly's version in the CLI's manifest and the lock, so
       # `phitex --version` names it)
       - run: |
@@ -86,14 +93,19 @@ jobs:
       # the version written above changes phitex-cli alone. Not in
       # release.yml: a signed release is built from nothing but its source)
       - uses: mozilla-actions/sccache-action@v0.0.10
-      - run: cargo build --release --locked -p phitex-cli
+      - run: |
+          t="${{ matrix.target }}"
+          cargo build --release --locked -p phitex-cli ${t:+--target $t}
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
       - run: |
-          ./target/release/phitex --version
-          ./target/release/phitex --version | grep -qF "${{ needs.which.outputs.version }}"
-          tar -czf "phitex-${{ matrix.asset }}.tar.gz" -C target/release phitex
+          t="${{ matrix.target }}"
+          out=target/${t:+$t/}release
+          file "$out/phitex"
+          "$out/phitex" --version
+          "$out/phitex" --version | grep -qF "${{ needs.which.outputs.version }}"
+          tar -czf "phitex-${{ matrix.asset }}.tar.gz" -C "$out" phitex
       - uses: actions/upload-artifact@v4
         with:
           name: phitex-${{ matrix.asset }}
