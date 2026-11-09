@@ -1725,9 +1725,10 @@ fn xdv_color_ops(ops: &[Op]) -> Vec<crate::exec::ColorOp> {
 /// skipped), none for another special.
 fn pdf_special(s: &[u8]) -> Option<(&[u8], &[u8])> {
     let t = s.trim_ascii().strip_prefix(b"pdf:")?.trim_ascii_start();
+    // (the command's letters: `pdf:bann<<...>>` has no space after it)
     let n = t
         .iter()
-        .position(u8::is_ascii_whitespace)
+        .position(|c| !c.is_ascii_alphabetic())
         .unwrap_or(t.len());
     Some((&t[..n], t[n..].trim_ascii_start()))
 }
@@ -1804,6 +1805,10 @@ fn xdv_alone_exact(ops: &[Op]) -> bool {
         b"setlinecap",
         b"uxobj",
         b"usexobj",
+        b"majorversion",
+        b"minorversion",
+        b"version",
+        b"pagecolor",
     ];
     // (the forms the page makes itself: those it may use)
     let made: Vec<&[u8]> = ops
