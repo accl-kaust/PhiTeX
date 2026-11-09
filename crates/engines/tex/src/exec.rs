@@ -525,10 +525,8 @@ pub(crate) fn after_evaluation() {
     }
 }
 
-/// The thread count: `given`, else `PHITEX_THREADS`, else 1 (v1.0 runs
-/// on one thread unless asked: the user's decision of 2026-11-07, the
-/// multi-thread speed reds known); 1 where this target cannot run
-/// threads.
+/// The thread count: `given`, else `PHITEX_THREADS`, else the available
+/// parallelism; 1 where this target cannot run threads.
 pub(crate) fn threads(given: Option<usize>) -> usize {
     // (`PHITEX_THREADS`, read once)
     static ENV: OnceLock<Option<usize>> = OnceLock::new();
@@ -542,7 +540,7 @@ pub(crate) fn threads(given: Option<usize>) -> usize {
                 .and_then(|s| s.parse().ok())
                 .filter(|&n| n > 0)
         })
-        .unwrap_or(1)
+        .unwrap_or_else(cpus)
     })
 }
 

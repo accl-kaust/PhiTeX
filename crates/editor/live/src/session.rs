@@ -156,7 +156,7 @@ pub struct Job {
     pub jobname: String,
     /// Where the outputs go (`.`: here).
     pub out_dir: PathBuf,
-    /// The engine's threads (none: `PHITEX_THREADS`, else all the cores).
+    /// The engine's threads (none: `PHITEX_THREADS`, else one).
     pub threads: Option<usize>,
     /// `--spec`: when the engine runs steps ahead of their inputs (none:
     /// its default).
@@ -606,8 +606,10 @@ impl Absorb {
     }
 }
 
-/// The engine's threads: `-j N`, else `PHITEX_THREADS`, else 1, as the
-/// engine itself defaults (v1.0 runs on one thread unless asked).
+/// The engine's threads: `-j N`, else `PHITEX_THREADS`, else 1 (1.0 runs
+/// on one thread unless asked: the user's decision of 2026-11-07, the
+/// multi-thread speed reds known). The session passes it to the engine
+/// resolved, so the engine's own default (every CPU) is not used.
 pub fn threads(given: Option<usize>) -> usize {
     given
         .filter(|&n| n > 0)
@@ -974,7 +976,10 @@ impl Session {
                         let (host, name) = (self.host.clone(), self.format_name(t));
                         Arc::new(move || host.published_format(&name)) as phitex_tex::PreludeSource
                     }),
-                    threads: self.job.threads,
+                    // (resolved here, not by the engine: 1.0's default
+                    // of one thread lives in the hosts, so the engine's
+                    // identity, and with it Shelf's formats, stays)
+                    threads: Some(threads(self.job.threads)),
                     progress: Some(progress),
                     // (pdfTeX's `\pdfshellescape`: 1 with -shell-escape,
                     // else TeX Live's restricted default)
