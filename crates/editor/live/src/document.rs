@@ -2195,9 +2195,20 @@ mod tests {
         host: Arc<dyn Host>,
         threads: usize,
     ) -> (Document, Vec<Value>, HashMap<usize, (Vec<u8>, bool)>) {
+        streamed_build_with("pdftex", text, host, threads)
+    }
+
+    /// [`streamed_build`] with the engine `engine`.
+    #[allow(clippy::type_complexity)]
+    fn streamed_build_with(
+        engine: &str,
+        text: &str,
+        host: Arc<dyn Host>,
+        threads: usize,
+    ) -> (Document, Vec<Value>, HashMap<usize, (Vec<u8>, bool)>) {
         let session = Session::new(
             Job {
-                engine: crate::tex::engine("pdftex").unwrap(),
+                engine: crate::tex::engine(engine).unwrap(),
                 threads: Some(threads),
                 ..job()
             },
@@ -2394,10 +2405,14 @@ mod tests {
     }
 
     /// A colour pushed on one page and popped on a later one colours the
-    /// pages between: those pages, and every one after, are not told
-    /// exact; those before are.
+    /// pages between: their files begin from the colours the pages before
+    /// them leave, and are exact, drawn as the build's file draws them (at
+    /// one thread, where each page's predecessors are known when it
+    /// streams; at two, a page streamed before them is told exact only
+    /// where it begins from no colour carried in, and every page told
+    /// exact is drawn as the build's).
     #[test]
-    fn a_colour_carried_across_pages_is_not_exact() {
+    fn a_colour_carried_across_pages_streams_exact() {
         let mut t = PDF_HEAD.to_owned();
         for i in 0..5 {
             let c = match i {
@@ -2414,26 +2429,82 @@ mod tests {
         for threads in [1, 2] {
             let (d, ev, files) = streamed_build(&t, Arc::new(Nothing), threads);
             let told = exact_told(&ev);
-            assert_eq!(told.get(&0), Some(&true), "threads {threads}: {ev:?}");
-            assert_eq!(told.get(&1), Some(&true), "threads {threads}: {ev:?}");
-            for k in 2..5 {
-                assert_eq!(
-                    told.get(&k),
-                    Some(&false),
-                    "threads {threads}: page {k}: {ev:?}"
-                );
+            if threads == 1 {
+                for k in 0..5 {
+                    assert_eq!(told.get(&k), Some(&true), "page {k}: {ev:?}");
+                }
             }
             let out = d.output().map(|o| o.1.to_vec()).unwrap();
-            for k in [0usize, 1] {
-                assert_eq!(
-                    pixels(&files[&k].0, 0, 1.0),
-                    pixels(&out, k, 1.0),
-                    "page {k}"
-                );
+            for (k, (pdf, exact)) in &files {
+                if *exact {
+                    assert_eq!(
+                        pixels(pdf, 0, 1.0),
+                        pixels(&out, *k, 1.0),
+                        "threads {threads}: page {k}"
+                    );
+                }
             }
-            // (page 2 drawn in the colour carried in the build's file: not
-            // in its own, which is why it is not exact)
-            assert_ne!(pixels(&files[&2].0, 0, 1.0), pixels(&out, 2, 1.0));
         }
+    }
+
+    /// A XeTeX build streams its pages too: each page's file xdvipdfmx's
+    /// of that page alone, exact where no colour is carried into it and
+    /// it draws with nothing another page makes, drawn then as the build's
+    /// file draws it; a page a colour is carried into streams, not exact.
+    /// The build's file the one a build that streams nothing writes.
+    #[test]
+    fn a_xetex_build_streams_its_pages() {
+        let out = std::process::Command::new("kpsewhich")
+            .args(["-var-value", "TEXMFDIST"])
+            .output()
+            .expect("kpsewhich (TeX Live) on the test machine");
+        let dist = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        let host = || -> Arc<dyn Host> {
+            Arc::new(XeHost {
+                dist: dist.clone(),
+                index: None,
+                read_face: Arc::default(),
+            })
+        };
+        let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255} \\count1=0 \\def\\l{\\advance\\count1 by1 \\ifnum\\count1<20000 \\expandafter\\l\\fi}\\l ".to_owned();
+        for i in 0..5 {
+            let c = match i {
+                1 => "\\special{color push rgb 1 0 0}",
+                3 => "\\special{color pop}",
+                _ => "",
+            };
+            t.push_str(&format!(
+                "\\hbox{{{c}\\vrule width {}pt height 30pt}}\\penalty-10000 ",
+                10 + i
+            ));
+        }
+        t.push_str("\\end\n");
+        let (d, ev, files) = streamed_build_with("xetex", &t, host(), 1);
+        let told = exact_told(&ev);
+        assert_eq!(told.len(), 5, "every page streamed: {ev:?}");
+        assert_eq!(told.get(&0), Some(&true), "{ev:?}");
+        assert_eq!(told.get(&1), Some(&true), "{ev:?}");
+        assert_eq!(told.get(&2), Some(&false), "a colour carried in: {ev:?}");
+        let out = d.output().map(|o| o.1.to_vec()).expect("the PDF");
+        for (k, (pdf, exact)) in &files {
+            let (w, h, px) = pixels(pdf, 0, 1.0);
+            assert!(w > 0 && h > 0 && !px.is_empty(), "page {k}");
+            if *exact {
+                assert_eq!(pixels(pdf, 0, 1.0), pixels(&out, *k, 1.0), "page {k}");
+            }
+        }
+        let mut quiet = Session::new(
+            Job {
+                engine: crate::tex::engine("xetex").unwrap(),
+                threads: Some(1),
+                ..job()
+            },
+            Arc::from(t.as_str()),
+            host(),
+            None,
+            Arc::new(Memory::default()),
+            Arc::new(Status::default()),
+        );
+        assert_eq!(Some(out), Some(quiet.build().out.pdf.to_vec()));
     }
 }

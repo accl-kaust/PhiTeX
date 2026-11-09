@@ -125,9 +125,15 @@ impl Run<'_, '_> {
                 "the scope closed",
             ),
             (
-                self.kids
-                    .iter()
-                    .any(|k| ![self.ops.put, self.ops.toolnode, self.ops.pdfpage].contains(&k.0)),
+                self.kids.iter().any(|k| {
+                    ![
+                        self.ops.put,
+                        self.ops.toolnode,
+                        self.ops.pdfpage,
+                        self.ops.xdvpage,
+                    ]
+                    .contains(&k.0)
+                }),
                 "children",
             ),
             (self.claim_rest || self.fatal_hit || self.eof, "the end"),

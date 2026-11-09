@@ -1663,6 +1663,226 @@ fn diff(
     Ok(())
 }
 
+/// A XeTeX page's PDF of its own while the evaluation streams its pages
+/// (`crate::exec::Progress::set_streaming`): a child of the run that
+/// shipped it (`[page, node, i]`: the page's entry, the run's node, its
+/// place among the run's shipouts), made only while streaming. Its file
+/// is xdvipdfmx's of that page alone, on a session of its own begun from
+/// the options, config and maps the build's link begins from; the page's
+/// fonts numbered by themselves (a DVI font number is no part of a PDF).
+/// Exact where the pages before it leave no colour carried in and it
+/// draws with nothing another page makes: no `pdf:` special but those
+/// that draw nothing (annotations, links, destinations, outlines, the
+/// document's information) and literal code that names no resource.
+/// Contributes nothing.
+pub(crate) struct XdvPage {
+    pub(crate) stream: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) watch: Arc<std::sync::RwLock<Option<crate::exec::Watch>>>,
+    pub(crate) xe: Arc<std::sync::OnceLock<crate::xetex::XeTeX>>,
+}
+
+/// The session a XeTeX page's file of its own begins from
+/// ([`XdvPage`]), by what it is made of: the values' table, `\mag`, the
+/// preamble's comment, the PDF's name and date.
+type AloneStart = Mutex<Option<((u64, i32, String, String, i64), Arc<Mutex<Session>>)>>;
+
+fn alone_start() -> &'static AloneStart {
+    static S: std::sync::OnceLock<AloneStart> = std::sync::OnceLock::new();
+    S.get_or_init(|| Mutex::new(None))
+}
+
+/// The colour stack commands among a XeTeX page's specials, in order
+/// (`color push`, `color pop`, `color` a value set; dvipdfmx's
+/// `pdf:bcolor`, `pdf:ecolor`): one stack, as xdvipdfmx keeps it.
+fn xdv_color_ops(ops: &[Op]) -> Vec<crate::exec::ColorOp> {
+    use phitex_pdf::ColorStackCmd as C;
+    let mut out = Vec::new();
+    for o in ops {
+        let Op::Special(s) = o else { continue };
+        let t = s.trim_ascii();
+        let c = if let Some(r) = t.strip_prefix(b"color") {
+            let r = r.trim_ascii();
+            if let Some(x) = r.strip_prefix(b"push") {
+                C::Push(x.trim_ascii().to_vec())
+            } else if r.starts_with(b"pop") {
+                C::Pop
+            } else {
+                C::Set(r.to_vec())
+            }
+        } else if let Some(x) = t.strip_prefix(b"pdf:bcolor") {
+            C::Push(x.trim_ascii().to_vec())
+        } else if t.starts_with(b"pdf:ecolor") {
+            C::Pop
+        } else {
+            continue;
+        };
+        out.push((0, c));
+    }
+    out
+}
+
+/// Whether a XeTeX page's specials draw only with what its own file has:
+/// no `pdf:` special but those that draw nothing, and literal code naming
+/// no resource (a graphics state, a shading, a pattern, a colour space,
+/// an external object, marked content's properties: the document's,
+/// `pdf:put @resources`, made on another page or at the end).
+fn xdv_alone_exact(ops: &[Op]) -> bool {
+    const QUIET: &[&[u8]] = &[
+        b"pdf:bann",
+        b"pdf:eann",
+        b"pdf:ann",
+        b"pdf:dest",
+        b"pdf:out",
+        b"pdf:outline",
+        b"pdf:docinfo",
+        b"pdf:docview",
+        b"pdf:pagesize",
+        b"pdf:bcolor",
+        b"pdf:ecolor",
+        b"pdf:link",
+        b"pdf:tounicode",
+        b"pdf:mapline",
+        b"pdf:mapfile",
+    ];
+    const CODE: &[&[u8]] = &[b"pdf:literal", b"pdf:code", b"pdf:content", b"pdf:direct"];
+    ops.iter().all(|o| {
+        let Op::Special(s) = o else { return true };
+        let t = s.trim_ascii();
+        if !t.starts_with(b"pdf:") {
+            return true;
+        }
+        if QUIET.iter().any(|q| t.starts_with(q)) {
+            return true;
+        }
+        if CODE.iter().any(|q| t.starts_with(q)) {
+            return !t
+                .split(|b| b.is_ascii_whitespace() || b"[]<>()/".contains(b))
+                .any(|w| {
+                    matches!(
+                        w,
+                        b"gs" | b"sh" | b"scn" | b"SCN" | b"cs" | b"CS" | b"Do" | b"BDC" | b"DP"
+                    )
+                });
+        }
+        false
+    })
+}
+
+impl phitex_defuse::Operation for XdvPage {
+    fn name(&self) -> &'static str {
+        "xdvpage"
+    }
+    fn contributes(
+        &self,
+        _: &[ValueId],
+        _: &phitex_defuse::Values,
+        _: phitex_defuse::Field,
+    ) -> bool {
+        false
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let v = cx.values();
+        if !self.stream.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(ValueId::UNIT);
+        }
+        let (page, node, i) = match cx.args() {
+            [p, n, i, ..] => (*p, int_of(v, *n), int_of(v, *i)),
+            _ => return Ok(ValueId::UNIT),
+        };
+        let Some(xe) = self.xe.get() else {
+            return Ok(ValueId::UNIT);
+        };
+        let Some(p) = xe.pdf.as_ref() else {
+            return Ok(ValueId::UNIT);
+        };
+        let progress = self
+            .watch
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|w| w.progress.clone());
+        let Some(progress) = progress.filter(|p| p.streams()) else {
+            return Ok(ValueId::UNIT);
+        };
+        let Some(k) = u32::try_from(i)
+            .ok()
+            .and_then(|i| progress.page_of(node.cast_unsigned(), i))
+        else {
+            return Ok(ValueId::UNIT);
+        };
+        // (the page with its sealed lines, its fonts, `\mag` and the
+        // preamble's comment: read as the end node reads them)
+        let (filled, _) = crate::assemble::fill_sealed_pages(cx, vec![page])?;
+        let Some(&page) = filled.first() else {
+            return Ok(ValueId::UNIT);
+        };
+        let mut defs = Defs::default();
+        crate::assemble::page_defs(cx, page, Some(xe), &mut defs)?;
+        let comment = crate::assemble::field(cx, "dvicomment")?
+            .map(|x| str_of(v, x))
+            .unwrap_or_default();
+        let mag =
+            i32::try_from(crate::assemble::field(cx, "param:mag")?.map_or(1000, |x| int_of(v, x)))
+                .unwrap_or(1000);
+        let w = Walk::of(v, page);
+        let nums: std::collections::BTreeMap<u32, u32> = defs
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<u32>>()
+            .into_iter()
+            .zip(1..)
+            .collect();
+        let mut dw = DviWriter::new_xdv_ops(mag, &comment);
+        dw.set_font_numbers(Arc::new(nums));
+        let Some(ops) = walk(&mut dw, &w, &defs, None) else {
+            return Ok(ValueId::UNIT);
+        };
+        progress.page_colors(k, xdv_color_ops(&ops));
+        progress.stream_page(k, |start| {
+            let hash = phitex_defuse::hash_words(0x7864_7670, &[v.digest(page)]);
+            let pdf = xdv_alone(p, v.instance(), mag, &comment, &ops)?;
+            // (a colour carried in: its file starts from none)
+            let exact = xdv_alone_exact(&ops) && start.is_none_or(Vec::is_empty);
+            Some((hash, pdf, exact))
+        });
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// The PDF of a XeTeX page alone, of its operations `ops`
+/// ([`XdvPage`]).
+fn xdv_alone(p: &XdvPdf, inst: u64, mag: i32, comment: &str, ops: &[Op]) -> Option<Vec<u8>> {
+    let key = (inst, mag, comment.to_owned(), p.name.clone(), p.date);
+    let files = (p.files)();
+    let start = {
+        let mut g = alone_start().locked();
+        match g.as_ref() {
+            Some((k, s)) if *k == key => s.clone(),
+            _ => {
+                let mut s = Session::direct(
+                    options(p),
+                    files.clone(),
+                    deflate(),
+                    u32::try_from(mag).unwrap_or(0),
+                    comment.as_bytes(),
+                )
+                .ok()?;
+                s.set_batch_deflate(batch());
+                let s = Arc::new(Mutex::new(s));
+                *g = Some((key, s.clone()));
+                s
+            }
+        }
+    };
+    let mut s = start.locked().snapshot();
+    s.set_files(files);
+    let chunk: Arc<[u8]> = Arc::from(s.page_ops(ops).ok()?.pdf);
+    let (tail, _) = s.finish_recorded().ok()?;
+    let l = layout(&[chunk], &tail, &s)?;
+    l.exact().ok().map(|b| b.as_ref().clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

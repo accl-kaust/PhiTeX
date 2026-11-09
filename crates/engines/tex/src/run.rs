@@ -110,6 +110,9 @@ pub(crate) struct Ops {
     /// A page's PDF side, run once the loop-backs settle
     /// (`crate::pdfout::PdfPage`).
     pub pdfpage: OpId,
+    /// A XeTeX page's PDF of its own while the evaluation streams its
+    /// pages (`crate::xdvpdf::XdvPage`).
+    pub xdvpage: OpId,
     /// A per-field read-back as a child of the run reading it back
     /// (`crate::ops::ReadBack`).
     pub readback: OpId,
