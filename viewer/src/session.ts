@@ -27,6 +27,25 @@ import { asDiagnostic, type Problem } from "./problems.ts";
 import { latexmkFiles, latexmkNotes } from "./latexmkrc.ts";
 import type { Entry } from "./outline.ts";
 
+/**
+ * A core's error as a person reads it: the hosts' "core trapped (…):" tag
+ * (what the session tells a lost core by) dropped; a host's own sentence
+ * kept, an engine's raw error said as a crash.
+ */
+export function plainWhy(e: string): string {
+  const m = /^core trapped \([^)]*\):\s*([\s\S]*)$/.exec(e);
+  if (!m) return sentence(e);
+  const t = m[1].trim();
+  return /[.!?]$/.test(t) ? t : `The engine crashed (${t || "no reason given"}).`;
+}
+
+/** `s` as a sentence: its first letter capital, a full stop at its end. */
+export function sentence(s: string): string {
+  const t = s.trim();
+  if (!t) return t;
+  return t[0].toUpperCase() + t.slice(1) + (/[.!?…]$/.test(t) ? "" : ".");
+}
+
 /** The events Options.remote's host tells (WatchEvent), routed to onWatch. */
 const WATCH = new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
 
@@ -501,8 +520,8 @@ export class PreviewSession {
         // naming the size and what to close)
         if (lost && this.opened && /needs more than the [\d.]+ GiB of memory/.test(res.error ?? "")) {
           this.opened = false;
-          this.sink.error(res.error!);
-          this.sink.connection?.(false, res.error!);
+          this.sink.error(plainWhy(res.error!));
+          this.sink.connection?.(false, plainWhy(res.error!));
           return res;
         }
         if (lost && this.opened && r.op !== "open") {
@@ -511,14 +530,14 @@ export class PreviewSession {
           // same input to the same engine: reopened once, then stopped, however
           // long each takes; counted by time, a slow one would loop forever)
           this.traps++;
-          const why = res.error ?? "the core restarted";
+          const why = plainWhy(res.error ?? "The engine restarted.");
           if (this.traps <= 1) {
-            this.sink.error(`${why}; reopening`);
-            this.sink.connection?.(false, `${why}; reopening`);
+            this.sink.error(`${why} Restarting it.`);
+            this.sink.connection?.(false, `${why} Restarting it.`);
             this.chain = this.chain.then(() => this.reopen());
           } else {
-            this.sink.error(`${why}, again: the preview stops here (reload the page to retry)`);
-            this.sink.connection?.(false, `${why}, again: reload the page to retry`);
+            this.sink.error(`${why} It happened again, so the preview has stopped. Reload the page to try again.`);
+            this.sink.connection?.(false, `${why} It happened again, so the preview has stopped. Reload the page to try again.`);
           }
         }
         return res;
@@ -541,8 +560,8 @@ export class PreviewSession {
     });
     core.onLost?.(() => {
       this.opened = false;
-      this.sink.error("core lost; reopening");
-      this.sink.connection?.(false, "the engine stopped; reopening");
+      this.sink.error("The engine stopped. Restarting it.");
+      this.sink.connection?.(false, "The engine stopped. Restarting it.");
       this.reopen();
     });
   }

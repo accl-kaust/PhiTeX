@@ -12,7 +12,7 @@
 // and zoom remembered; a build that ships nothing keeps the last good page,
 // dimmed, with why; problems jump to their line.
 
-import type { PageImage, Status } from "./session.ts";
+import { sentence, type PageImage, type Status } from "./session.ts";
 import { KINDS, kindOf, type Diagnostic, type Kind } from "./diagnostics.ts";
 import type { PackageState } from "./packages.ts";
 import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
@@ -1733,7 +1733,7 @@ export class Panel {
       this.win.classList.remove("offline-quiet");
       return;
     }
-    const text = `Disconnected from the engine: the pages are the last ones built${why ? ` (${why})` : ""}.`;
+    const text = `${why ? sentence(why) : "Lost the connection to PhiTeX's engine."} The pages shown are from the last build.`;
     this.$("#gonewhy").textContent = text;
     this.$("#offpill").title = text;
     // (dismissed once: it stays dismissed until the connection comes back)
