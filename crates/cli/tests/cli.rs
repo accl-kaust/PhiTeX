@@ -1010,8 +1010,9 @@ impl Viewer {
 /// unsaved buffer (`didOpen`, `didChange`) is what is built: an edit that
 /// makes an error is published at its line, the fix clears it and the
 /// pages change; a double-click in the viewer (its `source`) is
-/// `window/showDocument` at that line; `phitex/cursor` on a word of the
-/// second page, with a selection, is the viewer's `follow` and `select`
+/// `window/showDocument` at that line; `textDocument/documentHighlight`
+/// (answered `[]`) and `phitex/cursor` on a word of the
+/// second page, with a selection, are the viewer's `follow` and `select`
 /// in bytes of the buffer; `shutdown` and `exit` end
 /// the watch with status 0. Nothing but LSP messages on standard output.
 #[test]
@@ -1062,6 +1063,7 @@ fn watch_lsp() {
             .is_some_and(|c| c.contains(&json!("phitex.showOnPage"))),
         "{init}"
     );
+    assert_eq!(caps["documentHighlightProvider"], true, "{init}");
     lsp_send(
         &mut to,
         &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
@@ -1126,6 +1128,13 @@ fn watch_lsp() {
             .is_some_and(|m| m.contains("Undefined control sequence")),
         "{err}"
     );
+    // (TeX's help, its interactive terminal's advice, is not the editor's)
+    assert!(
+        err["message"]
+            .as_str()
+            .is_some_and(|m| !m.contains("type `I'") && !m.contains("never \\def'ed")),
+        "{err}"
+    );
     // (the fix, with a word of page 2 changed first: whatever build
     // takes the first change alone still has the error)
     lsp_send(
@@ -1169,6 +1178,25 @@ fn watch_lsp() {
         &mut to,
         &json!({"jsonrpc": "2.0", "id": show["id"], "result": {"success": true}}),
     );
+    let start: usize = text.split_inclusive('\n').take(second).map(str::len).sum();
+    let line = [start, start + "Xray foxtrot golf hotel.".len()];
+    // (a client without `phitex/cursor` (Helix, Zed): its cursor asked
+    // highlights for, answered with none and shown on the pages)
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 5, "method": "textDocument/documentHighlight", "params": {
+            "textDocument": {"uri": uri}, "position": at(second, 14),
+        }}),
+    );
+    let none = lsp_until(&rx, &mut seen, |m| m["id"] == 5);
+    assert_eq!(none["result"], json!([]), "{none}");
+    let follow = viewer.until(|v| v["event"] == "follow");
+    assert_eq!(
+        follow,
+        json!({"event": "follow", "file": "doc.tex", "at": start + 14,
+            "word": [start + 13, start + 17], "line": line}),
+        "{follow}"
+    );
     // (the editor's cursor on a word of page 2, a selection with it: the
     // viewer told their bytes in the buffer, the glyph origins' space, in
     // the origins' name of the file)
@@ -1179,12 +1207,11 @@ fn watch_lsp() {
             "range": {"start": at(second, 5), "end": at(second, 12)},
         }}),
     );
-    let start: usize = text.split_inclusive('\n').take(second).map(str::len).sum();
     let follow = viewer.until(|v| v["event"] == "follow");
     assert_eq!(
         follow,
         json!({"event": "follow", "file": "doc.tex", "at": start + 7,
-            "word": [start + 5, start + 12], "line": [start, start + "Xray foxtrot golf hotel.".len()]}),
+            "word": [start + 5, start + 12], "line": line}),
         "{follow}"
     );
     let select = viewer.until(|v| v["event"] == "select");

@@ -26,7 +26,9 @@
 //!   Shelf's); the settings ([`Lsp::on_configure`]) a new session where
 //!   they change it.
 //! - **End.** `exit`, or the end of standard input, ends the watch as `q`
-//!   does.
+//!   does. Before a main file was found ([`Lsp::main_from_open`]) the
+//!   process ends at once: status 0 after `shutdown`, else 1, as the
+//!   protocol says.
 
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
@@ -349,6 +351,67 @@ fn find_main(root: &Path) -> Option<String> {
     }
 }
 
+/// The main file named by the first `.tex` document opened on `input`
+/// ([`Lsp::main_from_open`]), and the messages read meanwhile (to be
+/// served once the watch runs). Err: the editor ended the session first,
+/// the exit status the protocol gives it: 0 after `shutdown`, else 1 (an
+/// `exit` without it, or the end of the input).
+fn wait_main(s: &Server, input: &mut impl BufRead) -> Result<(PathBuf, Vec<Value>), i32> {
+    let mut pending = Vec::new();
+    let mut shut_down = false;
+    let end = |shut_down: bool| if shut_down { 0 } else { crate::EXIT_FAILED };
+    loop {
+        let Some(m) = read(input) else {
+            return Err(end(shut_down));
+        };
+        match m["method"].as_str().unwrap_or("") {
+            "exit" => return Err(end(shut_down)),
+            "shutdown" => {
+                shut_down = true;
+                s.handle(&m);
+                continue;
+            }
+            "textDocument/didOpen" => {}
+            _ => {
+                pending.push(m);
+                continue;
+            }
+        }
+        let d = &m["params"]["textDocument"];
+        let path = d["uri"].as_str().and_then(path_of);
+        pending.push(m.clone());
+        let Some(path) = path.filter(|p| p.extension().is_some_and(|e| e == "tex")) else {
+            continue;
+        };
+        let text = d["text"].as_str().unwrap_or("");
+        let dir = path.parent().unwrap_or(Path::new("/")).to_path_buf();
+        // (the file names its main one, `% !TEX root = ../paper.tex`)
+        if let (_, Some(r)) = crate::config::magic_comments(text)
+            && dir.join(&r).is_file()
+        {
+            return Ok((dir.join(r), pending));
+        }
+        if text.contains("\\documentclass") {
+            return Ok((path, pending));
+        }
+        // (a file the main one inputs, opened first: that main file,
+        // beside it or above, never the file itself or none)
+        if let Some(main) = includer(&path) {
+            return Ok((main, pending));
+        }
+        if let Some(n) = find_main(&dir) {
+            return Ok((dir.join(n), pending));
+        }
+        s.show_message(
+            2,
+            &format!(
+                "phitex watch: {} has no \\documentclass, nor one .tex file beside it: open the main file",
+                path.display()
+            ),
+        );
+    }
+}
+
 impl Lsp {
     /// Read standard input until `initialize` (answering anything else
     /// before it as the protocol says), enter its root, and name the main
@@ -459,55 +522,9 @@ impl Lsp {
         let mut input = lock(&self.input)
             .take()
             .unwrap_or_else(|| BufReader::new(std::io::stdin()));
-        let mut pending = Vec::new();
-        let main = loop {
-            let Some(m) = read(&mut input) else {
-                std::process::exit(crate::EXIT_FAILED);
-            };
-            match m["method"].as_str().unwrap_or("") {
-                "exit" => std::process::exit(crate::EXIT_FAILED),
-                "shutdown" => {
-                    s.handle(&m);
-                    continue;
-                }
-                "textDocument/didOpen" => {}
-                _ => {
-                    pending.push(m);
-                    continue;
-                }
-            }
-            let d = &m["params"]["textDocument"];
-            let path = d["uri"].as_str().and_then(path_of);
-            pending.push(m.clone());
-            let Some(path) = path.filter(|p| p.extension().is_some_and(|e| e == "tex")) else {
-                continue;
-            };
-            let text = d["text"].as_str().unwrap_or("");
-            let dir = path.parent().unwrap_or(Path::new("/")).to_path_buf();
-            // (the file names its main one, `% !TEX root = ../paper.tex`)
-            if let (_, Some(r)) = crate::config::magic_comments(text)
-                && dir.join(&r).is_file()
-            {
-                break dir.join(r);
-            }
-            if text.contains("\\documentclass") {
-                break path;
-            }
-            // (a file the main one inputs, opened first: that main file,
-            // beside it or above, never the file itself or none)
-            if let Some(main) = includer(&path) {
-                break main;
-            }
-            if let Some(n) = find_main(&dir) {
-                break dir.join(n);
-            }
-            s.show_message(
-                2,
-                &format!(
-                    "phitex watch: {} has no \\documentclass, nor one .tex file beside it: open the main file",
-                    path.display()
-                ),
-            );
+        let (main, pending) = match wait_main(s, &mut input) {
+            Ok(found) => found,
+            Err(code) => std::process::exit(code),
         };
         *lock(&self.input) = Some(input);
         *lock(&self.pending) = pending;
@@ -653,5 +670,73 @@ mod tests {
         assert_eq!(read(&mut r).unwrap()["method"], "initialize");
         assert_eq!(read(&mut r).unwrap(), json!({}));
         assert!(read(&mut r).is_none());
+    }
+
+    /// Messages framed as an editor sends them.
+    fn framed(ms: &[Value]) -> std::io::Cursor<Vec<u8>> {
+        let mut raw = Vec::new();
+        for m in ms {
+            let body = m.to_string();
+            raw.extend(format!("Content-Length: {}\r\n\r\n{body}", body.len()).into_bytes());
+        }
+        std::io::Cursor::new(raw)
+    }
+
+    /// A server on the watch's host, its messages kept.
+    fn server() -> (Server, Arc<Mutex<Vec<Value>>>) {
+        let sent: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let s = sent.clone();
+        let watch = Arc::new(Watch {
+            asks: Mutex::default(),
+            wake: Mutex::new(None),
+            root: Mutex::new(PathBuf::new()),
+            viewer: Mutex::new(None),
+            quit: Mutex::new(None),
+            configure: Mutex::new(None),
+            pdf: Mutex::new(None),
+        });
+        let server = Server::new(Box::new(move |v: &Value| lock(&s).push(v.clone())), watch);
+        (server, sent)
+    }
+
+    /// An editor that ends the session while the server still waits for
+    /// a main file: exit status 0 after `shutdown` (the protocol's rule;
+    /// Neovim reports any other), 1 after an `exit` or an end without it.
+    #[test]
+    fn ending_before_a_main_file() {
+        let shutdown = json!({"jsonrpc": "2.0", "id": 2, "method": "shutdown"});
+        let exit = json!({"jsonrpc": "2.0", "method": "exit"});
+        let (s, sent) = server();
+        let mut r = framed(&[shutdown.clone(), exit.clone()]);
+        assert_eq!(wait_main(&s, &mut r).err(), Some(0));
+        assert_eq!(lock(&sent)[0]["id"], 2, "shutdown answered");
+        assert_eq!(lock(&sent)[0]["result"], Value::Null);
+        let (s, _) = server();
+        assert_eq!(wait_main(&s, &mut framed(&[shutdown])).err(), Some(0));
+        let (s, _) = server();
+        assert_eq!(
+            wait_main(&s, &mut framed(&[exit])).err(),
+            Some(crate::EXIT_FAILED)
+        );
+        let (s, _) = server();
+        assert_eq!(
+            wait_main(&s, &mut framed(&[])).err(),
+            Some(crate::EXIT_FAILED)
+        );
+    }
+
+    /// The first `.tex` document opened with a `\documentclass` is the
+    /// main file; what came before it is kept to be served.
+    #[test]
+    fn the_first_document_opened_names_the_main_file() {
+        let (s, _) = server();
+        let mut r = framed(&[
+            json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+            json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///nowhere/a.bib", "text": "@book{x}"}}}),
+            json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///nowhere/paper.tex", "text": "\\documentclass{article}"}}}),
+        ]);
+        let (main, pending) = wait_main(&s, &mut r).expect("a main file");
+        assert_eq!(main, Path::new("/nowhere/paper.tex"));
+        assert_eq!(pending.len(), 3);
     }
 }

@@ -235,7 +235,7 @@ page's length against `page_codes`.
   deltas applied (offsets, files, positions, widths compared): an
   inserted line moves the later pages' offsets but lists none of them;
   the viewer shifts its cached offsets itself. The deltas come from
-  the Build (in `phitex watch` and the planned `phitex lsp` the viewer
+  the Build (in `phitex watch` and `phitex watch --lsp` the viewer
   never sees the edit). The first ask lists every page.
 
 ## 4. The API
