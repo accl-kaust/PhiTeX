@@ -242,9 +242,11 @@ pub struct StreamedPage {
 /// ([`Progress::page_colors`]): a page is drawn exactly alone only where
 /// every page before it left them as it found them (a color pushed on
 /// one page and popped on a later one colors the pages between).
+/// Kept across a build's passes (a page not made again in a later pass
+/// leaves what it left), made afresh when a build begins to stream
+/// ([`Progress::set_streaming`]).
 #[derive(Debug, Default)]
 struct Colors {
-    evaluation: u64,
     /// Whether page `k` (from 1) left them as it found them.
     keeps: std::collections::BTreeMap<u64, bool>,
     /// The pages 1 to `upto` all did.
@@ -252,19 +254,6 @@ struct Colors {
     /// The pages told not exact only for want of the pages before them
     /// known: page, identity.
     waiting: std::collections::BTreeMap<u64, u64>,
-}
-
-impl Colors {
-    /// Made for evaluation `e`: a new one's pages known afresh.
-    fn of(&mut self, e: u64) -> &mut Colors {
-        if self.evaluation != e {
-            *self = Colors {
-                evaluation: e,
-                ..Colors::default()
-            };
-        }
-        self
-    }
 }
 
 /// What is told of the pages streamed ([`Progress::on_stream`]): whether
@@ -348,6 +337,12 @@ impl Progress {
     /// once the loop-backs settle, and each page wanted is told
     /// ([`Progress::on_stream`]). The output is the same either way.
     pub fn set_streaming(&self, on: bool) {
+        if on {
+            *self
+                .colors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Colors::default();
+        }
         self.streaming.store(on, Ordering::Relaxed);
     }
 
@@ -379,7 +374,6 @@ impl Progress {
                 .colors
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let c = c.of(e);
             let before = c.upto + 1 >= k;
             // (not known yet, none known to color it: told again once known)
             let unknown = (c.upto + 1..k).all(|j| c.keeps.get(&j) != Some(&false));
@@ -399,7 +393,7 @@ impl Progress {
         });
     }
 
-    /// Page `k` (from 1) of this evaluation left the color stacks as it
+    /// Page `k` (from 1) of this build left the color stacks as it
     /// found them (`keeps`) or not: the pages after it waiting for it
     /// told exact where all before them now are ([`Progress::stream_page`]).
     pub(crate) fn page_colors(&self, k: u64, keeps: bool) {
@@ -409,7 +403,7 @@ impl Progress {
                 .colors
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let c = c.of(e);
+            let c = &mut *c;
             c.keeps.insert(k, keeps);
             if !keeps {
                 c.upto = c.upto.min(k.saturating_sub(1));
