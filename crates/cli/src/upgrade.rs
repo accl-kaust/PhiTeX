@@ -261,8 +261,11 @@ fn replace(exe: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::rename(&new, exe).map_err(|e| format!("{}: {e}", exe.display()))
 }
 
-/// `phitex upgrade`: the exit status.
-pub fn upgrade(ui: &Ui) -> i32 {
+/// `phitex upgrade`: the newest release (or nightly) checked for, and, if
+/// it is later, installed once the user says yes ("[Y/n]": Enter is yes),
+/// or at once with `--no-confirm`. Off a terminal it asks nothing and
+/// installs nothing without `--no-confirm`. The exit status.
+pub fn upgrade(ui: &Ui, no_confirm: bool) -> i32 {
     let have = crate::version();
     let r = match channel().and_then(|c| newest(c).map_err(|e| format!("no release found: {e}"))) {
         Ok(r) => r,
@@ -293,6 +296,26 @@ pub fn upgrade(ui: &Ui) -> i32 {
         ));
         return crate::EXIT_FAILED;
     };
+    if !no_confirm {
+        use std::io::IsTerminal as _;
+        if !std::io::stdin().is_terminal() {
+            ui.line(&format!(
+                "phitex {v} is out (you have {have}); run phitex upgrade --no-confirm to install it without asking"
+            ));
+            return 0;
+        }
+        ui.ask(&format!("upgrade phitex {have} to {v}? [Y/n]"));
+        let mut a = String::new();
+        let read = std::io::stdin().read_line(&mut a);
+        // (the line typed ended it already; an end of input did not)
+        if read.is_ok_and(|n| n == 0) {
+            ui.answered(None);
+        }
+        if read.is_err() || !yes(&a, true) {
+            ui.line(&format!("phitex {have} kept"));
+            return 0;
+        }
+    }
     ui.line(&format!("downloading phitex {v} ({asset})"));
     match fetch(&r, &asset).and_then(|b| replace(&exe, &b)) {
         Ok(()) => {
@@ -306,6 +329,16 @@ pub fn upgrade(ui: &Ui) -> i32 {
             ui.error(&e);
             crate::EXIT_FAILED
         }
+    }
+}
+
+/// Whether answer `a` to a "[Y/n]" (`default` true) or "[y/N]" question
+/// is yes: y or yes in any case, else the default when it is empty.
+fn yes(a: &str, default: bool) -> bool {
+    match a.trim().to_ascii_lowercase().as_str() {
+        "" => default,
+        "y" | "yes" => true,
+        _ => false,
     }
 }
 
@@ -455,6 +488,23 @@ fn said(n: &Value, v: &str, by_script: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn answers() {
+        for (a, d, want) in [
+            ("\n", true, true),
+            ("", true, true),
+            ("y\n", true, true),
+            ("Yes\n", true, true),
+            (" Y ", false, true),
+            ("n\n", true, false),
+            ("no\n", true, false),
+            ("\n", false, false),
+            ("maybe\n", true, false),
+        ] {
+            assert_eq!(yes(a, d), want, "{a:?} default {d}");
+        }
+    }
 
     #[test]
     fn versions_by_phi() {

@@ -133,6 +133,12 @@ for each version tag.
 `cargo install` and distribution packages are the other methods.
 
 **`phitex upgrade`:**
+- Checks first: it says the newer version and asks `upgrade phitex 1.0 to
+  1.0.1? [Y/n]` (Enter is yes). `--no-confirm` (`-y`, `--yes`; global, so
+  it also answers yes to watch's question whether to write the PDF on
+  quitting) installs without asking. Off a terminal it asks nothing and
+  installs nothing unless `--no-confirm` is given: it says the version
+  that is out.
 - Does the same download and checks, with the public key built into the
   binary. It replaces the binary atomically (write beside it, then rename).
 - Follows the user's `update-channel`: `stable` (the default: GitHub's
