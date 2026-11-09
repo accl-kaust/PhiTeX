@@ -573,8 +573,15 @@ impl WatchArgs {
 
 /// The command line's options (`args` after the program's name).
 fn parse(args: &[String]) -> Result<Options, clap::Error> {
+    use clap::{CommandFactory as _, FromArgMatches as _};
     let line = std::iter::once("phitex").chain(args.iter().map(String::as_str));
-    Cli::try_parse_from(line).map(Cli::into_options)
+    // (the help's colours as the rest's: NO_COLOR over CLICOLOR_FORCE)
+    let mut cmd = Cli::command();
+    if std::env::var_os("NO_COLOR").is_some_and(|x| !x.is_empty()) {
+        cmd = cmd.color(ColorChoice::Never);
+    }
+    let m = cmd.try_get_matches_from(line)?;
+    Cli::from_arg_matches(&m).map(Cli::into_options)
 }
 
 /// What to build.
@@ -901,7 +908,8 @@ pub(crate) fn resolve(o: &Options) -> Result<Target, String> {
     };
     // (TeX Live asked for, none here: said, with the way to Shelf; never
     // a switch to it on our own, one source a run)
-    if files == tex::Files::TexLive && !tex::has_texlive() {
+    // (`clean` reads no TeX file: it needs none)
+    if files == tex::Files::TexLive && o.command != Some(Command::Clean) && !tex::has_texlive() {
         return Err(
             "no TeX Live found on this machine (kpathsea finds no texmf.cnf); \
              PhiTeX can fetch TeX's files from Shelf instead: phitex config files shelf \

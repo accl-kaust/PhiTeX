@@ -730,3 +730,58 @@ fn exit_statuses_completions_help() {
     let out = run(&dir, &["help", "build"]);
     assert!(out.status.success() && text(&out.stdout).contains("--engine"));
 }
+
+/// NO_COLOR wins over CLICOLOR_FORCE (no-color.org), in the help too;
+/// CLICOLOR_FORCE alone colours a pipe; --color=never wins over both.
+#[test]
+fn no_color_wins() {
+    let dir = scratch("colours");
+    std::fs::write(dir.join("doc.tex"), TINY).expect("the document");
+    let esc = |o: &Output| o.stderr.contains(&0x1b) || o.stdout.contains(&0x1b);
+    let with = |env: &[(&str, &str)], args: &[&str]| {
+        let mut c = phitex(&dir);
+        for (k, v) in env {
+            c.env(k, v);
+        }
+        c.args(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("phitex runs")
+    };
+    let build = ["build", "--ini", "--etex", "doc.tex"];
+    assert!(esc(&with(&[("CLICOLOR_FORCE", "1")], &build)));
+    assert!(!esc(&with(
+        &[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")],
+        &build
+    )));
+    assert!(!esc(&with(
+        &[("CLICOLOR_FORCE", "1"), ("NO_COLOR", "1")],
+        &["--help"]
+    )));
+    let mut never = vec!["--color=never"];
+    never.extend(build);
+    assert!(!esc(&with(&[("CLICOLOR_FORCE", "1")], &never)));
+}
+
+/// `phitex clean` needs no TeX Live: it reads no TeX file.
+#[test]
+fn clean_without_texlive() {
+    let dir = scratch("clean-no-tl");
+    std::fs::write(dir.join("doc.tex"), TINY).expect("the document");
+    std::fs::write(dir.join("doc.log"), "a log").expect("an output");
+    let out = phitex(&dir)
+        .args(["clean", "doc.tex"])
+        .env("TEXMFCNF", "/nonexistent")
+        .stdin(Stdio::null())
+        .output()
+        .expect("phitex runs");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!dir.join("doc.log").exists());
+    let out = phitex(&dir)
+        .args(["build", "doc.tex"])
+        .env("TEXMFCNF", "/nonexistent")
+        .stdin(Stdio::null())
+        .output()
+        .expect("phitex runs");
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+}

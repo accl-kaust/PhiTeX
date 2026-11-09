@@ -25,7 +25,8 @@ pub fn set_color(c: Option<bool>) {
     let _ = COLOR.set(c);
 }
 
-/// Colours on standard error, unless it is no terminal or `NO_COLOR`.
+/// Colours on standard error: `--color`, else none under `NO_COLOR`,
+/// else on a terminal or under `CLICOLOR_FORCE`.
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
     pub color: bool,
@@ -49,9 +50,12 @@ impl Style {
         if let Some(&Some(color)) = COLOR.get() {
             return Style { color, tty };
         }
+        // (no-color.org: NO_COLOR, set and not empty, wins over everything
+        // but the command line's --color; CLICOLOR_FORCE colours a pipe)
         let set = |v: &str| std::env::var_os(v).is_some_and(|x| !x.is_empty() && x != "0");
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|x| !x.is_empty());
         Style {
-            color: set("CLICOLOR_FORCE") || (tty && std::env::var_os("NO_COLOR").is_none()),
+            color: !no_color && (set("CLICOLOR_FORCE") || tty),
             tty,
         }
     }
