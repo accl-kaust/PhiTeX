@@ -66,12 +66,13 @@ const ARTICLE: &str = "\\documentclass{article}\n\\begin{document}\n\\section{On
 
 /// A `file:` URI of `p`, its bytes percent-encoded where a URI needs it.
 fn uri(p: &Path) -> String {
+    use std::fmt::Write as _;
     let mut s = String::from("file://");
     for b in p.to_string_lossy().bytes() {
         if b.is_ascii_alphanumeric() || b"/-._~".contains(&b) {
             s.push(char::from(b));
         } else {
-            s.push_str(&format!("%{b:02X}"));
+            let _ = write!(s, "%{b:02X}");
         }
     }
     s
@@ -693,7 +694,7 @@ fn config_checks_values() {
     assert!(text(&run(&dir, &["config"]).stdout).contains("ignored"));
 }
 
-/// The exit statuses: 0 done, 1 the document's errors, 2 PhiTeX could
+/// The exit statuses: 0 done, 1 the document's errors, 2 `PhiTeX` could
 /// not start (a usage error, a missing file, a wrong setting), as
 /// `--help-all` says; `phitex completions SHELL` writes a script,
 /// `phitex help` and `phitex help build` the help.
@@ -731,8 +732,8 @@ fn exit_statuses_completions_help() {
     assert!(out.status.success() && text(&out.stdout).contains("--engine"));
 }
 
-/// NO_COLOR wins over CLICOLOR_FORCE (no-color.org), in the help too;
-/// CLICOLOR_FORCE alone colours a pipe; --color=never wins over both.
+/// `NO_COLOR` wins over `CLICOLOR_FORCE` (no-color.org), in the help too;
+/// `CLICOLOR_FORCE` alone colours a pipe; --color=never wins over both.
 #[test]
 fn no_color_wins() {
     let dir = scratch("colours");
