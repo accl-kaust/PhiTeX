@@ -2926,6 +2926,16 @@ pub(crate) fn page_alone(
         let l = link(v, &f, &line, units, None, &cmds, false, Some(&alone));
         if l.errors.is_empty() && l.fail.is_none() {
             let pdf = l.layout?.exact().ok().map(|b| b.as_ref().clone())?;
+            if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                eprintln!(
+                    "stream: page {} bare {bare} complete {} landed {} missing {:?} needs {:?}",
+                    pc.pj,
+                    found.complete,
+                    alone.landed.get(),
+                    found.missing,
+                    found.cmds.iter().map(|c| c.2).collect::<Vec<_>>()
+                );
+            }
             return Some((pdf, !bare && found.complete && alone.landed.get()));
         }
         if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
@@ -3347,6 +3357,12 @@ impl StreamObjs {
                 continue;
             }
             let Some((k, c)) = self.one(self.by_num.get(&n)) else {
+                if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                    eprintln!(
+                        "stream: object {n}: {} commands claim it",
+                        self.by_num.get(&n).map_or(0, Vec::len)
+                    );
+                }
                 out.complete = false;
                 out.missing.push(n);
                 continue;

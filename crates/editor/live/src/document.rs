@@ -2448,9 +2448,8 @@ mod tests {
     }
 
     /// A XeTeX build streams its pages too: each page's file xdvipdfmx's
-    /// of that page alone, exact where no colour is carried into it and
-    /// it draws with nothing another page makes, drawn then as the build's
-    /// file draws it; a page a colour is carried into streams, not exact.
+    /// of that page alone, the colours the pages before it leave pushed at
+    /// its start; exact, drawn as the build's file draws it.
     /// The build's file the one a build that streams nothing writes.
     #[test]
     fn a_xetex_build_streams_its_pages() {
@@ -2468,9 +2467,15 @@ mod tests {
         };
         let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255} \\count1=0 \\def\\l{\\advance\\count1 by1 \\ifnum\\count1<20000 \\expandafter\\l\\fi}\\l ".to_owned();
         for i in 0..5 {
+            // (a named object made on the first page, drawn with on the
+            // last: made again first in that page's file)
             let c = match i {
+                0 => "\\special{pdf:obj @g << /G1 << /CA 0.5 /ca 0.5 >> >>}",
                 1 => "\\special{color push rgb 1 0 0}",
                 3 => "\\special{color pop}",
+                4 => {
+                    "\\special{pdf:put @resources << /ExtGState @g >>}\\special{pdf:literal /G1 gs}"
+                }
                 _ => "",
             };
             t.push_str(&format!(
@@ -2482,9 +2487,10 @@ mod tests {
         let (d, ev, files) = streamed_build_with("xetex", &t, host(), 1);
         let told = exact_told(&ev);
         assert_eq!(told.len(), 5, "every page streamed: {ev:?}");
-        assert_eq!(told.get(&0), Some(&true), "{ev:?}");
-        assert_eq!(told.get(&1), Some(&true), "{ev:?}");
-        assert_eq!(told.get(&2), Some(&false), "a colour carried in: {ev:?}");
+        // (a colour carried in pushed at its file's start: exact too)
+        for k in 0..5 {
+            assert_eq!(told.get(&k), Some(&true), "page {k}: {ev:?}");
+        }
         let out = d.output().map(|o| o.1.to_vec()).expect("the PDF");
         for (k, (pdf, exact)) in &files {
             let (w, h, px) = pixels(pdf, 0, 1.0);

@@ -1721,51 +1721,137 @@ fn xdv_color_ops(ops: &[Op]) -> Vec<crate::exec::ColorOp> {
     out
 }
 
-/// Whether a XeTeX page's specials draw only with what its own file has:
-/// no `pdf:` special but those that draw nothing, and literal code naming
-/// no resource (a graphics state, a shading, a pattern, a colour space,
-/// an external object, marked content's properties: the document's,
-/// `pdf:put @resources`, made on another page or at the end).
-fn xdv_alone_exact(ops: &[Op]) -> bool {
-    const QUIET: &[&[u8]] = &[
-        b"pdf:bann",
-        b"pdf:eann",
-        b"pdf:ann",
-        b"pdf:dest",
-        b"pdf:out",
-        b"pdf:outline",
-        b"pdf:docinfo",
-        b"pdf:docview",
-        b"pdf:pagesize",
-        b"pdf:bcolor",
-        b"pdf:ecolor",
-        b"pdf:link",
-        b"pdf:tounicode",
-        b"pdf:mapline",
-        b"pdf:mapfile",
+/// A `pdf:` special's command and the rest (`pdf: econtent`'s space
+/// skipped), none for another special.
+fn pdf_special(s: &[u8]) -> Option<(&[u8], &[u8])> {
+    let t = s.trim_ascii().strip_prefix(b"pdf:")?.trim_ascii_start();
+    let n = t
+        .iter()
+        .position(u8::is_ascii_whitespace)
+        .unwrap_or(t.len());
+    Some((&t[..n], t[n..].trim_ascii_start()))
+}
+
+/// Whether a special makes or adds to one of the document's named objects
+/// (`pdf:obj @x`, `pdf:put @x` but the page's own, `pdf:stream @x`,
+/// `pdf:fstream @x`): what a page's file of its own makes again first,
+/// for the pages before it ([`crate::exec::Progress::doc_specials_before`]).
+fn doc_special(s: &[u8]) -> bool {
+    let Some((cmd, rest)) = pdf_special(s) else {
+        return false;
+    };
+    let own = [
+        &b"@resources"[..],
+        b"@thispage",
+        b"@thisannot",
+        b"@prevpage",
+        b"@nextpage",
+        b"@xpos",
+        b"@ypos",
     ];
-    const CODE: &[&[u8]] = &[b"pdf:literal", b"pdf:code", b"pdf:content", b"pdf:direct"];
+    matches!(cmd, b"obj" | b"put" | b"stream" | b"fstream")
+        && rest.starts_with(b"@")
+        && !own.iter().any(|o| rest.starts_with(o))
+}
+
+/// Whether a XeTeX page's specials draw only with what its own file has,
+/// the document's named objects of the pages before it made again first:
+/// none it does not know (a form used that no special of the page makes,
+/// `pdf:uxobj`; a `pdf:` special of another kind).
+fn xdv_alone_exact(ops: &[Op]) -> bool {
+    const KNOWN: &[&[u8]] = &[
+        b"bann",
+        b"eann",
+        b"ann",
+        b"dest",
+        b"out",
+        b"outline",
+        b"docinfo",
+        b"docview",
+        b"pagesize",
+        b"bcolor",
+        b"ecolor",
+        b"link",
+        b"tounicode",
+        b"mapline",
+        b"mapfile",
+        b"obj",
+        b"put",
+        b"stream",
+        b"fstream",
+        b"btrans",
+        b"etrans",
+        b"bcontent",
+        b"econtent",
+        b"literal",
+        b"code",
+        b"content",
+        b"direct",
+        b"image",
+        b"bxobj",
+        b"exobj",
+        b"bxform",
+        b"exform",
+        b"close",
+        b"bead",
+        b"thread",
+        b"names",
+        b"bgcolor",
+        b"setlinewidth",
+        b"setlinedash",
+        b"setmiterlimit",
+        b"setlinejoin",
+        b"setlinecap",
+        b"uxobj",
+        b"usexobj",
+    ];
+    // (the forms the page makes itself: those it may use)
+    let made: Vec<&[u8]> = ops
+        .iter()
+        .filter_map(|o| match o {
+            Op::Special(s) => pdf_special(s),
+            _ => None,
+        })
+        .filter(|(c, _)| matches!(*c, b"bxobj" | b"bxform"))
+        .filter_map(|(_, r)| r.split(u8::is_ascii_whitespace).next())
+        .collect();
     ops.iter().all(|o| {
         let Op::Special(s) = o else { return true };
-        let t = s.trim_ascii();
-        if !t.starts_with(b"pdf:") {
+        let Some((cmd, rest)) = pdf_special(s) else {
             return true;
+        };
+        if matches!(cmd, b"uxobj" | b"usexobj") {
+            let name = rest
+                .split(u8::is_ascii_whitespace)
+                .next()
+                .unwrap_or_default();
+            return made.contains(&name);
         }
-        if QUIET.iter().any(|q| t.starts_with(q)) {
-            return true;
-        }
-        if CODE.iter().any(|q| t.starts_with(q)) {
-            return !t
-                .split(|b| b.is_ascii_whitespace() || b"[]<>()/".contains(b))
-                .any(|w| {
-                    matches!(
-                        w,
-                        b"gs" | b"sh" | b"scn" | b"SCN" | b"cs" | b"CS" | b"Do" | b"BDC" | b"DP"
-                    )
-                });
-        }
-        false
+        KNOWN.contains(&cmd)
     })
+}
+
+/// The specials that put a page's colour stack where `start` says, at its
+/// start: the stack's entries pushed, then its current value (one stack,
+/// xdvipdfmx's; [`xdv_color_ops`]).
+fn color_prelude(start: &crate::exec::ColorStart) -> Vec<Op> {
+    let mut out = Vec::new();
+    for (_, stack, cur) in start {
+        let mut vals: Vec<&Option<Vec<u8>>> = stack.iter().collect();
+        vals.push(cur);
+        // (the bottom one the stack's own unless set: then set first)
+        if let Some(Some(v)) = vals.first() {
+            let mut sp = b"color ".to_vec();
+            sp.extend(v);
+            out.push(Op::Special(sp));
+        }
+        for v in vals.iter().skip(1) {
+            let mut sp = b"color push ".to_vec();
+            sp.extend(v.as_deref().unwrap_or(b"gray 0"));
+            out.push(Op::Special(sp));
+        }
+    }
+    out
 }
 
 impl phitex_defuse::Operation for XdvPage {
@@ -1839,11 +1925,44 @@ impl phitex_defuse::Operation for XdvPage {
             return Ok(ValueId::UNIT);
         };
         progress.page_colors(k, xdv_color_ops(&ops));
+        progress.page_doc_specials(
+            k,
+            ops.iter()
+                .filter_map(|o| match o {
+                    Op::Special(s) if doc_special(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect(),
+        );
         progress.stream_page(k, |start| {
             let hash = phitex_defuse::hash_words(0x7864_7670, &[v.digest(page)]);
-            let pdf = xdv_alone(p, v.instance(), mag, &comment, &ops)?;
-            // (a colour carried in: its file starts from none)
-            let exact = xdv_alone_exact(&ops) && start.is_none_or(Vec::is_empty);
+            // (the document's named objects the pages before it made, made
+            // again first; the colours they leave it pushed)
+            let before = progress.doc_specials_before(k);
+            let mut all: Vec<Op> = before
+                .iter()
+                .flatten()
+                .map(|s| Op::Special(s.clone()))
+                .collect();
+            all.extend(start.map(color_prelude).unwrap_or_default());
+            all.extend(ops.iter().cloned());
+            let pdf = xdv_alone(p, v.instance(), mag, &comment, &all)?;
+            // (exact where both are known; a colour carried in and not
+            // known: drawn from none, told exact later only if none is)
+            let exact = xdv_alone_exact(&ops) && before.is_some();
+            if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") && !exact {
+                let why: Vec<String> = ops
+                    .iter()
+                    .filter_map(|o| match o {
+                        Op::Special(s) if !xdv_alone_exact(std::slice::from_ref(o)) => {
+                            Some(String::from_utf8_lossy(&s[..s.len().min(60)]).into_owned())
+                        }
+                        _ => None,
+                    })
+                    .take(3)
+                    .collect();
+                eprintln!("stream: xdv page {k} not exact: colours {start:?}, specials {why:?}");
+            }
             Some((hash, pdf, exact))
         });
         Ok(ValueId::UNIT)

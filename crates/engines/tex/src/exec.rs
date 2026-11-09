@@ -209,6 +209,9 @@ pub struct Progress {
     on_stream: OnceLock<StreamHook>,
     /// The pages streamed' colors ([`Colors`]).
     colors: std::sync::Mutex<Colors>,
+    /// Each page streamed's specials on the document (XeTeX's named
+    /// objects made or added to: `crate::xdvpdf::XdvPage`), by page from 1.
+    doc_specials: std::sync::Mutex<std::collections::BTreeMap<u64, Vec<Vec<u8>>>>,
     /// Told at every job's start ([`Progress::on_tick`]).
     on_tick: OnceLock<TickHook>,
 }
@@ -361,6 +364,7 @@ impl Progress {
             streaming: std::sync::atomic::AtomicBool::new(false),
             on_stream: OnceLock::new(),
             colors: std::sync::Mutex::default(),
+            doc_specials: std::sync::Mutex::default(),
             on_tick: OnceLock::new(),
         }
     }
@@ -383,6 +387,10 @@ impl Progress {
                 .colors
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Colors::default();
+            self.doc_specials
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
         }
         self.streaming.store(on, Ordering::Relaxed);
     }
@@ -491,6 +499,30 @@ impl Progress {
                 });
             }
         }
+    }
+
+    /// Page `k` (from 1) of this build makes or adds to the document's
+    /// named objects with `specials` (XeTeX's `pdf:obj @x`, `pdf:put @x`,
+    /// `pdf:stream @x`).
+    pub(crate) fn page_doc_specials(&self, k: u64, specials: Vec<Vec<u8>>) {
+        self.doc_specials
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(k, specials);
+    }
+
+    /// The document's specials of pages 1 to `k - 1` in order, where each
+    /// of those pages is known ([`Progress::page_doc_specials`]).
+    pub(crate) fn doc_specials_before(&self, k: u64) -> Option<Vec<Vec<u8>>> {
+        let m = self
+            .doc_specials
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut out = Vec::new();
+        for j in 1..k {
+            out.extend(m.get(&j)?.iter().cloned());
+        }
+        Some(out)
     }
 
     /// Whether a page streamed would be told ([`Progress::on_stream`]).
