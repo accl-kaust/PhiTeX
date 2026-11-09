@@ -6091,6 +6091,41 @@ mod tests {
         assert!(b.cats.contains(&(b'~', 13)));
     }
 
+    /// A long paragraph over many lines is cut again at content-defined
+    /// line starts (`cdc_starts`), each slice but the last ending at one
+    /// (`mids`); an edit in one line moves the cuts next to it only.
+    #[test]
+    fn a_long_paragraph_is_cut_at_content_defined_lines() {
+        let doc = |w: &str| {
+            let mut t = String::from("\\hsize=300pt\n");
+            for k in 0..700 {
+                t.push_str(&format!("w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17));
+                t.push(if k % 10 == 9 { '\n' } else { ' ' });
+            }
+            t.push_str(w);
+            t.push_str("\n\n\\bye\n");
+            t
+        };
+        let cuts = |t: &str| {
+            let an = Analysis::new(t, FileKind::Document, no_defs().clone());
+            let (sl, _, mids) = slices_of(t, &an, FileKind::Document);
+            let ends: Vec<usize> = sl
+                .iter()
+                .zip(&mids)
+                .filter(|x| *x.1)
+                .map(|x| x.0.1)
+                .collect();
+            ends
+        };
+        let a = cuts(&doc("end"));
+        assert!(a.len() >= 3, "{a:?}");
+        // (a word longer on the first line, before every cut: each moves
+        // by the bytes added, none comes or goes)
+        let t = doc("end").replacen("word0\\kern0pt", "woooord0\\kern0pt", 1);
+        let b: Vec<usize> = cuts(&t).into_iter().map(|x| x - 3).collect();
+        assert_eq!(a, b);
+    }
+
     #[test]
     fn control_space_after_a_macro_is_a_region() {
         let t = "\\def\\hello{Hello}\n\\hello\\ world.\n\\bye\n";

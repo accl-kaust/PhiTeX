@@ -61,7 +61,7 @@ impl Run<'_, '_> {
     /// is nameable here and the cut pays (see the module).
     pub(crate) fn text_cut(&mut self) -> bool {
         if let Some(why) = self.text_cut_refusal() {
-            if crate::exec::obs_flag!("PHITEX_CUT_TRACE") && why != "few commands" {
+            if crate::exec::obs_flag!("PHITEX_CUT_TRACE") {
                 eprintln!(
                     "cut: node {} at its text's end after {} commands: none ({why})",
                     self.cx.node().raw(),
