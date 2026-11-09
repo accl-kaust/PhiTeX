@@ -1844,7 +1844,7 @@ impl Run<'_, '_> {
         // level is the text's: for the piece that goes on past the page,
         // [`Run::define_fire_conflict`])
         // (and the rest after it, reading the finisher's definition,
-        // `Run::cont_load`: the binding's level is outside the routine)
+        // `Run::cont_state`: the binding's level is outside the routine)
         let base = if self.fin.is_some() && lvl > 0 && !self.st.defined_here(l) {
             let f = self.loc_field(l);
             self.fin_boxes.retain(|e| e.0 != f);

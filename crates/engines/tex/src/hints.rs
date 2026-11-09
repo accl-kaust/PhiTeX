@@ -1077,12 +1077,12 @@ pub fn paragraph_units(text: &str) -> Vec<(usize, usize)> {
 // loop walks the commands and braces only or jumps over the ranges: a
 // paragraph's plain text is never visited atom by atom)
 #[allow(clippy::too_many_lines)]
-fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usize)>, Vec<bool>) {
+fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usize)>, Vec<bool>, Vec<bool>) {
     if kind != FileKind::Document {
         return if text.is_empty() {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         } else {
-            (vec![(0, text.len())], vec![true])
+            (vec![(0, text.len())], vec![true], vec![false])
         };
     }
     let p = &an.p;
@@ -1500,8 +1500,45 @@ fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usiz
     }
     starts.sort_unstable();
     starts.dedup();
+    // (the content-defined cuts: a long slice is cut again at line
+    // starts the text alone chooses, [`cdc_starts`]; a run reaching such
+    // a slice's end with a paragraph or a box of its own open ends there
+    // and leaves the rest to a continuation, or reads on, `crate::cut`)
+    let cdc = {
+        let ok = |pos: usize| {
+            let k = p.atoms.partition_point(|a| a.start < pos);
+            let Some(a) = p.atoms.get(k) else {
+                return false;
+            };
+            // (the line's first atom on the line itself, at depth 0,
+            // outside conditionals, brace groups, a command's arguments
+            // and every operand; read for sure)
+            let nl = text[pos..].find('\n').map_or(text.len(), |x| pos + x);
+            a.start < nl
+                && !matches!(a.kind, AtomKind::Par | AtomKind::Space)
+                && depth(k) == 0
+                && ifd(k) == 0
+                && !groups.has(k)
+                && !commands.has(k)
+                && !claimed.has(k)
+                && !operand.has(k)
+                && !p
+                    .tokens
+                    .get(a.tok)
+                    .is_some_and(|t| t.tz == pass::Status::Pending)
+        };
+        cdc_starts(text, &starts, ok)
+    };
+    let mut mid_at: Vec<usize> = Vec::new();
+    if !cdc.is_empty() {
+        mid_at.clone_from(&cdc);
+        starts.extend(cdc);
+        starts.sort_unstable();
+        starts.dedup();
+    }
     let mut out = Vec::with_capacity(starts.len());
     let mut pars = Vec::with_capacity(starts.len());
+    let mut mids = Vec::with_capacity(starts.len());
     for (i, &s) in starts.iter().enumerate() {
         let e = starts.get(i + 1).copied().unwrap_or(text.len());
         if e > s {
@@ -1527,9 +1564,88 @@ fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usiz
                 });
             out.push((s, e));
             pars.push(has_par);
+            mids.push(mid_at.binary_search(&e).is_ok());
         }
     }
-    (out, pars)
+    (out, pars, mids)
+}
+
+/// The bytes a content-defined cut needs since the last slice start, at
+/// least ([`cdc_starts`]).
+pub(crate) const CDC_MIN: usize = 1024;
+
+/// One line in this many, by its hash, ends a content-defined chunk.
+const CDC_ONE_IN: u64 = 4;
+
+/// The content-defined cuts of a text's slices (`starts`, sorted): in a
+/// slice of `2 * CDC_MIN` bytes or more, the starts of lines whose line
+/// before hashes to 0 modulo [`CDC_ONE_IN`] (FNV-1a of its last 64
+/// bytes), [`CDC_MIN`] bytes or more past the last start and a quarter of
+/// that before the slice's end, where `ok` says a slice may start (the
+/// pass's reading: depth 0, no conditional, no brace group, no
+/// command's arguments). Only the text near a cut decides it, as
+/// rsync's and restic's chunkers do: an edit moves the cuts next to it
+/// and no other. No cut inside a picture's body (`\begin{tikzpicture}`
+/// to its `\end`): a picture's text is its child's, its parent claims
+/// it whole (`crate::pic`).
+fn cdc_starts(text: &str, starts: &[usize], ok: impl Fn(usize) -> bool) -> Vec<usize> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    for (i, &s) in starts.iter().enumerate() {
+        let e = starts.get(i + 1).copied().unwrap_or(b.len());
+        if e.saturating_sub(s) < 2 * CDC_MIN {
+            continue;
+        }
+        // (the pictures' bodies in the slice)
+        let mut pics: Vec<(usize, usize)> = Vec::new();
+        for name in crate::pic::PICS {
+            let open = format!("\\begin{{{name}}}");
+            let close = format!("\\end{{{name}}}");
+            let mut at = s;
+            while let Some(x) = text[at..e].find(&open) {
+                let a = at + x;
+                let z = text[a..e].find(&close).map_or(e, |y| a + y + close.len());
+                pics.push((a, z));
+                at = z.max(a + 1);
+                if at >= e {
+                    break;
+                }
+            }
+        }
+        let mut last = s;
+        let mut ls = s;
+        while let Some(x) = b[ls..e].iter().position(|&c| c == b'\n') {
+            let nl = ls + x;
+            let pos = nl + 1;
+            if pos >= e {
+                break;
+            }
+            let line = &b[ls..nl];
+            let blank = line.iter().all(|c| matches!(c, b' ' | b'\t' | b'\r'));
+            if !blank
+                && pos - last >= CDC_MIN
+                && e - pos >= CDC_MIN / 4
+                && line_hash(&line[line.len().saturating_sub(64)..]) % CDC_ONE_IN == 0
+                && !pics.iter().any(|&(a, z)| a < pos && pos < z)
+                && ok(pos)
+            {
+                out.push(pos);
+                last = pos;
+            }
+            ls = pos;
+        }
+    }
+    out
+}
+
+/// FNV-1a of `bytes`.
+fn line_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &c in bytes {
+        h ^= u64::from(c);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
 }
 
 /// Whether the atoms of `text[s..e]` open and close their groups
@@ -3535,7 +3651,7 @@ fn analyse_reusing(
         crate::timeline::note("hints: the pass (lex, atoms, classify)", t0.elapsed());
     }
     let t0 = std::time::Instant::now();
-    let (slices, pars) = slices_of(text, &an, kind);
+    let (slices, pars, mids) = slices_of(text, &an, kind);
     if tm {
         crate::timeline::note("hints: the slices", t0.elapsed());
     }
@@ -3797,6 +3913,12 @@ fn analyse_reusing(
                     .filter(|&(_, ne)| an.slice_claims_nothing(k0, ne))
                     .map(|_| 1),
             };
+            // (a slice ending at a content-defined cut, mid-paragraph
+            // often: its run ends there, its rest a continuation, or
+            // reads on into the next, its run's to say, `crate::cut`)
+            if mids[i] {
+                b.claim = None;
+            }
         }
         slice_hints.push(intern(&h));
     }
@@ -5977,7 +6099,7 @@ mod tests {
         d.harvest(&plain, kind_of(&plain, FileKind::Package), 0);
         let defs: Defs = Arc::new(d);
         let an = Analysis::new(t, FileKind::Document, defs);
-        let (sl, pars) = slices_of(t, &an, FileKind::Document);
+        let (sl, pars, _) = slices_of(t, &an, FileKind::Document);
         eprintln!("{sl:?} {pars:?}");
         let h = t.find("world").expect("world");
         let k = sl

@@ -225,6 +225,12 @@ pub struct Options {
     /// `None` takes `PHITEX_STUCK_MB` (0: never), else the smaller of half
     /// the machine's memory and three quarters of its cgroup's limit.
     pub memory_limit: Option<u64>,
+    /// The commands a run of the document's text does before it may end
+    /// at its text's end with a paragraph or a box of its own open, its
+    /// rest a continuation node (`crate::cut`): `None` the default
+    /// (`PHITEX_CUT_MIN`, else 3000); `u64::MAX` never. The output is the
+    /// same whatever it is.
+    pub cut_min: Option<u64>,
     /// The threads the engine's batches run on: `None` takes
     /// `PHITEX_THREADS`, else the available parallelism; `Some(1)` runs
     /// them in order. The output is the same at any count.
@@ -1028,6 +1034,7 @@ impl Default for Options {
             },
             stuck_after: None,
             memory_limit: None,
+            cut_min: crate::exec::env_str!("PHITEX_CUT_MIN").and_then(|x| x.parse().ok()),
             threads: None,
             progress: None,
             edits: None,
@@ -1892,12 +1899,9 @@ pub struct Stats {
     /// Attempts that resumed a stopped run at its blocked read, and that
     /// started over though one was kept (a read changed).
     pub resumed: u64,
-    /// Runs of an edited node that went on from a checkpoint of their
-    /// last run (`crate::resume`); runs cut off at one.
-    pub resumed_at_mark: u64,
-    /// Runs that ended at a checkpoint of their last run reached in its
-    /// state (the cutoff, `crate::resume`): that run's products stand.
-    pub cut_offs: u64,
+    /// Runs that ended at their text's end with a continuation
+    /// (`crate::cut`).
+    pub text_cuts: u64,
     /// Runs of the text's pieces begun after a run claimed the rest of
     /// the input at a fatal error (none: the job ends there, §93).
     pub starts_after_fatal: u64,
@@ -3355,8 +3359,8 @@ impl Graph {
             origins: origins_on,
             stream: stream_on,
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            resumed_edits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            cut_offs: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            text_cuts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            cut_min: Arc::new(std::sync::atomic::AtomicU64::new(crate::cut::CUT_MIN)),
             fatal_starts: Arc::default(),
             siblings_pulled: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
@@ -4293,13 +4297,9 @@ impl Graph {
                 .ops
                 .units_folded
                 .load(std::sync::atomic::Ordering::Relaxed);
-            stats.resumed_at_mark += self
+            stats.text_cuts += self
                 .ops
-                .resumed_edits
-                .swap(0, std::sync::atomic::Ordering::Relaxed);
-            stats.cut_offs += self
-                .ops
-                .cut_offs
+                .text_cuts
                 .swap(0, std::sync::atomic::Ordering::Relaxed);
             // (the evaluation's: the next one's fatal run, if any, sets it
             // again)
@@ -5998,6 +5998,9 @@ fn prelude_env(prelude: Option<&str>, opts: &Options) -> (Arc<Cached>, Option<Fo
     if let Some(x) = &opts.xetex {
         let _ = g.ops.xe.set(x.clone());
     }
+    if let Some(n) = opts.cut_min {
+        g.ops.cut_min.store(n, std::sync::atomic::Ordering::Relaxed);
+    }
     g.ops.fin_predict.store(
         opts.finisher_predictions,
         std::sync::atomic::Ordering::Relaxed,
@@ -6453,6 +6456,9 @@ impl Build {
         );
         if let Some(x) = &opts.xetex {
             let _ = g.ops.xe.set(x.clone());
+        }
+        if let Some(n) = opts.cut_min {
+            g.ops.cut_min.store(n, std::sync::atomic::Ordering::Relaxed);
         }
         g.ops.fin_predict.store(
             opts.finisher_predictions,

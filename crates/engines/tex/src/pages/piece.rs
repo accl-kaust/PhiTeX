@@ -7,7 +7,7 @@
 //!   placed after it, after the finishers of the pages firing there,
 //!   keyed by the piece and the candidate, its continuation a field the
 //!   piece defines ([`cont_field`], [`Run::cont_encode`],
-//!   [`Run::cont_load`]). A cut is how the text is divided into nodes;
+//!   [`Run::cont_state`]). A cut is how the text is divided into nodes;
 //!   no page decides it.
 //! - At its end a piece gives its profile and its items as units
 //!   ([`Run::contribute_units`]) and defines what it leaves the next
@@ -935,7 +935,9 @@ impl Run<'_, '_> {
         if fin {
             return self.define_rtn(raw);
         }
-        if raw.is_empty() {
+        // (a run cut at its text's end has its rest to place, items or
+        // none, `crate::cut`)
+        if raw.is_empty() && !self.text_cut {
             return Ok(());
         }
         // (a piece whose run ended at a candidate: the resume is its to
@@ -1378,8 +1380,15 @@ impl Run<'_, '_> {
         }
         // (what a page firing at an earlier candidate reads there: the
         // names the run defined after it, its locals at the cut being
-        // later than it, `Run::preload_candidate`)
-        let (reads, defs) = self.check_data(Some(k));
+        // later than it, `Run::preload_candidate`; a cut at the text's
+        // end is at no candidate: the last one the run passed is its last
+        // if nothing happened after it, as at any piece's end)
+        let last = if self.text_cut {
+            self.last_candidate()
+        } else {
+            Some(k)
+        };
+        let (reads, defs) = self.check_data(last);
         self.pin_reaching_page_params(&mut raw)?;
         let (cont, locals) = self.cont_encode()?;
         if crate::exec::obs_flag!("PHITEX_CONT_DUMP") {
@@ -1412,7 +1421,11 @@ impl Run<'_, '_> {
                 }
             }
         }
-        self.contribute_units(&raw, Some(k), reads, defs, locals)?;
+        // (a text cut with no item for the main list: no units, as a
+        // piece with none has)
+        if !raw.is_empty() {
+            self.contribute_units(&raw, last, reads, defs, locals)?;
+        }
         let flags = i64::from(self.top) | (i64::from(self.doc) << 1);
         let pid = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
         // (the siblings the rest of the piece will take where the piece's
@@ -1963,6 +1976,10 @@ impl Run<'_, '_> {
             v.int(i64::from(self.no_pull)),
             v.int(i64::from(self.rec_load)),
             v.int(i64::from(self.cond_loaded || self.cond_stop)),
+            // (XeTeX's classes of the last character and of a space: a
+            // cut inside a paragraph, `crate::cut`)
+            v.int(i64::from(self.ic_prev)),
+            v.int(i64::from(self.ic_space)),
         ]);
         let cont = v.list(vec![
             v.list(frames),
@@ -1992,7 +2009,8 @@ impl Run<'_, '_> {
     }
 
     /// The continuation `x`'s text as the run's input, from its start,
-    /// with each segment's file line ([`Run::cont_load`]).
+    /// with each segment's file line (a resume's start, before
+    /// [`Run::cont_state`]).
     pub(crate) fn cont_text(&mut self, x: ValueId) -> R<()> {
         let v = self.v;
         let xs = list_of(v, x);
@@ -2011,18 +2029,12 @@ impl Run<'_, '_> {
         Ok(())
     }
 
-    /// A resume piece's start: the continuation `x` ([`Run::cont_encode`])
-    /// loaded; the base-level values the open groups' bindings hide
-    /// checked against the engine's reaching here (a global definition
-    /// between the cut and here, the finisher's, replaces the binding and
-    /// makes the groups' saves inert, §283).
-    pub(crate) fn cont_load(&mut self, x: ValueId, pid: ValueId) -> R<()> {
-        self.cont_text(x)?;
-        self.cont_state(x, pid)
-    }
-
-    /// [`Run::cont_load`] past the text: the state, the nest, the
-    /// conditionals and the rest the continuation carries.
+    /// A resume piece's start past its text ([`Run::cont_text`]): the
+    /// state, the nest, the conditionals and the rest the continuation
+    /// carries ([`Run::cont_encode`]); the base-level values the open
+    /// groups' bindings hide checked against the engine's reaching here
+    /// (a global definition between the cut and here, the finisher's,
+    /// replaces the binding and makes the groups' saves inert, §283).
     #[allow(clippy::too_many_lines)]
     pub(crate) fn cont_state(&mut self, x: ValueId, pid: ValueId) -> R<()> {
         let v = self.v;
@@ -2221,6 +2233,10 @@ impl Run<'_, '_> {
         self.no_pull = n(16) != 0;
         self.rec_load = n(17) != 0;
         self.cond_loaded = n(18) != 0;
+        if m.len() > 20 {
+            self.ic_prev = i32::try_from(n(19)).unwrap_or(0);
+            self.ic_space = i32::try_from(n(20)).unwrap_or(0);
+        }
         Ok(())
     }
 }
@@ -2323,10 +2339,10 @@ impl Operation for Resume {
             // (on from a checkpoint of its last run on this continuation,
             // `crate::resume`; checkpoints taken as it goes)
             r.cont_text(cont)?;
-            if !r.resume_edit()? {
-                r.cont_state(cont, a(1))?;
+            r.cont_state(cont, a(1))?;
+            if crate::cut::check() {
+                r.cut_check(cont);
             }
-            r.ck_begin();
             r.run_all()
         });
         if crate::exec::prof_flag!("PHITEX_TEX_TIME") && t0.elapsed().as_millis() > 200 {

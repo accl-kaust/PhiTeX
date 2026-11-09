@@ -51,7 +51,7 @@ use crate::val::{Tok, int_of, list_of, toks_of, toks_value};
 
 /// The box environments a run places as children: their names, as
 /// `\begin{name}` names them. Pictures do not nest.
-const PICS: &[&str] = &["tikzpicture", "pgfpicture"];
+pub(crate) const PICS: &[&str] = &["tikzpicture", "pgfpicture"];
 
 /// The key of the parent's bindings ([`Run::pic_locals`]) holding its
 /// appends pending at the picture (`Run::appending`).
@@ -335,49 +335,6 @@ fn trace() -> bool {
 }
 
 impl Run<'_, '_> {
-    /// A picture's child's own state as a checkpoint carries it
-    /// ([`Run::pic_ck_restore`]): the parent's items it took, its
-    /// streams and the parent's steps it started from; unit in another
-    /// run.
-    pub(crate) fn pic_ck(&self) -> ValueId {
-        let v = self.v;
-        let Some(p) = self.pic_child.as_ref() else {
-            return ValueId::UNIT;
-        };
-        v.list(vec![
-            v.int(i64::try_from(p.took).unwrap_or(0)),
-            v.list(p.streams.clone()),
-            v.list(
-                p.base_steps
-                    .iter()
-                    .map(|&(f, c)| v.list(vec![f.0, v.int(i64::from(c))]))
-                    .collect(),
-            ),
-        ])
-    }
-
-    /// [`Run::pic_ck`]'s state put back in a child going on from a
-    /// checkpoint (its appends pending come back with the run's,
-    /// `Run::ck_run_restore`).
-    pub(crate) fn pic_ck_restore(&mut self, x: ValueId) {
-        let v = self.v;
-        let Some(p) = self.pic_child.as_mut() else {
-            return;
-        };
-        let [took, streams, steps] = list_of(v, x)[..] else {
-            return;
-        };
-        p.took = usize::try_from(int_of(v, took)).unwrap_or(0);
-        p.streams = list_of(v, streams);
-        p.base_steps = list_of(v, steps)
-            .into_iter()
-            .filter_map(|e| match list_of(v, e)[..] {
-                [f, c] => Some((Field(f), i32::try_from(int_of(v, c)).unwrap_or(0))),
-                _ => None,
-            })
-            .collect();
-    }
-
     /// At `\begin` read by the command loop: whether the picture's body
     /// was taken from the input and the child's output put in its place
     /// (true), or the run goes on inline (false: no picture here, a
@@ -978,8 +935,8 @@ impl Run<'_, '_> {
                 l.par = (ys.get(5).copied() != Some(ValueId::UNIT)).then(|| (m(5), m(6)));
                 l.clang = m(7);
                 l.prev_graf = m(8);
-                l.mode_line = ys.get(9).and_then(|&x| crate::resume::line_mark_of(v, x));
-                l.mode_place = ys.get(10).and_then(|&x| crate::resume::place_of(v, x));
+                l.mode_line = ys.get(9).and_then(|&x| crate::cut::line_mark_of(v, x));
+                l.mode_place = ys.get(10).and_then(|&x| crate::cut::place_of(v, x));
                 l.ag = toks_of(v, ys.get(12).copied());
             }
         }
@@ -1272,23 +1229,15 @@ impl Run<'_, '_> {
         let (appending, steps, appending_vals) = self.pic_pending()?;
         let conds0 = (self.conds.clone(), self.if_codes.clone());
         self.input.append_text(fs);
-        // (asked again for a read that moved, its text the same: on from
-        // its last run's last checkpoint before that read, as a piece's
-        // run goes on, `crate::resume`; the checkpoint holds the steps it
-        // started from, the parent's items it took, its streams and its
-        // appends pending)
-        if !self.resume_edit()? {
-            self.appending = appending;
-            self.appending_vals = appending_vals;
-            for (loc, f, c, g) in steps {
-                if self.st.add(v, loc, c, g)
-                    && let Some(p) = self.pic_child.as_mut()
-                {
-                    p.base_steps.push((f, c));
-                }
+        self.appending = appending;
+        self.appending_vals = appending_vals;
+        for (loc, f, c, g) in steps {
+            if self.st.add(v, loc, c, g)
+                && let Some(p) = self.pic_child.as_mut()
+            {
+                p.base_steps.push((f, c));
             }
         }
-        self.ck_begin();
         let res = self.run_all();
         let why = match res {
             Err(Halt::Stop(s)) => return Err(Halt::Stop(s)),
@@ -1296,9 +1245,6 @@ impl Run<'_, '_> {
             Err(Halt::Hole) => Some("a hole".to_owned()),
             Err(Halt::Fatal) => Some("a fatal error".to_owned()),
             Err(Halt::Cut | Halt::Recut(_)) => Some("a cut".to_owned()),
-            // (cut off: its state met its last run's at a checkpoint, the
-            // reads after it holding; that run's output stands)
-            Err(Halt::Same) => return Err(Halt::Same),
             Ok(()) => self.pic_shape(lid, &conds0),
         };
         if let Some(w) = why {
@@ -1461,8 +1407,6 @@ impl Run<'_, '_> {
         if let Some(p) = self.pic_child.as_mut() {
             p.streams.clear();
         }
-        // (no checkpoint of a refused run stands for the next)
-        self.ck = None;
         self.pic_out = Some(v.list(vec![v.int(1), v.str(why)]));
     }
 
@@ -1559,8 +1503,8 @@ impl Run<'_, '_> {
                 packed,
                 v.int(l.clang),
                 v.int(l.prev_graf),
-                crate::resume::line_mark_value(v, l.mode_line),
-                crate::resume::place_value(v, l.mode_place.as_ref()),
+                crate::cut::line_mark_value(v, l.mode_line),
+                crate::cut::place_value(v, l.mode_place.as_ref()),
                 v.list(l.extra),
                 toks_value(v, &l.ag),
             ])
