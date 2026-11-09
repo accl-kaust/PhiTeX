@@ -787,7 +787,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             l.refuse(&e);
         }
         ui.error(&e);
-        std::process::exit(crate::EXIT_FAILED);
+        std::process::exit(crate::EXIT_USAGE);
     });
     if let Some(l) = &lsp {
         l.accept(
@@ -834,7 +834,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             if let Some(l) = &lsp {
                 l.refuse(&e);
             }
-            std::process::exit(crate::EXIT_FAILED);
+            std::process::exit(crate::EXIT_INTERNAL);
         });
     spin.done();
     // (no log laid out after a build; the PDF file appended an update
@@ -1086,7 +1086,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     let watching = RefCell::new(Watching {
         w: watcher(&root, wanted.clone(), ours.clone(), tx.clone()).unwrap_or_else(|e| {
             ui.error(&format!("can't watch {}: {e}", root.display()));
-            std::process::exit(crate::EXIT_FAILED);
+            std::process::exit(crate::EXIT_INTERNAL);
         }),
         root: canonical(&root),
         outside: HashSet::new(),
@@ -2402,7 +2402,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             ui.line(&st.dim(&format!("phitex watch: {why}: a new session")));
             if let Err(e) = std::env::set_current_dir(&dir) {
                 ui.error(&format!("can't enter {}: {e}", dir.display()));
-                std::process::exit(crate::EXIT_FAILED);
+                std::process::exit(crate::EXIT_INTERNAL);
             }
             kept.rx = Some(rx);
             kept.view = view;

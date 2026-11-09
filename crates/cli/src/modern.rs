@@ -39,9 +39,11 @@ browser; each PDF is the one a clean build makes. PhiTeX never stops to
 ask for input, and never runs an external TeX, BibTeX or \\write18
 command.
 
-Exit status, as pdflatex's: 0 built without errors (warnings allowed),
-1 anything else (TeX's errors, a usage, configuration or file error, or
-PhiTeX itself failing; standard error says which).";
+Exit status: 0 done (warnings allowed); 1 the document has errors (as
+pdflatex's 1); 2 PhiTeX could not start: a usage error, a wrong setting,
+a file not found, no TeX Live; 3 PhiTeX failed: the engine stopped, a
+file could not be written, the network (upgrade, Shelf). Standard error
+says which. Under an engine's name (pdflatex, --compat) web2c's 0 and 1.";
 
 /// `--help`'s last lines: where the settings are, and `--help-all`.
 fn short_after_help() -> String {
@@ -132,8 +134,7 @@ pub fn version_text() -> &'static str {
     disable_help_flag = true,
     styles = STYLES,
     color = ColorChoice::Auto,
-    arg_required_else_help = true,
-    disable_help_subcommand = true
+    arg_required_else_help = true
 )]
 struct Cli {
     #[command(subcommand)]
@@ -172,6 +173,15 @@ enum Sub {
     },
     /// What is new in this version
     News,
+    /// Shell completions: phitex completions bash > ~/.local/share/bash-completion/completions/phitex
+    ///
+    /// The script for SHELL on standard output. bash: into
+    /// ~/.local/share/bash-completion/completions/phitex; zsh: a file
+    /// _phitex on $fpath; fish: ~/.config/fish/completions/phitex.fish.
+    Completions {
+        #[arg(value_name = "SHELL")]
+        shell: clap_complete::Shell,
+    },
     /// Install the latest release
     ///
     /// Its signature checked, for an install made by phitex.org/install.sh.
@@ -489,6 +499,11 @@ impl Cli {
                 o.output_dir = output_dir;
             }
             Some(Sub::News) => o.command = Some(Command::News),
+            Some(Sub::Completions { shell }) => {
+                let mut cmd = <Cli as clap::CommandFactory>::command();
+                clap_complete::generate(shell, &mut cmd, "phitex", &mut std::io::stdout());
+                std::process::exit(0);
+            }
             Some(Sub::Upgrade) => o.command = Some(Command::Upgrade),
             Some(Sub::Config { key, value, unset }) => {
                 o.command = Some(Command::Config);
@@ -1117,7 +1132,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         Ok(j) => j,
         Err(e) => {
             ui.error(&e);
-            return crate::EXIT_FAILED;
+            return crate::EXIT_USAGE;
         }
     };
     for n in session::waiting_notes(&job) {
@@ -1132,7 +1147,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         Err(e) => {
             spin.done();
             ui.error(&e);
-            return crate::EXIT_FAILED;
+            return crate::EXIT_INTERNAL;
         }
     };
     // (a package that could not be had, `--shelf`: said)
@@ -1149,7 +1164,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         Err(m) => {
             spin.done();
             ui.failed("the build", &m);
-            return crate::EXIT_FAILED;
+            return crate::EXIT_INTERNAL;
         }
     };
     status.set("writing the outputs");
@@ -1159,7 +1174,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
         Err(e) => {
             spin.done();
             ui.error(&e);
-            return crate::EXIT_FAILED;
+            return crate::EXIT_INTERNAL;
         }
     };
     spin.done();
@@ -1192,7 +1207,17 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     if r.out.errors.is_empty() {
         crate::star::built(Path::new(&t.file), ui, o.lsp);
     }
-    let code = i32::from(!r.out.errors.is_empty());
+    // (the engine's own failure, not the document's errors: 3)
+    let code = if r
+        .out
+        .errors
+        .iter()
+        .any(|e| !phitex_live::session::transcript_error(e))
+    {
+        crate::EXIT_INTERNAL
+    } else {
+        i32::from(!r.out.errors.is_empty())
+    };
     // (the process exits next: the session's engine and tables, hundreds
     // of megabytes, are left to it instead of freed one by one)
     std::mem::forget(s);
@@ -1298,7 +1323,7 @@ fn clean(t: &Target, ui: &Ui) -> i32 {
 fn clean_all(ui: &Ui) -> ! {
     let c = crate::cache::Cache::open(None).unwrap_or_else(|e| {
         ui.error(&e);
-        std::process::exit(crate::EXIT_FAILED);
+        std::process::exit(crate::EXIT_INTERNAL);
     });
     let dir = crate::cache::home_relative(&c.dir);
     match c.clear_all() {
@@ -1311,7 +1336,7 @@ fn clean_all(ui: &Ui) -> ! {
         }
         Err(e) => {
             ui.error(&format!("{dir}: {e}"));
-            std::process::exit(crate::EXIT_FAILED);
+            std::process::exit(crate::EXIT_INTERNAL);
         }
     }
     std::process::exit(0);
@@ -1324,11 +1349,7 @@ pub fn main(args: &[String]) -> ! {
         Ok(o) => o,
         Err(e) => {
             let _ = e.print();
-            std::process::exit(if e.use_stderr() {
-                crate::EXIT_FAILED
-            } else {
-                0
-            });
+            std::process::exit(if e.use_stderr() { crate::EXIT_USAGE } else { 0 });
         }
     };
     crate::ui::set_color(o.color);
@@ -1347,7 +1368,7 @@ pub fn main(args: &[String]) -> ! {
         ui.error(
             "no command given: build, watch, clean, config, news or upgrade (`phitex --help`)",
         );
-        std::process::exit(crate::EXIT_FAILED);
+        std::process::exit(crate::EXIT_USAGE);
     };
     if command == Command::News {
         crate::news::print(o.json);
@@ -1366,7 +1387,7 @@ pub fn main(args: &[String]) -> ! {
                 }
                 Err(e) => {
                     ui.error(&e);
-                    std::process::exit(crate::EXIT_FAILED);
+                    std::process::exit(crate::EXIT_USAGE);
                 }
             }
         }
@@ -1384,7 +1405,7 @@ pub fn main(args: &[String]) -> ! {
                 Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
                 Err(e) => {
                     ui.error(&e);
-                    std::process::exit(crate::EXIT_FAILED);
+                    std::process::exit(crate::EXIT_USAGE);
                 }
             }
             std::process::exit(0);
@@ -1396,7 +1417,7 @@ pub fn main(args: &[String]) -> ! {
             }
             Err(e) => {
                 ui.error(&e);
-                std::process::exit(crate::EXIT_FAILED);
+                std::process::exit(crate::EXIT_USAGE);
             }
         }
         std::process::exit(0);
@@ -1417,7 +1438,7 @@ pub fn main(args: &[String]) -> ! {
     let lsp = if o.lsp && command == Command::Watch {
         if o.json {
             ui.error("--lsp and --json both speak on standard output: one of them");
-            std::process::exit(crate::EXIT_FAILED);
+            std::process::exit(crate::EXIT_USAGE);
         }
         let l = crate::lsp::Lsp::begin(&mut o.file);
         if l.wants_main() {
@@ -1457,7 +1478,7 @@ pub fn main(args: &[String]) -> ! {
                 st.dim("for the whole cache")
             ));
         }
-        std::process::exit(crate::EXIT_FAILED);
+        std::process::exit(crate::EXIT_USAGE);
     });
     for w in &t.warnings {
         ui.warning(w);

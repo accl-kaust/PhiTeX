@@ -692,3 +692,41 @@ fn config_checks_values() {
     assert_eq!(row("synctex")["from"], "project");
     assert!(text(&run(&dir, &["config"]).stdout).contains("ignored"));
 }
+
+/// The exit statuses: 0 done, 1 the document's errors, 2 PhiTeX could
+/// not start (a usage error, a missing file, a wrong setting), as
+/// `--help-all` says; `phitex completions SHELL` writes a script,
+/// `phitex help` and `phitex help build` the help.
+#[test]
+fn exit_statuses_completions_help() {
+    let dir = scratch("exits");
+    std::fs::write(dir.join("good.tex"), TINY).expect("the document");
+    std::fs::write(dir.join("bad.tex"), "\\undefinedcs\n\\end\n").expect("the document");
+    let code = |args: &[&str]| run(&dir, args).status.code();
+    assert_eq!(code(&["build", "--ini", "--etex", "good.tex"]), Some(0));
+    assert_eq!(code(&["build", "--ini", "--etex", "bad.tex"]), Some(1));
+    assert_eq!(code(&["build", "nothere.tex"]), Some(2));
+    assert_eq!(code(&["build", "--frob", "good.tex"]), Some(2));
+    assert_eq!(code(&["bulid", "good.tex"]), Some(2));
+    assert_eq!(code(&["config", "engine", "banana"]), Some(2));
+    assert_eq!(code(&["--compat=pdflatex", "-frob", "x.tex"]), Some(1));
+    let help = text(&run(&dir, &["--help-all"]).stdout);
+    assert!(
+        help.contains("2 PhiTeX could not start") && help.contains("3 PhiTeX failed"),
+        "{help}"
+    );
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let out = run(&dir, &["completions", shell]);
+        assert!(out.status.success(), "{shell}: {}", text(&out.stderr));
+        let script = text(&out.stdout);
+        assert!(
+            script.contains("phitex") && script.contains("watch"),
+            "{shell}"
+        );
+    }
+    assert_eq!(code(&["completions", "tcsh"]), Some(2));
+    let out = run(&dir, &["help"]);
+    assert!(out.status.success() && text(&out.stdout).contains("Commands:"));
+    let out = run(&dir, &["help", "build"]);
+    assert!(out.status.success() && text(&out.stdout).contains("--engine"));
+}

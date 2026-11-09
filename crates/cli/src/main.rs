@@ -74,10 +74,20 @@ pub fn version() -> &'static str {
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-/// The exit status of any failure, as pdflatex's (web2c exits 0 or 1):
-/// TeX's errors, a usage, configuration or file error, PhiTeX's own
-/// failure. Which one it was is on standard error.
+/// The exit status of any failure under an engine's name (`pdflatex`,
+/// `--compat`) and of `bibtex`, `makeindex`, as web2c's: 1. The modern
+/// command line's statuses: 0 done, 1 the document has errors
+/// ([`EXIT_FAILED`] too), 2 PhiTeX could not start ([`EXIT_USAGE`]),
+/// 3 PhiTeX failed ([`EXIT_INTERNAL`]); `phitex --help-all` says so.
 pub const EXIT_FAILED: i32 = 1;
+
+/// `phitex`: a usage error (an unknown option, a missing argument), a
+/// setting that is wrong, a file that is not there, no TeX Live.
+pub const EXIT_USAGE: i32 = 2;
+
+/// `phitex`: PhiTeX itself failed (the engine stopped, a file it could
+/// not write, the network for `upgrade` and Shelf).
+pub const EXIT_INTERNAL: i32 = 3;
 
 /// When the process reached `main` (the cold build's timeline begins
 /// here, `PHITEX_TEX_TIME`).

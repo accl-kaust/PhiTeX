@@ -271,7 +271,7 @@ pub fn upgrade(ui: &Ui, no_confirm: bool) -> i32 {
         Ok(r) => r,
         Err(e) => {
             ui.error(&e);
-            return crate::EXIT_FAILED;
+            return crate::EXIT_INTERNAL;
         }
     };
     let v = r.version.clone();
@@ -294,7 +294,7 @@ pub fn upgrade(ui: &Ui, no_confirm: bool) -> i32 {
              update it the way it was installed (curl -fsSL https://phitex.org/install.sh | sh, \
              cargo install, or your package manager)"
         ));
-        return crate::EXIT_FAILED;
+        return crate::EXIT_USAGE;
     };
     if !no_confirm {
         use std::io::IsTerminal as _;
@@ -327,7 +327,7 @@ pub fn upgrade(ui: &Ui, no_confirm: bool) -> i32 {
         }
         Err(e) => {
             ui.error(&e);
-            crate::EXIT_FAILED
+            crate::EXIT_INTERNAL
         }
     }
 }
