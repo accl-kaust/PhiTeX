@@ -1193,15 +1193,16 @@ fn watch_lsp() {
         json!({"event": "select", "file": "doc.tex", "from": start + 5, "to": start + 12}),
         "{select}"
     );
-    // (the pages' origins, made at the watch's first idle point after a
-    // build: asked once its `origins` event said so, as a browser asks;
-    // the cursor may come before that idle point, and the follow is made
-    // from the page text then. Asked at once, the request met "not made
-    // yet" when the cursor was taken first, accl 24974)
-    if !viewer.events.iter().any(|e| e["event"] == "origins") {
-        viewer.until(|v| v["event"] == "origins");
-    }
-    let o = viewer.ask(&json!({"id": 4, "op": "origins", "page": 1}));
+    // (a page's origins, made when asked, that page alone: pending
+    // until the watch has made them, asked again as a browser asks)
+    let end = Instant::now() + Duration::from_secs(60);
+    let o = loop {
+        let o = viewer.ask(&json!({"id": 4, "op": "origins", "page": 1}));
+        if o["json"]["pending"] != json!(true) || Instant::now() > end {
+            break o;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
     assert!(
         o["json"]["files"]
             .as_array()
