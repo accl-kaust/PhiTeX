@@ -112,6 +112,14 @@ impl Edits {
                 }
                 return Applied::Nothing;
             }
+            // (the pages a source place's lines went to, when asked)
+            Ask::PageOf { file, at } => {
+                if let Some(v) = viewer {
+                    let pages = s.pages_of_source(&file, at);
+                    v.put_page_of(file, at, pages);
+                }
+                return Applied::Nothing;
+            }
             // (a page's origins, made for that page alone, when asked)
             Ask::Origins(k) => {
                 if let Some(v) = viewer {

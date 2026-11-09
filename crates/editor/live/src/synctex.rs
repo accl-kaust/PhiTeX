@@ -21,7 +21,19 @@ use phitex_tex::{Build, PageOrigins};
 /// their record counts.
 #[derive(Default)]
 pub struct Writer {
-    pages: Vec<(Option<Arc<PageOrigins>>, u64, usize, Arc<[u8]>)>,
+    /// Per page: the origins and key its member was made from, its record
+    /// count, its member, and its sheet's text's hash (a page whose
+    /// origins moved but whose sheet is the same text: its member kept,
+    /// not compressed again).
+    pages: Vec<(Option<Arc<PageOrigins>>, u64, usize, Arc<[u8]>, u64)>,
+}
+
+/// A sheet's text's hash.
+fn text_hash(t: &str) -> u64 {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut h = std::hash::DefaultHasher::new();
+    t.hash(&mut h);
+    h.finish()
 }
 
 /// What page `p`'s sheet is made from besides its origins: the line
@@ -184,11 +196,24 @@ impl Writer {
     /// `JOB.synctex.gz` of build `b`, its files named from directory
     /// `dir`; `None` where the build kept no origins.
     pub fn write(&mut self, b: &Build, dir: &Path) -> Option<Vec<u8>> {
+        self.write_until(b, dir, &|| false).flatten()
+    }
+
+    /// [`Writer::write`], given up between two pages once `stop` says so
+    /// (`None`: an event waits; the pages' answers and members made so far
+    /// kept, the next call goes on from them).
+    #[allow(clippy::option_option)]
+    pub fn write_until(
+        &mut self,
+        b: &Build,
+        dir: &Path,
+        stop: &dyn Fn() -> bool,
+    ) -> Option<Option<Vec<u8>>> {
         let t0 = std::time::Instant::now();
-        let snap = b.origins_snapshot();
+        let snap = b.origins_snapshot_until(stop)?;
         let (pages, files) = (&snap.pages, &snap.files);
         if pages.iter().all(Option::is_none) {
-            return None;
+            return Some(None);
         }
         phitex_tex::timeline::note("synctex: the pages' origins", t0.elapsed());
         let lines: Vec<Option<Vec<usize>>> = snap
@@ -223,32 +248,45 @@ impl Writer {
         pre.push_str("Output:pdf\nMagnification:1000\nUnit:1\nX Offset:0\nY Offset:0\nContent:\n");
         let mut out = gzip(pre.as_bytes());
         let mut count = 0;
-        let mut fresh = 0;
+        let (mut fresh, mut made) = (0, 0);
         self.pages.truncate(pages.len());
         for (k, p) in pages.iter().enumerate() {
+            if k > 0 && stop() {
+                return None;
+            }
             let h = p.as_ref().map_or(0, |p| sheet_key(k, p, &lines));
             // (the same answer, kept by the build while it is the same)
             let same = |q: &Option<Arc<PageOrigins>>| matches!((q, p), (Some(a), Some(b)) if Arc::ptr_eq(a, b));
-            match self.pages.get(k) {
-                Some((q, x, n, m)) if *x == h && same(q) => {
-                    count += n;
-                    out.extend_from_slice(m);
-                }
+            if let Some((q, x, n, m, _)) = self.pages.get(k)
+                && *x == h
+                && same(q)
+            {
+                count += n;
+                out.extend_from_slice(m);
+                continue;
+            }
+            made += 1;
+            let (text, n) = match p {
+                Some(p) => sheet(k + 1, p, &lines),
+                None => (format!("{{{0}\n}}{0}\n", k + 1), 0),
+            };
+            count += n;
+            let th = text_hash(&text);
+            // (another answer, the same sheet: an edit moved its bytes,
+            // not its lines; the member kept)
+            let m: Arc<[u8]> = match self.pages.get(k) {
+                Some((.., m, t)) if *t == th => m.clone(),
                 _ => {
                     fresh += 1;
-                    let (text, n) = match p {
-                        Some(p) => sheet(k + 1, p, &lines),
-                        None => (format!("{{{0}\n}}{0}\n", k + 1), 0),
-                    };
-                    count += n;
-                    let m: Arc<[u8]> = gzip(text.as_bytes()).into();
-                    out.extend_from_slice(&m);
-                    if k < self.pages.len() {
-                        self.pages[k] = (p.clone(), h, n, m);
-                    } else {
-                        self.pages.push((p.clone(), h, n, m));
-                    }
+                    gzip(text.as_bytes()).into()
                 }
+            };
+            out.extend_from_slice(&m);
+            let e = (p.clone(), h, n, m, th);
+            if k < self.pages.len() {
+                self.pages[k] = e;
+            } else {
+                self.pages.push(e);
             }
         }
         out.extend(gzip(
@@ -257,11 +295,11 @@ impl Writer {
         phitex_tex::timeline::note("synctex: the file", t0.elapsed());
         if std::env::var_os("PHITEX_ORIGINS_TIME").is_some() {
             eprintln!(
-                "synctex: {:?} in all, {fresh} of {} pages compressed",
+                "synctex: {:?} in all, {made} of {} pages' sheets made, {fresh} compressed",
                 t0.elapsed(),
                 pages.len()
             );
         }
-        Some(out)
+        Some(Some(out))
     }
 }

@@ -32,6 +32,10 @@ use crate::watch::{Applied, Edits, diagnostics, splice_utf16, tex_text, viewer_p
 /// host's, each as it happens.
 type Emit = Arc<Mutex<Box<dyn FnMut(Value) + Send>>>;
 
+/// The work a step gives the SyncTeX file before it hands back to its
+/// host ([`Document::step`]).
+const SYNCTEX_SLICE: std::time::Duration = std::time::Duration::from_millis(8);
+
 /// A session with its viewer and the editor's buffers.
 pub struct Document {
     session: Session,
@@ -309,9 +313,13 @@ impl Document {
         if again {
             self.build(&why.join(", "), came);
         } else if self.session.synctex_due() && !self.viewer.has_asks() {
-            // (then the SyncTeX file, from those origins, off the typing
-            // path too)
-            if let Err(e) = self.session.write_synctex() {
+            // (then the SyncTeX file, off the typing path too, in a step's
+            // share: given up between two pages once an ask waits or the
+            // step has had `SYNCTEX_SLICE`, the rest the next step's)
+            let t = Instant::now();
+            let viewer = &self.viewer;
+            let stop = || viewer.has_asks() || t.elapsed() >= SYNCTEX_SLICE;
+            if let Err(e) = self.session.write_synctex_until(&stop) {
                 eprintln!("phitex: {e}");
             }
         } else if self.diagnostics_due && !self.viewer.has_asks() {
