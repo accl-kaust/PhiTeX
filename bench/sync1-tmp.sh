@@ -24,6 +24,7 @@ for l in "${bins[@]}"; do
   if [ "${AMS:-1}" = 1 ]; then for j in 8 16; do
     rm -rf $w/amsh $w/amsh-cold && cp -a bench/amsldoc $w/amsh
     PHITEX_CACHE_DIR=$w/cache-$l timeout 1200 python3 -I scripts/accl/gate-edits.py $w/bins/$l/phitex $w/amsh amsldoc.tex $j 20 $j $r/ams-$l-j$j.json --exact-pdf > /dev/null 2>&1
+    [ -f $w/amsh/amsldoc.synctex.gz ] && md5sum < $w/amsh/amsldoc.synctex.gz | sed "s|^|amsedit $l -j$j synctex md5 |"
     python3 -I -c 'import json,sys;r=json.load(open(sys.argv[1]));x=sorted(r["edit_walls_s"]);print(f"amsedit {sys.argv[2]} -j{sys.argv[3]}: "+r["verdict"]+f" median {1000*x[len(x)//2]:.1f} ms")' $r/ams-$l-j$j.json $l $j
   done; fi
 done

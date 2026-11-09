@@ -441,12 +441,25 @@ pub(crate) struct Node {
 
 /// The shingle index over the nodes' words: 4 words in a row (and, for
 /// pages too short for those, single words of four characters or more),
-/// to the nodes that have them (at most [`CAP`]; more: common).
+/// to the nodes that have them (more than [`CAP`]: common, never a
+/// vote). The postings are by node (its raw id), kept from one answer to
+/// the next ([`Postings`]): an edit takes the nodes it changed out and
+/// puts them in again, the others' entries stay; `nodes` are the nodes
+/// in the document's order, `order` each one's place there.
 #[derive(Default)]
 pub(crate) struct Index {
     pub nodes: Vec<Node>,
-    shingles: FxHashMap<u64, Vec<u32>>,
-    singles: FxHashMap<u64, Vec<u32>>,
+    order: FxHashMap<u64, u32>,
+    post: Arc<Postings>,
+}
+
+/// Each shingle's nodes and each long word's (distinct, by raw id), and
+/// the scan each node is in by ([`Index`]).
+#[derive(Default, Clone)]
+pub(crate) struct Postings {
+    shingles: FxHashMap<u64, Vec<u64>>,
+    singles: FxHashMap<u64, Vec<u64>>,
+    scans: FxHashMap<u64, Arc<NodeScan>>,
 }
 
 const CAP: usize = 8;
@@ -471,39 +484,118 @@ fn skip_one(s: &[u64]) -> [u64; 3] {
     })
 }
 
-impl Index {
-    pub(crate) fn new(nodes: Vec<Node>) -> Index {
-        let mut ix = Index {
-            nodes,
-            ..Index::default()
+/// A node's shingles (four words in a row, and four of five in a row
+/// with one of the middle three left out: a word no page shows, a
+/// label's, between them) and its words of four characters or more,
+/// each once.
+fn node_keys(sc: &NodeScan) -> (Vec<u64>, Vec<u64>) {
+    let hs: Vec<u64> = sc.words.iter().map(|w| w.2).collect();
+    let mut sh: Vec<u64> = hs.windows(4).map(shingle).collect();
+    sh.extend(hs.windows(5).flat_map(skip_one));
+    sh.sort_unstable();
+    sh.dedup();
+    let mut si: Vec<u64> = sc
+        .words
+        .iter()
+        .filter(|w| w.1 - w.0 >= 4)
+        .map(|w| w.2)
+        .collect();
+    si.sort_unstable();
+    si.dedup();
+    (sh, si)
+}
+
+impl Postings {
+    /// Node `raw` (scan `sc`) put in.
+    fn put(&mut self, raw: u64, sc: &Arc<NodeScan>) {
+        let (sh, si) = node_keys(sc);
+        for h in sh {
+            self.shingles.entry(h).or_default().push(raw);
+        }
+        for h in si {
+            self.singles.entry(h).or_default().push(raw);
+        }
+        self.scans.insert(raw, sc.clone());
+    }
+
+    /// Node `raw` taken out.
+    fn take(&mut self, raw: u64) {
+        let Some(sc) = self.scans.remove(&raw) else {
+            return;
         };
-        for (k, n) in ix.nodes.iter().enumerate() {
-            let k = u32::try_from(k).unwrap_or(u32::MAX);
-            let hs: Vec<u64> = n.scan.words.iter().map(|w| w.2).collect();
-            for s in hs.windows(4) {
-                add(&mut ix.shingles, shingle(s), k);
-            }
-            // (and four of five in a row, the middle one left out: a word
-            // no page shows, a label's, between them)
-            for s in hs.windows(5) {
-                for x in skip_one(s) {
-                    add(&mut ix.shingles, x, k);
-                }
-            }
-            for w in &n.scan.words {
-                if w.1 - w.0 >= 4 {
-                    add(&mut ix.singles, w.2, k);
+        let (sh, si) = node_keys(&sc);
+        for (m, hs) in [(&mut self.shingles, sh), (&mut self.singles, si)] {
+            for h in hs {
+                if let Some(e) = m.get_mut(&h) {
+                    e.retain(|&r| r != raw);
+                    if e.is_empty() {
+                        m.remove(&h);
+                    }
                 }
             }
         }
-        ix
     }
 }
 
-fn add(m: &mut FxHashMap<u64, Vec<u32>>, h: u64, k: u32) {
-    let e = m.entry(h).or_default();
-    if e.last() != Some(&k) && e.len() <= CAP {
-        e.push(k);
+impl Index {
+    /// The index of `nodes` (in the document's order) from the postings
+    /// `post` made last: the nodes gone or changed taken out, the new or
+    /// changed put in. The postings are those [`Index`] made afresh would
+    /// hold: each shingle's nodes as a set, read only where they are
+    /// [`CAP`] or fewer.
+    pub(crate) fn update(nodes: Vec<Node>, mut post: Arc<Postings>) -> Index {
+        let order: FxHashMap<u64, u32> = nodes
+            .iter()
+            .enumerate()
+            .map(|(k, n)| (n.raw, u32::try_from(k).unwrap_or(u32::MAX)))
+            .collect();
+        let stale: Vec<u64> = post
+            .scans
+            .iter()
+            .filter(|(raw, sc)| {
+                order
+                    .get(raw)
+                    .is_none_or(|&k| !Arc::ptr_eq(&nodes[k as usize].scan, sc))
+            })
+            .map(|(&raw, _)| raw)
+            .collect();
+        let fresh: Vec<&Node> = nodes
+            .iter()
+            .filter(|n| {
+                post.scans
+                    .get(&n.raw)
+                    .is_none_or(|sc| !Arc::ptr_eq(sc, &n.scan))
+            })
+            .collect();
+        if !stale.is_empty() || !fresh.is_empty() {
+            let p = Arc::make_mut(&mut post);
+            for raw in stale {
+                p.take(raw);
+            }
+            for n in fresh {
+                p.put(n.raw, &n.scan);
+            }
+        }
+        Index { nodes, order, post }
+    }
+
+    /// The nodes (by place) shingle `h` names, where they are [`CAP`] or
+    /// fewer.
+    fn shingle_nodes(&self, h: u64) -> Option<impl Iterator<Item = u32> + '_> {
+        self.post
+            .shingles
+            .get(&h)
+            .filter(|ns| ns.len() <= CAP)
+            .map(|ns| ns.iter().filter_map(|r| self.order.get(r).copied()))
+    }
+
+    /// The same for single word `h`, where they are two or fewer.
+    fn single_nodes(&self, h: u64) -> Option<impl Iterator<Item = u32> + '_> {
+        self.post
+            .singles
+            .get(&h)
+            .filter(|ns| ns.len() <= 2)
+            .map(|ns| ns.iter().filter_map(|r| self.order.get(r).copied()))
     }
 }
 
@@ -660,24 +752,22 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
         .map(shingle)
         .chain(whash.windows(5).flat_map(skip_one));
     for sh in page_shingles {
-        if let Some(ns) = ix.shingles.get(&sh)
-            && ns.len() <= CAP
-        {
+        if let Some(ns) = ix.shingle_nodes(sh) {
+            let ns: Vec<u32> = ns.collect();
             #[allow(clippy::cast_precision_loss)]
             let w = 1.0 / ns.len() as f64;
-            for &n in ns {
+            for n in ns {
                 *votes.entry(n).or_default() += w;
             }
         }
     }
     if votes.is_empty() {
-        for h in &whash {
-            if let Some(ns) = ix.singles.get(h)
-                && ns.len() <= 2
-            {
+        for &h in &whash {
+            if let Some(ns) = ix.single_nodes(h) {
+                let ns: Vec<u32> = ns.collect();
                 #[allow(clippy::cast_precision_loss)]
                 let w = 1.0 / ns.len() as f64;
-                for &n in ns {
+                for n in ns {
                     *votes.entry(n).or_default() += w;
                 }
             }
@@ -1664,8 +1754,20 @@ impl State {
             let g = self.index.locked();
             g.as_ref().filter(|x| x.0 == key).map(|x| x.1.clone())
         };
+        // (another set of nodes: the index of the last one updated, the
+        // nodes the edit changed taken out and put in again, not made
+        // anew from every node's words: para4000's edit, 180 ms a time)
         let index = index.unwrap_or_else(|| {
-            let ix = Arc::new(Index::new(nodes));
+            let post = self
+                .index
+                .locked()
+                .take()
+                .map(|(_, ix)| match Arc::try_unwrap(ix) {
+                    Ok(ix) => ix.post,
+                    Err(ix) => ix.post.clone(),
+                })
+                .unwrap_or_default();
+            let ix = Arc::new(Index::update(nodes, post));
             *self.index.locked() = Some((key, ix.clone()));
             ix
         });

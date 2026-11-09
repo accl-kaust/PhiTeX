@@ -530,6 +530,10 @@ pub struct Session {
     pub view_layout: bool,
     /// `JOB.synctex.gz`'s members made last (`-synctex`).
     synctex: Mutex<crate::synctex::Writer>,
+    /// A watch's `JOB.synctex.gz` left for idle ([`Session::write_synctex`]):
+    /// never on the typing path, an edit before it drops it (the next
+    /// build's is written instead).
+    synctex_due: std::sync::atomic::AtomicBool,
     /// The main text's lines counted by block ([`LineMarks`]).
     lines: LineMarks,
 }
@@ -659,6 +663,7 @@ impl Session {
             watching: false,
             view_layout: false,
             synctex: Mutex::default(),
+            synctex_due: std::sync::atomic::AtomicBool::new(false),
             lines: LineMarks::default(),
         }
     }
@@ -2114,26 +2119,64 @@ impl Session {
         }
         // (`-synctex`: from the pages' glyph origins, the files named from
         // the main file's directory)
-        if self.job.synctex
-            && let Some(b) = &self.build
-        {
-            let root = match self.job.path.parent() {
-                Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-                _ => PathBuf::from("."),
-            };
-            let root = self.host.canonical(&root);
-            let gz = self
-                .synctex
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .write(b, &root);
-            if let Some(gz) = gz {
+        // (a watch's at idle, [`Session::write_synctex`]: the pages'
+        // origins matched off the typing path)
+        if self.job.synctex && self.build.is_some() {
+            if self.watching {
+                self.synctex_due
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            } else if let Some(gz) = self.synctex_bytes() {
                 put(&format!("{}.synctex.gz", self.job.jobname), &gz)?;
+                phitex_tex::timeline::lap("write: the SyncTeX file");
             }
-            phitex_tex::timeline::lap("write: the SyncTeX file");
         }
         phitex_tex::timeline::lap("write: the log, the files TeX wrote");
         Ok(Written { main, files })
+    }
+
+    /// `JOB.synctex.gz`'s bytes for the build as it is now (none when
+    /// unchanged since the last made).
+    fn synctex_bytes(&self) -> Option<Vec<u8>> {
+        let b = self.build.as_ref()?;
+        let root = match self.job.path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let root = self.host.canonical(&root);
+        self.synctex
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .write(b, &root)
+    }
+
+    /// Whether a watch's `JOB.synctex.gz` waits for idle.
+    #[must_use]
+    pub fn synctex_due(&self) -> bool {
+        self.synctex_due.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A watch's `JOB.synctex.gz`, left by the last build for idle, written
+    /// now: the file and its bytes' hash (none when none was due or it
+    /// is unchanged).
+    ///
+    /// # Errors
+    /// The sink's.
+    pub fn write_synctex(&self) -> Result<Option<(PathBuf, u64)>, String> {
+        if !self
+            .synctex_due
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            return Ok(None);
+        }
+        let Some(gz) = self.synctex_bytes() else {
+            return Ok(None);
+        };
+        let h = tex::fingerprint(&gz);
+        let p = self
+            .sink
+            .put(&format!("{}.synctex.gz", self.job.jobname), &gz, h)?;
+        phitex_tex::timeline::lap("idle: the SyncTeX file");
+        Ok(Some((p, h)))
     }
 
     /// The build's transcript as it is now, the job's `.log` (laid out

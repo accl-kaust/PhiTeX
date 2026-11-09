@@ -1178,6 +1178,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     }
                     Err(e) => ui.error(&e),
                 }
+                match s.write_synctex() {
+                    Ok(Some((p, _))) => ui.line(&st.dim(&format!("wrote {}", p.display()))),
+                    Ok(None) => {}
+                    Err(e) => ui.error(&e),
+                }
             }
         }
         // (the records the builds changed, stored before the watch ends;
@@ -1191,6 +1196,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if o.log
             && let Err(e) = s.write_log()
         {
+            ui.error(&e);
+        }
+        // (a SyncTeX file the watch left for idle, written before it ends)
+        if let Err(e) = s.write_synctex() {
             ui.error(&e);
         }
         ui.finish();
@@ -1999,8 +2008,27 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
+        // (then the SyncTeX file, from those origins: never on the typing
+        // path, dropped for the next build's when an edit comes first)
+        if s.synctex_due() && !origins_due.get() && held.is_empty() {
+            match rx.try_recv() {
+                Ok(e) => held.push_back(e),
+                Err(mpsc::TryRecvError::Empty) => {
+                    let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
+                    match s.write_synctex() {
+                        Ok(Some((p, h))) => {
+                            let p = p.canonicalize().unwrap_or_else(|_| root.join(&p));
+                            mine.insert(p, h);
+                        }
+                        Ok(None) => {}
+                        Err(e) => ui.error(&e),
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
         // (then, nothing waiting still, the diagnostics left for later)
-        if diags_due.get().is_some() && !origins_due.get() && held.is_empty() {
+        if diags_due.get().is_some() && !origins_due.get() && !s.synctex_due() && held.is_empty() {
             match rx.try_recv() {
                 Ok(e) => held.push_back(e),
                 Err(mpsc::TryRecvError::Empty) => late_diagnostics(&s),

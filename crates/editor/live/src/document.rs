@@ -317,6 +317,12 @@ impl Document {
             // the pages asked after the build before them, not after
             // them, Grail's 21 ms a keystroke)
             self.origins_now();
+        } else if self.session.synctex_due() && !self.viewer.has_asks() {
+            // (then the SyncTeX file, from those origins, off the typing
+            // path too)
+            if let Err(e) = self.session.write_synctex() {
+                eprintln!("phitex: {e}");
+            }
         } else if self.diagnostics_due && !self.viewer.has_asks() {
             // (then, in a step of their own, the diagnostics the build
             // left for later: low priority, never on the typing path; an
@@ -330,7 +336,7 @@ impl Document {
     /// [`Document::step`] does it when nothing is asked; a host that
     /// steps the document steps it again, after what waits.
     pub fn pending(&self) -> bool {
-        self.origins_due || self.diagnostics_due
+        self.origins_due || self.session.synctex_due() || self.diagnostics_due
     }
 
     /// The diagnostics the last build left for later, made and given to
