@@ -1237,6 +1237,8 @@ fn a_cut_paragraph_is_asked_again_for_a_read_at_its_start() {
 /// that macro's definition before it runs the last continuation, not the
 /// box from its start; the output and log are a cold build's.
 #[test]
+// (the box opened by `\bgroup`, as an environment's is: a brace group
+// of the text is one slice, never cut, `hints::cdc_starts`)
 fn a_box_over_paragraphs_and_a_file_is_cut_inside() {
     use std::fmt::Write as _;
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-anywhere");
@@ -1253,7 +1255,7 @@ fn a_box_over_paragraphs_and_a_file_is_cut_inside() {
     let prelude = common::plain();
     let doc = |m: &str| {
         format!(
-            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{\\begingroup\\count1=7 {}\n\n{}\n\n\\input inner\n\n{}\n\nend \\late.\\endgroup}}\n\\box1\n\n\\bye\n",
+            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox\\bgroup \\begingroup\\count1=7 {}\n\n{}\n\n\\input inner\n\n{}\n\nend \\late.\\endgroup\\egroup\n\\box1\n\n\\bye\n",
             words(700, "w"),
             words(700, "v"),
             words(900, "u")
@@ -1306,7 +1308,7 @@ fn a_run_is_cut_inside_its_own_conditional() {
     let prelude = common::plain();
     let doc = |m: &str| {
         format!(
-            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{\\begingroup\\count1=7 \\ifnum\\count1=7 {}\n\n{}\n\n\\ifodd\\count1 \\input inner\n\n{}\n\nend \\late.\\else odd never\\fi\\else never\\fi\\endgroup}}\n\\box1\n\n\\bye\n",
+            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox\\bgroup \\begingroup\\count1=7 \\ifnum\\count1=7 {}\n\n{}\n\n\\ifodd\\count1 \\input inner\n\n{}\n\nend \\late.\\else odd never\\fi\\else never\\fi\\endgroup\\egroup\n\\box1\n\n\\bye\n",
             words(700, "w"),
             words(700, "v"),
             words(900, "u")
@@ -1458,7 +1460,7 @@ fn a_run_is_cut_after_a_child_it_made() {
     let prelude = common::plain();
     let doc = |m: &str| {
         format!(
-            "\\pdfoutput=1 \\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{{}\n\n\\shipout\\hbox{{early page}}\n\n{}\n\nend \\late.}}\n\\box1\n\n\\bye\n",
+            "\\pdfoutput=1 \\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox\\bgroup {}\n\n\\shipout\\hbox{{early page}}\n\n{}\n\nend \\late.\\egroup\n\\box1\n\n\\bye\n",
             words(300, "w"),
             words(1500, "v")
         )
