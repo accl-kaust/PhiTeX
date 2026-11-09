@@ -3633,6 +3633,145 @@ fn watch_reads_a_changed_bst_and_bib() {
     let _ = child.wait();
 }
 
+/// Waits for build `n`'s output written as the exact file (when the
+/// watch idles, `--idle`).
+fn exact_written(lines: &mut impl Iterator<Item = String>, n: u64, seen: &mut Vec<String>) {
+    loop {
+        let w = until(lines, "event", &"written".into(), seen);
+        if w["build"] == n && w["exact"] == true {
+            return;
+        }
+    }
+}
+
+/// A `.bib` edited while watching, through each way a change comes (the
+/// file on disk, the editor's buffer over the viewer's `edit` and
+/// `set_file`), is the bibliography tool's input at the next build: each
+/// build's PDF a clean build's of the same files (BibTeX and biber). The
+/// frontends' report: an entry's title replaced, the PDF kept the old
+/// one until the session was opened again.
+fn watch_bib_edits(name: &str, preamble: &str, back: &str) {
+    let _one = one();
+    let dir = scratch(name);
+    let bib =
+        |t: &str| format!("@book{{x, author = {{Ann Author}}, title = {{{t}}}, year = 2001}}\n");
+    let doc = format!(
+        "\\documentclass{{article}}\n{preamble}\\begin{{document}}\nSee \\cite{{x}}.\n{back}\\end{{document}}\n"
+    );
+    std::fs::write(dir.join("refs.bib"), bib("Tea")).expect("the database");
+    std::fs::write(dir.join("doc.tex"), &doc).expect("the document");
+    let clean = |title: &str| {
+        let d = scratch(&format!("{name}-clean"));
+        std::fs::write(d.join("refs.bib"), bib(title)).expect("the database");
+        std::fs::write(d.join("doc.tex"), &doc).expect("the document");
+        let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &d)
+            .args(["build", "doc.tex"])
+            .output()
+            .expect("phitex build runs");
+        assert!(
+            out.status.success(),
+            "the clean build failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read(d.join("doc.pdf")).expect("the clean PDF")
+    };
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--write", "--json", "--idle", "200", "doc.tex"])
+        .env("XDG_RUNTIME_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let url = until(&mut lines, "event", &"viewer".into(), &mut seen)["url"]
+        .as_str()
+        .expect("the viewer's url")
+        .to_owned();
+    let cold = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(cold["ok"], true, "{cold}");
+    let pdf = || std::fs::read(dir.join("doc.pdf")).expect("the watch's PDF");
+    exact_written(&mut lines, 1, &mut seen);
+    let tea = clean("Tea");
+    assert!(
+        pdf() == tea,
+        "the cold build: {}",
+        first_difference(&pdf(), &tea)
+    );
+    // (the file on disk changed)
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(dir.join("refs.bib"), bib("Juice")).expect("the edit");
+    let ev = until(&mut lines, "build", &2.into(), &mut seen);
+    assert_eq!(ev["ok"], true, "{ev}");
+    exact_written(&mut lines, 2, &mut seen);
+    let want = clean("Juice");
+    assert!(want != tea, "the title is in the PDF");
+    assert!(
+        pdf() == want,
+        "the file on disk: {}",
+        first_difference(&pdf(), &want)
+    );
+    // (the viewer's edit: the title replaced in the editor's buffer)
+    let at = bib("Juice").find("Juice").expect("the title");
+    let _s1 = ws_send(
+        &url,
+        &format!(
+            "{{\"id\":1,\"op\":\"edit\",\"file\":\"refs.bib\",\"start\":{at},\"end\":{},\"text\":\"Coffee\"}}",
+            at + 5
+        ),
+    );
+    let ev = until(&mut lines, "build", &3.into(), &mut seen);
+    assert_eq!(ev["ok"], true, "{ev}");
+    exact_written(&mut lines, 3, &mut seen);
+    let want = clean("Coffee");
+    assert!(
+        pdf() == want,
+        "the viewer's edit: {}",
+        first_difference(&pdf(), &want)
+    );
+    // (the editor's whole buffer)
+    let _s2 = ws_send(
+        &url,
+        &format!(
+            "{{\"id\":2,\"op\":\"set_file\",\"file\":\"refs.bib\",\"text\":{}}}",
+            json_string(&bib("Milk"))
+        ),
+    );
+    let ev = until(&mut lines, "build", &4.into(), &mut seen);
+    assert_eq!(ev["ok"], true, "{ev}");
+    exact_written(&mut lines, 4, &mut seen);
+    let want = clean("Milk");
+    assert!(
+        pdf() == want,
+        "the editor's buffer: {}",
+        first_difference(&pdf(), &want)
+    );
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+}
+
+#[test]
+fn watch_bib_edits_bibtex() {
+    watch_bib_edits(
+        "watch-bib-bibtex",
+        "",
+        "\\bibliographystyle{plain}\n\\bibliography{refs}\n",
+    );
+}
+
+#[test]
+fn watch_bib_edits_biber() {
+    watch_bib_edits(
+        "watch-bib-biber",
+        "\\usepackage[backend=biber]{biblatex}\n\\addbibresource{refs.bib}\n",
+        "\\printbibliography\n",
+    );
+}
+
 /// A project's `phitex.toml` runs nothing, whatever it names: `\\write18`'s
 /// any command only with `--shell-escape` or the user's own setting; the
 /// viewer `--open` starts only the user's; each key ignored is said.
