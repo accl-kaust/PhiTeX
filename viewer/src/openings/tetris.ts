@@ -47,10 +47,24 @@ export function tetris(box: HTMLElement, dark: boolean): Opening {
   const cv = el.querySelector("canvas")!, ctx = cv.getContext("2d")!;
   const colors = [dark ? "#9fb7e0" : INK.light, ...RIBBON];
   const dpr = devicePixelRatio || 1;
-  const W = (cv.width = box.clientWidth * dpr), H = (cv.height = box.clientHeight * dpr);
-  // (the well: the sheet's left three fifths, above the ticker)
-  const cell = (W * 0.56) / COLS, ROWS = Math.floor((H * 0.8) / cell), ox = W * 0.05, oy = W * 0.06;
-  let grid: (string | null)[][] = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+  // (the well: the sheet's left three fifths, above the ticker. Its size the
+  // sheet's as it is each frame: the sheet may have none yet when the opening
+  // starts (Overleaf's pane laid out after it), and eases to the page's
+  // aspect; read once, a sheet of no size kept a well of no size, empty)
+  let W = 0, H = 0, cell = 0, ROWS = 0, ox = 0, oy = 0;
+  let grid: (string | null)[][] = [];
+  const fit = (): boolean => {
+    const w = Math.round(box.clientWidth * dpr), h = Math.round(box.clientHeight * dpr);
+    if (!w || !h) return false;
+    if (w === W && h === H) return true;
+    [W, H] = [(cv.width = w), (cv.height = h)];
+    [cell, ox, oy] = [(W * 0.56) / COLS, W * 0.05, W * 0.06];
+    // (rows gained or lost at the top: what has landed stays on the floor)
+    const rows = Math.max(4, Math.floor((H * 0.8) / cell));
+    grid = rows >= grid.length ? [...Array.from({ length: rows - grid.length }, () => Array(COLS).fill(null)), ...grid] : grid.slice(grid.length - rows);
+    ROWS = rows;
+    return true;
+  };
   type Piece = { cells: number[][]; x: number; y: number; c: string };
   const make = (): Piece => {
     const cells = SHAPES[Math.floor(Math.random() * SHAPES.length)];
@@ -71,6 +85,7 @@ export function tetris(box: HTMLElement, dark: boolean): Opening {
     }
     return best;
   };
+  fit();
   let piece = make(), next = make(), target = aim(piece), acc = 0, clearing: number[] = [], flash = 0, out = -1, speed = 45;
   const block = (x: number, y: number, s: number, c: string, k = 0) => {
     const g = s * 0.08, h = (s - 2 * g) * (1 - 0.8 * k);
@@ -87,6 +102,13 @@ export function tetris(box: HTMLElement, dark: boolean): Opening {
   };
   const t0 = performance.now();
   const stopLoop = loop((t, dt) => {
+    const rows = ROWS;
+    if (!fit()) return;
+    // (a well grown or shrunk: the falling piece aimed again, from the top if it no longer fits)
+    if (rows !== ROWS) {
+      if (!fits(piece, piece.x, piece.y)) piece.y = -2;
+      target = aim(piece);
+    }
     ctx.clearRect(0, 0, W, H);
     // (the well's floor and walls, faint)
     ctx.fillStyle = dark ? "#3d4047" : "#e7e9ee";
@@ -134,12 +156,22 @@ export function tetris(box: HTMLElement, dark: boolean): Opening {
     // (setting the page: the pieces fall faster)
     speed = what === "Typesetting" ? 28 : 45;
   };
+  // (the ticker: a hint crosses the whole sheet before the next one takes its
+  // place, at the end of its pass; the panel's next hint comes sooner (7 s,
+  // the pass is 14 s), so the latest one waits and those between are skipped)
+  const tick = $(".tick span");
+  let ticking = false, waiting: string | null = null;
+  tick.addEventListener("animationiteration", () => {
+    if (waiting) (tick.textContent = waiting), (waiting = null);
+  });
   const hint = (text: string) => {
-    const s = $(".tick span");
-    s.textContent = `Did you know? ${text}`;
-    s.style.animation = "none";
-    void s.offsetWidth;
-    s.style.animation = "";
+    const t = `Did you know? ${text}`;
+    if (ticking) return void (waiting = t);
+    ticking = true;
+    tick.textContent = t;
+    tick.style.animation = "none";
+    void tick.offsetWidth;
+    tick.style.animation = "";
   };
   return ending(el, () => ((out = performance.now() - t0), el.classList.add("out"), 560), stopLoop, { step, hint });
 }
