@@ -147,7 +147,10 @@ A clean build sends each page as it ships, before the build settles
   the page shipped, and is in the file under the number the build's file
   gives it (images from `\pdfximage`, with their soft masks and an
   included page's resources; `\pdfxform` forms; `\pdfobj` objects, and
-  what each of them names in turn). The pages before it also left the
+  what each of them names in turn; of the objects its
+  `\pdfpageresources` names, those of the kinds its content draws with:
+  a page drawing with no graphics state does not need pgf's). The pages
+  before it also left the
   colour stacks as they found them. `false` when the page draws with
   something not complete yet (a `\pdfobj reserveobjnum` filled later,
   objects written at `\AtEndDocument`, such as pgf's shared ExtGState,

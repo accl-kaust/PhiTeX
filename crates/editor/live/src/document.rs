@@ -2348,7 +2348,8 @@ mod tests {
     /// useobjnum` at the end): a graphics state, a shading, a pattern, a
     /// colour space, an external object. Each page streams all the same,
     /// not exact, and is drawn without what it lacks; a page that draws
-    /// with none of them is drawn as the build's file draws it.
+    /// with none of them (its resources name them all the same) is exact,
+    /// drawn as the build's file draws it.
     #[test]
     fn pages_drawing_with_later_objects_stream_inexact() {
         let mut t = PDF_HEAD.to_owned();
@@ -2378,7 +2379,9 @@ mod tests {
         t.push_str("\\setbox0\\hbox{\\pdfrefobj\\gs\\pdfrefobj\\sh\\pdfrefobj\\pat\\pdfrefobj\\cs\\pdfrefobj\\xo}\\shipout\\box0 \\end\n");
         let (d, ev, files) = streamed_build(&t, Arc::new(Nothing), 1);
         let told = exact_told(&ev);
-        for k in 0..6u64 {
+        // (the first draws with none of what its resources name: exact)
+        assert_eq!(told.get(&0), Some(&true), "page 0: {ev:?}");
+        for k in 1..6u64 {
             assert_eq!(told.get(&k), Some(&false), "page {k}: {ev:?}");
         }
         let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");

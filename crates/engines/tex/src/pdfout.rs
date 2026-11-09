@@ -2798,8 +2798,8 @@ impl phitex_defuse::Operation for PdfPage {
                     p.stream_page(k, || {
                         let shown = v.int(shown_id(kx.raw(), Some(&h)).cast_signed());
                         let hash = phitex_defuse::hash_words(0x7061_6765, &[v.digest(shown)]);
-                        made.get()?;
-                        let (pdf, exact) = page_alone(v, kx, &pc, &units, &self.objs)?;
+                        let content = made.get().map(|m| m.0.content())?;
+                        let (pdf, exact) = page_alone(v, kx, &pc, &units, &self.objs, content)?;
                         if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
                             eprintln!(
                                 "stream: page {k} exact {exact}, {} bytes, {} commands kept",
@@ -2838,6 +2838,7 @@ pub(crate) fn page_alone(
     pc: &PagePiece,
     units: &FxHashMap<i64, ValueId>,
     objs: &Mutex<StreamObjs>,
+    content: &[u8],
 ) -> Option<(Vec<u8>, bool)> {
     let mut params = PdfParams::default();
     page_params(v, &mut params, &pc.params);
@@ -2873,8 +2874,11 @@ pub(crate) fn page_alone(
             _ => {}
         }
     }
+    // (of the objects its resources name, those of the kinds its content
+    // draws with: pgf names its graphics states, patterns and shadings on
+    // every page, a page drawing with none of them does not need them)
     if let Some(t) = &params.page_resources {
-        refs_in(t, &mut need);
+        resource_refs(t, content, &mut need, &mut named);
     }
     for t in [&params.page_attr, &params.pages_attr]
         .into_iter()
@@ -2959,6 +2963,79 @@ struct Alone<'a> {
 fn pad_objects(st: &mut PdfState, n: usize) {
     while st.objects_numbered() < n.min(STREAM_FLOOR_MAX) {
         st.new_objnum();
+    }
+}
+
+/// The objects resource dictionary text `t` (`\pdfpageresources`, the
+/// inside of the page's `/Resources`) names, by the kind of resource
+/// they are under (`/ExtGState`, `/Pattern`, ...): those of a kind content
+/// stream `c` draws with added to `need` (an operator that takes one:
+/// `gs`, `sh`, `scn`, `cs`, `Do`, `BDC`, `Tf`; a string's text that looks
+/// like one counts too), the others to `named`.
+fn resource_refs(t: &[u8], c: &[u8], need: &mut Vec<i64>, named: &mut Vec<i64>) {
+    let ops: FxHashSet<&[u8]> = c
+        .split(|b| b.is_ascii_whitespace() || b"[]<>()/".contains(b))
+        .filter(|w| !w.is_empty())
+        .collect();
+    // (a page whose content was not kept, one not written as plain text
+    // and rules: every kind drawn with, to be safe)
+    let all = c.is_empty();
+    let uses = |kind: &[u8]| -> bool {
+        let has = |o: &[u8]| all || ops.contains(o);
+        match kind {
+            b"ExtGState" => has(b"gs"),
+            b"Shading" => has(b"sh") || has(b"scn") || has(b"SCN"),
+            b"Pattern" => has(b"scn") || has(b"SCN"),
+            b"ColorSpace" => has(b"cs") || has(b"CS"),
+            b"XObject" => has(b"Do"),
+            b"Properties" => has(b"BDC") || has(b"DP"),
+            b"Font" => has(b"Tf"),
+            // (an entry of no kind a content stream names: drawn with, to be safe)
+            _ => true,
+        }
+    };
+    // (the words, the dictionaries' and arrays' brackets apart)
+    let mut words: Vec<&[u8]> = Vec::new();
+    let mut i = 0;
+    while i < t.len() {
+        let b = t[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+        } else if t[i..].starts_with(b"<<") || t[i..].starts_with(b">>") {
+            words.push(&t[i..i + 2]);
+            i += 2;
+        } else if b"[]".contains(&b) {
+            words.push(&t[i..=i]);
+            i += 1;
+        } else {
+            let j = t[i + 1..]
+                .iter()
+                .position(|&c| c.is_ascii_whitespace() || b"[]<>/()".contains(&c))
+                .map_or(t.len(), |k| i + 1 + k);
+            words.push(&t[i..j]);
+            i = j;
+        }
+    }
+    let (mut depth, mut kind): (i32, &[u8]) = (0, b"");
+    for (k, w) in words.iter().enumerate() {
+        match *w {
+            b"<<" | b"[" => depth += 1,
+            b">>" | b"]" => depth -= 1,
+            _ if depth == 0 && w.first() == Some(&b'/') => kind = &w[1..],
+            b"R" if k >= 2
+                && words[k - 1].iter().all(u8::is_ascii_digit)
+                && let Some(n) = std::str::from_utf8(words[k - 2])
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok()) =>
+            {
+                if uses(kind) {
+                    need.push(n);
+                } else {
+                    named.push(n);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -5783,6 +5860,33 @@ fn link(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Of the objects a page's resources name, those of a kind its
+    /// content draws with are needed; the rest only named. Pgf's on every
+    /// page: a page drawing with no graphics state needs none.
+    #[test]
+    fn resources_needed_by_the_kinds_drawn_with() {
+        let res = b"/ExtGState 5 0 R /Pattern 6 0 R /ColorSpace << /pgfprgb [/Pattern /DeviceRGB] /X 9 0 R >> /Shading << /S1 7 0 R >> /Foo 8 0 R";
+        let run = |c: &[u8]| {
+            let (mut need, mut named) = (Vec::new(), Vec::new());
+            resource_refs(res, c, &mut need, &mut named);
+            need.sort_unstable();
+            named.sort_unstable();
+            (need, named)
+        };
+        assert_eq!(
+            run(b"BT /F1 10 Tf (gs) Tj ET 0 0 m 1 1 l S"),
+            (vec![5, 8], vec![6, 7, 9])
+        );
+        assert_eq!(run(b"0 0 m 1 1 l S"), (vec![8], vec![5, 6, 7, 9]));
+        assert_eq!(
+            run(b"/Pattern cs /P1 scn 0 0 1 1 re f"),
+            (vec![6, 7, 8, 9], vec![5])
+        );
+        assert_eq!(run(b"/S1 sh /G gs"), (vec![5, 7, 8], vec![6, 9]));
+        // (no content kept: every kind)
+        assert_eq!(run(b""), (vec![5, 6, 7, 8, 9], vec![]));
+    }
 
     /// A file's text as bytes is one shared copy (every `\pdfximage` of
     /// a page of one PDF keeps it in its record): the same allocation

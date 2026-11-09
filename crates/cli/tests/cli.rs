@@ -4995,6 +4995,8 @@ fn watch_time_to_first_page() {
     let joined = t0.elapsed();
     let mut viewer = Viewer::connect(&url);
     let (mut first, mut pages) = (None, 0usize);
+    // (each page streamed: whether it was last told exact)
+    let mut told: std::collections::BTreeMap<u64, bool> = std::collections::BTreeMap::new();
     let settled = loop {
         let e = viewer.until_within(Duration::from_secs(3600), |v| {
             v["event"] == "page" || v["event"] == "settled"
@@ -5003,6 +5005,9 @@ fn watch_time_to_first_page() {
             break t0.elapsed();
         }
         pages += 1;
+        if let Some(k) = e["k"].as_u64() {
+            told.insert(k, e["exact"].as_bool().unwrap_or(true));
+        }
         if first.is_none() {
             first = Some((e["k"].as_u64().unwrap_or(0) + 1, t0.elapsed()));
         }
@@ -5010,6 +5015,12 @@ fn watch_time_to_first_page() {
     let n = viewer.ask(&serde_json::json!({"id": 1, "op": "pages"}))["json"]["pages"]
         .as_array()
         .map_or(0, Vec::len);
+    let exact = told.values().filter(|&&e| e).count();
+    eprintln!(
+        "ttfp {main} {args}: {} pages streamed, {exact} exact, {} not",
+        told.len(),
+        told.len() - exact
+    );
     eprintln!(
         "ttfp {main} {args}: viewer joined at {:.0} ms; first page streamed: {}; settled at {:.0} ms, {n} pages, {pages} page events before it",
         joined.as_secs_f64() * 1e3,
