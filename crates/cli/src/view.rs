@@ -13,7 +13,8 @@
 //!   same from one watch to the next and a tab still open joins again.
 //! - **Pages.** Drawn here as strips (`phitex_live::view`'s
 //!   [`Viewer::frame`], `phitex_render`): `frame/K/S` is page K (from 0)
-//!   at S thousandths of a pixel a point, its bands' keys and places, its
+//!   at S thousandths of a pixel a point (a decimal: the viewer's scale
+//!   to the pixel, `1641.5446`), its bands' keys and places, its
 //!   text and links; `strips/KEY,…` the pixels of the bands the browser
 //!   does not have. The browser keeps the bands it has by key and composes
 //!   each page from them. After a build, `{"event":"settled"}`: the

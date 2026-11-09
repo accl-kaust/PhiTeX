@@ -7,8 +7,12 @@ import type { Link, PageImage } from "./types.ts";
 import { LAYER_LINES } from "./text.ts";
 
 export interface ViewerHost {
-  /** Draw page `k` (the viewer wants it: in view, and not drawn at its hash). */
-  need(k: number): void;
+  /**
+   * Draw page `k` (the viewer wants it: in view, and not drawn at its hash
+   * or at the zoom); a promise that settles once it is drawn (set) or not,
+   * so the viewer asks for a page no more than once at a time.
+   */
+  need(k: number): void | Promise<void>;
   /** The page most in view changed. */
   inView(k: number): void;
   /** CSS pixels per PDF point at the current zoom (1 is 100%). */
@@ -64,9 +68,6 @@ export class Viewer {
           // a page a frame)
           const boxes = this.measure();
           const v = scroller.getBoundingClientRect();
-          // (scrolled by whole CSS pixels, a fractional device ratio moves a
-          // page off the device's grid: snapped again, those on screen)
-          for (const [k, r] of boxes) if (this.slots[k]) this.snap(this.slots[k], r);
           // (a page zoomed in drawn sharp only around the part that was in
           // view, `data-win`: asked again once the view leaves that part)
           for (const [k, r] of boxes) {
@@ -74,11 +75,9 @@ export class Viewer {
             const win = s?.img?.canvas.dataset.win?.split(",").map(Number);
             const now = win && part(r, v);
             if (!now || (now[0] >= win[0] - 1e-3 && now[1] >= win[1] - 1e-3 && now[2] <= win[2] + 1e-3 && now[3] <= win[3] + 1e-3)) continue;
-            const key = `${k}:${s.hash}`;
-            if (this.asked.has(key)) continue;
-            this.asked.add(key);
+            if (this.asked.has(`${k}:${s.hash}`)) continue;
             s.drawn = null;
-            this.host.need(k);
+            this.ask(k);
           }
         });
     }, { passive: true });
@@ -210,10 +209,7 @@ export class Viewer {
     for (const { k, boxes } of marks) {
       const s = this.slots[k];
       if (!s) continue;
-      if (s.drawn !== s.hash && !this.asked.has(`${k}:${s.hash}`)) {
-        this.asked.add(`${k}:${s.hash}`);
-        this.host.need(k);
-      }
+      if (s.drawn !== s.hash) this.ask(k);
       for (const [x, y, bw, bh] of boxes) {
         const m = document.createElement("div");
         m.className = "mark sel";
@@ -383,10 +379,7 @@ export class Viewer {
     if (!s || !boxes.length) return;
     for (const m of this.root.querySelectorAll(".mark:not(.sel)")) if (m.parentElement !== s.el) m.remove();
     // (the page it jumps to, drawn now: not when the observer next sees it)
-    if (s.drawn !== s.hash && !this.asked.has(`${k}:${s.hash}`)) {
-      this.asked.add(`${k}:${s.hash}`);
-      this.host.need(k);
-    }
+    if (s.drawn !== s.hash) this.ask(k);
     // (the boxes already there move to the new place: the highlight glides
     // from word to word, as the cursor goes)
     const { w, h } = this.size;
@@ -446,10 +439,7 @@ export class Viewer {
     const hit = hits[cur];
     const s = hit && this.slots[hit.k];
     if (!s) return;
-    if (s.drawn !== s.hash && !this.asked.has(`${hit.k}:${s.hash}`)) {
-      this.asked.add(`${hit.k}:${s.hash}`);
-      this.host.need(hit.k);
-    }
+    if (s.drawn !== s.hash) this.ask(hit.k);
     const [x, y] = hit.boxes[0];
     const top = s.el.offsetTop + (y / h) * s.el.offsetHeight;
     const left = s.el.offsetLeft + (x / w) * s.el.offsetWidth;
@@ -603,18 +593,42 @@ export class Viewer {
       const b = at.el.getBoundingClientRect();
       this.scroller.scrollTop += b.top + frac * b.height - v.top;
     }
-    // (a page drawn coarser than its box now is drawn again at the new size;
-    // until then its old bitmap scales)
-    const want = Math.round(this.size.w * (96 / 72) * this.host.scale() * (window.devicePixelRatio || 1));
-    let coarse = false;
-    for (const s of this.slots) {
-      const c = s.img?.canvas.querySelector("canvas");
-      if (c && c.width < want - 1) (s.drawn = null), (coarse = true);
-    }
-    if (coarse) {
+    // (a page drawn at another zoom, coarser or finer, is drawn again at
+    // this one: until then its old bitmap is stretched to its box. Finer
+    // was kept before, a bitmap shrunk by the browser: its glyphs' edges
+    // aliased, after every zoom out, for good)
+    let other = false;
+    for (const s of this.slots) if (s.img && !this.fits(s)) (s.drawn = null), (other = true);
+    // (every drawn page's bitmap at its pixels again in its new box: one
+    // stretched while its box was another size, say Letter's before the
+    // first page said A4, stayed stretched by a pixel, its glyphs
+    // resampled, until it was drawn again; boxes read first, then written)
+    const drawn = this.slots.filter((s) => s.img);
+    const boxes = drawn.map((s) => s.el.getBoundingClientRect());
+    drawn.forEach((s, i) => this.snap(s, boxes[i]));
+    if (other) {
       this.asked.clear();
       this.wantVisible();
     }
+  }
+
+  /** Device pixels a PDF point at the zoom now: what a page is drawn at. */
+  private ppp(): number {
+    return (96 / 72) * this.host.scale() * (window.devicePixelRatio || 1);
+  }
+
+  /**
+   * Whether page `s` was drawn at the zoom now: its element's `data-scale`
+   * (Strips.page's pixels a point), else its bitmap's width.
+   */
+  private fits(s: Slot): boolean {
+    const el = s.img?.canvas;
+    if (!el) return false;
+    const want = this.ppp();
+    const at = Number(el.dataset.scale);
+    if (at) return Math.abs(at - want) <= want * 1e-4;
+    const c = el.querySelector("canvas");
+    return !c || Math.abs(c.width - this.size.w * want) <= 1;
   }
 
   /**
@@ -690,11 +704,17 @@ export class Viewer {
   }
 
   /**
-   * A page drawn as a bitmap shown at its own pixels, on the device's grid:
-   * its box exactly its pixel count over the device ratio (the slot's box,
-   * rounded on its own, can be a pixel off) and moved by the fraction of a
-   * device pixel the slot's corner sits at, so the browser copies the
-   * pixels and never resamples them (resampled, the page looks blurry).
+   * A page drawn as a bitmap shown at its own pixels: its box exactly its
+   * pixel count over the device ratio (the slot's box, rounded on its
+   * own, can be a pixel off), so the browser copies the pixels and never
+   * resamples them (resampled, the page looks blurry). Where on the
+   * device's grid it lands is the browser's: Chrome and Firefox paint a
+   * canvas snapped to whole device pixels. A transform to move it there
+   * by the fraction its box's corner sits at was never snapped itself:
+   * at a device ratio of 2 every glyph was blurred by half a pixel.
+   * A page drawn in part (`data-win`, zoomed in past `Strips`' budget):
+   * its box the whole page's pixels (`data-pw`, `data-ph`), so the part,
+   * placed in fractions of it, is at its own pixels too.
    */
   private snap(s: Slot, box?: DOMRect): void {
     const wrap = s.img?.canvas;
@@ -702,25 +722,26 @@ export class Viewer {
     if (!wrap || !c || !c.width || !c.height) return;
     const dpr = window.devicePixelRatio || 1;
     const r = box ?? s.el.getBoundingClientRect();
+    const pw = Number(wrap.dataset.pw) || c.width, ph = Number(wrap.dataset.ph) || c.height;
+    // (drawn at the zoom, `data-scale`: at its own pixels, its box the
+    // slot's to a pixel by pageBox's rounding; drawn at another, or a
+    // host's bitmap of no scale more than a rounding off its box: stretched)
+    const own = wrap.dataset.scale ? this.fits(s) : Math.abs(pw - r.width * dpr) <= 1.5 && Math.abs(ph - r.height * dpr) <= 1.5;
     // (a bitmap of another size than its page's box, a zoom's until the page
     // is drawn again: stretched to the box, so the page and the marks on it,
     // placed in fractions of the box, stay together; never overflowing it)
     // (each written only when it changes: an unchanged write still costs
     // the next frame its layout)
-    const set = (k: "width" | "height" | "transform", v: string) => {
+    const set = (k: "width" | "height", v: string) => {
       if (wrap.style[k] !== v) wrap.style[k] = v;
     };
-    if (Math.abs(c.width - r.width * dpr) > 1.5 || Math.abs(c.height - r.height * dpr) > 1.5) {
+    if (!own) {
       set("width", "100%");
       set("height", "100%");
-      set("transform", "");
       return;
     }
-    set("width", `${c.width / dpr}px`);
-    set("height", `${c.height / dpr}px`);
-    const fx = r.left * dpr - Math.round(r.left * dpr);
-    const fy = r.top * dpr - Math.round(r.top * dpr);
-    set("transform", fx || fy ? `translate(${-fx / dpr}px, ${-fy / dpr}px)` : "");
+    set("width", `${pw / dpr}px`);
+    set("height", `${ph / dpr}px`);
   }
 
   /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */
@@ -776,16 +797,73 @@ export class Viewer {
     return onScreen;
   }
 
-  /** Ask for each visible page not drawn at its hash (once per hash). */
+  /**
+   * Ask for each visible page not drawn at its hash (once per hash): those
+   * on screen first, nearest the view's middle first; those just off it
+   * (the observer's margin) once none on screen is on its way, so the
+   * page in view is never queued behind them.
+   */
   private wantVisible(): void {
-    for (const k of this.visible) {
+    const want = [...this.visible].filter((k) => {
       const s = this.slots[k];
-      if (!s || s.drawn === s.hash) continue;
-      const key = `${k}:${s.hash}`;
-      if (this.asked.has(key)) continue;
-      this.asked.add(key);
-      this.host.need(k);
-    }
+      return s && s.drawn !== s.hash && !this.asked.has(`${k}:${s.hash}`);
+    });
+    if (!want.length) return;
+    const v = this.scroller.getBoundingClientRect();
+    const mid = (v.top + v.bottom) / 2;
+    const at = new Map(want.map((k) => {
+      const b = this.slots[k].el.getBoundingClientRect();
+      return [k, { on: b.bottom > v.top && b.top < v.bottom, far: Math.abs((b.top + b.bottom) / 2 - mid) }];
+    }));
+    want.sort((a, b) => at.get(a)!.far - at.get(b)!.far);
+    for (const k of want) if (at.get(k)!.on) this.ask(k);
+    if ([...this.flying.keys()].some((k) => this.onScreen(k))) return;
+    for (const k of want) if (!at.get(k)!.on) this.ask(k);
+  }
+
+  /** Whether page `k`'s box is in the view. */
+  private onScreen(k: number): boolean {
+    const s = this.slots[k];
+    if (!s) return false;
+    const b = s.el.getBoundingClientRect(), v = this.scroller.getBoundingClientRect();
+    return b.bottom > v.top && b.top < v.bottom;
+  }
+
+  /**
+   * Pages asked for whose drawing has not come yet, each whether the
+   * zoom changed meanwhile (it comes drawn at the zoom it was asked at).
+   */
+  private flying = new Map<number, { again: boolean }>();
+
+  /**
+   * Page `k` asked for at its hash, once at a time: asked again while its
+   * drawing is on its way (a zoom, frame after frame of a pinch), it is
+   * asked again once that drawing comes, at the zoom then. A zoom asked
+   * a page as many times as it had frames, the core drew them all in turn,
+   * and the drawing at the zoom it rested at came last.
+   */
+  private ask(k: number): void {
+    const s = this.slots[k];
+    if (!s) return;
+    const key = `${k}:${s.hash}`;
+    if (this.asked.has(key)) return;
+    this.asked.add(key);
+    const f = this.flying.get(k);
+    if (f) return void (f.again = true);
+    this.flying.set(k, { again: false });
+    const done = () => {
+      const g = this.flying.get(k);
+      this.flying.delete(k);
+      const t = this.slots[k];
+      if (t && g?.again && (t.drawn !== t.hash || !this.fits(t))) {
+        this.asked.delete(`${k}:${t.hash}`);
+        t.drawn = null;
+      }
+      this.wantVisible();
+    };
+    const p = this.host.need(k);
+    if (p) p.then(done, done);
+    else queueMicrotask(done);
   }
 }
 

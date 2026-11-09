@@ -262,17 +262,14 @@ var Viewer = class {
           frame = 0;
           const boxes2 = this.measure();
           const v = scroller.getBoundingClientRect();
-          for (const [k, r] of boxes2) if (this.slots[k]) this.snap(this.slots[k], r);
           for (const [k, r] of boxes2) {
             const s = this.slots[k];
             const win = s?.img?.canvas.dataset.win?.split(",").map(Number);
             const now = win && part(r, v);
             if (!now || now[0] >= win[0] - 1e-3 && now[1] >= win[1] - 1e-3 && now[2] <= win[2] + 1e-3 && now[3] <= win[3] + 1e-3) continue;
-            const key = `${k}:${s.hash}`;
-            if (this.asked.has(key)) continue;
-            this.asked.add(key);
+            if (this.asked.has(`${k}:${s.hash}`)) continue;
             s.drawn = null;
-            this.host.need(k);
+            this.ask(k);
           }
         });
     }, { passive: true });
@@ -384,10 +381,7 @@ var Viewer = class {
     for (const { k, boxes: boxes2 } of marks) {
       const s = this.slots[k];
       if (!s) continue;
-      if (s.drawn !== s.hash && !this.asked.has(`${k}:${s.hash}`)) {
-        this.asked.add(`${k}:${s.hash}`);
-        this.host.need(k);
-      }
+      if (s.drawn !== s.hash) this.ask(k);
       for (const [x, y, bw, bh] of boxes2) {
         const m = document.createElement("div");
         m.className = "mark sel";
@@ -538,10 +532,7 @@ var Viewer = class {
     const s = this.slots[k];
     if (!s || !boxes2.length) return;
     for (const m of this.root.querySelectorAll(".mark:not(.sel)")) if (m.parentElement !== s.el) m.remove();
-    if (s.drawn !== s.hash && !this.asked.has(`${k}:${s.hash}`)) {
-      this.asked.add(`${k}:${s.hash}`);
-      this.host.need(k);
-    }
+    if (s.drawn !== s.hash) this.ask(k);
     const { w, h } = this.size;
     const have = [...s.el.querySelectorAll(".mark:not(.sel)")];
     boxes2.forEach(([x, y, bw, bh], i) => {
@@ -593,10 +584,7 @@ var Viewer = class {
     const hit = hits[cur];
     const s = hit && this.slots[hit.k];
     if (!s) return;
-    if (s.drawn !== s.hash && !this.asked.has(`${hit.k}:${s.hash}`)) {
-      this.asked.add(`${hit.k}:${s.hash}`);
-      this.host.need(hit.k);
-    }
+    if (s.drawn !== s.hash) this.ask(hit.k);
     const [x, y] = hit.boxes[0];
     const top = s.el.offsetTop + y / h * s.el.offsetHeight;
     const left = s.el.offsetLeft + x / w * s.el.offsetWidth;
@@ -731,16 +719,32 @@ var Viewer = class {
       const b = at.el.getBoundingClientRect();
       this.scroller.scrollTop += b.top + frac * b.height - v.top;
     }
-    const want = Math.round(this.size.w * (96 / 72) * this.host.scale() * (window.devicePixelRatio || 1));
-    let coarse = false;
-    for (const s of this.slots) {
-      const c = s.img?.canvas.querySelector("canvas");
-      if (c && c.width < want - 1) s.drawn = null, coarse = true;
-    }
-    if (coarse) {
+    let other = false;
+    for (const s of this.slots) if (s.img && !this.fits(s)) s.drawn = null, other = true;
+    const drawn = this.slots.filter((s) => s.img);
+    const boxes2 = drawn.map((s) => s.el.getBoundingClientRect());
+    drawn.forEach((s, i) => this.snap(s, boxes2[i]));
+    if (other) {
       this.asked.clear();
       this.wantVisible();
     }
+  }
+  /** Device pixels a PDF point at the zoom now: what a page is drawn at. */
+  ppp() {
+    return 96 / 72 * this.host.scale() * (window.devicePixelRatio || 1);
+  }
+  /**
+   * Whether page `s` was drawn at the zoom now: its element's `data-scale`
+   * (Strips.page's pixels a point), else its bitmap's width.
+   */
+  fits(s) {
+    const el = s.img?.canvas;
+    if (!el) return false;
+    const want = this.ppp();
+    const at = Number(el.dataset.scale);
+    if (at) return Math.abs(at - want) <= want * 1e-4;
+    const c = el.querySelector("canvas");
+    return !c || Math.abs(c.width - this.size.w * want) <= 1;
   }
   /**
    * The place on the pages under (`x`, `y`) (client pixels): the page there,
@@ -806,11 +810,17 @@ var Viewer = class {
     if (s.el.firstChild !== c) s.el.replaceChildren(c);
   }
   /**
-   * A page drawn as a bitmap shown at its own pixels, on the device's grid:
-   * its box exactly its pixel count over the device ratio (the slot's box,
-   * rounded on its own, can be a pixel off) and moved by the fraction of a
-   * device pixel the slot's corner sits at, so the browser copies the
-   * pixels and never resamples them (resampled, the page looks blurry).
+   * A page drawn as a bitmap shown at its own pixels: its box exactly its
+   * pixel count over the device ratio (the slot's box, rounded on its
+   * own, can be a pixel off), so the browser copies the pixels and never
+   * resamples them (resampled, the page looks blurry). Where on the
+   * device's grid it lands is the browser's: Chrome and Firefox paint a
+   * canvas snapped to whole device pixels. A transform to move it there
+   * by the fraction its box's corner sits at was never snapped itself:
+   * at a device ratio of 2 every glyph was blurred by half a pixel.
+   * A page drawn in part (`data-win`, zoomed in past `Strips`' budget):
+   * its box the whole page's pixels (`data-pw`, `data-ph`), so the part,
+   * placed in fractions of it, is at its own pixels too.
    */
   snap(s, box) {
     const wrap = s.img?.canvas;
@@ -818,20 +828,18 @@ var Viewer = class {
     if (!wrap || !c || !c.width || !c.height) return;
     const dpr = window.devicePixelRatio || 1;
     const r = box ?? s.el.getBoundingClientRect();
+    const pw = Number(wrap.dataset.pw) || c.width, ph = Number(wrap.dataset.ph) || c.height;
+    const own = wrap.dataset.scale ? this.fits(s) : Math.abs(pw - r.width * dpr) <= 1.5 && Math.abs(ph - r.height * dpr) <= 1.5;
     const set = (k, v) => {
       if (wrap.style[k] !== v) wrap.style[k] = v;
     };
-    if (Math.abs(c.width - r.width * dpr) > 1.5 || Math.abs(c.height - r.height * dpr) > 1.5) {
+    if (!own) {
       set("width", "100%");
       set("height", "100%");
-      set("transform", "");
       return;
     }
-    set("width", `${c.width / dpr}px`);
-    set("height", `${c.height / dpr}px`);
-    const fx = r.left * dpr - Math.round(r.left * dpr);
-    const fy = r.top * dpr - Math.round(r.top * dpr);
-    set("transform", fx || fy ? `translate(${-fx / dpr}px, ${-fy / dpr}px)` : "");
+    set("width", `${pw / dpr}px`);
+    set("height", `${ph / dpr}px`);
   }
   /** Turn `n` pages (back if negative) from the page at the view's top, as a PDF viewer's Page Down / Page Up: back from inside a page goes to its own top first. */
   turn(n) {
@@ -881,16 +889,70 @@ var Viewer = class {
     }
     return onScreen;
   }
-  /** Ask for each visible page not drawn at its hash (once per hash). */
+  /**
+   * Ask for each visible page not drawn at its hash (once per hash): those
+   * on screen first, nearest the view's middle first; those just off it
+   * (the observer's margin) once none on screen is on its way, so the
+   * page in view is never queued behind them.
+   */
   wantVisible() {
-    for (const k of this.visible) {
+    const want = [...this.visible].filter((k) => {
       const s = this.slots[k];
-      if (!s || s.drawn === s.hash) continue;
-      const key = `${k}:${s.hash}`;
-      if (this.asked.has(key)) continue;
-      this.asked.add(key);
-      this.host.need(k);
-    }
+      return s && s.drawn !== s.hash && !this.asked.has(`${k}:${s.hash}`);
+    });
+    if (!want.length) return;
+    const v = this.scroller.getBoundingClientRect();
+    const mid = (v.top + v.bottom) / 2;
+    const at = new Map(want.map((k) => {
+      const b = this.slots[k].el.getBoundingClientRect();
+      return [k, { on: b.bottom > v.top && b.top < v.bottom, far: Math.abs((b.top + b.bottom) / 2 - mid) }];
+    }));
+    want.sort((a, b) => at.get(a).far - at.get(b).far);
+    for (const k of want) if (at.get(k).on) this.ask(k);
+    if ([...this.flying.keys()].some((k) => this.onScreen(k))) return;
+    for (const k of want) if (!at.get(k).on) this.ask(k);
+  }
+  /** Whether page `k`'s box is in the view. */
+  onScreen(k) {
+    const s = this.slots[k];
+    if (!s) return false;
+    const b = s.el.getBoundingClientRect(), v = this.scroller.getBoundingClientRect();
+    return b.bottom > v.top && b.top < v.bottom;
+  }
+  /**
+   * Pages asked for whose drawing has not come yet, each whether the
+   * zoom changed meanwhile (it comes drawn at the zoom it was asked at).
+   */
+  flying = /* @__PURE__ */ new Map();
+  /**
+   * Page `k` asked for at its hash, once at a time: asked again while its
+   * drawing is on its way (a zoom, frame after frame of a pinch), it is
+   * asked again once that drawing comes, at the zoom then. A zoom asked
+   * a page as many times as it had frames, the core drew them all in turn,
+   * and the drawing at the zoom it rested at came last.
+   */
+  ask(k) {
+    const s = this.slots[k];
+    if (!s) return;
+    const key = `${k}:${s.hash}`;
+    if (this.asked.has(key)) return;
+    this.asked.add(key);
+    const f = this.flying.get(k);
+    if (f) return void (f.again = true);
+    this.flying.set(k, { again: false });
+    const done = () => {
+      const g = this.flying.get(k);
+      this.flying.delete(k);
+      const t = this.slots[k];
+      if (t && g?.again && (t.drawn !== t.hash || !this.fits(t))) {
+        this.asked.delete(`${k}:${t.hash}`);
+        t.drawn = null;
+      }
+      this.wantVisible();
+    };
+    const p = this.host.need(k);
+    if (p) p.then(done, done);
+    else queueMicrotask(done);
   }
 };
 function part(r, v) {
@@ -3492,7 +3554,7 @@ function safeColor(c, or) {
 }
 var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false };
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
-  const snap = (x) => Math.floor(x * dpr) / dpr;
+  const snap = (x) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
 }
 var PATHS = {
@@ -5003,43 +5065,47 @@ var Panel = class {
   gesture;
   /**
    * Zoom by `f` keeping the point (`px`, `py`, from the stage's top left)
-   * where it is, as pdf.js's and hayro's viewers do: while the gesture goes
-   * on, the pages as they are scaled by one transform around the pointer
-   * (no layout, no drawing: the pages, their marks and their text scale
-   * together); once it rests (250 ms, longer than a wheel's notches are
-   * apart), the zoom set once, the place kept under the pointer by its
-   * page, and the pages drawn once at it.
+   * where it is, as pdf.js's viewer does: the pages laid out at the zoom
+   * once a frame while the gesture goes on, the place under the pointer
+   * kept by its page, and drawn at it as soon as the core can (Viewer.ask:
+   * a page once at a time, the zoom it rests at last); their old bitmaps
+   * stretched until then. Once it rests (250 ms, longer than a wheel's
+   * notches are apart) the zoom is saved and told. The pages were scaled
+   * by one transform until the gesture rested, and only then drawn: every
+   * zoom showed stretched bitmaps for 250 ms and a drawing more.
    */
   zoomAt(f, px, py) {
-    const stage = this.$("#stage"), view = this.$("#viewer");
-    const r = stage.getBoundingClientRect();
+    const r = this.$("#stage").getBoundingClientRect();
     let g = this.gesture;
     if (!g) {
       const x = r.left + px, y = r.top + py;
-      const v = view.getBoundingClientRect();
-      view.style.transformOrigin = `${x - v.left}px ${y - v.top}px`;
-      g = this.gesture = { from: this.scale(), f: 1, x, y, at: this.viewer.pointAt(x, y) };
+      g = this.gesture = { from: this.scale(), f: 1, x, y, at: this.viewer.pointAt(x, y), frame: 0 };
     }
     g.f = Math.min(8, Math.max(0.25, g.from * g.f * f)) / g.from;
-    view.style.transform = `scale(${g.f})`;
-    view.style.willChange = "transform";
+    const gg = g;
+    if (!g.frame) g.frame = requestAnimationFrame(() => (gg.frame = 0, this.zoomLay(gg)));
     clearTimeout(g.end);
     g.end = setTimeout(() => this.zoomEnd(), 250);
   }
-  /** The zoom gesture rested: the pages at the zoom, the place under the pointer kept, drawn once. */
-  zoomEnd() {
-    const g = this.gesture;
-    if (!g) return;
-    this.gesture = void 0;
-    const view = this.$("#viewer");
-    view.style.transform = "";
-    view.style.willChange = "";
+  /** The gesture's zoom now: the pages laid out at it, the place under the pointer where it was, those drawn at another zoom asked for. */
+  zoomLay(g) {
     this.prefs.zoom = String(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
     this.$("#stage").classList.remove("fit");
     this.viewer.redraw(true);
     if (g.at) this.viewer.keepAt(g.at, g.x, g.y);
     this.viewer.redraw();
+  }
+  /** The zoom gesture rested: its last frame laid out, the zoom saved and told. */
+  zoomEnd() {
+    const g = this.gesture;
+    if (!g) return;
+    this.gesture = void 0;
+    if (g.frame) {
+      cancelAnimationFrame(g.frame);
+      this.zoomLay(g);
+    }
+    requestAnimationFrame(() => this.drawScrollMarks());
     this.save();
     this.emit();
   }
@@ -7452,9 +7518,15 @@ var PreviewSession = class {
 var BUDGET = 16e6;
 var BASE = 4e6;
 var Strips = class {
-  /** The bitmaps kept, by key (the oldest dropped past `max`). */
+  /**
+   * The bitmaps kept, by key, and their pixels' bytes: the oldest dropped
+   * past `max` (the watch's own strips' budget, 256 MiB). A count of 4000
+   * was no bound on bytes: every zoom draws every band again at its scale,
+   * and a pinch draws several scales on the way.
+   */
   kept = /* @__PURE__ */ new Map();
-  max = 4e3;
+  bytes = 0;
+  max = 256 << 20;
   src;
   /** Where the last frame's numbers are shown (none: not shown). */
   chip;
@@ -7471,7 +7543,11 @@ var Strips = class {
    * size and links. `view`: the part of it on screen (the viewer's
    * `view(k)`); zoomed past `BUDGET` pixels a page, the page drawn small
    * and stretched and the part on screen (and as much again around it)
-   * drawn at `scale` over it, its element's `data-win` that part.
+   * drawn at `scale` over it, its element's `data-win` that part. The
+   * element's `data-scale` is `scale` (the zoom it is the drawing for: the
+   * viewer draws a page again when the zoom moves off it), `data-pw` and
+   * `data-ph` the whole page's pixels at the scale its sharpest part is
+   * drawn at (the box that shows them one to one).
    */
   async page(k, scale, view) {
     const size = this.sizes.get(k) ?? this.sizes.values().next().value;
@@ -7483,6 +7559,7 @@ var Strips = class {
       if (!f) return null;
       const el2 = document.createElement("div");
       el2.className = "phx-page";
+      Object.assign(el2.dataset, { scale: String(scale), pw: String(f.pw), ph: String(f.ph) });
       el2.append(this.canvas(f), textLayer(f.text.map(composeLine), f.w, f.h));
       return { el: el2, w: f.w, h: f.h, links: f.links };
     }
@@ -7498,7 +7575,7 @@ var Strips = class {
     if (!base || !part3?.win) return null;
     const el = document.createElement("div");
     el.className = "phx-page";
-    el.dataset.win = win.join(",");
+    Object.assign(el.dataset, { win: win.join(","), scale: String(scale), pw: String(part3.pw), ph: String(part3.ph) });
     const tile = this.canvas(part3);
     const [x, y, w, h] = part3.win;
     tile.className = "phx-tile";
@@ -7574,16 +7651,20 @@ var Strips = class {
         const px = pagewise(new Uint8ClampedArray(buf, at, w * h * 4));
         made.push(
           createImageBitmap(new ImageData(px, w, h)).then((b) => {
+            const old = this.kept.get(key);
+            if (old) this.bytes -= old.width * old.height * 4, old.close();
             this.kept.set(key, b);
+            this.bytes += w * h * 4;
           })
         );
       }
       at += w * h * 4;
     }
     await Promise.all(made);
-    for (const k of this.kept.keys()) {
-      if (this.kept.size <= this.max) break;
-      this.kept.get(k)?.close();
+    for (const [k, b] of this.kept) {
+      if (this.bytes <= this.max) break;
+      this.bytes -= b.width * b.height * 4;
+      b.close();
       this.kept.delete(k);
     }
   }
@@ -8065,7 +8146,7 @@ var Pages = class {
 var stripSource = {
   async frame(k, scale, win) {
     const part3 = win ? `/${win.map((x) => x.toFixed(5)).join(",")}` : "";
-    const r = await fetch(new URL(`frame/${k}/${Math.round(scale * 1e3)}${part3}`, location.href), { cache: "no-store" });
+    const r = await fetch(new URL(`frame/${k}/${(scale * 1e3).toFixed(4)}${part3}`, location.href), { cache: "no-store" });
     return r.ok ? await r.json() : null;
   },
   async strips(keys) {
@@ -8097,7 +8178,8 @@ var panel = new Panel(
   {
     onPage: () => {
     },
-    onNeed: (k) => void session.fetch(k),
+    // (settled once the page is drawn: the viewer asks for a page once at a time)
+    onNeed: (k) => session.fetch(k),
     // (the build's PDF, as the watch wrote it)
     onPdf: () => {
       const a = document.createElement("a");
