@@ -534,15 +534,6 @@ pub struct Session {
     /// never on the typing path, an edit before it drops it (the next
     /// build's is written instead).
     synctex_due: std::sync::atomic::AtomicBool,
-    /// (observe, `PHITEX_SYNCTEX_COMPARE`) the origins as the build left
-    /// them, compared at idle.
-    #[allow(clippy::type_complexity)]
-    synctex_probe: Mutex<
-        Option<(
-            (Vec<(u64, usize, usize)>, u64, u64),
-            Vec<Option<phitex_tex::PageOrigins>>,
-        )>,
-    >,
     /// The main text's lines counted by block ([`LineMarks`]).
     lines: LineMarks,
 }
@@ -673,7 +664,6 @@ impl Session {
             view_layout: false,
             synctex: Mutex::default(),
             synctex_due: std::sync::atomic::AtomicBool::new(false),
-            synctex_probe: Mutex::default(),
             lines: LineMarks::default(),
         }
     }
@@ -2149,18 +2139,6 @@ impl Session {
         // (a watch's at idle, [`Session::write_synctex`]: the pages'
         // origins matched off the typing path)
         if self.job.synctex && self.build.is_some() {
-            if std::env::var_os("PHITEX_SYNCTEX_COMPARE").is_some()
-                && let Some(b) = &self.build
-            {
-                let snap = b.origins_snapshot();
-                *self
-                    .synctex_probe
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner) = Some((
-                    b.origins_probe(),
-                    snap.pages.iter().map(|p| p.as_deref().cloned()).collect(),
-                ));
-            }
             if self.watching && std::env::var_os("PHITEX_SYNCTEX_NOW").is_none() {
                 self.synctex_due
                     .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2206,44 +2184,6 @@ impl Session {
             .swap(false, std::sync::atomic::Ordering::Relaxed)
         {
             return Ok(None);
-        }
-        if let Some((probe, pages)) = self
-            .synctex_probe
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-            && let Some(b) = &self.build
-        {
-            let now = b.origins_probe();
-            let snap = b.origins_snapshot();
-            let ids = probe
-                .0
-                .iter()
-                .zip(&now.0)
-                .filter(|(a, b)| a.0 != b.0)
-                .count();
-            let glyphs: Vec<usize> = probe
-                .0
-                .iter()
-                .zip(&now.0)
-                .enumerate()
-                .filter(|(_, (a, b))| a.0 == b.0 && (a.1 != b.1 || a.2 != b.2))
-                .map(|(k, _)| k)
-                .collect();
-            let differ: Vec<usize> = pages
-                .iter()
-                .zip(&snap.pages)
-                .enumerate()
-                .filter(|(_, (a, b))| a.as_ref() != b.as_deref())
-                .map(|(k, _)| k)
-                .collect();
-            eprintln!(
-                "synctex compare: pages {} -> {}, ids moved {ids}, glyphs replaced on pages {glyphs:?}, spans {}, text {}, origins differ on pages {differ:?}",
-                probe.0.len(),
-                now.0.len(),
-                if probe.1 == now.1 { "same" } else { "CHANGED" },
-                if probe.2 == now.2 { "same" } else { "CHANGED" },
-            );
         }
         let Some(gz) = self.synctex_bytes() else {
             return Ok(None);

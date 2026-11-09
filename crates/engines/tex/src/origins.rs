@@ -2175,28 +2175,6 @@ impl crate::Build {
         }
     }
 
-    /// (observe) What the origins are made from now: per page its
-    /// identity and its kept glyphs' address and count, and a hash of the
-    /// node spans and of the document's text.
-    #[must_use]
-    pub fn origins_probe(&self) -> (Vec<(u64, usize, usize)>, u64, u64) {
-        let inp = self.origins_input();
-        let pages = inp
-            .shown
-            .iter()
-            .map(|&id| {
-                kept(inp.inst, id).map_or((id, 0, 0), |g| {
-                    (id, Arc::as_ptr(&g) as usize, g.codes.len())
-                })
-            })
-            .collect();
-        let spans = inp.spans.iter().fold(0u64, |h, (raw, f, s, e, _)| {
-            phitex_defuse::hash_words(h, &[*raw, f.is_some().into(), *s as u64, *e as u64])
-        });
-        let text = phitex_defuse::hash_bytes(0, inp.doc_text.as_bytes());
-        (pages, spans, text)
-    }
-
     /// The files origins name, by their index in [`PageOrigins::file`]:
     /// append-only, an index means the same file for the Build's life.
     #[must_use]
