@@ -1066,7 +1066,11 @@ impl Run<'_, '_> {
         // (one group of the run's own open is no bar: it is left to the
         // engine as the scope the given-back sibling runs in,
         // `Run::run_all`)
-        if (self.open_span() && !self.can_leave_scope()) || self.aopen != 0 {
+        if (self.open_span()
+            && !self.can_leave_scope()
+            && !(crate::boxscope::on() && self.can_leave_lists()))
+            || self.aopen != 0
+        {
             return refuse(&|| {
                 format!(
                     "open: {} nest levels, {} conditionals, {} alignments",

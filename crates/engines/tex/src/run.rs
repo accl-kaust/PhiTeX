@@ -6711,6 +6711,19 @@ impl<'c, 'a> Run<'c, 'a> {
                 if self.give_back_peeked()? {
                     if self.can_leave_scope() {
                         self.leave_scope()?;
+                    } else if crate::boxscope::on() && self.can_leave_lists() {
+                        // (lists of its own open: left, `crate::boxscope`)
+                        if crate::exec::prof_flag!("PHITEX_BOXSCOPE_TRACE") {
+                            eprintln!(
+                                "boxscope: node {} leaves at a give-back {:?}",
+                                self.cx.node().raw(),
+                                self.nest
+                                    .iter()
+                                    .map(|l| (l.mode, l.group, l.owns))
+                                    .collect::<Vec<_>>()
+                            );
+                        }
+                        self.leave_lists()?;
                     }
                     return Ok(());
                 }
