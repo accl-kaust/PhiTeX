@@ -1659,4 +1659,95 @@ mod tests {
         let (built, _) = run(None);
         assert_eq!(built["ok"], false, "{built}");
     }
+
+    /// The project's files as a browser host has them: those given
+    /// (`ph_provide`) and no other, each with the number of its giving
+    /// as its stamp.
+    #[derive(Default)]
+    struct Given(Mutex<(HashMap<String, Vec<u8>>, u64, HashMap<String, u64>)>);
+
+    impl Given {
+        fn give(&self, name: &str, bytes: &[u8]) {
+            let mut g = lock(&self.0);
+            g.1 += 1;
+            let n = g.1;
+            g.0.insert(name.to_owned(), bytes.to_vec());
+            g.2.insert(name.to_owned(), n);
+        }
+    }
+
+    impl Host for Given {
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            let g = lock(&self.0);
+            let name = name.strip_prefix("./").unwrap_or(name);
+            [format!("{name}.tex"), name.to_owned()]
+                .into_iter()
+                .find(|n| g.0.contains_key(n))
+                .map(|n| PathBuf::from(format!("./{n}")))
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            let p = path.to_string_lossy();
+            lock(&self.0)
+                .0
+                .get(p.strip_prefix("./").unwrap_or(&p))
+                .cloned()
+        }
+        fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+            let p = path.to_string_lossy();
+            lock(&self.0)
+                .2
+                .get(p.strip_prefix("./").unwrap_or(&p))
+                .map(|n| n.to_le_bytes().to_vec())
+        }
+    }
+
+    /// A file the build looked for and did not find is looked for again
+    /// once it may exist: one the editor then opens (`set_file` of a path
+    /// new to the session, which the host never gave: Overleaf's new
+    /// `late.tex`) is read from its buffer at the next build, and one the
+    /// host gives later is read at a `rebuild`; each build as a clean
+    /// build of the files then gives it (no error kept, its pages there).
+    #[test]
+    fn a_file_missing_then_made_is_found() {
+        let main = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255} \\hbox{}\\penalty-10000 \\input NAME \\end\n";
+        let page = "\\hbox{}\\penalty-10000 \n";
+        let run = |name: &str, host: Arc<Given>| {
+            Document::new(
+                Session::new(
+                    job(),
+                    Arc::from(main.replace("NAME", name).as_str()),
+                    host,
+                    None,
+                    Arc::new(Memory::default()),
+                    Arc::new(Status::default()),
+                ),
+                "doc.tex",
+            )
+        };
+        let build = |d: &mut Document| {
+            let ev = d.step();
+            ev.iter()
+                .find(|e| e["event"] == "build")
+                .cloned()
+                .unwrap_or_else(|| panic!("no build: {ev:?}"))
+        };
+        // (the editor's buffer of a file the host never gave)
+        let mut d = run("late", Arc::new(Given::default()));
+        let cold = build(&mut d);
+        assert_eq!(cold["ok"], false, "late.tex is missing: {cold}");
+        d.request(&json!({"id": 2, "op": "set_file", "file": "late.tex", "text": page}));
+        let b = build(&mut d);
+        assert_eq!(b["ok"], true, "late.tex opened in the editor: {b}");
+        assert_eq!(b["pages"], 2, "{b}");
+        // (a file the host gives after the build missed it, then a rebuild)
+        let host = Arc::new(Given::default());
+        let mut d = run("pic", host.clone());
+        let cold = build(&mut d);
+        assert_eq!(cold["ok"], false, "pic.tex is missing: {cold}");
+        host.give("pic.tex", page.as_bytes());
+        d.request(&json!({"id": 3, "op": "rebuild"}));
+        let b = build(&mut d);
+        assert_eq!(b["ok"], true, "pic.tex given, then a rebuild: {b}");
+        assert_eq!(b["pages"], 2, "{b}");
+    }
 }
