@@ -71,9 +71,9 @@ fn asset() -> Option<String> {
     Some(format!("phitex-{arch}-{os}.tar.gz"))
 }
 
-/// Windows's release zip for `arch` (x86-64's alone, for now).
+/// Windows's release zip for `arch` (x86-64's and arm64's).
 fn windows_asset(arch: &str) -> Option<String> {
-    (arch == "x86_64").then(|| format!("phitex-{arch}-windows.zip"))
+    matches!(arch, "x86_64" | "aarch64").then(|| format!("phitex-{arch}-windows.zip"))
 }
 
 /// The file named `name` in zip archive `zip` (stored or deflated), by
@@ -824,7 +824,11 @@ mod tests {
             windows_asset("x86_64").as_deref(),
             Some("phitex-x86_64-windows.zip")
         );
-        assert_eq!(windows_asset("aarch64"), None);
+        assert_eq!(
+            windows_asset("aarch64").as_deref(),
+            Some("phitex-aarch64-windows.zip")
+        );
+        assert_eq!(windows_asset("x86"), None);
     }
 
     /// Windows: the program replaced by renaming the old aside (a running

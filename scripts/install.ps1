@@ -3,7 +3,7 @@
 #   irm https://phitex.org/install.ps1 | iex
 #
 # Downloads phitex.exe for this machine from PhiTeX's GitHub release
-# (phitex-x86_64-windows.zip), checks it against the release's SHA256SUMS
+# (phitex-x86_64-windows.zip, or phitex-aarch64-windows.zip on arm64), checks it against the release's SHA256SUMS
 # (and that file's minisign signature when minisign is installed), puts
 # it in %LOCALAPPDATA%\Programs\phitex and adds that folder to the user's
 # PATH. Nothing else on the machine is touched, and nothing is sent but
@@ -51,6 +51,7 @@
     $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
     switch ($arch) {
         'AMD64' { $arch = 'x86_64' }
+        'ARM64' { $arch = 'aarch64' }
         default { Die "no build for $arch Windows: build from source (https://github.com/$Repo)" }
     }
     $asset = "phitex-$arch-windows.zip"

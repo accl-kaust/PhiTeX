@@ -102,7 +102,7 @@ string).
 
 **Binaries** are GitHub release assets (free, no bandwidth limit, no CORS
 needed for curl): `phitex-<arch>-<os>.tar.gz` (x86_64 and aarch64; linux
-and macos), `phitex-x86_64-windows.zip` (holding `phitex.exe`),
+and macos), `phitex-<arch>-windows.zip` (x86_64 and aarch64, holding `phitex.exe`),
 `SHA256SUMS` and `SHA256SUMS.minisig` for each version tag.
 
 ## 3. Which release a PhiTeX reads
@@ -138,7 +138,8 @@ and macos), `phitex-x86_64-windows.zip` (holding `phitex.exe`),
 PowerShell (5.1 or 7). The script (`scripts/install.ps1`) does what
 install.sh does, with the same settings (`$env:PHITEX_VERSION`,
 `$env:PHITEX_CHANNEL`, `$env:PHITEX_PREFIX`):
-1. picks the target (x86-64 Windows; `phitex-x86_64-windows.zip`);
+1. picks the target (x86-64 or arm64 Windows; `phitex-x86_64-windows.zip`,
+   `phitex-aarch64-windows.zip`);
 2. downloads the zip and `SHA256SUMS`, and checks the signature with
    minisign when it is installed (else by SHA-256 over HTTPS, as
    install.sh without minisign);
