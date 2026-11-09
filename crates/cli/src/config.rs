@@ -882,7 +882,6 @@ fn canonical(k: &str) -> &str {
 /// and building it, or opening it in an editor, must run nothing it names.
 /// Keys that name a program or allow one to run, or say where files are
 /// written (a folder a program reads from), are the user's.
-#[cfg(test)]
 const USERS_ALONE: &[&str] = &[
     "shell-escape",
     "viewer",
