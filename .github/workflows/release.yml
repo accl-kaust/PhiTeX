@@ -1,7 +1,9 @@
 # A release (docs/ci.md): a tag v1.6, v1.6.1, v1.61, … on main whose commit passed the
 # gate. The CLI built for Linux (x86_64, aarch64; glibc 2.35, Ubuntu
 # 22.04's) and macOS (arm64, x86_64), each a tarball phitex-<arch>-<os>.tar.gz
-# (the names phitex.org/install.sh asks for), SHA256SUMS of them, signed
+# (the names phitex.org/install.sh asks for), and Windows (x86_64), a zip
+# of phitex.exe, phitex-<arch>-windows.zip (x86_64, aarch64;
+# phitex.org/install.ps1's), SHA256SUMS of them, signed
 # with minisign, GitHub's build provenance for each, and the GitHub release
 # made with all of them.
 #
@@ -81,6 +83,10 @@ jobs:
           # SDKs, and Rosetta runs it for the check; GitHub's Intel runners
           # took 39 min a build against 13)
           - { os: macos-15, asset: x86_64-macos, target: x86_64-apple-darwin }
+          # (Windows: a zip of phitex.exe, phitex-<arch>-windows.zip, the
+          # name phitex.org/install.ps1 asks for)
+          - { os: windows-2022, asset: x86_64-windows }
+          - { os: windows-11-arm, asset: aarch64-windows }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -90,24 +96,53 @@ jobs:
       # (.cargo/config.toml links Linux with clang and mold)
       - if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq clang mold
+      # (Windows's arm64 runner: rustup and LLVM's clang, which ring needs
+      # there, set up where missing)
+      - if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            Invoke-WebRequest https://win.rustup.rs/aarch64 -OutFile "$env:RUNNER_TEMP\rustup-init.exe"
+            & "$env:RUNNER_TEMP\rustup-init.exe" -y --default-toolchain none --profile minimal
+            if ($LASTEXITCODE -ne 0) { throw 'rustup-init failed' }
+            "$env:USERPROFILE\.cargo\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          }
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path "$llvm\clang.exe")) {
+            choco install llvm -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'LLVM did not install' }
+          }
+          $llvm | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - run: rustup show active-toolchain || rustup toolchain install
       - if: matrix.target != ''
         run: |
           rustup target add ${{ matrix.target }}
           softwareupdate --install-rosetta --agree-to-license
-      - run: |
+      - shell: bash
+        run: |
           t="${{ matrix.target }}"
           PHITEX_BUILT_BY=release cargo build --release --locked -p phitex-cli ${t:+--target $t}
-      - run: |
+      - if: runner.os != 'Windows'
+        run: |
           t="${{ matrix.target }}"
           out=target/${t:+$t/}release
           file "$out/phitex"
           "$out/phitex" --version
           tar -czf "phitex-${{ matrix.asset }}.tar.gz" -C "$out" phitex
+      # (the zip by PowerShell's Compress-Archive, there on every Windows
+      # runner, arm64's too)
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = 'target/release/phitex.exe'
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'phitex.exe does not run' }
+          Compress-Archive -Path $exe -DestinationPath 'phitex-${{ matrix.asset }}.zip' -CompressionLevel Optimal
+          Get-Item 'phitex-${{ matrix.asset }}.zip'
       - uses: actions/upload-artifact@v4
         with:
           name: phitex-${{ matrix.asset }}
-          path: phitex-${{ matrix.asset }}.tar.gz
+          path: phitex-${{ matrix.asset }}.*
   frontends:
     needs: build
     uses: ./.github/workflows/frontends.yml
@@ -126,7 +161,7 @@ jobs:
           merge-multiple: true
       - run: |
           cd dist
-          sha256sum phitex-*.tar.gz > SHA256SUMS
+          sha256sum phitex-*.tar.gz phitex-*.zip > SHA256SUMS
           cat SHA256SUMS
           sudo apt-get update -qq && sudo apt-get install -y -qq minisign
           minisign -G -W -p "$RUNNER_TEMP/dry.pub" -s "$RUNNER_TEMP/dry.key"
@@ -157,7 +192,7 @@ jobs:
           PASS: ${{ secrets.MINISIGN_PASSWORD }}
         run: |
           cd dist
-          sha256sum phitex-*.tar.gz > SHA256SUMS
+          sha256sum phitex-*.tar.gz phitex-*.zip > SHA256SUMS
           cat SHA256SUMS
           [ -n "$KEY" ] || { echo "no MINISIGN_SECRET_KEY: the release is not signed"; exit 1; }
           sudo apt-get update -qq && sudo apt-get install -y -qq minisign
@@ -170,7 +205,7 @@ jobs:
       # `gh attestation verify phitex-….tar.gz -R accl-kaust/PhiTeX`)
       - uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist/phitex-*.tar.gz
+          subject-path: dist/phitex-*
       - name: the release
         env:
           GH_TOKEN: ${{ github.token }}

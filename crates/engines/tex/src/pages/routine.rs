@@ -633,6 +633,18 @@ impl Run<'_, '_> {
                 t0.elapsed().checked_sub(t_fonts).unwrap().as_micros()
             ));
         }
+        // (a XeTeX page while the evaluation streams its pages: its PDF of
+        // its own made by a child, `crate::xdvpdf::XdvPage`, by the run's
+        // node and its place among the run's shipouts)
+        if !pos.pdf
+            && self.ops.stream.load(std::sync::atomic::Ordering::Relaxed)
+            && self.ops.xe.get().is_some_and(|x| x.pdf.is_some())
+        {
+            let node = v.int(i64::from_ne_bytes(self.cx.node().raw().to_ne_bytes()));
+            let i = v.int(i64::from(self.shipped));
+            let op = self.ops.xdvpage;
+            self.kid(op, vec![page, node, i]);
+        }
         let su = v.seq_unit(page);
         self.contribute("pages", su);
         self.shipped += 1;

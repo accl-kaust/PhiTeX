@@ -373,6 +373,12 @@ impl PdfState {
                 name()
             )));
         };
+        // (pdfTeX's `<NAME` and `>` around the file's reading: a subset's
+        // `<`, a whole file's `<<`)
+        self.font_files.push((
+            fd.fm.ff_name.clone().unwrap_or_default(),
+            fd.fm.is_subsetted(),
+        ));
         if fd.fm.is_type1() {
             let e = self.write_t1_memo(&file, fd)?;
             fd.ff_found = true;

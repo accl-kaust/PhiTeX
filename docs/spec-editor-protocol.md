@@ -45,7 +45,9 @@ same records, so they cannot drift.
   - `initializationOptions`: `{main?, threads?, follow?, files?}` (the
     settings of §3.5, read before the first build; `main` as before), and
     `client: {name, version}`, the extension's own (informational: the
-    server needs nothing from it).
+    server needs nothing from it), and `phitexCursor: true` from a client
+    that sends `phitex/cursor` (§3.1: its `documentHighlight` requests
+    then move nothing).
 - Answered with:
 
 ```json
@@ -55,6 +57,7 @@ same records, so they cannot drift.
    "executeCommandProvider": {"commands": ["phitex.openViewer", "phitex.rebuild", "phitex.showOnPage",
        "phitex.stop", "phitex.savePdf", "phitex.clearCache", "phitex.cacheStats"]},
    "documentSymbolProvider": true,
+   "documentHighlightProvider": true,
    "experimental": {"phitex": {"protocol": 1}}},
  "serverInfo": {"name": "phitex", "version": "0.0.x"}}
 ```
@@ -74,7 +77,11 @@ same records, so they cannot drift.
   (`{items: [{section: "phitex"}]}`) where the client can answer it, and
   sends `phitex/status {state: "starting"}`.
 - `shutdown` answered `null`; `exit` (or the transport's end) ends the
-  server: natively the watch exits 0, as `q` does.
+  server: natively the watch ends as `q` ends it, with status 0 after
+  `shutdown` and 1 without it (an `exit` alone, or the input's end: the
+  LSP's rule); `phitex.stop` ends it with 0. A native server still
+  waiting for the first `.tex` document to name the main file ends at
+  once, with the same statuses.
 - The server's own requests have string ids `phitex-N`; their answers
   are read (`workspace/configuration`, `window/showMessageRequest`) or
   ignored.
@@ -150,13 +157,15 @@ A clean build sends each page as it ships, before the build settles
   what each of them names in turn; of the objects its
   `\pdfpageresources` names, those of the kinds its content draws with:
   a page drawing with no graphics state does not need pgf's). The pages
-  before it also left the
-  colour stacks as they found them. `false` when the page draws with
+  before it are known, and its
+  file begins from the colours they leave it (a colour pushed on one
+  page and popped on a later one is carried into the pages between, as
+  the build's file carries it). `false` when the page draws with
   something not complete yet (a `\pdfobj reserveobjnum` filled later,
   objects written at `\AtEndDocument`, such as pgf's shared ExtGState,
   Pattern and ColorSpace dictionaries named through
-  `\pdfpageresources`), or a colour may carry into it from an earlier
-  page. The page is still drawn, without what it lacks:
+  `\pdfpageresources`), or the colours carried into it are not known
+  yet (pages shipped out of order). The page is still drawn, without what it lacks:
   - a missing graphics state is drawn opaque;
   - a missing shading, or a fill with a missing pattern, draws nothing
     (a flat fill would hide what lies under a shaded background);
@@ -165,9 +174,17 @@ A clean build sends each page as it ships, before the build settles
 
   A viewer marks such a page quietly, "Preview: final colours and
   shading when the build ends", until the settled page replaces it.
+- A XeTeX build streams its pages too: each page's file is
+  xdvipdfmx's of that page alone. It is exact where no colour is carried
+  into it and it draws with nothing another page makes (no `pdf:` special
+  but annotations, links, destinations, outlines and the document's
+  information, and literal code naming no resource).
+- A page whose file cannot be written with the objects it names is
+  written without them (its text, rules and colours), `exact: false`.
 - A page sent with `exact: false` only because the pages before it were
   not known yet (pages ship out of order at more than one thread) is
-  sent again with the same `hash` and `exact: true` once they are.
+  sent again with the same `hash` and `exact: true` once they are, where
+  they carry no colour into it.
   Treat it as an update of that page's mark only.
 - The `status` and `pages` answers list the pages streamed so far
   (`hashes`/`pages`) and, as `"inexact": [k, …]`, those not exact. The
@@ -212,8 +229,19 @@ and used at once (the client's answer is not waited for).
 ```json
 {"state": "starting" | "fetching" | "typesetting" | "ready" | "failed" | "stopped",
  "ms": 67.2, "pages": 3, "errors": 0, "warnings": 2, "engine": "native" | "wasm",
- "root": "/home/me/paper", "main": "paper.tex"}
+ "root": "/home/me/paper", "main": "paper.tex",
+ "update": null | {"latest": "1.1" | null, "advisory": false,
+                   "lines": ["phitex 1.1 is out (you have 1.0):", "  1.1     Faster.", "update: phitex upgrade"]}}
 ```
+
+- `update`: what the update check says to this version, natively, when
+  the user turned the check on (`update-check = true`; never under CI or
+  `PHITEX_NO_UPDATE_CHECK`): the releases after it, the advisories for it
+  (`advisory: true` when there is one) and how to update, the lines the
+  terminal prints (docs/spec-distribution.md §4). `null`: the check is
+  off or unset, or there is nothing to say. Read from the kept
+  `news.json` as the watch starts and at each idle point; fetched at most
+  once a day in the background. The wasm core sends `null`.
 
 - `root`, `main`: the folder the watch runs in and its main file, named
   from there. The watch may run above the editor's root (a chapter opened
@@ -265,6 +293,18 @@ cursor goes the same path, from bytes it makes itself):
 - `select` (with a `range` only): the glyphs from `from..to` marked on
   every page; `from == to` clears them.
 
+A client that cannot send `phitex/cursor` (Helix, Zed, Sublime, any LSP
+client without PhiTeX's plugin) gets forward search from a standard
+request: the server advertises `documentHighlightProvider`, clients ask
+`textDocument/documentHighlight {textDocument, position}` as the cursor
+moves or rests (VS Code, Zed, Helix; Neovim when configured), and the
+server answers `[]` (nothing highlighted) and takes the position as
+`phitex/cursor`'s (a `follow`, no selection). Two forward searches per
+move would disagree, so a client that sends `phitex/cursor` turns this
+off: from the start with `initializationOptions.phitexCursor: true`
+(PhiTeX's clients set it), else at the first `phitex/cursor` the
+session sees. `phitex.showOnPage` is unaffected.
+
 Page to source stays `window/showDocument`: a double-click on the page
 (or an error's place) opens the place in the editor, selected, the focus
 taken (`Server::show`); it is the inverse search every LSP editor has.
@@ -279,7 +319,12 @@ reveals the range without moving the focus.
 ### 3.2 Diagnostics and messages
 
 - `textDocument/publishDiagnostics` after each build, by file (as today:
-  the main file always, files that had some cleared).
+  the main file always, files that had some cleared). A diagnostic's
+  `message` is the error's line, then, for TeX's (`code: "tex"`), TeX's
+  context lines (`l.4 Hello \hobx` and the rest of the line below it).
+  TeX's help ("type `I' and the correct spelling ...") is the interactive
+  terminal's advice and is not sent: editors show `message` inline. The
+  viewer's problems keep it (`help: string[]`).
 - `window/logMessage`: the terminal's lines (errors 1, warnings 2, notes
   3, lines 4).
 - `window/showMessage` / `window/showMessageRequest` for what needs the
@@ -471,3 +516,223 @@ pub trait PackSource: Send + Sync {
   packs as it is found. A release without one: an XeTeX job with `files =
   "shelf"` is refused at the start, said so (tl2026.6 has none: the next
   release is to be made with `FONT_INDEX`).
+
+## 6. The `--json` event stream
+
+`phitex build --json` and `phitex watch --json` print one JSON object a
+line on standard output and nothing else there (the terminal's lines
+are not printed; `--json --lsp` is refused). Each object has `event`,
+one of those below; a reader ignores events and fields it does not know.
+Times are milliseconds (floats), sizes bytes. Read from the code
+(`crates/cli/src/watch.rs`, `modern.rs`, `ui.rs`); the build is counted
+from 1 in a watch.
+
+| event | when | fields |
+|---|---|---|
+| `note`, `warning`, `error` | what the terminal says as `note:`, `warning:`, `error:` | `message` |
+| `viewer` | a watch's viewer serves | `url` (with its token) |
+| `started` | a watch's build begins | `builds` (this build's number), `why` |
+| `build` | a watch's build is in | below |
+| `build` | `phitex build`'s build is in | below |
+| `failed` | a watch's build failed inside the engine (a panic); the watch goes on | `build`, `why`, `message` (its first line) |
+| `diagnostics` | a watch's warnings, made once the editing pauses (a `build` event with `diagnostics: null` comes first) | `build`, `diagnostics` (the engine's own checks: a count), `warnings`, `errors` (counts) |
+| `written` | the exact PDF file written (a watch writes it when idle) | `exact: true`, `build`, `output` (path) |
+| `screen` | an edit painted in the viewer without a build | `build`, `ms` |
+| `diff` | a watch's comparison with a past commit shown | `label`, `changes` (count), `errors` (count); or `error` (why it failed) |
+| `cache` | after a build, and when a watch ends | `dir`, `bytes`, `limit` (0: none) |
+| `clean` | `phitex clean` | `removed` (files), `cache_bytes` (freed); `clean --all`: `cache_bytes` only |
+
+**A watch's `build`:**
+
+```
+{event: "build", build: n, why: string,
+ notes: [string],                 // the session's notes of this build
+ edit: "file:line" | null,        // the line of the main file the edit was on
+ ok: bool,                        // no TeX error
+ output: path | null,             // the PDF written, if any
+ pages: n, pages_changed: [n] ,   // the pages, those that changed
+ nodes_run: n, runs: n | null, rounds: n | null, absorbed: n | null,
+ parallel: {threads, busy_ms, engine_ms, critical_path, peak_running,
+            batches, batches_inline, max_batch,
+            hints: {bounded, any, violations, undeclared, stops, pending_waits},
+            max_ready,
+            speculation: {run, confirmed, mispredicted, fuel_outs}} | null,
+ wall_ms: ms,
+ stats: {build, why, version, engine, files: "texlive" | "shelf",
+         files_release: string | null, wall_ms, phases_ms: {phase: ms},
+         hints: {...} | null, nodes: {ran, kept, live}, runs, rounds,
+         pages, pages_changed, threads, cores_busy: f | null,
+         busy_ms, engine_ms, wasted_ms, resident_kb, values_bytes, ok},
+ errors: [string],                // TeX's errors, as the log has them
+ diagnostics: n | null}           // the engine's checks; null: the `diagnostics` event says them
+```
+
+**`phitex build`'s `build`:**
+
+```
+{event: "build", why: string, ok: bool, output: path | null, pages: n,
+ wall_ms: ms, nodes_run: n, rounds: n, errors: [string],
+ warnings: n,                     // the log's warnings
+ diagnostics: n,                  // the engine's checks
+ engine_warnings: [string],       // the engine's own warnings (the page layout not settled)
+ log: path}
+```
+
+The `parallel` and `stats` objects are measurements: their fields may
+grow; a client that shows a build needs only `build`, `ok`, `pages`,
+`wall_ms`, `output` and `errors`.
+
+## 7. Editor setup
+
+The command is `phitex watch --lsp` (there is no `phitex lsp`), run with
+the project's folder as the editor's root. PhiTeX's own clients are the
+full setup: the page follows the cursor, a double-click on the page
+reaches the source, and they show the caches and status. They live in
+[PhiTeX-frontends](https://github.com/accl-kaust/PhiTeX-frontends):
+
+- **VS Code**: the extension *PhiTeX ⚡ Instant* (`accl-kaust.phitex-instant`,
+  `apps/vscode/`; not yet on the Marketplace: a `.vsix` built from that
+  repository).
+- **Neovim 0.11+**: `apps/editors/nvim/phitex.lua` (lazy.nvim:
+  `{ "accl-kaust/PhiTeX-frontends", config = function(p) dofile(p.dir .. "/apps/editors/nvim/phitex.lua") end }`).
+- **Emacs 29+**: `apps/editors/emacs/phitex.el` (`phitex-mode`, by
+  use-package `:vc` or by loading the file).
+
+Any other LSP client runs the server bare: problems, the outline, the
+commands, and, with no plugin, forward search through
+`textDocument/documentHighlight` (§3.1). Inverse search is
+`window/showDocument`, where the client supports it (else the viewer
+opens `--editor` / `$EDITOR`). The server answers no hover, completion
+or definition: run texlab beside it.
+
+**Neovim 0.11** (built-in client, no plugin):
+
+```lua
+vim.lsp.config('phitex', {
+  cmd = { 'phitex', 'watch', '--lsp' },
+  filetypes = { 'tex', 'plaintex', 'bib' },
+  root_markers = { 'phitex.toml', '.latexmkrc', '.git' },
+  settings = { phitex = { threads = 4 } },
+})
+vim.lsp.enable('phitex')
+-- forward search: Neovim asks documentHighlight only when told to
+vim.api.nvim_create_autocmd({ 'CursorHold', 'CursorHoldI' }, {
+  pattern = '*.tex',
+  callback = function() vim.lsp.buf.document_highlight() end,
+})
+```
+
+**Emacs (eglot, no plugin):**
+
+```elisp
+(add-to-list 'eglot-server-programs
+             '((latex-mode LaTeX-mode tex-mode) . ("phitex" "watch" "--lsp")))
+```
+
+eglot runs one server a mode, so this replaces texlab there; `phitex.el`
+runs both (or use lsp-mode, which takes add-on servers). eglot asks
+`documentHighlight` as the cursor rests (`eglot-ignored-server-capabilities`
+must not list `:documentHighlightProvider`).
+
+**Helix** (`languages.toml`):
+
+```toml
+[language-server.phitex]
+command = "phitex"
+args = ["watch", "--lsp"]
+
+[[language]]
+name = "latex"
+language-servers = ["texlab", "phitex"]
+```
+
+**Zed** (`settings.json`; Zed may want an extension to name a new server):
+
+```json
+"lsp": { "phitex": { "binary": { "path": "phitex", "arguments": ["watch", "--lsp"] } } },
+"languages": { "LaTeX": { "language_servers": ["texlab", "phitex"] } }
+```
+
+**Sublime Text** (the LSP package, `LSP.sublime-settings`):
+
+```json
+"clients": {
+  "phitex": {
+    "enabled": true,
+    "command": ["phitex", "watch", "--lsp"],
+    "selector": "text.tex.latex"
+  }
+}
+```
+
+**VS Code without the extension**: a generic LSP client extension, its
+server command `["phitex", "watch", "--lsp"]`.
+
+## 8. Attaching to a running watch
+
+Every `phitex watch`, with `--lsp` or not, also serves the same language
+server to editors that attach to it: a watch started in a terminal can
+be used from Neovim or Emacs without a second session
+(`crates/cli/src/attach.rs`).
+
+**Transport.** One on every system: a TCP listener on `127.0.0.1` at a
+port the system chooses, the same `Content-Length` framing as standard
+input and output. Each connection is a client of its own.
+
+**Discovery.** Each watch writes one file, `<pid>.json`, in the sessions
+folder:
+
+| system | folder |
+|---|---|
+| Linux, macOS | `$XDG_RUNTIME_DIR/phitex/`, else `~/.cache/phitex/sessions/` (`$PHITEX_CACHE_DIR/sessions/` where that is set) |
+| Windows | `%LOCALAPPDATA%\phitex\sessions\` |
+
+```json
+{"pid": 4242,
+ "main": "/home/u/paper/paper.tex",
+ "root": "/home/u/paper",
+ "viewer": "http://127.0.0.1:24817/3f0c.../",
+ "lsp": {"host": "127.0.0.1", "port": 40125, "token": "9d1e5c0a7b3f48e2a6c4d8b0f1e2a3c4"},
+ "version": "1.0.0",
+ "started": "2026-11-09T10:21:07.512Z"}
+```
+
+- `main` is absolute, `root` the folder the watch runs in (file names
+  are relative to it), `viewer` null without a viewer (`--no-view`).
+- The folder is made 0700 and must be the user's alone (one another user
+  owns, or a link, is refused: the watch then serves no socket); the file
+  is 0600, as it holds the token and the viewer's own. It is written
+  whole (beside, then renamed), again when the viewer or the main file
+  changes, and removed when the watch ends.
+- A file whose watch does not run (its process gone, or its port not
+  answering) is ignored and removed by its readers.
+- `phitex sessions` lists the running watches; `phitex sessions --json`
+  prints their files' objects as one JSON array on one line.
+- An editor picks the watch whose `root` holds the buffer's file,
+  preferring the one whose `main` is that file.
+
+**Connecting.** The first message must be `initialize` with
+`initializationOptions.token` (with `phitexCursor` and the settings as
+on standard input); it must come within 3 seconds and 64 KiB. Otherwise
+the connection is closed with no answer (the token is compared in
+constant time; at most 16 connections wait for their first message at
+once). The answer is as §1's, with
+`capabilities.experimental.phitex.attached: true`; the client is then
+told the viewer (`window/logMessage`) and the last diagnostics.
+
+**Many clients on one session.**
+
+- `didOpen`/`didChange` apply as from standard input; the last edit
+  wins: a client's ranged change of a file another client edited last is
+  sent as its whole text. A file one client closes that another has open
+  is that client's text; closed by all, the disk's again.
+- `phitex/cursor` and `documentHighlight` (§3.1) come from whichever
+  client moved; the client whose cursor or edit came last is in focus.
+- Inverse search (`window/showDocument`) goes to the client in focus,
+  else to every client.
+- Builds, progress, diagnostics, `phitex/status` and the log go to every
+  client.
+- An attached client's `exit`, its connection's end and `phitex.stop`
+  only detach it; its settings (`threads`, `main`, `files`) change
+  nothing. The watch belongs to its terminal (or to the editor on its
+  standard input, `--lsp`) and keeps running.

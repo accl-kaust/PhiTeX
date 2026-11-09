@@ -16,11 +16,7 @@ pub const REPO: &str = "https://github.com/accl-kaust/PhiTeX";
 const AFTER: usize = 10;
 
 fn state_file() -> Option<PathBuf> {
-    let env = |k| std::env::var_os(k).filter(|d| !d.is_empty());
-    let d = env("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".local").join("state")))?;
-    Some(d.join("phitex").join("star"))
+    Some(crate::dirs::phitex(crate::dirs::Kind::State)?.join("star"))
 }
 
 /// The state's text with document `id` counted: the new text, and

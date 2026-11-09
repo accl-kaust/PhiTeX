@@ -416,7 +416,7 @@ impl Inputs {
 }
 
 fn expand_home(p: &str) -> PathBuf {
-    match (p.strip_prefix('~'), std::env::var_os("HOME")) {
+    match (p.strip_prefix('~'), crate::dirs::home()) {
         (Some(rest), Some(h)) => PathBuf::from(format!("{}{rest}", h.to_string_lossy())),
         _ => PathBuf::from(p),
     }

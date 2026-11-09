@@ -1,3 +1,8 @@
+// (Unix's: the programs these tests run under other names are symbolic
+// links, the ones they run are shell scripts, `timeout` bounds them, and
+// their builds need TeX Live; Windows CI runs the unit tests and builds
+// a document end to end instead, checks.yml)
+#![cfg(unix)]
 //! The `phitex` binary, end to end. The tests whose builds need what
 //! `phitex-tex` does not do yet (LaTeX's format, PDF output) are ignored
 //! with what they wait for; they are the gate it must pass, against the pdfTeX oracles under
@@ -874,7 +879,9 @@ fn lsp_send(w: &mut impl std::io::Write, v: &serde_json::Value) {
 }
 
 /// The server's messages, read on a thread of their own.
-fn lsp_messages(out: std::process::ChildStdout) -> std::sync::mpsc::Receiver<serde_json::Value> {
+fn lsp_messages(
+    out: impl std::io::Read + Send + 'static,
+) -> std::sync::mpsc::Receiver<serde_json::Value> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut r = BufReader::new(out);
@@ -1010,8 +1017,9 @@ impl Viewer {
 /// unsaved buffer (`didOpen`, `didChange`) is what is built: an edit that
 /// makes an error is published at its line, the fix clears it and the
 /// pages change; a double-click in the viewer (its `source`) is
-/// `window/showDocument` at that line; `phitex/cursor` on a word of the
-/// second page, with a selection, is the viewer's `follow` and `select`
+/// `window/showDocument` at that line; `textDocument/documentHighlight`
+/// (answered `[]`) and `phitex/cursor` on a word of the
+/// second page, with a selection, are the viewer's `follow` and `select`
 /// in bytes of the buffer; `shutdown` and `exit` end
 /// the watch with status 0. Nothing but LSP messages on standard output.
 #[test]
@@ -1062,6 +1070,7 @@ fn watch_lsp() {
             .is_some_and(|c| c.contains(&json!("phitex.showOnPage"))),
         "{init}"
     );
+    assert_eq!(caps["documentHighlightProvider"], true, "{init}");
     lsp_send(
         &mut to,
         &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
@@ -1126,6 +1135,13 @@ fn watch_lsp() {
             .is_some_and(|m| m.contains("Undefined control sequence")),
         "{err}"
     );
+    // (TeX's help, its interactive terminal's advice, is not the editor's)
+    assert!(
+        err["message"]
+            .as_str()
+            .is_some_and(|m| !m.contains("type `I'") && !m.contains("never \\def'ed")),
+        "{err}"
+    );
     // (the fix, with a word of page 2 changed first: whatever build
     // takes the first change alone still has the error)
     lsp_send(
@@ -1169,6 +1185,25 @@ fn watch_lsp() {
         &mut to,
         &json!({"jsonrpc": "2.0", "id": show["id"], "result": {"success": true}}),
     );
+    let start: usize = text.split_inclusive('\n').take(second).map(str::len).sum();
+    let line = [start, start + "Xray foxtrot golf hotel.".len()];
+    // (a client without `phitex/cursor` (Helix, Zed): its cursor asked
+    // highlights for, answered with none and shown on the pages)
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 5, "method": "textDocument/documentHighlight", "params": {
+            "textDocument": {"uri": uri}, "position": at(second, 14),
+        }}),
+    );
+    let none = lsp_until(&rx, &mut seen, |m| m["id"] == 5);
+    assert_eq!(none["result"], json!([]), "{none}");
+    let follow = viewer.until(|v| v["event"] == "follow");
+    assert_eq!(
+        follow,
+        json!({"event": "follow", "file": "doc.tex", "at": start + 14,
+            "word": [start + 13, start + 17], "line": line}),
+        "{follow}"
+    );
     // (the editor's cursor on a word of page 2, a selection with it: the
     // viewer told their bytes in the buffer, the glyph origins' space, in
     // the origins' name of the file)
@@ -1179,12 +1214,11 @@ fn watch_lsp() {
             "range": {"start": at(second, 5), "end": at(second, 12)},
         }}),
     );
-    let start: usize = text.split_inclusive('\n').take(second).map(str::len).sum();
     let follow = viewer.until(|v| v["event"] == "follow");
     assert_eq!(
         follow,
         json!({"event": "follow", "file": "doc.tex", "at": start + 7,
-            "word": [start + 5, start + 12], "line": [start, start + "Xray foxtrot golf hotel.".len()]}),
+            "word": [start + 5, start + 12], "line": line}),
         "{follow}"
     );
     let select = viewer.until(|v| v["event"] == "select");
@@ -1230,6 +1264,341 @@ fn watch_lsp() {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert!(status.success(), "the watch ended with {status}");
+}
+
+/// Editors attached to a terminal's `phitex watch` (docs/spec-editor-protocol.md
+/// §8): its discovery file (0600, in a 0700 folder) names its port and
+/// token, and `phitex sessions --json` lists it; two clients attach, each
+/// told so in `initialize`; one's unsaved edit makes an error both are
+/// shown at its place at once (a terminal's watch places an edit's
+/// errors as one with a viewer does); the other detaches (`shutdown`, `exit`: its connection closed)
+/// and the watch goes on building the first one's fix; a wrong or missing
+/// token is closed unanswered; `q` ends the watch and removes its file.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines, reason = "one watch's session, in order")]
+fn watch_attach() {
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt as _;
+    let _one = one();
+    let text = plain() + "Alpha bravo charlie delta.\n\\bye\n";
+    let first = text[..text.find("Alpha bravo").expect("the words")]
+        .matches('\n')
+        .count();
+    let dir = scratch("watch-attach");
+    std::fs::write(dir.join("doc.tex"), &text).expect("the document");
+    let run = dir.join("run");
+    std::fs::create_dir_all(&run).expect("a runtime folder");
+    let root = dir.canonicalize().expect("the directory");
+    let uri = format!("file://{}/doc.tex", root.display());
+    let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
+    let mut child = command(bin, &dir)
+        .args([
+            "watch",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "4",
+            "doc.tex",
+        ])
+        .env("XDG_RUNTIME_DIR", &run)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut keys = child.stdin.take().expect("its input");
+    // (its discovery file)
+    let sessions = run.join("phitex");
+    let end = Instant::now() + Duration::from_secs(120);
+    let (file, info) = loop {
+        let found = std::fs::read_dir(&sessions)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "json"));
+        if let Some(p) = found
+            && let Ok(v) =
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(&p).unwrap_or_default())
+        {
+            break (p, v);
+        }
+        assert!(
+            Instant::now() < end,
+            "no discovery file in {}",
+            sessions.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mode = |p: &Path| std::fs::metadata(p).expect("it").permissions().mode() & 0o777;
+    assert_eq!(mode(&file), 0o600, "{}", file.display());
+    assert_eq!(mode(&sessions), 0o700, "{}", sessions.display());
+    assert_eq!(
+        info["main"],
+        root.join("doc.tex").display().to_string(),
+        "{info}"
+    );
+    assert_eq!(info["lsp"]["host"], "127.0.0.1", "{info}");
+    let port = u16::try_from(info["lsp"]["port"].as_u64().expect("a port")).expect("a port");
+    let token = info["lsp"]["token"].as_str().expect("a token").to_owned();
+    assert_eq!(token.len(), 32, "{info}");
+    let listed = command(bin, &dir)
+        .args(["sessions", "--json"])
+        .env("XDG_RUNTIME_DIR", &run)
+        .output()
+        .expect("phitex sessions runs");
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("JSON");
+    assert_eq!(listed, json!([info.clone()]), "{listed}");
+    let connect = || {
+        let s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("its socket");
+        let r = s.try_clone().expect("the socket");
+        (s, lsp_messages(r))
+    };
+    let initialize = |token: serde_json::Value| {
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null,
+            "rootUri": format!("file://{}", root.display()),
+            "capabilities": {"window": {"showDocument": {"support": true}}},
+            "initializationOptions": {"token": token},
+        }})
+    };
+    // (two clients)
+    let (mut to_a, rx_a) = connect();
+    let (mut to_b, rx_b) = connect();
+    let (mut seen_a, mut seen_b) = (Vec::new(), Vec::new());
+    for (to, rx, seen) in [
+        (&mut to_a, &rx_a, &mut seen_a),
+        (&mut to_b, &rx_b, &mut seen_b),
+    ] {
+        lsp_send(to, &initialize(json!(token)));
+        let init = lsp_until(rx, seen, |m| m["id"] == 1);
+        assert_eq!(
+            init["result"]["capabilities"]["experimental"]["phitex"]["attached"], true,
+            "{init}"
+        );
+        lsp_send(
+            to,
+            &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+        );
+    }
+    // (a's unsaved edit: an error, shown to both)
+    let at = |l: usize, c: usize| json!({"line": l, "character": c});
+    lsp_send(
+        &mut to_a,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": uri, "languageId": "tex", "version": 1, "text": text},
+        }}),
+    );
+    lsp_send(
+        &mut to_a,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"range": {"start": at(first, 0), "end": at(first, 0)}, "text": "\\undefinedmacro "}],
+        }}),
+    );
+    let error = |m: &serde_json::Value| {
+        m["method"] == "textDocument/publishDiagnostics"
+            && m["params"]["uri"] == uri.as_str()
+            && m["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|d| d.iter().any(|d| d["severity"] == 1))
+    };
+    let bad = lsp_until(&rx_a, &mut seen_a, error);
+    assert_eq!(
+        bad["params"]["diagnostics"][0]["range"]["start"]["line"], first,
+        "{bad}"
+    );
+    lsp_until(&rx_b, &mut seen_b, error);
+    // (no status before the session has a state)
+    for m in seen_a.iter().chain(&seen_b) {
+        assert!(
+            m["method"] != "phitex/status" || m["params"]["state"] != "",
+            "{m}"
+        );
+    }
+    // (b detaches; the watch goes on)
+    lsp_send(
+        &mut to_b,
+        &json!({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": null}),
+    );
+    lsp_until(&rx_b, &mut seen_b, |m| m["id"] == 9);
+    lsp_send(
+        &mut to_b,
+        &json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    );
+    let closed = loop {
+        match rx_b.recv_timeout(Duration::from_secs(30)) {
+            Ok(_) => {}
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(
+        closed,
+        std::sync::mpsc::RecvTimeoutError::Disconnected,
+        "b's connection closed"
+    );
+    assert!(
+        child.try_wait().expect("the watch").is_none(),
+        "the watch ended with b"
+    );
+    lsp_send(
+        &mut to_a,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": {"uri": uri, "version": 3},
+            "contentChanges": [{"range": {"start": at(first, 0), "end": at(first, 16)}, "text": ""}],
+        }}),
+    );
+    lsp_until(&rx_a, &mut seen_a, |m| {
+        m["method"] == "textDocument/publishDiagnostics"
+            && m["params"]["uri"] == uri.as_str()
+            && m["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|d| d.iter().all(|d| d["severity"] != 1))
+    });
+    // (a wrong token, none: closed unanswered)
+    for wrong in [json!("0".repeat(32)), serde_json::Value::Null] {
+        let (mut to_c, rx_c) = connect();
+        lsp_send(&mut to_c, &initialize(wrong));
+        assert_eq!(
+            rx_c.recv_timeout(Duration::from_secs(30)).err(),
+            Some(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "answered without the token"
+        );
+    }
+    // (the watch's end, as its terminal ends it: the file removed)
+    keys.write_all(b"q\n").expect("the watch reads");
+    keys.flush().expect("the watch reads");
+    let end = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("the watch") {
+            break s;
+        }
+        assert!(Instant::now() < end, "the watch did not end at q");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "the watch ended with {status}");
+    assert!(!file.exists(), "the discovery file is left");
+}
+
+/// `phitex watch --lsp` ended by `exit` without `shutdown` exits with
+/// status 1, as the LSP says (with `shutdown` first: 0, `watch_lsp`).
+#[test]
+fn watch_lsp_exit_without_shutdown() {
+    use serde_json::json;
+    let _one = one();
+    let dir = scratch("watch-lsp-exit");
+    std::fs::write(dir.join("doc.tex"), plain() + "Alpha.\n\\bye\n").expect("the document");
+    let root = dir.canonicalize().expect("the directory");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--lsp", "--no-view", "--ini", "--etex", "doc.tex"])
+        .env("XDG_RUNTIME_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut to = child.stdin.take().expect("its input");
+    let rx = lsp_messages(child.stdout.take().expect("its output"));
+    let mut seen = Vec::new();
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null, "rootUri": format!("file://{}", root.display()), "capabilities": {}}}),
+    );
+    lsp_until(&rx, &mut seen, |m| m["id"] == 1);
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    );
+    let end = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("the watch") {
+            break s;
+        }
+        assert!(Instant::now() < end, "the watch did not end after exit");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(status.code(), Some(1), "the watch ended with {status}");
+}
+
+/// A terminal's watch keeps its last build's problems with no editor
+/// connected, and an editor that attaches is given them at once: the
+/// first `publishDiagnostics` it gets has the document's error.
+#[cfg(unix)]
+#[test]
+fn watch_attach_replays_the_problems() {
+    use serde_json::json;
+    let _one = one();
+    let text = plain() + "Alpha \\undefinedmacro bravo.\n\\bye\n";
+    let line = text[..text.find("Alpha").expect("the words")]
+        .matches('\n')
+        .count();
+    let dir = scratch("watch-attach-replay");
+    std::fs::write(dir.join("doc.tex"), &text).expect("the document");
+    let run = dir.join("run");
+    std::fs::create_dir_all(&run).expect("a runtime folder");
+    let root = dir.canonicalize().expect("the directory");
+    let uri = format!("file://{}/doc.tex", root.display());
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args([
+            "watch",
+            "--json",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "4",
+            "doc.tex",
+        ])
+        .env("XDG_RUNTIME_DIR", &run)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut keys = child.stdin.take().expect("its input");
+    let mut lines = BufReader::new(child.stdout.take().expect("its output"))
+        .lines()
+        .map_while(Result::ok);
+    let mut seen = Vec::new();
+    let built = until(&mut lines, "build", &1.into(), &mut seen);
+    assert_eq!(built["ok"], false, "{built}");
+    let info = std::fs::read_dir(run.join("phitex"))
+        .expect("the sessions folder")
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|e| e == "json"))
+        .and_then(|p| serde_json::from_slice::<serde_json::Value>(&std::fs::read(p).ok()?).ok())
+        .expect("a discovery file");
+    let port = u16::try_from(info["lsp"]["port"].as_u64().expect("a port")).expect("a port");
+    let s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("its socket");
+    let rx = lsp_messages(s.try_clone().expect("the socket"));
+    let mut to = s;
+    let mut got = Vec::new();
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null, "rootUri": format!("file://{}", root.display()),
+            "capabilities": {}, "initializationOptions": {"token": info["lsp"]["token"]},
+        }}),
+    );
+    let first = lsp_until(&rx, &mut got, |m| {
+        m["method"] == "textDocument/publishDiagnostics" && m["params"]["uri"] == uri.as_str()
+    });
+    let errors: Vec<&serde_json::Value> = first["params"]["diagnostics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|d| d["severity"] == 1)
+        .collect();
+    assert_eq!(errors.len(), 1, "{first}");
+    assert_eq!(errors[0]["range"]["start"]["line"], line, "{first}");
+    keys.write_all(b"q\n").expect("the watch reads");
+    keys.flush().expect("the watch reads");
+    drop(lines);
+    let _ = child.wait();
 }
 
 /// `phitex watch --lsp`'s progress (docs/spec-editor-protocol.md §2):
@@ -1971,10 +2340,10 @@ fn exit_statuses() {
     };
     assert_eq!(
         status(&["build", "--engine", "tex", "nothere.tex"]),
-        Some(1)
+        Some(2)
     );
-    assert_eq!(status(&["check", "x.tex"]), Some(1));
-    assert_eq!(status(&["x.tex"]), Some(1));
+    assert_eq!(status(&["check", "x.tex"]), Some(2));
+    assert_eq!(status(&["x.tex"]), Some(2));
     assert_eq!(status(&["--help"]), Some(0));
     assert_eq!(status(&["--compat=pdflatex", "-help"]), Some(0));
     assert_eq!(status(&["--compat=pdflatex", "-frob", "x.tex"]), Some(1));
@@ -2212,8 +2581,8 @@ fn tiny() -> &'static str {
     "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x Hi\\end\n"
 }
 
-/// Every option is accepted before the command, after it and after the
-/// file: `-o DIR` and `-j N` in the three positions, the output where
+/// A build's options are accepted after the command, before and after
+/// the file: `-o DIR` and `-j N` in those positions, the output where
 /// `-o` says.
 #[test]
 fn options_in_any_position() {
@@ -2221,7 +2590,7 @@ fn options_in_any_position() {
     let dir = scratch("options");
     std::fs::write(dir.join("t.tex"), tiny()).expect("the document");
     let lines: [&[&str]; 3] = [
-        &["-o", "out1", "-j", "2", "build", "--ini", "--etex", "t.tex"],
+        &["build", "-o", "out1", "-j", "2", "--ini", "--etex", "t.tex"],
         &["build", "-o", "out2", "-j", "2", "--ini", "--etex", "t.tex"],
         &["build", "--ini", "--etex", "t.tex", "-o", "out3", "-j", "2"],
     ];
@@ -2241,7 +2610,7 @@ fn options_in_any_position() {
 }
 
 /// An unknown option is named, with `--help` suggested, and the exit
-/// status is pdflatex's 1; an option before the command is never taken for TeX's
+/// status is a usage error's 2; an option before the command is never taken for TeX's
 /// command line.
 #[test]
 fn unknown_option_is_named() {
@@ -2252,16 +2621,16 @@ fn unknown_option_is_named() {
         .output()
         .expect("phitex runs");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(err.contains("--frob"), "the option is not named:\n{err}");
     assert!(err.contains("--help"), "--help is not suggested:\n{err}");
     assert!(err.lines().count() <= 8, "more than a few lines:\n{err}");
     let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["-o", "out", "--frob", "build", "t.tex"])
+        .args(["--frob", "build", "t.tex"])
         .output()
         .expect("phitex runs");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(err.contains("--frob") && !err.contains("compat"), "{err}");
 }
 
@@ -2323,7 +2692,7 @@ fn help_is_sectioned() {
     };
     let short = help("--help");
     assert!(
-        short.lines().count() <= 35 && short.contains("--help-all") && short.contains("--jobs"),
+        short.lines().count() <= 35 && short.contains("--help-all") && short.contains("build"),
         "--help is not the short help:\n{short}"
     );
     assert!(
@@ -2341,14 +2710,27 @@ fn help_is_sectioned() {
         "Examples:",
         "build",
         "watch",
-        "--write",
         "clean",
         "--json",
+        "Exit status",
+    ] {
+        assert!(
+            text.contains(section),
+            "`{section}` is not in the help:\n{text}"
+        );
+    }
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--help-all"])
+        .output()
+        .expect("phitex runs");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    for section in [
+        "--write",
         "--no-view",
         "--shell-escape",
-        "Exit status",
         "--output-dir",
         "--jobs",
+        "--lsp",
     ] {
         assert!(
             text.contains(section),
@@ -3893,7 +4275,9 @@ fn watch_open_starts_only_the_users_viewer() {
         let _ = until(&mut lines, "build", &1.into(), &mut seen);
         // (a viewer started is not waited for)
         std::thread::sleep(Duration::from_millis(500));
-        drop(child.stdin.take());
+        if let Some(mut i) = child.stdin.take() {
+            let _ = i.write_all(b"q\n");
+        }
         let _ = child.wait();
         assert_eq!(dir.join("ran").exists(), runs, "{name}");
     }

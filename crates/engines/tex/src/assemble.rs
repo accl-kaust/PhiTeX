@@ -90,7 +90,7 @@ pub(crate) fn output(cx: &mut Ctx<'_>, o: &crate::run::Ops) -> Result<ValueId, S
 /// Example: a page of lines A, B, C, a word edited in B keeping B's
 /// dimensions: the finisher stands, this node reads B's unit again and
 /// writes the page with the new B.
-fn fill_sealed_pages(
+pub(crate) fn fill_sealed_pages(
     cx: &mut Ctx<'_>,
     pages: Vec<ValueId>,
 ) -> Result<(Vec<ValueId>, Vec<u64>), Stop> {

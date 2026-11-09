@@ -1,5 +1,6 @@
 //! The native runner of `\write18`'s commands (`phitex_tex::ShellHook`,
-//! docs/note-shell-hook.md): `/bin/sh -c` in a fresh scratch directory
+//! docs/note-shell-hook.md): `/bin/sh -c` (Windows: `cmd.exe /c`, as
+//! web2c's `system` runs them there) in a fresh scratch directory
 //! per call holding only the files the engine hands it, with kpathsea's
 //! variables exported (latexminted's `latexrestricted` finds TeX Live by
 //! `SELFAUTOLOC`) and the document's directory first on `TEXINPUTS`, so
@@ -28,21 +29,15 @@ impl ProcessHook {
         doc_dir: &Path,
         exported: impl Iterator<Item = (&'a [u8], &'a [u8])>,
     ) -> ProcessHook {
-        use std::os::unix::ffi::OsStrExt;
         let mut env: Vec<(std::ffi::OsString, std::ffi::OsString)> = exported
-            .map(|(a, b)| {
-                (
-                    std::ffi::OsStr::from_bytes(a).to_owned(),
-                    std::ffi::OsStr::from_bytes(b).to_owned(),
-                )
-            })
+            .map(|(a, b)| (os_string(a), os_string(b)))
             .collect();
         env.sort();
         // (the project's files found by kpsewhich, the document's
-        // directory first, then the default path: the trailing colon)
+        // directory first, then the default path: the trailing separator)
         let dir = std::path::absolute(doc_dir).unwrap_or_else(|_| doc_dir.to_path_buf());
         let mut inputs = dir.into_os_string();
-        inputs.push(":");
+        inputs.push(PATH_SEP);
         if let Some(t) = std::env::var_os("TEXINPUTS") {
             inputs.push(t);
         }
@@ -62,10 +57,10 @@ impl ProcessHook {
                     .iter()
                     .find(|(k, _)| k == "TEXINPUTS")
                     .and_then(|(_, v)| v.to_str())
-                    .and_then(|v| v.split(':').next())
+                    .and_then(|v| v.split(PATH_SEP).next())
                     .unwrap_or("")
                     .to_owned();
-                format!("{dir}:{value}").into()
+                format!("{dir}{PATH_SEP}{value}").into()
             } else {
                 value.into()
             };
@@ -73,6 +68,59 @@ impl ProcessHook {
             self.env.push((name.into(), value));
         }
         self
+    }
+}
+
+/// kpathsea's separator of a search path's elements (`ENV_SEP`).
+const PATH_SEP: &str = if cfg!(windows) { ";" } else { ":" };
+
+/// kpathsea's bytes as an operating-system string (Windows: UTF-8).
+fn os_string(b: &[u8]) -> std::ffi::OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(b).to_owned()
+    }
+    #[cfg(not(unix))]
+    String::from_utf8_lossy(b).into_owned().into()
+}
+
+/// The shell running `command`, as C's `system` runs it: `/bin/sh -c`;
+/// on Windows `cmd.exe /d /s /c "command"` (`/s`: the quotes around it
+/// dropped and the rest as typed, Rust's own quoting kept out of it).
+fn shell(command: &str) -> std::process::Command {
+    #[cfg(unix)]
+    {
+        let mut c = std::process::Command::new("/bin/sh");
+        c.arg("-c").arg(command);
+        c
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        let cmd = std::env::var_os("COMSPEC")
+            .filter(|c| !c.is_empty())
+            .unwrap_or_else(|| "cmd.exe".into());
+        let mut c = std::process::Command::new(cmd);
+        c.args(["/d", "/s", "/c"]).raw_arg(format!("\"{command}\""));
+        c
+    }
+}
+
+/// `status` as C's `system` returns it on Unix (the engine's status):
+/// Windows's exit code shifted as a wait status's is (one past a byte,
+/// an NTSTATUS's, as 255: still a failure). `cmd.exe` says a command it
+/// does not find, and exits 1, as Windows's `system` returns it to TeX.
+fn wait_status(status: std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status.into_raw()
+    }
+    #[cfg(windows)]
+    match status.code() {
+        None => 127 << 8,
+        Some(c) => i32::from(u8::try_from(c).unwrap_or(255)) << 8,
     }
 }
 
@@ -99,13 +147,16 @@ fn atime_moves() -> bool {
                 return Ok(false);
             }
             unread(&p)?;
-            let copied = std::process::Command::new("/bin/sh")
-                .args(["-c", "cat probe > copy"])
-                .current_dir(&d)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()?;
+            let copied = shell(if cfg!(windows) {
+                "type probe > copy"
+            } else {
+                "cat probe > copy"
+            })
+            .current_dir(&d)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
             Ok(copied.success() && was_read(&p))
         })()
         .unwrap_or(false);
@@ -172,8 +223,15 @@ fn tree(root: &Path) -> (Vec<String>, Vec<PathBuf>) {
 /// found) and 126 (found but not runnable), its message the why; any
 /// other status is the command's own, which says its errors (empty).
 fn shell_why(status: i32, stderr: &[u8]) -> String {
-    use std::os::unix::process::ExitStatusExt;
-    match std::process::ExitStatus::from_raw(status).code() {
+    #[cfg(unix)]
+    let code = {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(status).code()
+    };
+    // (Windows: [`wait_status`]'s, never signalled)
+    #[cfg(not(unix))]
+    let code = Some(status >> 8);
+    match code {
         Some(c @ (126 | 127)) => {
             let said = String::from_utf8_lossy(stderr);
             let said = said.lines().rev().find(|l| !l.trim().is_empty());
@@ -201,7 +259,6 @@ fn inside(name: &str) -> bool {
 
 impl ShellHook for ProcessHook {
     fn run(&self, command: &str, files: &[(String, Arc<[u8]>)]) -> ShellRan {
-        use std::os::unix::process::ExitStatusExt;
         let track = atime_moves();
         let dir = scratch();
         // (not run at all: `system`'s 127, and why, which the engine says)
@@ -232,10 +289,8 @@ impl ShellHook for ProcessHook {
         {
             track &= unread(&p).is_ok();
         }
-        let mut cmd = std::process::Command::new("/bin/sh");
-        cmd.arg("-c")
-            .arg(command)
-            .current_dir(&dir)
+        let mut cmd = shell(command);
+        cmd.current_dir(&dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -245,10 +300,10 @@ impl ShellHook for ProcessHook {
         // (`system`'s status: the shell's own 127 when it cannot start)
         // (and its standard output, which a piped input reads)
         let (status, stdout, stderr) = match cmd.output() {
-            Ok(o) => (o.status.into_raw(), o.stdout, o.stderr),
+            Ok(o) => (wait_status(o.status), o.stdout, o.stderr),
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&dir);
-                return fail(format!("/bin/sh could not start: {e}"));
+                return fail(format!("the shell could not start: {e}"));
             }
         };
         let why = shell_why(status, &stderr);
@@ -315,6 +370,7 @@ mod tests {
     /// A command over the files it is handed: what it wrote, changed and
     /// removed, and what it read.
     #[test]
+    #[cfg(unix)]
     fn runs_over_the_files_given() {
         let h = ProcessHook::new(Path::new("."), std::iter::empty());
         let files: Vec<(String, Arc<[u8]>)> = vec![
@@ -350,5 +406,28 @@ mod tests {
             "{:?}",
             r.why
         );
+    }
+
+    /// Windows: `cmd.exe`'s commands over the files handed, its exit
+    /// codes as wait statuses, a command not found a failure.
+    #[test]
+    #[cfg(windows)]
+    fn runs_in_cmd() {
+        let h = ProcessHook::new(Path::new("."), std::iter::empty());
+        let files: Vec<(String, Arc<[u8]>)> = vec![
+            ("a.txt".into(), Arc::from(&b"alpha\r\n"[..])),
+            ("sub/c.txt".into(), Arc::from(&b"gamma\r\n"[..])),
+        ];
+        let r = h.run("type a.txt > made.txt && del sub\\c.txt", &files);
+        assert_eq!(r.status, 0, "{:?}", r.why);
+        assert_eq!(
+            r.wrote,
+            vec![("made.txt".to_owned(), b"alpha\r\n".to_vec())]
+        );
+        assert_eq!(r.removed, vec!["sub/c.txt".to_owned()]);
+        let r = h.run("exit 3", &files);
+        assert_eq!((r.status, r.why.as_str()), (3 << 8, ""));
+        let r = h.run("phitex-no-such-program-here x", &files);
+        assert_ne!(r.status, 0);
     }
 }

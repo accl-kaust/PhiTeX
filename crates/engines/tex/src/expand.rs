@@ -1591,7 +1591,8 @@ impl Run<'_, '_> {
             }
             _ => {
                 let j = self.get_loc(crate::fields::cell::JOBNAME)?;
-                s.push_str(&j.map_or_else(|| "texput".to_owned(), |x| str_of(self.v, x)));
+                let j = j.map_or_else(|| "texput".to_owned(), |x| str_of(self.v, x));
+                s.push_str(&print_file_name(&j));
             }
         }
         self.push_toks(str_toks(&s));
@@ -1996,6 +1997,18 @@ impl Run<'_, '_> {
             );
         }
         Ok((name, was_quoted))
+    }
+}
+
+/// A file name as web2c's `print_file_name` prints it (tex.ch): in
+/// quotes when it holds a space (its own quotes left out), else as it
+/// is. `\jobname` of `pdflatex "my paper.tex"` is `"my paper"`, so that
+/// LaTeX's `\jobname.aux` is one file name, not `my` and some text.
+pub(crate) fn print_file_name(name: &str) -> String {
+    if name.contains(' ') {
+        format!("\"{}\"", name.replace('"', ""))
+    } else {
+        name.to_owned()
     }
 }
 

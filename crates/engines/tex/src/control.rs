@@ -2241,7 +2241,9 @@ impl Run<'_, '_> {
         if self.cur.chr >= 4 {
             return crate::etex::show(self);
         }
-        let mut s = String::from("> ");
+        // (the event's text without `> `: the log's layout prints it,
+        // §1294's `print_nl("> ")`)
+        let mut s = String::new();
         match self.cur.chr {
             0 => {
                 self.get_token();
@@ -2285,8 +2287,7 @@ impl Run<'_, '_> {
             }
         }
         s.push('.');
-        self.show_ended();
-        self.log("show", &s)
+        self.log_shown(&s)
     }
 
     /// `\setlanguage` (§1377): a language whatsit in horizontal mode,
@@ -2595,7 +2596,10 @@ impl Run<'_, '_> {
             // (a warning LaTeX writes this way: a diagnostic at the
             // command that raised it, with the line as it is logged)
             self.written_warning(&s)?;
-            self.log_lines("wlog", &s, marks)?;
+            // (§1350, §1370: a negative stream's the log's alone; one past
+            // 15 or not open, the terminal's too)
+            let kind = if k < 0 { "wlog" } else { "write" };
+            self.log_lines(kind, &s, marks)?;
         }
         Ok(())
     }

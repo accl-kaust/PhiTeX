@@ -38,6 +38,15 @@ pub type Finder = Arc<dyn Fn(&str) -> Option<(String, Vec<u8>)> + Send + Sync>;
 /// encoding of ENCFONTS's: two lookups, two keys.
 pub const FONT_KEY: &str = "\u{1}font:";
 
+/// pdfTeX's banner as its terminal's first line begins: `\pdftexbanner`
+/// without kpathsea's version.
+#[must_use]
+pub fn terminal_banner() -> &'static str {
+    crate::pdfout::BANNER
+        .split_once(" kpathsea version")
+        .map_or(crate::pdfout::BANNER, |(b, _)| b)
+}
+
 /// The key of the font side's lookup of file `name` ([`FONT_KEY`]).
 pub(crate) fn font_key(name: &str) -> String {
     format!("{FONT_KEY}{name}")
@@ -1199,11 +1208,28 @@ fn file_digest(f: Option<&(String, Vec<u8>)>) -> [u8; 32] {
 type Read = (String, [u8; 32], String, Vec<u8>);
 
 /// The native content key of the file at `path`: its length,
-/// modification time (ns) and inode, little-endian; empty where the
-/// metadata is not there. What a native host's [`ContentKey`] gives
+/// modification time (ns) and inode, little-endian (Windows, which has
+/// no inode in `std`: its creation time, in 100 ns, in the inode's
+/// place: a file put over another is a new one there too); empty where
+/// the metadata is not there. What a native host's [`ContentKey`] gives
 /// with the path its lookup finds.
 #[must_use]
 pub fn file_stat_key(path: &str) -> Vec<u8> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if let Ok(m) = std::fs::metadata(path) {
+            let ns = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+            return [m.len(), ns, m.creation_time()]
+                .iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect();
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -3249,6 +3275,9 @@ impl Graph {
             match crate::exec::env_str!("PHITEX_COLLECT_MB").and_then(|x| x.parse::<u64>().ok()) {
                 Some(0) => None,
                 Some(mb) => Some(mb << 20),
+                // (a wasm core's whole memory is 4 GiB: a quarter of it in
+                // dead values before the first collection is too much)
+                None if cfg!(target_family = "wasm") => Some(256u64 << 20),
                 None => Some(1u64 << 30),
             };
         // (`PHITEX_RUNS_PER_NODE`: a node run more often in one evaluation
@@ -3315,6 +3344,12 @@ impl Graph {
             watch: watch.clone(),
             objs: stream_objs.clone(),
         }));
+        let xe: Arc<std::sync::OnceLock<crate::xetex::XeTeX>> = Arc::default();
+        let xdvpage = eng.register(Arc::new(crate::xdvpdf::XdvPage {
+            stream: stream_on.clone(),
+            watch: watch.clone(),
+            xe: xe.clone(),
+        }));
         let readback = eng.register(Arc::new(crate::ops::ReadBack(shared.clone())));
         let pic = eng.register(Arc::new(crate::pic::Pic(shared.clone())));
         let fields = Arc::new(crate::fields::Fields::new(eng.values()));
@@ -3343,6 +3378,7 @@ impl Graph {
             tool,
             toolnode,
             pdfpage,
+            xdvpage,
             readback,
             pic,
             tool_opts: Arc::default(),
@@ -3375,7 +3411,7 @@ impl Graph {
             held: Arc::default(),
             node_rec: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             pdf_cmds: Arc::default(),
-            xe: Arc::default(),
+            xe,
             tcx: Arc::default(),
             rel_keys: Arc::default(),
             class_proj,
@@ -5040,6 +5076,9 @@ struct OutMemo {
     )>,
     pages: Option<(Option<ValueId>, Vec<u64>)>,
     log: crate::log::LayoutMemo,
+    /// The log's end the last output was made with (§642's line, or a
+    /// fatal error's), for [`Build::terminal`].
+    end: String,
     /// The files' texts ([`Build::files`]) by the `streams` value.
     #[allow(clippy::type_complexity)]
     files: Option<(Option<ValueId>, Arc<Vec<(String, String)>>)>,
@@ -8464,7 +8503,72 @@ impl Build {
             )
         };
         let log = memo.log.finish(&end);
+        memo.end = end;
         (dvi, log)
+    }
+
+    /// The terminal of a job run with it on (`nonstop_mode`,
+    /// `scroll_mode`), as pdfTeX prints it: `head` (the banner and what
+    /// is said before the log opens), the events less those the log
+    /// alone has (`\wlog`, and with `\tracingonline` not positive the
+    /// diagnostics, shown boxes and `\openout` lines), laid out at the
+    /// terminal's own columns, the end, `Transcript written on
+    /// LOG_NAME.` ([`crate::log::terminal`]).
+    #[must_use]
+    pub fn terminal(&self, head: &str, log_name: &str) -> String {
+        let _ = self.output_shared();
+        let v = self.g.eng.values();
+        let end = self.memo.locked().end.clone();
+        // (pdfTeX's files said by their paths, as kpathsea found them)
+        let path =
+            |n: &str| (self.opts.finder)(&font_key(n)).map_or_else(|| n.to_owned(), |(p, _)| p);
+        let layout = self.pdf_layout();
+        let files = layout
+            .as_ref()
+            .map(phitex_pdf::Layout::font_files)
+            .unwrap_or_default();
+        let reads = layout
+            .as_ref()
+            .map(phitex_pdf::Layout::font_reads)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(page, name)| {
+                let n = name.map_or_else(
+                    || "pdftex.map".to_owned(),
+                    |n| String::from_utf8_lossy(&n).into_owned(),
+                );
+                (page, path(&n))
+            })
+            .collect();
+        let fonts: String = files
+            .iter()
+            .map(|(n, subset)| {
+                let p = path(&String::from_utf8_lossy(n));
+                if *subset {
+                    format!("<{p}>")
+                } else {
+                    format!("<<{p}>>")
+                }
+            })
+            .collect();
+        crate::log::terminal(
+            v,
+            &self.opts.name,
+            self.g.eng.acc_value(self.unit, v.field("log")),
+            &|n| {
+                self.dlines
+                    .get(&n)
+                    .copied()
+                    .or_else(|| doc_file_line(&self.g.ops.docs, n))
+            },
+            &crate::log::TermParts {
+                head,
+                end: &end,
+                log_name,
+                reads,
+                fonts,
+            },
+        )
     }
 
     /// A node by its raw id ([`Stats::reruns`]): its operation and

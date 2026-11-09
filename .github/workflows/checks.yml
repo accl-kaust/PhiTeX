@@ -1,5 +1,8 @@
 # Cheap checks on GitHub's runners (docs/ci.md): formatting, clippy, the
-# wasm32 build of the pure crates, the unit tests. Everything that needs TeX
+# wasm32 build of the pure crates, the unit tests, and Windows's clippy and
+# unit tests (job windows). Started by hand (`gh workflow run checks.yml
+# --ref BRANCH`), also TeX Live end to end on Windows and Linux, their PDFs
+# compared byte for byte (jobs texlive, texlive-same). Everything that needs TeX
 # Live or the manual corpus runs in the gate (gate.yml, in the CI image). No secrets, read-only token, and no
 # pull_request_target: a pull request's code never runs with privileges.
 name: checks
@@ -60,3 +63,213 @@ jobs:
       # most of which build documents on TeX Live, and phitex-live's unit
       # tests run in the gate's tests shard, in the CI image)
       - run: cargo test --workspace --exclude phitex-live --lib --bins --no-fail-fast --quiet
+  # (Windows, x86_64-pc-windows-msvc: the workspace's lint, and the unit
+  # tests of the CLI, the engine and kpathsea, which need no TeX Live)
+  # (and on Windows's arm64 runner, aarch64-pc-windows-msvc: rustup and
+  # LLVM's clang, which ring needs there, set up first where missing)
+  windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - if: runner.arch == 'ARM64'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            Invoke-WebRequest https://win.rustup.rs/aarch64 -OutFile "$env:RUNNER_TEMP\rustup-init.exe"
+            & "$env:RUNNER_TEMP\rustup-init.exe" -y --default-toolchain none --profile minimal
+            if ($LASTEXITCODE -ne 0) { throw 'rustup-init failed' }
+            "$env:USERPROFILE\.cargo\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          }
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path "$llvm\clang.exe")) {
+            choco install llvm -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'LLVM did not install' }
+          }
+          & "$llvm\clang.exe" --version
+          $llvm | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - run: cargo clippy --workspace --exclude phitex-defuse --all-targets -- -D warnings
+      - run: cargo test -p phitex-cli -p phitex-tex -p phitex-kpse --lib --bins --no-fail-fast --quiet
+  # (macOS, which has no /proc: the CLI's checks of a watch's process,
+  # kill(pid, 0), as on Linux)
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - run: cargo test -p phitex-cli --bins --quiet -- 'attach::'
+  # (by hand: phitex on TeX Live 2025's frozen tlnet-final, the same
+  # files on both systems, scripts/ci/e2e.ps1: build, watch, an edit, q)
+  texlive:
+    if: github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      TL_REPO: https://ftp.math.utah.edu/pub/tex/historic/systems/texlive/2025/tlnet-final
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mold
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: texlive-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - uses: actions/cache@v4
+        id: tl
+        with:
+          path: ~/texlive
+          key: tl2025-basic-${{ runner.os }}-1
+      - if: steps.tl.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: scripts/ci/install-tl.ps1 -Root ~/texlive -Repo $env:TL_REPO
+      - run: cargo build --profile fastdev --locked -p phitex-cli
+      - shell: pwsh
+        run: |
+          $bin = if ($IsWindows) { '~/texlive/tl/bin/windows' } else { '~/texlive/tl/bin/x86_64-linux' }
+          $exe = if ($IsWindows) { 'target/fastdev/phitex.exe' } else { 'target/fastdev/phitex' }
+          scripts/ci/e2e.ps1 -Phitex $exe -TexBin $bin -Out e2e
+      # (scripts/install.ps1 as `irm … | iex` runs it, in Windows
+      # PowerShell 5.1, on a copy of a release made here: the zip, its
+      # SHA256SUMS, served on localhost; into a folder whose name has a
+      # space; then again over the first, the installed phitex running)
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $rel = Join-Path $env:RUNNER_TEMP 'release'
+          New-Item -ItemType Directory -Force $rel | Out-Null
+          Copy-Item scripts/install.ps1 $rel
+          Compress-Archive target/fastdev/phitex.exe (Join-Path $rel 'phitex-x86_64-windows.zip')
+          $h = (Get-FileHash (Join-Path $rel 'phitex-x86_64-windows.zip')).Hash.ToLowerInvariant()
+          "$h  phitex-x86_64-windows.zip" | Set-Content -Encoding ascii (Join-Path $rel 'SHA256SUMS')
+          $srv = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $rel -PassThru
+          Start-Sleep 3
+          $env:PHITEX_BASE_URL = 'http://127.0.0.1:8765'
+          $env:PHITEX_PREFIX = Join-Path $env:RUNNER_TEMP 'my programs\phitex'
+          powershell.exe -NoProfile -Command 'irm http://127.0.0.1:8765/install.ps1 | iex'
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed ($LASTEXITCODE)" }
+          $exe = Join-Path $env:PHITEX_PREFIX 'phitex.exe'
+          & $exe --version
+          $user = (Get-ItemProperty HKCU:\Environment).Path
+          if (($user -split ';') -notcontains $env:PHITEX_PREFIX) { throw "the user's PATH has no $env:PHITEX_PREFIX: $user" }
+          $rec = Get-Content (Join-Path $env:LOCALAPPDATA 'phitex\install.json') | ConvertFrom-Json
+          if ($rec.method -ne 'script' -or $rec.asset -ne 'phitex-x86_64-windows.zip') { throw "install.json: $rec" }
+          # (again, over a running phitex.exe: it is renamed aside)
+          $si = [Diagnostics.ProcessStartInfo]::new($exe)
+          foreach ($a in 'watch', '--lsp') { $si.ArgumentList.Add($a) }
+          $si.WorkingDirectory = $env:RUNNER_TEMP
+          $si.RedirectStandardInput = $true; $si.RedirectStandardOutput = $true
+          $running = [Diagnostics.Process]::Start($si)
+          Start-Sleep 2
+          if ($running.HasExited) { throw "phitex watch --lsp did not keep running ($($running.ExitCode))" }
+          powershell.exe -NoProfile -Command 'irm http://127.0.0.1:8765/install.ps1 | iex'
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 over a running phitex failed ($LASTEXITCODE)" }
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'the reinstalled phitex.exe does not run' }
+          $running.Kill()
+          Get-ChildItem -Force $env:PHITEX_PREFIX
+          if (-not (Get-ChildItem -Force $env:PHITEX_PREFIX -Filter '.phitex-*.old')) { throw 'the running phitex.exe was not renamed aside' }
+          Stop-Process -Id $srv.Id
+      # (phitex upgrade on Windows, from a copy of a release served here:
+      # a build that takes its releases from it and trusts a key made here,
+      # installed where install.ps1 put phitex.exe, upgrades itself while
+      # it runs to the zip's phitex.exe, its signature and sum checked)
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $t = $env:RUNNER_TEMP
+          gh release download 0.12 -R jedisct1/minisign -p '*win64.zip' -D "$t\ms"
+          Expand-Archive (Get-ChildItem "$t\ms" -Filter *.zip | Select-Object -First 1).FullName "$t\ms\x"
+          # (the zip holds a build per machine: this runner's, x86_64)
+          $ms = (Get-ChildItem "$t\ms\x" -Recurse -Filter minisign.exe | Where-Object { $_.FullName -match 'x86_64' } | Select-Object -First 1).FullName
+          & $ms -G -W -p "$t\test.pub" -s "$t\test.key"
+          if ($LASTEXITCODE -ne 0) { throw 'no test key' }
+          $env:PHITEX_UPGRADE_TEST_KEY = (Get-Content "$t\test.pub")[1]
+          $env:PHITEX_UPGRADE_TEST_BASE = 'http://127.0.0.1:8766'
+          cargo build --profile fastdev --locked -p phitex-cli --target-dir target/upgrade-test
+          if ($LASTEXITCODE -ne 0) { throw 'the test build failed' }
+          Remove-Item Env:PHITEX_UPGRADE_TEST_KEY, Env:PHITEX_UPGRADE_TEST_BASE
+          $rel = "$t\upgrade-release"
+          $dl = "$rel\download\v9.9"
+          New-Item -ItemType Directory -Force $dl | Out-Null
+          '{"tag_name": "v9.9"}' | Set-Content -Encoding ascii "$rel\latest.json"
+          Compress-Archive target/fastdev/phitex.exe "$dl\phitex-x86_64-windows.zip"
+          $h = (Get-FileHash "$dl\phitex-x86_64-windows.zip").Hash.ToLowerInvariant()
+          "$h  phitex-x86_64-windows.zip" | Set-Content -Encoding ascii "$dl\SHA256SUMS"
+          & $ms -S -s "$t\test.key" -m "$dl\SHA256SUMS"
+          if ($LASTEXITCODE -ne 0) { throw 'not signed' }
+          # (HTTP/1.1, keep-alive answered as GitHub's servers answer it: under
+          # HTTP/1.0 the server closed a connection the client then reused)
+          $srv = Start-Process python -ArgumentList '-m', 'http.server', '8766', '--bind', '127.0.0.1', '--protocol', 'HTTP/1.1', '--directory', $rel -PassThru
+          Start-Sleep 3
+          $exe = Join-Path $t 'my programs\phitex\phitex.exe'
+          Copy-Item target/upgrade-test/fastdev/phitex.exe $exe -Force
+          & $exe upgrade -y
+          if ($LASTEXITCODE -ne 0) { throw "phitex upgrade failed ($LASTEXITCODE)" }
+          $want = (Get-FileHash target/fastdev/phitex.exe).Hash
+          if ((Get-FileHash $exe).Hash -ne $want) { throw "phitex.exe is not the release zip's after the upgrade" }
+          & $exe --version
+          # (a signature by another key: refused, nothing installed)
+          Copy-Item target/upgrade-test/fastdev/phitex.exe $exe -Force
+          & $ms -G -W -p "$t\other.pub" -s "$t\other.key"
+          & $ms -S -s "$t\other.key" -m "$dl\SHA256SUMS"
+          & $exe upgrade -y
+          if ($LASTEXITCODE -eq 0) { throw 'an upgrade signed by another key went ahead' }
+          if ((Get-FileHash $exe).Hash -eq $want) { throw 'an upgrade signed by another key was installed' }
+          Stop-Process -Id $srv.Id
+          # (the refused upgrade's status, 1, is not this step's)
+          exit 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ runner.os }}
+          path: e2e/doc.pdf
+          retention-days: 7
+  # (the two systems' PDFs of the same document on the same TeX Live:
+  # the same bytes)
+  texlive-same:
+    needs: texlive
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: e2e-*
+      - run: |
+          ls -l e2e-*/doc.pdf
+          sha256sum e2e-*/doc.pdf
+          cmp e2e-Linux/doc.pdf e2e-Windows/doc.pdf || { cmp -l e2e-Linux/doc.pdf e2e-Windows/doc.pdf | head -20; exit 1; }
+          echo "Windows's PDF is Linux's, byte for byte"

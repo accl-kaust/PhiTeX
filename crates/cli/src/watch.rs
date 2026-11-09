@@ -7,7 +7,7 @@
 //! keys (`keys.rs`: `r` rebuilds, `o` opens the viewer, `p` shows the
 //! errors again, `w` the warnings, `s` how the build went, `h` lists
 //! them, `q` quits; a live tree of the build's phases while it runs) and a status line below
-//! what is printed; on a pipe, the same as lines (its end quits). Every
+//! what is printed; on a pipe, the same as lines (its end is no quit). Every
 //! message the terminal shows is the viewer's too (its console). With
 //! `--lsp`, standard input and output are an editor's language client's
 //! instead (`lsp.rs`): its buffers are asked as the viewer's are, its
@@ -458,7 +458,8 @@ impl Here {
                 keys::restore();
                 ui.line(&ui.st.dim("stopped while working"));
                 modern::cache_summary(&self.target, ui);
-                std::process::exit(0);
+                crate::attach::forget();
+                std::process::exit(crate::lsp::exit_status());
             }
             Key::Rebuild | Key::Problems | Key::Warnings | Key::Summary if busy => {
                 // (said once a build: a held key says nothing more)
@@ -478,7 +479,7 @@ impl Here {
 
 /// Standard input's keys (a terminal's, one at a time; escape sequences,
 /// the arrows', dropped) or lines, to `tx` (those not answered `here`);
-/// its end quits.
+/// a terminal's end quits, a pipe's or a file's does not.
 fn read_keys(tx: &mpsc::Sender<(Instant, Event)>, raw: bool, here: &Here) {
     if raw {
         let mut bytes = std::io::stdin().lock().bytes();
@@ -507,6 +508,10 @@ fn read_keys(tx: &mpsc::Sender<(Instant, Event)>, raw: bool, here: &Here) {
             };
             let k = t.chars().next().and_then(Key::of);
             text.clear();
+            if k == Some(Key::Suspend) {
+                keys::suspend();
+                continue;
+            }
             if let Some(k) = k
                 && !here.answer(k)
                 && tx.send((Instant::now(), Event::Key(k))).is_err()
@@ -522,7 +527,13 @@ fn read_keys(tx: &mpsc::Sender<(Instant, Event)>, raw: bool, here: &Here) {
                 return;
             }
         }
+        // (standard input not a terminal, at its end: no more keys, not
+        // a quit. `phitex watch &`, nohup, a service or a Makefile has
+        // it at its end from the start; such a watch runs until a
+        // signal, as latexmk -pvc does)
+        return;
     }
+    // (a terminal's end: it hung up)
     let _ = tx.send((Instant::now(), Event::Key(Key::Quit)));
 }
 
@@ -586,7 +597,7 @@ fn show_warnings(ui: &crate::ui::Ui, st: crate::ui::Style, s: &Session, l: &Last
                 ui.line(&st.green("no warnings"));
             }
             for (k, n, first) in ws {
-                ui.warning(&format!("{n} × {k:?}"));
+                ui.warning(&k.name(n));
                 for l in first {
                     ui.line(&st.dim(&format!("  {l}")));
                 }
@@ -597,7 +608,7 @@ fn show_warnings(ui: &crate::ui::Ui, st: crate::ui::Style, s: &Session, l: &Last
 }
 
 /// The quit line: `✓ 9 builds · fastest edit 9.2 ms · median 412 ms ·
-/// cold 15.38 s`.
+/// clean build 15.38 s`.
 fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
     if l.builds == 0 {
         return None;
@@ -615,7 +626,7 @@ fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
         parts.push(format!("median {}", ms(e[e.len() / 2])));
     }
     if let Some(c) = l.cold {
-        parts.push(format!("cold {}", ms(c)));
+        parts.push(format!("clean build {}", ms(c)));
     }
     let mut sc = l.screens.clone();
     sc.sort();
@@ -669,7 +680,9 @@ fn faster(cold: Duration, wall: Duration) -> Option<String> {
 /// and the editor's connection are kept.
 pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
     let (tx, rx) = mpsc::channel::<(Instant, Event)>();
-    let lsp = lsp.map(Arc::new);
+    // (no editor on standard input: a terminal's watch, which editors
+    // may attach to all the same, `attach.rs`)
+    let lsp = Some(Arc::new(lsp.unwrap_or_else(Lsp::terminal)));
     if let Some(l) = &lsp {
         let tx = Mutex::new(tx.clone());
         l.on_configure(Box::new(move |s| {
@@ -718,8 +731,7 @@ fn reconfigured(
             Ok(f) => o2.files = Some(f),
             Err(e) => {
                 if let Some(l) = lsp {
-                    l.server()
-                        .show_message(1, &format!("PhiTeX: the settings: {e}"));
+                    l.show_message(1, &format!("PhiTeX: the settings: {e}"));
                 }
                 return None;
             }
@@ -735,8 +747,7 @@ fn reconfigured(
     };
     let said = |e: &str| {
         if let Some(l) = lsp {
-            l.server()
-                .show_message(1, &format!("PhiTeX: the settings: {e}"));
+            l.show_message(1, &format!("PhiTeX: the settings: {e}"));
         }
     };
     let (t2, dir) = match modern::resolve_again(&o2) {
@@ -762,6 +773,9 @@ fn reconfigured(
 fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Options) {
     let st = ui.st;
     let lsp = kept.lsp.clone();
+    // (an editor on standard input and output, `--lsp`: no keys, no
+    // terminal of its own)
+    let on_stdio = lsp.as_ref().is_some_and(|l| l.editor());
     // (a watch writes nothing into the folder unless asked, `--write` or
     // `watch-write`: the pages are in the viewer. Without a viewer the file
     // is the only way to see them; `copy-pdf` copies the file written.
@@ -777,7 +791,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             l.refuse(&e);
         }
         ui.error(&e);
-        std::process::exit(crate::EXIT_FAILED);
+        crate::attach::forget();
+        std::process::exit(crate::EXIT_USAGE);
     });
     if let Some(l) = &lsp {
         l.accept(
@@ -804,7 +819,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     for n in session::waiting_notes(&job) {
         ui.line(&format!("{}: {n}", st.yellow("note")));
     }
-    if !writing && !ui.quiet && lsp.is_none() {
+    if !writing && !ui.quiet && !on_stdio {
         ui.line(&st.dim(&format!(
             "files: nothing written here while watching, the pages are in the viewer (a PDF viewer on {}.pdf won't update); --write or `phitex config watch-write on` writes the PDF and its .synctex.gz after each build",
             job.jobname
@@ -824,7 +839,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             if let Some(l) = &lsp {
                 l.refuse(&e);
             }
-            std::process::exit(crate::EXIT_FAILED);
+            crate::attach::forget();
+            std::process::exit(crate::EXIT_INTERNAL);
         });
     spin.done();
     // (no log laid out after a build; the PDF file appended an update
@@ -837,7 +853,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (writing no file, the viewer's PDF kept as update sections in
     // memory, `ViewFile`: an edit's pages linked live, not folded again
     // from the first one changed to the end; the exact file made when idle)
-    if !writing && (o.view || lsp.is_some()) {
+    if !writing && (o.view || on_stdio) {
         s.view_layout = true;
     }
     // (since when the PDF file is not the exact one: written when the
@@ -948,7 +964,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     "{}  {}  {}",
                     st.dim("viewer"),
                     st.cyan(v.url()),
-                    st.dim(if lsp.is_some() {
+                    st.dim(if on_stdio {
                         "(phitex.openViewer opens it)"
                     } else {
                         "(o opens it)"
@@ -1012,7 +1028,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // editor's `$/progress` and `phitex/status`)
     {
         let shown = view.as_ref().map(View::viewer);
-        let server = lsp.as_ref().map(|l| l.server().clone());
+        let server = lsp.clone();
         if shown.is_some() || server.is_some() {
             status.meter().listen(Box::new(move |p| {
                 if let Some(v) = &shown {
@@ -1037,7 +1053,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // editor)
     {
         let ui = Mutex::new(ui.clone());
-        let server = lsp.as_ref().map(|l| l.server().clone());
+        let server = lsp.clone();
         status.meter().on_unreachable(Box::new(move |why| {
             ui.lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -1073,7 +1089,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     let watching = RefCell::new(Watching {
         w: watcher(&root, wanted.clone(), ours.clone(), tx.clone()).unwrap_or_else(|e| {
             ui.error(&format!("can't watch {}: {e}", root.display()));
-            std::process::exit(crate::EXIT_FAILED);
+            crate::attach::forget();
+            std::process::exit(crate::EXIT_INTERNAL);
         }),
         root: canonical(&root),
         outside: HashSet::new(),
@@ -1082,7 +1099,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     watching
         .borrow_mut()
         .add(&wanted.lock().unwrap_or_else(PoisonError::into_inner));
-    let raw = lsp.is_none() && !ui.json && keys::raw();
+    let raw = !on_stdio && !ui.json && keys::raw();
     let building = kept.building.clone();
     let at_wait = kept.waiting.clone();
     let told = kept.told.clone();
@@ -1101,7 +1118,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             target: t.clone(),
             asking: kept.asking.clone(),
         };
-        match &lsp {
+        match lsp.as_ref().filter(|_| on_stdio) {
             // (the editor's `exit`, or its end: as `q`)
             Some(l) => l.serve(Box::new(move || {
                 if !here.answer(Key::Quit) {
@@ -1205,7 +1222,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             ui.line(&l);
         }
         modern::cache_summary(t, ui);
-        std::process::exit(0);
+        crate::attach::forget();
+        std::process::exit(crate::lsp::exit_status());
     };
     // (the status line: the last build and the browsers watching)
     let show = |ui: &Ui, l: &Last| {
@@ -1273,7 +1291,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if let Some(v) = &view {
             v.building(true);
         }
-        let spin = ui.spin(format!("{what}: build {builds} ({why})"), status.clone());
+        let spin = ui.spin(
+            format!("{what}: build {builds} ({})", crate::ui::said_why(why)),
+            status.clone(),
+        );
         // (`--json`: the build has its text and evaluates from here; an
         // edit of the main file from now on is offered to it. Its count is
         // `builds`: a reader waiting for a build's result by `build` is not
@@ -1307,7 +1328,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             Err(m) => {
                 spin.done();
                 building.store(false, Ordering::Relaxed);
-                ui.failed(&format!("build {builds} ({why})"), &m);
+                ui.failed(
+                    &format!("build {builds} ({})", crate::ui::said_why(why)),
+                    &m,
+                );
                 let first = m.lines().next().unwrap_or("the engine panicked");
                 ui.event(
                     &json!({"event": "failed", "build": builds, "why": why, "message": first}),
@@ -1403,6 +1427,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if let Some(out) = &written {
             last.borrow_mut().good = Some(out.clone());
         }
+        // (the build's problems and PDF kept for the editors whether or not
+        // one is connected: one that attaches later is given them at once)
         if view.is_some() || lsp.is_some() {
             // (a layout: the viewer's file brought to it, its last bytes
             // and the objects that changed, nothing read from disk; the
@@ -1503,7 +1529,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 })
                 .collect::<Vec<_>>()
                 .join(", "),
-            None => why.to_owned(),
+            None => crate::ui::said_why(why),
         };
         let nodes = r.runs.last().map_or(0, |x| x.commands_run);
         let changed = &r.out.pages_changed;
@@ -1570,18 +1596,21 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     view::ranges(changed)
                 )
             });
-            facts.push(if builds > 1 && live > 0 {
-                format!("{nodes}/{live} nodes")
-            } else {
-                format!("{nodes} nodes")
-            });
+            // (the engine's pieces run: its counters, -vv)
+            if ui.verbose > 1 {
+                facts.push(if builds > 1 && live > 0 {
+                    format!("{nodes}/{live} nodes")
+                } else {
+                    format!("{nodes} nodes")
+                });
+            }
         }
         let mut tail = Vec::new();
         let cold = last.borrow().cold;
         match cold {
             None if !failed => {
                 last.borrow_mut().cold = Some(r.wall);
-                crate::star::built(&main_file, ui, lsp.is_some());
+                crate::star::built(&main_file, ui, on_stdio);
             }
             Some(c) if !failed && !noop => {
                 last.borrow_mut().edits.push(r.wall);
@@ -2107,6 +2136,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 }
                 Event::Key(k) => match k {
                     Key::Quit => quit(ui, &mut s, Some(&mut rx)),
+                    // (taken by the key reader itself: `keys::suspend`)
+                    Key::Suspend => {}
                     Key::Rebuild => {
                         // (every input read again from disk: a change made
                         // outside that no event told)
@@ -2394,7 +2425,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             ui.line(&st.dim(&format!("phitex watch: {why}: a new session")));
             if let Err(e) = std::env::set_current_dir(&dir) {
                 ui.error(&format!("can't enter {}: {e}", dir.display()));
-                std::process::exit(crate::EXIT_FAILED);
+                crate::attach::forget();
+                std::process::exit(crate::EXIT_INTERNAL);
             }
             kept.rx = Some(rx);
             kept.view = view;

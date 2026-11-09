@@ -209,6 +209,9 @@ pub struct Progress {
     on_stream: OnceLock<StreamHook>,
     /// The pages streamed' colors ([`Colors`]).
     colors: std::sync::Mutex<Colors>,
+    /// Each page streamed's specials on the document (XeTeX's named
+    /// objects made or added to: `crate::xdvpdf::XdvPage`), by page from 1.
+    doc_specials: std::sync::Mutex<std::collections::BTreeMap<u64, Vec<Vec<u8>>>>,
     /// Told at every job's start ([`Progress::on_tick`]).
     on_tick: OnceLock<TickHook>,
 }
@@ -238,21 +241,62 @@ pub struct StreamedPage {
     pub exact: bool,
 }
 
-/// The color stacks the pages streamed leave the next page
-/// ([`Progress::page_colors`]): a page is drawn exactly alone only where
-/// every page before it left them as it found them (a color pushed on
-/// one page and popped on a later one colors the pages between).
-/// Kept across a build's passes (a page not made again in a later pass
-/// leaves what it left), made afresh when a build begins to stream
-/// ([`Progress::set_streaming`]).
+/// A colour stack command a page's walk meets, in its order: the stack's
+/// number and the command (a form's are the form stacks', not met).
+pub(crate) type ColorOp = (usize, phitex_pdf::ColorStackCmd);
+
+/// The colour stacks' page values where a page begins, each stack not as
+/// it was made: its number, the entries pushed below its current value,
+/// its current value (`None` in either: the value it was made with). A
+/// page's own file starts from them (`crate::pdfout::page_alone`).
+pub(crate) type ColorStart = Vec<phitex_pdf::PageColor>;
+
+/// [`ColorStart`] after the commands `ops` (pdfTeX's `colorstackpush`,
+/// `pop`, `set`; a pop from an empty stack changes nothing).
+fn color_after(start: &ColorStart, ops: &[ColorOp]) -> ColorStart {
+    type Stack = (Vec<Option<Vec<u8>>>, Option<Vec<u8>>);
+    let mut m: std::collections::BTreeMap<usize, Stack> = start
+        .iter()
+        .map(|(n, s, c)| (*n, (s.clone(), c.clone())))
+        .collect();
+    for (n, op) in ops {
+        let e = m.entry(*n).or_default();
+        match op {
+            phitex_pdf::ColorStackCmd::Push(t) => {
+                let cur = e.1.take();
+                e.0.push(cur);
+                e.1 = Some(t.clone());
+            }
+            phitex_pdf::ColorStackCmd::Pop => {
+                if let Some(x) = e.0.pop() {
+                    e.1 = x;
+                }
+            }
+            phitex_pdf::ColorStackCmd::Set(t) => e.1 = Some(t.clone()),
+            phitex_pdf::ColorStackCmd::Current => {}
+        }
+    }
+    m.into_iter()
+        .filter(|(_, (s, c))| !s.is_empty() || c.is_some())
+        .map(|(n, (s, c))| (n, s, c))
+        .collect()
+}
+
+/// The colour stacks where each page streamed begins ([`Progress::page_colors`]):
+/// a page is drawn exactly alone only where every page before it is
+/// known, its file starting from the colours they leave it (a colour
+/// pushed on one page and popped on a later one colours the pages
+/// between). Kept across a build's passes (a page not made again in a
+/// later pass leaves what it left), made afresh when a build begins to
+/// stream ([`Progress::set_streaming`]).
 #[derive(Debug, Default)]
 struct Colors {
-    /// Whether page `k` (from 1) left them as it found them.
-    keeps: std::collections::BTreeMap<u64, bool>,
-    /// The pages 1 to `upto` all did.
-    upto: u64,
+    /// The commands of page `k` (from 1).
+    ops: std::collections::BTreeMap<u64, Vec<ColorOp>>,
+    /// Where pages 1, 2, ... begin, as far as every page before is known.
+    starts: Vec<ColorStart>,
     /// The pages told not exact only for want of the pages before them
-    /// known: page, identity.
+    /// known, drawn from no colour carried in: page, identity.
     waiting: std::collections::BTreeMap<u64, u64>,
 }
 
@@ -320,6 +364,7 @@ impl Progress {
             streaming: std::sync::atomic::AtomicBool::new(false),
             on_stream: OnceLock::new(),
             colors: std::sync::Mutex::default(),
+            doc_specials: std::sync::Mutex::default(),
             on_tick: OnceLock::new(),
         }
     }
@@ -342,6 +387,10 @@ impl Progress {
                 .colors
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Colors::default();
+            self.doc_specials
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
         }
         self.streaming.store(on, Ordering::Relaxed);
     }
@@ -353,50 +402,61 @@ impl Progress {
     }
 
     /// Page `k` (from 1) made in this evaluation, told if it is wanted:
-    /// `make` gives its identity, its PDF and whether that draws every
-    /// object as the build's file will (none: not streamed). It is told
-    /// exact where that is so and the pages before it are known to leave
-    /// the colors as they found them ([`Progress::page_colors`]); where
-    /// they are not known yet, told again once they are.
-    pub(crate) fn stream_page(&self, k: u64, make: impl FnOnce() -> Option<(u64, Vec<u8>, bool)>) {
+    /// `make` gives, from where its colours begin (none: not known yet,
+    /// drawn from none carried in), its identity, its PDF and whether
+    /// that draws every object as the build's file will (none: not
+    /// streamed). It is told exact where that is so and its colours'
+    /// start is known ([`Progress::page_colors`]); where it is not known
+    /// yet, told again exact once it is known to carry none.
+    pub(crate) fn stream_page(
+        &self,
+        k: u64,
+        make: impl FnOnce(Option<&ColorStart>) -> Option<(u64, Vec<u8>, bool)>,
+    ) {
         let Some(h) = self.on_stream.get() else {
             return;
         };
         if !(h.want)(k) {
             return;
         }
-        let Some((hash, pdf, objects)) = make() else {
+        let start = {
+            let c = self
+                .colors
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            usize::try_from(k - 1)
+                .ok()
+                .and_then(|i| c.starts.get(i).cloned())
+        };
+        let Some((hash, pdf, objects)) = make(start.as_ref()) else {
             return;
         };
         let e = self.evaluation();
-        let exact = {
+        {
             let mut c = self
                 .colors
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let before = c.upto + 1 >= k;
-            // (not known yet, none known to color it: told again once known)
-            let unknown = (c.upto + 1..k).all(|j| c.keeps.get(&j) != Some(&false));
-            if objects && !before && unknown {
+            if objects && start.is_none() {
                 c.waiting.insert(k, hash);
             } else {
                 c.waiting.remove(&k);
             }
-            objects && before
-        };
+        }
         (h.page)(StreamedPage {
             evaluation: e,
             page: k,
             hash,
             pdf,
-            exact,
+            exact: objects && start.is_some(),
         });
     }
 
-    /// Page `k` (from 1) of this build left the color stacks as it
-    /// found them (`keeps`) or not: the pages after it waiting for it
-    /// told exact where all before them now are ([`Progress::stream_page`]).
-    pub(crate) fn page_colors(&self, k: u64, keeps: bool) {
+    /// Page `k` (from 1) of this build meets the colour stack commands
+    /// `ops`: where the pages after it begin known as far as every page
+    /// before them is; those waiting for it that begin from no colour
+    /// carried in told exact ([`Progress::stream_page`]).
+    pub(crate) fn page_colors(&self, k: u64, ops: Vec<ColorOp>) {
         let e = self.evaluation();
         let told: Vec<(u64, u64)> = {
             let mut c = self
@@ -404,18 +464,28 @@ impl Progress {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let c = &mut *c;
-            c.keeps.insert(k, keeps);
-            if !keeps {
-                c.upto = c.upto.min(k.saturating_sub(1));
-                // (a page after it can no more be told exact)
-                let _ = c.waiting.split_off(&(k + 1));
+            if c.starts.is_empty() {
+                c.starts.push(ColorStart::new());
             }
-            while c.keeps.get(&(c.upto + 1)) == Some(&true) {
-                c.upto += 1;
+            if c.ops.get(&k) != Some(&ops) {
+                c.ops.insert(k, ops);
+                // (the pages after it begin anew from it)
+                c.starts.truncate(usize::try_from(k).unwrap_or(usize::MAX));
             }
-            let rest = c.waiting.split_off(&(c.upto + 2));
-            std::mem::replace(&mut c.waiting, rest)
-                .into_iter()
+            while let Some(o) = c.ops.get(&(c.starts.len() as u64)) {
+                let next = color_after(c.starts.last().unwrap_or(&ColorStart::new()), o);
+                c.starts.push(next);
+            }
+            let known = c.starts.len() as u64;
+            let rest = c.waiting.split_off(&(known + 1));
+            let done = std::mem::replace(&mut c.waiting, rest);
+            done.into_iter()
+                .filter(|&(p, _)| {
+                    usize::try_from(p - 1)
+                        .ok()
+                        .and_then(|i| c.starts.get(i))
+                        .is_some_and(Vec::is_empty)
+                })
                 .collect()
         };
         if let Some(h) = self.on_stream.get() {
@@ -429,6 +499,30 @@ impl Progress {
                 });
             }
         }
+    }
+
+    /// Page `k` (from 1) of this build makes or adds to the document's
+    /// named objects with `specials` (XeTeX's `pdf:obj @x`, `pdf:put @x`,
+    /// `pdf:stream @x`).
+    pub(crate) fn page_doc_specials(&self, k: u64, specials: Vec<Vec<u8>>) {
+        self.doc_specials
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(k, specials);
+    }
+
+    /// The document's specials of pages 1 to `k - 1` in order, where each
+    /// of those pages is known ([`Progress::page_doc_specials`]).
+    pub(crate) fn doc_specials_before(&self, k: u64) -> Option<Vec<Vec<u8>>> {
+        let m = self
+            .doc_specials
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut out = Vec::new();
+        for j in 1..k {
+            out.extend(m.get(&j)?.iter().cloned());
+        }
+        Some(out)
     }
 
     /// Whether a page streamed would be told ([`Progress::on_stream`]).

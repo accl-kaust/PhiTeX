@@ -384,6 +384,13 @@ impl PdfState {
     pub fn flushed(&self) -> usize {
         self.flushes
     }
+    /// The colour stacks' page values a page begins from (a page
+    /// written apart after pages that left a colour pushed): each stack
+    /// named, its entries below its current value and that value (`None`:
+    /// the value the stack was made with).
+    pub fn start_page_colors(&mut self, st: &[crate::color::PageColor]) {
+        self.stacks.start_page(st);
+    }
 
     /// `\pdfcolorstackinit [page] [direct] {...}`: the new stack's
     /// number (`\pdfcolorstackinit` expands to it).

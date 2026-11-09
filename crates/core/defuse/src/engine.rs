@@ -1927,14 +1927,15 @@ impl Engine {
         // (a stale reader's `seen` holds what an earlier run read: swept
         // first, it holds nothing)
         self.sweep_readers_now();
-        let mut roots: Vec<ValueId> = extra;
-        self.roots(&mut |x| roots.push(x));
-        for i in 0..self.ops.len() {
-            if let Some(op) = self.ops.get(i) {
-                op.roots(self, &mut |x| roots.push(x));
+        self.values.collect(&mut |keep: &mut dyn FnMut(ValueId)| {
+            extra.iter().for_each(|&x| keep(x));
+            self.roots(keep);
+            for i in 0..self.ops.len() {
+                if let Some(op) = self.ops.get(i) {
+                    op.roots(self, keep);
+                }
             }
-        }
-        self.values.collect(roots)
+        })
     }
 
     /// The reader records of runs no longer their node's last dropped from

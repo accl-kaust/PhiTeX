@@ -148,6 +148,7 @@ fn doc_token(main: &std::path::Path) -> String {
     {
         let mut o = std::fs::OpenOptions::new();
         o.write(true).create(true).truncate(true);
+        // (Windows: the cache, under %LOCALAPPDATA%, is the user's alone)
         #[cfg(unix)]
         std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
         if let Ok(mut w) = o.open(&f) {
@@ -520,20 +521,21 @@ pub fn open_with(cmd: &str, file: &std::path::Path) -> std::io::Result<()> {
 }
 
 /// Show `url` in the user's browser (`BROWSER`, else the desktop's
-/// opener). Whether one was started.
+/// opener; Windows's: `ShellExecute` on it, by `url.dll`'s
+/// `FileProtocolHandler`, which no shell parses). Whether one was started.
 pub fn open_browser(url: &str) -> bool {
-    let cmd = std::env::var("BROWSER")
-        .ok()
-        .filter(|b| !b.is_empty())
-        .unwrap_or_else(|| {
-            if cfg!(target_os = "macos") {
-                "open".into()
-            } else {
-                "xdg-open".into()
-            }
-        });
-    std::process::Command::new(cmd)
-        .arg(url)
+    let set = std::env::var("BROWSER").ok().filter(|b| !b.is_empty());
+    let mut c = match set {
+        Some(b) => std::process::Command::new(b),
+        None if cfg!(windows) => {
+            let mut c = std::process::Command::new("rundll32.exe");
+            c.arg("url.dll,FileProtocolHandler");
+            c
+        }
+        None if cfg!(target_os = "macos") => std::process::Command::new("open"),
+        None => std::process::Command::new("xdg-open"),
+    };
+    c.arg(url)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

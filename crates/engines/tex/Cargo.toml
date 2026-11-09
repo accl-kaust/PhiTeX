@@ -40,8 +40,9 @@ observe = ["phitex-defuse/observe", "phitex-pdf/observe"]
 phitex-kpse = { path = "../../tools/kpse" }
 
 # the profile measures run on the CLI's allocator (`phitex-cli`'s
-# `jemalloc`), not the system's
-[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+# `jemalloc`), not the system's (none on Windows: jemalloc does not
+# build for MSVC)
+[target.'cfg(not(any(target_family = "wasm", windows)))'.dev-dependencies]
 tikv-jemallocator = "0.6"
 
 [lints]

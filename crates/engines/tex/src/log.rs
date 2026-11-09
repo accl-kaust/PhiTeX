@@ -46,26 +46,102 @@ pub(crate) fn printable(c: u32, out: &mut String) {
 /// The line break of a `box` event's text: no character TeX prints.
 pub(crate) const BOX_LINE: char = '\u{10FFFD}';
 
-/// The `.log` writer: `file_offset` and the text.
+/// A log event's kind's mark: the event was made while
+/// `\tracingonline` was positive, so what TeX prints of it between
+/// `begin_diagnostic` and `end_diagnostic` is on the terminal too
+/// (`Run::online_kind`). The log is laid out as without it.
+pub(crate) const ONLINE: char = '+';
+
+/// The terminal beside the log ([`Log::with_terminal`]): its text,
+/// `term_offset`, and whether what is printed now goes to it
+/// (`selector` `term_and_log`, else `log_only`).
+#[derive(Default)]
+struct Terminal {
+    text: String,
+    offset: usize,
+    on: bool,
+}
+
+/// The `.log` writer: `file_offset` and the text; with a terminal
+/// beside it, `term_offset` and the terminal's text, as TeX prints to
+/// both (§57–§62: one `print_ln` for both, each wrapped at its own
+/// offset, `print_nl` when either has a partial line).
 #[derive(Default)]
 pub struct Log {
     pub text: String,
     offset: usize,
+    term: Option<Terminal>,
 }
 
 impl Log {
+    /// `f` with `selector` `term_only`: the terminal alone, its
+    /// `print_nl` by its own column; the log untouched.
+    fn term_only(&mut self, f: impl FnOnce(&mut Log)) {
+        let Some(term) = self.term.take() else {
+            return;
+        };
+        let mut t = Log {
+            text: String::new(),
+            offset: 0,
+            term: Some(Terminal { on: true, ..term }),
+        };
+        f(&mut t);
+        self.term = t.term;
+    }
+
+    /// A log with the terminal beside it, both at a line's start.
+    fn with_terminal() -> Log {
+        Log {
+            term: Some(Terminal {
+                on: true,
+                ..Terminal::default()
+            }),
+            ..Log::default()
+        }
+    }
+
+    /// `selector` for what follows: the terminal too (`term_and_log`),
+    /// or the log alone (`log_only`).
+    fn online(&mut self, on: bool) {
+        if let Some(t) = &mut self.term {
+            t.on = on;
+        }
+    }
+
     /// `print_ln` (§57).
     pub fn print_ln(&mut self) {
         self.text.push('\n');
         self.offset = 0;
+        if let Some(t) = self.term.as_mut().filter(|t| t.on) {
+            t.text.push('\n');
+            t.offset = 0;
+        }
     }
 
-    /// `print_raw_char` (§58).
+    /// `print_raw_char` (§58): each stream wrapped at its own offset.
     fn raw(&mut self, c: char) {
         self.text.push(c);
         self.offset += 1;
         if self.offset == MAX_PRINT_LINE {
-            self.print_ln();
+            self.text.push('\n');
+            self.offset = 0;
+        }
+        if let Some(t) = self.term.as_mut().filter(|t| t.on) {
+            t.text.push(c);
+            t.offset += 1;
+            if t.offset == MAX_PRINT_LINE {
+                t.text.push('\n');
+                t.offset = 0;
+            }
+        }
+    }
+
+    /// Text put on both streams as it is (no wrapping, as `tex_printf`
+    /// writes it), the offsets left alone.
+    fn push_str(&mut self, s: &str) {
+        self.text.push_str(s);
+        if let Some(t) = self.term.as_mut().filter(|t| t.on) {
+            t.text.push_str(s);
         }
     }
 
@@ -111,7 +187,8 @@ impl Log {
 
     /// `print_nl` (§62).
     pub fn print_nl(&mut self, s: &str, nl: i64) {
-        if self.offset > 0 {
+        let term = self.term.as_ref().is_some_and(|t| t.on && t.offset > 0);
+        if self.offset > 0 || term {
             self.print_ln();
         }
         self.print(s, nl);
@@ -123,14 +200,24 @@ impl Log {
     /// before the place read and after, printed already).
     fn context(&mut self, text: &str, help: bool) {
         use crate::context::{LEVEL, NL, PART};
+        // (§90: the help lines after the last level, and the `print_ln`
+        // after them, the log's alone: `decr(selector)` with the
+        // terminal on)
+        let helps_at = text.rfind(LEVEL).map_or(0, |k| k + LEVEL.len_utf8());
         let mut rest = text;
         while let Some(c) = rest.chars().next() {
+            let at = text.len() - rest.len();
             rest = &rest[c.len_utf8()..];
             let end = rest.find([LEVEL, NL]).unwrap_or(rest.len());
             let (part, more) = rest.split_at(end);
             rest = more;
             if c == NL {
+                let help_line = help && at >= helps_at;
+                if help_line {
+                    self.online(false);
+                }
                 self.print_nl(part, -1);
+                self.online(true);
                 continue;
             }
             if c != LEVEL {
@@ -178,7 +265,9 @@ impl Log {
             }
         }
         if help {
+            self.online(false);
             self.print_ln();
+            self.online(true);
             self.print_ln();
         }
     }
@@ -207,15 +296,39 @@ impl Log {
         self.print_ln();
     }
 
-    /// One event.
+    /// One event: on the terminal too unless it is the log's alone
+    /// (`\wlog`; a diagnostic, a shown box, web2c's `\openout` line
+    /// without [`ONLINE`]; a box report's display, its report and short
+    /// display on both).
     pub fn event(&mut self, kind: &str, text: &str, nl: i64) {
+        let (kind, online) = match kind.strip_suffix(ONLINE) {
+            Some(k) => (k, true),
+            None => (kind, false),
+        };
+        let log_only = match kind {
+            "wlog" => true,
+            "diag" | "box" | "openout" => !online,
+            _ => false,
+        };
+        if log_only {
+            self.online(false);
+        }
+        self.event_on(kind, text, nl, online);
+        self.online(true);
+    }
+
+    fn event_on(&mut self, kind: &str, text: &str, nl: i64, online: bool) {
         let len = text.chars().count();
+        // (`term_offset`: 0 without a terminal, as in batch mode, where
+        // nothing is printed on it)
+        let term = self.term.as_ref().map_or(0, |t| t.offset);
+        let partial = self.offset > 0 || term > 0;
         match kind {
             "msg" => {
                 // §1280
-                if len > MAX_PRINT_LINE - 2 {
+                if term + len > MAX_PRINT_LINE - 2 {
                     self.print_ln();
-                } else if self.offset > 0 {
+                } else if partial {
                     self.raw(' ');
                 }
                 self.print(text, nl);
@@ -229,7 +342,7 @@ impl Log {
             "error" => self.error(text, nl),
             RUNAWAY => self.runaway(text, nl),
             CONTEXT | CONTEXT_ONLY => self.context(text, kind == CONTEXT),
-            "wlog" => {
+            "wlog" | "write" => {
                 // §1370
                 self.print_nl("", nl);
                 self.print(text, nl);
@@ -266,6 +379,11 @@ impl Log {
                     self.print(parts.next().unwrap_or_default(), nl);
                     self.print_ln();
                 }
+                // (`begin_diagnostic`: the box shown, and the end, on the
+                // terminal only with \tracingonline positive)
+                if !online {
+                    self.online(false);
+                }
                 if let Some(first) = parts.next() {
                     self.print(first, nl);
                 }
@@ -283,9 +401,9 @@ impl Log {
             }
             "open" => {
                 // §537
-                if len > MAX_PRINT_LINE - 2 {
+                if term + len > MAX_PRINT_LINE - 2 {
                     self.print_ln();
-                } else if self.offset > 0 {
+                } else if partial {
                     self.raw(' ');
                 }
                 self.raw('(');
@@ -294,7 +412,9 @@ impl Log {
             "close" => self.raw(')'),
             "ship" => {
                 // §638
-                if self.offset > 0 {
+                if term > MAX_PRINT_LINE - 9 {
+                    self.print_ln();
+                } else if partial {
                     self.raw(' ');
                 }
                 self.print_plain(text);
@@ -316,7 +436,7 @@ impl Log {
             // either whole on its line, the line the front ends show)
             FAIL | DRIVER => {
                 self.print_ln();
-                self.text.push_str(text);
+                self.push_str(text);
                 self.print_ln();
             }
             _ => self.print(text, nl),
@@ -391,6 +511,119 @@ fn mark_lines(marks: &[i64], dline: &dyn Fn(u64) -> Option<i64>) -> Vec<i64> {
         .collect()
 }
 
+/// Event `x` of a log as it is laid out: its kind, its text (each
+/// [`LINE_MARK`] its line's number, the context's command line the main
+/// file's name), `\newlinechar`, and its marks with the lines they made.
+#[allow(clippy::type_complexity, reason = "one tuple, two callers")]
+fn event_parts(
+    v: &Values,
+    x: ValueId,
+    name: &str,
+    dline: &dyn Fn(u64) -> Option<i64>,
+) -> (String, String, i64, Option<(Vec<i64>, Vec<i64>)>) {
+    let xs = list_of(v, x);
+    let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
+    let mut text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
+    let nl = xs.get(2).map_or(-1, |&n| int_of(v, n));
+    let mut marked = None;
+    if let Some(&ms) = xs.get(3) {
+        let marks: Vec<i64> = list_of(v, ms).iter().map(|&m| int_of(v, m)).collect();
+        let lines = mark_lines(&marks, dline);
+        for l in &lines {
+            text = text.replacen(LINE_MARK, &l.to_string(), 1);
+        }
+        marked = Some((marks, lines));
+    }
+    if kind == CONTEXT || kind == CONTEXT_ONLY {
+        // (the terminal's line: what the job was given, `main.tex`
+        // for `./main.tex`)
+        let mut cmd = String::new();
+        for c in name.strip_prefix("./").unwrap_or(name).chars() {
+            printable(u32::from(c), &mut cmd);
+        }
+        text = text.replace(crate::context::CMDLINE, &cmd);
+    }
+    (kind, text, nl, marked)
+}
+
+/// What the terminal says besides the events ([`terminal`]).
+pub(crate) struct TermParts<'a> {
+    /// The banner and what is said before the log opens.
+    pub head: &'a str,
+    /// The log's end: §642's line, or a fatal error's.
+    pub end: &'a str,
+    /// The log's name, as `Transcript written on` says it.
+    pub log_name: &'a str,
+    /// What pdfTeX reads as fonts are first used, each by the page
+    /// (0 the first) whose shipping reads it: the font map, an encoding
+    /// file (`{PATH}`, said before the page's `]`).
+    pub reads: Vec<(i64, String)>,
+    /// The font files embedded, as pdfTeX says them when it writes them
+    /// at the end (`<PATH>`, a whole one's `<<PATH>>`), one after another.
+    pub fonts: String,
+}
+
+/// A job's terminal as TeX prints it with the terminal on
+/// (`nonstop_mode`, `scroll_mode`): the head, the events laid out on the
+/// log and the terminal at once (a line's start on either depends on
+/// both columns: `print_nl`, `\message`, a file's open, a page shipped;
+/// the log's alone not on the terminal), the font map and encoding files
+/// in the page where a font first needs them, ` )`, `(see the transcript file for additional
+/// information)` when the job's history is not spotless (§1335: an error,
+/// or a diagnostic the terminal did not show), the font files, the end,
+/// then `Transcript written on LOG.` (§1333).
+pub(crate) fn terminal(
+    v: &Values,
+    name: &str,
+    events: Option<ValueId>,
+    dline: &dyn Fn(u64) -> Option<i64>,
+    t: &TermParts<'_>,
+) -> String {
+    let mut log = Log::with_terminal();
+    log.raw('(');
+    log.print(name, -1);
+    let mut page = 0i64;
+    let mut spotless = true;
+    for x in events.map(|e| v.seq_to_vec(e)).unwrap_or_default() {
+        let (kind, text, nl, _) = event_parts(v, x, name, dline);
+        let online = kind.ends_with(ONLINE);
+        let bare = kind.trim_end_matches(ONLINE);
+        // (§90's `error` and §245's `begin_diagnostic` with the terminal
+        // left out: the history no longer spotless)
+        if bare == CONTEXT
+            || bare == CONTEXT_ONLY
+            || (!online && matches!(bare, "diag" | "box"))
+            || (!online && (bare == HREPORT || bare == VREPORT))
+        {
+            spotless = false;
+        }
+        if bare == "shipend" {
+            for (_, r) in t.reads.iter().filter(|(p, _)| *p == page) {
+                log.print(&format!("{{{r}}}"), -1);
+            }
+            page += 1;
+        }
+        log.event(&kind, &text, nl);
+    }
+    log.print(" )", -1);
+    if !spotless {
+        // (`selector:=term_only`: `print_nl` by the terminal's column)
+        log.term_only(|l| l.print_nl("(see the transcript file for additional information)", -1));
+    }
+    log.print(&t.fonts, -1);
+    for l in t.end.split('\n') {
+        log.print_nl(l, -1);
+    }
+    // (§1333: the log closed; then on the terminal alone `print_nl`, the
+    // transcript's name, `print_ln`)
+    log.term_only(|l| {
+        l.print_nl(&format!("Transcript written on {}.", t.log_name), -1);
+        l.print_ln();
+    });
+    let term = log.term.take().map(|t| t.text).unwrap_or_default();
+    format!("{}{term}", t.head)
+}
+
 impl LayoutMemo {
     /// The log of a document: the file opened, the events (laid out
     /// again from the first that differs from the last ones'); the worst
@@ -452,25 +685,9 @@ impl LayoutMemo {
             } else if xs.first() == Some(&driver) {
                 self.fatal.push((k, Fatal::Driver));
             }
-            let kind = xs.first().map(|&k| str_of(v, k)).unwrap_or_default();
-            let mut text = xs.get(1).map(|&t| str_of(v, t)).unwrap_or_default();
-            let nl = xs.get(2).map_or(-1, |&n| int_of(v, n));
-            if let Some(&ms) = xs.get(3) {
-                let marks: Vec<i64> = list_of(v, ms).iter().map(|&m| int_of(v, m)).collect();
-                let lines = mark_lines(&marks, dline);
-                for l in &lines {
-                    text = text.replacen(LINE_MARK, &l.to_string(), 1);
-                }
+            let (kind, text, nl, marked) = event_parts(v, x, name, dline);
+            if let Some((marks, lines)) = marked {
                 self.marked.push((k, marks, lines));
-            }
-            if kind == CONTEXT || kind == CONTEXT_ONLY {
-                // (the terminal's line: what the job was given, `main.tex`
-                // for `./main.tex`)
-                let mut cmd = String::new();
-                for c in name.strip_prefix("./").unwrap_or(name).chars() {
-                    printable(u32::from(c), &mut cmd);
-                }
-                text = text.replace(crate::context::CMDLINE, &cmd);
             }
             log.event(&kind, &text, nl);
             self.after.push((log.text.len(), log.offset));
@@ -488,6 +705,7 @@ impl LayoutMemo {
         let mut log = Log {
             text: std::mem::take(&mut self.text),
             offset: self.offset,
+            term: None,
         };
         let len = log.text.len();
         log.print(" )", -1);
@@ -499,5 +717,42 @@ impl LayoutMemo {
         log.text.truncate(len);
         self.text = log.text;
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn term(log: &Log) -> String {
+        log.term
+            .as_ref()
+            .map(|t| t.text.clone())
+            .unwrap_or_default()
+    }
+
+    /// The log's alone stay off the terminal: `\wlog`, a diagnostic, an
+    /// `\openout` line; with [`ONLINE`] a diagnostic is on both. Each
+    /// stream wraps at its own column, and `print_nl` breaks both when
+    /// either has a partial line.
+    #[test]
+    fn terminal_beside_the_log() {
+        let mut log = Log::with_terminal();
+        log.event("msg", "Hello", -1);
+        log.event("wlog", "File: x.sty", -1);
+        log.event("diag", "{vertical mode: \\par}", -1);
+        log.event("openout", "\\openout1 = `doc.aux'.", -1);
+        log.event(&format!("diag{ONLINE}"), "{horizontal mode}", -1);
+        assert_eq!(
+            log.text,
+            "Hello\nFile: x.sty\n{vertical mode: \\par}\n\\openout1 = `doc.aux'.\n\n\n{horizontal mode}\n"
+        );
+        assert_eq!(term(&log), "Hello\n{horizontal mode}\n");
+        let mut log = Log::with_terminal();
+        log.event("msg", &"x".repeat(85), -1);
+        assert_eq!(
+            term(&log),
+            format!("\n{}\n{}", "x".repeat(79), "x".repeat(6))
+        );
     }
 }
