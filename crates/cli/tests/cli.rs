@@ -4314,6 +4314,84 @@ fn next_build(
     panic!("the watch ended before a build: {seen:?}");
 }
 
+/// `phitex watch` looks again for a file its build looked for and did
+/// not find once one of that name is made: `\input{late}` before
+/// `late.tex` exists fails (LaTeX's "File not found" error), and the
+/// file's creation rebuilds with it found, the PDF a clean build's.
+#[test]
+fn watch_finds_a_file_made_after_a_build_missed_it() {
+    let _one = one();
+    let d = scratch("watch-late");
+    let home = d.join("home");
+    std::fs::create_dir_all(&home).expect("a home");
+    let main =
+        "\\documentclass{article}\n\\begin{document}\nBefore.\n\\input{late}\n\\end{document}\n";
+    let late = "Late words.\n";
+    let root = d.join("project");
+    std::fs::create_dir_all(&root).expect("the project");
+    std::fs::write(root.join("main.tex"), main).expect("main");
+    let phitex = |dir: &Path, args: &[&str]| {
+        let mut c = command(Path::new(env!("CARGO_BIN_EXE_phitex")), dir);
+        c.args(args)
+            .env("HOME", &home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("TEXINPUTS")
+            .env("LATEXMKRCSYS", home.join("no-system-latexmkrc"));
+        c
+    };
+    let mut child = phitex(
+        &root,
+        &[
+            "watch",
+            "--write",
+            "--json",
+            "--no-view",
+            "--exact-pdf",
+            "--engine",
+            "pdflatex",
+            "main.tex",
+        ],
+    )
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::inherit())
+    .spawn()
+    .expect("phitex watch runs");
+    let stdout = child.stdout.take().expect("its output");
+    let mut lines = BufReader::new(stdout).lines().map_while(Result::ok);
+    let mut seen = Vec::new();
+    let cold = next_build(&mut lines, &mut seen);
+    assert_eq!(cold["ok"], false, "late.tex is missing: {cold}");
+    std::thread::sleep(Duration::from_millis(50));
+    std::fs::write(root.join("late.tex"), late).expect("late.tex made");
+    let ev = next_build(&mut lines, &mut seen);
+    assert_eq!(ev["ok"], true, "late.tex made: {ev}");
+    std::thread::sleep(Duration::from_millis(300));
+    let watched = std::fs::read(root.join("main.pdf")).expect("the watch's PDF");
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(b"q\n");
+    }
+    let _ = child.wait();
+    let clean = d.join("clean");
+    std::fs::create_dir_all(&clean).expect("the clean one");
+    std::fs::write(clean.join("main.tex"), main).expect("main");
+    std::fs::write(clean.join("late.tex"), late).expect("late");
+    let out = phitex(&clean, &["build", "--engine", "pdflatex", "main.tex"])
+        .output()
+        .expect("phitex build runs");
+    assert!(
+        out.status.success(),
+        "the clean build: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let want = std::fs::read(clean.join("main.pdf")).expect("the clean PDF");
+    assert!(
+        watched == want,
+        "the watch's PDF is not the clean build's: {}",
+        first_difference(&watched, &want)
+    );
+}
+
 /// `phitex watch` rebuilds on a change of any file the build read from
 /// disk, whatever folder it is in, and of the settings' files: run from
 /// a project's root on `lab/a.tex` (the build in `lab/`), a style found

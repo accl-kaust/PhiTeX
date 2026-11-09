@@ -60,6 +60,13 @@ pub trait Host: Send + Sync {
         None
     }
 
+    /// The file TeX names `name` was looked for and not found, and may
+    /// be there now (a Rebuild, `r` in the watch): a host that keeps its
+    /// answers ([`Host::locate`]'s "nowhere" included) looks for it again
+    /// at its next lookup. A host that keeps none (the CLI's: kpathsea
+    /// lists a folder again once it changed) has nothing to do.
+    fn look_again(&self, _name: &str) {}
+
     /// Whether two names are one file (none of the host's own: names are
     /// compared as they are).
     fn same_file(&self, _a: &str, _b: &str) -> bool {
