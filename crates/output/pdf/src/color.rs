@@ -60,6 +60,10 @@ fn nonempty(s: &[u8]) -> Option<Vec<u8>> {
     (!s.is_empty()).then(|| s.to_vec())
 }
 
+/// A color stack's page stack and its current page value
+/// ([`Stacks::page_state`]).
+pub(crate) type StackState = (Vec<Option<Vec<u8>>>, Option<Vec<u8>>);
+
 impl Stacks {
     /// `colstacks_first_init`.
     fn init(&mut self) {
@@ -208,7 +212,7 @@ impl Stacks {
 
     /// Each color stack's page stack and current page value: what a page
     /// leaves the next one of the stacks.
-    pub(crate) fn page_state(&self) -> Vec<(Vec<Option<Vec<u8>>>, Option<Vec<u8>>)> {
+    pub(crate) fn page_state(&self) -> Vec<StackState> {
         self.list
             .iter()
             .map(|c| (c.page_stack.clone(), c.page_current.clone()))
