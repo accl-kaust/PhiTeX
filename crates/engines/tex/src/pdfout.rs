@@ -5380,6 +5380,7 @@ fn link(
     if let Some(a) = alone {
         base_tables(v, a.base, a.fonts, &mut st);
         st.start_page_colors(a.colors);
+        st.hold_writes();
     }
     let mut forms = Forms::default();
     let mut reloc = Reloc::new();
@@ -5645,6 +5646,7 @@ fn link(
             // it names, so that none names one of them)
             if let Some(a) = alone {
                 pad_objects(&mut st, a.floor);
+                st.write_held();
             }
             let n0 = st.objects_numbered();
             // (a page naming an object the link numbered otherwise than
