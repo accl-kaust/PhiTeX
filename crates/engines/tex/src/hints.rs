@@ -1135,10 +1135,11 @@ fn statement_starts(
             }
             let a = &p.atoms[j];
             // (a `}`'s depth is after it closes)
-            if an.depth(j) == 0 && matches!(a.kind, AtomKind::Char(';') | AtomKind::Close) {
-                if let Some(c) = next_cs(j + 1) {
-                    out.push(p.atoms[c].start);
-                }
+            if an.depth(j) == 0
+                && matches!(a.kind, AtomKind::Char(';') | AtomKind::Close)
+                && let Some(c) = next_cs(j + 1)
+            {
+                out.push(p.atoms[c].start);
             }
             j += 1;
         }

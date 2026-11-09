@@ -6687,6 +6687,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// close (the pass predicted its end wrong) reads on into the
     /// following siblings, claimed, until it is closed or the text ends:
     /// correct, and serial for exactly that span.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn run_all(&mut self) -> R<()> {
         let args = self.cx.args();
         // the node's text kind (`args[1]`: 1 the job's text, 2 a

@@ -104,25 +104,24 @@ impl Run<'_, '_> {
             "appends pending"
         } else if self.nest.last().is_some_and(|l| l.group == 0) {
             "the innermost level a paragraph"
-        } else if let Some(k) = self.nest.iter().enumerate().position(|(k, l)| {
-            !if !l.owns {
-                l.group != 0
-            } else if l.group == 0 {
-                l.mode == 102
-                    && l.par.is_some()
-                    && self.nest.get(k + 1).is_some_and(|u| u.group != 0)
-            } else {
-                is_box_group(l.group) && l.par.is_none() && l.prev_graf == 0
-            }
-        }) {
+        } else {
+            let k = self.nest.iter().enumerate().position(|(k, l)| {
+                !if !l.owns {
+                    l.group != 0
+                } else if l.group == 0 {
+                    l.mode == 102
+                        && l.par.is_some()
+                        && self.nest.get(k + 1).is_some_and(|u| u.group != 0)
+                } else {
+                    is_box_group(l.group) && l.par.is_none() && l.prev_graf == 0
+                }
+            })?;
             let l = &self.nest[k];
             if l.owns && l.group != 0 && !is_box_group(l.group) {
                 "a list of a group not a box's (math, insert, …)"
             } else {
                 "a level that cannot be left"
             }
-        } else {
-            return None;
         };
         Some(why)
     }
