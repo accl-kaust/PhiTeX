@@ -537,3 +537,61 @@ fn update_note_once_per_version() {
         "a new version asks again:\n{shown}"
     );
 }
+
+/// What a reader sees says "clean build", never "cold", and shows no
+/// engine counters: not `build -v`'s lines, not a watch's rows and quit
+/// line, not `--help-all`; `-vv` adds the counters.
+#[test]
+fn reader_text_says_clean_build() {
+    let dir = scratch("wording");
+    std::fs::write(dir.join("doc.tex"), TINY).expect("the document");
+    let out = run(&dir, &["build", "-v", "--ini", "--etex", "doc.tex"]);
+    let err = text(&out.stderr);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("clean build"), "{err}");
+    for jargon in [
+        "cold",
+        "nodes",
+        "cutoffs",
+        "guesses refuted",
+        "engine tables",
+    ] {
+        assert!(!err.contains(jargon), "-v says {jargon}:\n{err}");
+    }
+    let out = run(&dir, &["build", "-vv", "--ini", "--etex", "doc.tex"]);
+    assert!(text(&out.stderr).contains("nodes"), "-vv has the counters");
+    let mut w = phitex(&dir)
+        .args(["watch", "--no-view", "--ini", "--etex", "doc.tex"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut keys = w.stdin.take().expect("its input");
+    let err = w.stderr.take().expect("its errors");
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for l in BufReader::new(err).lines().map_while(Result::ok) {
+            let _ = tx.send(l);
+        }
+    });
+    let mut lines = Vec::new();
+    let end = Instant::now() + Duration::from_secs(300);
+    while !lines.iter().any(|l: &String| l.starts_with("ok:")) {
+        lines.push(
+            rx.recv_timeout(end.saturating_duration_since(Instant::now()))
+                .expect("a build"),
+        );
+    }
+    keys.write_all(b"q\n").expect("q");
+    wait(&mut w, 60);
+    lines.extend(rx.try_iter());
+    let shown = lines.join("\n");
+    assert!(shown.contains("clean build"), "{shown}");
+    assert!(
+        !shown.contains("cold") && !shown.contains("nodes"),
+        "{shown}"
+    );
+    let help = text(&run(&dir, &["--help-all"]).stdout);
+    assert!(!help.contains("cold") && !help.contains("graph"), "{help}");
+}

@@ -596,7 +596,7 @@ fn show_warnings(ui: &crate::ui::Ui, st: crate::ui::Style, s: &Session, l: &Last
                 ui.line(&st.green("no warnings"));
             }
             for (k, n, first) in ws {
-                ui.warning(&format!("{n} × {k:?}"));
+                ui.warning(&k.name(n));
                 for l in first {
                     ui.line(&st.dim(&format!("  {l}")));
                 }
@@ -607,7 +607,7 @@ fn show_warnings(ui: &crate::ui::Ui, st: crate::ui::Style, s: &Session, l: &Last
 }
 
 /// The quit line: `✓ 9 builds · fastest edit 9.2 ms · median 412 ms ·
-/// cold 15.38 s`.
+/// clean build 15.38 s`.
 fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
     if l.builds == 0 {
         return None;
@@ -625,7 +625,7 @@ fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
         parts.push(format!("median {}", ms(e[e.len() / 2])));
     }
     if let Some(c) = l.cold {
-        parts.push(format!("cold {}", ms(c)));
+        parts.push(format!("clean build {}", ms(c)));
     }
     let mut sc = l.screens.clone();
     sc.sort();
@@ -1277,7 +1277,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if let Some(v) = &view {
             v.building(true);
         }
-        let spin = ui.spin(format!("{what}: build {builds} ({why})"), status.clone());
+        let spin = ui.spin(
+            format!("{what}: build {builds} ({})", crate::ui::said_why(why)),
+            status.clone(),
+        );
         // (`--json`: the build has its text and evaluates from here; an
         // edit of the main file from now on is offered to it. Its count is
         // `builds`: a reader waiting for a build's result by `build` is not
@@ -1311,7 +1314,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             Err(m) => {
                 spin.done();
                 building.store(false, Ordering::Relaxed);
-                ui.failed(&format!("build {builds} ({why})"), &m);
+                ui.failed(
+                    &format!("build {builds} ({})", crate::ui::said_why(why)),
+                    &m,
+                );
                 let first = m.lines().next().unwrap_or("the engine panicked");
                 ui.event(
                     &json!({"event": "failed", "build": builds, "why": why, "message": first}),
@@ -1508,7 +1514,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 })
                 .collect::<Vec<_>>()
                 .join(", "),
-            None => why.to_owned(),
+            None => crate::ui::said_why(why),
         };
         let nodes = r.runs.last().map_or(0, |x| x.commands_run);
         let changed = &r.out.pages_changed;
@@ -1575,11 +1581,14 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     view::ranges(changed)
                 )
             });
-            facts.push(if builds > 1 && live > 0 {
-                format!("{nodes}/{live} nodes")
-            } else {
-                format!("{nodes} nodes")
-            });
+            // (the engine's pieces run: its counters, -vv)
+            if ui.verbose > 1 {
+                facts.push(if builds > 1 && live > 0 {
+                    format!("{nodes}/{live} nodes")
+                } else {
+                    format!("{nodes} nodes")
+                });
+            }
         }
         let mut tail = Vec::new();
         let cold = last.borrow().cold;

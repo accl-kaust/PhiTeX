@@ -83,6 +83,20 @@ impl Style {
     }
 }
 
+/// A build's reason as a reader reads it: the session's `cold` (its
+/// first build, or one asked from nothing) is a clean build; a file's
+/// name, an edit's place and the rest are as they are.
+pub fn said_why(why: &str) -> String {
+    why.split(", ")
+        .map(|w| match w {
+            "cold" => "clean build",
+            "asked: a cold build" => "a clean build was asked",
+            w => w,
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// A duration for the terminal: milliseconds under a second.
 pub fn ms(d: Duration) -> String {
     let m = d.as_secs_f64() * 1e3;

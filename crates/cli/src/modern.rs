@@ -29,16 +29,15 @@ const STYLES: Styles = Styles::styled()
     .invalid(AnsiColor::Yellow.on_default());
 
 const ABOUT: &str = "\
-PhiTeX: TeX documents as graph reduction
+PhiTeX: a fast TeX compiler with a live preview
 
-A document is built to its fixpoint as latexmk builds it with pdflatex:
-the files it writes and reads back go round until they settle (at most
-5 rounds, latexmk's limit; past them the build fails as latexmk's does,
-the last round's output kept), BibTeX, biber and makeindex run in
-process when the document reads what they make. Under `watch` it is kept up to date as its files and the
-editor's buffers change, each build byte-identical to a cold one, the
-pages live in the browser. It never stops for input, and never runs an
-external TeX, BibTeX or \\write18 command.
+`phitex build` makes the PDF as latexmk -pdf does: it runs LaTeX,
+BibTeX, biber and makeindex as often as the document needs (at most 5
+passes, latexmk's limit), byte for byte the PDF pdflatex makes.
+`phitex watch` rebuilds as you edit and shows the pages in your
+browser; each PDF is the one a clean build makes. PhiTeX never stops to
+ask for input, and never runs an external TeX, BibTeX or \\write18
+command.
 
 Exit status, as pdflatex's: 0 built without errors (warnings allowed),
 1 anything else (TeX's errors, a usage, configuration or file error, or
@@ -155,9 +154,9 @@ enum Sub {
     },
     /// Rebuild on every change, the pages live in the browser
     ///
-    /// Build, then rebuild whenever an input changes (an edit of the
-    /// graph); keys on standard input: r rebuild, q quit (with --lsp: an
-    /// editor's language client there).
+    /// Build, then rebuild whenever a file the document reads changes;
+    /// keys on a terminal: r rebuild, q quit, h the rest (with --lsp:
+    /// an editor's language client on standard input and output).
     Watch {
         #[arg(value_name = "FILE")]
         file: Option<String>,
@@ -251,10 +250,11 @@ struct Opts {
     /// per document in the cache). The output is the same either way.
     #[arg(long = "node-records", global = true, hide = true)]
     node_records: bool,
-    /// More: each run, the engine's counts, the cache (-vv: more still)
+    /// More detail: each pass, each warning, the cache (-vv: the engine's counters)
     ///
-    /// Each run, each warning's first lines, an engine failure's whole
-    /// message, the engine's counts and tables, the cache's use (-vv: more)
+    /// Each pass over the document and why it ran, each warning's first
+    /// lines, a failure's whole message, the cache's use; -vv adds the
+    /// engine's own counters and tables
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     verbose: u8,
     /// Only problems and the result
@@ -908,25 +908,34 @@ pub fn report(
 ) {
     let st = ui.st;
     let job = &s.job;
-    if o.verbose > 0 {
+    let verbose = o.verbose.max(ui.verbose);
+    // (-v: each pass over the document, in a reader's words; -vv: the
+    // engine's own counters and tables too)
+    if verbose > 0 {
         for (k, run) in r.runs.iter().enumerate() {
+            let engine = if verbose > 1 {
+                format!(
+                    ", {} nodes{}",
+                    run.commands_run,
+                    run.parallel().map(|p| format!(", {p}")).unwrap_or_default()
+                )
+            } else {
+                String::new()
+            };
             ui.line(&st.dim(&format!(
-                "  run {}: {} ({}): {} nodes reduced{}",
+                "  pass {}: {} ({}){engine}",
                 k + 1,
                 ms(run.wall),
-                run.why,
-                run.commands_run,
-                run.parallel().map(|p| format!(", {p}")).unwrap_or_default(),
+                crate::ui::said_why(&run.why),
             )));
         }
     }
-    // (the engine's counts and tables: -v)
-    if o.verbose > 0 || ui.verbose > 0 {
+    if verbose > 1 {
         for n in &r.notes {
             ui.line(&st.dim(&format!("  {n}")));
         }
     }
-    if let (Some(d), true) = (&r.internal, o.verbose > 0 || ui.verbose > 0) {
+    if let (Some(d), true) = (&r.internal, verbose > 1) {
         ui.line(&st.dim(&format!("  the engine's details: {d}")));
     }
     let log = job.out_dir.join(format!("{}.log", job.jobname));
@@ -1095,7 +1104,7 @@ fn build(t: &Target, o: &Options, ui: &Ui) -> i32 {
     phitex_tex::timeline::lap("cli: the cache's summary");
     if let Some(full) = o.report {
         let mut a = crate::report::Report::new(t, o, full);
-        a.build(&s, &r, "cold", &r.log_text());
+        a.build(&s, &r, "clean build", &r.log_text());
         match a.write(&s, t) {
             Ok(p) => ui.line(&format!(
                 "report: {} · file an issue: {}",
