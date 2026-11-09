@@ -173,8 +173,13 @@ struct Doc {
 #[derive(Default)]
 pub struct Renderer {
     doc: Option<Doc>,
-    strips: HashMap<u64, Arc<Strip>>,
-    order: VecDeque<u64>,
+    /// The strips kept, each with when it was last drawn or listed in a
+    /// frame (a tick of [`Renderer::tick`]).
+    strips: HashMap<u64, (Arc<Strip>, u64)>,
+    /// Keys by when they were drawn or listed, oldest first; an entry whose
+    /// tick is not its strip's now is stale (the strip was listed since).
+    order: VecDeque<(u64, u64)>,
+    tick: u64,
     bytes: usize,
     /// Each glyph's outline's box and the outline's hash (by hayro's glyph
     /// key, its font object and id: a subset made again for new
@@ -869,20 +874,54 @@ impl Renderer {
     /// A strip drawn for a frame (`None`: unknown, or dropped since).
     #[must_use]
     pub fn strip(&self, key: u64) -> Option<Arc<Strip>> {
-        self.strips.get(&key).cloned()
+        self.strips.get(&key).map(|(s, _)| s.clone())
     }
 
+    /// `s` kept as `key`'s strip, the newest; the oldest dropped past
+    /// [`KEEP_BYTES`]. A key drawn again replaces its strip and its bytes:
+    /// counted twice (a page's identical bands are one key, each drawn),
+    /// the count grew past the budget for good, and every strip was then
+    /// dropped as soon as it was drawn, the viewer's pages blank.
     fn keep(&mut self, key: u64, s: Strip) {
+        self.tick += 1;
         self.bytes += s.rgba.len();
-        self.strips.insert(key, Arc::new(s));
-        self.order.push_back(key);
+        if let Some((old, _)) = self.strips.insert(key, (Arc::new(s), self.tick)) {
+            self.bytes -= old.rgba.len();
+        }
+        self.order.push_back((key, self.tick));
+        self.evict();
+    }
+
+    /// `key`'s strip made the newest: a frame lists it, and the viewer
+    /// asks for it next. Kept in the order it was first drawn, a band a
+    /// frame listed (kept from an earlier build or zoom) was among the
+    /// first dropped when the frame's new bands were drawn, before the
+    /// viewer could fetch it: a blank band.
+    fn touch(&mut self, key: u64) {
+        self.tick += 1;
+        if let Some(e) = self.strips.get_mut(&key) {
+            e.1 = self.tick;
+            self.order.push_back((key, self.tick));
+        }
+    }
+
+    /// The oldest strips dropped while they are past [`KEEP_BYTES`]; the
+    /// order's stale entries dropped once they outnumber the strips.
+    fn evict(&mut self) {
         while self.bytes > KEEP_BYTES {
-            let Some(k) = self.order.pop_front() else {
+            let Some((k, t)) = self.order.pop_front() else {
                 break;
             };
-            if let Some(s) = self.strips.remove(&k) {
+            if self.strips.get(&k).is_some_and(|e| e.1 == t)
+                && let Some((s, _)) = self.strips.remove(&k)
+            {
                 self.bytes -= s.rgba.len();
             }
+        }
+        if self.order.len() > 2 * self.strips.len() + 1024 {
+            let strips = &self.strips;
+            self.order
+                .retain(|(k, t)| strips.get(k).is_some_and(|e| e.1 == *t));
         }
     }
 
@@ -1062,10 +1101,19 @@ impl Renderer {
             })
             .collect();
         bands.sort_by_key(|b| (b.y, b.x));
+        // (a key drawn once a frame: identical bands, a repeated line or
+        // rule, are one strip; those kept made the newest, so drawing the
+        // new ones never drops them before the viewer fetches them)
+        let mut seen = std::collections::HashSet::new();
         let fresh: Vec<bool> = bands
             .iter()
-            .map(|b| !self.strips.contains_key(&b.key))
+            .map(|b| !self.strips.contains_key(&b.key) && seen.insert(b.key))
             .collect();
+        for (b, f) in bands.iter().zip(&fresh) {
+            if !f {
+                self.touch(b.key);
+            }
+        }
         let drawn = fresh.iter().filter(|f| **f).count();
         let kept = bands.len() - drawn;
         self.draw(page, base, &settings, &bands, &fresh)?;

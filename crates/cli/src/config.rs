@@ -673,10 +673,12 @@ pub fn listing(key: Option<&str>, dir: &Path, st: crate::ui::Style) -> Result<Ve
     let w = rows.iter().map(|r| r.0.len()).max().unwrap_or(0);
     for &&(k, default, what) in &rows {
         let (u, p) = (value(&user, k), value(&project, k));
+        // (a value set stands out from the defaults: the project's green,
+        // yours cyan, a default dim with its note)
         let now = match (&p, &u) {
-            (Some(p), _) => format!("{p} {}", st.dim("(project)")),
-            (None, Some(u)) => format!("{u} {}", st.dim("(yours)")),
-            (None, None) => format!("{default} {}", st.dim("(default)")),
+            (Some(p), _) => format!("{} {}", st.green(p), st.dim("(project)")),
+            (None, Some(u)) => format!("{} {}", st.cyan(u), st.dim("(yours)")),
+            (None, None) => st.dim(&format!("{default} (default)")),
         };
         out.push(format!(
             "  {}  {now}",

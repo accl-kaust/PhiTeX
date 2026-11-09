@@ -114,8 +114,12 @@ export interface ViewPrefs {
 export interface PanelEvents {
   /** The page in view changed (the one an edit paints first). */
   onPage(p: number): void;
-  /** Page `k` is wanted: in view, not drawn at its current hash. */
-  onNeed?(k: number): void;
+  /**
+   * Page `k` is wanted: in view, not drawn at its current hash or zoom; a
+   * promise settled once it is drawn (or not), so a page is asked for
+   * once at a time (no promise: asked again whenever wanted).
+   */
+  onNeed?(k: number): void | Promise<void>;
   onPdf(): void;
   /** The debug check (a fresh build compared every 5 s): absent, no debug button. */
   onDebug?(on: boolean): void;
@@ -270,9 +274,15 @@ export interface PanelPrefs {
 
 const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false };
 
-/** A page's CSS size at `cssWidth`, each side rounded down to whole device pixels (its canvas then on the pixel grid). */
+/**
+ * A page's CSS size at `cssWidth`: each side rounded up to whole device
+ * pixels, as the core rounds a page's bitmap (crates/output/render:
+ * `ceil` of its points times the scale), so a page drawn at the zoom
+ * fills its box to the pixel. Rounded down, and the height made from the
+ * rounded width, the box was up to three pixels short of the bitmap.
+ */
 export function pageBox(d: { w: number; h: number }, cssWidth: number, dpr = globalThis.devicePixelRatio || 1): [number, number] {
-  const snap = (x: number) => Math.floor(x * dpr) / dpr;
+  const snap = (x: number) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap((d.h * cssWidth) / d.w)];
 }
 
@@ -2012,51 +2022,54 @@ export class Panel {
    * (client pixels, and on its page), and when it ends.
    */
   private gesture:
-    | { from: number; f: number; x: number; y: number; at: { k: number; fx: number; fy: number } | null; end?: ReturnType<typeof setTimeout> }
+    | { from: number; f: number; x: number; y: number; at: { k: number; fx: number; fy: number } | null; frame: number; end?: ReturnType<typeof setTimeout> }
     | undefined;
 
   /**
    * Zoom by `f` keeping the point (`px`, `py`, from the stage's top left)
-   * where it is, as pdf.js's and hayro's viewers do: while the gesture goes
-   * on, the pages as they are scaled by one transform around the pointer
-   * (no layout, no drawing: the pages, their marks and their text scale
-   * together); once it rests (250 ms, longer than a wheel's notches are
-   * apart), the zoom set once, the place kept under the pointer by its
-   * page, and the pages drawn once at it.
+   * where it is, as pdf.js's viewer does: the pages laid out at the zoom
+   * once a frame while the gesture goes on, the place under the pointer
+   * kept by its page, and drawn at it as soon as the core can (Viewer.ask:
+   * a page once at a time, the zoom it rests at last); their old bitmaps
+   * stretched until then. Once it rests (250 ms, longer than a wheel's
+   * notches are apart) the zoom is saved and told. The pages were scaled
+   * by one transform until the gesture rested, and only then drawn: every
+   * zoom showed stretched bitmaps for 250 ms and a drawing more.
    */
   private zoomAt(f: number, px: number, py: number): void {
-    const stage = this.$("#stage"), view = this.$("#viewer");
-    const r = stage.getBoundingClientRect();
+    const r = this.$("#stage").getBoundingClientRect();
     let g = this.gesture;
     if (!g) {
       const x = r.left + px, y = r.top + py;
-      const v = view.getBoundingClientRect();
-      view.style.transformOrigin = `${x - v.left}px ${y - v.top}px`;
-      g = this.gesture = { from: this.scale(), f: 1, x, y, at: this.viewer.pointAt(x, y) };
+      g = this.gesture = { from: this.scale(), f: 1, x, y, at: this.viewer.pointAt(x, y), frame: 0 };
     }
     g.f = Math.min(8, Math.max(0.25, g.from * g.f * f)) / g.from;
-    view.style.transform = `scale(${g.f})`;
-    view.style.willChange = "transform";
-    // (the zoom itself set once it rests: a page drawn meanwhile is sized
-    // at the zoom the transform scales)
+    const gg = g;
+    if (!g.frame) g.frame = requestAnimationFrame(() => ((gg.frame = 0), this.zoomLay(gg)));
     clearTimeout(g.end);
     g.end = setTimeout(() => this.zoomEnd(), 250);
   }
 
-  /** The zoom gesture rested: the pages at the zoom, the place under the pointer kept, drawn once. */
-  private zoomEnd(): void {
-    const g = this.gesture;
-    if (!g) return;
-    this.gesture = undefined;
-    const view = this.$("#viewer");
-    view.style.transform = "";
-    view.style.willChange = "";
+  /** The gesture's zoom now: the pages laid out at it, the place under the pointer where it was, those drawn at another zoom asked for. */
+  private zoomLay(g: NonNullable<Panel["gesture"]>): void {
     this.prefs.zoom = String(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
     this.$("#stage").classList.remove("fit");
     this.viewer.redraw(true);
     if (g.at) this.viewer.keepAt(g.at, g.x, g.y);
     this.viewer.redraw();
+  }
+
+  /** The zoom gesture rested: its last frame laid out, the zoom saved and told. */
+  private zoomEnd(): void {
+    const g = this.gesture;
+    if (!g) return;
+    this.gesture = undefined;
+    if (g.frame) {
+      cancelAnimationFrame(g.frame);
+      this.zoomLay(g);
+    }
+    requestAnimationFrame(() => this.drawScrollMarks());
     this.save();
     this.emit();
   }

@@ -248,7 +248,10 @@ class Pages implements CoreTransport {
 const stripSource: StripSource = {
   async frame(k, scale, win) {
     const part = win ? `/${win.map((x) => x.toFixed(5)).join(",")}` : "";
-    const r = await fetch(new URL(`frame/${k}/${Math.round(scale * 1000)}${part}`, location.href), { cache: "no-store" });
+    // (the scale as asked, to a ten-millionth: rounded to a thousandth, a
+    // page's bitmap came up to a pixel and more off its box, and was shown
+    // stretched by that, every glyph resampled)
+    const r = await fetch(new URL(`frame/${k}/${(scale * 1000).toFixed(4)}${part}`, location.href), { cache: "no-store" });
     return r.ok ? ((await r.json()) as Frame) : null;
   },
   async strips(keys) {
@@ -288,7 +291,8 @@ const source = (file: string, line: number, col = 1) => void sock.request({ op: 
 const panel = new Panel(
   {
     onPage: () => {},
-    onNeed: (k) => void session.fetch(k),
+    // (settled once the page is drawn: the viewer asks for a page once at a time)
+    onNeed: (k): Promise<void> => session.fetch(k),
     // (the build's PDF, as the watch wrote it)
     onPdf: () => {
       const a = document.createElement("a");
