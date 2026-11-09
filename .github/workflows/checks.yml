@@ -122,6 +122,47 @@ jobs:
           $bin = if ($IsWindows) { '~/texlive/tl/bin/windows' } else { '~/texlive/tl/bin/x86_64-linux' }
           $exe = if ($IsWindows) { 'target/fastdev/phitex.exe' } else { 'target/fastdev/phitex' }
           scripts/ci/e2e.ps1 -Phitex $exe -TexBin $bin -Out e2e
+      # (scripts/install.ps1 as `irm … | iex` runs it, in Windows
+      # PowerShell 5.1, on a copy of a release made here: the zip, its
+      # SHA256SUMS, served on localhost; into a folder whose name has a
+      # space; then again over the first, the installed phitex running)
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $rel = Join-Path $env:RUNNER_TEMP 'release'
+          New-Item -ItemType Directory -Force $rel | Out-Null
+          Copy-Item scripts/install.ps1 $rel
+          Compress-Archive target/fastdev/phitex.exe (Join-Path $rel 'phitex-x86_64-windows.zip')
+          $h = (Get-FileHash (Join-Path $rel 'phitex-x86_64-windows.zip')).Hash.ToLowerInvariant()
+          "$h  phitex-x86_64-windows.zip" | Set-Content -Encoding ascii (Join-Path $rel 'SHA256SUMS')
+          $srv = Start-Process python -ArgumentList '-m', 'http.server', '8765', '--bind', '127.0.0.1', '--directory', $rel -PassThru
+          Start-Sleep 3
+          $env:PHITEX_BASE_URL = 'http://127.0.0.1:8765'
+          $env:PHITEX_PREFIX = Join-Path $env:RUNNER_TEMP 'my programs\phitex'
+          powershell.exe -NoProfile -Command 'irm http://127.0.0.1:8765/install.ps1 | iex'
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 failed ($LASTEXITCODE)" }
+          $exe = Join-Path $env:PHITEX_PREFIX 'phitex.exe'
+          & $exe --version
+          $user = (Get-ItemProperty HKCU:\Environment).Path
+          if (($user -split ';') -notcontains $env:PHITEX_PREFIX) { throw "the user's PATH has no $env:PHITEX_PREFIX: $user" }
+          $rec = Get-Content (Join-Path $env:LOCALAPPDATA 'phitex\install.json') | ConvertFrom-Json
+          if ($rec.method -ne 'script' -or $rec.asset -ne 'phitex-x86_64-windows.zip') { throw "install.json: $rec" }
+          # (again, over a running phitex.exe: it is renamed aside)
+          $si = [Diagnostics.ProcessStartInfo]::new($exe)
+          foreach ($a in 'watch', '--lsp') { $si.ArgumentList.Add($a) }
+          $si.WorkingDirectory = $env:RUNNER_TEMP
+          $si.RedirectStandardInput = $true; $si.RedirectStandardOutput = $true
+          $running = [Diagnostics.Process]::Start($si)
+          Start-Sleep 2
+          if ($running.HasExited) { throw "phitex watch --lsp did not keep running ($($running.ExitCode))" }
+          powershell.exe -NoProfile -Command 'irm http://127.0.0.1:8765/install.ps1 | iex'
+          if ($LASTEXITCODE -ne 0) { throw "install.ps1 over a running phitex failed ($LASTEXITCODE)" }
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'the reinstalled phitex.exe does not run' }
+          $running.Kill()
+          Get-ChildItem -Force $env:PHITEX_PREFIX
+          if (-not (Get-ChildItem -Force $env:PHITEX_PREFIX -Filter '.phitex-*.old')) { throw 'the running phitex.exe was not renamed aside' }
+          Stop-Process -Id $srv.Id
       - uses: actions/upload-artifact@v4
         with:
           name: e2e-${{ runner.os }}

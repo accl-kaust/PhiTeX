@@ -96,10 +96,14 @@ gzip -dc h/<pdftex-map pack>.pack | grep -c '^ptmr8r '    # 1, not 0
 **news.json and install.sh** are static files of the site (PhiTeX.org repo,
 `public/`, deployed with it to the Pages project `phitex-org`):
 `https://phitex.org/news.json` and `https://phitex.org/install.sh`.
+**install.ps1** is this repository's `scripts/install.ps1`, served by the
+site at `https://phitex.org/install.ps1` (as text: `irm` hands `iex` a
+string).
 
 **Binaries** are GitHub release assets (free, no bandwidth limit, no CORS
-needed for curl): `<target>.tar.gz`, `SHA256SUMS` and `SHA256SUMS.minisig`
-for each version tag.
+needed for curl): `phitex-<arch>-<os>.tar.gz` (x86_64 and aarch64; linux
+and macos), `phitex-x86_64-windows.zip` (holding `phitex.exe`),
+`SHA256SUMS` and `SHA256SUMS.minisig` for each version tag.
 
 ## 3. Which release a PhiTeX reads
 
@@ -130,6 +134,35 @@ for each version tag.
 4. installs to `~/.local/bin/phitex` and writes `~/.local/share/phitex/install.json`
    (`{"method": "script", "version": ...}`).
 
+**Install on Windows:** `irm https://phitex.org/install.ps1 | iex` in
+PowerShell (5.1 or 7). The script (`scripts/install.ps1`) does what
+install.sh does, with the same settings (`$env:PHITEX_VERSION`,
+`$env:PHITEX_CHANNEL`, `$env:PHITEX_PREFIX`):
+1. picks the target (x86-64 Windows; `phitex-x86_64-windows.zip`);
+2. downloads the zip and `SHA256SUMS`, and checks the signature with
+   minisign when it is installed (else by SHA-256 over HTTPS, as
+   install.sh without minisign);
+3. installs `phitex.exe` to `%LOCALAPPDATA%\Programs\phitex` (a running
+   one renamed aside first: Windows renames a running program's file but
+   does not replace it), adds that folder to the user's `PATH` (the
+   registry's value, its `%VARIABLES%` kept), and writes
+   `%LOCALAPPDATA%\phitex\install.json` as install.sh writes its own.
+
+To remove it: delete `%LOCALAPPDATA%\Programs\phitex` and
+`%LOCALAPPDATA%\phitex`, and take the folder off the user's `PATH`.
+
+**Where phitex keeps its files:** on Linux and macOS XDG's folders
+(`$XDG_CONFIG_HOME/phitex`, else `~/.config/phitex`; the cache, state and
+data likewise under `~/.cache`, `~/.local/state`, `~/.local/share`); on
+Windows, unless those variables are set, `%APPDATA%\phitex` for the
+settings (`phitex.toml`) and `%LOCALAPPDATA%\phitex` for the rest
+(`install.json`; `cache\`, `state\`). `PHITEX_CACHE_DIR` moves the cache
+on both. TeX Live is found as on Unix, by `tex.exe` on `PATH`
+(`…\texlive\YYYY\bin\windows`), and searched with kpathsea's Windows
+rules (`;` between path elements, drive letters, `\` as `/`). MiKTeX's
+trees are not kpathsea's and are not read; with MiKTeX alone, use
+`files = "shelf"`.
+
 `cargo install` and distribution packages are the other methods.
 
 **`phitex upgrade`:**
@@ -140,7 +173,9 @@ for each version tag.
   installs nothing unless `--no-confirm` is given: it says the version
   that is out.
 - Does the same download and checks, with the public key built into the
-  binary. It replaces the binary atomically (write beside it, then rename).
+  binary. It replaces the binary atomically (write beside it, then rename;
+  on Windows the running `phitex.exe` is renamed aside first, and an
+  earlier upgrade's left-over removed once it no longer runs).
 - Follows the user's `update-channel`: `stable` (the default: GitHub's
   latest release) or `nightly` (the pre-release tagged `nightly`, checked
   against the nightly key built in, `ci/nightly.pub`; a later stable

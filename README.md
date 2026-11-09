@@ -84,6 +84,13 @@ with your own PDF viewer, jumping both ways as with pdflatex.
 curl -fsSL https://phitex.org/install.sh | sh
 phitex watch paper.tex
 ```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://phitex.org/install.ps1 | iex
+phitex watch paper.tex
+```
 <!-- TODO(link): install.sh needs the first GitHub release; until then, build from source below -->
 
 `phitex watch` builds your document, opens it live in your browser, and
