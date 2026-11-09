@@ -230,7 +230,9 @@ impl Writer {
             // (the same answer, kept by the build while it is the same)
             let same = |q: &Option<Arc<PageOrigins>>| matches!((q, p), (Some(a), Some(b)) if Arc::ptr_eq(a, b));
             match self.pages.get(k) {
-                Some((q, x, n, m)) if *x == h && same(q) => {
+                Some((q, x, n, m))
+                    if *x == h && same(q) && std::env::var_os("PHITEX_SYNCTEX_FRESH").is_none() =>
+                {
                     count += n;
                     out.extend_from_slice(m);
                 }

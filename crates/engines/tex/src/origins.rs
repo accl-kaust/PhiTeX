@@ -1810,6 +1810,7 @@ impl State {
         // nodes' texts are)
         let kept = self.matches.locked().get(&id).cloned();
         if let Some((g0, m)) = kept
+            && !crate::exec::env_flag!("PHITEX_ORIGINS_FRESH")
             && Arc::ptr_eq(&g0, g)
             && m.nodes
                 .iter()
@@ -1948,6 +1949,7 @@ fn answer(
         .locked()
         .get(&id)
         .filter(|a| a.key == key && Arc::ptr_eq(&a.g, &g) && Arc::ptr_eq(&a.m, &m))
+        .filter(|_| !crate::exec::env_flag!("PHITEX_ORIGINS_FRESH"))
         .map(|a| (a.at.clone(), a.of.clone(), a.out.clone()));
     // (`PHITEX_ORIGINS_CHECK`: an answer kept or shifted compared with
     // one made from nothing kept, the page matched again)
