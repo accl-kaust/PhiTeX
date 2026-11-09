@@ -507,6 +507,10 @@ fn read_keys(tx: &mpsc::Sender<(Instant, Event)>, raw: bool, here: &Here) {
             };
             let k = t.chars().next().and_then(Key::of);
             text.clear();
+            if k == Some(Key::Suspend) {
+                keys::suspend();
+                continue;
+            }
             if let Some(k) = k
                 && !here.answer(k)
                 && tx.send((Instant::now(), Event::Key(k))).is_err()

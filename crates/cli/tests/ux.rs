@@ -272,3 +272,127 @@ fn file_names_with_spaces() {
     assert_eq!(d["params"]["diagnostics"], json!([]), "{d}");
     assert!(l.end().success());
 }
+
+/// A one-page job without a format (`--ini --etex`).
+const TINY: &str = "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x Hi\\end\n";
+
+/// The pid of the phitex whose command line holds `mark`.
+fn pid_of(mark: &str) -> Option<u32> {
+    let end = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < end {
+        for e in std::fs::read_dir("/proc").ok()?.flatten() {
+            let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+                continue;
+            };
+            let cmd = std::fs::read(e.path().join("cmdline")).unwrap_or_default();
+            let cmd = text(&cmd).replace('\0', " ");
+            if cmd.contains("phitex")
+                && cmd.contains(" watch ")
+                && cmd.contains(mark)
+                && !cmd.contains("script")
+                && !cmd.contains("stty")
+                && !cmd.starts_with("timeout")
+            {
+                return Some(pid);
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    None
+}
+
+/// A process's state letter (`/proc/PID/stat`: `T` stopped).
+fn state(pid: u32) -> char {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    s.rsplit(')')
+        .next()
+        .and_then(|r| r.trim().chars().next())
+        .unwrap_or('?')
+}
+
+/// The modes of the terminal `pid` reads (`stty -a` of its standard input).
+fn modes(pid: u32) -> String {
+    let tty = std::fs::read_link(format!("/proc/{pid}/fd/0")).expect("its terminal");
+    let out = Command::new("stty")
+        .arg("-F")
+        .arg(&tty)
+        .arg("-a")
+        .output()
+        .expect("stty");
+    text(&out.stdout)
+}
+
+fn has(modes: &str, flag: &str) -> bool {
+    modes.split_whitespace().any(|w| w == flag)
+}
+
+/// A watch on a terminal (`script` gives it one): Ctrl-Z suspends it with
+/// the terminal put back (echo, line editing), SIGCONT gives it the keys
+/// again, and SIGTERM (as SIGHUP, SIGINT, SIGQUIT) ends it with the
+/// terminal put back, as the shell after it finds it.
+#[test]
+fn watch_puts_the_terminal_back() {
+    let dir = scratch("terminal");
+    std::fs::write(dir.join("term-mark.tex"), TINY).expect("the document");
+    let line = format!(
+        "{} watch --ini --etex term-mark.tex; stty -a > modes-after.txt",
+        bin().display()
+    );
+    let mut script = Command::new("script")
+        .args(["-qefc", &line, "/dev/null"])
+        .current_dir(&dir)
+        .env(
+            "PHITEX_CACHE_DIR",
+            PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("phitex-cache"),
+        )
+        .env("XDG_CONFIG_HOME", dir.join(".home/config"))
+        .env("XDG_STATE_HOME", dir.join(".home/state"))
+        .env("TERM", "xterm")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("script runs");
+    let mut keys = script.stdin.take().expect("its input");
+    let pid = pid_of("term-mark.tex").expect("the watch");
+    // (its keys one at a time: the watch's mode)
+    let end = Instant::now() + Duration::from_secs(60);
+    while has(&modes(pid), "icanon") {
+        assert!(Instant::now() < end, "the watch never took the keys");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    keys.write_all(b"\x1a").expect("Ctrl-Z");
+    keys.flush().expect("Ctrl-Z");
+    let end = Instant::now() + Duration::from_secs(30);
+    while state(pid) != 'T' {
+        assert!(Instant::now() < end, "Ctrl-Z did not suspend the watch");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let m = modes(pid);
+    assert!(
+        has(&m, "icanon") && has(&m, "echo"),
+        "suspended in the watch's mode:\n{m}"
+    );
+    Command::new("kill")
+        .args(["-CONT", &pid.to_string()])
+        .status()
+        .expect("kill");
+    let end = Instant::now() + Duration::from_secs(30);
+    while has(&modes(pid), "icanon") {
+        assert!(
+            Instant::now() < end,
+            "fg did not give the watch its keys again"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("kill");
+    wait(&mut script, 60);
+    let after = std::fs::read_to_string(dir.join("modes-after.txt")).expect("stty after the watch");
+    assert!(
+        has(&after, "icanon") && has(&after, "echo") && has(&after, "isig"),
+        "the terminal after a SIGTERM:\n{after}"
+    );
+}

@@ -2023,6 +2023,7 @@ dependencies = [
  "bytesize",
  "clap",
  "jiff",
+ "libc",
  "minisign-verify",
  "notify",
  "phitex-biber",

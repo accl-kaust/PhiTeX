@@ -95,8 +95,15 @@ fn main() {
         tools::makeindex_main(&args);
     }
     let env = std::env::var("PHITEX_COMPAT").ok();
-    match compat::select(&argv0, args, env.as_deref()) {
-        compat::Selection::Compat { progname, args } => compat::main(&progname, &args),
-        compat::Selection::Modern(args) => modern::main(&args),
+    // (a panic that ends the process puts the terminal back first, as
+    // every other way out does: `keys.rs`)
+    let run =
+        std::panic::catch_unwind(move || match compat::select(&argv0, args, env.as_deref()) {
+            compat::Selection::Compat { progname, args } => compat::main(&progname, &args),
+            compat::Selection::Modern(args) => modern::main(&args),
+        });
+    if let Err(p) = run {
+        keys::restore();
+        std::panic::resume_unwind(p);
     }
 }

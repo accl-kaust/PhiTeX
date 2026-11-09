@@ -580,6 +580,19 @@ impl Ui {
                     loop {
                         std::thread::sleep(Duration::from_millis(250));
                         let now = crate::keys::width();
+                        // (back from Ctrl-Z: the shell's lines are over
+                        // the bottom ones, drawn again below them)
+                        if crate::keys::resumed() {
+                            let mut b = lock(&bottom);
+                            if b.gone {
+                                return;
+                            }
+                            b.drawn = 0;
+                            b.drawn_widths.clear();
+                            redraw(&mut std::io::stderr().lock(), &mut b);
+                            was = now;
+                            continue;
+                        }
                         if now == was {
                             continue;
                         }
