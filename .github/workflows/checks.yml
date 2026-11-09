@@ -65,9 +65,50 @@ jobs:
       - run: cargo test --workspace --exclude phitex-live --lib --bins --no-fail-fast --quiet
   # (Windows, x86_64-pc-windows-msvc: the workspace's lint, and the unit
   # tests of the CLI, the engine and kpathsea, which need no TeX Live)
+  # (and on Windows's arm64 runner, aarch64-pc-windows-msvc: rustup and
+  # LLVM's clang, which ring needs there, set up first where missing)
   windows:
-    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-11-arm]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - if: runner.arch == 'ARM64'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            Invoke-WebRequest https://win.rustup.rs/aarch64 -OutFile "$env:RUNNER_TEMP\rustup-init.exe"
+            & "$env:RUNNER_TEMP\rustup-init.exe" -y --default-toolchain none --profile minimal
+            if ($LASTEXITCODE -ne 0) { throw 'rustup-init failed' }
+            "$env:USERPROFILE\.cargo\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          }
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path "$llvm\clang.exe")) {
+            choco install llvm -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'LLVM did not install' }
+          }
+          & "$llvm\clang.exe" --version
+          $llvm | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - run: cargo clippy --workspace --exclude phitex-defuse --all-targets -- -D warnings
+      - run: cargo test -p phitex-cli -p phitex-tex -p phitex-kpse --lib --bins --no-fail-fast --quiet
+  # (macOS, which has no /proc: the CLI's checks of a watch's process,
+  # kill(pid, 0), as on Linux)
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -79,9 +120,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-      - run: cargo clippy --workspace --exclude phitex-defuse --all-targets -- -D warnings
-      - run: cargo test -p phitex-cli -p phitex-tex -p phitex-kpse --lib --bins --no-fail-fast --quiet
+          key: macos-cargo-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+      - run: cargo test -p phitex-cli --bins --quiet -- 'attach::'
   # (by hand: phitex on TeX Live 2025's frozen tlnet-final, the same
   # files on both systems, scripts/ci/e2e.ps1: build, watch, an edit, q)
   texlive:
@@ -162,6 +202,52 @@ jobs:
           $running.Kill()
           Get-ChildItem -Force $env:PHITEX_PREFIX
           if (-not (Get-ChildItem -Force $env:PHITEX_PREFIX -Filter '.phitex-*.old')) { throw 'the running phitex.exe was not renamed aside' }
+          Stop-Process -Id $srv.Id
+      # (phitex upgrade on Windows, from a copy of a release served here:
+      # a build that takes its releases from it and trusts a key made here,
+      # installed where install.ps1 put phitex.exe, upgrades itself while
+      # it runs to the zip's phitex.exe, its signature and sum checked)
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $t = $env:RUNNER_TEMP
+          gh release download 0.12 -R jedisct1/minisign -p '*win64.zip' -D "$t\ms"
+          Expand-Archive (Get-ChildItem "$t\ms" -Filter *.zip | Select-Object -First 1).FullName "$t\ms\x"
+          $ms = (Get-ChildItem "$t\ms\x" -Recurse -Filter minisign.exe | Select-Object -First 1).FullName
+          & $ms -G -W -p "$t\test.pub" -s "$t\test.key"
+          if ($LASTEXITCODE -ne 0) { throw 'no test key' }
+          $env:PHITEX_UPGRADE_TEST_KEY = (Get-Content "$t\test.pub")[1]
+          $env:PHITEX_UPGRADE_TEST_BASE = 'http://127.0.0.1:8766'
+          cargo build --profile fastdev --locked -p phitex-cli --target-dir target/upgrade-test
+          if ($LASTEXITCODE -ne 0) { throw 'the test build failed' }
+          Remove-Item Env:PHITEX_UPGRADE_TEST_KEY, Env:PHITEX_UPGRADE_TEST_BASE
+          $rel = "$t\upgrade-release"
+          $dl = "$rel\download\v9.9"
+          New-Item -ItemType Directory -Force $dl | Out-Null
+          '{"tag_name": "v9.9"}' | Set-Content -Encoding ascii "$rel\latest.json"
+          Compress-Archive target/fastdev/phitex.exe "$dl\phitex-x86_64-windows.zip"
+          $h = (Get-FileHash "$dl\phitex-x86_64-windows.zip").Hash.ToLowerInvariant()
+          "$h  phitex-x86_64-windows.zip" | Set-Content -Encoding ascii "$dl\SHA256SUMS"
+          & $ms -S -s "$t\test.key" -m "$dl\SHA256SUMS"
+          if ($LASTEXITCODE -ne 0) { throw 'not signed' }
+          $srv = Start-Process python -ArgumentList '-m', 'http.server', '8766', '--bind', '127.0.0.1', '--directory', $rel -PassThru
+          Start-Sleep 3
+          $exe = Join-Path $t 'my programs\phitex\phitex.exe'
+          Copy-Item target/upgrade-test/fastdev/phitex.exe $exe -Force
+          & $exe upgrade -y
+          if ($LASTEXITCODE -ne 0) { throw "phitex upgrade failed ($LASTEXITCODE)" }
+          $want = (Get-FileHash target/fastdev/phitex.exe).Hash
+          if ((Get-FileHash $exe).Hash -ne $want) { throw "phitex.exe is not the release zip's after the upgrade" }
+          & $exe --version
+          # (a signature by another key: refused, nothing installed)
+          Copy-Item target/upgrade-test/fastdev/phitex.exe $exe -Force
+          & $ms -G -W -p "$t\other.pub" -s "$t\other.key"
+          & $ms -S -s "$t\other.key" -m "$dl\SHA256SUMS"
+          & $exe upgrade -y
+          if ($LASTEXITCODE -eq 0) { throw 'an upgrade signed by another key went ahead' }
+          if ((Get-FileHash $exe).Hash -eq $want) { throw 'an upgrade signed by another key was installed' }
           Stop-Process -Id $srv.Id
       - uses: actions/upload-artifact@v4
         with:
