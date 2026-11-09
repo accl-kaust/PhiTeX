@@ -5337,6 +5337,10 @@ fn watch_streams_pages_before_it_settles() {
 /// viewer and to `settled`, and the pages streamed before it.
 #[test]
 #[ignore = "a measurement: PHITEX_TTFP_DIR, PHITEX_TTFP_MAIN, PHITEX_TTFP_ARGS"]
+#[allow(
+    clippy::too_many_lines,
+    reason = "a measurement: its setup, both modes and its report in one"
+)]
 fn watch_time_to_first_page() {
     let src = PathBuf::from(std::env::var("PHITEX_TTFP_DIR").expect("PHITEX_TTFP_DIR"));
     let main = std::env::var("PHITEX_TTFP_MAIN").expect("PHITEX_TTFP_MAIN");
