@@ -409,17 +409,20 @@ pub fn begin() {
 }
 
 /// The update check speaking (after a build's result, as a watch
-/// starts): with `update-check` not set, a line asking for it, every run;
+/// starts): with `update-check` not set, a line asking for it, once a
+/// version;
 /// on, what the kept `news.json` says for this version.
 pub fn check(ui: &Ui) {
     let st = ui.st;
     match setting() {
         Setting::Mute | Setting::Off => {}
+        // (asked once a version: a new one asks again, never every run)
+        Setting::Unset if asked_before(crate::version()) => {}
         Setting::Unset => ui.line(&format!(
             "{} {} {}",
-            st.dim("update checks are not set:"),
+            st.dim("Check daily for new PhiTeX releases?"),
             st.cyan("phitex config update-check on"),
-            st.dim("(off: never ask again)")
+            st.dim("(or off; this note shows once per version)")
         )),
         Setting::On => {
             let Some(n) = std::fs::read(kept())
@@ -438,6 +441,26 @@ pub fn check(ui: &Ui) {
             }
         }
     }
+}
+
+/// Whether the update check's question was put to version `v` already
+/// (`$XDG_STATE_HOME/phitex/update-asked` holds the last version asked);
+/// if not, it is kept as asked now. A state folder that can't be written
+/// asks nothing: a note every run is worse than none.
+fn asked_before(v: &str) -> bool {
+    let env = |k| std::env::var_os(k).filter(|d| !d.is_empty());
+    let Some(d) = env("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".local").join("state")))
+    else {
+        return true;
+    };
+    let f = d.join("phitex").join("update-asked");
+    if std::fs::read_to_string(&f).is_ok_and(|s| s.trim() == v) {
+        return true;
+    }
+    let kept = std::fs::create_dir_all(d.join("phitex")).is_ok() && std::fs::write(&f, v).is_ok();
+    !kept
 }
 
 /// What news `n` says to version `v`: the releases after it, each with

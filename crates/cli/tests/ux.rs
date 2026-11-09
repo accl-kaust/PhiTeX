@@ -485,3 +485,55 @@ fn config_and_news_answer_on_stdout() {
     assert_eq!(v["event"], "news", "{v}");
     assert!(v["version"].is_string(), "{v}");
 }
+
+/// What phitex prints on a terminal (`script` gives it one) for `line`,
+/// run by sh in `dir` with the test's settings folders.
+fn on_a_terminal(dir: &Path, line: &str) -> String {
+    let log = dir.join("typescript.txt");
+    let status = Command::new("script")
+        .args(["-qefc", line])
+        .arg(&log)
+        .current_dir(dir)
+        .env(
+            "PHITEX_CACHE_DIR",
+            PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("phitex-cache"),
+        )
+        .env("XDG_CONFIG_HOME", dir.join(".home/config"))
+        .env("XDG_STATE_HOME", dir.join(".home/state"))
+        .env("TERM", "xterm")
+        .env_remove("CI")
+        .env_remove("PHITEX_NO_UPDATE_CHECK")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("script runs");
+    assert!(status.success(), "{line}");
+    text(&std::fs::read(&log).expect("the typescript"))
+}
+
+/// The update check's question shows once per version on a terminal,
+/// not after every build.
+#[test]
+fn update_note_once_per_version() {
+    let dir = scratch("update-note");
+    std::fs::write(dir.join("doc.tex"), TINY).expect("the document");
+    let b = bin().display().to_string();
+    let line = format!(
+        "{b} build --ini --etex doc.tex; {b} build --ini --etex doc.tex; {b} build --ini --etex doc.tex"
+    );
+    let shown = on_a_terminal(&dir, &line);
+    assert_eq!(
+        shown.matches("phitex config update-check on").count(),
+        1,
+        "{shown}"
+    );
+    std::fs::write(dir.join(".home/state/phitex/update-asked"), "0.0.1")
+        .expect("an older version asked");
+    let shown = on_a_terminal(&dir, &format!("{b} build --ini --etex doc.tex"));
+    assert_eq!(
+        shown.matches("phitex config update-check on").count(),
+        1,
+        "a new version asks again:\n{shown}"
+    );
+}
