@@ -104,13 +104,24 @@ fn a_fatal_error_ends_the_job_before_an_included_file() {
         let b = common::build(opts, Some(&common::plain()), src);
         assert!(b.fatal(), "-j{threads}: {:?}", b.stats.runs_by_op);
         // (whether the file's pieces were staged before the error or the
-        // file was never read: nothing after the error runs)
-        let exec = common::runs_of(&b, "exec");
-        assert!(
-            exec <= 6,
-            "-j{threads}: the pieces before the error and the error's, no more: {exec} exec runs, {:?}",
+        // file was never read: nothing after the error begins. At one
+        // thread that is a count; at eight, how many pieces the other
+        // workers began ahead before the error's run is the scheduler's
+        // timing, so the property itself is asserted, as in
+        // a_fatal_error_ends_the_job_on_eight_threads)
+        assert_eq!(
+            b.stats.starts_after_fatal, 0,
+            "-j{threads}: no piece after the error begins once its run claimed the rest: {:?}",
             b.stats.runs_by_op
         );
+        if threads == 1 {
+            let exec = common::runs_of(&b, "exec");
+            assert!(
+                exec <= 6,
+                "-j1: the pieces before the error and the error's, no more: {exec} exec runs, {:?}",
+                b.stats.runs_by_op
+            );
+        }
         assert_eq!(
             common::runs_of(&b, "finish"),
             0,
