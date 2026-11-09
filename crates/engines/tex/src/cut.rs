@@ -70,10 +70,11 @@ impl Run<'_, '_> {
             }
             return Ok(false);
         }
-        // (the next slice must be a text's: the rest runs it)
-        match self.cx.following(self.pulled) {
-            Some((op, _)) if op == self.ops.exec => {}
-            _ => return Ok(false),
+        // (the next slice must be a text's: the rest runs it. Found so,
+        // no read: the run reads nothing of the text after its own, so an
+        // edit there runs only the continuation, `Ctx::ends_before`)
+        if self.cx.ends_before(self.pulled, self.ops.exec) {
+            return Ok(false);
         }
         if crate::exec::obs_flag!("PHITEX_CUT_TRACE") {
             eprintln!(
