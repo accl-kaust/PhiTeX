@@ -300,7 +300,7 @@ pub fn forget() {
 }
 
 /// Whether the watch a discovery file names runs: its process (Unix's
-/// `kill(pid, 0)`, macOS's as Linux's; Windows's `tasklist`) and its
+/// `kill(pid, 0)`, macOS's as Linux's; Windows's `OpenProcess`) and its
 /// socket, which answers a connection.
 pub fn alive(v: &Value) -> bool {
     let Some(pid) = v["pid"].as_u64() else {
@@ -351,22 +351,36 @@ fn unix_runs(pid: u64) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// Windows: whether process `pid` runs, as `tasklist` lists it (its CSV
-/// names a process's id in quotes, in every language; none when the
-/// list could not be had).
+/// Windows: whether process `pid` runs: a handle to it opened
+/// (`OpenProcess`; refused as another user's: it runs) whose exit code is
+/// still `STILL_ACTIVE`. A pid past `u32` names none.
 #[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "a process's state: Windows's API, which std does not give"
+)]
 fn windows_runs(pid: u64) -> Option<bool> {
-    if u32::try_from(pid).is_err() {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ACCESS_DENIED, GetLastError, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    let Ok(pid) = u32::try_from(pid) else {
         return Some(false);
+    };
+    // SAFETY: OpenProcess takes plain values; a null handle is its failure.
+    let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if h.is_null() {
+        // SAFETY: the calling thread's last error, right after the call.
+        return Some(unsafe { GetLastError() } == ERROR_ACCESS_DENIED);
     }
-    let out = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())?;
-    Some(String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")))
+    let mut code = 0u32;
+    // SAFETY: `h` is an open process handle, `code` a u32 to fill; the
+    // handle is closed once, here.
+    let ok = unsafe { GetExitCodeProcess(h, &raw mut code) } != 0;
+    unsafe { CloseHandle(h) };
+    ok.then_some(code == STILL_ACTIVE.cast_unsigned())
 }
 
 /// The running watches' discovery files in `d`, oldest first; those of
