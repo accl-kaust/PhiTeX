@@ -1526,6 +1526,17 @@ impl Session {
         ))
     }
 
+    /// The pages (0 the first) byte `at` of `file`'s lines were placed on
+    /// (`phitex_tex::Build::pages_of_source`): none known, empty.
+    #[must_use]
+    pub fn pages_of_source(&self, file: &str, at: usize) -> Vec<usize> {
+        self.build
+            .as_ref()
+            .filter(|_| self.job.origins || self.job.synctex)
+            .map(|b| b.pages_of_source(file, u32::try_from(at).unwrap_or(u32::MAX)))
+            .unwrap_or_default()
+    }
+
     /// Page `k`'s glyph origins (0 the first), made for that page alone
     /// (its answer kept while its nodes are, shifted where they only
     /// moved), and the files origins name: none without origins or a
@@ -2142,7 +2153,7 @@ impl Session {
             if self.watching {
                 self.synctex_due
                     .store(true, std::sync::atomic::Ordering::Relaxed);
-            } else if let Some(gz) = self.synctex_bytes() {
+            } else if let Some(Some(gz)) = self.synctex_bytes(&|| false) {
                 put(&format!("{}.synctex.gz", self.job.jobname), &gz)?;
                 phitex_tex::timeline::lap("write: the SyncTeX file");
             }
@@ -2153,8 +2164,11 @@ impl Session {
 
     /// `JOB.synctex.gz`'s bytes for the build as it is now (none when
     /// unchanged since the last made).
-    fn synctex_bytes(&self) -> Option<Vec<u8>> {
-        let b = self.build.as_ref()?;
+    #[allow(clippy::option_option)]
+    fn synctex_bytes(&self, stop: &dyn Fn() -> bool) -> Option<Option<Vec<u8>>> {
+        let Some(b) = self.build.as_ref() else {
+            return Some(None);
+        };
         let root = match self.job.path.parent() {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
             _ => PathBuf::from("."),
@@ -2163,7 +2177,7 @@ impl Session {
         self.synctex
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .write(b, &root)
+            .write_until(b, &root, stop)
     }
 
     /// Whether a watch's `JOB.synctex.gz` waits for idle.
@@ -2179,21 +2193,51 @@ impl Session {
     /// # Errors
     /// The sink's.
     pub fn write_synctex(&self) -> Result<Option<(PathBuf, u64)>, String> {
-        if !self
-            .synctex_due
-            .swap(false, std::sync::atomic::Ordering::Relaxed)
-        {
-            return Ok(None);
+        self.write_synctex_until(&|| false)
+    }
+
+    /// [`Session::write_synctex`], given up between two pages once `stop`
+    /// says so (an event waits: a keystroke never waits for it): still
+    /// due then, the pages made so far kept for the next call.
+    ///
+    /// # Errors
+    /// The sink's.
+    pub fn write_synctex_until(
+        &self,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<Option<(PathBuf, u64)>, String> {
+        match self.synctex_made_until(stop) {
+            Some(Some(gz)) => self.put_synctex(&gz).map(Some),
+            _ => Ok(None),
         }
-        let Some(gz) = self.synctex_bytes() else {
-            return Ok(None);
-        };
-        let h = tex::fingerprint(&gz);
+    }
+
+    /// A watch's `JOB.synctex.gz`'s bytes, left by the last build for
+    /// idle, made now, given up between two pages once `stop` says so
+    /// (`None`: still due, the pages made so far kept for the next call;
+    /// `Some(None)`: none due or none to write).
+    #[allow(clippy::option_option)]
+    pub fn synctex_made_until(&self, stop: &dyn Fn() -> bool) -> Option<Option<Vec<u8>>> {
+        use std::sync::atomic::Ordering::Relaxed;
+        if !self.synctex_due.load(Relaxed) {
+            return Some(None);
+        }
+        let gz = self.synctex_bytes(stop)?;
+        self.synctex_due.store(false, Relaxed);
+        Some(gz)
+    }
+
+    /// `JOB.synctex.gz` written: the file and its bytes' hash.
+    ///
+    /// # Errors
+    /// The sink's.
+    pub fn put_synctex(&self, gz: &[u8]) -> Result<(PathBuf, u64), String> {
+        let h = tex::fingerprint(gz);
         let p = self
             .sink
-            .put(&format!("{}.synctex.gz", self.job.jobname), &gz, h)?;
+            .put(&format!("{}.synctex.gz", self.job.jobname), gz, h)?;
         phitex_tex::timeline::lap("idle: the SyncTeX file");
-        Ok(Some((p, h)))
+        Ok((p, h))
     }
 
     /// The build's transcript as it is now, the job's `.log` (laid out

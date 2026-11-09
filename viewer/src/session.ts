@@ -62,6 +62,7 @@ export type CoreReq =
   | { op: "log" }
   | { op: "pages" }
   | { op: "origins"; page: number }
+  | { op: "page_of"; file: string; at: number }
   | { op: "trace"; on: boolean }
   | { op: "auxdump" }
   | { op: "check"; file?: string; expect?: string }
@@ -73,6 +74,9 @@ export type CoreReq =
 // (the page types the renderer shares: PhiTeX's viewer/src, vendored)
 import type { Link, PageImage } from "./types.ts";
 export type { PageImage };
+
+/** The longest a request answered "pending" is asked again for, in all (ms). */
+const PENDING_CAP_MS = 10_000;
 
 export interface CoreRes {
   ok: boolean;
@@ -447,6 +451,7 @@ export class PreviewSession {
       // (a request for them still in flight may have been answered before
       // they came, its reply sent after this event: not shared or kept, the
       // page asked again, glyphsFetch)
+      if ((e as { event?: string }).event === "origins") this.originsGen++;
       if (this.o.remote && (e as { event?: string }).event === "origins") return void (this.originsSeen++, this.glyphsAsked.clear(), this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
       if (this.o.remote && "event" in e && WATCH.has(e.event)) return this.onWatch(e as WatchEvent);
       // (a build of the core's began or ended; `preparing`, older cores' name for it)
@@ -1118,19 +1123,40 @@ export class PreviewSession {
   /** The watch's `origins` events seen: a page's answer asked before the latest is of the origins before it. */
   private originsSeen = 0;
 
+  /** The builds' `origins` events seen, the core's and the watch's: an ask made before the latest is of an older build. */
+  private originsGen = 0;
+
+  /**
+   * `req` asked until it is made: an answer `{pending: true}` (made when
+   * asked, by the core's owner) asked again after 4 ms, then 8, doubling to
+   * 100 ms, for [`PENDING_CAP_MS`] at most; given up (null) once `stale()`
+   * says the ask is of an older build (a single-threaded core's long build
+   * holds its step: asked every 4 ms with no end, a page gone by the next
+   * build was asked for ever).
+   */
+  private async untilMade(req: CoreReq, stale: () => boolean = () => false): Promise<CoreRes | null> {
+    let r = await this.core.request(req);
+    for (let wait = 4, spent = 0; r.ok && r.json?.pending; wait = Math.min(2 * wait, 100)) {
+      if (stale() || spent >= PENDING_CAP_MS) return null;
+      await new Promise((go) => setTimeout(go, wait));
+      spent += wait;
+      if (stale()) return null;
+      r = await this.core.request(req);
+    }
+    return r;
+  }
+
   private async glyphsFetch(k: number, key: string): Promise<Glyph[]> {
     const seen = this.originsSeen;
-    const r = await this.core.request({ op: "origins", page: k });
-    // (the origins came while this was asked, the answer made before
-    // them: the page asked again, as the event's lookups do)
-    if (seen !== this.originsSeen) return this.glyphsOf(k);
+    const gen = this.originsGen;
     // (a page's origins are made when asked, that page alone: asked again
-    // once they are, as the log is)
-    if (r.ok && (r.json as { pending?: boolean } | undefined)?.pending) {
-      await new Promise((ok) => setTimeout(ok, 4));
-      return this.glyphsFetch(k, key);
-    }
-    if (!r.ok || !r.json) return [];
+    // until they are, while this build's)
+    const r = await this.untilMade({ op: "origins", page: k }, () => gen !== this.originsGen);
+    // (the origins came while this was asked, the answer made before
+    // them: the page asked again, as the event's lookups do, if it is
+    // still there)
+    if (seen !== this.originsSeen || gen !== this.originsGen) return k < this.hashes.length ? this.glyphsOf(k) : [];
+    if (!r || !r.ok || !r.json || r.json.pending) return [];
     // (the job's names: "main" for main.tex, "ch/intro.tex", "article.cls")
     const path = (n: string) => {
       n = n.replace(/^\.\//, "");
@@ -1344,7 +1370,12 @@ export class PreviewSession {
     const want = `${file}:${at}`;
     this.followWant = want;
     void (async () => {
-      for (const k of order) {
+      // (the pages its source's lines were placed on first, as the core
+      // finds them without matching a page; then the rest, in order)
+      const gen = this.originsGen;
+      const r = await this.untilMade({ op: "page_of", file, at }, () => gen !== this.originsGen || this.followWant !== want);
+      const placed: number[] = Array.isArray(r?.json?.pages) ? (r?.json?.pages as number[]) : [];
+      for (const k of [...placed, ...order.filter((x) => !placed.includes(x))]) {
         if (this.followWant !== want) return;
         if (k >= this.hashes.length || this.cached(k)) continue;
         const all = await this.glyphsOf(k);
@@ -1366,17 +1397,10 @@ export class PreviewSession {
     if (!this.opened) return null;
     // (made only when asked: the first answer may be "pending", the core's
     // owner laying it out; asked again until it is there)
-    for (let i = 0; i < 50; i++) {
-      const r = await this.core.request({ op: "log" });
-      if (!r.ok) return null;
-      if (r.json?.pending) {
-        await new Promise((go) => setTimeout(go, 100));
-        continue;
-      }
-      const t = r.json?.text;
-      return typeof t === "string" && t ? t : null;
-    }
-    return null;
+    const r = await this.untilMade({ op: "log" });
+    if (!r?.ok || r.json?.pending) return null;
+    const t = r.json?.text;
+    return typeof t === "string" && t ? t : null;
   }
 
   /**

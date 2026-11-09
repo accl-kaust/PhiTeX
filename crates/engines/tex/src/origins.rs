@@ -238,6 +238,29 @@ fn glyph_memo() -> &'static GlyphMemo {
     M.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
+/// The pieces (their nodes' raw ids) whose sealed lines a page shows,
+/// by the value store and the page's identity in the link: where a
+/// source place is on the pages, with no page matched
+/// ([`crate::Build::pages_of_source`]).
+type PieceMemo = Mutex<FxHashMap<(u64, u64), Arc<[i64]>>>;
+
+fn piece_memo() -> &'static PieceMemo {
+    static M: OnceLock<PieceMemo> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(FxHashMap::default()))
+}
+
+/// Page `id`'s pieces (value store `inst`), kept.
+pub(crate) fn keep_pieces(inst: u64, id: u64, pieces: &[i64]) {
+    let mut m = piece_memo().locked();
+    if m.get(&(inst, id)).is_some_and(|p| **p == *pieces) {
+        return;
+    }
+    if m.len() > 1 << 16 {
+        m.clear();
+    }
+    m.insert((inst, id), Arc::from(pieces));
+}
+
 /// Page `id`'s glyphs (value store `inst`), kept.
 pub(crate) fn keep(inst: u64, id: u64, g: PageGlyphs) {
     let mut m = glyph_memo().locked();
@@ -2134,6 +2157,18 @@ impl crate::Build {
     /// [`Self::origin_texts`]), made with one look at the sources.
     #[must_use]
     pub fn origins_snapshot(&self) -> OriginsSnapshot {
+        self.origins_snapshot_until(&|| false)
+            .unwrap_or_else(|| OriginsSnapshot {
+                pages: Vec::new(),
+                files: Vec::new(),
+                texts: Vec::new(),
+            })
+    }
+
+    /// [`Self::origins_snapshot`], given up between two pages once `stop`
+    /// says so (`None`; the pages answered so far kept, the next call
+    /// goes on from them).
+    pub fn origins_snapshot_until(&self, stop: &dyn Fn() -> bool) -> Option<OriginsSnapshot> {
         let t0 = std::time::Instant::now();
         let st = self.origins_state();
         let inp = self.origins_input();
@@ -2142,9 +2177,13 @@ impl crate::Build {
         let t2 = t0.elapsed();
         let pdf: OnceLock<Arc<Vec<u8>>> = OnceLock::new();
         let get = || pdf.get_or_init(|| self.origins_pdf()).clone();
-        let pages = (0..cx.inp.shown.len())
-            .map(|k| answer(st, &cx, k, &get))
-            .collect();
+        let mut pages = Vec::with_capacity(cx.inp.shown.len());
+        for k in 0..cx.inp.shown.len() {
+            if k > 0 && stop() {
+                return None;
+            }
+            pages.push(answer(st, &cx, k, &get));
+        }
         let t3 = t0.elapsed();
         let files = st.files.locked().clone();
         let texts = (0..files.len())
@@ -2165,11 +2204,55 @@ impl crate::Build {
                 t0.elapsed().saturating_sub(t3)
             );
         }
-        OriginsSnapshot {
+        Some(OriginsSnapshot {
             pages,
             files,
             texts,
+        })
+    }
+
+    /// The pages (0 the first) whose sealed lines came from the nodes
+    /// whose text holds byte `at` of `file` (as origins name it, `.tex`
+    /// or not; its bytes as origins count them): found from where the
+    /// nodes' lines were placed, no page matched (a forward search's
+    /// page). Empty where none is known: the caller looks on the pages.
+    #[must_use]
+    pub fn pages_of_source(&self, file: &str, at: u32) -> Vec<usize> {
+        let st = self.origins_state();
+        let cx = st.ctx(self.origins_input());
+        let file = file.trim_start_matches("./");
+        let names = st.files.locked().clone();
+        let Some(fi) = names
+            .iter()
+            .position(|n| n == file || format!("{n}.tex") == file)
+            .and_then(|i| u32::try_from(i).ok())
+        else {
+            return Vec::new();
+        };
+        let raws: phitex_defuse::FxHashSet<i64> = cx
+            .spans
+            .iter()
+            .filter(|(_, sp)| {
+                sp.file == fi
+                    && cx.place(sp.file, sp.doc, sp.s) <= at
+                    && at < cx.place(sp.file, sp.doc, sp.s + sp.len).max(1)
+            })
+            .map(|(&raw, _)| raw.cast_signed())
+            .collect();
+        if raws.is_empty() {
+            return Vec::new();
         }
+        let memo = piece_memo().locked();
+        cx.inp
+            .shown
+            .iter()
+            .enumerate()
+            .filter(|&(_, &id)| {
+                memo.get(&(cx.inp.inst, id))
+                    .is_some_and(|ps| ps.iter().any(|p| raws.contains(p)))
+            })
+            .map(|(k, _)| k)
+            .collect()
     }
 
     /// The files origins name, by their index in [`PageOrigins::file`]:

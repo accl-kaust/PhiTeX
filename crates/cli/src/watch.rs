@@ -2021,21 +2021,40 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             match rx.try_recv() {
                 Ok(e) => held.push_back(e),
                 Err(mpsc::TryRecvError::Empty) => {
-                    let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
-                    // (written whole, a quit meanwhile taken after it: a
-                    // quit that dropped it left the last build's PDF beside
-                    // the SyncTeX file of the build before, a page's
-                    // records off)
-                    at_wait.store(true, Ordering::Relaxed);
-                    let w = s.write_synctex();
-                    at_wait.store(false, Ordering::Relaxed);
-                    match w {
-                        Ok(Some((p, h))) => {
-                            let p = p.canonicalize().unwrap_or_else(|_| root.join(&p));
-                            mine.insert(p, h);
+                    // (made page by page, given up between two pages once
+                    // an event comes, a key too: a keystroke or a quit never
+                    // waits for it; still due then, the pages made kept for
+                    // the next try. The files' lock taken only to write it:
+                    // the watcher's events reach the loop meanwhile)
+                    let came: RefCell<Option<(Instant, Event)>> = RefCell::new(None);
+                    let stop = || {
+                        if came.borrow().is_some() {
+                            return true;
                         }
-                        Ok(None) => {}
-                        Err(e) => ui.error(&e),
+                        match rx.try_recv() {
+                            Ok(e) => {
+                                *came.borrow_mut() = Some(e);
+                                true
+                            }
+                            Err(mpsc::TryRecvError::Empty) => false,
+                            Err(mpsc::TryRecvError::Disconnected) => true,
+                        }
+                    };
+                    at_wait.store(true, Ordering::Relaxed);
+                    let made = s.synctex_made_until(&stop);
+                    at_wait.store(false, Ordering::Relaxed);
+                    if let Some(e) = came.into_inner() {
+                        held.push_back(e);
+                    }
+                    if let Some(Some(gz)) = made {
+                        let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
+                        match s.put_synctex(&gz) {
+                            Ok((p, h)) => {
+                                let p = p.canonicalize().unwrap_or_else(|_| root.join(&p));
+                                mine.insert(p, h);
+                            }
+                            Err(e) => ui.error(&e),
+                        }
                     }
                 }
                 Err(mpsc::TryRecvError::Disconnected) => break,

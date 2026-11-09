@@ -158,6 +158,13 @@ pub enum Ask {
     /// session's owner, for that page alone, and given back with
     /// [`Viewer::put_origins`]; a build makes none.
     Origins(usize),
+    /// The pages byte `at` of `file`'s lines were placed on wanted (the
+    /// `page_of` op, a forward search's page): made by the session's
+    /// owner and given back with [`Viewer::put_page_of`].
+    PageOf {
+        file: String,
+        at: usize,
+    },
     /// Build again from nothing: the session's build dropped, its format
     /// kept (the editor's `phitex.rebuild`).
     Cold,
@@ -238,6 +245,9 @@ struct Pages {
     /// The pages asked whose answer is made: `origins.pages[k]` none
     /// among them is a page without origins, not one to come.
     made: std::collections::HashSet<usize>,
+    /// The pages a source place's lines were placed on, by file and byte,
+    /// made when asked ([`Ask::PageOf`]) for this build.
+    placed: std::collections::HashMap<(String, usize), Vec<usize>>,
 }
 
 /// A viewer's state and its requests' answers.
@@ -805,6 +815,12 @@ impl Viewer {
         p.made.insert(k);
     }
 
+    /// The pages byte `at` of `file` was placed on, made when asked
+    /// ([`Ask::PageOf`]), for the `page_of` op.
+    pub fn put_page_of(&self, file: String, at: usize, pages: Vec<usize>) {
+        lock(&self.pages).placed.insert((file, at), pages);
+    }
+
     pub fn take_asks(&self) -> Vec<Ask> {
         std::mem::take(&mut *lock(&self.asks))
     }
@@ -945,6 +961,7 @@ impl Viewer {
         // (a build's origins: none made, each page's when it is asked,
         // the `origins` op; never on the typing path)
         pages.origins.clone_from(&b.origins);
+        pages.placed.clear();
         pages.made = b
             .origins
             .as_ref()
@@ -1172,6 +1189,24 @@ impl Viewer {
                     "history": history,
                     "painted_hash": null,
                 }))
+            }
+            // (made when asked, by the session's owner: the viewer asks
+            // again, as for `origins`)
+            "page_of" => {
+                let file = text("file").unwrap_or_default();
+                let at = req.get("at").and_then(index).unwrap_or(0);
+                let p = lock(&s.pages);
+                if let Some(ks) = p.placed.get(&(file.clone(), at)) {
+                    ok(json!({"pages": ks}))
+                } else {
+                    drop(p);
+                    let a = Ask::PageOf { file, at };
+                    let queued = lock(&s.asks).contains(&a);
+                    if !queued {
+                        s.ask(a);
+                    }
+                    ok(json!({"pending": true}))
+                }
             }
             "origins" => match origins(
                 s,

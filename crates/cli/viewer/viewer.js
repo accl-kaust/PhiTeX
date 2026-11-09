@@ -6374,6 +6374,7 @@ var preambleOf = (t) => {
 };
 var usesMinted = (t) => /\\(usepackage|RequirePackage)\s*(\[[^\]]*\])?\s*\{[^}]*\bminted\b/.test(t);
 var WATCH2 = /* @__PURE__ */ new Set(["page", "progress", "diagnostics", "settled", "superseded", "sync"]);
+var PENDING_CAP_MS = 1e4;
 var NEAR_CULPRIT = 64;
 function place3(t, pos) {
   const at = byteOffset(t, pos);
@@ -6530,6 +6531,7 @@ var PreviewSession = class {
       }
       if (e.event === "follow") return this.followBytes(e.file, e.at, e.word, e.line);
       if (e.event === "select") return void this.selectBytes(e.file, e.from, e.to);
+      if (e.event === "origins") this.originsGen++;
       if (this.o.remote && e.event === "origins") return void (this.originsSeen++, this.glyphsAsked.clear(), this.glyphCache.clear(), this.culprits.clear(), this.sink.origins?.());
       if (this.o.remote && "event" in e && WATCH2.has(e.event)) return this.onWatch(e);
       if (e.event === "building" || e.event === "preparing") return this.sink.preparing?.(e.on);
@@ -7104,15 +7106,33 @@ var PreviewSession = class {
   glyphsAsked = /* @__PURE__ */ new Map();
   /** The watch's `origins` events seen: a page's answer asked before the latest is of the origins before it. */
   originsSeen = 0;
+  /** The builds' `origins` events seen, the core's and the watch's: an ask made before the latest is of an older build. */
+  originsGen = 0;
+  /**
+   * `req` asked until it is made: an answer `{pending: true}` (made when
+   * asked, by the core's owner) asked again after 4 ms, then 8, doubling to
+   * 100 ms, for [`PENDING_CAP_MS`] at most; given up (null) once `stale()`
+   * says the ask is of an older build (a single-threaded core's long build
+   * holds its step: asked every 4 ms with no end, a page gone by the next
+   * build was asked for ever).
+   */
+  async untilMade(req, stale = () => false) {
+    let r = await this.core.request(req);
+    for (let wait = 4, spent = 0; r.ok && r.json?.pending; wait = Math.min(2 * wait, 100)) {
+      if (stale() || spent >= PENDING_CAP_MS) return null;
+      await new Promise((go) => setTimeout(go, wait));
+      spent += wait;
+      if (stale()) return null;
+      r = await this.core.request(req);
+    }
+    return r;
+  }
   async glyphsFetch(k, key) {
     const seen = this.originsSeen;
-    const r = await this.core.request({ op: "origins", page: k });
-    if (seen !== this.originsSeen) return this.glyphsOf(k);
-    if (r.ok && r.json?.pending) {
-      await new Promise((ok) => setTimeout(ok, 4));
-      return this.glyphsFetch(k, key);
-    }
-    if (!r.ok || !r.json) return [];
+    const gen = this.originsGen;
+    const r = await this.untilMade({ op: "origins", page: k }, () => gen !== this.originsGen);
+    if (seen !== this.originsSeen || gen !== this.originsGen) return k < this.hashes.length ? this.glyphsOf(k) : [];
+    if (!r || !r.ok || !r.json || r.json.pending) return [];
     const path = (n) => {
       n = n.replace(/^\.\//, "");
       if (this.o.remote) return n;
@@ -7306,7 +7326,10 @@ var PreviewSession = class {
     const want = `${file}:${at}`;
     this.followWant = want;
     void (async () => {
-      for (const k of order) {
+      const gen = this.originsGen;
+      const r = await this.untilMade({ op: "page_of", file, at }, () => gen !== this.originsGen || this.followWant !== want);
+      const placed = Array.isArray(r?.json?.pages) ? r?.json?.pages : [];
+      for (const k of [...placed, ...order.filter((x) => !placed.includes(x))]) {
         if (this.followWant !== want) return;
         if (k >= this.hashes.length || this.cached(k)) continue;
         const all = await this.glyphsOf(k);
@@ -7325,17 +7348,10 @@ var PreviewSession = class {
   /** The last build's transcript, the job's `.log` (the viewer's "View log"; none: the core has none yet). */
   async log() {
     if (!this.opened) return null;
-    for (let i = 0; i < 50; i++) {
-      const r = await this.core.request({ op: "log" });
-      if (!r.ok) return null;
-      if (r.json?.pending) {
-        await new Promise((go) => setTimeout(go, 100));
-        continue;
-      }
-      const t = r.json?.text;
-      return typeof t === "string" && t ? t : null;
-    }
-    return null;
+    const r = await this.untilMade({ op: "log" });
+    if (!r?.ok || r.json?.pending) return null;
+    const t = r.json?.text;
+    return typeof t === "string" && t ? t : null;
   }
   /**
    * The boxes of [`start`, `end`) (bytes, as a problem's range) of `file` on

@@ -2775,6 +2775,11 @@ impl phitex_defuse::Operation for PdfPage {
                 .origins
                 .load(std::sync::atomic::Ordering::Relaxed)
                 .then(|| shown_id(kx.raw(), Some(&h)));
+            // (and the pieces its lines came from: a source place's page
+            // found without matching, `Build::pages_of_source`)
+            if let Some(id) = glyphs {
+                crate::origins::keep_pieces(v.instance(), id, &pc.pieces);
+            }
             let made = record_of(v, key, &pc, &h, &mut line, glyphs);
             // (streamed: the page told, as `Build::pages` would name it,
             // with its PDF alone, where it is wanted)
