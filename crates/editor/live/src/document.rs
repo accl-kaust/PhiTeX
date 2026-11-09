@@ -2074,7 +2074,7 @@ mod tests {
                 );
             }
             // (nothing streamed once the build is in)
-            assert!(d.viewer().streamed_hashes().is_empty());
+            assert_eq!(d.viewer().streamed_hashes(), Vec::<Option<u64>>::new());
             // (the file a build that streams nothing writes)
             let mut quiet = session(&text);
             let r = quiet.build();

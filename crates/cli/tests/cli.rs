@@ -4812,6 +4812,7 @@ fn watch_follows_what_the_build_read_anywhere() {
 /// written the one `phitex build` writes. At one thread and four. The
 /// time to the first page and to `settled` said.
 #[test]
+#[allow(clippy::too_many_lines, reason = "one watch session at each thread count, in order")]
 fn watch_streams_pages_before_it_settles() {
     use serde_json::json;
     let _one = one();
