@@ -268,11 +268,12 @@ struct Global {
 #[derive(Args, Debug, Default)]
 #[allow(clippy::struct_excessive_bools)]
 struct BuildArgs {
-    /// The exact PDF file: what a build always writes, and on watch every
-    /// edit writing it (as --exact). Hidden: scripts give it to build and
-    /// watch alike, as it was global
-    #[arg(long = "exact-pdf", hide = true)]
-    exact_pdf: bool,
+    /// The exact PDF file on every edit: a watch writes it each time
+    /// (else an edit appends an update section, and the exact file is
+    /// written once the editor is idle); a build always writes it, so
+    /// there it changes nothing (scripts give it to build and watch alike)
+    #[arg(long, alias = "exact-pdf", hide_short_help = true)]
+    exact: bool,
     /// Where the outputs go (TeX's -output-directory)
     #[arg(
         short = 'o',
@@ -358,11 +359,6 @@ struct BuildArgs {
 #[derive(Args, Debug, Default)]
 #[allow(clippy::struct_excessive_bools)]
 struct WatchArgs {
-    /// watch: every edit writes the exact PDF file too (else an edit
-    /// appends an update section to it, and the exact file is written
-    /// once the editor is idle)
-    #[arg(long, hide_short_help = true)]
-    exact: bool,
     /// watch: open the viewer
     ///
     /// watch: open the viewer in the browser (or start phitex.toml's
@@ -535,7 +531,7 @@ impl Cli {
 impl BuildArgs {
     fn apply(self, o: &mut Options) {
         let b = self;
-        o.exact_file = b.exact_pdf;
+        o.exact_file = b.exact;
         o.engine = b.engine;
         o.output = b.output_format.as_deref().map(|f| match f {
             "dvi" => Output::Dvi,
@@ -579,7 +575,6 @@ impl WatchArgs {
         o.view = !w.no_view;
         o.write = w.write;
         o.diagnostics = w.diagnostics;
-        o.exact_file = o.exact_file || w.exact;
         o.idle = Duration::from_millis(w.idle.unwrap_or(300));
         o.log = w.log;
         o.port = w.port;
