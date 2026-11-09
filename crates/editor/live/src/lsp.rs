@@ -718,8 +718,12 @@ impl Server {
         })
     }
 
-    /// `phitex/status` with `state` and the last build's facts.
+    /// `phitex/status` with `state` and the last build's facts; none
+    /// before the session has a state (`starting` is the first).
     fn status(&self, state: &'static str) {
+        if state.is_empty() {
+            return;
+        }
         let (last, root, main, updating, update) = {
             let mut st = lock(&self.st);
             st.state = state;

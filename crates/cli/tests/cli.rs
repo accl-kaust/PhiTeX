@@ -1269,7 +1269,8 @@ fn watch_lsp() {
 /// §8): its discovery file (0600, in a 0700 folder) names its port and
 /// token, and `phitex sessions --json` lists it; two clients attach, each
 /// told so in `initialize`; one's unsaved edit makes an error both are
-/// shown; the other detaches (`shutdown`, `exit`: its connection closed)
+/// shown at its place at once (a terminal's watch places an edit's
+/// errors as one with a viewer does); the other detaches (`shutdown`, `exit`: its connection closed)
 /// and the watch goes on building the first one's fix; a wrong or missing
 /// token is closed unanswered; `q` ends the watch and removes its file.
 #[cfg(unix)]
@@ -1409,6 +1410,13 @@ fn watch_attach() {
         "{bad}"
     );
     lsp_until(&rx_b, &mut seen_b, error);
+    // (no status before the session has a state)
+    for m in seen_a.iter().chain(&seen_b) {
+        assert!(
+            m["method"] != "phitex/status" || m["params"]["state"] != "",
+            "{m}"
+        );
+    }
     // (b detaches; the watch goes on)
     lsp_send(
         &mut to_b,
