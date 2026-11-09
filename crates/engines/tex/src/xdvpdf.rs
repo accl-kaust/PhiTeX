@@ -1929,7 +1929,7 @@ impl phitex_defuse::Operation for XdvPage {
         let Some(ops) = walk(&mut dw, &w, &defs, None) else {
             return Ok(ValueId::UNIT);
         };
-        progress.page_colors(k, xdv_color_ops(&ops));
+        progress.page_colors(k, xdv_color_ops(&ops), v);
         progress.page_doc_specials(
             k,
             ops.iter()
@@ -1956,22 +1956,42 @@ impl phitex_defuse::Operation for XdvPage {
             // known: drawn from none, told exact later only if none is)
             let exact = xdv_alone_exact(&ops) && before.is_some();
             if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") && !exact {
-                let why: Vec<String> = ops
-                    .iter()
-                    .filter_map(|o| match o {
-                        Op::Special(s) if !xdv_alone_exact(std::slice::from_ref(o)) => {
-                            Some(String::from_utf8_lossy(&s[..s.len().min(60)]).into_owned())
-                        }
-                        _ => None,
-                    })
-                    .take(3)
-                    .collect();
-                eprintln!("stream: xdv page {k} not exact: colours {start:?}, specials {why:?}");
+                trace_not_exact(k, start, &ops);
             }
-            Some((hash, pdf, exact))
+            // (made before the pages before it are known: made again from
+            // what they leave it, once known, `Progress::page_colors`)
+            let remake: Option<crate::exec::Remake> = start.is_none().then(|| {
+                let (p, prog, ops) = (p.clone(), progress.clone(), ops.clone());
+                let (inst, comment) = (v.instance(), comment.clone());
+                Box::new(move |_: &Values, start: &crate::exec::ColorStart| {
+                    let before = prog.doc_specials_before(k)?;
+                    let mut all: Vec<Op> = before.iter().map(|s| Op::Special(s.clone())).collect();
+                    all.extend(color_prelude(start));
+                    all.extend(ops.iter().cloned());
+                    let pdf = xdv_alone(&p, inst, mag, &comment, &all)?;
+                    Some((pdf, xdv_alone_exact(&ops)))
+                }) as crate::exec::Remake
+            });
+            Some((hash, pdf, exact, remake))
         });
         Ok(ValueId::UNIT)
     }
+}
+
+/// Why XeTeX page `k`'s file is not exact (`PHITEX_STREAM_TRACE`): the
+/// colours carried in, its first specials of a kind not known.
+fn trace_not_exact(k: u64, start: Option<&crate::exec::ColorStart>, ops: &[Op]) {
+    let why: Vec<String> = ops
+        .iter()
+        .filter_map(|o| match o {
+            Op::Special(s) if !xdv_alone_exact(std::slice::from_ref(o)) => {
+                Some(String::from_utf8_lossy(&s[..s.len().min(60)]).into_owned())
+            }
+            _ => None,
+        })
+        .take(3)
+        .collect();
+    eprintln!("stream: xdv page {k} not exact: colours {start:?}, specials {why:?}");
 }
 
 /// The PDF of a XeTeX page alone, of its operations `ops`

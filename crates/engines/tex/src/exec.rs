@@ -295,9 +295,37 @@ struct Colors {
     ops: std::collections::BTreeMap<u64, Vec<ColorOp>>,
     /// Where pages 1, 2, ... begin, as far as every page before is known.
     starts: Vec<ColorStart>,
-    /// The pages told not exact only for want of the pages before them
-    /// known, drawn from no colour carried in: page, identity.
-    waiting: std::collections::BTreeMap<u64, u64>,
+    /// The pages streamed before every page before them was known, drawn
+    /// from no colour carried in ([`Waiting`]).
+    waiting: std::collections::BTreeMap<u64, Waiting>,
+}
+
+/// A page's file made again from where its colours begin, on the values
+/// it was made from (none: those values are gone, a collection since, or
+/// the writer could not): its PDF and whether it draws every object as
+/// the build's file will.
+pub(crate) type Remake =
+    Box<dyn FnOnce(&phitex_defuse::Values, &ColorStart) -> Option<(Vec<u8>, bool)> + Send>;
+
+/// A page's identity made again from the colours carried into it
+/// ([`Progress::page_colors`]): another page to a viewer.
+pub(crate) fn recolored(hash: u64) -> u64 {
+    phitex_defuse::hash_words(hash, &[0x636f_6c6f_7273])
+}
+
+/// A page streamed before its colours' start was known
+/// ([`Progress::stream_page`]): its identity, whether its file draws
+/// every object as the build's will, and how to make it again.
+struct Waiting {
+    hash: u64,
+    objects: bool,
+    remake: Remake,
+}
+
+impl std::fmt::Debug for Waiting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Waiting({:x}, {})", self.hash, self.objects)
+    }
 }
 
 /// What is told of the pages streamed ([`Progress::on_stream`]): whether
@@ -411,7 +439,7 @@ impl Progress {
     pub(crate) fn stream_page(
         &self,
         k: u64,
-        make: impl FnOnce(Option<&ColorStart>) -> Option<(u64, Vec<u8>, bool)>,
+        make: impl FnOnce(Option<&ColorStart>) -> Option<(u64, Vec<u8>, bool, Option<Remake>)>,
     ) {
         let Some(h) = self.on_stream.get() else {
             return;
@@ -428,7 +456,7 @@ impl Progress {
                 .ok()
                 .and_then(|i| c.starts.get(i).cloned())
         };
-        let Some((hash, pdf, objects)) = make(start.as_ref()) else {
+        let Some((hash, pdf, objects, remake)) = make(start.as_ref()) else {
             return;
         };
         let e = self.evaluation();
@@ -437,10 +465,20 @@ impl Progress {
                 .colors
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if objects && start.is_none() {
-                c.waiting.insert(k, hash);
-            } else {
-                c.waiting.remove(&k);
+            match remake.filter(|_| start.is_none()) {
+                Some(remake) => {
+                    c.waiting.insert(
+                        k,
+                        Waiting {
+                            hash,
+                            objects,
+                            remake,
+                        },
+                    );
+                }
+                None => {
+                    c.waiting.remove(&k);
+                }
             }
         }
         (h.page)(StreamedPage {
@@ -454,11 +492,14 @@ impl Progress {
 
     /// Page `k` (from 1) of this build meets the colour stack commands
     /// `ops`: where the pages after it begin known as far as every page
-    /// before them is; those waiting for it that begin from no colour
-    /// carried in told exact ([`Progress::stream_page`]).
-    pub(crate) fn page_colors(&self, k: u64, ops: Vec<ColorOp>) {
+    /// before them is. Each page streamed before that, from no colour
+    /// carried in ([`Progress::stream_page`]), is told again: where none
+    /// is carried in, exact as it is; else made again on `v` from the
+    /// colours carried in, under another identity (the viewer draws it
+    /// again), and told.
+    pub(crate) fn page_colors(&self, k: u64, ops: Vec<ColorOp>, v: &phitex_defuse::Values) {
         let e = self.evaluation();
-        let told: Vec<(u64, u64)> = {
+        let known: Vec<(u64, ColorStart, Waiting)> = {
             let mut c = self
                 .colors
                 .lock()
@@ -476,26 +517,37 @@ impl Progress {
                 let next = color_after(c.starts.last().unwrap_or(&ColorStart::new()), o);
                 c.starts.push(next);
             }
-            let known = c.starts.len() as u64;
-            let rest = c.waiting.split_off(&(known + 1));
+            let n = c.starts.len() as u64;
+            let rest = c.waiting.split_off(&(n + 1));
             let done = std::mem::replace(&mut c.waiting, rest);
             done.into_iter()
-                .filter(|&(p, _)| {
-                    usize::try_from(p - 1)
-                        .ok()
-                        .and_then(|i| c.starts.get(i))
-                        .is_some_and(Vec::is_empty)
+                .filter_map(|(p, w)| {
+                    let st = usize::try_from(p - 1).ok().and_then(|i| c.starts.get(i))?;
+                    Some((p, st.clone(), w))
                 })
                 .collect()
         };
-        if let Some(h) = self.on_stream.get() {
-            for (page, hash) in told {
+        let Some(h) = self.on_stream.get() else {
+            return;
+        };
+        for (page, start, w) in known {
+            if start.is_empty() {
+                if w.objects {
+                    (h.page)(StreamedPage {
+                        evaluation: e,
+                        page,
+                        hash: w.hash,
+                        pdf: Vec::new(),
+                        exact: true,
+                    });
+                }
+            } else if let Some((pdf, exact)) = (w.remake)(v, &start) {
                 (h.page)(StreamedPage {
                     evaluation: e,
                     page,
-                    hash,
-                    pdf: Vec::new(),
-                    exact: true,
+                    hash: crate::exec::recolored(w.hash),
+                    pdf,
+                    exact,
                 });
             }
         }

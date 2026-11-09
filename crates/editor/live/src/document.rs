@@ -2406,11 +2406,8 @@ mod tests {
 
     /// A colour pushed on one page and popped on a later one colours the
     /// pages between: their files begin from the colours the pages before
-    /// them leave, and are exact, drawn as the build's file draws them (at
-    /// one thread, where each page's predecessors are known when it
-    /// streams; at two, a page streamed before them is told exact only
-    /// where it begins from no colour carried in, and every page told
-    /// exact is drawn as the build's).
+    /// them leave (a page streamed before those are known made again once
+    /// they are), and are exact, drawn as the build's file draws them.
     #[test]
     fn a_colour_carried_across_pages_streams_exact() {
         let mut t = PDF_HEAD.to_owned();
@@ -2429,10 +2426,14 @@ mod tests {
         for threads in [1, 2] {
             let (d, ev, files) = streamed_build(&t, Arc::new(Nothing), threads);
             let told = exact_told(&ev);
-            if threads == 1 {
-                for k in 0..5 {
-                    assert_eq!(told.get(&k), Some(&true), "page {k}: {ev:?}");
-                }
+            // (a page streamed before the pages before it were known made
+            // again from the colours they carry in: every page exact)
+            for k in 0..5 {
+                assert_eq!(
+                    told.get(&k),
+                    Some(&true),
+                    "threads {threads}: page {k}: {ev:?}"
+                );
             }
             let out = d.output().map(|o| o.1.to_vec()).unwrap();
             for (k, (pdf, exact)) in &files {
