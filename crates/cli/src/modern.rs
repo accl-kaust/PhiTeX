@@ -105,11 +105,16 @@ fn after_help() -> String {
 pub fn version_text() -> &'static str {
     static TEXT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         format!(
-            "{}\n\
+            "{}{}\n\
              Copyright 2026 Ammar Seliaman (https://github.com/Flinner, flinner <at> nand <dot> sh)\n\
              AGPL-3.0-only: free software, without any warranty. https://phitex.org\n\
              engine {:016x}, records {}, Shelf schema {} (release {}), editor protocol {}",
             crate::version(),
+            if crate::source_build() {
+                " (source build)"
+            } else {
+                ""
+            },
             phitex_tex::engine_id(),
             phitex_live::host::RECORDS_VERSION,
             phitex_shelf::SCHEMAS.map(|s| s.to_string()).join(", "),

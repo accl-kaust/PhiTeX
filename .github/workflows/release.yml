@@ -97,7 +97,7 @@ jobs:
           softwareupdate --install-rosetta --agree-to-license
       - run: |
           t="${{ matrix.target }}"
-          cargo build --release --locked -p phitex-cli ${t:+--target $t}
+          PHITEX_BUILT_BY=release cargo build --release --locked -p phitex-cli ${t:+--target $t}
       - run: |
           t="${{ matrix.target }}"
           out=target/${t:+$t/}release

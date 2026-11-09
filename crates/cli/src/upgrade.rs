@@ -266,7 +266,13 @@ fn replace(exe: &Path, bytes: &[u8]) -> Result<(), String> {
 /// or at once with `--no-confirm`. Off a terminal it asks nothing and
 /// installs nothing without `--no-confirm`. The exit status.
 pub fn upgrade(ui: &Ui, no_confirm: bool) -> i32 {
-    let have = crate::version();
+    // (a source build's version names the release it leads to: any
+    // release or nightly is offered to it)
+    let have = if crate::source_build() {
+        format!("{} (source build)", crate::version())
+    } else {
+        crate::version().to_owned()
+    };
     let r = match channel().and_then(|c| newest(c).map_err(|e| format!("no release found: {e}"))) {
         Ok(r) => r,
         Err(e) => {
@@ -275,7 +281,7 @@ pub fn upgrade(ui: &Ui, no_confirm: bool) -> i32 {
         }
     };
     let v = r.version.clone();
-    if !later(&v, have) {
+    if !crate::source_build() && !later(&v, crate::version()) {
         ui.line(&format!(
             "phitex {have} is the latest {}",
             if r.tag == "nightly" {
