@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use crate::aux::{N_AUX_BIBDATA, N_AUX_BIBSTYLE, N_AUX_CITATION, N_AUX_INPUT};
+use crate::auxfile::{N_AUX_BIBDATA, N_AUX_BIBSTYLE, N_AUX_CITATION, N_AUX_INPUT};
 use crate::bib::{N_BIB_COMMENT, N_BIB_PREAMBLE, N_BIB_STRING};
 use crate::bst::{
     N_BST_ENTRY, N_BST_EXECUTE, N_BST_FUNCTION, N_BST_INTEGERS, N_BST_ITERATE, N_BST_MACRO,

@@ -71,6 +71,9 @@ jobs:
           # SDKs, and Rosetta runs it for the check; GitHub's Intel runners
           # took 39 min a build against 13)
           - { os: macos-15, asset: x86_64-macos, target: x86_64-apple-darwin }
+          # (Windows: a zip of phitex.exe, phitex-x86_64-windows.zip, the
+          # name phitex.org/install.ps1 asks for)
+          - { os: windows-2022, asset: x86_64-windows }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -87,7 +90,8 @@ jobs:
           softwareupdate --install-rosetta --agree-to-license
       # (the nightly's version in the CLI's manifest and the lock, so
       # `phitex --version` names it)
-      - run: |
+      - shell: bash
+        run: |
           v=${{ needs.which.outputs.version }}
           perl -0pi -e 's/^version = "[^"]*"/version = "'"$v"'"/m' crates/cli/Cargo.toml
           perl -0pi -e 's/(name = "phitex-cli"\nversion = )"[^"]*"/$1"'"$v"'"/' Cargo.lock
@@ -96,23 +100,33 @@ jobs:
       # the version written above changes phitex-cli alone. Not in
       # release.yml: a signed release is built from nothing but its source)
       - uses: mozilla-actions/sccache-action@v0.0.10
-      - run: |
+      - shell: bash
+        run: |
           t="${{ matrix.target }}"
           cargo build --release --locked -p phitex-cli ${t:+--target $t}
         env:
           RUSTC_WRAPPER: sccache
           SCCACHE_GHA_ENABLED: "true"
-      - run: |
+      - if: runner.os != 'Windows'
+        run: |
           t="${{ matrix.target }}"
           out=target/${t:+$t/}release
           file "$out/phitex"
           "$out/phitex" --version
           "$out/phitex" --version | grep -qF "${{ needs.which.outputs.version }}"
           tar -czf "phitex-${{ matrix.asset }}.tar.gz" -C "$out" phitex
+      - if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          out=target/release
+          "$out/phitex.exe" --version
+          "$out/phitex.exe" --version | grep -qF "${{ needs.which.outputs.version }}"
+          (cd "$out" && 7z a -tzip -mx=9 "$GITHUB_WORKSPACE/phitex-${{ matrix.asset }}.zip" phitex.exe)
+          7z l "phitex-${{ matrix.asset }}.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: phitex-${{ matrix.asset }}
-          path: phitex-${{ matrix.asset }}.tar.gz
+          path: phitex-${{ matrix.asset }}.*
           retention-days: 3
   frontends:
     needs: [which, build]
@@ -171,7 +185,7 @@ jobs:
           PASS: ${{ secrets.NIGHTLY_MINISIGN_PASSWORD }}
         run: |
           cd dist
-          sha256sum phitex-*.tar.gz > SHA256SUMS
+          sha256sum phitex-*.tar.gz phitex-*.zip > SHA256SUMS
           cat SHA256SUMS
           [ -n "$KEY" ] || { echo "no NIGHTLY_MINISIGN_KEY: the nightly is not signed"; exit 1; }
           sudo apt-get update -qq && sudo apt-get install -y -qq minisign
@@ -182,7 +196,7 @@ jobs:
           minisign -Vm SHA256SUMS -p ../ci/nightly.pub
       - uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist/phitex-*.tar.gz
+          subject-path: dist/phitex-*
       - name: the nightly, in place of the last
         env:
           GH_TOKEN: ${{ github.token }}
