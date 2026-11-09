@@ -2041,10 +2041,21 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         }
                     };
                     at_wait.store(true, Ordering::Relaxed);
+                    let t0 = Instant::now();
                     let made = s.synctex_made_until(&stop);
                     at_wait.store(false, Ordering::Relaxed);
                     if let Some(e) = came.into_inner() {
+                        // (`PHITEX_TEX_TIME`: how long the event waited on it)
+                        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+                            eprintln!(
+                                "synctex: given up for an event after {:?}, the event waited {:?}",
+                                t0.elapsed(),
+                                e.0.elapsed()
+                            );
+                        }
                         held.push_back(e);
+                    } else if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+                        eprintln!("synctex: made in {:?}", t0.elapsed());
                     }
                     if let Some(Some(gz)) = made {
                         let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
