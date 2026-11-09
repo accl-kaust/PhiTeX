@@ -327,15 +327,19 @@ fn has(modes: &str, flag: &str) -> bool {
 }
 
 /// A watch on a terminal (`script` gives it one): Ctrl-Z suspends it with
-/// the terminal put back (echo, line editing), SIGCONT gives it the keys
-/// again, and SIGTERM (as SIGHUP, SIGINT, SIGQUIT) ends it with the
+/// the terminal put back (echo, line editing), the shell's `fg` gives it
+/// the keys again, and SIGTERM (as SIGHUP, SIGINT, SIGQUIT) ends it with the
 /// terminal put back, as the shell after it finds it.
 #[test]
 fn watch_puts_the_terminal_back() {
     let dir = scratch("terminal");
     std::fs::write(dir.join("term-mark.tex"), TINY).expect("the document");
+    // (an interactive shell's job control, as at a terminal: the watch
+    // in a process group of its own, its shell's group beside it, so a
+    // stop is not discarded as an orphaned group's is; the shell's `fg`
+    // after three seconds)
     let line = format!(
-        "{} watch --ini --etex term-mark.tex; stty -a > modes-after.txt",
+        "bash --norc --noprofile -ic '{} watch --ini --etex term-mark.tex; sleep 3; fg; stty -a > modes-after.txt'",
         bin().display()
     );
     let mut script = Command::new("script")
@@ -373,10 +377,6 @@ fn watch_puts_the_terminal_back() {
         has(&m, "icanon") && has(&m, "echo"),
         "suspended in the watch's mode:\n{m}"
     );
-    Command::new("kill")
-        .args(["-CONT", &pid.to_string()])
-        .status()
-        .expect("kill");
     let end = Instant::now() + Duration::from_secs(30);
     while has(&modes(pid), "icanon") {
         assert!(
