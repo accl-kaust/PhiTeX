@@ -185,6 +185,8 @@ pub(crate) struct Ops {
     /// [`crate::Options::origins`]: the pages' writers keep their glyphs
     /// (`crate::origins`).
     pub origins: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The evaluation streams its pages (`crate::pdfout::PdfPage::stream`).
+    pub stream: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The profile units the page loop folded over all its runs
     /// (`crate::pages::Run::fold_unit`; `Stats::units_folded`).
     pub units_folded: std::sync::Arc<std::sync::atomic::AtomicU64>,

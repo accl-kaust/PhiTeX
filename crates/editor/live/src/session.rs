@@ -906,6 +906,11 @@ impl Session {
                 // (its pages the session's progress records)
                 self.status.meter().build_begins(0);
                 self.status.meter().watch(&progress);
+                // (its pages streamed as they ship, where a viewer shows
+                // them, `Meter::on_streamed`: the cold build only, never an
+                // edit's, whose pages come in at once)
+                progress.set_streaming(self.status.meter().streams());
+                let streaming = progress.clone();
                 {
                     let (status, name) = (self.status.clone(), self.job.engine.name);
                     let making = std::sync::atomic::AtomicBool::new(false);
@@ -1057,6 +1062,7 @@ impl Session {
                 };
                 phitex_tex::timeline::lap("session: the options (records read)");
                 let b = Build::with(opts, prelude.as_deref(), &text);
+                streaming.set_streaming(false);
                 phitex_tex::timeline::lap("engine: the build returned");
                 self.store_prelude(&b, prelude.as_deref(), cached.map(|(k, _)| k));
                 phitex_tex::timeline::lap("session: the format stored (when new)");

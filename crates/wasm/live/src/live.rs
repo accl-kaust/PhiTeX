@@ -113,11 +113,24 @@ fn dpx_suffix(format: phitex_live::dvipdf::Format) -> &'static str {
 
 impl Host for Shelf {
     fn locate(&self, name: &str) -> Option<PathBuf> {
-        self.files.locate(name, self.engine).map(PathBuf::from)
+        let found = self.files.locate(name, self.engine).map(PathBuf::from);
+        // (the host's turn, without threads: the files' locks let go)
+        crate::session::let_host_in();
+        found
     }
 
     fn read(&self, path: &Path) -> Option<Vec<u8>> {
-        self.files.read(&path.to_string_lossy()).map(|b| b.to_vec())
+        let b = self.files.read(&path.to_string_lossy()).map(|b| b.to_vec());
+        crate::session::let_host_in();
+        b
+    }
+
+    /// Without threads, the host's turns while the cold build runs: the
+    /// engine's tick ([`crate::session::let_host_in`]).
+    fn progress(&self, progress: &Arc<phitex_tex::Progress>) {
+        if !crate::THREADED {
+            progress.on_tick(Box::new(crate::session::let_host_in));
+        }
     }
 
     /// [`Files::look_again`]: a name the host said was nowhere asked of

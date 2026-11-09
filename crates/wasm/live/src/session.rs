@@ -39,6 +39,66 @@ fn event(v: &Value) {
     event_text(&v.to_string());
 }
 
+/// The event told when the document outgrows the core's memory
+/// (`heap.rs`): the core aborts next. A static text: told with the
+/// allocator's lock held.
+pub(crate) const LOST_MEMORY: &str = r#"{"event":"lost","why":"memory","message":"The document needs more memory than PhiTeX's engine has here: the build stopped."}"#;
+
+/// Every panic told to the host before the core aborts (the wasm core is
+/// built with `panic = "abort"`: a panic anywhere ends it), as the event
+/// `{"event":"lost","why":"panic","message":…}`: a host whose threads'
+/// trap does not reach it still says why the document is gone. Then the
+/// default hook (the message on stderr).
+fn tell_panics() {
+    static SET: std::sync::Once = std::sync::Once::new();
+    SET.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            event(&json!({"event": "lost", "why": "panic", "message": info.to_string()}));
+            default(info);
+        }));
+    });
+}
+
+/// The least time between two of the host's turns while a step runs
+/// ([`let_host_in`]).
+const TURN_EVERY: std::time::Duration = std::time::Duration::from_millis(40);
+
+/// Without threads, while a step builds: the host's turn, at most every
+/// [`TURN_EVERY`], as the event `{"event":"yield"}`. A host that switches
+/// stacks (JSPI: `ph_step` entered as `WebAssembly.promising`, the
+/// `event` import a `WebAssembly.Suspending` that answers this event with
+/// a promise) answers the requests that came meanwhile (`ph_request`,
+/// `ph_frame`, `ph_strips`, `ph_lsp`) before the step goes on: the pages
+/// the build streamed drawn while it runs, as the old core's slices let
+/// it. A host that does not ignores the event. Called with no lock held
+/// that those answers take (the viewer's, the files', the open
+/// document's): the engine's tick ([`phitex_tex::Progress::on_tick`])
+/// and the files read ([`crate::live::Shelf`]).
+pub(crate) fn let_host_in() {
+    if THREADED || !STEPPING.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let now = std::time::Instant::now();
+    if LAST.with(|l| l.get().is_some_and(|t| now - t < TURN_EVERY)) {
+        return;
+    }
+    event_text(r#"{"event":"yield"}"#);
+    LAST.with(|l| l.set(Some(std::time::Instant::now())));
+}
+
+thread_local! {
+    /// The host's last turn, or the step's start ([`let_host_in`]): a
+    /// step shorter than [`TURN_EVERY`] (an edit's) gives none.
+    static LAST: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Without threads: a step runs ([`step_once`]). The host's calls made
+/// in its turns ([`let_host_in`]) find the document out of its place:
+/// a step asked then waits for this one's end, an open is refused, a
+/// close drops the document once the step is done.
+static STEPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn shell_hook() -> &'static Arc<shell::Hook> {
     static HOOK: OnceLock<Arc<shell::Hook>> = OnceLock::new();
     HOOK.get_or_init(|| Arc::new(shell::Hook::new(abi::shell)))
@@ -161,6 +221,11 @@ pub(crate) fn set_index(tsv: &[u8], release: &[u8], table: &[u8], bundled: &str)
 /// answer's bytes); the session thread builds and tells its events. A
 /// document open before is closed.
 pub(crate) fn open(req: &[u8]) -> i32 {
+    // (a step under way, in the host's turn: the open waits for its end)
+    if STEPPING.load(std::sync::atomic::Ordering::Relaxed) {
+        *lock(&OUTPUT) = b"a build is under way: open again once ph_step returns".to_vec();
+        return 4;
+    }
     let Ok(req) = serde_json::from_slice::<Value>(req) else {
         return 1;
     };
@@ -186,6 +251,7 @@ pub(crate) fn open(req: &[u8]) -> i32 {
         }
     };
     let shell = req["shell"].as_bool().unwrap_or(false);
+    tell_panics();
     close();
     spawn_workers();
     // (the main file is the project's too: what the editor's edits apply
@@ -482,6 +548,12 @@ static STEPPED: Mutex<Option<Document>> = Mutex::new(None);
 /// made); 0: nothing asked, or no document; with threads, always 0 (the
 /// session thread steps it).
 pub(crate) fn step_once() -> i32 {
+    use std::sync::atomic::Ordering::Relaxed;
+    // (asked in the host's turn of a step under way: nothing taken, the
+    // ask left for the step after it, which that step's answer asks for)
+    if STEPPING.load(Relaxed) {
+        return 0;
+    }
     let Some((wake, output)) = lock(&OPEN)
         .as_ref()
         .map(|o| (o.wake.clone(), o.output.clone()))
@@ -500,7 +572,15 @@ pub(crate) fn step_once() -> i32 {
     let Some(mut doc) = lock(&STEPPED).take() else {
         return 0;
     };
+    STEPPING.store(true, Relaxed);
+    LAST.with(|l| l.set(Some(std::time::Instant::now())));
     step(&mut doc, &output);
+    STEPPING.store(false, Relaxed);
+    // (closed in a turn of the host's while it ran: dropped)
+    let closed = lock(&wake.state).1;
+    if closed {
+        return 0;
+    }
     let later = doc.pending() && !lock(&wake.state).0;
     *lock(&STEPPED) = Some(doc);
     if later { 2 } else { 1 }

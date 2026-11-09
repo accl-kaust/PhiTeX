@@ -324,6 +324,12 @@ impl PageRecord {
     pub fn simple(&self) -> bool {
         self.simple
     }
+
+    /// The page's content stream, uncompressed, as its walk wrote it.
+    #[must_use]
+    pub fn content(&self) -> &[u8] {
+        &self.shown.0
+    }
 }
 
 /// The recording of a walk in progress.

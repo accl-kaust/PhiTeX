@@ -280,7 +280,33 @@ pub struct Viewer {
     /// The pages drawn as strips, their text and the outline
     /// (`phitex_render`, [`Viewer::frame`], [`Viewer::strips`]).
     strips: Mutex<phitex_render::Renderer>,
+    /// The pages streamed while the build runs ([`Viewer::stream_page`]),
+    /// until it is in ([`Viewer::built`]).
+    streamed: Mutex<Streamed>,
 }
+
+/// The pages a build streamed while it runs: each one's identity as the
+/// viewer is told it (a page's own, [`STREAMED`] in it) and its file of its
+/// own, by page (from 0).
+#[derive(Default)]
+struct Streamed {
+    hashes: Vec<Option<u64>>,
+    pdfs: std::collections::HashMap<usize, Arc<[u8]>>,
+    /// The bytes of the files kept ([`STREAM_KEEP`]).
+    bytes: usize,
+}
+
+/// The most bytes of streamed pages' files kept until the build is in (a
+/// wasm core's memory is the document's too): a page past it is not
+/// streamed, but for the first [`crate::progress::STREAM_FIRST`].
+pub const STREAM_KEEP: usize = 64 << 20;
+
+/// What a streamed page's identity has in it (xor): no page the build
+/// settles with is named so, and each streamed page is drawn again from
+/// the build's file when it is in. A streamed page is the page as a pass
+/// of the build made it, which the build may make otherwise; and its file
+/// of its own has no other page to link to.
+pub const STREAMED: u64 = 0x5354_5245_414d_4544;
 
 /// The messages a viewer that joins is shown.
 const CONSOLE: usize = 2000;
@@ -309,6 +335,7 @@ impl Default for Viewer {
             emit: Mutex::new(None),
             route: Mutex::new(None),
             strips: Mutex::new(phitex_render::Renderer::new()),
+            streamed: Mutex::new(Streamed::default()),
         }
     }
 }
@@ -410,9 +437,14 @@ impl Viewer {
         if !(0.05..=16.0).contains(&scale) {
             return None;
         }
-        let pdf = self.pdf()?;
+        // (a page streamed while the build runs: its file of its own)
+        let streamed = lock(&self.streamed).pdfs.get(&k).cloned();
+        let (pdf, at) = match streamed {
+            Some(p) => (p, 0),
+            None => (self.pdf()?, k),
+        };
         let t = std::time::Instant::now();
-        let f = lock(&self.strips).frame_in(&pdf, k, scale, win)?;
+        let f = lock(&self.strips).frame_in(&pdf, at, scale, win)?;
         let us = t.elapsed().as_micros();
         let bands: Vec<Value> = f
             .bands
@@ -739,6 +771,42 @@ impl Viewer {
         std::mem::take(&mut *lock(&self.asks))
     }
 
+    /// Page `k` (from 0) made while the build runs, `hash` its identity
+    /// as the build would name it, `pdf` a file of that page alone
+    /// ([`phitex_tex::StreamedPage`]), `pages` the pages shipped so far:
+    /// kept until the build is in and the viewers told,
+    /// `{"event":"page","k":K,"hash":H,"pages":N}` (`H` as [`STREAMED`]
+    /// says). The same page again tells nothing.
+    pub fn stream_page(&self, k: usize, hash: u64, pdf: Vec<u8>, pages: u64) {
+        let h = hash ^ STREAMED;
+        {
+            let mut st = lock(&self.streamed);
+            if st.hashes.get(k) == Some(&Some(h)) {
+                return;
+            }
+            let old = st.pdfs.get(&k).map_or(0, |p| p.len());
+            let first = u64::try_from(k).is_ok_and(|k| k < crate::progress::STREAM_FIRST);
+            if !first && st.bytes - old + pdf.len() > STREAM_KEEP {
+                return;
+            }
+            if st.hashes.len() <= k {
+                st.hashes.resize(k + 1, None);
+            }
+            st.hashes[k] = Some(h);
+            st.bytes = st.bytes - old + pdf.len();
+            st.pdfs.insert(k, Arc::from(pdf));
+        }
+        let n = pages.max(u64::try_from(k).unwrap_or(u64::MAX).saturating_add(1));
+        self.emit(
+            &json!({"event": "page", "k": k, "hash": format!("{h:016x}"), "pages": n}).to_string(),
+        );
+    }
+
+    /// The pages streamed so far (from 0; none: not streamed).
+    pub fn streamed_hashes(&self) -> Vec<Option<u64>> {
+        lock(&self.streamed).hashes.clone()
+    }
+
     /// A progress record of the build under way (the session's
     /// [`crate::progress::Meter`]): `{"event":"progress", ...}`.
     pub fn progress(&self, p: &crate::progress::Progress) {
@@ -811,6 +879,8 @@ impl Viewer {
     /// changed, and how many there are.
     pub fn built(&self, b: &Built) -> (Vec<usize>, usize) {
         self.builds.fetch_add(1, Ordering::Relaxed);
+        // (the pages streamed while it ran: the build's own from now on)
+        *lock(&self.streamed) = Streamed::default();
         let mut pages = lock(&self.pages);
         let changed: Vec<usize> = b
             .hashes
@@ -946,11 +1016,24 @@ impl Viewer {
         let state = || {
             let p = lock(&s.pages);
             let d = lock(&s.diff);
-            let hashes = if d.shown {
+            let mut hashes = if d.shown {
                 d.hashes.clone()
             } else {
                 p.hashes.clone()
             };
+            // (the pages streamed while the build runs, over the last
+            // build's: a viewer that asks then is shown them)
+            if !d.shown {
+                let st = lock(&s.streamed);
+                if hashes.len() < st.hashes.len() {
+                    hashes.resize(st.hashes.len(), 0);
+                }
+                for (k, h) in st.hashes.iter().enumerate() {
+                    if let Some(h) = h {
+                        hashes[k] = *h;
+                    }
+                }
+            }
             (hashes, p.history, p.ms)
         };
         let ok = |json: Value| json!({"id": id, "ok": true, "json": json});

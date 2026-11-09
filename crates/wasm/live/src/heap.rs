@@ -49,6 +49,7 @@ pub extern "C" fn sbrk(increment: isize) -> *mut u8 {
         std::process::abort();
     }
     if SEALED.load(Ordering::Acquire) {
+        out_of_memory();
         return FAIL;
     }
     let old = wasm32::memory_grow::<0>(increment.unsigned_abs() / PAGE);
@@ -56,6 +57,20 @@ pub extern "C" fn sbrk(increment: isize) -> *mut u8 {
         return FAIL;
     }
     (old * PAGE) as *mut u8
+}
+
+/// The document outgrew the memory (sealed: dlmalloc's allocation fails
+/// next, and the core aborts, "memory allocation of N bytes failed"):
+/// told to the host first, once, as the event `{"event":"lost",...}`
+/// ([`crate::session::LOST_MEMORY`]), so that a host whose threads' trap
+/// never reaches it still says why the document is gone. Inside dlmalloc,
+/// its lock held: nothing allocated here (a static text, the host's
+/// import).
+fn out_of_memory() {
+    static TOLD: AtomicBool = AtomicBool::new(false);
+    if !TOLD.swap(true, Ordering::AcqRel) {
+        crate::abi::event(crate::session::LOST_MEMORY);
+    }
 }
 
 /// The memory grown by the allocator towards `pages` (at most 65535):
