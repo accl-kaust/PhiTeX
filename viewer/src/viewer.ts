@@ -495,7 +495,7 @@ export class Viewer {
       this.io.unobserve(s.el);
       s.el.remove();
     }
-    for (let k = 0; k < hashes.length; k++) this.slotAt(k).hash = hashes[k];
+    for (let k = 0; k < hashes.length; k++) this.waits(Object.assign(this.slotAt(k), { hash: hashes[k] }));
     // (asked once a layout: an ask lost, say before the session was up, goes again)
     this.asked.clear();
     this.wantVisible();
@@ -507,8 +507,18 @@ export class Viewer {
    * drawn when seen.
    */
   shipped(k: number, hash: string): void {
-    this.slotAt(k).hash = hash;
+    this.waits(Object.assign(this.slotAt(k), { hash }));
     this.wantVisible();
+  }
+
+  /**
+   * A page the build has not shipped alone (no hash yet: a streamed page
+   * after it came first) says it comes at the build's end, not a blank
+   * sheet: one with images, shadings or transparency is never streamed
+   * (PhiTeX's stream1), only drawn once the whole build is in.
+   */
+  private waits(s: Slot): void {
+    s.el.classList.toggle("later", !s.hash && !s.img);
   }
 
   /** Page `k`'s slot, made (with those before it) if there is none yet. */
@@ -522,6 +532,7 @@ export class Viewer {
       this.root.append(el);
       const s: Slot = { el, hash: "", drawn: null, img: null };
       this.slots.push(s);
+      this.waits(s);
       this.sizeSlot(s);
       this.io.observe(el);
     }
@@ -536,6 +547,7 @@ export class Viewer {
     const resized = !!img.w && !!img.h && (img.w !== this.size.w || img.h !== this.size.h);
     if (img.w && img.h) this.size = { w: img.w, h: img.h };
     s.img = img;
+    this.waits(s);
     // (the first page's size known: the pages at it, drawn again if coarser)
     if (resized) queueMicrotask(() => this.redraw());
     s.drawn = hash ?? s.hash;

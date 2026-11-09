@@ -632,7 +632,7 @@ var Viewer = class {
       this.io.unobserve(s.el);
       s.el.remove();
     }
-    for (let k = 0; k < hashes.length; k++) this.slotAt(k).hash = hashes[k];
+    for (let k = 0; k < hashes.length; k++) this.waits(Object.assign(this.slotAt(k), { hash: hashes[k] }));
     this.asked.clear();
     this.wantVisible();
   }
@@ -642,8 +642,17 @@ var Viewer = class {
    * drawn when seen.
    */
   shipped(k, hash) {
-    this.slotAt(k).hash = hash;
+    this.waits(Object.assign(this.slotAt(k), { hash }));
     this.wantVisible();
+  }
+  /**
+   * A page the build has not shipped alone (no hash yet: a streamed page
+   * after it came first) says it comes at the build's end, not a blank
+   * sheet: one with images, shadings or transparency is never streamed
+   * (PhiTeX's stream1), only drawn once the whole build is in.
+   */
+  waits(s) {
+    s.el.classList.toggle("later", !s.hash && !s.img);
   }
   /** Page `k`'s slot, made (with those before it) if there is none yet. */
   slotAt(k) {
@@ -656,6 +665,7 @@ var Viewer = class {
       this.root.append(el);
       const s = { el, hash: "", drawn: null, img: null };
       this.slots.push(s);
+      this.waits(s);
       this.sizeSlot(s);
       this.io.observe(el);
     }
@@ -669,6 +679,7 @@ var Viewer = class {
     const resized = !!img.w && !!img.h && (img.w !== this.size.w || img.h !== this.size.h);
     if (img.w && img.h) this.size = { w: img.w, h: img.h };
     s.img = img;
+    this.waits(s);
     if (resized) queueMicrotask(() => this.redraw());
     s.drawn = hash ?? s.hash;
     this.toPaint.add(s);
@@ -1228,6 +1239,8 @@ header:active { cursor: grabbing; }
 /* (the first page's sheet up: the stage holds still under it, its width kept, so nothing scrolls behind the sheet) */
 .win.sheet-up .stage, .win.docked.sheet-up .stage { overflow: hidden; scrollbar-gutter: stable; }
 .slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); container-type: inline-size; }
+/* (a page the build has not shipped alone yet: it comes at the build's end, said, not a blank sheet) */
+.slot.later::before { content: "Drawn when the build ends"; position: absolute; inset: 0; display: grid; place-items: center; color: #8a8f98; font: 500 clamp(9px, 2.6cqw, 18px)/1.3 var(--ph-font); }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
