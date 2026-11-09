@@ -1337,8 +1337,8 @@ fn a_run_is_cut_inside_its_own_conditional() {
                 "{t} threads, edit {k}: the log is the cold build's"
             );
             assert!(
-                text_runs(&b) <= cuts + 1,
-                "{t} threads, edit {k}: {} text runs, the box's {cuts} cuts (the definition's node and the last continuation)",
+                text_runs(&b) <= cuts + 2,
+                "{t} threads, edit {k}: {} text runs, the box's {cuts} cuts (the definition's node, the last continuation and the box's reader)",
                 text_runs(&b)
             );
         }
