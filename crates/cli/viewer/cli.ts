@@ -535,6 +535,40 @@ addEventListener("keydown", (e) => {
   if (e.key === "Escape" && pick && !pick.hidden) (closePick(), e.stopImmediatePropagation());
 }, { capture: true });
 
+// ---- Printing: the PDF, not this page ----
+// (Ctrl+P here printed the page itself: the toolbar and the pages'
+// pictures. The build's PDF, doc.pdf as the watch made it, is printed
+// instead, from a hidden frame; a browser that won't print a PDF in a
+// frame gets it in a tab, to print from there)
+let printFrame: HTMLIFrameElement | undefined;
+const printPdf = async () => {
+  const r = await fetch(new URL("doc.pdf", location.href), { cache: "no-store" }).catch(() => undefined);
+  if (!r?.ok) return void panel.msg("There's no PDF to print yet", true, true);
+  const url = URL.createObjectURL(new Blob([await r.arrayBuffer()], { type: "application/pdf" }));
+  if (printFrame) (URL.revokeObjectURL(printFrame.src), printFrame.remove());
+  const f = (printFrame = document.createElement("iframe"));
+  f.setAttribute("aria-hidden", "true");
+  f.tabIndex = -1;
+  f.style.cssText = "position: fixed; right: 0; bottom: 0; width: 0; height: 0; border: 0; visibility: hidden";
+  f.onload = () => {
+    try {
+      f.contentWindow!.focus();
+      f.contentWindow!.print();
+    } catch {
+      window.open(url, "_blank");
+      panel.msg("The PDF opened in a new tab: print it from there", false, true);
+    }
+  };
+  f.src = url;
+  document.body.append(f);
+};
+addEventListener("keydown", (e) => {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey || e.key.toLowerCase() !== "p") return;
+  e.preventDefault();
+  e.stopImmediatePropagation();
+  void printPdf();
+}, { capture: true });
+
 let started = false;
 sock.onOpen = () => {
   panel.msg("connected to phitex watch");

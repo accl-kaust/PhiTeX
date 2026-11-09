@@ -8,6 +8,13 @@
   /* (the page is the panel's, viewer/src/panel.ts: it fills the window) */
   html, body { margin: 0; height: 100%; background: #eceef2; }
   @media (prefers-color-scheme: dark) { html, body { background: #0f1319; } }
+  /* (printed from the browser's menu: not this page's toolbar and pictures,
+     a note; Ctrl+P on the page prints the PDF, cli.ts printPdf) */
+  @media print {
+    html, body { background: #fff; color: #000; }
+    body > * { display: none !important; }
+    body::after { content: "This is PhiTeX's live preview, not your PDF. To print the PDF, press Ctrl+P (⌘P on a Mac) on the preview."; display: block; padding: 2em; font: 14px/1.5 system-ui, sans-serif; }
+  }
 </style>
 </head>
 <body>
