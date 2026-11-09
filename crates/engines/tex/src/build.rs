@@ -234,7 +234,13 @@ impl Run<'_, '_> {
         // list's, and the `\aftergroup` tokens were dropped)
         let base = self.base_mode()?;
         self.unsave_extras(&base)?;
-        self.kind_outer(md)
+        let outer = self.kind_outer(md)?;
+        // (a paragraph left open under this scope is the run's again,
+        // `crate::boxscope`)
+        if crate::boxscope::on() && self.reown_paragraph(&base, &outer)? {
+            return self.mode();
+        }
+        Ok(outer)
     }
 
     /// The groups still open when the run ends. Only `\end` inside
@@ -306,7 +312,7 @@ impl Run<'_, '_> {
         let mut xs = vec![
             v.int(l.group),
             v.int(sid),
-            v.int(base.lid),
+            v.int(l.lid),
             v.int(i64::from(l.mode)),
             v.int(base.depth + 1),
             parent,
@@ -389,7 +395,7 @@ impl Run<'_, '_> {
             let mut xs = vec![
                 v.int(l.group),
                 v.int(sid(k)),
-                v.int(base.lid),
+                v.int(l.lid),
                 v.int(i64::from(l.mode)),
                 v.int(base.depth + 1 + i64::try_from(k).unwrap_or(0)),
                 outer,
@@ -1001,7 +1007,15 @@ impl Run<'_, '_> {
                 }
                 _ => match self.par_level_under_groups() {
                     Some(k) => self.end_graf_under_groups(k)?,
-                    None => return Ok(()),
+                    None => {
+                        if crate::boxscope::on() && md.lid <= -(1i64 << 55) {
+                            eprintln!(
+                                "boxscope: node {} ends a paragraph left open inside a group: not followed",
+                                self.cx.node().raw()
+                            );
+                        }
+                        return Ok(());
+                    }
                 },
             };
             // §1096: error_count:=0
@@ -4926,6 +4940,11 @@ fn own_box_needs_depth(v: &Values, own: &[ValueId]) -> bool {
 /// A transition setting the previous depth to `d`.
 fn pd_set(v: &Values, d: i32) -> ValueId {
     v.list(vec![v.int(nodes::T_PD), v.int(i64::from(d))])
+}
+
+/// [`pd_set`], for a list left open (`crate::boxscope`).
+pub(crate) fn pd_value(v: &Values, d: i32) -> ValueId {
+    pd_set(v, d)
 }
 
 /// A transition setting the space factor to `s`.

@@ -6673,7 +6673,7 @@ impl<'c, 'a> Run<'c, 'a> {
     /// Whether this run places its pictures as children (`crate::pic`):
     /// a document piece's run.
     fn pic_armed(&self, op: phitex_defuse::OpId) -> bool {
-        self.doc && (op == self.ops.exec || op == self.ops.resume)
+        self.doc && (op == self.ops.exec || op == self.ops.resume) && !crate::boxscope::on()
     }
 
     /// Runs the node's input to its end (§1030's loop): every command of
@@ -6758,6 +6758,22 @@ impl<'c, 'a> Run<'c, 'a> {
                     self.effect,
                     self.st.sig().0
                 );
+            }
+            // (lists of its own open, at rest: left to the following
+            // nodes, `crate::boxscope`)
+            if crate::boxscope::on() && !self.eof && self.can_leave_lists() {
+                if crate::exec::obs_flag!("PHITEX_BOXSCOPE_TRACE") {
+                    eprintln!(
+                        "boxscope: node {} leaves {:?}",
+                        self.cx.node().raw(),
+                        self.nest
+                            .iter()
+                            .map(|l| (l.mode, l.group, l.owns))
+                            .collect::<Vec<_>>()
+                    );
+                }
+                self.leave_lists()?;
+                return Ok(());
             }
             // (or ends here, its rest a continuation of its own, where the
             // state is nameable and the cut pays, `crate::cut`)

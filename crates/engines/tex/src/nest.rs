@@ -210,7 +210,7 @@ impl Run<'_, '_> {
         self.nest.push(l);
     }
 
-    fn open_level(&mut self, l: &mut Level) {
+    pub(crate) fn open_level(&mut self, l: &mut Level) {
         self.flush_bulk_codes();
         let (gid, sb, db, st) = self.st.open();
         l.gid = gid;

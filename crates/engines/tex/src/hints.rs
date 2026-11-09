@@ -1063,6 +1063,90 @@ impl TextHints {
 /// ends there). Any other control sequence at depth 0 takes the
 /// `[...]`/`{...}` groups right after it into its slice
 /// (`\centerline{...}`).
+/// The statement starts inside a document's `tikzpicture`
+/// environments (`PHITEX_BOXSCOPE`, [`slices_of`]): byte offsets.
+fn statement_starts(
+    text: &str,
+    an: &Analysis<'_>,
+    claimed: &Spans,
+    operand: &Spans,
+    commands: &Spans,
+) -> Vec<usize> {
+    let p = &an.p;
+    let n = p.atoms.len();
+    let env_at = |k: usize| -> Option<(bool, usize)> {
+        let a = p.atoms.get(k)?;
+        if a.kind != AtomKind::Cs || an.depth(k) != 0 {
+            return None;
+        }
+        let begin = match a.name(text) {
+            "begin" => true,
+            "end" => false,
+            _ => return None,
+        };
+        let b = p.atoms.get(k + 1)?;
+        if b.kind != AtomKind::Open || b.mate == usize::MAX || b.mate <= k + 1 {
+            return None;
+        }
+        let name = &text[b.end..p.atoms[b.mate].start];
+        (name == "tikzpicture").then_some((begin, b.mate + 1))
+    };
+    let next_cs = |mut j: usize| -> Option<usize> {
+        while p
+            .atoms
+            .get(j)
+            .is_some_and(|x| matches!(x.kind, AtomKind::Space))
+        {
+            j += 1;
+        }
+        let a = p.atoms.get(j)?;
+        (a.kind == AtomKind::Cs
+            && a.name(text) != "end"
+            && an.depth(j) == 0
+            && !claimed.has(j)
+            && !operand.has(j)
+            && !commands.has(j))
+        .then_some(j)
+    };
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k < n {
+        let Some((true, mut j)) = env_at(k) else {
+            k += 1;
+            continue;
+        };
+        // (the options)
+        if p.atoms
+            .get(j)
+            .is_some_and(|x| x.kind == AtomKind::Char('['))
+        {
+            while j < n && !(p.atoms[j].kind == AtomKind::Char(']') && an.depth(j) == 0) {
+                j += 1;
+            }
+            j += 1;
+        }
+        if let Some(c) = next_cs(j) {
+            out.push(p.atoms[c].start);
+        }
+        while j < n {
+            if let Some((false, e)) = env_at(j) {
+                j = e;
+                break;
+            }
+            let a = &p.atoms[j];
+            // (a `}`'s depth is after it closes)
+            if an.depth(j) == 0 && matches!(a.kind, AtomKind::Char(';') | AtomKind::Close) {
+                if let Some(c) = next_cs(j + 1) {
+                    out.push(p.atoms[c].start);
+                }
+            }
+            j += 1;
+        }
+        k = j;
+    }
+    out
+}
+
 /// The units of a text as the hint pass slices a document's text
 /// ([`slices_of`] with no prelude definitions): byte ranges, in order.
 /// The edit-locality sweep (`tests/sweep`) edits one word in each.
@@ -1533,6 +1617,21 @@ fn slices_of(
         cdc_starts(text, &starts, ok)
     };
     let mut mid_at: Vec<usize> = Vec::new();
+    // (`PHITEX_BOXSCOPE`: a picture's statements, each a slice: after
+    // `\begin{tikzpicture}` and its options, after each `;` and each
+    // brace group followed by a command, at depth 0 and outside
+    // conditionals, inside the environment; a run there with the
+    // picture's box open leaves it to the following nodes,
+    // `crate::boxscope`; a wrong cut costs a pull)
+    let cdc = if crate::boxscope::on() {
+        let mut cdc = cdc;
+        cdc.extend(statement_starts(text, an, &claimed, &operand, &commands));
+        cdc.sort_unstable();
+        cdc.dedup();
+        cdc
+    } else {
+        cdc
+    };
     if !cdc.is_empty() {
         mid_at.clone_from(&cdc);
         starts.extend(cdc);
