@@ -10170,6 +10170,8 @@ fn declare_fields(eng: &Engine) {
         let fld = eng.values().field(f);
         eng.declare_accumulator(fld, Arc::new(SeqMonoid));
     }
+    // (the items of each list left open, `crate::boxscope`)
+    eng.declare_accumulator_prefix(crate::boxscope::ITEMS_PREFIX, Arc::new(SeqMonoid));
     // (the streams by file, `run::stream_bucket`, and the files' names)
     let mut per: Vec<Field> = (0..crate::run::STREAM_BUCKETS)
         .map(|k| eng.values().field(&format!("wstreams:{k}")))

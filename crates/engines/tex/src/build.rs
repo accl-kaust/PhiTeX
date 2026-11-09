@@ -525,6 +525,12 @@ impl Run<'_, '_> {
         if nodes.is_empty() {
             return;
         }
+        if crate::boxscope::is_global(lid) {
+            for x in nodes {
+                self.append_left(lid, x);
+            }
+            return;
+        }
         if lid == 0 {
             if self.st.take_page_params() {
                 self.put_page_params_or_raise();
@@ -549,6 +555,10 @@ impl Run<'_, '_> {
         let v = self.v;
         if let Some(l) = self.level_of(lid) {
             fold_item(v, lid, node, &mut l.fold, &mut l.list);
+            return;
+        }
+        if crate::boxscope::is_global(lid) {
+            self.append_left(lid, node);
             return;
         }
         if lid == 0 {
@@ -702,11 +712,9 @@ impl Run<'_, '_> {
                 }
             }
         } else if crate::boxscope::is_global(lid) {
-            // a list left open by another node (`crate::boxscope`): what
-            // its opener had, then the contributions after the opener
-            let from = self.left_list_start(lid, &mut st, &mut out)?;
-            let all = self.cx.fold(f, from, None)?;
-            fold_entries(v, lid, &v.seq_to_vec(all), &mut st, &mut out);
+            // a list left open by another node: its own field
+            // (`crate::boxscope`)
+            self.left_list_fold(lid, &mut st, &mut out)?;
         } else {
             // a list is this run's or the engine's (lid 0)
             let all = self.cx.fold(f, None, None)?;

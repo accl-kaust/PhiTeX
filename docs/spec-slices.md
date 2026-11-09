@@ -247,9 +247,12 @@ on, as now.
 What each list left open is (no gaps left for later): its id is from
 the scope depth it is left at (lists open at once are left at different
 depths), never from the opener's node, so a re-cut of the opener changes
-no kind; what it held is `list0:<id>` with the opener's node, and its
-reader folds that, then only the contributions after the opener
-(`Run::left_list_start`), not the unit's whole `items`. A `\par` inside
+no kind; its items are contributions to its own accumulator
+`bitems:<id>`, the opener's a start entry holding what it had, and its
+reader folds that field from the last start entry on
+(`Run::left_list_fold`): nothing it reads names the opener, so an opener
+run again (an edit of the text before the picture) with the same items
+wakes no reader of the list. A `\par` inside
 a group in a paragraph left open ends the paragraph
 (`Run::end_left_paragraph`): `par:<list>` cleared, and every kind in it
 reads that field (`Run::par_kind`), so the groups go on in the vertical

@@ -16,11 +16,12 @@
 //!   the id of the list it is in;
 //! - every list open gets an id no list open at the same time has (from
 //!   the scope depth it is left at, [`global_lid`]: not from the opener's
-//!   node, so a re-cut of the opener changes no kind); what it holds so
-//!   far is the field `list0:<id>` with the opener's node, and the items
-//!   after it are `items` contributions under the id; its reader folds
-//!   the field, then the contributions after the opener
-//!   ([`Run::left_list_start`]);
+//!   node, so a re-cut of the opener changes no kind); its items are
+//!   contributions to its own accumulator `bitems:<id>`, the opener's a
+//!   start entry holding what it had; its reader folds the field and
+//!   takes the entries from the last start on ([`Run::left_list_fold`]):
+//!   nothing it reads names the opener, so an opener run again with the
+//!   same items wakes no reader of the list;
 //! - a paragraph, which no group brackets, is left only under a group,
 //!   its own parameters the field `par:<list it is in>`: open while that
 //!   field names it. A group's kind in it reads the field
@@ -32,7 +33,7 @@ use crate::build::{FoldState, Mode, fold_item, sf_value};
 use crate::nest::Level;
 use crate::run::{R, Run};
 use crate::val::{group, int_of, list_of};
-use phitex_defuse::{NodeId, ValueId};
+use phitex_defuse::ValueId;
 
 /// The ids of lists left open are at or below this.
 const BASE: i64 = -(1i64 << 55);
@@ -60,9 +61,15 @@ fn par_field(vlid: i64) -> String {
     format!("par:{vlid}")
 }
 
-fn list0_field(lid: i64) -> String {
-    format!("list0:{lid}")
+/// The prefix of the accumulators of lists left open.
+pub(crate) const ITEMS_PREFIX: &str = "bitems:";
+
+fn items_field(lid: i64) -> String {
+    format!("{ITEMS_PREFIX}{lid}")
 }
+
+/// The head of a list's start entry.
+const START: &str = "\u{0}bstart";
 
 fn is_box_group(g: i64) -> bool {
     matches!(
@@ -128,12 +135,11 @@ impl Run<'_, '_> {
     }
 
     /// Leaves the run's open levels to the following nodes: each list's
-    /// items so far and its transitions' state as `list0:<id>`, each
+    /// items so far and its transitions' state as a start entry of `bitems:<id>`, each
     /// paragraph's parameters as `par:<list>`, the groups as scopes
     /// ([`Run::leave_scope`]).
     pub(crate) fn leave_lists(&mut self) -> R<()> {
         let v = self.v;
-        let node = self.cx.node().raw();
         let base = self.base_mode()?;
         self.muts += 1;
         let mut levels = std::mem::take(&mut self.nest);
@@ -162,7 +168,7 @@ impl Run<'_, '_> {
             };
             let l = &mut levels[i];
             let lid = l.lid;
-            let mut xs = vec![v.int(i64::try_from(node).unwrap_or(0))];
+            let mut xs = vec![v.str(START)];
             xs.extend(crate::nest::into_values(v, std::mem::take(&mut l.list)));
             xs.push(if l.mode.abs() == 1 {
                 crate::build::pd_value(v, l.fold.pd)
@@ -171,7 +177,7 @@ impl Run<'_, '_> {
             });
             let rec = v.list(xs);
             let (group0, par, clang) = (l.group == 0, l.par, l.clang);
-            self.set(&list0_field(lid), rec, true);
+            self.contribute(&items_field(lid), v.seq_unit(rec));
             if group0 {
                 let (lang, packed) = par.unwrap_or((0, 0));
                 let rec = v.list(vec![v.int(lid), v.int(lang), v.int(packed), v.int(clang)]);
@@ -184,29 +190,73 @@ impl Run<'_, '_> {
         self.leave_scope()
     }
 
-    /// [`Run::list_fold`] of list `lid` left open: what its opener had,
-    /// folded into `st` and `out`, and the node after which its
-    /// contributions come (None: no field, the unit's start).
-    pub(crate) fn left_list_start(
+    /// An item appended to list `lid` left open by another node.
+    pub(crate) fn append_left(&mut self, lid: i64, x: ValueId) {
+        let s = self.v.seq_unit(x);
+        self.contribute(&items_field(lid), s);
+    }
+
+    /// [`Run::list_fold`] of list `lid` left open: the entries of its
+    /// field from the last start on, then this run's own, folded into
+    /// `st` and `out`.
+    pub(crate) fn left_list_fold(
         &mut self,
         lid: i64,
         st: &mut FoldState,
         out: &mut Vec<ValueId>,
-    ) -> R<Option<NodeId>> {
+    ) -> R<()> {
         let v = self.v;
-        let Some(rec) = self.get(&list0_field(lid))? else {
-            return Ok(None);
-        };
-        let xs = list_of(v, rec);
-        let Some((&n, items)) = xs.split_first() else {
-            return Ok(None);
-        };
-        for &x in items {
-            fold_item(v, lid, x, st, out);
+        let name = items_field(lid);
+        let f = v.field(&name);
+        let all = self.cx.fold(f, None, None)?;
+        let own: Vec<ValueId> = self
+            .contribs
+            .iter()
+            .filter(|(g, _)| *g == f)
+            .flat_map(|&(_, x)| v.seq_to_vec(x))
+            .collect();
+        // (from the end back to the last start: this list's entries only,
+        // whatever lists of the same id came before)
+        let n = v.seq_len(all);
+        let mut entries = Vec::new();
+        let mut i = n;
+        let start = v.str(START);
+        let mut found = false;
+        while i > 0 {
+            i -= 1;
+            let Some(x) = v.seq_nth(all, i) else { break };
+            if list_of(v, x).first() == Some(&start) {
+                entries.push(x);
+                found = true;
+                break;
+            }
+            entries.push(x);
         }
-        Ok(Some(NodeId::from_raw(
-            u64::try_from(int_of(v, n)).unwrap_or(0),
-        )))
+        // (this run's own start, if it left the list and reads it again)
+        let own_start = own
+            .iter()
+            .rposition(|&x| list_of(v, x).first() == Some(&start));
+        let (entries, own) = match own_start {
+            Some(k) => (Vec::new(), &own[k..]),
+            None => {
+                if !found {
+                    entries.clear();
+                }
+                entries.reverse();
+                (entries, &own[..])
+            }
+        };
+        for x in entries.into_iter().chain(own.iter().copied()) {
+            let xs = list_of(v, x);
+            if xs.first() == Some(&start) {
+                for &y in &xs[1..] {
+                    fold_item(v, lid, y, st, out);
+                }
+            } else {
+                fold_item(v, lid, x, st, out);
+            }
+        }
+        Ok(())
     }
 
     /// The paragraph a group's kind `k` (mode 102, a list left open) is
