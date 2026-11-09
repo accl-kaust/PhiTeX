@@ -43,8 +43,11 @@ jobs:
           runs() { gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=$1" -q '[.check_runs[].conclusion] | join(" ")'; }
           checks=$(runs checks) gate=$(runs gate)
           echo "dev $sha: checks [$checks] gate [$gate]"
-          case " $checks " in *" success "*) ;; *) echo "dev's checks are not green: no nightly"; exit 0 ;; esac
-          case " $gate " in *" failure "*) echo "dev's gate failed: no nightly"; exit 0 ;; esac
+          # (a scheduled nightly waits for green; one started by hand builds dev as it is)
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            case " $checks " in *" success "*) ;; *) echo "dev's checks are not green: no nightly"; exit 0 ;; esac
+            case " $gate " in *" failure "*) echo "dev's gate failed: no nightly"; exit 0 ;; esac
+          fi
           built=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" -q .object.sha 2>/dev/null || true)
           if [ "$built" = "$sha" ] && [ "$GITHUB_EVENT_NAME" = schedule ]; then echo "nightly is $sha already"; exit 0; fi
           v=$(gh api "repos/$GITHUB_REPOSITORY/contents/crates/cli/Cargo.toml?ref=$sha" -q .content | base64 -d | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
