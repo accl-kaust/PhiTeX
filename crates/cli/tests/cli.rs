@@ -874,7 +874,9 @@ fn lsp_send(w: &mut impl std::io::Write, v: &serde_json::Value) {
 }
 
 /// The server's messages, read on a thread of their own.
-fn lsp_messages(out: std::process::ChildStdout) -> std::sync::mpsc::Receiver<serde_json::Value> {
+fn lsp_messages(
+    out: impl std::io::Read + Send + 'static,
+) -> std::sync::mpsc::Receiver<serde_json::Value> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut r = BufReader::new(out);
@@ -1256,6 +1258,214 @@ fn watch_lsp() {
         std::thread::sleep(Duration::from_millis(50));
     };
     assert!(status.success(), "the watch ended with {status}");
+}
+
+/// Editors attached to a terminal's `phitex watch` (docs/spec-editor-protocol.md
+/// §8): its discovery file (0600, in a 0700 folder) names its port and
+/// token, and `phitex sessions --json` lists it; two clients attach, each
+/// told so in `initialize`; one's unsaved edit makes an error both are
+/// shown; the other detaches (`shutdown`, `exit`: its connection closed)
+/// and the watch goes on building the first one's fix; a wrong or missing
+/// token is closed unanswered; `q` ends the watch and removes its file.
+#[cfg(unix)]
+#[test]
+#[allow(clippy::too_many_lines, reason = "one watch's session, in order")]
+fn watch_attach() {
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt as _;
+    let _one = one();
+    let text = plain() + "Alpha bravo charlie delta.\n\\bye\n";
+    let first = text[..text.find("Alpha bravo").expect("the words")]
+        .matches('\n')
+        .count();
+    let dir = scratch("watch-attach");
+    std::fs::write(dir.join("doc.tex"), &text).expect("the document");
+    let run = dir.join("run");
+    std::fs::create_dir_all(&run).expect("a runtime folder");
+    let root = dir.canonicalize().expect("the directory");
+    let uri = format!("file://{}/doc.tex", root.display());
+    let bin = Path::new(env!("CARGO_BIN_EXE_phitex"));
+    let mut child = command(bin, &dir)
+        .args([
+            "watch",
+            "--no-view",
+            "--ini",
+            "--etex",
+            "-j",
+            "4",
+            "doc.tex",
+        ])
+        .env("XDG_RUNTIME_DIR", &run)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut keys = child.stdin.take().expect("its input");
+    // (its discovery file)
+    let sessions = run.join("phitex");
+    let end = Instant::now() + Duration::from_secs(120);
+    let (file, info) = loop {
+        let found = std::fs::read_dir(&sessions)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.extension().is_some_and(|e| e == "json"));
+        if let Some(p) = found
+            && let Ok(v) =
+                serde_json::from_slice::<serde_json::Value>(&std::fs::read(&p).unwrap_or_default())
+        {
+            break (p, v);
+        }
+        assert!(
+            Instant::now() < end,
+            "no discovery file in {}",
+            sessions.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mode = |p: &Path| std::fs::metadata(p).expect("it").permissions().mode() & 0o777;
+    assert_eq!(mode(&file), 0o600, "{}", file.display());
+    assert_eq!(mode(&sessions), 0o700, "{}", sessions.display());
+    assert_eq!(
+        info["main"],
+        root.join("doc.tex").display().to_string(),
+        "{info}"
+    );
+    assert_eq!(info["lsp"]["host"], "127.0.0.1", "{info}");
+    let port = u16::try_from(info["lsp"]["port"].as_u64().expect("a port")).expect("a port");
+    let token = info["lsp"]["token"].as_str().expect("a token").to_owned();
+    assert_eq!(token.len(), 32, "{info}");
+    let listed = command(bin, &dir)
+        .args(["sessions", "--json"])
+        .env("XDG_RUNTIME_DIR", &run)
+        .output()
+        .expect("phitex sessions runs");
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("JSON");
+    assert_eq!(listed, json!([info.clone()]), "{listed}");
+    let connect = || {
+        let s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("its socket");
+        let r = s.try_clone().expect("the socket");
+        (s, lsp_messages(r))
+    };
+    let initialize = |token: serde_json::Value| {
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null,
+            "rootUri": format!("file://{}", root.display()),
+            "capabilities": {"window": {"showDocument": {"support": true}}},
+            "initializationOptions": {"token": token},
+        }})
+    };
+    // (two clients)
+    let (mut to_a, rx_a) = connect();
+    let (mut to_b, rx_b) = connect();
+    let (mut seen_a, mut seen_b) = (Vec::new(), Vec::new());
+    for (to, rx, seen) in [
+        (&mut to_a, &rx_a, &mut seen_a),
+        (&mut to_b, &rx_b, &mut seen_b),
+    ] {
+        lsp_send(to, &initialize(json!(token)));
+        let init = lsp_until(rx, seen, |m| m["id"] == 1);
+        assert_eq!(
+            init["result"]["capabilities"]["experimental"]["phitex"]["attached"], true,
+            "{init}"
+        );
+        lsp_send(
+            to,
+            &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+        );
+    }
+    // (a's unsaved edit: an error, shown to both)
+    let at = |l: usize, c: usize| json!({"line": l, "character": c});
+    lsp_send(
+        &mut to_a,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
+            "textDocument": {"uri": uri, "languageId": "tex", "version": 1, "text": text},
+        }}),
+    );
+    lsp_send(
+        &mut to_a,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": {"uri": uri, "version": 2},
+            "contentChanges": [{"range": {"start": at(first, 0), "end": at(first, 0)}, "text": "\\undefinedmacro "}],
+        }}),
+    );
+    let error = |m: &serde_json::Value| {
+        m["method"] == "textDocument/publishDiagnostics"
+            && m["params"]["uri"] == uri.as_str()
+            && m["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|d| d.iter().any(|d| d["severity"] == 1))
+    };
+    let bad = lsp_until(&rx_a, &mut seen_a, error);
+    assert_eq!(
+        bad["params"]["diagnostics"][0]["range"]["start"]["line"], first,
+        "{bad}"
+    );
+    lsp_until(&rx_b, &mut seen_b, error);
+    // (b detaches; the watch goes on)
+    lsp_send(
+        &mut to_b,
+        &json!({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": null}),
+    );
+    lsp_until(&rx_b, &mut seen_b, |m| m["id"] == 9);
+    lsp_send(
+        &mut to_b,
+        &json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    );
+    let closed = loop {
+        match rx_b.recv_timeout(Duration::from_secs(30)) {
+            Ok(_) => {}
+            Err(e) => break e,
+        }
+    };
+    assert_eq!(
+        closed,
+        std::sync::mpsc::RecvTimeoutError::Disconnected,
+        "b's connection closed"
+    );
+    assert!(
+        child.try_wait().expect("the watch").is_none(),
+        "the watch ended with b"
+    );
+    lsp_send(
+        &mut to_a,
+        &json!({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": {"uri": uri, "version": 3},
+            "contentChanges": [{"range": {"start": at(first, 0), "end": at(first, 16)}, "text": ""}],
+        }}),
+    );
+    lsp_until(&rx_a, &mut seen_a, |m| {
+        m["method"] == "textDocument/publishDiagnostics"
+            && m["params"]["uri"] == uri.as_str()
+            && m["params"]["diagnostics"]
+                .as_array()
+                .is_some_and(|d| d.iter().all(|d| d["severity"] != 1))
+    });
+    // (a wrong token, none: closed unanswered)
+    for wrong in [json!("0".repeat(32)), serde_json::Value::Null] {
+        let (mut to_c, rx_c) = connect();
+        lsp_send(&mut to_c, &initialize(wrong));
+        assert_eq!(
+            rx_c.recv_timeout(Duration::from_secs(30)).err(),
+            Some(std::sync::mpsc::RecvTimeoutError::Disconnected),
+            "answered without the token"
+        );
+    }
+    // (the watch's end, as its terminal ends it: the file removed)
+    keys.write_all(b"q\n").expect("the watch reads");
+    keys.flush().expect("the watch reads");
+    let end = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(s) = child.try_wait().expect("the watch") {
+            break s;
+        }
+        assert!(Instant::now() < end, "the watch did not end at q");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.success(), "the watch ended with {status}");
+    assert!(!file.exists(), "the discovery file is left");
 }
 
 /// `phitex watch --lsp`'s progress (docs/spec-editor-protocol.md §2):

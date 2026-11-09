@@ -30,11 +30,14 @@
 //!   process ends at once: status 0 after `shutdown`, else 1, as the
 //!   protocol says.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 
-use phitex_live::lsp::{LspHost, Server, Settings, path_of};
+use phitex_live::lsp::{LspHost, Server, Settings, Trouble, path_of};
+use phitex_live::progress::Progress;
 use serde_json::{Value, json};
 
 use crate::view::{Ask, Built};
@@ -44,7 +47,13 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// The next message on `r` (none: its end).
-fn read(r: &mut impl BufRead) -> Option<Value> {
+pub(crate) fn read(r: &mut impl BufRead) -> Option<Value> {
+    read_capped(r, usize::MAX)
+}
+
+/// The next message on `r`, its body at most `max` bytes (none: its end,
+/// or a longer one).
+pub(crate) fn read_capped(r: &mut impl BufRead, max: usize) -> Option<Value> {
     loop {
         let mut len = None;
         loop {
@@ -64,6 +73,9 @@ fn read(r: &mut impl BufRead) -> Option<Value> {
         }
         // (a header without its length: nothing to read, the next one)
         let Some(n) = len else { continue };
+        if n > max {
+            return None;
+        }
         let mut b = vec![0; n];
         r.read_exact(&mut b).ok()?;
         if let Ok(v) = serde_json::from_slice(&b) {
@@ -104,6 +116,21 @@ struct Watch {
     /// The settings changed: the watch told.
     configure: Mutex<Option<Box<dyn Fn(Settings) + Send>>>,
     pdf: Mutex<Option<Pdf>>,
+    /// The editors' servers: the one on standard input and output (id 0,
+    /// `--lsp`), those attached over the watch's socket ([`crate::attach`]).
+    servers: Mutex<Vec<(u64, Arc<Server>)>>,
+    /// The client whose cursor or edit came last: a place on the pages is
+    /// shown in it.
+    focus: Mutex<Option<u64>>,
+    /// Each file's last editor: another client's edit of it is its whole
+    /// text (the last edit wins; its ranges are in that client's text).
+    writers: Mutex<HashMap<String, u64>>,
+    /// The main file, from the root, once the watch runs.
+    main: Mutex<Option<String>>,
+    /// The last diagnostics, for a client that attaches later.
+    diags: Mutex<Vec<Value>>,
+    /// The next attached client's id.
+    next: AtomicU64,
 }
 
 /// The caches as `phitex.cacheStats` gives them: the build cache's and
@@ -183,7 +210,30 @@ impl Watch {
     }
 }
 
-impl LspHost for Watch {
+impl Watch {
+    fn new() -> Arc<Watch> {
+        Arc::new(Watch {
+            asks: Mutex::default(),
+            wake: Mutex::new(None),
+            root: Mutex::new(PathBuf::new()),
+            viewer: Mutex::new(None),
+            quit: Mutex::new(None),
+            configure: Mutex::new(None),
+            pdf: Mutex::new(None),
+            servers: Mutex::default(),
+            focus: Mutex::new(None),
+            writers: Mutex::default(),
+            main: Mutex::new(None),
+            diags: Mutex::default(),
+            next: AtomicU64::new(1),
+        })
+    }
+
+    /// The servers now (none locked while they are called).
+    fn servers(&self) -> Vec<(u64, Arc<Server>)> {
+        lock(&self.servers).clone()
+    }
+
     /// The viewer's hidden kinds, from the user's phitex.toml (the `prefs`
     /// op's file), read as each build is published.
     fn hidden(&self) -> Vec<String> {
@@ -193,7 +243,7 @@ impl LspHost for Watch {
             .unwrap_or_default()
     }
 
-    fn ask(&self, a: Ask) {
+    fn push(&self, a: Ask) {
         lock(&self.asks).push(a);
         if let Some(w) = lock(&self.wake).as_ref() {
             w();
@@ -232,12 +282,129 @@ impl LspHost for Watch {
         }
     }
 
+    fn exists(&self, name: &str) -> bool {
+        lock(&self.root).join(name).exists()
+    }
+}
+
+/// One editor's host: the watch, as one client sees it. Its edits and
+/// cursor are the watch's asks; the stdio client (`--lsp`, id 0) owns
+/// the watch (`phitex.stop` ends it, its settings start a new session),
+/// an attached one only itself (`phitex.stop` and `exit` detach it).
+struct Client {
+    watch: Arc<Watch>,
+    id: u64,
+    attached: bool,
+    server: OnceLock<Weak<Server>>,
+    /// An attached client's connection, closed (its `phitex.stop`).
+    close: Mutex<Option<Box<dyn Fn() + Send>>>,
+}
+
+impl Client {
+    fn new(watch: &Arc<Watch>, id: u64, attached: bool) -> Arc<Client> {
+        Arc::new(Client {
+            watch: watch.clone(),
+            id,
+            attached,
+            server: OnceLock::new(),
+            close: Mutex::new(None),
+        })
+    }
+
+    fn text(&self, file: &str) -> Option<String> {
+        self.server.get()?.upgrade()?.text(file)
+    }
+}
+
+impl LspHost for Client {
+    fn hidden(&self) -> Vec<String> {
+        self.watch.hidden()
+    }
+
+    fn ask(&self, a: Ask) {
+        let w = &self.watch;
+        let a = match a {
+            // (another client edited the file last: this one's ranges are
+            // in its own text, so its whole text)
+            Ask::Edit {
+                file,
+                start,
+                end,
+                text,
+            } => {
+                let last = lock(&w.writers).insert(file.clone(), self.id);
+                match self.text(&file) {
+                    Some(whole) if last.is_some_and(|l| l != self.id) => {
+                        Ask::SetFile { file, text: whole }
+                    }
+                    _ => Ask::Edit {
+                        file,
+                        start,
+                        end,
+                        text,
+                    },
+                }
+            }
+            Ask::SetFile { file, text } => {
+                lock(&w.writers).insert(file.clone(), self.id);
+                Ask::SetFile { file, text }
+            }
+            // (closed here, open in another client: its text)
+            Ask::Closed { file } => {
+                let other = w
+                    .servers()
+                    .into_iter()
+                    .find(|(id, s)| *id != self.id && s.owns(&file));
+                match other.and_then(|(id, s)| Some((id, s.text(&file)?))) {
+                    Some((id, text)) => {
+                        lock(&w.writers).insert(file.clone(), id);
+                        Ask::SetFile { file, text }
+                    }
+                    None => {
+                        lock(&w.writers).remove(&file);
+                        Ask::Closed { file }
+                    }
+                }
+            }
+            a => a,
+        };
+        if matches!(
+            a,
+            Ask::Cursor { .. } | Ask::Edit { .. } | Ask::SetFile { .. }
+        ) {
+            *lock(&w.focus) = Some(self.id);
+        }
+        w.push(a);
+    }
+
+    fn command(&self, name: &str, arg: &Value) -> Option<Result<Value, String>> {
+        if self.attached && name == "phitex.stop" {
+            if let Some(c) = lock(&self.close).as_ref() {
+                c();
+            }
+            return Some(Ok(Value::Null));
+        }
+        self.watch.command(name, arg)
+    }
+
+    fn read(&self, name: &str) -> Option<String> {
+        self.watch.read(name)
+    }
+
+    fn configure(&self, s: &Settings) {
+        // (the watch is its terminal's or its first editor's: an attached
+        // client's settings change nothing of it)
+        if !self.attached {
+            self.watch.configure(s);
+        }
+    }
+
     fn canonical(&self, path: &Path) -> Option<PathBuf> {
         path.canonicalize().ok()
     }
 
     fn exists(&self, name: &str) -> bool {
-        lock(&self.root).join(name).exists()
+        self.watch.exists(name)
     }
 
     fn engine(&self) -> &'static str {
@@ -247,7 +414,9 @@ impl LspHost for Watch {
 
 /// The watch's language server.
 pub struct Lsp {
-    server: Arc<Server>,
+    /// The editor on standard input and output (`--lsp`); none: a
+    /// terminal's watch, which editors may attach to.
+    server: Option<Arc<Server>>,
     watch: Arc<Watch>,
     /// Standard input, as `initialize` left it (what came after it may
     /// be read already), until served.
@@ -419,20 +588,15 @@ impl Lsp {
     pub fn begin(file: &mut Option<String>) -> Lsp {
         let out = Arc::new(Mutex::new(std::io::stdout()));
         let mut input = BufReader::new(std::io::stdin());
-        let watch = Arc::new(Watch {
-            asks: Mutex::default(),
-            wake: Mutex::new(None),
-            root: Mutex::new(PathBuf::new()),
-            viewer: Mutex::new(None),
-            quit: Mutex::new(None),
-            configure: Mutex::new(None),
-            pdf: Mutex::new(None),
-        });
+        let watch = Watch::new();
         let o = out.clone();
+        let client = Client::new(&watch, 0, false);
         let server = Arc::new(Server::new(
             Box::new(move |v: &Value| write(&o, v)),
-            watch.clone(),
+            client.clone(),
         ));
+        let _ = client.server.set(Arc::downgrade(&server));
+        lock(&watch.servers).push((0, server.clone()));
         loop {
             let Some(m) = read(&mut input) else {
                 std::process::exit(crate::EXIT_FAILED);
@@ -483,7 +647,7 @@ impl Lsp {
                     .or_else(|| find_main(&here));
             }
             return Lsp {
-                server,
+                server: Some(server),
                 watch,
                 input: Mutex::new(Some(input)),
                 wants_main: file.is_none() && !configured,
@@ -492,11 +656,39 @@ impl Lsp {
         }
     }
 
-    /// The watch cannot run: `initialize` answered with why, or, answered
-    /// already, the editor shown it; the watch ends.
-    pub fn refuse(&self, e: &str) -> ! {
-        self.server.refuse(&format!("phitex watch: {e}"));
-        std::process::exit(crate::EXIT_FAILED);
+    /// A terminal's watch: no editor on standard input; editors attach
+    /// over its socket ([`crate::attach`]) once it runs.
+    pub fn terminal() -> Lsp {
+        Lsp {
+            server: None,
+            watch: Watch::new(),
+            input: Mutex::new(None),
+            wants_main: false,
+            pending: Mutex::default(),
+        }
+    }
+
+    /// Whether an editor runs this watch on standard input and output
+    /// (`--lsp`): no keys, no terminal.
+    pub fn editor(&self) -> bool {
+        self.server.is_some()
+    }
+
+    /// Whether any editor is connected now (the stdio one or one
+    /// attached): the work only an editor reads is worth doing.
+    pub fn served(&self) -> bool {
+        !lock(&self.watch.servers).is_empty()
+    }
+
+    /// The watch cannot run: with an editor on standard input,
+    /// `initialize` answered with why, or, answered already, the editor
+    /// shown it, and the watch ends; else nothing (the terminal says it).
+    pub fn refuse(&self, e: &str) {
+        if let Some(s) = &self.server {
+            s.refuse(&format!("phitex watch: {e}"));
+            crate::attach::forget();
+            std::process::exit(crate::EXIT_FAILED);
+        }
     }
 
     /// Whether nothing named the main file: [`Lsp::main_from_open`]
@@ -513,7 +705,7 @@ impl Lsp {
     /// first; what the editor sends meanwhile is served once the watch
     /// runs.
     pub fn main_from_open(&self) -> String {
-        let s = &self.server;
+        let s = self.server.as_ref().expect("an editor on standard input");
         s.answer_init();
         s.log(
             3,
@@ -539,11 +731,21 @@ impl Lsp {
         main.to_string_lossy().into_owned()
     }
 
-    /// `initialize` answered: the watch runs in `root` on `main`.
+    /// The watch runs in `root` on `main`: the stdio editor's
+    /// `initialize` answered, editors attached told, and the watch's
+    /// socket served and published ([`crate::attach`]).
     pub fn accept(&self, root: &Path, main: &str) {
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         root.clone_into(&mut lock(&self.watch.root));
-        self.server.accept(&root, main);
+        *lock(&self.watch.main) = Some(main.to_owned());
+        for (id, s) in self.watch.servers() {
+            if id == 0 {
+                s.accept(&root, main);
+            } else {
+                s.set_main(main);
+            }
+        }
+        listen(&self.watch);
     }
 
     /// Call `wake` when the editor asks the watch for something.
@@ -556,9 +758,20 @@ impl Lsp {
         *lock(&self.watch.configure) = Some(f);
     }
 
-    /// The settings the editor gave so far.
+    /// `window/showMessage` of `kind` to the stdio editor, whose
+    /// settings the watch takes.
+    pub fn show_message(&self, kind: u8, text: &str) {
+        if let Some(s) = &self.server {
+            s.show_message(kind, text);
+        }
+    }
+
+    /// The settings the stdio editor gave so far.
     pub fn settings(&self) -> Settings {
-        self.server.settings()
+        self.server
+            .as_ref()
+            .map(|s| s.settings())
+            .unwrap_or_default()
     }
 
     /// The last build's PDF, for `phitex.savePdf`.
@@ -574,55 +787,98 @@ impl Lsp {
     /// Whether file `name` is open in the editor (its buffer owns it: the
     /// disk's changes of it are not read).
     pub fn owns(&self, name: &str) -> bool {
-        self.server.owns(name)
+        self.watch.servers().iter().any(|(_, s)| s.owns(name))
     }
 
-    /// The viewer is at `url`: logged, and opened by `phitex.openViewer`.
+    /// The viewer is at `url`: logged, opened by `phitex.openViewer`,
+    /// and published for editors that attach.
     pub fn viewer(&self, url: &str) {
         *lock(&self.watch.viewer) = Some(url.to_owned());
-        self.server.viewer(url);
+        for (_, s) in self.watch.servers() {
+            s.viewer(url);
+        }
+        crate::attach::publish(&info(&self.watch));
     }
 
-    /// The server, as the session's progress and the watch's builds
-    /// reach it.
-    pub fn server(&self) -> &Arc<Server> {
-        &self.server
+    /// A build's progress record, to every editor.
+    pub fn progress(&self, p: &Progress) {
+        for (_, s) in self.watch.servers() {
+            s.progress(p);
+        }
+    }
+
+    /// What needs the user ([`Server::trouble`]), to every editor.
+    pub fn trouble(&self, t: Trouble, why: &str) {
+        for (_, s) in self.watch.servers() {
+            s.trouble(t, why);
+        }
     }
 
     /// Where the terminal's messages go (`Ui::tap`, beside the viewer's
-    /// console): lines, notes, warnings and errors logged.
+    /// console): lines, notes, warnings and errors logged, in every
+    /// editor.
     pub fn console(&self) -> Box<dyn Fn(&Value) + Send> {
-        let s = self.server.clone();
-        Box::new(move |item: &Value| s.console(item))
+        let w = self.watch.clone();
+        Box::new(move |item: &Value| {
+            for (_, s) in w.servers() {
+                s.console(item);
+            }
+        })
     }
 
     /// A build began.
     pub fn building(&self) {
-        self.server.building();
+        for (_, s) in self.watch.servers() {
+            s.building();
+        }
     }
 
     /// A build is in ([`Server::built`]).
     pub fn built(&self, b: &Built) {
-        self.server.built(b);
+        if let Some(d) = &b.diagnostics {
+            d.clone_into(&mut lock(&self.watch.diags));
+        }
+        for (_, s) in self.watch.servers() {
+            s.built(b);
+        }
     }
 
     /// The diagnostics a build left for later, made now
     /// ([`Server::diagnostics`]).
     pub fn diagnostics(&self, d: &[serde_json::Value]) {
-        self.server.diagnostics(d);
+        d.clone_into(&mut lock(&self.watch.diags));
+        for (_, s) in self.watch.servers() {
+            s.diagnostics(d);
+        }
+    }
+
+    /// The editor whose cursor or edit came last (else every editor)
+    /// does `f`: whether one could.
+    fn in_focus(&self, f: impl Fn(&Server) -> bool) -> bool {
+        let servers = self.watch.servers();
+        let focus = *lock(&self.watch.focus);
+        if let Some((_, s)) = servers.iter().find(|(id, _)| Some(*id) == focus)
+            && f(s)
+        {
+            return true;
+        }
+        servers
+            .iter()
+            .filter(|(id, _)| Some(*id) != focus)
+            .fold(false, |any, (_, s)| f(s) || any)
     }
 
     /// The editor shows `file` (the watch's name) at `line` and character
-    /// `col` (from 1): whether the client can (else the `--editor` command
-    /// opens it).
+    /// `col` (from 1): whether a client can (else the `--editor` command
+    /// opens it). The client that moved last shows it, else every one.
     pub fn show(&self, file: &str, line: usize, col: usize) -> bool {
-        self.server.show(file, line, col)
+        self.in_focus(|s| s.show(file, line, col))
     }
 
     /// The editor selects `file` from `from` to `to` (line, character,
-    /// from 1), a selection made on the pages: whether the client can.
+    /// from 1), a selection made on the pages: whether a client can.
     pub fn select(&self, file: &str, from: (usize, usize), to: (usize, usize)) -> bool {
-        self.server.select(file, from, to)
+        self.in_focus(|s| s.select(file, from, to))
     }
 
     /// Serve the editor's messages on a thread of their own; `quit` ends
@@ -630,7 +886,9 @@ impl Lsp {
     pub fn serve(&self, quit: Box<dyn Fn() + Send + Sync>) {
         let quit: Arc<dyn Fn() + Send + Sync> = Arc::from(quit);
         *lock(&self.watch.quit) = Some(quit.clone());
-        let s = self.server.clone();
+        let Some(s) = self.server.clone() else {
+            return;
+        };
         let input = lock(&self.input).take();
         let pending = std::mem::take(&mut *lock(&self.pending));
         std::thread::Builder::new()
@@ -652,6 +910,106 @@ impl Lsp {
                 quit();
             })
             .expect("a thread");
+    }
+}
+
+/// The watch as its discovery file says it ([`crate::attach::publish`]):
+/// `{pid, main, root, viewer, version, started}`, the socket's own
+/// fields added there.
+fn info(w: &Watch) -> Value {
+    let root = lock(&w.root).clone();
+    let main = lock(&w.main).as_deref().map(|m| root.join(m));
+    json!({
+        "pid": std::process::id(),
+        "main": main.map(|m| m.display().to_string()),
+        "root": root.display().to_string(),
+        "viewer": lock(&w.viewer).clone(),
+        "version": env!("CARGO_PKG_VERSION"),
+    })
+}
+
+/// Serve the watch's socket (once, from the first session that runs):
+/// each connection that opens with `initialize` and the token is an
+/// editor attached ([`attached`]).
+fn listen(watch: &Arc<Watch>) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    let mut started = false;
+    ONCE.call_once(|| started = true);
+    if !started {
+        crate::attach::publish(&info(watch));
+        return;
+    }
+    let w = watch.clone();
+    let opened = crate::attach::open(&info(watch), move |first, input, out| {
+        attached(&w, &first, input, out);
+    });
+    if let Err(e) = opened {
+        // (a watch that cannot be attached to is still a watch)
+        for (_, s) in watch.servers() {
+            s.log(2, &format!("phitex watch: editors cannot attach: {e}"));
+        }
+    }
+}
+
+/// An editor attached: `first` its `initialize` (the token checked), its
+/// messages read from `input` and its answers written to `out`, until it
+/// ends (`exit`, its connection closed, `phitex.stop`); the watch goes
+/// on.
+fn attached(watch: &Arc<Watch>, first: &Value, mut input: impl BufRead, out: std::net::TcpStream) {
+    let id = watch.next.fetch_add(1, Ordering::Relaxed);
+    let closer = out.try_clone().ok();
+    let out = Mutex::new(out);
+    let client = Client::new(watch, id, true);
+    let server = Arc::new(Server::new(
+        Box::new(move |v: &Value| {
+            let body = v.to_string();
+            let mut o = lock(&out);
+            let sent =
+                write!(o, "Content-Length: {}\r\n\r\n{body}", body.len()).and_then(|()| o.flush());
+            // (a client that does not read: its connection closed, the
+            // watch never held up by it)
+            if sent.is_err() {
+                let _ = o.shutdown(std::net::Shutdown::Both);
+            }
+        }),
+        client.clone(),
+    ));
+    let _ = client.server.set(Arc::downgrade(&server));
+    if let Some(c) = closer {
+        *lock(&client.close) = Some(Box::new(move || {
+            let _ = c.shutdown(std::net::Shutdown::Both);
+        }));
+    }
+    server.initialize(first);
+    server.set_attached();
+    let root = lock(&watch.root).clone();
+    let main = lock(&watch.main).clone().unwrap_or_default();
+    server.accept(&root, &main);
+    if let Some(url) = lock(&watch.viewer).clone() {
+        server.viewer(&url);
+    }
+    let diags = lock(&watch.diags).clone();
+    server.diagnostics(&diags);
+    lock(&watch.servers).push((id, server.clone()));
+    while let Some(m) = read(&mut input) {
+        if !server.handle(&m) {
+            break;
+        }
+    }
+    // (detached: its buffers are the watch's no more, unless another
+    // client has them open)
+    lock(&watch.servers).retain(|(i, _)| *i != id);
+    {
+        let mut focus = lock(&watch.focus);
+        if *focus == Some(id) {
+            *focus = None;
+        }
+    }
+    for file in server.files() {
+        client.ask(Ask::Closed { file });
+    }
+    if let Some(c) = lock(&client.close).as_ref() {
+        c();
     }
 }
 
@@ -686,17 +1044,98 @@ mod tests {
     fn server() -> (Server, Arc<Mutex<Vec<Value>>>) {
         let sent: Arc<Mutex<Vec<Value>>> = Arc::default();
         let s = sent.clone();
-        let watch = Arc::new(Watch {
-            asks: Mutex::default(),
-            wake: Mutex::new(None),
-            root: Mutex::new(PathBuf::new()),
-            viewer: Mutex::new(None),
-            quit: Mutex::new(None),
-            configure: Mutex::new(None),
-            pdf: Mutex::new(None),
-        });
-        let server = Server::new(Box::new(move |v: &Value| lock(&s).push(v.clone())), watch);
+        let watch = Watch::new();
+        let server = Server::new(
+            Box::new(move |v: &Value| lock(&s).push(v.clone())),
+            Client::new(&watch, 0, false),
+        );
         (server, sent)
+    }
+
+    /// A client of `watch` (`id`, attached or not) as `attached` makes
+    /// one, its messages dropped.
+    fn client_of(watch: &Arc<Watch>, id: u64, attached: bool) -> Arc<Server> {
+        let c = Client::new(watch, id, attached);
+        let s = Arc::new(Server::new(Box::new(|_: &Value| {}), c.clone()));
+        let _ = c.server.set(Arc::downgrade(&s));
+        s.initialize(&json!({"id": 1, "params": {"rootUri": "file:///p", "capabilities": {}}}));
+        s.accept(Path::new("/p"), "a.tex");
+        lock(&watch.servers).push((id, s.clone()));
+        s
+    }
+
+    /// Two editors on one watch: each one's buffer edits as its own;
+    /// an edit after the other's is its whole text (the last edit wins);
+    /// the cursor's client is the one in focus; a file one closes that
+    /// the other has open is the other's text, else the disk's again.
+    #[test]
+    fn two_editors_on_one_watch() {
+        let w = Watch::new();
+        let (a, b) = (client_of(&w, 0, false), client_of(&w, 1, true));
+        let open = |text: &str| json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///p/a.tex", "text": text}}});
+        let change = |c: u64, text: &str| {
+            json!({"jsonrpc": "2.0", "method": "textDocument/didChange", "params": {
+            "textDocument": {"uri": "file:///p/a.tex"},
+            "contentChanges": [{"range": {"start": {"line": 0, "character": c}, "end": {"line": 0, "character": c}}, "text": text}]}})
+        };
+        a.handle(&open("one"));
+        b.handle(&open("one"));
+        a.handle(&change(3, "!"));
+        a.handle(&change(4, "?"));
+        b.handle(&change(0, ">"));
+        let asks = std::mem::take(&mut *lock(&w.asks));
+        let kinds: Vec<String> = asks
+            .iter()
+            .map(|x| match x {
+                Ask::SetFile { text, .. } => format!("set {text}"),
+                Ask::Edit { start, text, .. } => format!("edit {start} {text}"),
+                _ => "other".to_owned(),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            ["set one", "set one", "set one!", "edit 4 ?", "set >one"]
+        );
+        assert_eq!(*lock(&w.focus), Some(1));
+        a.handle(
+            &json!({"jsonrpc": "2.0", "method": "phitex/cursor", "params": {
+            "textDocument": {"uri": "file:///p/a.tex"}, "position": {"line": 0, "character": 1}}}),
+        );
+        assert_eq!(*lock(&w.focus), Some(0));
+        lock(&w.asks).clear();
+        // (b closes it, a has it open: a's text)
+        b.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didClose", "params": {"textDocument": {"uri": "file:///p/a.tex"}}}));
+        assert!(matches!(&lock(&w.asks)[..], [Ask::SetFile { text, .. }] if text == "one!?"));
+        lock(&w.asks).clear();
+        a.handle(&json!({"jsonrpc": "2.0", "method": "textDocument/didClose", "params": {"textDocument": {"uri": "file:///p/a.tex"}}}));
+        assert!(matches!(&lock(&w.asks)[..], [Ask::Closed { .. }]));
+    }
+
+    /// An attached client's `phitex.stop` and settings touch only itself:
+    /// the watch neither ends nor starts a new session.
+    #[test]
+    fn an_attached_client_owns_only_itself() {
+        let w = Watch::new();
+        let quits = Arc::new(AtomicU64::new(0));
+        let q = quits.clone();
+        *lock(&w.quit) = Some(Arc::new(move || {
+            q.fetch_add(1, Ordering::Relaxed);
+        }));
+        let configured = Arc::new(AtomicU64::new(0));
+        let c = configured.clone();
+        *lock(&w.configure) = Some(Box::new(move |_| {
+            c.fetch_add(1, Ordering::Relaxed);
+        }));
+        let b = client_of(&w, 1, true);
+        b.handle(&json!({"jsonrpc": "2.0", "method": "workspace/didChangeConfiguration", "params": {"settings": {"phitex": {"threads": 8}}}}));
+        b.handle(&json!({"jsonrpc": "2.0", "id": 5, "method": "workspace/executeCommand", "params": {"command": "phitex.stop"}}));
+        assert_eq!(quits.load(Ordering::Relaxed), 0);
+        assert_eq!(configured.load(Ordering::Relaxed), 0);
+        let a = client_of(&w, 0, false);
+        a.handle(&json!({"jsonrpc": "2.0", "method": "workspace/didChangeConfiguration", "params": {"settings": {"phitex": {"threads": 8}}}}));
+        a.handle(&json!({"jsonrpc": "2.0", "id": 5, "method": "workspace/executeCommand", "params": {"command": "phitex.stop"}}));
+        assert_eq!(quits.load(Ordering::Relaxed), 1);
+        assert_eq!(configured.load(Ordering::Relaxed), 1);
     }
 
     /// An editor that ends the session while the server still waits for

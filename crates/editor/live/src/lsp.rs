@@ -387,6 +387,9 @@ struct State {
     /// or one seen): `textDocument/documentHighlight` no longer moves the
     /// pages, or each cursor move would be two forward searches.
     own_cursor: bool,
+    /// The client attached to a watch another program started (its
+    /// terminal's): `experimental.phitex.attached` in the answer.
+    attached: bool,
     /// The URIs of the last diagnostics published, not empty.
     published: HashSet<String>,
     run: Option<Run>,
@@ -504,11 +507,37 @@ impl Server {
         st.init = Some(m["id"].clone());
     }
 
+    /// The client is attached to a running watch (natively, over its
+    /// socket): said in `initialize`'s answer
+    /// (`experimental.phitex.attached`).
+    pub fn set_attached(&self) {
+        lock(&self.st).attached = true;
+    }
+
+    /// The client's text of file `name` (the watch's name), if it has it
+    /// open.
+    pub fn text(&self, name: &str) -> Option<String> {
+        lock(&self.st).docs.get(name).cloned()
+    }
+
+    /// The files the client has open (the watch's names).
+    pub fn files(&self) -> Vec<String> {
+        lock(&self.st).docs.keys().cloned().collect()
+    }
+
     /// `initialize` answered with the server's capabilities (once).
     pub fn answer_init(&self) {
-        let Some(id) = lock(&self.st).init.take() else {
+        let (id, attached) = {
+            let mut st = lock(&self.st);
+            (st.init.take(), st.attached)
+        };
+        let Some(id) = id else {
             return;
         };
+        let mut experimental = json!({"protocol": PROTOCOL});
+        if attached {
+            experimental["attached"] = json!(true);
+        }
         self.reply(
             &id,
             json!({
@@ -518,7 +547,7 @@ impl Server {
                     "executeCommandProvider": {"commands": COMMANDS},
                     "documentSymbolProvider": true,
                     "documentHighlightProvider": true,
-                    "experimental": {"phitex": {"protocol": PROTOCOL}},
+                    "experimental": {"phitex": experimental},
                 },
                 "serverInfo": {"name": "phitex", "version": env!("CARGO_PKG_VERSION")},
             }),

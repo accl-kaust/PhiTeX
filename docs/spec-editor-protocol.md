@@ -630,3 +630,72 @@ language-servers = ["texlab", "phitex"]
 
 **VS Code without the extension**: a generic LSP client extension, its
 server command `["phitex", "watch", "--lsp"]`.
+
+## 8. Attaching to a running watch
+
+Every `phitex watch`, with `--lsp` or not, also serves the same language
+server to editors that attach to it: a watch started in a terminal can
+be used from Neovim or Emacs without a second session
+(`crates/cli/src/attach.rs`).
+
+**Transport.** One on every system: a TCP listener on `127.0.0.1` at a
+port the system chooses, the same `Content-Length` framing as standard
+input and output. Each connection is a client of its own.
+
+**Discovery.** Each watch writes one file, `<pid>.json`, in the sessions
+folder:
+
+| system | folder |
+|---|---|
+| Linux, macOS | `$XDG_RUNTIME_DIR/phitex/`, else `~/.cache/phitex/sessions/` (`$PHITEX_CACHE_DIR/sessions/` where that is set) |
+| Windows | `%LOCALAPPDATA%\phitex\sessions\` |
+
+```json
+{"pid": 4242,
+ "main": "/home/u/paper/paper.tex",
+ "root": "/home/u/paper",
+ "viewer": "http://127.0.0.1:24817/3f0c.../",
+ "lsp": {"host": "127.0.0.1", "port": 40125, "token": "9d1e5c0a7b3f48e2a6c4d8b0f1e2a3c4"},
+ "version": "1.0.0",
+ "started": "2026-11-09T10:21:07.512Z"}
+```
+
+- `main` is absolute, `root` the folder the watch runs in (file names
+  are relative to it), `viewer` null without a viewer (`--no-view`).
+- The folder is made 0700 and must be the user's alone (one another user
+  owns, or a link, is refused: the watch then serves no socket); the file
+  is 0600, as it holds the token and the viewer's own. It is written
+  whole (beside, then renamed), again when the viewer or the main file
+  changes, and removed when the watch ends.
+- A file whose watch does not run (its process gone, or its port not
+  answering) is ignored and removed by its readers.
+- `phitex sessions` lists the running watches; `phitex sessions --json`
+  prints their files' objects as one JSON array on one line.
+- An editor picks the watch whose `root` holds the buffer's file,
+  preferring the one whose `main` is that file.
+
+**Connecting.** The first message must be `initialize` with
+`initializationOptions.token` (with `phitexCursor` and the settings as
+on standard input); it must come within 3 seconds and 64 KiB. Otherwise
+the connection is closed with no answer (the token is compared in
+constant time; at most 16 connections wait for their first message at
+once). The answer is as §1's, with
+`capabilities.experimental.phitex.attached: true`; the client is then
+told the viewer (`window/logMessage`) and the last diagnostics.
+
+**Many clients on one session.**
+
+- `didOpen`/`didChange` apply as from standard input; the last edit
+  wins: a client's ranged change of a file another client edited last is
+  sent as its whole text. A file one client closes that another has open
+  is that client's text; closed by all, the disk's again.
+- `phitex/cursor` and `documentHighlight` (§3.1) come from whichever
+  client moved; the client whose cursor or edit came last is in focus.
+- Inverse search (`window/showDocument`) goes to the client in focus,
+  else to every client.
+- Builds, progress, diagnostics, `phitex/status` and the log go to every
+  client.
+- An attached client's `exit`, its connection's end and `phitex.stop`
+  only detach it; its settings (`threads`, `main`, `files`) change
+  nothing. The watch belongs to its terminal (or to the editor on its
+  standard input, `--lsp`) and keeps running.

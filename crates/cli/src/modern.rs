@@ -162,6 +162,12 @@ enum Sub {
         #[arg(value_name = "FILE")]
         file: Option<String>,
     },
+    /// The running watches an editor can attach to (--json: as JSON)
+    ///
+    /// Each `phitex watch` serves its language server on 127.0.0.1 and
+    /// says so in a file of its own (docs/spec-editor-protocol.md §8):
+    /// its main file, its viewer, its port and token.
+    Sessions,
     /// What is new in this version
     News,
     /// Install the latest release
@@ -371,6 +377,7 @@ pub enum Command {
     News,
     Upgrade,
     Config,
+    Sessions,
 }
 
 /// The modern command line's options, as the rest of the program reads
@@ -435,6 +442,7 @@ impl Cli {
             Some(Sub::Watch { file }) => (Some(Command::Watch), file, false),
             Some(Sub::Clean { all, file }) => (Some(Command::Clean), file, all),
             Some(Sub::News) => (Some(Command::News), None, false),
+            Some(Sub::Sessions) => (Some(Command::Sessions), None, false),
             Some(Sub::Upgrade) => (Some(Command::Upgrade), None, false),
             Some(Sub::Config { .. }) => (Some(Command::Config), None, false),
             None => (None, None, false),
@@ -1269,6 +1277,9 @@ pub fn main(args: &[String]) -> ! {
         crate::news::print();
         std::process::exit(0);
     }
+    if command == Command::Sessions {
+        std::process::exit(crate::attach::sessions(&ui, o.json));
+    }
     if command == Command::Config {
         let (k, v) = o.set.clone().unwrap_or_default();
         let (Some(k), Some(v)) = (k.clone(), v) else {
@@ -1358,7 +1369,7 @@ pub fn main(args: &[String]) -> ! {
         Command::Clean => std::process::exit(clean(&t, &ui)),
         Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
         // (answered before the target)
-        Command::News | Command::Upgrade | Command::Config => unreachable!(),
+        Command::News | Command::Upgrade | Command::Config | Command::Sessions => unreachable!(),
     }
 }
 
