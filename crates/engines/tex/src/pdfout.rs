@@ -2855,18 +2855,18 @@ pub(crate) fn page_alone(
             Whatsit::StartLink { objnum, attr, .. } => {
                 let n = objnum.cast_signed();
                 if is_rel(*objnum) {
-                    rels.push(n)
+                    rels.push(n);
                 } else {
-                    named.push(n)
+                    named.push(n);
                 }
                 refs_in(attr.as_deref().unwrap_or_default(), &mut named);
             }
             Whatsit::Annot { objnum, data, .. } => {
                 let n = objnum.cast_signed();
                 if is_rel(*objnum) {
-                    rels.push(n)
+                    rels.push(n);
                 } else {
-                    named.push(n)
+                    named.push(n);
                 }
                 refs_in(data, &mut named);
             }
@@ -3082,7 +3082,7 @@ impl Claim {
         let xs = list_of(v, input);
         let text = |k: usize| {
             xs.get(k)
-                .and_then(|&t| v.with_str(t, |s| crate::pdfprim::bytes(s)))
+                .and_then(|&t| v.with_str(t, crate::pdfprim::bytes))
                 .unwrap_or_default()
         };
         let int = |k: usize| xs.get(k).map_or(0, |&n| int_of(v, n));
@@ -3116,7 +3116,7 @@ impl Claim {
                             }
                             _ => {
                                 for &y in &ys {
-                                    if let Some(t) = v.with_str(y, |s| crate::pdfprim::bytes(s)) {
+                                    if let Some(t) = v.with_str(y, crate::pdfprim::bytes) {
                                         refs_in(&t, &mut c.names);
                                     }
                                 }
