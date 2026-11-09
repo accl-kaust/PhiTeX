@@ -207,7 +207,7 @@ pub struct Progress {
     /// only once the loop-backs settle ([`Progress::set_streaming`]).
     streaming: std::sync::atomic::AtomicBool,
     on_stream: OnceLock<StreamHook>,
-    /// Told every [`TICK_JOBS`] jobs begun ([`Progress::on_tick`]).
+    /// Told at every job's start ([`Progress::on_tick`]).
     on_tick: OnceLock<TickHook>,
 }
 
@@ -250,9 +250,6 @@ impl std::fmt::Debug for TickHook {
         f.write_str("TickHook")
     }
 }
-
-/// The jobs begun between two ticks ([`Progress::on_tick`]).
-pub const TICK_JOBS: u64 = 256;
 
 /// What is told of the format ([`Progress::on_format`]).
 pub struct FormatHook(Box<dyn Fn(bool) + Send + Sync>);
@@ -344,8 +341,9 @@ impl Progress {
         self.on_stream.get().is_some()
     }
 
-    /// `hook` called on the thread that begins a job, every
-    /// [`TICK_JOBS`] jobs (once per progress: whether it was set): a
+    /// `hook` called on the thread that begins a job, at every job's
+    /// start (once per progress: whether it was set; it keeps its own
+    /// pace, a clock's): a
     /// host with one thread lets its other work in there.
     pub fn on_tick(&self, hook: Box<dyn Fn() + Send + Sync>) -> bool {
         self.on_tick.set(TickHook(hook)).is_ok()
@@ -548,15 +546,13 @@ impl Busy {
         };
         let i = WORKER.with(|x| *x) % w.progress.slots.len();
         let off = w.offsets.get(&node).copied().unwrap_or(Progress::INSIDE);
-        let t = w.progress.total.fetch_add(1, Ordering::Relaxed);
+        w.progress.total.fetch_add(1, Ordering::Relaxed);
         w.progress.slots[i].store(Progress::pack(op, off), Ordering::Relaxed);
         let p = w.progress.clone();
         drop(g);
         // (the tick told with no lock of the build's held here: a host
         // may answer its own requests inside it)
-        if t % TICK_JOBS == 0
-            && let Some(h) = p.on_tick.get()
-        {
+        if let Some(h) = p.on_tick.get() {
             (h.0)();
         }
         Busy(Some((p, i)))
