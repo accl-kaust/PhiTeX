@@ -488,7 +488,7 @@ fn kept() -> PathBuf {
 /// run never waits for it; [`check`] reads what is kept when it speaks).
 pub fn begin() {
     if setting() == Setting::On {
-        fetch();
+        fetch_news();
     }
 }
 
@@ -496,12 +496,12 @@ pub fn begin() {
 /// notice is the editor's (`phitex/status`).
 pub fn begin_for_editor() {
     if chosen() == Setting::On {
-        fetch();
+        fetch_news();
     }
 }
 
 /// `news.json` fetched in the background when the kept one is a day old.
-fn fetch() {
+fn fetch_news() {
     let kept = kept();
     let age = std::fs::metadata(&kept)
         .and_then(|m| m.modified())

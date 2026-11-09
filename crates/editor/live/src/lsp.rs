@@ -1886,7 +1886,7 @@ mod tests {
         );
         assert_eq!(
             got[8]["params"],
-            json!({"state": "ready", "ms": 67.4, "pages": 3, "errors": 0, "warnings": 0, "warnings_updating": false, "engine": "wasm", "root": "/p", "main": "main.tex"})
+            json!({"state": "ready", "ms": 67.4, "pages": 3, "errors": 0, "warnings": 0, "warnings_updating": false, "engine": "wasm", "root": "/p", "main": "main.tex", "update": null})
         );
         // (a keystroke's build: no progress, the status after it)
         lock(&sent).clear();
