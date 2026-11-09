@@ -27,7 +27,17 @@ pub struct Style {
 
 impl Style {
     pub fn detect() -> Style {
-        let tty = std::io::stderr().is_terminal();
+        Style::on(std::io::stderr().is_terminal())
+    }
+
+    /// For standard output (a command's answer: `config`, `news`).
+    pub fn stdout() -> Style {
+        Style::on(std::io::stdout().is_terminal())
+    }
+
+    /// For a stream that is a terminal (`tty`) or not: colours on a
+    /// terminal, or forced by `CLICOLOR_FORCE`.
+    fn on(tty: bool) -> Style {
         let set = |v: &str| std::env::var_os(v).is_some_and(|x| !x.is_empty() && x != "0");
         Style {
             color: set("CLICOLOR_FORCE") || (tty && std::env::var_os("NO_COLOR").is_none()),

@@ -616,10 +616,26 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ),
 ];
 
-/// `phitex config` (no key: every setting; a key: that one): each with
-/// its value in your file and in the project's `phitex.toml` above `dir`,
-/// the one that holds, and what it does.
-pub fn listing(key: Option<&str>, dir: &Path, st: crate::ui::Style) -> Result<Vec<String>, String> {
+/// One setting as `phitex config` shows it: its key, default and what
+/// it does, its value in your file and in the project's.
+pub struct Row {
+    pub key: &'static str,
+    pub default: &'static str,
+    pub what: &'static str,
+    pub user: Option<String>,
+    pub project: Option<String>,
+}
+
+/// The settings `phitex config` shows (no key: every one; a key: that
+/// one), with your file and the project's `phitex.toml` above `dir`.
+pub struct Listing {
+    pub user_file: Option<PathBuf>,
+    pub project_file: Option<PathBuf>,
+    pub rows: Vec<Row>,
+}
+
+/// [`Listing`] of `key` (none: every setting) for a run in `dir`.
+pub fn listed(key: Option<&str>, dir: &Path) -> Result<Listing, String> {
     let read = |p: &Path| -> Result<toml::Table, String> {
         match std::fs::read_to_string(p) {
             Ok(t) => t
@@ -628,17 +644,17 @@ pub fn listing(key: Option<&str>, dir: &Path, st: crate::ui::Style) -> Result<Ve
             Err(_) => Ok(toml::Table::new()),
         }
     };
-    let user_path = user_file();
-    let user = match &user_path {
+    let user_file = user_file();
+    let user = match &user_file {
         Some(p) => read(p)?,
         None => toml::Table::new(),
     };
-    let project_path = find_file(dir);
-    let project = match &project_path {
+    let project_file = find_file(dir);
+    let project = match &project_file {
         Some(p) => read(p)?,
         None => toml::Table::new(),
     };
-    let rows: Vec<&(&str, &str, &str)> = match key {
+    let chosen: Vec<&(&str, &str, &str)> = match key {
         Some(k) => {
             let canon = canonical(k);
             let r: Vec<_> = SETTINGS.iter().filter(|s| s.0 == canon).collect();
@@ -661,30 +677,91 @@ pub fn listing(key: Option<&str>, dir: &Path, st: crate::ui::Style) -> Result<Ve
                 v => v.to_string(),
             })
     };
+    let rows = chosen
+        .into_iter()
+        .map(|&(k, default, what)| Row {
+            key: k,
+            default,
+            what,
+            user: value(&user, k),
+            project: value(&project, k),
+        })
+        .collect();
+    Ok(Listing {
+        user_file,
+        project_file,
+        rows,
+    })
+}
+
+impl Row {
+    /// The value that holds, and where it comes from: `project`, `yours`
+    /// or `default`.
+    pub fn holds(&self) -> (String, &'static str) {
+        match (&self.project, &self.user) {
+            (Some(p), _) => (p.clone(), "project"),
+            (None, Some(u)) => (u.clone(), "yours"),
+            (None, None) => (self.default.to_owned(), "default"),
+        }
+    }
+}
+
+/// `phitex config --json`: the listing as one JSON object.
+pub fn listing_json(key: Option<&str>, dir: &Path) -> Result<serde_json::Value, String> {
+    let l = listed(key, dir)?;
+    let path = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string());
+    let settings: Vec<serde_json::Value> = l
+        .rows
+        .iter()
+        .map(|r| {
+            let (value, from) = r.holds();
+            serde_json::json!({
+                "key": r.key,
+                "value": value,
+                "from": from,
+                "default": r.default,
+                "yours": r.user,
+                "project": r.project,
+                "description": r.what,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "yours": path(&l.user_file),
+        "project": path(&l.project_file),
+        "settings": settings,
+    }))
+}
+
+/// `phitex config` (no key: every setting; a key: that one): each with
+/// its value in your file and in the project's `phitex.toml` above `dir`,
+/// the one that holds, and what it does.
+pub fn listing(key: Option<&str>, dir: &Path, st: crate::ui::Style) -> Result<Vec<String>, String> {
+    let l = listed(key, dir)?;
     let home = |p: &Option<PathBuf>| {
         p.as_ref()
             .map_or("none".to_owned(), |p| crate::cache::home_relative(p))
     };
     let mut out = vec![st.dim(&format!(
         "yours: {} · project: {} (the project's wins)",
-        home(&user_path),
-        home(&project_path)
+        home(&l.user_file),
+        home(&l.project_file)
     ))];
-    let w = rows.iter().map(|r| r.0.len()).max().unwrap_or(0);
-    for &&(k, default, what) in &rows {
-        let (u, p) = (value(&user, k), value(&project, k));
+    let w = l.rows.iter().map(|r| r.key.len()).max().unwrap_or(0);
+    for r in &l.rows {
         // (a value set stands out from the defaults: the project's green,
         // yours cyan, a default dim with its note)
-        let now = match (&p, &u) {
-            (Some(p), _) => format!("{} {}", st.green(p), st.dim("(project)")),
-            (None, Some(u)) => format!("{} {}", st.cyan(u), st.dim("(yours)")),
-            (None, None) => st.dim(&format!("{default} (default)")),
+        let (v, from) = r.holds();
+        let now = match from {
+            "project" => format!("{} {}", st.green(&v), st.dim("(project)")),
+            "yours" => format!("{} {}", st.cyan(&v), st.dim("(yours)")),
+            _ => st.dim(&format!("{v} (default)")),
         };
         out.push(format!(
             "  {}  {now}",
-            st.bold(&crate::ui::pad(k, w, false))
+            st.bold(&crate::ui::pad(r.key, w, false))
         ));
-        out.push(format!("  {}  {}", " ".repeat(w), st.dim(what)));
+        out.push(format!("  {}  {}", " ".repeat(w), st.dim(r.what)));
     }
     if key.is_none() {
         out.push(st.dim("phitex config KEY VALUE sets one in yours (on, off, a number or text)"));

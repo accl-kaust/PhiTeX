@@ -445,3 +445,43 @@ fn watch_outlives_the_end_of_its_input() {
         .expect("kill");
     wait(&mut child, 60);
 }
+
+/// `phitex config` is a command's answer: its listing on standard
+/// output, nothing on standard error; `--json` one JSON object, the
+/// value that holds and where it comes from; `news --json` one JSON line.
+#[test]
+fn config_and_news_answer_on_stdout() {
+    let dir = scratch("config-stdout");
+    let out = run(&dir, &["config"]);
+    assert!(out.status.success());
+    let listing = text(&out.stdout);
+    assert!(
+        listing.contains("synctex") && listing.contains("update-check"),
+        "{listing}"
+    );
+    assert!(out.stderr.is_empty(), "{}", text(&out.stderr));
+    let out = run(&dir, &["config", "synctex"]);
+    assert!(text(&out.stdout).contains("synctex"));
+    let out = run(&dir, &["config", "--json"]);
+    let v: Value = serde_json::from_slice(&out.stdout).expect("one JSON object");
+    let synctex = v["settings"]
+        .as_array()
+        .and_then(|a| a.iter().find(|s| s["key"] == "synctex"))
+        .expect("synctex listed")
+        .clone();
+    assert_eq!(synctex["from"], "default", "{synctex}");
+    assert!(run(&dir, &["config", "synctex", "on"]).status.success());
+    let out = run(&dir, &["config", "--json", "synctex"]);
+    let v: Value = serde_json::from_slice(&out.stdout).expect("one JSON object");
+    assert_eq!(v["settings"][0]["value"], "true", "{v}");
+    assert_eq!(v["settings"][0]["from"], "yours", "{v}");
+    let out = run(&dir, &["news", "--json"]);
+    let lines: Vec<&str> = std::str::from_utf8(&out.stdout)
+        .expect("UTF-8")
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let v: Value = serde_json::from_str(lines[0]).expect("JSON");
+    assert_eq!(v["event"], "news", "{v}");
+    assert!(v["version"].is_string(), "{v}");
+}

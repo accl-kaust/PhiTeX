@@ -1266,15 +1266,22 @@ pub fn main(args: &[String]) -> ! {
         std::process::exit(crate::EXIT_FAILED);
     };
     if command == Command::News {
-        crate::news::print();
+        crate::news::print(o.json);
         std::process::exit(0);
     }
     if command == Command::Config {
         let (k, v) = o.set.clone().unwrap_or_default();
         let (Some(k), Some(v)) = (k.clone(), v) else {
+            // (the listing is the command's answer: standard output, as
+            // `git config`'s; `--json` one object)
             let cwd = std::env::current_dir().unwrap_or_default();
-            match crate::config::listing(k.as_deref(), &cwd, ui.st) {
-                Ok(lines) => lines.iter().for_each(|l| ui.line(l)),
+            let shown = if o.json {
+                crate::config::listing_json(k.as_deref(), &cwd).map(|v| vec![v.to_string()])
+            } else {
+                crate::config::listing(k.as_deref(), &cwd, Style::stdout())
+            };
+            match shown {
+                Ok(lines) => lines.iter().for_each(|l| println!("{l}")),
                 Err(e) => {
                     ui.error(&e);
                     std::process::exit(crate::EXIT_FAILED);
@@ -1283,7 +1290,10 @@ pub fn main(args: &[String]) -> ! {
             std::process::exit(0);
         };
         match crate::config::set_user(&k, &v) {
-            Ok(p) => ui.line(&format!("{k} = {v} in {}", crate::cache::home_relative(&p))),
+            Ok(p) => {
+                ui.line(&format!("{k} = {v} in {}", crate::cache::home_relative(&p)));
+                ui.event(&json!({"event": "config", "key": k, "value": v, "file": p.display().to_string()}));
+            }
             Err(e) => {
                 ui.error(&e);
                 std::process::exit(crate::EXIT_FAILED);
