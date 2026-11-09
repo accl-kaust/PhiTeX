@@ -910,7 +910,9 @@ impl Inner {
             // list drops its dead once per doubling, not per filing)
             let Some(v) = self.readers.get_mut(&f) else {
                 new += 1;
-                g.reader_lists.push((f, k.max(4)));
+                // (exact: most fields of a segment are read by a node or
+                // two, 3.9 million lists in the `TikZ` manual)
+                g.reader_lists.push((f, k));
                 g.ix_shards[2].push(FieldIndex::shard_of(f));
                 continue;
             };
@@ -920,7 +922,7 @@ impl Inner {
             if v.capacity() - v.len() < k {
                 v.retain(|r| live(eng, r.node(), r.serial));
                 if v.len() + k > v.capacity() / 2 {
-                    g.reader_lists.push((f, (v.len() * 2).max(v.len() + k)));
+                    g.reader_lists.push((f, (v.len() + v.len() / 2).max(v.len() + k)));
                 }
             }
         }
