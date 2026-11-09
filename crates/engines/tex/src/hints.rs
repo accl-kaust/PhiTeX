@@ -1522,10 +1522,10 @@ fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usiz
                 && !commands.has(k)
                 && !claimed.has(k)
                 && !operand.has(k)
-                && !p
+                && p
                     .tokens
                     .get(a.tok)
-                    .is_some_and(|t| t.tz == pass::Status::Pending)
+                    .is_none_or(|t| t.tz != pass::Status::Pending)
         };
         cdc_starts(text, &starts, ok)
     };
@@ -1625,7 +1625,7 @@ fn cdc_starts(text: &str, starts: &[usize], ok: impl Fn(usize) -> bool) -> Vec<u
             if !blank
                 && pos - last >= CDC_MIN
                 && e - pos >= CDC_MIN / 4
-                && line_hash(&line[line.len().saturating_sub(64)..]) % CDC_ONE_IN == 0
+                && line_hash(&line[line.len().saturating_sub(64)..]).is_multiple_of(CDC_ONE_IN)
                 && !pics.iter().any(|&(a, z)| a < pos && pos < z)
                 && ok(pos)
             {

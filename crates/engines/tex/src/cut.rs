@@ -44,7 +44,7 @@
 
 use phitex_defuse::ValueId;
 
-use crate::run::{R, Run};
+use crate::run::Run;
 use crate::val::{int_of, list_of};
 
 /// The items (the lists' and the groups' bindings) a continuation may
@@ -59,7 +59,7 @@ impl Run<'_, '_> {
     /// ([`Run::open_span`]), where the run would read on into the next
     /// slice: it ends here, its rest a continuation (true), if the state
     /// is nameable here and the cut pays (see the module).
-    pub(crate) fn text_cut(&mut self) -> R<bool> {
+    pub(crate) fn text_cut(&mut self) -> bool {
         if let Some(why) = self.text_cut_refusal() {
             if crate::exec::obs_flag!("PHITEX_CUT_TRACE") && why != "few commands" {
                 eprintln!(
@@ -68,13 +68,13 @@ impl Run<'_, '_> {
                     self.cmds
                 );
             }
-            return Ok(false);
+            return false;
         }
         // (the next slice must be a text's: the rest runs it. Found so,
         // no read: the run reads nothing of the text after its own, so an
         // edit there runs only the continuation, `Ctx::ends_before`)
         if self.cx.ends_before(self.pulled, self.ops.exec) {
-            return Ok(false);
+            return false;
         }
         if crate::exec::obs_flag!("PHITEX_CUT_TRACE") {
             eprintln!(
@@ -96,7 +96,7 @@ impl Run<'_, '_> {
         self.ops
             .text_cuts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(true)
+        true
     }
 
     /// Why the run may not end here with a continuation, if it may not.

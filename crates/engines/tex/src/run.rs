@@ -6714,7 +6714,7 @@ impl<'c, 'a> Run<'c, 'a> {
             }
             // (or ends here, its rest a continuation of its own, where the
             // state is nameable and the cut pays, `crate::cut`)
-            if self.open_span() && !self.eof && self.text_cut()? {
+            if self.open_span() && !self.eof && self.text_cut() {
                 return Ok(());
             }
             if self.open_span() && !self.eof && self.pull()? {
