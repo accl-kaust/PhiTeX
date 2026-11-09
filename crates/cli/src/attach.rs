@@ -300,13 +300,17 @@ pub fn forget() {
 }
 
 /// Whether the watch a discovery file names runs: its process (where the
-/// system lists them, `/proc`) and its socket, which answers a
-/// connection.
+/// system lists them, `/proc`; Windows's `tasklist`) and its socket,
+/// which answers a connection.
 pub fn alive(v: &Value) -> bool {
     let Some(pid) = v["pid"].as_u64() else {
         return false;
     };
     if Path::new("/proc/self").exists() && !Path::new(&format!("/proc/{pid}")).exists() {
+        return false;
+    }
+    #[cfg(windows)]
+    if windows_runs(pid) == Some(false) {
         return false;
     }
     let Some(port) = v["lsp"]["port"]
@@ -320,6 +324,21 @@ pub fn alive(v: &Value) -> bool {
         Duration::from_millis(300),
     )
     .is_ok()
+}
+
+/// Windows: whether process `pid` runs, as `tasklist` lists it (its CSV
+/// names a process's id in quotes, in every language; none when the
+/// list could not be had).
+#[cfg(windows)]
+fn windows_runs(pid: u64) -> Option<bool> {
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    Some(String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")))
 }
 
 /// The running watches' discovery files in `d`, oldest first; those of
