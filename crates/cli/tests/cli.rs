@@ -2815,26 +2815,55 @@ fn watch_r_rereads_only_files_that_moved() {
     let mut seen = Vec::new();
     let cold = until(&mut lines, "build", &1.into(), &mut seen);
     assert_eq!(cold["ok"], true, "{cold}");
-    let mut r = |k: u64, what: &str| {
+    // (the nodes the builds ran up to the one `r` asked for, that one
+    // included: the watch follows the files it read, so a write builds
+    // too, on its own or with `r` in one build, as the events come; the
+    // builds counted by why, not by number)
+    let mut r = |what: &str| {
         stdin.write_all(b"r\n").expect("r");
         stdin.flush().expect("r");
-        let ev = until(&mut lines, "build", &k.into(), &mut seen);
-        assert_eq!(ev["ok"], true, "{what}: {ev}");
-        ev["nodes_run"].as_u64().unwrap_or(u64::MAX)
+        let mut nodes = 0;
+        loop {
+            let ev = until(&mut lines, "event", &"build".into(), &mut seen);
+            assert_eq!(ev["ok"], true, "{what}: {ev}");
+            nodes += ev["nodes_run"].as_u64().unwrap_or(u64::MAX / 4);
+            if ev["why"].as_str().is_some_and(|w| w.contains("asked")) {
+                return nodes;
+            }
+        }
     };
     assert_eq!(
-        r(2, "nothing changed"),
+        r("nothing changed"),
         0,
         "r with nothing changed ran nodes"
     );
     std::thread::sleep(Duration::from_millis(20));
     std::fs::write(dir.join("chap.tex"), chap).expect("the same bytes");
     assert_eq!(
-        r(3, "the same bytes"),
+        r("the same bytes"),
         0,
         "r after the same bytes ran nodes"
     );
     let path = dir.join("chap.tex");
+    // (the file's fields as `r`'s key sees them, said if the test fails)
+    let fields = |p: &Path| {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(p).map_or_else(
+            |e| e.to_string(),
+            |m| {
+                format!(
+                    "size {} mtime {}.{:09} ctime {}.{:09} ino {}",
+                    m.len(),
+                    m.mtime(),
+                    m.mtime_nsec(),
+                    m.ctime(),
+                    m.ctime_nsec(),
+                    m.ino()
+                )
+            },
+        )
+    };
+    let before = fields(&path);
     let mtime = std::fs::metadata(&path)
         .and_then(|m| m.modified())
         .expect("its time");
@@ -2847,9 +2876,12 @@ fn watch_r_rereads_only_files_that_moved() {
         .open(&path)
         .and_then(|f| f.set_modified(mtime))
         .expect("the time set back");
+    let after = fields(&path);
+    let n = r("same size and time");
     assert!(
-        r(4, "same size and time") > 0,
-        "the rewritten file was not read again"
+        n > 0,
+        "the rewritten file was not read again ({n} nodes run)\nbefore: {before}\nafter:  {after}\nevents:\n{}",
+        seen.join("\n")
     );
     let watched = std::fs::read(dir.join("main.dvi")).expect("the watch's DVI");
     let _ = stdin.write_all(b"q\n");

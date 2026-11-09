@@ -698,3 +698,31 @@ fn snapshots(progress: &Arc<phitex_tex::Progress>) {
             }
         });
 }
+
+#[cfg(test)]
+mod tests {
+    /// A file rewritten to the same size with its modification time set
+    /// back has another key: its change time moved (`r` reads it again).
+    #[test]
+    #[cfg(unix)]
+    fn a_rewrite_with_its_time_set_back_has_another_stamp() {
+        let dir = std::env::temp_dir().join(format!("phitex-stamp-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("chap.tex");
+        std::fs::write(&p, "a first sentence\n").expect("write");
+        let before = super::disk_stamp(&p).expect("a stamp");
+        let mtime = std::fs::metadata(&p)
+            .and_then(|m| m.modified())
+            .expect("its time");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&p, "a other sentence\n").expect("same size");
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .and_then(|f| f.set_modified(mtime))
+            .expect("the time set back");
+        let after = super::disk_stamp(&p).expect("a stamp");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_ne!(before, after, "the stamp did not move");
+    }
+}
