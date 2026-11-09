@@ -109,6 +109,9 @@ impl Run<'_, '_> {
         if let Some(t) = self.nest.last() {
             return Ok(t.mode);
         }
+        if crate::boxscope::on() {
+            return Ok(self.base_mode_with(false)?.m);
+        }
         let Some(k) = self.scope_kind()? else {
             return Ok(1);
         };
@@ -160,7 +163,7 @@ impl Run<'_, '_> {
             },
             None => (0, 0, 0, 1, 0, Vec::new()),
         };
-        Ok(Mode {
+        let mut md = Mode {
             m: km,
             km,
             lid,
@@ -170,7 +173,14 @@ impl Run<'_, '_> {
             depth,
             extra,
             vm: km,
-        })
+        };
+        if km == 102
+            && crate::boxscope::is_global(lid)
+            && let Some(k) = k
+        {
+            self.par_kind(k, &mut md)?;
+        }
+        Ok(md)
     }
 
     /// `{` and `\begingroup` (§1063): a level of the nest sharing the
@@ -691,9 +701,14 @@ impl Run<'_, '_> {
                     st.pd = self.main_pd_before()?;
                 }
             }
+        } else if crate::boxscope::is_global(lid) {
+            // a list left open by another node (`crate::boxscope`): what
+            // its opener had, then the contributions after the opener
+            let from = self.left_list_start(lid, &mut st, &mut out)?;
+            let all = self.cx.fold(f, from, None)?;
+            fold_entries(v, lid, &v.seq_to_vec(all), &mut st, &mut out);
         } else {
-            // a list is this run's or the engine's (lid 0): no list is
-            // opened by one node and read by another
+            // a list is this run's or the engine's (lid 0)
             let all = self.cx.fold(f, None, None)?;
             fold_entries(v, lid, &v.seq_to_vec(all), &mut st, &mut out);
         }
@@ -1007,15 +1022,10 @@ impl Run<'_, '_> {
                 }
                 _ => match self.par_level_under_groups() {
                     Some(k) => self.end_graf_under_groups(k)?,
-                    None => {
-                        if crate::boxscope::on() && md.lid <= -(1i64 << 55) {
-                            eprintln!(
-                                "boxscope: node {} ends a paragraph left open inside a group: not followed",
-                                self.cx.node().raw()
-                            );
-                        }
-                        return Ok(());
-                    }
+                    None => match self.end_left_paragraph(md)? {
+                        Some(items) => items,
+                        None => return Ok(()),
+                    },
                 },
             };
             // §1096: error_count:=0
@@ -2586,7 +2596,7 @@ impl Run<'_, '_> {
         let xs = list_of(v, k);
         let n = |i: usize| xs.get(i).map_or(0, |&y| int_of(v, y));
         let km = i32::try_from(n(3)).unwrap_or(1);
-        Ok(Mode {
+        let mut md = Mode {
             m: km,
             km,
             lid: n(2),
@@ -2596,7 +2606,13 @@ impl Run<'_, '_> {
             depth: n(4),
             extra: xs.get(6..).map(<[ValueId]>::to_vec).unwrap_or_default(),
             vm: km,
-        })
+        };
+        // (a group in a paragraph left open: the paragraph's state,
+        // `crate::boxscope`)
+        if km == 102 && crate::boxscope::is_global(md.lid) {
+            self.par_kind(k, &mut md)?;
+        }
+        Ok(md)
     }
 
     /// `build_discretionary` (§1119–§1121).

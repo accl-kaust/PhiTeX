@@ -8,41 +8,60 @@
 //!
 //! Lists and groups are two stacks in TeX (the nest and the save stack,
 //! §211, §268): a paragraph begun inside a group goes on after the group
-//! closes. So they are left apart:
+//! closes, and `\par` inside a group ends the paragraph with the group
+//! still open. So they are left apart:
 //!
 //! - every group open (a box's own group among them) is an engine scope,
 //!   as [`Run::leave_scope`] leaves one; its kind carries the mode and
 //!   the id of the list it is in;
-//! - every list open is a list id unique among nodes ([`global_lid`]),
-//!   its items so far contributions under that id ([`Run::append`]), as
-//!   the main list's are; the node that ends it folds them
-//!   ([`Run::list_fold`]);
-//! - a paragraph, which no group brackets, is a field `par:<list it is
-//!   in>` holding its id and its own parameters, read only where a
-//!   group's close leaves the paragraph on top again
-//!   ([`Run::reown_paragraph`]).
+//! - every list open gets an id no list open at the same time has (from
+//!   the scope depth it is left at, [`global_lid`]: not from the opener's
+//!   node, so a re-cut of the opener changes no kind); what it holds so
+//!   far is the field `list0:<id>` with the opener's node, and the items
+//!   after it are `items` contributions under the id; its reader folds
+//!   the field, then the contributions after the opener
+//!   ([`Run::left_list_start`]);
+//! - a paragraph, which no group brackets, is left only under a group,
+//!   its own parameters the field `par:<list it is in>`: open while that
+//!   field names it. A group's kind in it reads the field
+//!   ([`Run::par_kind`]); a `\par` there ends it
+//!   ([`Run::end_left_paragraph`]); the close of the group above it
+//!   makes it the run's again ([`Run::reown_paragraph`]).
 
-use crate::build::sf_value;
+use crate::build::{FoldState, Mode, fold_item, sf_value};
 use crate::nest::Level;
 use crate::run::{R, Run};
 use crate::val::{group, int_of, list_of};
-use phitex_defuse::ValueId;
+use phitex_defuse::{NodeId, ValueId};
+
+/// The ids of lists left open are at or below this.
+const BASE: i64 = -(1i64 << 55);
 
 /// Whether open lists may be left to the following nodes.
 pub(crate) fn on() -> bool {
     crate::exec::env_flag!("PHITEX_BOXSCOPE")
 }
 
-/// A list id for the `k`-th list a node leaves open: one no other node's
-/// list has (a run's own ids are small negative counters).
-fn global_lid(node: u64, k: usize) -> i64 {
-    let n = i64::try_from(node & ((1 << 50) - 1)).unwrap_or(0);
-    -(1i64 << 55) - n * 64 - i64::try_from(k).unwrap_or(63).min(63)
+/// Whether `lid` is a list left open by some node.
+pub(crate) fn is_global(lid: i64) -> bool {
+    lid <= BASE
 }
 
-/// The field holding the paragraph open in list `vlid`.
+/// The id of the `k`-th list a run at scope depth `depth` leaves open.
+/// Lists open at once are left at different depths: a run inside one
+/// runs inside its groups' scopes, and a run back at the depth it was
+/// left at comes after its last group closed, the lists ended or the
+/// run's own again.
+fn global_lid(depth: i64, k: usize) -> i64 {
+    BASE - depth.clamp(0, 1 << 40) * 64 - i64::try_from(k).unwrap_or(63).min(63)
+}
+
 fn par_field(vlid: i64) -> String {
     format!("par:{vlid}")
+}
+
+fn list0_field(lid: i64) -> String {
+    format!("list0:{lid}")
 }
 
 fn is_box_group(g: i64) -> bool {
@@ -89,8 +108,8 @@ impl Run<'_, '_> {
     }
 
     /// Leaves the run's open levels to the following nodes: each list's
-    /// items as contributions under its global id, each paragraph's
-    /// parameters as `par:<list>`, the groups as scopes
+    /// items so far and its transitions' state as `list0:<id>`, each
+    /// paragraph's parameters as `par:<list>`, the groups as scopes
     /// ([`Run::leave_scope`]).
     pub(crate) fn leave_lists(&mut self) -> R<()> {
         let v = self.v;
@@ -105,7 +124,7 @@ impl Run<'_, '_> {
                 continue;
             }
             let old = levels[i].lid;
-            let new = global_lid(node, k);
+            let new = global_lid(base.depth, k);
             k += 1;
             for l in &mut levels[i..] {
                 if l.lid == old {
@@ -113,49 +132,142 @@ impl Run<'_, '_> {
                 }
             }
         }
-        // each list's items and its transitions' state
         for i in 0..levels.len() {
             if !levels[i].owns {
                 continue;
             }
-            let lid = levels[i].lid;
-            let items = crate::nest::into_values(v, std::mem::take(&mut levels[i].list));
-            for x in items {
-                self.append(lid, x);
-            }
-            let l = &levels[i];
-            if l.mode.abs() == 1 {
-                let pd = crate::build::pd_value(v, l.fold.pd);
-                self.append(lid, pd);
+            let vlid = match i.checked_sub(1) {
+                Some(b) => levels[b].lid,
+                None => base.lid,
+            };
+            let l = &mut levels[i];
+            let lid = l.lid;
+            let mut xs = vec![v.int(i64::try_from(node).unwrap_or(0))];
+            xs.extend(crate::nest::into_values(v, std::mem::take(&mut l.list)));
+            xs.push(if l.mode.abs() == 1 {
+                crate::build::pd_value(v, l.fold.pd)
             } else {
-                self.append(lid, sf_value(v, l.fold.sf));
-            }
-            if l.group == 0 {
-                // a paragraph: what its end reads besides its items
-                let vlid = match i.checked_sub(1) {
-                    Some(b) => levels[b].lid,
-                    None => base.lid,
-                };
-                let (lang, packed) = l.par.unwrap_or((0, 0));
-                let rec = v.list(vec![v.int(lid), v.int(lang), v.int(packed), v.int(l.clang)]);
+                sf_value(v, l.fold.sf)
+            });
+            let rec = v.list(xs);
+            let (group0, par, clang) = (l.group == 0, l.par, l.clang);
+            self.set(&list0_field(lid), rec, true);
+            if group0 {
+                let (lang, packed) = par.unwrap_or((0, 0));
+                let rec = v.list(vec![v.int(lid), v.int(lang), v.int(packed), v.int(clang)]);
                 self.set(&par_field(vlid), rec, true);
             }
         }
+        self.par_memo = None;
         // the groups as scopes
         self.nest = levels.into_iter().filter(|l| l.group != 0).collect();
         self.leave_scope()
     }
 
-    /// After the close of an engine scope whose kind `md` is a group in
-    /// a paragraph left open (`leave_lists`) and whose outer kind is the
-    /// vertical list the paragraph is in: the paragraph is this run's
-    /// again, its items folded, its parameters read from `par:<list>`.
-    pub(crate) fn reown_paragraph(
+    /// [`Run::list_fold`] of list `lid` left open: what its opener had,
+    /// folded into `st` and `out`, and the node after which its
+    /// contributions come (None: no field, the unit's start).
+    pub(crate) fn left_list_start(
         &mut self,
-        md: &crate::build::Mode,
-        outer: &crate::build::Mode,
-    ) -> R<bool> {
-        if md.km != 102 || outer.km.abs() != 1 || md.lid > -(1i64 << 55) {
+        lid: i64,
+        st: &mut FoldState,
+        out: &mut Vec<ValueId>,
+    ) -> R<Option<NodeId>> {
+        let v = self.v;
+        let Some(rec) = self.get(&list0_field(lid))? else {
+            return Ok(None);
+        };
+        let xs = list_of(v, rec);
+        let Some((&n, items)) = xs.split_first() else {
+            return Ok(None);
+        };
+        for &x in items {
+            fold_item(v, lid, x, st, out);
+        }
+        Ok(Some(NodeId::from_raw(
+            u64::try_from(int_of(v, n)).unwrap_or(0),
+        )))
+    }
+
+    /// The paragraph a group's kind `k` (mode 102, a list left open) is
+    /// in: `md`'s list stays it while `par:<list below>` names it, with
+    /// the list below as its vertical list; else the paragraph ended
+    /// (a `\par` inside the group) and `md` is that vertical list's.
+    pub(crate) fn par_kind(&mut self, k: ValueId, md: &mut Mode) -> R<()> {
+        if let Some((kk, open, vlid, vm)) = self.par_memo
+            && kk == k
+        {
+            apply(md, open, vlid, vm);
+            return Ok(());
+        }
+        let v = self.v;
+        // the list below: the first kind outward in another list
+        let mut cur = k;
+        let (vlid, vm) = loop {
+            let xs = list_of(v, cur);
+            let Some(&p) = xs.get(5) else {
+                break (0, 1);
+            };
+            if p == ValueId::UNIT {
+                break (0, 1);
+            }
+            let ys = list_of(v, p);
+            let n = |i: usize| ys.get(i).map_or(0, |&y| int_of(v, y));
+            if n(2) != md.lid {
+                break (n(2), i32::try_from(n(3)).unwrap_or(1));
+            }
+            cur = p;
+        };
+        let open = self.get(&par_field(vlid))?.is_some_and(|r| {
+            list_of(v, r)
+                .first()
+                .is_some_and(|&x| int_of(v, x) == md.lid)
+        });
+        self.par_memo = Some((k, open, vlid, vm));
+        apply(md, open, vlid, vm);
+        Ok(())
+    }
+
+    /// `\par` (§1096) in a paragraph left open by another node, under
+    /// groups of the engine's: its items, the field cleared (the groups
+    /// go on in the vertical list), its parameters the run's last
+    /// paragraph's. None: no such paragraph.
+    pub(crate) fn end_left_paragraph(&mut self, md: &Mode) -> R<Option<Vec<crate::nest::Item>>> {
+        if !on() || !is_global(md.lid) || self.nest.iter().any(|l| l.owns) {
+            return Ok(None);
+        }
+        let v = self.v;
+        let Some(rec) = self.get(&par_field(md.vlid))? else {
+            return Ok(None);
+        };
+        let xs = list_of(v, rec);
+        let n = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
+        if xs.len() < 4 || n(0) != md.lid {
+            return Ok(None);
+        }
+        let f = self.list_fold(md.lid)?;
+        self.set(&par_field(md.vlid), ValueId::UNIT, true);
+        self.par_memo = None;
+        self.last_par = (n(1), n(2));
+        self.last_par_line = None;
+        self.last_par_place = None;
+        // (the run's groups above it now in the vertical list)
+        let (vm, vlid) = (md.vm, md.vlid);
+        for l in &mut self.nest {
+            if l.lid == md.lid {
+                l.lid = vlid;
+                l.mode = vm;
+            }
+        }
+        Ok(Some(crate::nest::of_values(f.items)))
+    }
+
+    /// After the close of an engine scope whose kind `md` is a group in
+    /// a paragraph left open, and whose outer kind is the vertical list
+    /// the paragraph is in: the paragraph is this run's again, its items
+    /// folded, its parameters read from `par:<list>`.
+    pub(crate) fn reown_paragraph(&mut self, md: &Mode, outer: &Mode) -> R<bool> {
+        if !is_global(md.lid) || md.m != 102 || outer.km.abs() != 1 {
             return Ok(false);
         }
         let v = self.v;
@@ -171,7 +283,7 @@ impl Run<'_, '_> {
         let mut l = Level::new(102, 0, md.lid, true, Vec::new());
         self.open_level(&mut l);
         l.list = crate::nest::of_values(f.items);
-        l.fold = crate::build::FoldState {
+        l.fold = FoldState {
             sf: f.sf,
             pd: f.pd,
             since_bp: f.since_bp,
@@ -179,8 +291,19 @@ impl Run<'_, '_> {
         l.par = Some((n(1), n(2)));
         l.clang = n(3);
         self.set(&par_field(outer.lid), ValueId::UNIT, true);
+        self.par_memo = None;
         self.muts += 1;
         self.nest.push(l);
         Ok(true)
+    }
+}
+
+fn apply(md: &mut Mode, open: bool, vlid: i64, vm: i32) {
+    md.vlid = vlid;
+    md.vm = vm;
+    if !open {
+        md.m = vm;
+        md.km = vm;
+        md.lid = vlid;
     }
 }
