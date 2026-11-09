@@ -17,7 +17,16 @@ pub use phitex_live::panics::{capture_panics, catch};
 
 use crate::session::Status;
 
-/// Colours on standard error, unless it is no terminal or `NO_COLOR`.
+/// `--color`: always (true) or never (false); none, by the stream.
+static COLOR: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+
+/// `--color`'s choice, for every [`Style`] from now on.
+pub fn set_color(c: Option<bool>) {
+    let _ = COLOR.set(c);
+}
+
+/// Colours on standard error: `--color`, else none under `NO_COLOR`,
+/// else on a terminal or under `CLICOLOR_FORCE`.
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
     pub color: bool,
@@ -27,10 +36,26 @@ pub struct Style {
 
 impl Style {
     pub fn detect() -> Style {
-        let tty = std::io::stderr().is_terminal();
+        Style::on(std::io::stderr().is_terminal())
+    }
+
+    /// For standard output (a command's answer: `config`, `news`).
+    pub fn stdout() -> Style {
+        Style::on(std::io::stdout().is_terminal())
+    }
+
+    /// For a stream that is a terminal (`tty`) or not: `--color`'s
+    /// choice, else colours on a terminal, or forced by `CLICOLOR_FORCE`.
+    fn on(tty: bool) -> Style {
+        if let Some(&Some(color)) = COLOR.get() {
+            return Style { color, tty };
+        }
+        // (no-color.org: NO_COLOR, set and not empty, wins over everything
+        // but the command line's --color; CLICOLOR_FORCE colours a pipe)
         let set = |v: &str| std::env::var_os(v).is_some_and(|x| !x.is_empty() && x != "0");
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|x| !x.is_empty());
         Style {
-            color: set("CLICOLOR_FORCE") || (tty && std::env::var_os("NO_COLOR").is_none()),
+            color: !no_color && (set("CLICOLOR_FORCE") || tty),
             tty,
         }
     }
@@ -71,6 +96,20 @@ impl Style {
     pub fn sym(self, fancy: &'static str, plain: &'static str) -> &'static str {
         if self.tty { fancy } else { plain }
     }
+}
+
+/// A build's reason as a reader reads it: the session's `cold` (its
+/// first build, or one asked from nothing) is a clean build; a file's
+/// name, an edit's place and the rest are as they are.
+pub fn said_why(why: &str) -> String {
+    why.split(", ")
+        .map(|w| match w {
+            "cold" => "clean build",
+            "asked: a cold build" => "a clean build was asked",
+            w => w,
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A duration for the terminal: milliseconds under a second.
@@ -580,6 +619,19 @@ impl Ui {
                     loop {
                         std::thread::sleep(Duration::from_millis(250));
                         let now = crate::keys::width();
+                        // (back from Ctrl-Z: the shell's lines are over
+                        // the bottom ones, drawn again below them)
+                        if crate::keys::resumed() {
+                            let mut b = lock(&bottom);
+                            if b.gone {
+                                return;
+                            }
+                            b.drawn = 0;
+                            b.drawn_widths.clear();
+                            redraw(&mut std::io::stderr().lock(), &mut b);
+                            was = now;
+                            continue;
+                        }
                         if now == was {
                             continue;
                         }

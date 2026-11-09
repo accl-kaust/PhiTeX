@@ -1970,10 +1970,10 @@ fn exit_statuses() {
     };
     assert_eq!(
         status(&["build", "--engine", "tex", "nothere.tex"]),
-        Some(1)
+        Some(2)
     );
-    assert_eq!(status(&["check", "x.tex"]), Some(1));
-    assert_eq!(status(&["x.tex"]), Some(1));
+    assert_eq!(status(&["check", "x.tex"]), Some(2));
+    assert_eq!(status(&["x.tex"]), Some(2));
     assert_eq!(status(&["--help"]), Some(0));
     assert_eq!(status(&["--compat=pdflatex", "-help"]), Some(0));
     assert_eq!(status(&["--compat=pdflatex", "-frob", "x.tex"]), Some(1));
@@ -2211,8 +2211,8 @@ fn tiny() -> &'static str {
     "\\catcode`\\{=1 \\catcode`\\}=2 \\font\\x=cmr10 \\x Hi\\end\n"
 }
 
-/// Every option is accepted before the command, after it and after the
-/// file: `-o DIR` and `-j N` in the three positions, the output where
+/// A build's options are accepted after the command, before and after
+/// the file: `-o DIR` and `-j N` in those positions, the output where
 /// `-o` says.
 #[test]
 fn options_in_any_position() {
@@ -2220,7 +2220,7 @@ fn options_in_any_position() {
     let dir = scratch("options");
     std::fs::write(dir.join("t.tex"), tiny()).expect("the document");
     let lines: [&[&str]; 3] = [
-        &["-o", "out1", "-j", "2", "build", "--ini", "--etex", "t.tex"],
+        &["build", "-o", "out1", "-j", "2", "--ini", "--etex", "t.tex"],
         &["build", "-o", "out2", "-j", "2", "--ini", "--etex", "t.tex"],
         &["build", "--ini", "--etex", "t.tex", "-o", "out3", "-j", "2"],
     ];
@@ -2240,7 +2240,7 @@ fn options_in_any_position() {
 }
 
 /// An unknown option is named, with `--help` suggested, and the exit
-/// status is pdflatex's 1; an option before the command is never taken for TeX's
+/// status is a usage error's 2; an option before the command is never taken for TeX's
 /// command line.
 #[test]
 fn unknown_option_is_named() {
@@ -2251,16 +2251,16 @@ fn unknown_option_is_named() {
         .output()
         .expect("phitex runs");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(err.contains("--frob"), "the option is not named:\n{err}");
     assert!(err.contains("--help"), "--help is not suggested:\n{err}");
     assert!(err.lines().count() <= 8, "more than a few lines:\n{err}");
     let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
-        .args(["-o", "out", "--frob", "build", "t.tex"])
+        .args(["--frob", "build", "t.tex"])
         .output()
         .expect("phitex runs");
     let err = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert_eq!(out.status.code(), Some(2), "{err}");
     assert!(err.contains("--frob") && !err.contains("compat"), "{err}");
 }
 
@@ -2322,7 +2322,7 @@ fn help_is_sectioned() {
     };
     let short = help("--help");
     assert!(
-        short.lines().count() <= 35 && short.contains("--help-all") && short.contains("--jobs"),
+        short.lines().count() <= 35 && short.contains("--help-all") && short.contains("build"),
         "--help is not the short help:\n{short}"
     );
     assert!(
@@ -2340,14 +2340,27 @@ fn help_is_sectioned() {
         "Examples:",
         "build",
         "watch",
-        "--write",
         "clean",
         "--json",
+        "Exit status",
+    ] {
+        assert!(
+            text.contains(section),
+            "`{section}` is not in the help:\n{text}"
+        );
+    }
+    let out = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--help-all"])
+        .output()
+        .expect("phitex runs");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    for section in [
+        "--write",
         "--no-view",
         "--shell-escape",
-        "Exit status",
         "--output-dir",
         "--jobs",
+        "--lsp",
     ] {
         assert!(
             text.contains(section),
@@ -3892,7 +3905,9 @@ fn watch_open_starts_only_the_users_viewer() {
         let _ = until(&mut lines, "build", &1.into(), &mut seen);
         // (a viewer started is not waited for)
         std::thread::sleep(Duration::from_millis(500));
-        drop(child.stdin.take());
+        if let Some(mut i) = child.stdin.take() {
+            let _ = i.write_all(b"q\n");
+        }
         let _ = child.wait();
         assert_eq!(dir.join("ran").exists(), runs, "{name}");
     }
