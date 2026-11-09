@@ -2926,6 +2926,16 @@ pub(crate) fn page_alone(
         let l = link(v, &f, &line, units, None, &cmds, false, Some(&alone));
         if l.errors.is_empty() && l.fail.is_none() {
             let pdf = l.layout?.exact().ok().map(|b| b.as_ref().clone())?;
+            if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                eprintln!(
+                    "stream: page {} bare {bare} complete {} landed {} missing {:?} needs {:?}",
+                    pc.pj,
+                    found.complete,
+                    alone.landed.get(),
+                    found.missing,
+                    found.cmds.iter().map(|c| c.2).collect::<Vec<_>>()
+                );
+            }
             return Some((pdf, !bare && found.complete && alone.landed.get()));
         }
         if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
@@ -3168,6 +3178,9 @@ fn refs_in(t: &[u8], out: &mut Vec<i64>) {
 #[derive(Clone)]
 pub(crate) struct Claim {
     serial: u64,
+    /// What it is made of (its input's digest): two commands claiming a
+    /// number with the same make the same object.
+    made_of: u64,
     rt: Option<i64>,
     cmd: Arc<Cmd>,
     /// Its object has its body once the command ran (an image, a form, an
@@ -3194,6 +3207,7 @@ impl Claim {
         let int = |k: usize| xs.get(k).map_or(0, |&n| int_of(v, n));
         let mut c = Claim {
             serial,
+            made_of: v.digest(input),
             rt: None,
             cmd,
             body: false,
@@ -3321,12 +3335,21 @@ impl StreamObjs {
         self.by_key.len()
     }
 
-    /// The one command `ks` holds.
+    /// The one object the commands `ks` make: one command, or several
+    /// made of the same input (a run's commands made again by another
+    /// node, a cut moved; the stale one's claim stands beside it) — the
+    /// latest of them.
     fn one(&self, ks: Option<&Vec<i64>>) -> Option<(i64, &Claim)> {
-        match ks.map(Vec::as_slice) {
-            Some(&[k]) => self.by_key.get(&k).map(|c| (k, c)),
-            _ => None,
-        }
+        let ks = ks?;
+        let &k = ks.last()?;
+        let c = self.by_key.get(&k)?;
+        ks.iter()
+            .all(|j| {
+                self.by_key
+                    .get(j)
+                    .is_some_and(|o| o.made_of == c.made_of && o.fill == c.fill)
+            })
+            .then_some((k, c))
     }
 
     /// The commands of the objects `need` names, followed through what
@@ -3347,6 +3370,12 @@ impl StreamObjs {
                 continue;
             }
             let Some((k, c)) = self.one(self.by_num.get(&n)) else {
+                if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                    eprintln!(
+                        "stream: object {n}: {} commands claim it",
+                        self.by_num.get(&n).map_or(0, Vec::len)
+                    );
+                }
                 out.complete = false;
                 out.missing.push(n);
                 continue;
