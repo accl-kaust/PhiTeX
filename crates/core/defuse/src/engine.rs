@@ -227,9 +227,9 @@ pub struct Engine {
     /// The nodes holding fields their commit did not walk
     /// (`Node::unwalked`), walked at the latest when the line is quiet.
     pub(crate) unwalked: crate::lock::Mx<Vec<NodeId>>,
-    /// The order of run starts and commit ends (`Node::run_began`,
-    /// `Node::committed_at`): a count, exact where clocks tie or skew.
-    pub(crate) seq: AtomicU64,
+    /// The quiet points so far (`sched::run_worker`): a run's wave
+    /// (`Node::run_began`), a count, exact where clocks tie or skew.
+    pub(crate) quiets: AtomicU64,
     pub(crate) window: AtomicU64,
     pub(crate) window_missed: AtomicBool,
     /// The width at which the runs the window held were last looked at.
@@ -458,7 +458,7 @@ impl Engine {
             frontier_held: AtomicU64::new(0),
             window_on: AtomicBool::new(false),
             unwalked: crate::lock::Mx::new(Vec::new()),
-            seq: AtomicU64::new(0),
+            quiets: AtomicU64::new(0),
             window: AtomicU64::new(crate::sched::WINDOW_START),
             window_missed: AtomicBool::new(false),
             window_released: AtomicU64::new(0),
