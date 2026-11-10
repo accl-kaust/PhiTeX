@@ -938,7 +938,13 @@ fn floats2col_routines_run_once_per_fire() {
     let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
         .expect("the oracle");
     let mut bad = Vec::new();
-    for threads in [1u64, 8, 16] {
+    // (`PHITEX_TEST_THREADS`, a measure: the thread counts, comma
+    // separated, each its build in this process in turn)
+    let counts: Vec<u64> = std::env::var("PHITEX_TEST_THREADS").map_or_else(
+        |_| vec![1, 8, 16],
+        |x| x.split(',').filter_map(|t| t.trim().parse().ok()).collect(),
+    );
+    for threads in counts {
         let opts = Options {
             threads: Some(usize::try_from(threads).unwrap_or(1)),
             ..pdf_opts(name, &dir)
