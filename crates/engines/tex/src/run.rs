@@ -197,6 +197,12 @@ pub(crate) struct Ops {
     /// The commands a run does before it may be cut at its text's end
     /// ([`crate::Options::cut_min`], `crate::cut`).
     pub cut_min: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The speculation window on for this evaluation (docs/spec-window.md),
+    /// and the page routines' give-backs found as guessed and not where the
+    /// routine ran on the page as it is: the fold goes on a guess no
+    /// finisher gave back yet while the guesses hold.
+    pub spec_window: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub give_back_guesses: std::sync::Arc<[std::sync::atomic::AtomicU64; 2]>,
     /// The node whose run claimed the rest of the input at a fatal error
     /// ([`Run::fatal_hit`]), and the runs of text pieces after it begun
     /// since: none begins once it has, whatever had begun before (§93;

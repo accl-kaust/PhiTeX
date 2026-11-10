@@ -62,6 +62,20 @@ node, over `GAP`. Continuations of a slice stand in its gap: distance 0.
   runs as far ahead as before after a few pages; one whose routines
   hand back state every page (floats2col) refutes on most pages and W
   stays near one page of text.
+- **The fold's own window.** The other half of the chain: since 10-29
+  ("no speculation depth") a clean build's fold never goes past a page
+  whose routine's give-back no finisher has made yet, so each page waits
+  for the routine before it (para400pdf at -j16: a critical path of 128
+  pages; DVI the same). With the window on, the fold goes on the guess
+  (`Run::guess_give_back`, what the routine gave back last) where the
+  guesses have held: each give-back found against the guess made for its
+  page is counted held or missed (`Ops::give_back_guesses`), and the fold
+  trusts the guess once at least 4 held and no more than one in eight
+  missed. Not a reversal of 10-29: a document whose routines hand back
+  something new each page (floats2col) never earns the trust, and folds
+  as it does now; one whose routines give back the same each page
+  (plain text, a running head) folds on, its pages beside their
+  routines. A miss refolds from that page, as a guess always did.
 - **Edits.** The window applies to a build's first evaluation (the
   clean build, `Build::settles == 1`) only. An edit's evaluation runs
   with it off: an edit runs few nodes, most of them before the

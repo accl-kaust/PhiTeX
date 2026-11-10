@@ -3412,6 +3412,8 @@ impl Graph {
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             text_cuts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cut_min: Arc::new(std::sync::atomic::AtomicU64::new(crate::cut::CUT_MIN)),
+            spec_window: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            give_back_guesses: Arc::new([const { std::sync::atomic::AtomicU64::new(0) }; 2]),
             fatal_starts: Arc::default(),
             siblings_pulled: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
@@ -6951,6 +6953,7 @@ impl Build {
         true
     }
 
+    #[allow(clippy::too_many_lines)]
     fn settle(&mut self) {
         if self.nothing_to_settle() {
             return;
@@ -7024,6 +7027,10 @@ impl Build {
         self.g
             .eng
             .set_spec_window(self.opts.spec_window && self.settles == 1);
+        self.g.ops.spec_window.store(
+            self.opts.spec_window && self.settles == 1,
+            std::sync::atomic::Ordering::Release,
+        );
         self.g.settle(
             self.unit,
             &self.opts.finder,

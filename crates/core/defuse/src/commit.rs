@@ -2210,9 +2210,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         crate::sched::log_frontier(eng, old, new, Some(node.id), "set");
         // (moved on: the speculation window widens where nothing ahead
         // was refuted since, docs/spec-window.md)
-        let pos = |x: u64| eng.placed_node(NodeId::from_raw(x - 1)).map(|n| n.pos_hint());
+        let pos = |x: u64| {
+            x.checked_sub(1)
+                .and_then(|x| eng.placed_node(NodeId::from_raw(x)))
+                .map(|n| n.pos_hint())
+        };
         if new != old && (new == 0 || (old != 0 && pos(new) > pos(old))) {
-            crate::sched::window_moved_on(eng);
+            let by = match (pos(old), pos(new)) {
+                (Some(a), Some(b)) => (b.0.saturating_sub(a.0)) / crate::order::GAP,
+                _ => crate::sched::WINDOW_START,
+            };
+            crate::sched::window_moved_on(eng, by);
         }
     }
     // a changed bracket: the readers after it whose answer moved

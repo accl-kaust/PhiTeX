@@ -2917,9 +2917,11 @@ pub(crate) fn window_refuted(eng: &Engine, ahead: u64) {
     }
 }
 
-/// The layer moved its frontier on: with no run ahead refuted since its
-/// last move, the window doubles.
-pub(crate) fn window_moved_on(eng: &Engine) {
+/// The layer moved its frontier on by `by` places: with no run ahead
+/// refuted since its last move, the window grows by twice that and at
+/// least doubles (a fold that moves in bursts, many pages a run, widens
+/// it as fast as it moves).
+pub(crate) fn window_moved_on(eng: &Engine, by: u64) {
     if !eng.window_on.load(Ordering::Acquire) {
         return;
     }
@@ -2927,7 +2929,7 @@ pub(crate) fn window_moved_on(eng: &Engine) {
         return;
     }
     let w = eng.window.load(Ordering::Acquire);
-    let n = (w * 2).min(WINDOW_MAX);
+    let n = (w * 2).max(w.saturating_add(by.saturating_mul(2))).min(WINDOW_MAX);
     if n > w
         && eng
             .window

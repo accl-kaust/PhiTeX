@@ -295,7 +295,12 @@ impl Engine {
     /// (docs/spec-window.md): on, its width measured from its start.
     pub fn set_spec_window(&self, on: bool) {
         self.window_on.store(on, Ordering::Release);
-        self.window.store(crate::sched::WINDOW_START, Ordering::Release);
+        // (`PHITEX_WINDOW_START`, measure: another first width)
+        let start = std::env::var("PHITEX_WINDOW_START")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(crate::sched::WINDOW_START);
+        self.window.store(start, Ordering::Release);
         self.window_missed.store(false, Ordering::Release);
     }
 
