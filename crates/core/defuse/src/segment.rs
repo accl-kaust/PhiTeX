@@ -92,6 +92,11 @@ pub(crate) struct Inner {
     /// it checks no bracket changed in its region after its own
     /// (`commit::reask_after_effect`).
     pub(crate) brk_gen: u64,
+    /// Records of its nodes replaced (or cleared) since its `guarded` set
+    /// was last counted: the quiet-point sweep counts again only a
+    /// segment where they are as many as half its nodes
+    /// (`Engine::sweep_readers`).
+    pub(crate) replaced: u32,
 }
 
 /// A field's definitions or contributions in one segment, by label. Most
@@ -1103,6 +1108,7 @@ impl Segment {
                 by_op: FxHashMap::default(),
                 holes: 0,
                 brk_gen: 0,
+                replaced: 0,
             }),
         }
     }
@@ -1448,6 +1454,7 @@ impl Segment {
                 by_op,
                 holes: up_holes,
                 brk_gen: inner.brk_gen,
+                replaced: 0,
             }),
         });
         let moved: Vec<Field> = {

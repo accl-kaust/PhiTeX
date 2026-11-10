@@ -1897,6 +1897,9 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             &mut placed,
         );
         let old = node.last.lock().replace(rec.clone());
+        if old.as_ref().is_some_and(|o| o.reads.len() > 0) {
+            inner.replaced = inner.replaced.saturating_add(1);
+        }
         for r in reads.iter().filter(|_| crate::obs::enabled()) {
             if let Some(f) = r.kind().field()
                 && ftrace(eng, f)
@@ -4326,6 +4329,7 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
         inner.guarded.len(),
     );
     *node.last.lock() = None;
+    inner.replaced = inner.replaced.saturating_add(1);
     for &f in changed_defs.iter().chain(&changed_contribs) {
         eng.bump(f);
     }

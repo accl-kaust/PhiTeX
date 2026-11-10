@@ -1970,6 +1970,19 @@ impl Engine {
         for sid in self.order.all() {
             let s = self.seg(sid);
             let mut inner = s.inner.write();
+            // (only where half its nodes' records were replaced since it
+            // was counted: an edit's sweep costs the segments it touched)
+            if (inner.replaced as usize) * 2 < inner.nodes.len().max(1) {
+                let n = inner.stops.len();
+                inner
+                    .stops
+                    .retain(|(_, _, r)| crate::segment::live(self, r.node, r.serial));
+                dropped += n - inner.stops.len();
+                for &x in inner.nodes.values() {
+                    left += self.node(x).record().map_or(0, |r| r.reads.len());
+                }
+                continue;
+            }
             let nodes: Vec<NodeId> = inner.nodes.values().copied().collect();
             for &x in &nodes {
                 let n = self.node(x);

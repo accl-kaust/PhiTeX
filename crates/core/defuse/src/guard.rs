@@ -127,6 +127,7 @@ pub(crate) fn recount(eng: &Engine, inner: &mut Inner) -> (Vec<Field>, Vec<Field
     let gone: Vec<Field> = inner.guarded.iter().filter(|f| !now.contains(f)).copied().collect();
     let new: Vec<Field> = now.iter().filter(|f| !inner.guarded.contains(f)).copied().collect();
     inner.guarded = now;
+    inner.replaced = 0;
     (gone, new)
 }
 
