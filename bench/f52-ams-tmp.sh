@@ -9,7 +9,7 @@ CARGO_TARGET_DIR=$w/target-prof cargo build -q --release -p phitex-cli \
 cp "$w/target-prof/release/phitex" "$bin"
 export SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1 TZ=UTC NO_COLOR=1
 for m in off box; do
-  e=(); [ $m = off ] || e=(PHITEX_BOXSCOPE=1 PHITEX_BOXSCOPE_TRACE=1)
+  e=(PHITEX_BOXSCOPE=0); [ $m = off ] || e=(PHITEX_BOXSCOPE=1 PHITEX_BOXSCOPE_TRACE=1)
   rm -rf "$w/ams-$m"; cp -a bench/amsldoc "$w/ams-$m"
   ( cd "$w/ams-$m" && env PHITEX_CACHE_DIR=$w/cache-$m "${e[@]}" "$bin" build amsldoc.tex --exact-pdf -j 1 > "$r/ams-$m.txt" 2>&1; echo "$m exit $? $(md5sum < amsldoc.pdf)"; cp amsldoc.pdf "$r/ams-$m.pdf" )
 done
