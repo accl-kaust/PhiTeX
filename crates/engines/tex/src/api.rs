@@ -1035,16 +1035,15 @@ impl Default for Options {
             program: "pdftex".to_owned(),
             prelude_bytes: None,
             prelude_fallback: None,
-            // (`PHITEX_TIME_LIMIT_SECS`: another bound, 0 for none; a
-            // measurement's cold build or reference must never be cut
-            // short, a truncated reference compares as a wrong edit)
+            // (no limit, as pdflatex has none: a large document's clean
+            // build takes as long as it takes, and a stuck one is the
+            // user's to stop; `PHITEX_TIME_LIMIT_SECS` sets one, 0 none)
             time_limit: match std::env::var("PHITEX_TIME_LIMIT_SECS")
                 .ok()
                 .and_then(|x| x.trim().parse::<u64>().ok())
             {
-                Some(0) => None,
+                Some(0) | None => None,
                 Some(n) => Some(std::time::Duration::from_secs(n)),
-                None => Some(std::time::Duration::from_secs(600)),
             },
             stuck_after: None,
             memory_limit: None,
@@ -1891,6 +1890,10 @@ pub struct Stats {
     pub refuted_nodes: u64,
     pub resumptions: u64,
     pub parks: u64,
+    /// Runs that waited, before doing anything, for a node before them
+    /// that may define a name they read (`phitex_defuse::Report::waits`):
+    /// not counted in `runs`.
+    pub waits: u64,
     pub cutoffs: u64,
     pub created: u64,
     pub freed: u64,
@@ -2865,6 +2868,7 @@ impl Stats {
         self.runs += r.runs;
         self.refuted_nodes += r.refuted_nodes;
         self.resumptions += r.resumed;
+        self.waits += r.waits;
         self.parks += r.parks;
         self.rounds += 1;
         // (the passes the files read back took: one, and each rerun a
@@ -9556,6 +9560,22 @@ impl Build {
                 (what, kind.to_owned(), field)
             })
             .collect()
+    }
+
+    /// The page chain: the wakes that ended at the last page's
+    /// finisher (its routine), from the first, in nodes. Each page's loop
+    /// rest waits for the routine of the page before it (no fold past a
+    /// give-back not known), so on a clean build it grows with the pages,
+    /// the same in DVI and PDF; the critical path traced from whichever
+    /// node committed last ([`Stats::critical_path`]) sees it only where
+    /// that node is on it.
+    #[must_use]
+    pub fn page_chain(&self) -> usize {
+        let e = &self.g.eng;
+        e.order(self.unit)
+            .into_iter()
+            .rfind(|&n| e.node_info(n).is_some_and(|i| i.op == "finish"))
+            .map_or(0, |n| e.chain_to(n).len())
     }
 
     /// The live nodes of operation `op`.

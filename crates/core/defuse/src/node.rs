@@ -763,6 +763,23 @@ impl ReadRec {
         }
     }
 
+    /// [`ReadRec::kind`] and [`ReadRec::path`] with one look in the table.
+    pub(crate) fn kind_path<'k>(&self, keys: &'k ReadKeys) -> (std::borrow::Cow<'k, ReadKind>, PathId) {
+        match self.k >> 61 {
+            Self::KEYED => {
+                let (k, p) = keys.get(u32::try_from(self.k & 0xffff_ffff).unwrap_or(u32::MAX));
+                (std::borrow::Cow::Borrowed(k), *p)
+            }
+            _ => (
+                std::borrow::Cow::Owned(ReadKind::Field {
+                    f: Field(ValueId::from_raw(self.key())),
+                    at: Anchor::Me,
+                }),
+                PathId::WHOLE,
+            ),
+        }
+    }
+
     pub(crate) fn path(&self, keys: &ReadKeys) -> PathId {
         match self.k >> 61 {
             Self::KEYED => keys.get(u32::try_from(self.k & 0xffff_ffff).unwrap_or(u32::MAX)).1,
@@ -808,10 +825,14 @@ const KEY_SHARDS: usize = 64;
 /// The slots of a thread's cache of read keys ([`ReadKeys::key`]).
 const KEY_CACHE: usize = 4096;
 
+/// A slot of a thread's cache of read keys: (engine, hash, key, what
+/// the key stands for), a copy, compared with no look in the table.
+type KeySlot = (u64, u64, u32, Option<(ReadKind, PathId)>);
+
 thread_local! {
-    /// A thread's last read keys, by hash: (engine, hash, key).
-    static KEY_CACHE_TLS: std::cell::RefCell<Box<[(u64, u64, u32)]>> =
-        std::cell::RefCell::new(vec![(0, 0, 0); KEY_CACHE].into_boxed_slice());
+    /// A thread's last read keys, by hash.
+    static KEY_CACHE_TLS: std::cell::RefCell<Box<[KeySlot]>> =
+        std::cell::RefCell::new(vec![(0, 0, 0, None); KEY_CACHE].into_boxed_slice());
 }
 
 /// A shard of [`ReadKeys`]' index.
@@ -839,25 +860,27 @@ impl ReadKeys {
         // takes no lock: every read of a run interns its key, and the
         // shards' read locks, taken by every thread at every read, cost a
         // twelfth of amsldoc's build at -j16)
-        let slot = usize::try_from(h).unwrap_or(0) % KEY_CACHE;
+        // (by the hash's high bits: an Fx hash's low bits follow the
+        // fields' low bits alone, and fields and nodes counted up share
+        // them, so slots by the low bits collide)
+        let slot = usize::try_from(h >> (64 - KEY_CACHE.trailing_zeros())).unwrap_or(0);
         if let Some(i) = KEY_CACHE_TLS.with(|c| {
-            let (owner, hh, i) = c.borrow()[slot];
-            (owner == self.id && hh == h && self.all.get(i as usize).is_some_and(|x| *x == k)).then_some(i)
+            let c = c.borrow();
+            let (owner, hh, i, x) = &c[slot];
+            (*owner == self.id && *hh == h && x.as_ref() == Some(&k)).then_some(*i)
         }) {
             return i;
         }
         let shard = &self.shards[usize::try_from(h >> 58).unwrap_or(0) % KEY_SHARDS];
-        if let Some(&i) = shard.read().get(&k) {
-            KEY_CACHE_TLS.with(|c| c.borrow_mut()[slot] = (self.id, h, i));
-            return i;
-        }
-        let mut w = shard.write();
-        if let Some(&i) = w.get(&k) {
-            return i;
-        }
-        let i = u32::try_from(self.all.push(k.clone())).expect("read keys");
-        w.insert(k, i);
-        KEY_CACHE_TLS.with(|c| c.borrow_mut()[slot] = (self.id, h, i));
+        let found = shard.read().get(&k).copied();
+        let i = found.unwrap_or_else(|| {
+            // (one probe: most keys missed are new, a node's own)
+            *shard
+                .write()
+                .entry(k.clone())
+                .or_insert_with_key(|k| u32::try_from(self.all.push(k.clone())).expect("read keys"))
+        });
+        KEY_CACHE_TLS.with(|c| c.borrow_mut()[slot] = (self.id, h, i, Some(k)));
         i
     }
 

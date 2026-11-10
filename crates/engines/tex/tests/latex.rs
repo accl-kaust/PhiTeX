@@ -1306,11 +1306,15 @@ fn latex_pictures_in_a_paragraph_are_children() {
         b.edit(&new);
         let pics = common::runs_of(&b, "pic");
         let cold = common::build(pdf_opts("parpics", &dir), Some(&prelude(true)), &new);
-        assert!(
-            cold_pics >= 2,
-            "the cold build placed {cold_pics} pictures as children"
-        );
-        assert_eq!(pics, 0, "edit {k}: {pics} pictures ran again");
+        // (with lists left open, `phitex_tex::boxscope_on`, a picture is
+        // no child: its statements are nodes; the PDF below is the check)
+        if !phitex_tex::boxscope_on() {
+            assert!(
+                cold_pics >= 2,
+                "the cold build placed {cold_pics} pictures as children"
+            );
+            assert_eq!(pics, 0, "edit {k}: {pics} pictures ran again");
+        }
         assert_eq!(b.pages().len(), before.len());
         if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
             panic!("edit {k} differs from a cold build: {d}");
@@ -1335,8 +1339,10 @@ fn latex_a_picture_asked_again_runs_again() {
     let mut b = common::build(pdf_opts("picck", &dir), Some(&prelude(true)), src);
     let before = b.pages();
     let cold_pics = common::runs_of(&b, "pic");
+    // (a picture is no child with lists left open: the PDFs are the check)
+    let children = !phitex_tex::boxscope_on();
     assert!(
-        cold_pics >= 1,
+        !children || cold_pics >= 1,
         "the cold build placed no picture as a child"
     );
     let gone = src.replace("\\gdef\\mymark{marked}", "");
@@ -1344,7 +1350,10 @@ fn latex_a_picture_asked_again_runs_again() {
     for (k, text) in [&gone, src, &other, src].into_iter().enumerate() {
         b.edit(text);
         let pics = common::runs_of(&b, "pic");
-        assert!(pics >= 1, "edit {k}: the picture did not run again");
+        assert!(
+            !children || pics >= 1,
+            "edit {k}: the picture did not run again"
+        );
         std::fs::write(dir.join("picck.tex"), text).expect("write");
         let cold = common::build(pdf_opts("picck", &dir), Some(&prelude(true)), text);
         assert_eq!(b.pages().len(), before.len());

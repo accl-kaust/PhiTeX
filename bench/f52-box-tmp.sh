@@ -35,9 +35,9 @@ Another paragraph.
 Last words.
 \end{document}
 TEX
-echo '[["s.tex","label one","label uno",2],["s.tex","label two","label dos",2],["s.tex","Most edits","Many edits",2],["s.tex","\\section{One}","\\section{Zero}Text.\\section{One}",2]]' > "$w/edits.json"
+echo '[["s.tex","label one","label uno",2],["s.tex","label two","label dos",2],["s.tex","Most edits","Many edits",2],["s.tex","And words after","And more words after",2],["s.tex","\\section{One}","\\section{Zero}Text.\\section{One}",2]]' > "$w/edits.json"
 for m in off box; do
-  e=(); [ $m = off ] || e=(PHITEX_BOXSCOPE=1 PHITEX_BOXSCOPE_TRACE=1 PHITEX_TEX_TIME=1)
+  e=(PHITEX_BOXSCOPE=0); [ $m = off ] || e=(PHITEX_BOXSCOPE=1 PHITEX_BOXSCOPE_TRACE=1 PHITEX_TEX_TIME=1)
   echo "== $m: clean build -j1"; rm -rf "$w/c" "$w/cache-$m"; cp -a "$d" "$w/c"
   ( cd "$w/c" && /usr/bin/time -f "%e s %M KB" env PHITEX_CACHE_DIR=$w/cache-$m "${e[@]}" "$bin" build --exact-pdf -j 1 s.tex > "$r/clean-$m.txt" 2>&1; echo "exit $?"; tail -1 "$r/clean-$m.txt"; md5sum s.pdf; cp s.pdf "$r/clean-$m.pdf" )
   echo "leaves: $(grep -c '^boxscope: node .* leaves' "$r/clean-$m.txt")"

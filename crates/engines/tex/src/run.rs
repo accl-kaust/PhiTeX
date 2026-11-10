@@ -1007,6 +1007,9 @@ pub(crate) struct Run<'c, 'a> {
     /// (`crate::boxscope`) a paragraph kind's state: the kind, whether
     /// its paragraph is still open, the list it is in and that list's mode.
     pub par_memo: Option<(ValueId, bool, i64, i32)>,
+    /// (`crate::boxscope`) a vertical kind's paragraph left open: the
+    /// kind and the paragraph's list, if one is open in it.
+    pub vpar_memo: Option<(ValueId, Option<i64>)>,
     /// `align_state` as this run has it (§309), once read.
     pub astate: Option<i64>,
     /// The alignments open in this run (`align_state`'s companion,
@@ -1441,6 +1444,7 @@ impl<'c, 'a> Run<'c, 'a> {
             elc: None,
             kind_memo: None,
             par_memo: None,
+            vpar_memo: None,
             astate: None,
             aopen: 0,
             bare: false,
@@ -6722,12 +6726,18 @@ impl<'c, 'a> Run<'c, 'a> {
                         // (lists of its own open: left, `crate::boxscope`)
                         if crate::exec::prof_flag!("PHITEX_BOXSCOPE_TRACE") {
                             eprintln!(
-                                "boxscope: node {} leaves at a give-back {:?}",
+                                "boxscope: node {} leaves at a give-back {:?} text {}",
                                 self.cx.node().raw(),
                                 self.nest
                                     .iter()
                                     .map(|l| (l.mode, l.group, l.owns))
-                                    .collect::<Vec<_>>()
+                                    .collect::<Vec<_>>(),
+                                self.cx.args().first().map_or_else(String::new, |&a| self
+                                    .v
+                                    .render(a)
+                                    .chars()
+                                    .take(90)
+                                    .collect::<String>())
                             );
                         }
                         self.leave_lists()?;
@@ -6804,12 +6814,18 @@ impl<'c, 'a> Run<'c, 'a> {
             if crate::boxscope::on() && !self.eof && self.can_leave_lists() {
                 if crate::exec::prof_flag!("PHITEX_BOXSCOPE_TRACE") {
                     eprintln!(
-                        "boxscope: node {} leaves {:?}",
+                        "boxscope: node {} leaves {:?} text {}",
                         self.cx.node().raw(),
                         self.nest
                             .iter()
                             .map(|l| (l.mode, l.group, l.owns))
-                            .collect::<Vec<_>>()
+                            .collect::<Vec<_>>(),
+                        self.cx.args().first().map_or_else(String::new, |&a| self
+                            .v
+                            .render(a)
+                            .chars()
+                            .take(90)
+                            .collect::<String>())
                     );
                 }
                 self.leave_lists()?;

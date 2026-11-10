@@ -60,6 +60,9 @@ pub struct Ctx<'a> {
     /// The node whose commit the run stopped to wait for (`Ctx::read`
     /// on its prediction at depth 0).
     pub(crate) wait_on: Option<NodeId>,
+    /// The stop for `wait_on` is a wait, the run having done nothing
+    /// ([`Ctx::wait_for_definer`]).
+    pub(crate) waits_only: bool,
     /// The run stopped at a read past the settling layer's frontier
     /// (`Ctx::set_frontier`): it runs again once the frontier passes it.
     pub(crate) wait_frontier: bool,
@@ -143,6 +146,7 @@ impl<'a> Ctx<'a> {
             last: me.run_record(),
             stuck: None,
             wait_on: None,
+            waits_only: false,
             wait_frontier: false,
             ahead_noted: false,
             goes_on: false,
@@ -1608,6 +1612,23 @@ impl<'a> Ctx<'a> {
             self.record(ReadKind::Hole, PathId::WHOLE, read::hole_value(self.eng, first));
         }
         Ok(h)
+    }
+
+    /// Where a node before me has not committed and its operation may
+    /// define one of `fields` ([`Ctx::hole_before_defining`]): I stop,
+    /// nothing filed, and run when it commits. With `nothing_done` (the
+    /// run has done nothing yet, its first read the one that waits) the
+    /// stop is a wait, not a run (`Report::waits`): a piece run beside
+    /// the text before it that reads a name that text defines, at once.
+    pub fn wait_for_definer(&mut self, fields: &[Field], nothing_done: bool) -> Result<(), Stop> {
+        self.check()?;
+        let (h, _) = read::on_one_layout(self.eng, || read::hole_before_defining(self.eng, self.me, fields));
+        if let Some(x) = h {
+            self.wait_on = Some(x);
+            self.waits_only = nothing_done;
+            return Err(stop());
+        }
+        Ok(())
     }
 
     /// Whether node `n` stands past the settling layer's frontier

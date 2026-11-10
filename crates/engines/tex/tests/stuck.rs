@@ -12,10 +12,20 @@ use std::time::{Duration, Instant};
 use phitex_tex::Options;
 
 fn build(name: &str, threads: usize, src: &str) -> (phitex_tex::Build, Duration) {
+    build_bound(name, threads, Duration::from_secs(3), src)
+}
+
+/// [`build`] with the clock's bound at `bound`.
+fn build_bound(
+    name: &str,
+    threads: usize,
+    bound: Duration,
+    src: &str,
+) -> (phitex_tex::Build, Duration) {
     let dir = common::scratch(&format!("stuck-{name}-{threads}"));
     let opts = Options {
         threads: Some(threads),
-        stuck_after: Some(Duration::from_secs(3)),
+        stuck_after: Some(bound),
         ..common::options("./d.tex", "d", "", &dir)
     };
     let t = Instant::now();
@@ -92,7 +102,9 @@ fn a_run_that_makes_no_progress_ends_the_build_stuck() {
             "Before the loop.\n\nAfter it.\n\n\\bye\n",
         );
         assert_eq!(stuck(&b), None, "-j{threads}: the cold build ends");
-        b.set_stuck_after(Some(Duration::from_secs(3)));
+        // (1 s: the edit is found stuck at the bound, so the bound is
+        // the part's time)
+        b.set_stuck_after(Some(Duration::from_secs(1)));
         let t = Instant::now();
         b.edit("Before the loop.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\iftrue\\repeat\n\nAfter it.\n\n\\bye\n");
         let t = t.elapsed();
@@ -108,12 +120,16 @@ fn a_run_that_makes_no_progress_ends_the_build_stuck() {
     }
     // (a cold build that computes, assigning, reading no new line for
     // longer than the bound, then ends: not stuck, as pdflatex would
-    // finish it; lisp-on-tex's div2 was stopped so after 300 s)
+    // finish it; lisp-on-tex's div2 was stopped so after 300 s. The bound
+    // 0.25 s and 2 000 000 steps, 1.5 s on mc: past the bound on a
+    // machine six times as fast. With the 3 s bound it took 40 000 000
+    // steps, 30 s at each thread count, the test's 70 s)
     for threads in [1, 8] {
-        let (b, t) = build(
+        let (b, t) = build_bound(
             "compute",
             threads,
-            "Before.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\ifnum\\count1<40000000 \\repeat Counted \\the\\count1.\n\n\\bye\n",
+            Duration::from_millis(250),
+            "Before.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\ifnum\\count1<2000000 \\repeat Counted \\the\\count1.\n\n\\bye\n",
         );
         assert_eq!(stuck(&b), None, "-j{threads}: after {t:?}");
         assert!(!b.output().0.is_empty(), "-j{threads}: the output is made");

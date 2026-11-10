@@ -87,6 +87,14 @@ pub use exec::{
     Progress, SpawnWorker, StreamHook, StreamedPage, cpus as exec_cpus, set_spawn_worker,
 };
 pub use native::NativeFonts;
+
+/// Whether lists are left open across nodes (`PHITEX_BOXSCOPE`,
+/// docs/spec-slices.md §6.1): pictures are then no children, their
+/// statements nodes of their own.
+#[must_use]
+pub fn boxscope_on() -> bool {
+    boxscope::on()
+}
 pub use origins::{OriginsSnapshot, PageOrigins};
 pub use phitex_otf::index::FontIndex;
 pub use phitex_otf::{FontSource, KpseFormat};

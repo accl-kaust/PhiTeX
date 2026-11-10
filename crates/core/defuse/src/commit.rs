@@ -963,7 +963,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 })
                 .map(|x| {
                     let mut y = *x;
-                    y.set_filed(r.state.is_some() && stays_filed(keys, x));
+                    y.set_filed(r.state.is_some() && stays_filed(&x.kind(keys), x));
                     y
                 }),
         );
@@ -1218,12 +1218,13 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // (only a run that parks: a next run going on from it keeps its
         // reads; any other's stand for its commit, and a walk asks no more
         // of them than their serial)
-        let serial = if parks && stays_filed(&eng.read_keys, r) {
+        let (kind, path) = r.kind_path(&eng.read_keys);
+        let serial = if parks && stays_filed(&kind, r) {
             serial | FILED
         } else {
             serial
         };
-        match &*r.kind(&eng.read_keys) {
+        match &*kind {
             ReadKind::Field { f, at } => {
                 let (anchor, inclusive) = match *at {
                     Anchor::Me => (node.id, false),
@@ -1231,8 +1232,8 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     Anchor::AfterOwn(n) => (n, true),
                     Anchor::End(_) | Anchor::Final => (node.id, true),
                 };
-                let rec = Reader::new(node.id, serial, anchor, inclusive, r.path(&eng.read_keys), r.seen());
-                if !filed_once.insert((*f, serial, anchor, inclusive, r.path(&eng.read_keys), r.seen())) {
+                let rec = Reader::new(node.id, serial, anchor, inclusive, path, r.seen());
+                if !filed_once.insert((*f, serial, anchor, inclusive, path, r.seen())) {
                     continue;
                 }
                 // (a derived read's witness, kept from an earlier run (one
@@ -1240,7 +1241,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 // name gives now as well, before the lock, so a change of
                 // that field asks it again)
                 if matches!(at, Anchor::Me | Anchor::Before(_) | Anchor::AfterOwn(_))
-                    && let Some(spec) = read::derived_spec(eng, r.path(&eng.read_keys))
+                    && let Some(spec) = read::derived_spec(eng, path)
                     && read::derived_base(eng.values(), spec) != Some(*f)
                     && let Some(g) = read::derived_field_at(eng, spec, anchor, inclusive)
                     && g != *f
@@ -1260,7 +1261,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 crate::engine::EnvReader {
                     node: node.id,
                     serial,
-                    path: r.path(&eng.read_keys),
+                    path,
                     seen: r.seen(),
                 },
             )),
@@ -1282,7 +1283,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     range_seen.push(Vec::new());
                     range_reads.len() - 1
                 });
-                range_seen[i].push((r.path(&eng.read_keys), r.seen()));
+                range_seen[i].push((path, r.seen()));
             }
             ReadKind::Next { f, after } => {
                 let i = *range_at.entry((*f, *after, None, true, false)).or_insert_with(|| {
@@ -1314,7 +1315,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     range_seen.push(Vec::new());
                     range_reads.len() - 1
                 });
-                range_seen[i].push((r.path(&eng.read_keys), r.seen()));
+                range_seen[i].push((path, r.seen()));
                 // (the range is filed as this search found it, its stop or
                 // the contribution it answers: a run that saw another
                 // answer is refuted here, not later by a search of its
@@ -1324,9 +1325,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 // range filed past what it read; amsldoc -j16 ended with 0
                 // pages, the loop's rest on "none after 72" with node 75's
                 // contribution filed, 10 builds in 600 on one loaded node)
-                if refuted.is_none()
-                    && read::apply_path(eng, next_answers.get(&i).copied().flatten(), r.path(&eng.read_keys))
-                        != r.seen()
+                if refuted.is_none() && read::apply_path(eng, next_answers.get(&i).copied().flatten(), path) != r.seen()
                 {
                     refuted = Some(ri);
                 }
@@ -1887,21 +1886,20 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             if r.filed() && !file_all {
                 continue;
             }
-            if let ReadKind::Field { f, at: Anchor::Me } = *r.kind(&eng.read_keys)
+            let (kind, path) = r.kind_path(&eng.read_keys);
+            if let ReadKind::Field { f, at: Anchor::Me } = *kind
                 && plain
-                && !read::client_path(eng, r.path(&eng.read_keys))
+                && !read::client_path(eng, path)
                 && let Some((_, d)) = Segment::reaching(&inner, f, pos, false)
             {
-                if refuted.is_none()
-                    && through(eng, Reaching::of(&d.plain(&eng.values)), r.path(&eng.read_keys)) != r.seen()
-                {
+                if refuted.is_none() && through(eng, Reaching::of(&d.plain(&eng.values)), path) != r.seen() {
                     note_refute(
                         eng,
                         f,
                         node.id,
                         Some(d.by),
                         r.seen(),
-                        through(eng, Reaching::of(&d.plain(&eng.values)), r.path(&eng.read_keys)),
+                        through(eng, Reaching::of(&d.plain(&eng.values)), path),
                     );
                     refuted = Some(i);
                 }
@@ -2745,8 +2743,8 @@ fn withdraws(eng: &Engine, node: &Node) -> bool {
 /// on from it ([`crate::node::ReadRec::filed`]): not a search that met a
 /// hole or the end, which the next run makes again, nor the reads that
 /// are not filed as readers.
-fn stays_filed(keys: &crate::node::ReadKeys, r: &crate::node::ReadRec) -> bool {
-    match &*r.kind(keys) {
+fn stays_filed(kind: &ReadKind, r: &crate::node::ReadRec) -> bool {
+    match kind {
         ReadKind::Field { .. } | ReadKind::Env { .. } | ReadKind::Fold { .. } => true,
         ReadKind::Next { .. } => r.seen().is_some(),
         ReadKind::Placed { .. } | ReadKind::Following { .. } | ReadKind::Hole => false,

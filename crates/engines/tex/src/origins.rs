@@ -272,6 +272,11 @@ pub(crate) fn keep(inst: u64, id: u64, g: PageGlyphs) {
     m.insert((inst, id), Arc::new(g));
 }
 
+/// Page `id`'s glyphs (value store `inst`) dropped: its record is gone.
+pub(crate) fn forget(inst: u64, id: u64) {
+    glyph_memo().locked().remove(&(inst, id));
+}
+
 /// Page `id`'s glyphs (value store `inst`), if kept.
 pub(crate) fn kept(inst: u64, id: u64) -> Option<Arc<PageGlyphs>> {
     glyph_memo().locked().get(&(inst, id)).cloned()
