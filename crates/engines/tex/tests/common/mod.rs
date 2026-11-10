@@ -244,7 +244,7 @@ pub fn edit_cost_failures(b: &Build, touched: u64, before: &[u64]) -> Vec<String
         }
     }
     #[allow(clippy::cast_precision_loss)]
-    let per_node = b.stats.runs as f64 / b.stats.nodes_run.max(1) as f64;
+    let per_node = per_node(b);
     if per_node > 1.1 {
         f.push(format!("runs a node {per_node:.2}"));
     }
@@ -287,8 +287,12 @@ pub struct Census {
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn per_node(b: &Build) -> f64 {
-    b.stats.runs as f64 / (b.stats.nodes_run.max(1) as f64)
+/// Runs a node, a resumption not counted: a run going on from where
+/// its node parked, woken by the answer it parked on (TeX's page builder
+/// going on after each paragraph, `Stats::resumptions`), redoes nothing.
+/// Since 95f39396e `Stats::runs` counts them; this measures reruns.
+pub fn per_node(b: &Build) -> f64 {
+    b.stats.runs.saturating_sub(b.stats.resumptions) as f64 / (b.stats.nodes_run.max(1) as f64)
 }
 
 fn causes(b: &Build) -> String {

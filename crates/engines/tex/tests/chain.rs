@@ -18,11 +18,14 @@ fn target_failures(name: &str, b: &phitex_tex::Build) -> Vec<String> {
     }
     let pages = b.pages().len();
     // the page chain is the design (docs/TARGET_GRAPH.md, Heights): no
-    // bound on its height in nodes; a node runs once (a park resumes)
+    // bound on its height in nodes; a node runs once (a park resumes:
+    // its resumptions, `Stats::resumptions`, are not runs again)
     let (runs, nodes) = (b.stats.runs, b.stats.nodes_run);
-    if runs * 10 > nodes * 11 {
+    let again = runs.saturating_sub(b.stats.resumptions);
+    if again * 10 > nodes * 11 {
         out.push(format!(
-            "{name}: {runs} runs for {nodes} nodes (> 1.1 a node)"
+            "{name}: {again} runs for {nodes} nodes (> 1.1 a node; {} resumptions besides)",
+            b.stats.resumptions
         ));
     }
     // a region runs as one node: at most a few nodes per region (the
