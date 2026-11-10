@@ -1873,7 +1873,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 u.extend(changed_defs.iter().copied());
                 u.sort_unstable();
                 u.dedup();
+                if !u.is_empty() {
+                    node.transient.store(true, Ordering::Release);
+                }
             } else if !u.is_empty() {
+                node.transient.store(false, Ordering::Release);
                 to_walk.append(&mut u);
                 to_walk.sort_unstable();
                 to_walk.dedup();
@@ -2723,7 +2727,11 @@ pub(crate) fn commit_stood(
 /// the walk wakes it if the value has moved since. A node gone was walked
 /// by its removal, which flushed this list first.
 pub(crate) fn flush_unwalked(eng: &Engine, w: Option<&Worker>, node: &Node, st: &mut CommitStats) {
-    let fs = std::mem::take(&mut *node.unwalked.lock());
+    let fs = {
+        let mut u = node.unwalked.lock();
+        node.transient.store(false, Ordering::Release);
+        std::mem::take(&mut *u)
+    };
     if fs.is_empty() {
         return;
     }

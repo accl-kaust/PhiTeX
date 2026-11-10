@@ -455,6 +455,23 @@ impl<'a> Ctx<'a> {
     /// loop is its finisher's: TeX's own chain from a routine to the text
     /// after it.
     fn wait_for_settling(&mut self, r: &crate::read::Reaching) -> Result<(), Stop> {
+        // (a definition a stale run committed, its node to run again
+        // (`Node::unwalked`): the run waits for that node's next commit,
+        // instead of going on on a value that commit takes back and
+        // running again. A page's routine ran on a float list a piece
+        // re-asked mid-run had filed, every routine after it again with
+        // it: floats2col at -j16, 765 and 3 151 finisher runs for 194,
+        // accl 27139, 27141)
+        if let Some(by) = r.by
+            && by != self.me.id
+            && self
+                .eng
+                .placed_node(by)
+                .is_some_and(|x| x.transient.load(std::sync::atomic::Ordering::Acquire))
+        {
+            self.wait_on = Some(by);
+            return Err(stop());
+        }
         if !r.provisional {
             return Ok(());
         }

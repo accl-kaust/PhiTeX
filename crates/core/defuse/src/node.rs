@@ -169,6 +169,9 @@ pub(crate) struct Node {
     /// next commit, of whatever kind, or its removal walks them
     /// (`commit::flush_unwalked`), against what each reader read.
     pub(crate) unwalked: Mx<Vec<Field>>,
+    /// `unwalked` is not empty: what the node has filed is its stale
+    /// run's, and its next commit is coming (`Ctx::wait_for_settling`).
+    pub(crate) transient: AtomicBool,
     /// Its runs ahead of the frontier refuted by the page layer
     /// (`commit::reask_reader`; `PHITEX_WINDOW_WAVE`).
     pub(crate) layer_refuted: AtomicU32,
@@ -313,6 +316,7 @@ impl Node {
             window_pass: AtomicBool::new(false),
             frontier_pass: AtomicBool::new(false),
             unwalked: Mx::new(Vec::new()),
+            transient: AtomicBool::new(false),
             layer_refuted: AtomicU32::new(0),
             back_frontier: Mx::new(None),
             asks: Mx::new(Vec::new()),
