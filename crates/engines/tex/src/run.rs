@@ -1010,6 +1010,11 @@ pub(crate) struct Run<'c, 'a> {
     /// (`crate::boxscope`) a vertical kind's paragraph left open: the
     /// kind and the paragraph's list, if one is open in it.
     pub vpar_memo: Option<(ValueId, Option<i64>)>,
+    /// (`crate::boxscope`) a list left open folded so far
+    /// ([`Run::left_list_fold`]): its id, its field's fold before this
+    /// run, how many of this run's contributions to it and the last of
+    /// them, the state and the items.
+    pub left_memo: Option<crate::boxscope::LeftMemo>,
     /// `align_state` as this run has it (§309), once read.
     pub astate: Option<i64>,
     /// The alignments open in this run (`align_state`'s companion,
@@ -1445,6 +1450,7 @@ impl<'c, 'a> Run<'c, 'a> {
             kind_memo: None,
             par_memo: None,
             vpar_memo: None,
+            left_memo: None,
             astate: None,
             aopen: 0,
             bare: false,
@@ -4991,6 +4997,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // where it reads the text it wrote, `start_input`)
         self.muts += 1;
         self.contribs.truncate(nc);
+        self.left_memo = None;
         self.kids.truncate(nk);
         self.nest.truncate(nest_len);
         self.conds = conds;
@@ -7227,6 +7234,7 @@ impl<'c, 'a> Run<'c, 'a> {
         // (a finisher's pages leave as their shapes, `pages`: their
         // writers read the lines, `crate::pdfout::PdfPage`)
         let pages_f = self.v.field("pages");
+        self.left_memo = None;
         for (f, x) in std::mem::take(&mut self.contribs) {
             let x = if f == pages_f { x } else { self.unseal(x) };
             self.cx.contribute(f, x);

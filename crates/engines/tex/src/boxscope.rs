@@ -77,6 +77,19 @@ fn first_free(depth: i64, base: &Mode) -> usize {
     0
 }
 
+/// The name of the token that appends a box closed with the engine
+/// scope it was in, the closed list's id after it
+/// ([`Run::box_end_outside`]).
+pub(crate) const BOX_END: &str = "\u{10FFFE}boxend:";
+
+/// The token's `chr` (`cmd::IGNORE`; an alignment's `endv` has its
+/// column there, never negative).
+pub(crate) const BOX_END_CHR: i32 = -0xb0e;
+
+fn box_end_field(lid: i64) -> String {
+    format!("boxend:{lid}")
+}
+
 fn par_field(vlid: i64) -> String {
     format!("par:{vlid}")
 }
@@ -115,6 +128,38 @@ impl phitex_defuse::Monoid for ResetMonoid {
         }
         let (ra, sa) = parts(v, a);
         v.list(vec![v.int(i64::from(ra)), v.seq_concat(sa, sb)])
+    }
+}
+
+/// A list left open folded so far by this run ([`Run::left_list_fold`]).
+pub(crate) struct LeftMemo {
+    lid: i64,
+    base: ValueId,
+    n: usize,
+    last: ValueId,
+    st: FoldState,
+    out: Vec<ValueId>,
+}
+
+/// The entries `seq` of a list left open folded into `st` and `out`: a
+/// start record's items, any other item itself.
+fn fold_seq(
+    v: &phitex_defuse::Values,
+    lid: i64,
+    start: ValueId,
+    seq: ValueId,
+    st: &mut FoldState,
+    out: &mut Vec<ValueId>,
+) {
+    for x in v.seq_to_vec(seq) {
+        let xs = list_of(v, x);
+        if xs.first() == Some(&start) {
+            for &y in &xs[1..] {
+                fold_item(v, lid, y, st, out);
+            }
+        } else {
+            fold_item(v, lid, x, st, out);
+        }
     }
 }
 
@@ -265,7 +310,8 @@ impl Run<'_, '_> {
 
     /// [`Run::list_fold`] of list `lid` left open: the entries of its
     /// field from the last start on, then this run's own, folded into
-    /// `st` and `out`.
+    /// `st` and `out`. (Folded once per run: a later read folds only the
+    /// run's contributions since, [`LeftMemo`].)
     pub(crate) fn left_list_fold(
         &mut self,
         lid: i64,
@@ -273,29 +319,51 @@ impl Run<'_, '_> {
         out: &mut Vec<ValueId>,
     ) -> R<()> {
         let v = self.v;
-        let name = items_field(lid);
-        let f = v.field(&name);
-        // (the fold from the unit's start: a start discards what came
-        // before it, [`ResetMonoid`]; then this run's own the same way)
-        let m = ResetMonoid;
-        let mut acc = self.cx.fold(f, None, None)?;
-        for &(g, x) in &self.contribs {
-            if g == f {
-                acc = phitex_defuse::Monoid::combine(&m, v, acc, x);
-            }
-        }
+        let f = v.field(&items_field(lid));
+        let base = self.cx.fold(f, None, None)?;
+        let own: Vec<ValueId> = self
+            .contribs
+            .iter()
+            .filter(|(g, _)| *g == f)
+            .map(|(_, x)| *x)
+            .collect();
         let start = v.str(START);
-        let (_, seq) = parts(v, acc);
-        for x in v.seq_to_vec(seq) {
-            let xs = list_of(v, x);
-            if xs.first() == Some(&start) {
-                for &y in &xs[1..] {
-                    fold_item(v, lid, y, st, out);
-                }
-            } else {
-                fold_item(v, lid, x, st, out);
+        let init = *st;
+        let (mut s, mut o, from) = match self.left_memo.take() {
+            Some(m)
+                if m.lid == lid
+                    && m.base == base
+                    && m.n <= own.len()
+                    && (m.n == 0 || m.last == own[m.n - 1]) =>
+            {
+                (m.st, m.out, m.n)
             }
+            _ => {
+                // (the fold from the unit's start: a start discards what
+                // came before it, [`ResetMonoid`])
+                let (mut s, mut o) = (init, out.clone());
+                fold_seq(v, lid, start, parts(v, base).1, &mut s, &mut o);
+                (s, o, 0)
+            }
+        };
+        for &x in &own[from..] {
+            let (reset, seq) = parts(v, x);
+            if reset {
+                s = init;
+                o.clear();
+            }
+            fold_seq(v, lid, start, seq, &mut s, &mut o);
         }
+        *st = s;
+        out.clone_from(&o);
+        self.left_memo = Some(LeftMemo {
+            lid,
+            base,
+            n: own.len(),
+            last: own.last().copied().unwrap_or(ValueId::UNIT),
+            st: s,
+            out: o,
+        });
         Ok(())
     }
 
@@ -407,6 +475,52 @@ impl Run<'_, '_> {
             }
         }
         Ok(Some(crate::nest::of_values(f.items)))
+    }
+}
+
+impl Run<'_, '_> {
+    /// A box packaged by a run that closed the engine scope it was in
+    /// (§1086, [`crate::run::CLOSE`]): the run's reads are the scope's
+    /// to its end, so the box, its context and its adjustments go to the
+    /// field `boxend:<list>` and a token reads them in the node after
+    /// it, outside the scope ([`Run::box_end_left`]).
+    pub(crate) fn box_end_outside(&mut self, lid: i64, ctx: i64, b: ValueId, adj: Vec<ValueId>) {
+        let v = self.v;
+        let mut xs = vec![v.int(ctx), b];
+        xs.extend(adj);
+        self.set(&box_end_field(lid), v.list(xs), true);
+        self.back_input(crate::val::Tok::cs(&format!("{BOX_END}{lid}")));
+    }
+
+    /// `box_end` (§1075) of a box [`Run::box_end_outside`] left, in the
+    /// mode outside the scope it closed; its adjustments after it, then
+    /// the page builder (§1076).
+    pub(crate) fn box_end_left(&mut self, md: &Mode) -> R<()> {
+        let v = self.v;
+        let lid = self
+            .cur
+            .tok
+            .as_cs()
+            .and_then(|n| n.strip_prefix(BOX_END).and_then(|k| k.parse::<i64>().ok()));
+        let Some(lid) = lid else {
+            return Ok(());
+        };
+        let Some(rec) = self.get(&box_end_field(lid))? else {
+            return Ok(());
+        };
+        let xs = list_of(v, rec);
+        let (Some(&c), Some(&b)) = (xs.first(), xs.get(1)) else {
+            return Ok(());
+        };
+        let ctx = int_of(v, c);
+        self.box_end_in(md, ctx, Some(b), false)?;
+        for &a in &xs[2..] {
+            self.append(md.vlid, a);
+        }
+        if ctx < crate::build::BOX_FLAG && md.m > 0 {
+            self.finish_candidate()?;
+        }
+        Ok(())
     }
 }
 

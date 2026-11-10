@@ -155,12 +155,23 @@ impl Run<'_, '_> {
         );
     }
 
-    /// (observe) Whether `PHITEX_CMD_TRACE` names this run's node.
+    /// (observe) Whether `PHITEX_CMD_TRACE` (`all`, or node ids and
+    /// ranges `a-b` apart by commas or colons) names this run's node.
     pub(crate) fn cmd_traced(&self) -> bool {
         let Some(want) = crate::exec::env_str!("PHITEX_CMD_TRACE") else {
             return false;
         };
-        want == "all" || want.parse::<u64>().ok() == Some(self.cx.node().raw())
+        let node = self.cx.node().raw();
+        want == "all"
+            || want
+                .split([',', ':'])
+                .any(|w| match w.trim().split_once('-') {
+                    Some((a, b)) => {
+                        a.parse::<u64>().is_ok_and(|a| a <= node)
+                            && b.parse::<u64>().is_ok_and(|b| node <= b)
+                    }
+                    None => w.trim().parse::<u64>().ok() == Some(node),
+                })
     }
 
     /// The commands between two heartbeat ticks ([`Run::heartbeat_tick`]).
@@ -542,6 +553,9 @@ impl Run<'_, '_> {
         }
         match c {
             cmd::RELAX => {}
+            cmd::IGNORE if self.cur.chr == crate::boxscope::BOX_END_CHR => {
+                self.box_end_left(&md)?;
+            }
             cmd::IGNORE => self.do_endv(&md)?,
             cmd::NO_ALIGN if self.cur.chr == 1 => self.align_peek(&md)?,
             cmd::SPACER => {

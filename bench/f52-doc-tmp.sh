@@ -3,7 +3,7 @@
 # doc tree, ACCL_IMAGE=phitex-ci-2026-09-25): md5s, the first difference,
 # where lists are left.   bench/f52-doc-tmp.sh latex/tikz2d-fr tikz2d-fr-doc.tex
 set -u
-dir=$1 main=$2
+dir=$1 main=$2 jn=${3:-1}
 cd "$w/phitex"
 mkdir -p "$w/b" "$r"; bin=$w/b/phitex
 CARGO_TARGET_DIR=$w/target-prof cargo build -q --release -p phitex-cli \
@@ -13,7 +13,7 @@ export SOURCE_DATE_EPOCH=1758800000 FORCE_SOURCE_DATE=1 TZ=UTC NO_COLOR=1
 for m in off box; do
   e=(PHITEX_BOXSCOPE=0); [ $m = off ] || e=(PHITEX_BOXSCOPE=1 PHITEX_BOXSCOPE_TRACE=1)
   rm -rf "$w/d-$m"; cp -a "/usr/share/doc/texlive/$dir" "$w/d-$m" || exit 1
-  ( cd "$w/d-$m" && env PHITEX_CACHE_DIR=$w/cache-$m "${e[@]}" "$bin" build "$main" --exact-pdf -j 1 > "$r/$m.txt" 2>&1; echo "$m exit $? $(md5sum < "${main%.tex}.pdf")"; cp "${main%.tex}.pdf" "$r/$m.pdf" )
+  ( cd "$w/d-$m" && env PHITEX_CACHE_DIR=$w/cache-$m "${e[@]}" "$bin" build "$main" --exact-pdf --engine "${ENG:-pdflatex}" -j "$jn" > "$r/$m.txt" 2>&1; echo "$m exit $? $(md5sum < "${main%.tex}.pdf")"; cp "${main%.tex}.pdf" "$r/$m.pdf" )
 done
 python3 -I - "$r/off.pdf" "$r/box.pdf" <<'PY'
 import sys, zlib, re

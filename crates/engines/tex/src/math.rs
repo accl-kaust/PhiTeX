@@ -318,6 +318,11 @@ impl Run<'_, '_> {
             self.last_par_place = l.mode_place;
         } else if let Some(k) = self.par_level_under_groups() {
             self.end_graf_under_groups(k)?;
+        } else {
+            // a paragraph another node left open (`crate::boxscope`)
+            // ends here as at a `\par`: its items are broken below, the
+            // paragraph after the display a new one (§1200)
+            let _ = self.end_left_paragraph(md)?;
         }
         let w = if items.is_empty() {
             -MAX_DIMEN

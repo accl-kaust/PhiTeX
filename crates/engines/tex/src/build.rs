@@ -27,7 +27,7 @@ use crate::run::{R, Run};
 use crate::val::{Tok, cmd, glue_of, group, int_of, list_of};
 
 pub(crate) const IGNORE_DEPTH: i32 = -65_536_000;
-const BOX_FLAG: i64 = 0o10000000000;
+pub(crate) const BOX_FLAG: i64 = 0o10000000000;
 
 /// What a command reads of its surroundings: the mode (tex.web's
 /// numbers: ±1 vertical, ±102 horizontal, ±203 math), the list it builds
@@ -2514,6 +2514,17 @@ impl Run<'_, '_> {
                     let put = self.ops.put;
                     self.kid(put, vec![v.list(vec![def]), v.list(Vec::new())]);
                     let _ = SHIP_OUT_FLAG;
+                } else if self.effect == crate::run::CLOSE {
+                    // the box goes on outside the scope closed: this run's
+                    // reads are inside it (`\baselineskip` for the
+                    // interline glue, §679), the following node's not
+                    let adj = packed
+                        .adjustments
+                        .iter()
+                        .map(|a| nodes::encode(v, a, &side))
+                        .collect();
+                    self.box_end_outside(md.lid, ctx, b, adj);
+                    return Ok(());
                 } else {
                     self.box_end_in(&outer, ctx, Some(b), false)?;
                 }
