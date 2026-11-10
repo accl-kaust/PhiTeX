@@ -34,7 +34,7 @@
 use crate::build::{FoldState, Mode, fold_item, sf_value};
 use crate::run::{R, Run};
 use crate::val::{group, int_of, list_of};
-use phitex_defuse::ValueId;
+use phitex_defuse::{NodeId, ValueId};
 
 /// The ids of lists left open are at or below this.
 const BASE: i64 = -(1i64 << 55);
@@ -43,9 +43,7 @@ const BASE: i64 = -(1i64 << 55);
 /// `PHITEX_BOXSCOPE=0` (or empty).
 pub(crate) fn on() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| {
-        std::env::var_os("PHITEX_BOXSCOPE").is_some_and(|v| !v.is_empty() && v != "0")
-    })
+    *F.get_or_init(|| std::env::var_os("PHITEX_BOXSCOPE").is_some_and(|v| !v.is_empty() && v != "0"))
 }
 
 /// Whether `lid` is a list left open by some node.
@@ -131,6 +129,18 @@ impl phitex_defuse::Monoid for ResetMonoid {
     }
 }
 
+/// Where a scope kind was defined, for the walk to its parents
+/// ([`Run::par_kind`]).
+#[derive(Clone, Copy)]
+pub(crate) enum KindFrom {
+    /// The scope this node runs in (its opener read before this node).
+    Here,
+    /// By this node.
+    Node(NodeId),
+    /// Not known: its parents are not walked.
+    Unknown,
+}
+
 /// A list left open folded so far by this run ([`Run::left_list_fold`]).
 pub(crate) struct LeftMemo {
     lid: i64,
@@ -184,8 +194,11 @@ fn is_box_group(g: i64) -> bool {
 
 impl Run<'_, '_> {
     /// Whether the run's open levels can all be left (`leave_lists`): a
-    /// text piece or a resume with no conditional, alignment, scope effect,
-    /// picture child or character run pending; the innermost level a
+    /// text piece or a resume with a box being built among its lists and
+    /// no conditional, scope effect or append
+    /// pending, nothing half done ([`Run::open_state_refusal`]: a word whose
+    /// lookahead met the text's end, a scan, an alignment, a picture
+    /// child, …); the innermost level a
     /// group; each level a group sharing the list below, a box's group, or
     /// a paragraph with a group above it (the paragraph is `par:<list>`,
     /// which a kind in that list reads, [`Run::vert_kind`]: the close of a
@@ -202,18 +215,27 @@ impl Run<'_, '_> {
             "not a text's run"
         } else if self.nest.is_empty() || !self.nest.iter().any(|l| l.owns) {
             "no list open"
+        } else if !self.nest.iter().any(|l| l.owns && is_box_group(l.group)) {
+            // (what leaving pays for is a box's contents run as nodes of
+            // their own, a picture's statements; a paragraph under groups
+            // alone is broken whole at its end whatever its nodes, and
+            // each slice of it left would be one more node: huaz's
+            // `\lstinline` groups, 2771 nodes against 725)
+            "no box open"
         } else if self.nest.len() >= usize::from(u8::MAX - 2) {
             "too deep"
         } else if !self.conds.is_empty() {
             "a conditional open"
         } else if self.effect != phitex_defuse::Effect::None {
             "a scope effect"
-        } else if self.aopen != 0 {
-            "an alignment"
-        } else if self.pic_child.is_some() {
-            "a picture child"
-        } else if self.chars_live.is_some() {
-            "a character run"
+        } else if let Some(why) = self.open_state_refusal() {
+            why
+        } else if self.cut.is_some() || self.close_cont.is_some() || self.tool_cut.is_some() {
+            "cut already"
+        } else if !self.ins_pending.is_empty() {
+            // (insertions waiting for the page builder: only this run
+            // holds them, as a continuation's cut would carry them)
+            "insertions pending"
         } else if !self.appending.is_empty() || !self.appending_vals.is_empty() {
             "appends pending"
         } else if self.nest.last().is_some_and(|l| l.group == 0) {
@@ -371,7 +393,11 @@ impl Run<'_, '_> {
     /// in: `md`'s list stays it while `par:<list below>` names it, with
     /// the list below as its vertical list; else the paragraph ended
     /// (a `\par` inside the group) and `md` is that vertical list's.
-    pub(crate) fn par_kind(&mut self, k: ValueId, md: &mut Mode) -> R<()> {
+    ///
+    /// `from`: where `k` was defined ([`KindFrom`]). A frame 0's parent is not carried
+    /// ([`crate::build::outer_before_opener`]): it is the kind that
+    /// reached the frame's opener ([`Run::kind_before`]), and so outward.
+    pub(crate) fn par_kind(&mut self, k: ValueId, from: KindFrom, md: &mut Mode) -> R<()> {
         if let Some((kk, open, vlid, vm)) = self.par_memo
             && kk == k
         {
@@ -379,12 +405,26 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let v = self.v;
+        let marker = crate::build::outer_before_opener(v);
         // the list below: the first kind outward in another list
         let mut cur = k;
+        let mut from = from;
         let (vlid, vm) = loop {
             let xs = list_of(v, cur);
             let Some(&p) = xs.get(5) else {
                 break (0, 1);
+            };
+            let p = if p == marker {
+                let opener = match from {
+                    KindFrom::Here => None,
+                    KindFrom::Node(n) => Some(n),
+                    KindFrom::Unknown => break (0, 1),
+                };
+                let (x, d) = self.kind_before(opener)?;
+                from = d.map_or(KindFrom::Unknown, KindFrom::Node);
+                x
+            } else {
+                p
             };
             if p == ValueId::UNIT {
                 break (0, 1);

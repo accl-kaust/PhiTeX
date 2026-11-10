@@ -235,9 +235,19 @@ So the two are left apart (`crate::boxscope`):
   that ends it folds them;
 - a paragraph is left only under a group (the group's kind names it),
   its own parameters (language, hyphen minima, `clang`) a field
-  `par:<list it is in>`, read only where the close of the group above
-  it leaves the paragraph on top again: that run owns it again and
-  goes on as today.
+  `par:<list it is in>`, which every kind in the list below reads
+  (`Run::par_kind`, `Run::vert_kind`);
+- lists are left only where a box is being built among them: what
+  leaving pays for is a box's contents run as nodes of their own. A
+  paragraph under groups alone is broken whole at its end whatever its
+  nodes, and each slice of it left would be one node more (huaz's
+  `\lstinline` groups: 2771 nodes against 725, its clean build twice
+  as long);
+- a run stops to leave its lists only where it could stop for a
+  continuation: nothing half done that only it holds, a word whose
+  lookahead met the text's end among them (`Run::open_state_refusal`); and a
+  character run's lookahead at its text's end reads the next slice on
+  whatever the run has open, the paragraph being another node's.
 
 The picture's text is cut at its statements (after `\begin{tikzpicture}`,
 after each `;` or brace group followed by a command, depth 0). A run
@@ -258,7 +268,16 @@ with the same items wakes no reader of the list. A `\par` inside
 a group in a paragraph left open ends the paragraph
 (`Run::end_left_paragraph`): `par:<list>` cleared, and every kind in it
 reads that field (`Run::par_kind`), so the groups go on in the vertical
-list as in TeX.
+list as in TeX; a display (`$$`, §1145) in such a paragraph ends it the
+same way before breaking its lines.
+
+A box whose group a later node closes is packaged there, but appended
+in the node after it: the close ends the engine scope, and the closing
+run's reads are the scope's to its end, `\baselineskip` for the
+interline glue among them (§679, §1086). The box, its context and its
+adjustments go to the field `boxend:<list>`, and an internal token put
+back reads them outside the scope (`Run::box_end_outside`,
+`Run::box_end_left`).
 
 ## 7. Parallel work
 

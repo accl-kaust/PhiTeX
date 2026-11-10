@@ -179,7 +179,7 @@ impl Run<'_, '_> {
         if crate::boxscope::on() {
             let kv = k.unwrap_or(ValueId::UNIT);
             if km == 102 && crate::boxscope::is_global(lid) {
-                self.par_kind(kv, &mut md)?;
+                self.par_kind(kv, crate::boxscope::KindFrom::Here, &mut md)?;
             } else if km.abs() == 1 {
                 self.vert_kind(kv, &mut md)?;
             }
@@ -2614,10 +2614,19 @@ impl Run<'_, '_> {
         let v = self.v;
         let cur = self.scope_kind()?.unwrap_or(ValueId::UNIT);
         let k = list_of(v, cur).get(5).copied().unwrap_or(ValueId::UNIT);
-        let k = if k == outer_before_opener(v) {
-            self.kind_before_opener()?
+        // (the node that defined `k`: None, the scope this node runs in,
+        // whose frames carry their parents but frame 0's)
+        let (k, from) = if k == outer_before_opener(v) {
+            let (x, d) = self.kind_before(None)?;
+            (
+                x,
+                d.map_or(
+                    crate::boxscope::KindFrom::Unknown,
+                    crate::boxscope::KindFrom::Node,
+                ),
+            )
         } else {
-            k
+            (k, crate::boxscope::KindFrom::Here)
         };
         if k == ValueId::UNIT {
             let mut md = Mode {
@@ -2655,7 +2664,7 @@ impl Run<'_, '_> {
         // `crate::boxscope`)
         if crate::boxscope::on() {
             if km == 102 && crate::boxscope::is_global(md.lid) {
-                self.par_kind(k, &mut md)?;
+                self.par_kind(k, from, &mut md)?;
             } else if km.abs() == 1 {
                 self.vert_kind(k, &mut md)?;
             }
@@ -3510,17 +3519,18 @@ impl Run<'_, '_> {
     }
 
     /// At the end of the node's text in a character run's lookahead
-    /// (§1038), with the paragraph (or a group, a conditional) open: the
-    /// next sibling's text read on into now, as the run would after the
-    /// run ends, so the lookahead sees the character that follows (its
-    /// ligature or kern with the last one, the right boundary only where
-    /// none follows). The cut between the nodes is the analysis', a bound
-    /// it does not verify: a cut inside a word (huaz's `''.`, cut after
-    /// `\huqq{az asztal}` where the analysis took `\code`'s `\lstinline`
-    /// for a verbatim run) lost the kern pdfTeX puts between `''` and `.`.
-    /// True when there is input now.
+    /// (§1038): the word is open, whatever else is (the paragraph may be
+    /// another node's, left open to this one, `crate::boxscope`): the
+    /// next sibling's text read on into now, so the lookahead sees the
+    /// character that follows (its ligature or kern with the last one,
+    /// the right boundary only where none follows). The cut between the
+    /// nodes is the analysis', a bound it does not verify: a cut inside a
+    /// word (huaz's `''.`, cut after `\huqq{az asztal}` where the
+    /// analysis took `\code`'s `\lstinline` for a verbatim run) lost the
+    /// kern pdfTeX puts between `''` and `.`. True when there is input
+    /// now.
     fn read_on_in_word(&mut self) -> R<bool> {
-        while self.open_span() && !self.eof && self.pull()? {
+        while !self.eof && self.pull()? {
             if self.has_input() {
                 return Ok(true);
             }
@@ -4312,24 +4322,34 @@ fn fil(order: i64, _w: i32) -> Glue {
 /// A scope kind's parent kind where the opener's own frame 0 does not
 /// carry it ([`Run::leave_scope`]): the kind before the opener, read where
 /// a group closes into it ([`Run::kind_outer`]). No kind is an integer.
-fn outer_before_opener(v: &Values) -> ValueId {
+pub(crate) fn outer_before_opener(v: &Values) -> ValueId {
     v.int(0)
 }
 
 impl Run<'_, '_> {
-    /// The scope kind outside the one the node runs in: the kind that
-    /// reached the node that opened that scope, read before it. None (the
-    /// unit) at the top.
-    fn kind_before_opener(&mut self) -> R<ValueId> {
+    /// The scope kind outside a frame 0 whose parent is not carried
+    /// ([`outer_before_opener`]): the kind that reached its opener, and
+    /// the node that defined that one (None: the kind is the top's or
+    /// its definer unknown). `opener`: the node that defined the kind
+    /// whose parent is asked; None, the scope this node runs in.
+    pub(crate) fn kind_before(
+        &mut self,
+        opener: Option<phitex_defuse::NodeId>,
+    ) -> R<(ValueId, Option<phitex_defuse::NodeId>)> {
         use phitex_defuse::{At, FieldAt};
         let f = self.v.field(crate::run::SCOPE_KIND);
-        let me = self.cx.node();
-        let FieldAt::Def(_, Some(opener)) = self.cx.read_at(f, At::Before(me))? else {
-            return Ok(ValueId::UNIT);
+        let opener = if let Some(n) = opener {
+            n
+        } else {
+            let me = self.cx.node();
+            let FieldAt::Def(_, Some(o)) = self.cx.read_at(f, At::Before(me))? else {
+                return Ok((ValueId::UNIT, None));
+            };
+            o
         };
         Ok(match self.cx.read_at(f, At::Before(opener))? {
-            FieldAt::Def(x, _) => x,
-            _ => ValueId::UNIT,
+            FieldAt::Def(x, d) => (x, d),
+            _ => (ValueId::UNIT, None),
         })
     }
 }
