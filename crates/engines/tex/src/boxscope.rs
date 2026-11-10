@@ -71,25 +71,43 @@ fn items_field(lid: i64) -> String {
 /// The head of a list's start entry.
 const START: &str = "\u{0}bstart";
 
-/// A left list's accumulator folded (a sequence) projected to its
-/// entries from the last start entry on, as a list (none: empty): what
-/// a reader of the list depends on, not the lists of the same id that
-/// ended before it.
-pub(crate) fn left_projection(x: ValueId, v: &phitex_defuse::Values) -> ValueId {
-    let start = v.str(START);
-    let n = v.seq_len(x);
-    let mut out = Vec::new();
-    let mut i = n;
-    while i > 0 {
-        i -= 1;
-        let Some(e) = v.seq_nth(x, i) else { break };
-        out.push(e);
-        if list_of(v, e).first() == Some(&start) {
-            out.reverse();
-            return v.list(out);
-        }
+/// The fold of a left list's accumulator: values `[reset, entries]`
+/// (`reset` 1: the entries begin with a start); a start discards what
+/// came before it, so the fold at a reader is its list's entries from its
+/// opener's start on, whatever lists of the same id ended before it, and
+/// a change in those leaves it equal (no reader of this list asked
+/// again). Associative: `[r, s]` then `[1, t]` is `[1, t]`, then `[0, t]`
+/// is `[r, s ++ t]`.
+pub(crate) struct ResetMonoid;
+
+impl phitex_defuse::Monoid for ResetMonoid {
+    fn empty(&self, v: &phitex_defuse::Values) -> ValueId {
+        v.list(vec![v.int(0), ValueId::NIL])
     }
-    v.list(Vec::new())
+
+    fn combine(&self, v: &phitex_defuse::Values, a: ValueId, b: ValueId) -> ValueId {
+        let (_, sb) = parts(v, b);
+        if reset_of(v, b) {
+            return b;
+        }
+        if sb == ValueId::NIL {
+            return a;
+        }
+        let (ra, sa) = parts(v, a);
+        v.list(vec![v.int(i64::from(ra)), v.seq_concat(sa, sb)])
+    }
+}
+
+fn reset_of(v: &phitex_defuse::Values, x: ValueId) -> bool {
+    parts(v, x).0
+}
+
+fn parts(v: &phitex_defuse::Values, x: ValueId) -> (bool, ValueId) {
+    let xs = list_of(v, x);
+    (
+        xs.first().is_some_and(|&r| int_of(v, r) == 1),
+        xs.get(1).copied().unwrap_or(ValueId::NIL),
+    )
 }
 
 fn is_box_group(g: i64) -> bool {
@@ -197,7 +215,8 @@ impl Run<'_, '_> {
             });
             let rec = v.list(xs);
             let (group0, par, clang) = (l.group == 0, l.par, l.clang);
-            self.contribute(&items_field(lid), v.seq_unit(rec));
+            let e = v.list(vec![v.int(1), v.seq_unit(rec)]);
+            self.contribute(&items_field(lid), e);
             if group0 {
                 let (lang, packed) = par.unwrap_or((0, 0));
                 let rec = v.list(vec![v.int(lid), v.int(lang), v.int(packed), v.int(clang)]);
@@ -212,8 +231,9 @@ impl Run<'_, '_> {
 
     /// An item appended to list `lid` left open by another node.
     pub(crate) fn append_left(&mut self, lid: i64, x: ValueId) {
-        let s = self.v.seq_unit(x);
-        self.contribute(&items_field(lid), s);
+        let v = self.v;
+        let e = v.list(vec![v.int(0), v.seq_unit(x)]);
+        self.contribute(&items_field(lid), e);
     }
 
     /// [`Run::list_fold`] of list `lid` left open: the entries of its
@@ -228,27 +248,18 @@ impl Run<'_, '_> {
         let v = self.v;
         let name = items_field(lid);
         let f = v.field(&name);
-        // (read through the projection to its last start: lists of the
-        // same id before it, ended, are not this reader's)
-        let path = phitex_defuse::PathId::of_proj(self.ops.left_proj);
-        let tail = self.cx.fold_path(f, None, None, path)?;
-        let own: Vec<ValueId> = self
-            .contribs
-            .iter()
-            .filter(|(g, _)| *g == f)
-            .flat_map(|&(_, x)| v.seq_to_vec(x))
-            .collect();
-        let start = v.str(START);
-        let mut entries = tail.map(|t| list_of(v, t)).unwrap_or_default();
-        // (this run's own start, if it left the list and reads it again)
-        let own_start = own
-            .iter()
-            .rposition(|&x| list_of(v, x).first() == Some(&start));
-        if own_start.is_some() {
-            entries.clear();
+        // (the fold from the unit's start: a start discards what came
+        // before it, [`ResetMonoid`]; then this run's own the same way)
+        let m = ResetMonoid;
+        let mut acc = self.cx.fold(f, None, None)?;
+        for &(g, x) in &self.contribs {
+            if g == f {
+                acc = phitex_defuse::Monoid::combine(&m, v, acc, x);
+            }
         }
-        let own = &own[own_start.unwrap_or(0)..];
-        for x in entries.into_iter().chain(own.iter().copied()) {
+        let start = v.str(START);
+        let (_, seq) = parts(v, acc);
+        for x in v.seq_to_vec(seq) {
             let xs = list_of(v, x);
             if xs.first() == Some(&start) {
                 for &y in &xs[1..] {

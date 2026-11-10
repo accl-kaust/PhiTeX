@@ -259,9 +259,6 @@ pub(crate) struct Ops {
     /// ([`crate::val::tail_projection`]): a reader of its kind reads that,
     /// not the item ([`Run::list_last_kind`]).
     pub tail_proj: phitex_defuse::ProjId,
-    /// A left list's entries from its last start on
-    /// ([`crate::boxscope::left_projection`]).
-    pub left_proj: phitex_defuse::ProjId,
     /// Whether the main list's last item is a penalty that forces a page
     /// ([`crate::val::forced_projection`]): a piece's start asks only that
     /// (`Run::forced_pending_before`).

@@ -248,11 +248,13 @@ What each list left open is (no gaps left for later): its id is from
 the scope depth it is left at (lists open at once are left at different
 depths), never from the opener's node, so a re-cut of the opener changes
 no kind; its items are contributions to its own accumulator
-`bitems:<id>`, the opener's a start entry holding what it had, and its
-reader folds that field from the last start entry on
-(`Run::left_list_fold`): nothing it reads names the opener, so an opener
-run again (an edit of the text before the picture) with the same items
-wakes no reader of the list. A `\par` inside
+`bitems:<id>`, the opener's a start entry holding what it had. The
+field's fold is a reset monoid (`ResetMonoid`): a start discards what
+came before it, so the fold at a reader is its own list's entries,
+whatever lists of the same id ended before it, and a change in those
+leaves it equal (`Run::left_list_fold`). Nothing it reads names the
+opener, so an opener run again (an edit of the text before the picture)
+with the same items wakes no reader of the list. A `\par` inside
 a group in a paragraph left open ends the paragraph
 (`Run::end_left_paragraph`): `par:<list>` cleared, and every kind in it
 reads that field (`Run::par_kind`), so the groups go on in the vertical
