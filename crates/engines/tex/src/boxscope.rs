@@ -39,11 +39,16 @@ use phitex_defuse::{NodeId, ValueId};
 /// The ids of lists left open are at or below this.
 const BASE: i64 = -(1i64 << 55);
 
-/// Whether open lists may be left to the following nodes: on, unless
-/// `PHITEX_BOXSCOPE=0` (or empty).
+/// Whether open lists may be left to the following nodes: off, unless
+/// `PHITEX_BOXSCOPE=1` (any value but empty or 0). Off by default: a
+/// definition local to a closed picture is filed, and a read after it
+/// searches back over every earlier picture's for the one it sees
+/// (one TikZ picture per section: quadratic clean builds).
 pub(crate) fn on() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| std::env::var_os("PHITEX_BOXSCOPE").is_none_or(|v| !v.is_empty() && v != "0"))
+    *F.get_or_init(|| {
+        std::env::var_os("PHITEX_BOXSCOPE").is_some_and(|v| !v.is_empty() && v != "0")
+    })
 }
 
 /// Whether `lid` is a list left open by some node.
