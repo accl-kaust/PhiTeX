@@ -63,6 +63,12 @@ node, over `GAP`. Continuations of a slice stand in its gap: distance 0.
     and no run ahead was refuted since the last move, W grows by twice
     the places the frontier moved, at least doubling (to at most 2^20
     places, the whole text).
+  - The page layer measures the exchange itself: each routine's
+    give-back is compared with the guess made for its page
+    (`Ops::give_back_guesses`). Once at least 4 have held and no more
+    than one in eight missed, the routines hand back nothing the text
+    could not have run ahead on, and W opens whole (`Ctx::open_spec_window`),
+    the held runs let go at the layer's commit.
   So a document whose text and routines exchange nothing (para4000,
   amsldoc) refutes nothing ahead, W doubles every page and the text
   runs as far ahead as before after a few pages; one whose routines

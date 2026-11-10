@@ -498,6 +498,17 @@ impl<'a> Ctx<'a> {
     /// past which it may yet place nodes (`None`: it places none, every
     /// reader is free). A reader of a field the layer defines past it
     /// waits for it to pass ([`Ctx::read`]).
+    /// The settling layer finds its routines and the text exchange
+    /// nothing a guess misses (docs/spec-window.md): the speculation
+    /// window opens whole; the runs it held are let go at this run's
+    /// commit of its frontier.
+    pub fn open_spec_window(&self) {
+        use std::sync::atomic::Ordering::{Acquire, Release};
+        if self.eng.window_on.load(Acquire) {
+            self.eng.window.store(crate::sched::WINDOW_MAX, Release);
+        }
+    }
+
     pub fn set_frontier(&mut self, at: Option<NodeId>) {
         self.product.frontier = Some(at);
     }

@@ -2876,7 +2876,7 @@ pub(crate) fn frontier_restore(eng: &Engine, w: Option<&Worker>, n: &Node) {
 /// The speculation window's first width, in places (docs/spec-window.md).
 pub(crate) const WINDOW_START: u64 = 8;
 /// Its widest: the whole text.
-const WINDOW_MAX: u64 = 1 << 20;
+pub(crate) const WINDOW_MAX: u64 = 1 << 20;
 
 /// `node`'s distance past the frontier `fr`, in places (slices as pushed,
 /// `order::GAP` labels apart), where the speculation window is on and

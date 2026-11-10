@@ -1125,10 +1125,14 @@ impl Run<'_, '_> {
         // (para400pdf -j16: a critical path of 128 pages))
         let ordering = std::sync::atomic::Ordering::Relaxed;
         let [hits, misses] = &*self.ops.give_back_guesses;
-        let trusted = beside
-            && self.ops.spec_window.load(ordering)
-            && misses.load(ordering) * 8 <= hits.load(ordering)
-            && hits.load(ordering) >= 4;
+        let holds = misses.load(ordering) * 8 <= hits.load(ordering) && hits.load(ordering) >= 4;
+        let trusted = beside && self.ops.spec_window.load(ordering) && holds;
+        // (and the text then exchanges nothing with the routines a guess
+        // misses: the speculation window opens whole, the text runs ahead
+        // as with it off)
+        if holds && self.ops.spec_window.load(ordering) {
+            self.cx.open_spec_window();
+        }
         self.rest_begun_at = Some(p.node);
         let gave = match out {
             // (its finisher, the definer of the give-back, whether or not
