@@ -4993,7 +4993,12 @@ pub(crate) fn check_pullers(eng: &Engine, w: Option<&Worker>, s: &Node, except: 
         if Some(id) == except || !live(eng, id, serial) {
             continue;
         }
-        check_puller(eng, w, eng.node(id), s.id);
+        let x = eng.node(id);
+        // (one passed over as no sibling of it stays passed over)
+        if !read::SiblingParents::of(x).may_take(eng, s) {
+            continue;
+        }
+        check_puller(eng, w, x, s.id);
     }
 }
 
@@ -5049,10 +5054,16 @@ pub(crate) fn check_inserted(eng: &Engine, w: Option<&Worker>, n: &Node) {
         };
         if let Some(p) = prev {
             let pn = eng.node(p);
-            check_pullers(eng, w, pn, None);
-            if pn
-                .record()
-                .is_some_and(|r| r.reads.iter().any(|rd| matches!(rd.kind(), ReadKind::Following { .. })))
+            for (id, serial) in pn.pullers.lock().clone() {
+                let x = eng.node(id);
+                if live(eng, id, serial) && read::SiblingParents::of(x).may_take(eng, n) {
+                    check_puller(eng, w, x, n.id);
+                }
+            }
+            if read::SiblingParents::of(pn).may_take(eng, n)
+                && pn
+                    .record()
+                    .is_some_and(|r| r.reads.iter().any(|rd| matches!(rd.kind(), ReadKind::Following { .. })))
             {
                 check_puller(eng, w, pn, n.id);
             }

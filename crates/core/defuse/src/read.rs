@@ -1002,6 +1002,12 @@ impl SiblingParents {
             .contains(&q)
     }
 
+    /// Whether `n` is a sibling of `me` whatever its state and claimer: one
+    /// whose change may move `me`'s reads of its siblings.
+    pub(crate) fn may_take(&mut self, eng: &Engine, n: &Node) -> bool {
+        eng.op(n.op()).sibling() && self.has(eng, n.parent)
+    }
+
     /// Whether `n` is a sibling a claim of `me` may take.
     pub(crate) fn takes(&mut self, eng: &Engine, n: &Node) -> bool {
         n.state() != State::Gone
