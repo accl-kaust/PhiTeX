@@ -160,6 +160,10 @@ impl LayeredSet {
         self.keys()
     }
 
+    #[allow(
+        clippy::zero_sized_map_values,
+        reason = "a set is a layered map of no values"
+    )]
     pub(crate) fn from_set(
         s: std::collections::HashSet<String, std::hash::BuildHasherDefault<crate::pass::hints::Fx>>,
     ) -> Self {
