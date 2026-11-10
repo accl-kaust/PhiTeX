@@ -1845,6 +1845,7 @@ impl Engine {
                 }
             }
             n.stopped.lock().iter().for_each(|&(f, _)| keep(f.0));
+            n.foreign.lock().fields.iter().for_each(|g| keep(g.0));
             for (g, r) in &n.foreign.lock().witness {
                 keep(g.0);
                 if crate::segment::live(self, r.node(), r.serial) {
@@ -1988,12 +1989,17 @@ impl Engine {
                 let n = self.node(x);
                 // (its foreign readers that read at it no more, each record
                 // looked at with no other node's lock held)
+                // (and the fields they read at it, counted again)
                 let rs: Vec<NodeId> = n.foreign.lock().readers.iter().copied().collect();
+                let mut fields = crate::FxHashSet::default();
                 let stale: Vec<NodeId> = rs
                     .into_iter()
                     .filter(|&r| {
                         let mut reads = false;
-                        crate::guard::reads_at(self, x, r, &mut reads);
+                        crate::guard::record_reads_at(self, x, r, &mut |g, _| {
+                            reads = true;
+                            fields.insert(g);
+                        });
                         !reads
                     })
                     .collect();
@@ -2002,6 +2008,7 @@ impl Engine {
                     fo.readers.remove(&r);
                     dropped += 1;
                 }
+                fo.fields = fields;
                 let k = fo.witness.len();
                 fo.witness
                     .retain(|(_, r)| crate::segment::live(self, r.node(), r.serial));

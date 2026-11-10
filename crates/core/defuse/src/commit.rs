@@ -509,7 +509,10 @@ fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, witness: bo
         a.has_foreign.store(true, Ordering::Release);
     } else if r.anchor() != r.node() {
         let a = eng.node(r.anchor());
-        a.foreign.lock().readers.insert(r.node());
+        let mut fo = a.foreign.lock();
+        fo.readers.insert(r.node());
+        fo.fields.insert(f);
+        drop(fo);
         a.has_foreign.store(true, Ordering::Release);
     }
     inner.guarded.insert(f)

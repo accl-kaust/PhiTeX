@@ -23,6 +23,9 @@ use crate::values::{Field, FxHashSet};
 #[derive(Default)]
 pub(crate) struct Foreign {
     pub(crate) readers: FxHashSet<NodeId>,
+    /// The fields `readers` read at it: a walk of another field asks
+    /// none of their records.
+    pub(crate) fields: FxHashSet<Field>,
     pub(crate) witness: Vec<(Field, Reader)>,
 }
 
@@ -59,7 +62,11 @@ pub(crate) fn readers_at(eng: &Engine, x: NodeId, f: Option<Field>, out: &mut dy
         if fo.readers.is_empty() && fo.witness.is_empty() {
             return;
         }
-        let rs: Vec<NodeId> = fo.readers.iter().copied().collect();
+        let rs: Vec<NodeId> = if f.is_none_or(|f| fo.fields.contains(&f)) {
+            fo.readers.iter().copied().collect()
+        } else {
+            Vec::new()
+        };
         let ws: Vec<(Field, Reader)> = fo
             .witness
             .iter()
@@ -134,10 +141,4 @@ pub(crate) fn recount(eng: &Engine, inner: &mut Inner) -> (Vec<Field>, Vec<Field
 /// The reads of node `r`'s record at node `x`, as reader records.
 pub(crate) fn record_reads_at(eng: &Engine, x: NodeId, r: NodeId, out: &mut dyn FnMut(Field, Reader)) {
     of_record(eng, x, r, None, out);
-}
-
-/// Whether node `r`'s record reads at node `x` (a foreign reader that
-/// still stands for it).
-pub(crate) fn reads_at(eng: &Engine, x: NodeId, r: NodeId, out: &mut bool) {
-    of_record(eng, x, r, None, &mut |_, _| *out = true);
 }
