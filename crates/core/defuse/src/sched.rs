@@ -2374,6 +2374,28 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         park_waiting(eng, pool, w, node, Some(x));
         return Ok(());
     }
+    // (a settling node that is no fold of the layer, a page's finisher,
+    // waits on a clean build for the text before it to settle: its
+    // routine runs on the state TeX's order has there, once. Run as soon
+    // as its page was folded, floats2col's finishers ran on the text
+    // before them as it first ran and again as each piece of it settled:
+    // 194 to 1330 finisher runs for 194 fires at -j16 with no text run
+    // past the frontier at all, mc 83931; docs/spec-window.md)
+    if !quiet
+        && pool.shared.n > 1
+        && eng.window_on.load(Ordering::Acquire)
+        && eng.window_settled.load(Ordering::Acquire)
+        && eng.op(node.op()).settles_at_quiet()
+        && !eng.op(node.op()).works_at_frontier()
+        && let Some(x) = crate::read::on_one_layout(eng, || crate::read::unsettled_before(eng, node))
+    {
+        if run_log() {
+            eprintln!("settled: node {} waits for {}", n.raw(), x.raw());
+        }
+        node.held.store(true, Ordering::Release);
+        park_waiting(eng, pool, w, node, Some(x));
+        return Ok(());
+    }
     // (one of a chain waits for the node before it that moved a read of
     // the chain's: run sooner, it runs on the value before that one's,
     // and again. One thread takes them in order anyway)
