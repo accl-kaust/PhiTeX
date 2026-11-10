@@ -172,6 +172,9 @@ pub(crate) struct Node {
     /// `unwalked` is not empty: what the node has filed is its stale
     /// run's, and its next commit is coming (`Ctx::wait_for_settling`).
     pub(crate) transient: AtomicBool,
+    /// When its last run began (`Engine::now_ns`): a re-ask by a settling
+    /// node whose run began before it is not held (`sched::held_edge`).
+    pub(crate) run_start: AtomicU64,
     /// Its runs ahead of the frontier refuted by the page layer
     /// (`commit::reask_reader`; `PHITEX_WINDOW_WAVE`).
     pub(crate) layer_refuted: AtomicU32,
@@ -317,6 +320,7 @@ impl Node {
             frontier_pass: AtomicBool::new(false),
             unwalked: Mx::new(Vec::new()),
             transient: AtomicBool::new(false),
+            run_start: AtomicU64::new(0),
             layer_refuted: AtomicU32::new(0),
             back_frontier: Mx::new(None),
             asks: Mx::new(Vec::new()),
