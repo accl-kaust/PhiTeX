@@ -1906,7 +1906,7 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
                 .between(field, crate::order::Pos(0), crate::order::Pos(u64::MAX))
                 .is_empty();
     }
-    settles_edge(eng, by, n) && !overlapped(eng, by, n)
+    settles_edge(eng, by, n)
 }
 
 /// Whether `reader`'s last run began before `by`'s last commit ended
@@ -1933,7 +1933,9 @@ fn overlapped(eng: &Engine, by: NodeId, reader: &Node) -> bool {
 
 /// Whether a definition by `by` reaches `reader` across the settling
 /// line: `by`'s operation settles at quiet points and its last run said
-/// nothing of `Ctx::settle_now`, `reader`'s does not settle, and the
+/// nothing of `Ctx::settle_now`, `reader`'s does not settle, its run
+/// saw `by`'s last commit (`overlapped`: else a race, asked at once,
+/// by a walk and by the reader's own commit's check alike), and the
 /// reader stands before the layer's frontier. One past it read the
 /// field while no frontier held it (before the layer first defined the
 /// field, `Engine::mark_settled`, or with the layer's fold ended; a read
@@ -1952,6 +1954,7 @@ pub(crate) fn settles_edge(eng: &Engine, by: NodeId, reader: &Node) -> bool {
         .is_some_and(|b| eng.op(b.op()).settles_at_quiet() && !b.settle_now.load(Ordering::Acquire))
         && !eng.op(reader.op()).settles_at_quiet()
         && !past_frontier(eng, reader, eng.frontier.load(Ordering::Acquire))
+        && !overlapped(eng, by, reader)
 }
 
 /// Lists a wake for the next quiet point (`Report::held_deferred`).
