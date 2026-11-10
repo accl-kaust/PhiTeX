@@ -13,7 +13,7 @@
 use crate::api::NodeId;
 use crate::engine::Engine;
 use crate::node::{Anchor, ReadKind, ReadRec};
-use crate::segment::{Inner, Reader};
+use crate::segment::{Guarded, Inner, Reader};
 use crate::values::{Field, FxHashSet};
 
 /// What other nodes read at a node: the readers whose records hold reads
@@ -123,13 +123,13 @@ pub(crate) fn fields_at(eng: &Engine, x: NodeId, out: &mut dyn FnMut(Field)) {
     readers_at(eng, x, None, &mut |g, _| out(g));
 }
 
-/// The fields read at a segment's nodes now, each once: what its
-/// `guarded` set is after a recount.
-pub(crate) fn fields_of(eng: &Engine, inner: &Inner) -> FxHashSet<Field> {
-    let mut s = FxHashSet::default();
+/// The fields read at a segment's nodes now, with their nodes' bits:
+/// what its `guarded` set is after a recount.
+pub(crate) fn fields_of(eng: &Engine, inner: &Inner) -> Guarded {
+    let mut s = Guarded::default();
     for &x in inner.nodes.values() {
         fields_at(eng, x, &mut |g| {
-            s.insert(g);
+            crate::segment::guard_insert(&mut s, g, x);
         });
     }
     s
@@ -139,8 +139,8 @@ pub(crate) fn fields_of(eng: &Engine, inner: &Inner) -> FxHashSet<Field> {
 /// it, and those that entered it (a node moved in), for the field index.
 pub(crate) fn recount(eng: &Engine, inner: &mut Inner) -> (Vec<Field>, Vec<Field>) {
     let now = fields_of(eng, inner);
-    let gone: Vec<Field> = inner.guarded.iter().filter(|f| !now.contains(f)).copied().collect();
-    let new: Vec<Field> = now.iter().filter(|f| !inner.guarded.contains(f)).copied().collect();
+    let gone: Vec<Field> = inner.guarded.keys().filter(|f| !now.contains_key(f)).copied().collect();
+    let new: Vec<Field> = now.keys().filter(|f| !inner.guarded.contains_key(f)).copied().collect();
     inner.guarded = now;
     inner.replaced = 0;
     (gone, new)
