@@ -918,6 +918,22 @@ impl Run<'_, '_> {
                 // every node of which has run, not a mix of the
                 // definitions some have made and others have not yet)
                 if self.cx.hole_before()?.is_some() {
+                    if crate::exec::obs_flag!("PHITEX_CUT_TRACE") {
+                        eprintln!(
+                            "read-on: node {} ({}) meets a hole after {} commands, pulled {}, open span {}, eof {}, levels {}, nest {:?}",
+                            self.cx.node().raw(),
+                            self.op_name(),
+                            self.cmds,
+                            self.pulled,
+                            self.open_span(),
+                            self.eof,
+                            self.input.levels.len(),
+                            self.nest
+                                .iter()
+                                .map(|l| (l.mode, l.group, l.owns, l.list.len()))
+                                .collect::<Vec<_>>()
+                        );
+                    }
                     return Err(Halt::Hole);
                 }
                 let args = self.resolve_units(&args)?;
