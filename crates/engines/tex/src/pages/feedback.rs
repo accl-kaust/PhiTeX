@@ -463,7 +463,20 @@ impl Run<'_, '_> {
     /// candidates pages fired at, in order (the first where it fired; the
     /// later ones as the builder goes on, each routine giving back
     /// nothing).
+    ///
+    /// Its reads are of the run's own page: what the builder makes of
+    /// the run's own items, on the page params it and the pieces before
+    /// it set, rests on where the run is cut. A second pass keeps none of
+    /// the first pass's (`Ctx::own_cut_reads`, `Ctx::begin_again`).
     fn page_so_far(&mut self) -> R<(crate::vprof::ScanState, Option<bool>, Vec<u32>)> {
+        let from = self.cx.reads_len();
+        self.page_read_mark = from;
+        let r = self.page_so_far_reads();
+        self.cx.own_cut_reads(from);
+        r
+    }
+
+    fn page_so_far_reads(&mut self) -> R<(crate::vprof::ScanState, Option<bool>, Vec<u32>)> {
         let v = self.v;
         let raw = self.own_outer_items();
         let last = raw

@@ -172,8 +172,9 @@ pub(crate) fn run_node(
         // Kept since checkpoints went (2e4da8ceb), the second pass
         // committed them as its own: cursolatex's first frame waited on
         // by the page loop for good at -j1)
+        let keep = r.recut_reads;
         let cx = r.cx;
-        cx.begin_again();
+        cx.begin_again(keep);
         r = Run::new(cx, o);
         r.stop_at = Some(k);
         // (a second pass to a candidate takes no marks)

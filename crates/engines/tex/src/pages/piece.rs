@@ -468,6 +468,9 @@ impl Run<'_, '_> {
                 self.cx.node().raw()
             );
         }
+        // (the read of the page that asked for it is the page_so_far just
+        // made: it and what follows it are not the second pass's reads)
+        self.recut_reads = self.page_read_mark;
         Err(Halt::Recut(k))
     }
 
@@ -629,6 +632,10 @@ impl Run<'_, '_> {
         if !piece || self.cut.is_some() {
             return Ok(());
         }
+        // (the reads before this one, the pages' objects' and the page so
+        // far it may look at below: a second pass keeps those,
+        // `Ctx::begin_again`)
+        let before = self.cx.reads_len();
         let Some(m) = self.cand_marks.iter().find(|m| m.fresh) else {
             return Ok(());
         };
@@ -663,6 +670,7 @@ impl Run<'_, '_> {
                 self.cx.node().raw()
             );
         }
+        self.recut_reads = before;
         Err(Halt::Recut(k))
     }
 

@@ -93,6 +93,12 @@ pub struct Ctx<'a> {
     /// [`Ctx::read_before_placer_over`]: the field whose association
     /// list answers my reads first.
     overlay: Option<Field>,
+    /// The reads of the pass [`Ctx::begin_again`] started over from that
+    /// the second pass's record keeps ([`Ctx::into_product`]).
+    passes_before: Vec<ReadRec>,
+    /// The ranges of this pass's reads that are of my own cut
+    /// ([`Ctx::own_cut_reads`]).
+    own_cut: Vec<std::ops::Range<usize>>,
 }
 
 /// The check ([`Ctx::tick`]) from which a run's reads are looked at
@@ -165,18 +171,42 @@ impl<'a> Ctx<'a> {
             ticks: 0,
             before_placer: None,
             overlay: None,
+            passes_before: Vec::new(),
+            own_cut: Vec::new(),
         }
     }
 
     /// Starts the run's product again, as at its start (its wake and its
     /// last run kept): a run that goes again from its start in the same
     /// call (a second pass to a candidate the first asked for) commits
-    /// what that pass makes, never the first pass's reads, placements,
-    /// waits or definitions past where the second stops.
-    pub fn begin_again(&mut self) {
+    /// what that pass makes, never the first pass's placements, waits or
+    /// definitions. The first pass's first `keep` reads, those made
+    /// before the read that asked for the second pass, stay as reads only
+    /// and are filed with the second's ([`Ctx::into_product`]): where the
+    /// second pass ends is the first's choice, made on what it read, past
+    /// that candidate too (the fonts and the text that put the page
+    /// there). Dropped, nothing the choice rests on re-asked the run: a
+    /// run cut at a candidate its page no longer fires at stood until its
+    /// text was edited, then was cut elsewhere, and its continuation and
+    /// the pages after it ran again (revtex-aps-xe's edit at -j1: 234
+    /// runs for 99 nodes, 80 for 75 before). Not the read that asked, nor
+    /// any after it, nor any the client said are of the run's own cut
+    /// ([`Ctx::own_cut_reads`]: the page so far over its own items, the
+    /// pages' objects): those rest on where it is cut, a cycle and not an
+    /// input.
+    pub fn begin_again(&mut self, keep: usize) {
         let (scope_gen, moves_gen) = (self.product.scope_gen, self.product.moves_gen);
         let fresh = Ctx::new(self.eng, self.worker, self.me);
-        self.product = fresh.product;
+        let mut first = std::mem::replace(&mut self.product, fresh.product);
+        first.reads.truncate(keep);
+        for r in std::mem::take(&mut self.own_cut).into_iter().rev() {
+            if r.start < first.reads.len() {
+                first.reads.drain(r.start..r.end.min(first.reads.len()));
+            }
+        }
+        // (not its sources: a scheduling hint of the definers it read,
+        // past the read that asked too)
+        self.passes_before.extend(first.reads);
         self.product.scope_gen = scope_gen;
         self.product.moves_gen = moves_gen;
         self.views.clear();
@@ -280,9 +310,52 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// The reads made since my read `from` ([`Ctx::reads_len`]) are of
+    /// the products of my own cut (a client's page builder over my own
+    /// items): what they answer rests on where the run is cut, so a pass
+    /// that ends at a candidate the first asked for keeps none of the
+    /// first pass's ([`Ctx::begin_again`]). Kept, a read of the page
+    /// params after my own (`tpp:param:vsize` after me, a definition my
+    /// own commit makes) re-asked me at that commit, and the page loop
+    /// waited on me for good (beamer_second_pass at -j1, no PDF).
+    pub fn own_cut_reads(&mut self, from: usize) {
+        let to = self.product.reads.len();
+        if from < to {
+            self.own_cut.push(from..to);
+        }
+    }
+
     /// The product, with the output.
     pub(crate) fn into_product(mut self, output: ValueId) -> Product {
         self.product.output = output;
+        // (the reads of the passes before a second, `begin_again`, but
+        // those the last pass made again with the same answer: one that
+        // answered otherwise is kept beside it)
+        let reads = std::mem::take(&mut self.passes_before);
+        if !reads.is_empty() {
+            let mut have: FxHashMap<(ReadKind, PathId, u64), ()> = self
+                .product
+                .reads
+                .iter()
+                .map(|r| ((*r.kind(), r.path(), r.seen_raw()), ()))
+                .collect();
+            let me = self.me.id;
+            for r in reads {
+                // (not a read of a pass's own product: the output of its
+                // `i`-th placement or the `i`-th sibling it claimed name
+                // that pass's placements and claims, started again with
+                // its product; nor the next contribution after me, which
+                // is what follows my own cut)
+                let own = match *r.kind() {
+                    ReadKind::Placed { .. } | ReadKind::Following { .. } => true,
+                    ReadKind::Next { after, .. } => after == Some(me),
+                    _ => false,
+                };
+                if !own && have.insert((*r.kind(), r.path(), r.seen_raw()), ()).is_none() {
+                    self.product.reads.push(r);
+                }
+            }
+        }
         self.product.woken_at = match self.woke {
             Some(Cause::Range { by, .. } | Cause::Changed { site: Some(by), .. }) => Some(by),
             _ => None,
