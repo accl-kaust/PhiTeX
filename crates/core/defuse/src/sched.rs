@@ -1188,7 +1188,7 @@ impl Pool {
             .lock()
             .iter()
             .filter_map(|&n| eng.placed_node(n))
-            .filter(|n| n.state() == State::Dirty)
+            .filter(|n| n.state() == State::Dirty && !n.held_window.load(Ordering::Acquire))
             .min_by_key(|n| n.pos_hint())
         else {
             return false;
@@ -1246,6 +1246,15 @@ impl Pool {
         if !eng.window_on.load(Ordering::Acquire) {
             return false;
         }
+        // (only where nothing else runs: every worker idle, none at a
+        // task. While one runs, what it commits widens the window or wakes
+        // what it held; a worker idle beside it that let them go would let
+        // go every run the window holds as fast as it found no other work)
+        if self.shared.idle.load(Ordering::SeqCst) < self.shared.spawned.load(Ordering::SeqCst)
+            || self.shared.at_work.iter().any(|s| s.load(Ordering::SeqCst) != 0)
+        {
+            return false;
+        }
         let fr = eng.frontier.load(Ordering::Acquire);
         let nearest = {
             let m = self.shared.frontier_waiting.lock();
@@ -1260,8 +1269,7 @@ impl Pool {
         if d > cur {
             eng.window.fetch_max(d, Ordering::AcqRel);
         }
-        release_frontier(eng, Some(w));
-        true
+        release_frontier(eng, Some(w)) > 0
     }
 
     fn idle_wait(&self, eng: &Engine, w: &Worker, edits: bool) -> Option<NodeId> {
@@ -2376,7 +2384,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     // (one that stopped at the frontier before: not begun past it, where
     // it would stop again and its run be thrown away; the end of a Grail
     // edit's document, 65-100 ms of commands an edit)
-    if node.held_frontier.load(Ordering::Relaxed) && past_frontier(eng, node, eng.frontier.load(Ordering::Acquire)) {
+    // (one the window held: not begun past it, nor parked once let go,
+    // `frontier_holds`; a run parked here and let go at once was queued
+    // and taken again for ever, every run ending, nothing moving: the
+    // livelock at -j16, docs/spec-window.md, Progress)
+    if (node.held_frontier.load(Ordering::Relaxed) || node.held_window.load(Ordering::Acquire))
+        && frontier_holds(eng, node, eng.frontier.load(Ordering::Acquire))
+    {
         park_frontier(eng, pool, w, node);
         return Ok(());
     }
@@ -2580,8 +2594,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             })
         }
         Ok(Err(_stop)) if cx.wait_frontier => {
+            // (a layer's read held: the next run waits for the frontier
+            // before it begins; the window's hold is its own,
+            // `Node::held_window`)
+            if !cx.wait_window {
+                node.held_frontier.store(true, Ordering::Relaxed);
+            }
             drop(cx);
-            node.held_frontier.store(true, Ordering::Relaxed);
             park_frontier(eng, pool, w, node);
             Ok(())
         }
@@ -2943,10 +2962,14 @@ pub(crate) fn frontier_restore(eng: &Engine, w: Option<&Worker>, n: &Node) {
     }
 }
 
-/// The speculation window's first width, in places (docs/spec-window.md).
-pub(crate) const WINDOW_START: u64 = 8;
 /// Its widest: the whole text.
 pub(crate) const WINDOW_MAX: u64 = 1 << 20;
+/// The speculation window's first width, in places (docs/spec-window.md):
+/// whole. It narrows only where the page layer refutes a run ahead of it:
+/// a text that exchanges nothing with the layer is never held.
+pub(crate) const WINDOW_START: u64 = WINDOW_MAX;
+/// The places a frontier's move counts where its positions are not known.
+pub(crate) const WINDOW_STEP: u64 = 8;
 
 /// `node`'s distance past the frontier `fr`, in places (slices as pushed,
 /// `order::GAP` labels apart), where the speculation window is on and
@@ -2983,6 +3006,9 @@ pub(crate) fn window_refuted(eng: &Engine, ahead: u64) {
             .compare_exchange(w, n, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     {
+        // (the held runs looked at at this width: let go once it has grown
+        // by half again, `window_acked`)
+        eng.window_released.store(n, Ordering::Release);
         eng.window_stats[1].fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -3040,18 +3066,25 @@ pub(crate) fn past_frontier(eng: &Engine, node: &Node, fr: u64) -> bool {
             .is_some_and(|x| x.state() != State::Gone && node.pos_hint() > x.pos_hint())
 }
 
+/// Whether `node`'s run waits at frontier `fr`: held by the window alone
+/// (`Node::held_window`), while past it and not let go by it
+/// (`Node::window_pass`); else while past the frontier. The one test of
+/// a held run, before it begins (`work`), as it parks (`park_frontier`)
+/// and as it is let go (`release_frontier`): a run let go is never parked
+/// again by a test that disagrees (docs/spec-window.md, Progress).
+pub(crate) fn frontier_holds(eng: &Engine, node: &Node, fr: u64) -> bool {
+    if node.held_window.load(Ordering::Acquire) {
+        !node.window_pass.load(Ordering::Acquire) && window_holds(eng, node, fr)
+    } else {
+        past_frontier(eng, node, fr)
+    }
+}
+
 /// A run that stopped at a read past the frontier (`Ctx::read`): dirty,
 /// queued nowhere, listed in `Shared::frontier_waiting` unless the
 /// frontier passed it meanwhile or the run was re-asked (then queued).
 fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
-    let held = || {
-        let fr = eng.frontier.load(Ordering::Acquire);
-        if node.held_window.load(Ordering::Acquire) {
-            window_holds(eng, node, fr)
-        } else {
-            past_frontier(eng, node, fr)
-        }
-    };
+    let held = || frontier_holds(eng, node, eng.frontier.load(Ordering::Acquire));
     if node.state() != State::Running || !held() || !node.cas_state(State::Running, State::Dirty) {
         end_run(eng, pool, w, node, State::Dirty);
         return;
@@ -3080,21 +3113,27 @@ fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
 }
 
 /// The runs waiting at the frontier that it has passed queued again
-/// (`park_frontier`).
-pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
-    let Some(w) = w else { return };
+/// (`park_frontier`); how many.
+pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) -> usize {
+    let Some(w) = w else { return 0 };
     let fr = eng.frontier.load(Ordering::Acquire);
     let go: Vec<NodeId> = {
         let mut m = w.shared.frontier_waiting.lock();
         if m.is_empty() {
-            return;
+            return 0;
         }
-        let (go, keep): (Vec<NodeId>, Vec<NodeId>) = m.iter().partition(|&&n| {
-            eng.placed_node(n).is_none_or(|x| {
-                // (held by the window alone: let go once within it)
-                !past_frontier(eng, x, fr) || (x.held_window.load(Ordering::Acquire) && !window_holds(eng, x, fr))
-            })
-        });
+        // (held by the window alone: let go once within it, with its pass:
+        // its next run is not held by the window again)
+        let (go, keep): (Vec<NodeId>, Vec<NodeId>) = m
+            .iter()
+            .partition(|&&n| eng.placed_node(n).is_none_or(|x| !frontier_holds(eng, x, fr)));
+        for &n in &go {
+            if let Some(x) = eng.placed_node(n)
+                && x.held_window.load(Ordering::Acquire)
+            {
+                x.window_pass.store(true, Ordering::Release);
+            }
+        }
         *m = keep;
         go
     };
@@ -3106,6 +3145,7 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
             log_clock(Instant::now())
         );
     }
+    let mut released = 0;
     for n in go {
         if let Some(x) = eng.placed_node(n).filter(|x| x.state() == State::Dirty) {
             // (the run goes on for the cause that woke it, which the hold
@@ -3124,8 +3164,10 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
                 },
             );
             enqueue(eng, Some(w), x, wake);
+            released += 1;
         }
     }
+    released
 }
 
 /// The runs waiting for `n`'s commit queued again (`park_waiting`).

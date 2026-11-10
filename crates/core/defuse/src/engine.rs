@@ -219,7 +219,7 @@ pub struct Engine {
     pub(crate) window_missed: AtomicBool,
     /// The width at which the runs the window held were last looked at.
     pub(crate) window_released: AtomicU64,
-    pub(crate) window_stats: [AtomicU64; 3],
+    pub(crate) window_stats: [AtomicU64; 4],
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
     pub(crate) layout_gen: AtomicU64,
@@ -305,16 +305,21 @@ impl Engine {
         self.window.store(start, Ordering::Release);
         self.window_released.store(start, Ordering::Release);
         self.window_missed.store(false, Ordering::Release);
+        for s in &self.window_stats {
+            s.store(0, Ordering::Release);
+        }
     }
 
-    /// (`PHITEX_TEX_TIME`) The speculation window's width now, the reads it
-    /// held, its halvings and its doublings.
-    pub fn window_stats(&self) -> (u64, u64, u64, u64) {
+    /// (`PHITEX_TEX_TIME`) The speculation window's width now, the runs it
+    /// held, its halvings and its doublings, and the first reads that
+    /// waited for a definer before them (`Ctx::wait_for_first_definer`).
+    pub fn window_stats(&self) -> (u64, u64, u64, u64, u64) {
         (
             self.window.load(Ordering::Relaxed),
             self.window_stats[0].load(Ordering::Relaxed),
             self.window_stats[1].load(Ordering::Relaxed),
             self.window_stats[2].load(Ordering::Relaxed),
+            self.window_stats[3].load(Ordering::Relaxed),
         )
     }
 
@@ -389,7 +394,7 @@ impl Engine {
             window: AtomicU64::new(crate::sched::WINDOW_START),
             window_missed: AtomicBool::new(false),
             window_released: AtomicU64::new(0),
-            window_stats: [const { AtomicU64::new(0) }; 3],
+            window_stats: [const { AtomicU64::new(0) }; 4],
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
             busy: AtomicU64::new(0),

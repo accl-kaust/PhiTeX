@@ -1989,6 +1989,14 @@ impl<'c, 'a> Run<'c, 'a> {
         if self.fin_scope_closer.is_some() && self.fin_read_in_scope(loc, f)? {
             return Ok(());
         }
+        // (before the run's first command is done, a read waits for a node
+        // before it not yet run whose text names the field among what it
+        // may define: a wait, not a run; the pieces started beside a
+        // document's first one read its `\hsize=6in` before it committed,
+        // each run again, para400dvi at -j16, docs/spec-window.md)
+        if self.cmds <= 1 {
+            self.cx.wait_for_first_definer(f)?;
+        }
         let r = self.st.get(self.cx, self.v, loc, f);
         if r.is_err() {
             note_stop(self.op_name(), f);

@@ -68,6 +68,13 @@ pub struct Ctx<'a> {
     pub(crate) wait_frontier: bool,
     /// This run's distance past the frontier is noted (`Node::ahead`).
     pub(crate) ahead_noted: bool,
+    /// The stop at the frontier is the speculation window's, not a read
+    /// of the layer's (`Node::held_window`).
+    pub(crate) wait_window: bool,
+    /// The holes before me that may define what I read, found at my
+    /// run's first read before its first command
+    /// ([`Ctx::wait_for_first_definer`]).
+    first_definers: Option<Vec<(NodeId, MayDefine)>>,
     /// `Ctx::goes_on`: the run goes on from where its last run stopped.
     pub(crate) goes_on: bool,
     /// Its checks so far ([`Ctx::tick`]).
@@ -149,6 +156,8 @@ impl<'a> Ctx<'a> {
             waits_only: false,
             wait_frontier: false,
             ahead_noted: false,
+            wait_window: false,
+            first_definers: None,
             goes_on: false,
             ticks: 0,
             before_placer: None,
@@ -458,16 +467,22 @@ impl<'a> Ctx<'a> {
         // (the speculation window, docs/spec-window.md: this run's distance
         // past the frontier noted at its first read, for a refutation of
         // it to narrow the window; past the window, held there)
+        // (a run the window let go is not held by it again: its pass,
+        // taken here; one thread runs everything in order, nothing to
+        // hold)
         if !self.ahead_noted {
             self.ahead_noted = true;
             let d = crate::sched::window_distance(eng, self.me, fr);
             self.me.ahead.store(d.map_or(0, |d| d + 1), Relaxed);
-            if d.is_some_and(|d| d > eng.window.load(Acquire)) {
+            let pass = self.me.window_pass.swap(false, Relaxed);
+            if !pass && self.has_other_threads() && d.is_some_and(|d| d > eng.window.load(Acquire)) {
                 eng.window_stats[0].fetch_add(1, Relaxed);
                 self.me.held_window.store(true, Relaxed);
                 self.wait_frontier = true;
+                self.wait_window = true;
                 return Err(stop());
             }
+            self.me.held_window.store(false, Relaxed);
         }
         if fr == 0 || !eng.settle_marked(f) || eng.op(self.me.op()).settles_at_quiet() {
             return Ok(());
@@ -1626,6 +1641,51 @@ impl<'a> Ctx<'a> {
         if let Some(x) = h {
             self.wait_on = Some(x);
             self.waits_only = nothing_done;
+            return Err(stop());
+        }
+        Ok(())
+    }
+
+    /// A read of `f` before my run's first command is done (nothing to
+    /// throw away): with the speculation window on (a clean build's
+    /// evaluation, more than one thread), where a node before me in my
+    /// unit has not committed and its operation names `f` among what it
+    /// may define, the run waits for the nearest such node and runs when
+    /// it commits: a wait, not a run (docs/spec-window.md, First reads).
+    /// The nodes are found once a run, at its first such read. Only the
+    /// order of the runs: a read let through is answered and filed as
+    /// before, and a definition that moves it re-asks it.
+    pub fn wait_for_first_definer(&mut self, f: Field) -> Result<(), Stop> {
+        use std::sync::atomic::Ordering::Acquire;
+        if !self.eng.window_on.load(Acquire)
+            || !self.has_other_threads()
+            || self.seen.contains_key(&f)
+            || !self.eng.op(self.me.op()).text()
+            || self.eng.op(self.me.op()).settles_at_quiet()
+        {
+            return Ok(());
+        }
+        let eng = self.eng;
+        let me = self.me;
+        let holes = self
+            .first_definers
+            .get_or_insert_with(|| read::on_one_layout(eng, || read::holes_naming_definitions(eng, me)));
+        if holes.is_empty() {
+            return Ok(());
+        }
+        let v = eng.values();
+        let name = v.as_str(f.0);
+        let hit = holes.iter().rev().find(|(_, m)| match m {
+            MayDefine::Names(ns) => ns.contains(&f),
+            MayDefine::Prefixes(ps) => name
+                .as_deref()
+                .is_some_and(|n| ps.iter().any(|p| n.starts_with(p.as_str()))),
+            MayDefine::Nothing | MayDefine::Any => false,
+        });
+        if let Some(&(x, _)) = hit {
+            eng.window_stats[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.wait_on = Some(x);
+            self.waits_only = true;
             return Err(stop());
         }
         Ok(())

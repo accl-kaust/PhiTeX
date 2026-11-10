@@ -2350,9 +2350,9 @@ fn print_accounting(
             "acct: frontier: {} reads held past the page layer's frontier",
             eng.frontier_held()
         );
-        let (w, held, halved, doubled) = eng.window_stats();
+        let (w, held, halved, doubled, first) = eng.window_stats();
         eprintln!(
-            "acct: window: width {w} places, {held} runs held, {halved} halvings, {doubled} doublings"
+            "acct: window: width {w} places, {held} runs held, {halved} halvings, {doubled} doublings, {first} first reads waited"
         );
     }
     // (runs against live nodes per operation: where the runs beyond one a
@@ -7045,9 +7045,9 @@ impl Build {
         // (`PHITEX_WINDOW_LOG`: the window as the evaluation left it)
         if self.opts.spec_window && self.settles == 1 && crate::exec::env_flag!("PHITEX_WINDOW_LOG")
         {
-            let (w, held, halved, doubled) = self.g.eng.window_stats();
+            let (w, held, halved, doubled, first) = self.g.eng.window_stats();
             eprintln!(
-                "window: width {w} places, {held} runs held, {halved} halvings, {doubled} doublings"
+                "window: width {w} places, {held} runs held, {halved} halvings, {doubled} doublings, {first} first reads waited"
             );
         }
         // (a text taken last that changed nothing: the result is for it)

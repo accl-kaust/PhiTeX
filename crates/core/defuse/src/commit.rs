@@ -2216,7 +2216,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         if new != old && (new == 0 || (old != 0 && pos(new) > pos(old))) {
             let by = match (pos(old), pos(new)) {
                 (Some(a), Some(b)) => (b.0.saturating_sub(a.0)) / crate::order::GAP,
-                _ => crate::sched::WINDOW_START,
+                _ => crate::sched::WINDOW_STEP,
             };
             crate::sched::window_moved_on(eng, by);
         }

@@ -150,8 +150,15 @@ pub(crate) struct Node {
     /// plus one (0: not past it): a refutation of that run halves the
     /// speculation window (docs/spec-window.md).
     pub(crate) ahead: std::sync::atomic::AtomicU64,
-    /// Its run was held by the window alone, not a read of the layer's.
+    /// Its run was held by the window alone, not a read of the layer's
+    /// (`Ctx::hold_at_frontier`): it waits for the window, not the
+    /// frontier (`sched::frontier_holds`).
     pub(crate) held_window: AtomicBool,
+    /// Let go from a hold of the window's (`sched::release_frontier`):
+    /// its next run is not held by the window again, whatever the width
+    /// is when it starts (docs/spec-window.md, Progress: a release is a
+    /// run, never a hold again).
+    pub(crate) window_pass: AtomicBool,
     /// A wake of it moved the settling layer's frontier back
     /// (`sched::frontier_back`): the frontier it set, the one it replaced
     /// and `Engine::frontier_gen` then. Its commit puts the replaced one
@@ -287,6 +294,7 @@ impl Node {
             held_frontier: AtomicBool::new(false),
             ahead: std::sync::atomic::AtomicU64::new(0),
             held_window: AtomicBool::new(false),
+            window_pass: AtomicBool::new(false),
             back_frontier: Mx::new(None),
             asks: Mx::new(Vec::new()),
             restated: AtomicU32::new(0),
