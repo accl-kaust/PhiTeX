@@ -5241,20 +5241,8 @@ pub(crate) fn relocate(
         };
         first = false;
         prev = m.id;
-        // the fields read at it (its record's, its foreign readers', its
-        // witnesses': they go with it) in the set of the segment it stands
-        // in now
-        if let Some((seg, mut inner)) = own_write(eng, &m) {
-            let mut first_of: Vec<Field> = Vec::new();
-            crate::guard::fields_at(eng, m.id, &mut |f| {
-                if crate::segment::guard_insert(&mut inner.guarded, f, m.id) {
-                    first_of.push(f);
-                }
-            });
-            for f in first_of {
-                eng.readers.add(f, seg.lo, seg.id);
-            }
-        }
+        // (the fields read at it are in the set of the segment it stands
+        // in now: filed by `land`)
         // the new place first: a walk from the old label stops at it
         for d in &defs {
             if let Some(c) = d.rel {
@@ -5558,6 +5546,19 @@ fn land(
         m.seg.store(seg.id.0, Ordering::Release);
         m.pos.store(p.0, Ordering::Release);
         inner.nodes.insert(p, m.id);
+        // (the fields read at it (its record's, its foreign readers', its
+        // witnesses': they go with it) in this segment's set, with its
+        // bit, under the lock that places it: set after, a walk between
+        // passed over it, its bit not set where its field stood already)
+        let mut first_of: Vec<Field> = Vec::new();
+        crate::guard::fields_at(eng, m.id, &mut |f| {
+            if crate::segment::guard_insert(&mut inner.guarded, f, m.id) {
+                first_of.push(f);
+            }
+        });
+        for f in first_of {
+            eng.readers.add(f, seg.lo, seg.id);
+        }
         if hole {
             inner.holes += 1;
         }
