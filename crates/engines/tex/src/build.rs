@@ -174,11 +174,15 @@ impl Run<'_, '_> {
             extra,
             vm: km,
         };
-        if km == 102
-            && crate::boxscope::is_global(lid)
-            && let Some(k) = k
-        {
-            self.par_kind(k, &mut md)?;
+        // (`crate::boxscope`: a paragraph left open in this kind's list,
+        // the document's top level, no kind, among them)
+        if crate::boxscope::on() {
+            let kv = k.unwrap_or(ValueId::UNIT);
+            if km == 102 && crate::boxscope::is_global(lid) {
+                self.par_kind(kv, &mut md)?;
+            } else if km.abs() == 1 {
+                self.vert_kind(kv, &mut md)?;
+            }
         }
         Ok(md)
     }
@@ -244,13 +248,9 @@ impl Run<'_, '_> {
         // list's, and the `\aftergroup` tokens were dropped)
         let base = self.base_mode()?;
         self.unsave_extras(&base)?;
-        let outer = self.kind_outer(md)?;
-        // (a paragraph left open under this scope is the run's again,
-        // `crate::boxscope`)
-        if crate::boxscope::on() && self.reown_paragraph(&base, &outer)? {
-            return self.mode();
-        }
-        Ok(outer)
+        // (a paragraph left open under this scope goes on in the kind
+        // outside it, `crate::boxscope`)
+        self.kind_outer(md)
     }
 
     /// The groups still open when the run ends. Only `\end` inside
@@ -2599,7 +2599,7 @@ impl Run<'_, '_> {
         let cur = self.scope_kind()?.unwrap_or(ValueId::UNIT);
         let k = list_of(v, cur).get(5).copied().unwrap_or(ValueId::UNIT);
         if k == ValueId::UNIT {
-            return Ok(Mode {
+            let mut md = Mode {
                 m: 1,
                 km: 1,
                 lid: 0,
@@ -2609,7 +2609,12 @@ impl Run<'_, '_> {
                 depth: 0,
                 extra: Vec::new(),
                 vm: 1,
-            });
+            };
+            // (a paragraph left open in the main list, `crate::boxscope`)
+            if crate::boxscope::on() {
+                self.vert_kind(k, &mut md)?;
+            }
+            return Ok(md);
         }
         let xs = list_of(v, k);
         let n = |i: usize| xs.get(i).map_or(0, |&y| int_of(v, y));
@@ -2627,8 +2632,12 @@ impl Run<'_, '_> {
         };
         // (a group in a paragraph left open: the paragraph's state,
         // `crate::boxscope`)
-        if km == 102 && crate::boxscope::is_global(md.lid) {
-            self.par_kind(k, &mut md)?;
+        if crate::boxscope::on() {
+            if km == 102 && crate::boxscope::is_global(md.lid) {
+                self.par_kind(k, &mut md)?;
+            } else if km.abs() == 1 {
+                self.vert_kind(k, &mut md)?;
+            }
         }
         Ok(md)
     }

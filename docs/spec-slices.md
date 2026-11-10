@@ -218,7 +218,7 @@ later passes run no picture node.
 A slice that cannot stand as a node pulls its neighbours, as now, so
 nothing depends on a hint.
 
-### 6.1 Lists and groups left apart (built 2026-11-10, `PHITEX_BOXSCOPE`)
+### 6.1 Lists and groups left apart (built 2026-11-10; on by default, `PHITEX_BOXSCOPE=0` turns it off)
 
 Every picture sits in a paragraph, and a paragraph is a list the run
 owns too: leaving only the box would leave nothing, the run still could

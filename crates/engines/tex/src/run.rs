@@ -1001,6 +1001,9 @@ pub(crate) struct Run<'c, 'a> {
     /// (`crate::boxscope`) a paragraph kind's state: the kind, whether
     /// its paragraph is still open, the list it is in and that list's mode.
     pub par_memo: Option<(ValueId, bool, i64, i32)>,
+    /// (`crate::boxscope`) a vertical kind's paragraph left open: the
+    /// kind and the paragraph's list, if one is open in it.
+    pub vpar_memo: Option<(ValueId, Option<i64>)>,
     /// `align_state` as this run has it (§309), once read.
     pub astate: Option<i64>,
     /// The alignments open in this run (`align_state`'s companion,
@@ -1435,6 +1438,7 @@ impl<'c, 'a> Run<'c, 'a> {
             elc: None,
             kind_memo: None,
             par_memo: None,
+            vpar_memo: None,
             astate: None,
             aopen: 0,
             bare: false,
