@@ -1,5 +1,5 @@
-//! Lists left open across nodes (docs/spec-slices.md §6, §6.1; off by
-//! default, `PHITEX_BOXSCOPE=1` turns it on).
+//! Lists left open across nodes (docs/spec-slices.md §6, §6.1; on by
+//! default, `PHITEX_BOXSCOPE=0` turns it off).
 //!
 //! A run at rest at its text's end with lists of its own open (a box
 //! being built, the paragraph the box is in) ends there instead of
@@ -43,9 +43,7 @@ const BASE: i64 = -(1i64 << 55);
 /// `PHITEX_BOXSCOPE=0` (or empty).
 pub(crate) fn on() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| {
-        std::env::var_os("PHITEX_BOXSCOPE").is_some_and(|v| !v.is_empty() && v != "0")
-    })
+    *F.get_or_init(|| std::env::var_os("PHITEX_BOXSCOPE").is_none_or(|v| !v.is_empty() && v != "0"))
 }
 
 /// Whether `lid` is a list left open by some node.
