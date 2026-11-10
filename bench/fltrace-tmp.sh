@@ -14,4 +14,4 @@ for i in $(seq 1 ${MAXTRY:-30}); do
   echo "try $i: exit $? finisher runs $n $(grep '^window:' $w/log.txt | tail -1)"
   if [ "$n" -gt ${OVER:-300} ]; then gzip -c $w/log.txt > $r/log.txt.gz; break; fi
 done
-python3 -I bench/fltrace-tmp.py $w/log.txt
+python3 -I bench/fltrace-tmp.py $w/log.txt; python3 -I bench/fltrace2-tmp.py $w/log.txt

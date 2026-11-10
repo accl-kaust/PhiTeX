@@ -2163,8 +2163,24 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
             .map(|f| f.pos_hint().0);
         let marked = field.is_some_and(|f| eng.settle_marked(f));
         // (and the node whose commit woke it, with its op)
+        // (its effect and what it may define, as its operation says:
+        // `Pending` brackets, `Any`)
         let by = wake.by.map_or("-".to_owned(), |b| {
-            format!("{} {}", b.raw(), eng.op(eng.node(b).op()).name())
+            let x = eng.node(b);
+            let op = eng.op(x.op());
+            let args = x.args();
+            let eff = match op.effect(&args, eng.values()) {
+                crate::api::Effect::Pending => "pending",
+                crate::api::Effect::None => "none",
+                _ => "scope",
+            };
+            let may = match op.may_define(&args, eng.values()) {
+                crate::api::MayDefine::Any => "any",
+                crate::api::MayDefine::Nothing => "nothing",
+                crate::api::MayDefine::Names(_) => "names",
+                crate::api::MayDefine::Prefixes(_) => "prefixes",
+            };
+            format!("{} {} {eff} {may}", b.raw(), op.name())
         });
         eprintln!(
             "wake: node {} op {:?} pos {:?} field {name} {:?}{site_pos} frontier-pos {fr_pos:?} marked {marked} by {by}\twake\t{}\t{}\t{name}\t{kind}\t{site_op}\t{}",
