@@ -6314,7 +6314,10 @@ fn reask_after_effect_with(
 /// a segment's nodes (`guarded`) and every one read through a derived
 /// path (`derived`), filed with the read, recounted from the records, and
 /// filed with a node where it lands; debug builds ask every read of the
-/// region again and assert none of those the test keeps is missed.
+/// region again and assert none of those the test keeps is missed, but
+/// those of a reader whose commit is under way (its reads anchored here
+/// installed with its record, filed after, under this segment's lock,
+/// and checked by that commit once filed).
 fn readers_of_fields(
     eng: &Engine,
     inner: &Inner,
@@ -6355,7 +6358,14 @@ fn readers_of_fields(
                 continue;
             }
             crate::guard::readers_at(eng, x, None, &mut |f, r| {
-                if (moves(&f) || read::derived_spec(eng, r.path()).is_some()) && live(eng, r.node(), r.serial) {
+                // (but a reader whose commit installed its record and has not
+                // filed its reads anchored elsewhere yet: that commit files
+                // them under this segment's lock, which this walk holds, and
+                // checks them after, `commit`'s step 6)
+                if (moves(&f) || read::derived_spec(eng, r.path()).is_some())
+                    && live(eng, r.node(), r.serial)
+                    && !eng.node(r.node()).committing.load(Ordering::SeqCst)
+                {
                     assert!(
                         found.contains(&key(f, &r)),
                         "a change of brackets missed reader {:?} of {:?} at {:?}: its field not in the segment's sets with its bit",
