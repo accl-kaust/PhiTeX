@@ -10,7 +10,7 @@ git checkout -q HEAD -- crates Cargo.lock
 mkdir -p $w/warm && printf '%s\n' '\documentclass{article}' '\begin{document}' 'x' '\end{document}' > $w/warm/warm.tex
 (cd $w/warm && PHITEX_CACHE_DIR=$w/cache $w/phitex-$1 build warm.tex > /dev/null 2>&1)
 for i in 1 2 3; do for c in $1 $2; do
-  rm -rf $w/c && cp -a $G/. $w/c/
+  rm -rf $w/c && mkdir -p $w/c && cp -a $G/. $w/c/ && ls $w/c/grail.tex > /dev/null || { echo "no grail.tex in $w/c"; ls $w/c | head; }
   s0=$(date +%s.%N); (cd $w/c && PHITEX_TEX_TIME=1 PHITEX_CACHE_DIR=$w/cache timeout 1200 $w/phitex-$c build -j16 --exact-pdf grail.tex > $r/grail-$c-$i.txt 2>&1); x=$?
   echo "grail $c run $i: exit $x $(python3 -c "import time;print(f'{time.time()-$s0:.2f}')")s $(md5sum < $w/c/grail.pdf 2>/dev/null | cut -c1-12) $(grep -oE 'acct: [0-9]+ runs' $r/grail-$c-$i.txt | tail -1)"
 done; done
