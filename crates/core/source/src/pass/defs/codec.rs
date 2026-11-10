@@ -17,12 +17,12 @@ impl Definitions {
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut w = W(MAGIC.to_vec());
-        w.map(&self.macros, |w, v| w.ats(v, W::shape));
-        w.map(&self.envs, |w, v| w.ats(v, |w, a| w.args(a)));
-        w.map(&self.catcoders, |w, v| w.ats(v, W::catcoder));
-        w.set(&self.env_catcoders);
+        w.map(&self.macros.to_map(), |w, v| w.ats(v, W::shape));
+        w.map(&self.envs.to_map(), |w, v| w.ats(v, |w, a| w.args(a)));
+        w.map(&self.catcoders.to_map(), |w, v| w.ats(v, W::catcoder));
+        w.set(&self.env_catcoders.to_set());
         w.u128(self.active);
-        w.map(&self.bodies, |w, v| {
+        w.map(&self.bodies.to_map(), |w, v| {
             w.ats(v, |w, b| {
                 w.str(&b.text);
                 w.effects(&b.effects);
@@ -41,8 +41,8 @@ impl Definitions {
                 }
             }
         }
-        w.set(&self.fonts);
-        w.map(&self.registers, |w, r| w.u32(*r));
+        w.set(&self.fonts.to_set());
+        w.map(&self.registers.to_map(), |w, r| w.u32(*r));
         let stamped: HashSet<String> = self.stamps.keys().cloned().collect();
         w.set(&stamped);
         w.0
@@ -57,18 +57,20 @@ impl Definitions {
             return None;
         }
         let mut d = Definitions {
-            macros: r.map(|r| r.ats(R::shape))?,
-            envs: r.map(|r| r.ats(R::args))?,
-            catcoders: r.map(|r| r.ats(R::catcoder))?,
-            env_catcoders: r.set()?,
+            macros: r.map(|r| r.ats(R::shape))?.into(),
+            envs: r.map(|r| r.ats(R::args))?.into(),
+            catcoders: r.map(|r| r.ats(R::catcoder))?.into(),
+            env_catcoders: super::super::layered::LayeredSet::from_set(r.set()?),
             active: r.u128()?,
-            bodies: r.map(|r| {
-                r.ats(|r| {
-                    let text = r.str()?;
-                    let effects = r.effects()?;
-                    Some(Arc::new(Body { text, effects }))
-                })
-            })?,
+            bodies: r
+                .map(|r| {
+                    r.ats(|r| {
+                        let text = r.str()?;
+                        let effects = r.effects()?;
+                        Some(Arc::new(Body { text, effects }))
+                    })
+                })?
+                .into(),
             ..Definitions::default()
         };
         d.order = match r.u8()? {
@@ -84,8 +86,8 @@ impl Definitions {
             }
             _ => return None,
         };
-        d.fonts = r.set()?;
-        d.registers = r.map(R::u32)?;
+        d.fonts = super::super::layered::LayeredSet::from_set(r.set()?);
+        d.registers = r.map(R::u32)?.into();
         let mut stamped: Vec<String> = r.set()?.into_iter().collect();
         if !r.0.is_empty() {
             return None;
