@@ -300,7 +300,12 @@ impl Run<'_, '_> {
     pub(crate) fn leave_scope(&mut self) -> R<()> {
         let v = self.v;
         let base = self.base_mode()?;
-        let parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
+        // (its parent kind not carried: read before the opener where a
+        // group closes into it, `Run::kind_outer`. Carried, one opener
+        // run on a wrong kind gave every scope nested in it, node after
+        // node, a kind of its own to run again for: floats2col's first
+        // wave at -j16, 343 of 715 text re-asks the scope kind)
+        let parent = outer_before_opener(v);
         if self.nest.len() > 1 {
             self.leave_frames(&base, parent);
             return self.read_step_bases();
@@ -2598,6 +2603,11 @@ impl Run<'_, '_> {
         let v = self.v;
         let cur = self.scope_kind()?.unwrap_or(ValueId::UNIT);
         let k = list_of(v, cur).get(5).copied().unwrap_or(ValueId::UNIT);
+        let k = if k == outer_before_opener(v) {
+            self.kind_before_opener()?
+        } else {
+            k
+        };
         if k == ValueId::UNIT {
             let mut md = Mode {
                 m: 1,
@@ -4285,6 +4295,31 @@ fn fil(order: i64, _w: i32) -> Glue {
         stretch: 65536,
         stretch_order: crate::val::order(order),
         ..Glue::ZERO
+    }
+}
+
+/// A scope kind's parent kind where the opener's own frame 0 does not
+/// carry it ([`Run::leave_scope`]): the kind before the opener, read where
+/// a group closes into it ([`Run::kind_outer`]). No kind is an integer.
+fn outer_before_opener(v: &Values) -> ValueId {
+    v.int(0)
+}
+
+impl Run<'_, '_> {
+    /// The scope kind outside the one the node runs in: the kind that
+    /// reached the node that opened that scope, read before it. None (the
+    /// unit) at the top.
+    fn kind_before_opener(&mut self) -> R<ValueId> {
+        use phitex_defuse::{At, FieldAt};
+        let f = self.v.field(crate::run::SCOPE_KIND);
+        let me = self.cx.node();
+        let FieldAt::Def(_, Some(opener)) = self.cx.read_at(f, At::Before(me))? else {
+            return Ok(ValueId::UNIT);
+        };
+        Ok(match self.cx.read_at(f, At::Before(opener))? {
+            FieldAt::Def(x, _) => x,
+            _ => ValueId::UNIT,
+        })
     }
 }
 
