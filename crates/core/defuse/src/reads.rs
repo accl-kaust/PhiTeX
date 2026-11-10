@@ -375,7 +375,31 @@ impl Reads {
             }
         };
         it.skip_before(key);
-        it.take_while(move |r| r.kind().field().is_some_and(|g| g.0.raw() == key))
+        std::iter::from_fn(move || if it.next_field() == Some(key) { it.next() } else { None })
+    }
+
+    /// Its reads of no field (`Placed`, `Following`, `Hole`), last in
+    /// set order: the blocks before them passed by their heads.
+    pub(crate) fn of_no_field(&self) -> impl Iterator<Item = ReadRec> + '_ {
+        let (mut lo, mut hi) = (0, self.blocks());
+        while lo < hi {
+            let mid = usize::midpoint(lo, hi);
+            if self.first_field(mid) < u64::MAX {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let k = lo.saturating_sub(1);
+        let mut it = Entries {
+            buf: &self.buf,
+            at: if self.n == 0 { 0 } else { self.block_at(k) },
+            j: if self.n == 0 { 0 } else { k * BLOCK },
+            n: self.len(),
+            prev: 0,
+        };
+        it.skip_before(u64::MAX);
+        it
     }
 
     /// The field of block `k`'s first entry (`u64::MAX` for one of none).
@@ -404,6 +428,23 @@ fn skip_varint(b: &[u8], i: &mut usize) {
 }
 
 impl Entries<'_> {
+    /// The field of the next entry (`u64::MAX` for one of none), read
+    /// alone; none at the end.
+    fn next_field(&self) -> Option<u64> {
+        if self.j >= self.n {
+            return None;
+        }
+        let b = self.buf;
+        let mut i = self.at;
+        let code = b[i] & 0x0f;
+        i += 1;
+        if !has_field(code) {
+            return Some(u64::MAX);
+        }
+        let prev = if self.j.is_multiple_of(BLOCK) { 0 } else { self.prev };
+        Some(prev + get(b, &mut i))
+    }
+
     /// Passes the entries whose field is before `key` (or of none, when
     /// `key` is a field), reading only their lengths.
     fn skip_before(&mut self, key: u64) {
@@ -586,6 +627,11 @@ mod tests {
             assert_eq!(got, want, "field {x}");
         }
         assert_eq!(r.of_field(f(500)).count(), 0);
+        let mut want: Vec<ReadRec> = v.iter().filter(|r| r.kind().field().is_none()).copied().collect();
+        let mut got: Vec<ReadRec> = r.of_no_field().collect();
+        want.sort_by_key(k);
+        got.sort_by_key(k);
+        assert_eq!(got, want);
         assert!(Reads::new(&[]).iter().next().is_none());
     }
 }
