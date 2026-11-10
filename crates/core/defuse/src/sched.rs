@@ -1895,7 +1895,26 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
                 .between(field, crate::order::Pos(0), crate::order::Pos(u64::MAX))
                 .is_empty();
     }
-    settles_edge(eng, by, n)
+    settles_edge(eng, by, n) && !overlapped(eng, by, n)
+}
+
+/// Whether `reader`'s last run began after `by`'s run being committed
+/// did: at one thread `by` would have committed first and the reader
+/// read its definition, so the re-ask is of a race of runs side by side,
+/// not the layer's feedback into text it has passed, and it is not held
+/// to the quiet point. Held, the reader (text between a page's routine
+/// and the frontier, which the page loop had passed while the routine
+/// ran) kept the float list from before the routine, and at the quiet
+/// point ran again on the routine's and every routine after it again:
+/// floats2col at -j8, 1 776 and 2 172 finisher runs for 194 (accl 27183,
+/// mc 84571), the reader's own commit's check of its reads held too.
+fn overlapped(eng: &Engine, by: NodeId, reader: &Node) -> bool {
+    let Some(b) = eng.placed_node(by) else { return false };
+    let (bs, rs) = (
+        b.run_start.load(Ordering::Acquire),
+        reader.run_start.load(Ordering::Acquire),
+    );
+    bs != 0 && rs >= bs
 }
 
 /// Whether a definition by `by` reaches `reader` across the settling
@@ -2223,6 +2242,22 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
             n.id.raw(),
             n.run_ns.load(Ordering::Relaxed)
         );
+        // (PHITEX_WAKE_BT: the path that woke it, for a wake by a settling
+        // node of one that does not settle: the walks behind a late
+        // cascade)
+        if std::env::var_os("PHITEX_WAKE_BT").is_some()
+            && !eng.op(n.op()).settles_at_quiet()
+            && wake.by.is_some_and(|b| eng.op(eng.node(b).op()).settles_at_quiet())
+        {
+            let bt = std::backtrace::Backtrace::force_capture().to_string();
+            let fns: Vec<&str> = bt
+                .lines()
+                .filter_map(|l| l.trim().split_once(": ").map(|x| x.1))
+                .filter(|l| l.contains("defuse::") && !l.contains("{closure") && !l.contains("catch_unwind"))
+                .take(10)
+                .collect();
+            eprintln!("wake-bt: node {} {}", n.id.raw(), fns.join(" < "));
+        }
     }
     match w {
         Some(w) => {
@@ -2450,6 +2485,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         park_frontier(eng, pool, w, node);
         return Ok(());
     }
+    node.run_start.store(eng.now_ns(), Ordering::Release);
     let first = node.run_epoch.swap(pool.epoch, Ordering::AcqRel) != pool.epoch;
     if first {
         node.runs.store(0, Ordering::Relaxed);
