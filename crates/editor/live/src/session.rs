@@ -901,10 +901,6 @@ impl Session {
                 self.status.set("format");
                 let (prelude, cached) = self.prelude()?;
                 phitex_tex::timeline::lap("session: the format found, read from the cache");
-                // (a format not cached is built first, in this build: slow
-                // until the kernel is fast, so a longer time limit for it;
-                // none would leave a stuck evaluation running for ever)
-                let first = prelude.is_some() && cached.is_none();
                 let workers = threads(self.job.threads);
                 let xe = self.job.engine.xetex();
                 let progress = Arc::new(phitex_tex::Progress::new(workers));
@@ -1060,7 +1056,6 @@ impl Session {
                     // 0 for none, as `phitex_tex::Options::default` reads it)
                     time_limit: time_limit_of(
                         std::env::var("PHITEX_TIME_LIMIT_SECS").ok().as_deref(),
-                        first,
                         opts.time_limit,
                     ),
                     ..opts
@@ -2330,14 +2325,13 @@ pub fn waiting_notes(_job: &Job) -> Vec<String> {
 const LATEXMK_AUX: &str = "\\relax \n\\gdef \\@abspage@last{1}\n";
 
 /// The build's time limit from `PHITEX_TIME_LIMIT_SECS` (`var`): that
-/// many seconds, none for 0 (a measurement's cold build is never cut
-/// short); unset or unreadable, 30 minutes for the session's first build
-/// (`first`), else the options' own (`fallback`).
-fn time_limit_of(var: Option<&str>, first: bool, fallback: Option<Duration>) -> Option<Duration> {
+/// many seconds, none for 0; unset or unreadable, the options' own
+/// (`fallback`: none by default, as pdflatex has none, so a large
+/// document's clean build is never cut short).
+fn time_limit_of(var: Option<&str>, fallback: Option<Duration>) -> Option<Duration> {
     match var.and_then(|v| v.trim().parse::<u64>().ok()) {
         Some(0) => None,
         Some(secs) => Some(Duration::from_secs(secs)),
-        None if first => Some(Duration::from_mins(30)),
         None => fallback,
     }
 }
@@ -2550,18 +2544,16 @@ mod tests {
     #[test]
     fn a_time_limit_of_zero_is_none() {
         let fb = Some(Duration::from_secs(600));
-        assert_eq!(super::time_limit_of(Some("0"), true, fb), None);
-        assert_eq!(super::time_limit_of(Some(" 0\n"), false, fb), None);
+        assert_eq!(super::time_limit_of(Some("0"), fb), None);
+        assert_eq!(super::time_limit_of(Some(" 0\n"), fb), None);
         assert_eq!(
-            super::time_limit_of(Some("90"), true, fb),
+            super::time_limit_of(Some("90"), fb),
             Some(Duration::from_secs(90))
         );
-        assert_eq!(
-            super::time_limit_of(None, true, fb),
-            Some(Duration::from_mins(30))
-        );
-        assert_eq!(super::time_limit_of(None, false, fb), fb);
-        assert_eq!(super::time_limit_of(Some("x"), false, fb), fb);
+        assert_eq!(super::time_limit_of(None, fb), fb);
+        assert_eq!(super::time_limit_of(Some("x"), fb), fb);
+        // (unset, the engine's default: no limit, as pdflatex)
+        assert_eq!(super::time_limit_of(None, None), None);
     }
 
     #[test]

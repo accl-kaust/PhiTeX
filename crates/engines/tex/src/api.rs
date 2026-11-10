@@ -1030,16 +1030,15 @@ impl Default for Options {
             program: "pdftex".to_owned(),
             prelude_bytes: None,
             prelude_fallback: None,
-            // (`PHITEX_TIME_LIMIT_SECS`: another bound, 0 for none; a
-            // measurement's cold build or reference must never be cut
-            // short, a truncated reference compares as a wrong edit)
+            // (no limit, as pdflatex has none: a large document's clean
+            // build takes as long as it takes, and a stuck one is the
+            // user's to stop; `PHITEX_TIME_LIMIT_SECS` sets one, 0 none)
             time_limit: match std::env::var("PHITEX_TIME_LIMIT_SECS")
                 .ok()
                 .and_then(|x| x.trim().parse::<u64>().ok())
             {
-                Some(0) => None,
+                Some(0) | None => None,
                 Some(n) => Some(std::time::Duration::from_secs(n)),
-                None => Some(std::time::Duration::from_secs(600)),
             },
             stuck_after: None,
             memory_limit: None,
