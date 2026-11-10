@@ -104,6 +104,11 @@ pub(crate) struct Node {
     /// committed (`Ctx::hole_before`), with their serial then: asked
     /// again when it commits, is taken, is removed or moves.
     pub(crate) waiters: Mx<Vec<(NodeId, u32)>>,
+    /// Runs that read their siblings (`Ctx::following`) over it, with their
+    /// serial then: each change of it as one (taken, given back, removed,
+    /// its text replaced, a node put after it) checks their answers, and
+    /// asks again those that moved (`commit::check_pullers`).
+    pub(crate) pullers: Mx<Vec<(NodeId, u32)>>,
     /// Range readers whose range starts or ends at it: asked again when
     /// it is removed (their bound gone, they answer none).
     pub(crate) bounded: Mx<Vec<(Field, RangeKey, RangeReader)>>,
@@ -385,6 +390,7 @@ impl Node {
             stale: AtomicBool::new(false),
             stopped: Mx::new(Vec::new()),
             waiters: Mx::new(Vec::new()),
+            pullers: Mx::new(Vec::new()),
             bounded: Mx::new(Vec::new()),
             run_ns: AtomicU64::new(0),
             commit_ns: AtomicU64::new(0),

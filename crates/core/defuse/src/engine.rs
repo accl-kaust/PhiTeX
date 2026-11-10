@@ -167,11 +167,12 @@ pub struct Engine {
     /// its siblings (`ReadKind::Following`, `Next`, `Hole`) made before
     /// one may name another sibling now. Moved (SeqCst) after the change
     /// is made and before the change's own re-asks read a node's record
-    /// (`commit::wake_puller`, a removed sibling's claimer); a commit
-    /// installs its record and then reads the count (SeqCst, step 6). So
-    /// either the re-ask meets the new record and asks the node again,
-    /// or the commit sees the count moved and checks those reads again,
-    /// kept ones too.
+    /// (`commit::check_pullers`, a removed sibling's claimer); a commit
+    /// files its sibling reads with the nodes they passed
+    /// (`commit::file_pullers`, each under that node's lock) and then reads
+    /// the count (SeqCst, step 6). So either the re-ask finds the read
+    /// filed and checks it, or the commit sees the count moved and checks
+    /// those reads again, kept ones too.
     pub(crate) struct_gen: AtomicU64,
     /// Nodes with brackets filed: none, and no scope is walked.
     pub(crate) bracket_nodes: AtomicUsize,
@@ -1176,6 +1177,8 @@ impl Engine {
         }
         *n.text.write() = args.into();
         self.structure_changed();
+        // (its text is what a read of its siblings answers)
+        commit::check_pullers(self, None, n, None);
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
         n.effect.store(crate::node::pack_effect(effect), Ordering::Release);
         if n.taken() {

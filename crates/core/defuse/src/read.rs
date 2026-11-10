@@ -839,6 +839,51 @@ pub(crate) fn following(eng: &Engine, me: &Node, i: usize) -> Option<Arc<Node>> 
     following_on(eng, me, i, &mut None)
 }
 
+/// Each node a read of `me`'s siblings up to the `i`-th passes over, the
+/// `i`-th itself included, or every node to the unit's end when there is
+/// none: what its answer rests on (`commit::file_pullers`).
+pub(crate) fn following_passed(eng: &Engine, me: &Node, i: usize, mut each: impl FnMut(&Arc<Node>)) {
+    let mut ps = SiblingParents::of(me);
+    let mut cur = Some(me.seg_hint());
+    let mut lower = Some(me.pos_hint());
+    let mut first = true;
+    let mut k = 0usize;
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.unit != me.unit {
+            return;
+        }
+        {
+            let inner = seg.inner.read();
+            if first {
+                let p = me.pos_hint();
+                if me.state() != State::Gone && (me.seg_hint() != sid || inner.nodes.get(&p) != Some(&me.id)) {
+                    drop(inner);
+                    cur = Some(me.seg_hint());
+                    lower = Some(me.pos_hint());
+                    continue;
+                }
+                first = false;
+                lower = Some(p);
+                ps = SiblingParents::of(me);
+            }
+            let lo = lower.map_or(Unbounded, Excluded);
+            for (_, id) in inner.nodes.range((lo, Unbounded)) {
+                let n = eng.node(*id);
+                each(n);
+                if ps.takes(eng, n) {
+                    if k == i {
+                        return;
+                    }
+                    k += 1;
+                }
+            }
+        }
+        lower = None;
+        cur = eng.order.next(sid, seg.lo);
+    }
+}
+
 /// `following`, going on from `at`, the `j`-th sibling an earlier call
 /// found, where `j < i` (siblings read one after another cost one pass,
 /// not one from `me` each); `at` becomes this answer.
@@ -963,12 +1008,6 @@ impl SiblingParents {
             && eng.op(n.op()).sibling()
             && !n.held_before(eng, self.me, self.at)
             && self.has(eng, n.parent)
-    }
-
-    /// [`SiblingParents::takes`] whatever claim holds `n`: whether it
-    /// read `n` among its siblings before a claim took it.
-    pub(crate) fn would_take(&mut self, eng: &Engine, n: &Node) -> bool {
-        n.state() != State::Gone && eng.op(n.op()).sibling() && self.has(eng, n.parent)
     }
 }
 
