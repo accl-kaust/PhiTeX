@@ -43,7 +43,9 @@ const BASE: i64 = -(1i64 << 55);
 /// `PHITEX_BOXSCOPE=0` (or empty).
 pub(crate) fn on() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F.get_or_init(|| std::env::var_os("PHITEX_BOXSCOPE").is_some_and(|v| !v.is_empty() && v != "0"))
+    *F.get_or_init(|| {
+        std::env::var_os("PHITEX_BOXSCOPE").is_some_and(|v| !v.is_empty() && v != "0")
+    })
 }
 
 /// Whether `lid` is a list left open by some node.
