@@ -542,6 +542,7 @@ struct Decoded {
     glues: FxHashMap<ValueId, Glue>,
     frames: FxHashMap<ValueId, Option<crate::input::Seg>>,
     leaves: FxHashMap<ValueId, phitex_typeset::node::Node>,
+    shapes: FxHashMap<ValueId, Rc<crate::hints::FrameShape>>,
 }
 
 /// Entries kept per map before it is emptied (a bound, not a policy).
@@ -819,6 +820,17 @@ pub(crate) fn frame_of(
     make: impl FnOnce() -> Option<crate::input::Seg>,
 ) -> Option<crate::input::Seg> {
     decoded(v, id, |d| &mut d.frames, make)
+}
+
+/// The scope shape of the source text `id` (a string value: a line
+/// frame's text, `crate::hints::scope_shape`), through this thread's
+/// cache: a rest names the same lines run after run.
+pub(crate) fn frame_shape_of(
+    v: &Values,
+    id: ValueId,
+    make: impl FnOnce() -> crate::hints::FrameShape,
+) -> Rc<crate::hints::FrameShape> {
+    decoded(v, id, |d| &mut d.shapes, || Rc::new(make()))
 }
 
 /// The node `id` decoded before on this thread, if its decoding met no

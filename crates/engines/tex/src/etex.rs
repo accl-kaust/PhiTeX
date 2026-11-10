@@ -1169,6 +1169,7 @@ fn pseudo_start(r: &mut Run<'_, '_>) -> R<()> {
             origin: None,
             lineno: u32::try_from(k + 1).unwrap_or(u32::MAX),
             owner: None,
+            src: None,
             rescanned: true,
             chars: false,
         });

@@ -1600,14 +1600,15 @@ pub(crate) fn line_frame(v: &Values, s: &Line) -> Option<ValueId> {
     if s.loc >= s.buf.len() && !end_due {
         return None;
     }
-    let text: String = s.buf[s.loc.min(s.buf.len())..]
-        .iter()
-        .map(|&c| char::from_u32(c).unwrap_or('?'))
-        .collect();
+    let chars = || {
+        s.buf[s.loc.min(s.buf.len())..]
+            .iter()
+            .map(|&c| char::from_u32(c).unwrap_or('?'))
+    };
     let starts = s.starts && s.endch == -2;
     let mut xs = vec![
         v.str("s"),
-        v.str(&text),
+        ValueId::UNIT,
         v.int(i64::from(s.state)),
         v.int(-2),
         v.int(
@@ -1635,6 +1636,23 @@ pub(crate) fn line_frame(v: &Values, s: &Line) -> Option<ValueId> {
             xs.push(v.int(i64::from(k)));
         }
     }
+    // (the frame the line was decoded from, where the line is still
+    // what it gave: that value again, no copy of the text; the values
+    // are interned, so it is the value a copy would make. A resume's
+    // rest is its predecessor's rest less what it read: a copy of it at
+    // every cut was the square of a long slice's length)
+    if s.loc == 0
+        && let Some(f) = s.src
+        && v.with_list(f, |fs| {
+            fs.len() == xs.len()
+                && fs[0] == xs[0]
+                && fs[2..] == xs[2..]
+                && v.with_str(fs[1], |t| t.chars().eq(chars())) == Some(true)
+        }) == Some(true)
+    {
+        return Some(f);
+    }
+    xs[1] = v.str(&chars().collect::<String>());
     Some(v.list(xs))
 }
 

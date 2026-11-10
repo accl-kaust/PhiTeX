@@ -5465,6 +5465,7 @@ pub(crate) fn scope_shape(v: &Values, fr: ValueId, carried: usize) -> ScopeShape
     let mut st = ShapeScan {
         open: vec![String::new(); carried],
         close: None,
+        record: None,
     };
     for f in list_of(v, fr) {
         let xs = list_of(v, f);
@@ -5476,7 +5477,13 @@ pub(crate) fn scope_shape(v: &Values, fr: ValueId, carried: usize) -> ScopeShape
                 let Some(&t) = xs.get(1) else {
                     return ScopeShape::Unknown;
                 };
-                st.text(&str_of(v, t));
+                // (a line's shape kept by its text's value: a rest's
+                // lines are scanned once, not at every cut that carries
+                // them, `crate::val::frame_shape_of`)
+                let fs = crate::val::frame_shape_of(v, t, || {
+                    v.with_str(t, FrameShape::of).unwrap_or_default()
+                });
+                st.apply(&fs);
             }
             "f" => {
                 let (Some(&id), Some(&o)) = (xs.get(1), xs.get(2)) else {
@@ -5551,11 +5558,39 @@ pub(crate) fn scope_shape(v: &Values, fr: ValueId, carried: usize) -> ScopeShape
     }
 }
 
+/// One text's scan as [`ShapeScan`] composes it: the closers it has
+/// with none of its own open, in order, then the openers it leaves
+/// open (a closer pops an opener of the text first, else one before
+/// it, whatever their names, as [`ShapeScan::event`] does).
+#[derive(Default, Debug)]
+pub(crate) struct FrameShape {
+    closers: Vec<String>,
+    openers: Vec<String>,
+}
+
+impl FrameShape {
+    pub(crate) fn of(text: &str) -> FrameShape {
+        let mut st = ShapeScan {
+            open: Vec::new(),
+            close: None,
+            record: Some(Vec::new()),
+        };
+        st.text(text);
+        FrameShape {
+            closers: st.record.unwrap_or_default(),
+            openers: st.open,
+        }
+    }
+}
+
 /// [`scope_shape`]'s scan: the openers still open (a carried group's
 /// name empty) and the first closer with none open.
 struct ShapeScan {
     open: Vec<String>,
     close: Option<String>,
+    /// For [`FrameShape::of`]: the closers with none open, kept, the
+    /// scan going on past them.
+    record: Option<Vec<String>>,
 }
 
 impl ShapeScan {
@@ -5566,7 +5601,26 @@ impl ShapeScan {
         if opens {
             self.open.push(name.to_owned());
         } else if self.open.pop().is_none() {
-            self.close = Some(name.to_owned());
+            if let Some(r) = &mut self.record {
+                r.push(name.to_owned());
+            } else {
+                self.close = Some(name.to_owned());
+            }
+        }
+    }
+
+    /// A text's [`FrameShape`], as [`ShapeScan::text`] of it.
+    fn apply(&mut self, fs: &FrameShape) {
+        for c in &fs.closers {
+            if self.close.is_some() {
+                return;
+            }
+            if self.open.pop().is_none() {
+                self.close = Some(c.clone());
+            }
+        }
+        if self.close.is_none() {
+            self.open.extend(fs.openers.iter().cloned());
         }
     }
 
@@ -6489,12 +6543,58 @@ mod tests {
         );
     }
 
+    /// A text's lines scanned one after another and their shapes
+    /// composed ([`FrameShape`], [`ShapeScan::apply`]) leave the same
+    /// openers and find the same first closer.
+    #[test]
+    fn frame_shapes_compose_as_the_scan() {
+        let lines = [
+            "\\begin{a}{x",
+            "}\\end{a}\\end{b}",
+            "\\begingroup{",
+            "% \\end{c}",
+            "}}\\endgroup",
+            "\\begin{document}\\end{document}",
+            "{\\bgroup",
+            "\\egroup}\\end{d}{",
+            "\\begin{e}",
+        ];
+        for carried in 0..3 {
+            for a in 0..lines.len() {
+                for b in 0..lines.len() {
+                    for c in 0..lines.len() {
+                        let ls = [lines[a], lines[b], lines[c]];
+                        let mut seq = ShapeScan {
+                            open: vec![String::new(); carried],
+                            close: None,
+                            record: None,
+                        };
+                        let mut com = ShapeScan {
+                            open: vec![String::new(); carried],
+                            close: None,
+                            record: None,
+                        };
+                        for l in ls {
+                            seq.text(l);
+                            com.apply(&FrameShape::of(l));
+                        }
+                        assert_eq!(seq.close, com.close, "{ls:?} {carried}");
+                        if seq.close.is_none() {
+                            assert_eq!(seq.open, com.open, "{ls:?} {carried}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn scope_shapes_of_source_text() {
         let shape = |t: &str, carried: usize| {
             let mut st = ShapeScan {
                 open: vec![String::new(); carried],
                 close: None,
+                record: None,
             };
             st.text(t);
             if let Some(c) = st.close {

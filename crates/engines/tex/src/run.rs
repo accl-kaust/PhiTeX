@@ -538,6 +538,7 @@ impl FileRest {
             origin: Some((self.name, at, ValueId::UNIT)),
             lineno: line,
             owner: None,
+            src: None,
             rescanned: false,
             chars: false,
         };
@@ -4912,6 +4913,7 @@ impl<'c, 'a> Run<'c, 'a> {
                 origin: None,
                 lineno: 0,
                 owner: None,
+                src: None,
                 rescanned: true,
                 chars: false,
             }));
@@ -7826,6 +7828,7 @@ fn decode_seg(v: &Values, f: ValueId) -> Option<Seg> {
                         )),
                         _ => None,
                     },
+                    src: Some(f),
                 }));
             }
             _ => {}

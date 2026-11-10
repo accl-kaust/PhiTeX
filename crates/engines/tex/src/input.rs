@@ -386,6 +386,11 @@ pub(crate) struct Line {
     /// XeTeX: `buf` is characters already (the line was read, its bytes
     /// decoded in its file's mode), not a file's bytes.
     pub chars: bool,
+    /// The frame value the line was decoded from (`run::decode_seg`): a
+    /// continuation's rest names it again where the line is still what
+    /// it decoded to (`pages::piece::line_frame`), not a copy of its
+    /// text. Not part of the line's meaning.
+    pub src: Option<phitex_defuse::ValueId>,
 }
 
 pub(crate) const MID_LINE: u8 = 0;
@@ -422,6 +427,7 @@ impl Line {
             origin: None,
             lineno: 0,
             owner: None,
+            src: None,
             rescanned,
             chars: false,
         }
