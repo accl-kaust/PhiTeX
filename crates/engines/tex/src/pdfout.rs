@@ -399,7 +399,10 @@ pub(crate) struct PagePiece {
     wparams: WParams,
     params: Vec<ValueId>,
     margins: [i32; 3],
-    whats: BTreeMap<u32, Whatsit>,
+    whats: PageWhats,
+    /// The page's value (the `pages` entry, `crate::pages`'s `ship_out`):
+    /// what its whatsits' values are in ([`PageWhats`]).
+    page: ValueId,
     fonts: Fonts,
     /// The page's box, its sealed lines shallow (`crate::pages::seal`),
     /// and their stand-ins (by `LAZY + k`): filled in for its writer
@@ -2178,6 +2181,7 @@ pub(crate) fn collect_pieces(v: &Values, live: &FxHashSet<u64>, keep: &mut dyn F
     m.retain(|k, pc| pc.inst != inst || live.contains(k));
     for pc in m.values().filter(|pc| pc.inst == inst) {
         pc.params.iter().chain(&pc.lazy).for_each(|&x| keep(x));
+        keep(pc.page);
         pc.base_in
             .g2u
             .into_iter()
@@ -2501,11 +2505,78 @@ pub(crate) fn ship(
 
 /// The page's whatsits as the writer asks for them: a form's from the
 /// forms' table, the page's from its data.
-fn page_whatsit(forms: &Forms, whats: &BTreeMap<u32, Whatsit>, h: u32) -> Option<Whatsit> {
+fn page_whatsit(v: &Values, forms: &Forms, whats: &PageWhats, h: u32) -> Option<Whatsit> {
     if h >= FORM_HANDLES {
         return forms.whats.get(&h).cloned();
     }
-    whats.get(&h).cloned()
+    whats.get(v, h)
+}
+
+/// A page's whatsits by handle ([`PagePiece::whats`]): their values, each
+/// decoded where the writer asks for it ([`whatsit`]; a `\special` from
+/// its node's value), and the object numbers they name, found once where
+/// the page shipped ([`apart_names`]). Kept decoded, a page's whatsits
+/// took 230 MB of the `TikZ` manual's at -j1 at 660 s, most of it the
+/// map's nodes.
+#[derive(Default)]
+struct PageWhats {
+    /// By handle: the value, and whether it is a `\special`'s node.
+    at: Box<[(u32, ValueId, bool)]>,
+    /// The numbers TeX numbered they name ([`what_objnum`]), by handle.
+    named: Box<[u64]>,
+    /// The read-time numbers they name ([`rel_objnum`]), sorted, once
+    /// each.
+    rels: Box<[u64]>,
+}
+
+impl PageWhats {
+    /// Of `xs` (handle, value, a `\special`'s node), those the writer
+    /// sees.
+    fn new(v: &Values, mut xs: Vec<(u32, ValueId, bool)>) -> Self {
+        xs.sort_unstable_by_key(|e| e.0);
+        let mut named = Vec::new();
+        let mut rels = Vec::new();
+        xs.retain(|&(_, x, special)| {
+            let Some(w) = Self::decode(v, x, special) else {
+                return false;
+            };
+            named.extend(what_objnum(&w));
+            rels.extend(rel_objnum(&w));
+            true
+        });
+        rels.sort_unstable();
+        rels.dedup();
+        PageWhats {
+            at: xs.into(),
+            named: named.into(),
+            rels: rels.into(),
+        }
+    }
+
+    fn decode(v: &Values, x: ValueId, special: bool) -> Option<Whatsit> {
+        if !special {
+            return whatsit(v, x);
+        }
+        let ys = list_of(v, x);
+        (ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special")).then(|| {
+            Whatsit::Special(bytes_of(
+                &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
+            ))
+        })
+    }
+
+    fn get(&self, v: &Values, h: u32) -> Option<Whatsit> {
+        let i = self.at.binary_search_by_key(&h, |e| e.0).ok()?;
+        let (_, x, special) = self.at[i];
+        Self::decode(v, x, special)
+    }
+
+    /// Every one, by handle.
+    fn each<'a>(&'a self, v: &'a Values) -> impl Iterator<Item = Whatsit> + 'a {
+        self.at
+            .iter()
+            .filter_map(move |&(_, x, special)| Self::decode(v, x, special))
+    }
 }
 
 /// The page's parameters on `st`, as the fold's step sets them.
@@ -2537,27 +2608,18 @@ fn ship_apart(
 ) -> R<()> {
     let v = r.v;
     let (side_lazy, side_whats) = (&side.lazy, &side.whats);
-    let mut whats: BTreeMap<u32, Whatsit> = BTreeMap::new();
+    let mut whats: Vec<(u32, ValueId, bool)> = Vec::new();
     for (&h, &d) in resolved {
-        if let Some(w) = whatsit(v, d) {
-            whats.insert(h, w);
-        }
+        whats.push((h, d, false));
     }
     for (h, &w) in side_whats.iter().enumerate() {
         let Ok(h) = u32::try_from(h) else { break };
-        if whats.contains_key(&h) || resolved.contains_key(&h) {
+        if resolved.contains_key(&h) {
             continue;
         }
-        let ys = list_of(v, w);
-        if ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
-            whats.insert(
-                h,
-                Whatsit::Special(bytes_of(
-                    &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
-                )),
-            );
-        }
+        whats.push((h, w, true));
     }
+    let whats = PageWhats::new(v, whats);
     let wparams = writer_params(r)?;
     let base_in = base_inputs(r)?;
     let mut pc = PagePiece {
@@ -2573,6 +2635,7 @@ fn ship_apart(
             filled: None,
             saved: Vec::new(),
         }),
+        page: page_v,
         lazy: side_lazy.clone(),
         bases: crate::nodes::sealed_bases(side),
         pieces: {
@@ -2719,7 +2782,7 @@ fn write_page_with(
     let local: Reloc = aliases.iter().map(|&(p, t)| (t, p)).collect();
     let (res, rec) = {
         let mut wh = |h: u32, _leaders: bool| {
-            page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &local))
+            page_whatsit(v, &forms, &pc.whats, h).map(|w| relocated(w, &local))
         };
         st.ship_recorded(bx, &pc.fonts, &mut wh)
     };
@@ -2835,9 +2898,9 @@ impl phitex_defuse::Operation for PdfPage {
                     // file begun from the colours they leave it; not its
                     // record's stacks, a walk that stops at an object the
                     // page's own writer lacks)
-                    if let Some(ops) =
-                        with_page_box(v, &pc, &h, &mut line, |bx| color_ops(&pc.whats, &bx.list))
-                    {
+                    if let Some(ops) = with_page_box(v, &pc, &h, &mut line, |bx| {
+                        color_ops(v, &pc.whats, &bx.list)
+                    }) {
                         if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
                             eprintln!("stream: page {k} colour commands {}", ops.len());
                         }
@@ -2913,7 +2976,7 @@ pub(crate) fn page_alone(
 ) -> Option<(Vec<u8>, bool)> {
     let mut params = PdfParams::default();
     page_params(v, &mut params, &pc.params);
-    let (need, mut named, rels) = page_names(pc, &params, content);
+    let (need, mut named, rels) = page_names(v, pc, &params, content);
     let found = objs.locked().closure(&need, &rels);
     named.extend(&need);
     named.extend(&found.named);
@@ -3010,6 +3073,7 @@ pub(crate) fn page_alone(
 /// attributes), and its links' and annotations' read-time ones
 /// ([`crate::pdfprim::REL`]).
 fn page_names(
+    v: &Values,
     pc: &PagePiece,
     params: &PdfParams,
     content: &[u8],
@@ -3017,8 +3081,8 @@ fn page_names(
     let mut need: Vec<i64> = Vec::new();
     let mut named: Vec<i64> = Vec::new();
     let mut rels: Vec<i64> = Vec::new();
-    for w in pc.whats.values() {
-        match w {
+    for w in pc.whats.each(v) {
+        match &w {
             Whatsit::RefObj(n) | Whatsit::RefXForm(n) | Whatsit::RefXImage(n) => {
                 need.push(i64::try_from(*n).unwrap_or(i64::MAX));
             }
@@ -3062,19 +3126,19 @@ fn page_names(
 /// The colour stack commands of a page of `list` (its whatsits `whats`)
 /// in the order its walk meets them (boxes, leaders' boxes; a form's are
 /// the form stacks', `\pdfrefxform` not followed).
-fn color_ops(whats: &BTreeMap<u32, Whatsit>, list: &[Node]) -> Vec<crate::exec::ColorOp> {
-    fn walk(whats: &BTreeMap<u32, Whatsit>, list: &[Node], out: &mut Vec<crate::exec::ColorOp>) {
+fn color_ops(v: &Values, whats: &PageWhats, list: &[Node]) -> Vec<crate::exec::ColorOp> {
+    fn walk(v: &Values, whats: &PageWhats, list: &[Node], out: &mut Vec<crate::exec::ColorOp>) {
         for n in list {
             match n {
-                Node::Box(b) => walk(whats, &b.list, out),
+                Node::Box(b) => walk(v, whats, &b.list, out),
                 Node::Glue(g) => {
                     if let Some(x) = g.leader.as_deref() {
-                        walk(whats, std::slice::from_ref(x), out);
+                        walk(v, whats, std::slice::from_ref(x), out);
                     }
                 }
                 Node::Whatsit(h, _) => {
-                    if let Some(Whatsit::ColorStack(s, c)) = whats.get(h) {
-                        out.push((*s, c.clone()));
+                    if let Some(Whatsit::ColorStack(s, c)) = whats.get(v, *h) {
+                        out.push((s, c));
                     }
                 }
                 _ => {}
@@ -3082,7 +3146,7 @@ fn color_ops(whats: &BTreeMap<u32, Whatsit>, list: &[Node]) -> Vec<crate::exec::
         }
     }
     let mut out = Vec::new();
-    walk(whats, list, &mut out);
+    walk(v, whats, list, &mut out);
     out
 }
 
@@ -4978,21 +5042,20 @@ fn rel_objnum(w: &Whatsit) -> Option<u64> {
 /// found scheduled where the line's is not, and the link shipped the
 /// page again); the link gives each name the number the line gives its
 /// object.
-fn apart_names(whats: &BTreeMap<u32, Whatsit>, floor: usize) -> (usize, Vec<(usize, u64)>) {
+fn apart_names(whats: &PageWhats, floor: usize) -> (usize, Vec<(usize, u64)>) {
     // (a number TeX numbered is one of this file's: no REL bit)
     let named = whats
-        .values()
-        .filter_map(what_objnum)
+        .named
+        .iter()
+        .copied()
         .max()
         .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
     let from = named.max(floor);
-    let mut rel: Vec<u64> = whats.values().filter_map(rel_objnum).collect();
-    rel.sort_unstable();
-    rel.dedup();
-    let aliases = rel
-        .into_iter()
+    let aliases = whats
+        .rels
+        .iter()
         .enumerate()
-        .map(|(i, t)| (from + 1 + i, t))
+        .map(|(i, &t)| (from + 1 + i, t))
         .collect();
     (named, aliases)
 }
@@ -5675,11 +5738,7 @@ fn link(
             let n0 = st.objects_numbered();
             // (a page naming an object the link numbered otherwise than
             // TeX read it is shipped with the link's number)
-            let moved = pc
-                .whats
-                .values()
-                .filter_map(what_objnum)
-                .any(|n| reloc.contains_key(&n));
+            let moved = pc.whats.named.iter().any(|n| reloc.contains_key(n));
             // (the names the page was written apart with for the
             // read-time numbers only its bytes name: the line's numbers
             // of their objects)
@@ -5707,7 +5766,7 @@ fn link(
                 // (the node that wrote the page logged the writer's
                 // error when it wrote it)
                 let mut wh = |h: u32, _leaders: bool| {
-                    page_whatsit(&forms, &pc.whats, h)
+                    page_whatsit(v, &forms, &pc.whats, h)
                         .filter(|w| alone.is_none_or(|a| a.keeps(w)))
                         .map(|w| relocated(w, &reloc))
                 };
