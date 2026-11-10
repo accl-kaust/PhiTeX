@@ -1330,3 +1330,30 @@ fn page_discards_marker_held_at_the_frontier() {
         );
     }
 }
+
+/// TeX Live manuals abntex2, doc-modeles-factures-belges-assocs and
+/// facture-belge-simple-sans-tva-doc (xelatex): a listing's line with
+/// accented letters, the run cut at the line's paragraph start inside the
+/// listing's groups. The line was reached as ASCII (`%`) and its accented
+/// rest joined later, decoded; the line stayed marked as bytes, so the
+/// continuation decoded its rest again: `ç` became U+FFFD, set at once
+/// before the word listings gathered, as `.notdef`. At -j1 and -j4
+/// (oracle: xelatex in the CI image, accl 27052).
+#[test]
+fn xe_listings_line_cut() {
+    check_threads("xe_listings_line_cut", "pdf");
+}
+
+/// TeX Live manual cursolatex (pdflatex) at -j1: beside a `.nav` an older
+/// beamer wrote, the first frame's piece asks for the page after its own
+/// and goes again from its start to that candidate (`Halt::Recut`). The
+/// second pass committed the first pass's product with its own (its reads
+/// and waits past the candidate): the page loop stayed stopped at that
+/// piece, the first frame's page was never made again, and the build
+/// wrote no PDF ("the pages' writers ran before every page had
+/// finished"). At -j1 and -j4 (oracle: pdflatex in the CI image, accl
+/// 27052).
+#[test]
+fn beamer_second_pass() {
+    check_threads("beamer_second_pass", "pdf");
+}

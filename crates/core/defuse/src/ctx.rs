@@ -152,6 +152,30 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Starts the run's product again, as at its start (its wake and its
+    /// last run kept): a run that goes again from its start in the same
+    /// call (a second pass to a candidate the first asked for) commits
+    /// what that pass makes, never the first pass's reads, placements,
+    /// waits or definitions past where the second stops.
+    pub fn begin_again(&mut self) {
+        let (scope_gen, moves_gen) = (self.product.scope_gen, self.product.moves_gen);
+        let fresh = Ctx::new(self.eng, self.worker, self.me);
+        self.product = fresh.product;
+        self.product.scope_gen = scope_gen;
+        self.product.moves_gen = moves_gen;
+        self.views.clear();
+        self.follow_at = None;
+        self.seen.clear();
+        self.unread_log.clear();
+        self.stop_at = None;
+        self.placed_keys = None;
+        self.stuck = None;
+        self.wait_on = None;
+        self.waits_only = false;
+        self.wait_frontier = false;
+        self.goes_on = false;
+    }
+
     /// [`Ctx::read_before_placer`], with the association list field
     /// `overlay` (`[[field, value]…]`, `[field]` for a binding to
     /// nothing), read at my own position, answering first: a field it
