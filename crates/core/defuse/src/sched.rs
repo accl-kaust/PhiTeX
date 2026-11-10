@@ -1923,6 +1923,22 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
 /// (accl 27183, 27201, 27368, mc 84571, 84657-84660, 84774). Ordered by
 /// commit ends instead, a routine run again in the wave on a race of its
 /// own was taken for feedback.
+///
+/// What bounds the layer's feedback inside a wave, with no hold there: a
+/// re-ask goes only to readers after its definer (a definition reaches
+/// forward), a routine's to the text after it, that text's to the
+/// routines and the page loop after it, and the loop, re-asked by a
+/// range, folds again from the text that moved (`frontier_back`) and
+/// places routines from there on. So every chain of re-asks in a wave
+/// moves on along the line, a node is asked again only by one before it,
+/// and by induction on the line's order the first settles, then the
+/// next: the wave ends, as at one thread, where every node runs in that
+/// order. Feedback to text before a routine (a page number read back)
+/// goes through the quiet point's passes (`Operation::final_only`, held
+/// wakes from a later wave), bounded by `Limits::settle_passes`. The
+/// no-livelock proof of the speculation window (docs/spec-window.md,
+/// Progress) is of its holds of runs, not of these wakes
+/// (`settle::routines_flipping_the_text_after_them_settle_within_a_wave`).
 fn same_wave(eng: &Engine, by: NodeId, reader: &Node) -> bool {
     let Some(b) = eng.placed_node(by) else { return false };
     let of = |n: &Node| match n.state() {
