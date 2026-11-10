@@ -96,6 +96,24 @@ node, over `GAP`. Continuations of a slice stand in its gap: distance 0.
   distance is read, W is never touched, the holds are the layer-field
   holds alone.
 
+## Next: a first read before its definer (not built yet)
+
+The same race at the start of a text, inside the window: under load at
+-j16, 121 of para400dvi's 626 nodes run again because they read
+`\hsize` before the first piece committed its `\hsize=6in` (stream2's
+runs3 census). The value read is defined (the format's), so the wait for
+a definer of an undefined control sequence does not catch it. Folded in
+here, as the window's own rule, not a second speculation change: a
+node's first read of a field, within the window, waits for an earlier
+node not yet run whose text may define that field (its `MayDefine`
+set, computed once per run of it), as a held run past the frontier
+waits for the fold. The may-define set of a LaTeX preamble is
+"anything" (a package can define every name); such a node is not
+waited on for every field but only where it is the reader's nearest
+earlier unrun node, so a preamble orders the text after it once, not
+field by field. Its measures are the chains and census_plain tests and
+para400dvi's reruns at -j16.
+
 ## Measures
 
 `PHITEX_TEX_TIME` prints the window's last W, its halvings and
