@@ -1845,7 +1845,12 @@ impl Engine {
                 }
             }
             n.stopped.lock().iter().for_each(|&(f, _)| keep(f.0));
-            n.anchored.lock().iter().for_each(|f| keep(f.0));
+            for (g, r) in &n.foreign.lock().witness {
+                keep(g.0);
+                if crate::segment::live(self, r.node(), r.serial) {
+                    r.seen().into_iter().for_each(&mut *keep);
+                }
+            }
         }
         for sid in self.order.all() {
             let inner = self.seg(sid).inner.read();
@@ -1858,10 +1863,7 @@ impl Engine {
                     }
                 });
             }
-            for (f, rs) in &inner.readers {
-                keep(f.0);
-                rs.iter().for_each(|r| r.seen().into_iter().for_each(&mut *keep));
-            }
+            inner.guarded.iter().for_each(|f| keep(f.0));
             for (f, m) in &inner.contribs {
                 keep(f.0);
                 m.values().for_each(|&x| keep(x));
@@ -1930,9 +1932,6 @@ impl Engine {
     /// [`Engine::collect`], with `extra` roots the caller holds (an edit
     /// source's, `EditSource::roots`).
     pub(crate) fn collect_with(&self, extra: Vec<ValueId>) -> Collected {
-        // (a stale reader's `seen` holds what an earlier run read: swept
-        // first, it holds nothing)
-        self.sweep_readers_now();
         self.values.collect(&mut |keep: &mut dyn FnMut(ValueId)| {
             extra.iter().for_each(|&x| keep(x));
             self.roots(keep);
@@ -1944,18 +1943,18 @@ impl Engine {
         })
     }
 
-    /// The reader records of runs no longer their node's last dropped from
-    /// every segment, and the lists they leave shrunk: at a quiet point
-    /// (the end of an evaluation, a pass's quiescence), where nothing
-    /// files a reader, once they outnumber the standing ones. The records
-    /// of a node's earlier runs stay filed
-    /// until met otherwise ([`crate::segment::push_pruned`]): in a build
-    /// that runs most nodes again they were two in three records filed.
-    /// The records dropped.
+    /// The segments' sets of fields read at their nodes counted again
+    /// (`guard::recount`), the fields no record reads there now taken
+    /// out of them and of the readers' index, and each node's foreign
+    /// readers and witnesses that no longer read at it dropped: at a
+    /// quiet point (the end of an evaluation, a pass's quiescence), where
+    /// nothing files a read, once the reads of records replaced since
+    /// the last outnumber those it left. A field left in a set costs a
+    /// walk a scan of that segment's nodes, no answer. What was dropped.
     pub(crate) fn sweep_readers(&self) -> usize {
-        // (a sweep costs every record filed: only once the stale ones
-        // outnumber those the last sweep left, so it costs each stale
-        // record a few visits, and an edit of a few nodes nothing)
+        // (a sweep costs every record's reads: only once the replaced
+        // ones outnumber those the last sweep counted, so it costs each
+        // replaced read a few looks, and an edit of a few nodes nothing)
         let stale = self.stale_reads.load(Ordering::Relaxed);
         if stale < (1 << 16).max(self.swept_left.load(Ordering::Relaxed)) {
             return 0;
@@ -1971,16 +1970,47 @@ impl Engine {
         for sid in self.order.all() {
             let s = self.seg(sid);
             let mut inner = s.inner.write();
-            inner.readers.retain(|_, rs| {
-                let n = rs.len();
-                rs.retain(|r| crate::segment::live(self, r.node(), r.serial));
-                dropped += n - rs.len();
-                if rs.capacity() > 2 * rs.len() + 4 {
-                    rs.shrink_to(rs.len());
+            let nodes: Vec<NodeId> = inner.nodes.values().copied().collect();
+            for &x in &nodes {
+                let n = self.node(x);
+                // (its foreign readers that read at it no more, each record
+                // looked at with no other node's lock held)
+                let rs: Vec<NodeId> = n.foreign.lock().readers.iter().copied().collect();
+                let stale: Vec<NodeId> = rs
+                    .into_iter()
+                    .filter(|&r| {
+                        let mut reads = false;
+                        crate::guard::reads_at(self, x, r, &mut reads);
+                        !reads
+                    })
+                    .collect();
+                let mut fo = n.foreign.lock();
+                for r in stale {
+                    fo.readers.remove(&r);
+                    dropped += 1;
                 }
-                left += rs.len();
-                !rs.is_empty()
-            });
+                let k = fo.witness.len();
+                fo.witness
+                    .retain(|(_, r)| crate::segment::live(self, r.node(), r.serial));
+                dropped += k - fo.witness.len();
+                if fo.readers.capacity() > 2 * fo.readers.len() + 4 {
+                    fo.readers.shrink_to_fit();
+                }
+                fo.witness.shrink_to_fit();
+                drop(fo);
+                left += n.record().map_or(0, |r| r.reads.len());
+            }
+            let (gone, new) = crate::guard::recount(self, &mut inner);
+            dropped += gone.len();
+            if inner.guarded.capacity() > 2 * inner.guarded.len() + 16 {
+                inner.guarded.shrink_to_fit();
+            }
+            for f in gone {
+                self.readers.remove(f, s.lo, s.id);
+            }
+            for f in new {
+                self.readers.add(f, s.lo, s.id);
+            }
             let n = inner.stops.len();
             inner
                 .stops
@@ -1991,21 +2021,21 @@ impl Engine {
         dropped
     }
 
+    /// (measure) The readers at the segments' nodes (their records' reads
+    /// at positions, foreign readers' and witnesses), those standing (all
+    /// of them: no record of an earlier run is filed), and the fields the
+    /// segments' sets name.
     pub fn reader_records(&self) -> (usize, usize, usize) {
-        let (mut filed, mut standing, mut fields) = (0usize, 0usize, 0usize);
+        let (mut filed, mut fields) = (0usize, 0usize);
         for sid in self.order.all() {
             let s = self.seg(sid);
             let inner = s.inner.read();
-            fields += inner.readers.len();
-            for rs in inner.readers.values() {
-                filed += rs.len();
-                standing += rs
-                    .iter()
-                    .filter(|r| crate::segment::live(self, r.node(), r.serial))
-                    .count();
+            fields += inner.guarded.len();
+            for &x in inner.nodes.values() {
+                crate::guard::readers_at(self, x, None, &mut |_, _| filed += 1);
             }
         }
-        (filed, standing, fields)
+        (filed, filed, fields)
     }
 
     /// What each live node's last run defined `f` to, in no order.

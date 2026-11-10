@@ -243,7 +243,7 @@ impl Order {
                     .filter(|x| !x.1.is_empty())
                     .map(|(f, _)| ((*f, 1u8), ())),
             );
-            m.extend(g.readers.keys().map(|f| ((*f, 2u8), ())));
+            m.extend(g.guarded.iter().map(|f| ((*f, 2u8), ())));
             m
         };
         let before: Vec<_> = gs.iter().map(|g| held(g)).collect();

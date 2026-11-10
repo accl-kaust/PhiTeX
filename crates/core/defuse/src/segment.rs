@@ -56,9 +56,12 @@ pub(crate) struct Inner {
     /// Definitions by field, in position order. A relation's value is kept
     /// materialised and recomputed in place when its input changes.
     pub(crate) defs: FxHashMap<Field, PosMap<Def>>,
-    /// Readers of each field anchored in this segment. Stale records (an
-    /// older serial than the reader's) are dropped when met.
-    pub(crate) readers: FxHashMap<Field, Vec<Reader>>,
+    /// The fields read at its nodes (`guard::readers_at`: their own reads
+    /// at themselves, others' reads anchored at them, witnesses): a field
+    /// enters when a read of it is filed here and leaves at a recount
+    /// (`guard::recount`: a split, a give, a sweep). No reader record is
+    /// kept: a walk finds them in the nodes' records.
+    pub(crate) guarded: FxHashSet<Field>,
     /// Contributions by field, in position order, and their fold.
     pub(crate) contribs: FxHashMap<Field, PosMap<ValueId>>,
     pub(crate) sums: FxHashMap<Field, ValueId>,
@@ -453,6 +456,17 @@ pub(crate) fn touched<T: Clone>(n: usize, x: T) -> Vec<T> {
     v
 }
 
+/// A set with room for `n` fields, its slots touched as `touched`'s.
+fn touched_set(n: usize) -> FxHashSet<Field> {
+    let mut m = FxHashSet::default();
+    m.reserve(n);
+    for i in 0..n as u64 {
+        m.insert(Field(ValueId::from_raw(i)));
+    }
+    m.clear();
+    m
+}
+
 /// A map with room for `n` entries, its slots touched as `touched`'s.
 fn touched_map<V: Default>(n: usize) -> FxHashMap<Field, V> {
     let mut m = FxHashMap::default();
@@ -470,10 +484,9 @@ fn touched_map<V: Default>(n: usize) -> FxHashMap<Field, V> {
 pub(crate) struct Grow {
     defs: usize,
     contribs: usize,
-    readers: usize,
+    guarded: usize,
     def_runs: Vec<(Field, usize)>,
     contrib_runs: Vec<(Field, usize)>,
-    reader_lists: Vec<(Field, usize)>,
     /// The fields predicted by the placements a commit makes, in order.
     preds: Vec<Field>,
     /// The brackets' run's new room.
@@ -485,9 +498,6 @@ pub(crate) struct Grow {
     ops: Vec<OpId>,
     op_lists: Vec<(OpId, usize)>,
     by_op: usize,
-    /// The nodes whose lists of fields read at them (`Node::anchored`)
-    /// need room, and how much.
-    anchored: Vec<(NodeId, usize)>,
     /// The room the commit's own lists need, where theirs is less: for the
     /// `next` readers stopped in the segment, and for the readers its
     /// walks may wake (`commit::walk_here`).
@@ -503,15 +513,13 @@ pub(crate) struct Made {
     ix_rooms: [Vec<crate::index::MadeRoom>; 3],
     by_op: Option<FxHashMap<OpId, Vec<NodeId>>>,
     op_lists: Vec<(OpId, Vec<NodeId>)>,
-    anchored: Vec<(NodeId, FxHashSet<Field>)>,
     brackets: Vec<(Pos, (NodeId, Brackets))>,
     nodes: Vec<(Pos, NodeId)>,
     defs: Option<FxHashMap<Field, PosMap<Def>>>,
     contribs: Option<FxHashMap<Field, PosMap<ValueId>>>,
-    readers: Option<FxHashMap<Field, Vec<Reader>>>,
+    guarded: Option<FxHashSet<Field>>,
     def_runs: Vec<(Field, Vec<(Pos, Def)>)>,
     contrib_runs: Vec<(Field, Vec<(Pos, ValueId)>)>,
-    reader_lists: Vec<(Field, Vec<Reader>)>,
 }
 
 /// Room a map needs for `k` new keys, as its new size; 0 when it has it.
@@ -532,37 +540,20 @@ const DUMMY_DEF: Def = Def {
     multi: false,
 };
 
-const DUMMY_READER: Reader = Reader {
-    seen: NO_VALUE,
-    node: 0,
-    serial: 0,
-    anchor: 0,
-    path: 0,
-};
-
 impl Grow {
     /// Room for what a commit of so many definitions, contributions and
     /// fields read could find to grow: none of it grown under the lock.
     /// (`preds`: the fields the commit's new placements are predicted to
     /// define, each as often)
-    pub(crate) fn with_capacity(
-        defs: usize,
-        contribs: usize,
-        reads: usize,
-        preds: usize,
-        placed: usize,
-        anchored: usize,
-    ) -> Grow {
+    pub(crate) fn with_capacity(defs: usize, contribs: usize, reads: usize, preds: usize, placed: usize) -> Grow {
         let n = defs + contribs + reads + preds;
         crate::index::FieldIndex::prepare(n);
         Grow {
             def_runs: Vec::with_capacity(defs + preds),
             contrib_runs: Vec::with_capacity(contribs),
-            reader_lists: Vec::with_capacity(reads),
             preds: Vec::with_capacity(preds),
             ops: Vec::with_capacity(placed),
             op_lists: Vec::with_capacity(placed),
-            anchored: Vec::with_capacity(anchored),
             ix_shards: [
                 Vec::with_capacity(defs + preds),
                 Vec::with_capacity(contribs),
@@ -582,14 +573,12 @@ impl Grow {
             && self.nodes == 0
             && self.by_op == 0
             && self.op_lists.is_empty()
-            && self.anchored.is_empty()
             && self.brackets == 0
             && self.scratch == [0, 0]
             && self.contribs == 0
-            && self.readers == 0
+            && self.guarded == 0
             && self.def_runs.is_empty()
             && self.contrib_runs.is_empty()
-            && self.reader_lists.is_empty()
             && self.ix_need.iter().all(Vec::is_empty)
     }
 
@@ -599,16 +588,14 @@ impl Grow {
     }
 
     fn clear(&mut self) {
-        (self.defs, self.contribs, self.readers, self.brackets) = (0, 0, 0, 0);
+        (self.defs, self.contribs, self.guarded, self.brackets) = (0, 0, 0, 0);
         self.scratch = [0, 0];
         self.by_op = 0;
         self.nodes = 0;
         self.ops.clear();
         self.op_lists.clear();
-        self.anchored.clear();
         self.def_runs.clear();
         self.contrib_runs.clear();
-        self.reader_lists.clear();
         self.preds.clear();
         for v in &mut self.ix_shards {
             v.clear();
@@ -635,14 +622,9 @@ impl Grow {
                 m
             }),
             op_lists: self.op_lists.iter().map(|&(o, n)| (o, Vec::with_capacity(n))).collect(),
-            anchored: self
-                .anchored
-                .iter()
-                .map(|&(a, n)| (a, FxHashSet::with_capacity_and_hasher(n, Default::default())))
-                .collect(),
             defs: (self.defs > 0).then(|| touched_map(self.defs)),
             contribs: (self.contribs > 0).then(|| touched_map(self.contribs)),
-            readers: (self.readers > 0).then(|| touched_map(self.readers)),
+            guarded: (self.guarded > 0).then(|| touched_set(self.guarded)),
             def_runs: self
                 .def_runs
                 .iter()
@@ -652,11 +634,6 @@ impl Grow {
                 .contrib_runs
                 .iter()
                 .map(|&(f, n)| (f, touched(n, (Pos(0), ValueId::UNIT))))
-                .collect(),
-            reader_lists: self
-                .reader_lists
-                .iter()
-                .map(|&(f, n)| (f, touched(n, DUMMY_READER)))
                 .collect(),
         }
     }
@@ -679,13 +656,6 @@ impl Made {
         {
             m.extend(inner.by_op.drain());
             std::mem::swap(&mut inner.by_op, m);
-        }
-        for (a, list) in &mut self.anchored {
-            let mut v = eng.node(*a).anchored.lock();
-            if list.capacity() > v.len() {
-                list.extend(v.drain());
-                std::mem::swap(&mut *v, list);
-            }
         }
         for (o, list) in &mut self.op_lists {
             let v = inner.by_op.entry(*o).or_default();
@@ -713,11 +683,11 @@ impl Made {
             std::mem::swap(&mut inner.contribs, m);
         }
         // (one made too small meanwhile is kept too, freed after the lock)
-        if let Some(m) = self.readers.as_mut()
-            && m.capacity() > inner.readers.capacity()
+        if let Some(m) = self.guarded.as_mut()
+            && m.capacity() > inner.guarded.capacity()
         {
-            m.extend(inner.readers.drain());
-            std::mem::swap(&mut inner.readers, m);
+            m.extend(inner.guarded.drain());
+            std::mem::swap(&mut inner.guarded, m);
         }
         for (f, run) in &mut self.def_runs {
             // (a field new here: its run in place, empty, for the
@@ -732,19 +702,6 @@ impl Made {
                 && run.capacity() > pm.len()
             {
                 *run = pm.regrow(std::mem::take(run));
-            }
-        }
-        for (f, list) in &mut self.reader_lists {
-            match inner.readers.get_mut(f) {
-                Some(v) => {
-                    if list.capacity() > v.len() {
-                        list.append(v);
-                        std::mem::swap(v, list);
-                    }
-                }
-                None => {
-                    inner.readers.insert(*f, std::mem::take(list));
-                }
             }
         }
     }
@@ -762,35 +719,15 @@ impl Inner {
         pos: Pos,
         defs: impl Iterator<Item = Field> + Clone,
         contribs: impl Iterator<Item = Field>,
-        reads: &[(Field, usize)],
+        reads: &[Field],
         preds: impl Iterator<Item = Field>,
         brackets: usize,
         old: impl Iterator<Item = Field> + Clone,
         has: [usize; 2],
         ops: impl Iterator<Item = OpId>,
-        anchored: impl Iterator<Item = (NodeId, Field)>,
     ) {
         use crate::index::FieldIndex;
         g.clear();
-        // (the fields read at other nodes, each listed there once)
-        // (`g.anchored` first counts each node's fields new to it, then
-        // keeps those without room for them)
-        for (a, f) in anchored {
-            if !eng.node(a).anchored.lock().contains(&f) {
-                match g.anchored.iter_mut().find(|x| x.0 == a) {
-                    Some(x) => x.1 += 1,
-                    None => g.anchored.push((a, 1)),
-                }
-            }
-        }
-        g.anchored.retain_mut(|(a, k)| {
-            let v = eng.node(*a).anchored.lock();
-            if v.capacity() - v.len() >= *k {
-                return false;
-            }
-            *k = ((v.len() + *k) * 2).max(4);
-            true
-        });
         // (the lists of nodes by operation its placements join, and the
         // segment's run of them)
         g.ops.extend(ops);
@@ -817,14 +754,9 @@ impl Inner {
         }
         // (the commit's lists: its `next` readers stopped here, and the
         // readers of the fields it defines or defined, each of which a walk
-        // may wake once)
-        let woken: usize = defs
-            .clone()
-            .chain(old)
-            .map(|f| self.readers.get(&f).map_or(0, Vec::len))
-            .sum::<usize>()
-            // (and its own, filed before the walks)
-            + reads.iter().map(|x| x.1).sum::<usize>();
+        // may wake once: about a node each in this segment, where the
+        // segment reads the field)
+        let woken: usize = defs.clone().chain(old).filter(|f| self.guarded.contains(f)).count() * self.nodes.len();
         let need = [self.stops.len(), woken];
         for i in 0..2 {
             if has[i] < need[i] {
@@ -901,32 +833,20 @@ impl Inner {
             }
         }
         g.contribs = map_room(&self.contribs, new);
+        // (the fields read here new to the segment: room in its set, and
+        // in the readers' index)
         let mut new = 0;
-        for &(f, k) in reads {
-            // (a list out of room first drops its records that no longer
-            // stand, a node's earlier runs': kept, they grew with every
-            // run for good, the course's lists ten times their readers.
-            // It grows only where what stands fills half of it, so a
-            // list drops its dead once per doubling, not per filing)
-            let Some(v) = self.readers.get_mut(&f) else {
+        for &f in reads {
+            if !self.guarded.contains(&f) {
                 new += 1;
-                // (exact: most fields of a segment are read by a node or
-                // two, 3.9 million lists in the `TikZ` manual)
-                g.reader_lists.push((f, k));
                 g.ix_shards[2].push(FieldIndex::shard_of(f));
-                continue;
-            };
-            if v.is_empty() {
-                g.ix_shards[2].push(FieldIndex::shard_of(f));
-            }
-            if v.capacity() - v.len() < k {
-                v.retain(|r| live(eng, r.node(), r.serial));
-                if v.len() + k > v.capacity() / 2 {
-                    g.reader_lists.push((f, (v.len() + v.len() / 2).max(v.len() + k)));
-                }
             }
         }
-        g.readers = map_room(&self.readers, new);
+        g.guarded = if new == 0 || self.guarded.capacity() - self.guarded.len() >= new {
+            0
+        } else {
+            ((self.guarded.len() + new) * 2).max(16)
+        };
         // (room in the field indexes last, held from here to the filing's
         // end: none while the segment's own is still to be made)
         if g.is_empty() {
@@ -1016,9 +936,10 @@ impl Def {
 /// `Def::depth` of a global definition: it reaches every later position.
 pub(crate) const GLOBAL: u16 = u16::MAX;
 
-/// A read filed under its field in its anchor's segment: 24 bytes (a
-/// book files 23 million: the `TikZ` manual), its node and anchor by
-/// their 32-bit indices, `inclusive` in its path's top bit.
+/// A reader as a walk asks it (`guard::readers_at`, made from a record's
+/// read), or a derived read's witness as its anchor keeps it: 24 bytes,
+/// its node and anchor by their 32-bit indices, `inclusive` in its path's
+/// top bit.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Reader {
     seen: u64,
@@ -1174,7 +1095,7 @@ impl Segment {
                 hi,
                 nodes: Nodes::new(),
                 defs: FxHashMap::default(),
-                readers: FxHashMap::default(),
+                guarded: FxHashSet::default(),
                 contribs: FxHashMap::default(),
                 sums: FxHashMap::default(),
                 sums_gen: 0,
@@ -1363,18 +1284,10 @@ impl Segment {
             ti.resum(eng, f);
         }
         let mine: FxHashMap<NodeId, ()> = nodes.iter().map(|(_, n)| (*n, ())).collect();
-        let keys: Vec<Field> = inner.readers.keys().copied().collect();
-        for f in keys {
-            let v = inner.readers.get_mut(&f).expect("a key");
-            let (out, keep): (Vec<Reader>, Vec<Reader>) = v.drain(..).partition(|r| mine.contains_key(&r.anchor()));
-            *v = keep;
-            if v.is_empty() {
-                inner.readers.remove(&f);
-            }
-            if !out.is_empty() {
-                ti.readers.entry(f).or_default().extend(out);
-            }
-        }
+        // (the fields read at them go with them: both sets counted again,
+        // the caller telling the index what changed)
+        crate::guard::recount(eng, inner);
+        crate::guard::recount(eng, ti);
         let (out, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut inner.stops)
             .into_iter()
             .partition(|s: &(Field, RangeKey, RangeReader)| s.2.to.is_some_and(|n| mine.contains_key(&n)));
@@ -1490,20 +1403,10 @@ impl Segment {
         for f in &resum {
             inner.resum(eng, *f);
         }
-        let mut readers: FxHashMap<Field, Vec<Reader>> = FxHashMap::default();
-        let mut gone_readers = Vec::new();
-        for (f, v) in &mut inner.readers {
-            let (up, down): (Vec<Reader>, Vec<Reader>) =
-                v.drain(..).partition(|r| eng.node(r.anchor()).pos_hint() >= at);
-            *v = down;
-            if !up.is_empty() {
-                readers.insert(*f, up);
-            }
-            if v.is_empty() {
-                gone_readers.push(*f);
-            }
-        }
-        inner.readers.retain(|_, v| !v.is_empty());
+        // (the fields read at the nodes of each half, counted again: the
+        // lower half's set loses those read only above, the upper's is
+        // made from its nodes)
+        let (gone_readers, _) = crate::guard::recount(eng, inner);
         let (stops, down): (Vec<_>, Vec<_>) = std::mem::take(&mut inner.stops)
             .into_iter()
             .partition(|s: &(Field, RangeKey, RangeReader)| s.2.to.is_some_and(|n| eng.node(n).pos_hint() >= at));
@@ -1537,7 +1440,7 @@ impl Segment {
                 hi,
                 nodes,
                 defs,
-                readers,
+                guarded: FxHashSet::default(),
                 contribs,
                 sums: FxHashMap::default(),
                 sums_gen: 0,
@@ -1550,6 +1453,7 @@ impl Segment {
         let moved: Vec<Field> = {
             let mut ni = new.inner.write();
             ni.sum_depth();
+            crate::guard::recount(eng, &mut ni);
             for f in &resum {
                 ni.resum(eng, *f);
             }
@@ -1563,7 +1467,7 @@ impl Segment {
             for f in ni.contribs.keys() {
                 eng.contribs.add(*f, at, new_id);
             }
-            for f in ni.readers.keys() {
+            for f in &ni.guarded {
                 eng.readers.add(*f, at, new_id);
             }
             ni.defs.keys().chain(ni.contribs.keys()).copied().collect()

@@ -226,12 +226,12 @@ pub(crate) struct Node {
     /// that change trusts where depths agree again only if no other
     /// change was filed since (`commit::reask_after_effect_at`).
     pub(crate) bracket_gen: AtomicU64,
-    /// The fields other nodes' reads anchored at it read (`At::Before`,
-    /// `At::AfterOwn`): its removal looks for those readers in its
-    /// segment, under those fields alone.
-    /// A set: a picture's run files 144 000 reads at its parent, of
-    /// thousands of fields, each looked up here.
-    pub(crate) anchored: Mx<crate::values::FxHashSet<Field>>,
+    /// The nodes whose reads are anchored at it (`At::Before`,
+    /// `At::AfterOwn`), and the witnesses filed at it
+    /// ([`crate::guard::Foreign`]): a walk past it asks their records, its
+    /// removal or move asks them again. A node each, not a field each: a
+    /// picture's run reads 144 000 fields at its parent.
+    pub(crate) foreign: Mx<crate::guard::Foreign>,
     /// Relocated since its last commit (`commit::relocate`): its next
     /// commit checks its placements where it stands now, though its run
     /// published nothing new (`Ctx::unchanged`).
@@ -297,7 +297,7 @@ impl Node {
             effect: AtomicU32::new(0),
             has_brackets: AtomicBool::new(false),
             bracket_gen: AtomicU64::new(0),
-            anchored: Mx::new(crate::values::FxHashSet::default()),
+            foreign: Mx::new(crate::guard::Foreign::default()),
             moved: AtomicBool::new(false),
             claim_all: AtomicBool::new(false),
             id,
