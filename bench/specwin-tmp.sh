@@ -6,8 +6,8 @@ export SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1
 ( cargo build -q --release -p phitex-cli > $r/build.txt 2>&1 ) || { echo BUILD FAILED; tail $r/build.txt; exit 1; }
 B=$PWD/target/release/phitex
 cargo test -q --release -p phitex-tex --test latex floats2col_routines_run_once_per_fire -- --nocapture 2>&1 | grep -E "fires" | sed "s/^/window off: /"
-for s in 8; do for i in 1 2 3 4 5; do
-  PHITEX_SPEC_WINDOW=1 PHITEX_WINDOW_START=$s cargo test -q --release -p phitex-tex --test latex floats2col_routines_run_once_per_fire -- --nocapture 2>&1 | grep -E "fires|test result" | grep -v "j 1:" | cut -c1-120 | sed "s/^/window on start $s run $i: /"
+for s in 8; do for i in 1 2 3 4 5 6 7 8 9 10; do
+  PHITEX_SPEC_WINDOW=1 PHITEX_WINDOW_START=$s timeout 300 cargo test -q --release -p phitex-tex --test latex floats2col_routines_run_once_per_fire -- --nocapture 2>&1 | grep -E "fires|test result" | grep -v "j 1:" | cut -c1-120 | sed "s/^/window on start $s run $i: /"
 done; done
 g=$w/bin/grail-src
 docs="amsldoc:bench/amsldoc:amsldoc para4000:bench/para4000.tex:para4000 para400:bench/para400.tex:para400"; [ -d "$g" ] && docs="$docs grail:$g:grail"

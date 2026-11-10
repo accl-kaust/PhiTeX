@@ -1232,6 +1232,34 @@ impl Pool {
         true
     }
 
+    /// No work to find and runs held by the speculation window alone
+    /// (docs/spec-window.md): it widens to the nearest of them and lets
+    /// them go. The window orders runs; it never keeps the only work
+    /// there is from running (a fold waiting on a node the window held:
+    /// floats2col at -j16, no run ahead left to widen it, every worker
+    /// idle).
+    fn release_window_only(&self, eng: &Engine, w: &Worker) -> bool {
+        if !eng.window_on.load(Ordering::Acquire) {
+            return false;
+        }
+        let fr = eng.frontier.load(Ordering::Acquire);
+        let nearest = {
+            let m = self.shared.frontier_waiting.lock();
+            m.iter()
+                .filter_map(|&n| eng.placed_node(n))
+                .filter(|x| x.held_window.load(Ordering::Acquire))
+                .filter_map(|x| window_distance(eng, x, fr))
+                .min()
+        };
+        let Some(d) = nearest else { return false };
+        let cur = eng.window.load(Ordering::Acquire);
+        if d > cur {
+            eng.window.fetch_max(d, Ordering::AcqRel);
+        }
+        release_frontier(eng, Some(w));
+        true
+    }
+
     fn idle_wait(&self, eng: &Engine, w: &Worker, edits: bool) -> Option<NodeId> {
         let m = &self.shared.park;
         let me = &self.shared.rest[w.ix];
@@ -1276,7 +1304,7 @@ impl Pool {
             if quiet_ends && self.shared.outstanding.load(Ordering::SeqCst) == 0 {
                 break None;
             }
-            if self.release_past_only(eng, w) {
+            if self.release_past_only(eng, w) || self.release_window_only(eng, w) {
                 continue;
             }
             if edits && t_idle.elapsed() >= ABSORB_EVERY {
