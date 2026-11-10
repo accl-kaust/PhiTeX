@@ -181,12 +181,29 @@ impl Reads {
         if n == 0 {
             return Reads::default();
         }
-        let mut keys: Vec<(SortKey, u32)> = v
+        // (by field first, a pair of words each; then each run of one
+        // field by the whole key: most fields are read once or twice)
+        let mut by_field: Vec<(u64, u32)> = v
             .iter()
             .enumerate()
-            .map(|(i, r)| (sort_key(r), u32::try_from(i).expect("reads in a run")))
+            .map(|(i, r)| {
+                (
+                    r.kind().field().map_or(u64::MAX, |f| f.0.raw()),
+                    u32::try_from(i).expect("reads in a run"),
+                )
+            })
             .collect();
-        keys.sort_unstable_by_key(|x| x.0);
+        by_field.sort_unstable();
+        let mut keys: Vec<(SortKey, u32)> = by_field.iter().map(|&(_, i)| (sort_key(&v[i as usize]), i)).collect();
+        let mut a = 0;
+        while a < keys.len() {
+            let f = keys[a].0.0;
+            let b = a + keys[a..].iter().take_while(|x| x.0.0 == f).count();
+            if b - a > 1 {
+                keys[a..b].sort_unstable_by_key(|x| x.0);
+            }
+            a = b;
+        }
         let blocks = n.div_ceil(BLOCK);
         let mut out: Vec<u8> = Vec::with_capacity(blocks * 4 + n * 10);
         out.resize(blocks * 4, 0);
