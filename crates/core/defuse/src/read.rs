@@ -1168,6 +1168,33 @@ pub(crate) fn hole_before(eng: &Engine, me: &Node) -> Option<NodeId> {
     None
 }
 
+/// The last node of a settling operation (`Operation::settles_at_quiet`,
+/// a page's routine) between `lo` and `me` on the line that has not
+/// committed (`Node::awaitable`): what it will define is not filed yet.
+pub(crate) fn settling_hole_between(eng: &Engine, me: &Node, lo: Pos) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let mut found = None;
+    let mut cur = eng.seg_for_pos(lo).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            break;
+        }
+        let inner = seg.inner.read();
+        if inner.holes > 0 {
+            for (_, id) in inner.nodes.range((Excluded(lo), Excluded(to))) {
+                let n = eng.node(*id);
+                if *id != me.id && n.awaitable() && eng.op(n.op()).settles_at_quiet() {
+                    found = Some(*id);
+                }
+            }
+        }
+        drop(inner);
+        cur = eng.order.next(sid, seg.lo);
+    }
+    found
+}
+
 /// The first node before `me` in its unit that has not committed (as
 /// [`hole_before`]) whose operation says it may define one of `fields`
 /// (`Operation::may_define`), with the first hole of all: a run that

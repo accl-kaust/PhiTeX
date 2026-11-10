@@ -206,6 +206,7 @@ pub struct Engine {
     /// An evaluation has ended: there is a last run's graph to order the
     /// next one's runs by (`sched::work`).
     pub(crate) holds_on: std::sync::atomic::AtomicBool,
+    pub(crate) rerun_holds: std::sync::atomic::AtomicBool,
     /// The payload past which the store is next collected, as the last
     /// collection left it (twice what stood after it): an evaluation goes
     /// on from it, or each would collect again what the last one kept.
@@ -452,6 +453,7 @@ impl Engine {
             movers: crate::lock::Mx::new(crate::values::FxHashSet::default()),
             movers_n: AtomicU64::new(0),
             holds_on: std::sync::atomic::AtomicBool::new(false),
+            rerun_holds: std::sync::atomic::AtomicBool::new(false),
             collect_mark: AtomicU64::new(0),
             frontier_by: AtomicU64::new(0),
             frontier_gen: AtomicU64::new(0),
@@ -1587,7 +1589,17 @@ impl Engine {
         }
         loop {
             let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
-            self.holds_on.store(epoch > 1, Ordering::Release);
+            // (PHITEX_CLEAN_HOLDS=1, a measure: the edit's holds on a
+            // clean build too)
+            let clean_holds = std::env::var_os("PHITEX_CLEAN_HOLDS");
+            self.holds_on.store(
+                epoch > 1 || clean_holds.as_ref().is_some_and(|x| x == "1"),
+                Ordering::Release,
+            );
+            // (=2: only a run again waits, for an open source it read
+            // that moved a reader, `sched::hold_for`)
+            self.rerun_holds
+                .store(clean_holds.as_ref().is_some_and(|x| x == "2"), Ordering::Release);
             self.final_gen.fetch_add(1, Ordering::AcqRel);
             let (pool, workers) = Pool::new(n, epoch, self.limits(), self.collect_mark.load(Ordering::SeqCst));
             let mut seed = self.take_pending(&workers[0]);

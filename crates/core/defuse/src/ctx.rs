@@ -516,11 +516,41 @@ impl<'a> Ctx<'a> {
         let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
         self.note_source(r.by);
         self.wait_for_settling(&r)?;
+        self.wait_for_routine(f, &r, at)?;
         self.hold_at_frontier(f, at)?;
         self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
         let x = self.follow_aliases(r.value)?;
         self.seen.insert(f, x);
         Ok(x)
+    }
+
+    /// A read of a field the settling layer defines (`Engine::settle_marked`)
+    /// by a node outside it, with a page's routine between the definition
+    /// reaching me and me that has not committed: the run waits for that
+    /// routine, which may define the field before me, as at one thread,
+    /// where it runs first. Read now, the answer was the one before the
+    /// routine, and the routine's commit asked the run again and every
+    /// routine after it (floats2col at -j16 in debug builds, 221 finisher
+    /// runs for 194, a race each: text between a routine and the frontier
+    /// the page loop had passed). No cycle: the wait is on a node before
+    /// me, parked, its worker freed (`Ctx::wait_for_settling`).
+    fn wait_for_routine(&mut self, f: Field, r: &crate::read::Reaching, at: NodeId) -> Result<(), Stop> {
+        let eng = self.eng;
+        if at != self.me.id
+            || !self.has_other_threads()
+            || !eng.settle_marked(f)
+            || eng.op(self.me.op()).settles_at_quiet()
+        {
+            return Ok(());
+        }
+        let lo =
+            r.by.and_then(|b| eng.placed_node(b))
+                .map_or_else(|| read::unit_start(eng, self.me), |b| b.pos_hint());
+        if let Some(x) = read::on_one_layout(eng, || read::settling_hole_between(eng, self.me, lo)) {
+            self.wait_on = Some(x);
+            return Err(stop());
+        }
+        Ok(())
     }
 
     /// A definition reaching me that is a settling node's prediction
