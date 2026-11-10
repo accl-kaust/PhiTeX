@@ -641,10 +641,21 @@ impl<'a> Ctx<'a> {
             At::Final => Anchor::Final,
             At::End(u) => Anchor::End(u),
         };
+        // (the change count the read loaded, kept: a definition made
+        // since it has the commit check it, and one that has not leaves
+        // it to the definer's re-ask, which compares with `seen`. Checked
+        // whatever the count, a read of a give-back not made yet was found
+        // other than the guess at the reader's own commit, and ran it
+        // again: census_plain, 92 of 110 page steps run again)
+        let ep = self
+            .product
+            .reads
+            .iter()
+            .rev()
+            .find(|r| matches!(&*r.kind(&self.eng.read_keys), ReadKind::Field { f: g, at } if *g == f && *at == anchor))
+            .map_or(u64::MAX, |r| r.epoch);
         self.unread(f);
-        // (no change count: the commit checks the read whatever its
-        // field's count says, as for `read_item`)
-        self.ep = u64::MAX;
+        self.ep = ep;
         self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, seen);
         self.seen.insert(f, seen);
     }
