@@ -2,7 +2,7 @@
 //! evaluation, edits, reports.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::api::{
@@ -208,6 +208,32 @@ pub struct Engine {
     /// (`PHITEX_TEX_TIME`) Reads by readers outside the settling layer of
     /// a field it defines held past its frontier (`Ctx::set_frontier`).
     pub(crate) frontier_held: AtomicU64,
+    /// The speculation window (docs/spec-window.md): on for this
+    /// evaluation (`Engine::set_spec_window`), its width in places past the
+    /// frontier, whether a run ahead was refuted since the frontier last
+    /// moved on, and its measures (reads held by it, halvings, doublings).
+    pub(crate) window_on: AtomicBool,
+    pub(crate) window: AtomicU64,
+    pub(crate) window_missed: AtomicBool,
+    /// The width at which the runs the window held were last looked at.
+    pub(crate) window_released: AtomicU64,
+    /// (measures, `PHITEX_FIRST_READS=0`, `PHITEX_WINDOW_WAVE=1`) the
+    /// first-read wait on, and the window narrowed only by a node's second
+    /// refutation by the layer.
+    pub(crate) first_reads_on: AtomicBool,
+    pub(crate) window_wave: AtomicBool,
+    /// (`PHITEX_WINDOW_CHAINS=0`, a measure) a clean build's run again
+    /// waits for its moving sources (`sched::hold_for`).
+    pub(crate) window_chains: AtomicBool,
+    /// (`PHITEX_WINDOW_AIMD=0`, `PHITEX_WINDOW_FLOOR`, measures) the
+    /// window grown a place at a time once the layer refuted a run ahead;
+    /// its narrowest; the runs ahead in since it last grew.
+    pub(crate) window_aimd: AtomicBool,
+    pub(crate) window_floor: AtomicU64,
+    pub(crate) window_acks: AtomicU64,
+    /// (`PHITEX_WINDOW_PIN=1`, a measure) no growth once exchanged.
+    pub(crate) window_pin: AtomicBool,
+    pub(crate) window_stats: [AtomicU64; 4],
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
     pub(crate) layout_gen: AtomicU64,
@@ -281,6 +307,64 @@ impl Engine {
         self.settle_marks[w].fetch_or(b, Ordering::Release);
     }
 
+    /// The speculation window on or off for the evaluations to come
+    /// (docs/spec-window.md): on, its width measured from its start.
+    pub fn set_spec_window(&self, on: bool) {
+        self.window_on.store(on, Ordering::Release);
+        // (`PHITEX_WINDOW_START`, measure: another first width)
+        let start = std::env::var("PHITEX_WINDOW_START")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(crate::sched::WINDOW_START);
+        self.window.store(start, Ordering::Release);
+        self.window_released.store(start, Ordering::Release);
+        self.window_missed.store(false, Ordering::Release);
+        self.first_reads_on.store(
+            std::env::var("PHITEX_FIRST_READS").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
+        self.window_wave.store(
+            std::env::var("PHITEX_WINDOW_WAVE").is_ok_and(|x| x == "1"),
+            Ordering::Release,
+        );
+        self.window_aimd.store(
+            std::env::var("PHITEX_WINDOW_AIMD").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
+        self.window_floor.store(
+            std::env::var("PHITEX_WINDOW_FLOOR")
+                .ok()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(1),
+            Ordering::Release,
+        );
+        self.window_acks.store(0, Ordering::Release);
+        self.window_pin.store(
+            std::env::var("PHITEX_WINDOW_PIN").is_ok_and(|x| x == "1"),
+            Ordering::Release,
+        );
+        self.window_chains.store(
+            std::env::var("PHITEX_WINDOW_CHAINS").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
+        for s in &self.window_stats {
+            s.store(0, Ordering::Release);
+        }
+    }
+
+    /// (`PHITEX_TEX_TIME`) The speculation window's width now, the runs it
+    /// held, its halvings and its doublings, and the first reads that
+    /// waited for a definer before them (`Ctx::wait_for_first_definer`).
+    pub fn window_stats(&self) -> (u64, u64, u64, u64, u64) {
+        (
+            self.window.load(Ordering::Relaxed),
+            self.window_stats[0].load(Ordering::Relaxed),
+            self.window_stats[1].load(Ordering::Relaxed),
+            self.window_stats[2].load(Ordering::Relaxed),
+            self.window_stats[3].load(Ordering::Relaxed),
+        )
+    }
+
     /// (`PHITEX_TEX_TIME`) `Engine::frontier_held`.
     pub fn frontier_held(&self) -> u64 {
         self.frontier_held.load(Ordering::Relaxed)
@@ -348,6 +432,18 @@ impl Engine {
             frontier_by: AtomicU64::new(0),
             frontier_gen: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
+            window_on: AtomicBool::new(false),
+            window: AtomicU64::new(crate::sched::WINDOW_START),
+            window_missed: AtomicBool::new(false),
+            window_released: AtomicU64::new(0),
+            first_reads_on: AtomicBool::new(true),
+            window_wave: AtomicBool::new(false),
+            window_chains: AtomicBool::new(true),
+            window_aimd: AtomicBool::new(true),
+            window_floor: AtomicU64::new(1),
+            window_acks: AtomicU64::new(0),
+            window_pin: AtomicBool::new(false),
+            window_stats: [const { AtomicU64::new(0) }; 4],
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
             busy: AtomicU64::new(0),

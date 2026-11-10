@@ -240,6 +240,11 @@ pub struct Options {
     /// (`PHITEX_CUT_MIN`, else 3000); `u64::MAX` never. The output is the
     /// same whatever it is.
     pub cut_min: Option<u64>,
+    /// The speculation window on a clean build's evaluation
+    /// (docs/spec-window.md; `PHITEX_SPEC_WINDOW=1`): the text runs no
+    /// further past the page layer's frontier than running ahead was
+    /// found to pay. Off by default; never on an edit's evaluation.
+    pub spec_window: bool,
     /// The threads the engine's batches run on: `None` takes
     /// `PHITEX_THREADS`, else the available parallelism; `Some(1)` runs
     /// them in order. The output is the same at any count.
@@ -1043,6 +1048,7 @@ impl Default for Options {
             stuck_after: None,
             memory_limit: None,
             cut_min: crate::exec::env_str!("PHITEX_CUT_MIN").and_then(|x| x.parse().ok()),
+            spec_window: crate::exec::env_flag!("PHITEX_SPEC_WINDOW"),
             threads: None,
             progress: None,
             edits: None,
@@ -2344,6 +2350,10 @@ fn print_accounting(
             "acct: frontier: {} reads held past the page layer's frontier",
             eng.frontier_held()
         );
+        let (w, held, halved, doubled, first) = eng.window_stats();
+        eprintln!(
+            "acct: window: width {w} places, {held} runs held, {halved} halvings, {doubled} doublings, {first} first reads waited"
+        );
     }
     // (runs against live nodes per operation: where the runs beyond one a
     // node go)
@@ -3406,6 +3416,8 @@ impl Graph {
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             text_cuts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cut_min: Arc::new(std::sync::atomic::AtomicU64::new(crate::cut::CUT_MIN)),
+            spec_window: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            give_back_guesses: Arc::new([const { std::sync::atomic::AtomicU64::new(0) }; 2]),
             fatal_starts: Arc::default(),
             siblings_pulled: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
@@ -6945,6 +6957,7 @@ impl Build {
         true
     }
 
+    #[allow(clippy::too_many_lines)]
     fn settle(&mut self) {
         if self.nothing_to_settle() {
             return;
@@ -7013,6 +7026,15 @@ impl Build {
         }
         let t_apply = t_all.elapsed();
         self.evaluated = true;
+        // (the speculation window: the clean build's evaluation alone, an
+        // edit's never, docs/spec-window.md)
+        self.g
+            .eng
+            .set_spec_window(self.opts.spec_window && self.settles == 1);
+        self.g.ops.spec_window.store(
+            self.opts.spec_window && self.settles == 1,
+            std::sync::atomic::Ordering::Release,
+        );
         self.g.settle(
             self.unit,
             &self.opts.finder,
@@ -7020,6 +7042,14 @@ impl Build {
             self.opts.fixpoint,
             &mut absorb,
         );
+        // (`PHITEX_WINDOW_LOG`: the window as the evaluation left it)
+        if self.opts.spec_window && self.settles == 1 && crate::exec::env_flag!("PHITEX_WINDOW_LOG")
+        {
+            let (w, held, halved, doubled, first) = self.g.eng.window_stats();
+            eprintln!(
+                "window: width {w} places, {held} runs held, {halved} halvings, {doubled} doublings, {first} first reads waited"
+            );
+        }
         // (a text taken last that changed nothing: the result is for it)
         let t_settle = t_all.elapsed();
         if let Some(v) = absorb.unchanged {

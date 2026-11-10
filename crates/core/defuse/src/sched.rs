@@ -1188,7 +1188,7 @@ impl Pool {
             .lock()
             .iter()
             .filter_map(|&n| eng.placed_node(n))
-            .filter(|n| n.state() == State::Dirty)
+            .filter(|n| n.state() == State::Dirty && !n.held_window.load(Ordering::Acquire))
             .min_by_key(|n| n.pos_hint())
         else {
             return false;
@@ -1236,6 +1236,42 @@ impl Pool {
         true
     }
 
+    /// No work to find and runs held by the speculation window alone
+    /// (docs/spec-window.md): it widens to the nearest of them and lets
+    /// them go. The window orders runs; it never keeps the only work
+    /// there is from running (a fold waiting on a node the window held:
+    /// floats2col at -j16, no run ahead left to widen it, every worker
+    /// idle).
+    fn release_window_only(&self, eng: &Engine, w: &Worker) -> bool {
+        if !eng.window_on.load(Ordering::Acquire) {
+            return false;
+        }
+        // (only where nothing else runs: every worker idle, none at a
+        // task. While one runs, what it commits widens the window or wakes
+        // what it held; a worker idle beside it that let them go would let
+        // go every run the window holds as fast as it found no other work)
+        if self.shared.idle.load(Ordering::SeqCst) < self.shared.spawned.load(Ordering::SeqCst)
+            || self.shared.at_work.iter().any(|s| s.load(Ordering::SeqCst) != 0)
+        {
+            return false;
+        }
+        let fr = eng.frontier.load(Ordering::Acquire);
+        let nearest = {
+            let m = self.shared.frontier_waiting.lock();
+            m.iter()
+                .filter_map(|&n| eng.placed_node(n))
+                .filter(|x| x.held_window.load(Ordering::Acquire))
+                .filter_map(|x| window_distance(eng, x, fr))
+                .min()
+        };
+        let Some(d) = nearest else { return false };
+        let cur = eng.window.load(Ordering::Acquire);
+        if d > cur {
+            eng.window.fetch_max(d, Ordering::AcqRel);
+        }
+        release_frontier(eng, Some(w)) > 0
+    }
+
     fn idle_wait(&self, eng: &Engine, w: &Worker, edits: bool) -> Option<NodeId> {
         let m = &self.shared.park;
         let me = &self.shared.rest[w.ix];
@@ -1280,7 +1316,7 @@ impl Pool {
             if quiet_ends && self.shared.outstanding.load(Ordering::SeqCst) == 0 {
                 break None;
             }
-            if self.release_past_only(eng, w) {
+            if self.release_past_only(eng, w) || self.release_window_only(eng, w) {
                 continue;
             }
             if edits && t_idle.elapsed() >= ABSORB_EVERY {
@@ -1989,6 +2025,34 @@ fn stall_dump(eng: &Engine, shared: &Shared, t_idle: Instant) {
         "stall: {} outstanding, {idle} of {spawned} workers idle, no run ended for {secs} s; nodes not clean:\n",
         shared.outstanding.load(Ordering::SeqCst)
     );
+    {
+        let fr = eng.frontier.load(Ordering::Acquire);
+        let waiting: Vec<String> = shared
+            .frontier_waiting
+            .lock()
+            .iter()
+            .map(|&n| {
+                let x = eng.placed_node(n);
+                format!(
+                    "{}{}{}",
+                    n.raw(),
+                    if x.as_ref().is_some_and(|x| x.held_window.load(Ordering::Acquire)) {
+                        "w"
+                    } else {
+                        ""
+                    },
+                    x.and_then(|x| window_distance(eng, x, fr))
+                        .map_or(String::new(), |d| format!(":{d}"))
+                )
+            })
+            .collect();
+        out.push_str(&format!(
+            "  frontier {} window {} on {} waiting at the frontier {waiting:?}\n",
+            fr.saturating_sub(1),
+            eng.window.load(Ordering::Acquire),
+            eng.window_on.load(Ordering::Acquire)
+        ));
+    }
     for sid in eng.order.all() {
         let seg = eng.seg(sid);
         let inner = seg.inner.read();
@@ -2270,7 +2334,11 @@ fn hold_for(eng: &Engine, node: &Node) -> Option<NodeId> {
     if op.works_at_frontier() || op.final_only() {
         return None;
     }
-    if eng.movers_n.load(Ordering::Acquire) != 0
+    // (a clean build's (the speculation window's, docs/spec-window.md):
+    // a run again waits for a source of its last run that is to run again
+    // and moved a reader; not for the nodes an edit made, there are none)
+    if eng.holds_on.load(Ordering::Acquire)
+        && eng.movers_n.load(Ordering::Acquire) != 0
         && let Some(x) = crate::read::mover_before(eng, node)
     {
         return Some(x);
@@ -2304,7 +2372,8 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     // and again. One thread takes them in order anyway)
     if !quiet
         && pool.shared.n > 1
-        && eng.holds_on.load(Ordering::Acquire)
+        && (eng.holds_on.load(Ordering::Acquire)
+            || (eng.window_on.load(Ordering::Acquire) && eng.window_chains.load(Ordering::Acquire)))
         && let Some(x) = hold_for(eng, node)
     {
         if run_log() {
@@ -2317,7 +2386,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     // (one that stopped at the frontier before: not begun past it, where
     // it would stop again and its run be thrown away; the end of a Grail
     // edit's document, 65-100 ms of commands an edit)
-    if node.held_frontier.load(Ordering::Relaxed) && past_frontier(eng, node, eng.frontier.load(Ordering::Acquire)) {
+    // (one the window held: not begun past it, nor parked once let go,
+    // `frontier_holds`; a run parked here and let go at once was queued
+    // and taken again for ever, every run ending, nothing moving: the
+    // livelock at -j16, docs/spec-window.md, Progress)
+    if (node.held_frontier.load(Ordering::Relaxed) || node.held_window.load(Ordering::Acquire))
+        && frontier_holds(eng, node, eng.frontier.load(Ordering::Acquire))
+    {
         park_frontier(eng, pool, w, node);
         return Ok(());
     }
@@ -2427,7 +2502,9 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     // (a run that waited for a node before it that may define what it
     // read, before it did anything, `Ctx::wait_for_definer`: a wait, not
     // a run; its node runs when that node commits)
-    let waited = cx.waits_only && cx.wait_on.is_some() && matches!(r, Ok(Err(_)));
+    // (and one the window held at its first read, before it did
+    // anything: a wait too)
+    let waited = ((cx.waits_only && cx.wait_on.is_some()) || cx.wait_window) && matches!(r, Ok(Err(_)));
     if waited {
         Worker::add(&w.waits, 1);
     } else if resumption {
@@ -2521,8 +2598,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             })
         }
         Ok(Err(_stop)) if cx.wait_frontier => {
+            // (a layer's read held: the next run waits for the frontier
+            // before it begins; the window's hold is its own,
+            // `Node::held_window`)
+            if !cx.wait_window {
+                node.held_frontier.store(true, Ordering::Relaxed);
+            }
             drop(cx);
-            node.held_frontier.store(true, Ordering::Relaxed);
             park_frontier(eng, pool, w, node);
             Ok(())
         }
@@ -2884,6 +2966,136 @@ pub(crate) fn frontier_restore(eng: &Engine, w: Option<&Worker>, n: &Node) {
     }
 }
 
+/// Its widest: the whole text.
+pub(crate) const WINDOW_MAX: u64 = 1 << 20;
+/// The speculation window's first width, in places (docs/spec-window.md):
+/// whole. It narrows only where the page layer refutes a run ahead of it:
+/// a text that exchanges nothing with the layer is never held.
+pub(crate) const WINDOW_START: u64 = WINDOW_MAX;
+/// The places a frontier's move counts where its positions are not known.
+pub(crate) const WINDOW_STEP: u64 = 8;
+
+/// `node`'s distance past the frontier `fr`, in places (slices as pushed,
+/// `order::GAP` labels apart), where the speculation window is on and
+/// `node` stands past it in its unit (docs/spec-window.md); none
+/// otherwise.
+pub(crate) fn window_distance(eng: &Engine, node: &Node, fr: u64) -> Option<u64> {
+    if fr == 0 || !eng.window_on.load(Ordering::Acquire) || eng.op(node.op()).settles_at_quiet() {
+        return None;
+    }
+    let f = eng.placed_node(NodeId::from_raw(fr - 1))?;
+    let (a, b) = (f.pos_hint().0, node.pos_hint().0);
+    let span = crate::order::UNIT_SPAN;
+    if b <= a || a / span != b / span {
+        return None;
+    }
+    Some((b - a) / crate::order::GAP)
+}
+
+/// Whether the speculation window holds `node` back at frontier `fr`:
+/// past it by more than the window.
+pub(crate) fn window_holds(eng: &Engine, node: &Node, fr: u64) -> bool {
+    window_distance(eng, node, fr).is_some_and(|d| beyond_window(eng, d))
+}
+
+/// Whether `d` places past the frontier is past the window: never where
+/// it is whole (a unit holds more places than `WINDOW_MAX`).
+pub(crate) fn beyond_window(eng: &Engine, d: u64) -> bool {
+    let w = eng.window.load(Ordering::Acquire);
+    w < WINDOW_MAX && d > w
+}
+
+/// A run ahead of the frontier by `ahead` places refuted: the window
+/// halves, to at most half that distance and at least one place.
+pub(crate) fn window_refuted(eng: &Engine, ahead: u64) {
+    eng.window_missed.store(true, Ordering::Release);
+    let w = eng.window.load(Ordering::Acquire);
+    let n = (w.min(ahead) / 2).max(eng.window_floor.load(Ordering::Acquire));
+    if n < w
+        && eng
+            .window
+            .compare_exchange(w, n, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        // (the held runs looked at at this width: let go once it has grown
+        // by half again, `window_acked`)
+        eng.window_released.store(n, Ordering::Release);
+        eng.window_stats[1].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A run ahead of the frontier committed: the window grows by a place (a
+/// window's worth of runs in, it has doubled: as fast as the text runs,
+/// not only as the fold moves). True where it has grown by half since the
+/// runs it held were last looked at: let them go where now within it.
+pub(crate) fn window_acked(eng: &Engine) -> bool {
+    if !eng.window_on.load(Ordering::Acquire) {
+        return false;
+    }
+    // (once the layer has refuted a run ahead, a place a window's worth
+    // of runs in, as a congestion window avoids the loss it met: grown a
+    // place a run, floats2col's window was whole again within a page)
+    if exchanged(eng) && eng.window_pin.load(Ordering::Acquire) {
+        return false;
+    }
+    if exchanged(eng) {
+        let w = eng.window.load(Ordering::Acquire);
+        let k = eng.window_acks.fetch_add(1, Ordering::AcqRel) + 1;
+        if k < w.max(1) {
+            return false;
+        }
+        eng.window_acks.store(0, Ordering::Release);
+    }
+    let w = eng.window.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+    if w > WINDOW_MAX {
+        eng.window.store(WINDOW_MAX, Ordering::Release);
+        return false;
+    }
+    let seen = eng.window_released.load(Ordering::Acquire);
+    w >= seen.saturating_add(seen / 2).max(seen + 1)
+        && eng
+            .window_released
+            .compare_exchange(seen, w, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+}
+
+/// The layer moved its frontier on by `by` places: with no run ahead
+/// refuted since its last move, the window grows by twice that and at
+/// least doubles (a fold that moves in bursts, many pages a run, widens
+/// it as fast as it moves).
+pub(crate) fn window_moved_on(eng: &Engine, by: u64) {
+    if !eng.window_on.load(Ordering::Acquire) {
+        return;
+    }
+    if eng.window_missed.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let w = eng.window.load(Ordering::Acquire);
+    // (after the layer refuted a run ahead, a place a move: it doubled
+    // before, and was whole again within a few pages)
+    let n = if exchanged(eng) && eng.window_pin.load(Ordering::Acquire) {
+        w
+    } else if exchanged(eng) {
+        w.saturating_add(1).min(WINDOW_MAX)
+    } else {
+        (w * 2).max(w.saturating_add(by.saturating_mul(2))).min(WINDOW_MAX)
+    };
+    if n > w
+        && eng
+            .window
+            .compare_exchange(w, n, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        eng.window_stats[2].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The page layer has refuted a run ahead of it in this evaluation: its
+/// routines and the text exchange state (docs/spec-window.md).
+pub(crate) fn exchanged(eng: &Engine) -> bool {
+    eng.window_aimd.load(Ordering::Acquire) && eng.window_stats[1].load(Ordering::Acquire) > 0
+}
+
 /// Whether `node` stands past the settling layer's frontier `fr` (its
 /// raw id plus one, `Engine::frontier`): after it, which stands.
 pub(crate) fn past_frontier(eng: &Engine, node: &Node, fr: u64) -> bool {
@@ -2893,11 +3105,25 @@ pub(crate) fn past_frontier(eng: &Engine, node: &Node, fr: u64) -> bool {
             .is_some_and(|x| x.state() != State::Gone && node.pos_hint() > x.pos_hint())
 }
 
+/// Whether `node`'s run waits at frontier `fr`: held by the window alone
+/// (`Node::held_window`), while past it and not let go by it
+/// (`Node::window_pass`); else while past the frontier. The one test of
+/// a held run, before it begins (`work`), as it parks (`park_frontier`)
+/// and as it is let go (`release_frontier`): a run let go is never parked
+/// again by a test that disagrees (docs/spec-window.md, Progress).
+pub(crate) fn frontier_holds(eng: &Engine, node: &Node, fr: u64) -> bool {
+    if node.held_window.load(Ordering::Acquire) {
+        !node.window_pass.load(Ordering::Acquire) && window_holds(eng, node, fr)
+    } else {
+        past_frontier(eng, node, fr)
+    }
+}
+
 /// A run that stopped at a read past the frontier (`Ctx::read`): dirty,
 /// queued nowhere, listed in `Shared::frontier_waiting` unless the
 /// frontier passed it meanwhile or the run was re-asked (then queued).
 fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
-    let held = || past_frontier(eng, node, eng.frontier.load(Ordering::Acquire));
+    let held = || frontier_holds(eng, node, eng.frontier.load(Ordering::Acquire));
     if node.state() != State::Running || !held() || !node.cas_state(State::Running, State::Dirty) {
         end_run(eng, pool, w, node, State::Dirty);
         return;
@@ -2926,18 +3152,27 @@ fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
 }
 
 /// The runs waiting at the frontier that it has passed queued again
-/// (`park_frontier`).
-pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
-    let Some(w) = w else { return };
+/// (`park_frontier`); how many.
+pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) -> usize {
+    let Some(w) = w else { return 0 };
     let fr = eng.frontier.load(Ordering::Acquire);
     let go: Vec<NodeId> = {
         let mut m = w.shared.frontier_waiting.lock();
         if m.is_empty() {
-            return;
+            return 0;
         }
+        // (held by the window alone: let go once within it, with its pass:
+        // its next run is not held by the window again)
         let (go, keep): (Vec<NodeId>, Vec<NodeId>) = m
             .iter()
-            .partition(|&&n| eng.placed_node(n).is_none_or(|x| !past_frontier(eng, x, fr)));
+            .partition(|&&n| eng.placed_node(n).is_none_or(|x| !frontier_holds(eng, x, fr)));
+        for &n in &go {
+            if let Some(x) = eng.placed_node(n)
+                && x.held_window.load(Ordering::Acquire)
+            {
+                x.window_pass.store(true, Ordering::Release);
+            }
+        }
         *m = keep;
         go
     };
@@ -2949,6 +3184,7 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
             log_clock(Instant::now())
         );
     }
+    let mut released = 0;
     for n in go {
         if let Some(x) = eng.placed_node(n).filter(|x| x.state() == State::Dirty) {
             // (the run goes on for the cause that woke it, which the hold
@@ -2967,8 +3203,10 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
                 },
             );
             enqueue(eng, Some(w), x, wake);
+            released += 1;
         }
     }
+    released
 }
 
 /// The runs waiting for `n`'s commit queued again (`park_waiting`).

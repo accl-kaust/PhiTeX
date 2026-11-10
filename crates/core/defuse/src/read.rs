@@ -1224,6 +1224,63 @@ pub(crate) fn hole_before_defining(eng: &Engine, me: &Node, fields: &[Field]) ->
     (None, first)
 }
 
+/// The nodes before `me` in its unit that have not committed (as
+/// [`hole_before_defining`]) and whose operation names what they may
+/// define (`MayDefine::Names`, `MayDefine::Prefixes`), each with that
+/// set, in order: what a run's first reads wait for
+/// (`Ctx::wait_for_first_definer`). Not a node that may define anything
+/// (`MayDefine::Any`): every read after it would wait for it, the text
+/// after it in order; nor one that runs only once the line is quiet or
+/// whose run panicked on inputs that hold (as [`open_before`]).
+pub(crate) fn holes_naming_definitions(eng: &Engine, me: &Node) -> Vec<(NodeId, crate::api::MayDefine)> {
+    let Some(to) = pos_of(eng, me.id) else {
+        return Vec::new();
+    };
+    let from = unit_start(eng, me);
+    let v = eng.values();
+    let mut out = Vec::new();
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            break;
+        }
+        if seg.unit == me.unit {
+            let holes: Vec<NodeId> = {
+                let inner = seg.inner.read();
+                if inner.holes == 0 {
+                    Vec::new()
+                } else {
+                    inner
+                        .nodes
+                        .range((Excluded(from), Excluded(to)))
+                        .map(|(_, id)| *id)
+                        .filter(|id| {
+                            let n = eng.node(*id);
+                            let op = eng.op(n.op());
+                            *id != me.id
+                                && n.unit == me.unit
+                                && n.is_hole()
+                                && op.text()
+                                && !op.final_only()
+                                && !n.held_panic.load(Ordering::Acquire)
+                        })
+                        .collect()
+                }
+            };
+            for id in holes {
+                let n = eng.node(id);
+                match eng.op(n.op()).may_define(&n.args(), v) {
+                    m @ (crate::api::MayDefine::Names(_) | crate::api::MayDefine::Prefixes(_)) => out.push((id, m)),
+                    crate::api::MayDefine::Nothing | crate::api::MayDefine::Any => {}
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    out
+}
+
 /// The first node before `me` in its unit that is to run, again or for
 /// the first time (`Node::is_open`), and that a run of this pass can bring
 /// a commit of: while one is, what `me` read before it may be a guess its
