@@ -557,6 +557,114 @@ pub(crate) fn assert_siblings_hold(eng: &Engine) {
     }
 }
 
+/// (debug, observe) The claims at a settled evaluation's end: each
+/// taken node held by a live claimer whose walk reaches it, each claimer's
+/// walk from itself to its last taken sibling holding every sibling it
+/// takes there, and no taken node's definitions or contributions filed at
+/// its place. A line per breach: a unit held twice, or by none, is a
+/// claim race (the `TikZ` manual at -j16 typeset a table's first row
+/// twice, its unit in a rest's claim and on the line on its own).
+#[cfg(any(debug_assertions, feature = "observe"))]
+pub(crate) fn claims_breaches(eng: &Engine) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut walked: FxHashSet<(NodeId, NodeId)> = FxHashSet::default();
+    let mut taken: Vec<(NodeId, Option<NodeId>)> = Vec::new();
+    for i in 0..eng.nodes.len() {
+        let Some(n) = eng.nodes.get(i) else { continue };
+        if n.state() == State::Gone || n.pos_hint() == Pos(0) {
+            continue;
+        }
+        if n.taken() {
+            taken.push((n.id, n.claimer()));
+            match n.claimer().and_then(|c| eng.placed_node(c)) {
+                None => out.push(format!(
+                    "node {:?} taken with no live claimer ({:?})",
+                    n.id,
+                    n.claimer()
+                )),
+                Some(c) if c.state() == State::Gone => {
+                    out.push(format!("node {:?} taken by {:?}, gone", n.id, c.id));
+                }
+                Some(_) => {}
+            }
+            if let Some(seg) = eng.seg_for_pos(n.pos_hint()) {
+                let inner = seg.inner.read();
+                let p = n.pos_hint();
+                if inner.defs.values().any(|m| m.get(&p).is_some_and(|d| d.by == n.id))
+                    || (inner.nodes.get(&p) == Some(&n.id) && inner.contribs.values().any(|m| m.get(&p).is_some()))
+                {
+                    out.push(format!(
+                        "node {:?} taken by {:?} with definitions or contributions filed at its place",
+                        n.id,
+                        n.claimer()
+                    ));
+                }
+            }
+        }
+        // (its walk: every sibling it takes from itself to its claim's end)
+        let Some(end) = n.claim_end.load(Ordering::Acquire).checked_sub(1).map(NodeId::from_raw) else {
+            continue;
+        };
+        let all = n.claim_all.load(Ordering::Acquire);
+        let mut ps = read::SiblingParents::of(n);
+        let mut cur = Some(n.seg_hint());
+        let mut lower = Some(n.pos_hint());
+        let mut reached = false;
+        'segs: while let Some(sid) = cur {
+            let seg = eng.seg(sid);
+            if seg.unit != n.unit {
+                break;
+            }
+            let inner = seg.inner.read();
+            let lo = lower.map_or(Unbounded, Excluded);
+            for (_, id) in inner.nodes.range((lo, Unbounded)) {
+                let x = eng.node(*id);
+                let takes = if all {
+                    let op = eng.op(x.op());
+                    x.state() != State::Gone && op.sibling() && op.text() && !x.held_before(eng, n.id, n.pos_hint())
+                } else {
+                    ps.takes(eng, x)
+                };
+                if takes {
+                    walked.insert((n.id, x.id));
+                }
+                if takes && (x.claimer() != Some(n.id) || !x.taken()) {
+                    out.push(format!(
+                        "claimer {:?} (claim to {:?}) passes over {:?}, held by {:?}, taken {}",
+                        n.id,
+                        end,
+                        x.id,
+                        x.claimer(),
+                        x.taken()
+                    ));
+                }
+                if x.id == end {
+                    reached = true;
+                    break 'segs;
+                }
+            }
+            let lo = seg.lo;
+            drop(inner);
+            lower = None;
+            cur = eng.order.next(sid, lo);
+        }
+        if !reached {
+            out.push(format!(
+                "claimer {:?}'s claim end {:?} not after it on the line",
+                n.id, end
+            ));
+        }
+    }
+    for (x, c) in taken {
+        if let Some(c) = c
+            && !walked.contains(&(c, x))
+        {
+            out.push(format!("node {x:?} taken by {c:?}, outside that claim's walk"));
+        }
+    }
+    out
+}
+
 /// Index changes made under a segment's lock, applied before it is let go
 /// (a field-index shard under it, as a split takes one): applied after
 /// it, one commit's removal of a segment's last definition of a field

@@ -1677,6 +1677,19 @@ impl Engine {
         // (debug: settled, every clean node's reads of its siblings hold)
         #[cfg(debug_assertions)]
         crate::commit::assert_siblings_hold(self);
+        // (debug, observe: settled, the claims partition the siblings)
+        #[cfg(any(debug_assertions, feature = "observe"))]
+        {
+            let lines = crate::commit::claims_breaches(self);
+            for l in &lines {
+                eprintln!("claims: {l}");
+            }
+            assert!(
+                lines.is_empty(),
+                "{} breaches of the claims at a settled evaluation's end",
+                lines.len()
+            );
+        }
         let swept = self.sweep_readers() as u64
             + workers
                 .iter()
