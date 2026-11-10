@@ -2300,6 +2300,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     if frontier.is_some() {
         crate::sched::release_frontier(eng, ww);
     }
+    // (a run ahead of the frontier in: the speculation window grows by a
+    // place, and the runs it held within the width now are let go)
+    if node.ahead.load(Ordering::Acquire) > 0 && crate::sched::window_acked(eng) {
+        crate::sched::release_frontier(eng, ww);
+    }
     if let Some(parent) = node.parent {
         let parent = eng.node(parent);
         if old_output != Some(p.output) {

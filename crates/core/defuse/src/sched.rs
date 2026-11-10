@@ -2917,6 +2917,27 @@ pub(crate) fn window_refuted(eng: &Engine, ahead: u64) {
     }
 }
 
+/// A run ahead of the frontier committed: the window grows by a place (a
+/// window's worth of runs in, it has doubled: as fast as the text runs,
+/// not only as the fold moves). True where it has grown by half since the
+/// runs it held were last looked at: let them go where now within it.
+pub(crate) fn window_acked(eng: &Engine) -> bool {
+    if !eng.window_on.load(Ordering::Acquire) {
+        return false;
+    }
+    let w = eng.window.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+    if w > WINDOW_MAX {
+        eng.window.store(WINDOW_MAX, Ordering::Release);
+        return false;
+    }
+    let seen = eng.window_released.load(Ordering::Acquire);
+    w >= seen.saturating_add(seen / 2).max(seen + 1)
+        && eng
+            .window_released
+            .compare_exchange(seen, w, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+}
+
 /// The layer moved its frontier on by `by` places: with no run ahead
 /// refuted since its last move, the window grows by twice that and at
 /// least doubles (a fold that moves in bursts, many pages a run, widens

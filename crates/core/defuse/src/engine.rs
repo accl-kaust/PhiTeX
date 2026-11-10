@@ -217,6 +217,8 @@ pub struct Engine {
     pub(crate) window_on: AtomicBool,
     pub(crate) window: AtomicU64,
     pub(crate) window_missed: AtomicBool,
+    /// The width at which the runs the window held were last looked at.
+    pub(crate) window_released: AtomicU64,
     pub(crate) window_stats: [AtomicU64; 3],
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
@@ -301,6 +303,7 @@ impl Engine {
             .and_then(|x| x.parse().ok())
             .unwrap_or(crate::sched::WINDOW_START);
         self.window.store(start, Ordering::Release);
+        self.window_released.store(start, Ordering::Release);
         self.window_missed.store(false, Ordering::Release);
     }
 
@@ -385,6 +388,7 @@ impl Engine {
             window_on: AtomicBool::new(false),
             window: AtomicU64::new(crate::sched::WINDOW_START),
             window_missed: AtomicBool::new(false),
+            window_released: AtomicU64::new(0),
             window_stats: [const { AtomicU64::new(0) }; 3],
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),

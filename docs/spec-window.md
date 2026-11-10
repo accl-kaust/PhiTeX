@@ -54,9 +54,15 @@ node, over `GAP`. Continuations of a slice stand in its gap: distance 0.
     W halves, to no less than 1 place and no more than half the distance
     it was refuted at. A refutation by the text alone says nothing of the
     window: a run behind the frontier meets it as well.
+  - Each run ahead that commits widens W by one place (so a window's
+    worth of runs in doubles it: as fast as the text runs, not only as
+    the fold moves, which may be in bursts of many pages), and the runs
+    the window held are let go where within it once W has grown by half
+    since they were last looked at.
   - When the layer moves the frontier forward (a fold step's commit)
-    and no run ahead was refuted since the last move, W doubles (to at
-    most 2^20 places, the whole text).
+    and no run ahead was refuted since the last move, W grows by twice
+    the places the frontier moved, at least doubling (to at most 2^20
+    places, the whole text).
   So a document whose text and routines exchange nothing (para4000,
   amsldoc) refutes nothing ahead, W doubles every page and the text
   runs as far ahead as before after a few pages; one whose routines
