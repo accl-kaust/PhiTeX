@@ -1064,7 +1064,8 @@ impl TextHints {
 /// `[...]`/`{...}` groups right after it into its slice
 /// (`\centerline{...}`).
 /// The statement starts inside a document's `tikzpicture`
-/// environments (`PHITEX_BOXSCOPE`, [`slices_of`]): byte offsets.
+/// environments, and the text right after one (`PHITEX_BOXSCOPE`,
+/// [`slices_of`]): byte offsets.
 fn statement_starts(
     text: &str,
     an: &Analysis<'_>,
@@ -1130,6 +1131,25 @@ fn statement_starts(
         }
         while j < n {
             if let Some((false, e)) = env_at(j) {
+                // (and right after the picture: the text after it a slice
+                // of its own, so an edit there leaves the picture's last
+                // statement as it was and keeps the slice's node)
+                let mut q = e;
+                while p
+                    .atoms
+                    .get(q)
+                    .is_some_and(|x| matches!(x.kind, AtomKind::Space))
+                {
+                    q += 1;
+                }
+                if let Some(a) = p.atoms.get(q)
+                    && an.depth(q) == 0
+                    && !matches!(a.kind, AtomKind::Par | AtomKind::Close)
+                    && !claimed.has(q)
+                    && !operand.has(q)
+                {
+                    out.push(a.start);
+                }
                 j = e;
                 break;
             }
