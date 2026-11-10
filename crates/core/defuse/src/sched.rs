@@ -1410,7 +1410,7 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
                     // amsldoc -j16 build wrong by one /PageLabels entry)
                     let moved = node
                         .record()
-                        .is_some_and(|r| r.reads.iter().any(|rd| !crate::read::holds(eng, node, rd, &mut memo)));
+                        .is_some_and(|r| r.reads.iter().any(|rd| !crate::read::holds(eng, node, &rd, &mut memo)));
                     if !moved {
                         continue;
                     }
@@ -1423,10 +1423,7 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
                                 .iter()
                                 .filter(|rd| !crate::read::holds(eng, node, rd, &mut memo))
                                 .map(|rd| {
-                                    let f = rd
-                                        .kind(&eng.read_keys)
-                                        .field()
-                                        .map_or_else(|| "-".to_owned(), |f| v.render(f.0));
+                                    let f = rd.kind().field().map_or_else(|| "-".to_owned(), |f| v.render(f.0));
                                     let seen = rd
                                         .seen()
                                         .map_or_else(String::new, |x| v.render(x).chars().take(160).collect());

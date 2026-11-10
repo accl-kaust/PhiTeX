@@ -120,7 +120,6 @@ impl<'a> Ctx<'a> {
                 at_hole: false,
                 state: None,
                 resumed: std::cell::Cell::new(false),
-                kept_reads: std::cell::Cell::new(None),
                 woken_at: None,
                 on_park: false,
                 settle_now: false,
@@ -285,9 +284,7 @@ impl<'a> Ctx<'a> {
 
     fn record(&mut self, kind: ReadKind, path: PathId, seen: Option<ValueId>) {
         let epoch = if kind.field().is_some() { self.ep } else { u64::MAX };
-        self.product
-            .reads
-            .push(ReadRec::new(&self.eng.read_keys, kind, path, seen, epoch));
+        self.product.reads.push(ReadRec::new(kind, path, seen, epoch));
     }
 
     /// The node whose definition a read got (`RunRecord::sources`).
@@ -315,7 +312,7 @@ impl<'a> Ctx<'a> {
             .iter()
             .enumerate()
             .skip(from)
-            .filter_map(|(i, r)| r.kind(&self.eng.read_keys).field().map(|f| (i, f)))
+            .filter_map(|(i, r)| r.kind().field().map(|f| (i, f)))
     }
 
     /// Loads `f`'s change count before a read of it ([`ReadRec::epoch`]).
@@ -1832,20 +1829,14 @@ impl<'a> Ctx<'a> {
         if let Some(i) = r
             .reads
             .iter()
-            .position(|rd| !r.read_holds(self.eng, self.me, rd, moved, &mut memo))
+            .position(|rd| !r.read_holds(self.eng, self.me, &rd, moved, &mut memo))
         {
             // (`PHITEX_STANDS_TRACE`, profile: the first read of the last
             // run that moved, with what it saw and what it would see now)
             if crate::obs::enabled() && std::env::var_os("PHITEX_STANDS_TRACE").is_some() {
-                let rd = &r.reads[i];
+                let rd = &r.reads.iter().nth(i).expect("the read found");
                 let v = &self.eng.values;
-                let now = crate::read::answer_in(
-                    self.eng,
-                    self.me,
-                    &rd.kind(&self.eng.read_keys),
-                    rd.path(&self.eng.read_keys),
-                    &mut memo.fold,
-                );
+                let now = crate::read::answer_in(self.eng, self.me, &rd.kind(), rd.path(), &mut memo.fold);
                 let show =
                     |x: Option<ValueId>| x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(200).collect());
                 eprintln!(
@@ -1853,11 +1844,8 @@ impl<'a> Ctx<'a> {
                     self.me.id.raw(),
                     self.woke,
                     r.reads.len(),
-                    rd.kind(&self.eng.read_keys)
-                        .field()
-                        .map(|f| v.render(f.0))
-                        .unwrap_or_default(),
-                    *rd.kind(&self.eng.read_keys),
+                    rd.kind().field().map(|f| v.render(f.0)).unwrap_or_default(),
+                    *rd.kind(),
                     show(rd.seen()),
                     show(now)
                 );
@@ -1900,20 +1888,15 @@ impl<'a> Ctx<'a> {
         let show = |rs: &[ReadRec]| -> Vec<String> {
             rs.iter()
                 .enumerate()
-                .filter(|(_, r)| r.kind(&self.eng.read_keys).field() == Some(f))
-                .map(|(i, r)| {
-                    format!(
-                        "#{i} {:?} {:?}",
-                        *r.kind(&self.eng.read_keys),
-                        r.seen().map(|x| v.render(x))
-                    )
-                })
+                .filter(|(_, r)| r.kind().field() == Some(f))
+                .map(|(i, r)| format!("#{i} {:?} {:?}", *r.kind(), r.seen().map(|x| v.render(x))))
                 .collect()
         };
         let last = self.last.as_ref();
         format!(
             "last run reads {:?} defs {:?}; this run reads {:?} defs {:?}",
-            last.map(|r| show(&r.reads)).unwrap_or_default(),
+            last.map(|r| show(&r.reads.iter().collect::<Vec<_>>()))
+                .unwrap_or_default(),
             last.map(|r| r
                 .defs
                 .iter()
@@ -1999,7 +1982,7 @@ impl<'a> Ctx<'a> {
         let mut i = 0;
         let log = &mut self.unread_log;
         self.product.reads.retain(|r| {
-            let keep = match &*r.kind(&self.eng.read_keys) {
+            let keep = match &*r.kind() {
                 ReadKind::Field { f: g, .. }
                 | ReadKind::Env { f: g }
                 | ReadKind::Fold { f: g, .. }
@@ -2022,10 +2005,10 @@ impl<'a> Ctx<'a> {
     pub fn own_reads_hold(&self) -> bool {
         let mut memo = crate::read::FoldMemo::new();
         self.product.reads.iter().all(|rd| {
-            matches!(&*rd.kind(&self.eng.read_keys), ReadKind::Placed { .. } | ReadKind::Hole)
+            matches!(&*rd.kind(), ReadKind::Placed { .. } | ReadKind::Hole)
                 || (crate::read::holds(self.eng, self.me, rd, &mut memo)
                     && rd
-                        .kind(&self.eng.read_keys)
+                        .kind()
                         .field()
                         .is_none_or(|f| rd.epoch == u64::MAX || self.eng.field_epoch(f) == rd.epoch))
         })
@@ -2087,7 +2070,7 @@ impl<'a> Ctx<'a> {
             .product
             .reads
             .iter()
-            .filter_map(|rd| match *rd.kind(&self.eng.read_keys) {
+            .filter_map(|rd| match *rd.kind() {
                 ReadKind::Placed { i, .. } => Some(i),
                 _ => None,
             })
@@ -2099,23 +2082,20 @@ impl<'a> Ctx<'a> {
             }
         }
         let moved = self.product.reads.iter().any(|rd| {
-            if matches!(&*rd.kind(&self.eng.read_keys), ReadKind::Following { .. }) {
+            if matches!(&*rd.kind(), ReadKind::Following { .. }) {
                 return false;
             }
-            if let ReadKind::Placed { i, guess } = &*rd.kind(&self.eng.read_keys) {
+            if let ReadKind::Placed { i, guess } = &*rd.kind() {
                 return match outs.get(i).copied().flatten() {
-                    Some(o) => read::apply_path(self.eng, Some(o), rd.path(&self.eng.read_keys)) != rd.seen(),
+                    Some(o) => read::apply_path(self.eng, Some(o), rd.path()) != rd.seen(),
                     // (no child of that key has run: a guess holds until
                     // the child commits; a real read of none saw none)
                     None => !guess && rd.seen().is_some(),
                 };
             }
             if !scope_moved
-                && !matches!(&*rd.kind(&self.eng.read_keys), ReadKind::Next { .. })
-                && rd
-                    .kind(&self.eng.read_keys)
-                    .field()
-                    .is_some_and(|f| self.eng.field_epoch(f) == rd.epoch)
+                && !matches!(&*rd.kind(), ReadKind::Next { .. })
+                && rd.kind().field().is_some_and(|f| self.eng.field_epoch(f) == rd.epoch)
             {
                 return false;
             }
