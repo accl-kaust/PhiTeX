@@ -228,7 +228,9 @@ impl Reads {
                 let h = (j / BLOCK) * HEAD;
                 out[h..h + 4].copy_from_slice(&off.to_le_bytes());
                 out[h + 4..h + 12].copy_from_slice(&f.to_le_bytes());
-                prev = 0;
+                // (the block's first field is in its head: its first
+                // entry's field a delta from it, 0, not 9 bytes)
+                prev = f;
             }
             let tag = if seen == NO_VALUE {
                 SEEN_NONE
@@ -404,9 +406,7 @@ impl Reads {
 
     /// The field of block `k`'s first entry (`u64::MAX` for one of none).
     fn first_field(&self, k: usize) -> u64 {
-        let mut w = [0u8; 8];
-        w.copy_from_slice(&self.buf[k * HEAD + 4..k * HEAD + 12]);
-        u64::from_le_bytes(w)
+        head_field(&self.buf, k)
     }
 }
 
@@ -417,6 +417,13 @@ pub(crate) struct Entries<'a> {
     j: usize,
     n: usize,
     prev: u64,
+}
+
+/// The first field of block `k` (its head's), `u64::MAX` for none.
+fn head_field(b: &[u8], k: usize) -> u64 {
+    let mut w = [0u8; 8];
+    w.copy_from_slice(&b[k * HEAD + 4..k * HEAD + 12]);
+    u64::from_le_bytes(w)
 }
 
 /// A varint's length at `b[i..]`.
@@ -441,7 +448,11 @@ impl Entries<'_> {
         if !has_field(code) {
             return Some(u64::MAX);
         }
-        let prev = if self.j.is_multiple_of(BLOCK) { 0 } else { self.prev };
+        let prev = if self.j.is_multiple_of(BLOCK) {
+            head_field(b, self.j / BLOCK)
+        } else {
+            self.prev
+        };
         Some(prev + get(b, &mut i))
     }
 
@@ -450,7 +461,11 @@ impl Entries<'_> {
     fn skip_before(&mut self, key: u64) {
         let b = self.buf;
         while self.j < self.n {
-            let prev = if self.j.is_multiple_of(BLOCK) { 0 } else { self.prev };
+            let prev = if self.j.is_multiple_of(BLOCK) {
+                head_field(b, self.j / BLOCK)
+            } else {
+                self.prev
+            };
             let mut i = self.at;
             let head = b[i];
             i += 1;
@@ -490,7 +505,7 @@ impl Iterator for Entries<'_> {
             return None;
         }
         if self.j.is_multiple_of(BLOCK) {
-            self.prev = 0;
+            self.prev = head_field(self.buf, self.j / BLOCK);
         }
         self.j += 1;
         let b = self.buf;
