@@ -4771,6 +4771,7 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     let mut freed: Vec<Arc<Node>> = Vec::new();
     let mut taken_holes: Vec<Arc<Node>> = Vec::new();
     let mut taken_now: Vec<NodeId> = Vec::new();
+    let mut handed: Vec<NodeId> = Vec::new();
     let mut stops: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
     // (what it held before, up to there; what it holds now, to here)
     let old_end = me
@@ -4856,6 +4857,9 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
                     if s.claimer().is_some_and(|c| c != me.id) && s.taken() {
                         s.claimer.store(me.id.raw() + 1, Ordering::Release);
                         eng.structure_changed();
+                        // (held now from before the nodes between: those
+                        // read it as a free sibling, see below)
+                        handed.push(s.id);
                     } else if s.take() {
                         s.claimer.store(me.id.raw() + 1, Ordering::Release);
                         eng.structure_changed();
@@ -4917,7 +4921,7 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     // past it went on for ever on what the held ones were to change:
     // csquotes at -j8 3 builds in 320, mhchem at -j4 5 in 60, a run on
     // without end, 340 parked on 337 taken, accl 25662, mc 80815)
-    for n in taken_now {
+    for &n in &taken_now {
         crate::sched::release_waiting(eng, w, n);
     }
     // (a claimer removed or taken while its run went on claims nothing:
@@ -4947,6 +4951,15 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     for s in &releases {
         wake_puller(eng, w, s, me.id);
     }
+    // (and each it took now: a node before it that read it among its
+    // siblings reads the next free one there now. Woken only for what a
+    // claim gave back, a rest that had read a sibling a claim before it
+    // took kept it as its next unit, and that unit was typeset twice, by
+    // the rest and in the claim: the `TikZ` manual at -j16, an arrow tips
+    // table's first row twice over)
+    for &id in taken_now.iter().chain(&handed) {
+        wake_puller_of(eng, w, eng.node(id), me.id, true);
+    }
     for s in freed {
         enqueue(
             eng,
@@ -4967,6 +4980,13 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
 /// over when it read them, and now it is free that answer moved; its
 /// commit checked the answer while `s` was still held.
 fn wake_puller(eng: &Engine, w: Option<&Worker>, s: &Node, except: NodeId) {
+    wake_puller_of(eng, w, s, except, false);
+}
+
+/// [`wake_puller`]; `taken`: `s` was taken now, by `except`: the node
+/// before it that would have taken it as a sibling before that claim held
+/// it (its claim's own taken siblings passed over).
+fn wake_puller_of(eng: &Engine, w: Option<&Worker>, s: &Node, except: NodeId, taken: bool) {
     let mut cur = Some(s.seg_hint());
     let mut upper = Some(s.pos_hint());
     while let Some(sid) = cur {
@@ -4983,7 +5003,11 @@ fn wake_puller(eng: &Engine, w: Option<&Worker>, s: &Node, except: NodeId) {
                 if x.id == except || x.state() == State::Gone || x.taken() {
                     continue;
                 }
-                if read::SiblingParents::of(x).takes(eng, s) || s.parent == Some(x.id) {
+                if taken && x.taken() {
+                    continue;
+                }
+                let mut ps = read::SiblingParents::of(x);
+                if (if taken { ps.would_take(eng, s) } else { ps.takes(eng, s) }) || s.parent == Some(x.id) {
                     found = Some(x.clone());
                     break;
                 }

@@ -964,6 +964,12 @@ impl SiblingParents {
             && !n.held_before(eng, self.me, self.at)
             && self.has(eng, n.parent)
     }
+
+    /// [`SiblingParents::takes`] whatever claim holds `n`: whether it
+    /// read `n` among its siblings before a claim took it.
+    pub(crate) fn would_take(&mut self, eng: &Engine, n: &Node) -> bool {
+        n.state() != State::Gone && eng.op(n.op()).sibling() && self.has(eng, n.parent)
+    }
 }
 
 pub(crate) fn text_value(eng: &Engine, n: &Node) -> ValueId {
