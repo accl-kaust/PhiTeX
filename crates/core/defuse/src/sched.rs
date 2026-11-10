@@ -2521,6 +2521,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     if !quiet
         && pool.shared.n > 1
         && (eng.holds_on.load(Ordering::Acquire)
+            || eng.rerun_holds.load(Ordering::Acquire)
             || (eng.window_on.load(Ordering::Acquire) && eng.window_chains.load(Ordering::Acquire)))
         && let Some(x) = hold_for(eng, node)
     {
