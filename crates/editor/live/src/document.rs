@@ -318,7 +318,10 @@ impl Document {
             // step has had `SYNCTEX_SLICE`, the rest the next step's)
             let t = Instant::now();
             let viewer = &self.viewer;
-            let stop = || viewer.has_asks() || t.elapsed() >= SYNCTEX_SLICE;
+            // (an ask stops it anywhere, the slice only between pages: a
+            // page's match longer than a slice is made whole)
+            let stop =
+                |between: bool| viewer.has_asks() || (between && t.elapsed() >= SYNCTEX_SLICE);
             if let Err(e) = self.session.write_synctex_until(&stop) {
                 eprintln!("phitex: {e}");
             }
@@ -2405,6 +2408,54 @@ mod tests {
         // (the status answer lists them, until the build is in)
         let r = d.request(&json!({"id": 2, "op": "pages"}));
         assert_eq!(r["json"]["inexact"], json!([]), "{r}");
+    }
+
+    /// Objects reserved and then given their bodies with `\\immediate`
+    /// (pgf's resources, which beamer decks draw with; at the document's
+    /// end in one run, known to the next run's pages), written into
+    /// object streams: each page drawing with them is exact, drawn as the
+    /// build's file draws it. (Its file runs each command at the number
+    /// TeX gave its object: a body written at once there opened an object
+    /// stream between the reserved numbers, the next reserved object one
+    /// past its number, the page not exact.)
+    #[test]
+    fn reserved_objects_filled_at_once_stream_exact() {
+        let mut t = PDF_HEAD.replace(
+            "\\pdfcompresslevel=0",
+            "\\pdfcompresslevel=9 \\pdfobjcompresslevel=2 \\pdfminorversion=5",
+        );
+        for n in ["gs", "pat", "cs"] {
+            t.push_str(&format!(
+                "\\pdfobj reserveobjnum \\edef\\{n}{{\\the\\pdflastobj}} "
+            ));
+        }
+        t.push_str("\\immediate\\pdfobj useobjnum\\gs{<</G1 <</ca 0.5 /CA 0.5>>>>} ");
+        t.push_str("\\immediate\\pdfobj useobjnum\\pat{<<>>} ");
+        t.push_str("\\immediate\\pdfobj useobjnum\\cs{<</C1 /DeviceRGB>>} ");
+        t.push_str("\\edef\\r{/ExtGState \\gs\\space 0 R /Pattern \\pat\\space 0 R /ColorSpace \\cs\\space 0 R}\\pdfpageresources\\expandafter{\\r} ");
+        for p in [
+            "\\pdfliteral{/G1 gs 1 0 0 rg 0 0 30 30 re f}\\vrule width 1pt height 1pt",
+            "\\pdfliteral{/C1 cs 0 0 1 scn 0 0 30 30 re f}\\vrule width 1pt height 1pt",
+            "\\pdfliteral{/G1 gs /C1 cs 0 1 0 scn 0 0 40 20 re f}\\vrule width 1pt height 1pt",
+        ] {
+            t.push_str(&format!("\\hbox{{{p}}}\\penalty-10000 "));
+        }
+        t.push_str("\\end\n");
+        for threads in [1, 2] {
+            let (d, ev, files) = streamed_build(&t, Arc::new(Nothing), threads);
+            let told = exact_told(&ev);
+            for k in 0..3u64 {
+                assert_eq!(told.get(&k), Some(&true), "j{threads} page {k}: {ev:?}");
+            }
+            let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+            for (k, (pdf, _)) in &files {
+                assert_eq!(
+                    pixels(pdf, 0, 1.0),
+                    pixels(&out, *k, 1.0),
+                    "j{threads} page {k}"
+                );
+            }
+        }
     }
 
     /// A colour pushed on one page and popped on a later one colours the

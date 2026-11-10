@@ -188,6 +188,19 @@ impl Run<'_, '_> {
                             self.page_nth()
                         );
                     }
+                    // (where a node before this one has not run yet and
+                    // its text may define the name, the name is not known
+                    // undefined: the run waits for that node, nothing
+                    // filed, and runs when it commits; at its first
+                    // command a wait, not a run (`Ctx::wait_for_definer`).
+                    // A document's macros defined in its first piece were
+                    // read undefined by the pieces run beside it, each
+                    // run again once it committed: plain's pages fixture,
+                    // \para, 6 of 46 nodes at -j16)
+                    if let Some(l) = self.mean_loc(self.cur.tok) {
+                        let f = self.loc_field(l);
+                        self.cx.wait_for_definer(&[f], self.cmds <= 1)?;
+                    }
                     // §370
                     self.log_help("error", "Undefined control sequence", &UNDEFINED_HELP)?;
                 }

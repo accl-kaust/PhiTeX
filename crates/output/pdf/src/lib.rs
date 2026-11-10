@@ -970,6 +970,9 @@ pub struct PdfState {
     /// ([`PdfState::defer_streams`]), and the parts so far.
     defer: bool,
     pending: Vec<Part>,
+    /// `\immediate\pdfobj`'s objects held, not written, while a page's
+    /// file of its own is linked ([`PdfState::hold_writes`]).
+    held: Option<Vec<usize>>,
 }
 
 impl PdfState {
@@ -1090,6 +1093,7 @@ impl PdfState {
             tap: tap::Tap::default(),
             defer: false,
             pending: Vec::new(),
+            held: None,
         }
     }
 

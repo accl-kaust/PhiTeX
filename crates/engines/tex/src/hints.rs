@@ -82,7 +82,7 @@ pub(crate) fn no_defs() -> &'static Defs {
 }
 
 /// What a node's text says it may define.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Hint {
     /// The bound, or `None`: anything.
     pub bound: Option<Bound>,
@@ -98,7 +98,7 @@ pub(crate) struct Hint {
 }
 
 /// A bounded definition set and what it rests on.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Bound {
     /// The engine's fields (`cs:name`, `act:code`).
     pub names: Vec<String>,
@@ -153,6 +153,12 @@ impl PartialEq for Cats {
 }
 
 impl Eq for Cats {}
+
+impl Hash for Cats {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        self.list.hash(h);
+    }
+}
 
 impl std::ops::Deref for Cats {
     type Target = [(u8, u8)];
@@ -3627,6 +3633,7 @@ fn atom_hints(
             .collect(),
     );
     let mut runs: FxHashMap<(u64, usize, u8), Arc<Hint>> = FxHashMap::default();
+    let mut alike: phitex_defuse::FxHashSet<Arc<Hint>> = phitex_defuse::FxHashSet::default();
     // (an atom inside a run of characters, or a space, is never read:
     // no span reads it, so it has no entry)
     for (i, &a) in an.sig.iter().enumerate() {
@@ -3697,7 +3704,17 @@ fn atom_hints(
         // (a guessed operand that is unbounded on its own is a value
         // read, not run: `\\headline={\\tenrm…}`)
         let unbounded_operand = claimed && h.bound.is_none();
-        hints.push(Some(Arc::new(h)));
+        // (one hint per distinct value, shared: most commands of a text
+        // have a hint like another's, and a text's analysis is kept as
+        // long as its nodes may ask, `Registry`)
+        let h = if let Some(x) = alike.get(&h) {
+            x.clone()
+        } else {
+            let x = Arc::new(h);
+            alike.insert(x.clone());
+            x
+        };
+        hints.push(Some(h));
         // (a command a macro is only guessed to read still runs in the
         // slice: its rows count in the union)
         skip.push(claimed && (at.kind != AtomKind::Cs || prim_op || unbounded_operand));

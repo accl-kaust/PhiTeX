@@ -1039,13 +1039,13 @@ pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut Fol
 /// (no placement of a run before stands for it: a run again is answered
 /// the guess again).
 pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &mut FoldMemo) -> bool {
-    if let ReadKind::Field { at, .. } = *rd.kind(&eng.read_keys)
-        && let Some(spec) = member_spec(eng, rd.path(&eng.read_keys))
+    if let ReadKind::Field { at, .. } = *rd.kind()
+        && let Some(spec) = member_spec(eng, rd.path())
         && !member_now(eng, me, at, spec)
     {
         return true;
     }
-    if let ReadKind::Placed { i, guess: true } = *rd.kind(&eng.read_keys) {
+    if let ReadKind::Placed { i, guess: true } = *rd.kind() {
         let Some(r) = me.run_record() else {
             return true;
         };
@@ -1056,7 +1056,7 @@ pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &m
             return true;
         }
     }
-    answer_in(eng, me, &rd.kind(&eng.read_keys), rd.path(&eng.read_keys), memo) == rd.seen()
+    answer_in(eng, me, rd.kind(), rd.path(), memo) == rd.seen()
 }
 
 /// [`answer`], its folds from `memo`, on one layout ([`on_one_layout`]).
@@ -1222,6 +1222,102 @@ pub(crate) fn hole_before_defining(eng: &Engine, me: &Node, fields: &[Field]) ->
         cur = eng.order.next(sid, seg.lo);
     }
     (None, first)
+}
+
+/// The nodes before `me` in its unit that have not committed (as
+/// [`hole_before_defining`]) and whose operation names what they may
+/// define (`MayDefine::Names`, `MayDefine::Prefixes`), each with that
+/// set, in order: what a run's first reads wait for
+/// (`Ctx::wait_for_first_definer`). Not a node that may define anything
+/// (`MayDefine::Any`): every read after it would wait for it, the text
+/// after it in order; nor one that runs only once the line is quiet or
+/// whose run panicked on inputs that hold (as [`open_before`]).
+pub(crate) fn holes_naming_definitions(eng: &Engine, me: &Node) -> Vec<(NodeId, crate::api::MayDefine)> {
+    let Some(to) = pos_of(eng, me.id) else {
+        return Vec::new();
+    };
+    let from = unit_start(eng, me);
+    let v = eng.values();
+    let mut out = Vec::new();
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            break;
+        }
+        if seg.unit == me.unit {
+            let holes: Vec<NodeId> = {
+                let inner = seg.inner.read();
+                if inner.holes == 0 {
+                    Vec::new()
+                } else {
+                    inner
+                        .nodes
+                        .range((Excluded(from), Excluded(to)))
+                        .map(|(_, id)| *id)
+                        .filter(|id| {
+                            let n = eng.node(*id);
+                            let op = eng.op(n.op());
+                            *id != me.id
+                                && n.unit == me.unit
+                                && n.is_hole()
+                                && op.text()
+                                && !op.final_only()
+                                && !n.held_panic.load(Ordering::Acquire)
+                        })
+                        .collect()
+                }
+            };
+            for id in holes {
+                let n = eng.node(id);
+                match eng.op(n.op()).may_define(&n.args(), v) {
+                    m @ (crate::api::MayDefine::Names(_) | crate::api::MayDefine::Prefixes(_)) => out.push((id, m)),
+                    crate::api::MayDefine::Nothing | crate::api::MayDefine::Any => {}
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    out
+}
+
+/// The nearest node before `me` in its unit that has not committed (as
+/// [`holes_naming_definitions`]) and whose scope brackets are known only
+/// by running it (`Effect::Pending`): the scope `me` reads may be one it
+/// opens or closes (`Ctx::wait_for_scope_opener`).
+pub(crate) fn hole_with_pending_brackets(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let from = unit_start(eng, me);
+    let v = eng.values();
+    let mut last = None;
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            break;
+        }
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            if inner.holes != 0 {
+                for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
+                    let n = eng.node(*id);
+                    let op = eng.op(n.op());
+                    if *id != me.id
+                        && n.unit == me.unit
+                        && n.is_hole()
+                        && op.text()
+                        && !op.final_only()
+                        && !n.held_panic.load(Ordering::Acquire)
+                        && op.effect(&n.args(), v) == crate::api::Effect::Pending
+                    {
+                        last = Some(*id);
+                    }
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    last
 }
 
 /// The first node before `me` in its unit that is to run, again or for
@@ -1474,10 +1570,10 @@ pub(crate) fn open_definer_before(eng: &Engine, me: &Node, r: &crate::node::RunR
 pub(crate) fn derived_target_open(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
     on_one_layout(eng, || {
         r.reads.iter().find_map(|rd| {
-            let ReadKind::Field { at, .. } = &(&*rd.kind(&eng.read_keys)) else {
+            let ReadKind::Field { at, .. } = &rd.kind() else {
                 return None;
             };
-            let spec = derived_spec(eng, rd.path(&eng.read_keys))?;
+            let spec = derived_spec(eng, rd.path())?;
             let (anchor, incl) = match *at {
                 Anchor::Me => (me.id, false),
                 Anchor::Before(n) => (n, false),

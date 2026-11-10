@@ -240,6 +240,11 @@ pub struct Options {
     /// (`PHITEX_CUT_MIN`, else 3000); `u64::MAX` never. The output is the
     /// same whatever it is.
     pub cut_min: Option<u64>,
+    /// The speculation window on a clean build's evaluation
+    /// (docs/spec-window.md; `PHITEX_SPEC_WINDOW=1`): the text runs no
+    /// further past the page layer's frontier than running ahead was
+    /// found to pay. Off by default; never on an edit's evaluation.
+    pub spec_window: bool,
     /// The threads the engine's batches run on: `None` takes
     /// `PHITEX_THREADS`, else the available parallelism; `Some(1)` runs
     /// them in order. The output is the same at any count.
@@ -1030,20 +1035,20 @@ impl Default for Options {
             program: "pdftex".to_owned(),
             prelude_bytes: None,
             prelude_fallback: None,
-            // (`PHITEX_TIME_LIMIT_SECS`: another bound, 0 for none; a
-            // measurement's cold build or reference must never be cut
-            // short, a truncated reference compares as a wrong edit)
+            // (no limit, as pdflatex has none: a large document's clean
+            // build takes as long as it takes, and a stuck one is the
+            // user's to stop; `PHITEX_TIME_LIMIT_SECS` sets one, 0 none)
             time_limit: match std::env::var("PHITEX_TIME_LIMIT_SECS")
                 .ok()
                 .and_then(|x| x.trim().parse::<u64>().ok())
             {
-                Some(0) => None,
+                Some(0) | None => None,
                 Some(n) => Some(std::time::Duration::from_secs(n)),
-                None => Some(std::time::Duration::from_secs(600)),
             },
             stuck_after: None,
             memory_limit: None,
             cut_min: crate::exec::env_str!("PHITEX_CUT_MIN").and_then(|x| x.parse().ok()),
+            spec_window: crate::exec::env_flag!("PHITEX_SPEC_WINDOW"),
             threads: None,
             progress: None,
             edits: None,
@@ -1885,6 +1890,10 @@ pub struct Stats {
     pub refuted_nodes: u64,
     pub resumptions: u64,
     pub parks: u64,
+    /// Runs that waited, before doing anything, for a node before them
+    /// that may define a name they read (`phitex_defuse::Report::waits`):
+    /// not counted in `runs`.
+    pub waits: u64,
     pub cutoffs: u64,
     pub created: u64,
     pub freed: u64,
@@ -2340,6 +2349,10 @@ fn print_accounting(
         eprintln!(
             "acct: frontier: {} reads held past the page layer's frontier",
             eng.frontier_held()
+        );
+        let (w, held, halved, doubled, first) = eng.window_stats();
+        eprintln!(
+            "acct: window: width {w} places, {held} runs held, {halved} halvings, {doubled} doublings, {first} first reads waited"
         );
     }
     // (runs against live nodes per operation: where the runs beyond one a
@@ -2855,6 +2868,7 @@ impl Stats {
         self.runs += r.runs;
         self.refuted_nodes += r.refuted_nodes;
         self.resumptions += r.resumed;
+        self.waits += r.waits;
         self.parks += r.parks;
         self.rounds += 1;
         // (the passes the files read back took: one, and each rerun a
@@ -3402,6 +3416,8 @@ impl Graph {
             units_folded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             text_cuts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cut_min: Arc::new(std::sync::atomic::AtomicU64::new(crate::cut::CUT_MIN)),
+            spec_window: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            give_back_guesses: Arc::new([const { std::sync::atomic::AtomicU64::new(0) }; 2]),
             fatal_starts: Arc::default(),
             siblings_pulled: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             counters: Arc::default(),
@@ -6941,6 +6957,7 @@ impl Build {
         true
     }
 
+    #[allow(clippy::too_many_lines)]
     fn settle(&mut self) {
         if self.nothing_to_settle() {
             return;
@@ -7009,6 +7026,15 @@ impl Build {
         }
         let t_apply = t_all.elapsed();
         self.evaluated = true;
+        // (the speculation window: the clean build's evaluation alone, an
+        // edit's never, docs/spec-window.md)
+        self.g
+            .eng
+            .set_spec_window(self.opts.spec_window && self.settles == 1);
+        self.g.ops.spec_window.store(
+            self.opts.spec_window && self.settles == 1,
+            std::sync::atomic::Ordering::Release,
+        );
         self.g.settle(
             self.unit,
             &self.opts.finder,
@@ -7016,6 +7042,14 @@ impl Build {
             self.opts.fixpoint,
             &mut absorb,
         );
+        // (`PHITEX_WINDOW_LOG`: the window as the evaluation left it)
+        if self.opts.spec_window && self.settles == 1 && crate::exec::env_flag!("PHITEX_WINDOW_LOG")
+        {
+            let (w, held, halved, doubled, first) = self.g.eng.window_stats();
+            eprintln!(
+                "window: width {w} places, {held} runs held, {halved} halvings, {doubled} doublings, {first} first reads waited"
+            );
+        }
         // (a text taken last that changed nothing: the result is for it)
         let t_settle = t_all.elapsed();
         if let Some(v) = absorb.unchanged {
@@ -9526,6 +9560,22 @@ impl Build {
                 (what, kind.to_owned(), field)
             })
             .collect()
+    }
+
+    /// The page chain: the wakes that ended at the last page's
+    /// finisher (its routine), from the first, in nodes. Each page's loop
+    /// rest waits for the routine of the page before it (no fold past a
+    /// give-back not known), so on a clean build it grows with the pages,
+    /// the same in DVI and PDF; the critical path traced from whichever
+    /// node committed last ([`Stats::critical_path`]) sees it only where
+    /// that node is on it.
+    #[must_use]
+    pub fn page_chain(&self) -> usize {
+        let e = &self.g.eng;
+        e.order(self.unit)
+            .into_iter()
+            .rfind(|&n| e.node_info(n).is_some_and(|i| i.op == "finish"))
+            .map_or(0, |n| e.chain_to(n).len())
     }
 
     /// The live nodes of operation `op`.

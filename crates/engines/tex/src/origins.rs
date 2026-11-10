@@ -272,6 +272,11 @@ pub(crate) fn keep(inst: u64, id: u64, g: PageGlyphs) {
     m.insert((inst, id), Arc::new(g));
 }
 
+/// Page `id`'s glyphs (value store `inst`) dropped: its record is gone.
+pub(crate) fn forget(inst: u64, id: u64) {
+    glyph_memo().locked().remove(&(inst, id));
+}
+
 /// Page `id`'s glyphs (value store `inst`), if kept.
 pub(crate) fn kept(inst: u64, id: u64) -> Option<Arc<PageGlyphs>> {
     glyph_memo().locked().get(&(inst, id)).cloned()
@@ -689,8 +694,19 @@ impl Src<'_> {
 }
 
 /// The match of page `g` against the nodes of `ix`.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
+    match_page_until(g, ix, &|_| false).expect("never stopped")
+}
+
+/// [`match_page`], given up (`None`) once `stop` says so, between its
+/// clusters' rounds and steps: a page's match is the longest step of
+/// the idle work (para4000: 7 to 16 ms), which a keystroke waited for.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn match_page_until(
+    g: &PageGlyphs,
+    ix: &Index,
+    stop: &dyn Fn(bool) -> bool,
+) -> Option<Matched> {
     // the glyphs, one a node (its first code)
     let mut glyphs: Vec<Glyph> = Vec::new();
     let mut atoms: Vec<Atom> = Vec::new();
@@ -837,6 +853,9 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
         .collect();
     let mut round = 0;
     while round < passes.len() {
+        if stop(false) {
+            return None;
+        }
         let ci = passes[round];
         let (a, b, _) = clusters[ci];
         // (and the nodes around it too short to vote: a heading, an
@@ -992,6 +1011,9 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
     // the characters left between two matched ones of one node: matched
     // to that node's characters between them (`footnote*` against
     // `footnote\footnote*`, a word a macro split)
+    if stop(false) {
+        return None;
+    }
     let mut k = 0;
     while k < atoms.len() {
         if matched_atoms[k].is_some() {
@@ -1067,6 +1089,9 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
             }
         })
         .collect();
+    if stop(false) {
+        return None;
+    }
     synthesize(&glyphs, &mut gorg, ix);
     let mut orgs = vec![Org::NONE; g.codes.len()];
     let mut cur = Org::NONE;
@@ -1089,7 +1114,7 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
             }
         };
     }
-    Matched {
+    Some(Matched {
         nodes: used
             .iter()
             .map(|&n| {
@@ -1100,7 +1125,7 @@ pub(crate) fn match_page(g: &PageGlyphs, ix: &Index) -> Matched {
             })
             .collect(),
         orgs,
-    }
+    })
 }
 
 /// Unmatched glyphs between two matched ones of the same node on their
@@ -1706,6 +1731,13 @@ impl State {
 
     #[allow(clippy::too_many_lines)]
     fn ctx<'a>(&self, inp: Input<'a>) -> Ctx<'a> {
+        self.ctx_until(inp, &|_| false).expect("never stopped")
+    }
+
+    /// [`State::ctx`], given up (`None`) once `stop` says so (every few
+    /// hundred nodes: a keystroke waits for none of it).
+    #[allow(clippy::too_many_lines)]
+    fn ctx_until<'a>(&self, inp: Input<'a>, stop: &dyn Fn(bool) -> bool) -> Option<Ctx<'a>> {
         let doc = self.file_index(&inp.doc_name);
         let mut texts: Vec<Option<Arc<str>>> = Vec::new();
         let mut spans: FxHashMap<u64, Span> = FxHashMap::default();
@@ -1733,7 +1765,10 @@ impl State {
         let memo = self.scans.locked();
         let mut fresh: FxHashMap<u64, Arc<NodeScan>> = FxHashMap::default();
         let mut reach: Option<(Option<String>, usize)> = None;
-        for &i in &order {
+        for (n, &i) in order.iter().enumerate() {
+            if n % 256 == 255 && stop(false) {
+                return None;
+            }
             let (raw, f, s, e, _) = &inp.spans[i];
             let name = f.as_ref().map(|x| x.0.clone());
             if let Some((n, end)) = &reach
@@ -1816,19 +1851,25 @@ impl State {
         });
         // (the document's own text, as given: where the nodes hold its
         // canonical text, offsets go over by line and column)
-        Ctx {
+        Some(Ctx {
             inp,
             index,
             spans,
             texts,
             bytes: Mutex::new(FxHashMap::default()),
             canon: OnceLock::new(),
-        }
+        })
     }
 
     /// Page `k`'s match, kept while its glyphs are the same and every
     /// node it names is there with the same text.
-    fn matched(&self, cx: &Ctx<'_>, id: u64, g: &Arc<PageGlyphs>) -> Arc<Matched> {
+    fn matched(
+        &self,
+        cx: &Ctx<'_>,
+        id: u64,
+        g: &Arc<PageGlyphs>,
+        stop: &dyn Fn(bool) -> bool,
+    ) -> Option<Arc<Matched>> {
         // (kept while the page's glyphs are the same, held, and its
         // nodes' texts are)
         let kept = self.matches.locked().get(&id).cloned();
@@ -1838,15 +1879,15 @@ impl State {
                 .iter()
                 .all(|&(raw, h)| cx.spans.get(&raw).is_some_and(|sp| sp.hash == h))
         {
-            return m;
+            return Some(m);
         }
-        let m = Arc::new(match_page(g, &cx.index));
+        let m = Arc::new(match_page_until(g, &cx.index, stop)?);
         let mut all = self.matches.locked();
         if all.len() > 1 << 16 {
             all.clear();
         }
         all.insert(id, (g.clone(), m.clone()));
-        m
+        Some(m)
     }
 }
 
@@ -1939,9 +1980,28 @@ fn answer(
     k: usize,
     pdf: &dyn Fn() -> Arc<Vec<u8>>,
 ) -> Option<Arc<PageOrigins>> {
-    let id = *cx.inp.shown.get(k)?;
-    let g = kept(cx.inp.inst, id)?;
-    let m = st.matched(cx, id, &g);
+    answer_until(st, cx, k, pdf, &|_| false).unwrap_or(None)
+}
+
+/// [`answer`], given up (`Err`) once `stop` says so while the page is
+/// matched.
+#[allow(clippy::too_many_lines)]
+fn answer_until(
+    st: &State,
+    cx: &Ctx<'_>,
+    k: usize,
+    pdf: &dyn Fn() -> Arc<Vec<u8>>,
+    stop: &dyn Fn(bool) -> bool,
+) -> Result<Option<Arc<PageOrigins>>, ()> {
+    let Some(&id) = cx.inp.shown.get(k) else {
+        return Ok(None);
+    };
+    let Some(g) = kept(cx.inp.inst, id) else {
+        return Ok(None);
+    };
+    let Some(m) = st.matched(cx, id, &g, stop) else {
+        return Err(());
+    };
     let nodes: Vec<Option<(Span, bool)>> = m
         .nodes
         .iter()
@@ -1992,7 +2052,7 @@ fn answer(
     if let Some((old, of, out)) = kept {
         if old == at {
             check("kept", &out);
-            return Some(out);
+            return Ok(Some(out));
         }
         // (each node moved whole: its start and end by one distance)
         let d: Option<Vec<i64>> = old
@@ -2029,7 +2089,7 @@ fn answer(
                     out: o.clone(),
                 },
             );
-            return Some(o);
+            return Ok(Some(o));
         }
     }
     let (out, of) = answer_fresh(cx, k, &g, &m, &nodes, pdf);
@@ -2049,7 +2109,7 @@ fn answer(
             out: out.clone(),
         },
     );
-    Some(out)
+    Ok(Some(out))
 }
 
 /// Page `k`'s answer made from its glyphs `g` and match `m`, its nodes
@@ -2157,7 +2217,7 @@ impl crate::Build {
     /// [`Self::origin_texts`]), made with one look at the sources.
     #[must_use]
     pub fn origins_snapshot(&self) -> OriginsSnapshot {
-        self.origins_snapshot_until(&|| false)
+        self.origins_snapshot_until(&|_| false)
             .unwrap_or_else(|| OriginsSnapshot {
                 pages: Vec::new(),
                 files: Vec::new(),
@@ -2168,21 +2228,21 @@ impl crate::Build {
     /// [`Self::origins_snapshot`], given up between two pages once `stop`
     /// says so (`None`; the pages answered so far kept, the next call
     /// goes on from them).
-    pub fn origins_snapshot_until(&self, stop: &dyn Fn() -> bool) -> Option<OriginsSnapshot> {
+    pub fn origins_snapshot_until(&self, stop: &dyn Fn(bool) -> bool) -> Option<OriginsSnapshot> {
         let t0 = std::time::Instant::now();
         let st = self.origins_state();
         let inp = self.origins_input();
         let t1 = t0.elapsed();
-        let cx = st.ctx(inp);
+        let cx = st.ctx_until(inp, stop)?;
         let t2 = t0.elapsed();
         let pdf: OnceLock<Arc<Vec<u8>>> = OnceLock::new();
         let get = || pdf.get_or_init(|| self.origins_pdf()).clone();
         let mut pages = Vec::with_capacity(cx.inp.shown.len());
         for k in 0..cx.inp.shown.len() {
-            if k > 0 && stop() {
+            if stop(true) {
                 return None;
             }
-            pages.push(answer(st, &cx, k, &get));
+            pages.push(answer_until(st, &cx, k, &get, stop).ok()?);
         }
         let t3 = t0.elapsed();
         let files = st.files.locked().clone();
@@ -2286,7 +2346,7 @@ impl crate::Build {
         Vec<usize>,
         Vec<(u32, u32, i64)>,
     ) {
-        self.origins_update_until(&|| false).unwrap_or_default()
+        self.origins_update_until(&|_| false).unwrap_or_default()
     }
 
     /// [`Self::origins_update`], given up between two pages once `stop`
@@ -2296,23 +2356,23 @@ impl crate::Build {
     #[allow(clippy::type_complexity)]
     pub fn origins_update_until(
         &self,
-        stop: &dyn Fn() -> bool,
+        stop: &dyn Fn(bool) -> bool,
     ) -> Option<(
         Vec<Option<Arc<PageOrigins>>>,
         Vec<usize>,
         Vec<(u32, u32, i64)>,
     )> {
         let st = self.origins_state();
-        let cx = st.ctx(self.origins_input());
+        let cx = st.ctx_until(self.origins_input(), stop)?;
         let pdf: OnceLock<Arc<Vec<u8>>> = OnceLock::new();
         let get = || pdf.get_or_init(|| self.origins_pdf()).clone();
         let mut pages: Vec<Option<Arc<PageOrigins>>> = Vec::with_capacity(cx.inp.shown.len());
         for k in 0..cx.inp.shown.len() {
             // (a page at least each call: a call always gets on)
-            if k > 0 && stop() {
+            if stop(true) {
                 return None;
             }
-            pages.push(answer(st, &cx, k, &get));
+            pages.push(answer_until(st, &cx, k, &get, stop).ok()?);
         }
         let cx_texts: Vec<(u32, Arc<[u8]>)> = {
             let inp = &cx.inp;

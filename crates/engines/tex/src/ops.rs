@@ -876,6 +876,14 @@ impl Operation for Link {
     fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
         let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
         let o = ops(&self.0);
+        // (the first pass's line quiet: its pages streamed, every one
+        // shipped. The passes after it, the files read back settling, run
+        // the pages' PDF sides once each is quiet, as a build that streams
+        // nothing: run as their pages ship, each ran again at every move of
+        // its page's pieces through every pass, the TikZ manual's pages
+        // some five times each, its clean build at -j16 over an hour
+        // against 28 min without a viewer, mc 83832, 83891)
+        o.stream.store(false, std::sync::atomic::Ordering::Relaxed);
         crate::assemble::link(cx, o)
     }
 }

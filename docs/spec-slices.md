@@ -245,7 +245,7 @@ So the two are left apart (`crate::boxscope`):
   as long);
 - a run stops to leave its lists only where it could stop for a
   continuation: nothing half done that only it holds, a word whose
-  lookahead met the text's end among them (`Run::stop_refusal`); and a
+  lookahead met the text's end among them (`Run::open_state_refusal`); and a
   character run's lookahead at its text's end reads the next slice on
   whatever the run has open, the paragraph being another node's.
 

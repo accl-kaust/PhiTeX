@@ -182,8 +182,25 @@ impl Run<'_, '_> {
         // checkpoint made 2.95 s); at every such candidate, the nodes'
         // overhead was more than that (4.4 s))
         let long = self.cmds >= self.ops.cut_min.load(std::sync::atomic::Ordering::Relaxed);
+        let mut span_ok = long && (open_cut || par_cut);
+        // (where the state there is one a continuation carries, as at the
+        // text's end, [`Run::open_state_refusal`]: a run reading a file
+        // back through its child, hypdoc's `.hd`, cut there lost the
+        // child, and the names it read after were the engine's)
+        if span_ok
+            && !(can || forced_par)
+            && let Some(why) = self.open_state_refusal()
+        {
+            if crate::exec::obs_flag!("PHITEX_CUT_TRACE") {
+                eprintln!(
+                    "cut: node {} at candidate {k} inside its own span: none ({why})",
+                    self.cx.node().raw()
+                );
+            }
+            span_ok = false;
+        }
         let cuttable = fresh
-            && (((can || forced_par || (long && (open_cut || par_cut))) && !self.rest_blank()?)
+            && (((can || forced_par || span_ok) && !self.rest_blank()?)
                 || ((restartable || open_cut || par_cut || forced_par) && self.stop_at == Some(k)));
         self.cand_marks.push(CandMark {
             k,

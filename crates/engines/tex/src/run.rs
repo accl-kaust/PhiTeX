@@ -197,6 +197,12 @@ pub(crate) struct Ops {
     /// The commands a run does before it may be cut at its text's end
     /// ([`crate::Options::cut_min`], `crate::cut`).
     pub cut_min: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The speculation window on for this evaluation (docs/spec-window.md),
+    /// and the page routines' give-backs found as guessed and not where the
+    /// routine ran on the page as it is: the fold goes on a guess no
+    /// finisher gave back yet while the guesses hold.
+    pub spec_window: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub give_back_guesses: std::sync::Arc<[std::sync::atomic::AtomicU64; 2]>,
     /// The node whose run claimed the rest of the input at a fatal error
     /// ([`Run::fatal_hit`]), and the runs of text pieces after it begun
     /// since: none begins once it has, whatever had begun before (§93;
@@ -1988,6 +1994,14 @@ impl<'c, 'a> Run<'c, 'a> {
         }
         if self.fin_scope_closer.is_some() && self.fin_read_in_scope(loc, f)? {
             return Ok(());
+        }
+        // (before the run's first command is done, a read waits for a node
+        // before it not yet run whose text names the field among what it
+        // may define: a wait, not a run; the pieces started beside a
+        // document's first one read its `\hsize=6in` before it committed,
+        // each run again, para400dvi at -j16, docs/spec-window.md)
+        if self.cmds <= 1 {
+            self.cx.wait_for_first_definer(f)?;
         }
         let r = self.st.get(self.cx, self.v, loc, f);
         if r.is_err() {
@@ -6644,6 +6658,13 @@ impl<'c, 'a> Run<'c, 'a> {
 
     #[inline(never)]
     fn scope_kind_read(&mut self) -> R<Option<ValueId>> {
+        // (before the run's first command is done, it waits for a node
+        // before it not yet run whose brackets only its run says: the
+        // scope it would read may be one that node opens or closes,
+        // docs/spec-window.md)
+        if self.cmds <= 1 {
+            self.cx.wait_for_scope_opener()?;
+        }
         let r = self.cx.read(self.v.field(SCOPE_KIND));
         if r.is_err() {
             self.trace_stop("scope kind");

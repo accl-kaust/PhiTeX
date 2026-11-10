@@ -184,7 +184,7 @@ impl Run<'_, '_> {
     /// Whether the run's open levels can all be left (`leave_lists`): a
     /// text piece or a resume with a box being built among its lists and
     /// no conditional, scope effect or append
-    /// pending, nothing half done ([`Run::stop_refusal`]: a word whose
+    /// pending, nothing half done ([`Run::open_state_refusal`]: a word whose
     /// lookahead met the text's end, a scan, an alignment, a picture
     /// child, …); the innermost level a
     /// group; each level a group sharing the list below, a box's group, or
@@ -216,7 +216,7 @@ impl Run<'_, '_> {
             "a conditional open"
         } else if self.effect != phitex_defuse::Effect::None {
             "a scope effect"
-        } else if let Some(why) = self.stop_refusal() {
+        } else if let Some(why) = self.open_state_refusal() {
             why
         } else if !self.appending.is_empty() || !self.appending_vals.is_empty() {
             "appends pending"

@@ -418,8 +418,30 @@ impl PdfState {
                 "`\\pdfobj reserveobjnum' cannot be used with \\immediate",
             ));
         }
-        self.pdf_write_obj(n);
+        if let Some(h) = &mut self.held {
+            h.push(n);
+        } else {
+            self.pdf_write_obj(n);
+        }
         Ok(())
+    }
+
+    /// From now on `\immediate\pdfobj`'s objects are held, written only
+    /// at [`PdfState::write_held`]. A page's file of its own runs the
+    /// commands of the objects it names each at the number TeX gave it,
+    /// not at their times: an object written at once there (`pgf`'s
+    /// resources, filled at the document's end) would open an object
+    /// stream, numbered between them, that TeX's file opened later.
+    pub fn hold_writes(&mut self) {
+        self.held.get_or_insert_with(Vec::new);
+    }
+
+    /// The objects held since [`PdfState::hold_writes`] written, in their
+    /// order, and writing at once again.
+    pub fn write_held(&mut self) {
+        for n in self.held.take().unwrap_or_default() {
+            self.pdf_write_obj(n);
+        }
     }
 
     /// `pdf_write_obj` (pdfTeX §1554).
