@@ -152,9 +152,19 @@ fn signed61(p: u64) -> i64 {
 #[derive(Default, Clone)]
 pub(crate) struct Reads {
     n: u32,
+    /// The log2 of its filter's bits (0: none).
+    flog: u8,
     /// The blocks' offsets into the entries (4 bytes each, little
-    /// endian), then the entries.
+    /// endian), then the entries, then a filter of the fields read
+    /// ([`Reads::may_read`]: about a byte a field, two bits set each).
     buf: Box<[u8]>,
+}
+
+/// A field's two bits in a filter of `1 << flog` bits.
+fn filter_bits(f: u64, flog: u8) -> (usize, usize) {
+    let h = (f ^ (f >> 29)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let sh = 64 - u32::from(flog);
+    ((h >> sh) as usize, (h.rotate_left(32) >> sh) as usize)
 }
 
 impl std::fmt::Debug for Reads {
@@ -250,14 +260,49 @@ impl Reads {
             }
             put(&mut out, epoch.wrapping_add(1));
         }
+        // (the filter of the fields read: a walk passes most nodes that
+        // read none of its field, each a look at two bits)
+        let mut fields = 0usize;
+        let mut last = u64::MAX;
+        for k in &keys {
+            if k.0.0 != u64::MAX && k.0.0 != last {
+                fields += 1;
+                last = k.0.0;
+            }
+        }
+        let flog = (fields * 8).next_power_of_two().max(64).trailing_zeros() as u8;
+        let at = out.len();
+        out.resize(at + (1usize << flog) / 8, 0);
+        for k in &keys {
+            if k.0.0 != u64::MAX {
+                let (a, b) = filter_bits(k.0.0, flog);
+                out[at + a / 8] |= 1 << (a % 8);
+                out[at + b / 8] |= 1 << (b % 8);
+            }
+        }
         Reads {
             n: u32::try_from(n).expect("reads in a run"),
+            flog,
             buf: out.into_boxed_slice(),
         }
     }
 
     pub(crate) fn len(&self) -> usize {
         self.n as usize
+    }
+
+    /// Whether it may read field `f` (none of the fields it reads gives
+    /// false).
+    pub(crate) fn may_read(&self, f: Field) -> bool {
+        if self.n == 0 {
+            return false;
+        }
+        if self.flog == 0 {
+            return true;
+        }
+        let at = self.buf.len() - (1usize << self.flog) / 8;
+        let (a, b) = filter_bits(f.0.raw(), self.flog);
+        self.buf[at + a / 8] & (1 << (a % 8)) != 0 && self.buf[at + b / 8] & (1 << (b % 8)) != 0
     }
 
     /// Bytes held (the measure).
@@ -291,7 +336,8 @@ impl Reads {
         let key = f.0.raw();
         // (the first block whose first entry's field is past `f`; the
         // field's entries begin in the block before it)
-        let (mut lo, mut hi) = (0, self.blocks());
+        let ok = self.n != 0 && self.may_read(f);
+        let (mut lo, mut hi) = (0, if ok { self.blocks() } else { 0 });
         while lo < hi {
             let mid = usize::midpoint(lo, hi);
             if self.first_field(mid) <= key {
@@ -306,7 +352,7 @@ impl Reads {
         while k > 0 && self.first_field(k) == key {
             k -= 1;
         }
-        let it = if self.n == 0 {
+        let it = if !ok {
             Entries {
                 buf: &self.buf,
                 at: 0,
