@@ -2425,11 +2425,6 @@ fn print_accounting(
         r.held_fired,
         r.held_passes,
     );
-    if r.held_unsettled {
-        eprintln!(
-            "acct: held wakes dropped past the settle_passes limit: the layout did not settle"
-        );
-    }
     let mut by_field: Vec<(String, u64)> = r
         .refuted_by_field
         .iter()
@@ -3493,6 +3488,7 @@ impl Graph {
         match e {
             E::RunawayNode { node, .. } | E::OpPanicked { node, .. } => ids.push(*node),
             E::Stuck { node: Some(n), .. } => ids.push(*n),
+            E::Unsettled { nodes, .. } => ids.extend(nodes.iter().copied()),
             E::TotalRuns { .. } | E::Deadline | E::Stuck { node: None, .. } => {}
         }
         // (the field and the nodes' texts first: a harness shows the
@@ -4206,14 +4202,6 @@ impl Graph {
             t_eval += t0.elapsed();
             self.eval_warnings.clear();
             self.no_fixpoint.clear();
-            // (the page layout not settled: the output is the last
-            // pass's, a warning)
-            if r.held_unsettled {
-                self.eval_warnings.push(format!(
-                    "the page layout did not settle after {} passes (the maximum, as latexmk's): the output is the last pass's",
-                    self.eng.limits().settle_passes
-                ));
-            }
             // (a reader of a file read back still moving at the cap,
             // latexmk's maximum runs: the build fails as latexmk's does,
             // the output its last run's, kept and written; the document's

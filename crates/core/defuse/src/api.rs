@@ -683,9 +683,6 @@ pub struct Report {
     pub held_deferred: u64,
     pub held_fired: u64,
     pub held_passes: u32,
-    /// Held wakes were dropped past `Limits::settle_passes`: the page
-    /// layer did not settle; the output is the last pass's.
-    pub held_unsettled: bool,
     /// Runs whose commit found every output of the node's run before
     /// equal (its definitions and relations, contributions, output,
     /// brackets and placements): reruns that asked nothing again, the
@@ -718,14 +715,11 @@ pub struct Limits {
     /// error.
     pub final_reruns: u32,
     /// The quiet points of one build at which held wakes may fire
-    /// (`Operation::settles_at_quiet`): past it the wakes still held are
-    /// dropped, the last state is written out, and `Report::held_unsettled`
-    /// says so, for the client to report as latexmk reports "maximum runs
-    /// reached" (the output kept). latexmk's `max_repeat` is 5 whole runs;
-    /// a pass here is finer and at eight threads a book's chapters take
-    /// 8 to 12 of them while the text still speculates ahead of the page
-    /// layer, so the default is 12 until that is settled (measured: 5 made
-    /// every course3 -j8 cold build end unsettled and wrong).
+    /// (`Operation::settles_at_quiet`): reaching it with wakes still held
+    /// is an engine defect, the evaluation's error
+    /// (`EvalError::Unsettled`), never wakes dropped and an output kept
+    /// as if settled. A pass is the layer's feedback from a later wave
+    /// (`sched::same_wave`); a chain of it inside a wave settles in it.
     pub settle_passes: u32,
     /// Runs in the whole evaluation (default none).
     pub total_runs: Option<u64>,
@@ -790,6 +784,14 @@ pub enum EvalError {
         op: &'static str,
         why: String,
     },
+    /// Wakes still held at `Limits::settle_passes` quiet points: an
+    /// engine defect, never an output written as if settled. The first
+    /// few readers still held.
+    Unsettled {
+        passes: u32,
+        held: usize,
+        nodes: Vec<NodeId>,
+    },
 }
 
 impl std::fmt::Display for EvalError {
@@ -801,6 +803,12 @@ impl std::fmt::Display for EvalError {
             EvalError::Deadline => write!(f, "deadline"),
             EvalError::Stuck { node: Some(n), op, why } => write!(f, "stuck: node {} ({op}): {why}", n.0),
             EvalError::Stuck { node: None, why, .. } => write!(f, "stuck: {why}"),
+            EvalError::Unsettled { passes, held, .. } => {
+                write!(
+                    f,
+                    "the page layout did not settle in {passes} passes ({held} wakes still held)"
+                )
+            }
         }
     }
 }

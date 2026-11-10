@@ -288,8 +288,6 @@ pub(crate) struct Worker {
     pub(crate) held_deferred: AtomicU64,
     pub(crate) held_fired: AtomicU64,
     pub(crate) held_passes: AtomicU64,
-    /// Held wakes dropped past `Limits::settle_passes` (1: yes).
-    pub(crate) held_unsettled: AtomicU64,
     pub(crate) woken: AtomicU64,
     pub(crate) walked: AtomicU64,
     pub(crate) scope_asked: AtomicU64,
@@ -736,7 +734,6 @@ impl Pool {
                 held_deferred: AtomicU64::new(0),
                 held_fired: AtomicU64::new(0),
                 held_passes: AtomicU64::new(0),
-                held_unsettled: AtomicU64::new(0),
                 woken: AtomicU64::new(0),
                 walked: AtomicU64::new(0),
                 scope_asked: AtomicU64::new(0),
@@ -1460,10 +1457,24 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
             // pass of the page layer's feedback into the text)
             let held: Vec<(NodeId, Wake)> = std::mem::take(&mut *eng.held.lock());
             if !held.is_empty() && w.held_passes.load(Ordering::Relaxed) >= u64::from(pool.limits.settle_passes) {
-                // (as latexmk past its maximum runs: the wakes still held
-                // are dropped, the last state is written out, and the
-                // client reports it)
-                w.held_unsettled.store(1, Ordering::Relaxed);
+                // (never a drop: a wake held and not fired leaves a reader
+                // on a value that moved, a wrong output written as if
+                // settled. The layer's feedback reaches the quiet point
+                // only from a later wave (`same_wave`), a chain of it
+                // moves in one pass, and so the cap is an engine defect:
+                // the build stops and says so)
+                debug_assert!(
+                    false,
+                    "the page layer did not settle in {} passes: {} wakes still held",
+                    pool.limits.settle_passes,
+                    held.len()
+                );
+                pool.fail(EvalError::Unsettled {
+                    passes: pool.limits.settle_passes,
+                    held: held.len(),
+                    nodes: held.iter().map(|x| x.0).take(8).collect(),
+                });
+                break;
             } else if !held.is_empty() {
                 let mut seen: crate::values::FxHashSet<NodeId> = crate::values::FxHashSet::default();
                 let mut memo = crate::read::FoldMemo::new();

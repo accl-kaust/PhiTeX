@@ -1664,9 +1664,7 @@ impl Engine {
         }
         // (debug: settled, every clean node's reads of its siblings hold)
         #[cfg(debug_assertions)]
-        if workers.iter().all(|w| w.held_unsettled.load(Ordering::Relaxed) == 0) {
-            crate::commit::assert_siblings_hold(self);
-        }
+        crate::commit::assert_siblings_hold(self);
         let swept = self.sweep_readers() as u64
             + workers
                 .iter()
@@ -1717,7 +1715,6 @@ impl Engine {
             rep.held_passes = rep
                 .held_passes
                 .max(u32::try_from(load(&w.held_passes)).unwrap_or(u32::MAX));
-            rep.held_unsettled |= load(&w.held_unsettled) > 0;
             rep.times.op_ns += load(&w.op_ns);
             rep.times.wasted_ns += load(&w.wasted_ns);
             rep.times.commit_ns += load(&w.commit_ns);
