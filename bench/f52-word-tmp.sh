@@ -35,10 +35,10 @@ Another paragraph.
 Last words.
 \end{document}
 TEX
-echo '[["s.tex","Most edits","Many edits",4]]' > "$w/edits.json"
+echo '[["s.tex","Most edits","Many edits",4],["s.tex","And words after","And more words after",4]]' > "$w/edits.json"
 for m in off box; do
-  e=(PHITEX_TEX_TIME=1); [ $m = off ] || e=(PHITEX_TEX_TIME=1 PHITEX_BOXSCOPE=1)
+  e=(PHITEX_TEX_TIME=1 PHITEX_RUN_TIMES=1); [ $m = off ] || e=(PHITEX_TEX_TIME=1 PHITEX_RUN_TIMES=1 PHITEX_BOXSCOPE=1)
   echo "== $m: the one-word edit under watch -j1"; rm -rf "$w/e" "$w/e-cold" "$w/cache-$m" "$r/watch-$m.txt"; cp -a "$d" "$w/e"
   env F52_ERR=$r/watch-$m.txt PHITEX_CACHE_DIR=$w/cache-$m "${e[@]}" timeout 900 python3 -I bench/f52-edits-tmp.py "$bin" "$w/e" s.tex 1 "$w/edits.json" "$r/edits-$m.json" --exact-pdf 2>&1 | tail -3
-  awk '/^=== edit/ {print; on=1; next} on && /^(acct: wall|edit phases|settle phases|watch phases|session phases|time:|incr|push_text|hints)/ {print "  " substr($0,1,300)}' "$r/watch-$m.txt"
+  awk '/^=== edit/ {print; on=1; next} on && /^acct: wall/ {print "  " substr($0,1,120)} on && /^runtime:/ {d=$5-$4; if (d>=0.3) printf "    %s %s %.1f\n", $2, $3, d}' "$r/watch-$m.txt"
 done
