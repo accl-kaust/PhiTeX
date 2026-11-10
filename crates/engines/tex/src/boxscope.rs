@@ -43,7 +43,7 @@ const BASE: i64 = -(1i64 << 55);
 /// `PHITEX_BOXSCOPE=1` (any value but empty or 0). Off by default: a
 /// definition local to a closed picture is filed, and a read after it
 /// searches back over every earlier picture's for the one it sees
-/// (one TikZ picture per section: quadratic clean builds).
+/// (one `TikZ` picture per section: quadratic clean builds).
 pub(crate) fn on() -> bool {
     static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *F.get_or_init(|| {
