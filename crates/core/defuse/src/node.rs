@@ -193,6 +193,10 @@ pub(crate) struct Node {
     /// `commit::settle_rel`, `commit::walk_here`): a re-ask for its change
     /// made before carried the older value (`sched::asked_before`).
     pub(crate) restated: AtomicU32,
+    /// Counts its commits, a run's and a stand's (`commit::commit_stood`,
+    /// which keeps the record and its serial): the commit a re-ask came
+    /// from (`sched::asked_before`).
+    pub(crate) commits: AtomicU32,
     /// Placed as its placer's continuation (`Ctx::follow`,
     /// `Ctx::follow_after`), not as its child: a node placed after the
     /// placer and its children goes before it.
@@ -325,6 +329,7 @@ impl Node {
             back_frontier: Mx::new(None),
             asks: Mx::new(Vec::new()),
             restated: AtomicU32::new(0),
+            commits: AtomicU32::new(0),
             follows: AtomicBool::new(false),
             anchor: AtomicU64::new(0),
             state_stale: AtomicBool::new(false),
