@@ -1809,9 +1809,15 @@ pub(crate) fn mark_stale_now(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wa
 }
 
 /// Whether node `n` was re-asked already for `wake`'s change: the same
-/// field, by the same run of the same node (its commit's walks can reach
-/// one reader twice, through the readers its lock found and a walk on),
-/// while that commit goes on.
+/// field, by the same commit of the same node (its walks can reach one
+/// reader twice, through the readers its lock found and a walk on), while
+/// that commit goes on. The commit, not the run's serial: a run that
+/// stands (`commit::commit_stood`) commits again on its last record and
+/// serial, and its re-asks were taken for the last commit's, made before
+/// the reader ran again. beamer_second_pass at -j1 (with a piece re-asked
+/// by its own commit): the page loop's step that parked at the piece, a
+/// hole then, was not asked again when the piece stood, kept its answer
+/// of none, and the build wrote no PDF.
 /// The first re-ask stands for both: it came after the commit had
 /// published what it defines, so a run of `n` begun since reads it, one
 /// at work then was told, and one committing then runs again. Asked
@@ -1837,7 +1843,7 @@ fn asked_before(eng: &Engine, n: &Node, wake: &Wake) -> bool {
     };
     let key = (
         by,
-        b.serial.load(Ordering::Acquire),
+        b.commits.load(Ordering::Acquire),
         b.restated.load(Ordering::Acquire),
         *field,
     );
@@ -1850,7 +1856,7 @@ fn asked_before(eng: &Engine, n: &Node, wake: &Wake) -> bool {
     // and the commit's second re-ask went through, 1 build in 160)
     asks.retain(|&(m, ser, _, _)| {
         eng.placed_node(m)
-            .is_some_and(|x| x.committing.load(Ordering::Acquire) && x.serial.load(Ordering::Acquire) == ser)
+            .is_some_and(|x| x.committing.load(Ordering::Acquire) && x.commits.load(Ordering::Acquire) == ser)
     });
     asks.push(key);
     false

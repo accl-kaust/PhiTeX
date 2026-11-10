@@ -1827,6 +1827,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let pos = pos_in(&inner, node);
         lap.lap("placements");
         // reads anchored here
+        node.commits.fetch_add(1, Ordering::AcqRel);
         node.committing.store(true, Ordering::SeqCst);
         for (f, r, witness) in here_reads.drain(..) {
             let a = eng.node(r.anchor());
@@ -2685,6 +2686,7 @@ pub(crate) fn commit_stood(
         let (_, inner) = own_write(eng, node)?;
         // (set before `asked` is read, as a commit sets it: a re-ask from
         // here on marks the node to run again, `sched::mark_stale_now`)
+        node.commits.fetch_add(1, Ordering::AcqRel);
         node.committing.store(true, Ordering::SeqCst);
         if node.asked.load(Ordering::SeqCst)
             || (read::scoped(eng) && eng.scope_gen.load(Ordering::Acquire) != scope_gen)
