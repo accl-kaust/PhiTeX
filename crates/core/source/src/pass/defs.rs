@@ -16,6 +16,7 @@ mod codec;
 use super::FileKind;
 use super::atoms::{self, Atom, AtomKind};
 use super::hints::{Closure, DefSet, Effects, effects};
+use super::layered::{Layered, LayeredSet};
 use super::lex::{self, changes_catcodes};
 
 /// One argument a command reads (see the table module's spec letters).
@@ -101,15 +102,15 @@ struct At<T> {
 /// The definitions harvested from a set of files.
 #[derive(Clone, Debug, Default)]
 pub struct Definitions {
-    macros: HashMap<String, Vec<At<Shape>>>,
-    envs: HashMap<String, Vec<At<Vec<Arg>>>>,
+    macros: Layered<Vec<At<Shape>>>,
+    envs: Layered<Vec<At<Vec<Arg>>>>,
     /// Per definition, whether its body changes catcodes: 0 no, 1 inside
     /// a group of its own (for the arguments it reads), 2 for good, 3 only
     /// of the characters in the mask (none that shape groups).
     /// With them, the catcodes it sets of characters its arguments name
     /// (`` \def\do#1{\catcode`#1=12 } ``): (parameter, catcode).
-    catcoders: HashMap<String, Vec<At<Catcoder>>>,
-    env_catcoders: HashSet<String>,
+    catcoders: Layered<Vec<At<Catcoder>>>,
+    env_catcoders: LayeredSet,
     /// Characters some `\catcode` makes active.
     active: u128,
     /// Per definition with a visible body, its text and what running it
@@ -117,17 +118,17 @@ pub struct Definitions {
     /// under [`OUTPUT`].
     /// (shared, not copied, by a copy of the definitions: a chain of
     /// them copies each set before adding to it)
-    bodies: HashMap<String, Vec<At<std::sync::Arc<Body>>>>,
+    bodies: Layered<Vec<At<std::sync::Arc<Body>>>>,
     /// The order the files load in (file → rank), when known: a later
     /// definition in another file then wins after it (load order).
     order: Option<HashMap<u32, u32>>,
     /// Names some `\\font` defines (their [`Shape::Quantity`] is `'c'`).
-    fonts: HashSet<String>,
+    fonts: LayeredSet,
     /// The register a name stands for where a `\\countdef` (or its
     /// kin) gave its number as digits (`\\countdef\\pageno=0`): its
     /// assignment defines that register alone. A later definition of
     /// the name without one drops it.
-    registers: HashMap<String, u32>,
+    registers: Layered<u32>,
     /// Closures computed with these as the prelude ([`Closure`]), or
     /// with definitions they were cloned from or to: by name, each set
     /// with every name looked up for it and those names' stamps then
@@ -136,7 +137,7 @@ pub struct Definitions {
     /// By name, the mark of the last change to its definitions, bodies
     /// or register (unique in the process; none: 0): two sets of
     /// definitions with a name's same stamp give it the same.
-    stamps: HashMap<String, u64>,
+    stamps: Layered<u64>,
     /// The stamp of the last change to [`Definitions::stamps`] (0: none):
     /// two sets of definitions with the same one have the same stamps.
     stamps_gen: u64,
@@ -313,12 +314,12 @@ impl Definitions {
     pub fn digest(&self) -> u64 {
         use std::fmt::Write as _;
         use std::hash::{Hash, Hasher};
-        fn put<T: std::fmt::Debug>(s: &mut String, tag: &str, m: &HashMap<String, Vec<At<T>>>) {
+        fn put<T: std::fmt::Debug + Clone>(s: &mut String, tag: &str, m: &Layered<Vec<At<T>>>) {
             let mut names: Vec<&String> = m.keys().collect();
             names.sort_unstable();
             for n in names {
                 let _ = write!(s, "{tag}{n}");
-                for d in &m[n] {
+                for d in m.get(n).into_iter().flatten() {
                     let _ = write!(s, "|{:?}", d.what);
                 }
                 s.push('\n');
@@ -329,9 +330,9 @@ impl Definitions {
         put(&mut s, "e:", &self.envs);
         put(&mut s, "c:", &self.catcoders);
         put(&mut s, "b:", &self.bodies);
-        let mut ec: Vec<&String> = self.env_catcoders.iter().collect();
+        let mut ec: Vec<&String> = self.env_catcoders.names().collect();
         ec.sort_unstable();
-        let mut fonts: Vec<&String> = self.fonts.iter().collect();
+        let mut fonts: Vec<&String> = self.fonts.names().collect();
         fonts.sort_unstable();
         let mut regs: Vec<(&String, &u32)> = self.registers.iter().collect();
         regs.sort_unstable();
@@ -782,7 +783,7 @@ impl Definitions {
         {
             return;
         }
-        let v = self.macros.entry(name.to_owned()).or_default();
+        let v = self.macros.entry_or_default(name);
         if !v.iter().any(|d| d.file == file && d.what == what) || v.iter().all(|d| d.file != file) {
             v.push(At { file, pos, what });
             self.touch(name);
@@ -799,7 +800,7 @@ impl Definitions {
             text: text[atoms[open].end..atoms[close].start].to_owned(),
             effects: effects(text, atoms, open + 1, close, false),
         });
-        let v = self.bodies.entry(name.to_owned()).or_default();
+        let v = self.bodies.entry_or_default(name);
         if !v.iter().any(|d| d.file == file && d.what == what) || v.iter().all(|d| d.file != file) {
             v.push(At { file, pos, what });
             self.touch(name);
@@ -812,8 +813,7 @@ impl Definitions {
             "noexpand" | "expandafter" | "csname" | "string" | "meaning" | "the"
         ) {
             self.catcoders
-                .entry(name.to_owned())
-                .or_default()
+                .entry_or_default(name)
                 .push(At { file, pos, what: k });
             self.touch(name);
         }
@@ -968,10 +968,10 @@ impl Definitions {
                 let (args, open) = newcommand_args(atoms, atoms[j].mate + 1);
                 let Some(open) = open else { return };
                 if matches!(body_catcodes(text, atoms, open, false).kind.0, 1 | 2) {
-                    self.env_catcoders.insert(env.clone());
+                    self.env_catcoders.insert_name(env.clone());
                 }
                 self.touch(&env);
-                self.envs.entry(env).or_default().push(At {
+                self.envs.entry_or_default(&env).push(At {
                     file,
                     pos,
                     what: args,
@@ -1007,7 +1007,7 @@ impl Definitions {
                 };
                 let args = xparse(&spec).unwrap_or_else(|e| vec![Arg::Pending(e.to_owned())]);
                 self.touch(&env);
-                self.envs.entry(env).or_default().push(At {
+                self.envs.entry_or_default(&env).push(At {
                     file,
                     pos,
                     what: args,
@@ -1019,7 +1019,7 @@ impl Definitions {
                     return;
                 };
                 self.touch(&env);
-                self.envs.entry(env).or_default().push(At {
+                self.envs.entry_or_default(&env).push(At {
                     file,
                     pos,
                     what: vec![Arg::Opt],
@@ -1053,7 +1053,7 @@ impl Definitions {
                     _ => 'c',
                 };
                 if name == "font" {
-                    self.fonts.insert(atoms[n].name(text).to_owned());
+                    self.fonts.insert_name(atoms[n].name(text).to_owned());
                 }
                 let target = atoms[n].name(text).to_owned();
                 match register_number(atoms, n + 1)

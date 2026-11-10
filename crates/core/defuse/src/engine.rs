@@ -2,7 +2,7 @@
 //! evaluation, edits, reports.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::api::{
@@ -105,8 +105,6 @@ pub struct Engine {
     pub(crate) monoids: Lock<Monoids>,
     pub(crate) env: Env,
     pub(crate) paths: Paths,
-    /// The reads' kinds and paths, interned ([`crate::node::ReadKeys`]).
-    pub(crate) read_keys: crate::node::ReadKeys,
     pub(crate) projections: Table<Projection>,
     /// The client's append for [`Rel::Append`] ([`Engine::set_append`]).
     append: std::sync::OnceLock<AppendFn>,
@@ -210,6 +208,32 @@ pub struct Engine {
     /// (`PHITEX_TEX_TIME`) Reads by readers outside the settling layer of
     /// a field it defines held past its frontier (`Ctx::set_frontier`).
     pub(crate) frontier_held: AtomicU64,
+    /// The speculation window (docs/spec-window.md): on for this
+    /// evaluation (`Engine::set_spec_window`), its width in places past the
+    /// frontier, whether a run ahead was refuted since the frontier last
+    /// moved on, and its measures (reads held by it, halvings, doublings).
+    pub(crate) window_on: AtomicBool,
+    pub(crate) window: AtomicU64,
+    pub(crate) window_missed: AtomicBool,
+    /// The width at which the runs the window held were last looked at.
+    pub(crate) window_released: AtomicU64,
+    /// (measures, `PHITEX_FIRST_READS=0`, `PHITEX_WINDOW_WAVE=1`) the
+    /// first-read wait on, and the window narrowed only by a node's second
+    /// refutation by the layer.
+    pub(crate) first_reads_on: AtomicBool,
+    pub(crate) window_wave: AtomicBool,
+    /// (`PHITEX_WINDOW_CHAINS=0`, a measure) a clean build's run again
+    /// waits for its moving sources (`sched::hold_for`).
+    pub(crate) window_chains: AtomicBool,
+    /// (`PHITEX_WINDOW_AIMD=0`, `PHITEX_WINDOW_FLOOR`, measures) the
+    /// window grown a place at a time once the layer refuted a run ahead;
+    /// its narrowest; the runs ahead in since it last grew.
+    pub(crate) window_aimd: AtomicBool,
+    pub(crate) window_floor: AtomicU64,
+    pub(crate) window_acks: AtomicU64,
+    /// (`PHITEX_WINDOW_PIN=1`, a measure) no growth once exchanged.
+    pub(crate) window_pin: AtomicBool,
+    pub(crate) window_stats: [AtomicU64; 4],
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
     pub(crate) layout_gen: AtomicU64,
@@ -283,6 +307,64 @@ impl Engine {
         self.settle_marks[w].fetch_or(b, Ordering::Release);
     }
 
+    /// The speculation window on or off for the evaluations to come
+    /// (docs/spec-window.md): on, its width measured from its start.
+    pub fn set_spec_window(&self, on: bool) {
+        self.window_on.store(on, Ordering::Release);
+        // (`PHITEX_WINDOW_START`, measure: another first width)
+        let start = std::env::var("PHITEX_WINDOW_START")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(crate::sched::WINDOW_START);
+        self.window.store(start, Ordering::Release);
+        self.window_released.store(start, Ordering::Release);
+        self.window_missed.store(false, Ordering::Release);
+        self.first_reads_on.store(
+            std::env::var("PHITEX_FIRST_READS").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
+        self.window_wave.store(
+            std::env::var("PHITEX_WINDOW_WAVE").is_ok_and(|x| x == "1"),
+            Ordering::Release,
+        );
+        self.window_aimd.store(
+            std::env::var("PHITEX_WINDOW_AIMD").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
+        self.window_floor.store(
+            std::env::var("PHITEX_WINDOW_FLOOR")
+                .ok()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(1),
+            Ordering::Release,
+        );
+        self.window_acks.store(0, Ordering::Release);
+        self.window_pin.store(
+            std::env::var("PHITEX_WINDOW_PIN").is_ok_and(|x| x == "1"),
+            Ordering::Release,
+        );
+        self.window_chains.store(
+            std::env::var("PHITEX_WINDOW_CHAINS").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
+        for s in &self.window_stats {
+            s.store(0, Ordering::Release);
+        }
+    }
+
+    /// (`PHITEX_TEX_TIME`) The speculation window's width now, the runs it
+    /// held, its halvings and its doublings, and the first reads that
+    /// waited for a definer before them (`Ctx::wait_for_first_definer`).
+    pub fn window_stats(&self) -> (u64, u64, u64, u64, u64) {
+        (
+            self.window.load(Ordering::Relaxed),
+            self.window_stats[0].load(Ordering::Relaxed),
+            self.window_stats[1].load(Ordering::Relaxed),
+            self.window_stats[2].load(Ordering::Relaxed),
+            self.window_stats[3].load(Ordering::Relaxed),
+        )
+    }
+
     /// (`PHITEX_TEX_TIME`) `Engine::frontier_held`.
     pub fn frontier_held(&self) -> u64 {
         self.frontier_held.load(Ordering::Relaxed)
@@ -350,6 +432,18 @@ impl Engine {
             frontier_by: AtomicU64::new(0),
             frontier_gen: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
+            window_on: AtomicBool::new(false),
+            window: AtomicU64::new(crate::sched::WINDOW_START),
+            window_missed: AtomicBool::new(false),
+            window_released: AtomicU64::new(0),
+            first_reads_on: AtomicBool::new(true),
+            window_wave: AtomicBool::new(false),
+            window_chains: AtomicBool::new(true),
+            window_aimd: AtomicBool::new(true),
+            window_floor: AtomicU64::new(1),
+            window_acks: AtomicU64::new(0),
+            window_pin: AtomicBool::new(false),
+            window_stats: [const { AtomicU64::new(0) }; 4],
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
             busy: AtomicU64::new(0),
@@ -374,7 +468,6 @@ impl Engine {
                 provider: Lock::new(None),
             },
             paths,
-            read_keys: crate::node::ReadKeys::new(),
             projections,
             append: std::sync::OnceLock::new(),
             shapes: Lock::new(FxHashMap::default()),
@@ -1722,7 +1815,7 @@ impl Engine {
                     };
                     let moved = r.reads.iter().any(|rd| {
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            answer(self, node, &rd.kind(&self.read_keys), rd.path(&self.read_keys)) != rd.seen()
+                            answer(self, node, rd.kind(), rd.path()) != rd.seen()
                         }))
                         .unwrap_or(true)
                     });
@@ -1763,7 +1856,7 @@ impl Engine {
     /// and of those gone.
     pub fn footprint(&self) -> String {
         let (filed, standing, fields) = self.reader_records();
-        let (mut live, mut gone) = ([0usize; 4], [0usize; 4]);
+        let (mut live, mut gone) = ([0usize; 5], [0usize; 5]);
         for i in 0..self.nodes.len() {
             let Some(n) = self.nodes.get(i) else { continue };
             let t = if n.state() == State::Gone { &mut gone } else { &mut live };
@@ -1772,11 +1865,20 @@ impl Engine {
                 t[1] += r.reads.len();
                 t[2] += r.defs.len();
                 t[3] += r.contribs.len();
+                t[4] += r.reads.bytes();
             }
         }
         format!(
-            "readers filed {filed} ({standing} standing) over {fields} segment fields; nodes alive {} (reads {}, defs {}, contribs {}), gone {} (reads {}, defs {}, contribs {})",
-            live[0], live[1], live[2], live[3], gone[0], gone[1], gone[2], gone[3]
+            "readers filed {filed} ({standing} standing) over {fields} segment fields; nodes alive {} (reads {} in {} MB, defs {}, contribs {}), gone {} (reads {}, defs {}, contribs {})",
+            live[0],
+            live[1],
+            live[4] >> 20,
+            live[2],
+            live[3],
+            gone[0],
+            gone[1],
+            gone[2],
+            gone[3]
         )
     }
 
@@ -1826,8 +1928,8 @@ impl Engine {
                     keep(f.0);
                     keep(x);
                 }
-                for rd in &r.reads {
-                    if let Some(f) = rd.kind(&self.read_keys).field() {
+                for rd in r.reads.iter() {
+                    if let Some(f) = rd.kind().field() {
                         keep(f.0);
                     }
                     rd.seen().into_iter().for_each(&mut *keep);
@@ -1840,7 +1942,13 @@ impl Engine {
                 }
             }
             n.stopped.lock().iter().for_each(|&(f, _)| keep(f.0));
-            n.anchored.lock().iter().for_each(|f| keep(f.0));
+            n.foreign.lock().fields.iter().for_each(|g| keep(g.0));
+            for (g, r) in &n.foreign.lock().witness {
+                keep(g.0);
+                if crate::segment::live(self, r.node(), r.serial) {
+                    r.seen().into_iter().for_each(&mut *keep);
+                }
+            }
         }
         for sid in self.order.all() {
             let inner = self.seg(sid).inner.read();
@@ -1853,10 +1961,7 @@ impl Engine {
                     }
                 });
             }
-            for (f, rs) in &inner.readers {
-                keep(f.0);
-                rs.iter().for_each(|r| r.seen().into_iter().for_each(&mut *keep));
-            }
+            inner.guarded.iter().for_each(|f| keep(f.0));
             for (f, m) in &inner.contribs {
                 keep(f.0);
                 m.values().for_each(|&x| keep(x));
@@ -1925,9 +2030,6 @@ impl Engine {
     /// [`Engine::collect`], with `extra` roots the caller holds (an edit
     /// source's, `EditSource::roots`).
     pub(crate) fn collect_with(&self, extra: Vec<ValueId>) -> Collected {
-        // (a stale reader's `seen` holds what an earlier run read: swept
-        // first, it holds nothing)
-        self.sweep_readers_now();
         self.values.collect(&mut |keep: &mut dyn FnMut(ValueId)| {
             extra.iter().for_each(|&x| keep(x));
             self.roots(keep);
@@ -1939,18 +2041,18 @@ impl Engine {
         })
     }
 
-    /// The reader records of runs no longer their node's last dropped from
-    /// every segment, and the lists they leave shrunk: at a quiet point
-    /// (the end of an evaluation, a pass's quiescence), where nothing
-    /// files a reader, once they outnumber the standing ones. The records
-    /// of a node's earlier runs stay filed
-    /// until met otherwise ([`crate::segment::push_pruned`]): in a build
-    /// that runs most nodes again they were two in three records filed.
-    /// The records dropped.
+    /// The segments' sets of fields read at their nodes counted again
+    /// (`guard::recount`), the fields no record reads there now taken
+    /// out of them and of the readers' index, and each node's foreign
+    /// readers and witnesses that no longer read at it dropped: at a
+    /// quiet point (the end of an evaluation, a pass's quiescence), where
+    /// nothing files a read, once the reads of records replaced since
+    /// the last outnumber those it left. A field left in a set costs a
+    /// walk a scan of that segment's nodes, no answer. What was dropped.
     pub(crate) fn sweep_readers(&self) -> usize {
-        // (a sweep costs every record filed: only once the stale ones
-        // outnumber those the last sweep left, so it costs each stale
-        // record a few visits, and an edit of a few nodes nothing)
+        // (a sweep costs every record's reads: only once the replaced
+        // ones outnumber those the last sweep counted, so it costs each
+        // replaced read a few looks, and an edit of a few nodes nothing)
         let stale = self.stale_reads.load(Ordering::Relaxed);
         if stale < (1 << 16).max(self.swept_left.load(Ordering::Relaxed)) {
             return 0;
@@ -1966,16 +2068,66 @@ impl Engine {
         for sid in self.order.all() {
             let s = self.seg(sid);
             let mut inner = s.inner.write();
-            inner.readers.retain(|_, rs| {
-                let n = rs.len();
-                rs.retain(|r| crate::segment::live(self, r.node(), r.serial));
-                dropped += n - rs.len();
-                if rs.capacity() > 2 * rs.len() + 4 {
-                    rs.shrink_to(rs.len());
+            // (only where half its nodes' records were replaced since it
+            // was counted: an edit's sweep costs the segments it touched)
+            if (inner.replaced as usize) * 2 < inner.nodes.len().max(1) {
+                let n = inner.stops.len();
+                inner
+                    .stops
+                    .retain(|(_, _, r)| crate::segment::live(self, r.node, r.serial));
+                dropped += n - inner.stops.len();
+                for &x in inner.nodes.values() {
+                    left += self.node(x).record().map_or(0, |r| r.reads.len());
                 }
-                left += rs.len();
-                !rs.is_empty()
-            });
+                continue;
+            }
+            let nodes: Vec<NodeId> = inner.nodes.values().copied().collect();
+            for &x in &nodes {
+                let n = self.node(x);
+                // (its foreign readers that read at it no more, each record
+                // looked at with no other node's lock held)
+                // (and the fields they read at it, counted again)
+                let rs: Vec<NodeId> = n.foreign.lock().readers.iter().copied().collect();
+                let mut fields = crate::FxHashSet::default();
+                let stale: Vec<NodeId> = rs
+                    .into_iter()
+                    .filter(|&r| {
+                        let mut reads = false;
+                        crate::guard::record_reads_at(self, x, r, &mut |g, _| {
+                            reads = true;
+                            fields.insert(g);
+                        });
+                        !reads
+                    })
+                    .collect();
+                let mut fo = n.foreign.lock();
+                for r in stale {
+                    fo.readers.remove(&r);
+                    dropped += 1;
+                }
+                fo.fields = fields;
+                let k = fo.witness.len();
+                fo.witness
+                    .retain(|(_, r)| crate::segment::live(self, r.node(), r.serial));
+                dropped += k - fo.witness.len();
+                if fo.readers.capacity() > 2 * fo.readers.len() + 4 {
+                    fo.readers.shrink_to_fit();
+                }
+                fo.witness.shrink_to_fit();
+                drop(fo);
+                left += n.record().map_or(0, |r| r.reads.len());
+            }
+            let (gone, new) = crate::guard::recount(self, &mut inner);
+            dropped += gone.len();
+            if inner.guarded.capacity() > 2 * inner.guarded.len() + 16 {
+                inner.guarded.shrink_to_fit();
+            }
+            for f in gone {
+                self.readers.remove(f, s.lo, s.id);
+            }
+            for f in new {
+                self.readers.add(f, s.lo, s.id);
+            }
             let n = inner.stops.len();
             inner
                 .stops
@@ -1986,21 +2138,21 @@ impl Engine {
         dropped
     }
 
+    /// (measure) The readers at the segments' nodes (their records' reads
+    /// at positions, foreign readers' and witnesses), those standing (all
+    /// of them: no record of an earlier run is filed), and the fields the
+    /// segments' sets name.
     pub fn reader_records(&self) -> (usize, usize, usize) {
-        let (mut filed, mut standing, mut fields) = (0usize, 0usize, 0usize);
+        let (mut filed, mut fields) = (0usize, 0usize);
         for sid in self.order.all() {
             let s = self.seg(sid);
             let inner = s.inner.read();
-            fields += inner.readers.len();
-            for rs in inner.readers.values() {
-                filed += rs.len();
-                standing += rs
-                    .iter()
-                    .filter(|r| crate::segment::live(self, r.node(), r.serial))
-                    .count();
+            fields += inner.guarded.len();
+            for &x in inner.nodes.values() {
+                crate::guard::readers_at(self, x, None, &mut |_, _| filed += 1);
             }
         }
-        (filed, standing, fields)
+        (filed, filed, fields)
     }
 
     /// What each live node's last run defined `f` to, in no order.
@@ -2084,7 +2236,7 @@ impl Engine {
             }
             let Some(r) = node.run_record() else { continue };
             let mut memo = read::FoldMemo::new();
-            if r.reads.iter().all(|rd| read::holds(self, node, rd, &mut memo)) {
+            if r.reads.iter().all(|rd| read::holds(self, node, &rd, &mut memo)) {
                 continue;
             }
             out.push(format!(
@@ -2103,11 +2255,11 @@ impl Engine {
         };
         let v = self.values();
         let mut out = String::new();
-        for rd in &r.reads {
-            let now = answer(self, node, &rd.kind(&self.read_keys), rd.path(&self.read_keys));
+        for rd in r.reads.iter() {
+            let now = answer(self, node, rd.kind(), rd.path());
             let show = |x: Option<ValueId>| x.map_or("none".to_owned(), |x| v.render(x));
             // (a field read: its name and the node whose definition reaches)
-            let site = match &*rd.kind(&self.read_keys) {
+            let site = match rd.kind() {
                 crate::node::ReadKind::Field {
                     f,
                     at: crate::node::Anchor::Me,
@@ -2122,8 +2274,8 @@ impl Engine {
             };
             out.push_str(&format!(
                 "{:?} path {} seen {} now {}{}{site}\n",
-                *rd.kind(&self.read_keys),
-                rd.path(&self.read_keys).0,
+                *rd.kind(),
+                rd.path().0,
                 show(rd.seen()),
                 show(now),
                 if now == rd.seen() { "" } else { " STALE" }
@@ -2285,18 +2437,18 @@ impl Engine {
                     r.map_or_else(
                         || "none".to_owned(),
                         |r| {
-                            let f = &*r.kind(&self.read_keys).field().map_or(String::new(), |f| v.render(f.0));
+                            let f = &*r.kind().field().map_or(String::new(), |f| v.render(f.0));
                             let s = r
                                 .seen()
                                 .map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(120).collect::<String>());
-                            format!("{f} {:?} seen {s}", *r.kind(&self.read_keys))
+                            format!("{f} {:?} seen {s}", *r.kind())
                         },
                     )
                 };
-                let k = (0..p.reads.len().max(rec.reads.len())).find(|&k| match (p.reads.get(k), rec.reads.get(k)) {
+                let recv: Vec<crate::node::ReadRec> = rec.reads.iter().collect();
+                let k = (0..p.reads.len().max(recv.len())).find(|&k| match (p.reads.get(k), recv.get(k)) {
                     (Some(a), Some(b)) => {
-                        a.seen() != b.seen()
-                            || format!("{:?}", *a.kind(&self.read_keys)) != format!("{:?}", *b.kind(&self.read_keys))
+                        a.seen() != b.seen() || format!("{:?}", *a.kind()) != format!("{:?}", *b.kind())
                     }
                     _ => true,
                 });
@@ -2304,16 +2456,16 @@ impl Engine {
                     why.push(format!(
                         "reads {} recorded {}: first apart at {k}: now {} | recorded {}",
                         p.reads.len(),
-                        rec.reads.len(),
+                        recv.len(),
                         show(p.reads.get(k)),
-                        show(rec.reads.get(k))
+                        show(recv.get(k))
                     ));
                 }
                 // (as sets by kind: what only one of them read, or read
                 // otherwise)
-                let key = |r: &crate::node::ReadRec| format!("{:?}", *r.kind(&self.read_keys));
-                let recd: FxHashMap<String, Option<ValueId>> = rec.reads.iter().map(|r| (key(r), r.seen())).collect();
-                let recr: FxHashMap<String, &crate::node::ReadRec> = rec.reads.iter().map(|r| (key(r), r)).collect();
+                let key = |r: &crate::node::ReadRec| format!("{:?}", *r.kind());
+                let recd: FxHashMap<String, Option<ValueId>> = recv.iter().map(|r| (key(r), r.seen())).collect();
+                let recr: FxHashMap<String, &crate::node::ReadRec> = recv.iter().map(|r| (key(r), r)).collect();
                 let nowd: FxHashMap<String, Option<ValueId>> = p.reads.iter().map(|r| (key(r), r.seen())).collect();
                 for r in &p.reads {
                     match recd.get(&key(r)) {
@@ -2322,8 +2474,7 @@ impl Engine {
                             "read otherwise: {} | answer {} filed {} epoch {} now-epoch {} | recorded {}",
                             show(Some(r)),
                             recr.get(&key(r)).map_or("?", |x| {
-                                let a =
-                                    crate::read::answer(self, node, &x.kind(&self.read_keys), x.path(&self.read_keys));
+                                let a = crate::read::answer(self, node, x.kind(), x.path());
                                 if a == r.seen() {
                                     "as now"
                                 } else if a == x.seen() {
@@ -2334,13 +2485,13 @@ impl Engine {
                             }),
                             recr.get(&key(r)).is_some_and(|x| x.filed()),
                             recr.get(&key(r)).map_or(0, |x| x.epoch),
-                            r.kind(&self.read_keys).field().map_or(0, |f| self.field_epoch(f)),
+                            r.kind().field().map_or(0, |f| self.field_epoch(f)),
                             s.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(120).collect())
                         )),
                         _ => {}
                     }
                 }
-                for r in &rec.reads {
+                for r in &recv {
                     if !nowd.contains_key(&key(r)) {
                         why.push(format!("only recorded: {}", show(Some(r))));
                     }
@@ -2431,10 +2582,10 @@ impl Engine {
                 out.push(format!("node {} is clean without a run", n.raw()));
                 continue;
             };
-            for rd in &r.reads {
-                let now = answer(self, node, &rd.kind(&self.read_keys), rd.path(&self.read_keys));
+            for rd in r.reads.iter() {
+                let now = answer(self, node, rd.kind(), rd.path());
                 if now != rd.seen() {
-                    let site = match &*rd.kind(&self.read_keys) {
+                    let site = match rd.kind() {
                         crate::node::ReadKind::Field {
                             f,
                             at: crate::node::Anchor::Me,
@@ -2471,14 +2622,14 @@ impl Engine {
                                 to.map_or("-".to_owned(), head)
                             )
                         }
-                        _ => rd.kind(&self.read_keys).field().map_or(String::new(), |f| format!(" (field {})", v.render(f.0))),
+                        _ => rd.kind().field().map_or(String::new(), |f| format!(" (field {})", v.render(f.0))),
                     };
                     out.push(format!(
                         "node {} ({}) read {:?} path {} saw {} but now {}{site}",
                         n.raw(),
                         self.op(node.op()).name(),
-                        *rd.kind(&self.read_keys),
-                        rd.path(&self.read_keys).0,
+                        *rd.kind(),
+                        rd.path().0,
                         rd.seen().map_or("none".to_owned(), |x| v.render(x)),
                         now.map_or("none".to_owned(), |x| v.render(x))
                     ));

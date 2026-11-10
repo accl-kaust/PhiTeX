@@ -66,6 +66,15 @@ pub struct Ctx<'a> {
     /// The run stopped at a read past the settling layer's frontier
     /// (`Ctx::set_frontier`): it runs again once the frontier passes it.
     pub(crate) wait_frontier: bool,
+    /// This run's distance past the frontier is noted (`Node::ahead`).
+    pub(crate) ahead_noted: bool,
+    /// The stop at the frontier is the speculation window's, not a read
+    /// of the layer's (`Node::held_window`).
+    pub(crate) wait_window: bool,
+    /// The holes before me that may define what I read, found at my
+    /// run's first read before its first command
+    /// ([`Ctx::wait_for_first_definer`]).
+    first_definers: Option<Vec<(NodeId, MayDefine)>>,
     /// `Ctx::goes_on`: the run goes on from where its last run stopped.
     pub(crate) goes_on: bool,
     /// Its checks so far ([`Ctx::tick`]).
@@ -123,7 +132,6 @@ impl<'a> Ctx<'a> {
                 at_hole: false,
                 state: None,
                 resumed: std::cell::Cell::new(false),
-                kept_reads: std::cell::Cell::new(None),
                 woken_at: None,
                 on_park: false,
                 settle_now: false,
@@ -146,6 +154,9 @@ impl<'a> Ctx<'a> {
             wait_on: None,
             waits_only: false,
             wait_frontier: false,
+            ahead_noted: false,
+            wait_window: false,
+            first_definers: None,
             goes_on: false,
             ticks: 0,
             before_placer: None,
@@ -289,9 +300,7 @@ impl<'a> Ctx<'a> {
 
     fn record(&mut self, kind: ReadKind, path: PathId, seen: Option<ValueId>) {
         let epoch = if kind.field().is_some() { self.ep } else { u64::MAX };
-        self.product
-            .reads
-            .push(ReadRec::new(&self.eng.read_keys, kind, path, seen, epoch));
+        self.product.reads.push(ReadRec::new(kind, path, seen, epoch));
     }
 
     /// The node whose definition a read got (`RunRecord::sources`).
@@ -319,7 +328,7 @@ impl<'a> Ctx<'a> {
             .iter()
             .enumerate()
             .skip(from)
-            .filter_map(|(i, r)| r.kind(&self.eng.read_keys).field().map(|f| (i, f)))
+            .filter_map(|(i, r)| r.kind().field().map(|f| (i, f)))
     }
 
     /// Loads `f`'s change count before a read of it ([`ReadRec::epoch`]).
@@ -452,6 +461,26 @@ impl<'a> Ctx<'a> {
         use std::sync::atomic::Ordering::{Acquire, Relaxed};
         let eng = self.eng;
         let fr = eng.frontier.load(Acquire);
+        // (the speculation window, docs/spec-window.md: this run's distance
+        // past the frontier noted at its first read, for a refutation of
+        // it to narrow the window; past the window, held there)
+        // (a run the window let go is not held by it again: its pass,
+        // taken here; one thread runs everything in order, nothing to
+        // hold)
+        if !self.ahead_noted {
+            self.ahead_noted = true;
+            let d = crate::sched::window_distance(eng, self.me, fr);
+            self.me.ahead.store(d.map_or(0, |d| d + 1), Relaxed);
+            let pass = self.me.window_pass.swap(false, Relaxed);
+            if !pass && self.has_other_threads() && d.is_some_and(|d| crate::sched::beyond_window(eng, d)) {
+                eng.window_stats[0].fetch_add(1, Relaxed);
+                self.me.held_window.store(true, Relaxed);
+                self.wait_frontier = true;
+                self.wait_window = true;
+                return Err(stop());
+            }
+            self.me.held_window.store(false, Relaxed);
+        }
         if fr == 0 || !eng.settle_marked(f) || eng.op(self.me.op()).settles_at_quiet() {
             return Ok(());
         }
@@ -468,6 +497,7 @@ impl<'a> Ctx<'a> {
             return Ok(());
         }
         eng.frontier_held.fetch_add(1, Relaxed);
+        self.me.held_window.store(false, Relaxed);
         if crate::sched::run_log() {
             eprintln!(
                 "frontier: read held node {} field {} at {}",
@@ -484,6 +514,18 @@ impl<'a> Ctx<'a> {
     /// past which it may yet place nodes (`None`: it places none, every
     /// reader is free). A reader of a field the layer defines past it
     /// waits for it to pass ([`Ctx::read`]).
+    /// The speculation window is on and has never narrowed in this
+    /// evaluation (docs/spec-window.md): the page layer has refuted no run
+    /// of the text ahead of it, its routines and the text exchange nothing
+    /// a run ahead missed. Once one is refuted it stays so, whatever W
+    /// grows back to: the exchange is the document's.
+    pub fn spec_window_whole(&self) -> bool {
+        use std::sync::atomic::Ordering::Acquire;
+        self.eng.window_on.load(Acquire)
+            && self.eng.window_stats[1].load(Acquire) == 0
+            && self.eng.window.load(Acquire) >= crate::sched::WINDOW_MAX
+    }
+
     pub fn set_frontier(&mut self, at: Option<NodeId>) {
         self.product.frontier = Some(at);
     }
@@ -580,6 +622,39 @@ impl<'a> Ctx<'a> {
                 None => FieldAt::Unset,
             },
         })
+    }
+
+    /// My read of `f` at `at` (made by [`Ctx::read_at`]) taken as having
+    /// answered `seen`: the run went on as though `seen` were there, a
+    /// guess of what a node yet to commit defines. A definition reaching
+    /// there that is `seen` asks nothing of me; any other re-asks me, as
+    /// for a read. (The page loop's fold on a trusted give-back guess,
+    /// docs/spec-window.md: read as unset, the finisher's give-back
+    /// equal to the guess ran each page step again.)
+    pub fn read_at_as(&mut self, f: Field, at: At, seen: Option<ValueId>) {
+        let anchor = match at {
+            At::Before(n) => Anchor::Before(n),
+            At::AfterOwn(n) => Anchor::AfterOwn(n),
+            At::Final => Anchor::Final,
+            At::End(u) => Anchor::End(u),
+        };
+        // (the change count the read loaded, kept: a definition made
+        // since it has the commit check it, and one that has not leaves
+        // it to the definer's re-ask, which compares with `seen`. Checked
+        // whatever the count, a read of a give-back not made yet was found
+        // other than the guess at the reader's own commit, and ran it
+        // again: census_plain, 92 of 110 page steps run again)
+        let ep = self
+            .product
+            .reads
+            .iter()
+            .rev()
+            .find(|r| matches!(r.kind(), ReadKind::Field { f: g, at } if *g == f && *at == anchor))
+            .map_or(u64::MAX, |r| r.epoch);
+        self.unread(f);
+        self.ep = ep;
+        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, seen);
+        self.seen.insert(f, seen);
     }
 
     /// [`Ctx::read_at`] at the line's end (`At::Final`, a loop-back
@@ -1140,13 +1215,13 @@ impl<'a> Ctx<'a> {
     /// The view one step further; None where the step does not apply.
     pub fn at(&mut self, v: View, s: Step) -> Option<View> {
         let rec = self.view_rec(v)?;
-        let (kind, value, epoch) = (rec.kind.clone(), rec.value, rec.epoch);
+        let (kind, value, epoch) = (rec.kind, rec.value, rec.epoch);
         let path = self.eng.path_extend(rec.path, s);
         let x = read::step(self.eng, value, s);
         let present = self.eng.path_extend(path, Step::Present);
         let seen = Some(self.eng.values().bool(x.is_some()));
         self.ep = epoch;
-        self.record(kind.clone(), present, seen);
+        self.record(kind, present, seen);
         x?;
         self.views.push(ViewRec {
             kind,
@@ -1160,7 +1235,7 @@ impl<'a> Ctx<'a> {
     /// The value at one step further, recorded as a read of that path.
     pub fn get(&mut self, v: View, s: Step) -> Option<ValueId> {
         let rec = self.view_rec(v)?;
-        let (kind, value, epoch) = (rec.kind.clone(), rec.value, rec.epoch);
+        let (kind, value, epoch) = (rec.kind, rec.value, rec.epoch);
         let path = self.eng.path_extend(rec.path, s);
         let x = read::step(self.eng, value, s);
         self.ep = epoch;
@@ -1184,7 +1259,7 @@ impl<'a> Ctx<'a> {
         let Some(rec) = self.view_rec(v) else {
             return ValueId::UNIT;
         };
-        let (kind, path, value) = (rec.kind.clone(), rec.path, rec.value);
+        let (kind, path, value) = (rec.kind, rec.path, rec.value);
         self.ep = rec.epoch;
         self.record(kind, path, value);
         value.unwrap_or(ValueId::UNIT)
@@ -1585,6 +1660,17 @@ impl<'a> Ctx<'a> {
         Ok(h)
     }
 
+    /// I stop for node `h`, a node before me that has not committed
+    /// ([`Ctx::hole_before`] found it), and run when it commits. With
+    /// `nothing_done` (no command of my run done yet) the stop is a wait,
+    /// not a run (`Report::waits`): a piece whose first command reads on
+    /// into the text after it, run before the text before it.
+    pub fn wait_for_hole(&mut self, h: NodeId, nothing_done: bool) -> Stop {
+        self.wait_on = Some(h);
+        self.waits_only = nothing_done;
+        stop()
+    }
+
     /// Where a node before me has not committed and its operation may
     /// define one of `fields` ([`Ctx::hole_before_defining`]): I stop,
     /// nothing filed, and run when it commits. With `nothing_done` (the
@@ -1597,6 +1683,52 @@ impl<'a> Ctx<'a> {
         if let Some(x) = h {
             self.wait_on = Some(x);
             self.waits_only = nothing_done;
+            return Err(stop());
+        }
+        Ok(())
+    }
+
+    /// A read of `f` before my run's first command is done (nothing to
+    /// throw away): with the speculation window on (a clean build's
+    /// evaluation, more than one thread), where a node before me in my
+    /// unit has not committed and its operation names `f` among what it
+    /// may define, the run waits for the nearest such node and runs when
+    /// it commits: a wait, not a run (docs/spec-window.md, First reads).
+    /// The nodes are found once a run, at its first such read. Only the
+    /// order of the runs: a read let through is answered and filed as
+    /// before, and a definition that moves it re-asks it.
+    pub fn wait_for_first_definer(&mut self, f: Field) -> Result<(), Stop> {
+        use std::sync::atomic::Ordering::Acquire;
+        if !self.eng.window_on.load(Acquire)
+            || !self.eng.first_reads_on.load(Acquire)
+            || !self.has_other_threads()
+            || self.seen.contains_key(&f)
+            || !self.eng.op(self.me.op()).text()
+            || self.eng.op(self.me.op()).settles_at_quiet()
+        {
+            return Ok(());
+        }
+        let eng = self.eng;
+        let me = self.me;
+        let holes = self
+            .first_definers
+            .get_or_insert_with(|| read::on_one_layout(eng, || read::holes_naming_definitions(eng, me)));
+        if holes.is_empty() {
+            return Ok(());
+        }
+        let v = eng.values();
+        let name = v.as_str(f.0);
+        let hit = holes.iter().rev().find(|(_, m)| match m {
+            MayDefine::Names(ns) => ns.contains(&f),
+            MayDefine::Prefixes(ps) => name
+                .as_deref()
+                .is_some_and(|n| ps.iter().any(|p| n.starts_with(p.as_str()))),
+            MayDefine::Nothing | MayDefine::Any => false,
+        });
+        if let Some(&(x, _)) = hit {
+            eng.window_stats[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.wait_on = Some(x);
+            self.waits_only = true;
             return Err(stop());
         }
         Ok(())
@@ -1853,20 +1985,14 @@ impl<'a> Ctx<'a> {
         if let Some(i) = r
             .reads
             .iter()
-            .position(|rd| !r.read_holds(self.eng, self.me, rd, moved, &mut memo))
+            .position(|rd| !r.read_holds(self.eng, self.me, &rd, moved, &mut memo))
         {
             // (`PHITEX_STANDS_TRACE`, profile: the first read of the last
             // run that moved, with what it saw and what it would see now)
             if crate::obs::enabled() && std::env::var_os("PHITEX_STANDS_TRACE").is_some() {
-                let rd = &r.reads[i];
+                let rd = &r.reads.iter().nth(i).expect("the read found");
                 let v = &self.eng.values;
-                let now = crate::read::answer_in(
-                    self.eng,
-                    self.me,
-                    &rd.kind(&self.eng.read_keys),
-                    rd.path(&self.eng.read_keys),
-                    &mut memo.fold,
-                );
+                let now = crate::read::answer_in(self.eng, self.me, rd.kind(), rd.path(), &mut memo.fold);
                 let show =
                     |x: Option<ValueId>| x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(200).collect());
                 eprintln!(
@@ -1874,11 +2000,8 @@ impl<'a> Ctx<'a> {
                     self.me.id.raw(),
                     self.woke,
                     r.reads.len(),
-                    rd.kind(&self.eng.read_keys)
-                        .field()
-                        .map(|f| v.render(f.0))
-                        .unwrap_or_default(),
-                    *rd.kind(&self.eng.read_keys),
+                    rd.kind().field().map(|f| v.render(f.0)).unwrap_or_default(),
+                    *rd.kind(),
                     show(rd.seen()),
                     show(now)
                 );
@@ -1921,20 +2044,15 @@ impl<'a> Ctx<'a> {
         let show = |rs: &[ReadRec]| -> Vec<String> {
             rs.iter()
                 .enumerate()
-                .filter(|(_, r)| r.kind(&self.eng.read_keys).field() == Some(f))
-                .map(|(i, r)| {
-                    format!(
-                        "#{i} {:?} {:?}",
-                        *r.kind(&self.eng.read_keys),
-                        r.seen().map(|x| v.render(x))
-                    )
-                })
+                .filter(|(_, r)| r.kind().field() == Some(f))
+                .map(|(i, r)| format!("#{i} {:?} {:?}", *r.kind(), r.seen().map(|x| v.render(x))))
                 .collect()
         };
         let last = self.last.as_ref();
         format!(
             "last run reads {:?} defs {:?}; this run reads {:?} defs {:?}",
-            last.map(|r| show(&r.reads)).unwrap_or_default(),
+            last.map(|r| show(&r.reads.iter().collect::<Vec<_>>()))
+                .unwrap_or_default(),
             last.map(|r| r
                 .defs
                 .iter()
@@ -2020,7 +2138,7 @@ impl<'a> Ctx<'a> {
         let mut i = 0;
         let log = &mut self.unread_log;
         self.product.reads.retain(|r| {
-            let keep = match &*r.kind(&self.eng.read_keys) {
+            let keep = match r.kind() {
                 ReadKind::Field { f: g, .. }
                 | ReadKind::Env { f: g }
                 | ReadKind::Fold { f: g, .. }
@@ -2043,10 +2161,10 @@ impl<'a> Ctx<'a> {
     pub fn own_reads_hold(&self) -> bool {
         let mut memo = crate::read::FoldMemo::new();
         self.product.reads.iter().all(|rd| {
-            matches!(&*rd.kind(&self.eng.read_keys), ReadKind::Placed { .. } | ReadKind::Hole)
+            matches!(rd.kind(), ReadKind::Placed { .. } | ReadKind::Hole)
                 || (crate::read::holds(self.eng, self.me, rd, &mut memo)
                     && rd
-                        .kind(&self.eng.read_keys)
+                        .kind()
                         .field()
                         .is_none_or(|f| rd.epoch == u64::MAX || self.eng.field_epoch(f) == rd.epoch))
         })
@@ -2108,7 +2226,7 @@ impl<'a> Ctx<'a> {
             .product
             .reads
             .iter()
-            .filter_map(|rd| match *rd.kind(&self.eng.read_keys) {
+            .filter_map(|rd| match *rd.kind() {
                 ReadKind::Placed { i, .. } => Some(i),
                 _ => None,
             })
@@ -2120,23 +2238,20 @@ impl<'a> Ctx<'a> {
             }
         }
         let moved = self.product.reads.iter().any(|rd| {
-            if matches!(&*rd.kind(&self.eng.read_keys), ReadKind::Following { .. }) {
+            if matches!(rd.kind(), ReadKind::Following { .. }) {
                 return false;
             }
-            if let ReadKind::Placed { i, guess } = &*rd.kind(&self.eng.read_keys) {
+            if let ReadKind::Placed { i, guess } = rd.kind() {
                 return match outs.get(i).copied().flatten() {
-                    Some(o) => read::apply_path(self.eng, Some(o), rd.path(&self.eng.read_keys)) != rd.seen(),
+                    Some(o) => read::apply_path(self.eng, Some(o), rd.path()) != rd.seen(),
                     // (no child of that key has run: a guess holds until
                     // the child commits; a real read of none saw none)
                     None => !guess && rd.seen().is_some(),
                 };
             }
             if !scope_moved
-                && !matches!(&*rd.kind(&self.eng.read_keys), ReadKind::Next { .. })
-                && rd
-                    .kind(&self.eng.read_keys)
-                    .field()
-                    .is_some_and(|f| self.eng.field_epoch(f) == rd.epoch)
+                && !matches!(rd.kind(), ReadKind::Next { .. })
+                && rd.kind().field().is_some_and(|f| self.eng.field_epoch(f) == rd.epoch)
             {
                 return false;
             }

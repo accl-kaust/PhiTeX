@@ -903,6 +903,42 @@ impl Run<'_, '_> {
 
     // --------------------------------------------------------- the text
 
+    /// A read-on reads a prefix every node of which has run: where one
+    /// has not, the run stops (`Halt::Hole`), and at its first command,
+    /// nothing done, it waits for that node, a wait and not a run (plain's
+    /// story at -j16: pieces whose first command reads on ran again whole
+    /// once the text before them had run).
+    fn read_on_after_text_before(&mut self) -> R<()> {
+        if let Some(h) = self.cx.hole_before()? {
+            self.trace_read_on_hole();
+            if self.cmds <= 1 {
+                return Err(Halt::Stop(self.cx.wait_for_hole(h, true)));
+            }
+            return Err(Halt::Hole);
+        }
+        Ok(())
+    }
+
+    /// (`PHITEX_CUT_TRACE`) A read-on that meets a hole.
+    fn trace_read_on_hole(&self) {
+        if crate::exec::obs_flag!("PHITEX_CUT_TRACE") {
+            eprintln!(
+                "read-on: node {} ({}) meets a hole after {} commands, pulled {}, open span {}, eof {}, levels {}, nest {:?}",
+                self.cx.node().raw(),
+                self.op_name(),
+                self.cmds,
+                self.pulled,
+                self.open_span(),
+                self.eof,
+                self.input.levels.len(),
+                self.nest
+                    .iter()
+                    .map(|l| (l.mode, l.group, l.owns, l.list.len()))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
     /// Claims the next sibling's text (its frames go to the back of the
     /// text).
     pub(crate) fn pull(&mut self) -> R<bool> {
@@ -917,9 +953,7 @@ impl Run<'_, '_> {
                 // (a read-on is serial, TeX's chain: it reads on a prefix
                 // every node of which has run, not a mix of the
                 // definitions some have made and others have not yet)
-                if self.cx.hole_before()?.is_some() {
-                    return Err(Halt::Hole);
-                }
+                self.read_on_after_text_before()?;
                 let args = self.resolve_units(&args)?;
                 let mut segs = crate::run::decode_segs(self.v, &args);
                 // (a line cut before this sibling, left in its state:

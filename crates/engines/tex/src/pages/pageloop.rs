@@ -1118,6 +1118,21 @@ impl Run<'_, '_> {
         // guess is done twice: para4000's deleted paragraph 184 -> 206 ms
         // at -j1, accl 23790)
         let beside = self.cx.has_other_threads();
+        // (the speculation window, docs/spec-window.md: on a clean build the
+        // fold goes on a guess no finisher gave back yet too, while the
+        // guesses found against the routines' give-backs mostly hold; the
+        // pages then fold beside their routines, not each after the last's
+        // (para400pdf -j16: a critical path of 128 pages))
+        let ordering = std::sync::atomic::Ordering::Relaxed;
+        let [hits, misses] = &*self.ops.give_back_guesses;
+        let holds = misses.load(ordering) * 8 <= hits.load(ordering) && hits.load(ordering) >= 4;
+        // (and only while the window is whole: the layer refutes no run
+        // of the text ahead of it. A routine may give back what it gave
+        // last while the text's float macros read and extend the lists
+        // it handed back: floats2col's guesses held, and the fold on
+        // them ran the finishers again with each wave of the text)
+        let trusted =
+            beside && self.ops.spec_window.load(ordering) && holds && self.cx.spec_window_whole();
         self.rest_begun_at = Some(p.node);
         let gave = match out {
             // (its finisher, the definer of the give-back, whether or not
@@ -1126,6 +1141,11 @@ impl Run<'_, '_> {
             // after)
             phitex_defuse::FieldAt::Def(x, fin) => {
                 ls.after = fin.map(|f| (p.node, f));
+                // (the routine's give-back on this page itself: the guess
+                // counted held or missed)
+                if let Some(o) = page_out_parts(v, x).filter(|o| o.1 == r.page) {
+                    self.ops.give_back_guesses[usize::from(o.0 != r.guess)].fetch_add(1, ordering);
+                }
                 page_out_parts(v, x)
                     .filter(|o| o.1 == r.page || (beside && o.0 == r.guess))
                     .map(|o| {
@@ -1135,6 +1155,26 @@ impl Run<'_, '_> {
             }
             _ => None,
         };
+        // (none given back for this page yet, the guesses trusted: folded
+        // on the guess; the routine's commit runs this again where it
+        // gives back other than the guess)
+        let gave = gave.or_else(|| {
+            trusted.then(|| {
+                self.rest_on_guess = true;
+                r.guess
+            })
+        });
+        // (folded on the guess, with the window on: the give-back read as
+        // the guess says this page's finisher makes it, so one equal to
+        // it asks nothing again. Read as it stood, a prediction or the
+        // give-back of the page before, the finisher's give-back ran the
+        // page step again whatever it was: census_plain's 112 page steps
+        // run again for 66 pages)
+        if gave.is_some() && self.rest_on_guess && self.ops.spec_window.load(ordering) {
+            let f = r.key.field(v, PAGE_OUT);
+            let x = crate::pages::page_out_value(v, r.key.piece, r.key.nth, r.guess, r.page);
+            self.cx.read_at_as(f, At::End(self.cx.unit()), Some(x));
+        }
         let Some(gave) = gave else {
             if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
                 eprintln!(
