@@ -546,30 +546,38 @@ fn an_unmatched_close_at_depth_zero_is_harmless() {
 
 #[test]
 fn many_scopes_side_by_side() {
-    // 2000 scopes each with its own local, read inside and after: the
-    // visibility walk is local, never over the whole line.
-    let (e, o) = engine();
-    let v = e.values();
-    let x = v.field("x").0;
-    let u = e.new_unit();
-    e.push(u, o.def, vec![x, v.int(0)]);
-    let mut pairs = Vec::new();
-    for i in 1..=2000 {
-        e.push(u, o.open, vec![]);
-        e.push(u, o.def, vec![x, v.int(i)]);
-        let inside = e.push(u, o.get, vec![x]);
-        e.push(u, o.close, vec![]);
-        let after = e.push(u, o.get, vec![x]);
-        pairs.push((i, inside, after));
-    }
-    let t = std::time::Instant::now();
-    e.evaluate(4).unwrap();
-    assert!(t.elapsed() < std::time::Duration::from_millis(500), "{:?}", t.elapsed());
-    for (i, inside, after) in pairs {
-        assert_eq!(int(&e, inside), i);
-        assert_eq!(int(&e, after), 0);
-    }
-    assert!(e.check_invariants().is_empty());
+    // Scopes side by side, each with its own local, read inside and
+    // after: the visibility walk is local, never over the whole line, so
+    // twice the scopes is twice the work (records walked, nodes scanned,
+    // runs), counted, not timed: a loaded machine's wall time is no bound.
+    let work = |n: i64| {
+        let (e, o) = engine();
+        let v = e.values();
+        let x = v.field("x").0;
+        let u = e.new_unit();
+        e.push(u, o.def, vec![x, v.int(0)]);
+        let mut pairs = Vec::new();
+        for i in 1..=n {
+            e.push(u, o.open, vec![]);
+            e.push(u, o.def, vec![x, v.int(i)]);
+            let inside = e.push(u, o.get, vec![x]);
+            e.push(u, o.close, vec![]);
+            let after = e.push(u, o.get, vec![x]);
+            pairs.push((i, inside, after));
+        }
+        let r = e.evaluate(4).unwrap();
+        for (i, inside, after) in pairs {
+            assert_eq!(int(&e, inside), i);
+            assert_eq!(int(&e, after), 0);
+        }
+        assert!(e.check_invariants().is_empty());
+        r.walked + r.scanned + r.runs
+    };
+    let (a, b) = (work(1000), work(2000));
+    assert!(
+        b <= 2 * a + a / 4,
+        "the scopes' work is linear: {a} for 1000 scopes, {b} for 2000"
+    );
 }
 
 /// A global relation inside a scope adds to the value reaching it, the
