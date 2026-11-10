@@ -107,14 +107,8 @@ impl Run<'_, '_> {
                 !(op == self.ops.exec || op == self.ops.resume) || !self.doc,
                 "not a document's piece",
             ),
-            // (few commands, unless the read-on would meet text before
-            // the run not yet run: it would stop there and run again whole
-            // once that text ran, where a cut runs again only its
-            // continuation, which waits for that text at its first
-            // command, `Run::pull`)
             (
-                self.cmds < self.ops.cut_min.load(std::sync::atomic::Ordering::Relaxed)
-                    && !self.cx.has_hole_before(),
+                self.cmds < self.ops.cut_min.load(std::sync::atomic::Ordering::Relaxed),
                 "few commands",
             ),
             (self.stop_at.is_some(), "a second pass"),

@@ -1663,15 +1663,6 @@ impl<'a> Ctx<'a> {
         Ok(h)
     }
 
-    /// Whether a node before me on the line has not committed (as
-    /// [`Ctx::hole_before`]). Not a read: nothing re-asks me when it
-    /// commits. For a choice whose answer is the same either way (where a
-    /// run cuts its work), not for what the run makes.
-    #[must_use]
-    pub fn has_hole_before(&self) -> bool {
-        read::on_one_layout(self.eng, || read::hole_before(self.eng, self.me)).is_some()
-    }
-
     /// I stop for node `h`, a node before me that has not committed
     /// ([`Ctx::hole_before`] found it), and run when it commits. With
     /// `nothing_done` (no command of my run done yet) the stop is a wait,
