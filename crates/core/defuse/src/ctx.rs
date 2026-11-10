@@ -627,28 +627,6 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    /// My read of `f` at `at` (made by [`Ctx::read_at`]) taken as having
-    /// answered `seen`: the run went on as though `seen` were there, a
-    /// guess of what a node yet to commit defines. A definition reaching
-    /// there that is `seen` asks nothing of me; any other re-asks me, as
-    /// for a read. (The page loop's fold on a trusted give-back guess,
-    /// docs/spec-window.md: read as unset, the finisher's give-back
-    /// equal to the guess ran each page step again.)
-    pub fn read_at_as(&mut self, f: Field, at: At, seen: Option<ValueId>) {
-        let anchor = match at {
-            At::Before(n) => Anchor::Before(n),
-            At::AfterOwn(n) => Anchor::AfterOwn(n),
-            At::Final => Anchor::Final,
-            At::End(u) => Anchor::End(u),
-        };
-        self.unread(f);
-        // (no change count: the commit checks the read whatever its
-        // field's count says, as for `read_item`)
-        self.ep = u64::MAX;
-        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, seen);
-        self.seen.insert(f, seen);
-    }
-
     /// [`Ctx::read_at`] at the line's end (`At::Final`, a loop-back
     /// read) through a path: the run depends only on the path's answer
     /// (an alias definition: on all of it, followed). None: no value
