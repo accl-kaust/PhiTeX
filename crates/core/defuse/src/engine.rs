@@ -1587,7 +1587,10 @@ impl Engine {
         }
         loop {
             let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
-            self.holds_on.store(epoch > 1, Ordering::Release);
+            // (PHITEX_CLEAN_HOLDS=1, a measure: the edit's holds on a
+            // clean build too)
+            let clean_holds = std::env::var_os("PHITEX_CLEAN_HOLDS").is_some_and(|x| x == "1");
+            self.holds_on.store(epoch > 1 || clean_holds, Ordering::Release);
             self.final_gen.fetch_add(1, Ordering::AcqRel);
             let (pool, workers) = Pool::new(n, epoch, self.limits(), self.collect_mark.load(Ordering::SeqCst));
             let mut seed = self.take_pending(&workers[0]);

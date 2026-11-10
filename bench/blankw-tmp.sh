@@ -9,7 +9,7 @@ B=$R/target/release/phitex
 w=$(mktemp -d -p $R/target/abw); cp $R/bench/tikzsizes/tikz200.tex $w/; (cd $w; $B build -j 1 tikz200.tex > /dev/null 2>&1)
 for n in ${NS:-150 300}; do for j in ${JS:-16}; do
   w=$(mktemp -d -p $R/target/abw); cp $R/bench/tikzvar/blank$n.tex $w/; cd $w
-  s0=$(date +%s%N); $B build -vv -j $j blank$n.tex > o.txt 2>&1; t=$(( ($(date +%s%N)-s0)/1000000 ))
+  s0=$(date +%s%N); env ${EXTRA:-} $B build -vv -j $j blank$n.tex > o.txt 2>&1; t=$(( ($(date +%s%N)-s0)/1000000 ))
   echo "blank $n j$j ${t} ms: $(grep -o '[0-9]* nodes run of [0-9]* live, [0-9]* runs' o.txt | tail -1) md5 $(md5sum < blank$n.pdf | cut -c1-12)"
   cd $R
 done; done
