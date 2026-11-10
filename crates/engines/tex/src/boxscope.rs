@@ -136,13 +136,19 @@ impl Run<'_, '_> {
         {
             Some("bisect: a paragraph")
         } else if crate::exec::env_flag!("PHITEX_BOXSCOPE_NOV")
-            && self.nest.iter().any(|l| l.owns && matches!(l.group, group::VBOX | group::VTOP))
+            && self
+                .nest
+                .iter()
+                .any(|l| l.owns && matches!(l.group, group::VBOX | group::VTOP))
         {
             Some("bisect: a vertical box")
         } else if crate::exec::env_flag!("PHITEX_BOXSCOPE_NORESUME") && op == self.ops.resume {
             Some("bisect: a resume")
         } else if crate::exec::env_flag!("PHITEX_BOXSCOPE_NOH")
-            && self.nest.iter().any(|l| l.owns && matches!(l.group, group::HBOX | group::ADJUSTED_HBOX))
+            && self
+                .nest
+                .iter()
+                .any(|l| l.owns && matches!(l.group, group::HBOX | group::ADJUSTED_HBOX))
         {
             Some("bisect: a horizontal box")
         } else {
@@ -152,7 +158,7 @@ impl Run<'_, '_> {
             return bisect;
         }
         let why = if !(op == self.ops.exec || op == self.ops.resume) {
-            "not a text's run""
+            "not a text's run"
         } else if self.nest.is_empty() || !self.nest.iter().any(|l| l.owns) {
             "no list open"
         } else if self.nest.len() >= usize::from(u8::MAX - 2) {
