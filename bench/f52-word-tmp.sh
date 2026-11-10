@@ -35,12 +35,10 @@ Another paragraph.
 Last words.
 \end{document}
 TEX
-echo '[["s.tex","Most edits","Many edits",2]]' > "$w/edits.json"
+echo '[["s.tex","Most edits","Many edits",4]]' > "$w/edits.json"
 for m in off box; do
-  e=(); [ $m = off ] || e=(PHITEX_BOXSCOPE=1 PHITEX_BOXSCOPE_TRACE=1 PHITEX_RUN_TIMES=1)
-  echo "== $m: the one-word edit under watch -j1, each run's time"; rm -rf "$w/e" "$w/e-cold" "$w/cache-$m"; cp -a "$d" "$w/e"
-  env F52_ERR=$r/watch-$m.txt PHITEX_TEX_TIME=1 PHITEX_CACHE_DIR=$w/cache-$m "${e[@]}" timeout 900 python3 -I bench/f52-edits-tmp.py "$bin" "$w/e" s.tex 1 "$w/edits.json" "$r/edits-$m.json" --exact-pdf 2>&1 | tail -4
-  # (the runs after the clean build: the lines after its 'finished')
-  echo "-- stderr after the clean build's report"; awk '/^finished:/ {n++; next} n>=1' "$r/watch-$m.txt" | grep -v "^ \\|^acct\\|^timeline\\|^  clock" | cut -c1-200 | head -60
-  python3 -I -c "import json,sys; d=json.load(open(sys.argv[1])); [print(json.dumps(e.get('event'))[:1500]) for e in d['edits']]" "$r/edits-$m.json"
+  e=(PHITEX_TEX_TIME=1); [ $m = off ] || e=(PHITEX_TEX_TIME=1 PHITEX_BOXSCOPE=1)
+  echo "== $m: the one-word edit under watch -j1"; rm -rf "$w/e" "$w/e-cold" "$w/cache-$m" "$r/watch-$m.txt"; cp -a "$d" "$w/e"
+  env F52_ERR=$r/watch-$m.txt PHITEX_CACHE_DIR=$w/cache-$m "${e[@]}" timeout 900 python3 -I bench/f52-edits-tmp.py "$bin" "$w/e" s.tex 1 "$w/edits.json" "$r/edits-$m.json" --exact-pdf 2>&1 | tail -3
+  awk '/^=== edit/ {print; on=1; next} on && /^(acct: wall|edit phases|settle phases|watch phases|session phases|time:|incr|push_text|hints)/ {print "  " substr($0,1,300)}' "$r/watch-$m.txt"
 done
