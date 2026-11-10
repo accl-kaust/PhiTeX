@@ -3038,6 +3038,9 @@ pub(crate) fn window_acked(eng: &Engine) -> bool {
     // (once the layer has refuted a run ahead, a place a window's worth
     // of runs in, as a congestion window avoids the loss it met: grown a
     // place a run, floats2col's window was whole again within a page)
+    if exchanged(eng) && eng.window_pin.load(Ordering::Acquire) {
+        return false;
+    }
     if exchanged(eng) {
         let w = eng.window.load(Ordering::Acquire);
         let k = eng.window_acks.fetch_add(1, Ordering::AcqRel) + 1;
@@ -3073,7 +3076,9 @@ pub(crate) fn window_moved_on(eng: &Engine, by: u64) {
     let w = eng.window.load(Ordering::Acquire);
     // (after the layer refuted a run ahead, a place a move: it doubled
     // before, and was whole again within a few pages)
-    let n = if exchanged(eng) {
+    let n = if exchanged(eng) && eng.window_pin.load(Ordering::Acquire) {
+        w
+    } else if exchanged(eng) {
         w.saturating_add(1).min(WINDOW_MAX)
     } else {
         (w * 2).max(w.saturating_add(by.saturating_mul(2))).min(WINDOW_MAX)

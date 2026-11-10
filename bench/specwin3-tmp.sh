@@ -15,7 +15,7 @@ on=(PHITEX_SPEC_WINDOW=1 PHITEX_WINDOW_LOG=1 ${WIN_EXTRA:-})
 # wave (PHITEX_WINDOW_WAVE=1), w8 (PHITEX_WINDOW_START=8)
 envof() { case $1 in off) e=() ;; on) e=("${on[@]}") ;; nofirst) e=("${on[@]}" PHITEX_FIRST_READS=0) ;;
   wave) e=("${on[@]}" PHITEX_WINDOW_WAVE=1) ;; nochains) e=("${on[@]}" PHITEX_WINDOW_CHAINS=0) ;;
-  floor0) e=("${on[@]}" PHITEX_WINDOW_FLOOR=0) ;; noaimd) e=("${on[@]}" PHITEX_WINDOW_AIMD=0) ;; w8) e=("${on[@]}" PHITEX_WINDOW_START=8) ;; esac; }
+  floor0) e=("${on[@]}" PHITEX_WINDOW_FLOOR=0) ;; pin0) e=("${on[@]}" PHITEX_WINDOW_FLOOR=0 PHITEX_WINDOW_PIN=1) ;; noaimd) e=("${on[@]}" PHITEX_WINDOW_AIMD=0) ;; w8) e=("${on[@]}" PHITEX_WINDOW_START=8) ;; esac; }
 # (the format built first, by a one-line document)
 mkdir -p $w/warm && printf '%s\n' '\documentclass{article}' '\begin{document}' 'x' '\end{document}' > $w/warm/warm.tex
 (cd $w/warm && PHITEX_CACHE_DIR=$w/cache timeout 900 $B build warm.tex > /dev/null 2>&1)

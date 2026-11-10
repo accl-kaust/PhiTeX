@@ -233,6 +233,8 @@ pub struct Engine {
     pub(crate) window_aimd: AtomicBool,
     pub(crate) window_floor: AtomicU64,
     pub(crate) window_acks: AtomicU64,
+    /// (`PHITEX_WINDOW_PIN=1`, a measure) no growth once exchanged.
+    pub(crate) window_pin: AtomicBool,
     pub(crate) window_stats: [AtomicU64; 4],
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
@@ -339,6 +341,10 @@ impl Engine {
             Ordering::Release,
         );
         self.window_acks.store(0, Ordering::Release);
+        self.window_pin.store(
+            std::env::var("PHITEX_WINDOW_PIN").is_ok_and(|x| x == "1"),
+            Ordering::Release,
+        );
         self.window_chains.store(
             std::env::var("PHITEX_WINDOW_CHAINS").map_or(true, |x| x != "0"),
             Ordering::Release,
@@ -438,6 +444,7 @@ impl Engine {
             window_aimd: AtomicBool::new(true),
             window_floor: AtomicU64::new(1),
             window_acks: AtomicU64::new(0),
+            window_pin: AtomicBool::new(false),
             window_stats: [const { AtomicU64::new(0) }; 4],
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
