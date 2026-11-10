@@ -9527,6 +9527,22 @@ impl Build {
             .collect()
     }
 
+    /// The page chain: the wakes that ended at the last page's
+    /// finisher (its routine), from the first, in nodes. Each page's loop
+    /// rest waits for the routine of the page before it (no fold past a
+    /// give-back not known), so on a clean build it grows with the pages,
+    /// the same in DVI and PDF; the critical path traced from whichever
+    /// node committed last ([`Stats::critical_path`]) sees it only where
+    /// that node is on it.
+    #[must_use]
+    pub fn page_chain(&self) -> usize {
+        let e = &self.g.eng;
+        e.order(self.unit)
+            .into_iter()
+            .rfind(|&n| e.node_info(n).is_some_and(|i| i.op == "finish"))
+            .map_or(0, |n| e.chain_to(n).len())
+    }
+
     /// The live nodes of operation `op`.
     #[must_use]
     pub fn nodes_by_op(&self, op: &str) -> usize {

@@ -372,7 +372,8 @@ fn para400() {
 /// nodes, and no link of it joins two page steps.
 /// The chain census gate (`common::Census`): plain documents of 400
 /// paragraphs with footnotes, DVI and exact PDF, cold and after a
-/// one-word edit: critical path at most 6, no page step reading
+/// one-word edit: the cold page chain at most 2 a page (`Build::page_chain`),
+/// the edit's critical path at most 6, no page step reading
 /// another's, at most 1.1 runs a node, at most 2 loop rounds cold and
 /// none after the first on the edit, no undeclared definition, no
 /// regime violation.

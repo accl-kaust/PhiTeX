@@ -2516,9 +2516,16 @@ impl Engine {
         if last == u64::MAX {
             return Vec::new();
         }
+        self.chain_to(NodeId::from_raw(last))
+    }
+
+    /// The chain of wakes that ended at node `n`'s last run, as
+    /// [`Engine::critical_chain`] gives it for the node that committed
+    /// last: each node and what woke it, from the first.
+    pub fn chain_to(&self, n: NodeId) -> Vec<(NodeId, Cause)> {
         let mut chain = Vec::new();
         let mut seen = FxHashSet::default();
-        let mut cur = Some(NodeId::from_raw(last));
+        let mut cur = Some(n);
         while let Some(n) = cur {
             if !seen.insert(n) {
                 break;

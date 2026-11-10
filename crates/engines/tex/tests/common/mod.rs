@@ -273,6 +273,9 @@ pub fn assert_edit_cost(name: &str, b: &Build, touched: u64, before: &[u64]) {
 pub struct Census {
     pub name: String,
     pub cold_cp: usize,
+    /// The cold build's page chain ([`Build::page_chain`]) and pages.
+    pub cold_page_chain: usize,
+    pub cold_pages: usize,
     pub cold_rounds: u64,
     pub cold_runs_per_node: f64,
     pub step_links: usize,
@@ -308,6 +311,7 @@ impl Census {
     /// edit's.
     pub fn take(name: &str, b: &mut Build, new: &str) -> Census {
         let cold_cp = b.stats.critical_path.unwrap_or(usize::MAX);
+        let (cold_page_chain, cold_pages) = (b.page_chain(), b.pages().len());
         let cold_rounds = b.stats.loop_rounds;
         let cold_runs_per_node = per_node(b);
         let step_links = b.page_step_links().len();
@@ -333,6 +337,8 @@ impl Census {
         Census {
             name: name.to_owned(),
             cold_cp,
+            cold_page_chain,
+            cold_pages,
             cold_rounds,
             cold_runs_per_node,
             step_links: step_links + b.page_step_links().len(),
@@ -351,15 +357,26 @@ impl Census {
         }
     }
 
-    /// What breaks the bar: critical path at most 6, no link between
+    /// What breaks the bar: the cold page chain at most 2 a page, the
+    /// edit's critical path at most 6, no link between
     /// two page steps, at most 1.1 runs a node, at most 2 loop rounds
     /// cold and 1 (no round after the first) on a word edit, no
     /// undeclared definition, no regime violation.
     pub fn failures(&self) -> Vec<String> {
         let mut f = Vec::new();
         let n = &self.name;
-        if self.cold_cp > 6 {
-            f.push(format!("{n}: cold critical path {}", self.cold_cp));
+        // (cold, the page chain: each page's loop rest waits for the
+        // routine of the page before it, no fold past a give-back not
+        // known, so it grows with the pages, the same in DVI and PDF: at
+        // most a rest and a routine a page, para400 127 for 66 pages in
+        // both, mc 83754. The critical path traced from the node that
+        // committed last is no measure of it: DVI's last, its dvi node,
+        // is woken by nothing, 1; PDF's is on the chain, 128)
+        if self.cold_page_chain > 2 * self.cold_pages {
+            f.push(format!(
+                "{n}: cold page chain {} for {} pages (> 2 a page)",
+                self.cold_page_chain, self.cold_pages
+            ));
         }
         if self.edit_cp > 6 {
             f.push(format!("{n}: edit critical path {}", self.edit_cp));
@@ -396,13 +413,15 @@ impl Census {
 pub fn census_table(rows: &[Census]) -> String {
     use std::fmt::Write as _;
     let mut t = String::from(
-        "doc | cp cold | cp edit | step links | runs/node cold | runs/node edit | rounds cold | rounds edit | undeclared | violations | edit nodes | edit page steps\n",
+        "doc | page chain cold (pages) | cp cold | cp edit | step links | runs/node cold | runs/node edit | rounds cold | rounds edit | undeclared | violations | edit nodes | edit page steps\n",
     );
     for r in rows {
         let _ = writeln!(
             t,
-            "{} | {} | {} | {} | {:.2} | {:.2} | {} | {} | {} | {} | {} | {}",
+            "{} | {} ({}) | {} | {} | {} | {:.2} | {:.2} | {} | {} | {} | {} | {} | {}",
             r.name,
+            r.cold_page_chain,
+            r.cold_pages,
             r.cold_cp,
             r.edit_cp,
             r.step_links,
