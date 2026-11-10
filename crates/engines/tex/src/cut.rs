@@ -102,16 +102,11 @@ impl Run<'_, '_> {
     /// Why the run may not end here with a continuation, if it may not.
     fn text_cut_refusal(&self) -> Option<&'static str> {
         let op = self.cx.op();
-        let checks: [(bool, &'static str); 26] = [
+        let checks: [(bool, &'static str); 8] = [
             (
                 !(op == self.ops.exec || op == self.ops.resume) || !self.doc,
                 "not a document's piece",
             ),
-            (
-                self.cmds < self.ops.cut_min.load(std::sync::atomic::Ordering::Relaxed),
-                "few commands",
-            ),
-            (self.stop_at.is_some(), "a second pass"),
             (
                 self.input.levels.iter().any(|l| match l.kind {
                     crate::input::kind::TOKS => l.a < l.b,
@@ -119,6 +114,10 @@ impl Run<'_, '_> {
                     _ => true,
                 }),
                 "input left",
+            ),
+            (
+                self.cmds < self.ops.cut_min.load(std::sync::atomic::Ordering::Relaxed),
+                "few commands",
             ),
             (
                 self.effect != phitex_defuse::Effect::None,
@@ -136,6 +135,32 @@ impl Run<'_, '_> {
                 }),
                 "children",
             ),
+            (
+                self.nest.iter().any(|l| !matches!(l.mode.abs(), 1 | 102)),
+                "math",
+            ),
+            (
+                self.main_items_since(self.cand_marks.last().map_or(0, |m| m.contribs)),
+                "items pending for the page",
+            ),
+            (self.residue() > MAX_RESIDUE, "a large residue"),
+        ];
+        checks
+            .iter()
+            .find(|c| c.0)
+            .map(|c| c.1)
+            .or_else(|| self.stop_refusal())
+    }
+
+    /// Why the run may not stop at its text's end and leave what it has
+    /// open to the nodes after it (a continuation, [`Run::text_cut`], or
+    /// its lists and groups, `crate::boxscope`): something half done that
+    /// only this run holds, a word whose lookahead met the text's end
+    /// among them. (Input left is the caller's to judge: a run leaving
+    /// its lists at a give-back has the token it peeked.)
+    pub(crate) fn stop_refusal(&self) -> Option<&'static str> {
+        let checks: [(bool, &'static str); 18] = [
+            (self.stop_at.is_some(), "a second pass"),
             (self.claim_rest || self.fatal_hit || self.eof, "the end"),
             (
                 self.cut.is_some() || self.close_cont.is_some() || self.tool_cut.is_some(),
@@ -165,15 +190,6 @@ impl Run<'_, '_> {
             (self.aopen != 0, "an alignment"),
             (!self.ins_pending.is_empty(), "insertions pending"),
             (!self.closed.is_empty(), "streams closed"),
-            (
-                self.nest.iter().any(|l| !matches!(l.mode.abs(), 1 | 102)),
-                "math",
-            ),
-            (
-                self.main_items_since(self.cand_marks.last().map_or(0, |m| m.contribs)),
-                "items pending for the page",
-            ),
-            (self.residue() > MAX_RESIDUE, "a large residue"),
         ];
         checks.iter().find(|c| c.0).map(|c| c.1)
     }

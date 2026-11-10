@@ -184,8 +184,11 @@ fn is_box_group(g: i64) -> bool {
 
 impl Run<'_, '_> {
     /// Whether the run's open levels can all be left (`leave_lists`): a
-    /// text piece or a resume with no conditional, alignment, scope effect,
-    /// picture child or character run pending; the innermost level a
+    /// text piece or a resume with a box being built among its lists and
+    /// no conditional, scope effect or append
+    /// pending, nothing half done ([`Run::stop_refusal`]: a word whose
+    /// lookahead met the text's end, a scan, an alignment, a picture
+    /// child, …); the innermost level a
     /// group; each level a group sharing the list below, a box's group, or
     /// a paragraph with a group above it (the paragraph is `par:<list>`,
     /// which a kind in that list reads, [`Run::vert_kind`]: the close of a
@@ -202,18 +205,21 @@ impl Run<'_, '_> {
             "not a text's run"
         } else if self.nest.is_empty() || !self.nest.iter().any(|l| l.owns) {
             "no list open"
+        } else if !self.nest.iter().any(|l| l.owns && is_box_group(l.group)) {
+            // (what leaving pays for is a box's contents run as nodes of
+            // their own, a picture's statements; a paragraph under groups
+            // alone is broken whole at its end whatever its nodes, and
+            // each slice of it left would be one more node: huaz's
+            // `\lstinline` groups, 2771 nodes against 725)
+            "no box open"
         } else if self.nest.len() >= usize::from(u8::MAX - 2) {
             "too deep"
         } else if !self.conds.is_empty() {
             "a conditional open"
         } else if self.effect != phitex_defuse::Effect::None {
             "a scope effect"
-        } else if self.aopen != 0 {
-            "an alignment"
-        } else if self.pic_child.is_some() {
-            "a picture child"
-        } else if self.chars_live.is_some() {
-            "a character run"
+        } else if let Some(why) = self.stop_refusal() {
+            why
         } else if !self.appending.is_empty() || !self.appending_vals.is_empty() {
             "appends pending"
         } else if self.nest.last().is_some_and(|l| l.group == 0) {
