@@ -588,6 +588,10 @@ pub struct Report {
     pub resumed: u64,
     /// Commits of runs that parked on an answer not in yet.
     pub parks: u64,
+    /// Runs that, before doing anything, waited for a node before them
+    /// that may define what they read (`Ctx::wait_for_definer`), filing
+    /// nothing: waits, not counted in `runs`.
+    pub waits: u64,
     /// Runs stopped at a check (`Ctx::tick`) because a read moved while
     /// they ran: run again on what it moved to.
     pub stopped_stale: u64,

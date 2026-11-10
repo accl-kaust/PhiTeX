@@ -1570,6 +1570,7 @@ impl Engine {
             rep.refuted_nodes += load(&w.refuted_nodes);
             rep.resumed += load(&w.resumed);
             rep.parks += load(&w.parks);
+            rep.waits += load(&w.waits);
             rep.stale_panics += load(&w.stale_panics);
             rep.stopped_stale += load(&w.stopped_stale);
             rep.wasted_ns += load(&w.wasted_ns);

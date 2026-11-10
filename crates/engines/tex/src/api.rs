@@ -1884,6 +1884,10 @@ pub struct Stats {
     pub refuted_nodes: u64,
     pub resumptions: u64,
     pub parks: u64,
+    /// Runs that waited, before doing anything, for a node before them
+    /// that may define a name they read (`phitex_defuse::Report::waits`):
+    /// not counted in `runs`.
+    pub waits: u64,
     pub cutoffs: u64,
     pub created: u64,
     pub freed: u64,
@@ -2854,6 +2858,7 @@ impl Stats {
         self.runs += r.runs;
         self.refuted_nodes += r.refuted_nodes;
         self.resumptions += r.resumed;
+        self.waits += r.waits;
         self.parks += r.parks;
         self.rounds += 1;
         // (the passes the files read back took: one, and each rerun a

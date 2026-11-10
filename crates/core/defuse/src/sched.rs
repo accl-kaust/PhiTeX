@@ -261,6 +261,9 @@ pub(crate) struct Worker {
     pub(crate) refuted_nodes: AtomicU64,
     pub(crate) resumed: AtomicU64,
     pub(crate) parks: AtomicU64,
+    /// Runs that waited for a node before them before doing anything
+    /// (`Ctx::wait_for_definer`): not runs ([`Report::waits`]).
+    pub(crate) waits: AtomicU64,
     /// Runs that panicked on inputs that moved during the run.
     pub(crate) stale_panics: AtomicU64,
     /// Runs stopped at a check because a read moved while they ran
@@ -714,6 +717,7 @@ impl Pool {
                 refuted_nodes: AtomicU64::new(0),
                 resumed: AtomicU64::new(0),
                 parks: AtomicU64::new(0),
+                waits: AtomicU64::new(0),
                 stopped_stale: AtomicU64::new(0),
                 stale_panics: AtomicU64::new(0),
                 op_ns: AtomicU64::new(0),
@@ -2423,7 +2427,13 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         };
         f.is_some() && *node.parked_on.lock() == f
     };
-    if resumption {
+    // (a run that waited for a node before it that may define what it
+    // read, before it did anything, `Ctx::wait_for_definer`: a wait, not
+    // a run; its node runs when that node commits)
+    let waited = cx.waits_only && cx.wait_on.is_some() && matches!(r, Ok(Err(_)));
+    if waited {
+        Worker::add(&w.waits, 1);
+    } else if resumption {
         Worker::add(&w.resumed, 1);
     } else {
         if !first {
@@ -2440,11 +2450,15 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     let run_ns = ns(t);
     node.run_ns.store(run_ns, Ordering::Relaxed);
     Worker::add(&w.op_ns, run_ns);
-    Worker::add(&w.runs, 1);
+    if !waited {
+        Worker::add(&w.runs, 1);
+    }
     w.shared.runs_now.fetch_add(1, Ordering::Relaxed);
     {
         let mut log = w.log.lock();
-        *log.runs_by_op.entry(node.op()).or_default() += 1;
+        if !waited {
+            *log.runs_by_op.entry(node.op()).or_default() += 1;
+        }
         if stands.is_some() {
             log.stood.push(node.id);
         }
