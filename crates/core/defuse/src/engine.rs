@@ -165,10 +165,13 @@ pub struct Engine {
     /// A count of the changes to the line's order and its siblings'
     /// texts and claims (`Engine::structure_changed`): a run's reads of
     /// its siblings (`ReadKind::Following`, `Next`, `Hole`) made before
-    /// one may name another sibling now. Moved before the change's own
-    /// re-asks (`commit::wake_puller`), so that a commit either is asked
-    /// again by them or sees the count moved and checks those reads
-    /// again, kept ones too (`commit`'s step 6).
+    /// one may name another sibling now. Moved (SeqCst) after the change
+    /// is made and before the change's own re-asks read a node's record
+    /// (`commit::wake_puller`, a removed sibling's claimer); a commit
+    /// installs its record and then reads the count (SeqCst, step 6). So
+    /// either the re-ask meets the new record and asks the node again,
+    /// or the commit sees the count moved and checks those reads again,
+    /// kept ones too.
     pub(crate) struct_gen: AtomicU64,
     /// Nodes with brackets filed: none, and no scope is walked.
     pub(crate) bracket_nodes: AtomicUsize,
