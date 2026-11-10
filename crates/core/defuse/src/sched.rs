@@ -1452,6 +1452,8 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
                 crate::commit::OWED.lock().as_ref().is_none_or(|m| m.is_empty()),
                 "a quiet point with a commit owing a check of reads a change of brackets passed"
             );
+            #[cfg(debug_assertions)]
+            crate::commit::assert_skipped_hold(eng);
             // (the wakes held to this quiet point: each reader's reads of
             // the field checked again now, re-asked where one moved; a
             // pass of the page layer's feedback into the text)

@@ -4996,6 +4996,7 @@ pub(crate) fn check_pullers(eng: &Engine, w: Option<&Worker>, s: &Node, except: 
         let x = eng.node(id);
         // (one passed over as no sibling of it stays passed over)
         if !read::SiblingParents::of(x).may_take(eng, s) {
+            note_skipped(eng, x, serial, s.id);
             continue;
         }
         check_puller(eng, w, x, s.id);
@@ -5006,18 +5007,7 @@ pub(crate) fn check_pullers(eng: &Engine, w: Option<&Worker>, s: &Node, except: 
 /// commit or its next run checks, `sched::mark_stale`) or one of those
 /// reads moved.
 fn check_puller(eng: &Engine, w: Option<&Worker>, x: &Arc<Node>, by: NodeId) {
-    let holds = x.state() == State::Clean
-        && x.record().is_some_and(|r| {
-            let mut at = None;
-            r.reads.iter().all(|rd| match *rd.kind() {
-                ReadKind::Following { i } => {
-                    let n = read::following_on(eng, x, i, &mut at);
-                    read::apply_path(eng, n.map(|n| read::text_value(eng, &n)), rd.path()) == rd.seen()
-                }
-                _ => true,
-            })
-        });
-    if !holds {
+    if x.state() != State::Clean || !following_holds(eng, x) {
         mark_stale(
             eng,
             w,
@@ -5027,6 +5017,70 @@ fn check_puller(eng: &Engine, w: Option<&Worker>, x: &Arc<Node>, by: NodeId) {
                 cause: Cause::Structure,
                 at_ns: eng.now_ns(),
             },
+        );
+    }
+}
+
+/// Whether `x`'s recorded reads of its siblings answer now as they did.
+pub(crate) fn following_holds(eng: &Engine, x: &Node) -> bool {
+    x.record().is_some_and(|r| {
+        let mut at = None;
+        r.reads.iter().all(|rd| match *rd.kind() {
+            ReadKind::Following { i } => {
+                let n = read::following_on(eng, x, i, &mut at);
+                read::apply_path(eng, n.map(|n| read::text_value(eng, &n)), rd.path()) == rd.seen()
+            }
+            _ => true,
+        })
+    })
+}
+
+/// (debug) The runs a change passed over as no sibling of theirs
+/// (`SiblingParents::may_take`) whose sibling reads answered otherwise
+/// then, by engine, node and serial, with the node changed: another
+/// change, a sibling's, asks each again, or a quiet point finds it so
+/// still and fails (`assert_skipped_hold`).
+#[cfg(debug_assertions)]
+pub(crate) static SKIPPED: crate::lock::Mx<Option<Skipped>> = crate::lock::Mx::new(None);
+
+/// (debug) `SKIPPED`'s map: (engine, node, serial) to the node changed.
+#[cfg(debug_assertions)]
+pub(crate) type Skipped = FxHashMap<(usize, NodeId, u32), NodeId>;
+
+/// (debug) `x` passed over by a change of `s`, as no sibling of it: noted
+/// if its sibling reads answer otherwise now (`SKIPPED`).
+#[cfg_attr(not(debug_assertions), allow(unused_variables))]
+fn note_skipped(eng: &Engine, x: &Node, serial: u32, s: NodeId) {
+    #[cfg(debug_assertions)]
+    if x.state() == State::Clean && !following_holds(eng, x) {
+        SKIPPED
+            .lock()
+            .get_or_insert_with(FxHashMap::default)
+            .insert((std::ptr::from_ref(eng) as usize, x.id, serial), s);
+    }
+}
+
+/// (debug) At a quiet point: each run a change passed over as no sibling
+/// of its own, its sibling reads answering otherwise then, answers as it
+/// read now, or is no longer that run.
+#[cfg(debug_assertions)]
+pub(crate) fn assert_skipped_hold(eng: &Engine) {
+    let me = std::ptr::from_ref(eng) as usize;
+    let mine: Vec<((usize, NodeId, u32), NodeId)> = {
+        let mut g = SKIPPED.lock();
+        let Some(m) = g.as_mut() else {
+            return;
+        };
+        let keys: Vec<_> = m.keys().filter(|k| k.0 == me).copied().collect();
+        keys.into_iter().filter_map(|k| m.remove(&k).map(|s| (k, s))).collect()
+    };
+    for ((_, id, serial), s) in mine {
+        let x = eng.node(id);
+        assert!(
+            !live(eng, id, serial) || x.state() != State::Clean || following_holds(eng, x),
+            "node {} serial {serial}: a change of node {}, passed over as no sibling of it, moved its reads of its siblings",
+            id.raw(),
+            s.raw()
         );
     }
 }
@@ -5056,8 +5110,13 @@ pub(crate) fn check_inserted(eng: &Engine, w: Option<&Worker>, n: &Node) {
             let pn = eng.node(p);
             for (id, serial) in pn.pullers.lock().clone() {
                 let x = eng.node(id);
-                if live(eng, id, serial) && read::SiblingParents::of(x).may_take(eng, n) {
+                if !live(eng, id, serial) {
+                    continue;
+                }
+                if read::SiblingParents::of(x).may_take(eng, n) {
                     check_puller(eng, w, x, n.id);
+                } else {
+                    note_skipped(eng, x, serial, n.id);
                 }
             }
             if read::SiblingParents::of(pn).may_take(eng, n)
