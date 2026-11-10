@@ -521,6 +521,14 @@ fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, witness: bo
     crate::segment::guard_insert(&mut inner.guarded, f, r.anchor())
 }
 
+/// (debug) The readers a change of brackets' walk found mid-commit, their
+/// reads at its region installed and not filed (`readers_of_fields`), by
+/// node and serial, with the scope count then: each owes a check of its
+/// unfiled reads in its commit's step 6 with the scope count moved past
+/// its run's start, asserted there, and none left at a quiet point.
+#[cfg(debug_assertions)]
+pub(crate) static OWED: crate::lock::Mx<Option<FxHashMap<(NodeId, u32), u64>>> = crate::lock::Mx::new(None);
+
 /// Index changes made under a segment's lock, applied before it is let go
 /// (a field-index shard under it, as a split takes one): applied after
 /// it, one commit's removal of a segment's last definition of a field
@@ -2389,6 +2397,17 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             !read::holds(eng, node, r, &mut memo)
         })
     });
+    // (debug) a change of brackets' walk that found this commit's reads
+    // installed and not filed (`OWED`): checked here against the answer
+    // now, the scope count moved past what this run began on
+    #[cfg(debug_assertions)]
+    if let Some(g) = OWED.lock().as_mut().and_then(|m| m.remove(&(node.id, serial))) {
+        assert!(
+            refuted.is_some() || (scope_moved && eng.scope_gen.load(Ordering::Acquire) >= g),
+            "node {:?} serial {serial}: a change of brackets passed its unfiled reads, and its commit did not check them with the scope count moved",
+            node.id
+        );
+    }
     // (where a read that moved sends the next run: a field's change, the
     // environment's, a range's at the range's start (where the change
     // lies the check does not know: a loop resuming from its state goes
@@ -6359,13 +6378,22 @@ fn readers_of_fields(
             }
             crate::guard::readers_at(eng, x, None, &mut |f, r| {
                 // (but a reader whose commit installed its record and has not
-                // filed its reads anchored elsewhere yet: that commit files
-                // them under this segment's lock, which this walk holds, and
-                // checks them after, `commit`'s step 6)
-                if (moves(&f) || read::derived_spec(eng, r.path()).is_some())
-                    && live(eng, r.node(), r.serial)
-                    && !eng.node(r.node()).committing.load(Ordering::SeqCst)
-                {
+                // filed its reads anchored here yet: none is missed. Its
+                // commit files them in its step 2, under this segment's write
+                // lock, so after this walk's read hold; this change filed its
+                // brackets and moved the scope count (`Engine::scope_changed`)
+                // before walking, so the commit's step 6 sees the count moved
+                // since its run began (`scope_moved`) and checks every read it
+                // has not filed yet against the answer now (`read::holds`),
+                // which is this change's. Owed here, and asserted there and at
+                // the quiet point, `OWED`)
+                if (moves(&f) || read::derived_spec(eng, r.path()).is_some()) && live(eng, r.node(), r.serial) {
+                    if !found.contains(&key(f, &r)) && eng.node(r.node()).committing.load(Ordering::SeqCst) {
+                        OWED.lock()
+                            .get_or_insert_with(FxHashMap::default)
+                            .insert((r.node(), r.serial), eng.scope_changes());
+                        return;
+                    }
                     assert!(
                         found.contains(&key(f, &r)),
                         "a change of brackets missed reader {:?} of {:?} at {:?}: its field not in the segment's sets with its bit",

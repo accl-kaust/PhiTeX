@@ -1445,6 +1445,11 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
                         .all(|&n| eng.placed_node(n).is_none_or(|x| x.unwalked.lock().is_empty())),
                     "a quiet point with a commit's fields unwalked"
                 );
+                #[cfg(debug_assertions)]
+                assert!(
+                    crate::commit::OWED.lock().as_ref().is_none_or(|m| m.is_empty()),
+                    "a quiet point with a commit owing a check of reads a change of brackets passed"
+                );
                 if pool.outstanding() > 0 {
                     continue;
                 }
