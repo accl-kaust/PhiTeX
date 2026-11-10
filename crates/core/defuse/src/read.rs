@@ -1134,7 +1134,8 @@ fn answer_on_layout(eng: &Engine, me: &Node, kind: &ReadKind, path: PathId, memo
 }
 
 /// The first text node (`Operation::text`) of `me`'s unit before it that
-/// has not committed (`Node::is_hole`); None when every one has. Each
+/// has not committed and may still (`Node::awaitable`: not one whose run
+/// panicked, held for the evaluation's decision); None when every one has. Each
 /// segment's count of such nodes passes over the segments without one.
 /// Not the unit's other nodes (what the client sets beside the text to
 /// work on it: its pages, finishers, writers, which may wait on text
@@ -1156,7 +1157,7 @@ pub(crate) fn hole_before(eng: &Engine, me: &Node) -> Option<NodeId> {
             if inner.holes > 0 {
                 for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
                     let n = eng.node(*id);
-                    if *id != me.id && n.unit == me.unit && n.is_hole() && eng.op(n.op()).text() {
+                    if *id != me.id && n.unit == me.unit && n.awaitable() && eng.op(n.op()).text() {
                         return Some(*id);
                     }
                 }
@@ -1198,7 +1199,7 @@ pub(crate) fn hole_before_defining(eng: &Engine, me: &Node, fields: &[Field]) ->
                         .map(|(_, id)| *id)
                         .filter(|id| {
                             let n = eng.node(*id);
-                            *id != me.id && n.unit == me.unit && n.is_hole() && eng.op(n.op()).text()
+                            *id != me.id && n.unit == me.unit && n.awaitable() && eng.op(n.op()).text()
                         })
                         .collect()
                 }
@@ -1258,12 +1259,7 @@ pub(crate) fn holes_naming_definitions(eng: &Engine, me: &Node) -> Vec<(NodeId, 
                         .filter(|id| {
                             let n = eng.node(*id);
                             let op = eng.op(n.op());
-                            *id != me.id
-                                && n.unit == me.unit
-                                && n.is_hole()
-                                && op.text()
-                                && !op.final_only()
-                                && !n.held_panic.load(Ordering::Acquire)
+                            *id != me.id && n.unit == me.unit && n.awaitable() && op.text() && !op.final_only()
                         })
                         .collect()
                 }
@@ -1304,10 +1300,9 @@ pub(crate) fn hole_with_pending_brackets(eng: &Engine, me: &Node) -> Option<Node
                     let op = eng.op(n.op());
                     if *id != me.id
                         && n.unit == me.unit
-                        && n.is_hole()
+                        && n.awaitable()
                         && op.text()
                         && !op.final_only()
-                        && !n.held_panic.load(Ordering::Acquire)
                         && op.effect(&n.args(), v) == crate::api::Effect::Pending
                     {
                         last = Some(*id);

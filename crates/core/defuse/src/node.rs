@@ -524,6 +524,19 @@ impl Node {
         !self.committed() && matches!(self.state(), State::Dirty | State::Running | State::RunningDirty)
     }
 
+    /// A hole a run may wait for: one whose commit can come in this pool.
+    /// Not a node whose run panicked on inputs that hold (held for the
+    /// evaluation's decision, `held_panic`): no commit of it comes, and
+    /// `sched::park_waiting` takes it as settled, queueing the waiter
+    /// again at once, so a search that named it named it again on every
+    /// run (kotex-utf at -j4: three readers ran a million times each,
+    /// waiting for the held 1825). Every wait's search of the holes before
+    /// a reader asks this one predicate; for a hole it is exactly
+    /// `!sched::settled_node`.
+    pub(crate) fn awaitable(&self) -> bool {
+        self.is_hole() && !self.held_panic.load(Ordering::Acquire)
+    }
+
     pub(crate) fn record(&self) -> Option<Arc<RunRecord>> {
         self.last.lock().clone()
     }
