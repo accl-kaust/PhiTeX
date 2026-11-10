@@ -1909,23 +1909,26 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
     settles_edge(eng, by, n) && !overlapped(eng, by, n)
 }
 
-/// Whether `reader`'s last run began after `by`'s run being committed
-/// did: at one thread `by` would have committed first and the reader
-/// read its definition, so the re-ask is of a race of runs side by side,
-/// not the layer's feedback into text it has passed, and it is not held
-/// to the quiet point. Held, the reader (text between a page's routine
-/// and the frontier, which the page loop had passed while the routine
-/// ran) kept the float list from before the routine, and at the quiet
-/// point ran again on the routine's and every routine after it again:
-/// floats2col at -j8, 1 776 and 2 172 finisher runs for 194 (accl 27183,
-/// mc 84571), the reader's own commit's check of its reads held too.
+/// Whether `reader`'s last run began before `by`'s last commit ended
+/// (or `by` has none): its read never saw what the layer's node had made,
+/// so a re-ask by `by` is a race of runs side by side, at one thread
+/// `by` would have committed first, and not the layer's feedback into
+/// text it has passed (a node that read its last commit and has it move
+/// now), which alone the quiet point holds. Held, a race cost a wave:
+/// the reader, text between a page's routine and the frontier the page
+/// loop had passed, kept the float list from before the routine, and at
+/// the quiet point ran again on the routine's and every routine after it
+/// again: floats2col at -j8 and -j16, 1 600 to 3 432 finisher runs for 194
+/// (accl 27183, 27201, mc 84571, 84657-84660). Held only for a reader
+/// that saw `by`'s last commit, a race costs the pages from it on once.
 fn overlapped(eng: &Engine, by: NodeId, reader: &Node) -> bool {
     let Some(b) = eng.placed_node(by) else { return false };
-    let (bs, rs) = (
-        b.run_start.load(Ordering::Acquire),
-        reader.run_start.load(Ordering::Acquire),
-    );
-    bs != 0 && rs >= bs
+    let c = b.committed_at.load(Ordering::Acquire);
+    let began = match reader.state() {
+        State::Running | State::RunningDirty => &reader.run_began,
+        _ => &reader.run_start,
+    };
+    c == 0 || began.load(Ordering::Acquire) <= c
 }
 
 /// Whether a definition by `by` reaches `reader` across the settling
@@ -2496,7 +2499,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         park_frontier(eng, pool, w, node);
         return Ok(());
     }
-    node.run_start.store(eng.now_ns(), Ordering::Release);
+    node.run_began.store(eng.now_ns(), Ordering::Release);
     let first = node.run_epoch.swap(pool.epoch, Ordering::AcqRel) != pool.epoch;
     if first {
         node.runs.store(0, Ordering::Relaxed);
@@ -2776,6 +2779,9 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             }
             let done = ns(pool.t0);
             node.done_ns.store(done, Ordering::Relaxed);
+            node.run_start
+                .store(node.run_began.load(Ordering::Acquire), Ordering::Release);
+            node.committed_at.store(eng.now_ns(), Ordering::Release);
             if run_log() {
                 eprintln!(
                     "commit: node {} done {} commit {} reask {} walked {} woken {}",
