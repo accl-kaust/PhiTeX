@@ -167,7 +167,13 @@ pub(crate) fn run_node(
         // node's start, `crate::cut`)
         RECUTS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         RECUTS[1].fetch_add(r.cmds, std::sync::atomic::Ordering::Relaxed);
+        // (and with a product of its own: the first pass's reads, waits
+        // and placements, past the candidate too, are not the second's.
+        // Kept since checkpoints went (2e4da8ceb), the second pass
+        // committed them as its own: cursolatex's first frame waited on
+        // by the page loop for good at -j1)
         let cx = r.cx;
+        cx.begin_again();
         r = Run::new(cx, o);
         r.stop_at = Some(k);
         // (a second pass to a candidate takes no marks)

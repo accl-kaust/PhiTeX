@@ -1,0 +1,65 @@
+% !TEX program = xelatex
+% A listing under XeLaTeX whose lines hold accented letters (the TeX Live
+% manuals abntex2 and the Belgian invoices'): a run cut at a line's
+% paragraph start inside the listing's groups carries the line's rest, its
+% characters decoded already, and the rest is never decoded again (the
+% c-cedilla was read as U+FFFD, set at once before the word listings
+% gathered, as .notdef).
+\documentclass{article}
+\usepackage{listings}\usepackage{xcolor}
+\lstset{basicstyle=\footnotesize,breaklines=true,backgroundcolor=\color{gray!10},frame=single}
+\begin{document}
+Paragraph 0 with some filler text to make the page run on and on, words words words.
+
+Paragraph 1 with some filler text to make the page run on and on, words words words.
+
+Paragraph 2 with some filler text to make the page run on and on, words words words.
+
+Paragraph 3 with some filler text to make the page run on and on, words words words.
+
+Paragraph 4 with some filler text to make the page run on and on, words words words.
+
+Paragraph 5 with some filler text to make the page run on and on, words words words.
+
+Paragraph 6 with some filler text to make the page run on and on, words words words.
+
+Paragraph 7 with some filler text to make the page run on and on, words words words.
+
+Paragraph 8 with some filler text to make the page run on and on, words words words.
+
+Paragraph 9 with some filler text to make the page run on and on, words words words.
+
+Paragraph 10 with some filler text to make the page run on and on, words words words.
+
+Paragraph 11 with some filler text to make the page run on and on, words words words.
+\begin{lstlisting}
+% retourne un encodage latin1 en français :
+\newcommand{\a}{x}
+% retourne un encodage utf8 en français et anglais :
+% À n'utiliser qu'une seule fois ;
+% Unité monétaire dans les titres du tableau
+\end{lstlisting}
+Paragraph 0 with some filler text to make the page run on and on, words words words.
+
+Paragraph 1 with some filler text to make the page run on and on, words words words.
+
+Paragraph 2 with some filler text to make the page run on and on, words words words.
+
+Paragraph 3 with some filler text to make the page run on and on, words words words.
+
+Paragraph 4 with some filler text to make the page run on and on, words words words.
+
+Paragraph 5 with some filler text to make the page run on and on, words words words.
+
+Paragraph 6 with some filler text to make the page run on and on, words words words.
+
+Paragraph 7 with some filler text to make the page run on and on, words words words.
+
+Paragraph 8 with some filler text to make the page run on and on, words words words.
+
+Paragraph 9 with some filler text to make the page run on and on, words words words.
+
+Paragraph 10 with some filler text to make the page run on and on, words words words.
+
+Paragraph 11 with some filler text to make the page run on and on, words words words.
+\end{document}
