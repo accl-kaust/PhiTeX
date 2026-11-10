@@ -174,11 +174,14 @@ impl Run<'_, '_> {
             extra,
             vm: km,
         };
-        if km == 102
-            && crate::boxscope::is_global(lid)
+        if crate::boxscope::on()
             && let Some(k) = k
         {
-            self.par_kind(k, &mut md)?;
+            if km == 102 && crate::boxscope::is_global(lid) {
+                self.par_kind(k, &mut md)?;
+            } else if km.abs() == 1 {
+                self.vert_kind(k, &mut md)?;
+            }
         }
         Ok(md)
     }
@@ -244,13 +247,9 @@ impl Run<'_, '_> {
         // list's, and the `\aftergroup` tokens were dropped)
         let base = self.base_mode()?;
         self.unsave_extras(&base)?;
-        let outer = self.kind_outer(md)?;
-        // (a paragraph left open under this scope is the run's again,
-        // `crate::boxscope`)
-        if crate::boxscope::on() && self.reown_paragraph(&base, &outer)? {
-            return self.mode();
-        }
-        Ok(outer)
+        // (a paragraph left open under this scope goes on in the kind
+        // outside it, `crate::boxscope`)
+        self.kind_outer(md)
     }
 
     /// The groups still open when the run ends. Only `\end` inside
@@ -2627,8 +2626,12 @@ impl Run<'_, '_> {
         };
         // (a group in a paragraph left open: the paragraph's state,
         // `crate::boxscope`)
-        if km == 102 && crate::boxscope::is_global(md.lid) {
-            self.par_kind(k, &mut md)?;
+        if crate::boxscope::on() {
+            if km == 102 && crate::boxscope::is_global(md.lid) {
+                self.par_kind(k, &mut md)?;
+            } else if km.abs() == 1 {
+                self.vert_kind(k, &mut md)?;
+            }
         }
         Ok(md)
     }

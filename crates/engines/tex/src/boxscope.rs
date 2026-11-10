@@ -25,12 +25,13 @@
 //! - a paragraph, which no group brackets, is left only under a group,
 //!   its own parameters the field `par:<list it is in>`: open while that
 //!   field names it. A group's kind in it reads the field
-//!   ([`Run::par_kind`]); a `\par` there ends it
-//!   ([`Run::end_left_paragraph`]); the close of the group above it
-//!   makes it the run's again ([`Run::reown_paragraph`]).
+//!   ([`Run::par_kind`]), and so does a kind of the list it is in
+//!   ([`Run::vert_kind`]): after the close of the group above it (the
+//!   picture's environment) the following nodes are in it, with no
+//!   continuation; the node at its `\par` breaks it
+//!   ([`Run::end_left_paragraph`]).
 
 use crate::build::{FoldState, Mode, fold_item, sf_value};
-use crate::nest::Level;
 use crate::run::{R, Run};
 use crate::val::{group, int_of, list_of};
 use phitex_defuse::ValueId;
@@ -122,11 +123,10 @@ impl Run<'_, '_> {
     /// text piece or a resume with no conditional, alignment, scope effect,
     /// picture child or character run pending; the innermost level a
     /// group; each level a group sharing the list below, a box's group, or
-    /// a paragraph with a group sharing its list right above it (that
-    /// group's kind names the paragraph, so the close of every scope
-    /// above it comes back to it; a box's group right above it would come
-    /// back to the list below the paragraph: amsldoc's minipage in a
-    /// `center`, its box put on the page, not in the paragraph).
+    /// a paragraph with a group above it (the paragraph is `par:<list>`,
+    /// which a kind in that list reads, [`Run::vert_kind`]: the close of a
+    /// box's group right above it comes back to it, amsldoc's minipage in
+    /// a `center`).
     pub(crate) fn can_leave_lists(&self) -> bool {
         self.leave_refusal().is_none()
     }
@@ -231,6 +231,7 @@ impl Run<'_, '_> {
             }
         }
         self.par_memo = None;
+        self.vpar_memo = None;
         // the groups as scopes
         self.nest = levels.into_iter().filter(|l| l.group != 0).collect();
         self.leave_scope()
@@ -318,6 +319,34 @@ impl Run<'_, '_> {
         Ok(())
     }
 
+    /// A vertical kind `k` (its list `md.lid`): the paragraph left open
+    /// in that list, if `par:<list>` names one, is the mode and the list
+    /// here ([`Run::base_mode`]): the close of a group in it (the
+    /// picture's environment) comes back to it, the following nodes add
+    /// to it, and the node at its `\par` breaks it
+    /// ([`Run::end_left_paragraph`]). One read a run.
+    pub(crate) fn vert_kind(&mut self, k: ValueId, md: &mut Mode) -> R<()> {
+        let open = match self.vpar_memo {
+            Some((kk, p)) if kk == k => p,
+            _ => {
+                let v = self.v;
+                let p = self
+                    .get(&par_field(md.lid))?
+                    .and_then(|r| list_of(v, r).first().map(|&x| int_of(v, x)))
+                    .filter(|&p| is_global(p));
+                self.vpar_memo = Some((k, p));
+                p
+            }
+        };
+        if let Some(p) = open {
+            md.vlid = md.lid;
+            md.vm = md.m;
+            md.m = 102;
+            md.lid = p;
+        }
+        Ok(())
+    }
+
     /// `\par` (§1096) in a paragraph left open by another node, under
     /// groups of the engine's: its items, the field cleared (the groups
     /// go on in the vertical list), its parameters the run's last
@@ -346,6 +375,7 @@ impl Run<'_, '_> {
         }
         self.set(&par_field(md.vlid), ValueId::UNIT, true);
         self.par_memo = None;
+        self.vpar_memo = None;
         self.last_par = (n(1), n(2));
         self.last_par_line = None;
         self.last_par_place = None;
@@ -358,49 +388,6 @@ impl Run<'_, '_> {
             }
         }
         Ok(Some(crate::nest::of_values(f.items)))
-    }
-
-    /// After the close of an engine scope whose kind `md` is a group in
-    /// a paragraph left open, and whose outer kind is the vertical list
-    /// the paragraph is in: the paragraph is this run's again, its items
-    /// folded, its parameters read from `par:<list>`.
-    pub(crate) fn reown_paragraph(&mut self, md: &Mode, outer: &Mode) -> R<bool> {
-        if !is_global(md.lid) || md.m != 102 || outer.km.abs() != 1 {
-            return Ok(false);
-        }
-        let v = self.v;
-        let Some(rec) = self.get(&par_field(outer.lid))? else {
-            return Ok(false);
-        };
-        let xs = list_of(v, rec);
-        let n = |i: usize| xs.get(i).map_or(0, |&x| int_of(v, x));
-        if xs.len() < 4 || n(0) != md.lid {
-            return Ok(false);
-        }
-        let f = self.list_fold(md.lid)?;
-        if crate::exec::prof_flag!("PHITEX_BOXSCOPE_TRACE") {
-            eprintln!(
-                "boxscope: node {} owns the paragraph again, list {} ({} items)",
-                self.cx.node().raw(),
-                md.lid,
-                f.items.len()
-            );
-        }
-        let mut l = Level::new(102, 0, md.lid, true, Vec::new());
-        self.open_level(&mut l);
-        l.list = crate::nest::of_values(f.items);
-        l.fold = FoldState {
-            sf: f.sf,
-            pd: f.pd,
-            since_bp: f.since_bp,
-        };
-        l.par = Some((n(1), n(2)));
-        l.clang = n(3);
-        self.set(&par_field(outer.lid), ValueId::UNIT, true);
-        self.par_memo = None;
-        self.muts += 1;
-        self.nest.push(l);
-        Ok(true)
     }
 }
 
