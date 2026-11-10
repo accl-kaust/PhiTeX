@@ -2162,8 +2162,12 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
             .and_then(|f| eng.placed_node(NodeId::from_raw(f)))
             .map(|f| f.pos_hint().0);
         let marked = field.is_some_and(|f| eng.settle_marked(f));
+        // (and the node whose commit woke it, with its op)
+        let by = wake.by.map_or("-".to_owned(), |b| {
+            format!("{} {}", b.raw(), eng.op(eng.node(b).op()).name())
+        });
         eprintln!(
-            "wake: node {} op {:?} pos {:?} field {name} {:?}{site_pos} frontier-pos {fr_pos:?} marked {marked}\twake\t{}\t{}\t{name}\t{kind}\t{site_op}\t{}",
+            "wake: node {} op {:?} pos {:?} field {name} {:?}{site_pos} frontier-pos {fr_pos:?} marked {marked} by {by}\twake\t{}\t{}\t{name}\t{kind}\t{site_op}\t{}",
             n.id.raw(),
             n.op(),
             n.pos_hint(),
