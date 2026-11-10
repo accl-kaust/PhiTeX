@@ -69,10 +69,11 @@ bounds, path, seen, ordinal), coded as:
 | ordinal | varint | ~2 |
 
 About 10-13 B a read against 24 B, and none of the 43 B of reader list
-and map. Every 8th entry starts a block whose field is coded whole; a
-table of the blocks' offsets and first fields (12 B per 8 entries,
+and map. Every 8th entry starts a block, whose first field is kept in
+a table of the blocks' offsets and first fields (12 B per 8 entries,
 1.5 B a read) lets a look-up by field binary-search the blocks as plain
-words and decode a few entries. A filter of the fields read (two bits a
+words and decode a few entries (a block's first entry codes its field
+as a delta from its head's, 0). A filter of the fields read (two bits a
 field, about a byte each) answers most look-ups of a field the node does
 not read with no search at all: a walk under scopes passes many nodes.
 
