@@ -240,6 +240,11 @@ pub struct Options {
     /// (`PHITEX_CUT_MIN`, else 3000); `u64::MAX` never. The output is the
     /// same whatever it is.
     pub cut_min: Option<u64>,
+    /// The speculation window on a clean build's evaluation
+    /// (docs/spec-window.md; `PHITEX_SPEC_WINDOW=1`): the text runs no
+    /// further past the page layer's frontier than running ahead was
+    /// found to pay. Off by default; never on an edit's evaluation.
+    pub spec_window: bool,
     /// The threads the engine's batches run on: `None` takes
     /// `PHITEX_THREADS`, else the available parallelism; `Some(1)` runs
     /// them in order. The output is the same at any count.
@@ -1044,6 +1049,7 @@ impl Default for Options {
             stuck_after: None,
             memory_limit: None,
             cut_min: crate::exec::env_str!("PHITEX_CUT_MIN").and_then(|x| x.parse().ok()),
+            spec_window: crate::exec::env_flag!("PHITEX_SPEC_WINDOW"),
             threads: None,
             progress: None,
             edits: None,
@@ -2340,6 +2346,10 @@ fn print_accounting(
         eprintln!(
             "acct: frontier: {} reads held past the page layer's frontier",
             eng.frontier_held()
+        );
+        let (w, held, halved, doubled) = eng.window_stats();
+        eprintln!(
+            "acct: window: width {w} places, {held} runs held, {halved} halvings, {doubled} doublings"
         );
     }
     // (runs against live nodes per operation: where the runs beyond one a
@@ -7009,6 +7019,11 @@ impl Build {
         }
         let t_apply = t_all.elapsed();
         self.evaluated = true;
+        // (the speculation window: the clean build's evaluation alone, an
+        // edit's never, docs/spec-window.md)
+        self.g
+            .eng
+            .set_spec_window(self.opts.spec_window && self.settles == 1);
         self.g.settle(
             self.unit,
             &self.opts.finder,

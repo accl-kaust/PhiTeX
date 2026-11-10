@@ -63,6 +63,8 @@ pub struct Ctx<'a> {
     /// The run stopped at a read past the settling layer's frontier
     /// (`Ctx::set_frontier`): it runs again once the frontier passes it.
     pub(crate) wait_frontier: bool,
+    /// This run's distance past the frontier is noted (`Node::ahead`).
+    pub(crate) ahead_noted: bool,
     /// `Ctx::goes_on`: the run goes on from where its last run stopped.
     pub(crate) goes_on: bool,
     /// Its checks so far ([`Ctx::tick`]).
@@ -142,6 +144,7 @@ impl<'a> Ctx<'a> {
             stuck: None,
             wait_on: None,
             wait_frontier: false,
+            ahead_noted: false,
             goes_on: false,
             ticks: 0,
             before_placer: None,
@@ -448,6 +451,20 @@ impl<'a> Ctx<'a> {
         use std::sync::atomic::Ordering::{Acquire, Relaxed};
         let eng = self.eng;
         let fr = eng.frontier.load(Acquire);
+        // (the speculation window, docs/spec-window.md: this run's distance
+        // past the frontier noted at its first read, for a refutation of
+        // it to narrow the window; past the window, held there)
+        if !self.ahead_noted {
+            self.ahead_noted = true;
+            let d = crate::sched::window_distance(eng, self.me, fr);
+            self.me.ahead.store(d.map_or(0, |d| d + 1), Relaxed);
+            if d.is_some_and(|d| d > eng.window.load(Acquire)) {
+                eng.window_stats[0].fetch_add(1, Relaxed);
+                self.me.held_window.store(true, Relaxed);
+                self.wait_frontier = true;
+                return Err(stop());
+            }
+        }
         if fr == 0 || !eng.settle_marked(f) || eng.op(self.me.op()).settles_at_quiet() {
             return Ok(());
         }
@@ -464,6 +481,7 @@ impl<'a> Ctx<'a> {
             return Ok(());
         }
         eng.frontier_held.fetch_add(1, Relaxed);
+        self.me.held_window.store(false, Relaxed);
         if crate::sched::run_log() {
             eprintln!(
                 "frontier: read held node {} field {} at {}",

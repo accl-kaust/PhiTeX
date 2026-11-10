@@ -2873,6 +2873,71 @@ pub(crate) fn frontier_restore(eng: &Engine, w: Option<&Worker>, n: &Node) {
     }
 }
 
+/// The speculation window's first width, in places (docs/spec-window.md).
+pub(crate) const WINDOW_START: u64 = 8;
+/// Its widest: the whole text.
+const WINDOW_MAX: u64 = 1 << 20;
+
+/// `node`'s distance past the frontier `fr`, in places (slices as pushed,
+/// `order::GAP` labels apart), where the speculation window is on and
+/// `node` stands past it in its unit (docs/spec-window.md); none
+/// otherwise.
+pub(crate) fn window_distance(eng: &Engine, node: &Node, fr: u64) -> Option<u64> {
+    if fr == 0 || !eng.window_on.load(Ordering::Acquire) || eng.op(node.op()).settles_at_quiet() {
+        return None;
+    }
+    let f = eng.placed_node(NodeId::from_raw(fr - 1))?;
+    let (a, b) = (f.pos_hint().0, node.pos_hint().0);
+    let span = crate::order::UNIT_SPAN;
+    if b <= a || a / span != b / span {
+        return None;
+    }
+    Some((b - a) / crate::order::GAP)
+}
+
+/// Whether the speculation window holds `node` back at frontier `fr`:
+/// past it by more than the window.
+pub(crate) fn window_holds(eng: &Engine, node: &Node, fr: u64) -> bool {
+    window_distance(eng, node, fr).is_some_and(|d| d > eng.window.load(Ordering::Acquire))
+}
+
+/// A run ahead of the frontier by `ahead` places refuted: the window
+/// halves, to at most half that distance and at least one place.
+pub(crate) fn window_refuted(eng: &Engine, ahead: u64) {
+    eng.window_missed.store(true, Ordering::Release);
+    let w = eng.window.load(Ordering::Acquire);
+    let n = (w.min(ahead) / 2).max(1);
+    if n < w
+        && eng
+            .window
+            .compare_exchange(w, n, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        eng.window_stats[1].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The layer moved its frontier on: with no run ahead refuted since its
+/// last move, the window doubles.
+pub(crate) fn window_moved_on(eng: &Engine) {
+    if !eng.window_on.load(Ordering::Acquire) {
+        return;
+    }
+    if eng.window_missed.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let w = eng.window.load(Ordering::Acquire);
+    let n = (w * 2).min(WINDOW_MAX);
+    if n > w
+        && eng
+            .window
+            .compare_exchange(w, n, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        eng.window_stats[2].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Whether `node` stands past the settling layer's frontier `fr` (its
 /// raw id plus one, `Engine::frontier`): after it, which stands.
 pub(crate) fn past_frontier(eng: &Engine, node: &Node, fr: u64) -> bool {
@@ -2886,7 +2951,14 @@ pub(crate) fn past_frontier(eng: &Engine, node: &Node, fr: u64) -> bool {
 /// queued nowhere, listed in `Shared::frontier_waiting` unless the
 /// frontier passed it meanwhile or the run was re-asked (then queued).
 fn park_frontier(eng: &Engine, pool: &Pool, w: &Worker, node: &Node) {
-    let held = || past_frontier(eng, node, eng.frontier.load(Ordering::Acquire));
+    let held = || {
+        let fr = eng.frontier.load(Ordering::Acquire);
+        if node.held_window.load(Ordering::Acquire) {
+            window_holds(eng, node, fr)
+        } else {
+            past_frontier(eng, node, fr)
+        }
+    };
     if node.state() != State::Running || !held() || !node.cas_state(State::Running, State::Dirty) {
         end_run(eng, pool, w, node, State::Dirty);
         return;
@@ -2924,9 +2996,12 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
         if m.is_empty() {
             return;
         }
-        let (go, keep): (Vec<NodeId>, Vec<NodeId>) = m
-            .iter()
-            .partition(|&&n| eng.placed_node(n).is_none_or(|x| !past_frontier(eng, x, fr)));
+        let (go, keep): (Vec<NodeId>, Vec<NodeId>) = m.iter().partition(|&&n| {
+            eng.placed_node(n).is_none_or(|x| {
+                // (held by the window alone: let go once within it)
+                !past_frontier(eng, x, fr) || (x.held_window.load(Ordering::Acquire) && !window_holds(eng, x, fr))
+            })
+        });
         *m = keep;
         go
     };

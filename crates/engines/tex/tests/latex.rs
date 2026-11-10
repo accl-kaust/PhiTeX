@@ -938,7 +938,7 @@ fn floats2col_routines_run_once_per_fire() {
     let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
         .expect("the oracle");
     let mut bad = Vec::new();
-    for threads in [1u64, 8] {
+    for threads in [1u64, 8, 16] {
         let opts = Options {
             threads: Some(usize::try_from(threads).unwrap_or(1)),
             ..pdf_opts(name, &dir)

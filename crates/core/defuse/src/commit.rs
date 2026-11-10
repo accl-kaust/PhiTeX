@@ -2208,6 +2208,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         let new = at.map_or(0, |n| n.raw() + 1);
         let old = eng.frontier.swap(new, Ordering::AcqRel);
         crate::sched::log_frontier(eng, old, new, Some(node.id), "set");
+        // (moved on: the speculation window widens where nothing ahead
+        // was refuted since, docs/spec-window.md)
+        let pos = |x: u64| eng.placed_node(NodeId::from_raw(x - 1)).map(|n| n.pos_hint());
+        if new != old && (new == 0 || (old != 0 && pos(new) > pos(old))) {
+            crate::sched::window_moved_on(eng);
+        }
     }
     // a changed bracket: the readers after it whose answer moved
     if let Some(old) = bracket_change {
@@ -3627,6 +3633,12 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
     let now = reader_answer(eng, f, r);
     if now != r.seen() {
         note_refute(eng, f, r.node(), by, r.seen(), now);
+        // (a run made ahead of the frontier refuted: the speculation window
+        // narrows, docs/spec-window.md)
+        let ahead = eng.node(r.node()).ahead.swap(0, Ordering::AcqRel);
+        if ahead > 0 && eng.window_on.load(Ordering::Acquire) {
+            crate::sched::window_refuted(eng, ahead - 1);
+        }
     }
     // (a derived read that stands where its name moved: the field named
     // now gets a witness, so its own change re-asks the reader; then it is
