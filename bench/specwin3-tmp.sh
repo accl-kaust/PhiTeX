@@ -21,9 +21,11 @@ mkdir -p $w/warm && printf '%s\n' '\documentclass{article}' '\begin{document}' '
 (cd $w/warm && PHITEX_CACHE_DIR=$w/cache timeout 900 $B build warm.tex > /dev/null 2>&1)
 case $part in
 floats)
+  # (FMT=1: the tests' cached format made first, as the gate's earlier latex tests make it)
+  [ -n "${FMT:-}" ] && cargo test -q --release -p phitex-tex --test latex latex_paragraph_nodes > $r/fmt.txt 2>&1; ls -la target/cache/pdflatex.fmt 2>&1 | head -1
   for mode in ${MODES:-on}; do envof $mode
   for i in $(seq 1 ${FN:-20}); do
-    env "${e[@]}" timeout 600 cargo test -q --release -p phitex-tex --test latex floats2col_routines_run_once_per_fire -- --nocapture > $r/t-$mode-$i.txt 2>&1
+    env "${e[@]}" ${TEST_EXTRA:-} timeout 600 cargo test -q --release -p phitex-tex --test latex floats2col_routines_run_once_per_fire -- --nocapture > $r/t-$mode-$i.txt 2>&1
     echo "$mode test run $i: exit $? $(grep -E 'fires' $r/t-$mode-$i.txt | grep -v 'j 1:' | cut -c1-160 | tr '\n' ' ') $(grep -E '^window:' $r/t-$mode-$i.txt | tr '\n' ' ')"
   done
   # (the CLI's reference: a -j1 build, window off)

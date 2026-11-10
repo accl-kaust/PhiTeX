@@ -8,10 +8,12 @@ B=$PWD/target/release/phitex
 mkdir -p $w/warm && printf '%s\n' '\documentclass{article}' '\begin{document}' 'x' '\end{document}' > $w/warm/warm.tex
 (cd $w/warm && PHITEX_CACHE_DIR=$w/cache timeout 900 $B build warm.tex > /dev/null 2>&1)
 for i in $(seq 1 ${MAXTRY:-30}); do
+  # (FRESH=1: each try on an empty cache, no records nor hints from a run before)
+  [ -n "${FRESH:-}" ] && rm -rf $w/cache
   rm -rf $w/f && mkdir -p $w/f && cp oracle/fixtures/latex/pdfdocs/floats2col.tex $w/f/
-  (cd $w/f && env PHITEX_SPEC_WINDOW=1 PHITEX_WINDOW_LOG=1 PHITEX_WINDOW_FLOOR=0 PHITEX_WINDOW_PIN=1 PHITEX_WINDOW_START=0 ${TRACE_EXTRA:-} PHITEX_RUN_LOG=1 PHITEX_WAKE_LOG=1 PHITEX_CACHE_DIR=$w/cache timeout 300 $B build -j16 --exact-pdf floats2col.tex > $w/log.txt 2>&1)
+  (cd $w/f && env PHITEX_SPEC_WINDOW=1 PHITEX_WINDOW_LOG=1 PHITEX_WINDOW_FLOOR=0 PHITEX_WINDOW_PIN=1 PHITEX_WINDOW_START=0 ${TRACE_EXTRA:-} PHITEX_TEX_TIME=1 PHITEX_RUN_LOG=1 PHITEX_WAKE_LOG=1 PHITEX_CACHE_DIR=$w/cache timeout 300 $B build -j16 --exact-pdf floats2col.tex > $w/log.txt 2>&1)
   n=$(grep -c '^run: node [0-9]* (finish)' $w/log.txt)
-  echo "try $i: exit $? finisher runs $n $(grep '^window:' $w/log.txt | tail -1)"
+  echo "try $i: exit $? finisher runs $n $(grep '^window:' $w/log.txt | tail -1) | evaluations $(grep -c '^window:' $w/log.txt) | $(grep -E '^acct: runs/live nodes by op' $w/log.txt | grep -oE 'finish [0-9]+/[0-9]+ \([0-9.]+\)' | tr '\n' ' ')"
   if [ "$n" -gt ${OVER:-300} ]; then gzip -c $w/log.txt > $r/log.txt.gz; break; fi
 done
 python3 -I bench/fltrace-tmp.py $w/log.txt; python3 -I bench/fltrace2-tmp.py $w/log.txt
