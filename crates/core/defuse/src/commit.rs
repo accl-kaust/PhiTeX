@@ -5063,6 +5063,38 @@ pub(crate) fn check_inserted(eng: &Engine, w: Option<&Worker>, n: &Node) {
     }
 }
 
+/// The nodes `m`'s claim holds: from it up to its claim's end
+/// (`Node::claim_end`), those whose claimer it is.
+fn held_by(eng: &Engine, m: &Node) -> Vec<Arc<Node>> {
+    let Some(end) = m.claim_end.load(Ordering::Acquire).checked_sub(1).map(NodeId::from_raw) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cur = Some(m.seg_hint());
+    let mut lower = Some(m.pos_hint());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.unit != m.unit {
+            break;
+        }
+        {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((lower.map_or(Unbounded, Excluded), Unbounded)) {
+                let x = eng.node(*id);
+                if x.claimer() == Some(m.id) {
+                    out.push(x.clone());
+                }
+                if *id == end {
+                    return out;
+                }
+            }
+        }
+        lower = None;
+        cur = eng.order.next(sid, seg.lo);
+    }
+    out
+}
+
 /// Files a run's reads of its siblings (`Ctx::following`) with every node
 /// they passed (`read::following_passed`), with its serial: a change of
 /// one of those asks it again where its answer moved (`check_pullers`).
@@ -5474,6 +5506,9 @@ pub(crate) fn relocate(
     let mut first = true;
     let mut landed: Vec<Arc<Node>> = Vec::with_capacity(movers.len());
     for m in movers {
+        // (what it holds, where it stands now: moved past a reader, each
+        // is held before that reader or no more, `Node::held_before`)
+        let held = held_by(eng, &m);
         let Some(left) = lift(eng, &m) else {
             continue;
         };
@@ -5536,6 +5571,9 @@ pub(crate) fn relocate(
         // over where it stands now)
         check_pullers(eng, w, &m, None);
         check_inserted(eng, w, &m);
+        for h in &held {
+            check_pullers(eng, w, h, None);
+        }
         hi = hi.max(npos);
         landed.push(m);
     }
