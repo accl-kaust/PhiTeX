@@ -118,30 +118,40 @@ fn of_record(eng: &Engine, x: NodeId, me: NodeId, f: Option<Field>, out: &mut dy
     }
 }
 
-/// The fields read at node `x` ([`readers_at`]'s, each once or more).
-pub(crate) fn fields_at(eng: &Engine, x: NodeId, out: &mut dyn FnMut(Field)) {
-    readers_at(eng, x, None, &mut |g, _| out(g));
+/// The fields read at a segment's nodes now, with their nodes' bits,
+/// and those read through a derived path: what its `guarded` and
+/// `derived` sets are after a recount.
+pub(crate) fn fields_of(eng: &Engine, inner: &Inner) -> (Guarded, Guarded) {
+    let (mut s, mut d) = (Guarded::default(), Guarded::default());
+    for &x in inner.nodes.values() {
+        file_at(eng, x, &mut s, &mut d);
+    }
+    (s, d)
 }
 
-/// The fields read at a segment's nodes now, with their nodes' bits:
-/// what its `guarded` set is after a recount.
-pub(crate) fn fields_of(eng: &Engine, inner: &Inner) -> Guarded {
-    let mut s = Guarded::default();
-    for &x in inner.nodes.values() {
-        fields_at(eng, x, &mut |g| {
-            crate::segment::guard_insert(&mut s, g, x);
-        });
-    }
-    s
+/// The fields read at node `x` filed in a segment's sets (`guarded` and
+/// `derived`), with its bit; the fields new to `guarded`.
+pub(crate) fn file_at(eng: &Engine, x: NodeId, g: &mut Guarded, d: &mut Guarded) -> Vec<Field> {
+    let mut first = Vec::new();
+    readers_at(eng, x, None, &mut |f, r| {
+        if crate::segment::guard_insert(g, f, x) {
+            first.push(f);
+        }
+        if crate::read::derived_spec(eng, r.path()).is_some() {
+            crate::segment::guard_insert(d, f, x);
+        }
+    });
+    first
 }
 
 /// Its `guarded` set counted again from its nodes: the fields that left
 /// it, and those that entered it (a node moved in), for the field index.
 pub(crate) fn recount(eng: &Engine, inner: &mut Inner) -> (Vec<Field>, Vec<Field>) {
-    let now = fields_of(eng, inner);
+    let (now, derived) = fields_of(eng, inner);
     let gone: Vec<Field> = inner.guarded.keys().filter(|f| !now.contains_key(f)).copied().collect();
     let new: Vec<Field> = now.keys().filter(|f| !inner.guarded.contains_key(f)).copied().collect();
     inner.guarded = now;
+    inner.derived = derived;
     inner.replaced = 0;
     (gone, new)
 }

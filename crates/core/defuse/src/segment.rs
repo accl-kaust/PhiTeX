@@ -64,6 +64,12 @@ pub(crate) struct Inner {
     /// the nodes it is read at, as bits ([`guard_bit`]): a walk asks the
     /// records of those alone, not every node of the segment.
     pub(crate) guarded: Guarded,
+    /// Of those, the fields read through a derived path
+    /// (`read::derived_spec`), with their nodes' bits: a change of
+    /// brackets asks every derived read in its region, whatever its
+    /// field (`commit::reask_after_effect_with`), found here without
+    /// reading every record there.
+    pub(crate) derived: Guarded,
     /// Contributions by field, in position order, and their fold.
     pub(crate) contribs: FxHashMap<Field, PosMap<ValueId>>,
     pub(crate) sums: FxHashMap<Field, ValueId>,
@@ -1113,6 +1119,7 @@ impl Segment {
                 nodes: Nodes::new(),
                 defs: FxHashMap::default(),
                 guarded: Guarded::default(),
+                derived: Guarded::default(),
                 contribs: FxHashMap::default(),
                 sums: FxHashMap::default(),
                 sums_gen: 0,
@@ -1459,6 +1466,7 @@ impl Segment {
                 nodes,
                 defs,
                 guarded: Guarded::default(),
+                derived: Guarded::default(),
                 contribs,
                 sums: FxHashMap::default(),
                 sums_gen: 0,

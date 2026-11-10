@@ -515,6 +515,9 @@ fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, witness: bo
         drop(fo);
         a.has_foreign.store(true, Ordering::Release);
     }
+    if read::derived_spec(eng, r.path()).is_some() {
+        crate::segment::guard_insert(&mut inner.derived, f, r.anchor());
+    }
     crate::segment::guard_insert(&mut inner.guarded, f, r.anchor())
 }
 
@@ -5558,12 +5561,10 @@ fn land(
         // witnesses': they go with it) in this segment's set, with its
         // bit, under the lock that places it: set after, a walk between
         // passed over it, its bit not set where its field stood already)
-        let mut first_of: Vec<Field> = Vec::new();
-        crate::guard::fields_at(eng, m.id, &mut |f| {
-            if crate::segment::guard_insert(&mut inner.guarded, f, m.id) {
-                first_of.push(f);
-            }
-        });
+        let first_of = {
+            let inner = &mut *inner;
+            crate::guard::file_at(eng, m.id, &mut inner.guarded, &mut inner.derived)
+        };
         for f in first_of {
             eng.readers.add(f, seg.lo, seg.id);
         }
@@ -6170,17 +6171,8 @@ fn reask_after_effect_with(
                 reach.fields.insert(*f);
             }
         }
-        for (&ap, &x) in inner.nodes.iter() {
-            if !inside(ap) {
-                continue;
-            }
-            crate::guard::readers_at(eng, x, None, &mut |f, r| {
-                let all = reach.all || f == eng.depth_field || reach.fields.contains(&f);
-                if (all || read::derived_spec(eng, r.path()).is_some()) && live(eng, r.node(), r.serial) {
-                    readers.push((f, r));
-                }
-            });
-        }
+        let moves = |f: &Field| reach.all || *f == eng.depth_field || reach.fields.contains(f);
+        readers_of_fields(eng, &inner, &moves, &|ap| inside(ap), &mut readers);
         past.segment(&inner, first, at, stop, by.id, |f, d| !inside_new_open(f, d));
         let lo = seg.lo;
         drop(inner);
@@ -6235,18 +6227,13 @@ fn reask_after_effect_with(
                 let seg = eng.seg(sid);
                 movable.learn(eng, seg);
                 let inner = seg.inner.read();
-                for (&ap, &x) in inner.nodes.iter() {
-                    if ap < at || end.is_some_and(|(_, q)| ap > q) {
-                        continue;
-                    }
-                    crate::guard::readers_at(eng, x, None, &mut |f, r| {
-                        if (movable.of(eng, f) || read::derived_spec(eng, r.path()).is_some())
-                            && live(eng, r.node(), r.serial)
-                        {
-                            readers.push((f, r));
-                        }
-                    });
-                }
+                readers_of_fields(
+                    eng,
+                    &inner,
+                    &|f| movable.of(eng, *f),
+                    &|ap| ap >= at && end.is_none_or(|(_, q)| ap <= q),
+                    &mut readers,
+                );
                 let lo = seg.lo;
                 drop(inner);
                 if end.is_some_and(|(last, _)| last == sid) {
@@ -6265,18 +6252,13 @@ fn reask_after_effect_with(
                 let seg = eng.seg(sid);
                 movable.learn(eng, seg);
                 let inner = seg.inner.read();
-                for (&ap, &x) in inner.nodes.iter() {
-                    if first && ap <= q {
-                        continue;
-                    }
-                    crate::guard::readers_at(eng, x, None, &mut |f, r| {
-                        if (movable.of(eng, f) || read::derived_spec(eng, r.path()).is_some())
-                            && live(eng, r.node(), r.serial)
-                        {
-                            readers.push((f, r));
-                        }
-                    });
-                }
+                readers_of_fields(
+                    eng,
+                    &inner,
+                    &|f| movable.of(eng, *f),
+                    &|ap| !first || ap > q,
+                    &mut readers,
+                );
                 let lo = seg.lo;
                 drop(inner);
                 first = false;
@@ -6308,6 +6290,44 @@ fn reask_after_effect_with(
         fields.dedup();
         for f in fields {
             reask_from(eng, w, f, q, sid, None, None, 0, st);
+        }
+    }
+}
+
+/// The live readers at the nodes of segment `inner` at positions `here`
+/// of each field `moves` names, and of every field through a derived
+/// path (`read::derived_spec`): from the segment's sets, each field's
+/// nodes by their bits, so a change of brackets looks at the reads it can
+/// move, not at every read of the region (windycity's clean build at -j1:
+/// 375 s of its 435 in these walks, every record of the region read whole
+/// at each, against 100 s for the whole build before the guard reads).
+fn readers_of_fields(
+    eng: &Engine,
+    inner: &Inner,
+    moves: &dyn Fn(&Field) -> bool,
+    here: &dyn Fn(Pos) -> bool,
+    readers: &mut Vec<(Field, Reader)>,
+) {
+    let mut each = |f: Field, bits: u64, derived_only: bool| {
+        for (&ap, &x) in inner.nodes.iter() {
+            if bits & crate::segment::guard_bit(x) == 0 || !here(ap) {
+                continue;
+            }
+            crate::guard::readers_at(eng, x, Some(f), &mut |g, r| {
+                if (!derived_only || read::derived_spec(eng, r.path()).is_some()) && live(eng, r.node(), r.serial) {
+                    readers.push((g, r));
+                }
+            });
+        }
+    };
+    for (&f, &bits) in &inner.guarded {
+        if moves(&f) {
+            each(f, bits, false);
+        }
+    }
+    for (&f, &bits) in &inner.derived {
+        if !moves(&f) {
+            each(f, bits, true);
         }
     }
 }
