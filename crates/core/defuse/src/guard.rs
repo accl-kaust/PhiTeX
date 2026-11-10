@@ -92,6 +92,13 @@ fn of_record(eng: &Engine, x: NodeId, me: NodeId, f: Option<Field>, out: &mut dy
     let Some(r) = last.as_ref().filter(|r| !r.provisional) else {
         return;
     };
+    // (a read its record keeps as filed stands from the node's floor on,
+    // as its reader record did (`commit::FILED`, `segment::live`): the
+    // record a commit that kept it installs comes before that commit's
+    // serial, and a walk between the two must still find the reader, so
+    // that the commit, re-asked, checks what it kept (`Node::asked`). Its
+    // own new reads it checks in any case)
+    let floor = crate::commit::FILED | rn.filed_floor.load(std::sync::atomic::Ordering::Acquire);
     let mut prev: Option<ReadRec> = None;
     let mut each = |rd: ReadRec| {
         // (a read made again with the same answer is one reader: the
@@ -101,7 +108,8 @@ fn of_record(eng: &Engine, x: NodeId, me: NodeId, f: Option<Field>, out: &mut dy
         }
         prev = Some(rd);
         if let Some((g, inclusive)) = at_x(x, me, &rd) {
-            out(g, Reader::new(me, r.serial, x, inclusive, rd.path(), rd.seen()));
+            let serial = if rd.filed() { floor } else { r.serial };
+            out(g, Reader::new(me, serial, x, inclusive, rd.path(), rd.seen()));
         }
     };
     match f {
