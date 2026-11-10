@@ -70,8 +70,11 @@ bounds, path, seen, ordinal), coded as:
 
 About 10-13 B a read against 24 B, and none of the 43 B of reader list
 and map. Every 8th entry starts a block whose field is coded whole; a
-table of block offsets (4 B per 8 entries) lets a lookup by field
-binary-search the blocks and decode at most two of them.
+table of the blocks' offsets and first fields (12 B per 8 entries,
+1.5 B a read) lets a look-up by field binary-search the blocks as plain
+words and decode a few entries. A filter of the fields read (two bits a
+field, about a byte each) answers most look-ups of a field the node does
+not read with no search at all: a walk under scopes passes many nodes.
 
 The kind and path are coded in the entry itself: no read is interned,
 so the read-key table goes, and with it the lookups that cost para4000

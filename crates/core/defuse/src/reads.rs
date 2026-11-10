@@ -16,6 +16,9 @@ use crate::values::{Field, ValueId};
 
 /// Entries a block holds: its first codes its field whole.
 const BLOCK: usize = 8;
+/// A block's head before the entries: its offset (4 bytes) and its first
+/// entry's field (8 bytes, `u64::MAX` for none), searched by a look-up.
+const HEAD: usize = 12;
 
 /// The kinds' codes: the low four bits of an entry's head.
 const K_ME: u8 = 0;
@@ -215,14 +218,16 @@ impl Reads {
             a = b;
         }
         let blocks = n.div_ceil(BLOCK);
-        let mut out: Vec<u8> = Vec::with_capacity(blocks * 4 + n * 10);
-        out.resize(blocks * 4, 0);
-        let base = blocks * 4;
+        let mut out: Vec<u8> = Vec::with_capacity(blocks * HEAD + n * 10);
+        out.resize(blocks * HEAD, 0);
+        let base = blocks * HEAD;
         let mut prev = 0u64;
         for (j, &((f, code, a, b, path, seen, epoch, filed), _)) in keys.iter().enumerate() {
             if j % BLOCK == 0 {
                 let off = u32::try_from(out.len() - base).expect("a record's reads fit 4 GB");
-                out[(j / BLOCK) * 4..(j / BLOCK) * 4 + 4].copy_from_slice(&off.to_le_bytes());
+                let h = (j / BLOCK) * HEAD;
+                out[h..h + 4].copy_from_slice(&off.to_le_bytes());
+                out[h + 4..h + 12].copy_from_slice(&f.to_le_bytes());
                 prev = 0;
             }
             let tag = if seen == NO_VALUE {
@@ -315,8 +320,8 @@ impl Reads {
     }
 
     fn block_at(&self, k: usize) -> usize {
-        let b = &self.buf[k * 4..k * 4 + 4];
-        self.blocks() * 4 + u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize
+        let b = &self.buf[k * HEAD..k * HEAD + 4];
+        self.blocks() * HEAD + u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize
     }
 
     /// Its reads in set order (by field).
@@ -375,14 +380,9 @@ impl Reads {
 
     /// The field of block `k`'s first entry (`u64::MAX` for one of none).
     fn first_field(&self, k: usize) -> u64 {
-        let mut i = self.block_at(k);
-        let code = self.buf[i] & 0x0f;
-        i += 1;
-        if has_field(code) {
-            get(&self.buf, &mut i)
-        } else {
-            u64::MAX
-        }
+        let mut w = [0u8; 8];
+        w.copy_from_slice(&self.buf[k * HEAD + 4..k * HEAD + 12]);
+        u64::from_le_bytes(w)
     }
 }
 
