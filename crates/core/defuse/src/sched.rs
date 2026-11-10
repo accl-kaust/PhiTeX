@@ -2016,6 +2016,34 @@ fn stall_dump(eng: &Engine, shared: &Shared, t_idle: Instant) {
         "stall: {} outstanding, {idle} of {spawned} workers idle, no run ended for {secs} s; nodes not clean:\n",
         shared.outstanding.load(Ordering::SeqCst)
     );
+    {
+        let fr = eng.frontier.load(Ordering::Acquire);
+        let waiting: Vec<String> = shared
+            .frontier_waiting
+            .lock()
+            .iter()
+            .map(|&n| {
+                let x = eng.placed_node(n);
+                format!(
+                    "{}{}{}",
+                    n.raw(),
+                    if x.as_ref().is_some_and(|x| x.held_window.load(Ordering::Acquire)) {
+                        "w"
+                    } else {
+                        ""
+                    },
+                    x.and_then(|x| window_distance(eng, x, fr))
+                        .map_or(String::new(), |d| format!(":{d}"))
+                )
+            })
+            .collect();
+        out.push_str(&format!(
+            "  frontier {} window {} on {} waiting at the frontier {waiting:?}\n",
+            fr.saturating_sub(1),
+            eng.window.load(Ordering::Acquire),
+            eng.window_on.load(Ordering::Acquire)
+        ));
+    }
     for sid in eng.order.all() {
         let seg = eng.seg(sid);
         let inner = seg.inner.read();
