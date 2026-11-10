@@ -52,12 +52,27 @@ pub(crate) fn is_global(lid: i64) -> bool {
 }
 
 /// The id of the `k`-th list a run at scope depth `depth` leaves open.
-/// Lists open at once are left at different depths: a run inside one
-/// runs inside its groups' scopes, and a run back at the depth it was
-/// left at comes after its last group closed, the lists ended or the
-/// run's own again.
+/// Lists open at once are left at different depths (a run inside one
+/// runs inside its groups' scopes), but for a paragraph left open, which
+/// outlives them: [`first_free`].
 fn global_lid(depth: i64, k: usize) -> i64 {
     BASE - depth.clamp(0, 1 << 40) * 64 - i64::try_from(k).unwrap_or(63).min(63)
+}
+
+/// The first `k` free for lists left at `depth` by a run whose base is
+/// `base`: past a paragraph left open at that depth that the run is in
+/// ([`Run::vert_kind`]; it outlives the scopes of the run that left
+/// it, so a later run at its depth leaves lists while it is open:
+/// tikz2d-fr's second picture in a `tcolorbox`, its box given the
+/// paragraph's id, its start resetting the paragraph's items).
+fn first_free(depth: i64, base: &Mode) -> usize {
+    if is_global(base.lid) {
+        let off = BASE - base.lid;
+        if off / 64 == depth.clamp(0, 1 << 40) {
+            return usize::try_from(off % 64 + 1).unwrap_or(63);
+        }
+    }
+    0
 }
 
 fn par_field(vlid: i64) -> String {
@@ -191,7 +206,7 @@ impl Run<'_, '_> {
         self.muts += 1;
         let mut levels = std::mem::take(&mut self.nest);
         // the run's own ids made global
-        let mut k = 0;
+        let mut k = first_free(base.depth, &base);
         for i in 0..levels.len() {
             if !levels[i].owns {
                 continue;
