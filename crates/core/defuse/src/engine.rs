@@ -162,6 +162,17 @@ pub struct Engine {
     /// at a node made before one may answer otherwise with no change of
     /// its field counted ([`crate::node::RunRecord::read_holds`]).
     pub(crate) moves_gen: AtomicU64,
+    /// A count of the changes to the line's order and its siblings'
+    /// texts and claims (`Engine::structure_changed`): a run's reads of
+    /// its siblings (`ReadKind::Following`, `Next`, `Hole`) made before
+    /// one may name another sibling now. Moved (SeqCst) after the change
+    /// is made and before the change's own re-asks read a node's record
+    /// (`commit::wake_puller`, a removed sibling's claimer); a commit
+    /// installs its record and then reads the count (SeqCst, step 6). So
+    /// either the re-ask meets the new record and asks the node again,
+    /// or the commit sees the count moved and checks those reads again,
+    /// kept ones too.
+    pub(crate) struct_gen: AtomicU64,
     /// Nodes with brackets filed: none, and no scope is walked.
     pub(crate) bracket_nodes: AtomicUsize,
     /// The field a read of the scope depth is recorded under
@@ -391,6 +402,12 @@ impl Engine {
         self.scope_gen.load(Ordering::Acquire)
     }
 
+    /// The line's order, a sibling's text or a claim changed
+    /// ([`Engine::struct_gen`]).
+    pub(crate) fn structure_changed(&self) {
+        self.struct_gen.fetch_add(1, Ordering::SeqCst);
+    }
+
     pub(crate) fn scope_changed(&self) -> u64 {
         self.scope_gen.fetch_add(1, Ordering::AcqRel) + 1
     }
@@ -424,6 +441,7 @@ impl Engine {
             swept_left: AtomicU64::new(0),
             scope_gen: AtomicU64::new(1),
             moves_gen: AtomicU64::new(1),
+            struct_gen: AtomicU64::new(1),
             bracket_nodes: AtomicUsize::new(0),
             depth_field,
             has_finals: std::sync::atomic::AtomicBool::new(false),
@@ -852,6 +870,7 @@ impl Engine {
             self.nodes
                 .set(usize::try_from(node.id.raw()).unwrap_or(usize::MAX), node.clone());
             inner.nodes.insert(p, node.id);
+            self.structure_changed();
             inner.holes += 1;
             inner.by_op.entry(node.op()).or_default().push(node.id);
             commit::file_predicted(self, seg, &mut inner, &node, pred);
@@ -912,6 +931,7 @@ impl Engine {
                     });
                     self.nodes.set(first_id + k, node.clone());
                     inner.nodes.insert(p, id);
+                    self.structure_changed();
                     inner.holes += 1;
                     inner.by_op.entry(op).or_default().push(id);
                     commit::file_predicted(self, &seg, &mut inner, &node, pred);
@@ -1121,6 +1141,7 @@ impl Engine {
             self.nodes
                 .set(usize::try_from(id.raw()).unwrap_or(usize::MAX), n.clone());
             inner.nodes.insert(p, id);
+            self.structure_changed();
             inner.holes += 1;
             inner.by_op.entry(op).or_default().push(id);
             commit::file_predicted(self, seg, &mut inner, &n, pred);
@@ -1152,6 +1173,7 @@ impl Engine {
             effect = crate::api::Effect::Pending;
         }
         *n.text.write() = args.into();
+        self.structure_changed();
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
         n.effect.store(crate::node::pack_effect(effect), Ordering::Release);
         if n.taken() {
@@ -1639,6 +1661,11 @@ impl Engine {
             for line in self.stale_audit() {
                 eprintln!("defuse stale-audit: {line}");
             }
+        }
+        // (debug: settled, every clean node's reads of its siblings hold)
+        #[cfg(debug_assertions)]
+        if workers.iter().all(|w| w.held_unsettled.load(Ordering::Relaxed) == 0) {
+            crate::commit::assert_siblings_hold(self);
         }
         let swept = self.sweep_readers() as u64
             + workers

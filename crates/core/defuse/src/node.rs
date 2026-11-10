@@ -887,6 +887,9 @@ pub(crate) struct Product {
     pub(crate) scope_gen: u64,
     /// The relocations counted when it began (`Engine::moves_gen`).
     pub(crate) moves_gen: u64,
+    /// The changes of structure counted when it began
+    /// (`Engine::struct_gen`).
+    pub(crate) struct_gen: u64,
     /// The run published nothing new (`Ctx::unchanged`): the last
     /// record's definitions, contributions, placements and output stand,
     /// with this run's reads.

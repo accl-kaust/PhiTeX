@@ -529,6 +529,31 @@ fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, witness: bo
 #[cfg(debug_assertions)]
 pub(crate) static OWED: crate::lock::Mx<Option<FxHashMap<(NodeId, u32), u64>>> = crate::lock::Mx::new(None);
 
+/// (debug) At a quiet point: every clean node's reads of its siblings
+/// (`ReadKind::Following`) hold, none left stale by a change of structure
+/// its commit and its wakers both passed (`Engine::struct_gen`).
+#[cfg(debug_assertions)]
+pub(crate) fn assert_siblings_hold(eng: &Engine) {
+    let mut memo = read::FoldMemo::new();
+    for i in 0..eng.nodes.len() {
+        let Some(n) = eng.nodes.get(i) else { continue };
+        if n.state() != State::Clean || n.pos_hint() == Pos(0) {
+            continue;
+        }
+        let Some(r) = n.run_record() else { continue };
+        for rd in r.reads.iter() {
+            if matches!(rd.kind(), ReadKind::Following { .. }) {
+                assert!(
+                    read::holds(eng, n, &rd, &mut memo),
+                    "a quiet point with node {:?}'s read of its siblings {:?} stale",
+                    n.id,
+                    rd.kind()
+                );
+            }
+        }
+    }
+}
+
 /// Index changes made under a segment's lock, applied before it is let go
 /// (a field-index shard under it, as a split takes one): applied after
 /// it, one commit's removal of a segment's last definition of a field
@@ -2374,8 +2399,30 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // for a run not woken by the answer it parked on, which a change
     // before it ran may have merged into its wake)
     let asked = node.asked.swap(false, Ordering::SeqCst);
+    // (the line's structure changed since the run began, `Engine::struct_gen`:
+    // its kept reads of its siblings checked again. Read after the record's
+    // install: a change counted after this read wakes this node through
+    // its new record, `wake_puller`, and one counted before is seen here;
+    // a kept sibling read checked only where the waker saw the old record
+    // was stale: the `TikZ` manual at -j16, a rest's next unit a line short,
+    // an arrow tips table typeset twice over)
+    let struct_moved = eng.struct_gen.load(Ordering::SeqCst) != p.struct_gen;
     if !file_all && (asked || scope_moved || !p.on_park) {
         unchecked.extend(reads.iter().enumerate().filter(|(_, r)| r.filed()).map(|(i, _)| i));
+    } else if !file_all && struct_moved {
+        unchecked.extend(
+            reads
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| {
+                    r.filed()
+                        && matches!(
+                            r.kind(),
+                            ReadKind::Following { .. } | ReadKind::Next { .. } | ReadKind::Hole
+                        )
+                })
+                .map(|(i, _)| i),
+        );
     }
     let refuted = refuted.or_else(|| {
         let mut memo = read::FoldMemo::new();
@@ -2668,6 +2715,7 @@ pub(crate) fn commit_stood(
     node: &Arc<Node>,
     r: &Arc<RunRecord>,
     scope_gen: u64,
+    struct_gen: u64,
 ) -> Option<CommitStats> {
     let t0 = Instant::now();
     let ww = Some(w);
@@ -2679,6 +2727,10 @@ pub(crate) fn commit_stood(
         || r.reads
             .iter()
             .any(|x| matches!(x.kind(), ReadKind::Next { .. } | ReadKind::Hole))
+        // (its sibling reads, kept, checked by a full commit where the
+        // structure moved since the run began, `Engine::struct_gen`)
+        || (eng.struct_gen.load(Ordering::SeqCst) != struct_gen
+            && r.reads.iter().any(|x| matches!(x.kind(), ReadKind::Following { .. })))
     {
         return None;
     }
@@ -4406,6 +4458,7 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
             eng.stale_reads.fetch_add(o.reads.len() as u64, Ordering::Relaxed);
         }
         inner.nodes.remove(&pos);
+        eng.structure_changed();
         if was_hole {
             inner.holes = inner.holes.saturating_sub(1);
         }
@@ -4665,6 +4718,7 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
                     // takes: given back, whatever it claims now)
                     if s.claimer() == Some(me.id) {
                         s.claimer.store(0, Ordering::Release);
+                        eng.structure_changed();
                         // (free at once, under the segment's lock: a node
                         // taken with no holder is neither held nor free,
                         // and another claim's walk meeting it counted it
@@ -4689,8 +4743,10 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
                     // that sibling: its holder is me now)
                     if s.claimer().is_some_and(|c| c != me.id) && s.taken() {
                         s.claimer.store(me.id.raw() + 1, Ordering::Release);
+                        eng.structure_changed();
                     } else if s.take() {
                         s.claimer.store(me.id.raw() + 1, Ordering::Release);
+                        eng.structure_changed();
                         taken_now.push(s.id);
                         // (one that has not run yet: what it was predicted
                         // to define is withdrawn as a run's would be)
@@ -4704,6 +4760,7 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
                 } else {
                     if s.claimer() == Some(me.id) {
                         s.claimer.store(0, Ordering::Release);
+                        eng.structure_changed();
                         // (free at once, under the segment's lock: a node
                         // taken with no holder is neither held nor free,
                         // and another claim's walk meeting it counted it
@@ -4868,6 +4925,7 @@ pub(crate) fn place(
     eng.nodes
         .set(usize::try_from(node.id.raw()).unwrap_or(usize::MAX), node.clone());
     inner.nodes.insert(p, node.id);
+    eng.structure_changed();
     inner.holes += 1;
     inner.by_op.entry(node.op()).or_default().push(node.id);
     file_predicted(eng, seg, inner, &node, pred);
@@ -4988,6 +5046,7 @@ fn place_before(
     eng.nodes
         .set(usize::try_from(node.id.raw()).unwrap_or(usize::MAX), node.clone());
     inner.nodes.insert(p, node.id);
+    eng.structure_changed();
     inner.holes += 1;
     inner.by_op.entry(node.op()).or_default().push(node.id);
     file_predicted(eng, seg, inner, &node, pred);
@@ -5444,6 +5503,7 @@ fn lift(eng: &Engine, m: &Arc<Node>) -> Option<Left> {
     let after = inner.nodes.range((Excluded(pos), Unbounded)).next().map(|(_, &n)| n);
     let moves = seg.moved.load(Ordering::Acquire);
     inner.nodes.remove(&pos);
+    eng.structure_changed();
     if hole {
         inner.holes = inner.holes.saturating_sub(1);
     }
@@ -5578,6 +5638,7 @@ fn land(
         m.seg.store(seg.id.0, Ordering::Release);
         m.pos.store(p.0, Ordering::Release);
         inner.nodes.insert(p, m.id);
+        eng.structure_changed();
         // (the fields read at it (its record's, its foreign readers', its
         // witnesses': they go with it) in this segment's set, with its
         // bit, under the lock that places it: set after, a walk between

@@ -1445,15 +1445,15 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
                         .all(|&n| eng.placed_node(n).is_none_or(|x| x.unwalked.lock().is_empty())),
                     "a quiet point with a commit's fields unwalked"
                 );
-                #[cfg(debug_assertions)]
-                assert!(
-                    crate::commit::OWED.lock().as_ref().is_none_or(|m| m.is_empty()),
-                    "a quiet point with a commit owing a check of reads a change of brackets passed"
-                );
                 if pool.outstanding() > 0 {
                     continue;
                 }
             }
+            #[cfg(debug_assertions)]
+            assert!(
+                crate::commit::OWED.lock().as_ref().is_none_or(|m| m.is_empty()),
+                "a quiet point with a commit owing a check of reads a change of brackets passed"
+            );
             // (the wakes held to this quiet point: each reader's reads of
             // the field checked again now, re-asked where one moved; a
             // pass of the page layer's feedback into the text)
@@ -2746,7 +2746,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             let at_once = eng.committing.fetch_add(1, Ordering::Relaxed) + 1;
             eng.commit_peak.fetch_max(at_once, Ordering::Relaxed);
             let st = match product.stood.clone() {
-                Some(r) => crate::commit::commit_stood(eng, w, node, &r, product.scope_gen),
+                Some(r) => crate::commit::commit_stood(eng, w, node, &r, product.scope_gen, product.struct_gen),
                 None => None,
             }
             .unwrap_or_else(|| commit(eng, w, node, product));

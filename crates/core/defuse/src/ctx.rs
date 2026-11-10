@@ -136,6 +136,7 @@ impl<'a> Ctx<'a> {
                 place_effects: Vec::new(),
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
                 moves_gen: eng.moves_gen.load(std::sync::atomic::Ordering::Acquire),
+                struct_gen: eng.struct_gen.load(std::sync::atomic::Ordering::SeqCst),
                 unchanged: false,
                 own_claim: false,
                 at_hole: false,
@@ -195,7 +196,8 @@ impl<'a> Ctx<'a> {
     /// pages' objects): those rest on where it is cut, a cycle and not an
     /// input.
     pub fn begin_again(&mut self, keep: usize) {
-        let (scope_gen, moves_gen) = (self.product.scope_gen, self.product.moves_gen);
+        let (scope_gen, moves_gen, struct_gen) =
+            (self.product.scope_gen, self.product.moves_gen, self.product.struct_gen);
         let fresh = Ctx::new(self.eng, self.worker, self.me);
         let mut first = std::mem::replace(&mut self.product, fresh.product);
         first.reads.truncate(keep);
@@ -209,6 +211,7 @@ impl<'a> Ctx<'a> {
         self.passes_before.extend(first.reads);
         self.product.scope_gen = scope_gen;
         self.product.moves_gen = moves_gen;
+        self.product.struct_gen = struct_gen;
         self.views.clear();
         self.follow_at = None;
         self.seen.clear();
