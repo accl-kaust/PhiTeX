@@ -2337,7 +2337,11 @@ fn hold_for(eng: &Engine, node: &Node) -> Option<NodeId> {
     if op.works_at_frontier() || op.final_only() {
         return None;
     }
-    if eng.movers_n.load(Ordering::Acquire) != 0
+    // (a clean build's (the speculation window's, docs/spec-window.md):
+    // a run again waits for a source of its last run that is to run again
+    // and moved a reader; not for the nodes an edit made, there are none)
+    if eng.holds_on.load(Ordering::Acquire)
+        && eng.movers_n.load(Ordering::Acquire) != 0
         && let Some(x) = crate::read::mover_before(eng, node)
     {
         return Some(x);
@@ -2371,7 +2375,8 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     // and again. One thread takes them in order anyway)
     if !quiet
         && pool.shared.n > 1
-        && eng.holds_on.load(Ordering::Acquire)
+        && (eng.holds_on.load(Ordering::Acquire)
+            || (eng.window_on.load(Ordering::Acquire) && eng.window_chains.load(Ordering::Acquire)))
         && let Some(x) = hold_for(eng, node)
     {
         if run_log() {

@@ -14,7 +14,7 @@ on=(PHITEX_SPEC_WINDOW=1 PHITEX_WINDOW_LOG=1 ${WIN_EXTRA:-})
 # MODES: off, on, and on with a measure's knob: nofirst (PHITEX_FIRST_READS=0),
 # wave (PHITEX_WINDOW_WAVE=1), w8 (PHITEX_WINDOW_START=8)
 envof() { case $1 in off) e=() ;; on) e=("${on[@]}") ;; nofirst) e=("${on[@]}" PHITEX_FIRST_READS=0) ;;
-  wave) e=("${on[@]}" PHITEX_WINDOW_WAVE=1) ;; w8) e=("${on[@]}" PHITEX_WINDOW_START=8) ;; esac; }
+  wave) e=("${on[@]}" PHITEX_WINDOW_WAVE=1) ;; nochains) e=("${on[@]}" PHITEX_WINDOW_CHAINS=0) ;; w8) e=("${on[@]}" PHITEX_WINDOW_START=8) ;; esac; }
 # (the format built first, by a one-line document)
 mkdir -p $w/warm && printf '%s\n' '\documentclass{article}' '\begin{document}' 'x' '\end{document}' > $w/warm/warm.tex
 (cd $w/warm && PHITEX_CACHE_DIR=$w/cache timeout 900 $B build warm.tex > /dev/null 2>&1)
@@ -25,15 +25,18 @@ floats)
     env "${e[@]}" timeout 600 cargo test -q --release -p phitex-tex --test latex floats2col_routines_run_once_per_fire -- --nocapture > $r/t-$i.txt 2>&1
     echo "$mode test run $i: exit $? $(grep -E 'fires' $r/t-$i.txt | grep -v 'j 1:' | cut -c1-160 | tr '\n' ' ') $(grep -E '^window:' $r/t-$i.txt | tr '\n' ' ')"
   done
-  want=$(md5sum < oracle/fixtures/latex/pdf/floats2col.pdf | cut -c1-12)
+  # (the CLI's reference: a -j1 build, window off)
+  rm -rf $w/f && mkdir -p $w/f && cp oracle/fixtures/latex/pdfdocs/floats2col.tex $w/f/
+  (cd $w/f && PHITEX_CACHE_DIR=$w/cache timeout 300 $B build -j1 --exact-pdf floats2col.tex > $r/f-ref.txt 2>&1)
+  want=$(md5sum < $w/f/floats2col.pdf | cut -c1-12)
   hangs=0
   for i in $(seq 1 ${CN:-50}); do
     rm -rf $w/f && mkdir -p $w/f && cp oracle/fixtures/latex/pdfdocs/floats2col.tex $w/f/
     s0=$(date +%s.%N)
-    (cd $w/f && env "${e[@]}" PHITEX_STALL_SECS=30 PHITEX_CACHE_DIR=$w/cache timeout 120 $B build -j16 --exact-pdf floats2col.tex > $r/f-$i.txt 2>&1); x=$?
+    (cd $w/f && env "${e[@]}" PHITEX_TEX_TIME=1 PHITEX_STALL_SECS=30 PHITEX_CACHE_DIR=$w/cache timeout 120 $B build -j16 --exact-pdf floats2col.tex > $r/f-$i.txt 2>&1); x=$?
     [ $x = 124 ] && hangs=$((hangs+1))
     m=$(md5sum < $w/f/floats2col.pdf 2>/dev/null | cut -c1-12)
-    echo "$mode cli run $i: exit $x $(python3 -c "import time;print(f'{time.time()-$s0:.2f}')")s md5 $m $([ "$m" = "$want" ] && echo same || echo DIFFERS) $(grep -h '^window:' $r/f-$i.txt | tail -1)"
+    echo "$mode cli run $i: exit $x $(python3 -c "import time;print(f'{time.time()-$s0:.2f}')")s md5 $m $([ "$m" = "$want" ] && echo same || echo DIFFERS) $(grep -oE 'acct: [0-9]+ runs[^,]*' $r/f-$i.txt | tail -1) $(grep -h '^window:' $r/f-$i.txt | tail -1)"
   done
   echo "$mode cli: $hangs hangs in ${CN:-50}"
   done

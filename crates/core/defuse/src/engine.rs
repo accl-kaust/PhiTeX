@@ -224,6 +224,9 @@ pub struct Engine {
     /// refutation by the layer.
     pub(crate) first_reads_on: AtomicBool,
     pub(crate) window_wave: AtomicBool,
+    /// (`PHITEX_WINDOW_CHAINS=0`, a measure) a clean build's run again
+    /// waits for its moving sources (`sched::hold_for`).
+    pub(crate) window_chains: AtomicBool,
     pub(crate) window_stats: [AtomicU64; 4],
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
@@ -318,6 +321,10 @@ impl Engine {
             std::env::var("PHITEX_WINDOW_WAVE").is_ok_and(|x| x == "1"),
             Ordering::Release,
         );
+        self.window_chains.store(
+            std::env::var("PHITEX_WINDOW_CHAINS").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
         for s in &self.window_stats {
             s.store(0, Ordering::Release);
         }
@@ -409,6 +416,7 @@ impl Engine {
             window_released: AtomicU64::new(0),
             first_reads_on: AtomicBool::new(true),
             window_wave: AtomicBool::new(false),
+            window_chains: AtomicBool::new(true),
             window_stats: [const { AtomicU64::new(0) }; 4],
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
