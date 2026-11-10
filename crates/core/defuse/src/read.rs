@@ -1039,13 +1039,13 @@ pub(crate) fn fold_in(eng: &Engine, f: Field, from: Pos, to: Pos, memo: &mut Fol
 /// (no placement of a run before stands for it: a run again is answered
 /// the guess again).
 pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &mut FoldMemo) -> bool {
-    if let ReadKind::Field { at, .. } = *rd.kind(&eng.read_keys)
-        && let Some(spec) = member_spec(eng, rd.path(&eng.read_keys))
+    if let ReadKind::Field { at, .. } = *rd.kind()
+        && let Some(spec) = member_spec(eng, rd.path())
         && !member_now(eng, me, at, spec)
     {
         return true;
     }
-    if let ReadKind::Placed { i, guess: true } = *rd.kind(&eng.read_keys) {
+    if let ReadKind::Placed { i, guess: true } = *rd.kind() {
         let Some(r) = me.run_record() else {
             return true;
         };
@@ -1056,7 +1056,7 @@ pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &m
             return true;
         }
     }
-    answer_in(eng, me, &rd.kind(&eng.read_keys), rd.path(&eng.read_keys), memo) == rd.seen()
+    answer_in(eng, me, rd.kind(), rd.path(), memo) == rd.seen()
 }
 
 /// [`answer`], its folds from `memo`, on one layout ([`on_one_layout`]).
@@ -1531,10 +1531,10 @@ pub(crate) fn open_definer_before(eng: &Engine, me: &Node, r: &crate::node::RunR
 pub(crate) fn derived_target_open(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
     on_one_layout(eng, || {
         r.reads.iter().find_map(|rd| {
-            let ReadKind::Field { at, .. } = &(&*rd.kind(&eng.read_keys)) else {
+            let ReadKind::Field { at, .. } = &rd.kind() else {
                 return None;
             };
-            let spec = derived_spec(eng, rd.path(&eng.read_keys))?;
+            let spec = derived_spec(eng, rd.path())?;
             let (anchor, incl) = match *at {
                 Anchor::Me => (me.id, false),
                 Anchor::Before(n) => (n, false),
