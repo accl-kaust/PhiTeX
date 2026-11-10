@@ -3013,7 +3013,7 @@ pub(crate) fn beyond_window(eng: &Engine, d: u64) -> bool {
 pub(crate) fn window_refuted(eng: &Engine, ahead: u64) {
     eng.window_missed.store(true, Ordering::Release);
     let w = eng.window.load(Ordering::Acquire);
-    let n = (w.min(ahead) / 2).max(1);
+    let n = (w.min(ahead) / 2).max(eng.window_floor.load(Ordering::Acquire));
     if n < w
         && eng
             .window
@@ -3034,6 +3034,17 @@ pub(crate) fn window_refuted(eng: &Engine, ahead: u64) {
 pub(crate) fn window_acked(eng: &Engine) -> bool {
     if !eng.window_on.load(Ordering::Acquire) {
         return false;
+    }
+    // (once the layer has refuted a run ahead, a place a window's worth
+    // of runs in, as a congestion window avoids the loss it met: grown a
+    // place a run, floats2col's window was whole again within a page)
+    if exchanged(eng) {
+        let w = eng.window.load(Ordering::Acquire);
+        let k = eng.window_acks.fetch_add(1, Ordering::AcqRel) + 1;
+        if k < w.max(1) {
+            return false;
+        }
+        eng.window_acks.store(0, Ordering::Release);
     }
     let w = eng.window.fetch_add(1, Ordering::AcqRel).saturating_add(1);
     if w > WINDOW_MAX {
@@ -3060,7 +3071,13 @@ pub(crate) fn window_moved_on(eng: &Engine, by: u64) {
         return;
     }
     let w = eng.window.load(Ordering::Acquire);
-    let n = (w * 2).max(w.saturating_add(by.saturating_mul(2))).min(WINDOW_MAX);
+    // (after the layer refuted a run ahead, a place a move: it doubled
+    // before, and was whole again within a few pages)
+    let n = if exchanged(eng) {
+        w.saturating_add(1).min(WINDOW_MAX)
+    } else {
+        (w * 2).max(w.saturating_add(by.saturating_mul(2))).min(WINDOW_MAX)
+    };
     if n > w
         && eng
             .window
@@ -3069,6 +3086,12 @@ pub(crate) fn window_moved_on(eng: &Engine, by: u64) {
     {
         eng.window_stats[2].fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// The page layer has refuted a run ahead of it in this evaluation: its
+/// routines and the text exchange state (docs/spec-window.md).
+pub(crate) fn exchanged(eng: &Engine) -> bool {
+    eng.window_aimd.load(Ordering::Acquire) && eng.window_stats[1].load(Ordering::Acquire) > 0
 }
 
 /// Whether `node` stands past the settling layer's frontier `fr` (its
