@@ -1275,6 +1275,14 @@ pub(crate) struct Run<'c, 'a> {
     pub(crate) text_cut: bool,
     /// The candidate a second pass ends at ([`Halt::Recut`]).
     pub stop_at: Option<u32>,
+    /// The run's reads made before its last look at the page so far
+    /// ([`Run::page_so_far`], `Ctx::reads_len`).
+    pub(crate) page_read_mark: usize,
+    /// With a [`Halt::Recut`], the reads made before the read that asked
+    /// for the second pass (the page after the run's own, the pages'
+    /// objects): those the second pass's record keeps
+    /// (`Ctx::begin_again`).
+    pub(crate) recut_reads: usize,
     /// While a character run's lookahead expands (§1038): its list and
     /// its effect on the space factor so far, its nodes not on the list
     /// yet; the tail is its last character ([`Run::space_factor`],
@@ -1529,6 +1537,8 @@ impl<'c, 'a> Run<'c, 'a> {
             cut: None,
             text_cut: false,
             stop_at: None,
+            page_read_mark: 0,
+            recut_reads: 0,
             chars_live: None,
             chars_eff: i32::MIN,
             tool_cut: None,
