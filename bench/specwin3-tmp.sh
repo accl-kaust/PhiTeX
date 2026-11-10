@@ -68,6 +68,14 @@ edits)
     python3 -I -c 'import json,sys;r=json.load(open(sys.argv[1]));x=sorted(r["edit_walls_s"]);print(f"amsedit {sys.argv[2]} -j8: "+r["verdict"]+f" median {1000*x[len(x)//2]:.1f} ms mean {1000*sum(x)/len(x):.1f} ms")' $r/ams-$mode-$i.json "$mode run $i"
   done; done
   ;;
+census)
+  # census_plain with the run log: the runs again, by operation and cause
+  for mode in ${MODES:-off on}; do envof $mode
+    env "${e[@]}" PHITEX_RUN_LOG=1 timeout 1500 cargo test -q --release -p phitex-tex --features profile,observe --test chain -- census_plain --exact --nocapture > $r/census-$mode.txt 2>&1
+    echo "census $mode: $(grep -E '^test result' $r/census-$mode.txt) $(grep -E '^para400(dvi|pdf) \|' $r/census-$mode.txt | cut -c1-70 | tr '\n' ' ')"
+    grep -E '^run: node' $r/census-$mode.txt | grep -v 'goes on true' | grep -v 'Created' | sed -E 's/^run: node [0-9]+ \(([a-z]+)\).*: ([a-z ]+); goes on false, woken by Some\(([A-Za-z]+).*/\1 \2 \3/' | sort | uniq -c | sort -rn | head -12 | sed "s/^/  $mode: /"
+  done
+  ;;
 tests)
   for mode in off on; do
     e=(); [ $mode = on ] && e=("${on[@]}")
