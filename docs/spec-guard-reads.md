@@ -168,6 +168,13 @@ segment's lock before its check, as the reader record is now. No lock
 is added: a node's `last` and `foreign` are rows of the node's locks,
 taken under a segment's as a commit takes `last`, never two at once.
 
+A read a record keeps from the run before as filed (a parked loop's,
+`ReadRec::filed`) is asked with the filed serial at the node's floor,
+as its reader record was (`commit::FILED`): a commit that kept it
+installs its record before its serial, and a walk in between must still
+re-ask the node (`Node::asked`), which is what makes the commit check
+the reads it kept. Its new reads the commit checks in any case.
+
 A segment's set and the field index only grow between recounts, so a
 walk never skips a segment holding a reader; a recount is under the
 segment's write lock (split, give, sweep), with the index changed there,
