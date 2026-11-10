@@ -945,8 +945,11 @@ fn floats2col_routines_run_once_per_fire() {
         |x| x.split(',').filter_map(|t| t.trim().parse().ok()).collect(),
     );
     for threads in counts {
+        // (`PHITEX_TEST_FIXPOINT=1`, a measure: the read-back files to
+        // their fixpoint, as the CLI builds)
         let opts = Options {
             threads: Some(usize::try_from(threads).unwrap_or(1)),
+            fixpoint: std::env::var("PHITEX_TEST_FIXPOINT").is_ok_and(|x| x == "1"),
             ..pdf_opts(name, &dir)
         };
         let b = common::build(opts, Some(&prelude(true)), &src);
