@@ -72,7 +72,7 @@ edits)
 census)
   # census_plain with the run log: the runs again, by operation and cause
   for mode in ${MODES:-off on}; do envof $mode
-    env "${e[@]}" PHITEX_RUN_LOG=1 timeout 1500 cargo test -q --release -p phitex-tex --features profile,observe --test chain -- census_plain --exact --nocapture > $r/census-$mode.txt 2>&1
+    env "${e[@]}" PHITEX_RUN_LOG=1 PHITEX_WAKE_LOG=${WAKE:-} timeout 1500 cargo test -q --release -p phitex-tex --features profile,observe --test chain -- census_plain --exact --nocapture > $r/census-$mode.txt 2>&1
     echo "census $mode: $(grep -E '^test result' $r/census-$mode.txt) $(grep -E '^para400(dvi|pdf) \|' $r/census-$mode.txt | cut -c1-70 | tr '\n' ' ')"
     grep -E '^run: node' $r/census-$mode.txt | grep -v 'goes on true' | grep -v 'Created' | sed -E 's/^run: node [0-9]+ \(([a-z]+)\).*: ([a-z ]+); goes on false, woken by Some\(([A-Za-z]+).*/\1 \2 \3/' | sort | uniq -c | sort -rn | head -12 | sed "s/^/  $mode: /"
   done
