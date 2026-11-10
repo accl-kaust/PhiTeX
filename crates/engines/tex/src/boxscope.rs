@@ -122,7 +122,11 @@ impl Run<'_, '_> {
     /// text piece or a resume with no conditional, alignment, scope effect,
     /// picture child or character run pending; the innermost level a
     /// group; each level a group sharing the list below, a box's group, or
-    /// a paragraph with a group above it.
+    /// a paragraph with a group sharing its list right above it (that
+    /// group's kind names the paragraph, so the close of every scope
+    /// above it comes back to it; a box's group right above it would come
+    /// back to the list below the paragraph: amsldoc's minipage in a
+    /// `center`, its box put on the page, not in the paragraph).
     pub(crate) fn can_leave_lists(&self) -> bool {
         self.leave_refusal().is_none()
     }
@@ -184,7 +188,10 @@ impl Run<'_, '_> {
                 } else if l.group == 0 {
                     l.mode == 102
                         && l.par.is_some()
-                        && self.nest.get(k + 1).is_some_and(|u| u.group != 0)
+                        && self
+                            .nest
+                            .get(k + 1)
+                            .is_some_and(|u| u.group != 0 && !u.owns && u.lid == l.lid)
                 } else {
                     is_box_group(l.group) && l.par.is_none() && l.prev_graf == 0
                 }
