@@ -432,9 +432,7 @@ type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
 /// A page's box ([`PagePiece::bx`]) and, where its sealed lines are
 /// filled in, the units they were read from ([`lines_key`]) and what the
 /// filling replaced
-/// (`crate::nodes::fill_sealed`): the lines stay filled while the units
-/// are the same (a cold build fills each page once and never puts the
-/// stand-ins back, nor drops the lines).
+/// (`crate::nodes::fill_sealed`), while it is filled ([`with_page_box`]).
 struct PageBox {
     bx: BoxNode,
     filled: Option<Lines>,
@@ -471,7 +469,18 @@ type Made = (phitex_pdf::PageRecord, BTreeSet<FontId>, usize);
 /// is dropped then, not kept to the next collection beside every other
 /// version (the `TikZ` manual's pages, written as they shipped for the
 /// viewer at each pass).
-type RecordMemo = Mutex<FxHashMap<u64, (Lines, Arc<OnceLock<Made>>)>>;
+/// With each, the identity its glyphs are kept by (value store, page in
+/// the link, `crate::origins`), dropped with the record: a page's
+/// glyphs of lines it no longer has were kept beside every other version
+/// before (the `TikZ` manual's viewer: 0.9 GB at -j16, 900 s).
+type RecordMemo = Mutex<FxHashMap<u64, (Lines, Arc<OnceLock<Made>>, Option<(u64, u64)>)>>;
+
+/// The glyphs kept of records dropped ([`RecordMemo`]).
+fn forget_glyphs(gone: impl IntoIterator<Item = Option<(u64, u64)>>) {
+    for (inst, id) in gone.into_iter().flatten() {
+        crate::origins::forget(inst, id);
+    }
+}
 
 fn records() -> &'static RecordMemo {
     static P: OnceLock<RecordMemo> = OnceLock::new();
@@ -509,8 +518,8 @@ pub(crate) fn shown_id(x: u64, h: Option<&Lines>) -> u64 {
 /// `f` of page `pc`'s box with its sealed lines filled in
 /// ([`crate::nodes::fill_sealed`], `line` giving a line's box as its
 /// piece made it from the units `h`, [`lines_key`]), the box
-/// filled in place (no copy of the page) and left so while the units
-/// are the same ([`PageBox`]); `None` where a line is not found.
+/// filled in place (no copy of the page) and put back after
+/// ([`PageBox`]); `None` where a line is not found.
 fn with_page_box<T>(
     v: &Values,
     pc: &PagePiece,
@@ -543,7 +552,14 @@ fn with_page_box<T>(
         return None;
     }
     g.filled = Some(h.clone());
-    Some(f(&g.bx))
+    let r = f(&g.bx);
+    // (the stand-ins put back once written: the record is kept by its
+    // lines, [`record_of`], so the page is written again only for other
+    // lines, or for its glyphs; kept filled, every page streamed to a
+    // viewer held its lines' lists to the end, 1.6 GB of the `TikZ`
+    // manual's at -j16)
+    g.unfill();
+    Some(r)
 }
 
 /// The record of page `pc` (key `key`), its sealed lines' units `h`
@@ -557,24 +573,32 @@ fn record_of(
     line: &mut dyn FnMut(&crate::nodes::Sealed) -> Option<ValueId>,
     glyphs: Option<u64>,
 ) -> Arc<OnceLock<Made>> {
+    let inst = v.instance();
+    let mut gone = Vec::new();
     let m = {
         let mut all = records().locked();
         // (the records of builds gone: dropped wholesale past a bound,
         // made again where asked)
         if all.len() > 1 << 14 {
-            all.clear();
+            gone.extend(all.drain().map(|(_, e)| e.2));
         }
         let e = all
             .entry(key)
-            .or_insert_with(|| (h.clone(), Arc::default()));
+            .or_insert_with(|| (h.clone(), Arc::default(), None));
         if e.0 != *h {
-            *e = (h.clone(), Arc::default());
+            gone.push(e.2.take());
+            *e = (h.clone(), Arc::default(), None);
+        }
+        if let Some(id) = glyphs
+            && e.2 != Some((inst, id))
+        {
+            gone.push(e.2.replace((inst, id)));
         }
         e.1.clone()
     };
+    forget_glyphs(gone);
     // (origins on: the page's glyphs as the writer shows them, kept by
     // its identity in the link, `crate::origins`)
-    let inst = v.instance();
     let tapped = |bx: &BoxNode| {
         let (made, g) = write_page_with(v, pc, bx, glyphs.is_some());
         if let (Some(id), Some(g)) = (glyphs, g) {
@@ -607,7 +631,7 @@ fn record_made(key: u64, h: &Lines) -> bool {
     records()
         .locked()
         .get(&key)
-        .is_some_and(|(l, m)| l == h && m.get().is_some())
+        .is_some_and(|(l, m, _)| l == h && m.get().is_some())
 }
 
 /// The pages by key: a pure function's memo.
@@ -2162,7 +2186,7 @@ pub(crate) fn collect_pieces(v: &Values, live: &FxHashSet<u64>, keep: &mut dyn F
             .for_each(&mut *keep);
     }
     let mut rs = records().locked();
-    rs.retain(|k, _| m.contains_key(k));
+    forget_glyphs(rs.extract_if(|k, _| !m.contains_key(k)).map(|(_, e)| e.2));
 }
 
 /// At a collection: the link's memos of the last link dropped (the line,
@@ -2191,7 +2215,7 @@ pub(crate) fn prune_pieces(v: &Values, line: &[ValueId]) {
     let mut m = pieces().locked();
     m.retain(|k, pc| pc.inst != inst || keep.contains(k));
     let mut rs = records().locked();
-    rs.retain(|k, _| m.contains_key(k));
+    forget_glyphs(rs.extract_if(|k, _| !m.contains_key(k)).map(|(_, e)| e.2));
 }
 
 /// The commands no record on the line names dropped ([`CmdMemo`]):
