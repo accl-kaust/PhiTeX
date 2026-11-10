@@ -206,6 +206,19 @@ impl Run<'_, '_> {
                 };
                 return Ok(true);
             }
+            if let Some(n) = t.as_cs()
+                && n.frozen()
+                && n.starts_with(crate::boxscope::BOX_END)
+            {
+                // a box closed with the engine scope it was in, appended
+                // outside it (`crate::boxscope`, [`Run::box_end_left`])
+                self.cur = Cur {
+                    tok: t,
+                    cmd: cmd::IGNORE,
+                    chr: crate::boxscope::BOX_END_CHR,
+                };
+                return Ok(true);
+            }
             if t == crate::expand::notexpanded_tok() {
                 // §358
                 let Some(t2) = self.next_tok()? else {

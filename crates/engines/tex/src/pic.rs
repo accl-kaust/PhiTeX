@@ -1390,6 +1390,7 @@ impl Run<'_, '_> {
         self.appending.clear();
         self.appending_vals.clear();
         self.contribs.clear();
+        self.left_memo = None;
         self.kids.clear();
         self.fread.clear();
         self.doc_lines.clear();
@@ -1450,6 +1451,7 @@ impl Run<'_, '_> {
         let v = self.v;
         let took = self.pic_child.as_ref().map_or(0, |p| p.took);
         let steps = self.pic_steps();
+        self.left_memo = None;
         let contribs: Vec<ValueId> = std::mem::take(&mut self.contribs)
             .into_iter()
             .map(|(f, x)| v.list(vec![f.0, x]))
