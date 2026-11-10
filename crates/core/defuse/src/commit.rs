@@ -534,17 +534,20 @@ pub(crate) static OWED: crate::lock::Mx<Option<FxHashMap<(NodeId, u32), u64>>> =
 /// its commit and its wakers both passed (`Engine::struct_gen`).
 #[cfg(debug_assertions)]
 pub(crate) fn assert_siblings_hold(eng: &Engine) {
-    let mut memo = read::FoldMemo::new();
     for i in 0..eng.nodes.len() {
         let Some(n) = eng.nodes.get(i) else { continue };
         if n.state() != State::Clean || n.pos_hint() == Pos(0) {
             continue;
         }
         let Some(r) = n.run_record() else { continue };
+        // (each read going on from the one before, as the run read them
+        // and its commit checks them: one pass over the siblings)
+        let mut at = None;
         for rd in r.reads.iter() {
-            if matches!(rd.kind(), ReadKind::Following { .. }) {
+            if let ReadKind::Following { i } = *rd.kind() {
+                let now = read::following_on(eng, n, i, &mut at);
                 assert!(
-                    read::holds(eng, n, &rd, &mut memo),
+                    read::apply_path(eng, now.map(|x| read::text_value(eng, &x)), rd.path()) == rd.seen(),
                     "a quiet point with node {:?}'s read of its siblings {:?} stale",
                     n.id,
                     rd.kind()
