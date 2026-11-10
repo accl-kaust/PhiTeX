@@ -506,8 +506,11 @@ fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, witness: bo
         push_pruned(&mut a.foreign.lock().witness, (f, r), |x| {
             live(eng, x.1.node(), x.1.serial)
         });
+        a.has_foreign.store(true, Ordering::Release);
     } else if r.anchor() != r.node() {
-        eng.node(r.anchor()).foreign.lock().readers.insert(r.node());
+        let a = eng.node(r.anchor());
+        a.foreign.lock().readers.insert(r.node());
+        a.has_foreign.store(true, Ordering::Release);
     }
     inner.guarded.insert(f)
 }

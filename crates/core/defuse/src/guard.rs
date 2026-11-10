@@ -51,6 +51,9 @@ fn at_x(x: NodeId, me: NodeId, rd: &ReadRec) -> Option<(Field, bool)> {
 pub(crate) fn readers_at(eng: &Engine, x: NodeId, f: Option<Field>, out: &mut dyn FnMut(Field, Reader)) {
     let n = eng.node(x);
     of_record(eng, x, x, f, out);
+    if !n.has_foreign.load(std::sync::atomic::Ordering::Acquire) {
+        return;
+    }
     let (foreign, witness) = {
         let fo = n.foreign.lock();
         if fo.readers.is_empty() && fo.witness.is_empty() {

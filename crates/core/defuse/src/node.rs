@@ -232,6 +232,9 @@ pub(crate) struct Node {
     /// removal or move asks them again. A node each, not a field each: a
     /// picture's run reads 144 000 fields at its parent.
     pub(crate) foreign: Mx<crate::guard::Foreign>,
+    /// `foreign` was ever filed into: a walk past a node never read at by
+    /// another takes no lock of it for that.
+    pub(crate) has_foreign: AtomicBool,
     /// Relocated since its last commit (`commit::relocate`): its next
     /// commit checks its placements where it stands now, though its run
     /// published nothing new (`Ctx::unchanged`).
@@ -298,6 +301,7 @@ impl Node {
             has_brackets: AtomicBool::new(false),
             bracket_gen: AtomicU64::new(0),
             foreign: Mx::new(crate::guard::Foreign::default()),
+            has_foreign: AtomicBool::new(false),
             moved: AtomicBool::new(false),
             claim_all: AtomicBool::new(false),
             id,
