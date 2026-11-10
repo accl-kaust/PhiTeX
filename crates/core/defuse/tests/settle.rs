@@ -123,8 +123,10 @@ fn int(e: &Engine, n: phitex_defuse::NodeId) -> Option<i64> {
 
 /// Line: P1 (page: pn := 1), T1 (text: reads pn), P2 (page: pn2 := pn +
 /// 1), T2 (text: reads pn2). P1's text is edited to pn := 5. P2, a page
-/// node, is re-asked at once; T1 and T2 are held to the quiet point and
-/// run there, once each: two held, two fired, one pass.
+/// node, is re-asked at once; T1, re-asked by the edited P1, is held to
+/// the quiet point and runs there; T2, re-asked by P2, a link of the
+/// chain P1 started (`Node::run_chained`), at once: each once, one held,
+/// one fired, one pass.
 #[test]
 fn text_readers_of_a_page_value_run_once_at_the_quiet_point() {
     let o = setup();
@@ -152,8 +154,8 @@ fn text_readers_of_a_page_value_run_once_at_the_quiet_point() {
         rr + 2,
         "T1 and T2 once each: {rep:?}"
     );
-    assert_eq!(rep.held_deferred, 2, "{rep:?}");
-    assert_eq!(rep.held_fired, 2, "{rep:?}");
+    assert_eq!(rep.held_deferred, 1, "{rep:?}");
+    assert_eq!(rep.held_fired, 1, "{rep:?}");
     assert_eq!(rep.held_passes, 1, "{rep:?}");
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
@@ -193,7 +195,8 @@ fn a_held_reader_that_read_the_final_value_meanwhile_is_not_run_again() {
 
 /// A text definition read by a page node is re-asked at once, as before:
 /// A (text: a := 1), P (page: pn := a + 10), T (text: reads pn). A is
-/// edited: P runs in the same pass, T at the quiet point; one pass.
+/// edited: P runs in the same pass, and T, re-asked by P, a link of the
+/// chain the edit of A started (`Node::run_chained`), at once: no pass.
 #[test]
 fn a_page_node_reading_the_text_is_re_asked_at_once() {
     let o = setup();
@@ -208,9 +211,9 @@ fn a_page_node_reading_the_text_is_re_asked_at_once() {
     e.replace(an, o.def_op, vec![a.0, v.int(3)]);
     let rep = e.evaluate(1).unwrap();
     assert_eq!(int(e, t), Some(13), "{rep:?}");
-    assert_eq!(rep.held_deferred, 1, "{rep:?}");
-    assert_eq!(rep.held_fired, 1, "{rep:?}");
-    assert_eq!(rep.held_passes, 1, "{rep:?}");
+    assert_eq!(rep.held_deferred, 0, "{rep:?}");
+    assert_eq!(rep.held_fired, 0, "{rep:?}");
+    assert_eq!(rep.held_passes, 0, "{rep:?}");
     assert_eq!(o.def.runs.load(Ordering::SeqCst), 2);
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
@@ -715,10 +718,11 @@ impl Operation for Copy {
 /// after it reads, and that text gives it to the next routine: a clean
 /// build settles in its one wave at every thread count, each routine
 /// run a bounded number of times, on one thread's values. An edit that
-/// flips the first input flips them all and settles too; there each
-/// routine's re-ask of the text after it is held, the read being of the
-/// wave before, so the chain moves one routine a pass (8 here, under
-/// `Limits::settle_passes`).
+/// flips the first input flips them all and settles too, in one pass:
+/// the edited node's change is held, the chain it starts is not
+/// (`Node::run_chained`). Held link by link, it moved one routine a pass,
+/// and past `Limits::settle_passes` the wakes still held were dropped
+/// with the output kept, wrong.
 #[test]
 fn routines_flipping_the_text_after_them_settle_within_a_wave() {
     let line = |n: usize, threads: usize, edit: bool| {
@@ -768,9 +772,9 @@ fn routines_flipping_the_text_after_them_settle_within_a_wave() {
             assert_eq!(rep.held_passes, 0, "-j{threads}: one wave: {rep:?}");
             let bound = (n * (n + 1) / 2) as u64;
             assert!(runs <= bound, "-j{threads}: {runs} routine runs for {n}");
-            let n = 8;
             let (got, runs, rep) = line(n, threads, true);
             assert_eq!(got, alt(n, 1), "-j{threads} edited: {rep:?}");
+            assert!(rep.held_passes <= 1, "-j{threads} edited: one pass: {rep:?}");
             assert!(
                 runs <= 2 * (n * (n + 1) / 2) as u64,
                 "-j{threads} edited: {runs} routine runs for {n}"
