@@ -33,7 +33,7 @@ def main():
     flags = sys.argv[7:]
     edits = json.load(open(edits_json))
     p = subprocess.Popen([binary, "watch", "--no-view", "--json", *flags, "-j", j, main_], cwd=d,
-                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(os.environ.get("F52_ERR", os.devnull), "w"))
+                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=open(os.environ.get("F52_ERR", os.devnull), "a"))
 
     def next_build():
         t = time.monotonic()
@@ -64,12 +64,15 @@ def main():
             continue
         text = text.replace(a, b)
         time.sleep(0.4)
+        if os.environ.get("F52_ERR"):
+            with open(os.environ["F52_ERR"], "a") as m:
+                m.write(f"=== edit {a[:30]!r} -> {b[:30]!r}\n")
         tmp = path + ".tmp"
         open(tmp, "w", encoding="latin-1").write(text)
         os.replace(tmp, path)
         ev, w = next_build()
         ms = round(w * 1000, 1)
-        res["edits"].append({"old": a[:40], "new": b[:40], "ms": ms, "wall_ms": (ev or {}).get("wall_ms")})
+        res["edits"].append({"old": a[:40], "new": b[:40], "ms": ms, "wall_ms": (ev or {}).get("wall_ms"), "event": ev})
         print(f"edit {a[:30]!r} -> {b[:30]!r}: {ms} ms (wall_ms {(ev or {}).get('wall_ms')})", flush=True)
     res["watch_hwm_mb"] = hwm(p.pid)
     pdf = os.path.join(d, os.path.splitext(main_)[0] + ".pdf")
@@ -93,7 +96,7 @@ def main():
         if x.endswith((".pdf", ".aux", ".log", ".toc", ".out")):
             os.remove(os.path.join(cold, x))
     subprocess.run([binary, "build", *flags, "-j", j, main_], cwd=cold,
-                   stdout=subprocess.DEVNULL, stderr=open(os.environ.get("F52_ERR", os.devnull), "w"))
+                   stdout=subprocess.DEVNULL, stderr=open(os.environ.get("F52_ERR", os.devnull) + ".cold" if os.environ.get("F52_ERR") else os.devnull, "w"))
     try:
         c = hashlib.md5(open(os.path.join(cold, os.path.basename(pdf)), "rb").read()).hexdigest()
     except OSError:
