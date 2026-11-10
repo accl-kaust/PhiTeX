@@ -6301,6 +6301,20 @@ fn reask_after_effect_with(
 /// move, not at every read of the region (windycity's clean build at -j1:
 /// 375 s of its 435 in these walks, every record of the region read whole
 /// at each, against 100 s for the whole build before the guard reads).
+///
+/// The readers are those the walk asked before, every read of the region
+/// filtered by the same test: `moves` is the walk's own (`ScopeReach`:
+/// the fields with a local definition between the change and the reader,
+/// those with one before it in a scope open there above the scopes both
+/// sides share, and the depth; or, after a race, `Movable`: every field
+/// with a definition whose reach scopes can move), and a read of a field
+/// outside it answers from definitions both sides of the change see
+/// alike (`ScopeReach`'s reasoning), but for a derived read, whose field
+/// is found from others at its place. The sets hold every field read at
+/// a segment's nodes (`guarded`) and every one read through a derived
+/// path (`derived`), filed with the read, recounted from the records, and
+/// filed with a node where it lands; debug builds ask every read of the
+/// region again and assert none of those the test keeps is missed.
 fn readers_of_fields(
     eng: &Engine,
     inner: &Inner,
@@ -6308,6 +6322,8 @@ fn readers_of_fields(
     here: &dyn Fn(Pos) -> bool,
     readers: &mut Vec<(Field, Reader)>,
 ) {
+    #[cfg(debug_assertions)]
+    let start = readers.len();
     let mut each = |f: Field, bits: u64, derived_only: bool| {
         for (&ap, &x) in inner.nodes.iter() {
             if bits & crate::segment::guard_bit(x) == 0 || !here(ap) {
@@ -6328,6 +6344,27 @@ fn readers_of_fields(
     for (&f, &bits) in &inner.derived {
         if !moves(&f) {
             each(f, bits, true);
+        }
+    }
+    #[cfg(debug_assertions)]
+    {
+        let key = |f: Field, r: &Reader| (f, r.node(), r.serial, r.anchor(), r.path());
+        let found: FxHashSet<_> = readers[start..].iter().map(|(f, r)| key(*f, r)).collect();
+        for (&ap, &x) in inner.nodes.iter() {
+            if !here(ap) {
+                continue;
+            }
+            crate::guard::readers_at(eng, x, None, &mut |f, r| {
+                if (moves(&f) || read::derived_spec(eng, r.path()).is_some()) && live(eng, r.node(), r.serial) {
+                    assert!(
+                        found.contains(&key(f, &r)),
+                        "a change of brackets missed reader {:?} of {:?} at {:?}: its field not in the segment's sets with its bit",
+                        r.node(),
+                        f,
+                        x
+                    );
+                }
+            });
         }
     }
 }
