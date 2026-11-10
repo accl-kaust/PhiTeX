@@ -233,11 +233,6 @@ pub struct Engine {
     pub(crate) window_acks: AtomicU64,
     /// (`PHITEX_WINDOW_PIN=1`, a measure) no growth once exchanged.
     pub(crate) window_pin: AtomicBool,
-    /// The nearest distance a run ahead was refuted at by the layer, and
-    /// (`PHITEX_WINDOW_CEIL=0`, a measure) whether the window's growth
-    /// stops short of it (`sched::grow_cap`).
-    pub(crate) window_ceiling: AtomicU64,
-    pub(crate) window_ceil_on: AtomicBool,
     pub(crate) window_stats: [AtomicU64; 4],
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
@@ -344,11 +339,6 @@ impl Engine {
             Ordering::Release,
         );
         self.window_acks.store(0, Ordering::Release);
-        self.window_ceiling.store(u64::MAX, Ordering::Release);
-        self.window_ceil_on.store(
-            std::env::var("PHITEX_WINDOW_CEIL").map_or(true, |x| x != "0"),
-            Ordering::Release,
-        );
         self.window_pin.store(
             std::env::var("PHITEX_WINDOW_PIN").is_ok_and(|x| x == "1"),
             Ordering::Release,
@@ -453,8 +443,6 @@ impl Engine {
             window_floor: AtomicU64::new(1),
             window_acks: AtomicU64::new(0),
             window_pin: AtomicBool::new(false),
-            window_ceiling: AtomicU64::new(u64::MAX),
-            window_ceil_on: AtomicBool::new(true),
             window_stats: [const { AtomicU64::new(0) }; 4],
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),

@@ -3029,9 +3029,6 @@ pub(crate) fn beyond_window(eng: &Engine, d: u64) -> bool {
 /// halves, to at most half that distance and at least one place.
 pub(crate) fn window_refuted(eng: &Engine, ahead: u64) {
     eng.window_missed.store(true, Ordering::Release);
-    if eng.window_ceil_on.load(Ordering::Acquire) {
-        eng.window_ceiling.fetch_min(ahead, Ordering::AcqRel);
-    }
     let w = eng.window.load(Ordering::Acquire);
     let n = (w.min(ahead) / 2).max(eng.window_floor.load(Ordering::Acquire));
     if n < w
@@ -3059,12 +3056,6 @@ pub(crate) fn window_acked(eng: &Engine) -> bool {
     // of runs in, as a congestion window avoids the loss it met: grown a
     // place a run, floats2col's window was whole again within a page)
     if exchanged(eng) && eng.window_pin.load(Ordering::Acquire) {
-        return false;
-    }
-    // (never as far as a run ahead was refuted at: the layer and the text
-    // exchange state there; let wider, floats2col's grew back to 100 to
-    // 150 places and ran its finishers again with each wave)
-    if eng.window.load(Ordering::Acquire) >= grow_cap(eng) {
         return false;
     }
     if exchanged(eng) {
@@ -3108,8 +3099,7 @@ pub(crate) fn window_moved_on(eng: &Engine, by: u64) {
         w.saturating_add(1).min(WINDOW_MAX)
     } else {
         (w * 2).max(w.saturating_add(by.saturating_mul(2))).min(WINDOW_MAX)
-    }
-    .min(grow_cap(eng).max(w));
+    };
     if n > w
         && eng
             .window
@@ -3117,15 +3107,6 @@ pub(crate) fn window_moved_on(eng: &Engine, by: u64) {
             .is_ok()
     {
         eng.window_stats[2].fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-/// The widest the window grows to: short of the nearest distance a run
-/// ahead was refuted at by the layer (whole while none was).
-pub(crate) fn grow_cap(eng: &Engine) -> u64 {
-    match eng.window_ceiling.load(Ordering::Acquire) {
-        u64::MAX => WINDOW_MAX,
-        c => c.saturating_sub(1),
     }
 }
 
