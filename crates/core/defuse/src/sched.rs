@@ -1548,6 +1548,13 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
             {
                 let going: crate::values::FxHashSet<NodeId> = rel.iter().copied().collect();
                 let mut m = pool.shared.waiting.lock();
+                // (none waits on a stale run's definitions past here: the
+                // quiet point walked them all above, `Ctx::wait_for_settling`)
+                debug_assert!(
+                    m.keys()
+                        .all(|&on| eng.placed_node(on).is_none_or(|x| !x.transient.load(Ordering::Acquire))),
+                    "a wait on a stale run's commit outlives a quiet point"
+                );
                 let (keep, go): (Vec<_>, Vec<_>) = std::mem::take(&mut *m)
                     .into_iter()
                     .partition(|(on, _)| going.contains(on));

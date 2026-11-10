@@ -461,13 +461,19 @@ impl<'a> Ctx<'a> {
         // running again. A page's routine ran on a float list a piece
         // re-asked mid-run had filed, every routine after it again with
         // it: floats2col at -j16, 765 and 3 151 finisher runs for 194,
-        // accl 27139, 27141)
+        // accl 27139, 27141). No wait cycle: only for a node before me
+        // in the document's order, so each such wait is on an earlier
+        // node than the waiter and none comes back round; a wait parks
+        // the run (`sched::park_waiting`) and frees its worker, and the
+        // node waited for is dirty and queued (re-asked while it ran),
+        // so it runs at -j1 too; and a quiet point walks every node's
+        // fields left unwalked before it lets the waits go, so no such
+        // wait outlives it (`sched::run_worker`'s assertion)
         if let Some(by) = r.by
             && by != self.me.id
-            && self
-                .eng
-                .placed_node(by)
-                .is_some_and(|x| x.transient.load(std::sync::atomic::Ordering::Acquire))
+            && let Some(x) = self.eng.placed_node(by)
+            && x.transient.load(std::sync::atomic::Ordering::Acquire)
+            && x.pos_hint() < self.me.pos_hint()
         {
             self.wait_on = Some(by);
             return Err(stop());
