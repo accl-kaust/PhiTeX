@@ -2224,10 +2224,9 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
             n.run_ns.load(Ordering::Relaxed)
         );
         // (PHITEX_WAKE_BT: the path that woke it, for a wake by a settling
-        // node of one that does not settle with the frontier gone: the
-        // walks behind a late cascade)
+        // node of one that does not settle: the walks behind a late
+        // cascade)
         if std::env::var_os("PHITEX_WAKE_BT").is_some()
-            && fr == 0
             && !eng.op(n.op()).settles_at_quiet()
             && wake.by.is_some_and(|b| eng.op(eng.node(b).op()).settles_at_quiet())
         {
@@ -2235,8 +2234,8 @@ fn log_wake(eng: &Engine, w: Option<&Worker>, n: &Node, wake: &Wake) {
             let fns: Vec<&str> = bt
                 .lines()
                 .filter_map(|l| l.trim().split_once(": ").map(|x| x.1))
-                .filter(|l| l.contains("defuse::"))
-                .take(14)
+                .filter(|l| l.contains("defuse::") && !l.contains("{closure") && !l.contains("catch_unwind"))
+                .take(10)
                 .collect();
             eprintln!("wake-bt: node {} {}", n.id.raw(), fns.join(" < "));
         }
