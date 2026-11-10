@@ -475,7 +475,7 @@ impl<'a> Ctx<'a> {
             let d = crate::sched::window_distance(eng, self.me, fr);
             self.me.ahead.store(d.map_or(0, |d| d + 1), Relaxed);
             let pass = self.me.window_pass.swap(false, Relaxed);
-            if !pass && self.has_other_threads() && d.is_some_and(|d| d > eng.window.load(Acquire)) {
+            if !pass && self.has_other_threads() && d.is_some_and(|d| crate::sched::beyond_window(eng, d)) {
                 eng.window_stats[0].fetch_add(1, Relaxed);
                 self.me.held_window.store(true, Relaxed);
                 self.wait_frontier = true;
@@ -517,15 +517,12 @@ impl<'a> Ctx<'a> {
     /// past which it may yet place nodes (`None`: it places none, every
     /// reader is free). A reader of a field the layer defines past it
     /// waits for it to pass ([`Ctx::read`]).
-    /// The settling layer finds its routines and the text exchange
-    /// nothing a guess misses (docs/spec-window.md): the speculation
-    /// window opens whole; the runs it held are let go at this run's
-    /// commit of its frontier.
-    pub fn open_spec_window(&self) {
-        use std::sync::atomic::Ordering::{Acquire, Release};
-        if self.eng.window_on.load(Acquire) {
-            self.eng.window.store(crate::sched::WINDOW_MAX, Release);
-        }
+    /// The speculation window is on and whole (docs/spec-window.md): the
+    /// page layer has refuted no run of the text ahead of it lately, its
+    /// routines and the text exchange nothing a run ahead missed.
+    pub fn spec_window_whole(&self) -> bool {
+        use std::sync::atomic::Ordering::Acquire;
+        self.eng.window_on.load(Acquire) && self.eng.window.load(Acquire) >= crate::sched::WINDOW_MAX
     }
 
     pub fn set_frontier(&mut self, at: Option<NodeId>) {
@@ -1658,6 +1655,7 @@ impl<'a> Ctx<'a> {
     pub fn wait_for_first_definer(&mut self, f: Field) -> Result<(), Stop> {
         use std::sync::atomic::Ordering::Acquire;
         if !self.eng.window_on.load(Acquire)
+            || !self.eng.first_reads_on.load(Acquire)
             || !self.has_other_threads()
             || self.seen.contains_key(&f)
             || !self.eng.op(self.me.op()).text()

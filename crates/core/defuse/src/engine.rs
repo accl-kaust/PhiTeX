@@ -219,6 +219,11 @@ pub struct Engine {
     pub(crate) window_missed: AtomicBool,
     /// The width at which the runs the window held were last looked at.
     pub(crate) window_released: AtomicU64,
+    /// (measures, `PHITEX_FIRST_READS=0`, `PHITEX_WINDOW_WAVE=1`) the
+    /// first-read wait on, and the window narrowed only by a node's second
+    /// refutation by the layer.
+    pub(crate) first_reads_on: AtomicBool,
+    pub(crate) window_wave: AtomicBool,
     pub(crate) window_stats: [AtomicU64; 4],
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
@@ -305,6 +310,14 @@ impl Engine {
         self.window.store(start, Ordering::Release);
         self.window_released.store(start, Ordering::Release);
         self.window_missed.store(false, Ordering::Release);
+        self.first_reads_on.store(
+            std::env::var("PHITEX_FIRST_READS").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
+        self.window_wave.store(
+            std::env::var("PHITEX_WINDOW_WAVE").is_ok_and(|x| x == "1"),
+            Ordering::Release,
+        );
         for s in &self.window_stats {
             s.store(0, Ordering::Release);
         }
@@ -394,6 +407,8 @@ impl Engine {
             window: AtomicU64::new(crate::sched::WINDOW_START),
             window_missed: AtomicBool::new(false),
             window_released: AtomicU64::new(0),
+            first_reads_on: AtomicBool::new(true),
+            window_wave: AtomicBool::new(false),
             window_stats: [const { AtomicU64::new(0) }; 4],
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),

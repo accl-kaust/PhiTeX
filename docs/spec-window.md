@@ -70,17 +70,15 @@ node, over `GAP`. Continuations of a slice stand in its gap: distance 0.
     and no run ahead was refuted since the last move, W grows by twice
     the places the frontier moved, at least doubling (to at most 2^20
     places, the whole text).
-  - The page layer measures the exchange itself: each routine's
-    give-back is compared with the guess made for its page
-    (`Ops::give_back_guesses`). Once at least 4 have held and no more
-    than one in eight missed, the routines hand back nothing the text
-    could not have run ahead on, and W opens whole (`Ctx::open_spec_window`),
-    the held runs let go at the layer's commit.
-  So a document whose text and routines exchange nothing (para4000,
-  amsldoc) refutes nothing ahead, W doubles every page and the text
-  runs as far ahead as before after a few pages; one whose routines
-  hand back state every page (floats2col) refutes on most pages and W
-  stays near one page of text.
+  So a document whose text and routines exchange nothing (para4000)
+  refutes nothing ahead and W stays whole: nothing is held; one whose
+  routines hand back state every page (floats2col) refutes on most
+  pages and W stays near one page of text. (Opening W whole once the
+  routines' give-backs matched their guesses, as a first version did,
+  opened it on floats2col too: its routines give back what they gave
+  last while the text's float macros read and extend what they handed
+  back. The refutations are the measure of the exchange, not the
+  give-backs.)
 - **The fold's own window.** The other half of the chain: since 10-29
   ("no speculation depth") a clean build's fold never goes past a page
   whose routine's give-back no finisher has made yet, so each page waits
@@ -90,9 +88,11 @@ node, over `GAP`. Continuations of a slice stand in its gap: distance 0.
   guesses have held: each give-back found against the guess made for its
   page is counted held or missed (`Ops::give_back_guesses`), and the fold
   trusts the guess once at least 4 held and no more than one in eight
-  missed. Not a reversal of 10-29: a document whose routines hand back
-  something new each page (floats2col) never earns the trust, and folds
-  as it does now; one whose routines give back the same each page
+  missed, and only while W is whole (`Ctx::spec_window_whole`: the layer
+  has refuted no run ahead of it since W last grew whole). Not a
+  reversal of 10-29: a document whose routines and text exchange state
+  (floats2col) narrows W and never earns the trust, and folds as it does
+  now; one whose routines give back the same each page
   (plain text, a running head) folds on, its pages beside their
   routines. A miss refolds from that page, as a guess always did.
 - **Edits.** The window applies to a build's first evaluation (the

@@ -11,34 +11,40 @@ export SOURCE_DATE_EPOCH=1700000000 FORCE_SOURCE_DATE=1 NO_COLOR=1
 ( cargo build -q --release -p phitex-cli > $r/build.txt 2>&1 ) || { echo BUILD FAILED; tail $r/build.txt; exit 1; }
 B=$PWD/target/release/phitex
 on=(PHITEX_SPEC_WINDOW=1 PHITEX_WINDOW_LOG=1 ${WIN_EXTRA:-})
+# MODES: off, on, and on with a measure's knob: nofirst (PHITEX_FIRST_READS=0),
+# wave (PHITEX_WINDOW_WAVE=1), w8 (PHITEX_WINDOW_START=8)
+envof() { case $1 in off) e=() ;; on) e=("${on[@]}") ;; nofirst) e=("${on[@]}" PHITEX_FIRST_READS=0) ;;
+  wave) e=("${on[@]}" PHITEX_WINDOW_WAVE=1) ;; w8) e=("${on[@]}" PHITEX_WINDOW_START=8) ;; esac; }
 # (the format built first, by a one-line document)
 mkdir -p $w/warm && printf '%s\n' '\documentclass{article}' '\begin{document}' 'x' '\end{document}' > $w/warm/warm.tex
 (cd $w/warm && PHITEX_CACHE_DIR=$w/cache timeout 900 $B build warm.tex > /dev/null 2>&1)
 case $part in
 floats)
-  for i in $(seq 1 20); do
-    env "${on[@]}" timeout 600 cargo test -q --release -p phitex-tex --test latex floats2col_routines_run_once_per_fire -- --nocapture > $r/t-$i.txt 2>&1
-    echo "test run $i: exit $? $(grep -E 'fires' $r/t-$i.txt | grep -v 'j 1:' | cut -c1-160 | tr '\n' ' ') $(grep -E '^window:' $r/t-$i.txt | tr '\n' ' ')"
+  for mode in ${MODES:-on}; do envof $mode
+  for i in $(seq 1 ${FN:-20}); do
+    env "${e[@]}" timeout 600 cargo test -q --release -p phitex-tex --test latex floats2col_routines_run_once_per_fire -- --nocapture > $r/t-$i.txt 2>&1
+    echo "$mode test run $i: exit $? $(grep -E 'fires' $r/t-$i.txt | grep -v 'j 1:' | cut -c1-160 | tr '\n' ' ') $(grep -E '^window:' $r/t-$i.txt | tr '\n' ' ')"
   done
   want=$(md5sum < oracle/fixtures/latex/pdf/floats2col.pdf | cut -c1-12)
   hangs=0
-  for i in $(seq 1 50); do
+  for i in $(seq 1 ${CN:-50}); do
     rm -rf $w/f && mkdir -p $w/f && cp oracle/fixtures/latex/pdfdocs/floats2col.tex $w/f/
     s0=$(date +%s.%N)
-    (cd $w/f && env "${on[@]}" PHITEX_STALL_SECS=30 PHITEX_CACHE_DIR=$w/cache timeout 120 $B build -j16 --exact-pdf floats2col.tex > $r/f-$i.txt 2>&1); x=$?
+    (cd $w/f && env "${e[@]}" PHITEX_STALL_SECS=30 PHITEX_CACHE_DIR=$w/cache timeout 120 $B build -j16 --exact-pdf floats2col.tex > $r/f-$i.txt 2>&1); x=$?
     [ $x = 124 ] && hangs=$((hangs+1))
     m=$(md5sum < $w/f/floats2col.pdf 2>/dev/null | cut -c1-12)
-    echo "cli run $i: exit $x $(python3 -c "import time;print(f'{time.time()-$s0:.2f}')")s md5 $m $([ "$m" = "$want" ] && echo same || echo DIFFERS) $(grep -h '^window:' $r/f-$i.txt | tail -1)"
+    echo "$mode cli run $i: exit $x $(python3 -c "import time;print(f'{time.time()-$s0:.2f}')")s md5 $m $([ "$m" = "$want" ] && echo same || echo DIFFERS) $(grep -h '^window:' $r/f-$i.txt | tail -1)"
   done
-  echo "cli: $hangs hangs in 50"
+  echo "$mode cli: $hangs hangs in ${CN:-50}"
+  done
   ;;
 clean)
-  g=$w/bin/grail-src
+  g=$w/bin/grail-src; ls $w/bin 2>&1 | head -3
   docs="para4000:bench/para4000.tex:para4000 para400:bench/para400.tex:para400 amsldoc:bench/amsldoc:amsldoc"; [ -d "$g" ] && docs="$docs grail:$g:grail"
   for d in $docs; do IFS=: read name src main <<< "$d"
-    for i in 1 2 3; do for mode in off on; do
+    for i in 1 2 3; do for mode in ${MODES:-off on}; do
       rm -rf $w/c && mkdir -p $w/c && if [ -d "$src" ]; then cp -a $src/. $w/c/; else cp $src $w/c/; fi
-      e=(); [ $mode = on ] && e=("${on[@]}")
+      envof $mode
       s0=$(date +%s.%N); (cd $w/c && env "${e[@]}" PHITEX_TEX_TIME=1 PHITEX_CACHE_DIR=$w/cache timeout 1200 $B build -j16 --exact-pdf $main.tex > $r/$name-$mode-$i.txt 2>&1); x=$?
       t=$(python3 -c "import time;print(f'{time.time()-$s0:.2f}')")
       echo "$name -j16 $mode run $i: exit $x ${t}s $(md5sum < $w/c/$main.pdf 2>/dev/null | cut -c1-12) $(grep -oE '[0-9]+ nodes run of [0-9]+ live' $r/$name-$mode-$i.txt | tail -1) runs $(grep -oE 'acct: [0-9]+ runs' $r/$name-$mode-$i.txt | tail -1) $(grep -h '^window:' $r/$name-$mode-$i.txt | tail -1)"

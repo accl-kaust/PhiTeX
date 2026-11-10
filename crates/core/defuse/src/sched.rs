@@ -2500,7 +2500,9 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     // (a run that waited for a node before it that may define what it
     // read, before it did anything, `Ctx::wait_for_definer`: a wait, not
     // a run; its node runs when that node commits)
-    let waited = cx.waits_only && cx.wait_on.is_some() && matches!(r, Ok(Err(_)));
+    // (and one the window held at its first read, before it did
+    // anything: a wait too)
+    let waited = ((cx.waits_only && cx.wait_on.is_some()) || cx.wait_window) && matches!(r, Ok(Err(_)));
     if waited {
         Worker::add(&w.waits, 1);
     } else if resumption {
@@ -2991,7 +2993,14 @@ pub(crate) fn window_distance(eng: &Engine, node: &Node, fr: u64) -> Option<u64>
 /// Whether the speculation window holds `node` back at frontier `fr`:
 /// past it by more than the window.
 pub(crate) fn window_holds(eng: &Engine, node: &Node, fr: u64) -> bool {
-    window_distance(eng, node, fr).is_some_and(|d| d > eng.window.load(Ordering::Acquire))
+    window_distance(eng, node, fr).is_some_and(|d| beyond_window(eng, d))
+}
+
+/// Whether `d` places past the frontier is past the window: never where
+/// it is whole (a unit holds more places than `WINDOW_MAX`).
+pub(crate) fn beyond_window(eng: &Engine, d: u64) -> bool {
+    let w = eng.window.load(Ordering::Acquire);
+    w < WINDOW_MAX && d > w
 }
 
 /// A run ahead of the frontier by `ahead` places refuted: the window

@@ -1126,13 +1126,13 @@ impl Run<'_, '_> {
         let ordering = std::sync::atomic::Ordering::Relaxed;
         let [hits, misses] = &*self.ops.give_back_guesses;
         let holds = misses.load(ordering) * 8 <= hits.load(ordering) && hits.load(ordering) >= 4;
-        let trusted = beside && self.ops.spec_window.load(ordering) && holds;
-        // (and the text then exchanges nothing with the routines a guess
-        // misses: the speculation window opens whole, the text runs ahead
-        // as with it off)
-        if holds && self.ops.spec_window.load(ordering) {
-            self.cx.open_spec_window();
-        }
+        // (and only while the window is whole: the layer refutes no run
+        // of the text ahead of it. A routine may give back what it gave
+        // last while the text's float macros read and extend the lists
+        // it handed back: floats2col's guesses held, and the fold on
+        // them ran the finishers again with each wave of the text)
+        let trusted =
+            beside && self.ops.spec_window.load(ordering) && holds && self.cx.spec_window_whole();
         self.rest_begun_at = Some(p.node);
         let gave = match out {
             // (its finisher, the definer of the give-back, whether or not

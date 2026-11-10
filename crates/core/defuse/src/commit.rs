@@ -3654,7 +3654,12 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
         let by_layer = by
             .and_then(|b| eng.placed_node(b))
             .is_some_and(|b| eng.op(b.op()).settles_at_quiet());
-        if ahead > 0 && by_layer && eng.window_on.load(Ordering::Acquire) {
+        if ahead > 0
+            && by_layer
+            && eng.window_on.load(Ordering::Acquire)
+            && (eng.node(r.node()).layer_refuted.fetch_add(1, Ordering::AcqRel) > 0
+                || !eng.window_wave.load(Ordering::Acquire))
+        {
             crate::sched::window_refuted(eng, ahead - 1);
         }
     }
