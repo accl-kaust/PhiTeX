@@ -288,8 +288,6 @@ pub(crate) struct Worker {
     pub(crate) held_deferred: AtomicU64,
     pub(crate) held_fired: AtomicU64,
     pub(crate) held_passes: AtomicU64,
-    /// Held wakes dropped past `Limits::settle_passes` (1: yes).
-    pub(crate) held_unsettled: AtomicU64,
     pub(crate) woken: AtomicU64,
     pub(crate) walked: AtomicU64,
     pub(crate) scope_asked: AtomicU64,
@@ -736,7 +734,6 @@ impl Pool {
                 held_deferred: AtomicU64::new(0),
                 held_fired: AtomicU64::new(0),
                 held_passes: AtomicU64::new(0),
-                held_unsettled: AtomicU64::new(0),
                 woken: AtomicU64::new(0),
                 walked: AtomicU64::new(0),
                 scope_asked: AtomicU64::new(0),
@@ -1460,10 +1457,24 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
             // pass of the page layer's feedback into the text)
             let held: Vec<(NodeId, Wake)> = std::mem::take(&mut *eng.held.lock());
             if !held.is_empty() && w.held_passes.load(Ordering::Relaxed) >= u64::from(pool.limits.settle_passes) {
-                // (as latexmk past its maximum runs: the wakes still held
-                // are dropped, the last state is written out, and the
-                // client reports it)
-                w.held_unsettled.store(1, Ordering::Relaxed);
+                // (never a drop: a wake held and not fired leaves a reader
+                // on a value that moved, a wrong output written as if
+                // settled. The layer's feedback reaches the quiet point
+                // only from a later wave (`same_wave`), a chain of it
+                // moves in one pass, and so the cap is an engine defect:
+                // the build stops and says so)
+                debug_assert!(
+                    false,
+                    "the page layer did not settle in {} passes: {} wakes still held",
+                    pool.limits.settle_passes,
+                    held.len()
+                );
+                pool.fail(EvalError::Unsettled {
+                    passes: pool.limits.settle_passes,
+                    held: held.len(),
+                    nodes: held.iter().map(|x| x.0).take(8).collect(),
+                });
+                break;
             } else if !held.is_empty() {
                 let mut seen: crate::values::FxHashSet<NodeId> = crate::values::FxHashSet::default();
                 let mut memo = crate::read::FoldMemo::new();
@@ -1924,6 +1935,15 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
 /// commit ends instead, a routine run again in the wave on a race of its
 /// own was taken for feedback.
 ///
+/// Nor is a re-ask by a routine whose run another node's commit asked
+/// for (`Node::run_chained`: a link of a chain of re-asks, not an edit
+/// of it): an edit's change then moves along the line in one pass, as a
+/// clean build's does. Held there too, the chain moved one routine a
+/// pass, and past `Limits::settle_passes` the wakes still held were
+/// dropped with the output kept: a wrong PDF after an edit at any thread
+/// count (`settle::routines_flipping_the_text_after_them_settle_within_a_wave`,
+/// 40 routines).
+///
 /// What bounds the layer's feedback inside a wave, with no hold there: a
 /// re-ask goes only to readers after its definer (a definition reaches
 /// forward), a routine's to the text after it, that text's to the
@@ -1941,11 +1961,16 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
 /// (`settle::routines_flipping_the_text_after_them_settle_within_a_wave`).
 fn same_wave(eng: &Engine, by: NodeId, reader: &Node) -> bool {
     let Some(b) = eng.placed_node(by) else { return false };
-    let of = |n: &Node| match n.state() {
-        State::Running | State::RunningDirty => n.run_began.load(Ordering::SeqCst),
-        _ => n.run_start.load(Ordering::SeqCst),
+    let running = |n: &Node| matches!(n.state(), State::Running | State::RunningDirty);
+    let of = |n: &Node| {
+        if running(n) {
+            n.run_began.load(Ordering::SeqCst)
+        } else {
+            n.run_start.load(Ordering::SeqCst)
+        }
     };
-    of(b) <= of(reader)
+    let chained = if running(b) { &b.chain_began } else { &b.run_chained };
+    of(b) <= of(reader) || chained.load(Ordering::SeqCst)
 }
 
 /// Whether a definition by `by` reaches `reader` across the settling
@@ -2521,6 +2546,12 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     }
     node.run_began
         .store(eng.quiets.load(Ordering::SeqCst), Ordering::SeqCst);
+    let chained = node.woke.lock().as_ref().is_some_and(|k| match k.cause {
+        Cause::Edited | Cause::Created { by: None } => false,
+        Cause::Created { by: Some(_) } => true,
+        _ => k.by.is_some_and(|b| b != node.id),
+    });
+    node.chain_began.store(chained, Ordering::SeqCst);
     let first = node.run_epoch.swap(pool.epoch, Ordering::AcqRel) != pool.epoch;
     if first {
         node.runs.store(0, Ordering::Relaxed);
@@ -2802,6 +2833,8 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             node.done_ns.store(done, Ordering::Relaxed);
             node.run_start
                 .store(node.run_began.load(Ordering::SeqCst), Ordering::SeqCst);
+            node.run_chained
+                .store(node.chain_began.load(Ordering::SeqCst), Ordering::SeqCst);
             if run_log() {
                 eprintln!(
                     "commit: node {} done {} commit {} reask {} walked {} woken {}",

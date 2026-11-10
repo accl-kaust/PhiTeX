@@ -178,6 +178,12 @@ pub(crate) struct Node {
     /// wave than the reader's read (`sched::same_wave`).
     pub(crate) run_start: AtomicU64,
     pub(crate) run_began: AtomicU64,
+    /// The run its last commit made, and its run under way, were asked
+    /// for by another node's commit in their wave (a re-ask, a
+    /// placement), not by an edit: a link of a chain of re-asks, whose
+    /// own re-asks are not held (`sched::same_wave`).
+    pub(crate) run_chained: AtomicBool,
+    pub(crate) chain_began: AtomicBool,
     /// Its runs ahead of the frontier refuted by the page layer
     /// (`commit::reask_reader`; `PHITEX_WINDOW_WAVE`).
     pub(crate) layer_refuted: AtomicU32,
@@ -329,6 +335,8 @@ impl Node {
             transient: AtomicBool::new(false),
             run_start: AtomicU64::new(0),
             run_began: AtomicU64::new(0),
+            run_chained: AtomicBool::new(false),
+            chain_began: AtomicBool::new(false),
             layer_refuted: AtomicU32::new(0),
             back_frontier: Mx::new(None),
             asks: Mx::new(Vec::new()),
