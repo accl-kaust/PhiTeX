@@ -34,7 +34,7 @@
 use crate::build::{FoldState, Mode, fold_item, sf_value};
 use crate::run::{R, Run};
 use crate::val::{group, int_of, list_of};
-use phitex_defuse::ValueId;
+use phitex_defuse::{NodeId, ValueId};
 
 /// The ids of lists left open are at or below this.
 const BASE: i64 = -(1i64 << 55);
@@ -129,6 +129,18 @@ impl phitex_defuse::Monoid for ResetMonoid {
     }
 }
 
+/// Where a scope kind was defined, for the walk to its parents
+/// ([`Run::par_kind`]).
+#[derive(Clone, Copy)]
+pub(crate) enum KindFrom {
+    /// The scope this node runs in (its opener read before this node).
+    Here,
+    /// By this node.
+    Node(NodeId),
+    /// Not known: its parents are not walked.
+    Unknown,
+}
+
 /// A list left open folded so far by this run ([`Run::left_list_fold`]).
 pub(crate) struct LeftMemo {
     lid: i64,
@@ -218,6 +230,12 @@ impl Run<'_, '_> {
             "a scope effect"
         } else if let Some(why) = self.open_state_refusal() {
             why
+        } else if self.cut.is_some() || self.close_cont.is_some() || self.tool_cut.is_some() {
+            "cut already"
+        } else if !self.ins_pending.is_empty() {
+            // (insertions waiting for the page builder: only this run
+            // holds them, as a continuation's cut would carry them)
+            "insertions pending"
         } else if !self.appending.is_empty() || !self.appending_vals.is_empty() {
             "appends pending"
         } else if self.nest.last().is_some_and(|l| l.group == 0) {
@@ -375,7 +393,11 @@ impl Run<'_, '_> {
     /// in: `md`'s list stays it while `par:<list below>` names it, with
     /// the list below as its vertical list; else the paragraph ended
     /// (a `\par` inside the group) and `md` is that vertical list's.
-    pub(crate) fn par_kind(&mut self, k: ValueId, md: &mut Mode) -> R<()> {
+    ///
+    /// `from`: where `k` was defined ([`KindFrom`]). A frame 0's parent is not carried
+    /// ([`crate::build::outer_before_opener`]): it is the kind that
+    /// reached the frame's opener ([`Run::kind_before`]), and so outward.
+    pub(crate) fn par_kind(&mut self, k: ValueId, from: KindFrom, md: &mut Mode) -> R<()> {
         if let Some((kk, open, vlid, vm)) = self.par_memo
             && kk == k
         {
@@ -383,12 +405,26 @@ impl Run<'_, '_> {
             return Ok(());
         }
         let v = self.v;
+        let marker = crate::build::outer_before_opener(v);
         // the list below: the first kind outward in another list
         let mut cur = k;
+        let mut from = from;
         let (vlid, vm) = loop {
             let xs = list_of(v, cur);
             let Some(&p) = xs.get(5) else {
                 break (0, 1);
+            };
+            let p = if p == marker {
+                let opener = match from {
+                    KindFrom::Here => None,
+                    KindFrom::Node(n) => Some(n),
+                    KindFrom::Unknown => break (0, 1),
+                };
+                let (x, d) = self.kind_before(opener)?;
+                from = d.map_or(KindFrom::Unknown, KindFrom::Node);
+                x
+            } else {
+                p
             };
             if p == ValueId::UNIT {
                 break (0, 1);
