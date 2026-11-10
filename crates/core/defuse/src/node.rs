@@ -172,12 +172,12 @@ pub(crate) struct Node {
     /// `unwalked` is not empty: what the node has filed is its stale
     /// run's, and its next commit is coming (`Ctx::wait_for_settling`).
     pub(crate) transient: AtomicBool,
-    /// When the run its last commit made began (`Engine::now_ns`), and
+    /// When the run its last commit made began (`Engine::seq`), and
     /// when its run under way began: a reader's read saw a settling
     /// node's last commit or not (`sched::overlapped`).
     pub(crate) run_start: AtomicU64,
     pub(crate) run_began: AtomicU64,
-    /// When its last commit ended (`Engine::now_ns`; 0: none yet).
+    /// When its last commit ended (`Engine::seq`; 0: none yet).
     pub(crate) committed_at: AtomicU64,
     /// Its runs ahead of the frontier refuted by the page layer
     /// (`commit::reask_reader`; `PHITEX_WINDOW_WAVE`).

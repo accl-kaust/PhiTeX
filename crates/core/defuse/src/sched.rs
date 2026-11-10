@@ -1923,12 +1923,12 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
 /// that saw `by`'s last commit, a race costs the pages from it on once.
 fn overlapped(eng: &Engine, by: NodeId, reader: &Node) -> bool {
     let Some(b) = eng.placed_node(by) else { return false };
-    let c = b.committed_at.load(Ordering::Acquire);
+    let c = b.committed_at.load(Ordering::SeqCst);
     let began = match reader.state() {
         State::Running | State::RunningDirty => &reader.run_began,
         _ => &reader.run_start,
     };
-    c == 0 || began.load(Ordering::Acquire) <= c
+    c == 0 || began.load(Ordering::SeqCst) < c
 }
 
 /// Whether a definition by `by` reaches `reader` across the settling
@@ -2499,7 +2499,8 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         park_frontier(eng, pool, w, node);
         return Ok(());
     }
-    node.run_began.store(eng.now_ns(), Ordering::Release);
+    node.run_began
+        .store(eng.seq.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
     let first = node.run_epoch.swap(pool.epoch, Ordering::AcqRel) != pool.epoch;
     if first {
         node.runs.store(0, Ordering::Relaxed);
@@ -2780,8 +2781,9 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             let done = ns(pool.t0);
             node.done_ns.store(done, Ordering::Relaxed);
             node.run_start
-                .store(node.run_began.load(Ordering::Acquire), Ordering::Release);
-            node.committed_at.store(eng.now_ns(), Ordering::Release);
+                .store(node.run_began.load(Ordering::SeqCst), Ordering::SeqCst);
+            node.committed_at
+                .store(eng.seq.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
             if run_log() {
                 eprintln!(
                     "commit: node {} done {} commit {} reask {} walked {} woken {}",
