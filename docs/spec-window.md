@@ -39,11 +39,7 @@ node, over `GAP`. Continuations of a slice stand in its gap: distance 0.
   than W places past the frontier stops at its first read
   (`Ctx::hold_at_frontier`, the hold the layer's own fields already
   use) and runs again once the frontier moves (`release_frontier`).
-  Within W it runs as now. A run let go from a window hold is not held
-  by the window again on that wake (each wake waits at most once), and
-  where no work is left but runs the window holds, it widens to the
-  nearest of them and lets them go: the window orders runs, it never
-  keeps the only work there is from running. Nothing else waits: no commit is held, no
+  Within W it runs as now. Nothing else waits: no commit is held, no
   lock is taken, a node commits where it stands (positions partition
   the commits as before). The frontier's own node and its continuations
   (distance 0) always run, so the fold is never held by the window.

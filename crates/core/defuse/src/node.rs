@@ -152,10 +152,6 @@ pub(crate) struct Node {
     pub(crate) ahead: std::sync::atomic::AtomicU64,
     /// Its run was held by the window alone, not a read of the layer's.
     pub(crate) held_window: AtomicBool,
-    /// Let go from a hold of the window's: its next run is not held by it
-    /// again (each wake waits at most once: no run held and let go in a
-    /// loop while the window narrows and widens).
-    pub(crate) window_passed: AtomicBool,
     /// A wake of it moved the settling layer's frontier back
     /// (`sched::frontier_back`): the frontier it set, the one it replaced
     /// and `Engine::frontier_gen` then. Its commit puts the replaced one
@@ -291,7 +287,6 @@ impl Node {
             held_frontier: AtomicBool::new(false),
             ahead: std::sync::atomic::AtomicU64::new(0),
             held_window: AtomicBool::new(false),
-            window_passed: AtomicBool::new(false),
             back_frontier: Mx::new(None),
             asks: Mx::new(Vec::new()),
             restated: AtomicU32::new(0),
