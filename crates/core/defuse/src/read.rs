@@ -1056,7 +1056,7 @@ pub(crate) fn holds(eng: &Engine, me: &Node, rd: &crate::node::ReadRec, memo: &m
             return true;
         }
     }
-    answer_in(eng, me, &rd.kind(), rd.path(), memo) == rd.seen()
+    answer_in(eng, me, rd.kind(), rd.path(), memo) == rd.seen()
 }
 
 /// [`answer`], its folds from `memo`, on one layout ([`on_one_layout`]).
@@ -1474,7 +1474,7 @@ pub(crate) fn open_definer_before(eng: &Engine, me: &Node, r: &crate::node::RunR
 pub(crate) fn derived_target_open(eng: &Engine, me: &Node, r: &crate::node::RunRecord) -> Option<NodeId> {
     on_one_layout(eng, || {
         r.reads.iter().find_map(|rd| {
-            let ReadKind::Field { at, .. } = &(&*rd.kind()) else {
+            let ReadKind::Field { at, .. } = &rd.kind() else {
                 return None;
             };
             let spec = derived_spec(eng, rd.path())?;

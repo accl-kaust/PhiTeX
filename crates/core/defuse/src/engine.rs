@@ -1718,7 +1718,7 @@ impl Engine {
                     };
                     let moved = r.reads.iter().any(|rd| {
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            answer(self, node, &rd.kind(), rd.path()) != rd.seen()
+                            answer(self, node, rd.kind(), rd.path()) != rd.seen()
                         }))
                         .unwrap_or(true)
                     });
@@ -2152,10 +2152,10 @@ impl Engine {
         let v = self.values();
         let mut out = String::new();
         for rd in r.reads.iter() {
-            let now = answer(self, node, &rd.kind(), rd.path());
+            let now = answer(self, node, rd.kind(), rd.path());
             let show = |x: Option<ValueId>| x.map_or("none".to_owned(), |x| v.render(x));
             // (a field read: its name and the node whose definition reaches)
-            let site = match &*rd.kind() {
+            let site = match rd.kind() {
                 crate::node::ReadKind::Field {
                     f,
                     at: crate::node::Anchor::Me,
@@ -2370,7 +2370,7 @@ impl Engine {
                             "read otherwise: {} | answer {} filed {} epoch {} now-epoch {} | recorded {}",
                             show(Some(r)),
                             recr.get(&key(r)).map_or("?", |x| {
-                                let a = crate::read::answer(self, node, &x.kind(), x.path());
+                                let a = crate::read::answer(self, node, x.kind(), x.path());
                                 if a == r.seen() {
                                     "as now"
                                 } else if a == x.seen() {
@@ -2479,9 +2479,9 @@ impl Engine {
                 continue;
             };
             for rd in r.reads.iter() {
-                let now = answer(self, node, &rd.kind(), rd.path());
+                let now = answer(self, node, rd.kind(), rd.path());
                 if now != rd.seen() {
-                    let site = match &*rd.kind() {
+                    let site = match rd.kind() {
                         crate::node::ReadKind::Field {
                             f,
                             at: crate::node::Anchor::Me,

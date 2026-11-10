@@ -356,7 +356,7 @@ impl Iterator for Entries<'_> {
         if self.j >= self.n {
             return None;
         }
-        if self.j % BLOCK == 0 {
+        if self.j.is_multiple_of(BLOCK) {
             self.prev = 0;
         }
         self.j += 1;
@@ -422,7 +422,7 @@ mod tests {
         let seens = [
             None,
             Some(ValueId::from_raw((2 << TAG_SHIFT) | (PAYLOAD & (-5i64 as u64)))),
-            Some(ValueId::from_raw((3 << TAG_SHIFT) | 0x1234_5678_9abc_def)),
+            Some(ValueId::from_raw((3 << TAG_SHIFT) | 0x0123_4567_89ab_cdef)),
             Some(ValueId::from_raw((4 << TAG_SHIFT) | (1 << 40) | 77)),
             Some(ValueId::from_raw((5 << TAG_SHIFT) | (1 << 40) | 3)),
             Some(ValueId::UNIT),

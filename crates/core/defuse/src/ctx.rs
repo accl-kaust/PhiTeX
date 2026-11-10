@@ -1133,13 +1133,13 @@ impl<'a> Ctx<'a> {
     /// The view one step further; None where the step does not apply.
     pub fn at(&mut self, v: View, s: Step) -> Option<View> {
         let rec = self.view_rec(v)?;
-        let (kind, value, epoch) = (rec.kind.clone(), rec.value, rec.epoch);
+        let (kind, value, epoch) = (rec.kind, rec.value, rec.epoch);
         let path = self.eng.path_extend(rec.path, s);
         let x = read::step(self.eng, value, s);
         let present = self.eng.path_extend(path, Step::Present);
         let seen = Some(self.eng.values().bool(x.is_some()));
         self.ep = epoch;
-        self.record(kind.clone(), present, seen);
+        self.record(kind, present, seen);
         x?;
         self.views.push(ViewRec {
             kind,
@@ -1153,7 +1153,7 @@ impl<'a> Ctx<'a> {
     /// The value at one step further, recorded as a read of that path.
     pub fn get(&mut self, v: View, s: Step) -> Option<ValueId> {
         let rec = self.view_rec(v)?;
-        let (kind, value, epoch) = (rec.kind.clone(), rec.value, rec.epoch);
+        let (kind, value, epoch) = (rec.kind, rec.value, rec.epoch);
         let path = self.eng.path_extend(rec.path, s);
         let x = read::step(self.eng, value, s);
         self.ep = epoch;
@@ -1177,7 +1177,7 @@ impl<'a> Ctx<'a> {
         let Some(rec) = self.view_rec(v) else {
             return ValueId::UNIT;
         };
-        let (kind, path, value) = (rec.kind.clone(), rec.path, rec.value);
+        let (kind, path, value) = (rec.kind, rec.path, rec.value);
         self.ep = rec.epoch;
         self.record(kind, path, value);
         value.unwrap_or(ValueId::UNIT)
@@ -1836,7 +1836,7 @@ impl<'a> Ctx<'a> {
             if crate::obs::enabled() && std::env::var_os("PHITEX_STANDS_TRACE").is_some() {
                 let rd = &r.reads.iter().nth(i).expect("the read found");
                 let v = &self.eng.values;
-                let now = crate::read::answer_in(self.eng, self.me, &rd.kind(), rd.path(), &mut memo.fold);
+                let now = crate::read::answer_in(self.eng, self.me, rd.kind(), rd.path(), &mut memo.fold);
                 let show =
                     |x: Option<ValueId>| x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(200).collect());
                 eprintln!(
@@ -1982,7 +1982,7 @@ impl<'a> Ctx<'a> {
         let mut i = 0;
         let log = &mut self.unread_log;
         self.product.reads.retain(|r| {
-            let keep = match &*r.kind() {
+            let keep = match r.kind() {
                 ReadKind::Field { f: g, .. }
                 | ReadKind::Env { f: g }
                 | ReadKind::Fold { f: g, .. }
@@ -2005,7 +2005,7 @@ impl<'a> Ctx<'a> {
     pub fn own_reads_hold(&self) -> bool {
         let mut memo = crate::read::FoldMemo::new();
         self.product.reads.iter().all(|rd| {
-            matches!(&*rd.kind(), ReadKind::Placed { .. } | ReadKind::Hole)
+            matches!(rd.kind(), ReadKind::Placed { .. } | ReadKind::Hole)
                 || (crate::read::holds(self.eng, self.me, rd, &mut memo)
                     && rd
                         .kind()
@@ -2082,10 +2082,10 @@ impl<'a> Ctx<'a> {
             }
         }
         let moved = self.product.reads.iter().any(|rd| {
-            if matches!(&*rd.kind(), ReadKind::Following { .. }) {
+            if matches!(rd.kind(), ReadKind::Following { .. }) {
                 return false;
             }
-            if let ReadKind::Placed { i, guess } = &*rd.kind() {
+            if let ReadKind::Placed { i, guess } = rd.kind() {
                 return match outs.get(i).copied().flatten() {
                     Some(o) => read::apply_path(self.eng, Some(o), rd.path()) != rd.seen(),
                     // (no child of that key has run: a guess holds until
@@ -2094,7 +2094,7 @@ impl<'a> Ctx<'a> {
                 };
             }
             if !scope_moved
-                && !matches!(&*rd.kind(), ReadKind::Next { .. })
+                && !matches!(rd.kind(), ReadKind::Next { .. })
                 && rd.kind().field().is_some_and(|f| self.eng.field_epoch(f) == rd.epoch)
             {
                 return false;

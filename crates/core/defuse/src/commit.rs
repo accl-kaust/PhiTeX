@@ -886,7 +886,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             if let Some(&seen) = again.get(&x.key())
                 && seen != x.seen()
                 && matches!(
-                    &*x.kind(),
+                    x.kind(),
                     ReadKind::Fold { .. }
                         | ReadKind::Next { .. }
                         | ReadKind::Field {
@@ -894,7 +894,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                             ..
                         }
                 )
-                && !(matches!(&*x.kind(), ReadKind::Next { .. }) && x.seen().is_none())
+                && !(matches!(x.kind(), ReadKind::Next { .. }) && x.seen().is_none())
             {
                 replaced_moved.push(*x.kind());
             }
@@ -954,11 +954,11 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                         lost_filed |= !keep;
                         return keep;
                     }
-                    read_again.is_none() && !gone(x) && !matches!(&*x.kind(), ReadKind::Placed { .. })
+                    read_again.is_none() && !gone(x) && !matches!(x.kind(), ReadKind::Placed { .. })
                 })
                 .map(|x| {
                     let mut y = *x;
-                    y.set_filed(r.state.is_some() && stays_filed(&x.kind(), x));
+                    y.set_filed(r.state.is_some() && stays_filed(x.kind(), x));
                     y
                 }),
         );
@@ -1212,12 +1212,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // reads; any other's stand for its commit, and a walk asks no more
         // of them than their serial)
         let (kind, path) = r.kind_path();
-        let serial = if parks && stays_filed(&kind, r) {
+        let serial = if parks && stays_filed(kind, r) {
             serial | FILED
         } else {
             serial
         };
-        match &*kind {
+        match kind {
             ReadKind::Field { f, at } => {
                 let (anchor, inclusive) = match *at {
                     Anchor::Me => (node.id, false),
@@ -2322,7 +2322,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             // (a `next`'s answer moves when a node it stopped at commits
             // with nothing, which counts no change of its field)
             if !scope_moved
-                && !matches!(&*r.kind(), ReadKind::Next { .. })
+                && !matches!(r.kind(), ReadKind::Next { .. })
                 && r.kind().field().is_some_and(|f| eng.field_epoch(f) == r.epoch)
             {
                 return false;
@@ -2372,7 +2372,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
             let by = now.and_then(|x| x.item.map(|(id, _)| id).or(x.stop)).unwrap_or(n);
             Cause::Range { field: f, by }
         }
-        _ => cause_of(&r.kind()),
+        _ => cause_of(r.kind()),
     };
     // (a read kept from the run its state came from no longer holds: the
     // run that resumed from that state rests on it. A range read names
@@ -2390,7 +2390,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     {
         // (the commit's own check: the read's old answer and its new one)
         let r = &reads[i];
-        let now = read::answer_in(eng, node, &r.kind(), r.path(), &mut read::FoldMemo::new());
+        let now = read::answer_in(eng, node, r.kind(), r.path(), &mut read::FoldMemo::new());
         note_refute(eng, f, node.id, None, r.seen(), now);
     }
     node.refuted
@@ -2430,7 +2430,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // -j4, accl 24790, 25034)
         let rests = |j: usize| kept(j) || parks;
         if kept(i) {
-            stale = !range(&reads[i].kind(), &c);
+            stale = !range(reads[i].kind(), &c);
         }
         causes.push(c);
         if rests(i) {
@@ -2443,10 +2443,10 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                 // since it was read stands; a sibling's read, answered
                 // only in turn with the ones before it, is taken as
                 // moved)
-                let moved = match &*r.kind() {
+                let moved = match r.kind() {
                     ReadKind::Following { .. } => kept(j),
                     _ if !scope_moved
-                        && !matches!(&*r.kind(), ReadKind::Next { .. })
+                        && !matches!(r.kind(), ReadKind::Next { .. })
                         && r.kind().field().is_some_and(|f| eng.field_epoch(f) == r.epoch) =>
                     {
                         false
@@ -2457,7 +2457,7 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
                     continue;
                 }
                 let c = cause_of_read(r);
-                if !kept(j) || range(&r.kind(), &c) {
+                if !kept(j) || range(r.kind(), &c) {
                     causes.push(c);
                 } else {
                     stale = true;
@@ -2603,7 +2603,7 @@ pub(crate) fn commit_stood(
         || r.state.is_some()
         || r.reads
             .iter()
-            .any(|x| matches!(&*x.kind(), ReadKind::Next { .. } | ReadKind::Hole))
+            .any(|x| matches!(x.kind(), ReadKind::Next { .. } | ReadKind::Hole))
     {
         return None;
     }
@@ -3500,7 +3500,7 @@ fn note_refute(
         let k = r
             .reads
             .iter()
-            .position(|x| matches!(&(&*x.kind()), ReadKind::Field { f: g, .. } if *g == f))
+            .position(|x| matches!(&x.kind(), ReadKind::Field { f: g, .. } if *g == f))
             .unwrap_or(r.reads.len());
         format!("{k}/{}", r.reads.len())
     });
@@ -4688,11 +4688,9 @@ fn wake_puller(eng: &Engine, w: Option<&Worker>, s: &Node, except: NodeId) {
             found
         };
         if let Some(x) = found {
-            let pulled = x.record().is_some_and(|r| {
-                r.reads
-                    .iter()
-                    .any(|rd| matches!(&*rd.kind(), ReadKind::Following { .. }))
-            });
+            let pulled = x
+                .record()
+                .is_some_and(|r| r.reads.iter().any(|rd| matches!(rd.kind(), ReadKind::Following { .. })));
             if pulled {
                 mark_stale(
                     eng,

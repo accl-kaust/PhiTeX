@@ -581,7 +581,7 @@ impl RunRecord {
             let a = eng.node(n);
             a.state() != State::Gone && !a.moved.load(Ordering::Acquire)
         };
-        let placed = match &*rd.kind() {
+        let placed = match rd.kind() {
             ReadKind::Field { at: Anchor::Me, .. } => at_place(me.id),
             ReadKind::Field {
                 at: Anchor::Before(n) | Anchor::AfterOwn(n),
