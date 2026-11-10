@@ -15,7 +15,7 @@ use crate::index::RangeKey;
 use crate::lock::Lock;
 use crate::node::State;
 use crate::order::{Pos, SEG_CAP, SegId};
-use crate::values::{Field, FxHashMap, FxHashSet, ValueId};
+use crate::values::{Field, FxHashMap, ValueId};
 
 pub(crate) struct Segment {
     pub(crate) id: SegId,
@@ -60,8 +60,10 @@ pub(crate) struct Inner {
     /// at themselves, others' reads anchored at them, witnesses): a field
     /// enters when a read of it is filed here and leaves at a recount
     /// (`guard::recount`: a split, a give, a sweep). No reader record is
-    /// kept: a walk finds them in the nodes' records.
-    pub(crate) guarded: FxHashSet<Field>,
+    /// kept: a walk finds them in the nodes' records. With each field,
+    /// the nodes it is read at, as bits ([`guard_bit`]): a walk asks the
+    /// records of those alone, not every node of the segment.
+    pub(crate) guarded: Guarded,
     /// Contributions by field, in position order, and their fold.
     pub(crate) contribs: FxHashMap<Field, PosMap<ValueId>>,
     pub(crate) sums: FxHashMap<Field, ValueId>,
@@ -461,17 +463,6 @@ pub(crate) fn touched<T: Clone>(n: usize, x: T) -> Vec<T> {
     v
 }
 
-/// A set with room for `n` fields, its slots touched as `touched`'s.
-fn touched_set(n: usize) -> FxHashSet<Field> {
-    let mut m = FxHashSet::default();
-    m.reserve(n);
-    for i in 0..n as u64 {
-        m.insert(Field(ValueId::from_raw(i)));
-    }
-    m.clear();
-    m
-}
-
 /// A map with room for `n` entries, its slots touched as `touched`'s.
 fn touched_map<V: Default>(n: usize) -> FxHashMap<Field, V> {
     let mut m = FxHashMap::default();
@@ -481,6 +472,27 @@ fn touched_map<V: Default>(n: usize) -> FxHashMap<Field, V> {
     }
     m.clear();
     m
+}
+
+/// The fields read at a segment's nodes, each with the bits of the
+/// nodes it is read at ([`guard_bit`]; 0 never stands).
+pub(crate) type Guarded = FxHashMap<Field, u64>;
+
+/// Node `x`'s bit in a field's [`Guarded`] bits: one of 64 by its id, so
+/// a segment's nodes (`order::SEG_CAP` of them) share few, and a walk asks
+/// the record of a node whose bit is set alone.
+#[inline]
+pub(crate) fn guard_bit(x: NodeId) -> u64 {
+    1 << (x.0.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 58)
+}
+
+/// Files node `x`'s read of `f` in `g`; true where `f` is new in it.
+#[inline]
+pub(crate) fn guard_insert(g: &mut Guarded, f: Field, x: NodeId) -> bool {
+    let e = g.entry(f).or_insert(0);
+    let new = *e == 0;
+    *e |= guard_bit(x);
+    new
 }
 
 /// What a commit would grow under its segment's lock, found under it and
@@ -522,7 +534,7 @@ pub(crate) struct Made {
     nodes: Vec<(Pos, NodeId)>,
     defs: Option<FxHashMap<Field, PosMap<Def>>>,
     contribs: Option<FxHashMap<Field, PosMap<ValueId>>>,
-    guarded: Option<FxHashSet<Field>>,
+    guarded: Option<Guarded>,
     def_runs: Vec<(Field, Vec<(Pos, Def)>)>,
     contrib_runs: Vec<(Field, Vec<(Pos, ValueId)>)>,
 }
@@ -629,7 +641,7 @@ impl Grow {
             op_lists: self.op_lists.iter().map(|&(o, n)| (o, Vec::with_capacity(n))).collect(),
             defs: (self.defs > 0).then(|| touched_map(self.defs)),
             contribs: (self.contribs > 0).then(|| touched_map(self.contribs)),
-            guarded: (self.guarded > 0).then(|| touched_set(self.guarded)),
+            guarded: (self.guarded > 0).then(|| touched_map(self.guarded)),
             def_runs: self
                 .def_runs
                 .iter()
@@ -761,7 +773,7 @@ impl Inner {
         // readers of the fields it defines or defined, each of which a walk
         // may wake once: about a node each in this segment, where the
         // segment reads the field)
-        let woken: usize = defs.clone().chain(old).filter(|f| self.guarded.contains(f)).count() * self.nodes.len();
+        let woken: usize = defs.clone().chain(old).filter(|f| self.guarded.contains_key(f)).count() * self.nodes.len();
         let need = [self.stops.len(), woken];
         for i in 0..2 {
             if has[i] < need[i] {
@@ -842,7 +854,7 @@ impl Inner {
         // in the readers' index)
         let mut new = 0;
         for &f in reads {
-            if !self.guarded.contains(&f) {
+            if !self.guarded.contains_key(&f) {
                 new += 1;
                 g.ix_shards[2].push(FieldIndex::shard_of(f));
             }
@@ -1100,7 +1112,7 @@ impl Segment {
                 hi,
                 nodes: Nodes::new(),
                 defs: FxHashMap::default(),
-                guarded: FxHashSet::default(),
+                guarded: Guarded::default(),
                 contribs: FxHashMap::default(),
                 sums: FxHashMap::default(),
                 sums_gen: 0,
@@ -1446,7 +1458,7 @@ impl Segment {
                 hi,
                 nodes,
                 defs,
-                guarded: FxHashSet::default(),
+                guarded: Guarded::default(),
                 contribs,
                 sums: FxHashMap::default(),
                 sums_gen: 0,
@@ -1474,7 +1486,7 @@ impl Segment {
             for f in ni.contribs.keys() {
                 eng.contribs.add(*f, at, new_id);
             }
-            for f in &ni.guarded {
+            for f in ni.guarded.keys() {
                 eng.readers.add(*f, at, new_id);
             }
             ni.defs.keys().chain(ni.contribs.keys()).copied().collect()

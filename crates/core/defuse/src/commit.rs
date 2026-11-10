@@ -515,7 +515,7 @@ fn file_reader(eng: &Engine, inner: &mut Inner, f: Field, r: Reader, witness: bo
         drop(fo);
         a.has_foreign.store(true, Ordering::Release);
     }
-    inner.guarded.insert(f)
+    crate::segment::guard_insert(&mut inner.guarded, f, r.anchor())
 }
 
 /// Index changes made under a segment's lock, applied before it is let go
@@ -2841,10 +2841,15 @@ fn walk_here(
         let stop = hole.map(|h| h.0).or(next.map(|x| x.0));
         // (the readers at the nodes from `from` to the stop, found in their
         // records, `guard::readers_at`; none where the segment reads no `f`)
-        if inner.guarded.contains(&f) {
+        if let Some(&bits) = inner.guarded.get(&f) {
             let inner = &*inner;
             let hi = stop.map_or(Unbounded, Included);
             for (&ap, &x) in inner.nodes.range((Included(from), hi)) {
+                // (a node none of whose bit's nodes reads `f`: its record
+                // not asked)
+                if bits & crate::segment::guard_bit(x) == 0 {
+                    continue;
+                }
                 crate::guard::readers_at(eng, x, Some(f), &mut |_, r| {
                     st.walked += 1;
                     let inside = (ap > from || (ap == from && r.inclusive()))
@@ -3147,9 +3152,12 @@ pub(crate) fn reask_from(
             // their records, `guard::readers_at`; none where the segment
             // reads no `f`)
             let mut readers: Vec<Reader> = Vec::new();
-            if inner.guarded.contains(&f) {
+            if let Some(&bits) = inner.guarded.get(&f) {
                 let hi = stop.map_or(Unbounded, Included);
                 for (&ap, &x) in inner.nodes.range((Included(from), hi)) {
+                    if bits & crate::segment::guard_bit(x) == 0 {
+                        continue;
+                    }
                     crate::guard::readers_at(eng, x, Some(f), &mut |_, r| {
                         st.walked += 1;
                         if (ap > from || (ap == from && r.inclusive()))
@@ -5239,7 +5247,7 @@ pub(crate) fn relocate(
         if let Some((seg, mut inner)) = own_write(eng, &m) {
             let mut first_of: Vec<Field> = Vec::new();
             crate::guard::fields_at(eng, m.id, &mut |f| {
-                if inner.guarded.insert(f) {
+                if crate::segment::guard_insert(&mut inner.guarded, f, m.id) {
                     first_of.push(f);
                 }
             });
@@ -6310,7 +6318,7 @@ impl Movable {
             let inner = seg.inner.read();
             inner
                 .guarded
-                .iter()
+                .keys()
                 .filter(|f| !self.0.contains_key(f))
                 .copied()
                 .collect()

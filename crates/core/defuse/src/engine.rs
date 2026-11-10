@@ -1965,7 +1965,7 @@ impl Engine {
                     }
                 });
             }
-            inner.guarded.iter().for_each(|f| keep(f.0));
+            inner.guarded.keys().for_each(|f| keep(f.0));
             for (f, m) in &inner.contribs {
                 keep(f.0);
                 m.values().for_each(|&x| keep(x));

@@ -89,9 +89,15 @@ walks, collection roots) decode in set order.
 ### 2.2 What a segment keeps
 
 `Inner::readers: FxHashMap<Field, Vec<Reader>>` becomes
-`Inner::guarded: FxHashSet<Field>`: the fields read at the positions of
+`Inner::guarded: FxHashMap<Field, u64>`: the fields read at the positions of
 its nodes (their own reads at themselves, reads of other nodes anchored
-at them, witnesses), a superset of those that stand. A field enters it
+at them, witnesses), a superset of those that stand, each with a bit per
+node that reads it there (`segment::guard_bit`: one of 64 by the node's id;
+a segment holds `SEG_CAP` = 64 nodes, so a few share one). A walk asks
+the record of a node whose bit is set alone: with a set of fields only,
+it looked up every node in its range, and a document of rare reads of
+common fields (windycity's clean build at -j1: 457 s against 100 s
+before this design) paid the segment's nodes for each reader. A field enters it
 when a commit files a read of it there (and then the field index, as a
 first reader does now); it leaves at a recount: a split or a give
 (rebalance) recounts both sides from their nodes' records, and the
@@ -134,7 +140,7 @@ reader is now the record's being the node's.
 
 | walk (commit.rs) | before | now | cost |
 |---|---|---|---|
-| `walk_here`: in the committing segment, under its lock | `inner.readers[f]`, every record of every run, each tested for standing and range | `f` in `inner.guarded`, then the nodes in `(from, stop)`, each looked up | nodes in range × one lookup (~0.1 µs); a chain of definitions (a counter per paragraph) is one node |
+| `walk_here`: in the committing segment, under its lock | `inner.readers[f]`, every record of every run, each tested for standing and range | `f` in `inner.guarded`, then the nodes in `(from, stop)` whose bit is set, each looked up | nodes in range × one bit test, readers (and the nodes sharing their bits) × one lookup |
 | `reask_from`: segment by segment after it | the same per segment, under its read lock | the same scan per segment | as above |
 | `next_with` / `reask_later` | the field index of definitions and readers | unchanged (the index lists the segments whose set has `f`) | O(log) |
 | `reask_after_effect_with`: a bracket's region | every reader record in every segment of the region, those of the fields a scope can move kept | every entry of every node's record in the region, decoded, the same filter | entries in region (was: records in region, dead ones too) |
