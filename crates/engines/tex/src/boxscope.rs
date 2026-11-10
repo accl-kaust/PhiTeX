@@ -130,8 +130,29 @@ impl Run<'_, '_> {
     /// Why the run's open levels cannot be left ([`Self::can_leave_lists`]).
     pub(crate) fn leave_refusal(&self) -> Option<&'static str> {
         let op = self.cx.op();
+        // (TEMPORARY bisection switches, amsldoc's difference)
+        let bisect = if crate::exec::env_flag!("PHITEX_BOXSCOPE_NOPAR")
+            && self.nest.iter().any(|l| l.owns && l.group == 0)
+        {
+            Some("bisect: a paragraph")
+        } else if crate::exec::env_flag!("PHITEX_BOXSCOPE_NOV")
+            && self.nest.iter().any(|l| l.owns && matches!(l.group, group::VBOX | group::VTOP))
+        {
+            Some("bisect: a vertical box")
+        } else if crate::exec::env_flag!("PHITEX_BOXSCOPE_NORESUME") && op == self.ops.resume {
+            Some("bisect: a resume")
+        } else if crate::exec::env_flag!("PHITEX_BOXSCOPE_NOH")
+            && self.nest.iter().any(|l| l.owns && matches!(l.group, group::HBOX | group::ADJUSTED_HBOX))
+        {
+            Some("bisect: a horizontal box")
+        } else {
+            None
+        };
+        if bisect.is_some() {
+            return bisect;
+        }
         let why = if !(op == self.ops.exec || op == self.ops.resume) {
-            "not a text's run"
+            "not a text's run""
         } else if self.nest.is_empty() || !self.nest.iter().any(|l| l.owns) {
             "no list open"
         } else if self.nest.len() >= usize::from(u8::MAX - 2) {
