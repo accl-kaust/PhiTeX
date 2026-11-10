@@ -61,15 +61,16 @@ node, over `GAP`. Continuations of a slice stand in its gap: distance 0.
     W halves, to no less than 1 place and no more than half the distance
     it was refuted at. A refutation by the text alone says nothing of the
     window: a run behind the frontier meets it as well.
-  - Each run ahead that commits widens W by one place (so a window's
-    worth of runs in doubles it: as fast as the text runs, not only as
-    the fold moves, which may be in bursts of many pages), and the runs
-    the window held are let go where within it once W has grown by half
-    since they were last looked at.
+  - Each run ahead that commits widens W by one place, and the runs the
+    window held are let go where within it once W has grown by half
+    since they were last looked at. Once the layer has refuted a run
+    ahead in the evaluation (`sched::exchanged`), a window's worth of
+    runs in widens it by one place (congestion avoidance after a loss;
+    `PHITEX_WINDOW_AIMD=0` keeps the place a run).
   - When the layer moves the frontier forward (a fold step's commit)
     and no run ahead was refuted since the last move, W grows by twice
     the places the frontier moved, at least doubling (to at most 2^20
-    places, the whole text).
+    places, the whole text); once exchanged, by one place.
   So a document whose text and routines exchange nothing (para4000)
   refutes nothing ahead and W stays whole: nothing is held; one whose
   routines hand back state every page (floats2col) refutes on most
@@ -97,6 +98,15 @@ node, over `GAP`. Continuations of a slice stand in its gap: distance 0.
   now; one whose routines give back the same each page
   (plain text, a running head) folds on, its pages beside their
   routines. A miss refolds from that page, as a guess always did.
+- **Reruns on a clean build wait for their moving sources.** With the
+  window on, `sched::hold_for`'s chain rule, an edit's until now, holds
+  a clean build's runs too: a node running again waits for a source of
+  its last run that is to run again and moved a reader
+  (`read::open_definer_before`); not the movers an edit made (a clean
+  build makes none). Without it floats2col's text ran again in waves
+  along the chains its float lists thread through (`PHITEX_WINDOW_CHAINS=0`,
+  mc 83862: 1 524 to 4 816 finisher runs at -j8/-j16, CLI builds of 3 to
+  43 s against 1.2 s); with it 204 to 1 447.
 - **Edits.** The window applies to a build's first evaluation (the
   clean build, `Build::settles == 1`) only. An edit's evaluation runs
   with it off: an edit runs few nodes, most of them before the
@@ -176,6 +186,31 @@ definition that moves it re-asks it.
   like any other, and a held one at the latest when nothing else runs.
 - **Edits.** Off with the window: an edit leaves almost every node
   committed, and edit speed wins ties.
+
+## What it does not do: floats2col
+
+floats2col (194 fires) is not brought to its bar (at most 1.1 finisher
+runs a fire at -j8 and -j16) by the window. Measured on mc (specwin2):
+
+- the window as above: 196 to 1 292 finisher runs a build (20 builds,
+  mc 83876); with congestion avoidance 197 to 887 (mc 83892);
+- W held at 0 once exchanged (`PHITEX_WINDOW_FLOOR=0 PHITEX_WINDOW_PIN=1`,
+  only the frontier's own slice runs): 194 to 527 (mc 83901);
+- W 0 from the start as well (`PHITEX_WINDOW_START=0`): 211 to 1 330
+  (mc 83913).
+
+So text running ahead of the fold is not what runs the finishers again:
+with no run past the frontier at all they still run 2 to 7 times a fire
+in some builds. The reruns are of finishers re-asked by state the text
+before their page defines (`cs:@freelist`, `count:242`, `box:247`), and
+of that text re-asked by the scope structure (`skind`, 12 757 of the
+reruns over 20 builds) and the float lists. The 194/194 a first version
+of the window measured came from a fault, not a policy: a run let go
+within W was parked and queued again for ever until the frontier passed
+it (the livelock above), each such run a worker spinning, so few runs
+ran at once. What remains is the exchange between the routines' group
+and the text's scope structure behind the frontier, not speculation
+ahead of it.
 
 ## Measures
 
