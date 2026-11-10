@@ -102,7 +102,7 @@ impl Run<'_, '_> {
     /// Why the run may not end here with a continuation, if it may not.
     fn text_cut_refusal(&self) -> Option<&'static str> {
         let op = self.cx.op();
-        let checks: [(bool, &'static str); 26] = [
+        let checks: [(bool, &'static str); 7] = [
             (
                 !(op == self.ops.exec || op == self.ops.resume) || !self.doc,
                 "not a document's piece",
@@ -111,7 +111,6 @@ impl Run<'_, '_> {
                 self.cmds < self.ops.cut_min.load(std::sync::atomic::Ordering::Relaxed),
                 "few commands",
             ),
-            (self.stop_at.is_some(), "a second pass"),
             (
                 self.input.levels.iter().any(|l| match l.kind {
                     crate::input::kind::TOKS => l.a < l.b,
@@ -119,10 +118,6 @@ impl Run<'_, '_> {
                     _ => true,
                 }),
                 "input left",
-            ),
-            (
-                self.effect != phitex_defuse::Effect::None,
-                "the scope closed",
             ),
             (
                 self.kids.iter().any(|k| {
@@ -136,11 +131,37 @@ impl Run<'_, '_> {
                 }),
                 "children",
             ),
-            (self.claim_rest || self.fatal_hit || self.eof, "the end"),
             (
                 self.cut.is_some() || self.close_cont.is_some() || self.tool_cut.is_some(),
                 "cut already",
             ),
+            (!self.ins_pending.is_empty(), "insertions pending"),
+            (
+                self.main_items_since(self.cand_marks.last().map_or(0, |m| m.contribs)),
+                "items pending for the page",
+            ),
+        ];
+        checks
+            .iter()
+            .find(|c| c.0)
+            .map(|c| c.1)
+            .or_else(|| self.open_state_refusal())
+    }
+
+    /// Why the run's state, with something of its own open, is not
+    /// nameable here, if it is not: what a continuation does not carry
+    /// (a scan, a word, a read-back's child, an alignment, ...). A cut
+    /// inside the run's own groups or conditionals, at its text's end
+    /// ([`Run::text_cut`]) or at a page-builder candidate
+    /// (`Run::finish_candidate_at`), is taken only where it is.
+    pub(crate) fn open_state_refusal(&self) -> Option<&'static str> {
+        let checks: [(bool, &'static str); 19] = [
+            (self.stop_at.is_some(), "a second pass"),
+            (
+                self.effect != phitex_defuse::Effect::None,
+                "the scope closed",
+            ),
+            (self.claim_rest || self.fatal_hit || self.eof, "the end"),
             (self.fin.is_some() || self.fin_box.is_some(), "a finisher"),
             (!self.sealed.is_empty(), "sealed lines"),
             (
@@ -163,15 +184,10 @@ impl Run<'_, '_> {
             (self.lt.sink.is_some(), "a lines sink"),
             (self.pic_child.is_some(), "a picture's child"),
             (self.aopen != 0, "an alignment"),
-            (!self.ins_pending.is_empty(), "insertions pending"),
             (!self.closed.is_empty(), "streams closed"),
             (
                 self.nest.iter().any(|l| !matches!(l.mode.abs(), 1 | 102)),
                 "math",
-            ),
-            (
-                self.main_items_since(self.cand_marks.last().map_or(0, |m| m.contribs)),
-                "items pending for the page",
             ),
             (self.residue() > MAX_RESIDUE, "a large residue"),
         ];
