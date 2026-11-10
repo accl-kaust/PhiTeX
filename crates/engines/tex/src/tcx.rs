@@ -133,10 +133,21 @@ impl Run<'_, '_> {
         let Some(s) = self.input.top_line() else {
             return Ok(());
         };
-        if s.rescanned || s.chars || s.buf.iter().all(|&c| c < 0x80) {
+        if s.rescanned || s.chars {
             return Ok(());
         }
-        let Some(t) = self.tcx()? else {
+        // (a line read is characters from here on, decoded or not: a
+        // continuation cut inside it carries its rest so, never decoded
+        // again, as XeTeX's, [`Run::xe_decode_top`])
+        let t = if s.buf.iter().all(|&c| c < 0x80) {
+            None
+        } else {
+            self.tcx()?
+        };
+        let Some(t) = t else {
+            if let Some(s) = self.input.top_line_mut() {
+                s.chars = true;
+            }
             return Ok(());
         };
         if let Some(s) = self.input.top_line_mut() {
