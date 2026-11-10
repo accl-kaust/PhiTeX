@@ -363,7 +363,7 @@ impl Order {
         if brackets {
             let g = eng.scope_changed();
             for gi in gs.iter_mut() {
-                gi.brk_gen = g;
+                gi.note_brackets(g, 0);
             }
             eng.bump(eng.depth_field);
         }

@@ -100,6 +100,12 @@ pub(crate) struct Inner {
     /// it checks no bracket changed in its region after its own
     /// (`commit::reask_after_effect`).
     pub(crate) brk_gen: u64,
+    /// The commit that made its last change of brackets (`commit::Filing`,
+    /// 0: none, or not a commit's) and the latest scope count of a change
+    /// made by any other before it: a commit's walks do not take its own
+    /// changes for a race (`commit::first_bracket_change_since`).
+    pub(crate) brk_commit: u64,
+    pub(crate) brk_other: u64,
     /// Records of its nodes replaced (or cleared) since its `guarded` set
     /// was last counted: the quiet-point sweep counts again only a
     /// segment where they are as many as half its nodes
@@ -731,6 +737,29 @@ impl Made {
 }
 
 impl Inner {
+    /// Notes a change of its brackets at scope count `g` by commit `by`
+    /// (`commit::Filing`, 0: none): `brk_other` keeps the latest made by
+    /// any other commit than the last one's.
+    pub(crate) fn note_brackets(&mut self, g: u64, by: u64) {
+        if by == 0 || by != self.brk_commit {
+            self.brk_other = self.brk_other.max(self.brk_gen);
+        }
+        self.brk_gen = g;
+        self.brk_commit = by;
+    }
+
+    /// The scope count of its last change of brackets made by another
+    /// than commit `me` (0: none known).
+    pub(crate) fn brk_since_other_than(&self, me: u64) -> u64 {
+        if me != 0 && self.brk_commit == me {
+            self.brk_other
+        } else {
+            self.brk_gen
+        }
+    }
+}
+
+impl Inner {
     /// What filing these definitions and contributions at `pos`, and
     /// readers of these fields (each so many times), would grow.
     /// `g` is cleared first; its lists' room is the caller's
@@ -1127,6 +1156,8 @@ impl Segment {
                 by_op: FxHashMap::default(),
                 holes: 0,
                 brk_gen: 0,
+                brk_commit: 0,
+                brk_other: 0,
                 replaced: 0,
             }),
         }
@@ -1474,6 +1505,8 @@ impl Segment {
                 by_op,
                 holes: up_holes,
                 brk_gen: inner.brk_gen,
+                brk_commit: inner.brk_commit,
+                brk_other: inner.brk_other,
                 replaced: 0,
             }),
         });

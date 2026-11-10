@@ -847,6 +847,7 @@ fn pos_in(inner: &Inner, node: &Node) -> Pos {
 /// Commits `p` as `node`'s run. Woken readers go to `w`'s deque.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product) -> CommitStats {
+    let _filing = Filing::begin();
     let mut st = CommitStats::default();
     let t0 = Instant::now();
     // (a run whose last run stood that `commit_stood` left to a full
@@ -5775,7 +5776,7 @@ pub(crate) fn file_brackets(eng: &Engine, inner: &mut Inner, node: &Node, pos: P
     }
     inner.sum_depth();
     let g = eng.scope_changed();
-    inner.brk_gen = g;
+    inner.note_brackets(g, Filing::current());
     node.bracket_gen.store(g, Ordering::Release);
     eng.bump(eng.depth_field);
     Some(old.unwrap_or_default())
@@ -5862,6 +5863,39 @@ fn through_segment(d: i64, net: i64, min: i64) -> (i64, i64) {
     ((d + min).max(0), (d + net).max(net - min))
 }
 
+/// The commit under way on this thread, by a number of its own: the
+/// brackets it files are marked with it (`Inner::brk_commit`), so its
+/// own walks do not take them for another's change
+/// ([`first_bracket_change_since`]). 0 outside a commit.
+pub(crate) struct Filing {
+    prev: u64,
+}
+
+thread_local! {
+    static FILING: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+static FILINGS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+impl Filing {
+    fn begin() -> Filing {
+        let id = FILINGS.fetch_add(1, Ordering::Relaxed);
+        Filing {
+            prev: FILING.with(|f| f.replace(id)),
+        }
+    }
+
+    pub(crate) fn current() -> u64 {
+        FILING.with(std::cell::Cell::get)
+    }
+}
+
+impl Drop for Filing {
+    fn drop(&mut self) {
+        FILING.with(|f| f.set(self.prev));
+    }
+}
+
 /// The first segment from the one at `at` (to `last` where given, else
 /// to the line's end) in which a bracket changed, or moved in, after
 /// scope count `g`: the region of a walk that one filed later may share.
@@ -5869,7 +5903,17 @@ fn through_segment(d: i64, net: i64, min: i64) -> (i64, i64) {
 /// this one in its own region. (Any change anywhere since counted as
 /// such a race: at -j4 nearly every walk, whose region was a node wide,
 /// asked every reader to the line's end, 4 to 5 M, biblatex, mc 80647.)
-fn first_bracket_change_since(eng: &Engine, at: Pos, last: Option<SegId>, g: u64) -> Option<SegId> {
+/// Not a change made by the commit walking (`commit`, `Filing`): every
+/// bracket a commit files (its node's, its placements' predictions, its
+/// removed nodes' taken out) is filed before any of its walks reads the
+/// brackets, so its walks see them all; only another's change made
+/// meanwhile is a race. Counted as one, a cut piece's rest whose commit
+/// placed the next piece with predicted brackets, or took out the rest it
+/// had, asked every reader of a movable field from there to the line's
+/// end, each found to see what it saw (windycity's clean build at -j1:
+/// ~14 000 scope-kind readers, up to 3.4 s a commit, 61 s of the
+/// build's 110 s in re-asks).
+fn first_bracket_change_since(eng: &Engine, at: Pos, last: Option<SegId>, g: u64, me: u64) -> Option<SegId> {
     if eng.scope_gen.load(Ordering::Acquire) == g {
         return None;
     }
@@ -5878,7 +5922,7 @@ fn first_bracket_change_since(eng: &Engine, at: Pos, last: Option<SegId>, g: u64
     while let Some(sid) = cur {
         let seg = eng.seg(sid);
         let inner = seg.inner.read();
-        if inner.brk_gen > g {
+        if inner.brk_since_other_than(me) > g {
             return Some(sid);
         }
         let lo = seg.lo;
@@ -6289,7 +6333,7 @@ fn reask_after_effect_with(
     let raced = if end.is_some_and(|(_, q)| q == at) {
         None
     } else {
-        first_bracket_change_since(eng, at, end.map(|(sid, _)| sid), g)
+        first_bracket_change_since(eng, at, end.map(|(sid, _)| sid), g, Filing::current())
     };
     if let Some(from) = raced {
         // (the readers of the region from the first segment where one
