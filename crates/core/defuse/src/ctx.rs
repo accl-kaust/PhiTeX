@@ -649,7 +649,7 @@ impl<'a> Ctx<'a> {
             .reads
             .iter()
             .rev()
-            .find(|r| matches!(&*r.kind(&self.eng.read_keys), ReadKind::Field { f: g, at } if *g == f && *at == anchor))
+            .find(|r| matches!(r.kind(), ReadKind::Field { f: g, at } if *g == f && *at == anchor))
             .map_or(u64::MAX, |r| r.epoch);
         self.unread(f);
         self.ep = ep;
