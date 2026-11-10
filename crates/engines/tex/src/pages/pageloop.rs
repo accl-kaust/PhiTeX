@@ -1156,14 +1156,21 @@ impl Run<'_, '_> {
             _ => None,
         };
         // (none given back for this page yet, the guesses trusted: folded
-        // on the guess; the read stands, the routine's commit runs this
-        // again on what it gives back)
-        let gave = gave.or_else(|| {
-            trusted.then(|| {
+        // on the guess; the routine's commit runs this again where it
+        // gives back other than the guess)
+        // (read as the give-back the guess says this page's finisher
+        // makes: one equal to it asks nothing again)
+        let gave = match gave {
+            Some(g) => Some(g),
+            None if trusted => {
                 self.rest_on_guess = true;
-                r.guess
-            })
-        });
+                let f = r.key.field(v, PAGE_OUT);
+                let x = crate::pages::page_out_value(v, r.key.piece, r.key.nth, r.guess, r.page);
+                self.cx.read_at_as(f, At::End(self.cx.unit()), Some(x));
+                Some(r.guess)
+            }
+            None => None,
+        };
         let Some(gave) = gave else {
             if crate::exec::obs_flag!("PHITEX_SCAN_TRACE") {
                 eprintln!(
