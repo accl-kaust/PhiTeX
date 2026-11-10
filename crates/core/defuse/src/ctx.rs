@@ -1663,6 +1663,17 @@ impl<'a> Ctx<'a> {
         Ok(h)
     }
 
+    /// I stop for node `h`, a node before me that has not committed
+    /// ([`Ctx::hole_before`] found it), and run when it commits. With
+    /// `nothing_done` (no command of my run done yet) the stop is a wait,
+    /// not a run (`Report::waits`): a piece whose first command reads on
+    /// into the text after it, run before the text before it.
+    pub fn wait_for_hole(&mut self, h: NodeId, nothing_done: bool) -> Stop {
+        self.wait_on = Some(h);
+        self.waits_only = nothing_done;
+        stop()
+    }
+
     /// Where a node before me has not committed and its operation may
     /// define one of `fields` ([`Ctx::hole_before_defining`]): I stop,
     /// nothing filed, and run when it commits. With `nothing_done` (the
