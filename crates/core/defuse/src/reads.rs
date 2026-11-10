@@ -357,7 +357,7 @@ impl Reads {
         while k > 0 && self.first_field(k) == key {
             k -= 1;
         }
-        let it = if !ok {
+        let mut it = if !ok {
             Entries {
                 buf: &self.buf,
                 at: 0,
@@ -374,8 +374,8 @@ impl Reads {
                 prev: 0,
             }
         };
-        it.skip_while(move |r| r.kind().field().is_none_or(|g| g.0.raw() < key))
-            .take_while(move |r| r.kind().field().is_some_and(|g| g.0.raw() == key))
+        it.skip_before(key);
+        it.take_while(move |r| r.kind().field().is_some_and(|g| g.0.raw() == key))
     }
 
     /// The field of block `k`'s first entry (`u64::MAX` for one of none).
@@ -393,6 +393,52 @@ pub(crate) struct Entries<'a> {
     j: usize,
     n: usize,
     prev: u64,
+}
+
+/// A varint's length at `b[i..]`.
+fn skip_varint(b: &[u8], i: &mut usize) {
+    while b[*i] >= 0x80 {
+        *i += 1;
+    }
+    *i += 1;
+}
+
+impl Entries<'_> {
+    /// Passes the entries whose field is before `key` (or of none, when
+    /// `key` is a field), reading only their lengths.
+    fn skip_before(&mut self, key: u64) {
+        let b = self.buf;
+        while self.j < self.n {
+            let prev = if self.j.is_multiple_of(BLOCK) { 0 } else { self.prev };
+            let mut i = self.at;
+            let head = b[i];
+            i += 1;
+            let code = head & 0x0f;
+            if !has_field(code) {
+                return;
+            }
+            let f = prev + get(b, &mut i);
+            if f >= key {
+                return;
+            }
+            for _ in 0..operands(code) {
+                skip_varint(b, &mut i);
+            }
+            skip_varint(b, &mut i);
+            let tag = head >> H_SEEN_SHIFT;
+            if tag != SEEN_NONE {
+                if u64::from(tag) == T_SEQ {
+                    i += 8;
+                } else {
+                    skip_varint(b, &mut i);
+                }
+            }
+            skip_varint(b, &mut i);
+            self.prev = f;
+            self.at = i;
+            self.j += 1;
+        }
+    }
 }
 
 impl Iterator for Entries<'_> {
