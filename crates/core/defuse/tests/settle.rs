@@ -664,3 +664,117 @@ fn a_child_reading_before_its_placer_is_not_held_at_its_placers_frontier() {
     assert_eq!(e.frontier_held(), held, "the child is not held: {rep:?}");
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
+
+/// `[from, to]`: a page-layer node: defines `to` := 1 - (the value of
+/// `from` reaching it): a routine whose output flips its input. Settles
+/// at quiet points. Counts its runs.
+struct Flip(Arc<AtomicU64>);
+
+impl Operation for Flip {
+    fn name(&self) -> &'static str {
+        "flip"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        let a = cx.args().to_vec();
+        let v = cx.values();
+        let x = cx.read(Field(a[0]))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+        let out = v.int(1 - x);
+        cx.define(Field(a[1]), out);
+        Ok(out)
+    }
+
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+}
+
+/// `[from, to]`: a text node: defines `to` := the value of `from`
+/// reaching it.
+struct Copy;
+
+impl Operation for Copy {
+    fn name(&self) -> &'static str {
+        "copy"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let a = cx.args().to_vec();
+        let x = cx.read(Field(a[0]))?.unwrap_or(ValueId::UNIT);
+        cx.define(Field(a[1]), x);
+        Ok(x)
+    }
+}
+
+/// The bound on the page layer's feedback inside a wave, where a
+/// routine's re-ask of the text after it is asked at once, not held to
+/// the quiet point (`sched::same_wave`): a re-ask goes only to readers
+/// after its definer, so a chain of them inside a wave moves on along
+/// the line and ends at its end. Here every routine flips what the text
+/// after it reads, and that text gives it to the next routine: a clean
+/// build settles in its one wave at every thread count, each routine
+/// run a bounded number of times, on one thread's values. An edit that
+/// flips the first input flips them all and settles too; there each
+/// routine's re-ask of the text after it is held, the read being of the
+/// wave before, so the chain moves one routine a pass (8 here, under
+/// `Limits::settle_passes`).
+#[test]
+fn routines_flipping_the_text_after_them_settle_within_a_wave() {
+    let line = |n: usize, threads: usize, edit: bool| {
+        let e = Engine::new();
+        let v = e.values();
+        let runs = Arc::new(AtomicU64::new(0));
+        let flip = e.register(Arc::new(Flip(runs.clone())));
+        let copy = e.register(Arc::new(Copy));
+        let def = e.register(Arc::new(Def {
+            runs: AtomicU64::new(0),
+        }));
+        let u = e.new_unit();
+        let first = e.push(u, def, vec![v.field("t0").0, v.int(0)]);
+        let mut outs = Vec::new();
+        for i in 0..n {
+            let (t, x, t2) = (
+                v.field(&format!("t{i}")),
+                v.field(&format!("x{i}")),
+                v.field(&format!("t{}", i + 1)),
+            );
+            e.push(u, flip, vec![t.0, x.0]);
+            outs.push(e.push(u, copy, vec![x.0, t2.0]));
+        }
+        let mut rep = e.evaluate(threads).unwrap();
+        if edit {
+            e.replace(first, def, vec![v.field("t0").0, v.int(1)]);
+            rep = e.evaluate(threads).unwrap();
+        }
+        let got: Vec<Option<i64>> = outs.iter().map(|&o| int(&e, o)).collect();
+        assert!(
+            e.check_invariants().is_empty(),
+            "-j{threads}: {:?} {rep:?}",
+            e.check_invariants()
+        );
+        (got, runs.load(Ordering::SeqCst), rep)
+    };
+    let alt = |n: usize, s: i64| {
+        (0..n)
+            .map(|i| Some(if i % 2 == 0 { 1 - s } else { s }))
+            .collect::<Vec<_>>()
+    };
+    for threads in [1, 2, 4, 8] {
+        for _ in 0..10 {
+            let n = 40;
+            let (got, runs, rep) = line(n, threads, false);
+            assert_eq!(got, alt(n, 0), "-j{threads}: {rep:?}");
+            assert_eq!(rep.held_passes, 0, "-j{threads}: one wave: {rep:?}");
+            let bound = (n * (n + 1) / 2) as u64;
+            assert!(runs <= bound, "-j{threads}: {runs} routine runs for {n}");
+            let n = 8;
+            let (got, runs, rep) = line(n, threads, true);
+            assert_eq!(got, alt(n, 1), "-j{threads} edited: {rep:?}");
+            assert!(
+                runs <= 2 * (n * (n + 1) / 2) as u64,
+                "-j{threads} edited: {runs} routine runs for {n}"
+            );
+        }
+    }
+}

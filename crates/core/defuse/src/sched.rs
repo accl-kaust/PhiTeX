@@ -1428,6 +1428,7 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
         // released, and once they are done, the loop-back values
         // published, their readers whose answer moved run again (a pass)
         if w.ix == 0 {
+            eng.quiets.fetch_add(1, Ordering::SeqCst);
             // (no quiet point while a commit's fields are unwalked
             // (`Node::unwalked`): their node, parked, has not committed
             // again; walked now, and the line goes on if they woke any)
@@ -1909,33 +1910,49 @@ fn held_edge(eng: &Engine, wake: &Wake, n: &Node) -> bool {
     settles_edge(eng, by, n)
 }
 
-/// Whether `reader`'s last run began before `by`'s last commit ended
-/// (or `by` has none): its read never saw what the layer's node had made,
-/// so a re-ask by `by` is a race of runs side by side, at one thread
-/// `by` would have committed first, and not the layer's feedback into
-/// text it has passed (a node that read its last commit and has it move
-/// now), which alone the quiet point holds. Held, a race cost a wave:
-/// the reader, text between a page's routine and the frontier the page
-/// loop had passed, kept the float list from before the routine, and at
-/// the quiet point ran again on the routine's and every routine after it
-/// again: floats2col at -j8 and -j16, 1 600 to 3 432 finisher runs for 194
-/// (accl 27183, 27201, mc 84571, 84657-84660). Held only for a reader
-/// that saw `by`'s last commit, a race costs the pages from it on once.
-fn overlapped(eng: &Engine, by: NodeId, reader: &Node) -> bool {
+/// Whether `by`'s run and `reader`'s read are of one wave, no quiet
+/// point between them (`Engine::quiets`): a re-ask by `by` is then a race
+/// of runs side by side (at one thread the two run in the line's order
+/// and the reader reads what `by` made), asked at once; only one from a
+/// later wave than the read, the layer's feedback into text it has
+/// passed, is held to the quiet point. Held, a race cost a wave: the
+/// reader, text between a page's routine and the frontier the page loop
+/// had passed, kept the float list from before the routine, and at the
+/// quiet point ran again on the routine's and every routine after it
+/// again: floats2col at -j8 and -j16, 571 to 3 432 finisher runs for 194
+/// (accl 27183, 27201, 27368, mc 84571, 84657-84660, 84774). Ordered by
+/// commit ends instead, a routine run again in the wave on a race of its
+/// own was taken for feedback.
+///
+/// What bounds the layer's feedback inside a wave, with no hold there: a
+/// re-ask goes only to readers after its definer (a definition reaches
+/// forward), a routine's to the text after it, that text's to the
+/// routines and the page loop after it, and the loop, re-asked by a
+/// range, folds again from the text that moved (`frontier_back`) and
+/// places routines from there on. So every chain of re-asks in a wave
+/// moves on along the line, a node is asked again only by one before it,
+/// and by induction on the line's order the first settles, then the
+/// next: the wave ends, as at one thread, where every node runs in that
+/// order. Feedback to text before a routine (a page number read back)
+/// goes through the quiet point's passes (`Operation::final_only`, held
+/// wakes from a later wave), bounded by `Limits::settle_passes`. The
+/// no-livelock proof of the speculation window (docs/spec-window.md,
+/// Progress) is of its holds of runs, not of these wakes
+/// (`settle::routines_flipping_the_text_after_them_settle_within_a_wave`).
+fn same_wave(eng: &Engine, by: NodeId, reader: &Node) -> bool {
     let Some(b) = eng.placed_node(by) else { return false };
-    let c = b.committed_at.load(Ordering::SeqCst);
-    let began = match reader.state() {
-        State::Running | State::RunningDirty => &reader.run_began,
-        _ => &reader.run_start,
+    let of = |n: &Node| match n.state() {
+        State::Running | State::RunningDirty => n.run_began.load(Ordering::SeqCst),
+        _ => n.run_start.load(Ordering::SeqCst),
     };
-    c == 0 || began.load(Ordering::SeqCst) < c
+    of(b) <= of(reader)
 }
 
 /// Whether a definition by `by` reaches `reader` across the settling
 /// line: `by`'s operation settles at quiet points and its last run said
-/// nothing of `Ctx::settle_now`, `reader`'s does not settle, its run
-/// saw `by`'s last commit (`overlapped`: else a race, asked at once,
-/// by a walk and by the reader's own commit's check alike), and the
+/// nothing of `Ctx::settle_now`, `reader`'s does not settle, it read in
+/// an earlier wave than `by`'s run (`same_wave`: else a race, asked at
+/// once, by a walk and by the reader's own commit's check alike), and the
 /// reader stands before the layer's frontier. One past it read the
 /// field while no frontier held it (before the layer first defined the
 /// field, `Engine::mark_settled`, or with the layer's fold ended; a read
@@ -1954,7 +1971,7 @@ pub(crate) fn settles_edge(eng: &Engine, by: NodeId, reader: &Node) -> bool {
         .is_some_and(|b| eng.op(b.op()).settles_at_quiet() && !b.settle_now.load(Ordering::Acquire))
         && !eng.op(reader.op()).settles_at_quiet()
         && !past_frontier(eng, reader, eng.frontier.load(Ordering::Acquire))
-        && !overlapped(eng, by, reader)
+        && !same_wave(eng, by, reader)
 }
 
 /// Lists a wake for the next quiet point (`Report::held_deferred`).
@@ -2503,7 +2520,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
         return Ok(());
     }
     node.run_began
-        .store(eng.seq.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+        .store(eng.quiets.load(Ordering::SeqCst), Ordering::SeqCst);
     let first = node.run_epoch.swap(pool.epoch, Ordering::AcqRel) != pool.epoch;
     if first {
         node.runs.store(0, Ordering::Relaxed);
@@ -2785,8 +2802,6 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
             node.done_ns.store(done, Ordering::Relaxed);
             node.run_start
                 .store(node.run_began.load(Ordering::SeqCst), Ordering::SeqCst);
-            node.committed_at
-                .store(eng.seq.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
             if run_log() {
                 eprintln!(
                     "commit: node {} done {} commit {} reask {} walked {} woken {}",
