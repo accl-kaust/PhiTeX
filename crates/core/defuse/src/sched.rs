@@ -1428,6 +1428,27 @@ fn run_worker(eng: &Engine, pool: &Pool, w: &Worker, mut src: Option<&mut dyn Ed
         // released, and once they are done, the loop-back values
         // published, their readers whose answer moved run again (a pass)
         if w.ix == 0 {
+            // (no quiet point while a commit's fields are unwalked
+            // (`Node::unwalked`): their node, parked, has not committed
+            // again; walked now, and the line goes on if they woke any)
+            let unwalked: Vec<NodeId> = std::mem::take(&mut *eng.unwalked.lock());
+            if !unwalked.is_empty() {
+                let mut st = crate::commit::CommitStats::default();
+                for n in &unwalked {
+                    if let Some(x) = eng.placed_node(*n) {
+                        crate::commit::flush_unwalked(eng, Some(w), x, &mut st);
+                    }
+                }
+                debug_assert!(
+                    unwalked
+                        .iter()
+                        .all(|&n| eng.placed_node(n).is_none_or(|x| x.unwalked.lock().is_empty())),
+                    "a quiet point with a commit's fields unwalked"
+                );
+                if pool.outstanding() > 0 {
+                    continue;
+                }
+            }
             // (the wakes held to this quiet point: each reader's reads of
             // the field checked again now, re-asked where one moved; a
             // pass of the page layer's feedback into the text)

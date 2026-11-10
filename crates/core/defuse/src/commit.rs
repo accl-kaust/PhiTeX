@@ -1853,7 +1853,33 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
         // the walks, as far as this segment goes
         changed_defs.sort_unstable();
         changed_defs.dedup();
-        for &f in &changed_defs {
+        // (a run re-asked while it ran commits what it defines but walks
+        // none of it: it runs again at once, and its next commit walks
+        // these with its own, against what each reader read; walked now,
+        // the readers after it ran on a value its next run took back:
+        // floats2col at -j16, a piece re-asked by a routine's give-back
+        // while it ran published a stale float list, and every page's
+        // routine after it ran on it and again, 4 000 finisher runs for
+        // 194 fires, accl 27112. Those of its last such commit too,
+        // `Node::unwalked`)
+        let stale_run = node.state() == State::RunningDirty;
+        let mut to_walk: Vec<Field> = if stale_run { Vec::new() } else { changed_defs.clone() };
+        {
+            let mut u = node.unwalked.lock();
+            if stale_run {
+                if u.is_empty() && !changed_defs.is_empty() {
+                    eng.unwalked.lock().push(node.id);
+                }
+                u.extend(changed_defs.iter().copied());
+                u.sort_unstable();
+                u.dedup();
+            } else if !u.is_empty() {
+                to_walk.append(&mut u);
+                to_walk.sort_unstable();
+                to_walk.dedup();
+            }
+        }
+        for &f in &to_walk {
             walks.push((
                 f,
                 walk_here(eng, &mut inner, f, pos, node.id, &mut wake, &mut later, &mut st),
@@ -2677,6 +2703,9 @@ pub(crate) fn commit_stood(
     let mut st = CommitStats::default();
     crate::sched::clear_front(eng, node);
     reask_stops(eng, ww, stops, node.id, &mut st);
+    // (the fields a commit before it left unwalked: this run stands on
+    // what that one filed, and they are walked now)
+    flush_unwalked(eng, ww, node, &mut st);
     if let Some(parent) = node.parent {
         wake_waiting(eng, ww, eng.node(parent), node.id, &mut st);
     }
@@ -2684,6 +2713,27 @@ pub(crate) fn commit_stood(
     *w.log.lock().wasted_by_op.entry(node.op()).or_default() += 1;
     st.commit_ns = ns(t0);
     Some(st)
+}
+
+/// What a stale run's commit filed and did not walk (`Node::unwalked`),
+/// walked now: at its node's next commit of any kind (one that stood, a
+/// resumption, one kept at a hole, through `commit` or `commit_stood`), at
+/// its removal, or at the quiet point if its node did not commit again.
+/// A reader that ran between the two commits recorded the filed value, so
+/// the walk wakes it if the value has moved since. A node gone was walked
+/// by its removal, which flushed this list first.
+pub(crate) fn flush_unwalked(eng: &Engine, w: Option<&Worker>, node: &Node, st: &mut CommitStats) {
+    let fs = std::mem::take(&mut *node.unwalked.lock());
+    if fs.is_empty() {
+        return;
+    }
+    if node.state() == State::Gone {
+        return;
+    }
+    let (pos, seg) = (node.pos_hint(), node.seg_hint());
+    for f in fs {
+        reask(eng, w, f, pos, seg, node.id, st);
+    }
 }
 
 /// A filed reader's serial: it stands from its node's `filed_floor` to
@@ -4270,6 +4320,10 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     // claims nothing after this: `release_leaving`)
     if remove {
         release_leaving(eng, w, node);
+        // (what its last commit left unwalked, walked from where it
+        // stands while it is on the line: a field that commit withdrew
+        // its removal does not walk)
+        flush_unwalked(eng, w, node, &mut CommitStats::default());
     }
     let Some((seg, mut inner)) = own_write(eng, node) else {
         return Vec::new();
@@ -5166,7 +5220,9 @@ pub(crate) fn relocate(
             // place's readers asked again, and its placements with it,
             // from the record it had: one cleared first left them on the
             // line with no placer, a finisher's page writers at -j16,
-            // note-intermittents §2)
+            // note-intermittents §2; what its last commit left unwalked
+            // walked first, from where it stood)
+            flush_unwalked(eng, w, &m, st);
             m.set_state(State::Gone);
             let rec = m.last.lock().take();
             lifted_walks(eng, w, &m, left, st);

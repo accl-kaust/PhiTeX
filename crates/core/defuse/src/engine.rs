@@ -213,6 +213,9 @@ pub struct Engine {
     /// frontier, whether a run ahead was refuted since the frontier last
     /// moved on, and its measures (reads held by it, halvings, doublings).
     pub(crate) window_on: AtomicBool,
+    /// The nodes holding fields their commit did not walk
+    /// (`Node::unwalked`), walked at the latest when the line is quiet.
+    pub(crate) unwalked: crate::lock::Mx<Vec<NodeId>>,
     pub(crate) window: AtomicU64,
     pub(crate) window_missed: AtomicBool,
     /// The width at which the runs the window held were last looked at.
@@ -433,6 +436,7 @@ impl Engine {
             frontier_gen: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
             window_on: AtomicBool::new(false),
+            unwalked: crate::lock::Mx::new(Vec::new()),
             window: AtomicU64::new(crate::sched::WINDOW_START),
             window_missed: AtomicBool::new(false),
             window_released: AtomicU64::new(0),

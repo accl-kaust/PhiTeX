@@ -164,6 +164,11 @@ pub(crate) struct Node {
     /// fields are not held at the frontier, which stays where the layer
     /// set it.
     pub(crate) frontier_pass: AtomicBool,
+    /// The fields a commit of a run re-asked while it ran changed but did
+    /// not walk (`commit::commit`): the node runs again at once, and its
+    /// next commit, of whatever kind, or its removal walks them
+    /// (`commit::flush_unwalked`), against what each reader read.
+    pub(crate) unwalked: Mx<Vec<Field>>,
     /// Its runs ahead of the frontier refuted by the page layer
     /// (`commit::reask_reader`; `PHITEX_WINDOW_WAVE`).
     pub(crate) layer_refuted: AtomicU32,
@@ -307,6 +312,7 @@ impl Node {
             held_window: AtomicBool::new(false),
             window_pass: AtomicBool::new(false),
             frontier_pass: AtomicBool::new(false),
+            unwalked: Mx::new(Vec::new()),
             layer_refuted: AtomicU32::new(0),
             back_frontier: Mx::new(None),
             asks: Mx::new(Vec::new()),
