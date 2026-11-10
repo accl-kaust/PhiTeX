@@ -3092,6 +3092,13 @@ pub(crate) fn release_frontier(eng: &Engine, w: Option<&Worker>) {
             log_clock(Instant::now())
         );
     }
+    for &n in &go {
+        if let Some(x) = eng.placed_node(n)
+            && x.held_window.swap(false, Ordering::AcqRel)
+        {
+            x.window_passed.store(true, Ordering::Release);
+        }
+    }
     for n in go {
         if let Some(x) = eng.placed_node(n).filter(|x| x.state() == State::Dirty) {
             // (the run goes on for the cause that woke it, which the hold

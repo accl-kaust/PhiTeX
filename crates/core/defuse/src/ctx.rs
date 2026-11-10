@@ -458,7 +458,8 @@ impl<'a> Ctx<'a> {
             self.ahead_noted = true;
             let d = crate::sched::window_distance(eng, self.me, fr);
             self.me.ahead.store(d.map_or(0, |d| d + 1), Relaxed);
-            if d.is_some_and(|d| d > eng.window.load(Acquire)) {
+            let passed = self.me.window_passed.swap(false, Relaxed);
+            if !passed && d.is_some_and(|d| d > eng.window.load(Acquire)) {
                 eng.window_stats[0].fetch_add(1, Relaxed);
                 self.me.held_window.store(true, Relaxed);
                 self.wait_frontier = true;
