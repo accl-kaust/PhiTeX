@@ -6651,6 +6651,13 @@ impl<'c, 'a> Run<'c, 'a> {
 
     #[inline(never)]
     fn scope_kind_read(&mut self) -> R<Option<ValueId>> {
+        // (before the run's first command is done, it waits for a node
+        // before it not yet run whose brackets only its run says: the
+        // scope it would read may be one that node opens or closes,
+        // docs/spec-window.md)
+        if self.cmds <= 1 {
+            self.cx.wait_for_scope_opener()?;
+        }
         let r = self.cx.read(self.v.field(SCOPE_KIND));
         if r.is_err() {
             self.trace_stop("scope kind");

@@ -1734,6 +1734,34 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// A read of the scope I run in before my run's first command is done
+    /// (nothing to throw away): with the speculation window on, where a
+    /// node before me in my unit has not committed and its scope brackets
+    /// are known only by running it (`Effect::Pending`), the run waits for
+    /// the nearest such node, a wait and not a run (docs/spec-window.md,
+    /// First reads). Not a node whose brackets its text predicts: the
+    /// scopes it opens and closes stand as filed.
+    pub fn wait_for_scope_opener(&mut self) -> Result<(), Stop> {
+        use std::sync::atomic::Ordering::Acquire;
+        if !self.eng.window_on.load(Acquire)
+            || !self.eng.first_reads_on.load(Acquire)
+            || !self.has_other_threads()
+            || !self.eng.op(self.me.op()).text()
+            || self.eng.op(self.me.op()).settles_at_quiet()
+        {
+            return Ok(());
+        }
+        let eng = self.eng;
+        let me = self.me;
+        if let Some(x) = read::on_one_layout(eng, || read::hole_with_pending_brackets(eng, me)) {
+            eng.window_stats[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.wait_on = Some(x);
+            self.waits_only = true;
+            return Err(stop());
+        }
+        Ok(())
+    }
+
     /// Whether node `n` stands past the settling layer's frontier
     /// ([`Ctx::set_frontier`]). Not a read.
     pub fn past_frontier(&self, n: NodeId) -> bool {

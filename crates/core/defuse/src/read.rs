@@ -1281,6 +1281,45 @@ pub(crate) fn holes_naming_definitions(eng: &Engine, me: &Node) -> Vec<(NodeId, 
     out
 }
 
+/// The nearest node before `me` in its unit that has not committed (as
+/// [`holes_naming_definitions`]) and whose scope brackets are known only
+/// by running it (`Effect::Pending`): the scope `me` reads may be one it
+/// opens or closes (`Ctx::wait_for_scope_opener`).
+pub(crate) fn hole_with_pending_brackets(eng: &Engine, me: &Node) -> Option<NodeId> {
+    let to = pos_of(eng, me.id)?;
+    let from = unit_start(eng, me);
+    let v = eng.values();
+    let mut last = None;
+    let mut cur = eng.seg_for_pos(from).map(|s| s.id).or_else(|| eng.order.first());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.lo >= to {
+            break;
+        }
+        if seg.unit == me.unit {
+            let inner = seg.inner.read();
+            if inner.holes != 0 {
+                for (_, id) in inner.nodes.range((Excluded(from), Excluded(to))) {
+                    let n = eng.node(*id);
+                    let op = eng.op(n.op());
+                    if *id != me.id
+                        && n.unit == me.unit
+                        && n.is_hole()
+                        && op.text()
+                        && !op.final_only()
+                        && !n.held_panic.load(Ordering::Acquire)
+                        && op.effect(&n.args(), v) == crate::api::Effect::Pending
+                    {
+                        last = Some(*id);
+                    }
+                }
+            }
+        }
+        cur = eng.order.next(sid, seg.lo);
+    }
+    last
+}
+
 /// The first node before `me` in its unit that is to run, again or for
 /// the first time (`Node::is_open`), and that a run of this pass can bring
 /// a commit of: while one is, what `me` read before it may be a guess its
