@@ -37,7 +37,7 @@ Last words.
 TEX
 echo '[["s.tex","label one","label uno",2],["s.tex","label two","label dos",2],["s.tex","Most edits","Many edits",2],["s.tex","\\section{One}","\\section{Zero}Text.\\section{One}",2]]' > "$w/edits.json"
 for m in off box; do
-  e=(); [ $m = off ] || e=(PHITEX_BOXSCOPE=1 PHITEX_BOXSCOPE_TRACE=1 PHITEX_WAKE_LOG=1)
+  e=(); [ $m = off ] || e=(PHITEX_BOXSCOPE=1 PHITEX_BOXSCOPE_TRACE=1 PHITEX_TEX_TIME=1)
   echo "== $m: clean build -j1"; rm -rf "$w/c" "$w/cache-$m"; cp -a "$d" "$w/c"
   ( cd "$w/c" && /usr/bin/time -f "%e s %M KB" env PHITEX_CACHE_DIR=$w/cache-$m "${e[@]}" "$bin" build --exact-pdf -j 1 s.tex > "$r/clean-$m.txt" 2>&1; echo "exit $?"; tail -1 "$r/clean-$m.txt"; md5sum s.pdf; cp s.pdf "$r/clean-$m.pdf" )
   echo "leaves: $(grep -c '^boxscope: node .* leaves' "$r/clean-$m.txt")"
@@ -49,5 +49,4 @@ for m in off box; do
 done
 # (each edit's runs, both modes)
 for m in off box; do echo "== $m: runs per edit (op node ms)"; awk '/^=== edit/ {print; on=1; next} on && /^runtime:/ {printf "  %s %s %.1f\n", $2, $3, $5-$4} on && /^boxscope/ {print "  " substr($0,1,140)}' "$r/watch-$m.txt" | head -150; done
-echo "== box: wakes per edit (woken op, node, cause, field)"
-awk -F'\t' '/^=== edit/ {print; on=1; next} on && $2 == "wake" {print "  " $3, $4, $6, $5, $7}' "$r/watch-box.txt" | head -120
+for m in off box; do echo "== $m: engine accounting per edit"; awk '/^=== edit/ {print; on=1; next} on && /^acct: wall|^acct-edit|^acct: commits by op|re-ask/ {print "  " substr($0,1,260)}' "$r/watch-$m.txt" | head -80; done
