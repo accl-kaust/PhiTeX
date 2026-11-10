@@ -6716,12 +6716,18 @@ impl<'c, 'a> Run<'c, 'a> {
                         // (lists of its own open: left, `crate::boxscope`)
                         if crate::exec::prof_flag!("PHITEX_BOXSCOPE_TRACE") {
                             eprintln!(
-                                "boxscope: node {} leaves at a give-back {:?}",
+                                "boxscope: node {} leaves at a give-back {:?} text {}",
                                 self.cx.node().raw(),
                                 self.nest
                                     .iter()
                                     .map(|l| (l.mode, l.group, l.owns))
-                                    .collect::<Vec<_>>()
+                                    .collect::<Vec<_>>(),
+                                self.cx.args().first().map_or_else(String::new, |&a| self
+                                    .v
+                                    .render(a)
+                                    .chars()
+                                    .take(90)
+                                    .collect::<String>())
                             );
                         }
                         self.leave_lists()?;
@@ -6798,12 +6804,18 @@ impl<'c, 'a> Run<'c, 'a> {
             if crate::boxscope::on() && !self.eof && self.can_leave_lists() {
                 if crate::exec::prof_flag!("PHITEX_BOXSCOPE_TRACE") {
                     eprintln!(
-                        "boxscope: node {} leaves {:?}",
+                        "boxscope: node {} leaves {:?} text {}",
                         self.cx.node().raw(),
                         self.nest
                             .iter()
                             .map(|l| (l.mode, l.group, l.owns))
-                            .collect::<Vec<_>>()
+                            .collect::<Vec<_>>(),
+                        self.cx.args().first().map_or_else(String::new, |&a| self
+                            .v
+                            .render(a)
+                            .chars()
+                            .take(90)
+                            .collect::<String>())
                     );
                 }
                 self.leave_lists()?;

@@ -329,6 +329,14 @@ impl Run<'_, '_> {
             return Ok(None);
         }
         let f = self.list_fold(md.lid)?;
+        if crate::exec::prof_flag!("PHITEX_BOXSCOPE_TRACE") {
+            eprintln!(
+                "boxscope: node {} ends the paragraph left open, list {} ({} items)",
+                self.cx.node().raw(),
+                md.lid,
+                f.items.len()
+            );
+        }
         self.set(&par_field(md.vlid), ValueId::UNIT, true);
         self.par_memo = None;
         self.last_par = (n(1), n(2));
@@ -363,6 +371,14 @@ impl Run<'_, '_> {
             return Ok(false);
         }
         let f = self.list_fold(md.lid)?;
+        if crate::exec::prof_flag!("PHITEX_BOXSCOPE_TRACE") {
+            eprintln!(
+                "boxscope: node {} owns the paragraph again, list {} ({} items)",
+                self.cx.node().raw(),
+                md.lid,
+                f.items.len()
+            );
+        }
         let mut l = Level::new(102, 0, md.lid, true, Vec::new());
         self.open_level(&mut l);
         l.list = crate::nest::of_values(f.items);
