@@ -69,8 +69,8 @@ bounds, path, seen, ordinal), coded as:
 | ordinal | varint | ~2 |
 
 About 10-13 B a read against 24 B, and none of the 43 B of reader list
-and map. Every 32nd entry starts a block whose field is coded whole; a
-table of block offsets (4 B per 32 entries) lets a lookup by field
+and map. Every 8th entry starts a block whose field is coded whole; a
+table of block offsets (4 B per 8 entries) lets a lookup by field
 binary-search the blocks and decode at most two of them.
 
 The kind and path are coded in the entry itself: no read is interned,

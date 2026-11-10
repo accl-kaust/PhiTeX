@@ -15,7 +15,7 @@ use crate::node::{Anchor, NO_VALUE, ReadKind, ReadRec};
 use crate::values::{Field, ValueId};
 
 /// Entries a block holds: its first codes its field whole.
-const BLOCK: usize = 32;
+const BLOCK: usize = 8;
 
 /// The kinds' codes: the low four bits of an entry's head.
 const K_ME: u8 = 0;
