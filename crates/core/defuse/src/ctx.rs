@@ -68,6 +68,9 @@ pub struct Ctx<'a> {
     pub(crate) wait_frontier: bool,
     /// This run's distance past the frontier is noted (`Node::ahead`).
     pub(crate) ahead_noted: bool,
+    /// Its reads of the settling layer's fields past the frontier are not
+    /// held (`Node::frontier_pass`, taken as the run begins).
+    pub(crate) frontier_pass: bool,
     /// The stop at the frontier is the speculation window's, not a read
     /// of the layer's (`Node::held_window`).
     pub(crate) wait_window: bool,
@@ -155,6 +158,7 @@ impl<'a> Ctx<'a> {
             waits_only: false,
             wait_frontier: false,
             ahead_noted: false,
+            frontier_pass: false,
             wait_window: false,
             first_definers: None,
             goes_on: false,
@@ -505,7 +509,7 @@ impl<'a> Ctx<'a> {
             }
             self.me.held_window.store(false, Relaxed);
         }
-        if fr == 0 || !eng.settle_marked(f) || eng.op(self.me.op()).settles_at_quiet() {
+        if fr == 0 || self.frontier_pass || !eng.settle_marked(f) || eng.op(self.me.op()).settles_at_quiet() {
             return Ok(());
         }
         // (a read made before my placer, `Ctx::read_before_placer`, or

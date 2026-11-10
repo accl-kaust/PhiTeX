@@ -1167,9 +1167,10 @@ impl Pool {
     /// held node would change: a run on old values in an endless loop of its
     /// own (numerica at -j8, a thread at 100% and 14 GB, no read of it
     /// moving, for no node before it ran) never ended, and the line never
-    /// went quiet. The frontier moves to the earliest held node, which goes
-    /// on; the others stay held, each let go in its turn as the one before
-    /// it ends. (Let go all at once, every held run went on on old values
+    /// went quiet. The earliest held node goes on, with a pass
+    /// (`Node::frontier_pass`: its run's reads of the layer's fields are
+    /// not held); the frontier stays the layer's own, and the others stay
+    /// held, each let go in its turn as the one before it ends. (Let go all at once, every held run went on on old values
     /// whenever the runs at work were past it for a moment: at -j32 a letter
     /// typed into a beamer frame ran 285 runs, 2.5 s.) Nor past a node
     /// before the earliest held one that is to run again
@@ -1193,7 +1194,6 @@ impl Pool {
         else {
             return false;
         };
-        let first = earliest.id.raw() + 1;
         let mut any = false;
         for s in &self.shared.at_work {
             let x = s.load(Ordering::Relaxed);
@@ -1223,17 +1223,23 @@ impl Pool {
         if crate::read::on_one_layout(eng, || crate::read::dirty_between(eng, from, earliest)).is_some() {
             return false;
         }
-        if eng
-            .frontier
-            .compare_exchange(fr, first, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return false;
+        // (the earliest held run let go with a pass, the frontier left
+        // where the layer set it: moved to that run, the layer then
+        // placed a page's finisher before it, whose give-back that run
+        // had read past, and that change to a reader now behind the
+        // frontier was held to the quiet point, every page after it
+        // run again then: floats2col at -j16, 400 to 1 700 finisher runs
+        // for 194 fires in some builds, mc 84169)
+        earliest.frontier_pass.store(true, Ordering::Release);
+        if run_log() {
+            eprintln!(
+                "frontier: pass {} at {} t {}",
+                earliest.id.raw(),
+                fr.saturating_sub(1),
+                log_clock(Instant::now())
+            );
         }
-        eng.frontier_gen.fetch_add(1, Ordering::AcqRel);
-        log_frontier(eng, fr, first, None, "past only");
-        release_frontier(eng, Some(w));
-        true
+        release_frontier(eng, Some(w)) > 0
     }
 
     /// No work to find and runs held by the speculation window alone
@@ -2448,6 +2454,7 @@ fn work(eng: &Engine, pool: &Pool, w: &Worker, n: NodeId) -> Result<(), EvalErro
     let version = eng.version.load(Ordering::Acquire);
     node.held_panic.store(false, Ordering::Release);
     let mut cx = Ctx::new(eng, Some(w), node);
+    cx.frontier_pass = node.frontier_pass.swap(false, Ordering::AcqRel);
     let retries0 = crate::read::retries();
     let stands = cx.last_run_stands();
     let r = match stands {
@@ -3132,6 +3139,9 @@ pub(crate) fn past_frontier(eng: &Engine, node: &Node, fr: u64) -> bool {
 /// and as it is let go (`release_frontier`): a run let go is never parked
 /// again by a test that disagrees (docs/spec-window.md, Progress).
 pub(crate) fn frontier_holds(eng: &Engine, node: &Node, fr: u64) -> bool {
+    if node.frontier_pass.load(Ordering::Acquire) {
+        return false;
+    }
     if node.held_window.load(Ordering::Acquire) {
         !node.window_pass.load(Ordering::Acquire) && window_holds(eng, node, fr)
     } else {

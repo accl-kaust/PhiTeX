@@ -159,6 +159,11 @@ pub(crate) struct Node {
     /// is when it starts (docs/spec-window.md, Progress: a release is a
     /// run, never a hold again).
     pub(crate) window_pass: AtomicBool,
+    /// Let go past the settling layer's frontier with nothing else to run
+    /// (`Pool::release_past_only`): its next run's reads of the layer's
+    /// fields are not held at the frontier, which stays where the layer
+    /// set it.
+    pub(crate) frontier_pass: AtomicBool,
     /// Its runs ahead of the frontier refuted by the page layer
     /// (`commit::reask_reader`; `PHITEX_WINDOW_WAVE`).
     pub(crate) layer_refuted: AtomicU32,
@@ -301,6 +306,7 @@ impl Node {
             ahead: std::sync::atomic::AtomicU64::new(0),
             held_window: AtomicBool::new(false),
             window_pass: AtomicBool::new(false),
+            frontier_pass: AtomicBool::new(false),
             layer_refuted: AtomicU32::new(0),
             back_frontier: Mx::new(None),
             asks: Mx::new(Vec::new()),
