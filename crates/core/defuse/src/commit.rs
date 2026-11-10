@@ -3635,8 +3635,15 @@ fn reask_reader(eng: &Engine, w: Option<&Worker>, f: Field, r: &Reader, by: Opti
         note_refute(eng, f, r.node(), by, r.seen(), now);
         // (a run made ahead of the frontier refuted: the speculation window
         // narrows, docs/spec-window.md)
+        // (by the page layer's own change, a routine's give-back or a page
+        // it placed: running ahead of the fold was what was wasted; a
+        // change in the text alone refutes a run behind the frontier as
+        // well, and says nothing of the window)
         let ahead = eng.node(r.node()).ahead.swap(0, Ordering::AcqRel);
-        if ahead > 0 && eng.window_on.load(Ordering::Acquire) {
+        let by_layer = by
+            .and_then(|b| eng.placed_node(b))
+            .is_some_and(|b| eng.op(b.op()).settles_at_quiet());
+        if ahead > 0 && by_layer && eng.window_on.load(Ordering::Acquire) {
             crate::sched::window_refuted(eng, ahead - 1);
         }
     }

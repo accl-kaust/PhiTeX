@@ -14,9 +14,9 @@ docs="amsldoc:bench/amsldoc:amsldoc para4000:bench/para4000.tex:para4000"; [ -n 
 for d in $docs; do IFS=: read name src main <<< "$d"
   for i in 1 2 3; do for mode in off on; do
     rm -rf $w/c && mkdir -p $w/c && if [ -d "$src" ]; then cp -a $src/. $w/c/; else cp $src $w/c/; fi
-    e=(); [ $mode = on ] && e=(PHITEX_SPEC_WINDOW=1)
+    e=(); [ $mode = on ] && e=(PHITEX_SPEC_WINDOW=1 PHITEX_WINDOW_LOG=1)
     s0=$(date +%s.%N); (cd $w/c && env "${e[@]}" PHITEX_CACHE_DIR=$w/cache timeout 1200 $B build -j16 --exact-pdf $main.tex > $r/$name-$mode-$i.txt 2>&1); x=$?
     t=$(python3 -c "import time;print(f'{time.time()-$s0:.2f}')")
-    echo "$name -j16 window $mode run $i: exit $x ${t}s $(md5sum < $w/c/$main.pdf 2>/dev/null | cut -c1-12)"
+    echo "$name -j16 window $mode run $i: exit $x ${t}s $(md5sum < $w/c/$main.pdf 2>/dev/null | cut -c1-12) $(grep -h "^window:" $r/$name-$mode-$i.txt | tail -1)"
   done; done
 done

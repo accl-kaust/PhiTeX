@@ -49,8 +49,11 @@ node, over `GAP`. Continuations of a slice stand in its gap: distance 0.
   - A text node's run records its distance past the frontier when it
     read (`Node::ahead`). When that run is refuted (a reader re-asked by
     a changed definition, `commit::reask_reader`) and it had run ahead
-    (distance > 0), W halves, to no less than 1 place and no more than
-    half the distance it was refuted at.
+    (distance > 0) by a change of the page layer's own (a routine's
+    give-back, a node the fold placed: the definer is a settling node),
+    W halves, to no less than 1 place and no more than half the distance
+    it was refuted at. A refutation by the text alone says nothing of the
+    window: a run behind the frontier meets it as well.
   - When the layer moves the frontier forward (a fold step's commit)
     and no run ahead was refuted since the last move, W doubles (to at
     most 2^20 places, the whole text).

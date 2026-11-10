@@ -7031,6 +7031,14 @@ impl Build {
             self.opts.fixpoint,
             &mut absorb,
         );
+        // (`PHITEX_WINDOW_LOG`: the window as the evaluation left it)
+        if self.opts.spec_window && self.settles == 1 && crate::exec::env_flag!("PHITEX_WINDOW_LOG")
+        {
+            let (w, held, halved, doubled) = self.g.eng.window_stats();
+            eprintln!(
+                "window: width {w} places, {held} runs held, {halved} halvings, {doubled} doublings"
+            );
+        }
         // (a text taken last that changed nothing: the result is for it)
         let t_settle = t_all.elapsed();
         if let Some(v) = absorb.unchanged {
