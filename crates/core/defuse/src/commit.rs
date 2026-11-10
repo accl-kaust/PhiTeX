@@ -2922,7 +2922,7 @@ fn reask_parent(eng: &Engine, w: Option<&Worker>, parent: &Arc<Node>, child: Nod
     // (its reads of placements, not its placements: a placer of thousands
     // reads few of them)
     let mut out = None;
-    for rd in r.reads.iter() {
+    for rd in r.reads.of_no_field() {
         if let ReadKind::Placed { i: j, guess } = *rd.kind()
             && r.placed.get(j) == Some(&child)
             && let o = *out.get_or_insert_with(|| eng.node(child).run_record().map(|x| x.output))
