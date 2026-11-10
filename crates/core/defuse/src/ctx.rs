@@ -517,12 +517,16 @@ impl<'a> Ctx<'a> {
     /// past which it may yet place nodes (`None`: it places none, every
     /// reader is free). A reader of a field the layer defines past it
     /// waits for it to pass ([`Ctx::read`]).
-    /// The speculation window is on and whole (docs/spec-window.md): the
-    /// page layer has refuted no run of the text ahead of it lately, its
-    /// routines and the text exchange nothing a run ahead missed.
+    /// The speculation window is on and has never narrowed in this
+    /// evaluation (docs/spec-window.md): the page layer has refuted no run
+    /// of the text ahead of it, its routines and the text exchange nothing
+    /// a run ahead missed. Once one is refuted it stays so, whatever W
+    /// grows back to: the exchange is the document's.
     pub fn spec_window_whole(&self) -> bool {
         use std::sync::atomic::Ordering::Acquire;
-        self.eng.window_on.load(Acquire) && self.eng.window.load(Acquire) >= crate::sched::WINDOW_MAX
+        self.eng.window_on.load(Acquire)
+            && self.eng.window_stats[1].load(Acquire) == 0
+            && self.eng.window.load(Acquire) >= crate::sched::WINDOW_MAX
     }
 
     pub fn set_frontier(&mut self, at: Option<NodeId>) {

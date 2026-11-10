@@ -88,8 +88,10 @@ node, over `GAP`. Continuations of a slice stand in its gap: distance 0.
   guesses have held: each give-back found against the guess made for its
   page is counted held or missed (`Ops::give_back_guesses`), and the fold
   trusts the guess once at least 4 held and no more than one in eight
-  missed, and only while W is whole (`Ctx::spec_window_whole`: the layer
-  has refuted no run ahead of it since W last grew whole). Not a
+  missed, and only while W has never narrowed (`Ctx::spec_window_whole`:
+  the layer has refuted no run ahead of it in this evaluation; W growing
+  back whole does not bring the trust back, the exchange is the
+  document's). Not a
   reversal of 10-29: a document whose routines and text exchange state
   (floats2col) narrows W and never earns the trust, and folds as it does
   now; one whose routines give back the same each page

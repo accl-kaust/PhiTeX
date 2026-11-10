@@ -22,8 +22,8 @@ case $part in
 floats)
   for mode in ${MODES:-on}; do envof $mode
   for i in $(seq 1 ${FN:-20}); do
-    env "${e[@]}" timeout 600 cargo test -q --release -p phitex-tex --test latex floats2col_routines_run_once_per_fire -- --nocapture > $r/t-$i.txt 2>&1
-    echo "$mode test run $i: exit $? $(grep -E 'fires' $r/t-$i.txt | grep -v 'j 1:' | cut -c1-160 | tr '\n' ' ') $(grep -E '^window:' $r/t-$i.txt | tr '\n' ' ')"
+    env "${e[@]}" timeout 600 cargo test -q --release -p phitex-tex --test latex floats2col_routines_run_once_per_fire -- --nocapture > $r/t-$mode-$i.txt 2>&1
+    echo "$mode test run $i: exit $? $(grep -E 'fires' $r/t-$mode-$i.txt | grep -v 'j 1:' | cut -c1-160 | tr '\n' ' ') $(grep -E '^window:' $r/t-$mode-$i.txt | tr '\n' ' ')"
   done
   # (the CLI's reference: a -j1 build, window off)
   rm -rf $w/f && mkdir -p $w/f && cp oracle/fixtures/latex/pdfdocs/floats2col.tex $w/f/
@@ -33,10 +33,10 @@ floats)
   for i in $(seq 1 ${CN:-50}); do
     rm -rf $w/f && mkdir -p $w/f && cp oracle/fixtures/latex/pdfdocs/floats2col.tex $w/f/
     s0=$(date +%s.%N)
-    (cd $w/f && env "${e[@]}" PHITEX_TEX_TIME=1 PHITEX_STALL_SECS=30 PHITEX_CACHE_DIR=$w/cache timeout 120 $B build -j16 --exact-pdf floats2col.tex > $r/f-$i.txt 2>&1); x=$?
+    (cd $w/f && env "${e[@]}" PHITEX_TEX_TIME=1 PHITEX_STALL_SECS=30 PHITEX_CACHE_DIR=$w/cache timeout 120 $B build -j16 --exact-pdf floats2col.tex > $r/f-$mode-$i.txt 2>&1); x=$?
     [ $x = 124 ] && hangs=$((hangs+1))
     m=$(md5sum < $w/f/floats2col.pdf 2>/dev/null | cut -c1-12)
-    echo "$mode cli run $i: exit $x $(python3 -c "import time;print(f'{time.time()-$s0:.2f}')")s md5 $m $([ "$m" = "$want" ] && echo same || echo DIFFERS) $(grep -oE 'acct: [0-9]+ runs[^,]*' $r/f-$i.txt | tail -1) $(grep -h '^window:' $r/f-$i.txt | tail -1)"
+    echo "$mode cli run $i: exit $x $(python3 -c "import time;print(f'{time.time()-$s0:.2f}')")s md5 $m $([ "$m" = "$want" ] && echo same || echo DIFFERS) $(grep -oE '^acct: [0-9]+ runs' $r/f-$mode-$i.txt | tail -1) $(grep -h '^window:' $r/f-$mode-$i.txt | tail -1)"
   done
   echo "$mode cli: $hangs hangs in ${CN:-50}"
   done
