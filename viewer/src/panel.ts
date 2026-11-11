@@ -291,9 +291,14 @@ export interface PanelPrefs {
   zoom: string;
   collapsed: boolean;
   details: boolean;
+  /** Links: previewed on hover; Back and Forward after a jump; where a jump lands lit; Ctrl+click to a new tab. */
+  peeks: boolean;
+  backs: boolean;
+  flashes: boolean;
+  newTabs: boolean;
 }
 
-const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false };
+const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true };
 
 /**
  * A page's CSS size at `cssWidth`: each side rounded up to whole device
@@ -739,6 +744,7 @@ export class Panel {
       // (a size saved while hidden, by an older version)
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
+      this.linksShown();
     });
   }
 
@@ -2503,6 +2509,7 @@ export class Panel {
     return [
       { title: "Preview", rows: preview },
       { title: "Appearance", rows: look },
+      { title: "Links", rows: this.linkRows() },
       { title: "Warnings/Errors", rows: problems },
       { title: "Build", rows: build },
       { title: "Packages", rows: [] },
@@ -2513,6 +2520,29 @@ export class Panel {
   /** Start the pages at page `k`, `top` points down it (a tab opened at a place: its address said where). */
   startAt(k: number, top: number | null): void {
     this.viewer.startAt(k, top);
+  }
+
+  /** The links' switches (PanelPrefs) given to the viewer. */
+  private linksShown(): void {
+    const v = this.viewer, p = this.prefs;
+    [v.peeks, v.backs, v.flashes, v.newTabs] = [p.peeks, p.backs, p.flashes, p.newTabs];
+    if (!p.backs) v.backsOff();
+  }
+
+  /** Settings' Links: each feature of the links on or off, kept with the panel's own choices (every host's). */
+  private linkRows(): SettingRow[] {
+    const sw = (k: "peeks" | "backs" | "flashes" | "newTabs") => (on?: boolean | string) => {
+      this.prefs[k] = on === true;
+      this.linksShown();
+      this.save();
+    };
+    const rows: SettingRow[] = [
+      { id: "peeks", label: "Preview links on hover", help: "A window over a link shows where it goes: the page, a citation's works, an address. Its pin keeps it open, moved and resized as you like", kind: "toggle", value: this.prefs.peeks, set: sw("peeks") },
+      { id: "backs", label: "Back and Forward after a jump", help: "A Back button in the corner once you follow a link, with the places before it; the mouse's back and forward buttons", kind: "toggle", value: this.prefs.backs, set: sw("backs") },
+      { id: "flashes", label: "Light up where a jump lands", help: "What a link pointed at lit for a moment", kind: "toggle", value: this.prefs.flashes, set: sw("flashes") },
+    ];
+    if (this.ev.onOpenAt) rows.push({ id: "newTabs", label: "Ctrl+click opens a new tab", help: "A link Ctrl+clicked (⌘ on a Mac) or middle-clicked opens this preview in a new tab at its target", kind: "toggle", value: this.prefs.newTabs, set: sw("newTabs") });
+    return rows;
   }
 
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */

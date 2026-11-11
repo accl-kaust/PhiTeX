@@ -506,13 +506,52 @@ document.head.append(Object.assign(document.createElement("style"), {
 #phx-pick header b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #phx-pick header small { grid-column: 1 / -1; color: var(--fg2); font-size: 12px; }
 #phx-pick .phx-commits { flex: 1; min-height: 0; }
-#phx-pick header button { grid-row: 1; grid-column: 2; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
-#phx-pick header button:hover { background: var(--hover); }`,
+#phx-pick header .close { grid-row: 1; grid-column: 2; }
+#phx-pick .ends { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin: 6px 0 2px; min-width: 0; }
+#phx-pick .ends .end { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; }
+#phx-pick .ends .end.set, #phx-pick .ends .end.t { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+#phx-pick .ends i { font-style: normal; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
+#phx-pick .ends .v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#phx-pick .ends .f:not(.set) .v { color: var(--fg2); }
+#phx-pick .ends .x { all: unset; cursor: pointer; width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; color: var(--fg2); font-size: 14px; }
+#phx-pick .ends .x[hidden] { display: none; }
+#phx-pick .ends .x:hover { background: var(--hover); color: var(--fg); }
+#phx-pick .ends .arrow { color: var(--fg2); }
+#phx-pick .ask { order: 2; flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); background: var(--bg); transition: background .2s; }
+#phx-pick .ask.asking { background: color-mix(in srgb, var(--accent) 14%, var(--bg)); }
+#phx-pick .ask .q { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg2); }
+#phx-pick .ask.asking .q { color: var(--fg); font-weight: 600; }
+#phx-pick .ask .no { display: none; }
+#phx-pick .ask.asking .no { display: inline-block; }
+#phx-pick .ask .yes:disabled { opacity: .45; cursor: default; }
+#phx-pick .ask button { border: 1px solid var(--line); background: var(--bg); color: var(--fg); border-radius: 9999px; padding: 2px 12px; cursor: pointer; font: inherit; }
+#phx-pick .ask .yes { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+#phx-pick .ask.nudge { animation: phx-nudge .35s; }
+@keyframes phx-nudge { 0%, 100% { transform: none; } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+#phx-pick header button { border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; }
+#phx-pick header button:hover { background: var(--hover); }
+`,
 }));
 let pick: HTMLElement | undefined;
 let graph: Commits | undefined;
-const closePick = () => {
-  if (pick) pick.hidden = true;
+/** The pair marked ("from..to", to "" the working tree), "" none; and the pair last compared. A pair
+ * marked and not compared is asked about whenever the picker goes, reopened or not. */
+let marked = "", compared = "";
+const closePick = (ask = true) => {
+  if (!pick || pick.hidden) return;
+  // (a pair marked, not compared: Compare it? the foot's bar lit, the picker kept; asked
+  // already, a second Esc or click outside is "Don't compare", the pair kept for next time)
+  const bar = pick.querySelector<HTMLElement>(".ask")!;
+  if (ask && marked && marked !== compared && !bar.classList.contains("asking")) {
+    bar.classList.add("asking");
+    bar.classList.remove("nudge");
+    void bar.offsetWidth;
+    bar.classList.add("nudge");
+    bar.querySelector<HTMLButtonElement>(".yes")!.focus();
+    return;
+  }
+  bar.classList.remove("asking", "nudge");
+  pick.hidden = true;
 };
 /** Compare (the panel's menu, its icon): the commit graph, or why there is none (not a git repository). */
 function openPick(): void {
@@ -520,16 +559,35 @@ function openPick(): void {
   if (!pick) {
     pick = document.createElement("div");
     pick.id = "phx-pick";
-    pick.innerHTML = `<header><b>Compare with an earlier version</b><small>Click: from · Shift+click: to (else the files as they are) · Double-click: a commit's own changes</small><button type="button">Close</button></header>`;
-    pick.querySelector("button")!.onclick = closePick;
+    pick.innerHTML = `<header><b>Compare with an earlier version</b><button type="button" class="close">Close</button><div class="ends"><span class="end f"><i>From</i><span class="v">click a commit</span><button type="button" class="x" data-end="from" aria-label="Clear From" hidden>×</button></span><span class="arrow">→</span><span class="end t"><i>To</i><span class="v">the working tree</span><button type="button" class="x" data-end="to" aria-label="To the working tree" hidden>×</button></span></div><small>Click one end, then the other (or drag between them) · Double-click: a commit's own changes</small></header><div class="ask"><span class="q">Choose From and To</span><button type="button" class="no">Don't compare</button><button type="button" class="yes" disabled>Compare</button></div>`;
+    pick.querySelector<HTMLButtonElement>(".close")!.onclick = () => closePick();
+    for (const x of pick.querySelectorAll<HTMLButtonElement>(".ends .x")) x.onclick = () => graph?.clear(x.dataset.end as "from" | "to");
+    const ask = pick.querySelector<HTMLElement>(".ask")!;
+    ask.querySelector<HTMLButtonElement>(".yes")!.onclick = () => graph?.run();
+    ask.querySelector<HTMLButtonElement>(".no")!.onclick = () => closePick(false);
     document.body.append(pick);
     graph = new Commits(pick, {
       load: async (skip, limit) => {
         const r = await sock.request({ op: "diff_log", skip, limit });
         return r.ok ? ((r.json?.commits ?? []) as Commit[]) : (r.error ?? "no git repository here");
       },
+      marked: (from, to, w) => {
+        marked = from ? `${from}..${to ?? ""}` : "";
+        const f = pick!.querySelector<HTMLElement>(".ends .f")!, t = pick!.querySelector<HTMLElement>(".ends .t")!;
+        f.querySelector(".v")!.textContent = from ? w.from : "click a commit";
+        f.classList.toggle("set", !!from);
+        f.querySelector<HTMLElement>(".x")!.hidden = !from;
+        t.querySelector(".v")!.textContent = w.to;
+        t.querySelector<HTMLElement>(".x")!.hidden = !to;
+        ask.querySelector(".q")!.textContent = from ? `Compare ${w.from.split(" ")[0]} → ${to ? w.to.split(" ")[0] : "the working tree"}${marked === compared ? " (shown now)" : ""}` : "Choose From and To";
+        ask.querySelector<HTMLButtonElement>(".yes")!.disabled = !from;
+        if (!from) ask.classList.remove("asking");
+      },
       pick: (from, to) => {
-        closePick();
+        compared = `${from}..${to ?? ""}`;
+        const q = pick!.querySelector(".ask .q")!;
+        if (!q.textContent!.endsWith(" (shown now)")) q.textContent += " (shown now)";
+        closePick(false);
         const short = (id: string) => id.slice(0, 7);
         void controls.start({ from, to }, short(from), to ? `to ${short(to)}` : "working tree");
       },
@@ -537,9 +595,16 @@ function openPick(): void {
     void graph.load();
   }
   pick.hidden = false;
+  pick.querySelector<HTMLElement>(".ask")!.classList.remove("asking", "nudge");
 }
+// (a click outside the picker: it goes, or asks first if a pair is marked; the Compare button's own click toggles it)
+addEventListener("pointerdown", (e) => {
+  if (!pick || pick.hidden || e.composedPath().some((n) => n === pick || (n as Element).id === "b-compare")) return;
+  closePick();
+}, { capture: true });
 addEventListener("keydown", (e) => {
   if (e.key === "Escape" && pick && !pick.hidden) (closePick(), e.stopImmediatePropagation());
+  else if (e.key === "Enter" && pick && !pick.hidden && !(e.target as Element)?.closest?.("button") && graph?.run()) (e.preventDefault(), e.stopImmediatePropagation());
 }, { capture: true });
 
 // ---- Printing: the PDF, not this page ----

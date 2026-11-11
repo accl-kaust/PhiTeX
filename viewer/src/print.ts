@@ -291,7 +291,7 @@ header:active { cursor: grabbing; }
 /* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
 .slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
 /* a link hovered: where it goes, in a small window (viewer.ts peekShow) */
-.peek { position: absolute; z-index: 4; width: min(440px, calc(100% - 16px)); text-align: left; background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 24px rgb(0 0 0 / 22%); overflow: hidden; cursor: pointer; font: var(--ph-size)/1.4 var(--ph-font); }
+.peek { position: absolute; z-index: 4; width: min(440px, calc(100% - 16px)); text-align: left; background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 24px rgb(0 0 0 / 22%); overflow: hidden; cursor: default; font: var(--ph-size)/1.4 var(--ph-font); }
 .peek .pv { position: relative; height: 250px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; background: #fff; }
 .peek .pv canvas { display: block; }
 .peek .pv .at { position: absolute; left: 0; width: 3px; height: 18px; background: var(--ph-accent); border-radius: 0 2px 2px 0; }
@@ -301,7 +301,28 @@ header:active { cursor: grabbing; }
 .peek.url .pu { display: block; }
 .peek .pf { display: flex; justify-content: space-between; gap: 12px; padding: 5px 10px; font-size: 12px; color: var(--ph-fg2); border-top: 1px solid var(--ph-border); }
 .peek.url .pf { border-top: 0; }
-.peek.url .go { display: none; }
+.peek .pf .pin { all: unset; cursor: pointer; display: inline-flex; align-items: center; margin-left: 8px; color: var(--ph-fg2); }
+.peek .pf .pin svg { width: 14px; height: 14px; }
+.peek .pf .pin:hover { color: var(--ph-fg); }
+.peek .pf .pin:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 2px; border-radius: 2px; }
+.peek .pf { align-items: center; }
+.peek .pf .go { all: unset; margin-left: auto; cursor: pointer; padding: 1px 10px; border-radius: var(--ph-pill); border: 1px solid var(--ph-border); color: var(--ph-fg); }
+.peek .pf .go:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.peek .pf .go:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 2px; }
+.peek .pf .go[hidden] { display: none; }
+/* a window kept open (viewer.ts peekPin): over the pages, where it was put, a bar to move it by */
+.peek.pinned { z-index: 5; box-shadow: 0 10px 32px rgb(0 0 0 / 28%); resize: both; display: flex; flex-direction: column; min-width: 240px; min-height: 120px; max-width: calc(100% - 8px); }
+/* (resized: what it shows fills it, scrolling inside) */
+.peek.pinned .pv { flex: 1 1 auto; height: auto; min-height: 60px; }
+.peek.pinned.cite .pc { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.peek.pinned .pc .cs { flex: 1 1 auto; max-height: none; min-height: 0; }
+/* (the corner kept for resizing: the footer's button clear of it) */
+.peek.pinned .pf { flex: none; padding-right: 28px; }
+.peek.pinned .pf .pin { display: none; }
+.peek .ph { display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px; cursor: move; user-select: none; touch-action: none; font-size: 12px; font-weight: 600; color: var(--ph-fg); background: var(--ph-hover, rgb(0 0 0 / 5%)); border-bottom: 1px solid var(--ph-border); }
+.peek .ph .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek .ph .x { all: unset; cursor: pointer; width: 20px; height: 20px; display: grid; place-items: center; border-radius: var(--ph-radius); color: var(--ph-fg2); font-size: 15px; }
+.peek .ph .x:hover { background: var(--ph-border); color: var(--ph-fg); }
 .peek .pc { display: none; }
 .peek.cite .pv { display: none; }
 .peek.cite .pc { display: block; }
@@ -310,9 +331,8 @@ header:active { cursor: grabbing; }
 .peek .pc .mh button:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); }
 .peek .pc .cs { position: relative; max-height: 300px; overflow-y: auto; overscroll-behavior: contain; }
 /* an entry, the same one or many: the label, title and key; who, when and where; its links */
-.peek .pc .ce { padding: 7px 12px 7px 9px; border-left: 3px solid transparent; cursor: pointer; }
+.peek .pc .ce { padding: 7px 12px 7px 9px; border-left: 3px solid transparent; }
 .peek .pc .ce + .ce { border-top: 1px solid var(--ph-border); }
-.peek .pc .ce:hover { background: var(--ph-hover, rgb(0 0 0 / 4%)); }
 .peek .pc .ce.here { border-left-color: var(--ph-accent); background: color-mix(in srgb, var(--ph-accent) 7%, transparent); }
 .peek .pc .hd { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .peek .pc .hd .lab { flex: none; font-size: 12px; font-weight: 600; color: var(--ph-accent); }
