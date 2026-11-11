@@ -208,6 +208,7 @@ pub struct Engine {
     /// next one's runs by (`sched::work`).
     pub(crate) holds_on: std::sync::atomic::AtomicBool,
     pub(crate) rerun_holds: std::sync::atomic::AtomicBool,
+    pub(crate) created_movers: std::sync::atomic::AtomicBool,
     /// The payload past which the store is next collected, as the last
     /// collection left it (twice what stood after it): an evaluation goes
     /// on from it, or each would collect again what the last one kept.
@@ -455,6 +456,7 @@ impl Engine {
             movers_n: AtomicU64::new(0),
             holds_on: std::sync::atomic::AtomicBool::new(false),
             rerun_holds: std::sync::atomic::AtomicBool::new(false),
+            created_movers: std::sync::atomic::AtomicBool::new(false),
             collect_mark: AtomicU64::new(0),
             frontier_by: AtomicU64::new(0),
             frontier_gen: AtomicU64::new(0),
@@ -1595,10 +1597,12 @@ impl Engine {
             // (PHITEX_CLEAN_HOLDS=1, a measure: the edit's holds on a
             // clean build too)
             let clean_holds = std::env::var_os("PHITEX_CLEAN_HOLDS");
-            self.holds_on.store(
-                epoch > 1 || clean_holds.as_ref().is_some_and(|x| x == "1"),
-                Ordering::Release,
-            );
+            let ch = |v: &str| clean_holds.as_ref().is_some_and(|x| x == v);
+            self.holds_on.store(epoch > 1 || ch("1") || ch("3"), Ordering::Release);
+            // (=3: the holds, but a node never run is no mover on a
+            // clean build, only one whose commit moved a read of its
+            // chain, `sched::note_move`)
+            self.created_movers.store(epoch > 1 || ch("1"), Ordering::Release);
             // (=2: only a run again waits, for an open source it read
             // that moved a reader, `sched::hold_for`)
             self.rerun_holds

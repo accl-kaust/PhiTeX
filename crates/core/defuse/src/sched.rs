@@ -1698,7 +1698,7 @@ pub(crate) fn enqueue(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, wake: Wak
     // (a node of an edit that has never run: what it defines is not known,
     // so those after it wait for it (`hold_for`))
     if matches!(wake.cause, Cause::Created { .. })
-        && (eng.holds_on.load(Ordering::Acquire) || (w.is_none() && eng.epoch.load(Ordering::Acquire) > 0))
+        && (eng.created_movers.load(Ordering::Acquire) || (w.is_none() && eng.epoch.load(Ordering::Acquire) > 0))
         && n.record().is_none()
     {
         let op = eng.op(n.op());
