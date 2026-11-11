@@ -1566,7 +1566,10 @@ export class Viewer {
   redraw(sizesOnly = false): void {
     if (sizesOnly) {
       for (const s of this.slots) this.sizeSlot(s);
-      for (const k of this.visible) if (this.slots[k]) this.snap(this.slots[k]);
+      // (the boxes snap needs read together, then written: one layout, not one a page)
+      const vis = [...this.visible].map((k) => this.slots[k]).filter((s): s is Slot => !!s);
+      const boxes = vis.map((s) => (s.img?.canvas?.dataset.scale ? undefined : s.el.getBoundingClientRect()));
+      vis.forEach((s, i) => this.snap(s, boxes[i]));
       return;
     }
     const at = this.slots[this.current];
@@ -1706,12 +1709,15 @@ export class Viewer {
     const c = wrap?.querySelector("canvas");
     if (!wrap || !c || !c.width || !c.height) return;
     const dpr = window.devicePixelRatio || 1;
-    const r = box ?? s.el.getBoundingClientRect();
     const pw = Number(wrap.dataset.pw) || c.width, ph = Number(wrap.dataset.ph) || c.height;
     // (drawn at the zoom, `data-scale`: at its own pixels, its box the
     // slot's to a pixel by pageBox's rounding; drawn at another, or a
-    // host's bitmap of no scale more than a rounding off its box: stretched)
-    const own = wrap.dataset.scale ? this.fits(s) : Math.abs(pw - r.width * dpr) <= 1.5 && Math.abs(ph - r.height * dpr) <= 1.5;
+    // host's bitmap of no scale more than a rounding off its box: stretched.
+    // The box read only for a bitmap of no scale: read after the slots'
+    // sizes were written, it laid the view out again, each frame of a zoom
+    // once a page)
+    const r = wrap.dataset.scale ? null : (box ?? s.el.getBoundingClientRect());
+    const own = !r ? this.fits(s) : Math.abs(pw - r.width * dpr) <= 1.5 && Math.abs(ph - r.height * dpr) <= 1.5;
     // (a bitmap of another size than its page's box, a zoom's until the page
     // is drawn again: stretched to the box, so the page and the marks on it,
     // placed in fractions of the box, stay together; never overflowing it)

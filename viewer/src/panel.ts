@@ -2177,7 +2177,7 @@ export class Panel {
    * (client pixels, and on its page), and when it ends.
    */
   private gesture:
-    | { from: number; f: number; x: number; y: number; at: { k: number; fx: number; fy: number } | null; frame: number; end?: ReturnType<typeof setTimeout> }
+    | { from: number; f: number; x: number; y: number; at: { k: number; fx: number; fy: number } | null; frame: number; end?: ReturnType<typeof setTimeout>; goal?: number; ox: number; oy: number }
     | undefined;
 
   /**
@@ -2191,24 +2191,60 @@ export class Panel {
    * by one transform until the gesture rested, and only then drawn: every
    * zoom showed stretched bitmaps for 250 ms and a drawing more.
    */
-  private zoomAt(f: number, px: number, py: number): void {
+  /**
+   * Zoom by `f` at the point (`px`, `py`) of the stage. `ease`: toward it over a few frames
+   * (a wheel's notches: each moves the goal, the zoom follows it by the time passed, most
+   * of the way in 200 ms whatever the frame rate: notches in a row one motion), else at
+   * once (a pinch's small steps, already one a frame).
+   */
+  private zoomAt(f: number, px: number, py: number, ease = false): void {
     const r = this.$("#stage").getBoundingClientRect();
     let g = this.gesture;
     if (!g) {
-      const x = r.left + px, y = r.top + py;
-      g = this.gesture = { from: this.scale(), f: 1, x, y, at: this.viewer.pointAt(x, y), frame: 0 };
+      const x = r.left + px, y = r.top + py, v = this.$("#viewer").getBoundingClientRect();
+      // (the pointer in the pages' own box: the transform's origin while the gesture runs)
+      g = this.gesture = { from: this.scale(), f: 1, x, y, at: this.viewer.pointAt(x, y), frame: 0, ox: x - v.left, oy: y - v.top };
     }
-    g.f = Math.min(8, Math.max(0.25, g.from * g.f * f)) / g.from;
+    const clamp = (v: number) => Math.min(8, Math.max(0.25, g.from * v)) / g.from;
     const gg = g;
-    if (!g.frame) g.frame = requestAnimationFrame(() => ((gg.frame = 0), this.zoomLay(gg)));
+    if (ease) {
+      gg.goal = clamp((gg.goal ?? gg.f) * f);
+      let last = performance.now();
+      const step = (t: number) => {
+        gg.frame = 0;
+        const d = gg.goal! - gg.f, k = 1 - Math.exp(-Math.max(0, t - last) / 90);
+        last = t;
+        // (in log terms: a zoom in and out at the same pace)
+        gg.f = Math.abs(d) / gg.goal! < 0.003 ? gg.goal! : gg.f * Math.pow(gg.goal! / gg.f, k);
+        this.zoomLay(gg);
+        if (gg.f !== gg.goal) gg.frame = requestAnimationFrame(step);
+      };
+      if (!gg.frame) gg.frame = requestAnimationFrame((t) => ((last = t - 16), step(t)));
+    } else {
+      gg.goal = undefined;
+      gg.f = clamp(gg.f * f);
+      if (!gg.frame) gg.frame = requestAnimationFrame(() => ((gg.frame = 0), this.zoomLay(gg)));
+    }
     clearTimeout(g.end);
     g.end = setTimeout(() => this.zoomEnd(), 250);
   }
 
-  /** The gesture's zoom now: the pages laid out at it, the place under the pointer where it was, those drawn at another zoom asked for. */
-  private zoomLay(g: NonNullable<Panel["gesture"]>): void {
+  /**
+   * The gesture's zoom now. While it runs: the pages scaled by a transform about the
+   * pointer, laid out at no frame (a layout a frame, the pages' boxes and the place under
+   * the pointer read back, cost each frame its time: 30 frames a second and less). `final`:
+   * the pages laid out at it, the place under the pointer where it was, those drawn at
+   * another zoom asked for, the transform gone.
+   */
+  private zoomLay(g: NonNullable<Panel["gesture"]>, final = false): void {
     this.prefs.zoom = String(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
+    const v = this.$("#viewer");
+    if (!final) {
+      Object.assign(v.style, { transformOrigin: `${g.ox}px ${g.oy}px`, transform: `scale(${g.f})`, willChange: "transform" });
+      return;
+    }
+    Object.assign(v.style, { transformOrigin: "", transform: "", willChange: "" });
     this.$("#stage").classList.remove("fit");
     this.viewer.redraw(true);
     if (g.at) this.viewer.keepAt(g.at, g.x, g.y);
@@ -2219,11 +2255,11 @@ export class Panel {
   private zoomEnd(): void {
     const g = this.gesture;
     if (!g) return;
+    // (still easing toward its goal: ended once there, not cut short by a jump)
+    if (g.goal !== undefined && g.f !== g.goal) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
     this.gesture = undefined;
-    if (g.frame) {
-      cancelAnimationFrame(g.frame);
-      this.zoomLay(g);
-    }
+    cancelAnimationFrame(g.frame);
+    this.zoomLay(g, true);
     requestAnimationFrame(() => this.drawScrollMarks());
     this.save();
     this.emit();
@@ -2309,7 +2345,8 @@ export class Panel {
         // proportion, as it goes)
         const notch = e.deltaMode !== 0 || Math.abs(e.deltaY) >= 50;
         const f = notch ? (e.deltaY < 0 ? 1.1 : 1 / 1.1) : Math.exp(-e.deltaY / 100);
-        this.zoomAt(f, e.clientX - r.left, e.clientY - r.top);
+        // (a notch eased to over a few frames, as a pinch goes: laid out at once it was a jump of 10% a notch)
+        this.zoomAt(f, e.clientX - r.left, e.clientY - r.top, notch && !matchMedia("(prefers-reduced-motion: reduce)").matches);
       },
       { passive: false },
     );

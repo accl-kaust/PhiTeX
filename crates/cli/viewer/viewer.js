@@ -1500,7 +1500,9 @@ var Viewer = class _Viewer {
   redraw(sizesOnly = false) {
     if (sizesOnly) {
       for (const s of this.slots) this.sizeSlot(s);
-      for (const k of this.visible) if (this.slots[k]) this.snap(this.slots[k]);
+      const vis = [...this.visible].map((k) => this.slots[k]).filter((s) => !!s);
+      const boxes3 = vis.map((s) => s.img?.canvas?.dataset.scale ? void 0 : s.el.getBoundingClientRect());
+      vis.forEach((s, i) => this.snap(s, boxes3[i]));
       return;
     }
     const at = this.slots[this.current];
@@ -1620,9 +1622,9 @@ var Viewer = class _Viewer {
     const c = wrap?.querySelector("canvas");
     if (!wrap || !c || !c.width || !c.height) return;
     const dpr = window.devicePixelRatio || 1;
-    const r = box ?? s.el.getBoundingClientRect();
     const pw = Number(wrap.dataset.pw) || c.width, ph = Number(wrap.dataset.ph) || c.height;
-    const own = wrap.dataset.scale ? this.fits(s) : Math.abs(pw - r.width * dpr) <= 1.5 && Math.abs(ph - r.height * dpr) <= 1.5;
+    const r = wrap.dataset.scale ? null : box ?? s.el.getBoundingClientRect();
+    const own = !r ? this.fits(s) : Math.abs(pw - r.width * dpr) <= 1.5 && Math.abs(ph - r.height * dpr) <= 1.5;
     const set = (k, v) => {
       if (wrap.style[k] !== v) wrap.style[k] = v;
     };
@@ -6319,23 +6321,57 @@ var Panel = class {
    * by one transform until the gesture rested, and only then drawn: every
    * zoom showed stretched bitmaps for 250 ms and a drawing more.
    */
-  zoomAt(f, px, py) {
+  /**
+   * Zoom by `f` at the point (`px`, `py`) of the stage. `ease`: toward it over a few frames
+   * (a wheel's notches: each moves the goal, the zoom follows it by the time passed, most
+   * of the way in 200 ms whatever the frame rate: notches in a row one motion), else at
+   * once (a pinch's small steps, already one a frame).
+   */
+  zoomAt(f, px, py, ease4 = false) {
     const r = this.$("#stage").getBoundingClientRect();
     let g = this.gesture;
     if (!g) {
-      const x = r.left + px, y = r.top + py;
-      g = this.gesture = { from: this.scale(), f: 1, x, y, at: this.viewer.pointAt(x, y), frame: 0 };
+      const x = r.left + px, y = r.top + py, v = this.$("#viewer").getBoundingClientRect();
+      g = this.gesture = { from: this.scale(), f: 1, x, y, at: this.viewer.pointAt(x, y), frame: 0, ox: x - v.left, oy: y - v.top };
     }
-    g.f = Math.min(8, Math.max(0.25, g.from * g.f * f)) / g.from;
+    const clamp = (v) => Math.min(8, Math.max(0.25, g.from * v)) / g.from;
     const gg = g;
-    if (!g.frame) g.frame = requestAnimationFrame(() => (gg.frame = 0, this.zoomLay(gg)));
+    if (ease4) {
+      gg.goal = clamp((gg.goal ?? gg.f) * f);
+      let last = performance.now();
+      const step = (t) => {
+        gg.frame = 0;
+        const d = gg.goal - gg.f, k = 1 - Math.exp(-Math.max(0, t - last) / 90);
+        last = t;
+        gg.f = Math.abs(d) / gg.goal < 3e-3 ? gg.goal : gg.f * Math.pow(gg.goal / gg.f, k);
+        this.zoomLay(gg);
+        if (gg.f !== gg.goal) gg.frame = requestAnimationFrame(step);
+      };
+      if (!gg.frame) gg.frame = requestAnimationFrame((t) => (last = t - 16, step(t)));
+    } else {
+      gg.goal = void 0;
+      gg.f = clamp(gg.f * f);
+      if (!gg.frame) gg.frame = requestAnimationFrame(() => (gg.frame = 0, this.zoomLay(gg)));
+    }
     clearTimeout(g.end);
     g.end = setTimeout(() => this.zoomEnd(), 250);
   }
-  /** The gesture's zoom now: the pages laid out at it, the place under the pointer where it was, those drawn at another zoom asked for. */
-  zoomLay(g) {
+  /**
+   * The gesture's zoom now. While it runs: the pages scaled by a transform about the
+   * pointer, laid out at no frame (a layout a frame, the pages' boxes and the place under
+   * the pointer read back, cost each frame its time: 30 frames a second and less). `final`:
+   * the pages laid out at it, the place under the pointer where it was, those drawn at
+   * another zoom asked for, the transform gone.
+   */
+  zoomLay(g, final = false) {
     this.prefs.zoom = String(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
+    const v = this.$("#viewer");
+    if (!final) {
+      Object.assign(v.style, { transformOrigin: `${g.ox}px ${g.oy}px`, transform: `scale(${g.f})`, willChange: "transform" });
+      return;
+    }
+    Object.assign(v.style, { transformOrigin: "", transform: "", willChange: "" });
     this.$("#stage").classList.remove("fit");
     this.viewer.redraw(true);
     if (g.at) this.viewer.keepAt(g.at, g.x, g.y);
@@ -6345,11 +6381,10 @@ var Panel = class {
   zoomEnd() {
     const g = this.gesture;
     if (!g) return;
+    if (g.goal !== void 0 && g.f !== g.goal) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
     this.gesture = void 0;
-    if (g.frame) {
-      cancelAnimationFrame(g.frame);
-      this.zoomLay(g);
-    }
+    cancelAnimationFrame(g.frame);
+    this.zoomLay(g, true);
     requestAnimationFrame(() => this.drawScrollMarks());
     this.save();
     this.emit();
@@ -6423,7 +6458,7 @@ var Panel = class {
         const r = stage.getBoundingClientRect();
         const notch = e.deltaMode !== 0 || Math.abs(e.deltaY) >= 50;
         const f = notch ? e.deltaY < 0 ? 1.1 : 1 / 1.1 : Math.exp(-e.deltaY / 100);
-        this.zoomAt(f, e.clientX - r.left, e.clientY - r.top);
+        this.zoomAt(f, e.clientX - r.left, e.clientY - r.top, notch && !matchMedia("(prefers-reduced-motion: reduce)").matches);
       },
       { passive: false }
     );
