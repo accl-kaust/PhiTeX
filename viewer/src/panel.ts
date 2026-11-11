@@ -296,9 +296,11 @@ export interface PanelPrefs {
   backs: boolean;
   flashes: boolean;
   newTabs: boolean;
+  /** The documents built in this panel before (a hash of the page's address and the main file's name), newest first: opened again, no opening plays. */
+  built: string[];
 }
 
-const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true };
+const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, built: [] };
 
 /**
  * A page's CSS size at `cssWidth`: each side rounded up to whole device
@@ -786,7 +788,7 @@ export class Panel {
     this.paints = 0;
     this.walk = null;
     this.opened = false;
-    this.sheetUp();
+    this.sheetUp(true);
     // (the last build's pages hidden under it until the dive: the new page shows through the hole)
     this.win.classList.toggle("reopening", !!this.anim);
   }
@@ -871,8 +873,11 @@ export class Panel {
     this.wasShown = on;
     this.host.style.display = display;
     if (on && !was) this.redraw();
-    // (shown with no page yet: the first page's sheet, the opening on it)
-    if (on && !this.last) this.step(this.firstStep(), undefined, "");
+    // (shown with no page yet: the first step said (the status), the sheet not put up: that
+    // waits for a build's own step (the host reading the files, packages fetched, its
+    // phases, typesetting). Put up here, it played while the panel connected to a document
+    // already built (the watch's last build), the pages a moment away)
+    if (on && !this.last) this.step(this.firstStep(), undefined, "", false);
   }
   private wasShown?: boolean;
 
@@ -1597,11 +1602,13 @@ export class Panel {
     this.hintTimer = setTimeout(show, 2000);
   }
 
-  private step(what: string, pct: number | undefined, detail = ""): void {
+  /** The sheet's step, said; `raise`: a build's step (the sheet put up if it isn't), else said only (the panel shown, nothing built yet). */
+  private step(what: string, pct: number | undefined, detail = "", raise = true): void {
     if (!this.firstPending()) return;
     this.walkTo(what);
-    this.sheetUp();
-    this.hints(true);
+    if (raise) this.sheetUp();
+    // (the hints with the sheet: none while a first open waits to put it up)
+    if (this.anim) this.hints(true);
     const el = this.$("#opening");
     this.stepNow = what;
     el.querySelector(".what")!.textContent = what;
@@ -1613,29 +1620,63 @@ export class Panel {
     this.renderStatus();
   }
 
-  /** The sheet up, the opening playing on it (once per panel: a later rebuild has pages). */
-  private sheetUp(): void {
+  /**
+   * The sheet up, the opening playing on it (once per panel: a later rebuild has pages),
+   * at a build's step; `now`: a Rebuild asked for. Put up once the stage is laid out, at the
+   * page's own place and size (before, it could come up at 0 x 0 in the corner).
+   */
+  private sheetUp(now = false): void {
     if (this.opened || this.anim || !this.wasShown) return;
+    const st = this.$("#stage");
+    if (st.clientWidth < 40 || st.clientHeight < 40) return void requestAnimationFrame(() => this.firstPending() && this.sheetUp(now));
     const el = this.$("#opening");
     el.hidden = false;
     el.classList.remove("in");
     this.win.classList.add("sheet-up");
     // (the opening's zoom: the whole page, unless the user chose one)
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
+    // (placed at the page's box at once: the sheet's transition (print.ts .opening) is for
+    // its dive into the page and for the stage's resizing; from the hidden sheet's 0 x 0 at
+    // the corner it grew the sheet across the stage as the opening began)
+    el.style.transition = "none";
     this.fitSheet();
+    void el.offsetWidth;
+    el.style.transition = "";
     const dark = this.sheetDark();
     const sheet = el.querySelector<HTMLElement>(".sheet")!;
     // (the first opening ever is PhiTeX's: kept with the tips seen, the host's too)
     const first = !this.seenIds.has("opening");
-    const { id, anim } = play(this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!);
+    // (a document built here before, opened again (a reload, the editor reopened): its steps
+    // on a still sheet, no opening played: the animation is for a document's first build.
+    // A Rebuild asked for plays it)
+    const warm = !now && this.prefs.built.includes(this.builtKey());
+    const { id, anim } = play(warm ? "off" : this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!);
     this.anim = anim;
-    this.lastLook = id;
+    if (!warm) this.lastLook = id;
     if (id !== "off") this.seen(["opening"]);
     // (one that says the steps itself: the sheet's own not shown)
     el.classList.toggle("owns", !!anim.step);
     // (and the step the sheet says now, a rebuild's first: the watch says no other)
     if (anim.step) anim.step(this.firstStep(), undefined, "");
     this.animSince = performance.now();
+    this.hints(true);
+  }
+
+  /** This document's key among the built ones: the page's address (the project, the watch's document) and the main file, hashed (FNV-1a). */
+  private builtKey(): string {
+    const loc = this.win.ownerDocument.defaultView?.location;
+    const s = `${loc?.host ?? ""}${loc?.pathname ?? ""}|${this.mainFiles.main ?? this.doc ?? ""}`;
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+    return (h >>> 0).toString(36);
+  }
+
+  /** This document's first page shown: built here, its next open plays no opening (the newest 200 kept). */
+  private builtHere(): void {
+    const k = this.builtKey(), was = this.prefs.built ?? [];
+    if (was[0] === k) return;
+    this.prefs.built = [k, ...was.filter((x) => x !== k)].slice(0, 200);
+    this.save();
   }
 
   /** The pages are dark (Dark PDF): an opening's sheet is too. */
@@ -1650,6 +1691,13 @@ export class Panel {
   private fitSheet(): void {
     const el = this.$("#opening");
     if (el.hidden || this.ending) return;
+    // (the first page laid out already (its size told before its drawing): its own box, the
+    // sheet the page it becomes; an A4 sheet over a Letter page overhung it till the dive)
+    const slot = this.$("#viewer").querySelector<HTMLElement>(".slot");
+    if (slot && slot.offsetWidth > 40) {
+      const r = slot.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
+      return void Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${r.top - b.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+    }
     const st = this.$("#stage");
     const room = { w: st.clientWidth - 24, h: st.clientHeight - 24 };
     let h = room.h, w = (h * 210) / 297;
@@ -1707,6 +1755,7 @@ export class Panel {
     this.win.classList.remove("sheet-up");
     if (was) {
       this.opened = true;
+      this.builtHere();
       this.stepNow = "";
       this.renderStatus();
       setTimeout(() => this.tips("unseen"), 600);
@@ -3150,6 +3199,8 @@ export class Panel {
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
     this.viewer.layout(hashes, previews);
+    // (the sheet up: on the first page's box now that it has one)
+    this.fitSheet();
     if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
     if (hashes.length) this.sheetDown();
     this.nav();
@@ -3218,6 +3269,8 @@ export class Panel {
     // (a view with no layout yet: this page's slots, up to it)
     if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => (i === k && hash) || `?${i}`));
     this.viewer.set(k, img, hash ?? null);
+    // (a page drawn: this document is built here, with or without a sheet over it)
+    this.builtHere();
     this.sheetDown();
     this.renderStatus();
     this.nav();

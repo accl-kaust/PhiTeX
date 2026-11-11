@@ -4617,7 +4617,7 @@ var OVERLEAF_WORDS = {
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
-var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true };
+var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, built: [] };
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
@@ -5039,7 +5039,7 @@ var Panel = class {
     this.paints = 0;
     this.walk = null;
     this.opened = false;
-    this.sheetUp();
+    this.sheetUp(true);
     this.win.classList.toggle("reopening", !!this.anim);
   }
   /**
@@ -5112,7 +5112,7 @@ var Panel = class {
     this.wasShown = on;
     this.host.style.display = display;
     if (on && !was) this.redraw();
-    if (on && !this.last) this.step(this.firstStep(), void 0, "");
+    if (on && !this.last) this.step(this.firstStep(), void 0, "", false);
   }
   wasShown;
   save() {
@@ -5741,11 +5741,12 @@ var Panel = class {
     };
     this.hintTimer = setTimeout(show, 2e3);
   }
-  step(what, pct, detail = "") {
+  /** The sheet's step, said; `raise`: a build's step (the sheet put up if it isn't), else said only (the panel shown, nothing built yet). */
+  step(what, pct, detail = "", raise = true) {
     if (!this.firstPending()) return;
     this.walkTo(what);
-    this.sheetUp();
-    this.hints(true);
+    if (raise) this.sheetUp();
+    if (this.anim) this.hints(true);
     const el = this.$("#opening");
     this.stepNow = what;
     el.querySelector(".what").textContent = what;
@@ -5756,25 +5757,51 @@ var Panel = class {
     this.anim?.step?.(what, pct, detail);
     this.renderStatus();
   }
-  /** The sheet up, the opening playing on it (once per panel: a later rebuild has pages). */
-  sheetUp() {
+  /**
+   * The sheet up, the opening playing on it (once per panel: a later rebuild has pages),
+   * at a build's step; `now`: a Rebuild asked for. Put up once the stage is laid out, at the
+   * page's own place and size (before, it could come up at 0 x 0 in the corner).
+   */
+  sheetUp(now = false) {
     if (this.opened || this.anim || !this.wasShown) return;
+    const st = this.$("#stage");
+    if (st.clientWidth < 40 || st.clientHeight < 40) return void requestAnimationFrame(() => this.firstPending() && this.sheetUp(now));
     const el = this.$("#opening");
     el.hidden = false;
     el.classList.remove("in");
     this.win.classList.add("sheet-up");
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
+    el.style.transition = "none";
     this.fitSheet();
+    void el.offsetWidth;
+    el.style.transition = "";
     const dark = this.sheetDark();
     const sheet = el.querySelector(".sheet");
     const first = !this.seenIds.has("opening");
-    const { id, anim } = play(this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop());
+    const warm = !now && this.prefs.built.includes(this.builtKey());
+    const { id, anim } = play(warm ? "off" : this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop());
     this.anim = anim;
-    this.lastLook = id;
+    if (!warm) this.lastLook = id;
     if (id !== "off") this.seen(["opening"]);
     el.classList.toggle("owns", !!anim.step);
     if (anim.step) anim.step(this.firstStep(), void 0, "");
     this.animSince = performance.now();
+    this.hints(true);
+  }
+  /** This document's key among the built ones: the page's address (the project, the watch's document) and the main file, hashed (FNV-1a). */
+  builtKey() {
+    const loc = this.win.ownerDocument.defaultView?.location;
+    const s = `${loc?.host ?? ""}${loc?.pathname ?? ""}|${this.mainFiles.main ?? this.doc ?? ""}`;
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+    return (h >>> 0).toString(36);
+  }
+  /** This document's first page shown: built here, its next open plays no opening (the newest 200 kept). */
+  builtHere() {
+    const k = this.builtKey(), was = this.prefs.built ?? [];
+    if (was[0] === k) return;
+    this.prefs.built = [k, ...was.filter((x) => x !== k)].slice(0, 200);
+    this.save();
   }
   /** The pages are dark (Dark PDF): an opening's sheet is too. */
   sheetDark() {
@@ -5786,6 +5813,11 @@ var Panel = class {
   fitSheet() {
     const el = this.$("#opening");
     if (el.hidden || this.ending) return;
+    const slot = this.$("#viewer").querySelector(".slot");
+    if (slot && slot.offsetWidth > 40) {
+      const r = slot.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
+      return void Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${r.top - b.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+    }
     const st = this.$("#stage");
     const room = { w: st.clientWidth - 24, h: st.clientHeight - 24 };
     let h = room.h, w = h * 210 / 297;
@@ -5835,6 +5867,7 @@ var Panel = class {
     this.win.classList.remove("sheet-up");
     if (was) {
       this.opened = true;
+      this.builtHere();
       this.stepNow = "";
       this.renderStatus();
       setTimeout(() => this.tips("unseen"), 600);
@@ -7107,6 +7140,7 @@ var Panel = class {
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
     this.viewer.layout(hashes, previews);
+    this.fitSheet();
     if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
     if (hashes.length) this.sheetDown();
     this.nav();
@@ -7162,6 +7196,7 @@ var Panel = class {
     this.$("#stage").classList.toggle("fit", (this.zoomNow ?? this.prefs.zoom) === "fit");
     if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => i === k && hash || `?${i}`));
     this.viewer.set(k, img, hash ?? null);
+    this.builtHere();
     this.sheetDown();
     this.renderStatus();
     this.nav();
