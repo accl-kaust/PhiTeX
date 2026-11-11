@@ -49,8 +49,8 @@ says which. Under an engine's name (pdflatex, --compat) web2c's 0 and 1.";
 fn short_after_help() -> String {
     let l = STYLES.get_literal();
     format!(
-        "Settings: phitex.toml (the project's), ~/.config/phitex/phitex.toml (yours):
-  {l}phitex config KEY VALUE{l:#}, e.g. {l}phitex config update-check on{l:#}
+        "Settings: phitex.toml (the project's), ~/.config/phitex/phitex.toml (yours; PHITEX_CONFIG: another file):
+  {l}phitex config KEY VALUE{l:#}, e.g. {l}phitex config update-check on{l:#}; {l}phitex config --init{l:#} writes one with every setting
 Every option: {l}phitex --help-all{l:#} · https://phitex.org"
     )
 }
@@ -82,8 +82,10 @@ fn after_help() -> String {
       update-check = true   (yours only: a daily check for a newer release)
       files = \"shelf\"   (TeX's files from Shelf's packs, kept in the cache's shelf/;
                           \"texlive\", kpathsea's, the default; one source a run)
-  ~/.config/phitex/phitex.toml holds your own defaults; a project's
-  phitex.toml wins over it key by key.
+  ~/.config/phitex/phitex.toml holds your own defaults (Windows:
+  %APPDATA%\\phitex\\phitex.toml; PHITEX_CONFIG names another file); a
+  project's phitex.toml wins over it key by key. `phitex config --init`
+  writes a phitex.toml with every setting, commented out (--init=yours: yours).
   A `% !TEX program = …` or `% !TEX root = …` comment in the file is honoured.
   latexmk's rc files are read as latexmk reads them (the system's, yours,
   then `.latexmkrc` or `latexmkrc` in the folder phitex is run in), as data:
@@ -210,6 +212,17 @@ enum Sub {
         /// Take KEY out of your settings (its default holds again)
         #[arg(long, value_name = "KEY", conflicts_with_all = ["key", "value"])]
         unset: Option<String>,
+        /// Write a phitex.toml with every setting, commented out: here (the
+        /// project's) or yours
+        #[arg(
+            long,
+            value_name = "WHERE",
+            num_args = 0..=1,
+            default_missing_value = "here",
+            value_parser = ["here", "yours"],
+            conflicts_with_all = ["key", "value", "unset"]
+        )]
+        init: Option<String>,
     },
     /// Remove a build's files (--all: the whole cache; no file: the
     /// cache's status)
@@ -473,6 +486,8 @@ pub struct Options {
     pub color: Option<bool>,
     /// `config --unset KEY`.
     pub unset: Option<String>,
+    /// `config --init`: `here` (a project's phitex.toml) or `yours`.
+    pub init: Option<String>,
 }
 
 impl Cli {
@@ -525,10 +540,16 @@ impl Cli {
                 std::process::exit(0);
             }
             Some(Sub::Upgrade) => o.command = Some(Command::Upgrade),
-            Some(Sub::Config { key, value, unset }) => {
+            Some(Sub::Config {
+                key,
+                value,
+                unset,
+                init,
+            }) => {
                 o.command = Some(Command::Config);
                 o.set = Some((key, value));
                 o.unset = unset;
+                o.init = init;
             }
             None => {}
         }
@@ -602,6 +623,31 @@ fn parse(args: &[String]) -> Result<Options, clap::Error> {
     }
     let m = cmd.try_get_matches_from(line)?;
     Cli::from_arg_matches(&m).map(Cli::into_options)
+}
+
+/// clap's long help (`--help-all`) without the blank lines between the
+/// options of a section (clap puts one after every option once any has a
+/// long help): a blank line kept only before a line that is not indented
+/// (a section's header, the text after the options).
+fn compact_help(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = String::with_capacity(text.len());
+    for (k, l) in lines.iter().enumerate() {
+        if crate::ui::plain(l).trim().is_empty() {
+            let next = lines[k + 1..]
+                .iter()
+                .map(|n| crate::ui::plain(n))
+                .find(|n| !n.trim().is_empty());
+            let prev = k.checked_sub(1).map(|j| crate::ui::plain(lines[j]));
+            let indented = |t: &str| t.starts_with("  ");
+            if next.as_deref().is_some_and(indented) && prev.as_deref().is_some_and(indented) {
+                continue;
+            }
+        }
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
 }
 
 /// What to build.
@@ -1463,6 +1509,24 @@ pub fn main(args: &[String]) -> ! {
     // (clap's own exit status for a usage error is 2: pdflatex's is 1)
     let mut o = match parse(args) {
         Ok(o) => o,
+        // (`--help-all`: clap's long help without its blank line between
+        // every two options)
+        Err(e)
+            if e.kind() == clap::error::ErrorKind::DisplayHelp
+                && args.iter().any(|a| a == "--help-all") =>
+        {
+            use std::io::IsTerminal as _;
+            let styled = e.render();
+            let color = std::io::stdout().is_terminal()
+                && std::env::var_os("NO_COLOR").is_none_or(|x| x.is_empty());
+            let text = if color {
+                styled.ansi().to_string()
+            } else {
+                styled.to_string()
+            };
+            print!("{}", compact_help(&text));
+            std::process::exit(0);
+        }
         Err(e) => {
             let _ = e.print();
             std::process::exit(if e.use_stderr() { crate::EXIT_USAGE } else { 0 });
@@ -1494,6 +1558,34 @@ pub fn main(args: &[String]) -> ! {
         std::process::exit(crate::attach::sessions(&ui, o.json));
     }
     if command == Command::Config {
+        if let Some(w) = &o.init {
+            let yours = w == "yours";
+            let path = if yours {
+                crate::config::user_file()
+            } else {
+                Some(PathBuf::from(crate::config::FILE))
+            };
+            let Some(path) = path else {
+                ui.error("no home directory for your phitex.toml (or set PHITEX_CONFIG to a file)");
+                std::process::exit(crate::EXIT_USAGE);
+            };
+            match crate::config::init(&path, yours) {
+                Ok(()) => {
+                    let st = ui.st;
+                    ui.line(&format!(
+                        "{} {}",
+                        st.green(&format!("wrote {}:", crate::cache::home_relative(&path))),
+                        st.dim("every setting, commented out; uncomment a line to set it")
+                    ));
+                    ui.event(&json!({"event": "config", "init": path.display().to_string()}));
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    ui.error(&e);
+                    std::process::exit(crate::EXIT_USAGE);
+                }
+            }
+        }
         if let Some(k) = &o.unset {
             match crate::config::unset_user(k) {
                 Ok(p) => {

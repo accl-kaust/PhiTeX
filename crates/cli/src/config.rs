@@ -343,11 +343,19 @@ pub fn parse_size(s: &str) -> Option<u64> {
         .map(|b| b.as_u64())
 }
 
-/// The user's settings file: `$XDG_CONFIG_HOME/phitex/phitex.toml`, else
-/// `~/.config/phitex/phitex.toml` (Windows: `%APPDATA%\phitex\phitex.toml`,
-/// [`crate::dirs`]).
+/// The environment variable naming the user's settings file in place of
+/// the usual one ([`user_file`]): a test's, a CI's, a second profile's.
+pub const CONFIG_ENV: &str = "PHITEX_CONFIG";
+
+/// The user's settings file: `$PHITEX_CONFIG` where it is set (the file
+/// itself, on every system), else `$XDG_CONFIG_HOME/phitex/phitex.toml`,
+/// else `~/.config/phitex/phitex.toml` (Windows:
+/// `%APPDATA%\phitex\phitex.toml`, [`crate::dirs`]).
 #[must_use]
 pub fn user_file() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os(CONFIG_ENV).filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
     Some(crate::dirs::phitex(crate::dirs::Kind::Config)?.join(FILE))
 }
 
@@ -460,7 +468,9 @@ pub fn unset_user(key: &str) -> Result<PathBuf, String> {
             None => format!("no setting '{key}' (phitex config lists them)"),
         });
     }
-    let p = user_file().ok_or("no home directory for ~/.config/phitex/phitex.toml")?;
+    let p = user_file().ok_or(
+        "no home directory for ~/.config/phitex/phitex.toml (or set PHITEX_CONFIG to a file)",
+    )?;
     let old = std::fs::read_to_string(&p).unwrap_or_default();
     let mut top = true;
     let kept: Vec<&str> = old
@@ -507,7 +517,9 @@ pub const SWITCHES: &[&str] = &["watch-write", "synctex", "update-check", "under
 pub fn prefs(
     set: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
-    let p = user_file().ok_or("no home directory for ~/.config/phitex/phitex.toml")?;
+    let p = user_file().ok_or(
+        "no home directory for ~/.config/phitex/phitex.toml (or set PHITEX_CONFIG to a file)",
+    )?;
     let mut text = std::fs::read_to_string(&p).unwrap_or_default();
     if let Some(set) = set {
         for (k, v) in set {
@@ -596,7 +608,9 @@ pub fn set_user(key: &str, value: &str) -> Result<PathBuf, String> {
     if key == "main" || key == "file" {
         return Err("`main` belongs in a project's phitex.toml, not yours".to_owned());
     }
-    let p = user_file().ok_or("no home directory for ~/.config/phitex/phitex.toml")?;
+    let p = user_file().ok_or(
+        "no home directory for ~/.config/phitex/phitex.toml (or set PHITEX_CONFIG to a file)",
+    )?;
     let old = std::fs::read_to_string(&p).unwrap_or_default();
     let new = with_key(&old, key, value)?;
     if let Some(d) = p.parent() {
@@ -711,6 +725,83 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
         "folders TeX searches first, relative to phitex.toml (\"../common/tex//\": with subfolders)",
     ),
 ];
+
+/// Each setting's example value as `phitex.toml` writes it (a valid
+/// value of its type: what `phitex config --init` comments out).
+const EXAMPLES: &[(&str, &str)] = &[
+    ("main", "\"paper.tex\""),
+    ("engine", "\"pdflatex\""),
+    ("output-dir", "\"build\""),
+    ("shell-escape", "false"),
+    ("viewer", "\"zathura\""),
+    ("editor", "\"code\""),
+    ("copy-pdf", "false"),
+    ("synctex", "false"),
+    ("cache-limit", "\"4GB\""),
+    ("files", "\"texlive\""),
+    ("phitex", "\">=1.0\""),
+    ("update-check", "true"),
+    ("update-channel", "\"stable\""),
+    ("watch-write", "false"),
+    ("threads", "0"),
+    ("follow", "\"cursor\""),
+    ("dark-pdf", "\"off\""),
+    ("opening", "\"random\""),
+    ("underline", "true"),
+    ("latexmk", "\"find\""),
+    ("inputs", "[\"../common/tex//\"]"),
+];
+
+/// The settings a project's `phitex.toml` alone takes (yours ignores them).
+const PROJECTS_ALONE: &[&str] = &["main", "phitex"];
+
+/// A `phitex.toml` with every setting in it, each commented out with
+/// what it does, its default and an example value (`phitex config
+/// --init`): `yours` your file's (no project-only key), else a project's
+/// (the keys that are yours alone after the others, said to be ignored
+/// there).
+#[must_use]
+pub fn starter(yours: bool) -> String {
+    let mut out = String::new();
+    if yours {
+        out.push_str("# Your PhiTeX settings (every project's, on this machine): uncomment a line\n# to set it. A project's phitex.toml wins over these, except the ones\n# marked yours only. `phitex config` lists them as they hold.\n");
+    } else {
+        out.push_str("# This project's PhiTeX settings: uncomment a line to set it. They win\n# over your own (~/.config/phitex/phitex.toml), except the ones that are\n# yours alone. `phitex config` lists them as they hold.\n");
+    }
+    let entry = |out: &mut String, k: &str, default: &str, what: &str| {
+        let ex = EXAMPLES.iter().find(|e| e.0 == k).map_or("\"\"", |e| e.1);
+        out.push_str(&format!("\n# {what}\n# default: {default}\n# {k} = {ex}\n"));
+    };
+    let (mine, theirs): (Vec<_>, Vec<_>) = SETTINGS
+        .iter()
+        .filter(|s| !yours || !PROJECTS_ALONE.contains(&s.0))
+        .partition(|s| yours || projects_may(s.0));
+    for &&(k, default, what) in &mine {
+        entry(&mut out, k, default, what);
+    }
+    if !theirs.is_empty() {
+        out.push_str("\n# ---- yours alone: ignored in a project's phitex.toml; set them with\n# ---- `phitex config KEY VALUE` (or `phitex config --init=yours`)\n");
+        for &&(k, default, what) in &theirs {
+            entry(&mut out, k, default, what);
+        }
+    }
+    out
+}
+
+/// `phitex config --init`: [`starter`] written to `path`, never over a
+/// file that is there.
+pub fn init(path: &Path, yours: bool) -> Result<(), String> {
+    if path.exists() {
+        return Err(format!(
+            "{} is there already: phitex config KEY VALUE sets one in yours, or edit it",
+            crate::cache::home_relative(path)
+        ));
+    }
+    if let Some(d) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    std::fs::write(path, starter(yours)).map_err(|e| format!("{}: {e}", path.display()))
+}
 
 /// One setting as `phitex config` shows it: its key, default and what
 /// it does, its value in your file and in the project's.
@@ -1423,6 +1514,40 @@ pub fn braced_inputs(text: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
+    /// `phitex config --init`'s file: every setting there, commented out
+    /// (it reads as no setting at all), and every line uncommented reads
+    /// as a valid phitex.toml too; a project's has the keys that are yours
+    /// alone after a note, yours has no project-only key.
+    #[test]
+    fn the_starter_file_reads_as_it_is_and_uncommented() {
+        for yours in [false, true] {
+            let t = super::starter(yours);
+            let c = super::parse(&t).expect("as written");
+            assert!(c.engine.is_none() && c.inputs.is_none(), "{t}");
+            let on: String = t
+                .lines()
+                .map(|l| match l.strip_prefix("# ") {
+                    Some(r) if r.contains(" = ") && !r.starts_with("default:") => r.to_owned(),
+                    _ => l.to_owned(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let c = super::parse(&on).unwrap_or_else(|e| panic!("uncommented: {e}\n{on}"));
+            assert!(c.warnings.is_empty(), "{:?}\n{on}", c.warnings);
+            assert_eq!(c.engine.as_deref(), Some("pdflatex"));
+            for (k, ..) in super::SETTINGS {
+                let there = t.contains(&format!("# {k} = "));
+                assert_eq!(
+                    there,
+                    !yours || !super::PROJECTS_ALONE.contains(k),
+                    "{k} in {}",
+                    if yours { "yours" } else { "the project's" }
+                );
+            }
+            assert_eq!(t.contains("---- yours alone"), !yours);
+        }
+    }
+
     #[test]
     fn a_key_set_in_place() {
         let old = "# mine\nupdate-check = false # was off\nviewer = \"zathura\"\n";
