@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 import manuals  # noqa: E402
 import pdfdiff  # noqa: E402
+import shards  # noqa: E402
 
 WORK = manuals.WORK
 
@@ -327,20 +328,27 @@ def cmd_run(args):
         # (a line naming `ID -jJ` is known at that -j alone: the others
         # still get their oracle, verdict.py says them red)
         args.known_ids = {l.split("\t")[0] for l in open(args.known) if l.strip() and not l.startswith("#")}
-    items = manuals.shard(manuals.load_list(args.list), args.shard)
+    # (the shard's documents and the -j each is built at here: a manual's
+    # builds at each -j dealt apart, by their measured walls: shards.py)
+    family = args.family or shards.family_of(args.list)
+    mine = shards.mine(family, manuals.load_list(args.list), args.shard, args.jobs)
     engines, tools = set(args.engines.split(",")), set(args.tools.split(","))
-    items = [c for c in items if c["engine"] in engines and not (set(c.get("tools", [])) - tools)]
+    mine = [(c, js) for c, js in mine if c["engine"] in engines and not (set(c.get("tools", [])) - tools)]
     if args.ids:
         want = set(args.ids.split(","))
-        items = [c for c in items if c["id"] in want]
-    items = sorted(items, key=lambda c: (-(c.get("oracle_wall_s") or 0), c["id"]))
+        mine = [(c, js) for c, js in mine if c["id"] in want]
+    items = [c for c, _ in mine]
+    at = {c["id"]: js for c, js in mine}
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     prewarm(args, sorted({c["engine"] for c in items}))
     par = dict((int(a), int(b)) for a, b in (x.split(":") for x in args.par.split(",")))
     print(f"{len(items)} documents, jobs {args.jobs}, parallel {par}, timeout {args.timeout} s", flush=True)
     for j in (int(x) for x in args.jobs.split(",")):
-        todo = [c for c in items if not (out / f"{c['id']}-j{j}.json").exists()]
+        # (the heaviest first, by its measured wall: the long ones are not
+        # left to the end of the pool)
+        todo = [c for c in shards.order(family, items, j)
+                if j in at[c["id"]] and not (out / f"{c['id']}-j{j}.json").exists()]
         with ProcessPoolExecutor(max_workers=par.get(j, 4)) as ex:
             fs = {ex.submit(run_one, c, j, args): c for c in todo}
             for f in as_completed(fs):
@@ -406,6 +414,7 @@ def main():
     p.add_argument("--out", required=True)
     p.add_argument("--ids")
     p.add_argument("--shard")
+    p.add_argument("--family", help="the times the shards are dealt by (shards.py): the list's stem unless given")
     p.add_argument("--engines", default="pdflatex")
     p.add_argument("--tools", default="bibtex,makeindex")
     p.add_argument("--shelf", action="store_true")

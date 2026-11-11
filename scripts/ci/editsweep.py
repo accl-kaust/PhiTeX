@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import common  # noqa: E402
 import manuals  # noqa: E402
 import pdfdiff  # noqa: E402
+import shards  # noqa: E402
 
 WORK = manuals.WORK
 WORD = re.compile(r"(?<=[ ])([a-z]{4,12})(?=[ .,;])")
@@ -182,6 +183,14 @@ def one(args, c):
     return res
 
 
+def timed(args, c):
+    """one(), its wall kept (wall_s: the shards are dealt by it, shards.py)."""
+    t = time.monotonic()
+    r = one(args, c)
+    r["wall_s"] = round(time.monotonic() - t, 3)
+    return r
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--list", required=True)
@@ -195,7 +204,7 @@ def main():
     ap.add_argument("--par", type=int, default=4)
     ap.add_argument("--timeout", type=int, default=600)
     args = ap.parse_args()
-    items = manuals.shard(manuals.load_list(args.list), args.shard)
+    items = shards.docs("edits", manuals.load_list(args.list), args.shard)
     engines, tools = set(args.engines.split(",")), set(args.tools.split(","))
     items = [c for c in items if c["engine"] in engines and not (set(c.get("tools", [])) - tools)]
     if args.ids:
@@ -208,7 +217,7 @@ def main():
     print(f"{len(items)} documents, {args.par} at once", flush=True)
     rows, reds = [], []
     with ProcessPoolExecutor(args.par) as ex:
-        for f in as_completed([ex.submit(one, args, c) for c in items]):
+        for f in as_completed([ex.submit(timed, args, c) for c in items]):
             r = f.result()
             (out / f"{r['id']}.json").write_text(json.dumps(r, indent=1))
             es = " ".join(f"L{e['line']}:{e['wall_ms']:.0f}ms/{e.get('nodes')}n/{e.get('runs')}r/{e.get('rounds')}q"
