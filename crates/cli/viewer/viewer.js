@@ -1541,6 +1541,24 @@ header:active { cursor: grabbing; }
 .settings .srow .help:empty { display: none; }
 .settings .srow.off .lab, .settings .srow.off .ctl { opacity: .55; }
 .settings .srow .err { grid-area: err; margin-top: 4px; font-size: 12px; color: var(--ph-danger); }
+.settings .srow.picks { grid-template-areas: "lab ctl" "help help" "picks picks" "err err"; }
+.settings .tiles { grid-area: picks; display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 12px 10px; margin-top: 10px; }
+.settings .pick { all: unset; cursor: pointer; display: grid; gap: 6px; min-width: 0; }
+.settings .pick:disabled { cursor: default; }
+.settings .pick .lk { position: relative; display: block; aspect-ratio: 210 / 297; overflow: hidden; border-radius: 2px; background: #fff; box-shadow: 0 0 0 1px var(--ph-border); opacity: .5; transition: opacity .15s, box-shadow .15s; }
+.settings .pick .lk.dark { background: ${DARK_PAGE}; }
+.settings .pick:hover .lk { opacity: .8; }
+.settings .pick[aria-checked="true"] .lk { opacity: 1; box-shadow: 0 0 0 2px var(--ph-accent); }
+.settings .pick .lk .pg, .settings .pick .lk .sheet { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.settings .pick .lk .sheet { background: #fff; container-type: inline-size; }
+.settings .pick .lk.dark .sheet { background: ${DARK_PAGE}; }
+.settings .pick .lk .sheet.in { background: none; }
+.settings .pick .lk .phx-open { position: absolute; inset: 0; width: 100%; height: 100%; }
+.settings .pick .nm { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.3; color: var(--ph-fg2); min-width: 0; }
+.settings .pick[aria-checked="true"] .nm { color: var(--ph-fg); }
+.settings .pick .box { flex: none; width: 12px; height: 12px; border-radius: 3px; box-shadow: inset 0 0 0 1.5px var(--ph-fg2); }
+.settings .pick[aria-checked="true"] .box { box-shadow: none; background: var(--ph-accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 5 8.6 9.6 3.6' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% no-repeat; }
+.settings .pick:focus-visible .lk { outline: 2px solid var(--ph-link); outline-offset: 2px; }
 .settings .srow .val { color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
 .settings select { font: inherit; font-size: 12px; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 3px 6px; max-width: 220px; }
 .settings .btn { padding: 3px 12px; font-size: 12px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
@@ -3675,18 +3693,92 @@ var LOOKS = [
   { id: "kaust", name: "ACCL | KAUST", make: (s, dark) => kaust(s, dark) },
   { id: "badapple", name: "Bad Apple!!", make: (s, dark) => badapple(s, dark) }
 ];
+var DEFAULT = LOOKS.filter((l) => l.id !== "badapple").map((l) => l.id);
+function looksIn(look2) {
+  if (look2 === "random") return DEFAULT;
+  if (look2 === "all") return LOOKS.map((l) => l.id);
+  if (look2 === "off") return [];
+  const ids = new Set(look2.split(",").map((v) => v.trim() === "retro" ? "win98" : v.trim()));
+  return LOOKS.filter((l) => ids.has(l.id)).map((l) => l.id);
+}
+function lookFrom(ids) {
+  const set = new Set(ids);
+  const chosen = LOOKS.filter((l) => set.has(l.id)).map((l) => l.id);
+  if (chosen.join(",") === DEFAULT.join(",")) return "random";
+  return chosen.length === LOOKS.length ? "all" : chosen.length ? chosen.join(",") : "off";
+}
 function lookOf(v) {
-  if (v === "retro") return "win98";
-  return v === "random" || v === "off" || LOOKS.some((l) => l.id === v) ? v : "random";
+  if (typeof v !== "string") return "random";
+  if (v === "random" || v === "all" || v === "off") return v;
+  const ids = looksIn(v);
+  return ids.length ? lookFrom(ids) : "random";
 }
 function play(look2, first, last, sheet, dark, doc) {
-  if (look2 === "off") return { id: "off", anim: still() };
-  let l = LOOKS.find((x) => x.id === look2);
-  if (!l) {
-    const pool = LOOKS.filter((x) => x.id !== last);
-    l = first ? LOOKS[0] : pool[Math.floor(Math.random() * pool.length)];
+  const ids = looksIn(look2);
+  if (!ids.length) return { id: "off", anim: still() };
+  const others = ids.filter((id2) => id2 !== last);
+  const pool = others.length ? others : ids;
+  const id = first && ids.includes("phitex") ? "phitex" : pool[Math.floor(Math.random() * pool.length)];
+  return { id, anim: LOOKS.find((l) => l.id === id).make(sheet, dark, doc) };
+}
+function preview(id, tile, dark, doc, steps, hint) {
+  const look2 = LOOKS.find((l) => l.id === id);
+  if (!look2) return () => {
+  };
+  const page = document.createElement("canvas"), sheet = document.createElement("div");
+  page.className = "pg";
+  sheet.className = "sheet";
+  tile.replaceChildren(page, sheet);
+  let anim = null, timers = [], alive = true;
+  const at = (ms, f) => timers.push(setTimeout(() => alive && f(), ms));
+  const round = () => {
+    timers.forEach(clearTimeout);
+    timers = [];
+    anim?.stop();
+    sheet.replaceChildren();
+    sheet.classList.remove("in");
+    firstPage(page, dark);
+    const a = anim = look2.make(sheet, dark, doc);
+    a.step?.(steps[0], void 0, "");
+    at(900, () => a.hint?.(hint));
+    for (let k = 1; k <= 24; k++) at(1100 + k * 90, () => a.step?.(steps[1], Math.round(100 * k / 24), `${k} of 24 \xB7 ${(k * 0.21).toFixed(1)} MB`));
+    at(3500, () => a.step?.(steps[2], void 0, "Page 1"));
+    at(5800, () => {
+      sheet.classList.add("in");
+      let next = false;
+      const again = () => !next && (next = true, a.stop(), sheet.replaceChildren(), at(1400, round));
+      void a.done(page).then(again);
+      at(1600, again);
+    });
+  };
+  round();
+  return () => {
+    alive = false;
+    timers.forEach(clearTimeout);
+    anim?.stop();
+    tile.replaceChildren();
+  };
+}
+function firstPage(cv, dark) {
+  const dpr = devicePixelRatio || 1, w = Math.max(1, Math.round(cv.clientWidth * dpr)), h = Math.max(1, Math.round(cv.clientHeight * dpr));
+  cv.width = w;
+  cv.height = h;
+  const g = cv.getContext("2d");
+  g.fillStyle = dark ? "#2c2e33" : "#ffffff";
+  g.fillRect(0, 0, w, h);
+  g.fillStyle = dark ? "#c9ccd2" : "#3a3f48";
+  const m = w * 0.14, line = h * 0.0125, lead = h * 0.024;
+  g.fillRect(w * 0.27, h * 0.1, w * 0.46, line * 1.7);
+  g.fillRect(w * 0.38, h * 0.1 + lead * 1.6, w * 0.24, line);
+  let y = h * 0.21;
+  for (let p = 0; y < h * 0.88; p++) {
+    const n = 4 + p * 5 % 4;
+    for (let k = 0; k < n && y < h * 0.88; k++, y += lead) {
+      const x0 = k === 0 ? m + w * 0.04 : m, x1 = k === n - 1 ? m + (w - 2 * m) * (0.35 + p * 37 % 50 / 100) : w - m;
+      g.fillRect(x0, y, x1 - x0, line);
+    }
+    y += lead * 0.6;
   }
-  return { id: l.id, anim: l.make(sheet, dark, doc) };
 }
 
 // viewer/src/hints.ts
@@ -4883,7 +4975,7 @@ var Panel = class {
     this.win.classList.add("sheet-up");
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
     this.fitSheet();
-    const dark = this.win.classList.contains("dark-pdf") || this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark");
+    const dark = this.sheetDark();
     const sheet = el.querySelector(".sheet");
     const first = !this.seenIds.has("opening");
     const { id, anim } = play(this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop());
@@ -4893,6 +4985,10 @@ var Panel = class {
     el.classList.toggle("owns", !!anim.step);
     if (anim.step) anim.step(this.firstStep(), void 0, "");
     this.animSince = performance.now();
+  }
+  /** The pages are dark (Dark PDF): an opening's sheet is too. */
+  sheetDark() {
+    return this.win.classList.contains("dark-pdf") || this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark");
   }
   /** When the opening began: a page there within 400 ms (a project already built) is shown at once, no opening. */
   animSince = 0;
@@ -5491,6 +5587,7 @@ var Panel = class {
   async settings(on = this.$("#settings").hidden) {
     const el = this.$("#settings");
     if (!on) {
+      this.tilesGone();
       if (!el.hidden) el.hidden = true, this.emit();
       return;
     }
@@ -5501,6 +5598,7 @@ var Panel = class {
       else groups.push({ title: g.title, rows: [...g.rows] });
     }
     this.settingRows.clear();
+    this.tilesGone();
     const shown = groups.filter((g) => g.rows.length);
     const at = Math.max(0, shown.findIndex((g) => g.title === this.settingsTab));
     el.replaceChildren(html`<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><nav class="stabs" role="tablist">${shown.map((g, i) => html`<button type="button" role="tab" data-tab="${i}" data-group="${g.title}" aria-selected="${i === at}">${g.title}</button>`)}</nav><div class="sbody"></div>`);
@@ -5545,6 +5643,12 @@ var Panel = class {
       s.disabled = off;
       for (const [v, l] of r.options ?? []) s.append(new Option(l, v, v === r.value, v === r.value));
       ctl.append(s);
+    } else if (r.kind === "picks") {
+      const on = new Set(String(r.value ?? "").split(","));
+      ctl.replaceChildren(html`<div class="seg" role="group" aria-label="${r.label}"><button type="button" data-all="1" disabled="${off}">All</button><button type="button" data-all="0" disabled="${off}">None</button></div>`);
+      const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="pick" role="checkbox" data-v="${v}" aria-checked="${String(on.has(v))}" disabled="${off}"><span class="lk"></span><span class="nm"><i class="box"></i>${l}</span></button>`)}</div>`;
+      row.querySelector(".help").after(grid);
+      if (r.tile) for (const b of row.querySelectorAll(".pick")) this.tileShown(b.querySelector(".lk"), (box) => r.tile(b.dataset.v, box));
     } else if (r.kind === "action") ctl.replaceChildren(html`<button type="button" class="btn" disabled="${off}">${r.button ?? r.label}</button>`);
     else ctl.innerHTML = `<span class="val"></span>`, ctl.querySelector(".val").textContent = String(r.value ?? "");
     return row;
@@ -5559,7 +5663,14 @@ var Panel = class {
     if (r.kind === "toggle" && e.type === "click" && t.closest(".switch")) v = r.value !== true;
     else if (r.kind === "choice" && e.type === "click") v = t.closest("[data-v]")?.dataset.v;
     else if (r.kind === "select" && e.type === "change") v = t.value;
-    else if (r.kind === "action" && e.type === "click" && t.closest(".btn")) v = void 0;
+    else if (r.kind === "picks" && e.type === "click") {
+      const all = t.closest("[data-all]")?.dataset.all, one = t.closest(".pick")?.dataset.v;
+      const on = new Set(String(r.value ?? "").split(",").filter(Boolean));
+      if (all) (r.options ?? []).forEach(([o]) => all === "1" ? on.add(o) : on.delete(o));
+      else if (one) on.has(one) ? on.delete(one) : on.add(one);
+      else return;
+      v = (r.options ?? []).filter(([o]) => on.has(o)).map(([o]) => o).join(",");
+    } else if (r.kind === "action" && e.type === "click" && t.closest(".btn")) v = void 0;
     else return;
     if (r.kind !== "action" && (v === void 0 || v === r.value)) return;
     const err = row.querySelector(".err");
@@ -5570,6 +5681,32 @@ var Panel = class {
     r.value = v;
     if (r.kind === "toggle") row.querySelector(".switch").setAttribute("aria-checked", String(v === true));
     if (r.kind === "choice") row.querySelectorAll("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    if (r.kind === "picks") {
+      const on = new Set(String(v).split(","));
+      row.querySelectorAll(".pick").forEach((b) => b.setAttribute("aria-checked", String(on.has(b.dataset.v))));
+    }
+  }
+  /** The picks tiles' pictures playing (each its stop), and what sees them on screen. */
+  tiles = /* @__PURE__ */ new Map();
+  tileSeen;
+  /** `box`'s picture played while it is on screen (its tab shown, scrolled to), stopped when not (another tab, the dialog closed). */
+  tileShown(box, play2) {
+    this.tileSeen ??= new IntersectionObserver((seen) => {
+      for (const s of seen) {
+        const t = this.tiles.get(s.target);
+        if (!t) continue;
+        if (s.isIntersecting && !t.stop) t.stop = t.play();
+        else if (!s.isIntersecting && t.stop) t.stop(), t.stop = void 0;
+      }
+    });
+    this.tiles.set(box, { play: () => play2(box) });
+    this.tileSeen.observe(box);
+  }
+  /** Every tile's picture stopped, none watched (the dialog drawn anew, or closed). */
+  tilesGone() {
+    this.tileSeen?.disconnect();
+    for (const t of this.tiles.values()) t.stop?.();
+    this.tiles.clear();
   }
   /** The panel's own rows: the main file, the pages' look, the debug check, the tips. */
   ownSettings() {
@@ -5580,13 +5717,31 @@ var Panel = class {
       return why;
     };
     const keep = ev.onPref ? void 0 : "This host doesn't keep it";
-    const preview = [];
+    const preview2 = [];
     if (this.mainFiles.names.length)
-      preview.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
+      preview2.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
     const look2 = [];
     look2.push(
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
-      { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset. Random: a different one each time", kind: "select", options: [["random", "Random"], ...LOOKS.map((l) => [l.id, l.name]), ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => this.look = lookOf(l)) }
+      {
+        id: "opening",
+        label: "Loading animation",
+        help: "Played on the first page while it is typeset: one of those picked, a different one each time. None: no animation",
+        kind: "picks",
+        options: LOOKS.map((l) => [l.id, l.name]),
+        value: looksIn(this.look).join(","),
+        disabled: keep,
+        set: async (v) => {
+          const l = lookFrom(String(v).split(","));
+          const why = await ev.onPref?.("opening", l);
+          if (!why) this.look = l;
+          return why;
+        },
+        tile: (id, box) => {
+          box.classList.toggle("dark", this.sheetDark());
+          return preview(id, box, this.sheetDark(), (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop(), this.words.steps, hintsFor(this.kind)[0] ?? "");
+        }
+      }
     );
     if (ev.onBoxes) look2.push({ id: "underline", label: "Show them on the PDF", help: "A wavy line under each one, and a mark beside the scrollbar", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     const problems = KINDS.map(([k, name]) => ({
@@ -5605,7 +5760,7 @@ var Panel = class {
     if (ev.onTour) tips.push({ id: "tour", label: "The tour", kind: "action", button: "Take the tour", set: () => (this.settings(false), ev.onTour()) });
     if (ev.onNews) tips.push({ id: "news", label: "What's new", kind: "action", button: "Show", set: () => (this.settings(false), ev.onNews()) });
     return [
-      { title: "Preview", rows: preview },
+      { title: "Preview", rows: preview2 },
       { title: "Appearance", rows: look2 },
       { title: "Warnings/Errors", rows: problems },
       { title: "Build", rows: build2 },

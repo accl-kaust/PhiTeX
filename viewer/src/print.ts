@@ -558,6 +558,24 @@ header:active { cursor: grabbing; }
 .settings .srow .help:empty { display: none; }
 .settings .srow.off .lab, .settings .srow.off .ctl { opacity: .55; }
 .settings .srow .err { grid-area: err; margin-top: 4px; font-size: 12px; color: var(--ph-danger); }
+.settings .srow.picks { grid-template-areas: "lab ctl" "help help" "picks picks" "err err"; }
+.settings .tiles { grid-area: picks; display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 12px 10px; margin-top: 10px; }
+.settings .pick { all: unset; cursor: pointer; display: grid; gap: 6px; min-width: 0; }
+.settings .pick:disabled { cursor: default; }
+.settings .pick .lk { position: relative; display: block; aspect-ratio: 210 / 297; overflow: hidden; border-radius: 2px; background: #fff; box-shadow: 0 0 0 1px var(--ph-border); opacity: .5; transition: opacity .15s, box-shadow .15s; }
+.settings .pick .lk.dark { background: ${DARK_PAGE}; }
+.settings .pick:hover .lk { opacity: .8; }
+.settings .pick[aria-checked="true"] .lk { opacity: 1; box-shadow: 0 0 0 2px var(--ph-accent); }
+.settings .pick .lk .pg, .settings .pick .lk .sheet { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.settings .pick .lk .sheet { background: #fff; container-type: inline-size; }
+.settings .pick .lk.dark .sheet { background: ${DARK_PAGE}; }
+.settings .pick .lk .sheet.in { background: none; }
+.settings .pick .lk .phx-open { position: absolute; inset: 0; width: 100%; height: 100%; }
+.settings .pick .nm { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.3; color: var(--ph-fg2); min-width: 0; }
+.settings .pick[aria-checked="true"] .nm { color: var(--ph-fg); }
+.settings .pick .box { flex: none; width: 12px; height: 12px; border-radius: 3px; box-shadow: inset 0 0 0 1.5px var(--ph-fg2); }
+.settings .pick[aria-checked="true"] .box { box-shadow: none; background: var(--ph-accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 5 8.6 9.6 3.6' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% no-repeat; }
+.settings .pick:focus-visible .lk { outline: 2px solid var(--ph-link); outline-offset: 2px; }
 .settings .srow .val { color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
 .settings select { font: inherit; font-size: 12px; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 3px 6px; max-width: 220px; }
 .settings .btn { padding: 3px 12px; font-size: 12px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }

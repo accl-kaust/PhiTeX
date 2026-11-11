@@ -27,7 +27,7 @@ import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
 import { KEYS, bindKeys, typing } from "./keys.ts";
 import { REPORT_TO } from "./report.ts";
 import type { Opening } from "./opening.ts";
-import { LOOKS, lookOf, play, type OpeningLook } from "./openings/index.ts";
+import { LOOKS, lookFrom, lookOf, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
 import { hintsFor } from "./hints.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
@@ -101,14 +101,16 @@ export interface SettingRow {
   label: string;
   /** A line under the label: what it does, where it is kept. */
   help?: string;
-  /** toggle: on or off; choice: a few buttons; select: a list; action: a button (`button` its label); info: `value` shown. */
-  kind: "toggle" | "choice" | "select" | "action" | "info";
+  /** toggle: on or off; choice: a few buttons; select: a list; picks: any of `options`, as tiles (`value` those picked, comma separated); action: a button (`button` its label); info: `value` shown. */
+  kind: "toggle" | "choice" | "select" | "picks" | "action" | "info";
   /** A choice's or a list's values and labels. */
   options?: [value: string, label: string][];
   value?: boolean | string;
   button?: string;
   /** Why it can't be changed here: shown in its place, the row dimmed. */
   disabled?: string;
+  /** A picks tile's picture, played in `box` while the tile is on screen: stopped by what it returns. */
+  tile?(v: string, box: HTMLElement): () => void;
   /** It set (a toggle's on, a choice's value; an action: nothing): the host's error text if it could not. */
   set?(v?: boolean | string): Promise<string | void> | string | void;
 }
@@ -1605,7 +1607,7 @@ export class Panel {
     // (the opening's zoom: the whole page, unless the user chose one)
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
     this.fitSheet();
-    const dark = this.win.classList.contains("dark-pdf") || (this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark"));
+    const dark = this.sheetDark();
     const sheet = el.querySelector<HTMLElement>(".sheet")!;
     // (the first opening ever is PhiTeX's: kept with the tips seen, the host's too)
     const first = !this.seenIds.has("opening");
@@ -1618,6 +1620,11 @@ export class Panel {
     // (and the step the sheet says now, a rebuild's first: the watch says no other)
     if (anim.step) anim.step(this.firstStep(), undefined, "");
     this.animSince = performance.now();
+  }
+
+  /** The pages are dark (Dark PDF): an opening's sheet is too. */
+  private sheetDark(): boolean {
+    return this.win.classList.contains("dark-pdf") || (this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark"));
   }
 
   /** When the opening began: a page there within 400 ms (a project already built) is shown at once, no opening. */
@@ -2301,6 +2308,7 @@ export class Panel {
   async settings(on = this.$("#settings").hidden): Promise<void> {
     const el = this.$("#settings");
     if (!on) {
+      this.tilesGone();
       if (!el.hidden) (el.hidden = true), this.emit();
       return;
     }
@@ -2311,6 +2319,7 @@ export class Panel {
       else groups.push({ title: g.title, rows: [...g.rows] });
     }
     this.settingRows.clear();
+    this.tilesGone();
     // (one group at a time, by its tab: the last one shown, else the first)
     const shown = groups.filter((g) => g.rows.length);
     const at = Math.max(0, shown.findIndex((g) => g.title === this.settingsTab));
@@ -2358,6 +2367,12 @@ export class Panel {
       s.disabled = off;
       for (const [v, l] of r.options ?? []) s.append(new Option(l, v, v === r.value, v === r.value));
       ctl.append(s);
+    } else if (r.kind === "picks") {
+      const on = new Set(String(r.value ?? "").split(","));
+      ctl.replaceChildren(html`<div class="seg" role="group" aria-label="${r.label}"><button type="button" data-all="1" disabled="${off}">All</button><button type="button" data-all="0" disabled="${off}">None</button></div>`);
+      const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="pick" role="checkbox" data-v="${v}" aria-checked="${String(on.has(v))}" disabled="${off}"><span class="lk"></span><span class="nm"><i class="box"></i>${l}</span></button>`)}</div>`;
+      row.querySelector(".help")!.after(grid);
+      if (r.tile) for (const b of row.querySelectorAll<HTMLElement>(".pick")) this.tileShown(b.querySelector(".lk")!, (box) => r.tile!(b.dataset.v!, box));
     } else if (r.kind === "action") ctl.replaceChildren(html`<button type="button" class="btn" disabled="${off}">${r.button ?? r.label}</button>`);
     else ctl.innerHTML = `<span class="val"></span>`, (ctl.querySelector(".val")!.textContent = String(r.value ?? ""));
     return row;
@@ -2373,7 +2388,14 @@ export class Panel {
     if (r.kind === "toggle" && e.type === "click" && t.closest(".switch")) v = r.value !== true;
     else if (r.kind === "choice" && e.type === "click") v = t.closest<HTMLElement>("[data-v]")?.dataset.v;
     else if (r.kind === "select" && e.type === "change") v = (t as HTMLSelectElement).value;
-    else if (r.kind === "action" && e.type === "click" && t.closest(".btn")) v = undefined;
+    else if (r.kind === "picks" && e.type === "click") {
+      const all = t.closest<HTMLElement>("[data-all]")?.dataset.all, one = t.closest<HTMLElement>(".pick")?.dataset.v;
+      const on = new Set(String(r.value ?? "").split(",").filter(Boolean));
+      if (all) (r.options ?? []).forEach(([o]) => (all === "1" ? on.add(o) : on.delete(o)));
+      else if (one) on.has(one) ? on.delete(one) : on.add(one);
+      else return;
+      v = (r.options ?? []).filter(([o]) => on.has(o)).map(([o]) => o).join(",");
+    } else if (r.kind === "action" && e.type === "click" && t.closest(".btn")) v = undefined;
     else return;
     if (r.kind !== "action" && (v === undefined || v === r.value)) return;
     const err = row.querySelector<HTMLElement>(".err")!;
@@ -2384,6 +2406,35 @@ export class Panel {
     r.value = v;
     if (r.kind === "toggle") row.querySelector(".switch")!.setAttribute("aria-checked", String(v === true));
     if (r.kind === "choice") row.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    if (r.kind === "picks") {
+      const on = new Set(String(v).split(","));
+      row.querySelectorAll<HTMLElement>(".pick").forEach((b) => b.setAttribute("aria-checked", String(on.has(b.dataset.v!))));
+    }
+  }
+
+  /** The picks tiles' pictures playing (each its stop), and what sees them on screen. */
+  private tiles = new Map<Element, { play(): () => void; stop?: () => void }>();
+  private tileSeen?: IntersectionObserver;
+
+  /** `box`'s picture played while it is on screen (its tab shown, scrolled to), stopped when not (another tab, the dialog closed). */
+  private tileShown(box: HTMLElement, play: (box: HTMLElement) => () => void): void {
+    this.tileSeen ??= new IntersectionObserver((seen) => {
+      for (const s of seen) {
+        const t = this.tiles.get(s.target);
+        if (!t) continue;
+        if (s.isIntersecting && !t.stop) t.stop = t.play();
+        else if (!s.isIntersecting && t.stop) t.stop(), (t.stop = undefined);
+      }
+    });
+    this.tiles.set(box, { play: () => play(box) });
+    this.tileSeen.observe(box);
+  }
+
+  /** Every tile's picture stopped, none watched (the dialog drawn anew, or closed). */
+  private tilesGone(): void {
+    this.tileSeen?.disconnect();
+    for (const t of this.tiles.values()) t.stop?.();
+    this.tiles.clear();
   }
 
   /** The panel's own rows: the main file, the pages' look, the debug check, the tips. */
@@ -2402,7 +2453,25 @@ export class Panel {
     const look: SettingRow[] = [];
     look.push(
       { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
-      { id: "opening", label: "Loading animation", help: "Played on the first page's sheet while it is typeset. Random: a different one each time", kind: "select", options: [["random", "Random"], ...LOOKS.map((l): [string, string] => [l.id, l.name]), ["off", "Off"]], value: this.look, disabled: keep, set: pref("opening", (l) => (this.look = lookOf(l))) },
+      {
+        id: "opening",
+        label: "Loading animation",
+        help: "Played on the first page while it is typeset: one of those picked, a different one each time. None: no animation",
+        kind: "picks",
+        options: LOOKS.map((l): [string, string] => [l.id, l.name]),
+        value: looksIn(this.look).join(","),
+        disabled: keep,
+        set: async (v) => {
+          const l = lookFrom(String(v).split(","));
+          const why = await ev.onPref?.("opening", l);
+          if (!why) this.look = l;
+          return why;
+        },
+        tile: (id, box) => {
+          box.classList.toggle("dark", this.sheetDark());
+          return lookPreview(id, box, this.sheetDark(), (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!, this.words.steps, hintsFor(this.kind)[0] ?? "");
+        },
+      },
     );
     if (ev.onBoxes) look.push({ id: "underline", label: "Show them on the PDF", help: "A wavy line under each one, and a mark beside the scrollbar", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
     // (the problems' filters, the same as the buttons at the top of the problems list)

@@ -78,9 +78,10 @@ pub struct Config {
     pub follow: Option<String>,
     /// The viewer's dark pages (yours only): `off`, `on`, `theme`.
     pub dark_pdf: Option<String>,
-    /// The viewer's loading animation (yours only): `random` (PhiTeX's the
-    /// first time, then another each time), one of them by name, or `off`.
-    /// `retro` (the first Windows 98's, retired) is read as `win98`.
+    /// The viewer's loading animation (yours only): `random` (the default:
+    /// every one but Bad Apple, PhiTeX's the first time, then another each
+    /// time), `all`, those picked by name, comma separated
+    /// (`tetris,badapple`: one of them each time), or `off`. `retro` (the first Windows 98's, retired) is read as `win98`.
     pub opening: Option<String>,
     /// Whether the viewer underlines what each problem is about (yours only).
     pub underline: Option<bool>,
@@ -138,6 +139,7 @@ pub const CHOICES: &[(&str, &[&str])] = &[
         "opening",
         &[
             "random",
+            "all",
             "phitex",
             "terminal",
             "win98",
@@ -155,6 +157,25 @@ pub const CHOICES: &[(&str, &[&str])] = &[
         ],
     ),
 ];
+
+/// `v` is one of `names`, the choices of `key`; `opening`'s may name several
+/// looks, comma separated (`random`, `all` and `off` alone).
+fn chosen(key: &str, names: &[&str], v: &str) -> bool {
+    names.contains(&v)
+        || key == "opening"
+            && v.split(',')
+                .all(|n| names.contains(&n) && !matches!(n, "random" | "all" | "off"))
+}
+
+/// What `key` may be, for an error: its names.
+fn said_names(key: &str, names: &[&str]) -> String {
+    let one = format!("one of {}", names.join(", "));
+    if key == "opening" {
+        format!("{one}, or looks comma separated")
+    } else {
+        one
+    }
+}
 
 /// `copy-pdf`'s value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -242,9 +263,9 @@ fn parse_named(text: &str, name: &str) -> Result<Config, String> {
     }
     for (k, names) in CHOICES {
         if let Some(v) = table.get(*k)
-            && !v.as_str().is_some_and(|v| names.contains(&v))
+            && !v.as_str().is_some_and(|v| chosen(k, names, v))
         {
-            return Err(format!("{name}: `{k}` is one of {}", names.join(", ")));
+            return Err(format!("{name}: `{k}` is {}", said_names(k, names)));
         }
     }
     // (not one of the viewer's CHOICES: a page never sets it)
@@ -412,11 +433,11 @@ fn check(key: &str, value: &str) -> Result<(), String> {
         return Err(format!("{key} is on or off, not '{value}'"));
     }
     if let Some(names) = names_of(key)
-        && !names.contains(&value)
+        && !chosen(key, names, value)
     {
         return Err(format!(
-            "{key} is one of {}, not '{value}'",
-            names.join(", ")
+            "{key} is {}, not '{value}'",
+            said_names(key, names)
         ));
     }
     match key {
@@ -498,8 +519,8 @@ pub fn prefs(
             if let Some((_, names)) = CHOICES.iter().find(|(c, _)| c == k) {
                 let n = v
                     .as_str()
-                    .filter(|n| names.contains(n))
-                    .ok_or(format!("{k}: one of {}", names.join(", ")))?;
+                    .filter(|n| chosen(k, names, n))
+                    .ok_or(format!("{k}: {}", said_names(k, names)))?;
                 text = with_line(&text, k, &format!("\"{n}\""))?;
                 continue;
             }
@@ -671,8 +692,8 @@ pub const SETTINGS: &[(&str, &str, &str)] = &[
     ),
     (
         "opening",
-        "phitex",
-        "the viewer's loading animation: phitex, retro, off (yours only)",
+        "random",
+        "the viewer's loading animation: random (all but Bad Apple), all, off, or looks comma separated (tetris,badapple) (yours only)",
     ),
     (
         "underline",

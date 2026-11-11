@@ -1,8 +1,11 @@
 // The loading animations to choose from (Settings › Appearance › Loading
 // animation): PhiTeX's own (opening.ts) and these, each played on the first
-// page's sheet while the first build runs. "random", the default, plays
-// PhiTeX's the first time ever and one of them at random at every opening
-// after (a document opened, a Rebuild); "off" plays none.
+// page's sheet while the first build runs. The user picks any of them in a
+// gallery that plays each (preview); every opening (a document opened, a
+// Rebuild) plays one of those picked at random, PhiTeX's the first time ever
+// when it is picked. "random", the default, is every one but Bad Apple (a
+// video's silhouettes: picked by those who want it); "all" every one; "off"
+// none.
 
 import { opening, still, type Opening } from "../opening.ts";
 import { win98 } from "./win98.ts";
@@ -39,22 +42,115 @@ export const LOOKS: Look[] = [
   { id: "badapple", name: "Bad Apple!!", make: (s, dark) => badapple(s, dark) },
 ];
 
-/** The choice: one of LOOKS, at random, or none. */
-export type OpeningLook = "random" | "off" | (typeof LOOKS)[number]["id"];
+/** The looks of the default, "random": every one but Bad Apple. */
+const DEFAULT = LOOKS.filter((l) => l.id !== "badapple").map((l) => l.id);
 
-/** The choice as kept: "retro" (the first Windows 98's, retired) is Windows 98's now; one not known is the default's. */
-export function lookOf(v: unknown): OpeningLook {
-  if (v === "retro") return "win98";
-  return v === "random" || v === "off" || LOOKS.some((l) => l.id === v) ? (v as OpeningLook) : "random";
+/**
+ * The choice as kept: "random" (the default's, DEFAULT), "all" (every one of LOOKS), "off" (none), or the
+ * ones chosen, by id, comma separated ("tetris,badapple"; one id alone is
+ * the first choice's, one look). Each opening plays one of them at random.
+ */
+export type OpeningLook = string;
+
+/** The ids chosen in `look`, in LOOKS' order. */
+export function looksIn(look: OpeningLook): string[] {
+  if (look === "random") return DEFAULT;
+  if (look === "all") return LOOKS.map((l) => l.id);
+  if (look === "off") return [];
+  const ids = new Set(look.split(",").map((v) => (v.trim() === "retro" ? "win98" : v.trim())));
+  return LOOKS.filter((l) => ids.has(l.id)).map((l) => l.id);
 }
 
-/** The opening to play for `look`: `first` (none played ever) gets PhiTeX's; random avoids the last one played. */
+/** The choice for `ids`: the default's is "random", every one "all", none "off". */
+export function lookFrom(ids: Iterable<string>): OpeningLook {
+  const set = new Set(ids);
+  const chosen = LOOKS.filter((l) => set.has(l.id)).map((l) => l.id);
+  if (chosen.join(",") === DEFAULT.join(",")) return "random";
+  return chosen.length === LOOKS.length ? "all" : chosen.length ? chosen.join(",") : "off";
+}
+
+/** The choice as kept, made canonical: "retro" (the first Windows 98's, retired) is Windows 98's now; one naming none known is the default's. */
+export function lookOf(v: unknown): OpeningLook {
+  if (typeof v !== "string") return "random";
+  if (v === "random" || v === "all" || v === "off") return v;
+  const ids = looksIn(v);
+  return ids.length ? lookFrom(ids) : "random";
+}
+
+/** The opening to play for `look`: `first` (none played ever) gets PhiTeX's when it is chosen; another than the last one played, when there is another. */
 export function play(look: OpeningLook, first: boolean, last: string | null, sheet: HTMLElement, dark: boolean, doc: string): { id: string; anim: Opening } {
-  if (look === "off") return { id: "off", anim: still() };
-  let l = LOOKS.find((x) => x.id === look);
-  if (!l) {
-    const pool = LOOKS.filter((x) => x.id !== last);
-    l = first ? LOOKS[0] : pool[Math.floor(Math.random() * pool.length)];
+  const ids = looksIn(look);
+  if (!ids.length) return { id: "off", anim: still() };
+  const others = ids.filter((id) => id !== last);
+  const pool = others.length ? others : ids;
+  const id = first && ids.includes("phitex") ? "phitex" : pool[Math.floor(Math.random() * pool.length)];
+  return { id, anim: LOOKS.find((l) => l.id === id)!.make(sheet, dark, doc) };
+}
+
+/**
+ * The look `id` played over and over in `tile` (Settings' gallery): on a
+ * sheet over a made-up first page, the build's steps as a cold build says
+ * them (`steps`: reading, fetching 24 packages, typesetting page 1), `hint`
+ * its "Did you know", then the page-in onto that page; again 1.4 s on.
+ * Stopped by what it returns.
+ */
+export function preview(id: string, tile: HTMLElement, dark: boolean, doc: string, steps: readonly [string, string, string], hint: string): () => void {
+  const look = LOOKS.find((l) => l.id === id);
+  if (!look) return () => {};
+  const page = document.createElement("canvas"), sheet = document.createElement("div");
+  page.className = "pg";
+  sheet.className = "sheet";
+  tile.replaceChildren(page, sheet);
+  let anim: Opening | null = null, timers: ReturnType<typeof setTimeout>[] = [], alive = true;
+  const at = (ms: number, f: () => void) => timers.push(setTimeout(() => alive && f(), ms));
+  const round = () => {
+    timers.forEach(clearTimeout);
+    timers = [];
+    anim?.stop();
+    sheet.replaceChildren();
+    sheet.classList.remove("in");
+    firstPage(page, dark);
+    const a = (anim = look.make(sheet, dark, doc));
+    a.step?.(steps[0], undefined, "");
+    at(900, () => a.hint?.(hint));
+    for (let k = 1; k <= 24; k++) at(1100 + k * 90, () => a.step?.(steps[1], Math.round((100 * k) / 24), `${k} of 24 · ${(k * 0.21).toFixed(1)} MB`));
+    at(3500, () => a.step?.(steps[2], undefined, "Page 1"));
+    at(5800, () => {
+      sheet.classList.add("in");
+      let next = false;
+      const again = () => !next && ((next = true), a.stop(), sheet.replaceChildren(), at(1400, round));
+      void a.done(page).then(again);
+      at(1600, again);
+    });
+  };
+  round();
+  return () => {
+    alive = false;
+    timers.forEach(clearTimeout);
+    anim?.stop();
+    tile.replaceChildren();
+  };
+}
+
+/** A first page drawn in `cv` at its size: a title, an author, paragraphs as grey lines. */
+function firstPage(cv: HTMLCanvasElement, dark: boolean): void {
+  const dpr = devicePixelRatio || 1, w = Math.max(1, Math.round(cv.clientWidth * dpr)), h = Math.max(1, Math.round(cv.clientHeight * dpr));
+  cv.width = w;
+  cv.height = h;
+  const g = cv.getContext("2d")!;
+  g.fillStyle = dark ? "#2c2e33" : "#ffffff";
+  g.fillRect(0, 0, w, h);
+  g.fillStyle = dark ? "#c9ccd2" : "#3a3f48";
+  const m = w * 0.14, line = h * 0.0125, lead = h * 0.024;
+  g.fillRect(w * 0.27, h * 0.1, w * 0.46, line * 1.7);
+  g.fillRect(w * 0.38, h * 0.1 + lead * 1.6, w * 0.24, line);
+  let y = h * 0.21;
+  for (let p = 0; y < h * 0.88; p++) {
+    const n = 4 + ((p * 5) % 4);
+    for (let k = 0; k < n && y < h * 0.88; k++, y += lead) {
+      const x0 = k === 0 ? m + w * 0.04 : m, x1 = k === n - 1 ? m + (w - 2 * m) * (0.35 + ((p * 37) % 50) / 100) : w - m;
+      g.fillRect(x0, y, x1 - x0, line);
+    }
+    y += lead * 0.6;
   }
-  return { id: l.id, anim: l.make(sheet, dark, doc) };
 }

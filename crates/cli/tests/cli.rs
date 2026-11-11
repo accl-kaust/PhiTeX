@@ -4522,7 +4522,7 @@ fn the_viewers_settings_are_the_users() {
     for (key, value) in [
         ("follow", "selection"),
         ("dark-pdf", "theme"),
-        ("opening", "off"),
+        ("opening", "tetris,badapple"),
         ("underline", "off"),
         ("threads", "2"),
     ] {
@@ -4533,7 +4533,7 @@ fn the_viewers_settings_are_the_users() {
     for line in [
         "follow = \"selection\"",
         "dark-pdf = \"theme\"",
-        "opening = \"off\"",
+        "opening = \"tetris,badapple\"",
         "underline = false",
         "threads = 2",
     ] {
