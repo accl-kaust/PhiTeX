@@ -4,9 +4,15 @@
 //!
 //! - **The index** ([`Index`]): every file by its texmf path
 //!   (`tex/latex/fontspec/fontspec.sty`), a row `path TAB pack TAB
-//!   deps...`: its pack, then for each engine of `release.json`'s `deps`
-//!   the packs its loading reads (comma-separated; hints only: a missing
-//!   one costs a round trip, never a wrong file). Schema 4 adds the pack
+//!   deps... TAB sum`: its pack, then for each engine of `release.json`'s
+//!   `deps` the packs its loading reads (comma-separated; hints only: a
+//!   missing one costs a round trip, never a wrong file), then, where
+//!   `release.json` has `file_sums` (`"sha256-48"`), the file's own
+//!   content: the first 12 hex digits of the SHA-256 of its bytes, what
+//!   the file's content key is ([`Files::key`]), so that a format made
+//!   on one release holds on the next unless a file it read changed
+//!   (a pack's id changes with any file of the pack, and with how the
+//!   release groups files into packs). Schema 4 adds the pack
 //!   table (`pack TAB sha256 TAB bytes`, [`Index::with_pack_table`]): every
 //!   pack is checked against it before use ([`Index::check`]), and one
 //!   that differs is refused, never read. Schema 3 has none.
@@ -62,6 +68,9 @@ struct Row {
     pack: Box<str>,
     /// Per engine of `Index::engines`, the packs its loading reads.
     deps: Box<[Box<str>]>,
+    /// The file's content sum (`release.json`'s `file_sums`), none in a
+    /// release without them.
+    sum: Option<Box<str>>,
 }
 
 /// Shelf's index of one release.
@@ -75,7 +84,14 @@ pub struct Index {
     /// The pack table: each pack's SHA-256 and size.
     table: Option<HashMap<Box<str>, Sum>>,
     release: String,
+    /// The formats the release publishes (`release.json`'s `formats`):
+    /// a format's name in a session's store to the pack that holds it.
+    formats: HashMap<String, String>,
 }
+
+/// The one file of a pack that holds a published format
+/// ([`Files::published_format`]): the engine's exported state.
+pub const FORMAT_FILE: &str = "format";
 
 /// Shelf's engine name for a program (`pdflatex`, `xelatex`, ...).
 #[must_use]
@@ -132,6 +148,10 @@ impl Index {
     /// `release.json`.
     #[must_use]
     pub fn new(tsv: &str, release: &Value) -> Index {
+        let engines: Vec<String> =
+            serde_json::from_value(release["deps"].clone()).unwrap_or_default();
+        // (the sum's column, after every engine's dependency column)
+        let sums = release["file_sums"].as_str() == Some("sha256-48");
         let mut rows = HashMap::new();
         let mut by_base: HashMap<Box<str>, Vec<Box<str>>> = HashMap::new();
         for line in tsv.lines() {
@@ -145,11 +165,18 @@ impl Index {
             }
             let base = path.rsplit_once('/').map_or(path, |(_, b)| b);
             by_base.entry(base.into()).or_default().push(path.into());
+            let mut deps: Vec<Box<str>> = cols.map(Into::into).collect();
+            let sum = if sums && deps.len() > engines.len() {
+                Some(deps.remove(engines.len())).filter(|s| !s.is_empty())
+            } else {
+                None
+            };
             rows.insert(
                 path.into(),
                 Row {
                     pack: pack.into(),
-                    deps: cols.map(Into::into).collect(),
+                    deps: deps.into(),
+                    sum,
                 },
             );
         }
@@ -157,7 +184,7 @@ impl Index {
             paths.sort_unstable();
         }
         let search = serde_json::from_value(release["search"].clone()).unwrap_or_default();
-        let engines = serde_json::from_value(release["deps"].clone()).unwrap_or_default();
+        let formats = serde_json::from_value(release["formats"].clone()).unwrap_or_default();
         Index {
             rows,
             by_base,
@@ -165,6 +192,7 @@ impl Index {
             engines,
             table: None,
             release: release["release"].as_str().unwrap_or("").to_owned(),
+            formats,
         }
     }
 
@@ -225,6 +253,19 @@ impl Index {
     #[must_use]
     pub fn pack_of(&self, path: &str) -> Option<&str> {
         self.rows.get(path).map(|r| &*r.pack)
+    }
+
+    /// `path`'s content sum (`file_sums`; none: the release has none).
+    #[must_use]
+    pub fn sum_of(&self, path: &str) -> Option<&str> {
+        self.rows.get(path).and_then(|r| r.sum.as_deref())
+    }
+
+    /// The pack holding the format the release publishes as `name` (a
+    /// session's store name: the engine, its identity, its text's hash).
+    #[must_use]
+    pub fn format_pack(&self, name: &str) -> Option<&str> {
+        self.formats.get(name).map(String::as_str)
     }
 
     /// The packs to fetch for `path` with `engine`: its own, then what its
@@ -552,16 +593,82 @@ impl Files {
 
     /// The path and content key of the file `name` would be, from the
     /// index alone, nothing fetched (a warm start checks the format
-    /// against them): its key the id of its pack (which names the pack's
-    /// content) and its texmf path.
+    /// against them): its texmf path and its key, the file's own content
+    /// sum (`sha256:` and the index's sum), so that a release that
+    /// changes other files, or groups them into other packs, leaves it as
+    /// it was; in a release without sums, the id of its pack (which names
+    /// the pack's content, so changes with any file of it) and the path.
     #[must_use]
     pub fn key(&self, name: &str) -> Option<(String, Vec<u8>)> {
-        let rel = self.path_of(name)?;
-        let pack = self.index.pack_of(rel)?;
-        Some((
-            format!("{TL}{rel}"),
-            [pack.as_bytes(), b"\0", rel.as_bytes()].concat(),
-        ))
+        self.key_in(name, format_of(name))
+    }
+
+    /// [`Files::key`] in kpathsea format `format`.
+    #[must_use]
+    pub fn key_in(&self, name: &str, format: &str) -> Option<(String, Vec<u8>)> {
+        let rel = self.path_in(name, format)?;
+        let key = match self.index.sum_of(rel) {
+            Some(sum) => [b"sha256:", sum.as_bytes()].concat(),
+            None => [self.index.pack_of(rel)?.as_bytes(), b"\0", rel.as_bytes()].concat(),
+        };
+        Some((format!("{TL}{rel}"), key))
+    }
+
+    /// Whether the release publishes a format named `name`
+    /// ([`Files::published_format`]'s), nothing fetched.
+    #[must_use]
+    pub fn publishes_format(&self, name: &str) -> bool {
+        self.index.format_pack(name).is_some()
+    }
+
+    /// The format the release publishes as `name` ([`Index::format_pack`]:
+    /// made by the release for this engine's identity, so good on its
+    /// files): its pack fetched and checked against the pack table, the
+    /// state it holds ([`FORMAT_FILE`]). Asked of the source once (a
+    /// second ask, after the session kept it in its store, answers
+    /// none); none: the release has no such format, or its pack could not
+    /// be had.
+    #[must_use]
+    pub fn published_format(&self, name: &str) -> Option<Vec<u8>> {
+        let id = self.index.format_pack(name)?.to_owned();
+        {
+            let mut s = self.lock();
+            if s.packs.contains_key(&id) {
+                return None;
+            }
+            s.packs.insert(id.clone(), Pack::Done);
+        }
+        self.tell(&Fetch::Asked { name, pack: &id });
+        let got = self
+            .packs
+            .source
+            .pack(&id)
+            .and_then(|raw| {
+                self.index.check(&id, &raw)?;
+                gunzip(&raw)
+                    .and_then(|b| unpack(&b))
+                    .ok_or_else(|| format!("pack {id} is not a pack"))
+            })
+            .and_then(|fs| {
+                fs.into_iter()
+                    .find(|(n, _)| n == FORMAT_FILE)
+                    .map(|(_, b)| b)
+                    .ok_or_else(|| format!("pack {id} holds no format"))
+            });
+        match got {
+            Ok(b) => {
+                self.tell(&Fetch::Arrived { name, pack: &id });
+                Some(b)
+            }
+            Err(why) => {
+                self.tell(&Fetch::Failed {
+                    name,
+                    pack: &id,
+                    why: &why,
+                });
+                None
+            }
+        }
     }
 }
 
@@ -585,6 +692,60 @@ pub fn pack(files: &[(&str, &[u8])]) -> Vec<u8> {
     gzip_stored(&b)
 }
 
+/// A file of a pack: its texmf path and bytes.
+pub type PackFile<'a> = (&'a str, &'a [u8]);
+
+/// A release as Shelf's `release.py` makes one, in memory, for tests and
+/// tools: each pack (`name`, its files) named by its content
+/// (`name-<12 hex digits of its SHA-256>`), every file's row with its
+/// content sum (`file_sums`), each format (`name`, the engine's state)
+/// published in a pack of its own; its pdfTeX search the texmf tree's
+/// `tex/` (any depth), `fonts/tfm`. The index (with its pack table) and
+/// the packs by id.
+#[must_use]
+pub fn release(
+    name: &str,
+    packs: &[(&str, &[PackFile<'_>])],
+    formats: &[(&str, &[u8])],
+) -> (Index, HashMap<String, Vec<u8>>) {
+    use std::fmt::Write as _;
+    let mut served = HashMap::new();
+    let (mut index, mut table) = (String::new(), String::new());
+    let mut named = |stem: &str, files: &[(&str, &[u8])]| {
+        let raw = pack(files);
+        let sum = sha256_hex(&raw);
+        let id = format!("{stem}-{}", &sum[..12]);
+        let _ = writeln!(table, "{id}\t{sum}\t{}", raw.len());
+        served.insert(id.clone(), raw);
+        id
+    };
+    for (stem, files) in packs {
+        let id = named(stem, files);
+        for (path, bytes) in *files {
+            let sum = sha256_hex(bytes);
+            let _ = writeln!(index, "{path}\t{id}\t\t\t{}", &sum[..12]);
+        }
+    }
+    let formats: HashMap<String, String> = formats
+        .iter()
+        .map(|(n, b)| {
+            (
+                (*n).to_owned(),
+                named(&format!("fmt-{n}"), &[(FORMAT_FILE, b)]),
+            )
+        })
+        .collect();
+    let meta = serde_json::json!({
+        "schema": 1, "release": name, "deps": ["pdftex", "xetex"], "file_sums": "sha256-48",
+        "formats": formats,
+        "search": {"pdftex": {"tex": ["tex"], "tfm": ["fonts/tfm"]}},
+    });
+    let ix = Index::new(&index, &meta)
+        .with_pack_table(&table)
+        .unwrap_or_else(|e| unreachable!("the table made here: {e}"));
+    (ix, served)
+}
+
 /// `b` as a gzip member of stored deflate blocks (no compression).
 #[must_use]
 pub fn gzip_stored(b: &[u8]) -> Vec<u8> {
@@ -602,7 +763,7 @@ pub fn gzip_stored(b: &[u8]) -> Vec<u8> {
     }
     out.extend_from_slice(&crc32(b).to_le_bytes());
     out.extend_from_slice(
-        &u32::try_from(b.len() & 0xffff_ffff)
+        &u32::try_from(u64::try_from(b.len()).unwrap_or(0) & 0xffff_ffff)
             .unwrap_or(0)
             .to_le_bytes(),
     );
@@ -642,7 +803,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn release() -> Value {
+    fn release_json() -> Value {
         serde_json::json!({
             "release": "tl-test",
             "deps": ["pdftex", "xetex"],
@@ -659,7 +820,7 @@ mod tests {
                    tex/latex/xunicode/xunicode.sty\txu-2\t\t\n\
                    tex/latex/amsmath/amsmath.sty\tamsmath-1\tamsfonts-1,base-1\t\n\
                    fonts/tfm/public/cm/cmr10.tfm\tcm-1\t\t\n";
-        Index::new(tsv, &release())
+        Index::new(tsv, &release_json())
     }
 
     #[test]
@@ -780,7 +941,11 @@ mod tests {
                    tex/latex/amsfonts/amsfonts.sty\tamsfonts-1\t\t\n\
                    tex/latex/base/article.cls\tbase-1\t\t\n\
                    fonts/tfm/public/cm/cmr10.tfm\tcm-1\t\t\n";
-        let ix = Arc::new(Index::new(tsv, &release()).with_pack_table(&table).unwrap());
+        let ix = Arc::new(
+            Index::new(tsv, &release_json())
+                .with_pack_table(&table)
+                .unwrap(),
+        );
         let src = Arc::new(Memory {
             packs: [
                 ("amsmath-1".to_owned(), am),
@@ -899,7 +1064,11 @@ mod tests {
                    tex/latex/base/article.cls\tbase-1\t\t\n\
                    tex/xelatex/xunicode/xunicode.sty\txu-1\t\t\n\
                    tex/latex/xunicode/xunicode.sty\txu-2\t\t\n";
-        let ix = Arc::new(Index::new(tsv, &release()).with_pack_table(&table).unwrap());
+        let ix = Arc::new(
+            Index::new(tsv, &release_json())
+                .with_pack_table(&table)
+                .unwrap(),
+        );
         let source = || {
             Arc::new(GivenOnce(Mutex::new(
                 packs
@@ -944,5 +1113,122 @@ mod tests {
         let pdf = Files::new(ix.clone(), src.clone(), "pdftex");
         assert_eq!(found(&pdf, "amsmath.sty"), am);
         assert_eq!(found(&Files::new(ix, src, "xetex"), "amsmath.sty"), None);
+    }
+
+    /// A file's content key is its own content's: a release that changes
+    /// another file of its pack, or groups the files into other packs
+    /// (other pack ids), leaves it as it was, nothing fetched to say so;
+    /// a release that changes the file changes it. In a release without
+    /// sums, the key is the pack's (which moves with any file of it).
+    #[test]
+    fn a_files_key_is_its_own_content() {
+        let key = |packs: &[(&str, &[PackFile<'_>])]| {
+            let (ix, served) = release("tl-test.1", packs, &[]);
+            let src = Arc::new(Memory {
+                packs: served,
+                asked: AtomicUsize::new(0),
+            });
+            let f = Files::new(Arc::new(ix), src.clone(), "pdftex");
+            let k = f.key("hyph-de.tex").expect("a key");
+            assert_eq!(
+                src.asked.load(Ordering::Relaxed),
+                0,
+                "a key fetches nothing"
+            );
+            k
+        };
+        let hyph: &[(&str, &[u8])] = &[
+            (
+                "tex/generic/hyph-utf8/patterns/hyph-de.tex",
+                b"\\patterns{a1b}",
+            ),
+            (
+                "tex/generic/hyph-utf8/patterns/hyph-fr.tex",
+                b"\\patterns{c1d}",
+            ),
+        ];
+        let a = key(&[("hyphen-german", hyph)]);
+        assert_eq!(
+            a.0,
+            "/usr/share/texmf-dist/tex/generic/hyph-utf8/patterns/hyph-de.tex"
+        );
+        // (another file of its pack changed: another pack id, the same key)
+        let other: &[(&str, &[u8])] = &[
+            (
+                "tex/generic/hyph-utf8/patterns/hyph-de.tex",
+                b"\\patterns{a1b}",
+            ),
+            (
+                "tex/generic/hyph-utf8/patterns/hyph-fr.tex",
+                b"\\patterns{c1d e1f}",
+            ),
+        ];
+        assert_eq!(key(&[("hyphen-german", other)]), a);
+        // (the files in packs of their own)
+        assert_eq!(
+            key(&[("hyphen-german", &hyph[..1]), ("hyphen-french", &hyph[1..])]),
+            a
+        );
+        // (the file changed: another key)
+        let changed: &[(&str, &[u8])] = &[(
+            "tex/generic/hyph-utf8/patterns/hyph-de.tex",
+            b"\\patterns{a1b g1h}",
+        )];
+        assert_ne!(key(&[("hyphen-german", changed)]), a);
+        // (no sums: the pack's id)
+        let old = Index::new(
+            "tex/generic/hyph-utf8/patterns/hyph-de.tex\thyphen-german-1\t\t\n",
+            &release_json(),
+        );
+        let f = Files::new(
+            Arc::new(old),
+            Arc::new(GivenOnce(Mutex::default())),
+            "pdftex",
+        );
+        assert_eq!(
+            f.key("hyph-de.tex").map(|k| k.1),
+            Some(b"hyphen-german-1\0tex/generic/hyph-utf8/patterns/hyph-de.tex".to_vec())
+        );
+    }
+
+    /// A sum's column comes after every engine's dependency column, and
+    /// the dependency columns are read as they were.
+    #[test]
+    fn sums_follow_the_dependency_columns() {
+        let meta = serde_json::json!({"deps": ["pdftex", "xetex"], "file_sums": "sha256-48"});
+        let ix = Index::new(
+            "a.sty\ta-1\tb-1\tc-1\t0123456789ab\nb.sty\tb-1\t\t\t\n",
+            &meta,
+        );
+        assert_eq!(ix.sum_of("a.sty"), Some("0123456789ab"));
+        assert_eq!(ix.sum_of("b.sty"), None);
+        assert_eq!(ix.packs("a.sty", "pdftex"), ["a-1", "b-1"]);
+        assert_eq!(ix.packs("a.sty", "xetex"), ["a-1", "c-1"]);
+        // (without `file_sums`: a column past the engines' is not a sum)
+        let ix = Index::new("a.sty\ta-1\t\t\t0123456789ab\n", &release_json());
+        assert_eq!(ix.sum_of("a.sty"), None);
+    }
+
+    /// A format the release publishes: its pack fetched, checked and its
+    /// state given, once; a name the release has no format for, none.
+    #[test]
+    fn a_published_format_is_fetched_once() {
+        let (ix, served) = release(
+            "tl-test.1",
+            &[("base", &[("tex/latex/base/latex.ltx", b"\\x")])],
+            &[("pdflatex-1-2", b"state")],
+        );
+        let src = Arc::new(Memory {
+            packs: served,
+            asked: AtomicUsize::new(0),
+        });
+        let f = Files::new(Arc::new(ix), src.clone(), "pdftex");
+        assert_eq!(f.published_format("xelatex-1-2"), None);
+        assert_eq!(
+            f.published_format("pdflatex-1-2").as_deref(),
+            Some(&b"state"[..])
+        );
+        assert_eq!(f.published_format("pdflatex-1-2"), None, "asked once");
+        assert_eq!(src.asked.load(Ordering::Relaxed), 1);
     }
 }

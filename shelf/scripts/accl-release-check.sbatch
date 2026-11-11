@@ -11,8 +11,10 @@
 # the same document from a texmf tree of the release's files alone, their
 # formats made there by fmtutil: a file the release lacks fails TeX
 # Live's build, so the release is never checked against itself. And every
-# font of TeX Live's own pdftex.map must be in the release's. Any
-# difference fails the job.
+# font of TeX Live's own pdftex.map must be in the release's. Then the
+# formats PhiTeX made there published with the release (release.py
+# --formats) and each taken, not made, by a build on a fresh cache
+# (scripts/check-formats.sh). Any difference fails the job.
 #
 #   scp shelf/scripts/*.sbatch mcmgt01:code/flinner/shelf-scripts/
 #   ssh mcmgt01 'export PATH=/opt/slurm/current/bin:$PATH; cd code/flinner/shelf-runs &&
@@ -88,7 +90,7 @@ box sh -c "cd $w/phitex && target/fastdev/examples/otf-index $w/fontindex-rel.px
 echo "PhiTeX and the font index $(date +%T)"
 
 # (3) the build and (4) the release, after the ones made before
-status=0
+status=0 st=0
 box env TLPDB=cache/texlive.tlpdb.xz FONT_INDEX="$w/fontindex-rel.pxfi" PACK_JOBS="$jobs" \
   python3 build.py "$label" > "$w/results/build.log" 2>&1 || status=$?
 tail -15 "$w/results/build.log"
@@ -104,7 +106,15 @@ echo "release $new (after $old): $after pack files kept, $((after - before)) new
 
 # (5)-(6) the check (scripts/check.sh) in TeX Live's image, without the network
 apptainer exec --containall --net --network none --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w" \
-  --home "$w" --pwd "$w" --env ROOT="$w/phitex",REL="$w/phitex/shelf/releases-v1",LABEL="$label",NEW="$new",BIN="$w/phitex/target/fastdev/phitex",FTREE="$w/ftree",W="$w/check",OUT="$w/results" \
-  "$tlsif" bash "$w/phitex/shelf/scripts/check.sh"; st=$?
+  --home "$w" --pwd "$w" --env ROOT="$w/phitex",REL="$w/phitex/shelf/releases-v1",LABEL="$label",NEW="$new",BIN="$w/phitex/target/fastdev/phitex",FTREE="$w/ftree",W="$w/check",OUT="$w/results",TLPDB="$w/phitex/shelf/cache/texlive.tlpdb.xz" \
+  "$tlsif" bash "$w/phitex/shelf/scripts/check.sh" || st=$?
+# (7) the formats the check made, published with the release
+# (release.py --formats) and each taken by a build on a fresh cache
+# (scripts/check-formats.sh)
+box python3 release.py "$label" --releases releases-v1 --formats "$w/check/c-shelf/formats" 2>&1 | tee -a "$w/results/summary.txt" || st=1
+cp "$w/phitex/shelf/releases-v1/$label/release.json" "$w/results/"
+apptainer exec --containall --net --network none --bind "$w/noresolve:/run/systemd/resolve:ro" --bind "$w" \
+  --home "$w" --pwd "$w" --env ROOT="$w/phitex",REL="$w/phitex/shelf/releases-v1",LABEL="$label",NEW="$new",BIN="$w/phitex/target/fastdev/phitex",W="$w/check",OUT="$w/results" \
+  "$tlsif" bash "$w/phitex/shelf/scripts/check-formats.sh" || st=1
 echo "end $(date +%T)"
 exit $st

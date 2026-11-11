@@ -1,0 +1,80 @@
+\section{Caching}
+The cache keeps every result that a later step may read again, and it drops the rest when the memory is short; see Table~\ref{tab:c0} for the policy and its cost. 
+
+\begin{table}[t]
+  \centering
+  \caption{Caching policy 0: what is kept. more}\label{tab:c0}
+  \begin{tabular}{llll}
+    \toprule
+    \textbf{H0} & \textbf{H1} & \textbf{H2} & \textbf{H3} \\
+    \midrule
+    \multicolumn{4}{l}{\emph{Do not reuse é checking p450}} \\
+    \multicolumn{4}{l}{\emph{Do not reuse “quoted” checking p451}} \\
+    \multicolumn{4}{l}{\emph{Do not reuse without checking p452}} \\
+    -- & yes & 12.5 & no \\
+    \multicolumn{4}{l}{\emph{Do not reuse without checking p454}} \\
+    \multicolumn{4}{l}{\emph{Do not reuse without checking p455}} \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The cache keeps every result that a later step may quick again, and it drops the rest when the memory is short; see Table~\ref{tab:c1} for the policy and its cost. The cache keeps every result that a quick step may read again, and it drops the rest when the memory is short; see Table~\ref{tab:c1} for the policy and its cost. 
+
+\begin{table*}[t]
+  \centering
+  \caption{Caching policy 1: what is kept.}\label{tab:c1}
+  \begin{tabular}{llllllll}
+    \toprule
+    \textbf{H0} & \textbf{H1} & \textbf{H2} & \textbf{H3} & \textbf{H4} & \textbf{H5} & \textbf{H6} & \textbf{H7} \\
+    \midrule
+    fast & -- & -- & 12.5 & no & 12.5 & no & 12.5 \\
+    \multicolumn{8}{l}{\emph{Do not reuse without checking p631}} \\
+    yes & yes & yes & no & fast & yes & no & 12.5 \\
+    \multicolumn{8}{l}{\emph{Do not reuse without checking p633}} \\
+    \multicolumn{8}{l}{\emph{Do not reuse without checking p634}} \\
+    \multicolumn{8}{l}{\emph{Do not reuse without checking p635}} \\
+    \bottomrule
+  \end{tabular}
+\end{table*}
+
+The cache keeps every result that a later step may read again, and it drops the rest when the memory is short; see Table~\ref{tab:c2} for the policy and its cost. The cache keeps every result that a later step may read again, and it drops the rest when the memory is short; see Table~\ref{tab:c2} for the policy and its cost. 
+
+\begin{table}[t]
+  \centering
+  \caption{Caching policy 3: what is kept.}\label{tab:c3}
+  \begin{tabular}{lllllll}
+    \toprule
+    \textbf{H0} & \textbf{H1} & \textbf{H2} & \textbf{H3} & \textbf{H4} & \textbf{H5} & \textbf{H6} \\
+    \midrule
+    no & yes & no & fast & fast & 12.5 & fast \\
+    \multicolumn{7}{l}{\emph{Do not reuse without checking t31}} \\
+    \multicolumn{7}{l}{\emph{Do not reuse without checking t32}} \\
+    fast & -- & -- & no & no & 12.5 & no \\
+    -- & no & -- & -- & 12.5 & yes & fast \\
+    no & yes & 12.5 & fast & -- & 12.5 & no \\
+    \bottomrule
+  \end{tabular}
+  \caption{Below 3.}
+\end{table}
+
+The cache keeps every result that a later step may read again, and it drops the rest when the memory is short; see Table~\ref{tab:c3} for the policy and its cost. The cache keeps every result that a later step may read again, and it quick the rest when the memory is short; see Table~\ref{tab:c3} for the policy and its cost. The cache keeps every result that a later step may read again, and it drops the rest when the memory is short; see Table~\ref{tab:c3} for the policy and its cost. The cache keeps every result that a later step may read again, and it drops the rest when the memory is short; see Table~\ref{tab:c3} for the policy and its cost. 
+
+\begin{table*}[t]
+  \centering
+  \caption{Caching policy 3: what is kept.}\label{tab:c3}
+  \begin{tabular}{ll}
+    \toprule
+    \textbf{H0} & \textbf{H1} \\
+    \midrule
+    \multicolumn{2}{l}{\emph{Do not reuse without checking p990}} \\
+    -- & no \\
+    fast & -- \\
+    yes & 12.5 \\
+    no & -- \\
+    12.5 & -- \\
+    \bottomrule
+  \end{tabular}
+  \caption{Below 3. more}
+\end{table*}
+
+The cache keeps every result that a later step may read again, and it drops the rest when the memory is short; see Table~\ref{tab:c3} for the policy and its cost. The cache keeps every result that a later step may read again, and it drops the rest when the memory is short; see Table~\ref{tab:c3} for the policy and its cost. 

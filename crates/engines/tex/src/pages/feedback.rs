@@ -287,6 +287,7 @@ impl Run<'_, '_> {
             int(xs[1]),
             glue_value(v, &glue_of(v, xs[2])),
             int(xs[3]),
+            int(xs[4]),
         ]))
     }
 }
@@ -297,16 +298,21 @@ impl Run<'_, '_> {
     /// candidate folded in (the contributions after it are not on the
     /// page), read, not defined.
     pub(crate) fn page_dimen(&mut self, m: i32) -> R<i32> {
-        let (st, fired, own_k) = self.page_so_far()?;
-        if fired == Some(true)
-            && let Some(k) = own_k
-        {
-            self.order_after_own_page(k)?;
+        let i = usize::try_from(m).unwrap_or(0).min(7);
+        // (§421: while the output routine is active, `page_so_far` as
+        // its page's fire left it, the page emptied or not: ltxgrid's
+        // `\@add@float` takes `\vsize-\pagegoal` into `\@pageht`)
+        if let Some(p) = self.fin.as_ref().and_then(|f| f.page.as_ref()) {
+            return Ok(p.so_far[i]);
+        }
+        let (st, fired, own_ks) = self.page_so_far()?;
+        if fired == Some(true) {
+            self.order_after_own_page(&own_ks)?;
         }
         if st.pb.contents == Contents::Empty {
             return Ok(if m == 0 { MAX_DIMEN } else { 0 });
         }
-        Ok(st.pb.so_far[usize::try_from(m).unwrap_or(0).min(7)])
+        Ok(st.pb.so_far[i])
     }
 
     /// `\insertpenalties` (§419) outside the output routine: the page
@@ -317,11 +323,9 @@ impl Run<'_, '_> {
         if self.fin.is_some() {
             return self.int_loc(crate::fields::cell::INSPEN);
         }
-        let (st, fired, own_k) = self.page_so_far()?;
-        if fired == Some(true)
-            && let Some(k) = own_k
-        {
-            self.order_after_own_page(k)?;
+        let (st, fired, own_ks) = self.page_so_far()?;
+        if fired == Some(true) {
+            self.order_after_own_page(&own_ks)?;
         }
         Ok(st.pb.insert_penalties)
     }
@@ -338,6 +342,68 @@ impl Run<'_, '_> {
     pub(crate) fn page_fires_in_own(&mut self) -> R<bool> {
         let (_, fired, _) = self.page_so_far()?;
         Ok(fired == Some(true))
+    }
+
+    /// At a candidate a page can fire at ([`Run::finish_candidate`]), or
+    /// a checkpoint taken after one restored: the page-layer registers the
+    /// run holds (loaded, or its own definitions or maps), whose next read
+    /// is ordered after a page firing there ([`Run::page_regs_held`]).
+    pub(crate) fn note_page_regs_held(&mut self) {
+        let op = self.cx.op();
+        if !(op == self.ops.exec || op == self.ops.resume)
+            || !(self.top || self.doc)
+            || !self.cand_marks.iter().any(|m| m.fresh)
+        {
+            return;
+        }
+        for l in crate::defer::page_regs(self) {
+            if (self.st.is_loaded(l) || self.st.has_map(l) || self.st.defined_after(l, 0))
+                && !self.page_regs_held.contains(&l)
+            {
+                self.page_regs_held.push(l);
+            }
+        }
+    }
+
+    /// A read of page-layer register `loc` (`\count0`, a register the
+    /// output routine defines: [`crate::defer::deferrable`]) by a piece,
+    /// the digits or a symbol, after a candidate of its own a page fires
+    /// at: TeX ran that page's routine there, and the register the text
+    /// reads after it is the one the routine stepped (tabularx's
+    /// `\TX@ckpt`, `\edef`'d from `\the\value{page}` in a float after
+    /// the page broke, then put back with `\global`). The value reaching
+    /// the piece's position, or a symbol resolved there, is the one
+    /// before that page: the run ends at the candidate instead
+    /// ([`Run::order_after_own_page`]), its rest a resume after the
+    /// page's finisher, which reads the routine's value.
+    pub(crate) fn order_page_reg_read(&mut self, loc: crate::state::Loc) -> R<()> {
+        let op = self.cx.op();
+        if !(op == self.ops.exec || op == self.ops.resume)
+            || !(self.top || self.doc)
+            || self.cut.is_some()
+            || self.stop_at.is_some()
+            || self.interp.is_some()
+            || !self.cand_marks.iter().any(|m| m.fresh)
+            || self.count_reg(loc).is_none()
+            || !crate::defer::deferrable(self, loc)
+        {
+            return Ok(());
+        }
+        let (_, fired, own_ks) = self.page_so_far()?;
+        if crate::exec::obs_flag!("PHITEX_PAGE_TRACE") {
+            eprintln!(
+                "page-trace: node {} reads page register {loc} after its candidates: fired {fired:?} at {own_ks:?}, marks {:?}",
+                self.cx.node().raw(),
+                self.cand_marks
+                    .iter()
+                    .map(|m| (m.k, m.fresh, m.restartable, m.open_cut))
+                    .collect::<Vec<_>>()
+            );
+        }
+        if fired == Some(true) {
+            self.order_after_own_page(&own_ks)?;
+        }
+        Ok(())
     }
 
     /// The `[tag]` page parameter markers of piece `pid`'s `items` on a
@@ -394,8 +460,23 @@ impl Run<'_, '_> {
     /// ([`PAGE_START`]) to its own last candidate: its state, stopped at
     /// the first page firing, and where that page fired (`Some(true)` in
     /// this piece's own items, `Some(false)` before them), and the own
-    /// candidate it fired at.
-    fn page_so_far(&mut self) -> R<(crate::vprof::ScanState, Option<bool>, Option<u32>)> {
+    /// candidates pages fired at, in order (the first where it fired; the
+    /// later ones as the builder goes on, each routine giving back
+    /// nothing).
+    ///
+    /// Its reads are of the run's own page: what the builder makes of
+    /// the run's own items, on the page params it and the pieces before
+    /// it set, rests on where the run is cut. A second pass keeps none of
+    /// the first pass's (`Ctx::own_cut_reads`, `Ctx::begin_again`).
+    fn page_so_far(&mut self) -> R<(crate::vprof::ScanState, Option<bool>, Vec<u32>)> {
+        let from = self.cx.reads_len();
+        self.page_read_mark = from;
+        let r = self.page_so_far_reads();
+        self.cx.own_cut_reads(from);
+        r
+    }
+
+    fn page_so_far_reads(&mut self) -> R<(crate::vprof::ScanState, Option<bool>, Vec<u32>)> {
         let v = self.v;
         let raw = self.own_outer_items();
         let last = raw
@@ -470,19 +551,20 @@ impl Run<'_, '_> {
         let own = items.len() - 1;
         let mut rd = RunReaching(self, None);
         let mut fired = None;
-        let mut own_k = None;
+        let mut own_ks = Vec::new();
         'items: for (i, x) in items.iter().enumerate() {
             let mut rest: &[crate::vprof::PItem] = x;
             let mut n_fires = 0;
             while st.fold_items(rest, dead, &mut rd) {
                 n_fires += 1;
-                // (the candidate the first page fired at in its own items:
-                // its build)
-                if fired.is_none() && i == own {
-                    own_k = match rest.get(st.fired_at) {
-                        Some(crate::vprof::PItem::Build(c)) => Some(*c),
-                        _ => None,
-                    };
+                // (the candidates pages fired at in its own items: their
+                // builds; none after one at no build, the first page's
+                // place unknown)
+                if i == own
+                    && (fired.is_none() || !own_ks.is_empty())
+                    && let Some(crate::vprof::PItem::Build(c)) = rest.get(st.fired_at)
+                {
+                    own_ks.push(*c);
                 }
                 if fired.is_none() {
                     fired = Some(i == own);
@@ -516,6 +598,6 @@ impl Run<'_, '_> {
             }
         }
         self.ins_fold = None;
-        Ok((st, fired, own_k))
+        Ok((st, fired, own_ks))
     }
 }

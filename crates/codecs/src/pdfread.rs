@@ -694,7 +694,13 @@ pub struct Page {
     pub resources: Option<Dict>,
 }
 
-/// An open PDF file.
+/// The page tree's nodes, each with its kids and their counts
+/// ([`Doc::kid_counts`]).
+type Kids = BTreeMap<Ref, Arc<[(Ref, i64)]>>;
+
+/// An open PDF file (a clone shares its bytes and the object streams
+/// read so far).
+#[derive(Clone)]
 pub struct Doc {
     /// The file's bytes; its offsets count from its `%PDF-` header
     /// (`base`: xpdf moves its start there).
@@ -717,6 +723,11 @@ pub struct Doc {
     /// The page tree's top node and its count (`numPages`).
     top: Ref,
     num_pages: usize,
+    /// Each page tree node's kids as [`Doc::page`] walks them, read once
+    /// when the file is opened (xpdf's `Catalog` reads the page tree
+    /// whole): a walk to page n otherwise parses every kid before it for
+    /// its `/Count` (an icon font's 5,000 pages, each included).
+    kids: Arc<Kids>,
     /// The catalog's `/Dests`, and its `/Names` `/Dests` (followed).
     dests: Obj,
     name_tree: Obj,
@@ -764,6 +775,7 @@ impl Doc {
                     generation: 0,
                 },
                 num_pages: 0,
+                kids: Arc::default(),
                 dests: Obj::Null,
                 name_tree: Obj::Null,
             };
@@ -773,6 +785,7 @@ impl Doc {
                     return Err(Error::Encrypted);
                 }
                 if doc.read_catalog() {
+                    doc.kids = Arc::new(doc.page_kids());
                     return Ok(doc);
                 }
             }
@@ -1734,20 +1747,17 @@ impl Doc {
             let Obj::Array(kids) = self.lookup(&d, b"Kids") else {
                 return Some(attrs.page(node));
             };
+            let counted;
+            let ks = if let Some(ks) = self.kids.get(&node) {
+                &ks[..]
+            } else {
+                counted = self.kid_counts(&kids).0;
+                &counted[..]
+            };
             let mut next = None;
-            for k in &kids {
-                let Obj::Ref(kr) = k else {
-                    continue;
-                };
-                let Obj::Dict(kd) = self.fetch(*kr) else {
-                    continue;
-                };
-                let c = match self.lookup(&kd, b"Count") {
-                    Obj::Int(c) => i64::from(c),
-                    _ => 1,
-                };
+            for &(kr, c) in ks {
                 if rel < c {
-                    next = Some((*kr, c));
+                    next = Some((kr, c));
                     break;
                 }
                 rel -= c;
@@ -1758,6 +1768,53 @@ impl Doc {
             node = kr;
             count = c;
         }
+    }
+
+    /// The kids of a page tree node as [`Doc::page`] walks them: those
+    /// that are references to dictionaries, each with its `/Count` (1:
+    /// a page); and those that are nodes (with `/Kids`).
+    fn kid_counts(&self, kids: &[Obj]) -> (Vec<(Ref, i64)>, Vec<Ref>) {
+        let mut out = Vec::new();
+        let mut nodes = Vec::new();
+        for k in kids {
+            let Obj::Ref(kr) = k else {
+                continue;
+            };
+            let Obj::Dict(kd) = self.fetch(*kr) else {
+                continue;
+            };
+            let c = match self.lookup(&kd, b"Count") {
+                Obj::Int(c) => i64::from(c),
+                _ => 1,
+            };
+            out.push((*kr, c));
+            if matches!(self.lookup(&kd, b"Kids"), Obj::Array(_)) {
+                nodes.push(*kr);
+            }
+        }
+        (out, nodes)
+    }
+
+    /// [`Doc::kids`]: every node of the page tree reachable from its top,
+    /// each once.
+    fn page_kids(&self) -> Kids {
+        let mut out = BTreeMap::new();
+        let mut todo = alloc::vec![self.top];
+        while let Some(node) = todo.pop() {
+            if out.contains_key(&node) {
+                continue;
+            }
+            let Obj::Dict(d) = self.fetch(node) else {
+                continue;
+            };
+            let Obj::Array(kids) = self.lookup(&d, b"Kids") else {
+                continue;
+            };
+            let (ks, nodes) = self.kid_counts(&kids);
+            out.insert(node, Arc::from(ks));
+            todo.extend(nodes);
+        }
+        out
     }
 
     /// The number of the page `r` refers to (`Catalog::findPage`), 0 if

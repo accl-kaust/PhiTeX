@@ -3,7 +3,7 @@
 //! TeX's, each paragraph of an input file is about one node, and an
 //! edit of one word in an input file reruns only that file's region.
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -225,5 +225,42 @@ fn a_distribution_file_is_not_cut_into_pieces() {
             "-j{threads}: the document's own file in pieces, the distribution's as one load: {exec} exec nodes, {:?}",
             b.stats.runs_by_op
         );
+    }
+}
+
+/// An `\input` file edited where two characters differ only in their
+/// last UTF-8 byte (its bytes read as Latin-1 characters: `\xe9` and
+/// `\xe8`, é and è, both 0xC3 first): the file cut again from the
+/// character that differs, and the edited output a cold build's. Before,
+/// the cut was asked to begin inside é and the engine stopped ("byte
+/// index ... is not a char boundary"), the output left as it was: a
+/// figure replaced by a JPG of its size, cut as a document's text, kept
+/// its old picture in `phitex watch` (the browser test's `figjpg.jpg`).
+#[test]
+fn input_edit_inside_a_character() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("inputs-latin1");
+    let _ = std::fs::create_dir_all(&dir);
+    let (before, after) = (
+        b"\\message{[\\number`\xe9]}Caf\xe9 one.\n\nTwo.\n",
+        b"\\message{[\\number`\xe8]}Caf\xe8 one.\n\nTwo.\n",
+    );
+    std::fs::write(dir.join("lat.tex"), before).unwrap();
+    let doc = "\\input lat\n\\bye\n";
+    let build = || {
+        common::build(
+            common::options("./doc.tex", "doc", "", &dir),
+            Some(&common::plain()),
+            doc,
+        )
+    };
+    let mut b = build();
+    assert!(b.output().1.contains("[233]"), "{}", b.output().1);
+    b.edit_file("lat.tex", Some(after));
+    std::fs::write(dir.join("lat.tex"), after).unwrap();
+    let cold = build();
+    let (edited, log) = b.output();
+    assert!(log.contains("[232]"), "the edit read: {log}");
+    if let Some(d) = common::first_difference(&edited, &cold.output().0) {
+        panic!("edit differs from cold: {d}");
     }
 }

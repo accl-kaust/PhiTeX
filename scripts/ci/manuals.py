@@ -19,6 +19,7 @@ job's scratch), so absolute paths are the same for every engine.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -249,6 +250,8 @@ def loop(run_dir, engine_cmd, tools, environ, job, base, inputs_ist, log):
         if new == state:
             res["settled"] = True
             break
+        # (the files the last pass changed: what keeps a job from settling)
+        res["changed"] = sorted(k for k in set(new) | set(state) if new.get(k) != state.get(k))
         state = new
     else:
         res["settled"] = False
@@ -267,12 +270,24 @@ def side_env(engine, extra=None, phitex=False, formats=None):
         if phitex:
             e["PHITEX_XETEX"] = "1"
     if phitex:
+        # (as the oracle's -no-shell-escape, oracle_cmd: ualberta's
+        # \\write18{makeindex} is refused there; PhiTeX's default is TeX
+        # Live's restricted one)
+        e["shell_escape"] = "f"
         e["PHITEX_CACHE_DIR"] = str(WORK / "cache")
         e["PHITEX_STORE_DIR"] = str(WORK / "store")
         e["NO_COLOR"] = "1"
         if formats:
             e["TEXFORMATS"] = f"{formats}:"
             e["PHITEX_FORMATS"] = str(formats)
+    if not phitex and os.environ.get("CI_ORACLE_ENV"):
+        # (the oracle's TeX Live over another tree: VAR=VALUE lines, as
+        # shelf/scripts/tl-tree.sh's tl_vars writes them for a Shelf
+        # release's files alone)
+        for line in Path(os.environ["CI_ORACLE_ENV"]).read_text().splitlines():
+            k, sep, v = line.partition("=")
+            if sep:
+                e[k] = v
     if extra:
         e.update(extra)
     return common.env(e)
@@ -353,7 +368,7 @@ def oracle_one(doc, c, cache, new_cache=None):
         elif not pdf.exists():
             res.update(status="excluded", reason="the oracle fails: " + why_failed(run_dir, job, run_dir / f"term-pass{r['passes']}.txt"))
         elif not r.get("settled"):
-            res.update(status="excluded", reason=f"the oracle does not settle in {MAX_PASSES} passes")
+            res.update(status="excluded", reason=f"the oracle does not settle in {MAX_PASSES} passes (the last pass changed {', '.join(res.get('changed', []))})")
         elif res["errors"]:
             res.update(status="excluded", reason=f"the oracle has errors ({res['errors']}): "
                        + why_failed(run_dir, job, run_dir / f"term-pass{r['passes']}.txt"))
@@ -381,14 +396,29 @@ def load_list(path):
     data = common.read_json(path)
     if data is None:
         sys.exit(f"cannot read {path}")
-    return data.get("manuals") or data.get("candidates")
+    return data.get("manuals") or data.get("documents") or data.get("candidates")
 
 
 def shard(items, spec):
     if not spec:
         return items
     i, n = (int(x) for x in spec.split("/"))
-    return [c for k, c in enumerate(items) if k % n == i]
+    # (dealt by time, not by count: each item weighs its oracle's wall,
+    # capped at the sweep's usual 300 s limit (a run past it is stopped
+    # there), and goes, heaviest first, to the shard with the least so
+    # far, ties to the lowest; the same list gives the same shards. Dealt
+    # by count, one shard took 58 min and another 19)
+    def weight(c):
+        return min(float(c.get("oracle_wall_s") or 1.0), 300.0)
+    order = sorted(range(len(items)), key=lambda k: (-weight(items[k]), k))
+    load = [0.0] * n
+    mine = set()
+    for k in order:
+        s = min(range(n), key=lambda j: (load[j], j))
+        load[s] += weight(items[k])
+        if s == i:
+            mine.add(k)
+    return [c for k, c in enumerate(items) if k in mine]
 
 
 def cmd_oracle(args):
@@ -411,8 +441,11 @@ def cmd_pin(args):
             excluded.append({"id": c["id"], "path": c["path"], "reason": "no oracle result"})
             continue
         if res["status"] == "ok":
+            # (the oracle PDF's md5: the gate's manuals shards compare with
+            # it, building the oracle only for a PDF that differs)
+            omd5 = hashlib.md5((hits[-1].parent / "files" / res["pdf"]).read_bytes()).hexdigest()
             pinned.append({**{k: c[k] for k in ("id", "path", "dir", "main", "engine")},
-                           "input_hash": res["input_hash"], "tools": res.get("tools", []),
+                           "input_hash": res["input_hash"], "oracle_md5": omd5, "tools": res.get("tools", []),
                            "passes": res.get("passes"), "oracle_wall_s": res.get("wall_s"),
                            "oracle_errors": res.get("errors")})
         else:
@@ -423,6 +456,13 @@ def cmd_pin(args):
                          "(no \\documentclass and \\begin{document}: its source is elsewhere, e.g. a .dtx "
                          "in texmf-dist/source, which the Arch packages leave out)"})
     old = common.read_json(args.out, {})
+    # (a document's own time limit and its reason, set by hand beside
+    # its entry, kept across a re-pin)
+    own = {c["id"]: c for c in old.get("manuals", [])}
+    for c in pinned:
+        for k in ("time_limit_s", "time_limit_why"):
+            if k in own.get(c["id"], {}):
+                c[k] = own[c["id"]][k]
     doc = {
         "image": args.image or old.get("image"),
         "texlive": "TeX Live 2026.1 (svn r78408), Arch Linux packages of the 2026-09-25 archive snapshot, texlive-doc",

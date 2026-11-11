@@ -335,3 +335,30 @@ fn a_store_counts_its_payload_only_while_it_collects() {
     assert!(c.lists >= 101 && c.bytes_before > c.bytes_after, "{c:?}");
     assert!(xs.iter().all(|&x| v.with_list(x, <[ValueId]>::len).is_none()));
 }
+
+/// A store past the floor that an edit grows by little is not collected
+/// at each evaluation: the next collection's mark, twice what the last
+/// left, holds across them. Each evaluation began again from the floor,
+/// so past 1 GB every edit paid a collection that freed next to nothing
+/// (the 306-page circuitikz manual: 2.7 s of a letter's 3.9 s).
+#[test]
+fn the_collection_mark_holds_across_evaluations() {
+    let e = Engine::new();
+    e.set_limits(Limits {
+        collect_at_bytes: Some(1 << 10),
+        ..Limits::default()
+    });
+    let (mk, ms, rs, fold) = line(&e);
+    let v = e.values();
+    let mut salts: Vec<i64> = (0..NODES).collect();
+    e.evaluate(4).unwrap();
+    let mut collections = 0;
+    for round in 1..40 {
+        // (one maker, two values in turn: the store stops growing)
+        salts[0] = 1000 + round % 2;
+        e.replace(ms[0], mk, vec![v.field("f0").0, v.int(LEN), v.int(salts[0])]);
+        collections += e.evaluate(4).unwrap().collections.len();
+        check(&e, &rs, fold, &salts);
+    }
+    assert!(collections <= 1, "{collections} collections in 39 small edits");
+}

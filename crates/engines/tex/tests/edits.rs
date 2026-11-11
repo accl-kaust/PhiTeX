@@ -4,7 +4,7 @@
 
 #![allow(clippy::many_single_char_names)]
 
-mod common;
+use crate::common;
 
 /// The byte ranges of the words (runs of ASCII letters not after `\`).
 fn words(s: &str) -> Vec<(usize, usize)> {
@@ -880,7 +880,7 @@ fn blanks_at_line_ends_run_no_node() {
         .iter()
         .map(|l| {
             l.strip_suffix('\n')
-                .map_or_else(|| format!("{l} \t "), |b| format!("{b} \t \n"))
+                .map_or_else(|| format!("{l}   "), |b| format!("{b}   \n"))
         })
         .collect();
     let mut last = src.clone();
@@ -953,25 +953,170 @@ fn a_line_inserted_at_the_top_reruns_no_weak_reader_of_the_line_number() {
     assert_eq!(weak, 0, "no weak reader of the line runs again");
 }
 
-/// A long paragraph edited near its end: the first edit's run (from the
-/// start) takes checkpoints, the next ones go on from one; an edit at its
-/// start runs from the start (taking them again); each output is the
-/// cold build's of its text.
+/// A box register voided globally by a paragraph (from another, void, register:
+/// a restore of the value it read would publish nothing), then deleted with it:
+/// the register is unset again, which TeX reads as the same void box, so
+/// the paragraph after it that reads the register does not run again
+/// (tikz's `\pgf@layerbox@background`, voided by every picture's end:
+/// a figure deleted re-ran every later picture, Grail, mc 80606).
 #[test]
-fn an_edited_paragraph_goes_on_from_a_checkpoint() {
+fn a_box_voided_globally_and_deleted_reruns_no_reader_of_it() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from("\\vsize=200pt \\hsize=150pt \\parindent=0pt\n");
+    src.push_str("Paragraph zero has a few words.\n\n");
+    src.push_str("\\global\\setbox7=\\box6 Paragraph one voids a box.\n\n");
+    for k in 2..6 {
+        let _ = writeln!(
+            src,
+            "\\setbox0=\\hbox{{\\copy7}}Paragraph {k} reads the box.\n"
+        );
+    }
+    src.push_str("Last words.\n\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./vb.tex", "vb", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replace("\\global\\setbox7=\\box6 ", "");
+    assert_ne!(text, src);
+    b.edit(&text);
+    for (n, op, why) in &b.stats.reruns {
+        eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
+    }
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let (out, _) = b.output();
+    let (cold_out, _) = cold.output();
+    assert!(
+        common::first_difference(&out, &cold_out).is_none(),
+        "the output is a cold build's"
+    );
+    let readers = b
+        .stats
+        .reruns
+        .iter()
+        .filter(|(_, op, why)| *op == "exec" && why.contains("box:7"))
+        .count();
+    assert_eq!(readers, 0, "no reader of the box runs again");
+}
+
+/// A list of fonts appended to by an `\xdef` as each font is first
+/// loaded (microtype's `\MT@font@list`): deleting the paragraph that first
+/// loaded a font moves its load (and its append) to a later paragraph.
+/// A paragraph between them, which appended another font and so checked
+/// the names in the list (the moved one among them) not to expand, does
+/// not run again: the list it appends to no longer holds the name there.
+/// Only the new first loader runs for the font (one thread).
+#[test]
+fn a_font_first_loaded_later_reruns_no_appender_between() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from(
+        "\\vsize=400pt \\hsize=150pt \\parindent=0pt\n\\def\\fontlist{\\tenrm}\n\
+         \\def\\load#1#2{\\expandafter\\ifx\\csname F#1\\endcsname\\relax\n\
+         \\global\\expandafter\\font\\csname F#1\\endcsname=cmr10 at #2pt\n\
+         \\xdef\\fontlist{\\fontlist\\csname F#1\\endcsname}\\fi\n\
+         {\\csname F#1\\endcsname x}}\n\n",
+    );
+    src.push_str("Paragraph zero has a few words.\n\n");
+    src.push_str("Paragraph one \\load{a}{11} loads a first.\n\n");
+    src.push_str("Paragraph two \\load{b}{12} loads b first.\n\n");
+    src.push_str("Paragraph three \\load{a}{11} uses a.\n\n");
+    for k in 4..8 {
+        let _ = write!(src, "Paragraph {k} \\load{{a}}{{11}} uses a.\n\n");
+    }
+    src.push_str("Last words.\n\\bye\n");
+    let prelude = common::plain();
+    // (one thread: the runs in the text's order, the new first loader
+    // before the later users, which then find the font where it was)
+    let opts = || phitex_tex::Options {
+        threads: Some(1),
+        ..common::options("./fl.tex", "fl", "", &fx)
+    };
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replace("Paragraph one \\load{a}{11} loads a first.\n\n", "");
+    assert_ne!(text, src);
+    b.edit(&text);
+    for (n, op, why) in &b.stats.reruns {
+        eprintln!("  rerun {op} {n}: {why} [{}]", b.describe_node(*n));
+    }
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let (out, _) = b.output();
+    let (cold_out, _) = cold.output();
+    assert!(
+        common::first_difference(&out, &cold_out).is_none(),
+        "the output is a cold build's"
+    );
+    // (made to run again for the font, and not standing on the reads of
+    // their run before: their text typeset again)
+    let mut readers: Vec<u64> = b
+        .stats
+        .reruns
+        .iter()
+        .filter(|(n, op, why)| *op == "exec" && why.contains("cs:Fa") && !b.stats.stood.contains(n))
+        .map(|(n, _, _)| *n)
+        .collect();
+    readers.sort_unstable();
+    readers.dedup();
+    let shown: Vec<String> = readers.iter().map(|&n| b.describe_node(n)).collect();
+    assert!(
+        readers.len() == 1 && shown[0].contains("Paragraph three"),
+        "only the new first loader of the font runs for it: {shown:?}"
+    );
+}
+
+/// The runs of the text's pieces and their continuations in the last
+/// evaluation.
+fn text_runs(b: &phitex_tex::Build) -> u64 {
+    common::runs_of(b, "exec") + common::runs_of(b, "resume")
+}
+
+/// Options whose runs are cut at the content-defined slice ends after
+/// a hundred commands (`crate::cut`): a test's small text is cut often.
+fn cutting(o: phitex_tex::Options) -> phitex_tex::Options {
+    phitex_tex::Options {
+        cut_min: Some(100),
+        ..o
+    }
+}
+
+/// A long paragraph over many lines is cut at its content-defined slice
+/// ends, each rest a continuation node: an edit near its end runs only
+/// the continuations from the one holding it on, not the paragraph from
+/// its start; an edit at its start runs every one again (the paragraph's
+/// list so far is in each); each output is the cold build's of its text,
+/// and a build that cuts nowhere makes the same output.
+#[test]
+fn an_edited_long_paragraph_runs_only_its_continuations_after_the_edit() {
     let fx = common::fixtures().join("plain");
     let prelude = common::plain();
-    let opts = || common::options("./long.tex", "long", "", &fx);
+    let opts = || cutting(common::options("./long.tex", "long", "", &fx));
     // (each word followed by a command: commands, as a real paragraph's
-    // citations and acronyms make them)
+    // citations and acronyms make them; ten words a line)
     let words: Vec<String> = (0..700)
         .map(|k| format!("w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17))
         .collect();
-    let par = |ws: &[String]| format!("\\hsize=300pt\n{}\n\n\\bye\n", ws.join(" "));
+    let par = |ws: &[String]| {
+        let lines: Vec<String> = ws.chunks(10).map(|c| c.join(" ")).collect();
+        format!("\\hsize=300pt\n{}\n\n\\bye\n", lines.join("\n"))
+    };
     let mut ws = words.clone();
     let mut b = common::build(opts(), Some(&prelude), &par(&ws));
-    for (k, at, resumes) in [
-        (0, 650, false),
+    let cuts = b.stats.text_cuts;
+    assert!(cuts >= 2, "the paragraph was cut {cuts} times");
+    let uncut = common::build(
+        phitex_tex::Options {
+            cut_min: Some(u64::MAX),
+            ..opts()
+        },
+        Some(&prelude),
+        &par(&ws),
+    );
+    assert_eq!(uncut.stats.text_cuts, 0, "a build that cuts nowhere");
+    assert!(
+        common::first_difference(&b.output().0, &uncut.output().0).is_none(),
+        "the cut build's output is the uncut one's"
+    );
+    for (k, at, late) in [
+        (0, 650, true),
         (1, 680, true),
         (2, 3, false),
         (3, 690, true),
@@ -985,11 +1130,746 @@ fn an_edited_paragraph_goes_on_from_a_checkpoint() {
             common::first_difference(&b.output().0, &cold.output().0).is_none(),
             "edit {k} at word {at}: the output is not the cold build's"
         );
-        assert_eq!(
-            b.stats.resumed_at_mark > 0,
-            resumes,
-            "edit {k} at word {at}: {} runs went on from a checkpoint",
-            b.stats.resumed_at_mark
+        if late {
+            assert!(
+                text_runs(&b) < cuts,
+                "edit {k} at word {at}: {} text runs, the paragraph's {cuts} cuts",
+                text_runs(&b)
+            );
+        }
+    }
+}
+
+/// A long paragraph over many lines edited near its end, an overfull
+/// line after the edit: the edit runs the continuation holding it, and
+/// its log (the overfull box's report of the lines the paragraph began
+/// and ended on) and output are a cold build's: the nest's lines go
+/// across a cut with the paragraph (`Run::cont_encode`).
+#[test]
+fn a_cut_paragraph_reports_the_lines_it_began_on() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("plain");
+    let prelude = common::plain();
+    let opts = || cutting(common::options("./lines.tex", "lines", "", &fx));
+    let doc = |w: &str| {
+        let mut s = String::from("\\hsize=300pt\nSet.\n\n");
+        for k in 0..700 {
+            let _ = write!(s, "w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            s.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        let _ = write!(
+            s,
+            "then {w} and \\hbox{{\\vrule width 400pt}} done.\n\n\\bye\n"
+        );
+        s
+    };
+    let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+    for (k, w) in ["two", "three", "there"].into_iter().enumerate() {
+        let text = doc(w);
+        b.edit(&text);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        let (out, log) = b.output();
+        let (cold_out, cold_log) = cold.output();
+        assert!(
+            common::first_difference(&out, &cold_out).is_none(),
+            "edit {k}: the output is not the cold build's"
+        );
+        assert_eq!(log, cold_log, "edit {k}: the log is the cold build's");
+        assert!(
+            log.contains("in paragraph at lines 4--"),
+            "edit {k}: the overfull box names the paragraph's lines: {}",
+            common::log_excerpt(&log)
+        );
+        // (the paragraph is cut, the cold build's too: the continuation
+        // the edit runs reports the paragraph's first line, carried)
+        assert!(
+            cold.stats.text_cuts > 0 && text_runs(&b) < cold.stats.text_cuts,
+            "edit {k}: {} text runs, {} cuts",
+            text_runs(&b),
+            cold.stats.text_cuts
         );
     }
+}
+
+/// A cut paragraph's first part rests on its reads: a register set
+/// before the paragraph and used at its start, set again, runs it again,
+/// and its continuations where what they carry changed; the output is a
+/// cold build's.
+#[test]
+fn a_cut_paragraph_is_asked_again_for_a_read_at_its_start() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("plain");
+    let prelude = common::plain();
+    let opts = || cutting(common::options("./early.tex", "early", "", &fx));
+    let doc = |d: &str, w: &str| {
+        let mut s = format!("\\hsize=300pt\n\\dimen5={d}\\relax Set.\n\n\\kern\\dimen5 ");
+        for k in 0..700 {
+            let _ = write!(s, "w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            s.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        let _ = write!(s, "then {w} done.\n\n\\bye\n");
+        s
+    };
+    let mut b = common::build(opts(), Some(&prelude), &doc("1pt", "one"));
+    for (k, (d, w)) in [
+        ("1pt", "two"),
+        ("1pt", "three"),
+        ("5pt", "three"),
+        ("5pt", "four"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let text = doc(d, w);
+        b.edit(&text);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        assert!(
+            common::first_difference(&b.output().0, &cold.output().0).is_none(),
+            "edit {k} (\\dimen5={d}, {w}): the output is not the cold build's"
+        );
+    }
+}
+
+/// A long box whose run reads on into the paragraphs after its node
+/// and into a file `\input` inside it, a group of its own open
+/// throughout, reading a macro only at its end: the box is cut at slice
+/// ends (in the group and the box, its lists carried), and an edit of
+/// that macro's definition before it runs the last continuation, not the
+/// box from its start; the output and log are a cold build's.
+#[test]
+// (the box opened by `\bgroup`, as an environment's is: a brace group
+// of the text is one slice, never cut, `hints::cdc_starts`)
+fn a_box_over_paragraphs_and_a_file_is_cut_inside() {
+    use std::fmt::Write as _;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-anywhere");
+    let _ = std::fs::create_dir_all(&dir);
+    let words = |n: usize, tag: &str| {
+        let mut s = String::new();
+        for k in 0..n {
+            let _ = write!(s, "{tag}{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            s.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        s
+    };
+    std::fs::write(dir.join("inner.tex"), words(900, "f")).unwrap();
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox\\bgroup \\begingroup\\count1=7 {}\n\n{}\n\n\\input inner\n\n{}\n\nend \\late.\\endgroup\\egroup\n\\box1\n\n\\bye\n",
+            words(700, "w"),
+            words(700, "v"),
+            words(900, "u")
+        )
+    };
+    let opts = || cutting(common::options("./ck.tex", "ck", "", &dir));
+    let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+    let cuts = b.stats.text_cuts;
+    assert!(cuts >= 2, "the box was cut {cuts} times");
+    for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+        let text = doc(m);
+        b.edit(&text);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        let (out, log) = b.output();
+        let (cold_out, cold_log) = cold.output();
+        assert!(
+            common::first_difference(&out, &cold_out).is_none(),
+            "edit {k} (\\late={m}): the output is not the cold build's"
+        );
+        assert_eq!(log, cold_log, "edit {k}: the log is the cold build's");
+        assert!(
+            text_runs(&b) < cuts,
+            "edit {k}: {} text runs, the box's {cuts} cuts",
+            text_runs(&b)
+        );
+    }
+}
+
+/// A box cut inside a conditional of its own, open from near its start
+/// to past a read near its end (`\ifnum ... \else ... \fi` around the
+/// box's material, in a group and a file too): the conditionals go to
+/// the continuation, so the `\else` after the read skips to its `\fi` as
+/// in an uncut run; an edit of what the read reads runs a continuation,
+/// not the box from its start, and the output and log are a cold
+/// build's, at 1 and 8 threads.
+#[test]
+fn a_run_is_cut_inside_its_own_conditional() {
+    use std::fmt::Write as _;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-in-if");
+    let _ = std::fs::create_dir_all(&dir);
+    let words = |n: usize, tag: &str| {
+        let mut s = String::new();
+        for k in 0..n {
+            let _ = write!(s, "{tag}{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+            s.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        s
+    };
+    std::fs::write(dir.join("inner.tex"), words(900, "f")).unwrap();
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox\\bgroup \\begingroup\\count1=7 \\ifnum\\count1=7 {}\n\n{}\n\n\\ifodd\\count1 \\input inner\n\n{}\n\nend \\late.\\else odd never\\fi\\else never\\fi\\endgroup\\egroup\n\\box1\n\n\\bye\n",
+            words(700, "w"),
+            words(700, "v"),
+            words(900, "u")
+        )
+    };
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..cutting(common::options("./ck.tex", "ck", "", &dir))
+        };
+        let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        let cuts = b.stats.text_cuts;
+        assert!(cuts >= 1, "{t} threads: the box was cut {cuts} times");
+        for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+            let text = doc(m);
+            b.edit(&text);
+            let cold = common::build(opts(), Some(&prelude), &text);
+            let (out, log) = b.output();
+            let (cold_out, cold_log) = cold.output();
+            assert!(
+                common::first_difference(&out, &cold_out).is_none(),
+                "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
+            );
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
+            assert!(
+                text_runs(&b) <= cuts + 2,
+                "{t} threads, edit {k}: {} text runs, the box's {cuts} cuts (the definition's node, the last continuation and the box's reader)",
+                text_runs(&b)
+            );
+        }
+    }
+}
+
+/// A run asked again for a read in the last row of a long `\halign`
+/// (no cut inside an alignment: its templates are no text of the run's)
+/// runs again, and the output and log are a cold build's, at 1 and 8
+/// threads.
+#[test]
+fn a_run_asked_again_inside_an_alignment() {
+    use std::fmt::Write as _;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-in-align");
+    let _ = std::fs::create_dir_all(&dir);
+    let rows = |n: usize| {
+        let mut s = String::new();
+        for k in 0..n {
+            let _ = writeln!(
+                s,
+                "w{k}a\\kern0pt w{k}b\\kern0pt w{k}c&\\ifodd{k} odd{k}\\else even{k}\\fi\\kern0pt v{k}\\cr"
+            );
+        }
+        s
+    };
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox{{\\tabskip=1pt\\halign{{#\\hfil\\tabskip=2pt&\\quad#\\hfil\\cr\n{}end \\late&{{\\late}}\\cr\n\\noalign{{\\kern1pt}}last&row\\cr}}}}\n\\box1\n\n\\bye\n",
+            rows(400)
+        )
+    };
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./ck.tex", "ck", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+            let text = doc(m);
+            b.edit(&text);
+            let cold = common::build(opts(), Some(&prelude), &text);
+            let (out, log) = b.output();
+            let (cold_out, cold_log) = cold.output();
+            assert!(
+                common::first_difference(&out, &cold_out).is_none(),
+                "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
+            );
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
+        }
+    }
+}
+
+/// A macro that reads two job-written files back with much work between
+/// (LaTeX's `\document`: the `.aux`, the packages' hooks, then the
+/// `.out`), and at its end a macro an earlier node defines: an edit of
+/// that definition runs the macro's run again (one command: no cut
+/// inside it), and the output and log are a cold build's, at 1 and 8
+/// threads.
+#[test]
+fn a_run_between_two_read_backs_asked_again() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-read-back");
+    let _ = std::fs::create_dir_all(&dir);
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\def\\late{{{m}}}\\def\\xa{{?}}\\def\\xb{{?}}\n\n\\def\\begindoc{{\\openin3=\\jobname.xa \\ifeof3 \\closein3 \\else\\closein3 \\input\\jobname.xa \\fi\n\\count255=0 \\loop\\advance\\count255 1 \\edef\\w{{\\the\\count255}}\\setbox0\\hbox{{\\w}}\\ifnum\\count255<3000 \\repeat\n\\openin3=\\jobname.xb \\ifeof3 \\closein3 \\else\\closein3 \\input\\jobname.xb \\fi\n\\immediate\\openout1=\\jobname.xa \\immediate\\openout2=\\jobname.xb \\edef\\w{{\\w\\late}}}}\n\\begindoc\nText \\xa\\ and \\xb\\ and \\w.\n\n\\immediate\\write1{{\\noexpand\\def\\noexpand\\xa{{A}}}}\n\\immediate\\write2{{\\noexpand\\def\\noexpand\\xb{{B}}}}\n\\bye\n"
+        )
+    };
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./rb.tex", "rb", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+            let text = doc(m);
+            b.edit(&text);
+            let cold = common::build(opts(), Some(&prelude), &text);
+            let (out, log) = b.output();
+            let (cold_out, cold_log) = cold.output();
+            assert!(
+                common::first_difference(&out, &cold_out).is_none(),
+                "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
+            );
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
+        }
+    }
+}
+
+/// A run that made a child before a cut (a page it shipped out: its PDF
+/// side) places it as it ends at the cut; the read the box is asked
+/// again for, at its end, runs a continuation, not the box from its
+/// start, and the output and log are a cold build's, at 1 and 8 threads.
+#[test]
+fn a_run_is_cut_after_a_child_it_made() {
+    use std::fmt::Write as _;
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("ck-after-kid");
+    let _ = std::fs::create_dir_all(&dir);
+    let words = |n: usize, tag: &str| {
+        let mut s = String::new();
+        for k in 0..n {
+            let _ = write!(
+                s,
+                "{tag}{}rd{}\\kern0pt\\penalty0",
+                ["o", "a", "e"][k % 3],
+                k % 17
+            );
+            s.push(if k % 10 == 9 { '\n' } else { ' ' });
+        }
+        s
+    };
+    let prelude = common::plain();
+    let doc = |m: &str| {
+        format!(
+            "\\pdfoutput=1 \\hsize=300pt\n\\def\\late{{{m}}}Set.\n\n\\setbox1\\vbox\\bgroup {}\n\n\\shipout\\hbox{{early page}}\n\n{}\n\nend \\late.\\egroup\n\\box1\n\n\\bye\n",
+            words(300, "w"),
+            words(1500, "v")
+        )
+    };
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..cutting(common::options("./ck.tex", "ck", "", &dir))
+        };
+        let mut b = common::build(opts(), Some(&prelude), &doc("one"));
+        let cuts = b.stats.text_cuts;
+        assert!(cuts >= 2, "{t} threads: the box was cut {cuts} times");
+        for (k, m) in ["two", "three", "one"].into_iter().enumerate() {
+            let text = doc(m);
+            b.edit(&text);
+            let cold = common::build(opts(), Some(&prelude), &text);
+            let (out, log) = b.output();
+            let (cold_out, cold_log) = cold.output();
+            assert!(
+                common::first_difference(&out, &cold_out).is_none(),
+                "{t} threads, edit {k} (\\late={m}): the output is not the cold build's"
+            );
+            assert_eq!(
+                log, cold_log,
+                "{t} threads, edit {k}: the log is the cold build's"
+            );
+            assert!(
+                text_runs(&b) < cuts,
+                "{t} threads, edit {k}: {} text runs, the box's {cuts} cuts",
+                text_runs(&b)
+            );
+        }
+    }
+}
+
+/// Exact PDF, compressed, a paragraph deleted near the start of 300:
+/// every later page's lines move, so the link places a new record for
+/// each. A page's content is compressed once, where the link places it
+/// with the document's font numbers (the page's own writer leaves it
+/// uncompressed: its font numbers are the page's keys, rewritten there
+/// anyway), and the records are made side by side before the link
+/// places them in order. Every page is placed (none shipped again), and
+/// the PDF equals a cold build's.
+#[test]
+fn a_paragraph_deleted_places_every_later_page_compressed_once() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from(
+        "\\pdfoutput=1 \\pdfcompresslevel=9 \\hsize=5in \\vsize=7in \\parindent=20pt\n",
+    );
+    for k in 0..300 {
+        let _ = writeln!(
+            src,
+            "Paragraph {k} has some words in it, {{\\bf a few bold}} and {{\\it italic}}, \
+             enough to fill a few lines of text set with plain's macros.\n"
+        );
+    }
+    src.push_str("\\bye\n");
+    let prelude = common::plain();
+    let opts = || common::options("./pz.tex", "pz", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    assert!(b.is_pdf());
+    let n = b.pages().len();
+    let before = b.pages();
+    let gone = "Paragraph 3 has some words in it, {\\bf a few bold} and {\\it italic}, \
+                enough to fill a few lines of text set with plain's macros.\n\n";
+    assert!(src.contains(gone));
+    let text = src.replacen(gone, "", 1);
+    b.edit(&text);
+    let touched = common::pages_touched(&before, &b.pages());
+    assert!(
+        touched.len() + 3 >= n,
+        "the pages after the deleted paragraph changed: {touched:?} of {n}"
+    );
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+    assert_eq!(b.link_pages().1, 0, "every page placed, none shipped again");
+}
+
+/// A page's routine that gives back a line only on a page whose last mark
+/// says so: a paragraph deleted moves the mark to another page, so what
+/// its routine gave back before is wrong, on the page that now gives back
+/// and on the page that no longer does. A rest waits for what the routine
+/// gives back on the page as it is now (`Run::rest_begins`): the PDF is a
+/// cold build's at every thread count.
+#[test]
+fn a_rest_gone_on_on_a_guess_is_run_again_on_what_the_routine_gave_back() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from(
+        "\\pdfoutput=1 \\hsize=3in \\vsize=2in \\parindent=0pt\n\
+         \\def\\X{X}\n\
+         \\output={\\shipout\\box255 \\advancepageno\n\
+         \\edef\\b{\\botmark}\\ifx\\b\\X \\global\\setbox1\\hbox{given back}\\unhbox1 \\par\\fi}\n",
+    );
+    for k in 0..60 {
+        let m = if k == 31 { "\\mark{X}" } else { "\\mark{n}" };
+        let _ = writeln!(
+            src,
+            "Paragraph {k}{m} has some words in it, enough to make a few lines of text \
+             on a page this narrow, and a few more for good measure.\n"
+        );
+    }
+    src.push_str("\\bye\n");
+    let prelude = common::plain();
+    let gone = "Paragraph 3\\mark{n} has some words in it, enough to make a few lines of text \
+                on a page this narrow, and a few more for good measure.\n\n";
+    assert!(src.contains(gone));
+    let text = src.replacen(gone, "", 1);
+    for t in [1, 4, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./pg.tex", "pg", "", &fx)
+        };
+        let mut b = common::build(opts(), Some(&prelude), &src);
+        assert!(b.is_pdf());
+        b.edit(&text);
+        let cold = common::build(opts(), Some(&prelude), &text);
+        let d = common::first_difference(&b.output().0, &cold.output().0);
+        assert!(
+            d.is_none(),
+            "-j{t}: the edit differs from a cold build: {d:?}"
+        );
+        b.edit(&src);
+        let cold = common::build(opts(), Some(&prelude), &src);
+        let d = common::first_difference(&b.output().0, &cold.output().0);
+        assert!(
+            d.is_none(),
+            "-j{t}: the revert differs from a cold build: {d:?}"
+        );
+    }
+}
+
+/// A page's routine that reads `\\inputlineno` into a body nothing looks
+/// at does not run again for a line inserted above it; one whose page
+/// shows the number does, and its page is a cold build's.
+#[test]
+fn a_routine_runs_again_for_the_line_number_only_where_it_shows() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let doc = |routine: &str| {
+        let mut s = format!(
+            "\\vsize=100pt \\hsize=150pt \\parindent=0pt\n\\output={{{routine}\\shipout\\vbox{{\\unvbox255}}}}\n"
+        );
+        for k in 0..12 {
+            let _ = writeln!(s, "Paragraph {k} has a few words, a line or two of them.\n");
+        }
+        s.push_str("\\bye\n");
+        s
+    };
+    let prelude = common::plain();
+    let opts = || common::options("./lnr.tex", "lnr", "", &fx);
+    // (read into a body nothing looks at: no routine runs)
+    let src = doc("{\\edef\\where{\\the\\inputlineno}}");
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = format!("\\relax\n{src}");
+    b.edit(&text);
+    let ran = b
+        .stats
+        .reruns
+        .iter()
+        .filter(|(_, op, _)| *op == "finish")
+        .count();
+    let cold = common::build(opts(), Some(&prelude), &text);
+    assert!(common::first_difference(&b.output().0, &cold.output().0).is_none());
+    assert_eq!(ran, 0, "no routine runs again: {:?}", b.stats.reruns);
+    // (shown on the page: every routine after the line runs, as cold)
+    let src = doc(
+        "\\edef\\where{\\the\\inputlineno}\\global\\setbox254\\hbox{\\where}\\shipout\\box254 ",
+    );
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = format!("\\relax\n{src}");
+    b.edit(&text);
+    let ran = b
+        .stats
+        .reruns
+        .iter()
+        .filter(|(_, op, _)| *op == "finish")
+        .count();
+    let cold = common::build(opts(), Some(&prelude), &text);
+    assert!(common::first_difference(&b.output().0, &cold.output().0).is_none());
+    assert!(ran > 0, "the routines that show it run again");
+}
+
+/// A run that opens a file, writes it and reads it back, as each of
+/// beamer's fragile frames does with the one `.vrb`, reads nothing written
+/// before it opened the file (§1374): a word edited in one such run runs
+/// no later one again, and the PDF equals a cold build's.
+#[test]
+fn a_file_the_run_opened_reads_nothing_before_it() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("own-opened");
+    let _ = std::fs::create_dir_all(&dir);
+    let prelude = common::plain();
+    let doc = "\\newwrite\\w\n\\def\\frag#1{\\immediate\\openout\\w=one.vrb \\immediate\\write\\w{#1}\\immediate\\closeout\\w \\input one.vrb \\par}\n\n\\frag{First word}\n\n\\frag{Second word}\n\n\\frag{Third word}\n\n\\bye\n";
+    let text = doc.replacen("First", "Firsu", 1);
+    for t in [1, 8] {
+        let opts = || phitex_tex::Options {
+            threads: Some(t),
+            ..common::options("./main.tex", "main", "", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude), doc);
+        b.edit(&text);
+        let later: Vec<String> = b
+            .stats
+            .reruns
+            .iter()
+            .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+            .filter(|x| x.contains("Second") || x.contains("Third"))
+            .collect();
+        assert!(later.is_empty(), "-j{t}: {later:?}");
+        let cold = common::build(opts(), Some(&prelude), &text);
+        assert_eq!(
+            common::first_difference(&b.output().0, &cold.output().0),
+            None,
+            "-j{t}"
+        );
+    }
+}
+
+/// A paragraph that reads `\pagetotal` early and again after much work,
+/// the first read leaving no trace in its state. An edit on an earlier
+/// page moves the page start reaching it (not the items between the old
+/// start and the paragraph): it runs again and reads the new page start
+/// (ribbonproofs' framed.sty: a cutoff once kept the old run's
+/// `\the\pagetotal`).
+#[test]
+fn a_rerun_sees_the_page_start_read_early() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let mut src = String::from(
+        "\\hsize=4in \\vsize=100pt \\parindent=0pt \\baselineskip=12pt \\parskip=0pt\n",
+    );
+    for p in 0..12 {
+        let _ = writeln!(src, "Filler {p}.\n");
+    }
+    src.push_str(
+        "Reader \\ifdim\\pagetotal<-1pt x\\fi \\count1=0 \\loop\\advance\\count1 by 1 \
+         \\ifnum\\count1<3000 \\repeat [\\the\\pagetotal]\n\n\\bye\n",
+    );
+    let prelude = common::plain();
+    let opts = || common::options("./cs.tex", "cs", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replacen("Filler 3.", "Filler 3.\\vrule height 40pt", 1);
+    b.edit(&text);
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let d = common::first_difference(&b.output().0, &cold.output().0);
+    assert!(d.is_none(), "edit differs from cold: {d:?}");
+}
+
+/// A long line with an overfull box early on it and a paragraph overfull
+/// after it, edited near its end: the edit's diagnostics hold what a
+/// cold build's do. What a diagnostic shows comes from the text.
+#[test]
+fn an_edited_run_holds_the_places_of_a_cold_build() {
+    let fx = common::fixtures().join("dvi");
+    let src = "\\hsize=1in \\parindent=0pt\n\
+         Reader \\setbox0\\hbox to 1pt{wide words} \\count1=0 \\loop\\advance\\count1 by 1 \
+         \\ifnum\\count1<3000 \\repeat \\hbox to 2in{}. Tail\n\n\\bye\n"
+        .to_owned();
+    let prelude = common::plain();
+    let opts = || common::options("./dl.tex", "dl", "", &fx);
+    let mut b = common::build(opts(), Some(&prelude), &src);
+    let text = src.replacen(". Tail", ". Tail typed", 1);
+    b.edit(&text);
+    let cold = common::build(opts(), Some(&prelude), &text);
+    let (x, y) = (b.diagnostic_places(), cold.diagnostic_places());
+    assert!(y.len() >= 2, "{y:?}");
+    assert_eq!(x, y);
+}
+
+/// A macro whose body is a head gobbling every group after it (a `.nav`
+/// file's `\sectionentry{1}{Title}{3}`, which beamer's frames expand
+/// with `\sectionentry` gobbling its five): the paragraphs that expand it
+/// read only its head and its groups' count, so a change of the
+/// characters in its groups runs none of them again. Where the head uses
+/// its argument, they all run again. Either way the edit's DVI file is a
+/// cold build's.
+#[test]
+fn a_gobbled_call_is_read_for_its_shape_only() {
+    use std::fmt::Write as _;
+    let fx = common::fixtures().join("dvi");
+    let opts = || common::options("./t.tex", "t", "", &fx);
+    let runs = |head: &str| {
+        let mut src = format!(
+            "\\catcode`\\{{=1 \\catcode`\\}}=2 \\catcode`\\#=6\n\\font\\tenrm=cmr10 \\tenrm \\hsize=100pt \\vsize=600pt \\parindent=0pt\n\\def\\gob#1#2{{{head}}}\\gdef\\h{{\\gob{{Title one}}{{3}}}}\n\n"
+        );
+        for i in 0..20 {
+            let _ = write!(src, "\\h Paragraph {i} of the text.\\par\n\n");
+        }
+        src.push_str("\\end\n");
+        let mut b = common::build(opts(), None, &src);
+        let text = src.replacen("Title one", "Title two", 1);
+        b.edit(&text);
+        let cold = common::build(opts(), None, &text);
+        let d = common::first_difference(&b.output().0, &cold.output().0);
+        assert!(
+            d.is_none(),
+            "{head:?}: the edit's DVI differs from a cold build's: {d:?}"
+        );
+        b.stats.nodes_run
+    };
+    let (gobbled, used) = (runs(""), runs("#1"));
+    eprintln!(
+        "nodes run by the edit: {gobbled} with the groups gobbled, {used} with the first used"
+    );
+    assert!(
+        gobbled + 20 <= used,
+        "the paragraphs expanding a gobbled call ran again: {gobbled} nodes run, {used} where they use it"
+    );
+}
+
+/// Pages fired inside a group of a piece's own (one command's text, as
+/// `\printindex`'s), and the piece read `\pagetotal` after them: the run
+/// ends at a candidate a page fired at in a second pass (`Halt::Recut`),
+/// from the piece's start again. The output and the value read are those
+/// of the same text outside the group, where the piece is cut at every
+/// candidate.
+#[test]
+fn a_second_pass_ends_at_the_page_read_after() {
+    let fx = common::fixtures().join("plain");
+    let prelude = common::plain();
+    let opts = |name: &str| common::options(&format!("./{name}.tex"), name, "", &fx);
+    // (lines as boxes on the main vertical list: a candidate after each,
+    // no paragraph to end at)
+    let words = (0..400).fold(String::new(), |mut s, k| {
+        let _ = std::fmt::Write::write_fmt(
+            &mut s,
+            format_args!(
+                "\\hbox{{w{}rd{}{}}}\n",
+                ["o", "a", "e"][k % 3],
+                k % 17,
+                "\\kern0pt x".repeat(50)
+            ),
+        );
+        s
+    });
+    let body = |group: bool| {
+        let (open, close) = if group {
+            ("\\begingroup ", "\\endgroup ")
+        } else {
+            ("", "")
+        };
+        format!(
+            "\\hsize=300pt \\vsize=200pt\n\\long\\def\\stuff{{{open}{words}\\message{{PT=\\the\\pagetotal}}{close}}}\n\\stuff\n\\bye\n"
+        )
+    };
+    let read = |log: &str| {
+        log.split("PT=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next())
+            .map(str::to_owned)
+    };
+    let b = common::build(opts("recut"), Some(&prelude), &body(true));
+    let plain = common::build(opts("recutflat"), Some(&prelude), &body(false));
+    let ((bd, bl), (pd, pl)) = (b.output(), plain.output());
+    assert!(
+        common::first_difference(&bd, &pd).is_none(),
+        "the second pass's output is the text's"
+    );
+    assert!(
+        read(&pl).is_some(),
+        "the read is logged: {}",
+        common::log_excerpt(&pl)
+    );
+    assert_eq!(
+        read(&bl),
+        read(&pl),
+        "\\pagetotal as the ungrouped text reads it"
+    );
+}
+
+/// TeX's `\parshape` starts empty (§232) and a paragraph's end empties it
+/// again inside the group it was set in (§1070): the job starts with the
+/// empty list bound, so "empty" and "never set" are one value. An edit
+/// that sets it empty before 40 paragraphs (`\parshape=0`) gives none of
+/// them another `\parshape`, and none runs again (bound to nothing, each
+/// read "unset" against "empty" and ran again, as the readers a list's
+/// reset reaches or not as the scopes around them move: 560 000 of the
+/// 774 000 re-asks of biblatex's manual's first 300 s at -j4, mc 80695).
+/// The edited text equals a cold build of it.
+#[test]
+fn a_parshape_emptied_is_its_start_value() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("parshape-reset");
+    let _ = std::fs::create_dir_all(&dir);
+    let prelude = common::plain();
+    let mut doc = String::from("Shaped.\n\n");
+    for k in 0..40 {
+        doc += &["Paragraph ", &k.to_string(), ".\n\n"].concat();
+    }
+    doc.push_str("\\end\n");
+    let opts = || phitex_tex::Options {
+        threads: Some(1),
+        ..common::options("./main.tex", "main", "", &dir)
+    };
+    let mut b = common::build(opts(), Some(&prelude), &doc);
+    let text = doc.replacen("Shaped.", "\\parshape=0 Shaped.", 1);
+    b.edit(&text);
+    let (run, by_op) = (b.stats.nodes_run, b.stats.runs_by_op.clone());
+    eprintln!("parshape edit: {run} nodes run, by op {by_op:?}");
+    let cold = common::build(opts(), Some(&prelude), &text);
+    assert_eq!(b.output().0, cold.output().0, "edit differs from cold");
+    let text_runs: u64 = by_op
+        .iter()
+        .filter(|x| x.0 == "exec" || x.0 == "resume")
+        .map(|x| x.1)
+        .sum();
+    assert!(
+        text_runs < 5,
+        "{text_runs} text runs after the edit (40 paragraphs after it): {by_op:?}"
+    );
 }

@@ -9,6 +9,12 @@
 # request to dev setting crates/cli/src/shelf.rs's RELEASE to the new
 # release: a PhiTeX builds from the release it names, so Shelf is
 # deployed first and PhiTeX names it after.
+# `formats_commit` (a PhiTeX commit): no new release and no TeX Live
+# fetched; that commit's PhiTeX built, checked against TeX Live on the
+# release served now, and its formats (its engine identity's) added to
+# that release (release.sh's FORMATS_COMMIT), the earlier identities'
+# kept; `deploy` then uploads the site with them (no pull request: the
+# release PhiTeX names is unchanged).
 name: shelf
 on:
   workflow_dispatch:
@@ -17,6 +23,15 @@ on:
         description: "deploy the release after a green check"
         type: boolean
         default: false
+      formats_commit:
+        description: "a PhiTeX commit: only add its formats to the release served now"
+        type: string
+        default: ""
+      clean:
+        description: "with formats_commit: serve the current release alone, with only that commit's formats (earlier releases and identities dropped)"
+        type: boolean
+        default: false
+
 permissions:
   contents: read
   packages: read
@@ -31,16 +46,25 @@ jobs:
     timeout-minutes: 350
     outputs:
       release: ${{ steps.made.outputs.release }}
+      formats: ${{ steps.made.outputs.formats }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          # (the whole history where a commit's formats are made: it is
+          # archived from this checkout)
+          fetch-depth: ${{ inputs.formats_commit != '' && '0' || '1' }}
       - run: scripts/ci/free-disk.sh
       - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - run: docker pull -q "$IMAGE"
-      - run: docker run --rm -v "$PWD:/src" -w /src -e CARGO_BUILD_JOBS=4 "$IMAGE" bash -c 'shelf/scripts/release.sh; st=$?; chmod -R a+rX out shelf/public; exit $st'
+      - env:
+          FORMATS_COMMIT: ${{ inputs.formats_commit }}
+          CLEAN: ${{ inputs.clean && '1' || '' }}
+        run: docker run --rm -v "$PWD:/src" -w /src -e CARGO_BUILD_JOBS=4 -e FORMATS_COMMIT -e CLEAN "$IMAGE" bash -c 'shelf/scripts/release.sh; st=$?; chmod -R a+rX out shelf/public; exit $st'
       - id: made
-        run: echo "release=$(cat out/shelf-results/release.txt)" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "release=$(cat out/shelf-results/release.txt)" >> "$GITHUB_OUTPUT"
+          echo "formats=$(cat out/shelf-results/formats.txt 2>/dev/null)" >> "$GITHUB_OUTPUT"
       # (a tar: an artifact's zip drops nothing here, but one file uploads faster than 15,000)
       - if: steps.made.outputs.release != ''
         run: tar -C shelf -cf site.tar public
@@ -86,7 +110,44 @@ jobs:
           done
           [ "$got" = "$r" ] || { echo "v1.shelf.phitex.org serves $got, not $r"; exit 1; }
           echo "v1.shelf.phitex.org serves $r"
+      - name: served formats
+        if: inputs.formats_commit != ''
+        env:
+          WANT: ${{ needs.release.outputs.formats }}
+        run: |
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            miss=$(curl -fsS https://v1.shelf.phitex.org/tl2026/release.json | python3 -c 'import json,os,sys;h=json.load(sys.stdin).get("formats") or {};print(" ".join(f for f in os.environ["WANT"].split() if f not in h))') && [ -z "$miss" ] && break
+            sleep 30
+          done
+          [ -z "$miss" ] || { echo "v1.shelf.phitex.org does not serve the formats $miss"; exit 1; }
+          echo "v1.shelf.phitex.org serves the formats $WANT"
+      # (as a client takes them, through the CDN: release.json's pack
+      # table holds every pack it names a format, and each pack served
+      # is what that table says: the v1.0 clean deploy's table, rewritten
+      # under its cached name, lacked them, and every client refused the
+      # formats while the origin was right)
+      - name: formats as a client takes them
+        run: |
+          python3 - <<'PY'
+          import gzip, hashlib, json, sys, urllib.request
+          base = "https://v1.shelf.phitex.org/tl2026/"
+          get = lambda p: urllib.request.urlopen(urllib.request.Request(base + p, headers={"User-Agent": "phitex-shelf-check"}), timeout=300).read()
+          doc = json.loads(get("release.json"))
+          table = {l.split("\t")[0]: l.split("\t")[1:] for l in gzip.decompress(get(doc["pack_table"])).decode().splitlines() if l}
+          bad = []
+          for name, pack in (doc.get("formats") or {}).items():
+              if pack not in table:
+                  bad.append(f"{name}: {pack} not in {doc['pack_table']}")
+                  continue
+              raw = get(f"h/{pack}.pack")
+              if hashlib.sha256(raw).hexdigest() != table[pack][0] or len(raw) != int(table[pack][1]):
+                  bad.append(f"{name}: {pack} served is not what {doc['pack_table']} says")
+          if bad:
+              sys.exit("a client refuses these formats:\n  " + "\n  ".join(bad))
+          print(f"{len(doc.get('formats') or {})} formats taken as a client takes them ({doc['pack_table']})")
+          PY
       - name: PhiTeX names it
+        if: inputs.formats_commit == ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |

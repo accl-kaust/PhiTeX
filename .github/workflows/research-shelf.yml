@@ -1,0 +1,67 @@
+# The research corpus with --shelf (docs/ci.md, Lane B): ci/research.json
+# built by the users' CLI from Shelf as served (v1.shelf.phitex.org, this
+# commit's shelf::RELEASE, a clean cache) and compared byte for byte with
+# TeX Live's own engines building the same documents from a texmf tree of
+# that release's files alone, their formats made there
+# (shelf/scripts/tl-tree.sh, as Shelf's release check makes it; the
+# release fetched from the host). Nightly and by hand;
+# not a check main requires: Shelf is released on its own schedule, so a
+# red here says what Shelf's release lacks (for example the base fonts'
+# map lines), to be fixed in Shelf, not waived here.
+name: research-shelf
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: read
+concurrency:
+  group: research-shelf-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  IMAGE: ghcr.io/accl-kaust/phitex-ci:2026-09-25
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE"
+      - run: scripts/ci/gate-gh.sh build cli
+      - run: tar -C out/r/store -cf store.tar .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: store-cli
+          path: store.tar
+          retention-days: 3
+  research:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: scripts/ci/free-disk.sh
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker pull -q "$IMAGE-doc"
+      - uses: actions/download-artifact@v4
+        with:
+          name: store-cli
+      - run: mkdir -p out/store && tar -C out/store -xf store.tar
+      - run: IMAGE="$IMAGE-doc" scripts/ci/gate-gh.sh research ${{ matrix.shard }} 2 shelf
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: r-research-shelf-${{ matrix.shard }}
+          path: out/r
+          retention-days: 14

@@ -1,7 +1,7 @@
 //! `Build::diagnostics`: TeX's errors and warnings and the engine's
 //! evaluation errors, each at its place in a file.
 
-mod common;
+use crate::common;
 
 use phitex_tex::{Build, Diagnostic, Options, Severity};
 
@@ -408,4 +408,237 @@ fn box_reports_are_in_the_log_as_tex_writes_them() {
     check(&b, "cold");
     common::rebuild(&mut b, &doc.replace("Other text.", "Other words."));
     check(&b, "after an edit of the paragraph between");
+}
+
+/// A warning written to the log in the kernel's shapes (`LaTeX
+/// Warning: `, `LaTeX Font Warning: `, `Package <name> Warning: `,
+/// `Class <name> Warning: `; LaTeX's `\GenericWarning` is a `\write` on
+/// a stream no file is open on) is a warning diagnostic where the write
+/// was met: its first line the message, its continuation lines (without
+/// their `(name)` lead) the help; the culprit the command whose
+/// argument holds the key the message quotes, else the last control
+/// sequence read. A text of another shape is none.
+#[test]
+fn written_warnings_are_diagnostics() {
+    let doc = "\\def\\r#1{\\immediate\\write16{LaTeX Warning: Reference `#1' on page 1 undefined on input line 1.}}\n\
+               \\def\\warn{\\immediate\\write16{LaTeX Font Warning: Font shape `OT1/cmr/bx/sc' undefined^^J(Font)              using `OT1/cmr/bx/n' instead on input line 2.}}\n\
+               See \\r{lbl} here.\n\
+               A \\warn B\n\
+               \\immediate\\write16{Package foo Warning: Something odd.}\n\
+               \\immediate\\write16{Class bar Warning: Odd too^^J(bar)                and more.}\n\
+               \\immediate\\write16{A plain message}\\immediate\\write-1{LaTeX Warning: Not from a \\string\\typeout.}\n\
+               \\bye\n";
+    let b = build(doc, |o| o);
+    let ds = b.diagnostics();
+    show(&ds);
+    let ws: Vec<&Diagnostic> = ds
+        .iter()
+        .filter(|d| d.severity == Severity::Warning)
+        .collect();
+    let ms: Vec<&str> = ws.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        ms,
+        [
+            "LaTeX Warning: Reference `lbl' on page 1 undefined on input line 1.",
+            "LaTeX Font Warning: Font shape `OT1/cmr/bx/sc' undefined",
+            "Package foo Warning: Something odd.",
+            "Class bar Warning: Odd too",
+            "LaTeX Warning: Not from a \\typeout.",
+        ]
+    );
+    assert_eq!(&doc[ws[0].range.0..ws[0].range.1], "\\r{lbl}");
+    assert_eq!((ws[0].line, ws[0].help.as_deref()), (3, None));
+    assert_eq!(&doc[ws[1].range.0..ws[1].range.1], "\\warn");
+    assert_eq!(
+        (ws[1].line, ws[1].help.as_deref()),
+        (4, Some("using `OT1/cmr/bx/n' instead on input line 2."))
+    );
+    assert_eq!(ws[2].range.0, ws[2].range.1);
+    assert_eq!(ws[3].help.as_deref(), Some("and more."));
+    assert!(ds.iter().all(|d| d.severity != Severity::Error), "{ds:?}");
+}
+
+/// §362 at the end of the main file: what the text ended in is TeX's
+/// error (§338, "File ended while scanning use of \a"), then what §339
+/// inserted is read, and only at the end again is the job aborted (§360,
+/// "*** (job aborted, no legal \end found)"), as pdfTeX's log has them.
+/// Before, the job was aborted at once and the error never said: an
+/// unclosed brace in an editor had no problem but the abort. The name as
+/// `sprint_cs` shows it, a space in it kept (LaTeX's robust `\textbf `,
+/// "use of \textbf ."). Oracle: pdflatex on the same shapes in LaTeX
+/// (TeX Live 2026, accl 24838).
+#[test]
+fn the_text_ending_inside_an_argument_or_a_definition() {
+    for threads in [1, 4] {
+        for (doc, msg) in [
+            (
+                "\\long\\def\\a#1{}\nText \\a{one\ntwo.\n",
+                "File ended while scanning use of \\a",
+            ),
+            (
+                "Text.\n\\def\\x{abc\n",
+                "File ended while scanning definition of \\x",
+            ),
+            (
+                "\\expandafter\\long\\expandafter\\def\\csname b \\endcsname#1{}\nText \\csname b \\endcsname{one\n",
+                "File ended while scanning use of \\b ",
+            ),
+            // (plain's `\bye` is `\outer`: §336's other error there, the
+            // name as shown the same way; `\bye` then ends the job)
+            (
+                "\\expandafter\\long\\expandafter\\def\\csname b \\endcsname#1{}\nText \\csname b \\endcsname{one\n\\bye\n",
+                "Forbidden control sequence found while scanning use of \\b ",
+            ),
+        ] {
+            let b = build(doc, |o| Options {
+                threads: Some(threads),
+                ..o
+            });
+            let ds = b.diagnostics();
+            show(&ds);
+            let errs: Vec<&str> = ds
+                .iter()
+                .filter(|d| d.severity == Severity::Error)
+                .map(|d| d.message.as_str())
+                .collect();
+            assert!(
+                errs.iter().any(|m| m.trim_end_matches('.') == msg),
+                "-j{threads} {doc:?}: {errs:?}"
+            );
+            let at = errs.iter().position(|m| m.trim_end_matches('.') == msg);
+            let abort = errs.iter().position(|m| m.contains("no legal \\end found"));
+            assert!(
+                msg.starts_with("Forbidden") || abort.is_some_and(|a| at.is_some_and(|i| i < a)),
+                "-j{threads} {doc:?}: the abort after the error: {errs:?}"
+            );
+        }
+    }
+}
+
+/// An error's context and help in the log as pdfTeX's `error` writes them
+/// in a run that cannot ask (§90): the list so far of a runaway (§306),
+/// the message, the context's two lines a level (§311-§318: the line of
+/// the file with its place read, `<inserted text>` and `<to be read
+/// again>` above it, the terminal's `<*>` line once the main file ended),
+/// the help lines and an empty line. The engine wrote the message alone.
+/// Oracle: pdflatex on the same shapes under LaTeX (accl 24909, the
+/// blocks byte for byte; bench/ux5-ctx), here under plain.
+#[test]
+fn an_error_has_its_context_and_help_in_the_log() {
+    for threads in [1, 4] {
+        for (doc, want) in [
+            (
+                "Bad \\nosuchcommand here.\n\\bye\n",
+                "! Undefined control sequence.\nl.1 Bad \\nosuchcommand\n                       here.\nThe control sequence at the end of the top line\nof your error message was never \\def'ed. If you have\nmisspelled it (e.g., `\\hobx'), type `I' and the correct\nspelling (e.g., `I\\hbox'). Otherwise just continue,\nand I'll forget about whatever was undefined.\n\n",
+            ),
+            (
+                "\\def\\x#1{}\nText \\x{abc\n\nrest.\n\\bye\n",
+                "Runaway argument?\n{abc \n! Paragraph ended before \\x was complete.\n<to be read again> \n                   \\par \nl.3 \n    \nI suspect you've forgotten a `}', causing me to apply this\ncontrol sequence to too much text. How can we recover?\nMy plan is to forget the whole thing and hope for the best.\n\n",
+            ),
+            (
+                "\\long\\def\\x#1{}\nText \\x{abc\ndef\n",
+                "Runaway argument?\n{abc def \n! File ended while scanning use of \\x.\n<inserted text> \n                \\par \n<*> doc.tex\n           \nI suspect you have forgotten a `}', causing me\nto read past where you wanted me to stop.\nI'll try to recover; but if the error is serious,\nyou'd better type `E' or `X' now and fix your file.\n\n! Emergency stop.\n<*> doc.tex\n           \n*** (job aborted, no legal \\end found)\n\n",
+            ),
+        ] {
+            let b = build(doc, |o| Options {
+                threads: Some(threads),
+                ..o
+            });
+            let (_, log) = b.output();
+            assert!(
+                log.contains(want),
+                "-j{threads} {doc:?}: the log has not\n{want}\nlog:\n{log}"
+            );
+        }
+    }
+}
+
+/// An error in a file the job writes and reads back (a `.bbl`, an
+/// `.aux`): placed at its line in the text the build read. The finder
+/// has no such file (or a stale copy on disk), and every error in one was
+/// placed at its first line: the Overleaf extension's
+/// "TeX capacity exceeded ... at paper.bbl:1" for an error on line 16.
+#[test]
+fn an_error_in_a_file_the_job_wrote_is_at_its_line() {
+    let doc = "\\immediate\\openout1=gen.tex\n\
+               \\immediate\\write1{first line}\n\
+               \\immediate\\write1{second \\noexpand\\undefinedmacro\\space here}\n\
+               \\immediate\\closeout1\n\
+               \\input gen\n\\bye\n";
+    let b = build(doc, |o| o);
+    let ds = b.diagnostics();
+    show(&ds);
+    let d = ds
+        .iter()
+        .find(|d| d.message == "Undefined control sequence")
+        .expect("the error");
+    assert!(d.file.ends_with("gen.tex"), "{}", d.file);
+    assert_eq!(d.line, 2, "{d:?}");
+    assert_eq!(d.range, (18, 33), "{d:?}");
+}
+
+/// An error in an `\input` file stays at its line through edits of the
+/// file that move it, with bytes past 127 before it ("≤", "é"): each
+/// edit's diagnostic is a cold build's of the same text. A line's place
+/// was its character count when read whole and a byte count of the
+/// one-character-per-byte text in a piece an edit cut, with the edits'
+/// moves in bytes: the Overleaf extension's errors three lines off after
+/// a paste with a "≤" in it, until a refresh.
+#[test]
+fn an_input_files_error_stays_at_its_line_through_edits_with_wide_bytes() {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("diag-wide-edits");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = "\\input sub\n\\bye\n";
+    let para = |w: &str| format!("A paragraph of text with {w} in it, long enough to break.\n\n");
+    let sub = |head: &str| {
+        format!(
+            "{head}{}{}{}Here \\undefinedmacro is the error.\n\n{}",
+            para("caf\u{e9}"),
+            para("a \u{2264} b"),
+            para("plain words"),
+            para("after")
+        )
+    };
+    let place = |b: &phitex_tex::Build, text: &str| {
+        let ds = b.diagnostics();
+        let d = ds
+            .iter()
+            .find(|d| d.message == "Undefined control sequence")
+            .unwrap_or_else(|| panic!("the error: {ds:#?}"))
+            .clone();
+        assert!(d.file.ends_with("sub.tex"), "{d:?}");
+        let want = text[..text.find("\\undefinedmacro").expect("the error's text")]
+            .matches('\n')
+            .count()
+            + 1;
+        (d.line, want, d.range)
+    };
+    let opts = || common::options("./doc.tex", "doc", "", &dir);
+    let first = sub("");
+    std::fs::write(dir.join("sub.tex"), &first).expect("the input file");
+    let mut b = common::build(opts(), Some(&common::plain()), doc);
+    let (line, want, _) = place(&b, &first);
+    assert_eq!(line, want, "cold");
+    for (k, text) in [
+        sub(&para("\u{2264}\u{2264} new \u{e9}")),
+        sub(&format!("{}{}", para("x"), para("\u{2014} two \u{d7}"))),
+        sub(""),
+        sub(&para("\u{1F600}")),
+    ]
+    .iter()
+    .enumerate()
+    {
+        b.edit_file("sub.tex", Some(text.as_bytes()));
+        std::fs::write(dir.join("sub.tex"), text).expect("the input file");
+        let cold = common::build(opts(), Some(&common::plain()), doc);
+        let (line, want, range) = place(&b, text);
+        let (cline, _, crange) = place(&cold, text);
+        assert_eq!(
+            (line, range),
+            (cline, crange),
+            "edit {k}: the edit's place, the cold build's"
+        );
+        assert_eq!(line, want, "edit {k}");
+    }
 }

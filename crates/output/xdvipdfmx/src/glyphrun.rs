@@ -226,7 +226,7 @@ pub struct GlyphRun {
 
 /// What a TFM font's characters are drawn with, worked out at its first
 /// glyph (by code: 256 names, glyph ids and texts; empty where none).
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 struct RunFont {
     /// 1 Type 1, 2 TrueType, 3 OpenType, 0 other.
     kind: u8,
@@ -239,14 +239,14 @@ struct RunFont {
 
 /// An `/ActualText` span being drawn: its cluster, and its text until its
 /// first run takes it.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 struct Span {
     cluster: u32,
     text: Option<String>,
 }
 
 /// The glyph runs' state.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// Whether runs are recorded at all ([`crate::api::Options::glyph_runs`]):
     /// a viewer needs them, a conversion for the PDF alone does not.

@@ -10,7 +10,7 @@
 //! | a value shard (`values::Values`) | an intern; a sequence node lookup | one insert or one lookup; plain reads take none |
 //! | paths and their extensions, monoids, environment values, shapes, memo, marks, pending (`engine::Engine`) | setup; rare inserts; a view's step; a push or an edit outside an evaluation | one map operation |
 //! | the settling layer's fields (`engine::Engine::settle_exact`) | a settling node's commit or prediction marking a field it has not marked; a read whose field's bit is set | one insert; one lookup |
-//! | a node's `last`, `woke`, `text`, `stopped`, `bounded` and `anchored` (`node::Node`) | its commit; its re-ask; an edit; a read of its arguments; a walk stopping at it; a range reader bounded by it filed or taken; a reader anchored at it filed (under that reader's segment's lock) or its removal | a swap; a clone; a push |
+//! | a node's `last`, `woke`, `text`, `stopped`, `bounded` and `foreign` (`node::Node`) | its commit; its re-ask; an edit; a read of its arguments; a walk stopping at it; a range reader bounded by it filed or taken; a reader anchored at it filed (under its segment's lock) or its removal; a walk asking its record or its foreign readers (`guard::readers_at`, under its segment's lock) | a swap; a clone; a push; a look-up in a record |
 //! | a node's claim walk (`node::Node::claim_mx`) | a claim taking or giving back its siblings (`commit::apply_claim`) | one walk from its `claim_end` to the one it stores, each segment's `inner` taken in turn under it; never two nodes' at once, nor under a segment's lock |
 //! | an edit source's roots (`sched::Shared::extra_roots`) | the caller's worker coming to a collection's barrier; the collector | one extend; one take |
 //! | the lists a collection took while a reader was pinned (`values::Values::graveyard`) | a collection | one take or one extend |
@@ -83,11 +83,19 @@ pub(crate) type WriteGuard<'a, T> = Held<RwLockWriteGuard<'a, T>>;
 /// A held guard of an [`Mx`].
 pub(crate) type MxGuard<'a, T> = Held<MutexGuard<'a, T>>;
 
-pub(crate) struct Lock<T>(RwLock<T>);
+pub(crate) struct Lock<T>(RwLock<T>, std::sync::atomic::AtomicU64);
 
 impl<T> Lock<T> {
     pub(crate) const fn new(x: T) -> Lock<T> {
-        Lock(RwLock::new(x))
+        Lock(RwLock::new(x), std::sync::atomic::AtomicU64::new(0))
+    }
+
+    /// How many exclusive guards were taken so far: read under a shared
+    /// guard, it is the count for what that guard sees, and any change
+    /// after it counts again (a cache of what the guarded value says,
+    /// kept with this count, stands while it is the same).
+    pub(crate) fn writes(&self) -> u64 {
+        self.1.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// A shared guard: `try_read` first, and only a refused try is timed.
@@ -119,7 +127,9 @@ impl<T> Lock<T> {
     /// An exclusive guard, timed as `read`.
     #[cfg_attr(feature = "profile", track_caller)]
     pub(crate) fn write(&self) -> WriteGuard<'_, T> {
-        Held::new(self.write_inner())
+        let g = self.write_inner();
+        self.1.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Held::new(g)
     }
 
     #[cfg_attr(feature = "profile", track_caller)]

@@ -12,18 +12,23 @@
 // and zoom remembered; a build that ships nothing keeps the last good page,
 // dimmed, with why; problems jump to their line.
 
-import type { PageImage, Status } from "./session.ts";
-import type { Diagnostic } from "./diagnostics.ts";
+import type { CiteAnswer, PageImage, Status } from "./session.ts";
+import { sentence } from "./words.ts";
+import { KINDS, kindOf, type Diagnostic, type Kind } from "./diagnostics.ts";
 import type { PackageState } from "./packages.ts";
 import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
-import { Viewer } from "./viewer.ts";
+import { Viewer, type Cited } from "./viewer.ts";
 import { VIEWER_CSS } from "./css.ts";
 import { PRINT_CSS } from "./print.ts";
-import { PROBLEMS_CSS, problemHtml } from "./problems.ts";
+import { PROBLEMS_CSS, problemNode, type Problem } from "./problems.ts";
+import { charOffset } from "./edits.ts";
+import { html, rich } from "./html.ts";
 import { OUTLINE_CSS, Outline, type Entry } from "./outline.ts";
-import { KEYS, bindKeys } from "./keys.ts";
+import { KEYS, bindKeys, typing } from "./keys.ts";
 import { REPORT_TO } from "./report.ts";
-import { opening, retro, still, type Opening } from "./opening.ts";
+import type { Opening } from "./opening.ts";
+import { LOOKS, lookFrom, lookOf, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
+import { hintsFor, keyed } from "./hints.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
@@ -65,7 +70,7 @@ export interface ViewState {
   chipTitle: string;
   /** The last repaint's keystroke→page time, and when it was (for a flourish). */
   speed?: { ms: number; at: number; first?: boolean };
-  sheet: boolean;
+  settings: boolean;
   /** Diagnostics: how many, and the worst severity (or ""). */
   diagCount: number;
   diagWorst: string;
@@ -77,11 +82,65 @@ export interface ViewState {
   timing: { summary: string; parts: [string, string][]; message: string };
 }
 
+/** A mark along the pages' scrollbar: a problem's place (`p`, its first box `box`) or a diff's change. */
+type ScrollMark = { k: number; y: number; cls: string; title: string; p?: { file: string; message: string; line: number | null; excerpt: Problem["excerpt"]; severity: "error" | "warning" }; box?: [number, number, number, number] };
+
+/** What each kind of problem is, under its switch in Settings. */
+const KIND_HELP: Record<Kind, string> = {
+  error: "LaTeX errors and files not found",
+  overfull: "Lines that stick out into the margin",
+  underfull: "Lines spread too far apart",
+  reference: "Undefined references and citations",
+  font: "Missing characters and substituted fonts",
+  other: "Every other warning",
+};
+
+/** A row of the Settings dialog: the panel's own, or a host's (PanelEvents.settings). */
+export interface SettingRow {
+  id: string;
+  label: string;
+  /** A line under the label: what it does, where it is kept. */
+  help?: string;
+  /** toggle: on or off; choice: a few buttons; select: a list; picks: any of `options`, as tiles (`value` those picked, comma separated); action: a button (`button` its label); info: `value` shown. */
+  kind: "toggle" | "choice" | "select" | "picks" | "action" | "info";
+  /** A choice's or a list's values and labels. */
+  options?: [value: string, label: string][];
+  value?: boolean | string;
+  button?: string;
+  /** Why it can't be changed here: shown in its place, the row dimmed. */
+  disabled?: string;
+  /** A picks tile's picture, played in `box` while the tile is on screen: stopped by what it returns. */
+  tile?(v: string, box: HTMLElement): () => void;
+  /** It set (a toggle's on, a choice's value; an action: nothing): the host's error text if it could not. */
+  set?(v?: boolean | string): Promise<string | void> | string | void;
+}
+
+/** A group of the Settings dialog: its title and its rows. */
+export interface SettingsGroup {
+  title: string;
+  rows: SettingRow[];
+}
+
+/** The panel's own choices, kept by the host (PanelEvents.onPref, Panel.viewPrefs). */
+export interface ViewPrefs {
+  "dark-pdf": DarkPdf;
+  opening: OpeningLook;
+  underline: boolean;
+}
+
 export interface PanelEvents {
+  /** Ctrl+click or a middle click on a link: the same viewer opened in a new tab at page `k`, `top` points down it (absent: such a click follows the link here). */
+  onOpenAt?(k: number, top: number | null): void;
+  /** What the citation under the pointer cites (Viewer's `cited`: its \cite's entries, from the source and the .bib). */
+  onCited?(from: { k: number; x: number; y: number }, to: number, top: number | null): Cited[] | null;
   /** The page in view changed (the one an edit paints first). */
   onPage(p: number): void;
-  /** Page `k` is wanted: in view, not drawn at its current hash. */
-  onNeed?(k: number): void;
+  /**
+   * Page `k` is wanted: in view, not drawn at its current hash or zoom; a
+   * promise settled once it is drawn (or not), so a page is asked for
+   * once at a time (no promise: asked again whenever wanted).
+   */
+  onNeed?(k: number): void | Promise<void>;
   onPdf(): void;
   /** The debug check (a fresh build compared every 5 s): absent, no debug button. */
   onDebug?(on: boolean): void;
@@ -104,6 +163,8 @@ export interface PanelEvents {
   onSyncSource?(k: number, x: number, y: number): void;
   /** The anonymized debug report (report.ts), for "Report a problem". */
   onReport?(): Promise<string>;
+  /** The host's lines for the timing popover's "Copy debug info" (PhiTeX's version, the engine, where the files come from), first. */
+  onDebugInfo?(): Promise<string[]>;
   /** Run this project with engine `e` from now on (the card's buttons). */
   onEngine?(e: Engine): void;
   /** The editor to `file`'s [from, to) (UTF-16 offsets); `focus` false keeps the focus on the page. */
@@ -116,6 +177,21 @@ export interface PanelEvents {
   onTour?(): void;
   /** "What's new" (settings). */
   onNews?(): void;
+  /** The host's rows of the Settings dialog, by group: after the panel's own in a group of the same title. */
+  settings?(): SettingsGroup[] | Promise<SettingsGroup[]>;
+  /**
+   * One of the panel's own choices (ViewPrefs) changed: the host keeps it
+   * where its other settings are (the watch: the user's phitex.toml), and
+   * says its error if it could not. The panel stores none; the host gives
+   * them back with viewPrefs().
+   */
+  onPref?<K extends keyof ViewPrefs>(key: K, value: ViewPrefs[K]): Promise<string | void> | string | void;
+  /** The kinds of problem hidden (the problems' filters), every one: kept by the host (the watch: the user's phitex.toml). */
+  onProblemsHidden?(kinds: string[]): void;
+  /** A project file's text as built (for Copy for an AI assistant: its lines around a problem, the main file's preamble), or null. */
+  onSource(file: string): Promise<string | null>;
+  /** The feature tips seen, every one so far: kept by the host where every port and browser reads them (the watch: the user's phitex.toml); absent, this browser's storage alone. */
+  onTipsSeen?(ids: string[]): void;
   /** The contents beside the pages opened: the outline wanted now (the host's session's `outline()`). */
   onContents?(): void;
   /** A link to a web address on a page (absent: opened in a new tab). */
@@ -126,8 +202,9 @@ export interface PanelEvents {
 
 /**
  * What the panel says that depends on where it runs (the defaults:
- * Overleaf's; VS Code's webview gives its own). `about` and `reading` are
- * markup, the rest text.
+ * Overleaf's; VS Code's webview gives its own). Text, but `about`: text with
+ * <b> and <code> in it (html.ts's rich), or the host's own nodes (html``),
+ * a link to the licence (#license) among them.
  */
 export interface PanelWords {
   /** The header's badge, and its tooltip. */
@@ -135,7 +212,7 @@ export interface PanelWords {
   badgeTitle: string;
   /** The line under the page, and what it opens. */
   byline: string;
-  about: string;
+  about: string | Node;
   /** The strip while the first build runs past 400 ms (`{s}`: the seconds so far); empty: no strip for builds at all (the host shows them). */
   preparing: string;
   /** Where the full license is. */
@@ -156,12 +233,15 @@ const OVERLEAF_WORDS: PanelWords = {
   badge: "Unofficial · experimental",
   badgeTitle: "An unofficial extension, not part of Overleaf. PhiTeX runs LaTeX (pdfTeX) in your browser; Overleaf's PDF is the real one.",
   byline: "Unofficial PhiTeX extension · experimental",
-  about: `<b>⚡ Instant is not part of Overleaf.</b> It is added by the <b>unofficial PhiTeX</b> browser extension, not made,
+  // (made when a panel reads it, not when this module loads: nothing of the DOM before a page)
+  get about() {
+    return html`<b>⚡ Instant is not part of Overleaf.</b> It is added by the <b>unofficial PhiTeX</b> browser extension, not made,
       endorsed or supported by Overleaf: an experimental incremental TeX engine that runs entirely in your browser. Nothing is
       sent anywhere; Overleaf's own PDF is on the <b>PDF</b> tab.
       <div class="about-foot">LaTeX, with TeX Live's packages fetched as needed. Free software (AGPL-3.0-only,
       <a id="license" target="_blank" rel="noopener">full license</a>), provided as is, without any warranty.
-      To turn it off: <code>chrome://extensions</code>.</div>`,
+      To turn it off: <code>chrome://extensions</code>.</div>`;
+  },
   preparing: "Getting ready for instant edits… {s} s (pages still scroll)",
   license: "LICENSE.txt",
   realPdf: "Overleaf's PDF is the real one.",
@@ -211,17 +291,29 @@ export interface PanelPrefs {
   zoom: string;
   collapsed: boolean;
   details: boolean;
+  /** Links: previewed on hover; Back and Forward after a jump; where a jump lands lit; Ctrl+click to a new tab. */
+  peeks: boolean;
+  backs: boolean;
+  flashes: boolean;
+  newTabs: boolean;
+  /** The documents built in this panel before (a hash of the page's address and the main file's name), newest first: opened again, no opening plays. */
+  built: string[];
 }
 
-const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false };
+const DEFAULTS: PanelPrefs = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, built: [] };
 
-/** A page's CSS size at `cssWidth`, each side rounded down to whole device pixels (its canvas then on the pixel grid). */
+/**
+ * A page's CSS size at `cssWidth`: each side rounded up to whole device
+ * pixels, as the core rounds a page's bitmap (crates/output/render:
+ * `ceil` of its points times the scale), so a page drawn at the zoom
+ * fills its box to the pixel. Rounded down, and the height made from the
+ * rounded width, the box was up to three pixels short of the bitmap.
+ */
 export function pageBox(d: { w: number; h: number }, cssWidth: number, dpr = globalThis.devicePixelRatio || 1): [number, number] {
-  const snap = (x: number) => Math.floor(x * dpr) / dpr;
+  const snap = (x: number) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap((d.h * cssWidth) / d.w)];
 }
 
-const esc = (t: string) => t.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 
 /** Material icons (Apache-2.0), inline: no dependency on the page's icon font. */
 const PATHS: Record<string, string> = {
@@ -242,6 +334,7 @@ const PATHS: Record<string, string> = {
   more_horiz: "M6 10c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm12 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm-6 0c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z",
   search: "M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z",
   compare: "M9.01 14H2v2h7.01v3L13 15l-3.99-4v3zm5.98-1v-3H22V8h-7.01V5L11 9l3.99 4z",
+  copy: "M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z",
   close: "M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z",
   log: "M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z",
   toc: "M3 9h14V7H3v2zm0 4h14v-2H3v2zm0 4h14v-2H3v2zm16 0h2v-2h-2v2zm0-10v2h2V7h-2zm0 6h2v-2h-2v2z",
@@ -250,8 +343,33 @@ const PATHS: Record<string, string> = {
   bolt: "M11 21h-1l1-7H7.5c-.58 0-.57-.32-.38-.66.19-.34.05-.08.07-.12C8.48 10.94 10.42 7.54 13 3h1l-1 7h3.5c.49 0 .56.33.47.51l-.07.15C12.96 17.55 11 21 11 21z",
   tips: "M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7z",
 };
+/** A problem's Copy for an AI assistant button (`i`: its row's place in the list). */
+const copyBtn = (i: number) =>
+  html`<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
+
+/** An icon by name (PATHS), as an <svg>. */
 const icon = (name: string, size = 18) =>
-  `<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`;
+  html`<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`.firstElementChild!;
+
+/** The zoom panel prefs keep: "fit", "page", or a scale from 0.25 to 8 as a string. Anything else
+ * (NaN, Infinity, a number out of range, a word no menu has) is "fit": a zoom that is not a
+ * number made every page's scale NaN, the pages stretched bitmaps and every zoom NaN again, kept
+ * with the prefs from one load to the next. */
+/**
+ * A zoom gesture's factor `f` a frame later, `dt` ms on, toward `goal`: in log terms (a
+ * zoom in and out at the same pace), most of the way in 200 ms; there once within 0.3%.
+ */
+export function zoomToward(f: number, goal: number, dt: number): number {
+  if (!(f > 0) || !Number.isFinite(f)) return goal;
+  const k = 1 - Math.exp(-Math.max(0, Number.isFinite(dt) ? dt : 16) / 90);
+  return Math.abs(goal - f) / goal < 0.003 ? goal : f * Math.pow(goal / f, k);
+}
+
+export function zoomOf(z: unknown): string {
+  if (z === "fit" || z === "page") return z;
+  const n = typeof z === "number" ? z : typeof z === "string" && z.trim() ? Number(z) : NaN;
+  return Number.isFinite(n) ? String(Math.min(8, Math.max(0.25, n))) : "fit";
+}
 
 /** The zooms the menu offers: fit the width, the whole page, then percentages. */
 const ZOOMS: [string, string][] = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
@@ -263,13 +381,50 @@ const mb = (b?: number) => (b ? ` · ${b < 1048576 ? `${Math.max(1, Math.round(b
 /** A duration as it reads best: 0.7 ms, 42 ms, 2.6 s, 14 s. */
 const dur = (ms: number) => (ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)} s`);
 
+/** A time's parts as the popover draws them: a bar of them, and their names and times under it (`cycle`: colours used again past it). */
+const bars = (parts: [string, number][], cycle = Infinity) =>
+  html`<div class="tbar">${parts.map(([, ms], i) => html`<i class="c${i % cycle}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`)}</div><div class="legend">${parts.map(([n, ms], i) => html`<span><i class="c${i % cycle}"></i>${n} ${dur(ms)}</span>`)}</div>`;
+
+/** The timing popover's row for the last page drawn as strips (Strips' `data-frame`): its time, split, and its strips drawn and reused. */
+function framePart(json: string | undefined): DocumentFragment | "" {
+  if (!json) return "";
+  const f = JSON.parse(json) as { page: number; inView: boolean; drawn: number; kept: number; probe: number; draw: number; watch: number; request: number; decode: number };
+  const split: [string, number][] = [["finding what changed", f.probe], ["drawing", f.draw], ["waiting for the engine", Math.max(0, f.request - f.watch)], ["decoding", f.decode]];
+  return html`<div class="row"><span class="k">Drawing page ${f.page}${f.inView ? " (in view)" : ""}</span><span class="v">${dur(f.request + f.decode)}</span>${bars(split)}<span class="note">${f.drawn} slice${f.drawn === 1 ? "" : "s"} of the page drawn, ${f.kept} kept from before</span></div>`;
+}
+
+/** The last page drawn (Strips' `data-frame`) in words, for Copy debug info: framePart's numbers as a line. */
+function frameText(json: string): string {
+  const f = JSON.parse(json) as { page: number; inView: boolean; drawn: number; kept: number; probe: number; draw: number; watch: number; request: number; decode: number };
+  return (
+    `page ${f.page}${f.inView ? " (in view)" : ""} in ${dur(f.request + f.decode)}: finding what changed ${dur(f.probe)}, drawing ${dur(f.draw)}, ` +
+    `waiting for the engine ${dur(Math.max(0, f.request - f.watch))}, decoding ${dur(f.decode)}; ${f.drawn} slices drawn, ${f.kept} kept`
+  );
+}
+
 /** The session's names for a build's parts, as the popover says them. */
 const PART_NAMES: Record<string, string> = {
-  "first paint": "First page painted",
-  "fixed point": "All pages settled",
+  "first paint": "Typesetting this page",
+  "fixed point": "Typesetting every page",
   "keystroke→page": "Keystroke to page",
-  rebuilt: "Rebuilt",
+  rebuilt: "Parts redone",
   batching: "Edits batched",
+};
+
+/** What each of those says, for a writer (the session's own parenthesis is for PhiTeX's developers: the debug report has it). */
+const PART_NOTES: Record<string, string> = {
+  "first paint": "in the engine",
+  "fixed point": "the whole document, references and contents included",
+  rebuilt: "",
+  batching: "",
+};
+
+/** The session's names for a sum's parts ("queued 1.4 + round trip 1.0 + paint 0.7"), as the popover says them. */
+const SPLIT_NAMES: Record<string, string> = {
+  queued: "waiting",
+  "round trip": "engine",
+  paint: "drawing",
+  "build and paint": "building and drawing",
 };
 
 /**
@@ -288,52 +443,52 @@ function part(key: string, raw: string): { key: string; label: string; value: st
   rest = rest.slice(num[0].length).trim();
   let split: [string, number][] | undefined;
   if (rest.startsWith("=")) {
-    split = [...rest.slice(1).matchAll(/([a-z][a-z ]*?)\s+([\d.]+)/gi)].map((m): [string, number] => [m[1].trim(), Number(m[2])]);
+    split = [...rest.slice(1).matchAll(/([a-z][a-z ]*?)\s+([\d.]+)/gi)].map((m): [string, number] => [SPLIT_NAMES[m[1].trim()] ?? m[1].trim(), Number(m[2])]);
     rest = "";
   }
   const extra = rest.replace(/^·\s*/, "");
-  return { key, label, value: dur(ms), ms, split, note: [note, extra].filter(Boolean).join(" · ") || undefined };
+  return { key, label, value: dur(ms), ms, split, note: [key in PART_NOTES ? PART_NOTES[key] : note, extra].filter(Boolean).join(" · ") || undefined };
 }
 
-const lines = (...w: number[]) => w.map((x) => `<i style="width:${x}%"></i>`).join("");
+const lines = (...w: number[]) => w.map((x) => html`<i style="width:${x}%"></i>`);
 
 /**
  * Feature tips, each shown once (own-bar hosts): the control it points at,
  * its words, new or not, and a small looping demo of it (CSS only: .tip .demo
  * in print.ts; still, at its end state, with reduced motion).
  */
-const TIPS: { id: string; at: string; title: string; text: string; demo: string; fresh?: boolean }[] = [
+const TIPS: { id: string; at: string; title: string; text: string; demo: () => DocumentFragment; fresh?: boolean }[] = [
   {
     id: "live", at: "#st", title: "Typeset as you type",
     text: "No compile button: change the source and only what you touched is typeset again. The page follows in milliseconds.",
     // (a heading typed in the editor, the page's heading following it letter by letter, the time it took)
-    demo: `<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon("bolt", 11)}12 ms</span></div>`,
+    demo: () => html`<div class="demo live" aria-hidden="true"><div class="ed"><span class="k">\\section{</span><span class="ty">Results</span><span class="car"></span><span class="k">}</span><i style="width:80%"></i><i style="width:60%"></i></div><div class="pg"><b>1&nbsp;&nbsp;<span class="ty">Results</span></b>${lines(95, 90, 70)}</div><span class="ms">${icon("bolt", 11)}12 ms</span></div>`,
   },
   {
     id: "compare", at: "#b-compare", title: "Compare versions", fresh: true,
     text: "See what changed since an earlier version, marked as latexdiff marks it: additions in blue, deletions struck out.",
     // (a sentence changes, then the change marked, then the navigator; Overleaf's compare tip had it first)
-    demo: `<div class="demo cmp" aria-hidden="true">The results are <span class="del">good</span><span class="add">&nbsp;excellent</span>.<span class="ver"><i class="v0">Submitted v1</i><i class="v1">Now vs Submitted v1</i></span><span class="tag">‹ 1 / 1 ›</span></div>`,
+    demo: () => html`<div class="demo cmp" aria-hidden="true">The results are <span class="del">good</span><span class="add">&nbsp;excellent</span>.<span class="ver"><i class="v0">Submitted v1</i><i class="v1">Now vs Submitted v1</i></span><span class="tag">‹ 1 / 1 ›</span></div>`,
   },
   {
     id: "timing", at: "#st", title: "How long it took",
     text: "Click the status for the last build's times and how long a keystroke takes to reach the page.",
-    demo: `<div class="demo tim" aria-hidden="true"><div class="mbar"><span class="mst">Built · 42 ms</span></div><div class="mpop"><b>Keystroke to page</b><p><span>edit</span><i style="--w:30%"></i><em>11 ms</em></p><p><span>typeset</span><i style="--w:55%"></i><em>25 ms</em></p><p><span>paint</span><i style="--w:18%"></i><em>6 ms</em></p></div></div>`,
+    demo: () => html`<div class="demo tim" aria-hidden="true"><div class="mbar"><span class="mst">Built · 42 ms</span></div><div class="mpop"><b>Keystroke to page</b><p><span>edit</span><i style="--w:30%"></i><em>11 ms</em></p><p><span>typeset</span><i style="--w:55%"></i><em>25 ms</em></p><p><span>paint</span><i style="--w:18%"></i><em>6 ms</em></p></div></div>`,
   },
   {
     id: "rebuild", at: "#b-rec", title: "Clean rebuild",
     text: "Builds run by themselves as you type. Start over from a clean slate here, or clear what PhiTeX keeps.",
-    demo: `<div class="demo reb" aria-hidden="true"><div class="mbar"><span class="msplit"><span class="go">${icon("refresh", 12)}Rebuild</span><span class="dd">${icon("expand_more", 12)}</span></span></div><div class="mmenu"><span>Rebuild</span><span class="pick">Clean rebuild</span></div><div class="pg">${lines(60, 95, 90, 70, 92, 50)}</div></div>`,
+    demo: () => html`<div class="demo reb" aria-hidden="true"><div class="mbar"><span class="msplit"><span class="go">${icon("refresh", 12)}Rebuild</span><span class="dd">${icon("expand_more", 12)}</span></span></div><div class="mmenu"><span>Rebuild</span><span class="pick">Clean rebuild</span></div><div class="pg">${lines(60, 95, 90, 70, 92, 50)}</div></div>`,
   },
   {
     id: "more", at: "#b-more", title: "Dark PDF and more",
     text: "The pages in dark mode, the log, the contents and the keys are in this menu.",
-    demo: `<div class="demo drk" aria-hidden="true"><div class="mbar"><span class="dots">${icon("more_horiz", 14)}</span></div><div class="mmenu"><span class="pick">${icon("dark", 11)}Dark PDF<b>✓</b></span><span>View log</span></div><div class="pg">${lines(55, 95, 88, 92, 60, 85)}</div></div>`,
+    demo: () => html`<div class="demo drk" aria-hidden="true"><div class="mbar"><span class="dots">${icon("more_horiz", 14)}</span></div><div class="mmenu"><span class="pick">${icon("dark", 11)}Dark PDF<b>✓</b></span><span>View log</span></div><div class="pg">${lines(55, 95, 88, 92, 60, 85)}</div></div>`,
   },
   {
     id: "contents", at: "#b-side", title: "Contents", fresh: true,
     text: "The document's sections beside the pages: click one to go there. This button (or t) shows or hides them.",
-    demo: `<div class="demo toc" aria-hidden="true"><div class="col"><span>1 Introduction</span><span>2 Method</span><span>3 Results</span><i class="at"></i></div><div class="pg"><div class="roll">${lines(45, 95, 90, 70)}<s></s>${lines(40, 92, 85, 60)}<s></s>${lines(42, 90, 94, 75)}</div></div></div>`,
+    demo: () => html`<div class="demo toc" aria-hidden="true"><div class="col"><span>1 Introduction</span><span>2 Method</span><span>3 Results</span><i class="at"></i></div><div class="pg"><div class="roll">${lines(45, 95, 90, 70)}<s></s>${lines(40, 92, 85, 60)}<s></s>${lines(42, 90, 94, 75)}</div></div></div>`,
   },
 ];
 
@@ -346,6 +501,12 @@ export class Panel {
   private store?: Prefs;
   private at = 0;
   private last: PageImage | null = null;
+  /** A page drawn in this page's life: the engine is up, a rebuild's opening starts past loading it. */
+  private drewOnce = false;
+  /** The step an opening says first: the one now, else loading the engine (or, once it ran here, the packages). */
+  private firstStep(): string {
+    return this.stepNow || this.words.steps[this.drewOnce ? 1 : 0];
+  }
   private url: string | null = null;
   private lastStatus: Status | null = null;
   private listeners: ((s: ViewState) => void)[] = [];
@@ -372,9 +533,10 @@ export class Panel {
     const host = document.createElement("phitex-preview");
     this.root = host.attachShadow({ mode: "open" });
     const item = (id: string, name: string, label: string, sub = "", cls = "") =>
-      `<button type="button" role="menuitem" id="${id}"${cls ? ` class="${cls}"` : ""}>${name ? `<span class="icon">${name}</span>` : '<span class="check"></span>'}<span>${label}</span>${sub ? `<span class="sub">${sub}</span>` : ""}</button>`;
-    this.root.innerHTML = (`<style>${VIEWER_CSS}${PROBLEMS_CSS}${OUTLINE_CSS}${PRINT_CSS}</style>
-<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
+      html`<button type="button" role="menuitem" id="${id}" class="${cls || null}">${name ? html`<span class="icon">${name}</span>` : html`<span class="check"></span>`}<span>${label}</span>${sub ? html`<span class="sub">${sub}</span>` : ""}</button>`;
+    const style = document.createElement("style");
+    style.textContent = VIEWER_CSS + PROBLEMS_CSS + OUTLINE_CSS + PRINT_CSS;
+    const skeleton = html`<div class="win ${this.kind}" role="dialog" aria-label="PhiTeX preview">
   <header><span>PhiTeX</span><span class="grow"></span><button class="ib" id="min" title="Collapse (Alt+Shift+P)" aria-label="Collapse"><span class="icon">close_fullscreen</span></button></header>
   <div class="bar" role="toolbar" aria-label="PhiTeX">
     <button type="button" class="ib" id="b-side" title="Contents (t)" aria-label="Contents" aria-pressed="false"><span class="icon">toc</span></button>
@@ -391,14 +553,14 @@ export class Panel {
     <button type="button" class="ib" id="b-more" aria-haspopup="menu" aria-expanded="false" title="More" aria-label="More"><span class="icon">more_horiz</span></button>
     <span class="progress" id="prog"></span>
     <div class="menu" id="m-rec" role="menu" hidden style="left:6px;top:calc(100% + 4px)">
-      ${item("r-rebuild", "", "Rebuild")}
-      <button type="button" role="menuitem" id="r-clean"><span class="check"></span><span>Clean rebuild<span class="desc">Start over: the project read again, built from the start</span></span></button>
+      <button type="button" role="menuitem" id="r-rebuild"><span class="check"></span><span>Rebuild<span class="desc">Build again with the files as they are</span></span></button>
+      <hr><button type="button" role="menuitem" id="r-clean"><span class="check"></span><span>Clean rebuild<span class="desc">Start over: the project read again, built from the start</span></span></button>
       <hr class="if-compare"><button type="button" role="menuitem" id="r-compare" class="if-compare"><span class="check"></span><span>Compare with an earlier version…<span class="desc">latexdiff against a saved version</span></span></button>
       <hr class="if-cache"><button type="button" role="menuitem" id="r-cache" class="if-cache"><span class="check"></span><span>Clear cache…<span class="desc">The packages and formats PhiTeX keeps</span></span></button>
     </div>
     <div class="menu timing" id="m-time" role="dialog" aria-label="Timing" hidden style="left:6px;top:calc(100% + 4px)"></div>
     <div class="menu" id="m-zoom" role="menu" hidden style="right:60px;top:calc(100% + 4px);min-width:170px">
-      ${ZOOMS.map(([z, t], i) => `${i === 2 ? "<hr>" : ""}<button type="button" role="menuitemradio" data-zoom="${z}"><span class="check"></span>${t}</button>`).join("")}
+      ${ZOOMS.map(([z, t], i) => [i === 2 ? html`<hr>` : "", html`<button type="button" role="menuitemradio" data-zoom="${z}"><span class="check"></span>${t}</button>`])}
     </div>
     <div class="menu" id="m-more" role="menu" hidden style="right:6px;top:calc(100% + 4px);min-width:250px">
       ${item("x-pdf", "download", "Download PDF")}
@@ -407,13 +569,7 @@ export class Panel {
       ${item("x-find", "search", "Find", "Ctrl+F", "narrow")}
       ${item("x-compare", "compare", "Compare…", "", "narrow")}
       <hr>
-      <div class="mi"><span class="icon">dark</span>Dark PDF</div>
-      <div class="radios" id="darkpdf" role="group" aria-label="Dark PDF"><button type="button" data-dark="off">Off</button><button type="button" data-dark="on">On</button><button type="button" data-dark="theme">Match theme</button></div>
-      <div class="mi"><span class="icon">tips</span>Loading animation</div>
-      <div class="radios" id="openlook" role="group" aria-label="Loading animation"><button type="button" data-look="phitex">PhiTeX</button><button type="button" data-look="retro">Windows 98</button><button type="button" data-look="off">Off</button></div>
-      <button type="button" role="menuitemcheckbox" id="x-culprits" aria-checked="true"><span class="check">✓</span><span>Underline problems<span class="desc">A wavy line under what each error and warning is about</span></span></button>
-      <button type="button" role="menuitemcheckbox" id="dbg" aria-checked="false"><span class="check"></span><span>Debug check<span class="desc">Compare with a fresh build every 5 s</span></span></button>
-      <hr>
+      ${item("x-settings", "tips", "Settings…")}
       ${item("x-tips", "tips", "What's new")}
       ${item("x-keys", "keyboard", "Keyboard shortcuts", "?")}
       ${item("x-about", "info", "About PhiTeX")}
@@ -423,19 +579,14 @@ export class Panel {
   <div class="diffbar" id="diffbar" role="toolbar" aria-label="Diff"></div>
   <div class="body">
     <nav class="side" id="side" aria-label="Contents"></nav>
-    <div class="stage" id="stage"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div class="speedchip" id="speedchip" hidden aria-live="off" title="From the keystroke to the page on screen; under it, the last page's strips: drawn and kept, the core's watch (probe, draw), fetch and compose"><b id="speedms"></b><span id="stripsline"></span></div>
-    <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div></div></div>
+    <div class="stagebox"><div class="stage" id="stage"><div class="empty" id="empty" hidden></div><div class="viewer" id="viewer"></div></div><div class="strips" id="strips"><div class="strip gone" id="gone" role="alert"><span class="why" id="gonewhy"></span><button type="button" class="x" id="gonex" title="Dismiss: keep viewing these pages (Esc)" aria-label="Dismiss">✕</button></div><div class="strip approx" id="approx"></div><div class="strip banner" id="banner"></div></div></div><div class="smarks" id="smarks" aria-hidden="true"></div><div class="ctip" id="ctip" role="tooltip" hidden></div><div id="speedchip" hidden><b id="speedms"></b><span id="stripsline"></span></div>
+    <div class="opening" id="opening" hidden><div class="sheet"></div><div class="steps" aria-live="polite"><div class="what"></div><div class="track unknown"><i></i></div><div class="detail"></div><div class="hint" id="hint" hidden></div></div></div>
     <div class="menu diffset" id="diffset" role="dialog" aria-label="Diff style"></div>
     <div class="menu logs" id="logs" role="dialog" aria-label="Problems" hidden><header><span id="logshead">Problems</span><span class="grow"></span><button type="button" class="ib" id="logsx" title="Close (Esc)" aria-label="Close"><span class="icon">close</span></button></header><div class="diags" id="diags" role="list"></div></div>
-    <div class="menu sheet-pop" id="sheet" role="dialog" aria-label="PhiTeX settings" hidden>
-      <label>Main file <select id="main" title="The file PhiTeX typesets"></select></label>
-      <label id="dbglabel">Debug check <input type="checkbox" id="dbg2"></label>
-      <div class="links"><button type="button" id="reload">Reload the files</button><button type="button" id="tour">Take the tour</button><button type="button" id="news">What's new</button></div>
-      <pre class="details" id="details"></pre>
-    </div>
+    <div class="dialog settings" id="settings" role="dialog" aria-label="Settings" hidden></div>
     <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
     <div class="dialog keys" id="keyhelp" role="dialog" aria-label="Keys" hidden></div>
-    <div class="dialog small about" id="about" role="dialog" aria-label="About the PhiTeX preview" hidden><header>About PhiTeX<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><div>${w.about}</div></div>
+    <div class="dialog small about" id="about" role="dialog" aria-label="About the PhiTeX preview" hidden><header>About PhiTeX<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><div>${typeof w.about === "string" ? rich(w.about) : w.about.cloneNode(true)}</div></div>
     <div class="dialog" id="logview" role="dialog" aria-label="The build's log" hidden><header>The last build's log<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close"><span class="icon">close</span></button></header><pre id="logtext"></pre></div>
     <div class="dialog" id="report" role="dialog" aria-label="Debug report" hidden>
       <header>Debug report</header>
@@ -446,7 +597,11 @@ export class Panel {
     <div class="offpill" id="offpill">Disconnected</div>
     <button type="button" class="byline" id="byline" title="About this preview">${w.byline}</button>
   </div>
-</div>`).replace(/<span class="icon"(?: aria-hidden="true")?>(\w+)<\/span>/g, (_, n) => icon(n, n === "expand_more" || n === "refresh" ? 16 : 18));
+</div>`;
+    // (the icons by name, <span class="icon">refresh</span>: inline SVG, no dependency on the page's icon font)
+    for (const ic of skeleton.querySelectorAll<HTMLElement>("span.icon"))
+      if (ic.className === "icon" && /^\w+$/.test(ic.textContent ?? "")) ic.replaceWith(icon(ic.textContent!, ic.textContent === "expand_more" || ic.textContent === "refresh" ? 16 : 18));
+    this.root.replaceChildren(style, skeleton);
     this.host = host;
     // (hidden until the host docks it, or decides it floats: no flash of a window on load)
     host.style.display = "none";
@@ -460,10 +615,6 @@ export class Panel {
     offer("#x-contents, #b-side", !!opts.outline);
     offer("#x-keys", !!opts.keys);
     offer("#b-find, #x-find", !!ev.onFind);
-    offer("#dbg, #dbglabel", !!ev.onDebug);
-    offer("#x-culprits", !!ev.onBoxes);
-    offer("#tour", !!ev.onTour);
-    offer("#news", !!ev.onNews);
     // (the menus: one open at a time, closed by a click elsewhere or Esc)
     const menus: [string, string][] = [["#b-rec", "#m-rec"], ["#st", "#m-time"], ["#b-zoom", "#m-zoom"], ["#b-more", "#m-more"], ["#b-probs", "#logs"]];
     this.menus = menus;
@@ -487,7 +638,10 @@ export class Panel {
     this.$("#x-log").onclick = () => (this.menu(null), void this.showLog());
     this.$("#x-contents").onclick = this.$("#b-side").onclick = () => (this.menu(null), this.side());
     this.$("#x-find").onclick = this.$("#b-find").onclick = () => (this.menu(null), this.find(true));
-    this.$("#x-tips").onclick = () => (this.menu(null), this.tips("fresh"));
+    // (What's new: the host's news where it has some (the watch: this version's
+    // CHANGELOG entry), the new features' tips under it; else the tips)
+    this.$("#x-tips").onclick = () => (this.menu(null), ev.onNews ? ev.onNews() : this.tips("fresh"));
+    this.$("#x-settings").onclick = () => (this.menu(null), void this.settings(true));
     this.$("#x-keys").onclick = () => {
       this.menu(null);
       this.$("#keyhelp").hidden = false;
@@ -501,15 +655,6 @@ export class Panel {
       const z = (e.target as HTMLElement).closest<HTMLElement>("[data-zoom]")?.dataset.zoom;
       if (z) (this.menu(null), this.zoomTo(z));
     };
-    this.$("#darkpdf").onclick = (e) => {
-      const d = (e.target as HTMLElement).closest<HTMLElement>("[data-dark]")?.dataset.dark;
-      if (d) this.darkPdf(d as DarkPdf);
-    };
-    this.$("#openlook").onclick = (e) => {
-      const l = (e.target as HTMLElement).closest<HTMLElement>("[data-look]")?.dataset.look;
-      if (l) this.openingLook(l as OpeningLook);
-    };
-    this.openingLook(this.openingLook());
     this.$("#logsx").onclick = () => this.diagnostics(false);
     const pg = this.$<HTMLInputElement>("#pgin");
     pg.onfocus = () => pg.select();
@@ -520,31 +665,18 @@ export class Panel {
       pg.blur();
     };
     pg.onblur = () => this.nav();
-    this.$("#dbg").onclick = () => this.toggleDebug();
-    this.$("#x-culprits").onclick = () => this.culpritsShown(!this.culpritsOn);
-    try {
-      this.culpritsOn = localStorage.getItem("phitex.culprits") !== "0";
-    } catch {
-      /* (shown) */
-    }
-    this.culpritsShown(this.culpritsOn, false);
     this.$("#stage").addEventListener("pointermove", (e) => this.culpritAt(e), { passive: true });
-    this.$("#stage").addEventListener("pointerleave", () => (this.$("#ctip").hidden = true));
-    this.$("#dbg2").onchange = () => this.toggleDebug();
-    this.$("#reload").onclick = () => (this.sheet(false), ev.onReload());
+    this.$("#stage").addEventListener("pointerleave", () => ((this.$("#ctip").hidden = true), this.$("#stage").classList.remove("onculprit")));
+    this.$("#stage").addEventListener("click", (e) => void this.culpritClicked(e));
     const license = this.$("#license") as HTMLAnchorElement | null;
     if (license) license.href = opts.fileUrl?.(w.license) ?? w.license;
-    this.$("#news").onclick = () => {
-      this.sheet(false);
-      ev.onNews?.();
-    };
-    this.$("#tour").onclick = () => {
-      this.sheet(false);
-      ev.onTour?.();
-    };
-    this.$<HTMLSelectElement>("#main").onchange = (e) => ev.onMain((e.target as HTMLSelectElement).value);
+    this.$("#settings").onclick = (e) => void this.settingClicked(e);
+    this.$("#settings").onchange = (e) => void this.settingClicked(e);
     this.$("#min").onclick = () => this.collapse(!this.prefs.collapsed);
     this.$("#diags").onclick = (e) => {
+      // (a problem's Copy for an AI assistant)
+      const copy = (e.target as HTMLElement).closest<HTMLElement>(".copyai");
+      if (copy) return void this.copyForAi(this.listed[Number(copy.dataset.i)]);
       // (a problem card's place)
       const at = (e.target as HTMLElement).closest<HTMLElement>(".phx-place[data-file]");
       if (at) {
@@ -552,12 +684,16 @@ export class Panel {
         return ev.onGoto(at.dataset.file!, Number(at.dataset.line) || 1);
       }
       const d = (e.target as HTMLElement).closest<HTMLElement>(".diag[data-line]");
-      if (d) ev.onGoto(d.dataset.file!, Number(d.dataset.line));
+      if (d) return ev.onGoto(d.dataset.file!, Number(d.dataset.line));
+      const card = (e.target as HTMLElement).closest<HTMLElement>(".phx-card[data-key]");
+      const place = card && this.culpritPlaces.get(card.dataset.key!);
+      if (place) this.viewer.mark(place.k, [place.box]);
+      else if (card) this.msg("Not on the pages (no text of it was typeset)", false, true);
     };
     this.$("#stage").addEventListener("pointerdown", () => {
       this.menu(null);
       this.diagnostics(false);
-      this.sheet(false);
+      this.settings(false);
       this.$("#about").hidden = true;
     });
     this.root.addEventListener("keydown", (e) => {
@@ -565,7 +701,7 @@ export class Panel {
       const open = this.root.querySelector<HTMLElement>(".dialog:not([hidden])");
       if (open) open.hidden = true;
       else if (this.menus.some(([, m]) => !this.$(m).hidden)) this.menu(null);
-      else this.escapeProblems();
+      else if (!this.escapeProblems()) this.unmark();
     });
     this.$("#gonex").onclick = () => this.dismissOffline();
     addEventListener("keydown", (e) => e.key === "Escape" && this.$("#stage").classList.contains("offline") && this.dismissOffline());
@@ -589,18 +725,27 @@ export class Panel {
       scale: () => this.scale(),
       box: (d, w) => pageBox(d, w),
       dbl: (k, x, y) => ev.onSyncSource?.(k, x, y),
+      peer: ev.onGotoRange ? (file, pos) => ev.onGotoRange!(file, pos, pos, true) : undefined,
       selected: (sel) => ev.onSelectPage?.(sel),
       link: ev.onLink ? (u) => ev.onLink!(u) : undefined,
+      // (only where the host has a source lookup: else the viewer reads the citation from the pages)
+      cited: ev.onCited ? (from, to, top) => ev.onCited!(from, to, top) : undefined,
+      // (the engine's reading of a citation: the session's, given by it (citesBy); none yet, the pages')
+      cites: (k, x, y) => this.citesAsk?.(k, x, y) ?? Promise.resolve(null),
+      openAt: ev.onOpenAt ? (k, top) => ev.onOpenAt!(k, top) : undefined,
+      // (Back by the mouse's back button and Alt+←: the tab's history in a browser tab (the watch, the demo),
+      // the button's events in VS Code's webview; Overleaf's are the browser's, they leave the project)
+      backWith: this.kind === "watch" ? "history" : this.kind === "vscode" ? "buttons" : undefined,
     });
     this.extras(opts);
-    this.darkPdf(this.darkPref(), false);
+    this.darkPdf("off");
     // (keep it on screen when the window shrinks)
     window.addEventListener("resize", () => this.place());
     // (the stage's size as last laid out, for scale(): read when it changes,
     // not on every call, where after a page's writes it laid the view out
     // again; observed before the window's, whose redraw reads it)
     const stage = this.$("#stage");
-    new ResizeObserver(() => (this.stageSize = { w: stage.clientWidth, h: stage.clientHeight })).observe(stage);
+    new ResizeObserver(() => ((this.stageSize = { w: stage.clientWidth, h: stage.clientHeight }), this.drawScrollMarks())).observe(stage);
     new ResizeObserver(() => {
       this.fitSheet();
       if (this.docked) return this.prefs.zoom === "fit" || this.zoomNow ? this.redraw() : undefined;
@@ -620,9 +765,12 @@ export class Panel {
     this.renderStatus();
     store?.load().then((p) => {
       this.prefs = { ...DEFAULTS, ...p };
+      // (a zoom kept that is no zoom: Fit, and kept so)
+      if (this.prefs.zoom !== zoomOf(this.prefs.zoom)) (this.prefs.zoom = zoomOf(this.prefs.zoom)), this.save();
       // (a size saved while hidden, by an older version)
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
+      this.linksShown();
     });
   }
 
@@ -662,8 +810,9 @@ export class Panel {
     this.loadDone = -1;
     // (its first page is a first build's, "First build · 5.4 s", not a keystroke's)
     this.paints = 0;
+    this.walk = null;
     this.opened = false;
-    this.sheetUp();
+    this.sheetUp(true);
     // (the last build's pages hidden under it until the dive: the new page shows through the hole)
     this.win.classList.toggle("reopening", !!this.anim);
   }
@@ -678,6 +827,7 @@ export class Panel {
     this.last = null;
     this.lastStatus = null;
     this.speed = undefined;
+    this.built = undefined;
     this.at = 0;
     clearTimeout(this.staleTimer);
     this.staleSince = 0;
@@ -747,8 +897,11 @@ export class Panel {
     this.wasShown = on;
     this.host.style.display = display;
     if (on && !was) this.redraw();
-    // (shown with no page yet: the first page's sheet, the opening on it)
-    if (on && !this.last) this.step(this.stepNow || this.words.steps[0], undefined, "");
+    // (shown with no page yet: the first step said (the status), the sheet not put up: that
+    // waits for a build's own step (the host reading the files, packages fetched, its
+    // phases, typesetting). Put up here, it played while the panel connected to a document
+    // already built (the watch's last build), the pages a moment away)
+    if (on && !this.last) this.step(this.firstStep(), undefined, "", false);
   }
   private wasShown?: boolean;
 
@@ -774,7 +927,7 @@ export class Panel {
     this.win.classList.toggle("collapsed", on);
     const b = this.$("#min");
     b.title = on ? "Expand (Alt+Shift+P)" : "Collapse (Alt+Shift+P)";
-    b.innerHTML = icon(on ? "open_in_full" : "close_fullscreen");
+    b.replaceChildren(icon(on ? "open_in_full" : "close_fullscreen"));
     this.win.style.width = on ? "" : `${this.prefs.w}px`;
     this.win.style.height = on ? "" : `${this.prefs.h}px`;
     if (!on) this.redraw();
@@ -878,9 +1031,9 @@ export class Panel {
     else if (!this.last && this.viewer.pages === 0 && !this.$("#empty").hidden) (t = errs ? `Stopped with ${errs} error${errs === 1 ? "" : "s"}` : "No page yet"), (err = !!errs);
     // (an opening up, a rebuild's too: its step, not the last build's status)
     else if (this.reopen || (!this.last && this.viewer.pages === 0)) t = this.stepNow || "Opening…";
-    else if (errs) (t = `Built with ${errs} error${errs === 1 ? "" : "s"}`), (err = true);
-    else if (this.speed?.first) (t = "First build"), (m = this.speed.ms < 1000 ? `${Math.round(this.speed.ms)} ms` : `${(this.speed.ms / 1000).toFixed(this.speed.ms < 10000 ? 1 : 0)} s`);
-    else (t = "Built"), (m = this.speed ? `${this.speed.ms < 10 ? this.speed.ms.toFixed(1) : Math.round(this.speed.ms)} ms` : "");
+    // (the time, errors or not: "Built with 2 errors · 42 ms")
+    else if (errs) (t = `Built with ${errs} error${errs === 1 ? "" : "s"}`), (m = this.latest() ? dur(this.latest()!.ms) : ""), (err = true);
+    else (t = this.latest()?.label ?? "Built"), (m = this.latest() ? dur(this.latest()!.ms) : "");
     text.textContent = t;
     more.textContent = m ? `· ${m}` : "";
     const was = this.statusNow;
@@ -958,6 +1111,7 @@ export class Panel {
     this.approx = !!e.approx;
     const a = this.$("#approx");
     a.classList.toggle("on", this.approx);
+    this.placeStrips();
     a.textContent = `Approximate: needs ${ENGINES[e.engine].label}, shown with pdfLaTeX (fonts substituted, breaks may differ). ${this.words.realPdf}`;
     if (!e.ready) this.stopped();
     else if (this.$("#empty").querySelector(".engine")) this.$("#empty").hidden = true;
@@ -1002,7 +1156,7 @@ export class Panel {
   /** Whether they are (the ⋯ menu's Underline problems, remembered on this machine); the last status's problems, and those drawn (by data-i). */
   private culpritsOn = true;
   private culpritDiags: Diagnostic[] = [];
-  private culpritsDrawn: { severity: "error" | "warning"; message: string }[] = [];
+  private culpritsDrawn: { file: string; range: [number, number]; severity: "error" | "warning"; message: string; line: number | null; excerpt: Problem["excerpt"] }[] = [];
   /** What the underlines drawn (or being looked up) are of: the problems and the pages' hashes. A build's every status repeats them. */
   private culpritsOf = "";
   /** The pages' hashes as last laid out. */
@@ -1010,63 +1164,148 @@ export class Panel {
   private async underline(diags: Diagnostic[]): Promise<void> {
     if (!this.ev.onBoxes) return;
     this.culpritDiags = diags;
-    if (!this.culpritsOn) return void (++this.culpritsSeq, (this.culpritsOf = ""), this.viewer.culprits([]), (this.$("#ctip").hidden = true));
+    // (off: nothing of them on the pages, neither the lines nor their marks beside the scrollbar)
+    if (!this.culpritsOn) return void (++this.culpritsSeq, (this.culpritsOf = ""), this.viewer.culprits([]), (this.$("#ctip").hidden = true), (this.problemMarks = []), this.drawScrollMarks());
     const want = diags
       .filter((d): d is Diagnostic & { problem: { severity: string; file: string; range: [number, number] } } => !!d.problem?.file && !!d.problem.range && d.problem.severity !== "note")
-      .map((d) => ({ file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? ("warning" as const) : ("error" as const), message: d.message }))
+      .filter((d) => !this.hiddenKinds.has(kindOf(d)))
+      .map((d) => {
+        const k = kindOf(d);
+        const amount = Number(/\(([\d.]+)pt too (?:wide|high)\)/.exec(d.message)?.[1]) || undefined;
+        return { file: d.problem.file, range: d.problem.range, severity: d.problem.severity === "warning" ? ("warning" as const) : ("error" as const), message: d.message, rule: k === "overfull" || k === "underfull" ? k : undefined, amount, line: d.problem.line ?? d.line ?? null, excerpt: d.problem.excerpt ?? null };
+      })
       .sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1))
       .slice(0, 20);
     // (the same problems on the same pages: the same boxes, drawn already)
-    const of = JSON.stringify([want, this.pageHashes]);
+    const of = JSON.stringify([want, this.pageHashes, [...this.hiddenKinds]]);
     if (of === this.culpritsOf) return;
     this.culpritsOf = of;
     const seq = ++this.culpritsSeq;
-    const found = await Promise.all(want.map((w, i) => this.ev.onBoxes!(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i })), () => [])));
+    const found = await Promise.all(want.map((w, i) => this.ev.onBoxes!(w.file, w.range[0], w.range[1]).then((hits) => hits.map((h) => ({ ...h, severity: w.severity, i, rule: w.rule, amount: w.amount })), () => [])));
     // (a newer status came while these were looked up: its own call draws them)
     if (seq !== this.culpritsSeq) return;
     this.culpritsDrawn = want;
     this.viewer.culprits(found.flat());
+    // (each problem's place on the pages, for its card's link and the scrollbar)
+    this.culpritPlaces = new Map(want.map((w, i) => [`${w.file}\0${w.range[0]}`, found[i][0] ? { k: found[i][0].k, box: found[i][0].boxes[0] } : null]));
+    this.problemMarks = want.flatMap((w, i) => (found[i][0]?.boxes[0] ? [{ k: found[i][0].k, y: found[i][0].boxes[0][1], cls: w.severity, title: w.message, p: w, box: found[i][0].boxes[0] }] : []));
+    this.drawScrollMarks();
   }
 
-  /** The underlines on or off (`keep`: remembered). */
-  private culpritsShown(on: boolean, keep = true): void {
-    this.culpritsOn = on;
-    const b = this.$("#x-culprits");
-    b.setAttribute("aria-checked", String(on));
-    b.querySelector(".check")!.textContent = on ? "✓" : "";
-    if (keep) {
-      try {
-        localStorage.setItem("phitex.culprits", on ? "1" : "0");
-      } catch {
-        /* (not remembered) */
-      }
-      void this.underline(this.culpritDiags);
-    }
+  /** Each problem's first place on the pages, by its file and byte (a card's "on the page"). */
+  private culpritPlaces = new Map<string, { k: number; box: [number, number, number, number] } | null>();
+  /** The scrollbar's marks: the problems' places, and the diff's changes (diffMarks). */
+  private problemMarks: ScrollMark[] = [];
+  private changeMarks: ScrollMark[] = [];
+
+  /** The diff's changes' places (page from 0, height in PDF points), marked along the scrollbar; none: gone. */
+  diffMarks(changes: { k: number; y: number; title: string }[]): void {
+    this.changeMarks = changes.map((c) => ({ ...c, cls: "change" }));
+    this.drawScrollMarks();
   }
 
-  /** The pointer over an underline: its problem's message, under it. */
-  private culpritAt(e: PointerEvent): void {
+  /**
+   * The marks along the pages' scrollbar, each where its place is in the
+   * whole scroll: hovered, what it is (a problem: the underline's tip, its
+   * line and file:line; a change: its title) beside it; clicked, the pages
+   * there, a problem's place flashed.
+   */
+  private drawScrollMarks(): void {
+    const el = this.$("#smarks");
+    const marks = [...this.problemMarks, ...this.changeMarks];
+    el.replaceChildren();
+    el.hidden = !marks.length;
+    if (!marks.length) return;
+    const fr = this.viewer.fractions(marks);
+    marks.forEach((m, i) => {
+      if (fr[i] < 0) return;
+      const t = document.createElement("i");
+      t.className = m.cls;
+      t.setAttribute("aria-label", m.title);
+      t.style.top = `${(fr[i] * 100).toFixed(3)}%`;
+      t.onmouseenter = () => this.markTip(t, m);
+      t.onmouseleave = () => (this.$("#ctip").hidden = true);
+      t.onclick = () => {
+        this.$("#ctip").hidden = true;
+        this.viewer.scrollToPlace(m.k, m.y);
+        if (m.box) this.viewer.mark(m.k, [m.box], false);
+      };
+      el.append(t);
+    });
+  }
+
+  /** A scrollbar mark's tip, left of the mark, at its height. */
+  private markTip(t: HTMLElement, m: ScrollMark): void {
     const tip = this.$("#ctip");
-    if (!this.culpritsDrawn.length || e.buttons) return void (tip.hidden = true);
-    // (a few pixels round the line: it is thin)
-    const hit = [...this.root.querySelectorAll<HTMLElement>(".slot .culprit")].find((m) => {
+    tip.dataset.i = "";
+    tip.className = `ctip ${m.p?.severity ?? "change"}`;
+    if (m.p) tip.replaceChildren(icon(m.p.severity, 14), culpritTip(m.p, "click to see it on the page"));
+    else tip.replaceChildren(html`<div class="txt"><div>${m.title}</div></div>`);
+    tip.hidden = false;
+    const body = this.$(".body").getBoundingClientRect(), r = t.getBoundingClientRect();
+    tip.style.left = `${Math.max(8, r.left - body.left - tip.offsetWidth - 10)}px`;
+    tip.style.top = `${Math.max(8, Math.min(body.height - tip.offsetHeight - 8, r.top - body.top - tip.offsetHeight / 2))}px`;
+  }
+
+  /** The underlines on or off. */
+  private culpritsShown(on: boolean): void {
+    this.culpritsOn = on;
+    void this.underline(this.culpritDiags);
+  }
+
+  /** The pages' origins came after the problems did: their underlines looked up again (the memo held an answer with no pages). */
+  origins(): void {
+    this.culpritsOf = "";
+    void this.underline(this.culpritDiags);
+  }
+
+  /** The underline under the pointer (a few pixels round it: the line is thin), and its problem. */
+  private culpritHit(e: MouseEvent): { el: HTMLElement; p: Panel["culpritsDrawn"][number] } | null {
+    if (!this.culpritsDrawn.length) return null;
+    const el = [...this.root.querySelectorAll<HTMLElement>(".slot .culprit")].find((m) => {
       const r = m.getBoundingClientRect();
       return e.clientX >= r.left - 2 && e.clientX <= r.right + 2 && e.clientY >= r.top - 2 && e.clientY <= r.bottom + 5;
     });
-    const p = hit && this.culpritsDrawn[Number(hit.dataset.i)];
-    if (!hit || !p) return void (tip.hidden = true);
-    if (tip.hidden || tip.dataset.i !== hit.dataset.i) {
-      tip.dataset.i = hit.dataset.i;
+    const p = el && this.culpritsDrawn[Number(el.dataset.i)];
+    return el && p ? { el, p } : null;
+  }
+
+  /**
+   * The pointer over an underline: its problem under it, what it is about
+   * (an undefined command's name, the message alone does not say it), its
+   * line as TeX read it, the culprit marked, and where (file:line); a click
+   * goes there.
+   */
+  private culpritAt(e: PointerEvent): void {
+    const tip = this.$("#ctip");
+    const hit = e.buttons ? null : this.culpritHit(e);
+    this.$("#stage").classList.toggle("onculprit", !!hit);
+    if (!hit) return void (tip.hidden = true);
+    const { el, p } = hit;
+    if (tip.hidden || tip.dataset.i !== el.dataset.i) {
+      tip.dataset.i = el.dataset.i;
       tip.className = `ctip ${p.severity}`;
-      tip.innerHTML = `${icon(p.severity, 14)}<span></span>`;
-      tip.querySelector("span")!.textContent = p.message;
+      tip.replaceChildren(icon(p.severity, 14), culpritTip(p));
       tip.hidden = false;
     }
-    const body = this.$(".body").getBoundingClientRect(), r = hit.getBoundingClientRect();
+    const body = this.$(".body").getBoundingClientRect(), r = el.getBoundingClientRect();
     const left = Math.max(8, Math.min(body.width - tip.offsetWidth - 8, e.clientX - body.left - 12));
     const below = r.bottom - body.top + 8;
     tip.style.left = `${left}px`;
     tip.style.top = `${below + tip.offsetHeight > body.height - 8 ? r.top - body.top - tip.offsetHeight - 6 : below}px`;
+  }
+
+  /** A click on an underline (not a drag's end, nothing selected): the editor to its culprit, selected; a host with no ranges, to its line. */
+  private async culpritClicked(e: MouseEvent): Promise<void> {
+    if (e.detail !== 1 || e.button !== 0) return;
+    const sel = this.root.ownerDocument.getSelection();
+    if (sel && !sel.isCollapsed) return;
+    const hit = this.culpritHit(e);
+    if (!hit) return;
+    const { file, range, line } = hit.p;
+    const text = this.ev.onGotoRange ? await this.ev.onSource(file).catch(() => null) : null;
+    if (text != null) this.ev.onGotoRange!(file, charOffset(text, range[0]), charOffset(text, range[1]), true);
+    else this.ev.onGoto(file, line ?? 1);
   }
 
   status(s: Status): void {
@@ -1086,13 +1325,46 @@ export class Panel {
     };
     const list = this.$("#diags");
     list.innerHTML = "";
-    for (const d of diags.slice(0, 50)) {
+    // (the filters: each kind there is, its count, on or off; what is off is
+    // gone from the list, the page's marks and the scrollbar's)
+    const byKind = new Map<Kind, number>();
+    for (const d of diags) byKind.set(kindOf(d), (byKind.get(kindOf(d)) ?? 0) + 1);
+    if (byKind.size > 1 || this.hiddenKinds.size) {
+      const f = document.createElement("div");
+      f.className = "kinds";
+      f.setAttribute("role", "group");
+      f.setAttribute("aria-label", "Show");
+      for (const [k, name] of KINDS) {
+        const n = byKind.get(k);
+        if (!n) continue;
+        const b = document.createElement("button");
+        b.type = "button";
+        b.dataset.kind = k;
+        b.setAttribute("aria-pressed", String(!this.hiddenKinds.has(k)));
+        b.textContent = `${name} ${n}`;
+        b.onclick = (e) => (e.stopPropagation(), this.toggleKind(k));
+        f.append(b);
+      }
+      list.append(f);
+    }
+    // (the first `listedMax`; the rest a click away, 50 at a time or all)
+    const shown = diags.filter((d) => !this.hiddenKinds.has(kindOf(d)));
+    this.listed = shown.slice(0, this.listedMax);
+    for (const [i, d] of this.listed.entries()) {
+      // (each error and warning: its own Copy for an AI assistant)
+      const copy = d.severity === "error" || d.severity === "warning" ? copyBtn(i) : null;
       // (a problem the build told whole: its card, its places links)
       if (d.problem) {
         const card = document.createElement("ol");
         card.className = "phx-card phx-inline";
         card.setAttribute("role", "listitem");
-        card.innerHTML = problemHtml(d.problem);
+        card.replaceChildren(problemNode(d.problem));
+        if (copy) card.firstElementChild!.prepend(copy);
+        // (a click on the card: its place on the pages; its file:line link: the editor)
+        if (d.problem.file && d.problem.range) {
+          card.dataset.key = `${d.problem.file}\0${d.problem.range[0]}`;
+          card.title = "Show it on the page (its file:line opens it in the editor)";
+        }
         list.append(card);
         continue;
       }
@@ -1104,7 +1376,7 @@ export class Panel {
         row.dataset.line = String(d.line);
         row.title = `Go to ${d.file}:${d.line}`;
       }
-      row.innerHTML = `<span class="where"></span><div class="text"></div>`;
+      row.replaceChildren(html`${copy}<span class="where"></span><div class="text"></div>`);
       row.querySelector(".text")!.textContent = d.message;
       if (d.detail && d.code === "engine") row.append(foldedDetail(d.detail, "Engine details"));
       else if (d.detail) {
@@ -1116,10 +1388,22 @@ export class Panel {
       row.querySelector(".where")!.textContent = d.file ? `${d.file}${d.line ? `, line ${d.line}` : ""}` : "";
       list.append(row);
     }
-    if (diags.length > 50) {
+    if (shown.length > this.listed.length) {
+      const left = shown.length - this.listed.length;
       const more = document.createElement("div");
-      more.className = "diag info";
-      more.textContent = `… and ${diags.length - 50} more`;
+      more.className = "diag info more";
+      const next = document.createElement("button");
+      next.type = "button";
+      next.textContent = left > 50 ? `Show 50 more (${left} left)` : `Show the other ${left}`;
+      next.onclick = (e) => (e.stopPropagation(), this.listMore(50));
+      more.append(next);
+      if (left > 50) {
+        const all = document.createElement("button");
+        all.type = "button";
+        all.textContent = "Show all";
+        all.onclick = (e) => (e.stopPropagation(), this.listMore(Infinity));
+        more.append(all);
+      }
       list.append(more);
     }
     if (this.ev.onReport) {
@@ -1136,7 +1420,7 @@ export class Panel {
     pb.hidden = !errors && !warnings;
     pb.className = `ib probs ${errors ? "error" : "warning"}`;
     pb.title = `${errors} error${errors === 1 ? "" : "s"}, ${warnings} warning${warnings === 1 ? "" : "s"}`;
-    this.$("#psev").innerHTML = icon(errors ? "error" : "warning", 16);
+    this.$("#psev").replaceChildren(icon(errors ? "error" : "warning", 16));
     this.$("#pcount").textContent = String(errors || warnings);
     this.$("#logshead").textContent = diags.length ? [errors && `${errors} error${errors === 1 ? "" : "s"}`, warnings && `${warnings} warning${warnings === 1 ? "" : "s"}`].filter(Boolean).join(", ") || "Notes" : "No problems";
     // (the list opened by itself only when there are no pages for it to cover; problems that changed close it again)
@@ -1150,6 +1434,74 @@ export class Panel {
     this.stale(s);
     this.renderStatus();
     queueMicrotask(() => this.emit());
+  }
+
+  /** The problems listed (by the rows' data-i). */
+  private listed: Diagnostic[] = [];
+  /** How many problems the list shows (50, then more as asked: "Show 50 more", "Show all"). */
+  private listedMax = 50;
+
+  /** `n` more problems listed (Infinity: all), the list drawn again where it is. */
+  private listMore(n: number): void {
+    this.listedMax += n;
+    if (this.lastStatus) this.status(this.lastStatus);
+  }
+
+  /**
+   * Copy for an AI assistant: one problem with what an assistant needs to
+   * explain it: its place, message, TeX's notes, help and suggestions, the
+   * macros it was in, the files that included its file, its source lines
+   * around it, the main file's preamble (the packages and definitions), the
+   * other problems listed, and the log where it was met (and its end, for
+   * an error). On the clipboard, nothing sent.
+   */
+  private async copyForAi(d: Diagnostic | undefined): Promise<void> {
+    if (!d) return;
+    const p = d.problem;
+    const file = p?.file ?? d.file, line = p?.line ?? d.line;
+    const main = this.lastStatus?.main ?? this.mainFiles.main;
+    const source = async (f: string) => (await this.ev.onSource(f).catch(() => null))?.split("\n") ?? null;
+    const numbered = (lines: string[], from: number, to: number, at?: number) =>
+      lines.slice(from - 1, to).map((t, i) => `${String(from + i).padStart(4)}${from + i === at ? ">" : " "} ${t}`);
+    const parts: string[] = [
+      `I'm writing a LaTeX document (typeset by PhiTeX, a pdfLaTeX/XeLaTeX-compatible engine) and the build reports this ${d.severity}. What is wrong, and how do I fix it in my source?`,
+      "",
+      `## The ${d.severity}`,
+      `${d.message}${file ? ` (${file}${line ? `, line ${line}${p?.col ? `, column ${p.col}` : ""}` : ""})` : ""}${p?.code ? ` [${p.code}]` : ""}`,
+    ];
+    if (p?.notes.length) parts.push(...p.notes.map((n) => `- ${n}`));
+    if (p?.context.length) parts.push(`TeX was inside: ${p.context.map((m) => `\\${m.name.replace(/^\\/, "")} (${m.before}‸${m.after})`).join(" ← ")}`);
+    if (p?.included.length) parts.push(`Its file was included from: ${p.included.map((i) => `${i.file}:${i.line}`).join(" ← ")}`);
+    if (p?.help.length || p?.suggestions.length) parts.push(`PhiTeX's hint: ${[...(p?.help ?? []), ...(p?.suggestions ?? [])].join(" ")}`);
+    // (the source around it: fifteen lines each side, the problem's marked)
+    const lines = file ? await source(file) : null;
+    if (lines && line) parts.push("", `## ${file}, lines around ${line}`, "```latex", ...numbered(lines, Math.max(1, line - 15), Math.min(lines.length, line + 15), line), "```");
+    else if (p?.excerpt) parts.push("", "## The source line", "```latex", p.excerpt.text, "```");
+    // (the main file's preamble: the class, the packages, the definitions; at most 120 lines)
+    const mainLines = main ? (main === file ? lines : await source(main)) : null;
+    if (main && mainLines) {
+      const end = mainLines.findIndex((l) => /\\begin\s*\{document\}/.test(l));
+      const upto = Math.min(end >= 0 ? end + 1 : 60, 120);
+      if (!(main === file && line && line <= upto + 15)) parts.push("", `## The preamble of ${main}`, "```latex", ...numbered(mainLines, 1, upto), "```");
+    }
+    // (the other problems, one line each: a cause is often one of them)
+    const others = this.listed.filter((x) => x !== d && (x.severity === "error" || x.severity === "warning")).slice(0, 10);
+    if (others.length) parts.push("", "## Other problems in the same build", ...others.map((x) => `- ${x.severity}: ${x.message}${x.file ? ` (${x.file}${x.line ? `:${x.line}` : ""})` : ""}`));
+    // (the log where TeX met it, and for an error the log's end, where TeX stopped)
+    const log = (await this.ev.onLog?.().catch(() => null))?.split("\n") ?? null;
+    if (log) {
+      const key = d.message.replace(/^.*?:\s*/, "").slice(0, 40);
+      const at = key ? log.findIndex((l) => l.includes(key)) : -1;
+      if (at >= 0) parts.push("", "## The log where it was met", "```", ...log.slice(Math.max(0, at - 10), at + 15), "```");
+      if (d.severity === "error" && (at < 0 || at + 15 < log.length - 40)) parts.push("", "## The end of the log", "```", ...log.slice(-40), "```");
+    }
+    const text = parts.join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      this.msg("Copied: paste it into your AI assistant", false, true);
+    } catch {
+      this.msg("Couldn't copy to the clipboard", true, true);
+    }
   }
 
   /** The reading step's last state, and when the sheet last changed (redrawn at most every 50 ms). */
@@ -1186,6 +1538,11 @@ export class Panel {
 
   packages(p: PackageState): void {
     const done = p.done?.length ?? 0;
+    // (the time any package was on its way, and what came: the timing popover's Downloads)
+    const now = performance.now(), d = this.downloads;
+    if (p.loading.length && d.since === undefined) d.since = now;
+    else if (!p.loading.length && d.since !== undefined) (d.ms += now - d.since), (d.since = undefined);
+    (d.n = done), (d.bytes = p.bytes ?? 0);
     const total = done + p.loading.length;
     if (done !== this.loadDone) this.loadDone = done;
     // (never backwards: a build asking for more grows the total)
@@ -1251,9 +1608,31 @@ export class Panel {
   /** This opening's typesetting has begun (the build running, or pages shipped): a later fetch said under it. */
   private typesetting = false;
 
-  private step(what: string, pct: number | undefined, detail = ""): void {
+  /** The "Did you know" under the opening: one hint a few seconds, from 2 s into a first build, gone with the sheet. */
+  private hintTimer: ReturnType<typeof setTimeout> | undefined;
+  private hintAt = Math.floor(Math.random() * 1000);
+  private hints(on: boolean): void {
+    const el = this.$("#hint");
+    if (!on) return void (clearTimeout(this.hintTimer), (this.hintTimer = undefined), (el.hidden = true));
+    if (this.hintTimer) return;
+    const list = hintsFor(this.kind);
+    const show = () => {
+      const text = list[this.hintAt++ % list.length];
+      // (an opening that says the steps itself says this too)
+      if (this.anim?.hint) this.anim.hint(text);
+      else keyed(el, text, "Did you know? "), (el.hidden = false);
+      this.hintTimer = setTimeout(show, 7000);
+    };
+    this.hintTimer = setTimeout(show, 2000);
+  }
+
+  /** The sheet's step, said; `raise`: a build's step (the sheet put up if it isn't), else said only (the panel shown, nothing built yet). */
+  private step(what: string, pct: number | undefined, detail = "", raise = true): void {
     if (!this.firstPending()) return;
-    this.sheetUp();
+    this.walkTo(what);
+    if (raise) this.sheetUp();
+    // (the hints with the sheet: none while a first open waits to put it up)
+    if (this.anim) this.hints(true);
     const el = this.$("#opening");
     this.stepNow = what;
     el.querySelector(".what")!.textContent = what;
@@ -1261,23 +1640,72 @@ export class Panel {
     const track = el.querySelector<HTMLElement>(".track")!;
     track.classList.toggle("unknown", pct === undefined);
     track.querySelector("i")!.style.width = pct === undefined ? "" : `${pct}%`;
+    this.anim?.step?.(what, pct, detail);
     this.renderStatus();
   }
 
-  /** The sheet up, the opening playing on it (once per panel: a later rebuild has pages). */
-  private sheetUp(): void {
+  /**
+   * The sheet up, the opening playing on it (once per panel: a later rebuild has pages),
+   * at a build's step; `now`: a Rebuild asked for. Put up once the stage is laid out, at the
+   * page's own place and size (before, it could come up at 0 x 0 in the corner).
+   */
+  private sheetUp(now = false): void {
     if (this.opened || this.anim || !this.wasShown) return;
+    const st = this.$("#stage");
+    if (st.clientWidth < 40 || st.clientHeight < 40) return void requestAnimationFrame(() => this.firstPending() && this.sheetUp(now));
     const el = this.$("#opening");
     el.hidden = false;
     el.classList.remove("in");
     this.win.classList.add("sheet-up");
     // (the opening's zoom: the whole page, unless the user chose one)
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
+    // (placed at the page's box at once: the sheet's transition (print.ts .opening) is for
+    // its dive into the page and for the stage's resizing; from the hidden sheet's 0 x 0 at
+    // the corner it grew the sheet across the stage as the opening began)
+    el.style.transition = "none";
     this.fitSheet();
-    const dark = this.win.classList.contains("dark-pdf") || (this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark"));
-    const sheet = el.querySelector<HTMLElement>(".sheet")!, look = this.openingLook();
-    this.anim = look === "off" ? still() : look === "retro" ? retro(sheet) : opening(sheet, dark ? "#e4e6ea" : "#1d3e72", dark ? "#2c2e33" : "#ffffff");
+    void el.offsetWidth;
+    el.style.transition = "";
+    const dark = this.sheetDark();
+    const sheet = el.querySelector<HTMLElement>(".sheet")!;
+    // (the first opening ever is PhiTeX's: kept with the tips seen, the host's too)
+    const first = !this.seenIds.has("opening");
+    // (a document built here before, opened again (a reload, the editor reopened): its steps
+    // on a still sheet, no opening played: the animation is for a document's first build.
+    // A Rebuild asked for plays it)
+    const warm = !now && this.prefs.built.includes(this.builtKey());
+    const { id, anim } = play(warm ? "off" : this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!);
+    this.anim = anim;
+    if (!warm) this.lastLook = id;
+    if (id !== "off") this.seen(["opening"]);
+    // (one that says the steps itself: the sheet's own not shown)
+    el.classList.toggle("owns", !!anim.step);
+    // (and the step the sheet says now, a rebuild's first: the watch says no other)
+    if (anim.step) anim.step(this.firstStep(), undefined, "");
     this.animSince = performance.now();
+    this.hints(true);
+  }
+
+  /** This document's key among the built ones: the page's address (the project, the watch's document) and the main file, hashed (FNV-1a). */
+  private builtKey(): string {
+    const loc = this.win.ownerDocument.defaultView?.location;
+    const s = `${loc?.host ?? ""}${loc?.pathname ?? ""}|${this.mainFiles.main ?? this.doc ?? ""}`;
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193);
+    return (h >>> 0).toString(36);
+  }
+
+  /** This document's first page shown: built here, its next open plays no opening (the newest 200 kept). */
+  private builtHere(): void {
+    const k = this.builtKey(), was = this.prefs.built ?? [];
+    if (was[0] === k) return;
+    this.prefs.built = [k, ...was.filter((x) => x !== k)].slice(0, 200);
+    this.save();
+  }
+
+  /** The pages are dark (Dark PDF): an opening's sheet is too. */
+  private sheetDark(): boolean {
+    return this.win.classList.contains("dark-pdf") || (this.win.classList.contains("docked") && this.win.classList.contains("pdf-dark"));
   }
 
   /** When the opening began: a page there within 400 ms (a project already built) is shown at once, no opening. */
@@ -1287,6 +1715,13 @@ export class Panel {
   private fitSheet(): void {
     const el = this.$("#opening");
     if (el.hidden || this.ending) return;
+    // (the first page laid out already (its size told before its drawing): its own box, the
+    // sheet the page it becomes; an A4 sheet over a Letter page overhung it till the dive)
+    const slot = this.$("#viewer").querySelector<HTMLElement>(".slot");
+    if (slot && slot.offsetWidth > 40) {
+      const r = slot.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
+      return void Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${r.top - b.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+    }
     const st = this.$("#stage");
     const room = { w: st.clientWidth - 24, h: st.clientHeight - 24 };
     let h = room.h, w = (h * 210) / 297;
@@ -1320,17 +1755,20 @@ export class Panel {
       follow();
       el.classList.add("in");
     });
-    // (the dive at once, whatever the opening's act; gone 650 ms on, and at most 900 ms on
-    // even where frames stall, a tab in the background: never left over the pages)
+    // (the dive at once, whatever the opening's act; gone 650 ms on (the longest, a window
+    // maximized, 1.3 s), and at most 1.6 s on even where frames stall, a tab in the
+    // background: never left over the pages)
     // (each its own sheet's: a later opening's sheet, up meanwhile, is never closed by this one's)
     const a = this.anim;
     const stop = () => this.anim === a && this.stopSheet();
-    void a.done().then(stop);
-    setTimeout(stop, 900);
+    // (the first page as drawn, for an exit that becomes it: Bad Apple's morph)
+    void a.done(this.$("#viewer").querySelector<HTMLCanvasElement>(".slot canvas") ?? undefined).then(stop);
+    setTimeout(stop, 1600);
   }
 
   /** The sheet gone (played out, or a card in its place). */
   private stopSheet(): void {
+    this.hints(false);
     const was = !!this.anim;
     this.anim?.stop();
     this.anim = null;
@@ -1341,6 +1779,7 @@ export class Panel {
     this.win.classList.remove("sheet-up");
     if (was) {
       this.opened = true;
+      this.builtHere();
       this.stepNow = "";
       this.renderStatus();
       setTimeout(() => this.tips("unseen"), 600);
@@ -1374,7 +1813,7 @@ export class Panel {
     this.toastKind = kind;
     el.className = `toast ${kind}${t.err ? " err" : ""}`;
     el.hidden = false;
-    el.innerHTML = `<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>` + (t.pct === null ? "" : `<div class="track"><i style="width:${t.pct}%"></i></div>`);
+    el.replaceChildren(html`<div class="t">${t.icon ? icon(t.icon, 16) : ""}<span></span></div><div class="d"></div>${t.pct === null ? "" : html`<div class="track"><i style="width:${t.pct}%"></i></div>`}`);
     el.querySelector(".t span")!.textContent = t.title;
     el.querySelector(".d")!.textContent = t.detail ?? "";
     if (t.ms) this.toastTimer = setTimeout(() => this.toast(kind, null), t.ms);
@@ -1412,6 +1851,7 @@ export class Panel {
       return;
     }
     stage.classList.add("stale");
+    this.placeStrips();
     const why = s.diagnostics?.find((d) => d.severity !== "info" && d.code !== "no-pages");
     this.$("#banner").textContent = `Showing the last complete render: ${why ? why.message + (why.line ? ` (${why.file}:${why.line})` : "") : "this build shipped no page"}.`;
   }
@@ -1430,7 +1870,8 @@ export class Panel {
       this.win.classList.remove("offline-quiet");
       return;
     }
-    const text = `Disconnected from the engine: the pages are the last ones built${why ? ` (${why})` : ""}.`;
+    const text = `${why ? sentence(why) : "Lost the connection to PhiTeX's engine."} The pages shown are from the last build.`;
+    this.placeStrips();
     this.$("#gonewhy").textContent = text;
     this.$("#offpill").title = text;
     // (dismissed once: it stays dismissed until the connection comes back)
@@ -1449,6 +1890,12 @@ export class Panel {
 
   private offline = false;
 
+  /** The strips over the pages (engine lost, stale, approximate) clear of the pages' scrollbar, whatever its width. */
+  private placeStrips(): void {
+    const v = this.$("#stage");
+    this.$("#strips").style.right = `${Math.max(0, v.offsetWidth - v.clientWidth)}px`;
+  }
+
   /** Follow what the panel shows (a host toolbar's controls). */
   onState(cb: (s: ViewState) => void): void {
     this.listeners.push(cb);
@@ -1465,7 +1912,7 @@ export class Panel {
       chip: this.chip.text,
       chipTitle: this.chip.title,
       speed: this.speed,
-      sheet: !this.$("#sheet").hidden,
+      settings: !this.$("#settings").hidden,
       // (the badge counts what needs a look: info is listed, not counted)
       diagCount: this.lastStatus?.diagnostics?.filter((d) => d.severity !== "info").length ?? 0,
       diagWorst: this.lastStatus?.diagnostics?.[0]?.severity ?? "",
@@ -1499,12 +1946,16 @@ export class Panel {
   /** The stage's client size, kept by its ResizeObserver (null until it is first laid out). */
   private stageSize: { w: number; h: number } | null = null;
   private scale(): number {
-    const z = this.zoomNow ?? this.prefs.zoom;
+    const z = zoomOf(this.zoomNow ?? this.prefs.zoom);
     if (z !== "fit" && z !== "page") return Number(z);
     const st = (this.stageSize ??= { w: this.$("#stage").clientWidth, h: this.$("#stage").clientHeight });
-    const width = Math.max(st.w - 40, 200) / ((this.last?.w ?? 595) * (96 / 72));
-    if (z === "fit") return width;
-    return Math.min(width, Math.max(st.h - 24, 100) / ((this.last?.h ?? 842) * (96 / 72)));
+    // (sizes that are sizes only: a page of no width yet, a stage not laid out, made Fit's scale
+    // Infinity or NaN, and a zoom from it NaN; then A4 and the least room)
+    const real = (v: number | undefined, or: number) => (v !== undefined && Number.isFinite(v) && v > 0 ? v : or);
+    const pw = real(this.last?.w, 595), ph = real(this.last?.h, 842);
+    const width = Math.max(real(st.w, 0) - 40, 200) / (pw * (96 / 72));
+    const s = z === "fit" ? width : Math.min(width, Math.max(real(st.h, 0) - 24, 100) / (ph * (96 / 72)));
+    return Math.min(8, Math.max(0.25, s));
   }
 
     goPage(k: number): void {
@@ -1528,6 +1979,12 @@ export class Panel {
   }
 
   /** The document's outline (its PDF's bookmarks), from the host after each build. */
+  /** The session's citation lookup (PreviewSink.citesBy: the engine's `cites` op), the viewer's for its citation cards. */
+  private citesAsk?: (k: number, x: number, y: number) => Promise<CiteAnswer[] | null>;
+  citesBy(ask: (k: number, x: number, y: number) => Promise<CiteAnswer[] | null>): void {
+    this.citesAsk = ask;
+  }
+
   outline(items: Entry[]): void {
     this.contents?.set(items);
     this.contents?.at(this.at);
@@ -1601,14 +2058,14 @@ export class Panel {
     if (!opts.keys) return;
     const help = this.$("#keyhelp");
     const extra: [string, string][] = [["e", "the build's errors and warnings"], ...(opts.outline ? ([["t", "the contents beside the pages"]] as [string, string][]) : [])];
-    help.innerHTML = `<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => `<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`).join("")}</table>`;
+    help.replaceChildren(html`<header>Keyboard shortcuts<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><table>${[...KEYS, ...extra].map(([k, w]) => html`<tr><td><kbd>${k}</kbd></td><td>${w}</td></tr>`)}</table>`);
     // (the problems' and the contents' keys first: Esc closes the list before anything else)
     addEventListener(
       "keydown",
       (e) => {
-        if (e.ctrlKey || e.altKey || e.metaKey || (e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable=true]")) return;
-        if (e.key === "Escape" && this.escapeProblems()) {
-          /* (the list closed) */
+        if (e.ctrlKey || e.altKey || e.metaKey || typing(e)) return;
+        if (e.key === "Escape" && (this.escapeProblems() || this.unmark())) {
+          /* (the list closed, else the highlights cleared) */
         } else if (e.key === "e") this.diagnostics();
         else if (e.key === "t" && this.contents) this.side();
         else return;
@@ -1649,6 +2106,33 @@ export class Panel {
     return JSON.stringify((this.lastStatus?.diagnostics ?? []).map((d) => [d.severity, d.message, d.file, d.line]));
   }
 
+  /** The kinds of problem not shown (the filters): this browser's, and the host's (problemsHidden). */
+  private hiddenKinds = (() => {
+    try {
+      return new Set<Kind>(JSON.parse(localStorage.getItem("phitex.kinds.hidden") ?? "[]"));
+    } catch {
+      return new Set<Kind>();
+    }
+  })();
+
+  /** The kinds hidden as the host keeps them (the watch: the user's phitex.toml, on every port and document). */
+  problemsHidden(kinds: string[]): void {
+    this.hiddenKinds = new Set(kinds.filter((k) => KINDS.some(([x]) => x === k)) as Kind[]);
+    if (this.lastStatus) this.status(this.lastStatus);
+  }
+
+  /** A kind's filter clicked: shown or hidden, everywhere, and kept. */
+  private toggleKind(k: Kind): void {
+    if (!this.hiddenKinds.delete(k)) this.hiddenKinds.add(k);
+    try {
+      localStorage.setItem("phitex.kinds.hidden", JSON.stringify([...this.hiddenKinds]));
+    } catch {
+      /* (the host's copy only) */
+    }
+    this.ev.onProblemsHidden?.([...this.hiddenKinds]);
+    if (this.lastStatus) this.status(this.lastStatus);
+  }
+
   /** The problems' list opened or closed. */
   diagnostics(on = this.$("#logs").hidden === true): void {
     const was = !this.$("#logs").hidden;
@@ -1662,6 +2146,13 @@ export class Panel {
   }
 
   /** Esc on the problems: the list closed; false when it wasn't open. */
+  /** The pages' highlights cleared (Esc), find's included: whether there were any. */
+  private unmark(): boolean {
+    const had = this.viewer.unmark();
+    if (had) this.hits = [];
+    return had;
+  }
+
   private escapeProblems(): boolean {
     if (this.$("#logs").hidden) return false;
     this.diagnostics(false);
@@ -1685,7 +2176,7 @@ export class Panel {
 
   zoomTo(z: string): void {
     this.zoomNow = null;
-    this.prefs.zoom = z;
+    this.prefs.zoom = zoomOf(z);
     this.zoomShown();
     this.save();
     this.redraw();
@@ -1712,51 +2203,85 @@ export class Panel {
    * (client pixels, and on its page), and when it ends.
    */
   private gesture:
-    | { from: number; f: number; x: number; y: number; at: { k: number; fx: number; fy: number } | null; end?: ReturnType<typeof setTimeout> }
+    | { from: number; f: number; goal: number; last: number; x: number; y: number; at: { k: number; fx: number; fy: number } | null; frame: number; end?: ReturnType<typeof setTimeout>; ox: number; oy: number }
     | undefined;
 
   /**
    * Zoom by `f` keeping the point (`px`, `py`, from the stage's top left)
-   * where it is, as pdf.js's and hayro's viewers do: while the gesture goes
-   * on, the pages as they are scaled by one transform around the pointer
-   * (no layout, no drawing: the pages, their marks and their text scale
-   * together); once it rests (250 ms, longer than a wheel's notches are
-   * apart), the zoom set once, the place kept under the pointer by its
-   * page, and the pages drawn once at it.
+   * where it is, as pdf.js's viewer does: the pages laid out at the zoom
+   * once a frame while the gesture goes on, the place under the pointer
+   * kept by its page, and drawn at it as soon as the core can (Viewer.ask:
+   * a page once at a time, the zoom it rests at last); their old bitmaps
+   * stretched until then. Once it rests (250 ms, longer than a wheel's
+   * notches are apart) the zoom is saved and told. The pages were scaled
+   * by one transform until the gesture rested, and only then drawn: every
+   * zoom showed stretched bitmaps for 250 ms and a drawing more.
    */
-  private zoomAt(f: number, px: number, py: number): void {
-    const stage = this.$("#stage"), view = this.$("#viewer");
-    const r = stage.getBoundingClientRect();
+  /**
+   * Zoom by `f` at the point (`px`, `py`) of the stage. Every event of a gesture moves its
+   * one goal; one frame loop brings the zoom to it. `ease`: over a few frames (a wheel's
+   * notches: the zoom follows the goal by the time passed, most of the way in 200 ms
+   * whatever the frame rate, notches in a row one motion), else at the next frame (a
+   * pinch's small steps, a high-resolution wheel's, already one a frame). A gesture's
+   * events of both kinds (a wheel's notches and its smooth deltas, mixed in Chrome) share
+   * the goal: the instant ones once cleared it while a notch's frame was pending, which
+   * then eased toward undefined, the zoom NaN.
+   */
+  private zoomAt(f: number, px: number, py: number, ease = false): void {
     let g = this.gesture;
     if (!g) {
-      const x = r.left + px, y = r.top + py;
-      const v = view.getBoundingClientRect();
-      view.style.transformOrigin = `${x - v.left}px ${y - v.top}px`;
-      g = this.gesture = { from: this.scale(), f: 1, x, y, at: this.viewer.pointAt(x, y) };
+      const r = this.$("#stage").getBoundingClientRect();
+      const x = r.left + px, y = r.top + py, v = this.$("#viewer").getBoundingClientRect();
+      // (the pointer in the pages' own box: the transform's origin while the gesture runs)
+      g = this.gesture = { from: this.scale(), f: 1, goal: 1, last: 0, x, y, at: this.viewer.pointAt(x, y), frame: 0, ox: x - v.left, oy: y - v.top };
     }
-    g.f = Math.min(8, Math.max(0.25, g.from * g.f * f)) / g.from;
-    view.style.transform = `scale(${g.f})`;
-    view.style.willChange = "transform";
-    // (the zoom itself set once it rests: a page drawn meanwhile is sized
-    // at the zoom the transform scales)
+    if (Number.isFinite(f) && f > 0) g.goal = Math.min(8, Math.max(0.25, g.from * g.goal * f)) / g.from;
+    if (!ease) g.f = g.goal;
+    const gg = g;
+    const step = (t: number) => {
+      gg.frame = 0;
+      gg.f = zoomToward(gg.f, gg.goal, t - gg.last);
+      gg.last = t;
+      this.zoomLay(gg);
+      if (gg.f !== gg.goal) gg.frame = requestAnimationFrame(step);
+    };
+    if (!g.frame) g.frame = requestAnimationFrame((t) => ((gg.last = t - 16), step(t)));
     clearTimeout(g.end);
     g.end = setTimeout(() => this.zoomEnd(), 250);
   }
 
-  /** The zoom gesture rested: the pages at the zoom, the place under the pointer kept, drawn once. */
-  private zoomEnd(): void {
-    const g = this.gesture;
-    if (!g) return;
-    this.gesture = undefined;
-    const view = this.$("#viewer");
-    view.style.transform = "";
-    view.style.willChange = "";
-    this.prefs.zoom = String(Number((g.from * g.f).toFixed(4)));
+  /**
+   * The gesture's zoom now. While it runs: the pages scaled by a transform about the
+   * pointer, laid out at no frame (a layout a frame, the pages' boxes and the place under
+   * the pointer read back, cost each frame its time: 30 frames a second and less). `final`:
+   * the pages laid out at it, the place under the pointer where it was, those drawn at
+   * another zoom asked for, the transform gone.
+   */
+  private zoomLay(g: NonNullable<Panel["gesture"]>, final = false): void {
+    this.prefs.zoom = zoomOf(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
+    const v = this.$("#viewer");
+    if (!final) {
+      Object.assign(v.style, { transformOrigin: `${g.ox}px ${g.oy}px`, transform: `scale(${g.f})`, willChange: "transform" });
+      return;
+    }
+    Object.assign(v.style, { transformOrigin: "", transform: "", willChange: "" });
     this.$("#stage").classList.remove("fit");
     this.viewer.redraw(true);
     if (g.at) this.viewer.keepAt(g.at, g.x, g.y);
     this.viewer.redraw();
+  }
+
+  /** The zoom gesture rested: its last frame laid out, the zoom saved and told. */
+  private zoomEnd(): void {
+    const g = this.gesture;
+    if (!g) return;
+    // (still easing toward its goal: ended once there, not cut short by a jump)
+    if (g.f !== g.goal) return void (g.end = setTimeout(() => this.zoomEnd(), 50));
+    this.gesture = undefined;
+    cancelAnimationFrame(g.frame);
+    this.zoomLay(g, true);
+    requestAnimationFrame(() => this.drawScrollMarks());
     this.save();
     this.emit();
   }
@@ -1841,7 +2366,8 @@ export class Panel {
         // proportion, as it goes)
         const notch = e.deltaMode !== 0 || Math.abs(e.deltaY) >= 50;
         const f = notch ? (e.deltaY < 0 ? 1.1 : 1 / 1.1) : Math.exp(-e.deltaY / 100);
-        this.zoomAt(f, e.clientX - r.left, e.clientY - r.top);
+        // (a notch eased to over a few frames, as a pinch goes: laid out at once it was a jump of 10% a notch)
+        this.zoomAt(f, e.clientX - r.left, e.clientY - r.top, notch && !matchMedia("(prefers-reduced-motion: reduce)").matches);
       },
       { passive: false },
     );
@@ -1884,9 +2410,6 @@ export class Panel {
 
   toggleDebug(): void {
     this.debugOn = !this.debugOn;
-    this.$("#dbg").setAttribute("aria-checked", String(this.debugOn));
-    this.$("#dbg").querySelector(".check")!.textContent = this.debugOn ? "✓" : "";
-    this.$<HTMLInputElement>("#dbg2").checked = this.debugOn;
     this.ev.onDebug?.(this.debugOn);
     this.msg(this.debugOn ? "Debug check on" : "Debug check off", false, true);
     this.emit();
@@ -1907,19 +2430,245 @@ export class Panel {
     this.menu("#m-time");
   }
 
-  /** The settings (docked under a host's toolbar: the main file, the debug check, reload, the latency's details). */
-  sheet(on = this.$("#sheet").hidden): void {
-    this.$("#sheet").hidden = !(on && !!this.docked);
+  // ---- Settings: the panel's own rows and the host's, one dialog in every host ----
+
+  /** The rows drawn (by data-id): what a click or a change sets. */
+  private settingRows = new Map<string, SettingRow>();
+
+  /** The Settings dialog shown (drawn anew: the host's values as they are now) or hidden. */
+  async settings(on = this.$("#settings").hidden): Promise<void> {
+    const el = this.$("#settings");
+    if (!on) {
+      this.tilesGone();
+      if (!el.hidden) (el.hidden = true), this.emit();
+      return;
+    }
+    const groups: SettingsGroup[] = this.ownSettings();
+    for (const g of (await this.ev.settings?.()) ?? []) {
+      const same = groups.find((x) => x.title === g.title);
+      if (same) same.rows.push(...g.rows);
+      else groups.push({ title: g.title, rows: [...g.rows] });
+    }
+    this.settingRows.clear();
+    this.tilesGone();
+    // (one group at a time, by its tab: the last one shown, else the first)
+    const shown = groups.filter((g) => g.rows.length);
+    const at = Math.max(0, shown.findIndex((g) => g.title === this.settingsTab));
+    el.replaceChildren(html`<header>Settings<span class="grow"></span><button type="button" class="ib" data-close aria-label="Close">${icon("close")}</button></header><nav class="stabs" role="tablist">${shown.map((g, i) => html`<button type="button" role="tab" data-tab="${i}" data-group="${g.title}" aria-selected="${i === at}">${g.title}</button>`)}</nav><div class="sbody"></div>`);
+    const body = el.querySelector(".sbody")!;
+    shown.forEach((g, i) => {
+      const sec = document.createElement("section");
+      sec.setAttribute("role", "tabpanel");
+      sec.hidden = i !== at;
+      for (const r of g.rows) sec.append(this.settingRow(r));
+      body.append(sec);
+    });
+    el.querySelector<HTMLElement>(".stabs")!.onclick = (e) => {
+      const t = (e.target as HTMLElement).closest<HTMLElement>("[data-tab]");
+      if (!t) return;
+      const k = Number(t.dataset.tab);
+      this.settingsTab = shown[k].title;
+      el.querySelectorAll<HTMLElement>("[data-tab]").forEach((b) => b.setAttribute("aria-selected", String(b === t)));
+      body.querySelectorAll<HTMLElement>("section").forEach((s, i) => (s.hidden = i !== k));
+    };
+    el.hidden = false;
     this.emit();
+  }
+
+  /** The Settings tab last shown (its group's title). */
+  private settingsTab = "";
+
+  /** One row: its label and help, its control, a line for the host's error. */
+  private settingRow(r: SettingRow): HTMLElement {
+    this.settingRows.set(r.id, r);
+    const row = document.createElement("div");
+    row.className = `srow ${r.kind}${r.disabled ? " off" : ""}`;
+    row.dataset.id = r.id;
+    row.innerHTML = `<b class="lab"></b><div class="ctl"></div><small class="help"></small><div class="err" hidden></div>`;
+    row.querySelector("b")!.textContent = r.label;
+    row.querySelector("small")!.textContent = r.disabled ?? r.help ?? "";
+    const ctl = row.querySelector(".ctl")!;
+    const off = !!(r.disabled || !r.set);
+    if (r.kind === "toggle") ctl.replaceChildren(html`<button type="button" role="switch" class="switch" aria-checked="${r.value === true}" aria-label="${r.label}" disabled="${off}"><i></i></button>`);
+    else if (r.kind === "choice")
+      ctl.replaceChildren(html`<div class="seg" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" data-v="${v}" aria-pressed="${r.value === v}" disabled="${off}">${l}</button>`)}</div>`);
+    else if (r.kind === "select") {
+      const s = document.createElement("select");
+      s.setAttribute("aria-label", r.label);
+      s.disabled = off;
+      for (const [v, l] of r.options ?? []) s.append(new Option(l, v, v === r.value, v === r.value));
+      ctl.append(s);
+    } else if (r.kind === "picks") {
+      const on = new Set(String(r.value ?? "").split(","));
+      ctl.replaceChildren(html`<div class="seg" role="group" aria-label="${r.label}"><button type="button" data-all="1" disabled="${off}">All</button><button type="button" data-all="0" disabled="${off}">None</button></div>`);
+      const grid = html`<div class="tiles" role="group" aria-label="${r.label}">${(r.options ?? []).map(([v, l]) => html`<button type="button" class="pick" role="checkbox" data-v="${v}" aria-checked="${String(on.has(v))}" disabled="${off}"><span class="lk"></span><span class="nm"><i class="box"></i>${l}</span></button>`)}</div>`;
+      row.querySelector(".help")!.after(grid);
+      if (r.tile) for (const b of row.querySelectorAll<HTMLElement>(".pick")) this.tileShown(b.querySelector(".lk")!, (box) => r.tile!(b.dataset.v!, box));
+    } else if (r.kind === "action") ctl.replaceChildren(html`<button type="button" class="btn" disabled="${off}">${r.button ?? r.label}</button>`);
+    else ctl.innerHTML = `<span class="val"></span>`, (ctl.querySelector(".val")!.textContent = String(r.value ?? ""));
+    return row;
+  }
+
+  /** A row's control used: its new value to the row's set, its error (if any) under it. */
+  private async settingClicked(e: Event): Promise<void> {
+    const t = e.target as HTMLElement;
+    const row = t.closest<HTMLElement>(".srow");
+    const r = row && this.settingRows.get(row.dataset.id!);
+    if (!row || !r?.set || r.disabled) return;
+    let v: boolean | string | undefined;
+    if (r.kind === "toggle" && e.type === "click" && t.closest(".switch")) v = r.value !== true;
+    else if (r.kind === "choice" && e.type === "click") v = t.closest<HTMLElement>("[data-v]")?.dataset.v;
+    else if (r.kind === "select" && e.type === "change") v = (t as HTMLSelectElement).value;
+    else if (r.kind === "picks" && e.type === "click") {
+      const all = t.closest<HTMLElement>("[data-all]")?.dataset.all, one = t.closest<HTMLElement>(".pick")?.dataset.v;
+      const on = new Set(String(r.value ?? "").split(",").filter(Boolean));
+      if (all) (r.options ?? []).forEach(([o]) => (all === "1" ? on.add(o) : on.delete(o)));
+      else if (one) on.has(one) ? on.delete(one) : on.add(one);
+      else return;
+      v = (r.options ?? []).filter(([o]) => on.has(o)).map(([o]) => o).join(",");
+    } else if (r.kind === "action" && e.type === "click" && t.closest(".btn")) v = undefined;
+    else return;
+    if (r.kind !== "action" && (v === undefined || v === r.value)) return;
+    const err = row.querySelector<HTMLElement>(".err")!;
+    const why = await r.set(v);
+    err.hidden = !why;
+    err.textContent = why || "";
+    if (why) return;
+    r.value = v;
+    if (r.kind === "toggle") row.querySelector(".switch")!.setAttribute("aria-checked", String(v === true));
+    if (r.kind === "choice") row.querySelectorAll<HTMLElement>("[data-v]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === v)));
+    if (r.kind === "picks") {
+      const on = new Set(String(v).split(","));
+      row.querySelectorAll<HTMLElement>(".pick").forEach((b) => b.setAttribute("aria-checked", String(on.has(b.dataset.v!))));
+    }
+  }
+
+  /** The picks tiles' pictures playing (each its stop), and what sees them on screen. */
+  private tiles = new Map<Element, { play(): () => void; stop?: () => void }>();
+  private tileSeen?: IntersectionObserver;
+
+  /** `box`'s picture played while it is on screen (its tab shown, scrolled to), stopped when not (another tab, the dialog closed). */
+  private tileShown(box: HTMLElement, play: (box: HTMLElement) => () => void): void {
+    this.tileSeen ??= new IntersectionObserver((seen) => {
+      for (const s of seen) {
+        const t = this.tiles.get(s.target);
+        if (!t) continue;
+        if (s.isIntersecting && !t.stop) t.stop = t.play();
+        else if (!s.isIntersecting && t.stop) t.stop(), (t.stop = undefined);
+      }
+    });
+    this.tiles.set(box, { play: () => play(box) });
+    this.tileSeen.observe(box);
+  }
+
+  /** Every tile's picture stopped, none watched (the dialog drawn anew, or closed). */
+  private tilesGone(): void {
+    this.tileSeen?.disconnect();
+    for (const t of this.tiles.values()) t.stop?.();
+    this.tiles.clear();
+  }
+
+  /** The panel's own rows: the main file, the pages' look, the debug check, the tips. */
+  private ownSettings(): SettingsGroup[] {
+    const ev = this.ev;
+    // (a choice of the panel's: applied here, kept by the host)
+    const pref = <K extends keyof ViewPrefs>(k: K, apply: (v: ViewPrefs[K]) => void) => async (v?: boolean | string) => {
+      const why = await ev.onPref?.(k, v as ViewPrefs[K]);
+      if (!why) apply(v as ViewPrefs[K]);
+      return why;
+    };
+    const keep = ev.onPref ? undefined : "This host doesn't keep it";
+    const preview: SettingRow[] = [];
+    if (this.mainFiles.names.length)
+      preview.push({ id: "main", label: "Main file", help: "The file PhiTeX typesets", kind: "select", options: this.mainFiles.names.map((n) => [n, n]), value: this.mainFiles.main ?? "", set: (v) => void ev.onMain(String(v)) });
+    const look: SettingRow[] = [];
+    look.push(
+      { id: "dark-pdf", label: "Dark PDF", help: "Darker pages; it inverts figures and photos too", kind: "choice", options: [["off", "Off"], ["on", "On"], ["theme", "Match theme"]], value: this.dark, disabled: keep, set: pref("dark-pdf", (d) => this.darkPdf(d)) },
+      {
+        id: "opening",
+        label: "Loading animation",
+        help: "Played on the first page while it is typeset: one of those picked, a different one each time. None: no animation",
+        kind: "picks",
+        options: LOOKS.map((l): [string, string] => [l.id, l.name]),
+        value: looksIn(this.look).join(","),
+        disabled: keep,
+        set: async (v) => {
+          const l = lookFrom(String(v).split(","));
+          const why = await ev.onPref?.("opening", l);
+          if (!why) this.look = l;
+          return why;
+        },
+        tile: (id, box) => {
+          box.classList.toggle("dark", this.sheetDark());
+          return lookPreview(id, box, this.sheetDark(), (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop()!, this.words.steps, hintsFor(this.kind)[0] ?? "");
+        },
+      },
+    );
+    if (ev.onBoxes) look.push({ id: "underline", label: "Show them on the PDF", help: "A wavy line under each one, and a mark beside the scrollbar", kind: "toggle", value: this.culpritsOn, disabled: keep, set: pref("underline", (on) => this.culpritsShown(on)) });
+    // (the problems' filters, the same as the buttons at the top of the problems list)
+    const problems: SettingRow[] = KINDS.map(([k, name]) => ({
+      id: `kind-${k}`,
+      label: name,
+      help: KIND_HELP[k],
+      kind: "toggle",
+      value: !this.hiddenKinds.has(k),
+      set: (on) => void (!!on === this.hiddenKinds.has(k) && this.toggleKind(k)),
+    }));
+    if (ev.onBoxes) problems.push(look.splice(look.findIndex((r) => r.id === "underline"), 1)[0]);
+    const build: SettingRow[] = [];
+    if (ev.onDebug) build.push({ id: "debug", label: "Debug check", help: "Compare with a fresh build every 5 s (this session only)", kind: "toggle", value: this.debugOn, set: () => this.toggleDebug() });
+    build.push({ id: "reload", label: "Reload the files", help: "Read the project's files again", kind: "action", button: "Reload", set: () => (this.settings(false), void ev.onReload()) });
+    const tips: SettingRow[] = [{ id: "tips", label: "Feature tips", help: "Shown again, from the start", kind: "action", button: "Show again", set: () => (this.tipsReset(), this.settings(false)) }];
+    if (ev.onTour) tips.push({ id: "tour", label: "The tour", kind: "action", button: "Take the tour", set: () => (this.settings(false), ev.onTour!()) });
+    if (ev.onNews) tips.push({ id: "news", label: "What's new", kind: "action", button: "Show", set: () => (this.settings(false), ev.onNews!()) });
+    return [
+      { title: "Preview", rows: preview },
+      { title: "Appearance", rows: look },
+      { title: "Links", rows: this.linkRows() },
+      { title: "Warnings/Errors", rows: problems },
+      { title: "Build", rows: build },
+      { title: "Packages", rows: [] },
+      { title: "Updates and tips", rows: tips },
+    ];
+  }
+
+  /** Start the pages at page `k`, `top` points down it (a tab opened at a place: its address said where). */
+  startAt(k: number, top: number | null): void {
+    this.viewer.startAt(k, top);
+  }
+
+  /** The links' switches (PanelPrefs) given to the viewer. */
+  private linksShown(): void {
+    const v = this.viewer, p = this.prefs;
+    [v.peeks, v.backs, v.flashes, v.newTabs] = [p.peeks, p.backs, p.flashes, p.newTabs];
+    if (!p.backs) v.backsOff();
+  }
+
+  /** Settings' Links: each feature of the links on or off, kept with the panel's own choices (every host's). */
+  private linkRows(): SettingRow[] {
+    const sw = (k: "peeks" | "backs" | "flashes" | "newTabs") => (on?: boolean | string) => {
+      this.prefs[k] = on === true;
+      this.linksShown();
+      this.save();
+    };
+    const rows: SettingRow[] = [
+      { id: "peeks", label: "Preview links on hover", help: "A window over a link shows where it goes: the page, a citation's works, an address. Its pin keeps it open, moved and resized as you like", kind: "toggle", value: this.prefs.peeks, set: sw("peeks") },
+      { id: "backs", label: "Back and Forward after a jump", help: "A Back button in the corner once you follow a link, with the places before it; the mouse's back and forward buttons", kind: "toggle", value: this.prefs.backs, set: sw("backs") },
+      { id: "flashes", label: "Light up where a jump lands", help: "What a link pointed at lit for a moment", kind: "toggle", value: this.prefs.flashes, set: sw("flashes") },
+    ];
+    if (this.ev.onOpenAt) rows.push({ id: "newTabs", label: "Ctrl+click opens a new tab", help: "A link Ctrl+clicked (⌘ on a Mac) or middle-clicked opens this preview in a new tab at its target", kind: "toggle", value: this.prefs.newTabs, set: sw("newTabs") });
+    return rows;
+  }
+
+  /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
+  viewPrefs(p: Partial<ViewPrefs>): void {
+    if (p["dark-pdf"]) this.darkPdf(p["dark-pdf"]);
+    if (p.opening) this.look = lookOf(p.opening);
+    if (p.underline !== undefined && p.underline !== this.culpritsOn) this.culpritsShown(p.underline);
   }
 
   /** Repaints so far: the first is the first build's. */
   private paints = 0;
-
-  /** The ⚡ chip shown or not (the host's setting: Overleaf's popup, on by default). */
-  speedChip(on: boolean): void {
-    this.win.classList.toggle("nospeed", !on);
-  }
 
   /** Where the pages' strips say the last frame's numbers (drawn, kept, watch, probe, draw, fetch, compose): under the ⚡ chip's. */
   stripsChip(): HTMLElement {
@@ -1929,60 +2678,35 @@ export class Panel {
   /** A repaint reached the screen, `ms` after its keystroke: the status says how fast. */
   painted(ms: number): void {
     // (the first paint is the first build's: downloads, the format, the whole document; the status says so, not "Built · 14906 ms")
-    this.speed = { ms, at: performance.now(), first: this.paints++ === 0 };
-    // (the ⚡ chip: each repaint's time, keystroke to screen, in the corner; a flash as it changes)
-    const chip = this.$("#speedchip");
-    chip.hidden = false;
-    this.$("#speedms").textContent = `⚡ ${this.speed.first ? "first build " : ""}${ms < 10 ? ms.toFixed(1) : Math.round(ms)} ms`;
-    chip.classList.toggle("slow", !this.speed.first && ms > 100);
-    chip.classList.remove("flash");
-    void chip.offsetWidth;
-    chip.classList.add("flash");
+    const first = this.paints++ === 0;
+    // (the first: the time the writer waited, opening to page (the walk), not the engine's last part)
+    if (first) this.walkEnd();
+    if (first && this.walk?.ms !== undefined) ms = this.walk.ms;
+    this.speed = { ms, at: performance.now(), first };
+    // (each repaint's time is the status's, "Built · 14 ms", and its popover's
+    // with the build's parts and the strips' numbers: nothing over the pages, the user's)
+    this.$("#speedms").textContent = `⚡ ${this.speed.first ? "first page " : ""}${dur(ms)}`;
     this.renderStatus();
+    if (!this.$("#m-time").hidden) this.timing();
     this.emit();
   }
 
   // ---- Dark PDF: the user's choice, Off by default (a static filter: it inverts figures too) ----
 
-  private darkPref(): DarkPdf {
-    try {
-      const d = localStorage.getItem("phitex.darkpdf");
-      return d === "on" || d === "theme" ? d : "off";
-    } catch {
-      return "off";
-    }
-  }
-
   private dark: DarkPdf = "off";
   private darkQuery = matchMedia("(prefers-color-scheme: dark)");
 
-  /** Dark pages off, on, or as the host's theme is; remembered on this machine. */
-  darkPdf(d: DarkPdf, save = true): void {
+  /** Dark pages off, on, or as the host's theme is (the host keeps the choice: viewPrefs). */
+  darkPdf(d: DarkPdf): void {
     this.dark = d;
-    if (save)
-      try {
-        localStorage.setItem("phitex.darkpdf", d);
-      } catch {
-        /* (not kept) */
-      }
-    this.root.querySelectorAll<HTMLElement>("#darkpdf [data-dark]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.dark === d)));
     this.darkQuery.onchange = () => this.applyDark();
     this.applyDark();
   }
 
-  /** The loading animation chosen (`set`: chosen now, kept in this browser), as it is. */
-  private openingLook(set?: OpeningLook): OpeningLook {
-    let l: OpeningLook = "phitex";
-    try {
-      if (set) localStorage.setItem("phitex.opening", set);
-      const v = localStorage.getItem("phitex.opening");
-      if (v === "retro" || v === "off") l = v;
-    } catch {
-      l = set ?? "phitex";
-    }
-    this.root.querySelectorAll<HTMLElement>("#openlook [data-look]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.look === l)));
-    return l;
-  }
+  /** The loading animation (the host keeps the choice: viewPrefs). */
+  private look: OpeningLook = "random";
+  /** The last one played (random plays another). */
+  private lastLook: string | null = null;
 
   /** The host page's own theme (theme()): undefined, never said. */
   private pageTheme: "dark" | "light" | null | undefined = undefined;
@@ -2030,14 +2754,36 @@ export class Panel {
    * features' (What's new: `fresh`), or every one (the tour); `asked`: the
    * host's tour().
    */
+  /** The tips seen: this browser's, and the host's (tipsSeen). */
+  private seenIds = (() => {
+    try {
+      return new Set<string>(JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]"));
+    } catch {
+      return new Set<string>();
+    }
+  })();
+
+  /** The tips seen as the host keeps them (the watch: the user's phitex.toml, the same on every port): not offered by themselves again. */
+  tipsSeen(ids: string[]): void {
+    for (const id of ids) this.seenIds.add(id);
+    // (one offered meanwhile and seen now: gone)
+    if (!this.$("#tip").hidden && this.tipList.every((t) => this.seenIds.has(t.id))) this.tip(-1);
+  }
+
+  /** Every tip unseen again (Settings' Show again): offered from the start at the next page. */
+  tipsReset(): void {
+    this.seenIds.clear();
+    try {
+      localStorage.removeItem("phitex.tips.seen");
+    } catch {
+      /* (none kept) */
+    }
+    this.tips("unseen", true);
+  }
+
   private tips(which: "unseen" | "fresh" | "all", asked = false): void {
     if (!this.ownBar || this.prefs.collapsed || (which === "unseen" && !asked && !this.autoTips)) return;
-    let seen: string[] = [];
-    try {
-      seen = JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]");
-    } catch {
-      /* (none seen) */
-    }
+    const seen = [...this.seenIds];
     // (Overleaf's welcome callout says "as you type" already: not twice)
     const offered = TIPS.filter((t) => !(t.id === "compare" && !this.ev.onCompare) && !(t.id === "contents" && !this.contents) && !(t.id === "live" && this.kind === "overleaf"));
     this.tipList = which === "all" ? offered : which === "fresh" ? offered.filter((t) => t.fresh) : offered.filter((t) => !seen.includes(t.id));
@@ -2046,13 +2792,15 @@ export class Panel {
 
   /** Tips seen: not offered by themselves again (What's new and the tour still show them). */
   private seen(ids: string[]): void {
+    const before = this.seenIds.size;
+    for (const id of ids) this.seenIds.add(id);
+    if (this.seenIds.size === before) return;
     try {
-      const seen = new Set<string>(JSON.parse(localStorage.getItem("phitex.tips.seen") ?? "[]"));
-      for (const id of ids) seen.add(id);
-      localStorage.setItem("phitex.tips.seen", JSON.stringify([...seen]));
+      localStorage.setItem("phitex.tips.seen", JSON.stringify([...this.seenIds]));
     } catch {
-      /* (shown again next time) */
+      /* (the host's copy only) */
     }
+    this.ev.onTipsSeen?.([...this.seenIds]);
   }
 
   private tip(i: number): void {
@@ -2066,9 +2814,7 @@ export class Panel {
     // (a control hidden at this width: the menu that holds it)
     if (!target || !target.offsetParent) target = this.$("#b-more");
     target.classList.add("ringed");
-    el.innerHTML =
-      `<h4>${t.fresh ? '<span class="new">New</span>' : ""}${esc(t.title)}</h4>${t.demo}<p>${esc(t.text)}</p>` +
-      `<div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`;
+    el.replaceChildren(html`<h4>${t.fresh ? html`<span class="new">New</span>` : ""}${t.title}</h4>${t.demo()}<p>${t.text}</p><div class="acts"><span class="n">${i + 1} of ${this.tipList.length}</span><button type="button" data-t="skip">Skip</button><button type="button" class="primary" data-t="next">${i + 1 < this.tipList.length ? "Next" : "Got it"}</button></div>`);
     el.hidden = false;
     const bar = this.$(".bar").getBoundingClientRect(), r = target.getBoundingClientRect(), w = el.offsetWidth;
     const cx = r.left + r.width / 2 - bar.left, left = Math.max(8, Math.min(bar.width - w - 8, cx - w / 2));
@@ -2095,15 +2841,11 @@ export class Panel {
       el.innerHTML = "";
       return;
     }
-    const esc = (t: string) => t.replace(/[&<>"]/g, (c) => `&#${c.charCodeAt(0)};`);
-    const n = d.busy ? `<span class="n busy">${esc(d.busy)}</span>` : `<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
-    el.innerHTML =
-      `<span class="what" title="${esc(d.title)} against the current version">${esc(d.title)} vs current <small>${esc(d.when)}</small></span>` +
-      `<button data-a="prev" title="Previous change (Shift+N)" ${d.busy || !d.changes ? "disabled" : ""}>‹</button>${n}<button data-a="next" title="Next change (N)" ${d.busy || !d.changes ? "disabled" : ""}>›</button>` +
-      `<span class="sep"></span><button data-a="toggle" class="${d.showing === "current" ? "cur" : ""}" title="Show the ${d.showing === "diff" ? "current version" : "diff"} (D)">${d.showing === "diff" ? "Current" : "Diff"}</button>` +
-      `<button data-a="pdf" title="Download the diff PDF" ${d.busy ? "disabled" : ""}>⬇ PDF</button><button data-a="tex" title="Download diff.tex" ${d.busy ? "disabled" : ""}>⬇ .tex</button>` +
-      `<button data-a="settings" title="Diff style: colors, markup" aria-label="Diff style">⚙</button>` +
-      `<button data-a="close" title="Stop comparing" aria-label="Stop comparing">✕</button>`;
+    const n = d.busy ? html`<span class="n busy">${d.busy}</span>` : html`<span class="n">${d.changes ? `${d.at > 0 ? `${d.at} / ` : ""}${d.changes} change${d.changes === 1 ? "" : "s"}` : "no changes"}</span>`;
+    const stuck = !!d.busy || !d.changes;
+    // (which pages are shown, said by a switch of two, the one shown pressed;
+    // the diff's style a click away on its own half: D switches)
+    el.replaceChildren(html`<span class="what" title="${d.title} against the current version">${d.title} vs current <small>${d.when}</small></span><button data-a="prev" title="Previous change (Shift+N)" disabled="${stuck}">‹</button>${n}<button data-a="next" title="Next change (N)" disabled="${stuck}">›</button><span class="sep"></span><span class="seg" role="group" aria-label="Pages shown (D)"><button data-a="${d.showing === "diff" ? "settings" : "toggle"}" class="on-diff" aria-pressed="${d.showing === "diff"}" title="${d.showing === "diff" ? "The diff is shown: its style (colors, markup, change bars)" : "Show the diff (D)"}">Diff${d.showing === "diff" ? html` <span class="chev" aria-label="Diff style">▾</span>` : ""}</button><button data-a="${d.showing === "current" ? "" : "toggle"}" class="on-current" aria-pressed="${d.showing === "current"}" title="${d.showing === "current" ? "The current version is shown" : "Show the current version (D)"}">Current</button></span><button data-a="pdf" title="Download the diff PDF" disabled="${!!d.busy}">⬇ PDF</button><button data-a="tex" title="Download diff.tex" disabled="${!!d.busy}">⬇ .tex</button><button data-a="settings" title="Diff style: colors, markup, change bars" aria-label="Diff style">⚙</button><button data-a="close" title="Stop comparing" aria-label="Stop comparing">✕</button>`);
     el.className = "diffbar on";
     el.onclick = (e) => {
       const a = (e.target as HTMLElement).closest<HTMLElement>("button[data-a]")?.dataset.a as keyof DiffBarActions | undefined;
@@ -2118,22 +2860,29 @@ export class Panel {
   diffSettings(look: DiffLook | null, change?: (l: DiffLook) => void, defaults?: DiffLook): void {
     const el = this.$("#diffset");
     if (!look) {
-      el.className = "diffset";
+      el.className = "menu diffset";
       return;
     }
     // (the look comes from a host, a store or a server: its colors go into
     // attributes, so only #rrggbb is taken, its names only as the lists have them)
     look = { ...look, add_color: safeColor(look.add_color, "#0000ff"), del_color: safeColor(look.del_color, "#ff0000") };
+    // (the styles, and change bars in the margin as a switch beside them:
+    // latexdiff's types with bars are a style's with them, where it has one)
     const MARKUP: [string, string][] = [
       ["underline", "Underline"], ["ctraditional", "Color + font"], ["traditional", "Font"], ["cfont", "Color + size"],
-      ["fontstrike", "Strike"], ["bold", "Bold"], ["changebar", "Change bars"], ["culinechbar", "Underline + bars"], ["invisible", "Hide deletions"],
+      ["fontstrike", "Strike"], ["bold", "Bold"], ["invisible", "Hide deletions"],
     ];
+    const WITH_BARS: Record<string, string> = { underline: "culinechbar", cfont: "cfontchbar", invisible: "changebar", ctraditional: "cchangebar" };
+    const BASE: Record<string, string> = Object.fromEntries(Object.entries(WITH_BARS).map(([a, b]) => [b, a]));
+    const base = BASE[look.markup] ?? look.markup;
+    const bars = look.markup in BASE;
     const SUB: [string, string][] = [["safe", "Plain"], ["color", "Colored"], ["marker", "Margin marks"]];
     const PAIRS: [string, string, string][] = [
       ["#0000ff", "#ff0000", "Blue / red"], ["#15803d", "#b91c1c", "Green / red"], ["#0072b2", "#d55e00", "Colorblind-safe"], ["#7e22ce", "#6b7280", "Purple / gray"],
     ];
     const seg = (key: "markup" | "subtype", opts: [string, string][]) =>
-      `<div class="opts">${opts.map(([v, t]) => `<button data-k="${key}" data-v="${v}" aria-pressed="${look[key] === v}">${t}</button>`).join("")}</div>`;
+      html`<div class="opts">${opts.map(([v, t]) => html`<button data-k="${key}" data-v="${v}" aria-pressed="${(key === "markup" ? base : look[key]) === v}">${t}</button>`)}</div>`;
+    const canBars = base in WITH_BARS;
     const deco = (add: boolean) => {
       const c = add ? look.add_color : look.del_color;
       if (look.markup === "invisible" && !add) return "display:none";
@@ -2141,14 +2890,8 @@ export class Panel {
       const line = add && /^(underline|culinechbar)$/.test(look.markup) ? `text-decoration: underline wavy ${c}; text-underline-offset: 3px;` : "";
       return `color:${c};${strike ? `text-decoration: line-through ${c};` : ""}${line}${look.markup === "bold" && add ? "font-weight:700;" : ""}`;
     };
-    el.innerHTML =
-      `<h4>Style</h4>${seg("markup", MARKUP)}` +
-      `<h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => `<button class="pair" data-pair="${a},${d}" aria-pressed="${look.add_color === a && look.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`).join("")}</div>` +
-      `<div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look.del_color}"></div>` +
-      `<h4>Mode</h4>${seg("subtype", SUB)}` +
-      `<div class="sample">The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div>` +
-      `<div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`;
-    el.className = "diffset on";
+    el.replaceChildren(html`<h4>Style</h4>${seg("markup", MARKUP)}<div class="row bars"><span>Change bars in the margin</span><button data-bars="1" role="switch" aria-checked="${bars}" aria-pressed="${bars}" disabled="${!canBars}" title="${canBars ? null : "Not with this style"}">${bars ? "On" : "Off"}</button></div><h4>Colors</h4><div class="opts">${PAIRS.map(([a, d, t]) => html`<button class="pair" data-pair="${a},${d}" aria-pressed="${look.add_color === a && look.del_color === d}"><i style="background:${a}"></i><i style="background:${d}"></i>${t}</button>`)}</div><div class="row"><span>Added</span><input type="color" data-c="add_color" value="${look.add_color}"><span>Deleted</span><input type="color" data-c="del_color" value="${look.del_color}"></div><h4>Mode</h4>${seg("subtype", SUB)}<div class="sample" style="${bars ? `box-shadow: inset 3px 0 0 ${look.add_color}; padding-left: 12px` : null}">The results are <span style="${deco(false)}">good</span> <span style="${deco(true)}">excellent</span>.</div><div class="foot"><small>As latexdiff's --type, --subtype</small><button data-reset="1">Reset</button></div>`);
+    el.className = "menu diffset on";
     const set = (l: Partial<DiffLook>) => {
       const next = { ...look, ...l };
       change?.(next);
@@ -2162,6 +2905,9 @@ export class Panel {
         const [a, d] = b.dataset.pair.split(",");
         return set({ add_color: a, del_color: d });
       }
+      // (a style picked keeps the bars where it can have them)
+      if (b.dataset.bars) return canBars && set({ markup: bars ? base : WITH_BARS[base] });
+      if (b.dataset.k === "markup") return set({ markup: bars && b.dataset.v! in WITH_BARS ? WITH_BARS[b.dataset.v!] : b.dataset.v! });
       if (b.dataset.k) set({ [b.dataset.k]: b.dataset.v } as Partial<DiffLook>);
     };
     el.onchange = (e) => {
@@ -2198,8 +2944,145 @@ export class Panel {
 
   latency(summary: string, details?: string): void {
     this.lat = { summary, details: details ?? this.lat?.details };
-    this.$("#details").textContent = details ?? summary;
     if (!this.$("#m-time").hidden) this.timing();
+  }
+
+  /**
+   * This opening's steps as the sheet said them (the project read, the
+   * packages, the format, typesetting), each with the time it was up, from
+   * the first step to the first page on screen (`ms`, then closed): the
+   * first build's time as the writer waited for it, not the engine's part.
+   */
+  private walk: { since: number; parts: [string, number][]; now?: string; at: number; ms?: number } | null = null;
+
+  /** The opening's step is now `what` (a step of the sheet's). */
+  private walkTo(what: string): void {
+    const now = performance.now();
+    const w = (this.walk ??= { since: now, parts: [], at: now });
+    if (w.ms !== undefined) return;
+    const step = what === this.words.steps[1] ? what : what === this.words.steps[2] ? (this.making ? "Making the format" : what) : this.words.steps[0];
+    if (step === w.now) return;
+    this.walkAdd(now);
+    (w.now = step), (w.at = now);
+  }
+
+  /** The step up until `now` counted (a step seen again adds to its first time). */
+  private walkAdd(now: number): void {
+    const w = this.walk!;
+    if (!w.now) return;
+    const p = w.parts.find(([k]) => k === w.now);
+    if (p) p[1] += now - w.at;
+    else w.parts.push([w.now, now - w.at]);
+  }
+
+  /** The first page is on screen: the opening's time closed. */
+  private walkEnd(): void {
+    const w = this.walk;
+    if (!w || w.ms !== undefined) return;
+    const now = performance.now();
+    this.walkAdd(now);
+    w.now = undefined;
+    w.ms = now - w.since;
+  }
+
+  /** The timing popover's first build: each step's time, as a bar, from opening to the first page. */
+  private walkPart(): DocumentFragment | "" {
+    const w = this.walk;
+    if (!w || w.ms === undefined || !this.speed?.first) return "";
+    const parts = w.parts.filter(([, ms]) => ms >= 1);
+    // (its total is the head's, "First page · 124 s": said once)
+    return html`<div class="row"><span class="k">Where the time went</span><span class="v"></span>${bars(parts, 4)}</div>`;
+  }
+
+  /** The last build's parts as its host measured them (the watch's stats), in order, and work done alongside them (not in the build's time): [name, ms]. */
+  private phases: { parts: [string, number][]; beside: [string, number][] } | null = null;
+
+  /** The last build's parts (`parts` add up to its time; `beside`: done at the same time, said under the bar). */
+  buildParts(parts: [string, number][], beside: [string, number][] = []): void {
+    this.phases = { parts, beside };
+    if (!this.$("#m-time").hidden) this.timing();
+  }
+
+  /** The timing popover's "Where the last build's time went": its parts as a bar, like the opening's. */
+  private phasesPart(): DocumentFragment | "" {
+    const p = this.phases;
+    if (!p) return "";
+    const parts = p.parts.filter(([, ms]) => ms >= 1);
+    if (!parts.length) return "";
+    const beside = p.beside.filter(([, ms]) => ms >= 1).map(([n, ms]) => `${n} ${dur(ms)}`).join(", ");
+    return html`<div class="row"><span class="k">Where the last build's time went</span><span class="v"></span>${bars(parts, 4)}${beside ? html`<span class="note">Alongside: ${beside}</span>` : ""}</div>`;
+  }
+
+  /** The packages fetched since the project opened: how many, their bytes, and the time any was on its way (`since`: one is now). */
+  private downloads: { n: number; bytes: number; ms: number; since?: number } = { n: 0, bytes: 0, ms: 0 };
+
+  /** The timing popover's Downloads row: the packages' time, how many and their size; none fetched, none. */
+  private downloadsPart(): DocumentFragment | "" {
+    const d = this.downloads;
+    if (!d.n && d.since === undefined) return "";
+    const ms = d.ms + (d.since === undefined ? 0 : performance.now() - d.since);
+    const size = d.bytes ? ` · ${d.bytes < 1e6 ? `${Math.max(1, Math.round(d.bytes / 1e3))} kB` : `${(d.bytes / 1e6).toFixed(1)} MB`}` : "";
+    return html`<div class="row"><span class="k">Downloads</span><span class="v">${dur(ms)}</span><span class="note">${d.n} package${d.n === 1 ? "" : "s"}${size}${d.since === undefined ? "" : ", more on the way"}</span></div>`;
+  }
+
+  /** The first build's time and the edits' since (the watch's), for the popover's bars. */
+  private times: { first?: number; edits: number[] } = { edits: [] };
+
+  /** A build's time: the first (cold) one's, or an edit's: drawn as bars beside each other in the timing popover. */
+  buildTime(ms: number, first: boolean): void {
+    if (first) this.times = { first: ms, edits: [] };
+    else this.times.edits.push(ms);
+    this.built = { ms, at: performance.now(), first };
+    // (a build that changed no page paints nothing: the status and the popover say it all the same)
+    this.renderStatus();
+    if (!this.$("#m-time").hidden) this.timing();
+    this.emit();
+  }
+
+  /** The last build the host said (buildTime), painted or not; `joined`: the one before this tab joined (joinedLate). */
+  private built?: { ms: number; at: number; first: boolean; joined?: boolean };
+
+  /**
+   * What the status and the timing popover's head say: the newest of the
+   * last paint (its time from the keystroke) and the last build (one that
+   * changed no page paints nothing, and was not said before: grail's 7 s).
+   */
+  private latest(): { label: string; ms: number; first: boolean } | undefined {
+    const s = this.speed, b = this.built;
+    if (b && (!s || b.at > s.at)) return { label: b.first ? "First build" : b.joined ? "Last build" : "Built, no page changed", ms: b.ms, first: b.first };
+    if (s) return { label: s.first ? "First page" : "Built", ms: s.ms, first: !!s.first };
+    return undefined;
+  }
+
+  /**
+   * This tab joined `builds` builds in: `first` the first build's time for
+   * the bars; the first build's paint was not this tab's, so its next is not
+   * called one; `last` the last build's time, for the status and the popover's
+   * head ("Last build", or "First build" if it was the only one).
+   */
+  joinedLate(first: number | undefined, builds: number, last?: { ms: number; cold: boolean }): void {
+    if (first !== undefined && this.times.first === undefined) this.times.first = first;
+    if (builds >= 1) this.paints = Math.max(this.paints, 1);
+    if (last && !this.built) {
+      this.built = { ms: last.ms, at: performance.now(), first: last.cold, joined: true };
+      this.renderStatus();
+      if (!this.$("#m-time").hidden) this.timing();
+    }
+  }
+
+  /** The bars: the first build, the last edit, the edits' median, each as long as its time (the longest the full width; a short one at least a sliver). */
+  private timeBars(): DocumentFragment | "" {
+    const t = this.times;
+    if (t.first === undefined || !t.edits.length) return "";
+    const sorted = [...t.edits].sort((a, b) => a - b);
+    const rows: [string, number, string][] = [
+      ["First build", t.first, "first"],
+      ["This edit", t.edits[t.edits.length - 1], "edit"],
+      ...(t.edits.length > 2 ? [["Edits, median", sorted[sorted.length >> 1], "median"] as [string, number, string]] : []),
+    ];
+    const max = Math.max(...rows.map((r) => r[1]), 1e-3);
+    const x = t.first / Math.max(t.edits[t.edits.length - 1], 1e-3);
+    return html`<div class="tbars" role="img" aria-label="First build ${dur(t.first)}, this edit ${dur(t.edits[t.edits.length - 1])}">${rows.map(([k, ms, c]) => html`<div class="tb"><span class="k">${k}</span><span class="track"><i class="${c}" style="width:${Math.max(0.6, (100 * ms) / max).toFixed(2)}%"></i></span><span class="v">${dur(ms)}</span></div>`)}${x >= 1.5 ? html`<div class="tb x">${x < 10 ? x.toFixed(1) : Math.round(x)}× faster than the first build</div>` : ""}</div>`;
   }
 
   /** The last build's parts as the session lists them: [what, how long]. */
@@ -2216,24 +3099,48 @@ export class Panel {
     const el = this.$("#m-time");
     const parts = this.timingParts().map(([k, v]) => part(k, v));
     // (the headline: a first build's time, else keystroke to page as the session measured it, else the host's paint)
-    const e2e = parts.find((p) => p.key === "keystroke→page")?.ms ?? this.speed?.ms;
-    const head = this.speed?.first ? ["First build", this.speed.ms] : e2e !== undefined ? ["Keystroke to page", e2e] : null;
-    const rows = parts
-      .map((p) => {
-        const bar = p.split?.length
-          ? `<div class="tbar">${p.split.map(([n, ms], i) => `<i class="c${i}" style="flex-grow:${Math.max(ms, 0.05)}"></i>`).join("")}</div>` +
-            `<div class="legend">${p.split.map(([n, ms], i) => `<span><i class="c${i}"></i>${esc(n)} ${esc(dur(ms))}</span>`).join("")}</div>`
-          : "";
-        return `<div class="row"><span class="k">${esc(p.label)}</span><span class="v">${esc(p.value)}</span>${bar}${p.note ? `<span class="note">${esc(p.note)}</span>` : ""}</div>`;
-      })
-      .join("");
-    el.innerHTML =
-      (head ? `<div class="head"><span>${esc(String(head[0]))}</span><b>${esc(dur(head[1] as number))}</b></div>` : `<div class="head"><span>No build yet</span></div>`) +
-      rows +
-      `<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div>`;
+    const l = this.latest();
+    const e2e = parts.find((p) => p.key === "keystroke→page")?.ms ?? l?.ms;
+    const head = !l ? (e2e !== undefined ? ["Keystroke to page", e2e] : null) : l.first || l.label !== "Built" ? [l.label, l.ms] : ["Keystroke to page", e2e ?? l.ms];
+    const rows = parts.map((p) => html`<div class="row"><span class="k">${p.label}</span><span class="v">${p.value}</span>${p.split?.length ? bars(p.split) : ""}${p.note ? html`<span class="note">${p.note}</span>` : ""}</div>`);
+    // (the last page drawn: its time as a bar like the build's parts, the watch's probe and draw, the transfer, the decode)
+    const strips = framePart(this.$("#stripsline").dataset.frame);
+    el.replaceChildren(html`${head ? html`<div class="head"><span>${String(head[0])}</span><b>${dur(head[1] as number)}</b></div>` : html`<div class="head"><span>No build yet</span></div>`}${this.walkPart()}${this.phasesPart()}${this.timeBars()}${this.downloadsPart()}${rows}${strips}<div class="foot"></div><div class="foot msg${this.msgErr ? " err" : ""}"></div><button type="button" class="reportbtn copydbg">Copy debug info</button>`);
+    el.querySelector<HTMLButtonElement>(".copydbg")!.onclick = (e) => {
+      e.stopPropagation();
+      const b = e.currentTarget as HTMLButtonElement;
+      void this.debugInfo()
+        .then((t) => navigator.clipboard.writeText(t))
+        .then(() => (b.textContent = "Copied ✓"), () => (b.textContent = "Couldn't copy"));
+    };
     // (the summary line only when there are no parts to say it)
-    el.querySelector(".foot")!.textContent = parts.length ? "" : (this.lat?.summary ?? "");
+    el.querySelector(".foot")!.textContent = parts.length || this.walk?.ms !== undefined ? "" : (this.lat?.summary ?? "");
     el.querySelector(".msg")!.textContent = this.msgText;
+  }
+
+  /**
+   * The timing popover's numbers as plain text, for a bug report or a chat:
+   * the host's lines (version, engine, files), the last build's head and
+   * parts as the session or the watch said them, the first page's steps,
+   * the downloads, the last page drawn, and this machine.
+   */
+  private async debugInfo(): Promise<string> {
+    const out: string[] = [...((await this.ev.onDebugInfo?.().catch(() => [])) ?? [])];
+    const l = this.latest();
+    if (l) out.push(`${l.label}: ${dur(l.ms)}`);
+    if (this.lat?.summary) out.push(this.lat.summary);
+    for (const line of (this.lat?.details ?? "").split("\n").filter(Boolean)) out.push(`  ${line.trim()}`);
+    const w = this.walk;
+    if (w?.ms !== undefined) out.push(`opening to first page ${dur(w.ms)}: ${w.parts.map(([n, ms]) => `${n.toLowerCase()} ${dur(ms)}`).join(", ")}`);
+    const d = this.downloads;
+    if (d.n) out.push(`downloads: ${d.n} packages, ${(d.bytes / 1e6).toFixed(1)} MB, ${dur(d.ms)}`);
+    const t = this.times;
+    if (t.first !== undefined) out.push(`first build ${dur(t.first)}${t.edits.length ? `; edits ${t.edits.length}, last ${dur(t.edits[t.edits.length - 1])}, median ${dur([...t.edits].sort((a, b) => a - b)[t.edits.length >> 1])}` : ""}`);
+    const f = this.$("#stripsline").dataset.frame;
+    if (f) out.push(`last page drawn: ${frameText(f)}`);
+    const nav = navigator as Navigator & { userAgentData?: { platform?: string } };
+    out.push(`machine: ${nav.hardwareConcurrency ?? "?"} cores, ${nav.userAgentData?.platform || nav.platform || "?"}; ${nav.userAgent}`);
+    return out.join("\n") + "\n";
   }
 
   /** The last message (connected, files read, a debug check's result), shown in the timing popover. */
@@ -2285,19 +3192,48 @@ export class Panel {
   }
 
   files(names: string[], _skipped: string[], took: string): void {
-    this.msg(`${names.length} file${names.length === 1 ? "" : "s"} · ${took} · all local`);
+    this.msg(`${names.length} file${names.length === 1 ? "" : "s"} read ${took} · they stay in this browser`);
   }
 
+  /** The main files to pick from (Settings' Main file), and the one built. */
   mains(names: string[], main: string | null): void {
-    const s = this.$<HTMLSelectElement>("#main");
-    s.innerHTML = "";
-    for (const n of names) s.append(new Option(n, n, n === main, n === main));
+    this.mainFiles = { names, main };
+    if (!this.$("#settings").hidden) void this.settings(true);
+  }
+  private mainFiles: { names: string[]; main: string | null } = { names: [], main: null };
+
+  /** The document's main file as the host names it, where it has no Main file to pick (the watch): the openings that show it (a prompt's, a title bar's). */
+  docName(name: string): void {
+    this.doc = name;
+  }
+  private doc: string | null = null;
+
+  /** What's new (the host's news, `text` as plain lines), in a dialog over the pages, with the new features' tips a click away. */
+  news(version: string, text: string): void {
+    const box = this.$("#logview"), pre = this.$("#logtext");
+    box.querySelector("header")!.firstChild!.textContent = `What's new in ${version}`;
+    pre.textContent = text;
+    let b = box.querySelector<HTMLButtonElement>("#newstips");
+    if (!b) {
+      b = document.createElement("button");
+      b.id = "newstips";
+      b.className = "btn";
+      b.textContent = "Show the new features";
+      b.onclick = () => ((box.hidden = true), this.tips("fresh"));
+      box.append(b);
+    }
+    b.hidden = false;
+    box.hidden = false;
+    box.querySelector<HTMLElement>("[data-close]")?.focus();
   }
 
   /** The last build's log (the host's), in a dialog over the pages. */
   private async showLog(): Promise<void> {
     const box = this.$("#logview"), pre = this.$("#logtext");
     pre.textContent = "Reading the log…";
+    box.querySelector("header")!.firstChild!.textContent = "The last build's log";
+    const nb = box.querySelector<HTMLElement>("#newstips");
+    if (nb) nb.hidden = true;
     box.hidden = false;
     // (the focus in the dialog: Esc reaches the panel's keys and closes it, the menu that opened it being gone)
     box.querySelector<HTMLElement>("[data-close]")?.focus();
@@ -2307,6 +3243,8 @@ export class Panel {
 
   private redraw(): void {
     this.viewer?.redraw();
+    // (the pages' heights changed with the zoom: the marks along the scroll with them)
+    if (this.viewer) requestAnimationFrame(() => this.drawScrollMarks());
   }
 
   /** The page box, for the page in view. */
@@ -2322,14 +3260,20 @@ export class Panel {
   }
 
   /** The pages there are, by hash (the viewer draws the changed ones it shows). */
-  layout(hashes: string[]): void {
+  layout(hashes: string[], previews?: ReadonlySet<string>): void {
     this.pageHashes = hashes;
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
-    this.viewer.layout(hashes);
+    this.viewer.layout(hashes, previews);
+    // (the sheet up: on the first page's box now that it has one)
+    this.fitSheet();
     if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
     if (hashes.length) this.sheetDown();
     this.nav();
+    // (a fast build's problems reach the view before its pages do: their
+    // underlines, looked up on no page, are looked up again on these; the
+    // same pages as before are not)
+    if (this.culpritDiags.length) void this.underline(this.culpritDiags);
   }
 
     /** The editor to a page's source (a double-click on it). */
@@ -2343,7 +3287,7 @@ export class Panel {
   }
 
   /** Collaborators' cursors on the pages ([] clears). */
-  others(marks: { k: number; boxes: [number, number, number, number][]; label: string; hue: number }[]): void {
+  others(marks: { k: number; boxes: [number, number, number, number][]; label: string; hue: number; file?: string; pos?: number }[]): void {
     this.viewer.others(marks);
   }
 
@@ -2383,25 +3327,29 @@ export class Panel {
       return;
     }
     this.last = img;
+    this.drewOnce = true;
+    this.walkEnd();
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
     this.$("#stage").classList.toggle("fit", (this.zoomNow ?? this.prefs.zoom) === "fit");
     // (a view with no layout yet: this page's slots, up to it)
     if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => (i === k && hash) || `?${i}`));
     this.viewer.set(k, img, hash ?? null);
+    // (a page drawn: this document is built here, with or without a sheet over it)
+    this.builtHere();
     this.sheetDown();
     this.renderStatus();
     this.nav();
   }
 }
 
-type DarkPdf = "off" | "on" | "theme";
+export type DarkPdf = "off" | "on" | "theme";
 
 /** The packages a first build downloaded, said under its step ("" when all were kept on this machine: none to count). */
 const downloaded = (n: number, bytes?: number) => (n ? `${n} package${n === 1 ? "" : "s"} downloaded${mb(bytes)}` : "");
 
 /** The loading animation: PhiTeX's opening, a Windows 98 setup dialog, or none. */
-type OpeningLook = "phitex" | "retro" | "off";
+export type { OpeningLook } from "./openings/index.ts";
 
 /** A long detail (an engine's dump) folded under `label`, opened on a click. */
 function foldedDetail(text: string, label: string): HTMLElement {
@@ -2419,4 +3367,30 @@ function foldedDetail(text: string, label: string): HTMLElement {
 /** A package source worth naming: not empty, nor a placeholder. */
 function known(source: string | undefined): boolean {
   return !!source && source !== "none";
+}
+
+/** How much of a long line the tip shows each side of its culprit (characters). */
+const TIP_AROUND = 36;
+
+/**
+ * An underline's tip: the message, with the culprit after it when it is a
+ * command the message does not name ("Undefined control sequence \pau");
+ * then the line as TeX read it, the culprit marked (cut round it when
+ * long), and file:line.
+ */
+function culpritTip(p: { file: string; message: string; line: number | null; excerpt: Problem["excerpt"] }, click = "click to go there"): HTMLElement {
+  const ex = p.excerpt;
+  const chars = ex ? [...ex.text] : [];
+  const culprit = ex ? chars.slice(ex.start, ex.start + ex.len).join("").trim() : "";
+  const named = /^\\[A-Za-z@]+\*?$|^\\.$/.test(culprit) && !p.message.includes(culprit);
+  let excerpt: DocumentFragment | string = "";
+  if (ex && culprit) {
+    const from = Math.max(0, ex.start - TIP_AROUND), to = Math.min(chars.length, ex.start + ex.len + TIP_AROUND);
+    const a = (from > 0 ? "…" : "") + chars.slice(from, ex.start).join("").trimStart();
+    const b = chars.slice(ex.start, ex.start + ex.len).join("");
+    const c = chars.slice(ex.start + ex.len, to).join("").trimEnd() + (to < chars.length ? "…" : "");
+    excerpt = html`<pre class="ex">${a}<mark>${b}</mark>${c}</pre>`;
+  }
+  const where = `${p.file.split("/").pop()}${p.line ? `:${p.line}` : ""}`;
+  return html`<div class="txt"><div>${p.message}${named ? html` <code>${culprit}</code>` : ""}</div>${excerpt}<div class="at">${where} · ${click}</div></div>`.firstElementChild as HTMLElement;
 }

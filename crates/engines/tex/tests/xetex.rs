@@ -9,7 +9,9 @@
 //! `PHITEX_GATE=NAME` runs that case alone; `PHITEX_GATE_OUT=DIR`
 //! writes each XDV made there.
 
-mod common;
+use crate::common;
+#[path = "fcindex/mod.rs"]
+mod fcindex;
 
 use std::path::Path;
 
@@ -41,18 +43,23 @@ impl FontSource for Kpse {
 
 /// The build's XeTeX: TeX Live's fonts through kpathsea, the name index
 /// of `PHITEX_FONT_INDEX` (`phitex-otf`'s `otf-index`, fontconfig's list
-/// of the fonts the oracle saw), made once.
+/// of the fonts the oracle saw), else made here the same way
+/// ([`tex_live_index`]), once.
 fn xetex() -> XeTeX {
     static X: OnceLock<XeTeX> = OnceLock::new();
     X.get_or_init(|| {
         let path = std::env::var("PATH").unwrap_or_default();
         let dir = std::env::split_paths(&path).find(|d| d.join("tex").is_file());
-        let kpse = dir.map(|d| phitex_kpse::Kpse::new(&d, "xetex", "xetex"));
-        let index = std::env::var("PHITEX_FONT_INDEX")
-            .ok()
-            .and_then(|p| std::fs::read(p).ok())
-            .and_then(|b| FontIndex::from_bytes(&b))
-            .map(Arc::new);
+        let kpse = dir
+            .as_ref()
+            .map(|d| phitex_kpse::Kpse::new(d, "xetex", "xetex"));
+        let index = match std::env::var("PHITEX_FONT_INDEX") {
+            Ok(p) => std::fs::read(p)
+                .ok()
+                .and_then(|b| FontIndex::from_bytes(&b)),
+            Err(_) => dir.as_deref().and_then(tex_live_index),
+        }
+        .map(Arc::new);
         XeTeX {
             fonts: Some(Arc::new(Kpse(Mutex::new(kpse)))),
             font_index: index,
@@ -61,6 +68,37 @@ fn xetex() -> XeTeX {
         }
     })
     .clone()
+}
+
+/// The name index of TeX Live's fonts under the TeX binaries at `bin`
+/// (no `PHITEX_FONT_INDEX` given), made as the gate makes it
+/// (`scripts/accl/gate-shard.sh`): fontconfig's list with the
+/// repository's `scripts/xetex/fonts.conf`, its tree TeX Live's
+/// `TEXMFDIST`. None where `kpsewhich` or `fc-list` is not there.
+fn tex_live_index(bin: &Path) -> Option<FontIndex> {
+    let out = std::process::Command::new(bin.join("kpsewhich"))
+        .args(["-var-value", "TEXMFDIST"])
+        .output()
+        .ok()?;
+    let texmfdist = String::from_utf8(out.stdout).ok()?.trim().to_owned();
+    if texmfdist.is_empty() {
+        return None;
+    }
+    let tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    let conf = tmp.join("xetex-fonts.conf");
+    let text = fcindex::tex_live_conf(
+        include_str!("../../../../scripts/xetex/fonts.conf"),
+        &texmfdist,
+        &tmp.join("xetex-fc-cache").display().to_string(),
+    );
+    std::fs::write(&conf, text).ok()?;
+    match fcindex::from_fontconfig(&conf) {
+        Ok(i) => Some(i),
+        Err(e) => {
+            eprintln!("the font index: {e}");
+            None
+        }
+    }
 }
 
 /// One document, its XDV against the oracle's at `threads`.
@@ -268,15 +306,22 @@ fn xelatex_kpse() -> &'static Mutex<Option<phitex_kpse::Kpse>> {
 /// Files from the document's directories (printed as `./name`), the
 /// rest through kpathsea as `xelatex` finds them.
 fn xelatex_finder(dirs: Vec<std::path::PathBuf>) -> Finder {
-    Arc::new(move |name: &str| {
+    Arc::new(move |key: &str| {
+        // (the font side's lookup in the format its extension names,
+        // TeX's own in the `tex` format, `phitex_tex::FONT_KEY`)
+        let (name, font) = match phitex_tex::font_name(key) {
+            Some(n) => (n, true),
+            None => (key, false),
+        };
         for dir in &dirs {
             let p = dir.join(name);
             if p.is_file() {
                 return Some((format!("./{name}"), std::fs::read(&p).ok()?));
             }
         }
-        let ext = Path::new(name)
-            .extension()
+        let ext = font
+            .then(|| Path::new(name).extension())
+            .flatten()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
         let fmt = match ext.as_str() {
@@ -470,6 +515,8 @@ fn xelatex_glyph_origins() {
 }
 
 /// The native runner of `\write18`'s commands, as the CLI has it.
+/// (the tests use part of it: what only the CLI calls is not dead code)
+#[allow(dead_code)]
 #[path = "../../../cli/src/shell.rs"]
 mod process_hook;
 

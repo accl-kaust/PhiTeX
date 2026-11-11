@@ -1,0 +1,80 @@
+% The research corpus (ci/research.json): a mathematics monograph in
+% amsbook (TeX Live's amsbook-template.tex does not build as shipped: its
+% \include{} placeholders name no file).
+\documentclass{amsbook}
+\usepackage{amssymb}
+\newtheorem{theorem}{Theorem}[chapter]
+\newtheorem{lemma}[theorem]{Lemma}
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+\numberwithin{section}{chapter}
+\numberwithin{equation}{chapter}
+\makeindex
+\begin{document}
+\frontmatter
+\title{Lectures on Finite Groups}
+\author{L. Algebraist}
+\address{Department of Mathematics, University of Examples}
+\email{algebraist@example.org}
+\subjclass[2020]{Primary 20D05; Secondary 20C15}
+\keywords{finite groups, Sylow theorems, representations}
+\date{January 1, 2026}
+\begin{abstract}
+A short monograph in the American Mathematical Society's book class.
+\end{abstract}
+\maketitle
+\tableofcontents
+\chapter*{Preface}
+These notes grew out of a one-semester course.
+\mainmatter
+\chapter{Groups}
+\section{Definitions}
+\begin{definition}\label{def:group}
+A \emph{group} is a set $G$ with an associative operation, an identity
+$e$ and inverses: $g g^{-1} = g^{-1} g = e$ for all $g \in G$.
+\end{definition}
+\begin{theorem}[Lagrange]\label{thm:lagrange}
+If $H \le G$ and $G$ is finite, then $|H|$ divides $|G|$:
+\begin{equation}\label{eq:lagrange}
+  |G| = [G:H]\,|H| .
+\end{equation}
+\end{theorem}
+\begin{proof}
+The left cosets of $H$ partition $G$ and each has $|H|$ elements.
+\end{proof}
+\section{Sylow's theorems}
+\begin{theorem}[Sylow]
+Let $|G| = p^a m$ with $p \nmid m$. Then $G$ has a subgroup of order
+$p^a$, any two are conjugate, and their number $n_p$ satisfies
+$n_p \equiv 1 \pmod p$ and $n_p \mid m$.
+\end{theorem}
+\begin{remark}
+Theorem~\ref{thm:lagrange} and \eqref{eq:lagrange} are used throughout.
+\end{remark}
+\chapter{Representations}
+\section{Characters}
+For a representation $\rho\colon G \to \mathrm{GL}(V)$ the character is
+$\chi(g) = \operatorname{tr}\rho(g)$, and
+\[
+  \langle \chi, \psi \rangle = \frac{1}{|G|} \sum_{g\in G} \chi(g)\overline{\psi(g)} .
+\]
+\begin{lemma}[Schur]
+A $G$-map between irreducible representations is zero or an isomorphism.
+\end{lemma}
+\begin{proof}
+Its kernel and image are subrepresentations.
+\end{proof}
+\appendix
+\chapter{Notation}
+$\mathbb{Z}$, $\mathbb{Q}$, $\mathbb{C}$: the integers, rationals and
+complex numbers; $\mathfrak{S}_n$ the symmetric group.
+\backmatter
+\begin{thebibliography}{9}
+\bibitem{serre} J.-P. Serre, \emph{Linear Representations of Finite
+Groups}, Springer, 1977.
+\bibitem{isaacs} I. M. Isaacs, \emph{Character Theory of Finite Groups},
+Academic Press, 1976.
+\end{thebibliography}
+\end{document}

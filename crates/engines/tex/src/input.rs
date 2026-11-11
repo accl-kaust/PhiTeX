@@ -50,6 +50,12 @@ thread_local! {
     static ARENAS: std::cell::RefCell<Vec<Vec<Tok>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// A new arena identity ([`Input::arena_id`]): unique in the process.
+fn next_arena_id() -> u64 {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// The largest token vector [`ARENAS`] keeps (64 MB).
 const ARENA_KEEP: usize = 1 << 24;
 
@@ -268,6 +274,10 @@ pub(crate) struct Level {
     pub a: u32,
     pub b: u32,
     pub c: u32,
+    /// The macro that read a job-written file back ([`crate::run::Run::read_back_at`]):
+    /// while this level is on the stack, the run's definitions keep their
+    /// value at the read-back (a checkpoint's input carries it).
+    pub rb: bool,
 }
 
 impl Level {
@@ -279,6 +289,7 @@ impl Level {
             a: r.start,
             b: r.end,
             c: r.start,
+            rb: false,
         }
     }
 
@@ -290,6 +301,7 @@ impl Level {
             a: u32::try_from(i).unwrap_or(u32::MAX),
             b: 0,
             c: 0,
+            rb: false,
         }
     }
 
@@ -301,6 +313,7 @@ impl Level {
             a: u32::try_from(i).unwrap_or(u32::MAX),
             b: 0,
             c: 0,
+            rb: false,
         }
     }
 
@@ -323,6 +336,9 @@ pub(crate) mod ty {
     /// XeTeX's `inter_char_text`.
     pub const INTER_CHAR: u8 = 18;
     pub const MACRO: u8 = 5;
+    /// §307's `inserted`: what §339 inserts to end a runaway list
+    /// (`ins_list`), shown as "<inserted text>" (`crate::context`).
+    pub const INSERTED: u8 = 19;
     /// A list no diagnostic names (`\the`, `\csname`, conversions).
     pub const OTHER: u8 = 17;
 }
@@ -370,6 +386,11 @@ pub(crate) struct Line {
     /// XeTeX: `buf` is characters already (the line was read, its bytes
     /// decoded in its file's mode), not a file's bytes.
     pub chars: bool,
+    /// The frame value the line was decoded from (`run::decode_seg`): a
+    /// continuation's rest names it again where the line is still what
+    /// it decoded to (`pages::piece::line_frame`), not a copy of its
+    /// text. Not part of the line's meaning.
+    pub src: Option<phitex_defuse::ValueId>,
 }
 
 pub(crate) const MID_LINE: u8 = 0;
@@ -384,14 +405,12 @@ impl Line {
     }
 
     /// A line from `text` (one line of a file, as web2c's `input_line`
-    /// reads it: trailing blanks removed), its `\endlinechar` applied.
+    /// reads it: its trailing spaces and line ends removed, tabs kept),
+    /// its `\endlinechar` applied.
     pub(crate) fn of_str(line: &str, endlinechar: i64, rescanned: bool) -> Line {
         let bytes = line.as_bytes();
         let mut end = bytes.len();
-        while end > 0 && matches!(bytes[end - 1], b'\n' | b'\r') {
-            end -= 1;
-        }
-        while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
+        while end > 0 && matches!(bytes[end - 1], b' ' | b'\n' | b'\r') {
             end -= 1;
         }
         let mut buf: Vec<u32> = line[..end].chars().map(u32::from).collect();
@@ -408,6 +427,7 @@ impl Line {
             origin: None,
             lineno: 0,
             owner: None,
+            src: None,
             rescanned,
             chars: false,
         }
@@ -421,50 +441,6 @@ pub(crate) enum Seg {
     Line(Line),
     Toks(Vec<Tok>),
     File(crate::run::FileRest),
-}
-
-impl Seg {
-    /// Whether two segments are the same text, read alike: an edited
-    /// node's last text against its new one ([`crate::resume`]).
-    pub(crate) fn same(&self, o: &Seg) -> bool {
-        match (self, o) {
-            (Seg::Line(a), Seg::Line(b)) => {
-                a.buf == b.buf
-                    && (
-                        a.loc,
-                        a.state,
-                        a.endch,
-                        a.starts,
-                        a.ends,
-                        a.lineno,
-                        a.rescanned,
-                        a.chars,
-                    ) == (
-                        b.loc,
-                        b.state,
-                        b.endch,
-                        b.starts,
-                        b.ends,
-                        b.lineno,
-                        b.rescanned,
-                        b.chars,
-                    )
-                    && a.origin == b.origin
-            }
-            (Seg::Toks(a), Seg::Toks(b)) => a == b,
-            (Seg::File(a), Seg::File(b)) => a.same(b),
-            _ => false,
-        }
-    }
-}
-
-/// A node's segments as a run's text holds them ([`Input::append_text`]
-/// on an empty text): a line segment continuing the one before joined to
-/// it.
-pub(crate) fn joined(segs: Vec<Seg>) -> Vec<Seg> {
-    let mut i = Input::new();
-    i.append_text(segs);
-    i.text
 }
 
 /// The input stack.
@@ -495,6 +471,10 @@ pub(crate) struct Input {
     /// between commands ([`Input::compact`]): four times what survived
     /// the last compaction, at least [`ARENA_COMPACT`].
     pub compact_at: usize,
+    /// The arena's identity: a token list level's range names the same
+    /// tokens while it stays (the arena only grows until it is replaced,
+    /// by a compaction or another input).
+    pub arena_id: u64,
     /// The levels as the command in progress found them, saved as they
     /// come on top ([`Input::snapshot`]).
     snap: Option<Snap>,
@@ -535,6 +515,13 @@ pub(crate) const ARENA_MAX: usize = 1 << 27;
 pub(crate) const ARENA_COMPACT: usize = 1 << 22;
 
 impl Input {
+    /// Token `i` of the arena replaced in place: the arena's ranges no
+    /// longer name what they named ([`Input::arena_id`]).
+    pub(crate) fn set_tok(&mut self, i: u32, t: Tok) {
+        self.arena.set(i, t);
+        self.arena_id = next_arena_id();
+    }
+
     pub(crate) fn new() -> Input {
         Input {
             arena: Arena::with_capacity(1 << 14),
@@ -549,6 +536,7 @@ impl Input {
             text: Vec::new(),
             text_at: 0,
             compact_at: ARENA_COMPACT,
+            arena_id: next_arena_id(),
             snap: None,
         }
     }
@@ -885,7 +873,9 @@ impl Input {
                 continue;
             }
             if l.a >= l.b {
+                let rb = l.rb;
                 *l = Level::toks(Range { start: 0, end: 0 }, l.ty);
+                l.rb = rb;
                 continue;
             }
             let r = fresh.alloc(&self.arena.toks[l.c as usize..l.b as usize]);
@@ -896,6 +886,7 @@ impl Input {
         }
         self.compact_at = (fresh.len() * 4).max(ARENA_COMPACT);
         self.arena = fresh;
+        self.arena_id = next_arena_id();
     }
 }
 

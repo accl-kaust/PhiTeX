@@ -5,7 +5,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { PreviewSession, type EditorHost } from "../src/session.ts";
-import type { Edit } from "../src/edits.ts";
+import { textSum, type Edit } from "../src/edits.ts";
+import { plainWhy } from "../src/words.ts";
 
 test("a change whose length is not the session's asks the editor for its text again", () => {
   let open!: (f: string, t: string) => void;
@@ -39,6 +40,26 @@ test("a change whose length is not the session's asks the editor for its text ag
   assert.equal(s.text("main.tex"), "!Oh, hello, world there");
   change("main.tex", [{ from: 23, to: 23, text: "." }], 24);
   assert.deepEqual(asked, ["main.tex"]);
+});
+
+// A change that kept the length but not the text (a same-length paste
+// misapplied): the length agrees, the sum given as typing pauses does not,
+// and the editor's text is asked for again.
+test("a same-length difference is found by the editor's sum", () => {
+  let open!: (f: string, t: string) => void;
+  let change!: (f: string, es: Edit[], len?: number, sum?: number) => void;
+  const asked: string[] = [];
+  const host: EditorHost = { loadProject: async () => ({}), onOpen: (cb) => (open = cb), onChanges: (cb) => (change = cb), resend: (f) => asked.push(f) };
+  const core = { request: async () => ({ ok: true, json: {} }) };
+  const sink = new Proxy({}, { get: () => () => undefined });
+  new PreviewSession(host, core as never, sink as never, { schedule: () => undefined });
+  open("t.tex", "alpha & 1.25");
+  // (the session given a change the editor never made, the same length)
+  change("t.tex", [{ from: 0, to: 5, text: "ALPHA" }], 12);
+  assert.deepEqual(asked, []);
+  // (the editor's pause: its length and sum, its text still "alpha & 1.25")
+  change("t.tex", [], 12, textSum("alpha & 1.25"));
+  assert.deepEqual(asked, ["t.tex"]);
 });
 
 // Collaborators' cursors (Overleaf's): each the word at its place marked on
@@ -163,4 +184,80 @@ test("a queued keystroke is timed by its own build", () => {
   assert.match(said[0], /build 2\.5 ms/);
   assert.match(said[0], /rebuilt +3 of 100 steps, 1 pass/);
   assert.equal(w.queued, null);
+});
+
+// The watch answers a request and sends its events on one socket, but a
+// reply made before the pages' origins came can go out after the
+// `origins` event that says they came (view.rs answers, then waits for
+// the socket the broadcast holds). A lookup begun after that event must
+// ask again, not share the request already in flight, whose answer is
+// "not made yet": the problems' underlines, looked up again on the event,
+// drew nothing until the next build (the browser suite's "kinds filter"
+// red, 1 run in N, the overfull box's bar never on the page).
+test("a page's glyphs asked before its origins came are asked again after the origins event", async () => {
+  const host: EditorHost = { loadProject: async () => ({}), onOpen: () => undefined, onChanges: () => undefined };
+  let emit!: (e: unknown) => void;
+  const held: ((r: unknown) => void)[] = [];
+  const core = {
+    request: (r: { op: string }) => (r.op === "origins" ? new Promise((go) => held.push(go)) : Promise.resolve({ ok: false })),
+    onEvent: (cb: (e: unknown) => void) => (emit = cb),
+  };
+  const sink = new Proxy({}, { get: () => () => undefined });
+  const s = new PreviewSession(host, core as never, sink as never, { schedule: () => undefined, remote: { source: () => undefined } });
+  const w = s as unknown as { opened: boolean; hashes: string[] };
+  w.opened = true;
+  w.hashes = ["a"];
+  const b64 = (xs: number[], f = false) => {
+    const d = new DataView(new ArrayBuffer(4 * xs.length));
+    xs.forEach((x, i) => (f ? d.setFloat32(4 * i, x, true) : d.setUint32(4 * i, x, true)));
+    return btoa(String.fromCharCode(...new Uint8Array(d.buffer)));
+  };
+  const page = { files: ["main.tex"], files_from: 0, n: 3, file: b64([0, 0, 0]), start: b64([6, 7, 8]), end: b64([7, 8, 9]), synth: b64([0]), x: b64([72, 78, 84], true), y: b64([100, 100, 100], true) };
+  // (the status's lookup: its request sent, the origins not made yet)
+  const first = s.boxesOf("main.tex", 6, 9);
+  await new Promise((go) => setTimeout(go, 0));
+  assert.equal(held.length, 1);
+  // (the origins event overtakes that request's answer; the panel looks up again)
+  emit({ event: "origins", pages: [1], edits: [] });
+  const again = s.boxesOf("main.tex", 6, 9);
+  await new Promise((go) => setTimeout(go, 0));
+  held[0]({ ok: false, error: "page 0's origins are not made yet" });
+  assert.equal(held.length, 2, "asked again after the event");
+  held[1]({ ok: true, json: page });
+  // (the first lookup's answer was of before: it too asks again, the same request)
+  assert.equal((await first).length, 1);
+  assert.equal(held.length, 2);
+  const got = await again;
+  assert.equal(got.length, 1, "the boxes found on the page");
+  assert.equal(got[0].k, 0);
+  // (and the stale answer kept nothing: the page's glyphs are the new ones)
+  assert.equal((await s.boxesOf("main.tex", 6, 9)).length, 1);
+});
+
+// A core that ran out of the memory it got (the Overleaf extension's
+// host names the size and what to close): said, not reopened; the same
+// document would outgrow it again, and the reopen's second trap said
+// "again: the preview stops here" over the host's words.
+test("a core that outgrew its memory is said, not reopened", async () => {
+  const host: EditorHost = { loadProject: async () => ({ "main.tex": "x" }), onOpen: () => undefined, onChanges: () => undefined };
+  const ops: string[] = [];
+  const why = "core trapped (thread 2): This document needs more than the 2 GiB of memory PhiTeX's engine got in this tab: close them.";
+  const core = { request: async (r: { op: string }) => (ops.push(r.op), r.op === "status" ? { ok: false, error: why } : { ok: false }) };
+  const said: string[] = [];
+  const sink = new Proxy({ error: (e: string) => said.push(e) }, { get: (t, p) => (t as Record<string | symbol, unknown>)[p] ?? (() => undefined) });
+  const s = new PreviewSession(host, core as never, sink as never, { schedule: () => undefined });
+  const w = s as unknown as { opened: boolean; core: { request(r: unknown): Promise<unknown> }; chain: Promise<unknown> };
+  w.opened = true;
+  await w.core.request({ op: "status" });
+  await w.chain;
+  assert.deepEqual(ops, ["status"], "no reopen");
+  // (said in plain words: the hosts' "core trapped (…):" tag dropped)
+  assert.deepEqual(said, ["This document needs more than the 2 GiB of memory PhiTeX's engine got in this tab: close them."]);
+  assert.equal(w.opened, false);
+});
+
+test("a core's error in plain words: its tag dropped, a raw error a crash", () => {
+  assert.equal(plainWhy("core trapped (thread 0): RuntimeError: unreachable"), "The engine crashed (RuntimeError: unreachable).");
+  assert.equal(plainWhy("core trapped (lost): This document needs more than the 4 GiB of memory PhiTeX can use in a browser."), "This document needs more than the 4 GiB of memory PhiTeX can use in a browser.");
+  assert.equal(plainWhy("phitex watch exited"), "phitex watch exited.");
 });

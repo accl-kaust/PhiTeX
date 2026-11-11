@@ -27,7 +27,8 @@
 
 extern crate alloc;
 
-mod aux;
+// (not `aux`: Windows reserves the name, a checkout there cannot make `aux.rs`)
+mod auxfile;
 mod bib;
 mod bst;
 mod builtins;

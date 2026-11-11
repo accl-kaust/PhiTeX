@@ -46,10 +46,12 @@
     clippy::struct_excessive_bools
 )]
 
+pub mod cites;
 pub mod document;
 pub mod dvipdf;
 pub mod failure;
 pub mod host;
+pub mod latexmkrc;
 pub mod lsp;
 pub mod panics;
 pub mod problems;

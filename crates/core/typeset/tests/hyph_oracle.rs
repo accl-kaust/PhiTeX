@@ -3,7 +3,7 @@
 //! built for a text in cmr10 and the paragraph after a second pass that
 //! offers every word to the hyphenation routine.
 
-mod common;
+use crate::common;
 
 use common::{TableFont, cases, parse_list, show_list};
 use phitex_typeset::glue::{Glue, Order};

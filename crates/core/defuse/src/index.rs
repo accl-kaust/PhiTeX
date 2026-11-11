@@ -323,10 +323,13 @@ impl FieldIndex {
 pub(crate) struct RangeIndex {
     shards: Box<[RangeShard]>,
     seq: AtomicU64,
+    /// The entries [`RangeIndex::holding`] stepped over since the last
+    /// report ([`crate::Report::range_stepped`]).
+    pub(crate) stepped: AtomicU64,
 }
 
 #[repr(align(64))]
-struct RangeShard(Lock<FxHashMap<Field, Ranges>>);
+struct RangeShard(Lock<FxHashMap<Field, Ranges>>, Lock<Vec<Field>>);
 
 /// One span class: by (start, filing), the end and the reader; or by
 /// (end, filing), the start and the reader.
@@ -456,9 +459,10 @@ impl RangeIndex {
     pub(crate) fn new() -> RangeIndex {
         RangeIndex {
             shards: (0..RANGE_SHARDS)
-                .map(|_| RangeShard(Lock::new(FxHashMap::default())))
+                .map(|_| RangeShard(Lock::new(FxHashMap::default()), Lock::new(Vec::new())))
                 .collect(),
             seq: AtomicU64::new(0),
+            stepped: AtomicU64::new(0),
         }
     }
 
@@ -472,9 +476,18 @@ impl RangeIndex {
     ) -> Vec<RangeKey> {
         let seq = self.seq.fetch_add(rs.len() as u64, Ordering::Relaxed);
         let keys: Vec<RangeKey> = (0..rs.len()).map(|i| RangeKey { seq: seq + i as u64 }).collect();
-        let mut w = self.shards[range_shard(f)].0.write();
+        let sh = &self.shards[range_shard(f)];
+        let mut w = sh.0.write();
         let m = w.entry(f).or_default();
         m.sweep(live);
+        // (a field with intervals listed once, for `widen_over`; listed
+        // while its map holds none, it is dropped there)
+        if m.len == 0 && !rs.is_empty() {
+            let mut l = sh.1.write();
+            if !l.contains(&f) {
+                l.push(f);
+            }
+        }
         for (k, (lo, hi, r)) in keys.iter().zip(rs) {
             m.insert(k.seq, lo, hi, r);
         }
@@ -525,15 +538,35 @@ impl RangeIndex {
     /// nodes among the segments of `[lo, hi)` (`order::Order::rebalance`).
     pub(crate) fn widen_over(&self, lo: Pos, hi: Pos) {
         let inside = |p: Pos| p > lo && p < hi;
+        if hi.0 <= lo.0.saturating_add(1) {
+            return;
+        }
+        // (the filings with an end strictly inside, found by the classes'
+        // orders: those starting there and those ending there, not every
+        // filing of every field: a rebalance or a relocation per placement
+        // walked all of them, para4000's re-broken pages 6% of a
+        // paragraph's deletion)
+        let (from, to) = ((Pos(lo.0 + 1), 0), (hi, 0));
+        let mut hit: Vec<u64> = Vec::new();
         for sh in &*self.shards {
             let mut w = sh.0.write();
-            for m in w.values_mut() {
-                let hit: Vec<(u64, Pos, Pos)> =
-                    m.at.iter()
-                        .filter(|(_, (a, b))| inside(*a) || inside(*b))
-                        .map(|(s, (a, b))| (*s, *a, *b))
-                        .collect();
-                for (seq, a, b) in hit {
+            // (the fields with intervals alone: the shard's map also holds
+            // every field read from the environment or at the end)
+            let mut l = sh.1.write();
+            l.retain(|f| w.get(f).is_some_and(|m| m.len > 0));
+            for f in l.iter() {
+                let Some(m) = w.get_mut(f) else { continue };
+                hit.clear();
+                for (_, c) in m.classes.iter().chain(&m.ends) {
+                    hit.extend(c.range(from..to).map(|(k, _)| k.1));
+                }
+                if hit.is_empty() {
+                    continue;
+                }
+                hit.sort_unstable();
+                hit.dedup();
+                for &seq in &hit {
+                    let Some(&(a, b)) = m.at.get(&seq) else { continue };
                     let r = m.take(seq).expect("a filing it holds");
                     m.insert(seq, if inside(a) { lo } else { a }, if inside(b) { hi } else { b }, r);
                 }
@@ -552,6 +585,7 @@ impl RangeIndex {
             return Vec::new();
         };
         let mut out = Vec::new();
+        let mut stepped = 0u64;
         for ((class, by_lo), (_, by_hi)) in m.classes.iter().zip(&m.ends) {
             let floor = if *class >= 64 {
                 0
@@ -567,6 +601,7 @@ impl RangeIndex {
             let mut b = by_hi.range((Pos(at.0.saturating_add(1)), 0)..=(Pos(ceil), u64::MAX));
             let (mut ra, mut rb) = (Vec::new(), Vec::new());
             loop {
+                stepped += 1;
                 let Some(((_, seq), (hi, rr))) = a.next() else {
                     out.append(&mut ra);
                     break;
@@ -583,6 +618,7 @@ impl RangeIndex {
                 }
             }
         }
+        self.stepped.fetch_add(stepped, Ordering::Relaxed);
         out
     }
 
@@ -600,8 +636,8 @@ impl RangeIndex {
                         r.seen.iter().for_each(|&(_, x)| x.into_iter().for_each(&mut *keep));
                     }
                 }
-                for r in rs.finals.iter().filter(|r| live(r.node, r.serial)) {
-                    r.seen.into_iter().for_each(&mut *keep);
+                for r in rs.finals.iter().filter(|r| live(r.node(), r.serial)) {
+                    r.seen().into_iter().for_each(&mut *keep);
                 }
                 if let Some(x) = rs.published.and_then(|r| r.value) {
                     keep(x);
@@ -609,8 +645,8 @@ impl RangeIndex {
                 for r in rs.envs.iter().filter(|r| live(r.node, r.serial)) {
                     r.seen.into_iter().for_each(&mut *keep);
                 }
-                for (_, r) in rs.ends_of.iter().filter(|(_, r)| live(r.node, r.serial)) {
-                    r.seen.into_iter().for_each(&mut *keep);
+                for (_, r) in rs.ends_of.iter().filter(|(_, r)| live(r.node(), r.serial)) {
+                    r.seen().into_iter().for_each(&mut *keep);
                 }
             }
         }
@@ -718,6 +754,38 @@ impl RangeIndex {
             .unwrap_or_default()
     }
 
+    /// Each field with `At::End` readers filed, with each unit they read
+    /// at.
+    pub(crate) fn end_fields(&self) -> Vec<(Field, UnitId)> {
+        let mut out = Vec::new();
+        for sh in &*self.shards {
+            for (f, m) in sh.0.read().iter() {
+                let mut us: Vec<UnitId> = Vec::new();
+                for (u, _) in &m.ends_of {
+                    if !us.contains(u) {
+                        us.push(*u);
+                    }
+                }
+                out.extend(us.into_iter().map(|u| (*f, u)));
+            }
+        }
+        out
+    }
+
+    /// [`Self::mark_dirty`] for every field published.
+    pub(crate) fn mark_all_dirty(&self) {
+        for sh in &*self.shards {
+            if !sh.0.read().values().any(|m| m.published.is_some() && !m.dirty) {
+                continue;
+            }
+            for m in sh.0.write().values_mut() {
+                if m.published.is_some() {
+                    m.dirty = true;
+                }
+            }
+        }
+    }
+
     /// Files an `At::End(u)` reader of `f`, the dead dropped when the
     /// list is about to grow.
     pub(crate) fn add_end(&self, f: Field, u: UnitId, r: Reader, live: impl Fn(&Reader) -> bool) {
@@ -735,7 +803,7 @@ impl RangeIndex {
                 m.ends_of
                     .iter()
                     .filter(|(v, r)| *v == u && live(r))
-                    .map(|(_, r)| r.clone())
+                    .map(|(_, r)| *r)
                     .collect()
             })
             .unwrap_or_default()
@@ -762,5 +830,74 @@ impl RangeIndex {
             w.remove(&f);
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NodeId;
+
+    fn rr(n: u64) -> RangeReader {
+        RangeReader {
+            node: NodeId::from_raw(n),
+            serial: 0,
+            from: None,
+            to: None,
+            next: false,
+            incl: false,
+            hole: false,
+            seen: std::sync::Arc::from(Vec::new()),
+        }
+    }
+
+    fn at(ix: &RangeIndex, f: Field, k: RangeKey) -> Option<(Pos, Pos)> {
+        ix.shards[range_shard(f)]
+            .0
+            .read()
+            .get(&f)
+            .and_then(|m| m.at.get(&k.seq).copied())
+    }
+
+    /// `widen_over` moves exactly the ends strictly inside the window to
+    /// its sides, whatever field holds them, among many fields read only
+    /// from the environment, and finds a field again once its intervals
+    /// are filed anew after it had none.
+    #[test]
+    fn widen_over_moves_the_ends_inside_alone() {
+        let ix = RangeIndex::new();
+        let f = |i: u64| Field(ValueId::from_raw(1000 + i));
+        for i in 0..500 {
+            ix.add_envs(f(100 + i), Vec::new(), |_| true);
+        }
+        let p = Pos;
+        let ka = ix.insert(
+            f(1),
+            vec![(p(10), p(50), rr(1)), (p(30), p(70), rr(2)), (p(5), p(100), rr(3))],
+            |_| true,
+        );
+        let kb = ix.insert(
+            f(2),
+            vec![(p(40), p(45), rr(4)), (p(20), p(60), rr(5)), (p(60), p(90), rr(6))],
+            |_| true,
+        );
+        ix.widen_over(p(20), p(60));
+        assert_eq!(at(&ix, f(1), ka[0]), Some((p(10), p(60))));
+        assert_eq!(at(&ix, f(1), ka[1]), Some((p(20), p(70))));
+        assert_eq!(at(&ix, f(1), ka[2]), Some((p(5), p(100))));
+        assert_eq!(at(&ix, f(2), kb[0]), Some((p(20), p(60))));
+        // (ends on the window's sides are not inside it)
+        assert_eq!(at(&ix, f(2), kb[1]), Some((p(20), p(60))));
+        assert_eq!(at(&ix, f(2), kb[2]), Some((p(60), p(90))));
+        // (every filing still found where it holds a label)
+        assert!(ix.holding(f(2), p(50)).iter().any(|(k, _)| *k == kb[0]));
+        // (a field emptied, then filed again: widened again)
+        for k in &kb {
+            assert!(ix.remove(f(2), *k));
+        }
+        ix.widen_over(p(0), p(1000));
+        let kc = ix.insert(f(2), vec![(p(200), p(300), rr(7))], |_| true);
+        ix.widen_over(p(150), p(250));
+        assert_eq!(at(&ix, f(2), kc[0]), Some((p(150), p(300))));
     }
 }

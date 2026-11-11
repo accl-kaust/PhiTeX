@@ -41,13 +41,16 @@
 //! it is called (OUTPUT.md §5).
 //!
 //! `PHITEX_HINTS=1` prints each distinct node text's answer and cause;
-//! `PHITEX_HINTS_OFF=1` answers `Any` for every node (the comparison).
+//! `PHITEX_HINTS=any` answers `Any` for every node (the comparison), and
+//! `PHITEX_HINTS=adversarial` bounds every node to define nothing, open
+//! no scope and claim nothing: the output must not change in either
+//! ([`HintsMode`]).
 
 use crate::exec::LockWait as _;
 use phitex_defuse::FxHashMap;
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use phitex_defuse::{Field, MayDefine, Value, ValueId, Values};
@@ -79,7 +82,7 @@ pub(crate) fn no_defs() -> &'static Defs {
 }
 
 /// What a node's text says it may define.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Hint {
     /// The bound, or `None`: anything.
     pub bound: Option<Bound>,
@@ -95,7 +98,7 @@ pub(crate) struct Hint {
 }
 
 /// A bounded definition set and what it rests on.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub(crate) struct Bound {
     /// The engine's fields (`cs:name`, `act:code`).
     pub names: Vec<String>,
@@ -150,6 +153,12 @@ impl PartialEq for Cats {
 }
 
 impl Eq for Cats {}
+
+impl Hash for Cats {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        self.list.hash(h);
+    }
+}
 
 impl std::ops::Deref for Cats {
     type Target = [(u8, u8)];
@@ -817,7 +826,7 @@ fn excerpt_at(text: &str, s: usize) -> &str {
 
 /// Whether a trace that prints hints' excerpts is on.
 fn excerpts() -> bool {
-    crate::exec::obs_flag!("PHITEX_HINTS")
+    print_hints()
         || crate::exec::obs_flag!("PHITEX_SLICES_TRACE")
         || crate::exec::obs_flag!("PHITEX_TEX_TRACE")
 }
@@ -1060,6 +1069,111 @@ impl TextHints {
 /// ends there). Any other control sequence at depth 0 takes the
 /// `[...]`/`{...}` groups right after it into its slice
 /// (`\centerline{...}`).
+/// The statement starts inside a document's `tikzpicture`
+/// environments, and the text right after one (`PHITEX_BOXSCOPE`,
+/// [`slices_of`]): byte offsets.
+fn statement_starts(
+    text: &str,
+    an: &Analysis<'_>,
+    claimed: &Spans,
+    operand: &Spans,
+    commands: &Spans,
+) -> Vec<usize> {
+    let p = &an.p;
+    let n = p.atoms.len();
+    let env_at = |k: usize| -> Option<(bool, usize)> {
+        let a = p.atoms.get(k)?;
+        if a.kind != AtomKind::Cs || an.depth(k) != 0 {
+            return None;
+        }
+        let begin = match a.name(text) {
+            "begin" => true,
+            "end" => false,
+            _ => return None,
+        };
+        let b = p.atoms.get(k + 1)?;
+        if b.kind != AtomKind::Open || b.mate == usize::MAX || b.mate <= k + 1 {
+            return None;
+        }
+        let name = &text[b.end..p.atoms[b.mate].start];
+        (name == "tikzpicture").then_some((begin, b.mate + 1))
+    };
+    let next_cs = |mut j: usize| -> Option<usize> {
+        while p
+            .atoms
+            .get(j)
+            .is_some_and(|x| matches!(x.kind, AtomKind::Space))
+        {
+            j += 1;
+        }
+        let a = p.atoms.get(j)?;
+        (a.kind == AtomKind::Cs
+            && a.name(text) != "end"
+            && an.depth(j) == 0
+            && !claimed.has(j)
+            && !operand.has(j)
+            && !commands.has(j))
+        .then_some(j)
+    };
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k < n {
+        let Some((true, mut j)) = env_at(k) else {
+            k += 1;
+            continue;
+        };
+        // (the options)
+        if p.atoms
+            .get(j)
+            .is_some_and(|x| x.kind == AtomKind::Char('['))
+        {
+            while j < n && !(p.atoms[j].kind == AtomKind::Char(']') && an.depth(j) == 0) {
+                j += 1;
+            }
+            j += 1;
+        }
+        if let Some(c) = next_cs(j) {
+            out.push(p.atoms[c].start);
+        }
+        while j < n {
+            if let Some((false, e)) = env_at(j) {
+                // (and right after the picture: the text after it a slice
+                // of its own, so an edit there leaves the picture's last
+                // statement as it was and keeps the slice's node)
+                let mut q = e;
+                while p
+                    .atoms
+                    .get(q)
+                    .is_some_and(|x| matches!(x.kind, AtomKind::Space))
+                {
+                    q += 1;
+                }
+                if let Some(a) = p.atoms.get(q)
+                    && an.depth(q) == 0
+                    && !matches!(a.kind, AtomKind::Par | AtomKind::Close)
+                    && !claimed.has(q)
+                    && !operand.has(q)
+                {
+                    out.push(a.start);
+                }
+                j = e;
+                break;
+            }
+            let a = &p.atoms[j];
+            // (a `}`'s depth is after it closes)
+            if an.depth(j) == 0
+                && matches!(a.kind, AtomKind::Char(';') | AtomKind::Close)
+                && let Some(c) = next_cs(j + 1)
+            {
+                out.push(p.atoms[c].start);
+            }
+            j += 1;
+        }
+        k = j;
+    }
+    out
+}
+
 /// The units of a text as the hint pass slices a document's text
 /// ([`slices_of`] with no prelude definitions): byte ranges, in order.
 /// The edit-locality sweep (`tests/sweep`) edits one word in each.
@@ -1074,12 +1188,16 @@ pub fn paragraph_units(text: &str) -> Vec<(usize, usize)> {
 // loop walks the commands and braces only or jumps over the ranges: a
 // paragraph's plain text is never visited atom by atom)
 #[allow(clippy::too_many_lines)]
-fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usize)>, Vec<bool>) {
+fn slices_of(
+    text: &str,
+    an: &Analysis<'_>,
+    kind: FileKind,
+) -> (Vec<(usize, usize)>, Vec<bool>, Vec<bool>) {
     if kind != FileKind::Document {
         return if text.is_empty() {
-            (Vec::new(), Vec::new())
+            (Vec::new(), Vec::new(), Vec::new())
         } else {
-            (vec![(0, text.len())], vec![true])
+            (vec![(0, text.len())], vec![true], vec![false])
         };
     }
     let p = &an.p;
@@ -1314,6 +1432,45 @@ fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usiz
         }
         // (a loading command is vertical: the paragraph ends before it)
         ends.extend(loaders.iter().copied());
+        // (an environment's end right before another's begin or end: no
+        // text of the paragraph comes between. Without this a stretch
+        // with no blank line was one paragraph from its first character
+        // on, so one slice: beamer frames one after another, each a word
+        // inside; a page fired in that stretch, and every rest after it
+        // carried the slice's later frames in its continuation, so a
+        // letter typed in a later frame ran all the frames before it
+        // again. The cut is only a place: a run in a paragraph there
+        // reads on into the next slice)
+        for &k in &an.structural {
+            let k = k as usize;
+            let a = &p.atoms[k];
+            if a.kind != AtomKind::Cs
+                || a.name(text) != "end"
+                || depth(k) != 0
+                || ifd(k) != 0
+                || claimed.has(k)
+            {
+                continue;
+            }
+            let Some(mate) = p
+                .atoms
+                .get(k + 1)
+                .filter(|b| b.kind == AtomKind::Open && b.mate != usize::MAX && b.mate > k + 1)
+                .map(|b| b.mate)
+            else {
+                continue;
+            };
+            let mut j = mate + 1;
+            while p.atoms.get(j).is_some_and(|x| x.kind == AtomKind::Space) {
+                j += 1;
+            }
+            if p.atoms
+                .get(j)
+                .is_some_and(|x| x.kind == AtomKind::Cs && matches!(x.name(text), "begin" | "end"))
+            {
+                ends.push(mate + 1);
+            }
+        }
         ends.sort_unstable();
         ends.dedup();
     }
@@ -1458,8 +1615,59 @@ fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usiz
     }
     starts.sort_unstable();
     starts.dedup();
+    // (the content-defined cuts: a long slice is cut again at line
+    // starts the text alone chooses, [`cdc_starts`]; a run reaching such
+    // a slice's end with a paragraph or a box of its own open ends there
+    // and leaves the rest to a continuation, or reads on, `crate::cut`)
+    let cdc = {
+        let ok = |pos: usize| {
+            let k = p.atoms.partition_point(|a| a.start < pos);
+            let Some(a) = p.atoms.get(k) else {
+                return false;
+            };
+            // (the line's first atom on the line itself, at depth 0,
+            // outside conditionals, brace groups, a command's arguments
+            // and every operand; read for sure)
+            let nl = text[pos..].find('\n').map_or(text.len(), |x| pos + x);
+            a.start < nl
+                && !matches!(a.kind, AtomKind::Par | AtomKind::Space)
+                && depth(k) == 0
+                && ifd(k) == 0
+                && !groups.has(k)
+                && !commands.has(k)
+                && !claimed.has(k)
+                && !operand.has(k)
+                && p.tokens
+                    .get(a.tok)
+                    .is_none_or(|t| t.tz != pass::Status::Pending)
+        };
+        cdc_starts(text, &starts, ok)
+    };
+    let mut mid_at: Vec<usize> = Vec::new();
+    // (`PHITEX_BOXSCOPE`: a picture's statements, each a slice: after
+    // `\begin{tikzpicture}` and its options, after each `;` and each
+    // brace group followed by a command, at depth 0 and outside
+    // conditionals, inside the environment; a run there with the
+    // picture's box open leaves it to the following nodes,
+    // `crate::boxscope`; a wrong cut costs a pull)
+    let cdc = if crate::boxscope::on() {
+        let mut cdc = cdc;
+        cdc.extend(statement_starts(text, an, &claimed, &operand, &commands));
+        cdc.sort_unstable();
+        cdc.dedup();
+        cdc
+    } else {
+        cdc
+    };
+    if !cdc.is_empty() {
+        mid_at.clone_from(&cdc);
+        starts.extend(cdc);
+        starts.sort_unstable();
+        starts.dedup();
+    }
     let mut out = Vec::with_capacity(starts.len());
     let mut pars = Vec::with_capacity(starts.len());
+    let mut mids = Vec::with_capacity(starts.len());
     for (i, &s) in starts.iter().enumerate() {
         let e = starts.get(i + 1).copied().unwrap_or(text.len());
         if e > s {
@@ -1485,9 +1693,88 @@ fn slices_of(text: &str, an: &Analysis<'_>, kind: FileKind) -> (Vec<(usize, usiz
                 });
             out.push((s, e));
             pars.push(has_par);
+            mids.push(mid_at.binary_search(&e).is_ok());
         }
     }
-    (out, pars)
+    (out, pars, mids)
+}
+
+/// The bytes a content-defined cut needs since the last slice start, at
+/// least ([`cdc_starts`]).
+pub(crate) const CDC_MIN: usize = 1024;
+
+/// One line in this many, by its hash, ends a content-defined chunk.
+const CDC_ONE_IN: u64 = 4;
+
+/// The content-defined cuts of a text's slices (`starts`, sorted): in a
+/// slice of `2 * CDC_MIN` bytes or more, the starts of lines whose line
+/// before hashes to 0 modulo [`CDC_ONE_IN`] (FNV-1a of its last 64
+/// bytes), [`CDC_MIN`] bytes or more past the last start and a quarter of
+/// that before the slice's end, where `ok` says a slice may start (the
+/// pass's reading: depth 0, no conditional, no brace group, no
+/// command's arguments). Only the text near a cut decides it, as
+/// rsync's and restic's chunkers do: an edit moves the cuts next to it
+/// and no other. No cut inside a picture's body (`\begin{tikzpicture}`
+/// to its `\end`): a picture's text is its child's, its parent claims
+/// it whole (`crate::pic`).
+fn cdc_starts(text: &str, starts: &[usize], ok: impl Fn(usize) -> bool) -> Vec<usize> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    for (i, &s) in starts.iter().enumerate() {
+        let e = starts.get(i + 1).copied().unwrap_or(b.len());
+        if e.saturating_sub(s) < 2 * CDC_MIN {
+            continue;
+        }
+        // (the pictures' bodies in the slice)
+        let mut pics: Vec<(usize, usize)> = Vec::new();
+        for name in crate::pic::PICS {
+            let open = format!("\\begin{{{name}}}");
+            let close = format!("\\end{{{name}}}");
+            let mut at = s;
+            while let Some(x) = text[at..e].find(&open) {
+                let a = at + x;
+                let z = text[a..e].find(&close).map_or(e, |y| a + y + close.len());
+                pics.push((a, z));
+                at = z.max(a + 1);
+                if at >= e {
+                    break;
+                }
+            }
+        }
+        let mut last = s;
+        let mut ls = s;
+        while let Some(x) = b[ls..e].iter().position(|&c| c == b'\n') {
+            let nl = ls + x;
+            let pos = nl + 1;
+            if pos >= e {
+                break;
+            }
+            let line = &b[ls..nl];
+            let blank = line.iter().all(|c| matches!(c, b' ' | b'\t' | b'\r'));
+            if !blank
+                && pos - last >= CDC_MIN
+                && e - pos >= CDC_MIN / 4
+                && line_hash(&line[line.len().saturating_sub(64)..]).is_multiple_of(CDC_ONE_IN)
+                && !pics.iter().any(|&(a, z)| a < pos && pos < z)
+                && ok(pos)
+            {
+                out.push(pos);
+                last = pos;
+            }
+            ls = pos;
+        }
+    }
+    out
+}
+
+/// FNV-1a of `bytes`.
+fn line_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &c in bytes {
+        h ^= u64::from(c);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
 }
 
 /// Whether the atoms of `text[s..e]` open and close their groups
@@ -3346,6 +3633,7 @@ fn atom_hints(
             .collect(),
     );
     let mut runs: FxHashMap<(u64, usize, u8), Arc<Hint>> = FxHashMap::default();
+    let mut alike: phitex_defuse::FxHashSet<Arc<Hint>> = phitex_defuse::FxHashSet::default();
     // (an atom inside a run of characters, or a space, is never read:
     // no span reads it, so it has no entry)
     for (i, &a) in an.sig.iter().enumerate() {
@@ -3416,7 +3704,17 @@ fn atom_hints(
         // (a guessed operand that is unbounded on its own is a value
         // read, not run: `\\headline={\\tenrm…}`)
         let unbounded_operand = claimed && h.bound.is_none();
-        hints.push(Some(Arc::new(h)));
+        // (one hint per distinct value, shared: most commands of a text
+        // have a hint like another's, and a text's analysis is kept as
+        // long as its nodes may ask, `Registry`)
+        let h = if let Some(x) = alike.get(&h) {
+            x.clone()
+        } else {
+            let x = Arc::new(h);
+            alike.insert(x.clone());
+            x
+        };
+        hints.push(Some(h));
         // (a command a macro is only guessed to read still runs in the
         // slice: its rows count in the union)
         skip.push(claimed && (at.kind != AtomKind::Cs || prim_op || unbounded_operand));
@@ -3493,7 +3791,7 @@ fn analyse_reusing(
         crate::timeline::note("hints: the pass (lex, atoms, classify)", t0.elapsed());
     }
     let t0 = std::time::Instant::now();
-    let (slices, pars) = slices_of(text, &an, kind);
+    let (slices, pars, mids) = slices_of(text, &an, kind);
     if tm {
         crate::timeline::note("hints: the slices", t0.elapsed());
     }
@@ -3755,6 +4053,12 @@ fn analyse_reusing(
                     .filter(|&(_, ne)| an.slice_claims_nothing(k0, ne))
                     .map(|_| 1),
             };
+            // (a slice ending at a content-defined cut, mid-paragraph
+            // often: its run ends there, its rest a continuation, or
+            // reads on into the next, its run's to say, `crate::cut`)
+            if mids[i] {
+                b.claim = None;
+            }
         }
         slice_hints.push(intern(&h));
     }
@@ -4042,9 +4346,14 @@ pub(crate) fn kind_of(text: &str, named: FileKind) -> FileKind {
 /// `crate::pages`), read whole under the format's definitions: what
 /// the finisher running it may define.
 pub(crate) fn routine_hint(text: &str, defs: &Defs) -> Hint {
+    match mode() {
+        HintsMode::Normal => {}
+        HintsMode::Any => return Hint::any("hints off", text),
+        HintsMode::Adversarial => return (*adversarial_hint()).clone(),
+    }
     let t = text_hints(text, FileKind::Document, defs);
     let mut h = t.at_until(0, text.len());
-    if crate::exec::obs_flag!("PHITEX_HINTS") {
+    if print_hints() {
         eprintln!(
             "hint (output routine) {:?}: {:?} ({})",
             short(text),
@@ -4531,7 +4840,7 @@ pub(crate) fn prepare(reg: &Registry, v: &Values, args: &[ValueId]) {
     let _ = hint_of_args(reg, v, args);
     let p = Prepared {
         // (`PHITEX_HINTS` prints each answer where the engine asks)
-        may: (!crate::exec::obs_flag!("PHITEX_HINTS")).then(|| may_define_now(reg, v, args)),
+        may: (!print_hints()).then(|| may_define_now(reg, v, args)),
         reads: Kept::Ready(reads_now(reg, v, args)),
     };
     let k = args_key(args);
@@ -4568,11 +4877,15 @@ pub(crate) fn prepared_done(reg: &Registry) {
 pub(crate) fn hint_of_args(reg: &Registry, v: &Values, args: &[ValueId]) -> Arc<Hint> {
     // (the hints off: every node's answers `Any`, its claim, effect and
     // reads unknown, [`set_hints_enabled`])
-    if OFF.load(Ordering::Relaxed) {
-        static ANY: OnceLock<Arc<Hint>> = OnceLock::new();
-        return ANY
-            .get_or_init(|| Arc::new(Hint::any("hints off", "")))
-            .clone();
+    match mode() {
+        HintsMode::Normal => {}
+        HintsMode::Any => {
+            static ANY: OnceLock<Arc<Hint>> = OnceLock::new();
+            return ANY
+                .get_or_init(|| Arc::new(Hint::any("hints off", "")))
+                .clone();
+        }
+        HintsMode::Adversarial => return adversarial_hint(),
     }
     let key = args_key(args);
     if let Some((_, h)) = reg.hints.of(key).get(&key).filter(|(a, _)| **a == *args) {
@@ -5152,6 +5465,7 @@ pub(crate) fn scope_shape(v: &Values, fr: ValueId, carried: usize) -> ScopeShape
     let mut st = ShapeScan {
         open: vec![String::new(); carried],
         close: None,
+        record: None,
     };
     for f in list_of(v, fr) {
         let xs = list_of(v, f);
@@ -5163,7 +5477,13 @@ pub(crate) fn scope_shape(v: &Values, fr: ValueId, carried: usize) -> ScopeShape
                 let Some(&t) = xs.get(1) else {
                     return ScopeShape::Unknown;
                 };
-                st.text(&str_of(v, t));
+                // (a line's shape kept by its text's value: a rest's
+                // lines are scanned once, not at every cut that carries
+                // them, `crate::val::frame_shape_of`)
+                let fs = crate::val::frame_shape_of(v, t, || {
+                    v.with_str(t, FrameShape::of).unwrap_or_default()
+                });
+                st.apply(&fs);
             }
             "f" => {
                 let (Some(&id), Some(&o)) = (xs.get(1), xs.get(2)) else {
@@ -5238,11 +5558,39 @@ pub(crate) fn scope_shape(v: &Values, fr: ValueId, carried: usize) -> ScopeShape
     }
 }
 
+/// One text's scan as [`ShapeScan`] composes it: the closers it has
+/// with none of its own open, in order, then the openers it leaves
+/// open (a closer pops an opener of the text first, else one before
+/// it, whatever their names, as [`ShapeScan::event`] does).
+#[derive(Default, Debug)]
+pub(crate) struct FrameShape {
+    closers: Vec<String>,
+    openers: Vec<String>,
+}
+
+impl FrameShape {
+    pub(crate) fn of(text: &str) -> FrameShape {
+        let mut st = ShapeScan {
+            open: Vec::new(),
+            close: None,
+            record: Some(Vec::new()),
+        };
+        st.text(text);
+        FrameShape {
+            closers: st.record.unwrap_or_default(),
+            openers: st.open,
+        }
+    }
+}
+
 /// [`scope_shape`]'s scan: the openers still open (a carried group's
 /// name empty) and the first closer with none open.
 struct ShapeScan {
     open: Vec<String>,
     close: Option<String>,
+    /// For [`FrameShape::of`]: the closers with none open, kept, the
+    /// scan going on past them.
+    record: Option<Vec<String>>,
 }
 
 impl ShapeScan {
@@ -5253,7 +5601,26 @@ impl ShapeScan {
         if opens {
             self.open.push(name.to_owned());
         } else if self.open.pop().is_none() {
-            self.close = Some(name.to_owned());
+            if let Some(r) = &mut self.record {
+                r.push(name.to_owned());
+            } else {
+                self.close = Some(name.to_owned());
+            }
+        }
+    }
+
+    /// A text's [`FrameShape`], as [`ShapeScan::text`] of it.
+    fn apply(&mut self, fs: &FrameShape) {
+        for c in &fs.closers {
+            if self.close.is_some() {
+                return;
+            }
+            if self.open.pop().is_none() {
+                self.close = Some(c.clone());
+            }
+        }
+        if self.close.is_none() {
+            self.open.extend(fs.openers.iter().cloned());
         }
     }
 
@@ -5397,18 +5764,104 @@ fn plain_catcode(b: u8, at: bool) -> u8 {
 // ---------------------------------------------------------------------
 // At the node.
 
-static OFF: AtomicBool = AtomicBool::new(false);
+/// How far the hints are trusted ([`set_hints_mode`]; `PHITEX_HINTS` for
+/// a process: `any` or `adversarial`, read once).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HintsMode {
+    /// The text's hints, as the pass made them.
+    Normal,
+    /// None: every node may define anything, its claim, scope effect and
+    /// reads unknown, every output routine unbounded (the comparison).
+    Any,
+    /// Wrong on purpose: every node and output routine bounded to define
+    /// nothing, to open and close no scope and to claim no sibling. A
+    /// hint only decides what waits and what is predicted, so a build
+    /// in this mode must make the normal build's output: a difference is
+    /// a hint trusted without a check (the user's invariant).
+    Adversarial,
+}
+
+const MODE_UNSET: u8 = u8::MAX;
+static MODE: AtomicU8 = AtomicU8::new(MODE_UNSET);
+
+/// The hints' mode: [`set_hints_mode`]'s, else `PHITEX_HINTS`'s.
+fn mode() -> HintsMode {
+    let m = match MODE.load(Ordering::Relaxed) {
+        MODE_UNSET => {
+            let m = match std::env::var("PHITEX_HINTS").as_deref() {
+                Ok("any") => 1,
+                Ok("adversarial") => 2,
+                _ => 0,
+            };
+            let _ = MODE.compare_exchange(MODE_UNSET, m, Ordering::Relaxed, Ordering::Relaxed);
+            MODE.load(Ordering::Relaxed)
+        }
+        m => m,
+    };
+    match m {
+        1 => HintsMode::Any,
+        2 => HintsMode::Adversarial,
+        _ => HintsMode::Normal,
+    }
+}
+
+/// Every hint `Any` ([`HintsMode::Any`]).
+fn off() -> bool {
+    mode() == HintsMode::Any
+}
+
+/// Sets how far the hints are trusted, for a process (comparisons, the
+/// hint check mode's tests).
+pub fn set_hints_mode(m: HintsMode) {
+    let x = match m {
+        HintsMode::Normal => 0,
+        HintsMode::Any => 1,
+        HintsMode::Adversarial => 2,
+    };
+    MODE.store(x, Ordering::Relaxed);
+}
 
 /// Turns the hints off (every node may define anything, as without
-/// them) or on again, for comparisons; `PHITEX_HINTS_OFF=1` does the
-/// same for a process.
+/// them) or on again, for comparisons ([`set_hints_mode`]).
 pub fn set_hints_enabled(on: bool) {
-    OFF.store(!on, Ordering::Relaxed);
+    set_hints_mode(if on {
+        HintsMode::Normal
+    } else {
+        HintsMode::Any
+    });
+}
+
+/// The adversarial mode's hint ([`HintsMode::Adversarial`]): defines
+/// nothing, no scope, claims none.
+fn adversarial_hint() -> Arc<Hint> {
+    static ADV: OnceLock<Arc<Hint>> = OnceLock::new();
+    ADV.get_or_init(|| {
+        let b = Bound {
+            state: Some(Vec::new()),
+            no_scope: true,
+            claim: Some(0),
+            ..Bound::default()
+        };
+        Arc::new(Hint {
+            bound: Some(b.clone()),
+            cause: "hints adversarial".to_owned(),
+            excerpt: String::new(),
+            guess: Some(b),
+        })
+    })
+    .clone()
+}
+
+/// `PHITEX_HINTS` set to print (observe): any value but a mode's.
+fn print_hints() -> bool {
+    cfg!(feature = "observe")
+        && crate::exec::env_str!("PHITEX_HINTS")
+            .is_some_and(|v| !matches!(v, "0" | "any" | "adversarial"))
 }
 
 /// Whether the node's text says its command opens and closes no scope.
 pub(crate) fn effect_none(reg: &Registry, v: &Values, args: &[ValueId]) -> bool {
-    if OFF.load(Ordering::Relaxed) {
+    if off() {
         return false;
     }
     hint_of_args(reg, v, args)
@@ -5430,7 +5883,7 @@ pub(crate) fn reads(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<
 
 /// [`reads`], answered now.
 fn reads_now(reg: &Registry, v: &Values, args: &[ValueId]) -> Option<Vec<Field>> {
-    if OFF.load(Ordering::Relaxed) {
+    if off() {
         return None;
     }
     let h = hint_of_args(reg, v, args);
@@ -5457,11 +5910,13 @@ pub(crate) fn may_define(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDef
 
 /// [`may_define`], answered now.
 fn may_define_now(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
-    if OFF.load(Ordering::Relaxed) {
-        return MayDefine::Any;
+    match mode() {
+        HintsMode::Normal => {}
+        HintsMode::Any => return MayDefine::Any,
+        HintsMode::Adversarial => return MayDefine::Nothing,
     }
     // (an answer is the hint's alone: made once per hint string)
-    let hv = hint_value(v, args).filter(|_| !crate::exec::obs_flag!("PHITEX_HINTS"));
+    let hv = hint_value(v, args).filter(|_| !print_hints());
     if let Some(hv) = hv
         && let Some(m) = reg.answers.of(hv.raw()).get(&hv.raw())
     {
@@ -5481,7 +5936,7 @@ fn may_define_now(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
 /// [`may_define_now`], made.
 fn may_define_answer(reg: &Registry, v: &Values, args: &[ValueId]) -> MayDefine {
     let h = hint_of_args(reg, v, args);
-    if crate::exec::obs_flag!("PHITEX_HINTS") {
+    if print_hints() {
         let answer = match &h.bound {
             None => "Any".to_owned(),
             Some(b) => cat(&[
@@ -5635,13 +6090,38 @@ pub(crate) fn verify(r: &mut Run<'_, '_>, h: &Hint) -> R<Option<String>> {
         }
     }
     for (name, class) in &b.means {
-        let x = r.get(name)?;
-        let m = r.decode_mean(x);
+        // (its class alone, through the engine's projection, where the
+        // run holds nothing of it: a redefinition keeping the class leaves
+        // this read standing, and a run asked again for the name's
+        // meaning goes on from its checkpoint before its use, P2)
+        let f = r.ops.fields.get_at(r.v, r.cx.values_epoch(), name);
+        let loc = r.loc_of(f);
+        let projected =
+            if r.st.held(loc) == crate::state::Held::Absent && r.interp.is_none() && !r.rec_load {
+                r.cx.read_path(f, phitex_defuse::PathId::of_proj(r.ops.mean_class_proj))?
+                    .map(|x| int_of(r.v, x))
+            } else {
+                None
+            };
+        // (0 a primitive, 2 undefined, 1 anything else)
+        let k = if let Some(k) = projected {
+            k
+        } else {
+            let x = r.get(name)?;
+            match r.decode_mean(x) {
+                Mean::Prim(..) => 0,
+                Mean::Undefined => 2,
+                _ => 1,
+            }
+        };
         let ok = match class {
-            0 => matches!(m, Mean::Prim(..)),
-            _ => !matches!(m, Mean::Undefined),
+            0 => k == 0,
+            _ => k != 2,
         };
         if !ok {
+            // (the meaning in full, for the message)
+            let x = r.get(name)?;
+            let m = r.decode_mean(x);
             return Ok(Some(cat(&[
                 name,
                 " is ",
@@ -5802,6 +6282,42 @@ mod tests {
         assert!(b.cats.contains(&(b'~', 13)));
     }
 
+    /// A long paragraph over many lines is cut again at content-defined
+    /// line starts (`cdc_starts`), each slice but the last ending at one
+    /// (`mids`); an edit in one line moves the cuts next to it only.
+    #[test]
+    fn a_long_paragraph_is_cut_at_content_defined_lines() {
+        use std::fmt::Write as _;
+        let doc = |w: &str| {
+            let mut t = String::from("\\hsize=300pt\n");
+            for k in 0..700 {
+                let _ = write!(t, "w{}rd{}\\kern0pt", ["o", "a", "e"][k % 3], k % 17);
+                t.push(if k % 10 == 9 { '\n' } else { ' ' });
+            }
+            t.push_str(w);
+            t.push_str("\n\n\\bye\n");
+            t
+        };
+        let cuts = |t: &str| {
+            let an = Analysis::new(t, FileKind::Document, no_defs().clone());
+            let (sl, _, mids) = slices_of(t, &an, FileKind::Document);
+            let ends: Vec<usize> = sl
+                .iter()
+                .zip(&mids)
+                .filter(|x| *x.1)
+                .map(|x| x.0.1)
+                .collect();
+            ends
+        };
+        let a = cuts(&doc("end"));
+        assert!(a.len() >= 3, "{a:?}");
+        // (a word longer on the first line, before every cut: each moves
+        // by the bytes added, none comes or goes)
+        let t = doc("end").replacen("word0\\kern0pt", "woooord0\\kern0pt", 1);
+        let b: Vec<usize> = cuts(&t).into_iter().map(|x| x - 3).collect();
+        assert_eq!(a, b);
+    }
+
     #[test]
     fn control_space_after_a_macro_is_a_region() {
         let t = "\\def\\hello{Hello}\n\\hello\\ world.\n\\bye\n";
@@ -5813,7 +6329,7 @@ mod tests {
         d.harvest(&plain, kind_of(&plain, FileKind::Package), 0);
         let defs: Defs = Arc::new(d);
         let an = Analysis::new(t, FileKind::Document, defs);
-        let (sl, pars) = slices_of(t, &an, FileKind::Document);
+        let (sl, pars, _) = slices_of(t, &an, FileKind::Document);
         eprintln!("{sl:?} {pars:?}");
         let h = t.find("world").expect("world");
         let k = sl
@@ -5917,6 +6433,32 @@ mod tests {
     }
 
     #[test]
+    fn an_environments_end_before_another_ends_the_paragraph() {
+        // (no blank line anywhere: each environment's text a slice of its
+        // own, not one paragraph from the first word to the last)
+        let t = "\\begin{frame}{A}\nOne.\n\\end{frame}\n\\begin{frame}{B}\nTwo.\n\\end{frame}\n";
+        let text = analyse(t, FileKind::Document, no_defs());
+        let slice = |needle: &str| -> usize {
+            text.slices
+                .iter()
+                .position(|&(s, e)| t[s..e].contains(needle))
+                .expect("a slice")
+        };
+        assert_ne!(slice("One"), slice("Two"));
+        assert_ne!(slice("One"), slice("begin{frame}{B}"));
+        // (text after an environment's end goes on in its paragraph: a
+        // cut there would have the rest run in the wrong mode, then
+        // taken back)
+        let t = "One\n\\begin{math}x\\end{math}\nTwo\\par\n";
+        let text = analyse(t, FileKind::Document, no_defs());
+        assert!(
+            text.slices
+                .iter()
+                .any(|&(s, e)| { t[s..e].contains("One") && t[s..e].contains("Two") })
+        );
+    }
+
+    #[test]
     fn paragraph_and_conditional_classes() {
         let t = "\\par\nText here \\ifnum1=1 \\fi\n\\afterassignment\\relax\\def\\y{}\n";
         let text = analyse(t, FileKind::Document, no_defs());
@@ -6001,12 +6543,58 @@ mod tests {
         );
     }
 
+    /// A text's lines scanned one after another and their shapes
+    /// composed ([`FrameShape`], [`ShapeScan::apply`]) leave the same
+    /// openers and find the same first closer.
+    #[test]
+    fn frame_shapes_compose_as_the_scan() {
+        let lines = [
+            "\\begin{a}{x",
+            "}\\end{a}\\end{b}",
+            "\\begingroup{",
+            "% \\end{c}",
+            "}}\\endgroup",
+            "\\begin{document}\\end{document}",
+            "{\\bgroup",
+            "\\egroup}\\end{d}{",
+            "\\begin{e}",
+        ];
+        for carried in 0..3 {
+            for a in 0..lines.len() {
+                for b in 0..lines.len() {
+                    for c in 0..lines.len() {
+                        let ls = [lines[a], lines[b], lines[c]];
+                        let mut seq = ShapeScan {
+                            open: vec![String::new(); carried],
+                            close: None,
+                            record: None,
+                        };
+                        let mut com = ShapeScan {
+                            open: vec![String::new(); carried],
+                            close: None,
+                            record: None,
+                        };
+                        for l in ls {
+                            seq.text(l);
+                            com.apply(&FrameShape::of(l));
+                        }
+                        assert_eq!(seq.close, com.close, "{ls:?} {carried}");
+                        if seq.close.is_none() {
+                            assert_eq!(seq.open, com.open, "{ls:?} {carried}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn scope_shapes_of_source_text() {
         let shape = |t: &str, carried: usize| {
             let mut st = ShapeScan {
                 open: vec![String::new(); carried],
                 close: None,
+                record: None,
             };
             st.text(t);
             if let Some(c) = st.close {

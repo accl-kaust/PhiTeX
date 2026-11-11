@@ -1,0 +1,26 @@
+\documentclass{article}
+\usepackage{tikz}
+\usepackage[expansion=true,protrusion=true]{microtype}
+\begin{document}
+% (a picture child in a box that refuses, its read-time object, after a paragraph
+% of the same piece broken with font expansion: the child starts with the
+% piece's appends pending to the fonts' expansion lists, and drops them
+% with its table)
+\parbox{4cm}{A paragraph set in a narrow box, so that its lines are
+stretched and shrunk with the font's expansion, more than once each.}
+\mbox{\begin{tikzpicture}\node{\immediate\pdfobj{<< /Refused true >>}x};\end{tikzpicture}}
+\count303=4 \count304=5 \count305=6 \csname\endcsname after the picture, in its paragraph:
+\message{[counts \the\count303 \space\the\count304 \space\the\count305 ]}%
+\the\count303, \the\count304, \the\count305.
+
+% (the empty name made \relax here, as TeX does, and seen so after)
+\count300=7 \count301=8 \count302=9 \csname\endcsname A paragraph that makes the empty control
+sequence after registers past 255 (the run's own locations past the fixed
+ones), and reads them: \message{[counts \the\count300 \space\the\count301 \space\the\count302 ]}%
+\the\count300, \the\count301, \the\count302.
+
+\message{[empty \ifcsname\endcsname defined\else undefined\fi]}%
+Protrusion at the margin of a paragraph long enough to break into lines,
+``quoted'' at its start, and the empty name
+\ifcsname\endcsname defined\else undefined\fi.
+\end{document}

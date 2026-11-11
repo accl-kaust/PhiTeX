@@ -24,17 +24,59 @@ use crate::session::Job;
 
 /// The machine a session runs on.
 pub trait Host: Send + Sync {
-    /// Where the job's file `name` (as TeX names it) is found (kpathsea's
-    /// lookup, in the format its extension names); none: nowhere.
+    /// Where the job's file `name` (as TeX names it, `\\input`'s and
+    /// `\\openin`'s) is found (kpathsea's lookup in its `tex` format);
+    /// none: nowhere.
     fn locate(&self, name: &str) -> Option<PathBuf>;
+
+    /// Where the font side's file `name` (a TFM, a VF, a map, an
+    /// encoding, a font file, a PK font: [`phitex_tex::FONT_KEY`]) is
+    /// found (kpathsea's lookup in the format its extension names);
+    /// [`Host::locate`]'s by default.
+    fn locate_font(&self, name: &str) -> Option<PathBuf> {
+        self.locate(name)
+    }
+
+    /// Where the file a finder's key `key` names is
+    /// ([`phitex_tex::Finder`]): [`Host::locate_font`] for the font
+    /// side's, [`Host::locate`] for TeX's.
+    fn locate_key(&self, key: &str) -> Option<PathBuf> {
+        match phitex_tex::font_name(key) {
+            Some(name) => self.locate_font(name),
+            None => self.locate(key),
+        }
+    }
 
     /// The bytes of the file at `path` (as [`Host::locate`] found it, or
     /// as a diagnostic names it); none: not readable.
     fn read(&self, path: &Path) -> Option<Vec<u8>>;
 
+    /// A key of the file at `path` that changes when its bytes do, read
+    /// without reading them (the CLI's: its size, modification time and
+    /// inode, [`phitex_tex::file_stat_key`]); none: the host has none, and
+    /// a reread reads the file. `r` in a watch reads again only the files
+    /// whose key moved ([`crate::session::Session::reread_all`]).
+    fn stamp(&self, _path: &Path) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// The file TeX names `name` was looked for and not found, and may
+    /// be there now (a Rebuild, `r` in the watch): a host that keeps its
+    /// answers ([`Host::locate`]'s "nowhere" included) looks for it again
+    /// at its next lookup. A host that keeps none (the CLI's: kpathsea
+    /// lists a folder again once it changed) has nothing to do.
+    fn look_again(&self, _name: &str) {}
+
     /// Whether two names are one file (none of the host's own: names are
     /// compared as they are).
     fn same_file(&self, _a: &str, _b: &str) -> bool {
+        false
+    }
+
+    /// Whether the file at `path` (as [`Host::locate`] found it) is the
+    /// distribution's, read-only: TeX Live's trees, Shelf's packs. A
+    /// watch watches every other file a build read, wherever it is.
+    fn distribution(&self, _path: &Path) -> bool {
         false
     }
 
@@ -62,6 +104,25 @@ pub trait Host: Send + Sync {
     /// they are read and hashed).
     fn content_key(&self) -> Option<phitex_tex::ContentKey> {
         None
+    }
+
+    /// The format the files' release publishes as `name` (the
+    /// session's store name: [`crate::session`]'s, the engine, its
+    /// identity, its text's hash), its exported state: what a cold build
+    /// takes when the store has no format of that name, or one whose
+    /// files changed (Shelf's: `phitex_shelf::Files::published_format`).
+    /// Asked only then; none: there is none (the format is made).
+    fn published_format(&self, _name: &str) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Whether the files' release publishes a format named `name`
+    /// ([`Host::published_format`]'s): a build that made that format
+    /// anyway tells the user so (the release's could not be had or did
+    /// not hold: the release is wrong, or this PhiTeX is not the one it
+    /// was made for).
+    fn publishes_format(&self, _name: &str) -> bool {
+        false
     }
 
     /// The tools' support files (bibliography styles and databases, index

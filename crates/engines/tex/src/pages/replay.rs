@@ -240,6 +240,11 @@ pub(crate) enum Src {
     /// `from` on: held over to the next page (§1021: what a split left,
     /// or the whole insertion with `from` 0).
     Held { piece: i64, item: u32, from: u32 },
+    /// [`Src::Held`] of an insertion page `page`'s routine gave back
+    /// (item `item` of its list, [`Src::Rtn`]): LaTeX's `\@reinserts`
+    /// puts a page's footnotes back as insertions of the routine's own,
+    /// which the next page may split again.
+    HeldRtn { page: i64, item: u32, from: u32 },
 }
 
 /// `len` items from consecutive positions of one source ([`Src::Held`]:
@@ -329,10 +334,10 @@ pub(crate) struct LoopFire {
     pub holding: bool,
     pub classes: Vec<u16>,
     /// The insertions held over (§1022), measured, with their sources;
-    /// `held_named` false where a source could not be named (a defect,
-    /// said where the page is noted).
+    /// `held_unnamed` why a source could not be named (a defect, said
+    /// where the page is noted).
     pub held: Vec<(Src, Node)>,
-    pub held_named: bool,
+    pub held_unnamed: Option<&'static str>,
     /// The marks on the page, in order (ids in [`LoopCarry::marks`]).
     pub marks: Vec<u32>,
     /// The best break where it is a penalty (§1013: 10000 after this
@@ -342,6 +347,8 @@ pub(crate) struct LoopFire {
     /// the page from its best break on, the item that fired it, the
     /// contributions after it.
     pub carried: Vec<SrcRef>,
+    /// `page_so_far` as the fire left it ([`super::Page::so_far`]).
+    pub so_far: [i32; 8],
 }
 
 /// The profile item a source names, as the loop has it.
@@ -381,7 +388,7 @@ pub(crate) fn loop_item_raw(lc: &LoopCarry, src: Src) -> Option<crate::vprof::PI
             let (_, _, items) = lc.rtns.iter().rev().find(|r| r.0 == page)?;
             items.get(item as usize).cloned()
         }
-        Src::Held { .. } => None,
+        Src::Held { .. } | Src::HeldRtn { .. } => None,
     }
 }
 
@@ -606,8 +613,17 @@ pub(crate) fn build_t(
                 // goes back too)
                 let topskip = f.contributions.len() == before.saturating_sub(f.best) + 2;
                 let holding = params.holding_inserts > 0;
-                let held = held_srcs(&f, &srcs, &ins, holding);
-                let held_named = held.is_some();
+                // (a piece's insertion's own list, where a rest of it is
+                // split again)
+                let lcr: &LoopCarry = lc;
+                let list_of_ins = |whole: Src| -> Option<Vec<Node>> {
+                    match loop_item_raw(lcr, whole)? {
+                        PItem::Node(Node::Ins(i)) => Some(i.list),
+                        _ => None,
+                    }
+                };
+                let held = held_srcs(&f, &srcs, &ins, holding, &list_of_ins);
+                let held_unnamed = held.as_ref().err().copied();
                 // (§1013: the best break, a penalty, is 10000 from here on)
                 let mut brk = None;
                 if f.output_penalty < phitex_typeset::linebreak::INF_PENALTY {
@@ -630,6 +646,7 @@ pub(crate) fn build_t(
                 if let Some((_, s)) = end_seen {
                     carried.push(s);
                 }
+                let so_far = st.pb.so_far;
                 st.pb = PageBuilder::new();
                 st.pb.measure_only = true;
                 st.j += 1;
@@ -649,10 +666,11 @@ pub(crate) fn build_t(
                     holding,
                     classes: f.ins_records.iter().map(|r| r.n).collect(),
                     held,
-                    held_named,
+                    held_unnamed,
                     marks: f.marks.clone(),
                     brk,
                     carried,
+                    so_far,
                 });
             }
         }
@@ -664,34 +682,52 @@ pub(crate) fn build_t(
 /// The sources of the insertions a fire holds over (§1020–§1022), in
 /// order: each insertion before the best break whose class has no best
 /// insertion or comes after it, all of them where `\holdinginserts` is
-/// positive, and the rest of the one split where a rest is left. `None`
-/// where one cannot be named by a piece's item ([`Src::Held`]): a defect,
-/// said by the caller.
+/// positive, and the rest of the one split where a rest is left. `Err`
+/// (why) where one cannot be named by a piece's or a routine's item
+/// ([`Src::Held`], [`Src::HeldRtn`]): a defect, said by the caller.
 pub(crate) fn held_srcs(
     f: &Fired,
     page_src: &[SrcRef],
     page_ins: &[Option<u16>],
     holding: bool,
-) -> Option<Vec<Src>> {
+    list_of_ins: &dyn Fn(Src) -> Option<Vec<Node>>,
+) -> Result<Vec<Src>, &'static str> {
     if f.held_inserts.is_empty() {
-        return Some(Vec::new());
+        return Ok(Vec::new());
     }
     let mut recs = f.ins_records.clone();
     // (sure ones, and the rest of a split, which pruning may leave empty)
     let mut out: Vec<(Src, bool)> = Vec::new();
     for (idx, ins) in page_ins.iter().enumerate().take(f.best) {
         let Some(n) = *ins else { continue };
-        let src = page_src.get(idx).and_then(|s| s.src)?;
-        let (piece, item, from) = match src {
-            Src::Piece { piece, item } if end_sub_of(item).is_none() => (piece, item, 0),
-            Src::Held { piece, item, from } => (piece, item, from),
-            _ => return None,
+        let src = page_src
+            .get(idx)
+            .and_then(|s| s.src)
+            .ok_or("an insertion the builder made")?;
+        // (the whole insertion's source, and where its list is from)
+        let (whole, from) = match src {
+            Src::Piece { item, .. } if end_sub_of(item).is_some() => {
+                return Err("an item of an \\end marker's own");
+            }
+            Src::Piece { .. } | Src::Rtn { .. } => (src, 0),
+            Src::Held { piece, item, from } => (Src::Piece { piece, item }, from),
+            Src::HeldRtn { page, item, from } => (Src::Rtn { page, item }, from),
+        };
+        let held = |from: u32| match whole {
+            Src::Rtn { page, item } => Src::HeldRtn { page, item, from },
+            Src::Piece { piece, item } | Src::Held { piece, item, .. } => {
+                Src::Held { piece, item, from }
+            }
+            h @ Src::HeldRtn { .. } => h,
         };
         if holding {
-            out.push((Src::Held { piece, item, from }, true));
+            out.push((held(from), true));
             continue;
         }
-        let r = recs.iter_mut().find(|r| r.n == n)?;
+        let r = recs
+            .iter_mut()
+            .find(|r| r.n == n)
+            .ok_or("a class with no record")?;
         let mut wait = true;
         let mut maybe = false;
         let mut at = from;
@@ -702,40 +738,60 @@ pub(crate) fn held_srcs(
                     && r.broken_ins == Some(idx)
                     && let Some(q) = r.broken_ptr
                 {
-                    // (a rest held again after a split of a rest: its
-                    // items are not the piece's from an index on)
-                    if from != 0 {
-                        return None;
-                    }
+                    // (a rest split again: its own rest is the piece's
+                    // insertion from the index its break is at there)
+                    let q = if from == 0 {
+                        Some(q)
+                    } else {
+                        list_of_ins(whole).and_then(|l| rest_origin(&l, from as usize, q))
+                    };
                     wait = true;
                     maybe = true;
-                    at = u32::try_from(q).ok()?;
+                    at = q
+                        .and_then(|q| u32::try_from(q).ok())
+                        .ok_or("the rest of a split split again, its insertion not found")?;
                 }
                 r.best_ins = None;
             }
         }
         if wait {
-            out.push((
-                Src::Held {
-                    piece,
-                    item,
-                    from: at,
-                },
-                !maybe,
-            ));
+            out.push((held(at), !maybe));
         }
     }
     let sure = out.iter().filter(|x| x.1).count();
     let keep_maybe = out.len() == f.held_inserts.len();
     if !keep_maybe && sure != f.held_inserts.len() {
-        return None;
+        return Err("the held insertions counted otherwise");
     }
-    Some(
-        out.into_iter()
-            .filter(|x| x.1 || keep_maybe)
-            .map(|x| x.0)
-            .collect(),
-    )
+    Ok(out
+        .into_iter()
+        .filter(|x| x.1 || keep_maybe)
+        .map(|x| x.0)
+        .collect())
+}
+
+/// Where item `q` of the rest of an insertion from `from` on (§1021:
+/// `list[from..]` pruned, §968: its discardables before the first box
+/// dropped, `\\splittopskip`'s glue put before that box) is in the
+/// insertion's own `list`: a rest of the rest from `q` is that list's
+/// rest from there (its glue, where the break is at it, the first box's).
+pub(crate) fn rest_origin(list: &[Node], from: usize, q: usize) -> Option<usize> {
+    let mut r = 0;
+    for (i, n) in list.iter().enumerate().skip(from) {
+        match n {
+            Node::Box(_) | Node::Rule(_) => {
+                return Some(if q <= r { i } else { i + (q - r - 1) });
+            }
+            Node::Whatsit(..) | Node::Language { .. } | Node::Mark(_) | Node::Ins(_) => {
+                if q == r {
+                    return Some(i);
+                }
+                r += 1;
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Consecutive sources as spans.
@@ -756,7 +812,7 @@ pub(crate) fn spans_of(srcs: &[Src]) -> Vec<Span> {
                 Src::Rtn { page, item } => {
                     matches!(s, Src::Rtn { page: p, item: i } if p == page && i == item + last.len)
                 }
-                Src::Held { .. } => false,
+                Src::Held { .. } | Src::HeldRtn { .. } => false,
             };
             if next {
                 last.len += 1;
@@ -779,7 +835,7 @@ pub(crate) fn span_srcs(s: &Span) -> impl Iterator<Item = Src> + '_ {
             page,
             item: item + d,
         },
-        h @ Src::Held { .. } => h,
+        h @ (Src::Held { .. } | Src::HeldRtn { .. }) => h,
     })
 }
 
@@ -791,6 +847,7 @@ pub(crate) fn params_marker(v: &Values, p: &PageParams) -> ValueId {
         v.int(i64::from(p.max_depth)),
         glue_value(v, &p.top_skip),
         v.int(i64::from(p.holding_inserts)),
+        v.int(i64::from(p.saving_vdiscards)),
     ])
 }
 
@@ -1095,7 +1152,7 @@ impl Run<'_, '_> {
     /// A held-over insertion as the loop measured it (the source names it).
     pub(crate) fn loop_node(lc: &LoopCarry, src: Src) -> Option<crate::vprof::PItem> {
         match src {
-            Src::Held { .. } => lc
+            Src::Held { .. } | Src::HeldRtn { .. } => lc
                 .held_nodes
                 .iter()
                 .find(|h| h.0 == src)
@@ -1143,7 +1200,7 @@ impl Run<'_, '_> {
             let mut keep: phitex_defuse::FxHashSet<i64> = lc.units.iter().map(|u| u.pid).collect();
             let piece = |s: &Src| match *s {
                 Src::Piece { piece, .. } | Src::Held { piece, .. } => Some(piece),
-                Src::Rtn { .. } => None,
+                Src::Rtn { .. } | Src::HeldRtn { .. } => None,
             };
             keep.extend(lc.srcs.iter().filter_map(piece));
             keep.extend(
@@ -1510,7 +1567,8 @@ pub(crate) fn with_text(v: &Values, mut p: PageParams, ch: &[(usize, ValueId)]) 
             0 => p.vsize = crate::val::i32_of(v, Some(x)),
             1 => p.max_depth = crate::val::i32_of(v, Some(x)),
             2 => p.top_skip = glue_of(v, Some(x)),
-            _ => p.holding_inserts = crate::val::i32_of(v, Some(x)),
+            3 => p.holding_inserts = crate::val::i32_of(v, Some(x)),
+            _ => p.saving_vdiscards = crate::val::i32_of(v, Some(x)) > 0,
         }
     }
     p
@@ -1525,7 +1583,7 @@ pub(crate) fn params_of(v: &Values, m: ValueId) -> PageParams {
         max_depth: i32::try_from(g(2)).unwrap_or(0),
         top_skip: glue_of(v, xs.get(3).copied()),
         holding_inserts: i32::try_from(g(4)).unwrap_or(0),
-        saving_vdiscards: false,
+        saving_vdiscards: g(5) > 0,
     }
 }
 
@@ -1571,12 +1629,18 @@ pub(crate) fn page_data(v: &Values, f: &Fired, side: &Side) -> ValueId {
         .iter()
         .map(|n| nodes::encode(v, n, side))
         .collect();
+    let discards: Vec<ValueId> = f
+        .discards
+        .iter()
+        .map(|n| nodes::encode(v, n, side))
+        .collect();
     v.list(vec![
         b255,
         v.list(inserts),
         v.list(marks),
         v.list(held),
         v.int(i64::from(f.output_penalty)),
+        v.list(discards),
     ])
 }
 
@@ -1645,9 +1709,11 @@ impl Run<'_, '_> {
     }
 
     /// Class `n`'s registers as the builder has them (`base`, from the
-    /// routines' give-backs in fold order), each with the text's own
+    /// routines' give-backs in fold order), its box with the text's own
     /// definition reaching `at` where the text set it after the piece
-    /// `since` (raw id, -1 none) the page before fired in: a finisher's
+    /// `since` (raw id, -1 none) the page before fired in, its other
+    /// registers as the text or the environment has them at `at` unless a
+    /// routine's definition reaches there: a finisher's
     /// definition never reaches the builder by its place, which the
     /// builder's own placements move (a routine's `\box\footins` read by
     /// place: the loop relocated the finisher, the pieces between its
@@ -1687,6 +1753,17 @@ impl Run<'_, '_> {
         });
         for (i, f) in fields.into_iter().enumerate() {
             let x = match self.field_at(f, at, false)? {
+                // (`\count`, `\dimen`, `\skip`: eqtb as it stands where
+                // the piece is, what no routine defined. A routine run in a
+                // group gives back the group's values, which the group's end
+                // takes away with no definition after the routine: multicol's
+                // `\count\footins` and `\skip\footins` times its columns)
+                phitex_defuse::FieldAt::Def(x, Some(d))
+                    if i > 0 && self.cx.op_of(d).is_some_and(|o| o != fin) =>
+                {
+                    x
+                }
+                phitex_defuse::FieldAt::Def(x, None) if i > 0 || env => x,
                 phitex_defuse::FieldAt::Def(x, Some(d))
                     if self.cx.op_of(d).is_some_and(|o| o != fin)
                         && after
@@ -1694,7 +1771,6 @@ impl Run<'_, '_> {
                 {
                     x
                 }
-                phitex_defuse::FieldAt::Def(x, None) if env => x,
                 _ => continue,
             };
             match i {
@@ -1746,7 +1822,7 @@ impl Run<'_, '_> {
             max_depth: int(xs[1]),
             top_skip: glue_of(v, xs[2]),
             holding_inserts: int(xs[3]),
-            saving_vdiscards: false,
+            saving_vdiscards: int(xs[4]) > 0,
         })
     }
 

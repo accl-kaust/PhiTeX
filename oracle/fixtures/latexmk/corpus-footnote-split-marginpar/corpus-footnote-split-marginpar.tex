@@ -1,0 +1,14 @@
+% A footnote too long for its page (split, its rest held over to the
+% next) and a \marginpar after it in the same paragraph: the marginpar's
+% output routine runs while the split footnote's rest is held over
+% (tamefloats' deml3541; PhiTeX lost the rest and the second page).
+\documentclass[12pt]{article}
+\newcount\n
+\begin{document}
+Text with a long note\footnote{%
+  \n=0
+  \loop \advance\n by 1
+    Line \the\n\ of the long note.\par
+  \ifnum\n<69 \repeat}
+and a marginal note after it.\marginpar{Here.}
+\end{document}

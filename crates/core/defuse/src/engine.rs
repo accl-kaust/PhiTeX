@@ -2,12 +2,12 @@
 //! evaluation, edits, reports.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::api::{
-    Cause, EditSource, EnvProvider, EvalError, Limits, Monoid, NodeId, NodeInfo, NodeState, OpId, Operation, PathId,
-    ProjId, Projection, Report, SeqMonoid, Settled, Step, UnitId,
+    AppendFn, Cause, EditSource, EnvProvider, EvalError, Limits, Monoid, NodeId, NodeInfo, NodeState, OpId, Operation,
+    PathId, ProjId, Projection, Rel, Report, SeqMonoid, Settled, Step, UnitId,
 };
 use crate::commit::{self, CommitStats, Predicted, own_write, place_after, settle_predictions, unfile};
 use crate::index::{FieldIndex, RangeIndex};
@@ -106,8 +106,15 @@ pub struct Engine {
     pub(crate) env: Env,
     pub(crate) paths: Paths,
     pub(crate) projections: Table<Projection>,
+    /// The client's append for [`Rel::Append`] ([`Engine::set_append`]).
+    append: std::sync::OnceLock<AppendFn>,
     /// Relations each operation has made: (op, field) -> c (`commit::learn_shape`).
     pub(crate) shapes: Lock<FxHashMap<(OpId, Field), i64>>,
+    /// A guarded read's path by its list, names path, element and inner
+    /// path (`Ctx::read_path_member`): made once, its spec a value and its
+    /// steps a path, each interned (an appender to a font list reads the
+    /// meaning of every name on it at each run).
+    pub(crate) member_paths: Lock<FxHashMap<(Field, PathId, ValueId, PathId), PathId>>,
     pub(crate) shapes_n: AtomicUsize,
     /// `Ctx::apply`'s memo.
     pub(crate) memo: Lock<Memo>,
@@ -151,6 +158,22 @@ pub struct Engine {
     /// cached at an older count is stale (`read::chain_start`), and a run
     /// that began before one checks every read at its commit.
     pub(crate) scope_gen: AtomicU64,
+    /// Counts the nodes relocated (`commit::relocate`): a read anchored
+    /// at a node made before one may answer otherwise with no change of
+    /// its field counted ([`crate::node::RunRecord::read_holds`]).
+    pub(crate) moves_gen: AtomicU64,
+    /// A count of the changes to the line's order and its siblings'
+    /// texts and claims (`Engine::structure_changed`): a run's reads of
+    /// its siblings (`ReadKind::Following`, `Next`, `Hole`) made before
+    /// one may name another sibling now. Moved (SeqCst) after the change
+    /// is made and before the change's own re-asks read a node's record
+    /// (`commit::check_pullers`, a removed sibling's claimer); a commit
+    /// files its sibling reads with the nodes they passed
+    /// (`commit::file_pullers`, each under that node's lock) and then reads
+    /// the count (SeqCst, step 6). So either the re-ask finds the read
+    /// filed and checks it, or the commit sees the count moved and checks
+    /// those reads again, kept ones too.
+    pub(crate) struct_gen: AtomicU64,
     /// Nodes with brackets filed: none, and no scope is walked.
     pub(crate) bracket_nodes: AtomicUsize,
     /// The field a read of the scope depth is recorded under
@@ -177,12 +200,60 @@ pub struct Engine {
     /// of the node past which it may yet place nodes, plus one; 0, none
     /// (no reader waits).
     pub(crate) frontier: AtomicU64,
+    /// The nodes whose last commit moved a later node's read of their
+    /// chain (`Node::moves`), and how many. A hint for the order of runs.
+    pub(crate) movers: crate::lock::Mx<crate::values::FxHashSet<NodeId>>,
+    pub(crate) movers_n: AtomicU64,
+    /// An evaluation has ended: there is a last run's graph to order the
+    /// next one's runs by (`sched::work`).
+    pub(crate) holds_on: std::sync::atomic::AtomicBool,
+    pub(crate) rerun_holds: std::sync::atomic::AtomicBool,
+    pub(crate) created_movers: std::sync::atomic::AtomicBool,
+    /// The payload past which the store is next collected, as the last
+    /// collection left it (twice what stood after it): an evaluation goes
+    /// on from it, or each would collect again what the last one kept.
+    pub(crate) collect_mark: AtomicU64,
     /// The node that set the frontier, its raw id plus one: a stop of its
     /// that moves on moves the frontier with it (`commit::reask_range`).
     pub(crate) frontier_by: AtomicU64,
+    /// Counts the frontier's moves other than a wake's move back and its
+    /// undoing (`sched::frontier_back`, `sched::frontier_restore`).
+    pub(crate) frontier_gen: AtomicU64,
     /// (`PHITEX_TEX_TIME`) Reads by readers outside the settling layer of
     /// a field it defines held past its frontier (`Ctx::set_frontier`).
     pub(crate) frontier_held: AtomicU64,
+    /// The speculation window (docs/spec-window.md): on for this
+    /// evaluation (`Engine::set_spec_window`), its width in places past the
+    /// frontier, whether a run ahead was refuted since the frontier last
+    /// moved on, and its measures (reads held by it, halvings, doublings).
+    pub(crate) window_on: AtomicBool,
+    /// The nodes holding fields their commit did not walk
+    /// (`Node::unwalked`), walked at the latest when the line is quiet.
+    pub(crate) unwalked: crate::lock::Mx<Vec<NodeId>>,
+    /// The quiet points so far (`sched::run_worker`): a run's wave
+    /// (`Node::run_began`), a count, exact where clocks tie or skew.
+    pub(crate) quiets: AtomicU64,
+    pub(crate) window: AtomicU64,
+    pub(crate) window_missed: AtomicBool,
+    /// The width at which the runs the window held were last looked at.
+    pub(crate) window_released: AtomicU64,
+    /// (measures, `PHITEX_FIRST_READS=0`, `PHITEX_WINDOW_WAVE=1`) the
+    /// first-read wait on, and the window narrowed only by a node's second
+    /// refutation by the layer.
+    pub(crate) first_reads_on: AtomicBool,
+    pub(crate) window_wave: AtomicBool,
+    /// (`PHITEX_WINDOW_CHAINS=0`, a measure) a clean build's run again
+    /// waits for its moving sources (`sched::hold_for`).
+    pub(crate) window_chains: AtomicBool,
+    /// (`PHITEX_WINDOW_AIMD=0`, `PHITEX_WINDOW_FLOOR`, measures) the
+    /// window grown a place at a time once the layer refuted a run ahead;
+    /// its narrowest; the runs ahead in since it last grew.
+    pub(crate) window_aimd: AtomicBool,
+    pub(crate) window_floor: AtomicU64,
+    pub(crate) window_acks: AtomicU64,
+    /// (`PHITEX_WINDOW_PIN=1`, a measure) no growth once exchanged.
+    pub(crate) window_pin: AtomicBool,
+    pub(crate) window_stats: [AtomicU64; 4],
     /// Counts the rebalances (`order::Order::rebalance`): a range reader
     /// whose span was found before one is filed again with its span now.
     pub(crate) layout_gen: AtomicU64,
@@ -256,6 +327,64 @@ impl Engine {
         self.settle_marks[w].fetch_or(b, Ordering::Release);
     }
 
+    /// The speculation window on or off for the evaluations to come
+    /// (docs/spec-window.md): on, its width measured from its start.
+    pub fn set_spec_window(&self, on: bool) {
+        self.window_on.store(on, Ordering::Release);
+        // (`PHITEX_WINDOW_START`, measure: another first width)
+        let start = std::env::var("PHITEX_WINDOW_START")
+            .ok()
+            .and_then(|x| x.parse().ok())
+            .unwrap_or(crate::sched::WINDOW_START);
+        self.window.store(start, Ordering::Release);
+        self.window_released.store(start, Ordering::Release);
+        self.window_missed.store(false, Ordering::Release);
+        self.first_reads_on.store(
+            std::env::var("PHITEX_FIRST_READS").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
+        self.window_wave.store(
+            std::env::var("PHITEX_WINDOW_WAVE").is_ok_and(|x| x == "1"),
+            Ordering::Release,
+        );
+        self.window_aimd.store(
+            std::env::var("PHITEX_WINDOW_AIMD").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
+        self.window_floor.store(
+            std::env::var("PHITEX_WINDOW_FLOOR")
+                .ok()
+                .and_then(|x| x.parse().ok())
+                .unwrap_or(1),
+            Ordering::Release,
+        );
+        self.window_acks.store(0, Ordering::Release);
+        self.window_pin.store(
+            std::env::var("PHITEX_WINDOW_PIN").is_ok_and(|x| x == "1"),
+            Ordering::Release,
+        );
+        self.window_chains.store(
+            std::env::var("PHITEX_WINDOW_CHAINS").map_or(true, |x| x != "0"),
+            Ordering::Release,
+        );
+        for s in &self.window_stats {
+            s.store(0, Ordering::Release);
+        }
+    }
+
+    /// (`PHITEX_TEX_TIME`) The speculation window's width now, the runs it
+    /// held, its halvings and its doublings, and the first reads that
+    /// waited for a definer before them (`Ctx::wait_for_first_definer`).
+    pub fn window_stats(&self) -> (u64, u64, u64, u64, u64) {
+        (
+            self.window.load(Ordering::Relaxed),
+            self.window_stats[0].load(Ordering::Relaxed),
+            self.window_stats[1].load(Ordering::Relaxed),
+            self.window_stats[2].load(Ordering::Relaxed),
+            self.window_stats[3].load(Ordering::Relaxed),
+        )
+    }
+
     /// (`PHITEX_TEX_TIME`) `Engine::frontier_held`.
     pub fn frontier_held(&self) -> u64 {
         self.frontier_held.load(Ordering::Relaxed)
@@ -270,6 +399,18 @@ impl Engine {
 
     /// A bracket changed: a new scope count.
     /// A new scope epoch: the epoch it begins.
+    /// How many times a node's brackets changed so far.
+    #[must_use]
+    pub fn scope_changes(&self) -> u64 {
+        self.scope_gen.load(Ordering::Acquire)
+    }
+
+    /// The line's order, a sibling's text or a claim changed
+    /// ([`Engine::struct_gen`]).
+    pub(crate) fn structure_changed(&self) {
+        self.struct_gen.fetch_add(1, Ordering::SeqCst);
+    }
+
     pub(crate) fn scope_changed(&self) -> u64 {
         self.scope_gen.fetch_add(1, Ordering::AcqRel) + 1
     }
@@ -302,6 +443,8 @@ impl Engine {
             pred_pending: Mx::new(Vec::new()),
             swept_left: AtomicU64::new(0),
             scope_gen: AtomicU64::new(1),
+            moves_gen: AtomicU64::new(1),
+            struct_gen: AtomicU64::new(1),
             bracket_nodes: AtomicUsize::new(0),
             depth_field,
             has_finals: std::sync::atomic::AtomicBool::new(false),
@@ -309,8 +452,29 @@ impl Engine {
             settle_marks: (0..SETTLE_MARK_WORDS).map(|_| AtomicU64::new(0)).collect(),
             settle_exact: Lock::new(crate::FxHashSet::default()),
             frontier: AtomicU64::new(0),
+            movers: crate::lock::Mx::new(crate::values::FxHashSet::default()),
+            movers_n: AtomicU64::new(0),
+            holds_on: std::sync::atomic::AtomicBool::new(false),
+            rerun_holds: std::sync::atomic::AtomicBool::new(false),
+            created_movers: std::sync::atomic::AtomicBool::new(false),
+            collect_mark: AtomicU64::new(0),
             frontier_by: AtomicU64::new(0),
+            frontier_gen: AtomicU64::new(0),
             frontier_held: AtomicU64::new(0),
+            window_on: AtomicBool::new(false),
+            unwalked: crate::lock::Mx::new(Vec::new()),
+            quiets: AtomicU64::new(0),
+            window: AtomicU64::new(crate::sched::WINDOW_START),
+            window_missed: AtomicBool::new(false),
+            window_released: AtomicU64::new(0),
+            first_reads_on: AtomicBool::new(true),
+            window_wave: AtomicBool::new(false),
+            window_chains: AtomicBool::new(true),
+            window_aimd: AtomicBool::new(true),
+            window_floor: AtomicU64::new(1),
+            window_acks: AtomicU64::new(0),
+            window_pin: AtomicBool::new(false),
+            window_stats: [const { AtomicU64::new(0) }; 4],
             layout_gen: AtomicU64::new(0),
             repair: std::sync::atomic::AtomicBool::new(false),
             busy: AtomicU64::new(0),
@@ -336,7 +500,9 @@ impl Engine {
             },
             paths,
             projections,
+            append: std::sync::OnceLock::new(),
             shapes: Lock::new(FxHashMap::default()),
+            member_paths: Lock::new(FxHashMap::default()),
             shapes_n: AtomicUsize::new(0),
             memo: Lock::new(FxHashMap::default()),
             marked: Lock::new(FxHashSet::default()),
@@ -542,6 +708,27 @@ impl Engine {
         OpId(u32::try_from(self.ops.push(op)).expect("operation ids"))
     }
 
+    /// The client's append, for its relations [`Rel::Append`]
+    /// (`Ctx::define_append_with`); set once, before any is made.
+    pub fn set_append(&self, f: AppendFn) {
+        let _ = self.append.set(f);
+    }
+
+    /// Relation `c`'s value on `input`, the value reaching it.
+    ///
+    /// # Panics
+    ///
+    /// On an append relation with no append set ([`Engine::set_append`]).
+    pub(crate) fn rel_apply(&self, c: Rel, input: Option<ValueId>) -> ValueId {
+        let v = self.values();
+        match c {
+            Rel::Add(c) => v.int(input.and_then(|x| v.as_int(x)).unwrap_or(0).wrapping_add(c)),
+            Rel::Append(items) => {
+                (self.append.get().expect("an append relation needs the client's append"))(input, items, v)
+            }
+        }
+    }
+
     pub fn register_projection(&self, p: Projection) -> ProjId {
         let i = self.projections.push(p);
         assert!(i < PROJ_PATHS, "too many projections");
@@ -688,6 +875,7 @@ impl Engine {
             self.nodes
                 .set(usize::try_from(node.id.raw()).unwrap_or(usize::MAX), node.clone());
             inner.nodes.insert(p, node.id);
+            self.structure_changed();
             inner.holes += 1;
             inner.by_op.entry(node.op()).or_default().push(node.id);
             commit::file_predicted(self, seg, &mut inner, &node, pred);
@@ -748,6 +936,7 @@ impl Engine {
                     });
                     self.nodes.set(first_id + k, node.clone());
                     inner.nodes.insert(p, id);
+                    self.structure_changed();
                     inner.holes += 1;
                     inner.by_op.entry(op).or_default().push(id);
                     commit::file_predicted(self, &seg, &mut inner, &node, pred);
@@ -957,6 +1146,7 @@ impl Engine {
             self.nodes
                 .set(usize::try_from(id.raw()).unwrap_or(usize::MAX), n.clone());
             inner.nodes.insert(p, id);
+            self.structure_changed();
             inner.holes += 1;
             inner.by_op.entry(op).or_default().push(id);
             commit::file_predicted(self, seg, &mut inner, &n, pred);
@@ -979,8 +1169,18 @@ impl Engine {
             inner.by_op.entry(op).or_default().push(node);
             n.op.store(op.0, Ordering::Release);
         }
-        let effect = self.op(op).effect(&args, &self.values);
+        let mut effect = self.op(op).effect(&args, &self.values);
+        if matches!(effect, crate::api::Effect::Scope(_))
+            && old_op == op
+            && n.record().is_some()
+            && self.op(op).same_effect(&n.args(), &args, &self.values)
+        {
+            effect = crate::api::Effect::Pending;
+        }
         *n.text.write() = args.into();
+        self.structure_changed();
+        // (its text is what a read of its siblings answers)
+        commit::check_pullers(self, None, n, None);
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
         n.effect.store(crate::node::pack_effect(effect), Ordering::Release);
         if n.taken() {
@@ -1009,7 +1209,13 @@ impl Engine {
         let n = self.node(node);
         let was_inert = n.taken();
         self.stats.edits.fetch_add(1, Ordering::Relaxed);
+        let (at, unit) = (n.pos_hint(), n.unit);
         unfile(self, None, n);
+        // (the first node after it to run again runs first on what it
+        // left: those after it wait for that one, `sched::mark_front`)
+        if self.epoch.load(Ordering::Acquire) > 0 {
+            crate::sched::mark_front(self, at, unit);
+        }
         if was_inert {
             self.wake_claimer(n);
         }
@@ -1083,6 +1289,14 @@ impl Engine {
     /// The node whose definition of `f` reaches `n` (None: the environment).
     pub fn reaching_def(&self, n: NodeId, f: Field) -> Option<NodeId> {
         reaching_at(self, f, n, false)?.by
+    }
+
+    /// The value of `f` reaching `n` (None: none, the environment's),
+    /// its alias definitions followed as a read before each alias's node
+    /// gives them; nothing recorded (a client's question after an
+    /// evaluation: the value a symbol of `f` as of `n` stands for).
+    pub fn value_reaching(&self, n: NodeId, f: Field) -> Option<ValueId> {
+        read::through_aliases(self, reaching_at(self, f, n, false)?.value)
     }
 
     /// `n`'s own definition of `f`.
@@ -1227,7 +1441,10 @@ impl Engine {
     }
 
     pub fn set_limits(&self, l: Limits) {
-        self.values.count_payload(l.collect_at_bytes.is_some());
+        // (counted where it collects, and where a memory limit is
+        // measured against it: `Limits::memory_bytes`)
+        self.values
+            .count_payload(l.collect_at_bytes.is_some() || l.memory_bytes.is_some());
         *self.limits.write() = l;
     }
 
@@ -1377,18 +1594,45 @@ impl Engine {
         }
         loop {
             let epoch = self.epoch.fetch_add(1, Ordering::AcqRel) + 1;
+            // (PHITEX_CLEAN_HOLDS=1, a measure: the edit's holds on a
+            // clean build too)
+            let clean_holds = std::env::var_os("PHITEX_CLEAN_HOLDS");
+            let ch = |v: &str| clean_holds.as_ref().is_some_and(|x| x == v);
+            self.holds_on.store(epoch > 1 || ch("1") || ch("3"), Ordering::Release);
+            // (=3: the holds, but a node never run is no mover on a
+            // clean build, only one whose commit moved a read of its
+            // chain, `sched::note_move`)
+            self.created_movers.store(epoch > 1 || ch("1"), Ordering::Release);
+            // (=2: only a run again waits, for an open source it read
+            // that moved a reader, `sched::hold_for`)
+            self.rerun_holds
+                .store(clean_holds.as_ref().is_some_and(|x| x == "2"), Ordering::Release);
             self.final_gen.fetch_add(1, Ordering::AcqRel);
-            let (pool, workers) = Pool::new(n, epoch, self.limits());
+            let (pool, workers) = Pool::new(n, epoch, self.limits(), self.collect_mark.load(Ordering::SeqCst));
             let mut seed = self.take_pending(&workers[0]);
             // (a node that runs only when the line is quiet waits for it)
             seed.retain(|&n| !pool.defer(self, n));
             // (in position order, as the blocks run: a node inserted before
             // others runs with them, not after every node pushed)
             commit::sort_by_label(self, &mut seed);
-            if !seed.is_empty() {
+            // (an edit's few nodes: on the first worker's queue, the others
+            // woken only if they wait there, as for any node a commit queues.
+            // Dealt out, an edit's two nodes began on two threads wherever
+            // they read one another. A first evaluation's pieces are dealt
+            // out in blocks in TeX's order, each block run in order by one
+            // worker: on one queue each idle worker took the next piece while
+            // the one before it ran, so every piece ran first on a state
+            // without its predecessor's definitions, and a piece that read
+            // on into its siblings did so on a prefix whose nodes had all
+            // run once on such states (a paragraph met `\open` new and
+            // `\close` old and read on through 21 siblings, 63 of them run
+            // again; the pieces after a fatal error ran on 7 workers)
+            if n > 1 && epoch > 1 && seed.len() < crate::sched::BLOCK_MIN {
+                workers[0].ready_all(self, &seed);
+            } else if !seed.is_empty() {
                 let per = seed.len().div_ceil(n);
                 for (i, chunk) in seed.chunks(per).enumerate() {
-                    workers[i].seed(chunk);
+                    workers[i].seed(self, chunk);
                 }
             }
             // (the trait object's lifetime shortened for the reborrow, which
@@ -1401,6 +1645,14 @@ impl Engine {
                 .iter()
                 .flat_map(|w| std::mem::take(&mut w.log.lock().panicked))
                 .collect();
+            if crate::sched::run_log() && !panicked.is_empty() {
+                let commits: u64 = workers.iter().map(|w| w.commits.load(Ordering::Relaxed)).sum();
+                eprintln!(
+                    "defuse: a pass ended with {} panicked runs (nodes {:?}) and {commits} commits",
+                    panicked.len(),
+                    panicked.iter().map(|p| p.0.raw()).collect::<Vec<_>>()
+                );
+            }
             all.extend(workers);
             if panicked.is_empty() {
                 break;
@@ -1429,6 +1681,22 @@ impl Engine {
                 eprintln!("defuse stale-audit: {line}");
             }
         }
+        // (debug: settled, every clean node's reads of its siblings hold)
+        #[cfg(debug_assertions)]
+        crate::commit::assert_siblings_hold(self);
+        // (debug, observe: settled, the claims partition the siblings)
+        #[cfg(any(debug_assertions, feature = "observe"))]
+        {
+            let lines = crate::commit::claims_breaches(self);
+            for l in &lines {
+                eprintln!("claims: {l}");
+            }
+            assert!(
+                lines.is_empty(),
+                "{} breaches of the claims at a settled evaluation's end",
+                lines.len()
+            );
+        }
         let swept = self.sweep_readers() as u64
             + workers
                 .iter()
@@ -1437,6 +1705,7 @@ impl Engine {
         let mut rep = Report {
             readers_swept: swept,
             scanned: self.scanned.swap(0, Ordering::Relaxed),
+            range_stepped: self.ranges.stepped.swap(0, Ordering::Relaxed),
             commits_at_once: self.commit_peak.swap(0, Ordering::Relaxed),
             collections: workers
                 .iter()
@@ -1459,12 +1728,14 @@ impl Engine {
             rep.refuted_nodes += load(&w.refuted_nodes);
             rep.resumed += load(&w.resumed);
             rep.parks += load(&w.parks);
+            rep.waits += load(&w.waits);
             rep.stale_panics += load(&w.stale_panics);
             rep.stopped_stale += load(&w.stopped_stale);
             rep.wasted_ns += load(&w.wasted_ns);
             rep.predictions_confirmed += load(&w.predictions_confirmed);
             rep.relative_resolved += load(&w.relative_resolved);
             rep.walked += load(&w.walked);
+            rep.scope_asked += load(&w.scope_asked);
             rep.shaped += load(&w.shaped);
             rep.commits += load(&w.commits);
             rep.final_reruns = rep
@@ -1476,7 +1747,6 @@ impl Engine {
             rep.held_passes = rep
                 .held_passes
                 .max(u32::try_from(load(&w.held_passes)).unwrap_or(u32::MAX));
-            rep.held_unsettled |= load(&w.held_unsettled) > 0;
             rep.times.op_ns += load(&w.op_ns);
             rep.times.wasted_ns += load(&w.wasted_ns);
             rep.times.commit_ns += load(&w.commit_ns);
@@ -1511,6 +1781,7 @@ impl Engine {
                 e.1 += k;
             }
             rep.rerun_causes.append(&mut log.causes);
+            rep.stood.append(&mut log.stood);
             rep.capped.append(&mut log.capped);
             for (f, k) in log.refuted_by_field.drain() {
                 *rbf.entry(f).or_default() += k;
@@ -1608,7 +1879,7 @@ impl Engine {
                     };
                     let moved = r.reads.iter().any(|rd| {
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            answer(self, node, &rd.kind, rd.path) != rd.seen
+                            answer(self, node, rd.kind(), rd.path()) != rd.seen()
                         }))
                         .unwrap_or(true)
                     });
@@ -1649,7 +1920,7 @@ impl Engine {
     /// and of those gone.
     pub fn footprint(&self) -> String {
         let (filed, standing, fields) = self.reader_records();
-        let (mut live, mut gone) = ([0usize; 4], [0usize; 4]);
+        let (mut live, mut gone) = ([0usize; 5], [0usize; 5]);
         for i in 0..self.nodes.len() {
             let Some(n) = self.nodes.get(i) else { continue };
             let t = if n.state() == State::Gone { &mut gone } else { &mut live };
@@ -1658,11 +1929,20 @@ impl Engine {
                 t[1] += r.reads.len();
                 t[2] += r.defs.len();
                 t[3] += r.contribs.len();
+                t[4] += r.reads.bytes();
             }
         }
         format!(
-            "readers filed {filed} ({standing} standing) over {fields} segment fields; nodes alive {} (reads {}, defs {}, contribs {}), gone {} (reads {}, defs {}, contribs {})",
-            live[0], live[1], live[2], live[3], gone[0], gone[1], gone[2], gone[3]
+            "readers filed {filed} ({standing} standing) over {fields} segment fields; nodes alive {} (reads {} in {} MB, defs {}, contribs {}), gone {} (reads {}, defs {}, contribs {})",
+            live[0],
+            live[1],
+            live[4] >> 20,
+            live[2],
+            live[3],
+            gone[0],
+            gone[1],
+            gone[2],
+            gone[3]
         )
     }
 
@@ -1683,6 +1963,9 @@ impl Engine {
             | Step::Has(x)
             | Step::Eq(x)
             | Step::Cmp(x)
+            | Step::Within(x)
+            | Step::Derived(x)
+            | Step::Member(x)
             | Step::Indices(x)
             | Step::Keys(x)
             | Step::Rank(x)
@@ -1699,16 +1982,21 @@ impl Engine {
                 for d in &r.defs {
                     keep(d.f.0);
                     keep(d.value);
+                    // (an append's items: what the value is made from
+                    // where the list it grows moves)
+                    if let Some(crate::Rel::Append(x)) = d.rel {
+                        keep(x);
+                    }
                 }
                 for &(f, x) in &r.contribs {
                     keep(f.0);
                     keep(x);
                 }
-                for rd in &r.reads {
-                    if let Some(f) = rd.kind.field() {
+                for rd in r.reads.iter() {
+                    if let Some(f) = rd.kind().field() {
                         keep(f.0);
                     }
-                    rd.seen.into_iter().for_each(&mut *keep);
+                    rd.seen().into_iter().for_each(&mut *keep);
                 }
             }
             for (f, _, r) in n.bounded.lock().iter() {
@@ -1718,18 +2006,26 @@ impl Engine {
                 }
             }
             n.stopped.lock().iter().for_each(|&(f, _)| keep(f.0));
-            n.anchored.lock().iter().for_each(|f| keep(f.0));
+            n.foreign.lock().fields.iter().for_each(|g| keep(g.0));
+            for (g, r) in &n.foreign.lock().witness {
+                keep(g.0);
+                if crate::segment::live(self, r.node(), r.serial) {
+                    r.seen().into_iter().for_each(&mut *keep);
+                }
+            }
         }
         for sid in self.order.all() {
             let inner = self.seg(sid).inner.read();
             for (f, m) in &inner.defs {
                 keep(f.0);
-                m.values().for_each(|d| keep(d.value));
+                m.values().for_each(|d| {
+                    keep(d.value);
+                    if let Some(crate::Rel::Append(x)) = d.rel {
+                        keep(x);
+                    }
+                });
             }
-            for (f, rs) in &inner.readers {
-                keep(f.0);
-                rs.iter().for_each(|r| r.seen.into_iter().for_each(&mut *keep));
-            }
+            inner.guarded.keys().for_each(|f| keep(f.0));
             for (f, m) in &inner.contribs {
                 keep(f.0);
                 m.values().for_each(|&x| keep(x));
@@ -1798,31 +2094,29 @@ impl Engine {
     /// [`Engine::collect`], with `extra` roots the caller holds (an edit
     /// source's, `EditSource::roots`).
     pub(crate) fn collect_with(&self, extra: Vec<ValueId>) -> Collected {
-        // (a stale reader's `seen` holds what an earlier run read: swept
-        // first, it holds nothing)
-        self.sweep_readers_now();
-        let mut roots: Vec<ValueId> = extra;
-        self.roots(&mut |x| roots.push(x));
-        for i in 0..self.ops.len() {
-            if let Some(op) = self.ops.get(i) {
-                op.roots(self, &mut |x| roots.push(x));
+        self.values.collect(&mut |keep: &mut dyn FnMut(ValueId)| {
+            extra.iter().for_each(|&x| keep(x));
+            self.roots(keep);
+            for i in 0..self.ops.len() {
+                if let Some(op) = self.ops.get(i) {
+                    op.roots(self, keep);
+                }
             }
-        }
-        self.values.collect(roots)
+        })
     }
 
-    /// The reader records of runs no longer their node's last dropped from
-    /// every segment, and the lists they leave shrunk: at a quiet point
-    /// (the end of an evaluation, a pass's quiescence), where nothing
-    /// files a reader, once they outnumber the standing ones. The records
-    /// of a node's earlier runs stay filed
-    /// until met otherwise ([`crate::segment::push_pruned`]): in a build
-    /// that runs most nodes again they were two in three records filed.
-    /// The records dropped.
+    /// The segments' sets of fields read at their nodes counted again
+    /// (`guard::recount`), the fields no record reads there now taken
+    /// out of them and of the readers' index, and each node's foreign
+    /// readers and witnesses that no longer read at it dropped: at a
+    /// quiet point (the end of an evaluation, a pass's quiescence), where
+    /// nothing files a read, once the reads of records replaced since
+    /// the last outnumber those it left. A field left in a set costs a
+    /// walk a scan of that segment's nodes, no answer. What was dropped.
     pub(crate) fn sweep_readers(&self) -> usize {
-        // (a sweep costs every record filed: only once the stale ones
-        // outnumber those the last sweep left, so it costs each stale
-        // record a few visits, and an edit of a few nodes nothing)
+        // (a sweep costs every record's reads: only once the replaced
+        // ones outnumber those the last sweep counted, so it costs each
+        // replaced read a few looks, and an edit of a few nodes nothing)
         let stale = self.stale_reads.load(Ordering::Relaxed);
         if stale < (1 << 16).max(self.swept_left.load(Ordering::Relaxed)) {
             return 0;
@@ -1838,16 +2132,66 @@ impl Engine {
         for sid in self.order.all() {
             let s = self.seg(sid);
             let mut inner = s.inner.write();
-            inner.readers.retain(|_, rs| {
-                let n = rs.len();
-                rs.retain(|r| crate::segment::live(self, r.node, r.serial));
-                dropped += n - rs.len();
-                if rs.capacity() > 2 * rs.len() + 4 {
-                    rs.shrink_to(rs.len());
+            // (only where half its nodes' records were replaced since it
+            // was counted: an edit's sweep costs the segments it touched)
+            if (inner.replaced as usize) * 2 < inner.nodes.len().max(1) {
+                let n = inner.stops.len();
+                inner
+                    .stops
+                    .retain(|(_, _, r)| crate::segment::live(self, r.node, r.serial));
+                dropped += n - inner.stops.len();
+                for &x in inner.nodes.values() {
+                    left += self.node(x).record().map_or(0, |r| r.reads.len());
                 }
-                left += rs.len();
-                !rs.is_empty()
-            });
+                continue;
+            }
+            let nodes: Vec<NodeId> = inner.nodes.values().copied().collect();
+            for &x in &nodes {
+                let n = self.node(x);
+                // (its foreign readers that read at it no more, each record
+                // looked at with no other node's lock held)
+                // (and the fields they read at it, counted again)
+                let rs: Vec<NodeId> = n.foreign.lock().readers.iter().copied().collect();
+                let mut fields = crate::FxHashSet::default();
+                let stale: Vec<NodeId> = rs
+                    .into_iter()
+                    .filter(|&r| {
+                        let mut reads = false;
+                        crate::guard::record_reads_at(self, x, r, &mut |g, _| {
+                            reads = true;
+                            fields.insert(g);
+                        });
+                        !reads
+                    })
+                    .collect();
+                let mut fo = n.foreign.lock();
+                for r in stale {
+                    fo.readers.remove(&r);
+                    dropped += 1;
+                }
+                fo.fields = fields;
+                let k = fo.witness.len();
+                fo.witness
+                    .retain(|(_, r)| crate::segment::live(self, r.node(), r.serial));
+                dropped += k - fo.witness.len();
+                if fo.readers.capacity() > 2 * fo.readers.len() + 4 {
+                    fo.readers.shrink_to_fit();
+                }
+                fo.witness.shrink_to_fit();
+                drop(fo);
+                left += n.record().map_or(0, |r| r.reads.len());
+            }
+            let (gone, new) = crate::guard::recount(self, &mut inner);
+            dropped += gone.len();
+            if inner.guarded.capacity() > 2 * inner.guarded.len() + 16 {
+                inner.guarded.shrink_to_fit();
+            }
+            for f in gone {
+                self.readers.remove(f, s.lo, s.id);
+            }
+            for f in new {
+                self.readers.add(f, s.lo, s.id);
+            }
             let n = inner.stops.len();
             inner
                 .stops
@@ -1858,21 +2202,21 @@ impl Engine {
         dropped
     }
 
+    /// (measure) The readers at the segments' nodes (their records' reads
+    /// at positions, foreign readers' and witnesses), those standing (all
+    /// of them: no record of an earlier run is filed), and the fields the
+    /// segments' sets name.
     pub fn reader_records(&self) -> (usize, usize, usize) {
-        let (mut filed, mut standing, mut fields) = (0usize, 0usize, 0usize);
+        let (mut filed, mut fields) = (0usize, 0usize);
         for sid in self.order.all() {
             let s = self.seg(sid);
             let inner = s.inner.read();
-            fields += inner.readers.len();
-            for rs in inner.readers.values() {
-                filed += rs.len();
-                standing += rs
-                    .iter()
-                    .filter(|r| crate::segment::live(self, r.node, r.serial))
-                    .count();
+            fields += inner.guarded.len();
+            for &x in inner.nodes.values() {
+                crate::guard::readers_at(self, x, None, &mut |_, _| filed += 1);
             }
         }
-        (filed, standing, fields)
+        (filed, filed, fields)
     }
 
     /// What each live node's last run defined `f` to, in no order.
@@ -1956,7 +2300,7 @@ impl Engine {
             }
             let Some(r) = node.run_record() else { continue };
             let mut memo = read::FoldMemo::new();
-            if r.reads.iter().all(|rd| read::holds(self, node, rd, &mut memo)) {
+            if r.reads.iter().all(|rd| read::holds(self, node, &rd, &mut memo)) {
                 continue;
             }
             out.push(format!(
@@ -1975,11 +2319,11 @@ impl Engine {
         };
         let v = self.values();
         let mut out = String::new();
-        for rd in &r.reads {
-            let now = answer(self, node, &rd.kind, rd.path);
+        for rd in r.reads.iter() {
+            let now = answer(self, node, rd.kind(), rd.path());
             let show = |x: Option<ValueId>| x.map_or("none".to_owned(), |x| v.render(x));
             // (a field read: its name and the node whose definition reaches)
-            let site = match &rd.kind {
+            let site = match rd.kind() {
                 crate::node::ReadKind::Field {
                     f,
                     at: crate::node::Anchor::Me,
@@ -1994,11 +2338,11 @@ impl Engine {
             };
             out.push_str(&format!(
                 "{:?} path {} seen {} now {}{}{site}\n",
-                rd.kind,
-                rd.path.0,
-                show(rd.seen),
+                *rd.kind(),
+                rd.path().0,
+                show(rd.seen()),
                 show(now),
-                if now == rd.seen { "" } else { " STALE" }
+                if now == rd.seen() { "" } else { " STALE" }
             ));
         }
         out
@@ -2032,7 +2376,7 @@ impl Engine {
                     "  def {} = {}{} {:?}\n",
                     v.render(d.f.0),
                     v.render(self.def_value(n, d.f).unwrap_or(d.value)),
-                    d.rel.map(|c| format!(" (rel {c:+})")).unwrap_or_default(),
+                    d.rel.map(|c| format!(" (rel {c})")).unwrap_or_default(),
                     d.loc
                 ));
             }
@@ -2069,6 +2413,13 @@ impl Engine {
                 continue;
             };
             let op = self.op(node.op()).clone();
+            // (`PHITEX_RERUN_CHECK=<op>`: only that operation's nodes)
+            if let Ok(only) = std::env::var("PHITEX_RERUN_CHECK")
+                && only != "1"
+                && op.name() != only
+            {
+                continue;
+            }
             let mut cx = crate::ctx::Ctx::new(self, None, node);
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| op.run(&mut cx)));
             let name = op.name();
@@ -2144,6 +2495,71 @@ impl Engine {
                 why.push(format!("claims {} was {}", p.claim, rec.claim));
             }
             if !why.is_empty() {
+                // (where the run again first read otherwise than the run
+                // recorded: the read it took, the value, against the record's)
+                let show = |r: Option<&crate::node::ReadRec>| {
+                    r.map_or_else(
+                        || "none".to_owned(),
+                        |r| {
+                            let f = &*r.kind().field().map_or(String::new(), |f| v.render(f.0));
+                            let s = r
+                                .seen()
+                                .map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(120).collect::<String>());
+                            format!("{f} {:?} seen {s}", *r.kind())
+                        },
+                    )
+                };
+                let recv: Vec<crate::node::ReadRec> = rec.reads.iter().collect();
+                let k = (0..p.reads.len().max(recv.len())).find(|&k| match (p.reads.get(k), recv.get(k)) {
+                    (Some(a), Some(b)) => {
+                        a.seen() != b.seen() || format!("{:?}", *a.kind()) != format!("{:?}", *b.kind())
+                    }
+                    _ => true,
+                });
+                if let Some(k) = k {
+                    why.push(format!(
+                        "reads {} recorded {}: first apart at {k}: now {} | recorded {}",
+                        p.reads.len(),
+                        recv.len(),
+                        show(p.reads.get(k)),
+                        show(recv.get(k))
+                    ));
+                }
+                // (as sets by kind: what only one of them read, or read
+                // otherwise)
+                let key = |r: &crate::node::ReadRec| format!("{:?}", *r.kind());
+                let recd: FxHashMap<String, Option<ValueId>> = recv.iter().map(|r| (key(r), r.seen())).collect();
+                let recr: FxHashMap<String, &crate::node::ReadRec> = recv.iter().map(|r| (key(r), r)).collect();
+                let nowd: FxHashMap<String, Option<ValueId>> = p.reads.iter().map(|r| (key(r), r.seen())).collect();
+                for r in &p.reads {
+                    match recd.get(&key(r)) {
+                        None => why.push(format!("only now: {}", show(Some(r)))),
+                        Some(s) if *s != r.seen() => why.push(format!(
+                            "read otherwise: {} | answer {} filed {} epoch {} now-epoch {} | recorded {}",
+                            show(Some(r)),
+                            recr.get(&key(r)).map_or("?", |x| {
+                                let a = crate::read::answer(self, node, x.kind(), x.path());
+                                if a == r.seen() {
+                                    "as now"
+                                } else if a == x.seen() {
+                                    "as recorded"
+                                } else {
+                                    "neither"
+                                }
+                            }),
+                            recr.get(&key(r)).is_some_and(|x| x.filed()),
+                            recr.get(&key(r)).map_or(0, |x| x.epoch),
+                            r.kind().field().map_or(0, |f| self.field_epoch(f)),
+                            s.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(120).collect())
+                        )),
+                        _ => {}
+                    }
+                }
+                for r in &recv {
+                    if !nowd.contains_key(&key(r)) {
+                        why.push(format!("only recorded: {}", show(Some(r))));
+                    }
+                }
                 out.push(format!("node {} ({name}): {}", node.id.raw(), why.join("; ")));
             }
         }
@@ -2230,10 +2646,10 @@ impl Engine {
                 out.push(format!("node {} is clean without a run", n.raw()));
                 continue;
             };
-            for rd in &r.reads {
-                let now = answer(self, node, &rd.kind, rd.path);
-                if now != rd.seen {
-                    let site = match &rd.kind {
+            for rd in r.reads.iter() {
+                let now = answer(self, node, rd.kind(), rd.path());
+                if now != rd.seen() {
+                    let site = match rd.kind() {
                         crate::node::ReadKind::Field {
                             f,
                             at: crate::node::Anchor::Me,
@@ -2241,26 +2657,44 @@ impl Engine {
                             .and_then(|r| r.by)
                             .map_or(String::new(), |b| {
                                 let bn = self.node(b);
+                                let head = |x: NodeId| {
+                                    self.debug_node(x).lines().next().unwrap_or("").chars().take(300).collect::<String>()
+                                };
                                 format!(
-                                    " (by {} at {} seg {} serial {}; reader at {} seg {} serial {})",
+                                    " (by {} at {} seg {} serial {}; reader at {} seg {} serial {}; field {}; reader: {}; definer: {})",
                                     b.raw(),
                                     bn.pos_hint().0,
                                     bn.seg_hint().0,
                                     bn.serial.load(std::sync::atomic::Ordering::Relaxed),
                                     node.pos_hint().0,
                                     node.seg_hint().0,
-                                    node.serial.load(std::sync::atomic::Ordering::Relaxed)
+                                    node.serial.load(std::sync::atomic::Ordering::Relaxed),
+                                    v.render(f.0),
+                                    head(n),
+                                    head(b)
                                 )
                             }),
-                        _ => String::new(),
+                        crate::node::ReadKind::Fold { f, from, to, .. } => {
+                            let head = |x: NodeId| {
+                                self.debug_node(x).lines().next().unwrap_or("").chars().take(300).collect::<String>()
+                            };
+                            format!(
+                                " (field {}; reader: {}; from: {}; to: {})",
+                                v.render(f.0),
+                                head(n),
+                                from.map_or("-".to_owned(), head),
+                                to.map_or("-".to_owned(), head)
+                            )
+                        }
+                        _ => rd.kind().field().map_or(String::new(), |f| format!(" (field {})", v.render(f.0))),
                     };
                     out.push(format!(
                         "node {} ({}) read {:?} path {} saw {} but now {}{site}",
                         n.raw(),
                         self.op(node.op()).name(),
-                        rd.kind,
-                        rd.path.0,
-                        rd.seen.map_or("none".to_owned(), |x| v.render(x)),
+                        *rd.kind(),
+                        rd.path().0,
+                        rd.seen().map_or("none".to_owned(), |x| v.render(x)),
                         now.map_or("none".to_owned(), |x| v.render(x))
                     ));
                 }
@@ -2271,7 +2705,7 @@ impl Engine {
                     let have = self.def_value(n, d.f);
                     if have != Some(want) {
                         out.push(format!(
-                            "node {} relation {} {c:+}: holds {} but the input gives {}",
+                            "node {} relation {} {c}: holds {} but the input gives {}",
                             n.raw(),
                             v.render(d.f.0),
                             have.map_or("none".to_owned(), |x| v.render(x)),
@@ -2298,9 +2732,16 @@ impl Engine {
         if last == u64::MAX {
             return Vec::new();
         }
+        self.chain_to(NodeId::from_raw(last))
+    }
+
+    /// The chain of wakes that ended at node `n`'s last run, as
+    /// [`Engine::critical_chain`] gives it for the node that committed
+    /// last: each node and what woke it, from the first.
+    pub fn chain_to(&self, n: NodeId) -> Vec<(NodeId, Cause)> {
         let mut chain = Vec::new();
         let mut seen = FxHashSet::default();
-        let mut cur = Some(NodeId::from_raw(last));
+        let mut cur = Some(n);
         while let Some(n) = cur {
             if !seen.insert(n) {
                 break;

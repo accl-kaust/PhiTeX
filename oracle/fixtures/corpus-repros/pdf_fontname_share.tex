@@ -1,0 +1,15 @@
+% \pdffontname and \pdffontobjnum of one scalable TFM at three sizes: pdfTeX
+% makes one font object for them (pdf_init_font), named by the first font's
+% number; the numbers are typeset, so a wrong one shows on the page.
+\documentclass{article}
+\begin{document}
+\font\fa=cmr10 \font\fb=cmr10 at 12pt \font\fc=cmr10 scaled 2000
+\font\fd=cmss10 at 9pt \font\fe=cmss10
+{\fa A}{\fb B}{\fc C}{\fd D}{\fe E}
+
+Names \pdffontname\fb, \pdffontname\fa, \pdffontname\fc;
+objects \pdffontobjnum\fb, \pdffontobjnum\fa, \pdffontobjnum\fc.
+
+Names \pdffontname\fd, \pdffontname\fe;
+objects \pdffontobjnum\fe, \pdffontobjnum\fd.
+\end{document}

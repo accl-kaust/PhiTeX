@@ -213,7 +213,7 @@ impl Run<'_, '_> {
                     },
                 }
             }
-            VKey::Named(name) => match self.file(&format!("{name}.tfm"))? {
+            VKey::Named(name) => match self.font_file(&format!("{name}.tfm"))? {
                 // (`read_font_info` failing: the null font)
                 None => none(),
                 Some(file) => {
@@ -225,6 +225,8 @@ impl Run<'_, '_> {
                         s: -1000,
                         ls: None,
                         ex: None,
+                        nolig: false,
+                        untagged: Vec::new(),
                     };
                     let chars = char_bits(crate::fonts::load_info(v, &i).as_deref());
                     Arc::new(VNode {

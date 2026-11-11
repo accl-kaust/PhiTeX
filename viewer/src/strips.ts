@@ -7,16 +7,21 @@
 // keeps. The host gives the two calls (`StripSource`): the CLI's over
 // HTTP from the watch, the frontends' cores over their wasm calls.
 
-import { composeLine, type TextLine } from "./text.ts";
+import { composeLine, type TextLine, LAYER_LINES } from "./text.ts";
 import type { Link } from "./types.ts";
 
-/** A page as the core gives it (Viewer::frame): sizes, bands `[key, top, height]`, text, links, what drawing it took. */
+/**
+ * A page as the core gives it (Viewer::frame): sizes, bands `[key, top,
+ * height, left, width]` (a line, or its part in one column: a core before
+ * columns gave `[key, top, height]`, its strip the window's width from its
+ * left), text, links, what drawing it took.
+ */
 export type Frame = {
   pw: number;
   ph: number;
   w: number;
   h: number;
-  bands: [string, number, number][];
+  bands: [string, number, number, number?, number?][];
   text: TextLine[];
   links: Link[];
   drawn: number;
@@ -57,9 +62,15 @@ const BUDGET = 16e6;
 const BASE = 4e6;
 
 export class Strips {
-  /** The bitmaps kept, by key (the oldest dropped past `max`). */
+  /**
+   * The bitmaps kept, by key, and their pixels' bytes: the oldest dropped
+   * past `max` (the watch's own strips' budget, 256 MiB). A count of 4000
+   * was no bound on bytes: every zoom draws every band again at its scale,
+   * and a pinch draws several scales on the way.
+   */
   private kept = new Map<string, ImageBitmap>();
-  private max = 4000;
+  private bytes = 0;
+  private max = 256 << 20;
   private src: StripSource;
   /** Where the last frame's numbers are shown (none: not shown). */
   private chip: HTMLElement | null;
@@ -80,7 +91,11 @@ export class Strips {
    * size and links. `view`: the part of it on screen (the viewer's
    * `view(k)`); zoomed past `BUDGET` pixels a page, the page drawn small
    * and stretched and the part on screen (and as much again around it)
-   * drawn at `scale` over it, its element's `data-win` that part.
+   * drawn at `scale` over it, its element's `data-win` that part. The
+   * element's `data-scale` is `scale` (the zoom it is the drawing for: the
+   * viewer draws a page again when the zoom moves off it), `data-pw` and
+   * `data-ph` the whole page's pixels at the scale its sharpest part is
+   * drawn at (the box that shows them one to one).
    */
   async page(k: number, scale: number, view?: Win | null): Promise<{ el: HTMLElement; w: number; h: number; links: Link[] } | null> {
     // (a page not seen yet: its size from another page's, else asked small)
@@ -94,6 +109,7 @@ export class Strips {
       if (!f) return null;
       const el = document.createElement("div");
       el.className = "phx-page";
+      Object.assign(el.dataset, { scale: String(scale), pw: String(f.pw), ph: String(f.ph) });
       el.append(this.canvas(f), textLayer(f.text.map(composeLine), f.w, f.h));
       return { el, w: f.w, h: f.h, links: f.links };
     }
@@ -111,7 +127,7 @@ export class Strips {
     if (!base || !part?.win) return null;
     const el = document.createElement("div");
     el.className = "phx-page";
-    el.dataset.win = win.join(",");
+    Object.assign(el.dataset, { win: win.join(","), scale: String(scale), pw: String(part.pw), ph: String(part.ph) });
     const tile = this.canvas(part);
     const [x, y, w, h] = part.win;
     tile.className = "phx-tile";
@@ -150,6 +166,9 @@ export class Strips {
     const want = [...new Set(f.bands.map((b) => b[0]).filter((key) => !this.kept.has(key)))];
     if (want.length) await this.fetch(want);
     const t2 = performance.now();
+    // (the same numbers as data, for the timing popover's bar)
+    if (this.chip)
+      this.chip.dataset.frame = JSON.stringify({ page: k + 1, inView: !!win, drawn: f.drawn, kept: f.kept, probe: f.us.probe / 1000, draw: f.us.draw / 1000, watch: f.us.all / 1000, request: t1 - t0, decode: t2 - t1 });
     if (this.chip)
       this.chip.textContent =
       `p${k + 1}${win ? " (in view)" : ""}: ${f.drawn} drawn, ${f.kept} kept · watch ${(f.us.all / 1000).toFixed(1)} ms ` +
@@ -160,16 +179,16 @@ export class Strips {
 
   /** `f` composed: a canvas of its window (the page, but for a window's frame), white under its strips. */
   private canvas(f: Frame): HTMLCanvasElement {
-    const [, y, w, h] = f.win ?? [0, 0, f.pw, f.ph];
+    const [x, y, w, h] = f.win ?? [0, 0, f.pw, f.ph];
     const c = document.createElement("canvas");
     c.width = w;
     c.height = h;
     const g = c.getContext("2d")!;
     g.fillStyle = "#fff";
     g.fillRect(0, 0, w, h);
-    for (const [key, top] of f.bands) {
+    for (const [key, top, , left] of f.bands) {
       const b = this.kept.get(key);
-      if (b) g.drawImage(b, 0, top - y);
+      if (b) g.drawImage(b, (left ?? x) - x, top - y);
     }
     return c;
   }
@@ -189,22 +208,35 @@ export class Strips {
       const w = dv.getUint32(at, true), h = dv.getUint32(at + 4, true);
       at += 8;
       if (w && h) {
-        const px = new Uint8ClampedArray(buf, at, w * h * 4);
+        // (in a Firefox content script the pixels are copied to the page's
+        // side first, cloneInto: an ImageData over this script's own array
+        // is refused there, "failed to extract Uint8ClampedArray")
+        const px = pagewise(new Uint8ClampedArray(buf, at, w * h * 4));
         made.push(
           createImageBitmap(new ImageData(px, w, h)).then((b) => {
+            const old = this.kept.get(key);
+            if (old) (this.bytes -= old.width * old.height * 4), old.close();
             this.kept.set(key, b);
+            this.bytes += w * h * 4;
           }),
         );
       }
       at += w * h * 4;
     }
     await Promise.all(made);
-    for (const k of this.kept.keys()) {
-      if (this.kept.size <= this.max) break;
-      this.kept.get(k)?.close();
+    for (const [k, b] of this.kept) {
+      if (this.bytes <= this.max) break;
+      this.bytes -= b.width * b.height * 4;
+      b.close();
       this.kept.delete(k);
     }
   }
+}
+
+/** `px` where the page's own objects are (Firefox's content scripts' cloneInto; elsewhere as it is). */
+function pagewise(px: Uint8ClampedArray<ArrayBuffer>): Uint8ClampedArray<ArrayBuffer> {
+  const clone = (globalThis as { cloneInto?: <T>(v: T, scope: object) => T }).cloneInto;
+  return clone ? clone(px, window) : px;
 }
 
 const SVG = "http://www.w3.org/2000/svg";
@@ -221,6 +253,7 @@ export function textLayer(lines: TextLine[], w: number, h: number): SVGElement {
     t.setAttribute("y", String(l.y));
     t.setAttribute("font-size", String(l.size));
     t.textContent = l.text;
+    LAYER_LINES.set(t, l);
     svg.append(t);
   }
   return svg;

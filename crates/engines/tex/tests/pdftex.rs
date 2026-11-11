@@ -7,7 +7,7 @@
 //! The `.pdf` oracles need a PDF output, which this crate does not have
 //! yet (it writes DVI): their byte comparison is the backend's gap.
 
-mod common;
+use crate::common;
 
 const PRELUDE: &str = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\$=3 \\catcode`\\&=4 \\catcode`\\#=6 \\catcode`\\^=7 \\catcode`\\~=13 \\hsize=468pt \\vsize=643pt \\parindent=20pt \\maxdepth=4pt \\baselineskip=12pt \\topskip=10pt \\tolerance=200 \\linepenalty=10 %\n";
 
@@ -706,4 +706,177 @@ fn a_written_files_date_is_the_builds_clock() {
         "the file opened as `v`, `v.tex`:\n{log}"
     );
     assert_eq!(dates[2], dates[3], "the log's date:\n{log}");
+}
+
+/// pdfTeX's commands in DVI mode (`\pdfoutput=0`), `check_pdfoutput`
+/// (pdfTeX §1349): `\pdfmapfile`, `\pdfmapline`, `\pdfliteral` and the
+/// others writing the PDF are `pdf_error`, which ends the job (`! pdfTeX
+/// error (\pdfmapfile): not allowed in DVI mode (\pdfoutput <= 0).`);
+/// `\pdfinfo` a warning, the job going on, as `pdftex -ini` (TeX Live
+/// 2026). They ran as in PDF mode, the job going on.
+#[test]
+fn pdf_commands_in_dvi_mode() {
+    let dir = common::fixtures().join("pdf");
+    for (cmd, fatal) in [
+        ("\\pdfmapfile{+foo.map}", true),
+        ("\\pdfmapline{=cmr10 CMR10 <cmr10.pfb}", true),
+        ("\\pdfliteral{0 g}", true),
+        ("\\pdfinfo{/Title (x)}", false),
+    ] {
+        let doc = format!(
+            "\\catcode`\\{{=1 \\catcode`\\}}=2 \\pdfoutput=0 \\font\\r=cmr10 \\r \\hsize=100pt \\vsize=100pt\nBefore. {cmd} After.\\par\n\\end\n"
+        );
+        let opts = common::options("./t.tex", "t", "", &dir);
+        let b = common::build(opts, None, &doc);
+        let (_, log) = b.output();
+        let name = cmd.split('{').next().unwrap_or_default();
+        if fatal {
+            assert!(b.fatal(), "{cmd}: the job did not end:\n{log}");
+            let want =
+                format!("! pdfTeX error ({name}): not allowed in DVI mode (\\pdfoutput <= 0).");
+            assert!(log.contains(&want), "{cmd}: no {want:?} in the log:\n{log}");
+        } else {
+            assert!(!b.fatal(), "{cmd}: the job ended:\n{log}");
+            let want = format!(
+                "pdfTeX warning ({name}): not allowed in DVI mode (\\pdfoutput <= 0); ignoring it"
+            );
+            // (the log's lines broken at `max_print_line`)
+            assert!(
+                log.replace('\n', "").contains(&want),
+                "{cmd}: no {want:?} in the log:\n{log}"
+            );
+        }
+    }
+}
+
+/// The `/XYZ` point of each named destination of an uncompressed PDF:
+/// name, then x and y as written.
+fn xyz_dests(pdf: &str) -> Vec<(String, String, String)> {
+    let obj = |n: &str| {
+        let k = pdf.find(&format!("\n{n} 0 obj"))?;
+        let s = &pdf[k..];
+        let a = s.find("/XYZ")?;
+        let mut w = s[a + 4..].split_whitespace();
+        Some((w.next()?.to_owned(), w.next()?.to_owned()))
+    };
+    let mut out = Vec::new();
+    for name in ["a", "b", "c", "d"] {
+        let Some(k) = pdf.find(&format!("({name}) ")) else {
+            continue;
+        };
+        let n = pdf[k + name.len() + 3..]
+            .split_whitespace()
+            .next()
+            .unwrap_or("");
+        if let Some((x, y)) = obj(n) {
+            out.push((name.to_owned(), x, y));
+        }
+    }
+    out
+}
+
+/// `\pdfdest ... xyz` under `\pdfsetmatrix` (pdftex.web, `do_dest`:
+/// "`pdf_dest_xyz`: if `matrixused` then `set_rect_dimens(p,
+/// parent_box, x, y, pdf_width(p), pdf_height(p), pdf_depth(p), ...)`"):
+/// pdfTeX reads the node's width, height and depth, which only `fitr`
+/// sets, so its point is leftover node memory (heria's targets 4096pt
+/// above the page; `docs/differences.md`, "Destinations under a matrix"),
+/// and no pdftex oracle can be had. `PhiTeX` takes them as zero: the
+/// dest's own point, transformed. Under the identity matrix that is the
+/// point written without one (`b` = `a`); a rotation about the
+/// `\pdfsave` point leaves that point where it is (`c` = `a`), and a
+/// point 20pt right of a save point raised 30pt, turned a quarter turn
+/// counterclockwise, is 50pt above `a` (`d`). `PhiTeX` wrote the corner
+/// of the rotated parent box's bounding box (the box's whole extent
+/// taken as the dest's: heria's vertical-mode target at its canvas's
+/// corner, accl 22566, 22579).
+#[test]
+fn dests_under_a_matrix() {
+    let dir = common::scratch("dests-under-a-matrix");
+    let doc = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\pdfcompresslevel=0 \\pdfobjcompresslevel=0 \\pdfpagewidth=300pt \\pdfpageheight=300pt\n\\shipout\\vbox{\\kern100pt\\hbox to 200pt{\\kern100pt\\pdfdest name{a} xyz\\pdfsave\\pdfsetmatrix{1 0 0 1}\\pdfdest name{b} xyz\\pdfrestore\\pdfsave\\pdfsetmatrix{0 1 -1 0}\\pdfdest name{c} xyz\\pdfrestore\\raise30pt\\hbox{\\pdfsave\\pdfsetmatrix{0 1 -1 0}\\kern20pt\\pdfdest name{d} xyz\\pdfrestore}\\hss}}\n\\end\n";
+    let opts = phitex_tex::Options {
+        epoch: Some(0),
+        ..common::options("./texput.tex", "texput", "", &dir)
+    };
+    let b = common::build(opts, None, doc);
+    let (pdf, log) = b.output();
+    let pdf = String::from_utf8_lossy(&pdf);
+    let d = xyz_dests(&pdf);
+    assert_eq!(d.len(), 4, "the four destinations:\n{pdf}\n{log}");
+    let (a, b, c, dd) = (&d[0], &d[1], &d[2], &d[3]);
+    assert_eq!((&b.1, &b.2), (&a.1, &a.2), "identity matrix: {d:?}");
+    assert_eq!(
+        (&c.1, &c.2),
+        (&a.1, &a.2),
+        "rotation about the point: {d:?}"
+    );
+    let num = |s: &str| s.parse::<f64>().expect("a number");
+    assert_eq!(dd.1, a.1, "x of the turned point: {d:?}");
+    let up = num(&dd.2) - num(&a.2);
+    assert!(
+        (up - 50.0 * 72.0 / 72.27).abs() < 0.002,
+        "50pt above: {d:?}"
+    );
+}
+
+/// A PDF file of no bytes where pdfTeX opens it and ships no page:
+/// `check_pdfversion` (pdftex.web) opens the file at a read-time write,
+/// `\immediate\pdfobj`, `\immediate\pdfxform`, `\pdfximage` or the first
+/// `\pdfcatalog ... openaction` (hyperref's at `\begin{document}`), and
+/// with no page "Finish the PDF file" never flushes the header from its
+/// buffer. pdflatex leaves `getversion.pdf` (hhtensor) and
+/// `BibBreeze.pdf` of 0 bytes, an empty article with hyperref too, and
+/// no file for an empty article without it (accl 22606, 22615).
+/// `PhiTeX` wrote no file.
+#[test]
+fn an_opened_pdf_without_pages_is_empty() {
+    let dir = common::scratch("opened-pdf-without-pages");
+    for (doc, want) in [
+        ("\\pdfoutput=1 \\immediate\\pdfobj{1}\\end\n", true),
+        (
+            "\\pdfoutput=1 \\pdfcatalog{/PageMode /UseNone} openaction goto page 1 {/Fit}\\end\n",
+            true,
+        ),
+        (
+            "\\pdfoutput=1 \\setbox0\\hbox{x}\\immediate\\pdfxform0 \\end\n",
+            true,
+        ),
+        // (not written at read time: no file)
+        (
+            "\\pdfoutput=1 \\pdfobj{1}\\pdfobj reserveobjnum \\pdfcatalog{/PageMode /UseNone}\\end\n",
+            false,
+        ),
+        ("\\pdfoutput=0 \\immediate\\pdfobj{1}\\end\n", false),
+        ("\\pdfoutput=1 \\end\n", false),
+    ] {
+        let opts = phitex_tex::Options {
+            epoch: Some(0),
+            ..common::options("./texput.tex", "texput", "", &dir)
+        };
+        let b = common::build(opts, Some(PRELUDE), doc);
+        let (pdf, log) = b.output();
+        assert!(pdf.is_empty(), "{doc}: no page, no bytes:\n{log}");
+        assert_eq!(b.empty_pdf(), want, "{doc}:\n{log}");
+    }
+}
+
+/// A sum of dimensions past 2^31 sp: the oracle's `integer` has 64 bits
+/// (Arch's `--disable-dump-share`), its box holds 48000.0pt and a `\count`
+/// takes 3145728000 (pdftex -ini in the CI image). Our `Scaled` is 32
+/// bits and shows -17536.0pt. docs/note-width-arithmetic.md.
+#[test]
+#[ignore = "open for v1.0: Scaled is i32, see docs/note-width-arithmetic.md"]
+fn widths_past_2_31_sp_as_pdftex() {
+    let fx = common::fixtures().join("dvi");
+    let src = "\\setbox0\\hbox{\\hskip16000pt\\hskip16000pt\\hskip16000pt}\n\
+               \\immediate\\write16{wd=\\the\\wd0}\n\
+               \\count1=\\wd0 \\immediate\\write16{count=\\the\\count1}\n\\bye\n";
+    let b = common::build(
+        common::options("./wide.tex", "wide", "", &fx),
+        Some(&common::plain()),
+        src,
+    );
+    let log = b.output().1;
+    assert!(log.contains("wd=48000.0pt"), "{log}");
+    assert!(log.contains("count=3145728000"), "{log}");
 }

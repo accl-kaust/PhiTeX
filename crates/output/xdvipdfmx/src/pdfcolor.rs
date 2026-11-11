@@ -148,7 +148,7 @@ pub struct IccHeader {
 }
 
 /// `struct iccbased_cdata`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct IccbasedCdata {
     /// 'i' 'c' 'c' 'b'.
     pub sig: i32,
@@ -161,7 +161,7 @@ pub struct IccbasedCdata {
 }
 
 /// `pdf_colorspace` (`cdata` is only ever an ICC-based one).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfColorspace {
     pub ident: Option<Vec<u8>>,
     pub subtype: i32,
@@ -172,7 +172,7 @@ pub struct PdfColorspace {
 
 /// `color_stack` (`stroke`/`fill` have `DEV_COLOR_STACK_MAX` entries).
 /// 20260113's stack has no `source`: push and pop take none.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct ColorStack {
     pub current: i32,
     pub stroke: Vec<PdfColor>,
@@ -191,7 +191,7 @@ impl Default for ColorStack {
 }
 
 /// pdfcolor.c's globals and statics.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct State {
     pub current_fill: PdfColor,
     pub current_stroke: PdfColor,

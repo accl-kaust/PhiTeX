@@ -54,6 +54,18 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// The cache's account, emptied first when asked ([`Viewer::on_cache`]).
 pub type CacheFn = Box<dyn Fn(bool) -> Result<Value, String> + Send>;
 
+/// The user's viewer preferences kept by the host across ports and
+/// browsers (the user's `phitex.toml`: the tips seen, ...): given `Some`
+/// keys and values, those set first; the preferences answered as an
+/// object ([`Viewer::on_prefs`]).
+pub type PrefsFn =
+    Box<dyn Fn(Option<&serde_json::Map<String, Value>>) -> Result<Value, String> + Send>;
+
+/// What the host tells the viewer when asked (`{"op":"info","what":...}`):
+/// this version's news, a file's lines around a problem (the request's
+/// other fields), ...; `None`: not here ([`Viewer::on_info`]).
+pub type InfoFn = Box<dyn Fn(&str, &Value) -> Option<Value> + Send>;
+
 /// What a build left, for the viewer.
 pub struct Built {
     /// The PDF to show (none: no pages, or a DVI that dvipdfmx refused).
@@ -63,8 +75,10 @@ pub struct Built {
     /// TeX's history (0 spotless … 2 errors).
     pub history: i32,
     pub ms: f64,
-    /// Its errors and warnings, each a JSON object.
-    pub diagnostics: Vec<Value>,
+    /// Its errors and warnings, each a JSON object; none: made later,
+    /// when the editing pauses ([`crate::session::Report::diagnostics_pending`],
+    /// [`Viewer::set_diagnostics`]), the last ones shown meanwhile.
+    pub diagnostics: Option<Vec<Value>>,
     /// The time from the change (a save, an editor's keystroke) to now
     /// (none: no change, a cold build): the viewer adds its drawing to it
     /// for the ⚡ chip.
@@ -140,6 +154,26 @@ pub enum Ask {
     /// The last build's transcript wanted (the `log` op): made by the
     /// session's owner and given back with [`Viewer::set_transcript`].
     Transcript,
+    /// Page `.0`'s glyph origins wanted (the `origins` op): made by the
+    /// session's owner, for that page alone, and given back with
+    /// [`Viewer::put_origins`]; a build makes none.
+    Origins(usize),
+    /// The pages byte `at` of `file`'s lines were placed on wanted (the
+    /// `page_of` op, a forward search's page): made by the session's
+    /// owner and given back with [`Viewer::put_page_of`].
+    PageOf {
+        file: String,
+        at: usize,
+    },
+    /// The citation a point of page `page` (from 0) shows wanted (the
+    /// `cites` op: its keys, labels and entries), `x` and `y` the point
+    /// in the origins' coordinates as `f32` bits: made by the session's
+    /// owner and given back with [`Viewer::put_cites`].
+    Cites {
+        page: usize,
+        x: u32,
+        y: u32,
+    },
     /// Build again from nothing: the session's build dropped, its format
     /// kept (the editor's `phitex.rebuild`).
     Cold,
@@ -214,7 +248,17 @@ struct Pages {
     hashes: Vec<u64>,
     history: i32,
     ms: f64,
+    /// The pages' origins made so far for this build, each when asked
+    /// ([`Ask::Origins`]): none made after a build.
     origins: Option<Origins>,
+    /// The pages asked whose answer is made: `origins.pages[k]` none
+    /// among them is a page without origins, not one to come.
+    made: std::collections::HashSet<usize>,
+    /// The pages a source place's lines were placed on, by file and byte,
+    /// made when asked ([`Ask::PageOf`]) for this build.
+    placed: std::collections::HashMap<(String, usize), Vec<usize>>,
+    /// The `cites` answers made for this build, by page and point.
+    cites: std::collections::HashMap<(usize, u32, u32), Value>,
 }
 
 /// A viewer's state and its requests' answers.
@@ -224,6 +268,13 @@ pub type SelectFn = Box<dyn Fn(&str, (usize, usize), (usize, usize)) + Send>;
 pub struct Viewer {
     pages: Mutex<Pages>,
     diagnostics: Mutex<Value>,
+    /// The first build's time and the builds so far: what a tab that joins
+    /// later was not told.
+    built_times: Mutex<(Option<f64>, u64)>,
+    /// The last build's `settled` and `stats` events, as sent: a tab that
+    /// joins after it is given them ([`Viewer::answer`]'s `info` `built`),
+    /// not "no build yet" until the next edit.
+    last_built: Mutex<(Value, Value)>,
     asks: Mutex<Vec<Ask>>,
     wake: Mutex<Option<Box<dyn Fn() + Send>>>,
     building: AtomicBool,
@@ -240,6 +291,8 @@ pub struct Viewer {
     /// The cache's size and limit, emptied when asked (the `cache` op:
     /// the viewer's Clear cache; the host's).
     cache: Mutex<Option<CacheFn>>,
+    prefs: Mutex<Option<PrefsFn>>,
+    info: Mutex<Option<InfoFn>>,
     /// The commits of the project's history (the diff's picker).
     log: Mutex<Option<Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>>>,
     /// Shows a source place (file, line, column from 1, and the place as
@@ -257,7 +310,36 @@ pub struct Viewer {
     /// The pages drawn as strips, their text and the outline
     /// (`phitex_render`, [`Viewer::frame`], [`Viewer::strips`]).
     strips: Mutex<phitex_render::Renderer>,
+    /// The pages streamed while the build runs ([`Viewer::stream_page`]),
+    /// until it is in ([`Viewer::built`]).
+    streamed: Mutex<Streamed>,
 }
+
+/// The pages a build streamed while it runs: each one's identity as the
+/// viewer is told it (a page's own, [`STREAMED`] in it) and its file of its
+/// own, by page (from 0).
+#[derive(Default)]
+struct Streamed {
+    hashes: Vec<Option<u64>>,
+    pdfs: std::collections::HashMap<usize, Arc<[u8]>>,
+    /// The pages whose files draw them otherwise than the build's file will
+    /// ([`phitex_tex::StreamedPage::exact`]: what they lack left out).
+    inexact: std::collections::BTreeSet<usize>,
+    /// The bytes of the files kept ([`STREAM_KEEP`]).
+    bytes: usize,
+}
+
+/// The most bytes of streamed pages' files kept until the build is in (a
+/// wasm core's memory is the document's too): a page past it is not
+/// streamed, but for the first [`crate::progress::STREAM_FIRST`].
+pub const STREAM_KEEP: usize = 64 << 20;
+
+/// What a streamed page's identity has in it (xor): no page the build
+/// settles with is named so, and each streamed page is drawn again from
+/// the build's file when it is in. A streamed page is the page as a pass
+/// of the build made it, which the build may make otherwise; and its file
+/// of its own has no other page to link to.
+pub const STREAMED: u64 = 0x5354_5245_414d_4544;
 
 /// The messages a viewer that joins is shown.
 const CONSOLE: usize = 2000;
@@ -267,6 +349,8 @@ impl Default for Viewer {
         Viewer {
             pages: Mutex::new(Pages::default()),
             diagnostics: Mutex::new(json!([])),
+            built_times: Mutex::new((None, 0)),
+            last_built: Mutex::new((Value::Null, Value::Null)),
             asks: Mutex::new(Vec::new()),
             wake: Mutex::new(None),
             building: AtomicBool::new(false),
@@ -275,6 +359,8 @@ impl Default for Viewer {
             transcript: Mutex::new((Arc::from(""), u64::MAX)),
             builds: std::sync::atomic::AtomicU64::new(0),
             cache: Mutex::new(None),
+            prefs: Mutex::new(None),
+            info: Mutex::new(None),
             log: Mutex::new(None),
             goto: Mutex::new(None),
             select: Mutex::new(None),
@@ -282,8 +368,15 @@ impl Default for Viewer {
             emit: Mutex::new(None),
             route: Mutex::new(None),
             strips: Mutex::new(phitex_render::Renderer::new()),
+            streamed: Mutex::new(Streamed::default()),
         }
     }
+}
+
+thread_local! {
+    /// The events made on this thread while it answers in the broadcasts'
+    /// turn ([`Viewer::answer_in_turn`]), sent after its reply.
+    static ANSWERING: std::cell::RefCell<Option<Vec<String>>> = const { std::cell::RefCell::new(None) };
 }
 
 impl Viewer {
@@ -293,9 +386,45 @@ impl Viewer {
     }
 
     fn emit(&self, text: &str) {
+        // (an answer under way on this thread holds the broadcasts' turn:
+        // the event goes out after its reply, [`Viewer::answer_in_turn`])
+        if ANSWERING.with(|a| {
+            a.borrow_mut()
+                .as_mut()
+                .map(|q| q.push(text.to_owned()))
+                .is_some()
+        }) {
+            return;
+        }
         if let Some(e) = lock(&self.emit).as_ref() {
             e(text);
         }
+    }
+
+    /// [`Viewer::answer`] for a browser, its reply given to `send` in the
+    /// broadcasts' turn (the `emit` lock): an event made after the answer
+    /// was made reaches the browser after the reply, never before it. The
+    /// socket's sends take turns with the broadcasts, and a reply made
+    /// before an event but sent after it misled the browser: the console's
+    /// backlog made before a build's end, replayed after the end's live
+    /// "busy" line, left the tab saying "Building…" (the browser suite's
+    /// title red, 1 run in 20); a page's origins answered "not made yet"
+    /// after the `origins` event said they were. An event the answer makes
+    /// itself goes after the reply. `send`'s result returned.
+    pub fn answer_in_turn(&self, req: &Value, send: impl FnOnce(&str) -> bool) -> bool {
+        let turn = lock(&self.emit);
+        ANSWERING.with(|a| *a.borrow_mut() = Some(Vec::new()));
+        let reply = self.answer(req);
+        let later = ANSWERING
+            .with(|a| a.borrow_mut().take())
+            .unwrap_or_default();
+        let ok = send(&reply);
+        if let Some(e) = turn.as_ref() {
+            for t in &later {
+                e(t);
+            }
+        }
+        ok
     }
 
     /// A `source` place shown by `goto(file, line, col, place)`.
@@ -322,7 +451,8 @@ impl Viewer {
 
     /// Page `k` of the PDF shown ([`Viewer::pdf`]) at `scale` pixels a
     /// point, as strips (`phitex_render`): its size in pixels and points,
-    /// its bands (each `[key, top, height]`, the key in hex), its text and
+    /// its bands (each `[key, top, height, left, width]`, the key in hex:
+    /// a line, or its part in one column), its text and
     /// links (`viewer/src/types.ts`' `Link`), and what drawing it took
     /// (`drawn` and `kept` bands, microseconds).
     pub fn frame(&self, k: usize, scale: f32) -> Option<Value> {
@@ -340,14 +470,19 @@ impl Viewer {
         if !(0.05..=16.0).contains(&scale) {
             return None;
         }
-        let pdf = self.pdf()?;
+        // (a page streamed while the build runs: its file of its own)
+        let streamed = lock(&self.streamed).pdfs.get(&k).cloned();
+        let (pdf, at) = match streamed {
+            Some(p) => (p, 0),
+            None => (self.pdf()?, k),
+        };
         let t = std::time::Instant::now();
-        let f = lock(&self.strips).frame_in(&pdf, k, scale, win)?;
+        let f = lock(&self.strips).frame_in(&pdf, at, scale, win)?;
         let us = t.elapsed().as_micros();
         let bands: Vec<Value> = f
             .bands
             .iter()
-            .map(|b| json!([format!("{:016x}", b.key), b.y, b.h]))
+            .map(|b| json!([format!("{:016x}", b.key), b.y, b.h, b.x, b.w]))
             .collect();
         let links: Vec<Value> = f
             .links
@@ -356,7 +491,12 @@ impl Viewer {
                 let [a, b, c, d] = l.rect;
                 match &l.target {
                     Target::Uri(u) => json!([a, b, c, d, u]),
-                    Target::Page(p, y) => json!([a, b, c, d, p, y]),
+                    // (the destination's name last where it has one:
+                    // hyperref's `cite.KEY`, `section.2`)
+                    Target::Page(p, y) => match &l.name {
+                        Some(n) => json!([a, b, c, d, p, y, n]),
+                        None => json!([a, b, c, d, p, y]),
+                    },
                 }
             })
             .collect();
@@ -500,6 +640,11 @@ impl Viewer {
     pub fn console(self: &Arc<Self>) -> Box<dyn Fn(Value) + Send> {
         let s = self.clone();
         Box::new(move |item: Value| {
+            // (kept and sent in one turn of the broadcasts: a backlog
+            // answered in its turn holds every item sent before it and
+            // none sent after, [`Viewer::answer_in_turn`])
+            let answering = ANSWERING.with(|a| a.borrow().is_some());
+            let turn = (!answering).then(|| lock(&s.emit));
             {
                 let mut c = lock(&s.console);
                 if item["kind"] == "status" {
@@ -511,7 +656,15 @@ impl Viewer {
                     c.0.push_back(item.clone());
                 }
             }
-            s.emit(&json!({"event": "console", "item": item}).to_string());
+            let text = json!({"event": "console", "item": item}).to_string();
+            match &turn {
+                Some(t) => {
+                    if let Some(e) = t.as_ref() {
+                        e(&text);
+                    }
+                }
+                None => s.emit(&text),
+            }
         })
     }
 
@@ -552,6 +705,16 @@ impl Viewer {
     /// `{bytes, limit, dir, freed}`.
     pub fn on_cache(&self, cache: CacheFn) {
         *lock(&self.cache) = Some(cache);
+    }
+
+    /// The user's preferences for the `prefs` op ([`PrefsFn`]).
+    pub fn on_prefs(&self, prefs: PrefsFn) {
+        *lock(&self.prefs) = Some(prefs);
+    }
+
+    /// What the host tells for the `info` op ([`InfoFn`]).
+    pub fn on_info(&self, info: InfoFn) {
+        *lock(&self.info) = Some(info);
     }
 
     pub fn on_log(&self, log: Box<dyn Fn(usize, usize) -> Result<Vec<Value>, String> + Send>) {
@@ -636,14 +799,130 @@ impl Viewer {
     /// announced (off the typing path: when no ask waits, or when asked),
     /// and the viewers told which pages' origins changed.
     pub fn set_origins(&self, origins: Option<Origins>, changed: Option<OriginsChanged>) {
-        lock(&self.pages).origins = origins;
+        {
+            let mut p = lock(&self.pages);
+            p.made = origins
+                .as_ref()
+                .map(|o| (0..o.pages.len()).collect())
+                .unwrap_or_default();
+            p.origins = origins;
+        }
         if let Some(c) = &changed {
             self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
         }
     }
 
+    /// Page `k`'s origins, made when asked ([`Ask::Origins`]), `files`
+    /// the files they name (all the build's so far), for the `origins`
+    /// op; none: the page has none.
+    pub fn put_origins(
+        &self,
+        k: usize,
+        files: Vec<String>,
+        page: Option<Arc<phitex_tex::PageOrigins>>,
+    ) {
+        let mut p = lock(&self.pages);
+        let o = p.origins.get_or_insert_with(Origins::default);
+        o.files = files;
+        if o.pages.len() <= k {
+            o.pages.resize(k + 1, None);
+        }
+        o.pages[k] = page;
+        p.made.insert(k);
+    }
+
+    /// The pages byte `at` of `file` was placed on, made when asked
+    /// ([`Ask::PageOf`]), for the `page_of` op.
+    pub fn put_page_of(&self, file: String, at: usize, pages: Vec<usize>) {
+        lock(&self.pages).placed.insert((file, at), pages);
+    }
+
+    /// The citation at a point of a page, made when asked
+    /// ([`Ask::Cites`]), for the `cites` op: `{"cites": [...]}`, or
+    /// `{"cites": null}` (no citation there).
+    pub fn put_cites(&self, page: usize, x: u32, y: u32, answer: Value) {
+        lock(&self.pages).cites.insert((page, x, y), answer);
+    }
+
+    /// The citation links under point (`x`, `y`) of page `k` (points from
+    /// its top left, a point's slack around each link's box), as hyperref
+    /// makes them: each a link to the named destination `cite.KEY`. Each
+    /// key in the links' order, with where its link goes (its entry: page
+    /// from 0, its top). Exact, read from the PDF: a document without
+    /// hyperref's citation links has none.
+    pub fn cite_links(&self, k: usize, x: f64, y: f64) -> Vec<(String, usize, Option<f64>)> {
+        let Some(pdf) = self.pdf() else {
+            return Vec::new();
+        };
+        let links = lock(&self.strips).links(&pdf, k);
+        links
+            .iter()
+            .filter(|l| {
+                let [a, b, c, d] = l.rect;
+                x >= a - 1.0 && x <= c + 1.0 && y >= b - 1.0 && y <= d + 1.0
+            })
+            .filter_map(|l| {
+                let key = l.name.as_deref()?.strip_prefix("cite.")?.to_owned();
+                match l.target {
+                    phitex_render::Target::Page(p, top) => Some((key, p, top)),
+                    phitex_render::Target::Uri(_) => None,
+                }
+            })
+            .collect()
+    }
+
     pub fn take_asks(&self) -> Vec<Ask> {
         std::mem::take(&mut *lock(&self.asks))
+    }
+
+    /// Page `k` (from 0) made while the build runs, `hash` its identity
+    /// as the build would name it, `pdf` a file of that page alone
+    /// ([`phitex_tex::StreamedPage`]), `pages` the pages shipped so far:
+    /// `exact` whether it draws the page as the build's file will: kept
+    /// until the build is in and the viewers told,
+    /// `{"event":"page","k":K,"hash":H,"pages":N,"exact":E}` (`H` as
+    /// [`STREAMED`] says). The same page again tells nothing, but where it
+    /// was not exact and now is (`pdf` empty: the page told before, now
+    /// known exact): told again, exact.
+    pub fn stream_page(&self, k: usize, hash: u64, pdf: Vec<u8>, pages: u64, exact: bool) {
+        let h = hash ^ STREAMED;
+        {
+            let mut st = lock(&self.streamed);
+            if st.hashes.get(k) == Some(&Some(h)) {
+                if !(exact && st.inexact.remove(&k)) {
+                    return;
+                }
+            } else if pdf.is_empty() {
+                return;
+            } else {
+                let old = st.pdfs.get(&k).map_or(0, |p| p.len());
+                let first = u64::try_from(k).is_ok_and(|k| k < crate::progress::STREAM_FIRST);
+                if !first && st.bytes - old + pdf.len() > STREAM_KEEP {
+                    return;
+                }
+                if st.hashes.len() <= k {
+                    st.hashes.resize(k + 1, None);
+                }
+                st.hashes[k] = Some(h);
+                st.bytes = st.bytes - old + pdf.len();
+                st.pdfs.insert(k, Arc::from(pdf));
+                if exact {
+                    st.inexact.remove(&k);
+                } else {
+                    st.inexact.insert(k);
+                }
+            }
+        }
+        let n = pages.max(u64::try_from(k).unwrap_or(u64::MAX).saturating_add(1));
+        self.emit(
+            &json!({"event": "page", "k": k, "hash": format!("{h:016x}"), "pages": n, "exact": exact})
+                .to_string(),
+        );
+    }
+
+    /// The pages streamed so far (from 0; none: not streamed).
+    pub fn streamed_hashes(&self) -> Vec<Option<u64>> {
+        lock(&self.streamed).hashes.clone()
     }
 
     /// A progress record of the build under way (the session's
@@ -660,6 +939,20 @@ impl Viewer {
 
     /// The file on disk is exact already (nothing to write when idle):
     /// the browsers told, as when it is written.
+    /// A build's stats, as the watch's `s` shows them (one object, the
+    /// same fields every build): `{"event":"stats", ...}`, for a timing
+    /// popover's "Copy debug info". Sent for every build, after `settled`.
+    pub fn stats(&self, stats: &Value) {
+        let mut e = serde_json::Map::new();
+        e.insert("event".into(), json!("stats"));
+        if let Value::Object(m) = stats {
+            e.extend(m.clone());
+        }
+        let stats = Value::Object(e);
+        self.emit(&stats.to_string());
+        lock(&self.last_built).1 = stats;
+    }
+
     pub fn written_exact(&self) {
         self.emit(&json!({"event": "written", "exact": true}).to_string());
     }
@@ -671,11 +964,41 @@ impl Viewer {
         self.emit(&json!({"event": "written", "exact": true}).to_string());
     }
 
+    /// The diagnostics the viewers have, each a JSON object.
+    pub fn diagnostics_items(&self) -> Vec<Value> {
+        lock(&self.diagnostics)
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The last build's diagnostics, each a JSON object, given to the
+    /// viewers (a build's own, or made after it, when the editing paused):
+    /// sent only where they are not the last ones.
+    pub fn set_diagnostics(&self, d: &[Value]) {
+        let items = Value::from(d.to_vec());
+        // (the lock let go before the event: an answer holds the events'
+        // turn and then reads them)
+        let fresh = {
+            let mut last = lock(&self.diagnostics);
+            let fresh = *last != items;
+            if fresh {
+                last.clone_from(&items);
+            }
+            fresh
+        };
+        if fresh {
+            self.emit(&json!({"event": "diagnostics", "items": items}).to_string());
+        }
+    }
+
     /// A build is in: its PDF and pages' hashes kept, the viewers told
     /// (they draw the pages that changed). The pages (from 1) whose hashes
     /// changed, and how many there are.
     pub fn built(&self, b: &Built) -> (Vec<usize>, usize) {
         self.builds.fetch_add(1, Ordering::Relaxed);
+        // (the pages streamed while it ran: the build's own from now on)
+        *lock(&self.streamed) = Streamed::default();
         let mut pages = lock(&self.pages);
         let changed: Vec<usize> = b
             .hashes
@@ -685,21 +1008,34 @@ impl Viewer {
             .map(|(k, _)| k + 1)
             .collect();
         pages.pdf.clone_from(&b.pdf);
-        // (a build announced without origins keeps the last ones until
-        // they are made, `Viewer::set_origins`: never on the typing path)
-        if b.origins.is_some() {
-            pages.origins.clone_from(&b.origins);
-        }
+        // (a build's origins: none made, each page's when it is asked,
+        // the `origins` op; never on the typing path)
+        pages.origins.clone_from(&b.origins);
+        pages.placed.clear();
+        pages.cites.clear();
+        pages.made = b
+            .origins
+            .as_ref()
+            .map(|o| (0..o.pages.len()).collect())
+            .unwrap_or_default();
         pages.history = b.history;
         pages.ms = b.ms;
         let n = b.hashes.len();
         pages.hashes.clone_from(&b.hashes);
         drop(pages);
-        let items = Value::from(b.diagnostics.clone());
-        self.emit(&json!({"event": "diagnostics", "items": items}).to_string());
-        *lock(&self.diagnostics) = items;
-        if let Some(c) = &b.changed {
-            self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
+        if let Some(d) = &b.diagnostics {
+            self.set_diagnostics(d);
+        }
+        // (the pages' origins asked again: a page this build did not draw
+        // again may have moved in its file)
+        let c = b.changed.clone().unwrap_or_default();
+        self.emit(&json!({"event": "origins", "pages": c.pages, "edits": c.edits}).to_string());
+        {
+            let mut t = lock(&self.built_times);
+            t.1 += 1;
+            if b.parts.get("cold") == Some(&json!(true)) {
+                t.0 = Some(b.ms);
+            }
         }
         // (the build's time and parts: a timing popover's, the first build's
         // too, which has no change to time from)
@@ -709,7 +1045,9 @@ impl Viewer {
         e.insert("ms".into(), json!(b.ms));
         e.insert("history".into(), json!(b.history));
         e.extend(b.parts.clone());
-        self.emit(&Value::Object(e).to_string());
+        let settled = Value::Object(e);
+        self.emit(&settled.to_string());
+        lock(&self.last_built).0 = settled;
         (changed, n)
     }
 }
@@ -756,11 +1094,17 @@ impl Viewer {
 
 /// Lines of a page's text as the viewer takes them (`viewer/src/text.ts`'
 /// `TextLine`).
+/// The pages' text lines as the viewer takes them, every place to a
+/// hundredth of a point (a twelfth of a pixel at 800%): written whole, a
+/// place was 17 digits, and a Grail page's frame 215 KB of them, each
+/// keystroke's made, sent and parsed.
 fn lines_json(lines: &[phitex_render::TextLine]) -> Value {
+    let r = |x: f64| (x * 100.0).round() / 100.0;
+    let all = |xs: &[f64]| xs.iter().map(|&x| r(x)).collect::<Vec<f64>>();
     Value::Array(
         lines
             .iter()
-            .map(|l| json!({"x": l.x, "y": l.y, "w": l.w, "size": l.size, "text": l.text, "xs": l.xs, "rs": l.rs}))
+            .map(|l| json!({"x": r(l.x), "y": r(l.y), "w": r(l.w), "size": r(l.size), "text": l.text, "xs": all(&l.xs), "rs": all(&l.rs)}))
             .collect(),
     )
 }
@@ -796,21 +1140,41 @@ impl Viewer {
         let state = || {
             let p = lock(&s.pages);
             let d = lock(&s.diff);
-            let hashes = if d.shown {
+            let mut hashes = if d.shown {
                 d.hashes.clone()
             } else {
                 p.hashes.clone()
             };
-            (hashes, p.history, p.ms)
+            // (the pages streamed while the build runs, over the last
+            // build's: a viewer that asks then is shown them)
+            if !d.shown {
+                let st = lock(&s.streamed);
+                if hashes.len() < st.hashes.len() {
+                    hashes.resize(st.hashes.len(), 0);
+                }
+                for (k, h) in st.hashes.iter().enumerate() {
+                    if let Some(h) = h {
+                        hashes[k] = *h;
+                    }
+                }
+            }
+            // (those streamed drawn otherwise than the build's file will)
+            let inexact: Vec<usize> = if d.shown {
+                Vec::new()
+            } else {
+                lock(&s.streamed).inexact.iter().copied().collect()
+            };
+            (hashes, p.history, p.ms, inexact)
         };
         let ok = |json: Value| json!({"id": id, "ok": true, "json": json});
         let fail = |e: &str| json!({"id": id, "ok": false, "error": e});
         let reply = match op {
             "open" | "status" => {
-                let (hs, history, ms) = state();
+                let (hs, history, ms, inexact) = state();
                 ok(json!({
                     "pages": hs.len(),
                     "hashes": hashes_json(&hs),
+                    "inexact": inexact,
                     "history": history,
                     "build_ms": ms,
                     "engine": "phitex",
@@ -824,7 +1188,10 @@ impl Viewer {
                     "undefined_names": [],
                 }))
             }
-            "pages" => ok(json!({"pages": hashes_json(&state().0)})),
+            "pages" => {
+                let (hs, _, _, inexact) = state();
+                ok(json!({"pages": hashes_json(&hs), "inexact": inexact}))
+            }
             "png" => fail("the pages are drawn as strips: frame and strips"),
             "frame" => {
                 #[allow(clippy::cast_possible_truncation, reason = "a scale: pixels a point")]
@@ -865,7 +1232,7 @@ impl Viewer {
                 // queued: its build's time and parts come with `settled`
                 // when it is in; the last build's were said as this
                 // keystroke's, a reopen's 7.8 s as a letter's)
-                let (hs, history, _) = state();
+                let (hs, history, _, _) = state();
                 ok(json!({
                     "ok": true,
                     "queued": true,
@@ -873,6 +1240,47 @@ impl Viewer {
                     "history": history,
                     "painted_hash": null,
                 }))
+            }
+            // (made when asked, by the session's owner: the viewer asks
+            // again, as for `origins`)
+            "page_of" => {
+                let file = text("file").unwrap_or_default();
+                let at = req.get("at").and_then(index).unwrap_or(0);
+                let p = lock(&s.pages);
+                if let Some(ks) = p.placed.get(&(file.clone(), at)) {
+                    ok(json!({"pages": ks}))
+                } else {
+                    drop(p);
+                    let a = Ask::PageOf { file, at };
+                    let queued = lock(&s.asks).contains(&a);
+                    if !queued {
+                        s.ask(a);
+                    }
+                    ok(json!({"pending": true}))
+                }
+            }
+            // (the citation under a point: `{"op":"cites","page":K,"x":X,
+            // "y":Y}`, made when asked, by the session's owner: the
+            // viewer asks again, as for `page_of`)
+            "cites" => {
+                let num = |k: &str| req.get(k).and_then(Value::as_f64).unwrap_or(f64::NAN);
+                #[allow(clippy::cast_possible_truncation, reason = "a point on a page")]
+                let (x, y) = ((num("x") as f32).to_bits(), (num("y") as f32).to_bits());
+                let page = page.unwrap_or(usize::MAX);
+                let p = lock(&s.pages);
+                if let Some(v) = p.cites.get(&(page, x, y)) {
+                    ok(v.clone())
+                } else if page >= p.hashes.len() {
+                    ok(json!({"cites": null}))
+                } else {
+                    drop(p);
+                    let a = Ask::Cites { page, x, y };
+                    let queued = lock(&s.asks).contains(&a);
+                    if !queued {
+                        s.ask(a);
+                    }
+                    ok(json!({"pending": true}))
+                }
             }
             "origins" => match origins(
                 s,
@@ -916,6 +1324,11 @@ impl Viewer {
                 s.ask(Ask::Rebuild);
                 ok(json!({}))
             }
+            // (Clean rebuild: the build dropped, made again from nothing)
+            "cold" => {
+                s.ask(Ask::Cold);
+                ok(json!({}))
+            }
             "console" => {
                 let c = lock(&s.console);
                 ok(json!({"items": c.0.iter().collect::<Vec<_>>(), "status": c.1}))
@@ -926,6 +1339,28 @@ impl Viewer {
                     Some(Ok(v)) => ok(v),
                     Some(Err(e)) => fail(&e),
                     None => fail("no cache here"),
+                }
+            }
+            // (`{"op":"prefs"}`: the user's viewer preferences; with
+            // `"set":{...}` those set first)
+            "prefs" => {
+                let set = req.get("set").and_then(Value::as_object);
+                match lock(&s.prefs).as_ref().map(|f| f(set)) {
+                    Some(Ok(v)) => ok(v),
+                    Some(Err(e)) => fail(&e),
+                    None => fail("no preferences here"),
+                }
+            }
+            "info" if text("what").as_deref() == Some("built") => {
+                let t = lock(&s.built_times);
+                let last = lock(&s.last_built);
+                ok(json!({"first_ms": t.0, "builds": t.1, "settled": last.0, "stats": last.1}))
+            }
+            "info" => {
+                let what = text("what").unwrap_or_default();
+                match lock(&s.info).as_ref().and_then(|f| f(&what, req)) {
+                    Some(v) => ok(v),
+                    None => fail(&format!("no {what:?} here")),
                 }
             }
             "diff" => ok(lock(&s.diff).state.clone()),
@@ -1043,10 +1478,23 @@ fn origins(s: &Viewer, k: usize, files_from: usize) -> Result<Value, String> {
         }
     }
     let p = lock(&s.pages);
-    match &p.origins {
-        Some(o) => origins_json(o, k, files_from),
-        None => Err("the pages' origins are not made yet".into()),
+    if p.made.contains(&k)
+        && let Some(o) = &p.origins
+    {
+        return origins_json(o, k, files_from);
     }
+    let n = p.hashes.len();
+    drop(p);
+    // (made when asked, by the session's owner, that page alone: the
+    // viewer asks again, as for the `log` op)
+    if k < n {
+        let queued = lock(&s.asks).contains(&Ask::Origins(k));
+        if !queued {
+            s.ask(Ask::Origins(k));
+        }
+        return Ok(json!({"pending": true}));
+    }
+    Err(format!("page {k}'s origins are not made yet"))
 }
 
 /// [`origins`]'s answer from the pages' origins `o`: page `k`'s, or not
@@ -1101,6 +1549,66 @@ pub fn base64(b: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A reply made before an event is sent before it: the console's
+    /// backlog answered while a build ends, its live "busy" clear made
+    /// meanwhile on another thread, reaches the browser after the reply
+    /// (it went first, and the replayed backlog left the tab "Building…").
+    /// A tab that joins after a build is given that build's stats (and
+    /// its `settled`) in `info` `built`, not nothing until the next one.
+    #[test]
+    fn a_tab_that_joins_late_is_given_the_last_builds_stats() {
+        let v = Viewer::default();
+        let built = |v: &Viewer| -> Value {
+            serde_json::from_str(&v.answer(&json!({"id": 1, "op": "info", "what": "built"})))
+                .unwrap()
+        };
+        assert_eq!(built(&v)["json"]["stats"], Value::Null);
+        v.stats(&json!({"build": 3, "wall_ms": 7.0}));
+        let j = built(&v);
+        assert_eq!(j["json"]["stats"]["event"], "stats");
+        assert_eq!(j["json"]["stats"]["build"], 3);
+    }
+
+    #[test]
+    fn a_reply_goes_before_the_events_made_after_it() {
+        use std::sync::mpsc;
+        let v = Arc::new(Viewer::default());
+        let got: Arc<Mutex<Vec<String>>> = Arc::default();
+        {
+            let got = got.clone();
+            v.on_emit(Box::new(move |t: &str| lock(&got).push(t.to_owned())));
+        }
+        let tell = v.console();
+        tell(json!({"kind": "busy", "text": "build 1"}));
+        let (answered, go) = mpsc::channel();
+        let w = {
+            let (v, got) = (v.clone(), got.clone());
+            std::thread::spawn(move || {
+                v.answer_in_turn(&json!({"id": 1, "op": "console"}), |r| {
+                    answered.send(()).unwrap();
+                    // (the other thread's event made now, while the reply waits to go)
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    lock(&got).push(format!("reply {r}"));
+                    true
+                })
+            })
+        };
+        go.recv().unwrap();
+        tell(json!({"kind": "busy", "text": ""}));
+        assert!(w.join().unwrap());
+        let got = lock(&got).clone();
+        let reply = got.iter().position(|t| t.starts_with("reply")).unwrap();
+        assert!(
+            got[reply].contains("build 1") && !got[reply].contains(r#""text":"""#),
+            "{got:?}"
+        );
+        let clear = got.iter().position(|t| t.contains(r#""text":"""#)).unwrap();
+        assert!(
+            reply < clear,
+            "the clear made after the answer went before its reply: {got:?}"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -1151,7 +1659,7 @@ mod tests {
             hashes: Vec::new(),
             history: 0,
             ms: 0.0,
-            diagnostics: Vec::new(),
+            diagnostics: Some(Vec::new()),
             since_ms: None,
             origins: None,
             changed: None,
@@ -1227,5 +1735,25 @@ mod tests {
     fn page_ranges() {
         assert_eq!(ranges(&[1, 3, 4, 5, 7, 8]), "1, 3–5, 7–8");
         assert_eq!(ranges(&[]), "");
+    }
+
+    /// A text line's places go to the viewer to a hundredth of a point.
+    #[test]
+    fn text_places_to_a_hundredth() {
+        let l = phitex_render::TextLine {
+            x: 72.123_456_789,
+            y: 100.0 / 3.0,
+            w: 10.005_1,
+            size: 9.962_59,
+            text: "ab".into(),
+            xs: vec![72.123_456_789, 77.777_777],
+            rs: vec![77.777_777, 82.004_999],
+        };
+        let j = lines_json(&[l]);
+        assert_eq!(
+            j,
+            json!([{"x": 72.12, "y": 33.33, "w": 10.01, "size": 9.96, "text": "ab",
+                    "xs": [72.12, 77.78], "rs": [77.78, 82.0]}])
+        );
     }
 }

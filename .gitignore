@@ -5,3 +5,7 @@
 /tools/minted-pyodide/node_modules
 __pycache__/
 /nightly.key
+/bench/para40000.tex
+
+# (scripts/wasm-live.sh: the frontends' wasm, built)
+/build/

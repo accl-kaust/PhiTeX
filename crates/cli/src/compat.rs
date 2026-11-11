@@ -99,6 +99,7 @@ fn usage(progname: &str) -> ! {
 pub fn main(progname: &str, args: &[String]) -> ! {
     let mut ini = progname == "initex";
     let mut shell_escape = false;
+    let mut batch = false;
     let mut etex = false;
     let mut jobname = None;
     let mut out_dir = std::env::var("TEXMF_OUTPUT_DIRECTORY")
@@ -149,8 +150,9 @@ pub fn main(progname: &str, args: &[String]) -> ! {
             "ini" => ini = true,
             "etex" => etex = true,
             "interaction" => {
-                // (every job runs to its end: the mode is checked, not kept)
-                interaction(&v()).unwrap_or_else(|| usage(progname));
+                // (every job runs to its end; batch mode prints nothing
+                // past the head on the terminal)
+                batch = interaction(&v()).unwrap_or_else(|| usage(progname)) == 0;
             }
             "jobname" => jobname = Some(v()),
             "output-directory" => out_dir = Some(v()),
@@ -248,6 +250,8 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         fixpoint: false,
         cache_limit: None,
         edit_diagnostics: true,
+        // (TeX's command line: no .latexmkrc, as pdflatex reads none)
+        inputs: Vec::new(),
         origins: false,
     };
     for n in session::waiting_notes(&job) {
@@ -269,7 +273,12 @@ pub fn main(progname: &str, args: &[String]) -> ! {
         );
         std::process::exit(crate::EXIT_FAILED);
     });
-    print!("{}", phitex_live::session::Session::terminal(&r));
+    let head = terminal_head(name, ini, etex || star, shell_escape);
+    if batch {
+        print!("{head}");
+    } else {
+        print!("{}", s.terminal(&r, &head));
+    }
     // (the engine's own failures and warnings, which TeX's transcript
     // does not have: on standard error, said as sentences)
     for e in r
@@ -293,6 +302,35 @@ pub fn main(progname: &str, args: &[String]) -> ! {
     std::process::exit(i32::from(!r.out.errors.is_empty() || r.out.history_error));
 }
 
+/// What TeX Live's engine `format` (`pdflatex`, `tex`, ...) prints on
+/// the terminal before the log opens: the banner and the format (`(INITEX)`
+/// with `-ini`), whether `\write18` runs (restricted, TeX Live's default),
+/// and e-TeX's `entering extended mode`.
+fn terminal_head(format: &str, ini: bool, etex: bool, shell_escape: bool) -> String {
+    let knuth = format == "tex";
+    let banner = if knuth {
+        "This is TeX, Version 3.141592653 (TeX Live 2026/Arch Linux)".to_owned()
+    } else {
+        phitex_tex::terminal_banner().to_owned()
+    };
+    let fmt = if ini {
+        " (INITEX)".to_owned()
+    } else {
+        format!(" (preloaded format={format})")
+    };
+    let shell = if shell_escape {
+        " \\write18 enabled.\n"
+    } else {
+        " restricted \\write18 enabled.\n"
+    };
+    let extended = if (ini && etex) || (!ini && !knuth) {
+        "entering extended mode\n"
+    } else {
+        ""
+    };
+    format!("{banner}{fmt}\n{shell}{extended}")
+}
+
 /// The main file TeX finds for `name`: `name.tex`, else `name` (here, as
 /// TeX's first `\input`).
 pub fn find_main(name: &str) -> Option<PathBuf> {
@@ -311,9 +349,13 @@ pub fn job_of(file: &str) -> String {
     let found = find_main(file).map(|p| p.to_string_lossy().into_owned());
     let name = found.as_deref().unwrap_or(file);
     // (as TeX scans a file name, §516-§517 with web2c's change: the area
-    // ends at the last `/`, the extension starts at the last `.` after
-    // it, whatever follows; §537: the job is the name without either)
-    let base = name.rsplit('/').next().unwrap_or(name);
+    // ends at the last `/` (`IS_DIR_SEP`: on Windows `\\` too), the
+    // extension starts at the last `.` after it, whatever follows; §537:
+    // the job is the name without either)
+    let base = name
+        .rsplit(|c| c == '/' || cfg!(windows) && c == '\\')
+        .next()
+        .unwrap_or(name);
     base.rfind('.').map_or(base, |k| &base[..k]).to_owned()
 }
 

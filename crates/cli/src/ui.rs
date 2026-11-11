@@ -17,7 +17,16 @@ pub use phitex_live::panics::{capture_panics, catch};
 
 use crate::session::Status;
 
-/// Colours on standard error, unless it is no terminal or `NO_COLOR`.
+/// `--color`: always (true) or never (false); none, by the stream.
+static COLOR: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+
+/// `--color`'s choice, for every [`Style`] from now on.
+pub fn set_color(c: Option<bool>) {
+    let _ = COLOR.set(c);
+}
+
+/// Colours on standard error: `--color`, else none under `NO_COLOR`,
+/// else on a terminal or under `CLICOLOR_FORCE`.
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
     pub color: bool,
@@ -27,10 +36,26 @@ pub struct Style {
 
 impl Style {
     pub fn detect() -> Style {
-        let tty = std::io::stderr().is_terminal();
+        Style::on(std::io::stderr().is_terminal())
+    }
+
+    /// For standard output (a command's answer: `config`, `news`).
+    pub fn stdout() -> Style {
+        Style::on(std::io::stdout().is_terminal())
+    }
+
+    /// For a stream that is a terminal (`tty`) or not: `--color`'s
+    /// choice, else colours on a terminal, or forced by `CLICOLOR_FORCE`.
+    fn on(tty: bool) -> Style {
+        if let Some(&Some(color)) = COLOR.get() {
+            return Style { color, tty };
+        }
+        // (no-color.org: NO_COLOR, set and not empty, wins over everything
+        // but the command line's --color; CLICOLOR_FORCE colours a pipe)
         let set = |v: &str| std::env::var_os(v).is_some_and(|x| !x.is_empty() && x != "0");
+        let no_color = std::env::var_os("NO_COLOR").is_some_and(|x| !x.is_empty());
         Style {
-            color: set("CLICOLOR_FORCE") || (tty && std::env::var_os("NO_COLOR").is_none()),
+            color: !no_color && (set("CLICOLOR_FORCE") || tty),
             tty,
         }
     }
@@ -73,6 +98,20 @@ impl Style {
     }
 }
 
+/// A build's reason as a reader reads it: the session's `cold` (its
+/// first build, or one asked from nothing) is a clean build; a file's
+/// name, an edit's place and the rest are as they are.
+pub fn said_why(why: &str) -> String {
+    why.split(", ")
+        .map(|w| match w {
+            "cold" => "clean build",
+            "asked: a cold build" => "a clean build was asked",
+            w => w,
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// A duration for the terminal: milliseconds under a second.
 pub fn ms(d: Duration) -> String {
     let m = d.as_secs_f64() * 1e3;
@@ -103,7 +142,7 @@ pub fn pad(s: &str, w: usize, right: bool) -> String {
 }
 
 /// `s` cut to `max` characters, an ellipsis where it is cut.
-fn clip(s: &str, max: usize) -> String {
+pub fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }
@@ -410,6 +449,14 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// The bottom lines written again, over what they were.
+/// The question `q`, the bottom lines erased first, with a blank after it
+/// and no line's end: the key typed next is answered after it, on its line.
+fn asked(e: &mut impl std::io::Write, b: &mut Bottom, q: &str) {
+    b.erase(e);
+    let _ = write!(e, "{q} ");
+    let _ = e.flush();
+}
+
 fn redraw(e: &mut impl std::io::Write, b: &mut Bottom) {
     b.erase(e);
     if b.gone {
@@ -469,6 +516,27 @@ impl Ui {
     pub fn line(&self, s: &str) {
         self.print(s);
         self.tell("line", s);
+    }
+
+    /// A question on standard error, left open after `q` and a blank for
+    /// its answer (the cursor where a key is typed), until
+    /// [`Ui::answered`].
+    pub fn ask(&self, q: &str) {
+        if !self.json {
+            let mut b = lock(&self.bottom);
+            asked(&mut std::io::stderr().lock(), &mut b, q);
+        }
+        self.tell("line", q);
+    }
+
+    /// The asked question's answer, `a` (none: no key came), and its line
+    /// ended: what is printed next starts a line of its own.
+    pub fn answered(&self, a: Option<&str>) {
+        if !self.json {
+            let mut e = std::io::stderr().lock();
+            let _ = writeln!(e, "{}", a.unwrap_or(""));
+            let _ = e.flush();
+        }
     }
 
     /// `--json`: one event, a line on standard output.
@@ -551,6 +619,19 @@ impl Ui {
                     loop {
                         std::thread::sleep(Duration::from_millis(250));
                         let now = crate::keys::width();
+                        // (back from Ctrl-Z: the shell's lines are over
+                        // the bottom ones, drawn again below them)
+                        if crate::keys::resumed() {
+                            let mut b = lock(&bottom);
+                            if b.gone {
+                                return;
+                            }
+                            b.drawn = 0;
+                            b.drawn_widths.clear();
+                            redraw(&mut std::io::stderr().lock(), &mut b);
+                            was = now;
+                            continue;
+                        }
                         if now == was {
                             continue;
                         }
@@ -738,6 +819,23 @@ impl Spin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The quit's question leaves the cursor after "[y/N] ", not on the
+    /// line below (it was printed as a line); the answer then ends it.
+    #[test]
+    fn a_question_is_left_open_for_its_key() {
+        let mut b = Bottom::default();
+        let mut out = Vec::new();
+        asked(
+            &mut out,
+            &mut b,
+            "write x.pdf and its .synctex.gz here? [y/N]",
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "write x.pdf and its .synctex.gz here? [y/N] "
+        );
+    }
 
     #[test]
     fn plain_text() {

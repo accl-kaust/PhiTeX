@@ -1,7 +1,7 @@
 //! The critical chain of plain documents, classified by cause: the
 //! measure for the chain work (`PHITEX_CHAIN=1` prints every link).
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 
@@ -18,11 +18,14 @@ fn target_failures(name: &str, b: &phitex_tex::Build) -> Vec<String> {
     }
     let pages = b.pages().len();
     // the page chain is the design (docs/TARGET_GRAPH.md, Heights): no
-    // bound on its height in nodes; a node runs once (a park resumes)
+    // bound on its height in nodes; a node runs once (a park resumes:
+    // its resumptions, `Stats::resumptions`, are not runs again)
     let (runs, nodes) = (b.stats.runs, b.stats.nodes_run);
-    if runs * 10 > nodes * 11 {
+    let again = runs.saturating_sub(b.stats.resumptions);
+    if again * 10 > nodes * 11 {
         out.push(format!(
-            "{name}: {runs} runs for {nodes} nodes (> 1.1 a node)"
+            "{name}: {again} runs for {nodes} nodes (> 1.1 a node; {} resumptions besides)",
+            b.stats.resumptions
         ));
     }
     // a region runs as one node: at most a few nodes per region (the
@@ -369,7 +372,8 @@ fn para400() {
 /// nodes, and no link of it joins two page steps.
 /// The chain census gate (`common::Census`): plain documents of 400
 /// paragraphs with footnotes, DVI and exact PDF, cold and after a
-/// one-word edit: critical path at most 6, no page step reading
+/// one-word edit: the cold page chain at most 2 a page (`Build::page_chain`),
+/// the edit's critical path at most 6, no page step reading
 /// another's, at most 1.1 runs a node, at most 2 loop rounds cold and
 /// none after the first on the edit, no undeclared definition, no
 /// regime violation.

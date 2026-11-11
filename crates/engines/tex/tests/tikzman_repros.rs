@@ -4,7 +4,7 @@
 //! while LaTeX's format is built (its 8-bit `\input` bytes:
 //! `inputs::input_file_bytes_past_127_are_one_character_each`).
 
-mod common;
+use crate::common;
 
 use std::path::PathBuf;
 

@@ -20,14 +20,14 @@ use phitex_typeset::glue::Glue;
 use phitex_typeset::node::{BoxKind, BoxNode, Disc, GlueKind, KernKind, Ligature, List, Node};
 use phitex_typeset::pack::{PackParams, Spec};
 
-use crate::control::{LEADER_FLAG, SHIP_OUT_FLAG};
+use crate::control::{GLOBAL_BOX_FLAG, LEADER_FLAG, SHIP_OUT_FLAG};
 use crate::fields::Par;
 use crate::nodes::{self, Side, T_BUILD_PAGE, T_DELETE, T_PD, T_SF, T_SPACE, T_VBOX};
 use crate::run::{R, Run};
 use crate::val::{Tok, cmd, glue_of, group, int_of, list_of};
 
 pub(crate) const IGNORE_DEPTH: i32 = -65_536_000;
-const BOX_FLAG: i64 = 0o10000000000;
+pub(crate) const BOX_FLAG: i64 = 0o10000000000;
 
 /// What a command reads of its surroundings: the mode (tex.web's
 /// numbers: ±1 vertical, ±102 horizontal, ±203 math), the list it builds
@@ -98,7 +98,7 @@ impl Run<'_, '_> {
             vlid,
             group,
             sid: t.lid,
-            depth: base.depth + groups,
+            depth: base.depth + groups + self.depth_add,
             extra: t.extra.clone(),
             vm,
         })
@@ -108,6 +108,9 @@ impl Run<'_, '_> {
     pub(crate) fn mode_m(&mut self) -> R<i32> {
         if let Some(t) = self.nest.last() {
             return Ok(t.mode);
+        }
+        if crate::boxscope::on() {
+            return Ok(self.base_mode_with(false)?.m);
         }
         let Some(k) = self.scope_kind()? else {
             return Ok(1);
@@ -160,7 +163,7 @@ impl Run<'_, '_> {
             },
             None => (0, 0, 0, 1, 0, Vec::new()),
         };
-        Ok(Mode {
+        let mut md = Mode {
             m: km,
             km,
             lid,
@@ -170,7 +173,18 @@ impl Run<'_, '_> {
             depth,
             extra,
             vm: km,
-        })
+        };
+        // (`crate::boxscope`: a paragraph left open in this kind's list,
+        // the document's top level, no kind, among them)
+        if crate::boxscope::on() {
+            let kv = k.unwrap_or(ValueId::UNIT);
+            if km == 102 && crate::boxscope::is_global(lid) {
+                self.par_kind(kv, crate::boxscope::KindFrom::Here, &mut md)?;
+            } else if km.abs() == 1 {
+                self.vert_kind(kv, &mut md)?;
+            }
+        }
+        Ok(md)
     }
 
     /// `{` and `\begingroup` (§1063): a level of the nest sharing the
@@ -227,7 +241,15 @@ impl Run<'_, '_> {
                     .collect::<Vec<_>>()
             );
         }
-        self.unsave_extras(md)?;
+        // (the scope's own lists, `ag` and `lvlfix`, are tagged with its
+        // sid: read as level 0 has it, not as the innermost level does,
+        // a paragraph the run began inside the scope (`\begingroup
+        // \color{red}`, then `\leavevmode ... \endgroup`): its sid is its
+        // list's, and the `\aftergroup` tokens were dropped)
+        let base = self.base_mode()?;
+        self.unsave_extras(&base)?;
+        // (a paragraph left open under this scope goes on in the kind
+        // outside it, `crate::boxscope`)
         self.kind_outer(md)
     }
 
@@ -278,10 +300,15 @@ impl Run<'_, '_> {
     pub(crate) fn leave_scope(&mut self) -> R<()> {
         let v = self.v;
         let base = self.base_mode()?;
-        let parent = self.scope_kind()?.unwrap_or(ValueId::UNIT);
+        // (its parent kind not carried: read before the opener where a
+        // group closes into it, `Run::kind_outer`. Carried, one opener
+        // run on a wrong kind gave every scope nested in it, node after
+        // node, a kind of its own to run again for: floats2col's first
+        // wave at -j16, 343 of 715 text re-asks the scope kind)
+        let parent = outer_before_opener(v);
         if self.nest.len() > 1 {
             self.leave_frames(&base, parent);
-            return Ok(());
+            return self.read_step_bases();
         }
         self.muts += 1;
         let Some(l) = self.nest.pop() else {
@@ -289,8 +316,10 @@ impl Run<'_, '_> {
         };
         // (the group's local definitions are the scope's, the base
         // level's stay the run's: `Locality::Scope`)
+        self.flush_bulk_codes();
         self.st
             .abandon_to_scope(v, l.save_base, l.def_base, l.open_stamp, self.rec_load);
+        self.read_step_bases()?;
         // (the scope's tag, its `ag` and `lvlfix` lists' too: its depth,
         // which no other scope open at a reader has; never the opener's
         // node, which a re-cut changes, its readers asked again for it)
@@ -298,7 +327,7 @@ impl Run<'_, '_> {
         let mut xs = vec![
             v.int(l.group),
             v.int(sid),
-            v.int(base.lid),
+            v.int(l.lid),
             v.int(i64::from(l.mode)),
             v.int(base.depth + 1),
             parent,
@@ -347,6 +376,18 @@ impl Run<'_, '_> {
         Ok(())
     }
 
+    /// The registers the run stepped and then wrote locally in a group
+    /// it leaves open, unread: read, the steps published as the value
+    /// they make beneath the scope's ([`crate::state::State::publication`]).
+    fn read_step_bases(&mut self) -> R<()> {
+        for loc in self.st.unread_steps_under_scope() {
+            let f = self.loc_field(loc);
+            let x = self.eng_read(f)?;
+            self.st.set_step_base(loc, x);
+        }
+        Ok(())
+    }
+
     /// Leaves the run's open groups (several, each sharing the list
     /// below it) to the engine as nested scopes, one frame per group,
     /// outermost first (`new_save_level` once per group, §274): frame
@@ -369,7 +410,7 @@ impl Run<'_, '_> {
             let mut xs = vec![
                 v.int(l.group),
                 v.int(sid(k)),
-                v.int(base.lid),
+                v.int(l.lid),
                 v.int(i64::from(l.mode)),
                 v.int(base.depth + 1 + i64::try_from(k).unwrap_or(0)),
                 outer,
@@ -382,6 +423,7 @@ impl Run<'_, '_> {
             .iter()
             .map(|l| (l.save_base, l.def_base, l.open_stamp))
             .collect();
+        self.flush_bulk_codes();
         self.st.abandon_to_frames(&spans);
         let f = self.ops.fields.get_at(v, self.cx.values_epoch(), "ag");
         let loc = self.loc_of(f);
@@ -488,6 +530,12 @@ impl Run<'_, '_> {
         if nodes.is_empty() {
             return;
         }
+        if crate::boxscope::is_global(lid) {
+            for x in nodes {
+                self.append_left(lid, x);
+            }
+            return;
+        }
         if lid == 0 {
             if self.st.take_page_params() {
                 self.put_page_params_or_raise();
@@ -512,6 +560,10 @@ impl Run<'_, '_> {
         let v = self.v;
         if let Some(l) = self.level_of(lid) {
             fold_item(v, lid, node, &mut l.fold, &mut l.list);
+            return;
+        }
+        if crate::boxscope::is_global(lid) {
+            self.append_left(lid, node);
             return;
         }
         if lid == 0 {
@@ -577,8 +629,19 @@ impl Run<'_, '_> {
     /// gives, without copying a local list.
     pub(crate) fn list_last(&mut self, lid: i64) -> R<(Option<ValueId>, usize)> {
         let v = self.v;
+        let child_base = self.pic_child.as_ref().is_some_and(|p| p.lid == lid);
         if let Some(l) = self.level_of(lid) {
             let n = l.list.len();
+            // (a picture child's own list is empty where the parent's
+            // items before the picture stand: a look past it refuses,
+            // `crate::pic`)
+            // (a picture child's own list is empty where the parent's items
+            // before the picture stand: a look past its start takes them,
+            // `Run::pic_take_list`)
+            if n == 0 && child_base && self.pic_take_list()? {
+                return self.list_last(lid);
+            }
+            let l = self.level_of(lid).expect("the level");
             return Ok((l.list.last_mut().map(|x| x.value(v)), n));
         }
         let (items, since) = self.list_items(lid)?;
@@ -653,9 +716,12 @@ impl Run<'_, '_> {
                     st.pd = self.main_pd_before()?;
                 }
             }
+        } else if crate::boxscope::is_global(lid) {
+            // a list left open by another node: its own field
+            // (`crate::boxscope`)
+            self.left_list_fold(lid, &mut st, &mut out)?;
         } else {
-            // a list is this run's or the engine's (lid 0): no list is
-            // opened by one node and read by another
+            // a list is this run's or the engine's (lid 0)
             let all = self.cx.fold(f, None, None)?;
             fold_entries(v, lid, &v.seq_to_vec(all), &mut st, &mut out);
         }
@@ -969,7 +1035,10 @@ impl Run<'_, '_> {
                 }
                 _ => match self.par_level_under_groups() {
                     Some(k) => self.end_graf_under_groups(k)?,
-                    None => return Ok(()),
+                    None => match self.end_left_paragraph(md)? {
+                        Some(items) => items,
+                        None => return Ok(()),
+                    },
                 },
             };
             // §1096: error_count:=0
@@ -1159,12 +1228,65 @@ impl Run<'_, '_> {
         let quad = self.font_int(fi, crate::fields::FontCell::Fd(6))?;
         let mut expansion = None;
         let mut auto = false;
+        let mut copy = false;
         let mut slots: Box<[std::sync::OnceLock<_>]> = Box::new([]);
         if let Some((st, sh, step, a)) = crate::pdfprim::expand_params(self, fi)?
             && step > 0
             && let Some((name, size)) = view.names.get(&f).cloned()
         {
-            let key = |e: i32| crate::fonts::expanded_key(&name, size, e);
+            copy = crate::pdfprim::is_font_copy(self, fi)?;
+            let base = copy.then_some(f);
+            let key = |e: i32| crate::fonts::expanded_key(base, &name, size, e);
+            // (the ratios the font has asked for, pdfTeX's `pdf_font_elink`,
+            // and what those fonts are bound to now, `pdf_font_blink`:
+            // another font's first ask since may have bound them to it,
+            // [`crate::pdfprim::get_expand_font`])
+            // (which ratios, not in what order they were first asked:
+            // [`Run::val_set`])
+            let link =
+                self.ops
+                    .fields
+                    .get_at(self.v, self.cx.values_epoch(), &format!("pdf:elink:{fi}"));
+            // (looked at, not read: the paragraph depends on whether each
+            // ratio it asks is there, `Run::note_elink_asks`)
+            let (set, peeked) = self.val_set_peek(link)?;
+            if peeked {
+                view.elink_peeked.insert(f, link);
+            }
+            let mut linked: Vec<i32> = set
+                .into_iter()
+                .filter_map(|x| i32::try_from(crate::val::int_of(self.v, x)).ok())
+                .collect();
+            linked.sort_unstable();
+            view.elink.insert(f, linked.clone());
+            for &e in &linked {
+                let k = key(e);
+                if view.ex_base.contains_key(&k) {
+                    continue;
+                }
+                // (looked at where the list was: read only for a ratio
+                // the paragraph asks, `Run::note_elink_asks`)
+                let kinfo = if view.elink_peeked.contains_key(&f) {
+                    let (x, peek) = self.font_info_peek(k)?;
+                    if let Some(fld) = peek {
+                        view.info_peeked.insert((f, e), (fld, x));
+                    }
+                    x
+                } else {
+                    self.font_get(k, crate::fields::FontCell::Info)?
+                };
+                if let Some((b, ..)) = crate::fonts::info(self.v, kinfo).and_then(|j| j.ex) {
+                    let b = u32::try_from(b).unwrap_or(0);
+                    view.ex_base.insert(k, b);
+                    // (the codes are that font's: in the view with it,
+                    // though no character of the list is in it)
+                    if b != f && b != 0 && !view.px.contains_key(&b) && !view.elink.contains_key(&b)
+                    {
+                        self.add_font_metrics(view, b)?;
+                        self.add_px(view, b)?;
+                    }
+                }
+            }
             expansion = Some(phitex_typeset::fonts::Expansion {
                 stretch: (st > 0).then(|| (key(st), st)),
                 shrink: (sh > 0).then(|| (key(-sh), -sh)),
@@ -1179,6 +1301,7 @@ impl Run<'_, '_> {
             Box::new(crate::fonts::Px {
                 expansion,
                 auto,
+                copy,
                 lp,
                 rp,
                 ef,
@@ -1492,6 +1615,7 @@ impl Run<'_, '_> {
         let t0 = crate::prof::start();
         let para = phitex_typeset::linebreak::line_break(list, display, &params, &view, &mut hy);
         crate::prof::add(crate::prof::LB_TS, t0);
+        self.note_elink_asks(&view)?;
         // (the fonts its expansion made, in the order it asked for them:
         // pdfTeX's internal fonts, numbered as they are made)
         let made = std::mem::take(&mut *view.exp_log.locked());
@@ -1626,6 +1750,8 @@ impl Run<'_, '_> {
         // (the patterns' words read here, outside the cell: an error
         // reading them stays this run's)
         let mut words: Vec<(u16, bool, Vec<String>)> = Vec::new();
+        // (e-TeX's saved hyphenation codes, the last per language)
+        let mut codes: Vec<(u16, Vec<u16>)> = Vec::new();
         if let Some(x) = x {
             for e in list_of(v, x) {
                 let xs = list_of(v, e);
@@ -1633,7 +1759,21 @@ impl Run<'_, '_> {
                 if langs.binary_search(&lang).is_err() {
                     continue;
                 }
-                let pattern = xs.get(1).is_some_and(|&k| crate::val::str_of(v, k) == "p");
+                let kind = xs
+                    .get(1)
+                    .map(|&k| crate::val::str_of(v, k))
+                    .unwrap_or_default();
+                if kind == "c" {
+                    let cs = xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default();
+                    let cs = cs
+                        .iter()
+                        .map(|&c| u16::try_from(int_of(v, c)).unwrap_or(0))
+                        .collect();
+                    codes.retain(|e| e.0 != lang);
+                    codes.push((lang, cs));
+                    continue;
+                }
+                let pattern = kind == "p";
                 let ws = xs.get(2).map(|&l| list_of(v, l)).unwrap_or_default();
                 words.push((
                     lang,
@@ -1645,6 +1785,9 @@ impl Run<'_, '_> {
         Ok(once
             .get_or_init(|| {
                 let mut p = phitex_typeset::hyph::Patterns::default();
+                for (lang, cs) in &codes {
+                    p.set_hyph_codes(*lang, cs.clone());
+                }
                 for (lang, pattern, ws) in &words {
                     for w in ws {
                         if *pattern {
@@ -1734,6 +1877,27 @@ impl Run<'_, '_> {
         let lvl = x.map_or(0, |x| crate::val::int_at(v, x, 0));
         let val = v.list(vec![v.int(lvl), b.unwrap_or(ValueId::UNIT)]);
         let base = self.base_mode()?.depth;
+        // (a finisher's use of a box the text's open groups bound, whose
+        // level is the text's: for the piece that goes on past the page,
+        // [`Run::define_fire_conflict`])
+        // (and the rest after it, reading the finisher's definition,
+        // `Run::cont_state`: the binding's level is outside the routine)
+        let base = if self.fin.is_some() && lvl > 0 && !self.st.defined_here(l) {
+            let f = self.loc_field(l);
+            self.fin_boxes.retain(|e| e.0 != f);
+            self.fin_boxes.push((f, val));
+            if crate::exec::obs_flag!("PHITEX_FIRE_TRACE") {
+                eprintln!(
+                    "fire-box: finisher {} {} at level {lvl}: {}",
+                    self.cx.node().raw(),
+                    crate::val::field_name(v, f),
+                    if b.is_some() { "set" } else { "void" }
+                );
+            }
+            lvl
+        } else {
+            base
+        };
         self.modify_at(l, val, lvl, base);
         // (the text's own, [`Run::tbox_loc`])
         if let Some(n) = crate::fields::box_of(l)
@@ -1902,10 +2066,10 @@ impl Run<'_, '_> {
             }
         } else if ctx < SHIP_OUT_FLAG {
             // §1077
-            let (n, global) = if ctx < BOX_FLAG + 256 {
+            let (n, global) = if ctx < GLOBAL_BOX_FLAG {
                 (ctx - BOX_FLAG, false)
             } else {
-                (ctx - BOX_FLAG - 256, true)
+                (ctx - GLOBAL_BOX_FLAG, true)
             };
             self.set_box_reg(md, n, b, global);
         } else if let Some(b) = b {
@@ -2030,7 +2194,7 @@ impl Run<'_, '_> {
             .get(9)
             .is_some_and(|&l| nodes::is_sealed(v, l))
         {
-            self.unseal(b)
+            self.unseal_open(b)
         } else {
             b
         };
@@ -2272,6 +2436,16 @@ impl Run<'_, '_> {
                 };
                 let depth_limit = self.ipar(Par::boxmaxdepth)?;
                 let items = self.list_own_items(md.lid)?;
+                if crate::boxscope::is_global(md.lid)
+                    && crate::exec::prof_flag!("PHITEX_BOXSCOPE_TRACE")
+                {
+                    eprintln!(
+                        "boxscope: node {} closes list {} ({} items)",
+                        self.cx.node().raw(),
+                        md.lid,
+                        items.len()
+                    );
+                }
                 let mut side = Side::default();
                 let mut kept = Vec::with_capacity(items.len());
                 let list: List = items
@@ -2326,7 +2500,7 @@ impl Run<'_, '_> {
                 };
                 let outer = self.close_group(md)?;
                 if (BOX_FLAG..SHIP_OUT_FLAG).contains(&ctx)
-                    && ctx < BOX_FLAG + 256
+                    && ctx < GLOBAL_BOX_FLAG
                     && self.effect == crate::run::CLOSE
                 {
                     // a local \setbox of an engine scope lands outside it
@@ -2340,6 +2514,17 @@ impl Run<'_, '_> {
                     let put = self.ops.put;
                     self.kid(put, vec![v.list(vec![def]), v.list(Vec::new())]);
                     let _ = SHIP_OUT_FLAG;
+                } else if self.effect == crate::run::CLOSE {
+                    // the box goes on outside the scope closed: this run's
+                    // reads are inside it (`\baselineskip` for the
+                    // interline glue, §679), the following node's not
+                    let adj = packed
+                        .adjustments
+                        .iter()
+                        .map(|a| nodes::encode(v, a, &side))
+                        .collect();
+                    self.box_end_outside(md.lid, ctx, b, adj);
+                    return Ok(());
                 } else {
                     self.box_end_in(&outer, ctx, Some(b), false)?;
                 }
@@ -2429,8 +2614,22 @@ impl Run<'_, '_> {
         let v = self.v;
         let cur = self.scope_kind()?.unwrap_or(ValueId::UNIT);
         let k = list_of(v, cur).get(5).copied().unwrap_or(ValueId::UNIT);
+        // (the node that defined `k`: None, the scope this node runs in,
+        // whose frames carry their parents but frame 0's)
+        let (k, from) = if k == outer_before_opener(v) {
+            let (x, d) = self.kind_before(None)?;
+            (
+                x,
+                d.map_or(
+                    crate::boxscope::KindFrom::Unknown,
+                    crate::boxscope::KindFrom::Node,
+                ),
+            )
+        } else {
+            (k, crate::boxscope::KindFrom::Here)
+        };
         if k == ValueId::UNIT {
-            return Ok(Mode {
+            let mut md = Mode {
                 m: 1,
                 km: 1,
                 lid: 0,
@@ -2440,12 +2639,17 @@ impl Run<'_, '_> {
                 depth: 0,
                 extra: Vec::new(),
                 vm: 1,
-            });
+            };
+            // (a paragraph left open in the main list, `crate::boxscope`)
+            if crate::boxscope::on() {
+                self.vert_kind(k, &mut md)?;
+            }
+            return Ok(md);
         }
         let xs = list_of(v, k);
         let n = |i: usize| xs.get(i).map_or(0, |&y| int_of(v, y));
         let km = i32::try_from(n(3)).unwrap_or(1);
-        Ok(Mode {
+        let mut md = Mode {
             m: km,
             km,
             lid: n(2),
@@ -2455,7 +2659,17 @@ impl Run<'_, '_> {
             depth: n(4),
             extra: xs.get(6..).map(<[ValueId]>::to_vec).unwrap_or_default(),
             vm: km,
-        })
+        };
+        // (a group in a paragraph left open: the paragraph's state,
+        // `crate::boxscope`)
+        if crate::boxscope::on() {
+            if km == 102 && crate::boxscope::is_global(md.lid) {
+                self.par_kind(k, from, &mut md)?;
+            } else if km.abs() == 1 {
+                self.vert_kind(k, &mut md)?;
+            }
+        }
+        Ok(md)
     }
 
     /// `build_discretionary` (§1119–§1121).
@@ -2675,7 +2889,12 @@ impl Run<'_, '_> {
                 }
                 self.flush_chars(md.lid, &mut out, std::mem::take(&mut raws));
                 self.chars_eff = SF_UNREAD;
+                // (a picture's `\begin` comes back unexpanded and ends the
+                // run of characters: the command loop places it as a
+                // child, or expands it as this would have, `crate::pic`)
+                self.pic_stop = true;
                 self.get_x_token();
+                self.pic_stop = false;
                 self.ck()?;
             }
             if !matches!(
@@ -3299,6 +3518,26 @@ impl Run<'_, '_> {
         }
     }
 
+    /// At the end of the node's text in a character run's lookahead
+    /// (§1038): the word is open, whatever else is (the paragraph may be
+    /// another node's, left open to this one, `crate::boxscope`): the
+    /// next sibling's text read on into now, so the lookahead sees the
+    /// character that follows (its ligature or kern with the last one,
+    /// the right boundary only where none follows). The cut between the
+    /// nodes is the analysis', a bound it does not verify: a cut inside a
+    /// word (huaz's `''.`, cut after `\huqq{az asztal}` where the
+    /// analysis took `\code`'s `\lstinline` for a verbatim run) lost the
+    /// kern pdfTeX puts between `''` and `.`. True when there is input
+    /// now.
+    fn read_on_in_word(&mut self) -> R<bool> {
+        while !self.eof && self.pull()? {
+            if self.has_input() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// `main_loop` (§1034–§1040) from character `ch`: true when the
     /// token after the characters is in `cur` (`goto reswitch`), false
     /// at `goto big_switch` (or at the end of the node's text).
@@ -3531,9 +3770,9 @@ impl Run<'_, '_> {
                         if self.cur.cmd != cmd::SPACER {
                             got = Some(self.cur.chr.cast_unsigned());
                         }
-                    } else if !self.has_input() {
+                    } else if !self.has_input() && !self.read_on_in_word()? {
                         input_done = true;
-                    } else if self.next_ck()? {
+                    } else if self.next_ck_x()? {
                         // (§1038: the characters so far are on the list, the
                         // last one its tail, the space factor after it:
                         // what an expansion here reads, [`Run::chars_live`])
@@ -3790,21 +4029,9 @@ impl Run<'_, '_> {
     ) -> R<()> {
         use phitex_typeset::pack::Report;
         let Some(r) = r else { return Ok(()) };
-        // (the paragraph's first line: read here, where a report names it)
-        let begin = match begin {
-            Begin::No => 0,
-            Begin::Par(m) => {
-                let l = match m {
-                    Some(m) => self.line_of_mark(m)?,
-                    None => 0,
-                };
-                if l > 0 {
-                    l
-                } else {
-                    i64::from(self.input_line_no()?)
-                }
-            }
-        };
+        // (a paragraph's: its line's number is the log's, made when the
+        // log is laid out, [`crate::log::LINE_MARK`])
+        let par = matches!(begin, Begin::Par(_));
         let what = if h { "\\hbox" } else { "\\vbox" };
         let head = match r {
             Report::Underfull(b) => format!("Underfull {what} (badness {b}"),
@@ -3822,7 +4049,7 @@ impl Run<'_, '_> {
         let mut s = format!("{head})");
         // (a paragraph's at its start, where it began; another box's where
         // it ends, as TeX's `line`)
-        let place = if begin > 0 {
+        let place = if par {
             s.push_str(" in paragraph");
             self.last_par_place.clone()
         } else {
@@ -3830,19 +4057,24 @@ impl Run<'_, '_> {
         };
         let place = place.unwrap_or_else(|| self.diag_place());
         self.diag_at(0, &s, place);
-        let line = self.input_line_no()?;
         let output =
             self.cx.op() == self.ops.finish || self.nest.iter().any(|l| l.group == group::OUTPUT);
+        let mut marks = Vec::new();
         let at = if output {
             ") has occurred while \\output is active".to_owned()
-        } else if begin != 0 {
-            format!(
-                ") in {} at lines {}--{line}",
-                if begin > 0 { "paragraph" } else { "alignment" },
-                begin.abs()
-            )
         } else {
-            format!(") detected at line {line}")
+            let first = match begin {
+                Begin::No | Begin::Par(None) => None,
+                Begin::Par(Some(m)) => Some(self.line_for_log(m, &mut marks)?),
+            };
+            let m = self.line_mark();
+            let line = self.line_for_log(m, &mut marks)?;
+            if par {
+                let first = first.unwrap_or_else(|| line.clone());
+                format!(") in paragraph at lines {first}--{line}")
+            } else {
+                format!(") detected at line {line}")
+            }
         };
         let sep = crate::log::BOX_LINE.to_string();
         let mut text = format!("{head}{at}");
@@ -3854,13 +4086,14 @@ impl Run<'_, '_> {
         let shown = self.show_node_lines(&Node::Box(Box::new(b.clone())), side)?;
         text.push_str(&sep);
         text.push_str(&shown.join(&sep));
-        self.log(
+        self.log_lines(
             if h {
                 crate::log::HREPORT
             } else {
                 crate::log::VREPORT
             },
             &text,
+            marks,
         )
     }
 
@@ -4050,7 +4283,18 @@ impl Run<'_, '_> {
         let stk = self.gpar(Par::splittopskip)?;
         let smd = self.ipar(Par::splitmaxdepth)?;
         let pp = self.pack_params(false)?;
-        let r = phitex_typeset::page::vsplit(bx.list, h, smd, stk, false, &pp);
+        let saving = self.ipar(Par::savingvdiscards)? > 0;
+        let r = phitex_typeset::page::vsplit(bx.list, h, smd, stk, saving, &pp);
+        // (e-TeX §977: `split_disc` holds this split's, the last one's gone)
+        if saving
+            || self
+                .get(crate::etex::SPLIT_DISCARDS)?
+                .is_some_and(|x| !list_of(v, x).is_empty())
+        {
+            let d = r.discards.iter().map(|n| nodes::encode(v, n, &side));
+            let d = v.list(d.collect());
+            self.set(crate::etex::SPLIT_DISCARDS, d, true);
+        }
         // (§977's `vpackage(p,h,exactly,split_max_depth)`, after the
         // rest's `vpack`: its badness is `\badness`, its report the log's,
         // §674-§678)
@@ -4072,6 +4316,41 @@ fn fil(order: i64, _w: i32) -> Glue {
         stretch: 65536,
         stretch_order: crate::val::order(order),
         ..Glue::ZERO
+    }
+}
+
+/// A scope kind's parent kind where the opener's own frame 0 does not
+/// carry it ([`Run::leave_scope`]): the kind before the opener, read where
+/// a group closes into it ([`Run::kind_outer`]). No kind is an integer.
+pub(crate) fn outer_before_opener(v: &Values) -> ValueId {
+    v.int(0)
+}
+
+impl Run<'_, '_> {
+    /// The scope kind outside a frame 0 whose parent is not carried
+    /// ([`outer_before_opener`]): the kind that reached its opener, and
+    /// the node that defined that one (None: the kind is the top's or
+    /// its definer unknown). `opener`: the node that defined the kind
+    /// whose parent is asked; None, the scope this node runs in.
+    pub(crate) fn kind_before(
+        &mut self,
+        opener: Option<phitex_defuse::NodeId>,
+    ) -> R<(ValueId, Option<phitex_defuse::NodeId>)> {
+        use phitex_defuse::{At, FieldAt};
+        let f = self.v.field(crate::run::SCOPE_KIND);
+        let opener = if let Some(n) = opener {
+            n
+        } else {
+            let me = self.cx.node();
+            let FieldAt::Def(_, Some(o)) = self.cx.read_at(f, At::Before(me))? else {
+                return Ok((ValueId::UNIT, None));
+            };
+            o
+        };
+        Ok(match self.cx.read_at(f, At::Before(opener))? {
+            FieldAt::Def(x, d) => (x, d),
+            _ => (ValueId::UNIT, None),
+        })
     }
 }
 
@@ -4770,6 +5049,11 @@ fn own_box_needs_depth(v: &Values, own: &[ValueId]) -> bool {
 /// A transition setting the previous depth to `d`.
 fn pd_set(v: &Values, d: i32) -> ValueId {
     v.list(vec![v.int(nodes::T_PD), v.int(i64::from(d))])
+}
+
+/// [`pd_set`], for a list left open (`crate::boxscope`).
+pub(crate) fn pd_value(v: &Values, d: i32) -> ValueId {
+    pd_set(v, d)
 }
 
 /// A transition setting the space factor to `s`.

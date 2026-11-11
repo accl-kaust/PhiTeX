@@ -11,7 +11,7 @@ use crate::obj::{DecodeParms, Obj, PDF_INDIRECT, PDF_OBJ_MAX_DEPTH, PdfOut};
 use crate::parse::{parse_number, parse_unsigned, skip_white};
 use crate::some;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub struct XrefIn {
     pub kind: u8,
     pub field2: u32,
@@ -21,7 +21,7 @@ pub struct XrefIn {
 }
 
 /// A PDF file read for its objects.
-#[derive(Clone)]
+#[derive(PartialEq, Clone)]
 pub struct PdfFile {
     pub ident: Vec<u8>,
     pub data: Arc<[u8]>,
@@ -195,6 +195,28 @@ impl PdfOut {
         }
         self.release_opt(trailer)?;
         self.release_opt(catalog)?;
+        Ok(())
+    }
+
+    /// `pdf_files_close`: the files read, freed as `ht_clear_table`
+    /// passes over `pdf_files` (by hash bucket, then in the order each
+    /// bucket's were opened). An object imported from one is held by its
+    /// cross-reference entry until then, and written when it is let go:
+    /// a stream's indirect `/Length`, replaced by the stream's own, is
+    /// written here, after the fonts. A file opened without a name is in
+    /// no table and is never freed (pdf_open).
+    ///
+    /// # Errors
+    /// As writing an object.
+    pub fn pdf_files_close(&mut self) -> Result<()> {
+        let mut order: Vec<(usize, u32)> = (0..self.files.len() as u32)
+            .filter(|&pf| !self.files[pf as usize].ident.is_empty())
+            .map(|pf| (crate::dpxutil::get_hash(&self.files[pf as usize].ident), pf))
+            .collect();
+        order.sort_by_key(|&(h, _)| h);
+        for (_, pf) in order {
+            self.pdf_file_free(pf)?;
+        }
         Ok(())
     }
 

@@ -38,6 +38,7 @@ mod atoms;
 mod classify;
 mod defs;
 mod hints;
+mod layered;
 mod lex;
 mod report;
 mod table;

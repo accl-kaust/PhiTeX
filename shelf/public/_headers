@@ -12,3 +12,10 @@
 /tl2026/release.json
   ! Cache-Control
   Cache-Control: public, max-age=300
+
+# (a release's own release-<release>.json: its formats added or dropped
+# after it is made, the same name; every other file is named by its
+# content, a pack table changed a new name: release.py write_table)
+/tl2026/release-*
+  ! Cache-Control
+  Cache-Control: public, max-age=300

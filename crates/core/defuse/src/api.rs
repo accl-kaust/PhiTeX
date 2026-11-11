@@ -196,6 +196,35 @@ pub enum Step {
     Eq(ValueId),
     /// The order of an integer against `k`: -1, 0 or 1.
     Cmp(ValueId),
+    /// Whether every element of a list is an element of list `k` (none:
+    /// not a list). A reader that checked something of each element of
+    /// the list it saw, `k`, through this stands while the list loses
+    /// elements or keeps them, and is asked again only for an element it
+    /// never checked: a list grown by appends whose appender checks each
+    /// name in it (an `\xdef` appending to a macro of font names it reads
+    /// as not expanding) is not asked again when an earlier first use of
+    /// a name moves later.
+    Within(ValueId),
+    /// A derived read (docs/spec-relative-counters.md §3), `spec` the
+    /// list `[base, prefix, j, suffix]`: the value of the field named
+    /// `prefix`, the decimal digits of `v + j`, `suffix`, where `v` is the
+    /// integer value of field `base` (0 where it has none); both read at
+    /// the reader's position. Its input is ignored: it is the path's
+    /// first step, and a reader through it, filed on `base` and on the
+    /// named field (a witness), answers the composed look-up on either, so
+    /// a move of `v` whose new name holds what the old one held leaves the
+    /// reader standing. Answered only where a read has a position
+    /// ([`crate::Ctx::read_derived`]); elsewhere it gives none.
+    Derived(ValueId),
+    /// A guarded read's first step (`Ctx::read_path_member`), `spec` the
+    /// list `[list, names, elem]`: the value itself, read by a reader
+    /// whose answer matters only while `elem` is an element of what path
+    /// `names` (its id as an integer) gives of field `list` where the
+    /// reader reads. Checked again, a read whose element has left that
+    /// list holds whatever it answers: the run that made it would not
+    /// look at it (a list of names appended to, each name's meaning
+    /// checked, a name's first append moved past the reader).
+    Member(ValueId),
     Each(PathId),
     Indices(ValueId),
     Keys(ValueId),
@@ -219,6 +248,31 @@ impl PathId {
         PathId(u32::from(p.0))
     }
 }
+
+/// A relation's operation on the value of its field reaching its node
+/// (`Ctx::define_rel`, `Ctx::define_append`): the engine recomputes the
+/// definition in place when that value moves, without running the node.
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Rel {
+    /// The integer reaching it plus a constant.
+    Add(i64),
+    /// The value reaching it with the items of a list (a list value)
+    /// appended, by the client's append ([`Engine::set_append`]).
+    Append(ValueId),
+}
+
+impl std::fmt::Display for Rel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Rel::Add(c) => write!(f, "{c:+}"),
+            Rel::Append(x) => write!(f, "append {}", x.raw()),
+        }
+    }
+}
+
+/// The client's append for [`Rel::Append`]: the value reaching the
+/// relation (`None` where none does) and the items appended; pure.
+pub type AppendFn = Arc<dyn Fn(Option<ValueId>, ValueId, &Values) -> ValueId + Send + Sync>;
 
 /// A client projection: pure, from a value to a small value.
 pub type Projection = Arc<dyn Fn(ValueId, &Values) -> ValueId + Send + Sync>;
@@ -274,7 +328,10 @@ pub trait Operation: Send + Sync {
     /// node is queued or running, and then runs before the loop-back values
     /// are published (a pass's writers: a page's PDF side, the link, the
     /// files): so they run once a pass, not once for every rerun of what
-    /// they read. Nothing an evaluation needs may wait on one.
+    /// they read. One whose definitions are not read back (`read_back`
+    /// false: the output's writers) waits further, for a quiet point whose
+    /// published values start no pass: it runs once an evaluation, after
+    /// its last pass. Nothing an evaluation needs may wait on one.
     fn final_only(&self) -> bool {
         false
     }
@@ -290,6 +347,36 @@ pub trait Operation: Send + Sync {
     /// decision of the layer (`Ctx::settle_now`) re-asks every reader at
     /// once.
     fn settles_at_quiet(&self) -> bool {
+        false
+    }
+
+    /// Whether a change of its definition of field `f` re-asks a reader at
+    /// once though the operation settles at quiet points: a step of a
+    /// serial chain the reader waits on, as [`Ctx::settle_now`] says of a
+    /// whole run (default no).
+    fn settles_now(&self, _f: Field, _values: &Values) -> bool {
+        false
+    }
+
+    /// Whether its nodes' work is at the settling layer's frontier
+    /// (`Ctx::set_frontier`) wherever they stand (default no): one past
+    /// the frontier runs in the order of a node at it. The page loop
+    /// does: it stands after the whole text and folds the piece at its
+    /// hole. A finisher does not: its work is its page, where it stands;
+    /// one past the frontier is a page the loop has not come to again,
+    /// whose run waits for the text and the pages before it.
+    fn works_at_frontier(&self) -> bool {
+        false
+    }
+
+    /// Whether its nodes stand in a chain (default no): each reads what
+    /// the ones before it defined, one after another along the document
+    /// (a page's routine reads the counters and marks the page before's
+    /// left). A value moving down it passes through nodes that are not
+    /// asked yet, so one waits for any node before it in the chain whose
+    /// last commit moved a read (`Node::moves`), not only for those it read
+    /// from (`sched::work`). The order of the runs only.
+    fn chains(&self) -> bool {
         false
     }
 
@@ -322,6 +409,16 @@ pub trait Operation: Send + Sync {
     /// Its scope effect, if known before it runs.
     fn effect(&self, _args: &[ValueId], _values: &Values) -> Effect {
         Effect::None
+    }
+
+    /// Whether a node's text going from `old` to `new` leaves its scope
+    /// effect as its last run found it, for all the text shows: then an
+    /// edit keeps the brackets the node has until it runs, where
+    /// [`Operation::effect`] says others. (A prediction refuted by this
+    /// node's run, filed again at each edit and taken back at each commit,
+    /// each a walk of every reader after it.)
+    fn same_effect(&self, _old: &[ValueId], _new: &[ValueId], _values: &Values) -> bool {
+        false
     }
 
     /// The values the client holds for this operation outside the engine
@@ -491,6 +588,10 @@ pub struct Report {
     pub resumed: u64,
     /// Commits of runs that parked on an answer not in yet.
     pub parks: u64,
+    /// Runs that, before doing anything, waited for a node before them
+    /// that may define what they read (`Ctx::wait_for_definer`), filing
+    /// nothing: waits, not counted in `runs`.
+    pub waits: u64,
     /// Runs stopped at a check (`Ctx::tick`) because a read moved while
     /// they ran: run again on what it moved to.
     pub stopped_stale: u64,
@@ -499,6 +600,9 @@ pub struct Report {
     pub stale_panics: u64,
     pub refuted_by_field: Vec<(Field, u64)>,
     pub rerun_causes: Vec<(NodeId, Cause)>,
+    /// The nodes whose run stood on its last run's reads (counted in
+    /// `runs`; their operation did not run), a node once per such run.
+    pub stood: Vec<NodeId>,
     /// With `profile`: every run's time by node.
     pub run_times: Vec<(NodeId, Duration)>,
     /// The longest chain of nodes each woken by the previous one's commit
@@ -518,11 +622,21 @@ pub struct Report {
     /// through, up to the next definition): a walk's work, which grows
     /// with the readers between two definitions, never with the line.
     pub walked: u64,
+    /// The readers the walks after a change of brackets asked again:
+    /// those in the region where the scopes on its two sides differ that
+    /// read a field whose definitions there or before it the change can
+    /// hide or show.
+    pub scope_asked: u64,
     /// The nodes the line's searches stepped over (a `next` contribution
     /// past the nodes not yet run, the claimed siblings followed), this
     /// evaluation's and the edits' before it: a search that goes on from
     /// where it stopped steps over each node about once.
     pub scanned: u64,
+    /// The interval entries the range index stepped over to find the
+    /// range readers a change re-asks (`index::RangeIndex::holding`): a
+    /// change costs the readers whose interval ends near it, never every
+    /// reader that starts before it.
+    pub range_stepped: u64,
     /// The most commits under way at once: more than one where commits
     /// do not wait on each other (no lock of all the line's).
     pub commits_at_once: u64,
@@ -569,9 +683,6 @@ pub struct Report {
     pub held_deferred: u64,
     pub held_fired: u64,
     pub held_passes: u32,
-    /// Held wakes were dropped past `Limits::settle_passes`: the page
-    /// layer did not settle; the output is the last pass's.
-    pub held_unsettled: bool,
     /// Runs whose commit found every output of the node's run before
     /// equal (its definitions and relations, contributions, output,
     /// brackets and placements): reruns that asked nothing again, the
@@ -604,14 +715,11 @@ pub struct Limits {
     /// error.
     pub final_reruns: u32,
     /// The quiet points of one build at which held wakes may fire
-    /// (`Operation::settles_at_quiet`): past it the wakes still held are
-    /// dropped, the last state is written out, and `Report::held_unsettled`
-    /// says so, for the client to report as latexmk reports "maximum runs
-    /// reached" (the output kept). latexmk's `max_repeat` is 5 whole runs;
-    /// a pass here is finer and at eight threads a book's chapters take
-    /// 8 to 12 of them while the text still speculates ahead of the page
-    /// layer, so the default is 12 until that is settled (measured: 5 made
-    /// every course3 -j8 cold build end unsettled and wrong).
+    /// (`Operation::settles_at_quiet`): reaching it with wakes still held
+    /// is an engine defect, the evaluation's error
+    /// (`EvalError::Unsettled`), never wakes dropped and an output kept
+    /// as if settled. A pass is the layer's feedback from a later wave
+    /// (`sched::same_wave`); a chain of it inside a wave settles in it.
     pub settle_passes: u32,
     /// Runs in the whole evaluation (default none).
     pub total_runs: Option<u64>,
@@ -623,8 +731,12 @@ pub struct Limits {
     /// sixth of it with nodes still outstanding (a wake lost), ends the
     /// evaluation with `EvalError::Stuck`, the nodes queued pending.
     pub stall: Option<Duration>,
-    /// The process's resident memory past which a run reports itself
-    /// stuck (default none; the client measures it, `Ctx::stuck`).
+    /// The evaluation's own value store (`Values::payload_bytes`) past
+    /// which a run reports itself stuck (default none; the client
+    /// measures it, `Ctx::stuck`). The store's payload, not the
+    /// process's resident memory: several builds in one process (a test
+    /// suite's, a host's) each hold their own, and one past its limit is
+    /// that build's, never its neighbours'.
     pub memory_bytes: Option<u64>,
     /// The value store's payload at which the evaluation stops every
     /// worker at the end of its run and collects (`Engine::collect`;
@@ -672,6 +784,14 @@ pub enum EvalError {
         op: &'static str,
         why: String,
     },
+    /// Wakes still held at `Limits::settle_passes` quiet points: an
+    /// engine defect, never an output written as if settled. The first
+    /// few readers still held.
+    Unsettled {
+        passes: u32,
+        held: usize,
+        nodes: Vec<NodeId>,
+    },
 }
 
 impl std::fmt::Display for EvalError {
@@ -683,6 +803,12 @@ impl std::fmt::Display for EvalError {
             EvalError::Deadline => write!(f, "deadline"),
             EvalError::Stuck { node: Some(n), op, why } => write!(f, "stuck: node {} ({op}): {why}", n.0),
             EvalError::Stuck { node: None, why, .. } => write!(f, "stuck: {why}"),
+            EvalError::Unsettled { passes, held, .. } => {
+                write!(
+                    f,
+                    "the page layout did not settle in {passes} passes ({held} wakes still held)"
+                )
+            }
         }
     }
 }

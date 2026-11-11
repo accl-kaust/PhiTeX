@@ -7,6 +7,8 @@
 // fetched through `load`, the pair chosen handed to `pick`. No dependency
 // on the viewer.
 
+import { html, svg } from "./html.ts";
+
 /** A commit, newest first in topological order (`phitex watch`'s `diff_log` op gives them). */
 export interface Commit {
   id: string;
@@ -87,18 +89,19 @@ export function ago(t: number, now = Date.now() / 1000): string {
   return "just now";
 }
 
-const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 
 const ROW = 24;
 const LANE = 12;
 const COLORS = ["#3e63dd", "#e5484d", "#30a46c", "#f5a524", "#8e4ec6", "#12a594", "#d6409f", "#978365"];
 
 export const COMMITS_CSS = `
-.phx-commits { font: 12px system-ui, sans-serif; overflow: auto; }
+.phx-commits { font: 12px system-ui, sans-serif; overflow: auto; user-select: none; -webkit-user-select: none; }
+.phx-commits .row.drag { background: rgba(62,99,221,.12); }
 .phx-commits .row { display: flex; align-items: center; height: ${ROW}px; cursor: pointer; white-space: nowrap; }
 .phx-commits .row:hover { background: rgba(127,127,127,.12); }
 .phx-commits .row.inrange { background: rgba(62,99,221,.10); }
 .phx-commits .row.from, .phx-commits .row.to { background: rgba(62,99,221,.22); }
+.phx-commits .row.drag { background: rgba(62,99,221,.16); }
 .phx-commits svg { flex: none; overflow: visible; }
 .phx-commits .txt { overflow: hidden; text-overflow: ellipsis; padding-left: 4px; }
 .phx-commits .sha { font: 11px ui-monospace, monospace; opacity: .65; margin-right: 6px; }
@@ -121,8 +124,11 @@ const KINDS = new Set(["head", "branch", "remote", "tag"]);
 export interface CommitsHost {
   /** Commits `skip`.. (at most `limit`), or an error to show. */
   load(skip: number, limit: number): Promise<Commit[] | string>;
-  /** Diff `to` (null: the working tree) against `from` (commit ids). */
+  /** Diff `to` (null: the working tree) against `from` (commit ids): the pair confirmed (Compare, Enter). */
   pick(from: string, to: string | null): void;
+  /** The pair marked so far (clicks, a drag, a double-click), not yet confirmed, with each end's
+   * words ("bcf5029 first draft", "the working tree"): the host's From and To fields. */
+  marked?(from: string | null, to: string | null, words: { from: string; to: string }): void;
 }
 
 /** A commit graph in `root`. */
@@ -136,6 +142,8 @@ export class Commits {
   /** The pair chosen (ids; `to` null: the working tree). */
   private from: string | null = null;
   private to: string | null = null;
+  /** A range's first end, clicked (a row; -1 the working tree), the second not yet: the rows to the pointer marked as it moves. */
+  private anchor: number | null = null;
   private page = 200;
 
   constructor(root: HTMLElement, host: CommitsHost) {
@@ -144,7 +152,18 @@ export class Commits {
     this.el.className = "phx-commits";
     root.append(this.el);
     this.el.addEventListener("click", (e) => this.click(e as MouseEvent));
+    // (a drag from one row to another: the range between them, the older end From, the newer To
+    // (the working tree's row: the files as they are); text never selected, a shift-click's either)
+    this.el.addEventListener("pointerdown", (e) => this.dragFrom(e));
+    // (a first end clicked: the rows from it to the pointer marked, as an airline's dates are)
+    this.el.addEventListener("pointermove", (e) => {
+      if (this.anchor === null || this.drag) return;
+      const over = this.rowAt(e.clientX, e.clientY);
+      if (over !== null) this.paintDrag({ from: this.anchor, over, moved: over !== this.anchor });
+    });
     this.el.addEventListener("dblclick", (e) => {
+      this.anchor = null;
+      this.paintDrag();
       const c = this.at(e.target as HTMLElement);
       // (a commit against its first parent: a merge's, what it brought)
       if (c && c.parents.length) this.choose(c.parents[0], c.id);
@@ -188,11 +207,39 @@ export class Commits {
     return this.load();
   }
 
-  private choose(from: string, to: string | null): void {
+  /** Mark a pair: nothing compared until it is confirmed (run). */
+  private choose(from: string | null, to: string | null): void {
     this.from = from;
     this.to = to;
     this.render();
-    this.host.pick(from, to);
+    const word = (rev: string | null, none: string) => {
+      if (!rev) return none;
+      const c = this.commits[this.find(rev)];
+      return c ? `${c.short} ${c.subject}` : rev.slice(0, 7);
+    };
+    this.host.marked?.(from, to, { from: word(from, ""), to: word(to, "the working tree") });
+  }
+
+  /** An end cleared (the host's ×): From, none marked; To, the working tree again. */
+  clear(end: "from" | "to"): void {
+    this.anchor = null;
+    this.paintDrag();
+    if (end === "from") this.choose(null, null);
+    else this.choose(this.from, null);
+  }
+
+  /** The range between two rows (-1 the working tree), whichever order: the older end From, the newer To. */
+  private range(a: number, b: number): void {
+    const [newer, older] = a < b ? [a, b] : [b, a];
+    if (older < 0) return;
+    this.choose(this.commits[older].id, newer < 0 ? null : this.commits[newer].id);
+  }
+
+  /** The pair marked, compared (the host's Compare, Enter); false if no From is marked yet. */
+  run(): boolean {
+    if (!this.from) return false;
+    this.host.pick(this.from, this.to);
+    return true;
   }
 
   private at(t: HTMLElement): Commit | undefined {
@@ -207,34 +254,99 @@ export class Commits {
     return this.commits.findIndex((c) => c.id.startsWith(rev) || c.refs.some((r) => r.name === rev));
   }
 
+  /** A drag across the rows: where it began (a row's index; -1 the working tree), and whether it left that row. */
+  private drag: { from: number; over: number; moved: boolean } | null = null;
+  /** A drag just chose: the click that ends it is not a click. */
+  private dragged = false;
+
+  /** The row under a point: a commit's index, -1 the working tree's, null none. */
+  private rowAt(x: number, y: number): number | null {
+    const root = this.el.getRootNode() as Document | ShadowRoot;
+    const row = (root.elementFromPoint?.(x, y) ?? document.elementFromPoint(x, y))?.closest<HTMLElement>(".row");
+    if (!row || !this.el.contains(row)) return null;
+    return row.dataset.i === undefined ? -1 : Number(row.dataset.i);
+  }
+
+  private dragFrom(e: PointerEvent): void {
+    if (e.button !== 0) return;
+    const at = this.rowAt(e.clientX, e.clientY);
+    if (at === null) return;
+    // (no text selection begun, a shift-click's extended)
+    e.preventDefault();
+    this.drag = { from: at, over: at, moved: false };
+    const move = (m: PointerEvent) => {
+      const over = this.rowAt(m.clientX, m.clientY);
+      if (!this.drag || over === null || over === this.drag.over) return;
+      this.drag.over = over;
+      // (held once it leaves its row, not before: a captured pointer's click goes to the list,
+      // not the row clicked, and a click or shift-click would choose nothing)
+      if (!this.drag.moved && over !== this.drag.from) this.el.setPointerCapture(m.pointerId);
+      this.drag.moved ||= over !== this.drag.from;
+      this.paintDrag();
+    };
+    const up = () => {
+      this.el.removeEventListener("pointermove", move);
+      this.el.removeEventListener("pointerup", up);
+      const d = this.drag;
+      this.drag = null;
+      this.paintDrag();
+      if (!d?.moved) return;
+      this.dragged = true;
+      // (newest first: the higher index the older end; the working tree (-1) the newest)
+      this.anchor = null;
+      this.range(d.from, d.over);
+    };
+    this.el.addEventListener("pointermove", move);
+    this.el.addEventListener("pointerup", up);
+  }
+
+  /** The rows a drag spans, marked as it goes. */
+  private paintDrag(d = this.drag): void {
+    const [a, b] = d ? [Math.min(d.from, d.over), Math.max(d.from, d.over)] : [0, -2];
+    for (const r of this.el.querySelectorAll<HTMLElement>(".row")) {
+      const i = r.dataset.i === undefined ? -1 : Number(r.dataset.i);
+      r.classList.toggle("drag", !!d?.moved && i >= a && i <= b);
+    }
+  }
+
   private click(e: MouseEvent): void {
+    if (this.dragged) return void (this.dragged = false);
     const t = e.target as HTMLElement;
     if (t.closest("[data-more]")) return void this.load();
     const row = t.closest<HTMLElement>(".row");
     if (!row || e.detail > 1) return;
-    const c = this.at(t);
+    const c = this.at(t), i = c ? this.commits.indexOf(c) : -1;
     if (e.shiftKey) {
       // (To: this commit or the working tree; From stays if it is older, else To's first parent)
+      this.anchor = null;
       if (!c) return this.choose(this.from ?? "HEAD", null);
-      const fi = this.find(this.from), ti = this.commits.indexOf(c);
-      const from = fi > ti ? this.commits[fi].id : (c.parents[0] ?? c.id);
+      const fi = this.find(this.from);
+      const from = fi > i ? this.commits[fi].id : (c.parents[0] ?? c.id);
       return this.choose(from, c.id);
     }
-    // (From: this commit; To stays if it is newer, else the working tree)
-    if (!c) return;
-    const ti = this.find(this.to), fi = this.commits.indexOf(c);
-    this.choose(c.id, this.to && ti >= 0 && ti < fi ? this.commits[ti].id : null);
+    // (a range as an airline's dates: the first click one end (From, to the working tree till
+    // the second), the second the other, whichever is older From; a third begins again)
+    if (this.anchor === null || this.anchor === i) {
+      this.anchor = this.anchor === i ? null : i;
+      if (this.anchor !== null && c) this.choose(c.id, null);
+      this.paintDrag();
+      return;
+    }
+    const a = this.anchor;
+    this.anchor = null;
+    this.paintDrag();
+    this.range(a, i);
   }
 
   private render(): void {
     const scroll = this.el.scrollTop;
-    this.el.innerHTML = this.html();
+    this.el.replaceChildren(this.html());
     this.el.scrollTop = scroll;
   }
 
-  private html(): string {
-    if (this.error) return `<div class="note err">${esc(this.error)}</div>`;
-    if (!this.commits.length) return `<div class="note">${this.loading ? "reading the history…" : "no commits"}</div>`;
+  private html(): DocumentFragment {
+    if (this.error) return html`<div class="note err">${this.error}</div>`;
+    if (!this.commits.length) return html`<div class="note">${this.loading ? "reading the history…" : "no commits"}</div>`;
     const { rows, width } = layout(this.commits);
     const W = (width + 1) * LANE;
     const x = (l: number) => LANE / 2 + l * LANE + 2;
@@ -242,21 +354,21 @@ export class Commits {
     const ti = this.to ? this.find(this.to) : -1;
     const tree = this.from !== null && !this.to;
     // (the working tree, above all: the range from To down to From marked)
-    const top = `<div class="row${tree ? " to" : ""}" title="Shift-click: diff the working tree"><svg width="${W}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 4}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${tree ? '<span class="end">TO</span>' : ""}<i>the working tree</i></span></div>`;
+    const top = html`<div class="row${tree ? " to" : ""}" title="Shift-click: To, the files as they are"><svg width="${W}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 4}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${tree ? html`<span class="end">TO</span>` : ""}<i>the working tree</i></span></div>`;
     const lines = this.commits.map((c, i) => {
       const r = rows[i];
       const col = COLORS[r.lane % COLORS.length];
       // (the lines down to the next row, over its top half)
-      const svg = r.down.map(([a, b]) => `<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
-      svg.push(c.parents.length > 1 ? `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : `<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
-      const pills = c.refs.map((f) => `<span class="pill ${KINDS.has(f.kind) ? f.kind : "branch"}">${esc(f.name)}</span>`).join("");
+      const marks = r.down.map(([a, b]) => svg`<path d="M${x(a)} ${ROW / 2} C${x(a)} ${ROW} ${x(b)} ${ROW} ${x(b)} ${ROW * 1.5}" stroke="${COLORS[b % COLORS.length]}" fill="none" stroke-width="1.6"/>`);
+      marks.push(c.parents.length > 1 ? svg`<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4.5" fill="Canvas" stroke="${col}" stroke-width="2"/>` : svg`<circle cx="${x(r.lane)}" cy="${ROW / 2}" r="4" fill="${col}"/>`);
+      const pills = c.refs.map((f) => html`<span class="pill ${KINDS.has(f.kind) ? f.kind : "branch"}">${f.name}</span>`);
       const lo = this.to ? ti : -1;
       const cls = i === fi ? " from" : i === ti ? " to" : fi >= 0 && i > lo && i < fi ? " inrange" : "";
-      const end = i === fi ? '<span class="end">FROM</span>' : i === ti ? '<span class="end">TO</span>' : "";
+      const end = i === fi ? html`<span class="end">FROM</span>` : i === ti ? html`<span class="end">TO</span>` : "";
       const title = `${c.subject}\n${c.author}, ${new Date(c.time * 1000).toLocaleString()}\nclick: From · shift-click: To · double-click: against its first parent`;
-      return `<div class="row${cls}" data-i="${i}" title="${esc(title)}"><svg width="${W}" height="${ROW}">${svg.join("")}</svg><span class="txt">${end}<span class="sha">${esc(c.short)}</span>${pills}${c.parents.length > 1 ? "<i>merge:</i> " : ""}${esc(c.subject)}<span class="who">${esc(c.author)}, ${ago(c.time)}</span></span></div>`;
+      return html`<div class="row${cls}" data-i="${i}" title="${title}"><svg width="${W}" height="${ROW}">${marks}</svg><span class="txt">${end}<span class="sha">${c.short}</span>${pills}${c.parents.length > 1 ? html`<i>merge:</i> ` : ""}${c.subject}<span class="who">${c.author}, ${ago(c.time)}</span></span></div>`;
     });
-    const more = this.more ? `<div class="note"><button type="button" data-more>${this.loading ? "reading…" : "more…"}</button></div>` : "";
-    return top + lines.join("") + more;
+    const more = this.more ? html`<div class="note"><button type="button" data-more>${this.loading ? "reading…" : "more…"}</button></div>` : "";
+    return html`${top}${lines}${more}`;
   }
 }

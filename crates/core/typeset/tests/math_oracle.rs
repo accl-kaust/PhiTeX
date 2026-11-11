@@ -5,7 +5,7 @@
 
 #![allow(clippy::many_single_char_names, clippy::too_many_lines)]
 
-mod common;
+use crate::common;
 
 use common::{FontSet, cases, parse_dimen, parse_list, set_font_names, show_list};
 use phitex_typeset::fonts::FontId;

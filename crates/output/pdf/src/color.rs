@@ -20,6 +20,15 @@ struct ColorStack {
     page_start: bool,
 }
 
+/// A colour stack a page begins from, named not as it was made
+/// ([`crate::PdfState::start_page_colors`]): its number, the entries
+/// below its current value, that value (`None`: the value the stack was
+/// made with; an empty text, a null string).
+pub type PageColor = (usize, Vec<Option<Vec<u8>>>, Option<Vec<u8>>);
+
+/// A color stack's page stack and current page value ([`Stacks::page_state`]).
+pub(crate) type StackState = (Vec<Option<Vec<u8>>>, Option<Vec<u8>>);
+
 /// The color stacks and the position and matrix stacks.
 #[derive(Clone, Default)]
 pub(crate) struct Stacks {
@@ -73,6 +82,24 @@ impl Stacks {
                 literal_mode: LiteralMode::DirectAlways,
                 page_start: true,
             });
+        }
+    }
+
+    /// The page values a page begins from, each stack named not as it
+    /// was made: its entries below and its current value (`None`: the
+    /// value it was made with; an empty text, a null string).
+    pub(crate) fn start_page(&mut self, st: &[PageColor]) {
+        self.init();
+        for (n, stack, cur) in st {
+            if let Some(c) = self.list.get_mut(*n) {
+                let init = c.page_current.clone();
+                let val = |e: &Option<Vec<u8>>| match e {
+                    None => init.clone(),
+                    Some(t) => nonempty(t),
+                };
+                c.page_stack = stack.iter().map(val).collect();
+                c.page_current = val(cur);
+            }
         }
     }
 
@@ -204,6 +231,15 @@ impl Stacks {
     /// Each color stack's page stack.
     pub(crate) fn page_stacks(&self) -> Vec<Vec<Option<Vec<u8>>>> {
         self.list.iter().map(|c| c.page_stack.clone()).collect()
+    }
+
+    /// Each color stack's page stack and current page value: what a page
+    /// leaves the next one of the stacks.
+    pub(crate) fn page_state(&self) -> Vec<StackState> {
+        self.list
+            .iter()
+            .map(|c| (c.page_stack.clone(), c.page_current.clone()))
+            .collect()
     }
 
     /// Each color stack's page stack depth.

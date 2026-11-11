@@ -257,11 +257,17 @@ pub struct PageRecord {
     pre_bare: String,
     depths: Vec<usize>,
     below: bool,
+    /// Whether the page left the color stacks' page values as it found
+    /// them ([`PageRecord::keeps_colors`]).
+    keeps_colors: bool,
     pre_p: Option<crate::PdfParams>,
     post_key: String,
     /// ... and after the page.
     post: Option<Box<Scratch>>,
-    /// The content stream object after its header line and `<<`.
+    /// The content stream object after its header line and `<<`; empty
+    /// where the walk left it uncompressed (`shown` is the content: the
+    /// replay compresses it, as it does a content whose font numbers
+    /// differ).
     blob: Vec<u8>,
     events: Vec<FontEv>,
     /// The fonts the page's resources list.
@@ -316,10 +322,25 @@ impl PageRecord {
             .map(|_| self.post_key.as_str())
     }
 
+    /// Whether the page left the color stacks' page values (each stack's
+    /// page stack and its current value) as they were where it began: a
+    /// page after it begins with the colors this one began with. A page
+    /// that pushes a color it pops on a later page does not.
+    #[must_use]
+    pub fn keeps_colors(&self) -> bool {
+        self.keeps_colors
+    }
+
     /// Whether the page can be replayed.
     #[must_use]
     pub fn simple(&self) -> bool {
         self.simple
+    }
+
+    /// The page's content stream, uncompressed, as its walk wrote it.
+    #[must_use]
+    pub fn content(&self) -> &[u8] {
+        &self.shown.0
     }
 }
 
@@ -335,6 +356,9 @@ pub(crate) struct Recording {
     pub pre_nums: [usize; 3],
     /// Where the content object's bytes begin and end in `out`.
     pub blob: Option<(usize, usize)>,
+    /// Whether the content stream was left uncompressed in `out` (the
+    /// replay compresses it: [`PageRecord`]'s blob is empty then).
+    pub deferred: bool,
     /// The font numbers written in the content ([`PageRecord`]'s).
     pub holes: Vec<(usize, usize, FontId)>,
     pub font_list: Vec<FontId>,
@@ -391,6 +415,12 @@ impl PdfState {
         let pre = self.pre_key();
         let pre_bare = self.pre_key_with(true);
         let depths = self.stacks.page_depths();
+        // (as the walk finds them: the stacks made at their first use)
+        let colors_before = {
+            let mut s = self.stacks.clone();
+            s.used();
+            s.page_state()
+        };
         let shared = self.sys_obj_ptr();
         // (a link running across the page's start: its objects are the
         // page before's, numbered where that page was placed)
@@ -426,11 +456,15 @@ impl PdfState {
         let rec = self.rec.take().unwrap_or_default();
         let pre_p = Some(self.p.clone());
         let below = self.stacks.below;
+        // (an error met on the way, an image or form a page written apart
+        // has not: the walk went on past it, its colours as they are)
+        let keeps_colors = self.stacks.page_state() == colors_before;
         let mut pr = PageRecord {
             pre,
             pre_bare,
             depths,
             below,
+            keeps_colors,
             pre_p,
             shared,
             pre_nums: rec.pre_nums,
@@ -452,7 +486,9 @@ impl PdfState {
             && !link_at_start
             && self.link_stack.is_empty();
         if pr.simple {
-            pr.blob = self.out[a..b].to_vec();
+            if !rec.deferred {
+                pr.blob = self.out[a..b].to_vec();
+            }
             pr.post = Some(Box::new(self.scratch()));
             pr.font_list = rec.font_list;
             pr.chars = page_chars;
@@ -730,7 +766,7 @@ impl PdfState {
             })
             .collect();
         let report = (!subs.is_empty()).then(|| format!("{} font numbers rewritten", subs.len()));
-        if subs.is_empty() {
+        if subs.is_empty() && !rec.blob.is_empty() {
             self.print(&rec.blob);
         } else {
             self.take_parts(parts);

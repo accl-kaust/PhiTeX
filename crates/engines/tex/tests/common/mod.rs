@@ -28,10 +28,24 @@ fn kpse() -> &'static Mutex<Option<phitex_kpse::Kpse>> {
 /// Files from `dir` (printed as `./name`), fonts through kpathsea.
 pub fn finder(dir: &Path) -> Finder {
     let dir = dir.to_path_buf();
-    Arc::new(move |name: &str| {
+    Arc::new(move |key: &str| {
+        // (the font side's lookup in the format its extension names,
+        // TeX's own in the `tex` format, `phitex_tex::FONT_KEY`)
+        let (name, font) = match phitex_tex::font_name(key) {
+            Some(n) => (n, true),
+            None => (key, false),
+        };
         let p = dir.join(name);
         if p.is_file() {
             return Some((format!("./{name}"), std::fs::read(&p).ok()?));
+        }
+        if !font {
+            let mut k = kpse().lock().ok()?;
+            let path = k
+                .as_mut()?
+                .find_file(name.as_bytes(), phitex_kpse::Format::Tex, false)?;
+            let path = String::from_utf8(path).ok()?;
+            return Some((path.clone(), std::fs::read(&path).ok()?));
         }
         if let Some((font, dpi)) = phitex_kpse::pk_name(name) {
             let mut k = kpse().lock().ok()?;
@@ -230,7 +244,7 @@ pub fn edit_cost_failures(b: &Build, touched: u64, before: &[u64]) -> Vec<String
         }
     }
     #[allow(clippy::cast_precision_loss)]
-    let per_node = b.stats.runs as f64 / b.stats.nodes_run.max(1) as f64;
+    let per_node = per_node(b);
     if per_node > 1.1 {
         f.push(format!("runs a node {per_node:.2}"));
     }
@@ -259,6 +273,9 @@ pub fn assert_edit_cost(name: &str, b: &Build, touched: u64, before: &[u64]) {
 pub struct Census {
     pub name: String,
     pub cold_cp: usize,
+    /// The cold build's page chain ([`Build::page_chain`]) and pages.
+    pub cold_page_chain: usize,
+    pub cold_pages: usize,
     pub cold_rounds: u64,
     pub cold_runs_per_node: f64,
     pub step_links: usize,
@@ -273,8 +290,12 @@ pub struct Census {
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn per_node(b: &Build) -> f64 {
-    b.stats.runs as f64 / (b.stats.nodes_run.max(1) as f64)
+/// Runs a node, a resumption not counted: a run going on from where
+/// its node parked, woken by the answer it parked on (TeX's page builder
+/// going on after each paragraph, `Stats::resumptions`), redoes nothing.
+/// Since 95f39396e `Stats::runs` counts them; this measures reruns.
+pub fn per_node(b: &Build) -> f64 {
+    b.stats.runs.saturating_sub(b.stats.resumptions) as f64 / (b.stats.nodes_run.max(1) as f64)
 }
 
 fn causes(b: &Build) -> String {
@@ -290,6 +311,7 @@ impl Census {
     /// edit's.
     pub fn take(name: &str, b: &mut Build, new: &str) -> Census {
         let cold_cp = b.stats.critical_path.unwrap_or(usize::MAX);
+        let (cold_page_chain, cold_pages) = (b.page_chain(), b.pages().len());
         let cold_rounds = b.stats.loop_rounds;
         let cold_runs_per_node = per_node(b);
         let step_links = b.page_step_links().len();
@@ -315,6 +337,8 @@ impl Census {
         Census {
             name: name.to_owned(),
             cold_cp,
+            cold_page_chain,
+            cold_pages,
             cold_rounds,
             cold_runs_per_node,
             step_links: step_links + b.page_step_links().len(),
@@ -333,15 +357,26 @@ impl Census {
         }
     }
 
-    /// What breaks the bar: critical path at most 6, no link between
+    /// What breaks the bar: the cold page chain at most 2 a page, the
+    /// edit's critical path at most 6, no link between
     /// two page steps, at most 1.1 runs a node, at most 2 loop rounds
     /// cold and 1 (no round after the first) on a word edit, no
     /// undeclared definition, no regime violation.
     pub fn failures(&self) -> Vec<String> {
         let mut f = Vec::new();
         let n = &self.name;
-        if self.cold_cp > 6 {
-            f.push(format!("{n}: cold critical path {}", self.cold_cp));
+        // (cold, the page chain: each page's loop rest waits for the
+        // routine of the page before it, no fold past a give-back not
+        // known, so it grows with the pages, the same in DVI and PDF: at
+        // most a rest and a routine a page, para400 127 for 66 pages in
+        // both, mc 83754. The critical path traced from the node that
+        // committed last is no measure of it: DVI's last, its dvi node,
+        // is woken by nothing, 1; PDF's is on the chain, 128)
+        if self.cold_page_chain > 2 * self.cold_pages {
+            f.push(format!(
+                "{n}: cold page chain {} for {} pages (> 2 a page)",
+                self.cold_page_chain, self.cold_pages
+            ));
         }
         if self.edit_cp > 6 {
             f.push(format!("{n}: edit critical path {}", self.edit_cp));
@@ -378,13 +413,15 @@ impl Census {
 pub fn census_table(rows: &[Census]) -> String {
     use std::fmt::Write as _;
     let mut t = String::from(
-        "doc | cp cold | cp edit | step links | runs/node cold | runs/node edit | rounds cold | rounds edit | undeclared | violations | edit nodes | edit page steps\n",
+        "doc | page chain cold (pages) | cp cold | cp edit | step links | runs/node cold | runs/node edit | rounds cold | rounds edit | undeclared | violations | edit nodes | edit page steps\n",
     );
     for r in rows {
         let _ = writeln!(
             t,
-            "{} | {} | {} | {} | {:.2} | {:.2} | {} | {} | {} | {} | {} | {}",
+            "{} | {} ({}) | {} | {} | {} | {:.2} | {:.2} | {} | {} | {} | {} | {} | {}",
             r.name,
+            r.cold_page_chain,
+            r.cold_pages,
             r.cold_cp,
             r.edit_cp,
             r.step_links,

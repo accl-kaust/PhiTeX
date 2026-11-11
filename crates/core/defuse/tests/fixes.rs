@@ -312,12 +312,11 @@ impl Operation for Def {
     }
 }
 
-/// The records of a node's earlier runs are dropped where the line is
-/// quiet once they outnumber those standing: what is filed stays within
-/// a bound of what stands, and an evaluation that swept ends with only
-/// standing records.
+/// A node's readers are its record's reads: none of its earlier runs'
+/// stands anywhere after a run of it, however often it runs again, and
+/// the segments name each field read once.
 #[test]
-fn reader_records_of_earlier_runs_are_swept_at_quiet_points() {
+fn reader_records_of_earlier_runs_are_not_kept() {
     let e = Engine::new();
     let v = e.values();
     let def = e.register(Arc::new(Def));
@@ -327,29 +326,21 @@ fn reader_records_of_earlier_runs_are_swept_at_quiet_points() {
     let d = e.push(u, def, vec![x.0, v.int(0)]);
     let r = e.push(u, rd, vec![x.0, v.int(3000)]);
     e.evaluate(2).unwrap();
-    let mut sweeps = 0;
     for i in 1..80 {
         e.replace(d, def, vec![x.0, v.int(i)]);
-        let rep = e.evaluate(2).unwrap();
+        e.evaluate(2).unwrap();
         assert_eq!(e.output(r), Some(v.int(i)));
-        let (filed, standing, _) = e.reader_records();
-        if rep.readers_swept > 0 {
-            sweeps += 1;
-            assert_eq!(filed, standing, "after the sweep of evaluation {i}");
-        }
-        assert!(
-            filed <= standing + (1 << 16) + 2 * 3001,
-            "{filed} filed for {standing} standing"
-        );
+        let (filed, standing, fields) = e.reader_records();
+        assert_eq!(filed, standing, "evaluation {i}");
+        assert!(fields <= 3001, "{fields} fields named");
     }
-    assert!(sweeps >= 2, "{sweeps} sweeps");
     assert!(e.check_invariants().is_empty());
 }
 
-/// A node run again and again files its reads anew each time; the records
-/// of its earlier runs go as a list runs out of room, so what a segment
-/// holds stays a few times what stands (the course's segments held ten
-/// times their readers, growing with every run: 9 M records, 1 GB).
+/// A node run again and again files its reads anew each time; what a
+/// segment holds stays what stands (the course's segments held ten times
+/// their readers when they kept reader records, growing with every run:
+/// 9 M records, 1 GB).
 #[test]
 fn reader_records_of_earlier_runs_do_not_pile_up() {
     let e = Engine::new();
@@ -368,7 +359,7 @@ fn reader_records_of_earlier_runs_do_not_pile_up() {
     }
     let (filed, standing, _) = e.reader_records();
     assert!(standing >= 101, "{standing}");
-    assert!(filed <= 8 * standing, "{filed} records filed for {standing} standing");
+    assert_eq!(filed, standing, "{filed} records filed for {standing} standing");
     assert!(e.check_invariants().is_empty());
 }
 

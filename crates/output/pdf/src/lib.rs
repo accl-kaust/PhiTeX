@@ -84,6 +84,7 @@
 
 mod cffstd;
 mod color;
+pub use color::PageColor;
 mod digest;
 pub mod enc;
 mod finish;
@@ -94,6 +95,7 @@ mod encodings;
 mod epdffont;
 mod font;
 mod image;
+pub mod lr;
 mod macnames;
 pub mod map;
 mod marks;
@@ -160,7 +162,7 @@ use phitex_typeset::arith::Scaled;
 use phitex_typeset::fonts::FontId;
 use phitex_typeset::node::BoxNode;
 
-pub use crate::image::{ImageSpec, PageBox, XImageInfo};
+pub use crate::image::{ImageSpec, PageBox, XImageInfo, open_doc};
 use crate::map::MapEntry;
 use crate::num::ONE_HUNDRED_INCH;
 pub use crate::objects::ObjBody;
@@ -301,6 +303,16 @@ pub struct PdfParams {
     /// `output_file_name`, e.g. `doc.pdf`: the `/ID` is the MD5 of the
     /// date and this name (`print_ID`, `utils.c`).
     pub output_file_name: String,
+}
+
+impl PdfParams {
+    /// pdfTeX's `get_ptex_use_underscore`: `/PTEX_Fullbanner` and an
+    /// included PDF's `/PTEX_FileName` (for `.`) under
+    /// `\\pdfptexuseunderscore`, and always in a PDF 2.0 file.
+    #[must_use]
+    pub fn ptex_underscore(&self) -> bool {
+        self.ptex_use_underscore > 0 || self.major_version >= 2
+    }
 }
 
 impl Default for PdfParams {
@@ -853,6 +865,9 @@ pub struct PdfState {
     cur_page_height: Scaled,
     cur_s: i32,
     doing_leaders: bool,
+    /// e-TeX's `cur_dir`: 1 inside right-to-left text (TeX--XeT); 0
+    /// between boxes shipped.
+    cur_dir: u8,
     /// `is_shipping_page`.
     shipping_page: bool,
     /// `pdf_cur_form` and the form's size.
@@ -904,6 +919,17 @@ pub struct PdfState {
     fixed_gen_tounicode: i32,
     // the font files' state across fonts
     subset_tags: BTreeSet<[u8; 6]>,
+    /// The font files embedded, in the order written, each whole or a
+    /// subset: what pdfTeX says of them on the terminal and in the log
+    /// (`<cmr10.pfb>`, `<<x.pfb>>`); written by [`PdfState::tail`], read
+    /// by [`Layout::font_files`], never part of the digest.
+    pub(crate) font_files: Vec<(Vec<u8>, bool)>,
+    /// The files pdfTeX reads when a font is first used, by the page
+    /// being written (0 the first): the font map (`None`), then each
+    /// encoding file once (`{PATH}` on the terminal and in the log, in
+    /// that page's `[N...]`); read by [`Layout::font_reads`], never part
+    /// of the digest.
+    pub(crate) font_reads: Vec<(i64, Option<Vec<u8>>)>,
     last_arg_other_subr3: i32,
     // `\pdfinfo` and friends, concatenated
     info_toks: Option<digest::Toks>,
@@ -944,6 +970,9 @@ pub struct PdfState {
     /// ([`PdfState::defer_streams`]), and the parts so far.
     defer: bool,
     pending: Vec<Part>,
+    /// `\immediate\pdfobj`'s objects held, not written, while a page's
+    /// file of its own is linked ([`PdfState::hold_writes`]).
+    held: Option<Vec<usize>>,
 }
 
 impl PdfState {
@@ -1005,6 +1034,7 @@ impl PdfState {
             cur_page_height: 0,
             cur_s: -1,
             doing_leaders: false,
+            cur_dir: 0,
             shipping_page: false,
             cur_form: 0,
             xform_height: 0,
@@ -1036,6 +1066,8 @@ impl PdfState {
             glyph_unicode: digest::TMap::new("glyph_unicode"),
             fixed_gen_tounicode: 0,
             subset_tags: BTreeSet::new(),
+            font_files: Vec::new(),
+            font_reads: Vec::new(),
             last_arg_other_subr3: 3,
             info_toks: None,
             catalog_toks: None,
@@ -1061,6 +1093,7 @@ impl PdfState {
             tap: tap::Tap::default(),
             defer: false,
             pending: Vec::new(),
+            held: None,
         }
     }
 

@@ -32,6 +32,10 @@ use crate::watch::{Applied, Edits, diagnostics, splice_utf16, tex_text, viewer_p
 /// host's, each as it happens.
 type Emit = Arc<Mutex<Box<dyn FnMut(Value) + Send>>>;
 
+/// The work a step gives the SyncTeX file before it hands back to its
+/// host ([`Document::step`]).
+const SYNCTEX_SLICE: std::time::Duration = std::time::Duration::from_millis(8);
+
 /// A session with its viewer and the editor's buffers.
 pub struct Document {
     session: Session,
@@ -44,7 +48,9 @@ pub struct Document {
     /// The last build's main output: its extension and bytes.
     output: Option<(&'static str, Arc<Vec<u8>>)>,
     /// Whether the last build's origins are still to be made.
-    origins_due: bool,
+    /// Whether the last build's diagnostics are still to be made
+    /// ([`crate::session::Report::diagnostics_pending`]).
+    diagnostics_due: bool,
     /// The language server attached ([`Document::lsp`]): told each
     /// build's start, progress and end.
     lsp: Lsp,
@@ -163,6 +169,17 @@ impl Document {
                     s.progress(p);
                 }
             }));
+            // (the pages a cold build streams: the viewer's `page` event,
+            // each drawn from its own file until the build is in)
+            let v = viewer.clone();
+            session
+                .status()
+                .meter()
+                .on_streamed(Box::new(move |p, pages| {
+                    if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
+                        v.stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
+                    }
+                }));
             let l = lsp.clone();
             session
                 .status()
@@ -181,7 +198,7 @@ impl Document {
             emit,
             builds: 0,
             output: None,
-            origins_due: false,
+            diagnostics_due: false,
             lsp,
         }
     }
@@ -274,6 +291,9 @@ impl Document {
                     again = true;
                 }
                 Applied::Rebuild => {
+                    // (every file read again: what the host gave since, a
+                    // figure replaced in Overleaf, is what this build reads)
+                    self.session.reread_all();
                     why.push("asked in the viewer".to_owned());
                     asked = true;
                     again = true;
@@ -292,12 +312,47 @@ impl Document {
         }
         if again {
             self.build(&why.join(", "), came);
-        }
-        // (nothing waits: the origins the last build changed, made now)
-        if self.origins_due && !self.viewer.has_asks() {
-            self.origins_now();
+        } else if self.session.synctex_due() && !self.viewer.has_asks() {
+            // (then the SyncTeX file, off the typing path too, in a step's
+            // share: given up between two pages once an ask waits or the
+            // step has had `SYNCTEX_SLICE`, the rest the next step's)
+            let t = Instant::now();
+            let viewer = &self.viewer;
+            // (an ask stops it anywhere, the slice only between pages: a
+            // page's match longer than a slice is made whole)
+            let stop =
+                |between: bool| viewer.has_asks() || (between && t.elapsed() >= SYNCTEX_SLICE);
+            if let Err(e) = self.session.write_synctex_until(&stop) {
+                eprintln!("phitex: {e}");
+            }
+        } else if self.diagnostics_due && !self.viewer.has_asks() {
+            // (then, in a step of their own, the diagnostics the build
+            // left for later: low priority, never on the typing path; an
+            // edit before them drops them, its build has its own)
+            self.diagnostics_now();
         }
         std::mem::take(&mut *lock(&self.events))
+    }
+
+    /// Whether work nobody waits for is left (the last build's origins):
+    /// [`Document::step`] does it when nothing is asked; a host that
+    /// steps the document steps it again, after what waits.
+    pub fn pending(&self) -> bool {
+        self.session.synctex_due() || self.diagnostics_due
+    }
+
+    /// The diagnostics the last build left for later, made and given to
+    /// the viewer and the language server; [`Document::step`] makes them
+    /// once no ask waits and the origins are made.
+    pub fn diagnostics_now(&mut self) {
+        if !std::mem::take(&mut self.diagnostics_due) {
+            return;
+        }
+        let d = crate::watch::late_diagnostics(&self.session, &self.session.diagnostics_now());
+        self.viewer.set_diagnostics(&d);
+        if let Some(l) = self.lsp_server() {
+            l.diagnostics(&d);
+        }
     }
 
     /// The pages' origins (glyph to source, SyncTeX's) of the last build,
@@ -305,10 +360,8 @@ impl Document {
     /// no ask waits, a host that needs them at once (a double-click while
     /// edits come) calls this.
     pub fn origins_now(&mut self) {
-        self.origins_due = false;
-        let s = &self.session;
-        if let Some(o) = s.origins() {
-            self.viewer.set_origins(Some(o), s.origins_changed());
+        if let Some((o, changed)) = self.session.origins_update() {
+            self.viewer.set_origins(Some(o), Some(changed));
         }
     }
 
@@ -334,9 +387,9 @@ impl Document {
                     since_ms: None,
                     origins: None,
                     changed: None,
-                    diagnostics: vec![
-                        json!({"severity": "error", "code": "engine", "message": first}),
-                    ],
+                    diagnostics: Some(vec![
+                        json!({"severity": "error", "code": "engine", "kind": "error", "message": first}),
+                    ]),
                     parts: serde_json::Map::new(),
                 };
                 v.built(&failed);
@@ -354,7 +407,7 @@ impl Document {
             s.write(&r, true)
         };
         let main = written.as_ref().ok().and_then(|w| w.main.clone());
-        let pdf = viewer_pdf(s, &r, || {
+        let pdf = viewer_pdf(s, &r, None, || {
             main.as_deref().and_then(|p: &Path| s.host().read(p))
         });
         let mut errors = r.out.errors.clone();
@@ -389,14 +442,25 @@ impl Document {
             // typing path, `Document::origins_now`)
             origins: None,
             changed: None,
-            diagnostics: diagnostics(s, &r, &log),
+            // (an edit's at their places later, `Document::diagnostics_now`;
+            // its errors at once, the last warnings with them)
+            diagnostics: if !r.diagnostics_pending {
+                Some(diagnostics(s, &r, &log))
+            } else if r.out.errors.is_empty() {
+                None
+            } else {
+                Some(crate::watch::with_last_warnings(
+                    diagnostics(s, &r, &log),
+                    &v.diagnostics_items(),
+                ))
+            },
             parts: Built::parts_of(s, &r),
         };
+        self.diagnostics_due = r.diagnostics_pending;
         v.built(&built);
         if let Some(l) = &lsp {
             l.built(&built);
         }
-        self.origins_due = true;
         v.building(false);
         // (the records the build changed, stored now: only when a load
         // changed them, compared with what is stored first; no idle timer)
@@ -634,6 +698,204 @@ mod tests {
         assert_eq!(two.get(Key::Doc("wkeys")), None);
     }
 
+    /// Shelf's files as a host gives them (the frontends' wasm core, the
+    /// CLI's `--shelf`): found through the release's index, their packs
+    /// from memory, each pack asked recorded (by its name, the id without
+    /// its hash).
+    struct ShelfFiles {
+        files: Arc<phitex_shelf::Files>,
+        asked: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct Served(HashMap<String, Vec<u8>>, Arc<Mutex<Vec<String>>>);
+
+    impl phitex_shelf::PackSource for Served {
+        fn pack(&self, id: &str) -> Result<Vec<u8>, String> {
+            let stem = id.rsplit_once('-').map_or(id, |(s, _)| s);
+            lock(&self.1).push(stem.to_owned());
+            self.0
+                .get(id)
+                .cloned()
+                .ok_or_else(|| format!("no pack {id}"))
+        }
+    }
+
+    impl ShelfFiles {
+        fn new(release: (phitex_shelf::Index, HashMap<String, Vec<u8>>)) -> ShelfFiles {
+            let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+            let src = Arc::new(Served(release.1, asked.clone()));
+            ShelfFiles {
+                files: Arc::new(phitex_shelf::Files::new(Arc::new(release.0), src, "pdftex")),
+                asked,
+            }
+        }
+
+        fn asked(&self) -> Vec<String> {
+            let mut a = lock(&self.asked).clone();
+            a.sort();
+            a
+        }
+    }
+
+    impl Host for ShelfFiles {
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            self.files.locate(name).map(PathBuf::from)
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            self.files.read(&path.to_string_lossy()).map(|b| b.to_vec())
+        }
+        fn content_key(&self) -> Option<phitex_tex::ContentKey> {
+            let f = self.files.clone();
+            Some(Arc::new(move |name: &str| f.key(name)))
+        }
+        fn published_format(&self, name: &str) -> Option<Vec<u8>> {
+            self.files.published_format(name)
+        }
+    }
+
+    /// A store in memory that keeps formats, counting their puts.
+    #[derive(Default)]
+    struct Formats(Mutex<HashMap<String, ([u8; 32], Vec<u8>)>>, Mutex<usize>);
+
+    impl crate::host::Store for Formats {
+        fn get(&self, _key: crate::host::Key<'_>) -> Option<Vec<u8>> {
+            None
+        }
+        fn put(&self, _key: crate::host::Key<'_>, _bytes: &[u8]) {}
+        fn format(&self, name: &str) -> Option<([u8; 32], Vec<u8>)> {
+            lock(&self.0).get(name).cloned()
+        }
+        fn put_format(&self, name: &str, key: &[u8; 32], bytes: &[u8]) {
+            *lock(&self.1) += 1;
+            lock(&self.0).insert(name.to_owned(), (*key, bytes.to_vec()));
+        }
+    }
+
+    impl Formats {
+        fn only(&self) -> (String, [u8; 32], Vec<u8>) {
+            let f = lock(&self.0);
+            assert_eq!(f.len(), 1, "one format stored");
+            let (n, (k, b)) = f.iter().next().expect("a format");
+            (n.clone(), *k, b.clone())
+        }
+        fn puts(&self) -> usize {
+            *lock(&self.1)
+        }
+    }
+
+    /// A format is good while the files it read are: one made on a Shelf
+    /// release stays good on a later release that changed other files
+    /// and gave every pack another id, nothing fetched to say so (a
+    /// format keyed by pack ids was found stale and made again in the
+    /// browser, every hyphenation pack fetched); one whose file changed
+    /// is not, and is made again. A release's own format is taken when
+    /// the store has none, or a stale one: a download, not a build.
+    #[test]
+    fn a_format_holds_while_the_files_it_read_do() {
+        let ini: &[u8] = b"\\catcode`\\{=1 \\catcode`\\}=2 \\input hyph-de.tex \\dump\n";
+        let de = "tex/generic/hyph-utf8/patterns/hyph-de.tex";
+        let fr = "tex/generic/hyph-utf8/patterns/hyph-fr.tex";
+        let job = || Job {
+            engine: crate::tex::engine("tex").unwrap(),
+            ini: false,
+            etex: false,
+            ..job()
+        };
+        let text = "\\shipout\\hbox{\\pat}\\end\n";
+        let build = |host: &Arc<ShelfFiles>, store: &Arc<Formats>| {
+            let s = Session::new(
+                job(),
+                Arc::from(text),
+                host.clone(),
+                Some(store.clone() as Arc<dyn crate::host::Store>),
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            );
+            let mut d = Document::new(s, "doc.tex");
+            let ev = d.step();
+            let b = ev.iter().find(|e| e["event"] == "build").expect("a build");
+            assert_eq!(b["ok"], true, "{ev:?}");
+        };
+        let a: &[(&str, &[phitex_shelf::PackFile<'_>])] = &[
+            ("tex-ini", &[("tex/plain/config/tex.ini", ini)]),
+            (
+                "hyphen-german",
+                &[(de, b"\\def\\pat{1}"), (fr, b"\\def\\x{1}")],
+            ),
+        ];
+        let store = Arc::new(Formats::default());
+        let on_a = Arc::new(ShelfFiles::new(phitex_shelf::release("tl-test.1", a, &[])));
+        build(&on_a, &store);
+        assert_eq!(on_a.asked(), ["hyphen-german", "tex-ini"]);
+        let (_, made_a, _) = store.only();
+        // (B: another file of the pack changed, the ini's pack renamed:
+        // every pack id another, the format's files as they were)
+        let b: &[(&str, &[phitex_shelf::PackFile<'_>])] = &[
+            ("ini", &[("tex/plain/config/tex.ini", ini)]),
+            (
+                "hyphen-german",
+                &[(de, b"\\def\\pat{1}"), (fr, b"\\def\\x{2}")],
+            ),
+        ];
+        let on_b = Arc::new(ShelfFiles::new(phitex_shelf::release("tl-test.2", b, &[])));
+        build(&on_b, &store);
+        assert_eq!(
+            on_b.asked(),
+            Vec::<String>::new(),
+            "the format checked by fetching packs"
+        );
+        assert_eq!(store.puts(), 1, "the format made again");
+        // (C: the file the format read changed: made again, on it)
+        let c: &[(&str, &[phitex_shelf::PackFile<'_>])] = &[
+            ("ini", &[("tex/plain/config/tex.ini", ini)]),
+            (
+                "hyphen-german",
+                &[(de, b"\\def\\pat{3}"), (fr, b"\\def\\x{2}")],
+            ),
+        ];
+        let on_c = Arc::new(ShelfFiles::new(phitex_shelf::release("tl-test.3", c, &[])));
+        build(&on_c, &store);
+        let (name, made_c, _) = store.only();
+        assert_ne!(made_c, made_a, "a stale format kept");
+        assert_eq!(on_c.asked(), ["hyphen-german", "ini"]);
+        // (D: changed again, its format published: a fresh store and a
+        // stale one take it, neither making it nor reading its files)
+        let d: &[(&str, &[phitex_shelf::PackFile<'_>])] = &[
+            ("ini", &[("tex/plain/config/tex.ini", ini)]),
+            (
+                "hyphen-german",
+                &[(de, b"\\def\\pat{4}"), (fr, b"\\def\\x{2}")],
+            ),
+        ];
+        let made = Arc::new(Formats::default());
+        build(
+            &Arc::new(ShelfFiles::new(phitex_shelf::release("tl-test.4", d, &[]))),
+            &made,
+        );
+        let (made_name, made_d, state) = made.only();
+        assert_eq!(made_name, name);
+        let published =
+            || phitex_shelf::release("tl-test.4", d, &[(name.as_str(), state.as_slice())]);
+        let fresh = Arc::new(Formats::default());
+        let on_d = Arc::new(ShelfFiles::new(published()));
+        build(&on_d, &fresh);
+        assert_eq!(
+            on_d.asked(),
+            [format!("fmt-{name}")],
+            "the format made, not taken"
+        );
+        assert_eq!(fresh.only().1, made_d, "the published format kept");
+        let on_d = Arc::new(ShelfFiles::new(published()));
+        build(&on_d, &store);
+        // (the stale format's changed file fetched by its check, the ini's
+        // not: no build)
+        assert_eq!(
+            on_d.asked(),
+            [format!("fmt-{name}"), "hyphen-german".to_owned()]
+        );
+        assert_eq!(store.only().1, made_d);
+    }
+
     /// `n` pages, each fired by the page builder (the progress counts
     /// the pages its finishers reach, `phitex_tex::Progress::on_page`).
     fn pages(n: usize) -> String {
@@ -666,6 +928,7 @@ mod tests {
             fixpoint: false,
             cache_limit: None,
             edit_diagnostics: true,
+            inputs: Vec::new(),
         }
     }
 
@@ -709,6 +972,109 @@ mod tests {
         assert_eq!(built["why"], "doc.tex (editor)", "{ev:?}");
         let p = d.request(&json!({"id": 8, "op": "pages"}));
         assert_eq!(p["json"]["pages"].as_array().map(Vec::len), Some(3), "{p}");
+    }
+
+    /// An edit's warnings at their places are made after its build, in a
+    /// step of their own once nothing is asked (never on the typing
+    /// path), and reach the viewer and the language server then; an
+    /// edit with an error has its diagnostics at once.
+    #[test]
+    fn an_edits_warnings_come_after_its_build() {
+        let doc = |boxes: usize, error: bool| {
+            let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 \\hsize=100pt \\vsize=100pt \\output={\\shipout\\box255} ".to_owned();
+            for _ in 0..boxes {
+                t.push_str("\\hbox to 10pt{\\vrule width 50pt}\n");
+            }
+            if error {
+                t.push_str("\\undefinedcs\n");
+            }
+            t.push_str("\\end\n");
+            t
+        };
+        let mut d = Document::new(
+            session(&doc(1, false), Arc::new(Memory::default())),
+            "doc.tex",
+        );
+        let sent: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let s = sent.clone();
+        let server = d.lsp(Box::new(move |v| lock(&s).push(v.clone())), None);
+        server.handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"rootUri": "file:///p"}}));
+        server.handle(&json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}));
+        let warnings = |e: &Value| {
+            e["items"].as_array().map_or(0, |v| {
+                v.iter().filter(|d| d["severity"] == "warning").count()
+            })
+        };
+        let ev = d.step();
+        let cold = ev
+            .iter()
+            .find(|e| e["event"] == "diagnostics")
+            .expect("the cold build's");
+        assert_eq!(warnings(cold), 1, "{ev:?}");
+        while d.pending() {
+            d.step();
+        }
+        lock(&sent).clear();
+        d.request(&json!({"id": 2, "op": "set_file", "file": "doc.tex", "text": doc(3, false)}));
+        let ev = d.step();
+        assert!(ev.iter().any(|e| e["event"] == "build"), "{ev:?}");
+        assert!(
+            ev.iter().all(|e| e["event"] != "diagnostics"),
+            "not on the typing path: {ev:?}"
+        );
+        let status = lock(&sent)
+            .iter()
+            .rev()
+            .find(|m| m["method"] == "phitex/status")
+            .cloned();
+        assert_eq!(
+            status
+                .as_ref()
+                .map(|m| m["params"]["warnings_updating"].clone()),
+            Some(json!(true)),
+            "{status:?}"
+        );
+        assert!(d.pending());
+        let mut later = Vec::new();
+        while d.pending() {
+            later.extend(d.step());
+        }
+        let late = later
+            .iter()
+            .find(|e| e["event"] == "diagnostics")
+            .expect("made once idle");
+        assert_eq!(warnings(late), 3, "{later:?}");
+        let got = lock(&sent).clone();
+        let published = got
+            .iter()
+            .rev()
+            .find(|m| m["method"] == "textDocument/publishDiagnostics")
+            .expect("published");
+        assert_eq!(
+            published["params"]["diagnostics"].as_array().map(Vec::len),
+            Some(3),
+            "{published}"
+        );
+        let status = got
+            .iter()
+            .rev()
+            .find(|m| m["method"] == "phitex/status")
+            .expect("a status");
+        assert_eq!(status["params"]["warnings"], 3, "{status}");
+        assert_eq!(status["params"]["warnings_updating"], false, "{status}");
+        // (an error: at once, at its place)
+        d.request(&json!({"id": 3, "op": "set_file", "file": "doc.tex", "text": doc(1, true)}));
+        let ev = d.step();
+        let now = ev
+            .iter()
+            .find(|e| e["event"] == "diagnostics")
+            .expect("with the build");
+        assert!(
+            now["items"]
+                .as_array()
+                .is_some_and(|v| v.iter().any(|d| d["severity"] == "error" && d["line"] == 2)),
+            "{now}"
+        );
     }
 
     /// A document's language server (the wasm core's): told the cold
@@ -926,6 +1292,87 @@ mod tests {
         assert_eq!(built["pages"], 3, "{ev:?}");
     }
 
+    /// The viewer's `edit` counts UTF-16 code units of the buffer, as the
+    /// editors give them (LSP's didChange too): a keystroke after Arabic
+    /// text is placed there, the next paragraph's macro argument read as
+    /// it is written, and the output a cold build's of the editor's text.
+    /// Sent in UTF-8 bytes (the viewer did), each keystroke went 12 units
+    /// later, into the next paragraph's `\lang{hindi}`, its language
+    /// argument then a name no language has: "The language ... is not
+    /// loaded" (the frontends' xe-multi scenario, polyglossia's
+    /// `\textlang`). The Arabic is a comment here: the edit's place is
+    /// the core's, before any engine reads the text.
+    #[test]
+    fn an_edit_after_wide_characters_is_placed_in_utf16_units() {
+        let doc = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\#=6 \
+            \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255}\n\
+            \\def\\lang#1#2{\\expandafter\\ifx\\csname l@#1\\endcsname\\relax \
+            \\errmessage{The language #1 is not loaded}\\fi\\hbox{#2}}\n\
+            \\expandafter\\def\\csname l@arabic\\endcsname{}\\expandafter\\def\\csname l@hindi\\endcsname{}\n\
+            % مرحبا بالعالم\n\\lang{arabic}{abc}\n\n\\lang{hindi}{def}\n\n\\penalty-10000 \\end\n";
+        let u16 = |s: &str, byte: usize| s[..byte].encode_utf16().count();
+        let session = |text: &str| {
+            Session::new(
+                job(),
+                Arc::from(text),
+                Arc::new(Nothing),
+                None,
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            )
+        };
+        // (TeX's errors: the build's other lines are the host's, "no
+        // dvipdfmx here")
+        let tex_errors = |b: &Value| -> Vec<Value> {
+            b["errors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|e| e.as_str().is_some_and(|e| e.starts_with('!')))
+                .cloned()
+                .collect()
+        };
+        let mut d = Document::new(session(doc), "doc.tex");
+        d.step();
+        // (the editor's buffer, as an open gives it: the edits apply to it)
+        d.push(Ask::SetFile {
+            file: "doc.tex".into(),
+            text: doc.into(),
+        });
+        let mut text = doc.to_owned();
+        for (k, ch) in [" ", "x", "yz"].into_iter().enumerate() {
+            // (typed before the first paragraph's closing brace)
+            let byte = text.find("}\n\n\\lang{hindi}").unwrap();
+            let u = u16(&text, byte);
+            let r = d.request(&json!({"id": k, "op": "edit", "file": "doc.tex", "start": u, "end": u, "text": ch}));
+            assert_eq!(r["ok"], true, "edit {k}: {r}");
+            text.insert_str(byte, ch);
+            let ev = d.step();
+            let built = ev
+                .iter()
+                .find(|e| e["event"] == "build")
+                .unwrap_or_else(|| panic!("edit {k}: built: {ev:?}"));
+            assert_eq!(tex_errors(built), Vec::<Value>::new(), "edit {k}: {built}");
+            let mut cold = Document::new(session(&text), "doc.tex");
+            let cev = cold.step();
+            let cb = cev.iter().find(|e| e["event"] == "build").expect("cold");
+            assert_eq!(
+                tex_errors(cb),
+                Vec::<Value>::new(),
+                "edit {k}: the cold build: {cb}"
+            );
+            assert_eq!(
+                d.output().map(|o| o.1),
+                cold.output().map(|o| o.1),
+                "edit {k}: the cold build's output"
+            );
+        }
+        assert!(
+            text.contains("\\lang{arabic}{abc xyz}\n\n\\lang{hindi}{def}"),
+            "{text}"
+        );
+    }
+
     /// A TFM no font map has an entry for (`oracle/fixtures/pdf`'s
     /// nomap10.tfm, cmr10's metrics), and no other file.
     struct NoMap;
@@ -938,6 +1385,73 @@ mod tests {
             (path == Path::new("nomap10.tfm"))
                 .then(|| include_bytes!("../../../../oracle/fixtures/pdf/nomap10.tfm").to_vec())
         }
+    }
+
+    /// A viewer's PDF kept as update sections where no file is written
+    /// (`Session::view_layout`): an edit's file is the last one's bytes
+    /// and the objects that changed, and the file made exact when idle
+    /// is the one a build from nothing writes.
+    #[test]
+    fn a_viewers_file_is_updated_then_made_exact() {
+        let doc = |w: usize| {
+            let mut t =
+                "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\pdfcompresslevel=0\n".to_owned();
+            for k in 0..3 {
+                t.push_str(&format!(
+                    "\\shipout\\hbox{{\\vrule width {}pt height 5pt}}\n",
+                    10 + k + w
+                ));
+            }
+            t.push_str("\\end\n");
+            t
+        };
+        let session = |text: &str| {
+            Session::new(
+                Job {
+                    engine: crate::tex::engine("pdftex").unwrap(),
+                    ..job()
+                },
+                Arc::from(text),
+                Arc::new(Nothing),
+                None,
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            )
+        };
+        let mut s = session(&doc(0));
+        s.view_layout = true;
+        let mut vf = crate::watch::ViewFile::default();
+        let r = s.build();
+        assert!(r.out.layout.is_some(), "a layout, not bytes");
+        let first = crate::watch::viewer_pdf(&s, &r, Some(&mut vf), || None)
+            .unwrap()
+            .unwrap();
+        assert!(first.starts_with(b"%PDF"));
+        s.set_text(doc(7));
+        let r = s.build();
+        let second = crate::watch::viewer_pdf(&s, &r, Some(&mut vf), || None)
+            .unwrap()
+            .unwrap();
+        assert!(
+            second.len() > first.len() && second.starts_with(&first),
+            "an update section after the last bytes"
+        );
+        assert!(vf.to_compact().is_some());
+        let exact = vf.compact().unwrap().expect("not exact before");
+        assert!(vf.compact().unwrap().is_none(), "exact now");
+        let mut cold = session(&doc(7));
+        let r = cold.build();
+        assert_eq!(
+            &*exact,
+            r.out.pdf.as_slice(),
+            "the exact file a cold build writes"
+        );
+        // (the same build again: the same bytes, shared)
+        let r = s.build();
+        let again = crate::watch::viewer_pdf(&s, &r, Some(&mut vf), || None)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&again, &exact));
     }
 
     /// A font with no map entry: pdfTeX's fatal error at the end of the
@@ -1161,5 +1675,897 @@ mod tests {
         );
         let (built, _) = run(None);
         assert_eq!(built["ok"], false, "{built}");
+    }
+
+    /// The project's files as a browser host has them: those given
+    /// (`ph_provide`) and no other, each with the number of its giving
+    /// as its stamp.
+    #[derive(Default)]
+    struct Given(Mutex<(HashMap<String, Vec<u8>>, u64, HashMap<String, u64>)>);
+
+    impl Given {
+        fn give(&self, name: &str, bytes: &[u8]) {
+            let mut g = lock(&self.0);
+            g.1 += 1;
+            let n = g.1;
+            g.0.insert(name.to_owned(), bytes.to_vec());
+            g.2.insert(name.to_owned(), n);
+        }
+    }
+
+    impl Host for Given {
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            let g = lock(&self.0);
+            let name = name.strip_prefix("./").unwrap_or(name);
+            [format!("{name}.tex"), name.to_owned()]
+                .into_iter()
+                .find(|n| g.0.contains_key(n))
+                .map(|n| PathBuf::from(format!("./{n}")))
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            let p = path.to_string_lossy();
+            lock(&self.0)
+                .0
+                .get(p.strip_prefix("./").unwrap_or(&p))
+                .cloned()
+        }
+        fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+            let p = path.to_string_lossy();
+            lock(&self.0)
+                .2
+                .get(p.strip_prefix("./").unwrap_or(&p))
+                .map(|n| n.to_le_bytes().to_vec())
+        }
+    }
+
+    /// A file the build looked for and did not find is looked for again
+    /// once it may exist: one the editor then opens (`set_file` of a path
+    /// new to the session, which the host never gave: Overleaf's new
+    /// `late.tex`) is read from its buffer at the next build, and one the
+    /// host gives later is read at a `rebuild`; each build as a clean
+    /// build of the files then gives it (no error kept, its pages there).
+    #[test]
+    fn a_file_missing_then_made_is_found() {
+        let main = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255} \\hbox{}\\penalty-10000 \\input NAME \\end\n";
+        let page = "\\hbox{}\\penalty-10000 \n";
+        let run = |name: &str, host: Arc<Given>| {
+            Document::new(
+                Session::new(
+                    job(),
+                    Arc::from(main.replace("NAME", name).as_str()),
+                    host,
+                    None,
+                    Arc::new(Memory::default()),
+                    Arc::new(Status::default()),
+                ),
+                "doc.tex",
+            )
+        };
+        let build = |d: &mut Document| {
+            let ev = d.step();
+            ev.iter()
+                .find(|e| e["event"] == "build")
+                .cloned()
+                .unwrap_or_else(|| panic!("no build: {ev:?}"))
+        };
+        // (the editor's buffer of a file the host never gave)
+        let mut d = run("late", Arc::new(Given::default()));
+        let cold = build(&mut d);
+        assert_eq!(cold["ok"], false, "late.tex is missing: {cold}");
+        d.request(&json!({"id": 2, "op": "set_file", "file": "late.tex", "text": page}));
+        let b = build(&mut d);
+        assert_eq!(b["ok"], true, "late.tex opened in the editor: {b}");
+        assert_eq!(b["pages"], 2, "{b}");
+        // (a file the host gives after the build missed it, then a rebuild)
+        let host = Arc::new(Given::default());
+        let mut d = run("pic", host.clone());
+        let cold = build(&mut d);
+        assert_eq!(cold["ok"], false, "pic.tex is missing: {cold}");
+        host.give("pic.tex", page.as_bytes());
+        d.request(&json!({"id": 3, "op": "rebuild"}));
+        let b = build(&mut d);
+        assert_eq!(b["ok"], true, "pic.tex given, then a rebuild: {b}");
+        assert_eq!(b["pages"], 2, "{b}");
+    }
+
+    /// A project's files as a host gives them, at their paths (`dir`
+    /// and the name: as given, `./`, a compile directory), found by
+    /// their names and read by their paths, BibTeX's searches answered
+    /// from the same copies, as the browser core's and the CLI's
+    /// `tool_finder` answer them: the host's file, never the editor's
+    /// buffer of it.
+    struct Project {
+        dir: &'static str,
+        files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    }
+
+    impl Project {
+        fn new(dir: &'static str, files: &[(&str, &str)]) -> Project {
+            Project {
+                dir,
+                files: Arc::new(Mutex::new(
+                    files
+                        .iter()
+                        .map(|(n, t)| ((*n).to_owned(), t.as_bytes().to_vec()))
+                        .collect(),
+                )),
+            }
+        }
+    }
+
+    /// `name` as a project's file is kept (no directory).
+    fn kept_name<'a>(dir: &str, name: &'a str) -> &'a str {
+        let n = name.strip_prefix(dir).unwrap_or(name);
+        n.strip_prefix("./").unwrap_or(n)
+    }
+
+    impl Host for Project {
+        // (by the name as given, the browser core's lookup: a path, the
+        // host's own name for the file, is no name it was given)
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            lock(&self.files)
+                .contains_key(name)
+                .then(|| PathBuf::from(format!("{}{name}", self.dir)))
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            lock(&self.files)
+                .get(kept_name(self.dir, &path.to_string_lossy()))
+                .cloned()
+        }
+        fn same_file(&self, a: &str, b: &str) -> bool {
+            kept_name(self.dir, a) == kept_name(self.dir, b)
+        }
+        fn tool_finder(&self) -> Option<phitex_tex::ToolFinder> {
+            let (dir, files) = (self.dir, self.files.clone());
+            Some(Arc::new(
+                move |search: phitex_tex::ToolSearch, name: &str| {
+                    let ext = match search {
+                        phitex_tex::ToolSearch::BibStyle => ".bst",
+                        phitex_tex::ToolSearch::BibData => ".bib",
+                        _ => "",
+                    };
+                    let n = kept_name(dir, name);
+                    let n = if n.ends_with(ext) {
+                        n.to_owned()
+                    } else {
+                        format!("{n}{ext}")
+                    };
+                    let b = lock(&files).get(&n).cloned()?;
+                    Some((format!("{dir}{n}"), b))
+                },
+            ))
+        }
+    }
+
+    /// The bibliography's text in the DVI: BibTeX's `.bbl` read in a
+    /// box, each entry's title a `\special`.
+    fn bib_title(dvi: &[u8]) -> Option<String> {
+        let at = dvi.windows(2).position(|w| w == b"T:")?;
+        let rest = &dvi[at + 2..];
+        let end = rest.iter().position(|&c| c == b'!')?;
+        Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+    }
+
+    /// A `.bib` edited in the editor (the viewer's `edit` and `set_file`,
+    /// the browser's upload of a file over its old copy, diffed in) is
+    /// BibTeX's input at the next build: the entry's new title in the
+    /// pages, each build's output a clean build's of the same files,
+    /// whatever path the host keeps the file at. The tools' searches
+    /// answered from the host's copy, the BibTeX run kept the old title
+    /// until the session was opened again (the frontends' report).
+    #[test]
+    fn an_edited_bib_is_bibtexs_input() {
+        let bst = "ENTRY { title } {} {}\n\
+                   FUNCTION {book} { \"\\special{T:\" title * \"!}\" * write$ newline$ }\n\
+                   READ\nITERATE {call.type$}\n";
+        let bib = |t: &str| format!("@book{{x, title = {{{t}}}}}\n");
+        let doc = "\\catcode`\\{=1 \\catcode`\\}=2 \
+                   \\immediate\\openout1=\\jobname.aux \
+                   \\immediate\\write1{\\string\\citation{x}}\
+                   \\immediate\\write1{\\string\\bibstyle{mine}}\
+                   \\immediate\\write1{\\string\\bibdata{refs}}\
+                   \\immediate\\closeout1 \
+                   \\setbox0\\hbox{\\openin2=\\jobname.bbl \\ifeof2 \\special{none}\\else\\closein2 \\input\\jobname.bbl \\fi}\
+                   \\shipout\\box0 \\end\n";
+        let dvi_of = |d: &Document| d.output().map(|(_, b)| b.to_vec()).expect("the DVI");
+        let built = |ev: &[Value]| {
+            let b = ev
+                .iter()
+                .find(|e| e["event"] == "build")
+                .cloned()
+                .expect("a build");
+            assert_eq!(b["ok"], true, "{ev:?}");
+            b
+        };
+        let open_in = |dir: &'static str, title: &str, kept: Option<(Arc<Kept>, Arc<Memory>)>| {
+            let host = Project::new(dir, &[("mine.bst", bst), ("refs.bib", &bib(title))]);
+            let (store, sink) = kept.unzip();
+            Document::new(
+                Session::new(
+                    Job {
+                        fixpoint: true,
+                        ..job()
+                    },
+                    Arc::from(doc),
+                    Arc::new(host),
+                    store.map(|s| s as Arc<dyn crate::host::Store>),
+                    sink.unwrap_or_default(),
+                    Arc::new(Status::default()),
+                ),
+                "doc.tex",
+            )
+        };
+        let clean = |dir: &'static str, title: &str| {
+            let mut d = open_in(dir, title, None);
+            built(&d.step());
+            dvi_of(&d)
+        };
+        // (each as a first session, and as a session opened again on the
+        // records and files the first left, as a browser's reopen)
+        for (dir, again) in [
+            ("", false),
+            ("./", false),
+            ("/compile/", false),
+            ("./", true),
+        ] {
+            let kept = again.then(|| (Arc::new(Kept::default()), Arc::new(Memory::default())));
+            let open = |dir, title| open_in(dir, title, kept.clone());
+            if again {
+                let mut d = open(dir, "Tea");
+                built(&d.step());
+            }
+            let mut d = open(dir, "Tea");
+            built(&d.step());
+            assert_eq!(
+                bib_title(&dvi_of(&d)).as_deref(),
+                Some("Tea"),
+                "{dir} {again}: cold: {}",
+                d.session().transcript()
+            );
+            // (the title replaced, as the browser diffs an upload in)
+            let old = bib("Tea");
+            let at = old.find("Tea").expect("the title");
+            let r = d.request(&json!({"id": 1, "op": "edit", "file": "refs.bib",
+                "start": at, "end": at + 3, "text": "Coffee"}));
+            assert_eq!(r["json"]["queued"], true, "{r}");
+            built(&d.step());
+            let dvi = dvi_of(&d);
+            assert_eq!(
+                bib_title(&dvi).as_deref(),
+                Some("Coffee"),
+                "{dir} {again}: the edit"
+            );
+            assert!(
+                dvi == clean(dir, "Coffee"),
+                "{dir} {again}: the edit's DVI a clean build's"
+            );
+            // (the whole file given, the editor's `set_file`)
+            d.request(&json!({"id": 2, "op": "set_file", "file": "refs.bib", "text": bib("Milk")}));
+            built(&d.step());
+            let dvi = dvi_of(&d);
+            assert_eq!(
+                bib_title(&dvi).as_deref(),
+                Some("Milk"),
+                "{dir} {again}: set_file"
+            );
+            assert!(
+                dvi == clean(dir, "Milk"),
+                "{dir} {again}: set_file's DVI a clean build's"
+            );
+            // (a Clean rebuild, the editor's buffer kept: read by the tool
+            // as by TeX, not the host's copy)
+            d.request(&json!({"id": 3, "op": "cold"}));
+            built(&d.step());
+            let dvi = dvi_of(&d);
+            assert_eq!(
+                bib_title(&dvi).as_deref(),
+                Some("Milk"),
+                "{dir} {again}: a Clean rebuild"
+            );
+            assert!(
+                dvi == clean(dir, "Milk"),
+                "{dir} {again}: the Clean rebuild's DVI a clean build's"
+            );
+        }
+    }
+
+    /// `n` pages of a PDF, each fired by the page builder and a rule of
+    /// its own width, after a loop of `k` steps (a build that takes a
+    /// while before its pages).
+    fn pdf_pages(k: u32, n: usize) -> String {
+        let mut t = format!(
+            "\\catcode`\\{{=1 \\catcode`\\}}=2 \\pdfoutput=1 \\pdfcompresslevel=0 \\vsize=100pt \\hsize=100pt \\pdfpagewidth=120pt \\pdfpageheight=120pt \\output={{\\shipout\\box255}} \\count1=0 \\def\\l{{\\advance\\count1 by1 \\ifnum\\count1<{k} \\expandafter\\l\\fi}}\\l "
+        );
+        for i in 0..n {
+            t.push_str(&format!(
+                "\\hbox{{\\vrule width {}pt height 5pt}}\\penalty-10000 ",
+                10 + i
+            ));
+        }
+        t.push_str("\\end\n");
+        t
+    }
+
+    /// A cold build streams its pages as they ship, through the viewer's
+    /// protocol: `page` events before `settled`, each page drawn from its
+    /// file of its own while the build runs exactly as the build's file
+    /// draws it when it is in (the same bands, text and links), each
+    /// streamed identity replaced by the settled one, and the build's
+    /// file the one a build that streams nothing writes. At one thread
+    /// and two.
+    #[test]
+    fn a_cold_build_streams_its_pages_before_it_settles() {
+        let n = 12;
+        let text = pdf_pages(20_000, n);
+        for threads in [1, 2] {
+            let session = |text: &str| {
+                Session::new(
+                    Job {
+                        engine: crate::tex::engine("pdftex").unwrap(),
+                        threads: Some(threads),
+                        ..job()
+                    },
+                    Arc::from(text),
+                    Arc::new(Nothing),
+                    None,
+                    Arc::new(Memory::default()),
+                    Arc::new(Status::default()),
+                )
+            };
+            let events: Arc<Mutex<Vec<Value>>> = Arc::default();
+            let frames: Arc<Mutex<HashMap<u64, Value>>> = Arc::default();
+            let viewer: Arc<std::sync::OnceLock<Arc<Viewer>>> = Arc::default();
+            let (ev, fr, vw) = (events.clone(), frames.clone(), viewer.clone());
+            let mut d = Document::new_with_emit(session(&text), "doc.tex", move |e| {
+                if e["event"] == "page"
+                    && let (Some(v), Some(k)) = (vw.get(), e["k"].as_u64())
+                {
+                    // (drawn while the build runs, as a viewer asks)
+                    let r = v.answer(&json!({"id": 1, "op": "frame", "page": k, "scale": 1.0}));
+                    let r: Value = serde_json::from_str(&r).unwrap();
+                    assert_eq!(r["ok"], true, "page {k} streamed, its frame: {r}");
+                    lock(&fr).insert(k, r["json"].clone());
+                }
+                lock(&ev).push(e);
+            });
+            let _ = viewer.set(d.viewer().clone());
+            d.step();
+            let ev = lock(&events).clone();
+            let at = |what: &str| ev.iter().position(|e| e["event"] == what);
+            let settled = at("settled").expect("settled");
+            let pages: Vec<&Value> = ev.iter().filter(|e| e["event"] == "page").collect();
+            assert!(
+                !pages.is_empty() && at("page").is_some_and(|p| p < settled),
+                "threads {threads}: no page streamed before settled: {ev:?}"
+            );
+            assert!(
+                ev[settled..].iter().all(|e| e["event"] != "page"),
+                "threads {threads}: a page streamed after settled: {ev:?}"
+            );
+            // (every page streamed: the first ones always are)
+            let mut ks: Vec<u64> = pages.iter().filter_map(|e| e["k"].as_u64()).collect();
+            ks.sort_unstable();
+            ks.dedup();
+            assert_eq!(
+                ks,
+                (0..u64::try_from(n).unwrap()).collect::<Vec<_>>(),
+                "threads {threads}: {ev:?}"
+            );
+            let settled_hashes = d.request(&json!({"id": 2, "op": "pages"}))["json"]["pages"]
+                .as_array()
+                .cloned()
+                .unwrap();
+            assert_eq!(settled_hashes.len(), n);
+            for e in &pages {
+                let k = usize::try_from(e["k"].as_u64().unwrap()).unwrap();
+                assert_ne!(
+                    e["hash"], settled_hashes[k],
+                    "threads {threads}: a streamed page named as a settled one"
+                );
+                assert!(e["pages"].as_u64().unwrap() > u64::try_from(k).unwrap());
+            }
+            // (each streamed page drawn as the build's file draws it)
+            let same = |f: &Value| {
+                json!([
+                    f["pw"], f["ph"], f["w"], f["h"], f["bands"], f["text"], f["links"]
+                ])
+            };
+            for (k, f) in lock(&frames).iter() {
+                let r = d.request(&json!({"id": 3, "op": "frame", "page": k, "scale": 1.0}));
+                assert_eq!(r["ok"], true, "{r}");
+                assert_eq!(
+                    same(f),
+                    same(&r["json"]),
+                    "threads {threads}: page {k} streamed is not the build's"
+                );
+            }
+            // (nothing streamed once the build is in)
+            assert_eq!(d.viewer().streamed_hashes(), Vec::<Option<u64>>::new());
+            // (the file a build that streams nothing writes)
+            let mut quiet = session(&text);
+            let r = quiet.build();
+            assert_eq!(
+                d.output().map(|o| o.1.to_vec()),
+                Some(r.out.pdf.to_vec()),
+                "threads {threads}: the streaming build's file"
+            );
+        }
+    }
+
+    /// Files by name, as a job reads them.
+    struct Files(HashMap<String, Vec<u8>>);
+
+    impl Host for Files {
+        fn locate(&self, name: &str) -> Option<PathBuf> {
+            self.0.contains_key(name).then(|| PathBuf::from(name))
+        }
+        fn read(&self, path: &Path) -> Option<Vec<u8>> {
+            self.0.get(path.to_str()?).cloned()
+        }
+    }
+
+    /// A `w` by `h` PNG, RGBA, each pixel's colour and alpha from `px`
+    /// (stored, not compressed, deflate blocks).
+    fn png(w: u32, h: u32, px: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
+        fn crc(b: &[u8]) -> u32 {
+            let mut c = 0xffff_ffffu32;
+            for &x in b {
+                c ^= u32::from(x);
+                for _ in 0..8 {
+                    c = if c & 1 == 1 {
+                        0xedb8_8320 ^ (c >> 1)
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+            !c
+        }
+        fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+            out.extend(u32::try_from(data.len()).unwrap().to_be_bytes());
+            let mut c = kind.to_vec();
+            c.extend(data);
+            out.extend(&c);
+            out.extend(crc(&c).to_be_bytes());
+        }
+        let mut raw = Vec::new();
+        for y in 0..h {
+            raw.push(0);
+            for x in 0..w {
+                raw.extend(px(x, y));
+            }
+        }
+        let (mut a, mut b) = (1u32, 0u32);
+        for &x in &raw {
+            a = (a + u32::from(x)) % 65521;
+            b = (b + a) % 65521;
+        }
+        let mut z = vec![0x78, 0x01];
+        let blocks: Vec<&[u8]> = raw.chunks(65535).collect();
+        for (i, blk) in blocks.iter().enumerate() {
+            z.push(u8::from(i + 1 == blocks.len()));
+            let n = u16::try_from(blk.len()).unwrap();
+            z.extend(n.to_le_bytes());
+            z.extend((!n).to_le_bytes());
+            z.extend(*blk);
+        }
+        z.extend(((b << 16) | a).to_be_bytes());
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = w.to_be_bytes().to_vec();
+        ihdr.extend(h.to_be_bytes());
+        ihdr.extend([8, 6, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, b"IDAT", &z);
+        chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    /// Page `k` of `pdf` as its pixels at `scale`: its size and RGBA,
+    /// the frame's bands put in place.
+    fn pixels(pdf: &[u8], k: usize, scale: f32) -> (u32, u32, Vec<u8>) {
+        let pdf: Arc<[u8]> = Arc::from(pdf);
+        let mut r = phitex_render::Renderer::new();
+        let f = r.frame(&pdf, k, scale).expect("the page drawn");
+        let (w, h) = (f.pw, f.ph);
+        let mut out = vec![0u8; (w * h * 4) as usize];
+        for b in &f.bands {
+            let s = r.strip(b.key).expect("its strip");
+            for y in 0..s.h {
+                let py = b.y + i32::try_from(y).unwrap();
+                if py < 0 || py >= i32::try_from(h).unwrap() {
+                    continue;
+                }
+                for x in 0..s.w {
+                    let px = b.x + i32::try_from(x).unwrap();
+                    if px < 0 || px >= i32::try_from(w).unwrap() {
+                        continue;
+                    }
+                    let from = ((y * s.w + x) * 4) as usize;
+                    let to = ((u32::try_from(py).unwrap() * w + u32::try_from(px).unwrap()) * 4)
+                        as usize;
+                    if s.rgba[from + 3] != 0 {
+                        out[to..to + 4].copy_from_slice(&s.rgba[from..from + 4]);
+                    }
+                }
+            }
+        }
+        (w, h, out)
+    }
+
+    /// What a streaming build of `text` told: each page's last file
+    /// streamed and whether it was exact (by page from 0), the events,
+    /// and the document once settled.
+    #[allow(clippy::type_complexity)]
+    fn streamed_build(
+        text: &str,
+        host: Arc<dyn Host>,
+        threads: usize,
+    ) -> (Document, Vec<Value>, HashMap<usize, (Vec<u8>, bool)>) {
+        streamed_build_with("pdftex", text, host, threads)
+    }
+
+    /// [`streamed_build`] with the engine `engine`.
+    #[allow(clippy::type_complexity)]
+    fn streamed_build_with(
+        engine: &str,
+        text: &str,
+        host: Arc<dyn Host>,
+        threads: usize,
+    ) -> (Document, Vec<Value>, HashMap<usize, (Vec<u8>, bool)>) {
+        let session = Session::new(
+            Job {
+                engine: crate::tex::engine(engine).unwrap(),
+                threads: Some(threads),
+                ..job()
+            },
+            Arc::from(text),
+            host,
+            None,
+            Arc::new(Memory::default()),
+            Arc::new(Status::default()),
+        );
+        let files: Arc<Mutex<HashMap<usize, (Vec<u8>, bool)>>> = Arc::default();
+        let fs = files.clone();
+        session.status().meter().on_streamed(Box::new(move |p, _| {
+            let k = usize::try_from(p.page - 1).unwrap();
+            let mut fs = lock(&fs);
+            if p.pdf.is_empty() {
+                if let Some(e) = fs.get_mut(&k) {
+                    e.1 |= p.exact;
+                }
+            } else {
+                fs.insert(k, (p.pdf.clone(), p.exact));
+            }
+        }));
+        let events: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let viewer: Arc<std::sync::OnceLock<Arc<Viewer>>> = Arc::default();
+        let (ev, vw) = (events.clone(), viewer.clone());
+        let mut d = Document::new_with_emit(session, "doc.tex", move |e| {
+            if e["event"] == "page"
+                && let (Some(v), Some(k)) = (vw.get(), e["k"].as_u64())
+            {
+                // (drawn while the build runs, as a viewer asks: never
+                // refused, whatever the page lacks)
+                let r = v.answer(&json!({"id": 1, "op": "frame", "page": k, "scale": 1.0}));
+                let r: Value = serde_json::from_str(&r).unwrap();
+                assert_eq!(r["ok"], true, "page {k} streamed, its frame: {r}");
+            }
+            lock(&ev).push(e);
+        });
+        let _ = viewer.set(d.viewer().clone());
+        d.step();
+        let ev = lock(&events).clone();
+        let files = lock(&files).clone();
+        (d, ev, files)
+    }
+
+    /// The page events' `exact`, by page (the last told).
+    fn exact_told(ev: &[Value]) -> HashMap<u64, bool> {
+        ev.iter()
+            .filter(|e| e["event"] == "page")
+            .map(|e| (e["k"].as_u64().unwrap(), e["exact"].as_bool().unwrap()))
+            .collect()
+    }
+
+    const PDF_HEAD: &str = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\pdfcompresslevel=0 \\vsize=100pt \\hsize=100pt \\pdfpagewidth=120pt \\pdfpageheight=120pt \\output={\\shipout\\box255} \\def\\space{ } \\count1=0 \\def\\l{\\advance\\count1 by1 \\ifnum\\count1<20000 \\expandafter\\l\\fi}\\l ";
+
+    /// Pages with images (a PNG with an alpha channel, its soft mask; a
+    /// PDF page included), a form showing an image, an object a page's
+    /// resources name, written before the pages: each streamed exact, and
+    /// its file drawn pixel for pixel as the build's file draws the page.
+    /// The build's file the one a build that streams nothing writes. At
+    /// one thread and two.
+    #[test]
+    fn image_and_form_pages_stream_exact() {
+        // (the PDF page included: a red square and a black rule)
+        let inc = {
+            let t = "\\catcode`\\{=1 \\catcode`\\}=2 \\pdfoutput=1 \\pdfcompresslevel=0 \\pdfpagewidth=40pt \\pdfpageheight=40pt \\hsize=40pt \\vsize=40pt \\output={\\shipout\\box255} \\hbox{\\pdfliteral{1 0 0 rg}\\vrule width 30pt height 30pt}\\end\n";
+            let mut q = Session::new(
+                Job {
+                    engine: crate::tex::engine("pdftex").unwrap(),
+                    ..job()
+                },
+                Arc::from(t),
+                Arc::new(Nothing),
+                None,
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            );
+            q.build().out.pdf.to_vec()
+        };
+        assert!(inc.starts_with(b"%PDF"), "the included page built");
+        let a = png(8, 8, |x, y| {
+            [
+                u8::try_from(x * 30).unwrap(),
+                0,
+                u8::try_from(y * 30).unwrap(),
+                u8::try_from(40 + x * 25).unwrap(),
+            ]
+        });
+        let host: Arc<dyn Host> = Arc::new(Files(HashMap::from([
+            ("a.png".to_owned(), a),
+            ("b.pdf".to_owned(), inc),
+        ])));
+        let mut t = PDF_HEAD.to_owned();
+        t.push_str("\\pdfximage width 40pt {a.png}\\edef\\i{\\the\\pdflastximage} \\pdfximage width 30pt {b.pdf}\\edef\\j{\\the\\pdflastximage} \\setbox0\\hbox{\\pdfrefximage\\j\\vrule width 3pt height 30pt}\\pdfxform 0 \\edef\\f{\\the\\pdflastxform} \\immediate\\pdfobj{<< /G1 << /ca 0.5 /CA 0.5 >> >>}\\edef\\g{\\the\\pdflastobj} \\edef\\r{/ExtGState \\g\\space 0 R}\\pdfpageresources\\expandafter{\\r} ");
+        for p in [
+            "\\pdfrefximage\\i",
+            "\\vrule width 10pt height 5pt",
+            "\\pdfrefximage\\j",
+            "\\pdfrefxform\\f",
+            "\\pdfliteral{/G1 gs 0 0 1 rg}\\vrule width 30pt height 30pt",
+            "\\pdfrefximage\\i\\pdfrefxform\\f",
+        ] {
+            t.push_str(&format!("\\hbox{{{p}}}\\penalty-10000 "));
+        }
+        t.push_str("\\end\n");
+        for threads in [1, 2] {
+            let (d, ev, files) = streamed_build(&t, host.clone(), threads);
+            let told = exact_told(&ev);
+            assert_eq!(
+                told.len(),
+                6,
+                "threads {threads}: every page streamed: {ev:?}"
+            );
+            assert!(
+                told.values().all(|&e| e),
+                "threads {threads}: every page exact: {told:?}"
+            );
+            let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+            for (k, (pdf, exact)) in &files {
+                assert!(exact, "threads {threads}: page {k}");
+                assert_eq!(
+                    pixels(pdf, 0, 2.0),
+                    pixels(&out, *k, 2.0),
+                    "threads {threads}: page {k} streamed is not drawn as the build's"
+                );
+            }
+            let mut quiet = Session::new(
+                Job {
+                    engine: crate::tex::engine("pdftex").unwrap(),
+                    threads: Some(threads),
+                    ..job()
+                },
+                Arc::from(t.as_str()),
+                host.clone(),
+                None,
+                Arc::new(Memory::default()),
+                Arc::new(Status::default()),
+            );
+            assert_eq!(
+                Some(out),
+                Some(quiet.build().out.pdf.to_vec()),
+                "threads {threads}: the streaming build's file"
+            );
+        }
+    }
+
+    /// Pages drawing with what is not made when they ship (pgf's way:
+    /// `\\pdfpageresources` naming reserved objects filled by `\\pdfobj
+    /// useobjnum` at the end): a graphics state, a shading, a pattern, a
+    /// colour space, an external object. Each page streams all the same,
+    /// not exact, and is drawn without what it lacks; a page that draws
+    /// with none of them (its resources name them all the same) is exact,
+    /// drawn as the build's file draws it.
+    #[test]
+    fn pages_drawing_with_later_objects_stream_inexact() {
+        let mut t = PDF_HEAD.to_owned();
+        let names = ["gs", "sh", "pat", "cs", "xo"];
+        for n in names {
+            t.push_str(&format!(
+                "\\pdfobj reserveobjnum \\edef\\{n}{{\\the\\pdflastobj}} "
+            ));
+        }
+        // (its text as pgf gives it: the numbers in it, not the macros)
+        t.push_str("\\edef\\r{/ExtGState \\gs\\space 0 R /Shading \\sh\\space 0 R /Pattern \\pat\\space 0 R /ColorSpace \\cs\\space 0 R /XObject \\xo\\space 0 R}\\pdfpageresources\\expandafter{\\r} ");
+        for p in [
+            "\\vrule width 10pt height 5pt",
+            "\\pdfliteral{/G1 gs}\\vrule width 30pt height 30pt",
+            "\\pdfliteral{q 0 0 30 30 re W n /S1 sh Q}\\vrule width 1pt height 1pt",
+            "\\pdfliteral{/Pattern cs /P1 scn 0 0 30 30 re f}\\vrule width 1pt height 1pt",
+            "\\pdfliteral{/C1 cs 0.5 scn 0 0 30 30 re f}\\vrule width 1pt height 1pt",
+            "\\pdfliteral{q 30 0 0 30 0 0 cm /X1 Do Q}\\vrule width 1pt height 1pt",
+        ] {
+            t.push_str(&format!("\\hbox{{{p}}}\\penalty-10000 "));
+        }
+        // (never filled here: in a document, filled at its end, after the
+        // pages; a small one's end may come before a page's file is made)
+        t.push_str("\\end\n");
+        let (d, ev, files) = streamed_build(&t, Arc::new(Nothing), 1);
+        let told = exact_told(&ev);
+        // (the first draws with none of what its resources name: exact)
+        assert_eq!(told.get(&0), Some(&true), "page 0: {ev:?}");
+        for k in 1..6u64 {
+            assert_eq!(told.get(&k), Some(&false), "page {k}: {ev:?}");
+        }
+        let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+        // (drawn without them: the page drawing with none is the build's)
+        for (k, (pdf, _)) in &files {
+            let (w, h, px) = pixels(pdf, 0, 1.0);
+            assert!(w > 0 && h > 0 && !px.is_empty(), "page {k}");
+        }
+        assert_eq!(pixels(&files[&0].0, 0, 1.0), pixels(&out, 0, 1.0));
+        // (the status answer lists them, until the build is in)
+        let r = d.request(&json!({"id": 2, "op": "pages"}));
+        assert_eq!(r["json"]["inexact"], json!([]), "{r}");
+    }
+
+    /// Objects reserved and then given their bodies with `\\immediate`
+    /// (pgf's resources, which beamer decks draw with; at the document's
+    /// end in one run, known to the next run's pages), written into
+    /// object streams: each page drawing with them is exact, drawn as the
+    /// build's file draws it. (Its file runs each command at the number
+    /// TeX gave its object: a body written at once there opened an object
+    /// stream between the reserved numbers, the next reserved object one
+    /// past its number, the page not exact.)
+    #[test]
+    fn reserved_objects_filled_at_once_stream_exact() {
+        let mut t = PDF_HEAD.replace(
+            "\\pdfcompresslevel=0",
+            "\\pdfcompresslevel=9 \\pdfobjcompresslevel=2 \\pdfminorversion=5",
+        );
+        for n in ["gs", "pat", "cs"] {
+            t.push_str(&format!(
+                "\\pdfobj reserveobjnum \\edef\\{n}{{\\the\\pdflastobj}} "
+            ));
+        }
+        t.push_str("\\immediate\\pdfobj useobjnum\\gs{<</G1 <</ca 0.5 /CA 0.5>>>>} ");
+        t.push_str("\\immediate\\pdfobj useobjnum\\pat{<<>>} ");
+        t.push_str("\\immediate\\pdfobj useobjnum\\cs{<</C1 /DeviceRGB>>} ");
+        t.push_str("\\edef\\r{/ExtGState \\gs\\space 0 R /Pattern \\pat\\space 0 R /ColorSpace \\cs\\space 0 R}\\pdfpageresources\\expandafter{\\r} ");
+        for p in [
+            "\\pdfliteral{/G1 gs 1 0 0 rg 0 0 30 30 re f}\\vrule width 1pt height 1pt",
+            "\\pdfliteral{/C1 cs 0 0 1 scn 0 0 30 30 re f}\\vrule width 1pt height 1pt",
+            "\\pdfliteral{/G1 gs /C1 cs 0 1 0 scn 0 0 40 20 re f}\\vrule width 1pt height 1pt",
+        ] {
+            t.push_str(&format!("\\hbox{{{p}}}\\penalty-10000 "));
+        }
+        t.push_str("\\end\n");
+        for threads in [1, 2] {
+            let (d, ev, files) = streamed_build(&t, Arc::new(Nothing), threads);
+            let told = exact_told(&ev);
+            for k in 0..3u64 {
+                assert_eq!(told.get(&k), Some(&true), "j{threads} page {k}: {ev:?}");
+            }
+            let out = d.output().map(|o| o.1.to_vec()).expect("the build's file");
+            for (k, (pdf, _)) in &files {
+                assert_eq!(
+                    pixels(pdf, 0, 1.0),
+                    pixels(&out, *k, 1.0),
+                    "j{threads} page {k}"
+                );
+            }
+        }
+    }
+
+    /// A colour pushed on one page and popped on a later one colours the
+    /// pages between: their files begin from the colours the pages before
+    /// them leave (a page streamed before those are known made again once
+    /// they are), and are exact, drawn as the build's file draws them.
+    #[test]
+    fn a_colour_carried_across_pages_streams_exact() {
+        let mut t = PDF_HEAD.to_owned();
+        for i in 0..5 {
+            let c = match i {
+                1 => "\\pdfcolorstack0 push{1 0 0 rg}",
+                3 => "\\pdfcolorstack0 pop",
+                _ => "",
+            };
+            t.push_str(&format!(
+                "\\hbox{{{c}\\vrule width {}pt height 30pt}}\\penalty-10000 ",
+                10 + i
+            ));
+        }
+        t.push_str("\\end\n");
+        for threads in [1, 2] {
+            let (d, ev, files) = streamed_build(&t, Arc::new(Nothing), threads);
+            let told = exact_told(&ev);
+            // (a page streamed before the pages before it were known made
+            // again from the colours they carry in: every page exact)
+            for k in 0..5 {
+                assert_eq!(
+                    told.get(&k),
+                    Some(&true),
+                    "threads {threads}: page {k}: {ev:?}"
+                );
+            }
+            let out = d.output().map(|o| o.1.to_vec()).unwrap();
+            for (k, (pdf, exact)) in &files {
+                if *exact {
+                    assert_eq!(
+                        pixels(pdf, 0, 1.0),
+                        pixels(&out, *k, 1.0),
+                        "threads {threads}: page {k}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A XeTeX build streams its pages too: each page's file xdvipdfmx's
+    /// of that page alone, the colours the pages before it leave pushed at
+    /// its start; exact, drawn as the build's file draws it.
+    /// The build's file the one a build that streams nothing writes.
+    #[test]
+    fn a_xetex_build_streams_its_pages() {
+        let out = std::process::Command::new("kpsewhich")
+            .args(["-var-value", "TEXMFDIST"])
+            .output()
+            .expect("kpsewhich (TeX Live) on the test machine");
+        let dist = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+        let host = || -> Arc<dyn Host> {
+            Arc::new(XeHost {
+                dist: dist.clone(),
+                index: None,
+                read_face: Arc::default(),
+            })
+        };
+        let mut t = "\\catcode`\\{=1 \\catcode`\\}=2 \\vsize=100pt \\hsize=100pt \\output={\\shipout\\box255} \\count1=0 \\def\\l{\\advance\\count1 by1 \\ifnum\\count1<20000 \\expandafter\\l\\fi}\\l ".to_owned();
+        for i in 0..5 {
+            // (a named object made on the first page, drawn with on the
+            // last: made again first in that page's file)
+            let c = match i {
+                0 => "\\special{pdf:obj @g << /G1 << /CA 0.5 /ca 0.5 >> >>}",
+                1 => "\\special{color push rgb 1 0 0}",
+                3 => "\\special{color pop}",
+                4 => {
+                    "\\special{pdf:put @resources << /ExtGState @g >>}\\special{pdf:literal /G1 gs}"
+                }
+                _ => "",
+            };
+            t.push_str(&format!(
+                "\\hbox{{{c}\\vrule width {}pt height 30pt}}\\penalty-10000 ",
+                10 + i
+            ));
+        }
+        t.push_str("\\end\n");
+        let (d, ev, files) = streamed_build_with("xetex", &t, host(), 1);
+        let told = exact_told(&ev);
+        assert_eq!(told.len(), 5, "every page streamed: {ev:?}");
+        // (a colour carried in pushed at its file's start: exact too)
+        for k in 0..5 {
+            assert_eq!(told.get(&k), Some(&true), "page {k}: {ev:?}");
+        }
+        let out = d.output().map(|o| o.1.to_vec()).expect("the PDF");
+        for (k, (pdf, exact)) in &files {
+            let (w, h, px) = pixels(pdf, 0, 1.0);
+            assert!(w > 0 && h > 0 && !px.is_empty(), "page {k}");
+            if *exact {
+                assert_eq!(pixels(pdf, 0, 1.0), pixels(&out, *k, 1.0), "page {k}");
+            }
+        }
+        let mut quiet = Session::new(
+            Job {
+                engine: crate::tex::engine("xetex").unwrap(),
+                threads: Some(1),
+                ..job()
+            },
+            Arc::from(t.as_str()),
+            host(),
+            None,
+            Arc::new(Memory::default()),
+            Arc::new(Status::default()),
+        );
+        assert_eq!(Some(out), Some(quiet.build().out.pdf.to_vec()));
     }
 }

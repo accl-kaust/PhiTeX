@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 description = "TeX's semantics on the reduction core: 21-bit tokens, expansion, macros, conditionals, registers, groups, modes; the Engine trait the engines implement"
+autotests = false
 
 [dependencies]
 phitex-defuse = { path = "../../core/defuse" }
@@ -40,9 +41,22 @@ observe = ["phitex-defuse/observe", "phitex-pdf/observe"]
 phitex-kpse = { path = "../../tools/kpse" }
 
 # the profile measures run on the CLI's allocator (`phitex-cli`'s
-# `jemalloc`), not the system's
-[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+# `jemalloc`), not the system's (none on Windows: jemalloc does not
+# build for MSVC)
+[target.'cfg(not(any(target_family = "wasm", windows)))'.dev-dependencies]
 tikv-jemallocator = "0.6"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "latex"
+path = "tests/latex.rs"
+
+[[test]]
+name = "suites"
+path = "tests/suites.rs"
+
+[[test]]
+name = "tests"
+path = "tests/tests.rs"

@@ -1,7 +1,7 @@
 //! Gate 1: `oracle/fixtures/core/*.tex` under INITEX; the log's lines
 //! from `(./core.tex` on equal TeX's.
 
-mod common;
+use crate::common;
 
 const PRELUDE: &str = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\$=3 \\catcode`\\&=4 \\catcode`\\#=6 \\catcode`\\^=7 \\catcode`\\~=13 \\hsize=468pt \\vsize=643pt \\parindent=20pt \\maxdepth=4pt \\baselineskip=12pt \\topskip=10pt \\tolerance=200 \\linepenalty=10 %\n";
 
@@ -112,5 +112,65 @@ fn progress_reader() {
             "a slot outlived its job"
         );
         eprintln!("{threads} threads: {} jobs", p.done());
+    }
+}
+
+/// The page the progress says the build reached is a page as the
+/// output counts it: the pages shipped, not the routine's firings. A
+/// two-column routine fires twice per page (Grail, acmart's sigplan:
+/// "page 35" of its 18 pages), one firing ships two pages, a special
+/// firing ships one, and the page numbers restart (roman, then arabic):
+/// at the end of a cold build and of an edit that moves every page after
+/// it, the page reached is the last page.
+#[test]
+fn progress_counts_the_pages_shipped() {
+    use std::fmt::Write as _;
+    use std::sync::Arc;
+    let fx = common::fixtures().join("plain");
+    let prelude = common::plain();
+    let doc = |pdf: bool, cols: usize| {
+        let mut t = if pdf { "\\pdfoutput=1 " } else { "" }.to_owned();
+        t.push_str(
+            "\\hsize=100pt \\vsize=100pt \\pageno=-1 \\newbox\\colA \\newcount\\col
+\\output={\\ifnum\\outputpenalty<-10001 \\shipout\\box255 \\else
+  \\global\\advance\\col1
+  \\ifodd\\col \\global\\setbox\\colA=\\box255
+  \\else \\shipout\\hbox{\\box\\colA\\box255}\\advancepageno \\fi
+  \\ifnum\\col=6 \\shipout\\hbox{extra}\\fi
+  \\ifnum\\col=8 \\global\\pageno=1 \\fi\\fi}
+",
+        );
+        for k in 0..cols {
+            let _ = writeln!(t, "\\hbox{{column {k}}}\\penalty-10000");
+            if k == 9 {
+                t.push_str("\\hbox{special}\\penalty-10002\n");
+            }
+        }
+        t.push_str("\\end\n");
+        t
+    };
+    for (pdf, threads) in [(false, 1), (false, 4), (true, 1), (true, 4)] {
+        let p = Arc::new(phitex_tex::Progress::new(threads));
+        let opts = phitex_tex::Options {
+            threads: Some(threads),
+            progress: Some(p.clone()),
+            ..common::options("./cols.tex", "cols", "", &fx)
+        };
+        let mut b = common::build(opts, Some(&prelude), &doc(pdf, 20));
+        // (10 two-column pages, the extra one, the special one)
+        assert_eq!(b.pages().len(), 12, "pdf {pdf}, {threads} threads");
+        assert_eq!(
+            p.page(),
+            12,
+            "pdf {pdf}, {threads} threads: the page reached, cold"
+        );
+        let src = doc(pdf, 24).replacen("column 3}", "column 3, again}", 1);
+        common::rebuild(&mut b, &src);
+        assert_eq!(b.pages().len(), 14, "pdf {pdf}, {threads} threads");
+        assert_eq!(
+            p.page(),
+            14,
+            "pdf {pdf}, {threads} threads: the page reached, an edit"
+        );
     }
 }

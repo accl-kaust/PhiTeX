@@ -1,0 +1,19 @@
+\documentclass{article}
+\usepackage{tikz}
+\newcounter{frame}
+\newcount\steps
+\newcommand\pic[1]{\begin{tikzpicture}\node{#1};\end{tikzpicture}}
+\begin{document}
+% (beamer's frame number in its footline: a picture shows a counter its
+% paragraph stepped and read before it; the picture is a child node that
+% reads its parent's bindings first)
+\stepcounter{frame}Frame \arabic{frame}: \pic{\arabic{frame}}
+
+\global\advance\steps by 2 \the\steps\ \pic{\the\steps}
+
+\stepcounter{frame}\stepcounter{frame}\ifnum\value{frame}>2 three \fi\pic{\arabic{frame}}
+
+\the\steps\ \global\advance\steps by 3 \pic{\the\steps}
+
+\addtocounter{frame}{5}\arabic{frame} \pic{\arabic{frame}} \pic{\arabic{frame}}
+\end{document}

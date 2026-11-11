@@ -59,6 +59,14 @@ use hayro::{RenderCache, RenderSettings, render_into};
 /// drawings.
 const GAP: f64 = 4.0;
 
+/// Columns closer than this (points) are one: wider than a word space,
+/// narrower than the space between two columns (LaTeX's `\columnsep`, 10
+/// points; ACM's 2 picas). A two-column page's line is a band of its
+/// own, not a band of every line beside a figure in the other column
+/// (a keystroke in Grail's two-column text drew 3.4 MB of pixels again,
+/// the whole column beside a figure).
+const COLUMN_GAP: f64 = 6.0;
+
 /// The strips kept for the viewer, at most this many bytes of pixels
 /// (the oldest dropped first): 256 MiB natively; 64 MiB in WebAssembly,
 /// whose 4 GiB memory the engine's threads share.
@@ -75,13 +83,16 @@ pub struct Strip {
     pub rgba: Vec<u8>,
 }
 
-/// A band of a page: its key (its [`Strip`]'s), and its top (pixels from
-/// the page's top) and height.
+/// A band of a page (a cell of its drawings: a line, or the part of a
+/// line in one column): its key (its [`Strip`]'s), its top (pixels from
+/// the page's top) and height, its left and width (its strip's).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Band {
     pub key: u64,
     pub y: i32,
     pub h: u32,
+    pub x: i32,
+    pub w: u32,
 }
 
 /// A line of the page's text, in points from the page's top left: its
@@ -107,11 +118,13 @@ pub enum Target {
 }
 
 /// A link: its box (points from the page's top left: left, top, right,
-/// bottom) and its target.
+/// bottom), its target, and the name of its destination where it goes
+/// to a named one (hyperref's `cite.KEY`, `section.2`, ...).
 #[derive(Clone, Debug)]
 pub struct Link {
     pub rect: [f64; 4],
     pub target: Target,
+    pub name: Option<String>,
 }
 
 /// A page as the viewer shows it: its size in pixels and in points, its
@@ -154,14 +167,21 @@ struct Doc {
     texts: HashMap<usize, Vec<TextLine>>,
     /// The outline, read once a PDF.
     outline: Option<Vec<Entry>>,
+    /// Its named destinations, each found once.
+    names: Names,
 }
 
 /// The strips of a viewer's pages, across builds.
 #[derive(Default)]
 pub struct Renderer {
     doc: Option<Doc>,
-    strips: HashMap<u64, Arc<Strip>>,
-    order: VecDeque<u64>,
+    /// The strips kept, each with when it was last drawn or listed in a
+    /// frame (a tick of [`Renderer::tick`]).
+    strips: HashMap<u64, (Arc<Strip>, u64)>,
+    /// Keys by when they were drawn or listed, oldest first; an entry whose
+    /// tick is not its strip's now is stale (the strip was listed since).
+    order: VecDeque<(u64, u64)>,
+    tick: u64,
     bytes: usize,
     /// Each glyph's outline's box and the outline's hash (by hayro's glyph
     /// key, its font object and id: a subset made again for new
@@ -350,12 +370,27 @@ impl<'a> Device<'a> for Probe<'_> {
                 }
                 Glyph::Type3(t) => {
                     let text = t.as_unicode().map(|b| bf(&b)).unwrap_or_default();
-                    (
-                        t.cache_key(),
-                        Rect::new(0.0, -300.0, 1000.0, 1000.0),
-                        text,
-                        0.0,
-                    )
+                    // (what its procedure draws, in the font's 1000 units
+                    // to the em, once per glyph: its box, and its right
+                    // edge as its advance, the font's widths being out of
+                    // reach. As an advance of none, every letter of a
+                    // Type 3 font, pdfTeX's bitmap ones, was a word apart)
+                    let key = t.cache_key();
+                    let (local, _) = *self.boxes.entry(key).or_insert_with(|| {
+                        let mut inner = HashMap::new();
+                        let mut sub = Probe {
+                            items: Vec::new(),
+                            around: 0,
+                            saved: Vec::new(),
+                            boxes: &mut inner,
+                            chars: Vec::new(),
+                        };
+                        t.interpret(&mut sub, Affine::IDENTITY, Affine::IDENTITY, &props.paint);
+                        let ink = sub.items.iter().map(|i| i.bbox).reduce(|a, b| a.union(b));
+                        (ink.unwrap_or(Rect::new(0.0, 0.0, 0.0, 0.0)), 0)
+                    });
+                    let adv = local.x1.max(0.0);
+                    (key, local, text, adv)
                 }
             };
             let gb = full.transform_rect_bbox(local);
@@ -384,9 +419,18 @@ impl<'a> Device<'a> for Probe<'_> {
     }
 
     fn draw_image(&mut self, image: Image<'a, '_>, props: ImageDrawProps<'a>) {
-        let bbox = props
-            .transform
-            .transform_rect_bbox(Rect::new(0.0, 0.0, 1.0, 1.0));
+        // (the image's transform takes its samples, `w` by `h`, to the
+        // page: hayro puts the `1/w`, `-1/h` scale of the unit square in
+        // front of the CTM. As the unit square, an image's box was its
+        // corner sample, a pixel or less: no band held its place, and
+        // every raster figure, PNG or JPEG, and every bitmap glyph a
+        // Type 3 font draws as an image mask, was left blank)
+        let bbox = props.transform.transform_rect_bbox(Rect::new(
+            0.0,
+            0.0,
+            f64::from(image.width()),
+            f64::from(image.height()),
+        ));
         let id = hash_of(|h| {
             self.around.hash(h);
             image.cache_key().hash(h);
@@ -438,8 +482,11 @@ fn lines_of(chars: &[Ch], scale: f64) -> Vec<TextLine> {
                 ..TextLine::default()
             });
         } else if let Some(l) = cur.as_mut() {
-            // (a word space TeX leaves as a gap: a space, as the PDF's text has it)
-            if x - last_r > size * 0.2 && !l.text.ends_with(' ') {
+            // (a word space TeX leaves as a gap: a space, as the PDF's text
+            // has it. A tenth of the em, as poppler's `pdftotext` takes
+            // it: a justified line's spaces shrink below a fifth, Grail's
+            // Libertine lines lost theirs, while kerns stay below a tenth)
+            if x - last_r > size * 0.1 && !l.text.ends_with(' ') {
                 l.text.push(' ');
                 l.xs.push(last_r);
                 l.rs.push(x);
@@ -498,58 +545,119 @@ fn dest_of(pages: &[Page<'_>], arr: &Array<'_>) -> Option<(usize, Option<f64>)> 
     Some((page, top.map(|t| h - (t - y0))))
 }
 
-/// A named destination, from the catalog's `/Dests` dictionary or its
-/// `/Names` `/Dests` tree.
-fn named<'a>(pdf: &'a Pdf, name: &[u8]) -> Option<Array<'a>> {
-    let xref = pdf.xref();
-    let root: Dict<'_> = xref.get(xref.root_id())?;
-    let as_dest = |o: Object<'a>| -> Option<Array<'a>> {
-        match o {
-            Object::Array(a) => Some(a),
-            Object::Dict(d) => d.get::<Array<'_>>(b"D"),
-            _ => None,
-        }
-    };
-    if let Some(d) = root.get::<Dict<'_>>(b"Dests")
-        && let Some(o) = d.get::<Object<'_>>(name)
-    {
-        return as_dest(o);
+/// A destination's value (an array, or a dictionary with one under `/D`).
+fn as_dest(o: Object<'_>) -> Option<Array<'_>> {
+    match o {
+        Object::Array(a) => Some(a),
+        Object::Dict(d) => d.get::<Array<'_>>(b"D"),
+        _ => None,
     }
-    let tree = root.get::<Dict<'_>>(b"Names")?.get::<Dict<'_>>(b"Dests")?;
+}
+
+/// A name of the `/Names` `/Dests` tree: its value's object, or its place
+/// (a value written inside its node).
+enum NameVal {
+    Ref(ObjectIdentifier),
+    At(Option<(usize, Option<f64>)>),
+}
+
+/// A document's named destinations (the catalog's `/Dests` dictionary,
+/// its `/Names` `/Dests` tree), each name's place found once: the tree's
+/// nodes read once a document and a name's value only when it is asked.
+/// (A search of the tree for every link read every value of each leaf it
+/// passed, each in an object stream whose offsets hayro reads again for
+/// every object: two thirds of a frame of a page with citations and
+/// references, Grail's 6.7 ms of 23 in WebAssembly.)
+#[derive(Default)]
+struct Names {
+    /// The tree's names (none: not read yet).
+    tree: Option<HashMap<Vec<u8>, NameVal>>,
+    /// Each name asked, and its place.
+    asked: HashMap<Vec<u8>, Option<(usize, Option<f64>)>>,
+}
+
+impl Names {
+    /// Named destination `name`'s page and top.
+    fn place(
+        &mut self,
+        pdf: &Pdf,
+        pages: &[Page<'_>],
+        name: &[u8],
+    ) -> Option<(usize, Option<f64>)> {
+        if let Some(p) = self.asked.get(name) {
+            return *p;
+        }
+        let p = self.find(pdf, pages, name);
+        self.asked.insert(name.to_vec(), p);
+        p
+    }
+
+    fn find(&mut self, pdf: &Pdf, pages: &[Page<'_>], name: &[u8]) -> Option<(usize, Option<f64>)> {
+        let xref = pdf.xref();
+        let root: Dict<'_> = xref.get(xref.root_id())?;
+        if let Some(d) = root.get::<Dict<'_>>(b"Dests")
+            && let Some(o) = d.get::<Object<'_>>(name)
+        {
+            return as_dest(o).and_then(|a| dest_of(pages, &a));
+        }
+        let tree = self.tree.get_or_insert_with(|| names_of(pdf, &root, pages));
+        match tree.get(name)? {
+            NameVal::At(p) => *p,
+            NameVal::Ref(id) => xref
+                .get::<Object<'_>>(*id)
+                .and_then(as_dest)
+                .and_then(|a| dest_of(pages, &a)),
+        }
+    }
+}
+
+/// The `/Names` `/Dests` tree's names, every node read once (its values
+/// not: a reference kept, resolved when asked), the first of a name kept.
+fn names_of(pdf: &Pdf, root: &Dict<'_>, pages: &[Page<'_>]) -> HashMap<Vec<u8>, NameVal> {
+    let mut out = HashMap::new();
+    let Some(tree) = root
+        .get::<Dict<'_>>(b"Names")
+        .and_then(|n| n.get::<Dict<'_>>(b"Dests"))
+    else {
+        return out;
+    };
+    let xref = pdf.xref();
     let mut stack = vec![tree];
+    // (at most this many nodes: a cycle of /Kids ends there)
+    let mut budget = 100_000usize;
     while let Some(node) = stack.pop() {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
         if let Some(names) = node.get::<Array<'_>>(b"Names") {
-            let mut it = names.iter::<Object<'_>>();
+            let mut it = names.raw_iter();
             while let (Some(k), Some(v)) = (it.next(), it.next()) {
-                if let Object::String(s) = k
-                    && s.as_bytes() == name
-                {
-                    return as_dest(v);
-                }
+                let key = match k {
+                    MaybeRef::NotRef(Object::String(s)) => s.as_bytes().to_vec(),
+                    MaybeRef::Ref(r) => match xref.get::<Object<'_>>(r.into()) {
+                        Some(Object::String(s)) => s.as_bytes().to_vec(),
+                        _ => continue,
+                    },
+                    MaybeRef::NotRef(_) => continue,
+                };
+                out.entry(key).or_insert_with(|| match v {
+                    MaybeRef::Ref(r) => NameVal::Ref(r.into()),
+                    MaybeRef::NotRef(o) => NameVal::At(as_dest(o).and_then(|a| dest_of(pages, &a))),
+                });
             }
         }
         if let Some(kids) = node.get::<Array<'_>>(b"Kids") {
-            for k in kids.iter::<Dict<'_>>() {
-                let inside = k.get::<Array<'_>>(b"Limits").is_none_or(|l| {
-                    let mut li = l.iter::<Object<'_>>();
-                    match (li.next(), li.next()) {
-                        (Some(Object::String(a)), Some(Object::String(b))) => {
-                            a.as_bytes() <= name && name <= b.as_bytes()
-                        }
-                        _ => true,
-                    }
-                });
-                if inside {
-                    stack.push(k);
-                }
-            }
+            // (in reverse: the first kid's names read first)
+            let kids: Vec<Dict<'_>> = kids.iter::<Dict<'_>>().collect();
+            stack.extend(kids.into_iter().rev());
         }
     }
-    None
+    out
 }
 
 /// A page's links (points from its top left).
-fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>) -> Vec<Link> {
+fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>, names: &mut Names) -> Vec<Link> {
     let mut out = Vec::new();
     let Some(annots) = page.raw().get::<Array<'_>>(b"Annots") else {
         return out;
@@ -576,14 +684,21 @@ fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>) -> Vec<Link> {
             v[0].max(v[2]) - mb.x0,
             h - (v[1].min(v[3]) - mb.y0),
         ];
-        let dest = |o: Object<'_>| -> Option<Target> {
-            let arr = match o {
-                Object::Array(a) => Some(a),
-                Object::String(s) => named(pdf, s.as_bytes()),
-                Object::Name(n) => named(pdf, n.as_str().as_bytes()),
+        let mut name = None;
+        let mut dest = |o: Object<'_>| -> Option<Target> {
+            match o {
+                Object::Array(a) => dest_of(pages, &a),
+                Object::String(s) => {
+                    name = Some(String::from_utf8_lossy(s.as_bytes()).into_owned());
+                    names.place(pdf, pages, s.as_bytes())
+                }
+                Object::Name(n) => {
+                    name = Some(n.as_str().to_owned());
+                    names.place(pdf, pages, n.as_str().as_bytes())
+                }
                 _ => None,
-            }?;
-            dest_of(pages, &arr).map(|(p, y)| Target::Page(p, y))
+            }
+            .map(|(p, y)| Target::Page(p, y))
         };
         let target = if let Some(act) = a.get::<Dict<'_>>(b"A") {
             match act
@@ -596,14 +711,14 @@ fn links_of(pdf: &Pdf, pages: &[Page<'_>], page: &Page<'_>) -> Vec<Link> {
                     .get::<Object<'_>>(b"URI")
                     .and_then(Object::into_string)
                     .map(|s| Target::Uri(String::from_utf8_lossy(s.as_bytes()).into_owned())),
-                Some("GoTo") => act.get::<Object<'_>>(b"D").and_then(dest),
+                Some("GoTo") => act.get::<Object<'_>>(b"D").and_then(&mut dest),
                 _ => None,
             }
         } else {
-            a.get::<Object<'_>>(b"Dest").and_then(dest)
+            a.get::<Object<'_>>(b"Dest").and_then(&mut dest)
         };
         if let Some(target) = target {
-            out.push(Link { rect, target });
+            out.push(Link { rect, target, name });
         }
     }
     out
@@ -692,8 +807,14 @@ fn text_string(b: &[u8]) -> String {
 
 /// The catalog's `/Outlines`: each entry's title and destination, its
 /// `/First` its entries, `/Next` the one after it.
-fn outline_of(pdf: &Pdf) -> Vec<Entry> {
-    fn level(pdf: &Pdf, pages: &[Page<'_>], first: Dict<'_>, budget: &mut usize) -> Vec<Entry> {
+fn outline_of(pdf: &Pdf, names: &mut Names) -> Vec<Entry> {
+    fn level(
+        pdf: &Pdf,
+        pages: &[Page<'_>],
+        first: Dict<'_>,
+        budget: &mut usize,
+        names: &mut Names,
+    ) -> Vec<Entry> {
         let mut out = Vec::new();
         let mut cur = Some(first);
         while let Some(d) = cur {
@@ -706,22 +827,21 @@ fn outline_of(pdf: &Pdf) -> Vec<Entry> {
                 .and_then(Object::into_string)
                 .map(|s| text_string(s.as_bytes()))
                 .unwrap_or_default();
-            let dest = |o: Object<'_>| -> Option<(usize, Option<f64>)> {
-                let arr = match o {
-                    Object::Array(a) => Some(a),
-                    Object::String(s) => named(pdf, s.as_bytes()),
-                    Object::Name(n) => named(pdf, n.as_str().as_bytes()),
+            let mut dest = |o: Object<'_>| -> Option<(usize, Option<f64>)> {
+                match o {
+                    Object::Array(a) => dest_of(pages, &a),
+                    Object::String(s) => names.place(pdf, pages, s.as_bytes()),
+                    Object::Name(n) => names.place(pdf, pages, n.as_str().as_bytes()),
                     _ => None,
-                }?;
-                dest_of(pages, &arr)
+                }
             };
             let place = match d.get::<Dict<'_>>(b"A") {
-                Some(a) => a.get::<Object<'_>>(b"D").and_then(dest),
-                None => d.get::<Object<'_>>(b"Dest").and_then(dest),
+                Some(a) => a.get::<Object<'_>>(b"D").and_then(&mut dest),
+                None => d.get::<Object<'_>>(b"Dest").and_then(&mut dest),
             };
             let kids = d
                 .get::<Dict<'_>>(b"First")
-                .map(|f| level(pdf, pages, f, budget))
+                .map(|f| level(pdf, pages, f, budget, names))
                 .unwrap_or_default();
             out.push(Entry {
                 title,
@@ -746,7 +866,7 @@ fn outline_of(pdf: &Pdf) -> Vec<Entry> {
     };
     // (at most this many entries: a cycle of /Next ends there)
     let mut budget = 100_000usize;
-    level(pdf, pages, first, &mut budget)
+    level(pdf, pages, first, &mut budget, names)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -763,20 +883,54 @@ impl Renderer {
     /// A strip drawn for a frame (`None`: unknown, or dropped since).
     #[must_use]
     pub fn strip(&self, key: u64) -> Option<Arc<Strip>> {
-        self.strips.get(&key).cloned()
+        self.strips.get(&key).map(|(s, _)| s.clone())
     }
 
+    /// `s` kept as `key`'s strip, the newest; the oldest dropped past
+    /// [`KEEP_BYTES`]. A key drawn again replaces its strip and its bytes:
+    /// counted twice (a page's identical bands are one key, each drawn),
+    /// the count grew past the budget for good, and every strip was then
+    /// dropped as soon as it was drawn, the viewer's pages blank.
     fn keep(&mut self, key: u64, s: Strip) {
+        self.tick += 1;
         self.bytes += s.rgba.len();
-        self.strips.insert(key, Arc::new(s));
-        self.order.push_back(key);
+        if let Some((old, _)) = self.strips.insert(key, (Arc::new(s), self.tick)) {
+            self.bytes -= old.rgba.len();
+        }
+        self.order.push_back((key, self.tick));
+        self.evict();
+    }
+
+    /// `key`'s strip made the newest: a frame lists it, and the viewer
+    /// asks for it next. Kept in the order it was first drawn, a band a
+    /// frame listed (kept from an earlier build or zoom) was among the
+    /// first dropped when the frame's new bands were drawn, before the
+    /// viewer could fetch it: a blank band.
+    fn touch(&mut self, key: u64) {
+        self.tick += 1;
+        if let Some(e) = self.strips.get_mut(&key) {
+            e.1 = self.tick;
+            self.order.push_back((key, self.tick));
+        }
+    }
+
+    /// The oldest strips dropped while they are past [`KEEP_BYTES`]; the
+    /// order's stale entries dropped once they outnumber the strips.
+    fn evict(&mut self) {
         while self.bytes > KEEP_BYTES {
-            let Some(k) = self.order.pop_front() else {
+            let Some((k, t)) = self.order.pop_front() else {
                 break;
             };
-            if let Some(s) = self.strips.remove(&k) {
+            if self.strips.get(&k).is_some_and(|e| e.1 == t)
+                && let Some((s, _)) = self.strips.remove(&k)
+            {
                 self.bytes -= s.rgba.len();
             }
+        }
+        if self.order.len() > 2 * self.strips.len() + 1024 {
+            let strips = &self.strips;
+            self.order
+                .retain(|(k, t)| strips.get(k).is_some_and(|e| e.1 == *t));
         }
     }
 
@@ -822,6 +976,7 @@ impl Renderer {
                 pdf: Pdf::new(Arc::new(Bytes(pdf.clone()))).ok()?,
                 texts: HashMap::new(),
                 outline: None,
+                names: Names::default(),
             }),
         }
     }
@@ -852,6 +1007,22 @@ impl Renderer {
         out
     }
 
+    /// Page `k`'s links (points from its top left), nothing drawn.
+    pub fn links(&mut self, pdf: &Arc<[u8]>, k: usize) -> Vec<Link> {
+        let Some(mut doc) = self.open(pdf) else {
+            return Vec::new();
+        };
+        let out = {
+            let pages = doc.pdf.pages();
+            match pages.get(k) {
+                Some(page) => links_of(&doc.pdf, pages, page, &mut doc.names),
+                None => Vec::new(),
+            }
+        };
+        self.doc = Some(doc);
+        out
+    }
+
     /// The PDF's outline (its bookmarks), its entries' pages and places.
     pub fn outline(&mut self, pdf: &Arc<[u8]>) -> Vec<Entry> {
         let Some(mut doc) = self.open(pdf) else {
@@ -859,7 +1030,7 @@ impl Renderer {
         };
         let out = doc
             .outline
-            .get_or_insert_with(|| outline_of(&doc.pdf))
+            .get_or_insert_with(|| outline_of(&doc.pdf, &mut doc.names))
             .clone();
         self.doc = Some(doc);
         out
@@ -903,69 +1074,74 @@ impl Renderer {
         let (items, chars) = probe(page, base, f64::from(pw), f64::from(ph), &mut self.boxes);
         let text = lines_of(&chars, s);
         doc.texts.insert(k, text.clone());
-        let links = links_of(pdf, pages, page);
+        let links = links_of(pdf, pages, page, &mut doc.names);
 
-        // (the bands: drawings' extents merged where they come within GAP)
-        let mut by_top: Vec<usize> = (0..items.len()).collect();
-        by_top.sort_by(|&a, &b| items[a].bbox.y0.total_cmp(&items[b].bbox.y0));
-        let mut spans: Vec<(f64, f64)> = Vec::new();
-        let mut band_of = vec![0usize; items.len()];
-        for &i in &by_top {
-            let b = items[i].bbox;
-            match spans.last_mut() {
-                Some(last) if b.y0 <= last.1 + GAP => last.1 = last.1.max(b.y1),
-                _ => spans.push((b.y0, b.y1)),
-            }
-            band_of[i] = spans.len() - 1;
-        }
+        // (the bands: the drawings cut where they leave a gap, rows, then
+        // in a row its columns, then their rows, ...)
+        let mut cells: Vec<Vec<usize>> = Vec::new();
+        cut(
+            &items,
+            (0..items.len()).collect(),
+            true,
+            false,
+            &mut cells,
+            s,
+        );
         let probe_us = micros(t1);
 
-        // (each band's key: its drawings in order, placed from its top)
-        let mut keys: Vec<DefaultHasher> = spans
-            .iter()
-            .map(|&(y0, y1)| {
-                let mut h = DefaultHasher::new();
-                (pw, q(y1 - y0), scale.to_bits()).hash(&mut h);
-                h
-            })
-            .collect();
-        for (i, it) in items.iter().enumerate() {
-            let b = band_of[i];
-            let top = spans[b].0 - 1.0;
-            (it.id, q(it.ax), q(it.ay - top)).hash(&mut keys[b]);
-        }
         let t2 = Instant::now();
-        // (cut to the window's rows, a band's key also its cut: its rows
-        // from its own top and the window's columns)
+        // (each band's place in pixels and key: its drawings in order,
+        // placed from its top left, cut to the window, its rows and columns
+        // from its own top left too)
         let (wtop, wbottom) = (wy as i32, (wy + wh) as i32);
-        let bands: Vec<Band> = spans
+        let (wleft, wright) = (wx as i32, (wx + ww) as i32);
+        let mut bands: Vec<Band> = cells
             .iter()
-            .enumerate()
-            .filter_map(|(b, &(y0, y1))| {
-                let top = (y0 - 1.0).round() as i32;
-                let bottom = top + ((y1 + 1.0) - (y0 - 1.0)).ceil().max(1.0) as i32;
+            .filter_map(|c| {
+                let r = c.iter().map(|&i| items[i].bbox).reduce(|a, b| a.union(b))?;
+                let top = (r.y0 - 1.0).round() as i32;
+                let bottom = top + ((r.y1 + 1.0) - (r.y0 - 1.0)).ceil().max(1.0) as i32;
+                let left = (r.x0 - 1.0).round() as i32;
+                let right = left + ((r.x1 + 1.0) - (r.x0 - 1.0)).ceil().max(1.0) as i32;
                 let (from, to) = (top.max(wtop), bottom.min(wbottom));
-                if from >= to {
+                let (l, rt) = (left.max(wleft), right.min(wright));
+                if from >= to || l >= rt {
                     return None;
                 }
-                let mut key = keys[b].clone();
-                if win.is_some() {
-                    (wx, ww, from - top, to - from).hash(&mut key);
+                let mut h = DefaultHasher::new();
+                (right - left, q(r.y1 - r.y0), scale.to_bits()).hash(&mut h);
+                let (x0, y0) = (r.x0 - 1.0, r.y0 - 1.0);
+                for &i in c {
+                    let it = &items[i];
+                    (it.id, q(it.ax - x0), q(it.ay - y0)).hash(&mut h);
                 }
+                (l - left, rt - l, from - top, to - from).hash(&mut h);
                 Some(Band {
-                    key: key.finish(),
+                    key: h.finish(),
                     y: from,
                     h: (to - from) as u32,
+                    x: l,
+                    w: (rt - l) as u32,
                 })
             })
             .collect();
+        bands.sort_by_key(|b| (b.y, b.x));
+        // (a key drawn once a frame: identical bands, a repeated line or
+        // rule, are one strip; those kept made the newest, so drawing the
+        // new ones never drops them before the viewer fetches them)
+        let mut seen = std::collections::HashSet::new();
         let fresh: Vec<bool> = bands
             .iter()
-            .map(|b| !self.strips.contains_key(&b.key))
+            .map(|b| !self.strips.contains_key(&b.key) && seen.insert(b.key))
             .collect();
+        for (b, f) in bands.iter().zip(&fresh) {
+            if !f {
+                self.touch(b.key);
+            }
+        }
         let drawn = fresh.iter().filter(|f| **f).count();
         let kept = bands.len() - drawn;
-        self.draw(page, base, &settings, &bands, &fresh, [wx, ww], ph)?;
+        self.draw(page, base, &settings, &bands, &fresh)?;
         Some(Frame {
             pw,
             ph,
@@ -983,11 +1159,15 @@ impl Renderer {
         })
     }
 
-    /// The bands of `bands` that are `fresh` drawn and kept: consecutive
-    /// ones in one pass of the page from the first's top to the last's
-    /// bottom (hayro skipping what falls outside), each band its rows of
-    /// it.
-    #[allow(clippy::too_many_arguments, clippy::cast_possible_truncation)]
+    /// The bands of `bands` that are `fresh` drawn and kept: those near
+    /// each other in one pass of the page over the rectangle around them
+    /// (hayro skipping what falls outside), each band its pixels of it.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap,
+        reason = "a page's pixels: a band's size fits an i32"
+    )]
     fn draw(
         &mut self,
         page: &Page<'_>,
@@ -995,29 +1175,40 @@ impl Renderer {
         settings: &InterpreterSettings,
         bands: &[Band],
         fresh: &[bool],
-        [wx, pw]: [u32; 2],
-        ph: u32,
     ) -> Option<()> {
         let cache = RenderCache::new();
-        let mut b = 0;
-        while b < bands.len() {
-            if !fresh[b] {
-                b += 1;
-                continue;
-            }
-            let mut e = b;
-            while e + 1 < bands.len() && fresh[e + 1] {
+        let todo: Vec<&Band> = bands
+            .iter()
+            .zip(fresh)
+            .filter_map(|(b, f)| f.then_some(b))
+            .collect();
+        let rect = |b: &Band| (b.x, b.y, b.x + b.w as i32, b.y + b.h as i32);
+        let area = |(x0, y0, x1, y1): (i32, i32, i32, i32)| i64::from(x1 - x0) * i64::from(y1 - y0);
+        let mut i = 0;
+        while i < todo.len() {
+            // (the next bands drawn with it while the rectangle around them
+            // is at most twice their pixels: the lines below an edit in one
+            // pass, a line in each column apart)
+            let mut around = rect(todo[i]);
+            let mut sum = area(around);
+            let mut e = i + 1;
+            while e < todo.len() {
+                let r = rect(todo[e]);
+                let u = (
+                    around.0.min(r.0),
+                    around.1.min(r.1),
+                    around.2.max(r.2),
+                    around.3.max(r.3),
+                );
+                if area(u) > 2 * (sum + area(r)) {
+                    break;
+                }
+                around = u;
+                sum += area(r);
                 e += 1;
             }
-            let top = bands[b].y.max(0);
-            let bottom = bands[b..=e]
-                .iter()
-                .map(|x| x.y + i32::try_from(x.h).unwrap_or(i32::MAX))
-                .max()
-                .unwrap_or(top + 1)
-                .min(i32::try_from(ph).unwrap_or(i32::MAX))
-                .max(top + 1);
-            let (sw, sh) = (u16::try_from(pw).ok()?, u16::try_from(bottom - top).ok()?);
+            let (x0, y0, x1, y1) = around;
+            let (sw, sh) = (u16::try_from(x1 - x0).ok()?, u16::try_from(y1 - y0).ok()?);
             let mut ctx = RenderContext::new(sw, sh);
             render_into(
                 page,
@@ -1025,7 +1216,7 @@ impl Renderer {
                 settings,
                 &RenderSettings::default(),
                 &mut ctx,
-                Affine::translate((-f64::from(wx), -f64::from(top))) * base,
+                Affine::translate((-f64::from(x0), -f64::from(y0))) * base,
             );
             ctx.flush();
             let mut pix = Pixmap::new(sw, sh);
@@ -1040,24 +1231,86 @@ impl Renderer {
                 },
             );
             let all = pix.data_as_u8_slice();
-            let row = pw as usize * 4;
-            for band in &bands[b..=e] {
-                let from = usize::try_from(band.y - top).unwrap_or(0);
-                let to = (from + band.h as usize).min(usize::from(sh));
-                let mut rgba = all[from * row..to * row].to_vec();
+            let row = usize::from(sw) * 4;
+            for band in &todo[i..e] {
+                let (dx, dy) = ((band.x - x0) as usize, (band.y - y0) as usize);
+                let w = band.w as usize;
+                let mut rgba = Vec::with_capacity(w * band.h as usize * 4);
+                for y in dy..dy + band.h as usize {
+                    rgba.extend_from_slice(&all[y * row + dx * 4..][..w * 4]);
+                }
                 unpremultiply(&mut rgba);
                 self.keep(
                     band.key,
                     Strip {
-                        w: pw,
-                        h: u32::try_from(to - from).unwrap_or(0),
+                        w: band.w,
+                        h: band.h,
                         rgba,
                     },
                 );
             }
-            b = e + 1;
+            i = e;
         }
         Some(())
+    }
+}
+
+/// The drawings `idx` of `items` cut into cells, into `out`: where their
+/// boxes leave a gap across the page (`rows`: a gap between rows, of
+/// [`GAP`] pixels; else between columns, of [`COLUMN_GAP`] points at
+/// `scale`), each part cut again the other way, until a part has no gap
+/// either way. A cell holds whole drawings, and no other cell's pixels
+/// reach into it.
+fn cut(
+    items: &[Item],
+    idx: Vec<usize>,
+    rows: bool,
+    tried: bool,
+    out: &mut Vec<Vec<usize>>,
+    scale: f64,
+) {
+    if idx.is_empty() {
+        return;
+    }
+    let gap = if rows {
+        GAP
+    } else {
+        (COLUMN_GAP * scale).max(GAP)
+    };
+    let span = |i: usize| {
+        let b = items[i].bbox;
+        if rows { (b.y0, b.y1) } else { (b.x0, b.x1) }
+    };
+    let mut by: Vec<usize> = idx;
+    by.sort_by(|&a, &b| span(a).0.total_cmp(&span(b).0));
+    let mut parts: Vec<Vec<usize>> = Vec::new();
+    let mut end = f64::NEG_INFINITY;
+    for i in by {
+        let (a, b) = span(i);
+        match parts.last_mut() {
+            Some(p) if a <= end + gap => {
+                p.push(i);
+                end = end.max(b);
+            }
+            _ => {
+                parts.push(vec![i]);
+                end = b;
+            }
+        }
+    }
+    if parts.len() == 1 {
+        let mut part = parts.pop().unwrap_or_default();
+        if tried {
+            // (the drawings in the page's order: a cell's key hashes them so)
+            part.sort_unstable();
+            out.push(part);
+        } else {
+            cut(items, part, !rows, true, out, scale);
+        }
+        return;
+    }
+    for p in parts {
+        cut(items, p, !rows, false, out, scale);
     }
 }
 

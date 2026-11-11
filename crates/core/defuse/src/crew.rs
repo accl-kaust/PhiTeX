@@ -16,7 +16,6 @@
 //! waits.
 
 use std::any::Any;
-use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
@@ -27,16 +26,18 @@ type Job = Box<dyn FnOnce() + Send + 'static>;
 /// wasm32-wasip1, does not).
 const THREADED: bool = !cfg!(all(target_arch = "wasm32", not(target_feature = "atomics")));
 
-/// The threads and the jobs not yet taken.
+/// The threads at rest, the one that last worked on top: the next job goes
+/// to it, its caches the warmest (one condition shared by all gave a job to
+/// the thread that had waited longest, so each edit's runs began cold).
 struct Crew {
-    st: Mutex<Waiting>,
-    cv: Condvar,
+    idle: Mutex<Vec<Arc<Slot>>>,
 }
 
-struct Waiting {
-    jobs: VecDeque<Job>,
-    /// Threads waiting for a job.
-    idle: usize,
+/// A thread's own place to be given a job.
+#[derive(Default)]
+struct Slot {
+    job: Mutex<Option<Job>>,
+    cv: Condvar,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -46,34 +47,28 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 fn crew() -> &'static Crew {
     static C: OnceLock<Crew> = OnceLock::new();
     C.get_or_init(|| Crew {
-        st: Mutex::new(Waiting {
-            jobs: VecDeque::new(),
-            idle: 0,
-        }),
-        cv: Condvar::new(),
+        idle: Mutex::new(Vec::new()),
     })
 }
 
 impl Crew {
-    /// `job` on a thread at once: an idle one (more idle than jobs
-    /// waiting), else a new one it starts on.
+    /// `job` on a thread at once: the idle one that worked last, else a new
+    /// one it starts on.
     fn submit(&'static self, job: Job) {
         // (a target without threads, WebAssembly without atomics: the job
         // run in place, on the caller's stack, its main stack as large as
-        // a worker's: `crates/wasm/build.rs`; only what needs no second
+        // a worker's: `crates/wasm/cli/build.rs`; only what needs no second
         // thread comes here, the pool at one worker)
         if !THREADED {
             job();
             return;
         }
-        let mut st = lock(&self.st);
-        if st.idle > st.jobs.len() {
-            st.jobs.push_back(job);
-            drop(st);
-            self.cv.notify_one();
+        let slot = lock(&self.idle).pop();
+        if let Some(slot) = slot {
+            *lock(&slot.job) = Some(job);
+            slot.cv.notify_one();
             return;
         }
-        drop(st);
         std::thread::Builder::new()
             .name("defuse-worker".to_owned())
             .stack_size(crate::WORKER_STACK)
@@ -86,16 +81,16 @@ impl Crew {
 
     /// A thread's life after its first job: the jobs, one after another.
     fn serve(&'static self) {
+        let slot = Arc::new(Slot::default());
         loop {
+            lock(&self.idle).push(slot.clone());
             let job = {
-                let mut st = lock(&self.st);
+                let mut j = lock(&slot.job);
                 loop {
-                    if let Some(j) = st.jobs.pop_front() {
-                        break j;
+                    if let Some(job) = j.take() {
+                        break job;
                     }
-                    st.idle += 1;
-                    st = self.cv.wait(st).unwrap_or_else(PoisonError::into_inner);
-                    st.idle -= 1;
+                    j = slot.cv.wait(j).unwrap_or_else(PoisonError::into_inner);
                 }
             };
             job();

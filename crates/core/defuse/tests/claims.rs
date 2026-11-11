@@ -311,6 +311,47 @@ fn a_panic_on_a_value_about_to_move_is_run_again_and_one_on_settled_values_fails
     }
 }
 
+/// `[text]`: places a `Text` child, reads its output (a guess until it
+/// has run), then panics: a read of the run's own placement, which the
+/// panic never commits.
+struct PlacesThenPanics(OpId);
+
+impl Operation for PlacesThenPanics {
+    fn name(&self) -> &'static str {
+        "places_then_panics"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let i = cx.child(self.0, vec![cx.values().int(5)]);
+        let _ = cx.placed_output_or(i, ValueId::UNIT);
+        panic!("always");
+    }
+}
+
+#[test]
+fn a_panic_after_a_guess_of_its_own_placement_fails_not_runs_forever() {
+    // R, never committed, panics after reading a guess of its own
+    // placement's output: no run before placed it, so a run again is
+    // answered the guess again; the read holds, and the evaluation fails
+    // with R's panic (it ran R again forever, the read judged against a
+    // last run R never had).
+    let threads = std::thread::available_parallelism().map_or(1, usize::from).clamp(2, 8);
+    for j in [1, threads] {
+        let (e, o) = engine();
+        let pp = e.register(Arc::new(PlacesThenPanics(o.text)));
+        let v = e.values();
+        let fv = v.field("f").0;
+        let u = e.new_unit();
+        e.push(u, o.def, vec![fv, v.int(1)]);
+        let r = e.push(u, pp, vec![]);
+        let err = e.evaluate(j).unwrap_err();
+        assert!(
+            matches!(err, phitex_defuse::EvalError::OpPanicked { node, .. } if node == r),
+            "-j{j}: {err:?}"
+        );
+    }
+}
+
 /// `[f]`: outputs f's published last definition, keeping every value it
 /// was answered.
 struct SeenFinal(Arc<std::sync::Mutex<Vec<ValueId>>>);
@@ -572,4 +613,226 @@ fn a_commit_that_stops_defining_a_field_its_placement_predicts_keeps_its_segment
     e.evaluate(1).unwrap();
     assert_eq!(e.output(r), Some(v.int(5)));
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+
+/// `[x, y]`: places a `Claimer` of one sibling, then a `Text` of x and
+/// one of y: a paragraph's first line reading on into the next, as a
+/// document region's run places its lines.
+struct Lines(std::sync::OnceLock<(OpId, OpId)>);
+
+impl Operation for Lines {
+    fn name(&self) -> &'static str {
+        "lines"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let (claimer, text) = *self.0.get().expect("registered");
+        let (x, y) = (cx.args()[0], cx.args()[1]);
+        let one = cx.values().int(1);
+        cx.child(claimer, vec![one]);
+        cx.child(text, vec![x]);
+        cx.child(text, vec![y]);
+        Ok(ValueId::UNIT)
+    }
+}
+
+#[test]
+fn a_taken_placement_remade_re_asks_its_claimer() {
+    // L places C (claiming one sibling), X and Y; C takes X. L's text
+    // edited, its run remakes X as X' (other args) and keeps C and Y: C
+    // reads X' and takes it, not keeping X's text while X' runs on its own.
+    for threads in [1, 4] {
+        let (e, o) = engine();
+        let v = e.values();
+        let lines = Arc::new(Lines(std::sync::OnceLock::new()));
+        let l_op = e.register(lines.clone());
+        let _ = lines.0.set((o.claimer, o.text));
+        let u = e.new_unit();
+        let l = e.push(u, l_op, vec![v.str("x"), v.str("y")]);
+        e.evaluate(threads).unwrap();
+        let c = op_nodes(&e, u, "claimer")[0];
+        let out = |c| v.with_list(e.output(c).unwrap(), <[ValueId]>::to_vec).unwrap();
+        assert_eq!(out(c), vec![v.str("x")], "-j{threads}");
+        e.replace(l, l_op, vec![v.str("x2"), v.str("y")]);
+        e.evaluate(threads).unwrap();
+        assert_eq!(op_nodes(&e, u, "claimer"), vec![c], "-j{threads}");
+        assert_eq!(out(c), vec![v.str("x2")], "-j{threads}");
+        let texts = op_nodes(&e, u, "text");
+        assert_eq!(texts.len(), 2, "-j{threads}");
+        assert_eq!(e.claimed(c), vec![texts[0]], "-j{threads}");
+        assert_eq!(e.node_info(texts[0]).unwrap().state, NodeState::Inert, "-j{threads}");
+        assert_eq!(e.node_info(texts[1]).unwrap().state, NodeState::Done, "-j{threads}");
+        assert!(e.check_invariants().is_empty());
+    }
+}
+
+/// `[x, y, t, z]`: defines the fields `x`, `y`, `t` and `z` as given.
+struct Def4;
+
+impl Operation for Def4 {
+    fn name(&self) -> &'static str {
+        "def4"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        for (i, name) in ["x", "y", "t", "z"].into_iter().enumerate() {
+            cx.define(v.field(name), cx.args()[i]);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[]`: reads `x`; where it is 1, spins 300 ms and claims its next
+/// sibling.
+struct ClaimIfLate;
+
+impl Operation for ClaimIfLate {
+    fn name(&self) -> &'static str {
+        "claim_if_late"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let x = cx.read(v.field("x"))?.and_then(|x| v.as_int(x));
+        if x == Some(1) {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_millis(300) {
+                std::hint::spin_loop();
+            }
+            let _ = cx.following(0);
+            cx.claim(1);
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[k]`: a node of the settling layer that runs only at a quiet point
+/// (`final_only`, `read_back`): predicted to define `s` = 7 before it runs, defines it
+/// so when it does.
+struct QuietSettler;
+
+impl Operation for QuietSettler {
+    fn name(&self) -> &'static str {
+        "quiet_settler"
+    }
+
+    fn final_only(&self) -> bool {
+        true
+    }
+
+    // (a writer read back: let go at the quiet point with the runs
+    // waiting for it, not after the last pass)
+    fn read_back(&self) -> bool {
+        true
+    }
+
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+
+    fn predicted_defs(&self, _args: &[ValueId], values: &phitex_defuse::Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(vec![(values.field("s"), values.int(7))])
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        cx.define(v.field("s"), v.int(7));
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// `[]`: reads `y` and `s` (a read of the settling node's prediction
+/// waits for its commit, `Ctx::read`), then defines `z` = `y`; counts
+/// the runs that stopped to wait.
+struct ReadsSettler(Arc<AtomicU64>);
+
+impl Operation for ReadsSettler {
+    fn name(&self) -> &'static str {
+        "reads_settler"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let y = cx.read(v.field("y"))?.unwrap_or(ValueId::UNIT);
+        if let Err(stop) = cx.read(v.field("s")) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            return Err(stop);
+        }
+        cx.define(v.field("z"), y);
+        Ok(y)
+    }
+}
+
+/// `[]`: reads `z` and `t`; while both are set and differ, goes on
+/// checking whether a read moved (`Ctx::tick`): a run on a value that
+/// only a re-ask ends, as a TeX loop on a stale counter. Gives up after
+/// 10 s, and says so.
+struct UntilEqual(Arc<std::sync::atomic::AtomicBool>);
+
+impl Operation for UntilEqual {
+    fn name(&self) -> &'static str {
+        "until_equal"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let z = cx.read(v.field("z"))?;
+        let t = cx.read(v.field("t"))?;
+        if let (Some(z), Some(t)) = (z, t)
+            && z != t
+        {
+            let t0 = Instant::now();
+            loop {
+                cx.tick(1)?;
+                if t0.elapsed() > Duration::from_secs(10) {
+                    self.0.store(true, Ordering::Release);
+                    break;
+                }
+                std::hint::spin_loop();
+            }
+        }
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A run parked waiting for a node's commit goes on when a claim takes
+/// that node, which then commits nothing. W reads the prediction of P, a
+/// settling node that runs only at a quiet point, and waits for P's
+/// commit; C, slow, claims P; R runs on until W's definition of `z`
+/// reaches it. Left parked until a quiet point that R keeps away, W
+/// never ran again and R ran for ever (csquotes -j8, mhchem -j4: a run
+/// went on without end, accl 25662, mc 80815). The texts between C and
+/// P put C alone at the head of the workers' first blocks.
+#[test]
+fn a_run_waiting_for_a_node_a_claim_takes_goes_on() {
+    let e = Engine::new();
+    let v = e.values();
+    let def4 = e.register(Arc::new(Def4));
+    let claim = e.register(Arc::new(ClaimIfLate));
+    let text = e.register(Arc::new(Text));
+    let p_op = e.register(Arc::new(QuietSettler));
+    let waits = Arc::new(AtomicU64::new(0));
+    let w_op = e.register(Arc::new(ReadsSettler(waits.clone())));
+    let gave_up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let r_op = e.register(Arc::new(UntilEqual(gave_up.clone())));
+    let u = e.new_unit();
+    e.push(u, def4, vec![v.int(1), v.int(1), v.int(1), v.int(0)]);
+    let c = e.push(u, claim, vec![]);
+    let p = e.push(u, p_op, vec![v.int(0)]);
+    for _ in 0..3 {
+        e.push(u, text, vec![v.int(0)]);
+    }
+    let w = e.push(u, w_op, vec![]);
+    e.push(u, r_op, vec![]);
+    let r = e.evaluate(4);
+    assert!(waits.load(Ordering::Relaxed) > 0, "W never waited for P: {r:?}");
+    assert!(r.is_ok(), "{r:?}");
+    assert!(
+        !gave_up.load(Ordering::Acquire),
+        "W left waiting for P, which the claim took, and R ran on"
+    );
+    assert_eq!(e.claimed(c), vec![p]);
+    assert_eq!(e.output(w), Some(v.int(1)), "W ran on y = 1");
+    assert!(e.check_invariants().is_empty());
 }

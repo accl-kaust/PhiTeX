@@ -1,0 +1,32 @@
+% !TEX program = pdftex
+% A page fires at a paragraph's start inside a group the text's run opens,
+% and its routine defines macros globally. What the text after it sees
+% depends on where each macro's value was bound. \own: the text binds it
+% itself before each read (LaTeX's \font@name, every \selectfont), so the
+% routine's value is never seen. \inner: bound in a group of each paragraph,
+% read inside it, then read again after that group: the old binding is the
+% routine's. \outer: bound locally in the group open at the break: the
+% routine's global replaces it at every level (§279), read after the group.
+% \late: read only in a conditional that the routine's value decides.
+% \never: set by the routine, never read after the first paragraph.
+% Over 30 pages: a page's routine re-asks the text it fired in, each after
+% the pages before it, more of them than the passes the layout may take.
+% (PDF: pdftex, the oracle made in the CI image)
+\newcount\n \newcount\shipped
+\def\own{0}\def\inner{0}\def\outer{0}\def\late{a}\def\never{0}
+\output={\plainoutput\global\advance\shipped1
+  \xdef\own{r\the\shipped}\xdef\inner{r\the\shipped}\xdef\outer{r\the\shipped}%
+  \gdef\late{b}\xdef\never{r\the\shipped}}
+\def\t{Some words to fill the lines of a paragraph, and more of them. }
+\long\def\iter{\advance\n1
+  Paragraph \the\n: \xdef\own{p\the\n}own \own;
+  {\def\inner{i\the\n}inner \inner;} after \inner;
+  \if a\late\else late;\fi
+  \t\t\t\t\t\par
+  \ifnum\n<400 \expandafter\iter\fi}
+\never
+\begingroup \def\outer{g}\iter \endgroup
+Outer after the group: \outer. Own: \own.\par
+\begingroup \def\t{}\n=0 \def\own{q}\iter \endgroup
+Last: \outer\ \own\ \inner.
+\bye

@@ -1,17 +1,16 @@
-# The tests shard's known reds (gate-shard.sh tests): a test named here
-# that fails is reported apart (known-red.txt), not red. Only reds the
-# user waived for the alpha (docs/alpha-checklist.md §0): the
-# intermittents of issue #3 (2026-10-29), and the reds of the tests that
-# ran in no CI before the tests shard, found red before the alpha's work
-# (768878f5a, mc 77044) and recorded for 1.61 (2026-10-31); each by its
-# exact name as the shard names it (PACKAGE--TARGET::TEST), a tab, and
-# its cause. CHANGELOG.md's "Known not to work" lists them too.
-phitex-cli--cli::watch_absorbs_an_edit_during_the_cold_build	issue #3 item 6: the cold build ends (about 205 ms) before the test's writer first writes (300 ms), so it absorbs nothing; the test's timing assumption, not the watch
-phitex-defuse--review::next_readers_follow_their_stops_across_splits	1.61: the engine core's review harness ends in RunawayNode (mc 77042), red before the alpha (768878f5a, 77044); a next reader across a split's stops
-phitex-tex--chain::chains	1.61, speed (recorded, not gated: the user's 2026-10-29 decision): runs per node above the 1.1 bar (display: 21 runs for 15 nodes), red before the alpha (77044)
-phitex-tex--chain::census_plain	1.61, speed: runs per node and critical-path bars, red before the alpha (77044)
-phitex-tex--cuts::a_moved_page_fire_relocates_the_rest_and_keeps_the_finisher	1.61, speed: 14 wasted runs where the test allows none, red before the alpha (77044)
-phitex-tex--fatal::a_read_on_waits_for_the_text_before_it	1.61, speed: at -j8, 64 siblings read on where -j1 reads 3 (speculation), red before the alpha (77044)
-phitex-tex--xetex::ini_features	the CI image has not the test's font (Amiri: "Font not loadable"), red before the alpha (77044); the image gets the font after the alpha
-phitex-tex--xetex::ini_bidi	the CI image has not the test's font (Amiri), as ini_features
-phitex-defuse--block_heads::a_blocks_definers_run_before_the_readers_they_re_ask	speed (recorded, not gated: the user's 2026-10-31 decision): wasted reader runs at -j8 on a 4-core runner, 421 for 200 readers against the bound 400 (GitHub gate run 41201269355); every result exact
+# The tests and latex shards' known reds (gate-shard.sh known_reds): a
+# test named here that fails is reported apart (known-red.txt), not red.
+# Only reds the user waived: for the alpha (docs/alpha-checklist.md §0)
+# the intermittents of issue #3 (2026-10-29), and the reds of the tests
+# that ran in no CI before the tests shard, found red before the alpha's
+# work (768878f5a, mc 77044) and recorded for 1.61 (2026-10-31); for
+# v1.0 the multi-thread reds (2026-11-07: v1.0 runs on one thread by
+# default). Each by its exact name as the shard names it
+# (PACKAGE--TARGET::TEST in the tests shard, latex::TEST in the latex
+# shard), a tab, and its cause with its GitHub issue (one issue per
+# known red; drop the line when the issue is fixed).
+phitex-tex--tests::chain::chains	issue #10: 1.61, speed (recorded, not gated: the user's 2026-10-29 decision): runs per node above the 1.1 bar (display: 21 runs for 15 nodes), red before the alpha (77044); since runs1-3 (resumptions and waits apart) what remains is pieces reading ahead of their definer (\hsize before the first piece commits), the speculation window's (docs/note-read-ahead-race.md)
+phitex-tex--tests::chain::census_plain	issue #11: 1.61, speed: runs per node, red before the alpha (77044); the bar now on the page chain (runs2), what remains is pieces reading ahead of their definer under load (para400dvi 1.29 in the gate: \hsize read before the first piece commits), the speculation window's (docs/note-read-ahead-race.md)
+phitex-tex--tests::fatal::a_read_on_waits_for_the_text_before_it	issue #12: 1.61, speed: at -j8, 64 siblings read on where -j1 reads 3 (speculation), red before the alpha (77044)
+phitex-defuse--tests::block_heads::a_blocks_definers_run_before_the_readers_they_re_ask	issue #13: speed (recorded, not gated: the user's 2026-10-31 decision): wasted reader runs at -j8 on a 4-core runner, 421 for 200 readers against the bound 400 (GitHub gate run 41201269355); every result exact
+latex::floats2col_routines_run_once_per_fire	issue #14: v1.0, multi-thread speed (the user waived multi-thread reds for v1.0, 2026-11-07; v1.0 runs on one thread by default): at -j8 the float finisher runs 1497 times for 194 fires (GitHub gate run 42433015869), every result exact

@@ -318,6 +318,11 @@ impl Run<'_, '_> {
             self.last_par_place = l.mode_place;
         } else if let Some(k) = self.par_level_under_groups() {
             self.end_graf_under_groups(k)?;
+        } else {
+            // a paragraph another node left open (`crate::boxscope`)
+            // ends here as at a `\par`: its items are broken below, the
+            // paragraph after the display a new one (§1200)
+            let _ = self.end_left_paragraph(md)?;
         }
         let w = if items.is_empty() {
             -MAX_DIMEN
@@ -361,8 +366,10 @@ impl Run<'_, '_> {
         self.push_toks(toks);
         // §1145: `if nest_ptr=1 then build_page` (the paragraph's lines
         // so far are on the page's list: a page can finish here, the
-        // display not begun; `\everydisplay` is read after the routine)
-        self.finish_candidate()?;
+        // display not begun; `\everydisplay` is read after the routine;
+        // a start a run can end at where a page is made to fire, as a
+        // paragraph's, `Run::finish_candidate_at`)
+        self.finish_candidate_at(true)?;
         Ok(())
     }
 
@@ -1385,8 +1392,11 @@ impl Run<'_, '_> {
             l.par = Some((lang, packed));
             l.clang = lang;
         }
-        // §443: an optional space
+        // §443: an optional space (a picture's `\begin` put back
+        // unexpanded: the command loop places it as a child, `crate::pic`)
+        self.pic_stop = true;
         self.get_x_token();
+        self.pic_stop = false;
         self.ck()?;
         if self.cur.cmd != cmd::SPACER {
             self.back_cur();

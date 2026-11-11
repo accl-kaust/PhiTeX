@@ -276,6 +276,8 @@ fn main() {
                 font_index: index.clone(),
                 // (the trace reads; XDV out, no PDF written)
                 pdf: None,
+                // (native fonts of these font files, new ones)
+                ..XeTeX::default()
             }),
             ..Options::default()
         };

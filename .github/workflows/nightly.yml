@@ -11,6 +11,9 @@
 # install by `PHITEX_CHANNEL=nightly` install.sh), checked against the
 # nightly key (ci/nightly.pub), never the release key. Signing runs in
 # the environment `nightly` (its secret NIGHTLY_MINISIGN_KEY).
+# The frontends' checks (frontends.yml) run on the nightly's binary too,
+# reported: a red one does not hold the nightly back (the release gate is
+# where they block). demo-live: the deployed demo.phitex.org, read only.
 name: nightly
 on:
   schedule:
@@ -40,8 +43,11 @@ jobs:
           runs() { gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=$1" -q '[.check_runs[].conclusion] | join(" ")'; }
           checks=$(runs checks) gate=$(runs gate)
           echo "dev $sha: checks [$checks] gate [$gate]"
-          case " $checks " in *" success "*) ;; *) echo "dev's checks are not green: no nightly"; exit 0 ;; esac
-          case " $gate " in *" failure "*) echo "dev's gate failed: no nightly"; exit 0 ;; esac
+          # (a scheduled nightly waits for green; one started by hand builds dev as it is)
+          if [ "$GITHUB_EVENT_NAME" = schedule ]; then
+            case " $checks " in *" success "*) ;; *) echo "dev's checks are not green: no nightly"; exit 0 ;; esac
+            case " $gate " in *" failure "*) echo "dev's gate failed: no nightly"; exit 0 ;; esac
+          fi
           built=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" -q .object.sha 2>/dev/null || true)
           if [ "$built" = "$sha" ] && [ "$GITHUB_EVENT_NAME" = schedule ]; then echo "nightly is $sha already"; exit 0; fi
           v=$(gh api "repos/$GITHUB_REPOSITORY/contents/crates/cli/Cargo.toml?ref=$sha" -q .content | base64 -d | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
@@ -61,7 +67,14 @@ jobs:
           - { os: ubuntu-22.04, asset: x86_64-linux }
           - { os: ubuntu-22.04-arm, asset: aarch64-linux }
           - { os: macos-15, asset: aarch64-macos }
-          - { os: macos-15-intel, asset: x86_64-macos }
+          # (Intel Macs' binary made on Apple silicon: Xcode carries both
+          # SDKs, and Rosetta runs it for the check; GitHub's Intel runners
+          # took 39 min a build against 13)
+          - { os: macos-15, asset: x86_64-macos, target: x86_64-apple-darwin }
+          # (Windows: a zip of phitex.exe, phitex-<arch>-windows.zip, the
+          # name phitex.org/install.ps1 asks for)
+          - { os: windows-2022, asset: x86_64-windows }
+          - { os: windows-11-arm, asset: aarch64-windows }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -71,23 +84,104 @@ jobs:
           persist-credentials: false
       - if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq clang mold
+      # (Windows's arm64 runner: rustup and LLVM's clang, which ring needs
+      # there, set up where missing)
+      - if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            Invoke-WebRequest https://win.rustup.rs/aarch64 -OutFile "$env:RUNNER_TEMP\rustup-init.exe"
+            & "$env:RUNNER_TEMP\rustup-init.exe" -y --default-toolchain none --profile minimal
+            if ($LASTEXITCODE -ne 0) { throw 'rustup-init failed' }
+            "$env:USERPROFILE\.cargo\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          }
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path "$llvm\clang.exe")) {
+            choco install llvm -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'LLVM did not install' }
+          }
+          $llvm | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - run: rustup show active-toolchain || rustup toolchain install
+      - if: matrix.target != ''
+        run: |
+          rustup target add ${{ matrix.target }}
+          softwareupdate --install-rosetta --agree-to-license
       # (the nightly's version in the CLI's manifest and the lock, so
       # `phitex --version` names it)
-      - run: |
+      - shell: bash
+        run: |
           v=${{ needs.which.outputs.version }}
           perl -0pi -e 's/^version = "[^"]*"/version = "'"$v"'"/m' crates/cli/Cargo.toml
           perl -0pi -e 's/(name = "phitex-cli"\nversion = )"[^"]*"/$1"'"$v"'"/' Cargo.lock
-      - run: cargo build --release --locked -p phitex-cli
-      - run: |
-          ./target/release/phitex --version
-          ./target/release/phitex --version | grep -qF "${{ needs.which.outputs.version }}"
-          tar -czf "phitex-${{ matrix.asset }}.tar.gz" -C target/release phitex
+      # (the compiler cache, on GitHub's cache: a nightly's crates compile
+      # once, the next nightly's from its objects where nothing changed;
+      # the version written above changes phitex-cli alone. Not in
+      # release.yml: a signed release is built from nothing but its source)
+      - uses: mozilla-actions/sccache-action@v0.0.10
+      - shell: bash
+        run: |
+          t="${{ matrix.target }}"
+          PHITEX_BUILT_BY=nightly cargo build --release --locked -p phitex-cli ${t:+--target $t}
+        env:
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+      - if: runner.os != 'Windows'
+        run: |
+          t="${{ matrix.target }}"
+          out=target/${t:+$t/}release
+          file "$out/phitex"
+          "$out/phitex" --version
+          "$out/phitex" --version | grep -qF "${{ needs.which.outputs.version }}"
+          tar -czf "phitex-${{ matrix.asset }}.tar.gz" -C "$out" phitex
+      # (the zip by PowerShell's Compress-Archive, there on every Windows
+      # runner, arm64's too)
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = 'target/release/phitex.exe'
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'phitex.exe does not run' }
+          if (-not ((& $exe --version) -match [regex]::Escape('${{ needs.which.outputs.version }}'))) { throw 'not the nightly version' }
+          Compress-Archive -Path $exe -DestinationPath 'phitex-${{ matrix.asset }}.zip' -CompressionLevel Optimal
+          Get-Item 'phitex-${{ matrix.asset }}.zip'
       - uses: actions/upload-artifact@v4
         with:
           name: phitex-${{ matrix.asset }}
-          path: phitex-${{ matrix.asset }}.tar.gz
+          path: phitex-${{ matrix.asset }}.*
           retention-days: 3
+  frontends:
+    needs: [which, build]
+    uses: ./.github/workflows/frontends.yml
+    with:
+      ref: ${{ needs.which.outputs.sha }}
+      binary: phitex-x86_64-linux
+  # (the live demo, as a visitor opens it: nothing deployed, nothing written)
+  demo-live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: ci/frontends.commit
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - id: pin
+        run: echo "sha=$(tr -d ' \n' < ci/frontends.commit)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: accl-kaust/PhiTeX-frontends
+          ref: ${{ steps.pin.outputs.sha }}
+          path: fe
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - working-directory: fe
+        env:
+          PHITEX_CHROME: /usr/bin/google-chrome
+        run: |
+          npm i --no-save --no-package-lock --prefix apps/web/test playwright-core@1.56.1
+          node apps/web/test/check.mjs https://demo.phitex.org/
   publish:
     needs: [which, build]
     runs-on: ubuntu-24.04
@@ -104,6 +198,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: phitex-*
           merge-multiple: true
       - name: SHA256SUMS, signed with the nightly key
         env:
@@ -111,7 +206,7 @@ jobs:
           PASS: ${{ secrets.NIGHTLY_MINISIGN_PASSWORD }}
         run: |
           cd dist
-          sha256sum phitex-*.tar.gz > SHA256SUMS
+          sha256sum phitex-*.tar.gz phitex-*.zip > SHA256SUMS
           cat SHA256SUMS
           [ -n "$KEY" ] || { echo "no NIGHTLY_MINISIGN_KEY: the nightly is not signed"; exit 1; }
           sudo apt-get update -qq && sudo apt-get install -y -qq minisign
@@ -122,7 +217,7 @@ jobs:
           minisign -Vm SHA256SUMS -p ../ci/nightly.pub
       - uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist/phitex-*.tar.gz
+          subject-path: dist/phitex-*
       - name: the nightly, in place of the last
         env:
           GH_TOKEN: ${{ github.token }}

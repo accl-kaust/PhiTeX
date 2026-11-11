@@ -1,0 +1,10 @@
+% @string macros used in another case than defined (acmart's sample-base.bib:
+% `journal = CACM` for `@String{CACM = ...}`): biber's btparse finds them
+% (biblatex, biber run by the build).
+\documentclass{article}
+\usepackage[style=numeric]{biblatex}
+\addbibresource{refs.bib}
+\begin{document}
+See \cite{JCohen96} and \cite{Cohen07}.
+\printbibliography
+\end{document}

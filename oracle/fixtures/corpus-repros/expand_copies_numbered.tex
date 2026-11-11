@@ -1,0 +1,36 @@
+% The copies microtype makes for its contexts (\pdfcopyfont) each load
+% their own expanded fonts at the same ratio, and pdfTeX numbers each; a
+% \font loaded anew after \pdffontexpand finds those of its name and size;
+% as the /F name of any font loaded after them shows.
+\documentclass{article}
+\pdfadjustspacing=2
+\font\base=cmr10
+\pdfcopyfont\one=\base
+\pdfcopyfont\two=\base
+\pdfcopyfont\three=\base
+\pdffontexpand\one 20 20 5 autoexpand
+\pdffontexpand\two 0 20 5 autoexpand
+\pdffontexpand\three 5 5 5 autoexpand
+\font\plain=cmr12
+\pdffontexpand\plain 20 20 5 autoexpand
+\font\again=cmr12
+\pdffontexpand\again 20 20 5 autoexpand
+\font\later=cmbx10
+\begin{document}
+\one This paragraph, set in the first copy, is long enough to break into
+a few lines, and each is stretched or shrunk a little by the expansion.
+\par
+\two This paragraph, set in the second copy, is long enough to break into
+a few lines, and each is stretched or shrunk a little by the expansion.
+\par
+\three This paragraph, set in the third copy, is long enough to break into
+a few lines, and each is stretched or shrunk a little by the expansion.
+\par
+\plain This paragraph, set in the font expanded first, is long enough to break
+into a few lines, and each is stretched or shrunk a little by the expansion.
+\par
+\again This paragraph, set in the font loaded again, is long enough to break
+into a few lines, and each is stretched or shrunk a little by the expansion.
+\par
+\later The font loaded after them: \pdffontname\later.
+\end{document}

@@ -7,7 +7,10 @@
 //!   signature against the key built in (`ci/minisign.pub`), always, then
 //!   the tarball against `SHA256SUMS`. The binary is replaced by rename
 //!   (written beside it first: a running phitex keeps its file). Another
-//!   install method gets the command for it instead.
+//!   install method gets the command for it instead. On Windows the
+//!   same for phitex.org/install.ps1's install, its zip's `phitex.exe`,
+//!   the running `.exe` renamed aside (Windows renames a running program's
+//!   file but does not replace it) before the new one takes its name.
 //! - **The update check**: off unless the user's own `phitex.toml` says
 //!   `update-check = true`. At most once a day, in the background (never
 //!   delaying a build), one GET of `news.json` (phitex.org, then its
@@ -26,16 +29,38 @@ const PUBKEY: &str = include_str!("../../../ci/minisign.pub");
 /// The nightly's key (nightly.yml signs with it): a nightly is never
 /// checked against the release key, nor a release against this one.
 const NIGHTLY_PUBKEY: &str = include_str!("../../../ci/nightly.pub");
+/// CI's test of `phitex upgrade` (checks.yml's texlive job, on Windows): a
+/// copy of a release served from the runner (`BASE/latest.json`,
+/// `BASE/download/TAG/…`), signed with a key made there (its base64
+/// line). Compiled in only by that test's build: a release's and a
+/// nightly's set neither, and nothing at run time can.
+const TEST_BASE: Option<&str> = option_env!("PHITEX_UPGRADE_TEST_BASE");
+const TEST_KEY: Option<&str> = option_env!("PHITEX_UPGRADE_TEST_KEY");
 const NEWS: [&str; 2] = [
     "https://phitex.org/news.json",
     "https://phitex-org.pages.dev/news.json",
 ];
 
-/// This machine's release tarball, as install.sh names it.
+/// The installer of this system's builds, the command that runs it.
+const INSTALLER: (&str, &str) = if cfg!(windows) {
+    (
+        "phitex.org/install.ps1",
+        "irm https://phitex.org/install.ps1 | iex",
+    )
+} else {
+    (
+        "phitex.org/install.sh",
+        "curl -fsSL https://phitex.org/install.sh | sh",
+    )
+};
+
+/// This machine's release tarball, as install.sh names it (Windows's
+/// zip, as install.ps1 does).
 fn asset() -> Option<String> {
     let os = match std::env::consts::OS {
         "linux" => "linux",
         "macos" => "macos",
+        "windows" => return windows_asset(std::env::consts::ARCH),
         _ => return None,
     };
     let arch = match std::env::consts::ARCH {
@@ -44,6 +69,58 @@ fn asset() -> Option<String> {
         _ => return None,
     };
     Some(format!("phitex-{arch}-{os}.tar.gz"))
+}
+
+/// Windows's release zip for `arch` (x86-64's and arm64's).
+fn windows_asset(arch: &str) -> Option<String> {
+    matches!(arch, "x86_64" | "aarch64").then(|| format!("phitex-{arch}-windows.zip"))
+}
+
+/// The file named `name` in zip archive `zip` (stored or deflated), by
+/// its central directory.
+fn unzip(zip: &[u8], name: &str) -> Option<Vec<u8>> {
+    let u16_at = |at: usize| Some(u16::from_le_bytes(zip.get(at..at + 2)?.try_into().ok()?));
+    let u32_at = |at: usize| Some(u32::from_le_bytes(zip.get(at..at + 4)?.try_into().ok()?));
+    let n = |x: u32| usize::try_from(x).ok();
+    // (the end record: the last signature with its comment running to the end)
+    let end = (0..=zip.len().checked_sub(22)?)
+        .rev()
+        .find(|&i| u32_at(i) == Some(0x0605_4b50))?;
+    let entries = u16_at(end + 10)?;
+    let mut at = n(u32_at(end + 16)?)?;
+    for _ in 0..entries {
+        if u32_at(at)? != 0x0201_4b50 {
+            return None;
+        }
+        let method = u16_at(at + 10)?;
+        let packed = n(u32_at(at + 20)?)?;
+        let size = n(u32_at(at + 24)?)?;
+        let name_len = usize::from(u16_at(at + 28)?);
+        let skip = name_len + usize::from(u16_at(at + 30)?) + usize::from(u16_at(at + 32)?);
+        let local = n(u32_at(at + 42)?)?;
+        if zip.get(at + 46..at + 46 + name_len)? == name.as_bytes() {
+            if u32_at(local)? != 0x0403_4b50 {
+                return None;
+            }
+            let data =
+                local + 30 + usize::from(u16_at(local + 26)?) + usize::from(u16_at(local + 28)?);
+            let body = zip.get(data..data.checked_add(packed)?)?;
+            let out = match method {
+                0 => body.to_vec(),
+                8 => {
+                    let mut out = Vec::with_capacity(size);
+                    if !phitex_codecs::inflate::inflate_raw(body, &mut out) {
+                        return None;
+                    }
+                    out
+                }
+                _ => return None,
+            };
+            return (out.len() == size).then_some(out);
+        }
+        at += 46 + skip;
+    }
+    None
 }
 
 /// `a` is a later version than `b` (`1.61` after `1.6.9`: φ's digits,
@@ -116,14 +193,15 @@ fn get(url: &str) -> Result<Vec<u8>, String> {
 struct Release {
     version: String,
     tag: String,
-    key: &'static str,
+    key: std::borrow::Cow<'static, str>,
 }
 
 /// The latest release (GitHub's `releases/latest`: the newest not marked
 /// a pre-release).
 fn latest() -> Result<Release, String> {
-    let b = get(&format!(
-        "https://api.github.com/repos/{REPO}/releases/latest"
+    let b = get(&TEST_BASE.map_or_else(
+        || format!("https://api.github.com/repos/{REPO}/releases/latest"),
+        |b| format!("{b}/latest.json"),
     ))?;
     let v: Value = serde_json::from_slice(&b).map_err(|e| format!("GitHub's answer: {e}"))?;
     let tag = v["tag_name"]
@@ -132,7 +210,9 @@ fn latest() -> Result<Release, String> {
     Ok(Release {
         version: tag.trim_start_matches('v').to_owned(),
         tag: tag.to_owned(),
-        key: PUBKEY,
+        key: TEST_KEY.map_or(std::borrow::Cow::Borrowed(PUBKEY), |k| {
+            std::borrow::Cow::Owned(format!("untrusted comment: test key\n{k}\n"))
+        }),
     })
 }
 
@@ -151,7 +231,7 @@ fn nightly() -> Result<Release, String> {
     Ok(Release {
         version: version.to_owned(),
         tag: "nightly".to_owned(),
-        key: NIGHTLY_PUBKEY,
+        key: std::borrow::Cow::Borrowed(NIGHTLY_PUBKEY),
     })
 }
 
@@ -211,11 +291,14 @@ fn untar<'a>(tar: &'a [u8], name: &str) -> Option<&'a [u8]> {
 /// Release `r`'s binary for this machine, verified: `SHA256SUMS` signed
 /// by its channel's key built in, the tarball's hash in it.
 fn fetch(r: &Release, asset: &str) -> Result<Vec<u8>, String> {
-    let base = format!("https://github.com/{REPO}/releases/download/{}", r.tag);
+    let base = TEST_BASE.map_or_else(
+        || format!("https://github.com/{REPO}/releases/download/{}", r.tag),
+        |b| format!("{b}/download/{}", r.tag),
+    );
     let sums = get(&format!("{base}/SHA256SUMS"))?;
     let sig = get(&format!("{base}/SHA256SUMS.minisig"))?;
     let pk =
-        minisign_verify::PublicKey::decode(r.key).map_err(|e| format!("the key built in: {e}"))?;
+        minisign_verify::PublicKey::decode(&r.key).map_err(|e| format!("the key built in: {e}"))?;
     let sig = minisign_verify::Signature::decode(&String::from_utf8_lossy(&sig))
         .map_err(|e| format!("SHA256SUMS.minisig: {e}"))?;
     pk.verify(&sums, &sig, false)
@@ -233,19 +316,20 @@ fn fetch(r: &Release, asset: &str) -> Result<Vec<u8>, String> {
             "{asset} does not match SHA256SUMS: nothing installed"
         ));
     }
+    if asset.ends_with(".zip") {
+        return unzip(&tgz, "phitex.exe").ok_or_else(|| format!("{asset} has no phitex.exe"));
+    }
     let tar = phitex_shelf::gunzip(&tgz).ok_or_else(|| format!("{asset}: not gzip"))?;
     untar(&tar, "phitex")
         .map(<[u8]>::to_vec)
         .ok_or_else(|| format!("{asset} has no phitex binary"))
 }
 
-/// Where install.sh says it installed (`$XDG_DATA_HOME/phitex/install.json`).
+/// Where install.sh says it installed (`$XDG_DATA_HOME/phitex/install.json`;
+/// install.ps1: `%LOCALAPPDATA%\phitex\install.json`, [`crate::dirs`]).
 fn install_record() -> Option<Value> {
-    let env = |k| std::env::var_os(k).filter(|d| !d.is_empty());
-    let d = env("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))?;
-    serde_json::from_slice(&std::fs::read(d.join("phitex").join("install.json")).ok()?).ok()
+    let d = crate::dirs::phitex(crate::dirs::Kind::Data)?;
+    serde_json::from_slice(&std::fs::read(d.join("install.json")).ok()?).ok()
 }
 
 /// `bytes` as the executable `exe`, by rename from beside it.
@@ -258,21 +342,53 @@ fn replace(exe: &Path, bytes: &[u8]) -> Result<(), String> {
         std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))
             .map_err(|e| format!("{}: {e}", new.display()))?;
     }
+    #[cfg(windows)]
+    {
+        // (the running program's file renamed aside, never removed while
+        // it runs; earlier upgrades' removed now, those still running kept)
+        let dir = exe.parent().unwrap_or(Path::new("."));
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                if n.starts_with(".phitex-") && n.ends_with(".old") {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+        let old = exe.with_file_name(format!(".phitex-{}.old", std::process::id()));
+        std::fs::rename(exe, &old).map_err(|e| format!("{}: {e}", exe.display()))?;
+        if let Err(e) = std::fs::rename(&new, exe) {
+            let _ = std::fs::rename(&old, exe);
+            return Err(format!("{}: {e}", exe.display()));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
     std::fs::rename(&new, exe).map_err(|e| format!("{}: {e}", exe.display()))
 }
 
-/// `phitex upgrade`: the exit status.
-pub fn upgrade(ui: &Ui) -> i32 {
-    let have = crate::version();
+/// `phitex upgrade`: the newest release (or nightly) checked for, and, if
+/// it is later, installed once the user says yes ("[Y/n]": Enter is yes),
+/// or at once with `--no-confirm`. Off a terminal it asks nothing and
+/// installs nothing without `--no-confirm`. The exit status.
+pub fn upgrade(ui: &Ui, no_confirm: bool) -> i32 {
+    // (a source build's version names the release it leads to: any
+    // release or nightly is offered to it)
+    let have = if crate::source_build() {
+        format!("{} (source build)", crate::version())
+    } else {
+        crate::version().to_owned()
+    };
     let r = match channel().and_then(|c| newest(c).map_err(|e| format!("no release found: {e}"))) {
         Ok(r) => r,
         Err(e) => {
             ui.error(&e);
-            return crate::EXIT_FAILED;
+            return crate::EXIT_INTERNAL;
         }
     };
     let v = r.version.clone();
-    if !later(&v, have) {
+    if !crate::source_build() && !later(&v, crate::version()) {
         ui.line(&format!(
             "phitex {have} is the latest {}",
             if r.tag == "nightly" {
@@ -287,12 +403,32 @@ pub fn upgrade(ui: &Ui) -> i32 {
     let by_script = install_record().is_some_and(|r| r["method"] == "script");
     let (Some(exe), true, Some(asset)) = (exe, by_script, asset()) else {
         ui.error(&format!(
-            "phitex {v} is out (you have {have}); this phitex was not installed by phitex.org/install.sh: \
-             update it the way it was installed (curl -fsSL https://phitex.org/install.sh | sh, \
-             cargo install, or your package manager)"
+            "phitex {v} is out (you have {have}); this phitex was not installed by {}: \
+             update it the way it was installed ({}, cargo install, or your package manager)",
+            INSTALLER.0, INSTALLER.1
         ));
-        return crate::EXIT_FAILED;
+        return crate::EXIT_USAGE;
     };
+    if !no_confirm {
+        use std::io::IsTerminal as _;
+        if !std::io::stdin().is_terminal() {
+            ui.line(&format!(
+                "phitex {v} is out (you have {have}); run phitex upgrade --no-confirm to install it without asking"
+            ));
+            return 0;
+        }
+        ui.ask(&format!("upgrade phitex {have} to {v}? [Y/n]"));
+        let mut a = String::new();
+        let read = std::io::stdin().read_line(&mut a);
+        // (the line typed ended it already; an end of input did not)
+        if matches!(read, Ok(0)) {
+            ui.answered(None);
+        }
+        if read.is_err() || !yes(&a, true) {
+            ui.line(&format!("phitex {have} kept"));
+            return 0;
+        }
+    }
     ui.line(&format!("downloading phitex {v} ({asset})"));
     match fetch(&r, &asset).and_then(|b| replace(&exe, &b)) {
         Ok(()) => {
@@ -304,8 +440,18 @@ pub fn upgrade(ui: &Ui) -> i32 {
         }
         Err(e) => {
             ui.error(&e);
-            crate::EXIT_FAILED
+            crate::EXIT_INTERNAL
         }
+    }
+}
+
+/// Whether answer `a` to a "[Y/n]" (`default` true) or "[y/N]" question
+/// is yes: y or yes in any case, else the default when it is empty.
+fn yes(a: &str, default: bool) -> bool {
+    match a.trim().to_ascii_lowercase().as_str() {
+        "" => default,
+        "y" | "yes" => true,
+        _ => false,
     }
 }
 
@@ -330,6 +476,15 @@ fn setting() -> Setting {
     {
         return Setting::Mute;
     }
+    chosen()
+}
+
+/// The user's `update-check` (CI and `PHITEX_NO_UPDATE_CHECK` mute it;
+/// no terminal is needed: an editor shows it).
+fn chosen() -> Setting {
+    if std::env::var_os("CI").is_some() || std::env::var_os("PHITEX_NO_UPDATE_CHECK").is_some() {
+        return Setting::Mute;
+    }
     match crate::config::user().ok().and_then(|c| c.update_check) {
         None => Setting::Unset,
         Some(false) => Setting::Off,
@@ -345,9 +500,21 @@ fn kept() -> PathBuf {
 /// background when the kept one is a day old and the check is on (the
 /// run never waits for it; [`check`] reads what is kept when it speaks).
 pub fn begin() {
-    if setting() != Setting::On {
-        return;
+    if setting() == Setting::On {
+        fetch_news();
     }
+}
+
+/// [`begin`] for an editor's watch (`--lsp`): no terminal needed, the
+/// notice is the editor's (`phitex/status`).
+pub fn begin_for_editor() {
+    if chosen() == Setting::On {
+        fetch_news();
+    }
+}
+
+/// `news.json` fetched in the background when the kept one is a day old.
+fn fetch_news() {
     let kept = kept();
     let age = std::fs::metadata(&kept)
         .and_then(|m| m.modified())
@@ -376,17 +543,20 @@ pub fn begin() {
 }
 
 /// The update check speaking (after a build's result, as a watch
-/// starts): with `update-check` not set, a line asking for it, every run;
+/// starts): with `update-check` not set, a line asking for it, once a
+/// version;
 /// on, what the kept `news.json` says for this version.
 pub fn check(ui: &Ui) {
     let st = ui.st;
     match setting() {
         Setting::Mute | Setting::Off => {}
+        // (asked once a version: a new one asks again, never every run)
+        Setting::Unset if asked_before(crate::version()) => {}
         Setting::Unset => ui.line(&format!(
             "{} {} {}",
-            st.dim("update checks are not set:"),
+            st.dim("Check daily for new PhiTeX releases?"),
             st.cyan("phitex config update-check on"),
-            st.dim("(off: never ask again)")
+            st.dim("(or off; this note shows once per version)")
         )),
         Setting::On => {
             let Some(n) = std::fs::read(kept())
@@ -405,6 +575,59 @@ pub fn check(ui: &Ui) {
             }
         }
     }
+}
+
+/// The update notice for an editor (`phitex/status`'s `update`,
+/// docs/spec-editor-protocol.md §2.3): with the check on, what the kept
+/// `news.json` says for this version, `{latest, advisory, lines}`; none:
+/// the check is off or unset, or there is nothing to say. Its fetch
+/// started ([`begin`], in the background) as the watch starts.
+pub fn notice() -> Option<Value> {
+    if chosen() != Setting::On {
+        return None;
+    }
+    let n = std::fs::read(kept())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())?;
+    notice_of(
+        &n,
+        crate::version(),
+        install_record().is_some_and(|r| r["method"] == "script"),
+    )
+}
+
+/// [`notice`] of news `n` for version `v`.
+fn notice_of(n: &Value, v: &str, by_script: bool) -> Option<Value> {
+    let lines = said(n, v, by_script);
+    if lines.is_empty() {
+        return None;
+    }
+    let latest = n["latest"].as_str().filter(|l| later(l, v));
+    Some(serde_json::json!({
+        "latest": latest,
+        "advisory": lines.iter().any(|l| l.trim_start().starts_with('⚠')),
+        "lines": lines,
+    }))
+}
+
+/// Whether the update check's question was put to version `v` already
+/// (`$XDG_STATE_HOME/phitex/update-asked` holds the last version asked);
+/// if not, it is kept as asked now. A state folder that can't be written
+/// asks nothing: a note every run is worse than none.
+fn asked_before(v: &str) -> bool {
+    let env = |k| std::env::var_os(k).filter(|d| !d.is_empty());
+    let Some(d) = env("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env("HOME").map(|h| PathBuf::from(h).join(".local").join("state")))
+    else {
+        return true;
+    };
+    let f = d.join("phitex").join("update-asked");
+    if std::fs::read_to_string(&f).is_ok_and(|s| s.trim() == v) {
+        return true;
+    }
+    let kept = std::fs::create_dir_all(d.join("phitex")).is_ok() && std::fs::write(&f, v).is_ok();
+    !kept
 }
 
 /// What news `n` says to version `v`: the releases after it, each with
@@ -446,7 +669,10 @@ fn said(n: &Value, v: &str, by_script: bool) -> Vec<String> {
         out.push(if by_script {
             "update: phitex upgrade".to_owned()
         } else {
-            "update: the way you installed phitex (curl -fsSL https://phitex.org/install.sh | sh for the script's)".to_owned()
+            format!(
+                "update: the way you installed phitex ({} for the script's)",
+                INSTALLER.1
+            )
         });
     }
     out
@@ -455,6 +681,38 @@ fn said(n: &Value, v: &str, by_script: bool) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The editor's update notice: the releases after the running one and
+    /// the advisories for it; none when it is current and unadvised.
+    #[test]
+    fn the_editors_notice() {
+        let n = serde_json::json!({"schema": 1, "latest": "1.1", "entries": [
+            {"version": "1.1", "kind": "release", "summary": "Faster."},
+            {"affects": "<1.0.1", "kind": "advisory", "summary": "1.0 can write a wrong PDF."}]});
+        let got = notice_of(&n, "1.0", true).expect("a notice");
+        assert_eq!(got["latest"], "1.1");
+        assert_eq!(got["advisory"], true);
+        assert_eq!(got["lines"][0], "phitex 1.1 is out (you have 1.0):");
+        assert_eq!(got["lines"].as_array().map(Vec::len), Some(4), "{got}");
+        assert!(notice_of(&n, "1.1", true).is_none());
+    }
+
+    #[test]
+    fn answers() {
+        for (a, d, want) in [
+            ("\n", true, true),
+            ("", true, true),
+            ("y\n", true, true),
+            ("Yes\n", true, true),
+            (" Y ", false, true),
+            ("n\n", true, false),
+            ("no\n", true, false),
+            ("\n", false, false),
+            ("maybe\n", true, false),
+        ] {
+            assert_eq!(yes(a, d), want, "{a:?} default {d}");
+        }
+    }
 
     #[test]
     fn versions_by_phi() {
@@ -513,6 +771,87 @@ mod tests {
         tar.resize(1024 + 1024, 0);
         assert_eq!(untar(&tar, "phitex"), Some(&b"hello"[..]));
         assert_eq!(untar(&tar, "other"), None);
+    }
+
+    /// A zip's file read by its central directory, stored or deflated
+    /// (a fixed deflate block of `hello`), and Windows's asset name.
+    #[test]
+    fn zip() {
+        let entry = |name: &str, method: u16, body: &[u8], size: u32, at: u32| {
+            let mut local = vec![0x50, 0x4b, 3, 4, 20, 0, 0, 0];
+            local.extend(method.to_le_bytes());
+            local.extend([0; 8]); // (time, date, crc: not read)
+            local.extend(u32::try_from(body.len()).unwrap().to_le_bytes());
+            local.extend(size.to_le_bytes());
+            local.extend(u16::try_from(name.len()).unwrap().to_le_bytes());
+            local.extend([0, 0]);
+            local.extend(name.as_bytes());
+            local.extend(body);
+            let mut central = vec![0x50, 0x4b, 1, 2, 20, 0, 20, 0, 0, 0];
+            central.extend(method.to_le_bytes());
+            central.extend([0; 8]);
+            central.extend(u32::try_from(body.len()).unwrap().to_le_bytes());
+            central.extend(size.to_le_bytes());
+            central.extend(u16::try_from(name.len()).unwrap().to_le_bytes());
+            central.extend([0; 12]);
+            central.extend(at.to_le_bytes());
+            central.extend(name.as_bytes());
+            (local, central)
+        };
+        // (`hello`, deflated: one fixed-Huffman block)
+        let deflated = [0xcb, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00];
+        let (l1, c1) = entry("README", 0, b"stored", 6, 0);
+        let (l2, c2) = entry(
+            "phitex.exe",
+            8,
+            &deflated,
+            5,
+            u32::try_from(l1.len()).unwrap(),
+        );
+        let mut z = [l1.as_slice(), &l2].concat();
+        let cd = u32::try_from(z.len()).unwrap();
+        z.extend(&c1);
+        z.extend(&c2);
+        z.extend([0x50, 0x4b, 5, 6, 0, 0, 0, 0, 2, 0, 2, 0]);
+        z.extend(u32::try_from(c1.len() + c2.len()).unwrap().to_le_bytes());
+        z.extend(cd.to_le_bytes());
+        z.extend([0, 0]);
+        assert_eq!(unzip(&z, "phitex.exe").as_deref(), Some(&b"hello"[..]));
+        assert_eq!(unzip(&z, "README").as_deref(), Some(&b"stored"[..]));
+        assert_eq!(unzip(&z, "other"), None);
+        assert_eq!(unzip(&z[..z.len() - 3], "phitex.exe"), None);
+        assert_eq!(
+            windows_asset("x86_64").as_deref(),
+            Some("phitex-x86_64-windows.zip")
+        );
+        assert_eq!(
+            windows_asset("aarch64").as_deref(),
+            Some("phitex-aarch64-windows.zip")
+        );
+        assert_eq!(windows_asset("x86"), None);
+    }
+
+    /// Windows: the program replaced by renaming the old aside (a running
+    /// program's file can be renamed, not replaced), the one left aside
+    /// by the upgrade before removed now.
+    #[test]
+    #[cfg(windows)]
+    fn replaced_aside() {
+        let dir = std::env::temp_dir().join(format!("phitex-replace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("phitex.exe");
+        std::fs::write(&exe, b"one").unwrap();
+        replace(&exe, b"two").unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"two");
+        replace(&exe, b"three").unwrap();
+        assert_eq!(std::fs::read(&exe).unwrap(), b"three");
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left.len(), 2, "{left:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

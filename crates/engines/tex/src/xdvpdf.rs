@@ -43,7 +43,7 @@ use std::sync::{Arc, Mutex};
 
 use phitex_defuse::{Ctx, Stop, ValueId, Values};
 use phitex_dvi::{DviWriter, Op};
-use phitex_xdvipdfmx::api::{Options as DpxOptions, Session};
+use phitex_xdvipdfmx::api::{Graft, Options as DpxOptions, Session};
 use phitex_xdvipdfmx::direct::PageState;
 use phitex_xdvipdfmx::io::{Files, Format};
 use phitex_xdvipdfmx::pdfdoc::EndRec;
@@ -92,22 +92,26 @@ enum Asked {
     GsFont(Vec<u8>),
 }
 
-/// Its answer.
+/// Its answer; a file read, with its stamp taken before it was read
+/// ([`Files::stamp`]; none: the host has none).
 #[derive(Clone)]
 enum Answer {
     Path(Option<Vec<u8>>),
     Bytes(Option<Arc<[u8]>>),
+    Read(Option<Arc<[u8]>>, Option<Vec<u8>>),
 }
 
 impl Answer {
     fn same(&self, o: &Answer) -> bool {
         match (self, o) {
             (Answer::Path(a), Answer::Path(b)) => a == b,
-            (Answer::Bytes(a), Answer::Bytes(b)) => match (a, b) {
-                (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
-                (None, None) => true,
-                _ => false,
-            },
+            (Answer::Bytes(a) | Answer::Read(a, _), Answer::Bytes(b) | Answer::Read(b, _)) => {
+                match (a, b) {
+                    (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+                    (None, None) => true,
+                    _ => false,
+                }
+            }
             _ => false,
         }
     }
@@ -134,11 +138,18 @@ impl Files for Logged {
     }
 
     fn read(&self, path: &[u8]) -> Option<Arc<[u8]>> {
+        // (the stamp before the bytes: a change between the two moves the
+        // stamp the next link compares, never hides behind it)
+        let stamp = self.files.stamp(path);
         let r = self.files.read(path);
         self.log
             .locked()
-            .insert(Asked::Read(path.to_vec()), Answer::Bytes(r.clone()));
+            .insert(Asked::Read(path.to_vec()), Answer::Read(r.clone(), stamp));
         r
+    }
+
+    fn stamp(&self, path: &[u8]) -> Option<Vec<u8>> {
+        self.files.stamp(path)
     }
 
     fn apply_filter(&self, template: &[u8], input: &[u8], version: i32) -> Option<Arc<[u8]>> {
@@ -159,22 +170,47 @@ impl Files for Logged {
     }
 }
 
-/// Whether every logged question has the same answer from `files`.
+/// Whether every logged question has the same answer from `files`. A
+/// file read whose stamp ([`Files::stamp`]) is the one it had when read
+/// is the same file, not read again; one whose stamp moved is read and
+/// compared, and its new stamp logged when its bytes are the same.
 fn still(log: &Log, files: &dyn Files) -> bool {
     let asked: Vec<(Asked, Answer)> = log
         .locked()
         .iter()
         .map(|(q, a)| (q.clone(), a.clone()))
         .collect();
-    asked.iter().all(|(q, a)| {
-        let now = match q {
-            Asked::Find(n, f, p) => Answer::Path(files.find(n, *f, p)),
-            Asked::Read(p) => Answer::Bytes(files.read(p)),
-            Asked::Filter(t, i, v) => Answer::Bytes(files.apply_filter(t, i, *v)),
-            Asked::GsFont(n) => Answer::Bytes(files.gs_font(n)),
+    let mut restamped = Vec::new();
+    let same = asked.iter().all(|(q, a)| {
+        let now = match (q, a) {
+            (Asked::Read(p), Answer::Read(_, Some(was))) => {
+                let stamp = files.stamp(p);
+                if stamp.as_ref() == Some(was) {
+                    return true;
+                }
+                let r = files.read(p);
+                let same = Answer::Bytes(r).same(a);
+                if same && let Some(s) = stamp {
+                    restamped.push((q.clone(), a.clone(), s));
+                }
+                return same;
+            }
+            (Asked::Find(n, f, p), _) => Answer::Path(files.find(n, *f, p)),
+            (Asked::Read(p), _) => Answer::Bytes(files.read(p)),
+            (Asked::Filter(t, i, v), _) => Answer::Bytes(files.apply_filter(t, i, *v)),
+            (Asked::GsFont(n), _) => Answer::Bytes(files.gs_font(n)),
         };
         now.same(a)
-    })
+    });
+    if same {
+        let mut l = log.locked();
+        for (q, a, s) in restamped {
+            if let Answer::Read(b, _) = a {
+                l.insert(q, Answer::Read(b, Some(s)));
+            }
+        }
+    }
+    same
 }
 
 /// A page as the walk ships it, decoded from its value once and kept
@@ -262,20 +298,74 @@ struct Base {
     docs: Vec<Arc<Docs>>,
     /// [`PageState`] before each page, and after the last.
     states: Vec<PageState>,
-    /// Before page `.0`: the session and the walk's writer.
-    snaps: Vec<(usize, Session, DviWriter)>,
+    /// Before some pages: the session and the walk's writer.
+    snaps: Vec<Arc<Snap>>,
+    /// The label xdvipdfmx would give next before each page, and after
+    /// the last.
+    labels: Vec<u32>,
+    /// The glyphs each page marked used ([`Session::take_usage`]).
+    usage: Vec<Arc<[u64]>>,
     /// Each page's bytes (empty: a page not shipped).
     chunks: Vec<Arc<[u8]>>,
     /// The session and the writer after the last page, before the end:
     /// where a page is written again ([`Session::reship`]).
-    post: Session,
-    post_writer: DviWriter,
+    post: Arc<Snap>,
     /// The file's `/Size`.
     size: u32,
     layout: phitex_pdf::Layout,
     /// The end's fonts, colours and resources as written, for a live
     /// file whose pages left them the same ([`Session::finish_replaying`]).
     end: Arc<EndRec>,
+}
+
+/// The link's state before page `at`: xdvipdfmx's session and the walk's
+/// writer, as a fold went; and the [`Graft`]s that make it the state of
+/// the folds since that went another way to a page before it and came
+/// back to the same state ([`Session::converged`]), in order.
+struct Snap {
+    at: usize,
+    s: Arc<Session>,
+    w: DviWriter,
+    grafts: Vec<Arc<Graft>>,
+}
+
+/// The most grafts a [`Snap`] keeps; past them its session is made anew.
+const GRAFTS: usize = 16;
+
+impl Snap {
+    /// A session as the snapshot stands for (one to go on from).
+    fn session(&self) -> Session {
+        let mut s = self.s.snapshot();
+        for g in &self.grafts {
+            s.graft(g);
+        }
+        s
+    }
+
+    /// This state as a fold that went another way came back to it: `g`
+    /// after the grafts it has.
+    fn grafted(&self, g: &Arc<Graft>) -> Snap {
+        let mut grafts = self.grafts.clone();
+        grafts.push(g.clone());
+        if grafts.len() > GRAFTS {
+            let mut s = self.s.snapshot();
+            for g in &grafts {
+                s.graft(g);
+            }
+            return Snap {
+                at: self.at,
+                s: Arc::new(s),
+                w: self.w.clone(),
+                grafts: Vec::new(),
+            };
+        }
+        Snap {
+            at: self.at,
+            s: self.s.clone(),
+            w: self.w.clone(),
+            grafts,
+        }
+    }
 }
 
 /// The link's state between builds.
@@ -333,8 +423,10 @@ type PackedOne = (i32, Arc<[u8]>, Arc<[u8]>, u64);
 
 thread_local! {
     /// A live file's end compressing ([`live`]): a stream compressed at
-    /// any level will do, and one compressed here is not kept (its level
-    /// is not the exact file's).
+    /// any level will do; one compressed here is kept at its own level
+    /// (the fast one), which an exact file's link never takes, and the
+    /// next live link finds it (an edit's end compresses the last one's
+    /// object streams, mostly the same).
     static PACK_ANY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -345,6 +437,18 @@ fn packed() -> &'static Mutex<Packed> {
 
 /// The streams the memo keeps: smaller ones are compressed again.
 const PACKED_MIN: usize = 4096;
+
+/// A live link's ([`PACK_ANY`]): its end's object streams are small, each
+/// a few hundred objects, and compressed at every edit.
+const PACKED_MIN_LIVE: usize = 256;
+
+fn packed_min() -> usize {
+    if PACK_ANY.with(std::cell::Cell::get) {
+        PACKED_MIN_LIVE
+    } else {
+        PACKED_MIN
+    }
+}
 
 /// A link that compresses streams begins: what the last two did not use
 /// is dropped.
@@ -362,7 +466,7 @@ fn packed_next() {
 
 /// `data` compressed at `level`, from the memo if it has it.
 fn packed_get(level: i32, data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() < PACKED_MIN {
+    if data.len() < packed_min() {
         return None;
     }
     let h = phitex_defuse::hash_bytes(0, data);
@@ -384,7 +488,7 @@ fn packed_put(level: i32, data: &[u8], out: &[u8]) {
     let mut p = packed().locked();
     p.made.0 += 1;
     p.made.1 += data.len();
-    if data.len() < PACKED_MIN || PACK_ANY.with(std::cell::Cell::get) {
+    if data.len() < packed_min() {
         return;
     }
     let h = phitex_defuse::hash_bytes(0, data);
@@ -448,6 +552,17 @@ struct Fold<'a> {
 #[derive(Default)]
 struct Times {
     from: usize,
+    /// The page from which the base's pages were kept (none: folded to
+    /// the end), the pages folded, whether the end was replayed.
+    to: Option<usize>,
+    done: usize,
+    replayed: bool,
+    checks: usize,
+    /// The base's pages kept between pages folded.
+    kept: usize,
+    converge: std::time::Duration,
+    start: std::time::Duration,
+    layout: std::time::Duration,
     walk: std::time::Duration,
     pages: std::time::Duration,
     snaps: std::time::Duration,
@@ -457,24 +572,32 @@ struct Times {
 /// The exact file of `walks` (the pages, `ids` their identities): a fold
 /// over one xdvipdfmx session, from the state the base kept before the
 /// first page that differs from its (the pages before it keep their
-/// bytes, a page whose bytes are the base's its chunk).
+/// bytes, a page whose bytes are the base's its chunk), up to a page
+/// where the base's pages go on and the state is the base's there but
+/// for where it stands (`converge`, [`Session::converged`]): the pages
+/// from there are the base's, each object as far further as the pages
+/// before it grew, and the end is written from the base's last state
+/// with that graft ([`Session::graft`]). A letter typed on one page
+/// writes that page and the end, not every page after it.
 #[allow(clippy::too_many_lines)]
-fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times), String> {
+fn fold(
+    f: &Fold<'_>,
+    ids: &[u64],
+    walks: &[Arc<Walk>],
+    converge: bool,
+) -> Result<(Base, Times), String> {
+    let t_fold = std::time::Instant::now();
     let n = walks.len();
     let same = f.base.map_or(0, |b| {
         b.ids.iter().zip(ids).take_while(|(a, c)| a == c).count()
     });
     // (the state before the first page that differs: the latest kept at
     // or before it)
-    let resume = f.base.and_then(|b| {
-        b.snaps
-            .iter()
-            .rev()
-            .find(|s| s.0 <= same && s.0 < n)
-            .map(|s| (s.0, s.1.snapshot(), s.2.clone()))
-    });
+    let resume = f
+        .base
+        .and_then(|b| b.snaps.iter().rev().find(|x| x.at <= same && x.at < n));
     let (k, mut s, mut w) = match resume {
-        Some(r) => r,
+        Some(r) => (r.at, r.session(), r.w.clone()),
         None => (
             0,
             f.start.locked().snapshot(),
@@ -482,22 +605,20 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
         ),
     };
     s.set_files(f.files.clone());
+    s.record_usage(true);
     w.set_font_numbers(f.nums.clone());
     let mut t = Times {
         from: k,
         ..Times::default()
     };
-    let (mut snaps, mut ops, mut docs, mut states, mut chunks, old) = match f.base {
+    let (mut snaps, mut ops, mut docs, mut states, mut chunks, mut labels, old) = match f.base {
         Some(b) => (
-            b.snaps
-                .iter()
-                .filter(|x| x.0 < k)
-                .map(|x| (x.0, x.1.snapshot(), x.2.clone()))
-                .collect(),
+            b.snaps.iter().filter(|x| x.at < k).cloned().collect(),
             b.ops[..k].to_vec(),
             b.docs[..k].to_vec(),
             b.states[..k].to_vec(),
             b.chunks[..k].to_vec(),
+            b.labels[..k].to_vec(),
             &b.chunks[..],
         ),
         None => (
@@ -506,16 +627,116 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             &[][..],
         ),
     };
+    let mut usage: Vec<Arc<[u64]>> = f.base.map_or_else(Vec::new, |b| b.usage[..k].to_vec());
+    t.start = t_fold.elapsed();
     let every = n.div_ceil(SNAPS).max(1);
-    for (i, p) in walks.iter().enumerate().skip(k) {
-        if i.is_multiple_of(every) {
+    let mut grafted: Option<(usize, Arc<Graft>)> = None;
+    // (the page the fold went on from last: the resumed one, or one after
+    // a stretch of the base's pages kept)
+    let mut seg = k;
+    let mut i = k;
+    // (a state kept from the base, grafted, the fold goes on from: pushed
+    // as the snapshot before its page)
+    let mut kept_snap: Option<Arc<Snap>> = resume.cloned();
+    while i < n {
+        let p = &walks[i];
+        // (the base's pages from here, and its state here but for where it
+        // stands: they and its end, the graft applied; or, where pages
+        // after differ again, its pages up to a state kept before the next
+        // that differs, the fold going on from that state grafted)
+        if converge
+            && i > seg
+            && let Some(b) = f.base
+            && b.ids.len() == n
+            && b.ids[i] == ids[i]
+            && b.labels.get(i) == Some(&s.next_label())
+            && let Some(x) = b.snaps.iter().find(|x| x.at == i)
+            && w.same_ahead(&x.w)
+        {
             let t0 = std::time::Instant::now();
-            snaps.push((i, s.snapshot(), w.clone()));
+            let g = s.converged(&x.s, &x.grafts, &b.post.s, &b.post.grafts);
+            t.converge += t0.elapsed();
+            if crate::exec::prof_flag!("PHITEX_TEX_TIME") && t.checks == 0 {
+                let c = std::time::Instant::now();
+                let clock = || u64::try_from(c.elapsed().as_micros()).unwrap_or(u64::MAX);
+                let parts: Vec<String> = s
+                    .compare_timed(&x.s, &clock)
+                    .into_iter()
+                    .filter(|p| p.1 >= 50)
+                    .map(|(w, us)| format!("{w} {us} µs"))
+                    .collect();
+                eprintln!(
+                    "xdv pdf: the state compared before page {}: {}",
+                    i + 1,
+                    parts.join(", ")
+                );
+            }
+            t.checks += 1;
+            if let Some(g) = g {
+                let g = Arc::new(g.with_after(b.usage[i..].to_vec()));
+                // (the next page that differs, and the last state the base
+                // kept at or before it, past this one)
+                let next = (i..n).find(|&j| b.ids[j] != ids[j]);
+                let back = next.and_then(|j| b.snaps.iter().rev().find(|x| x.at <= j && x.at > i));
+                if next.is_none() {
+                    grafted = Some((i, g));
+                    break;
+                }
+                // (none kept between: the fold goes on through them)
+                if let Some(back) = back {
+                    let m = back.at;
+                    chunks.extend(b.chunks[i..m].iter().cloned());
+                    ops.extend(b.ops[i..m].iter().cloned());
+                    docs.extend(b.docs[i..m].iter().cloned());
+                    states.extend(b.states[i..m].iter().cloned());
+                    labels.extend(b.labels[i..m].iter().copied());
+                    usage.extend(b.usage[i..m].iter().cloned());
+                    snaps.extend(
+                        b.snaps
+                            .iter()
+                            .filter(|x| x.at >= i && x.at < m)
+                            .map(|x| Arc::new(x.grafted(&g))),
+                    );
+                    let there = Arc::new(back.grafted(&g));
+                    s = there.session();
+                    s.set_files(f.files.clone());
+                    s.record_usage(true);
+                    w = there.w.clone();
+                    kept_snap = Some(there);
+                    t.kept += m - i;
+                    seg = m;
+                    i = m;
+                    continue;
+                }
+            }
+            if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+                eprintln!(
+                    "xdv pdf: not the base's state before page {}: {}",
+                    i + 1,
+                    s.differs(&x.s)
+                );
+            }
+        }
+        if i == seg
+            && let Some(r) = kept_snap.take()
+        {
+            // (the state gone on from: the base's, kept as it is)
+            snaps.push(r);
+        } else if i.is_multiple_of(every) {
+            let t0 = std::time::Instant::now();
+            snaps.push(Arc::new(Snap {
+                at: i,
+                s: Arc::new(s.snapshot()),
+                w: w.clone(),
+                grafts: Vec::new(),
+            }));
             t.snaps += t0.elapsed();
         }
+        labels.push(s.next_label());
         let t0 = std::time::Instant::now();
         let o = walk(&mut w, p, f.defs, f.origins).map(Arc::<[Op]>::from);
         t.walk += t0.elapsed();
@@ -530,6 +751,8 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
             None => Arc::from(&[][..]),
         };
         t.pages += t0.elapsed();
+        t.done += 1;
+        usage.push(Arc::from(s.take_usage()));
         // (a page whose bytes are the last file's: that file's bytes, the
         // same allocation, so that an update finds them unchanged at once)
         match old.get(i) {
@@ -538,17 +761,58 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
         }
         docs.push(Arc::new(Docs::of(o.as_deref(), i, &mut s)));
         ops.push(o);
+        i += 1;
     }
-    states.push(s.page_state().map_err(|e| fatal(&e))?);
     let t0 = std::time::Instant::now();
-    let post = s.snapshot();
-    let post_writer = w.clone();
+    let (post, mut s, rec) = if let (Some((i, g)), Some(b)) = (&grafted, f.base) {
+        {
+            let i = *i;
+            t.to = Some(i);
+            chunks.extend(b.chunks[i..].iter().cloned());
+            ops.extend(b.ops[i..].iter().cloned());
+            docs.extend(b.docs[i..].iter().cloned());
+            states.extend(b.states[i..].iter().cloned());
+            labels.extend(b.labels[i..].iter().copied());
+            usage.extend(b.usage[i..].iter().cloned());
+            snaps.extend(
+                b.snaps
+                    .iter()
+                    .filter(|x| x.at >= i)
+                    .map(|x| Arc::new(x.grafted(g))),
+            );
+            let post = Arc::new(b.post.grafted(g));
+            let mut s = post.session();
+            s.set_files(f.files.clone());
+            (post, s, Some(b.end.clone()))
+        }
+    } else {
+        {
+            states.push(s.page_state().map_err(|e| fatal(&e))?);
+            labels.push(s.next_label());
+            let post = Arc::new(Snap {
+                at: n,
+                s: Arc::new(s.snapshot()),
+                w: w.clone(),
+                grafts: Vec::new(),
+            });
+            (post, s, f.base.map(|b| b.end.clone()))
+        }
+    };
     t.snaps += t0.elapsed();
     let t0 = std::time::Instant::now();
-    let (tail, end) = s.finish_recorded().map_err(|e| fatal(&e))?;
+    let (tail, end) = if let Some(r) = &rec {
+        let (tail, new) = s.finish_again(r).map_err(|e| fatal(&e))?;
+        t.replayed = new.is_none();
+        (tail, new.map_or_else(|| r.clone(), Arc::new))
+    } else {
+        let (tail, end) = s.finish_recorded().map_err(|e| fatal(&e))?;
+        (tail, Arc::new(end))
+    };
     t.end = t0.elapsed();
+    let t0 = std::time::Instant::now();
     let layout = layout(&chunks, &tail, &s)
         .ok_or("xdvipdfmx: the file's cross-reference section was not written")?;
+    t.layout = t0.elapsed();
     Ok((
         Base {
             ids: ids.to_vec(),
@@ -557,12 +821,13 @@ fn fold(f: &Fold<'_>, ids: &[u64], walks: &[Arc<Walk>]) -> Result<(Base, Times),
             docs,
             states,
             snaps,
+            labels,
+            usage,
             chunks,
             post,
-            post_writer,
             size: s.next_label(),
             layout,
-            end: Arc::new(end),
+            end,
         },
         t,
     ))
@@ -582,6 +847,11 @@ struct Docs {
     outline: Vec<DocSpecial>,
     /// One that can't be done again ([`Again::Never`]): its start.
     never: Option<String>,
+    /// The names of the forms the page makes (`pdf:bxobj @name`): a page
+    /// written again makes its forms again under the names the file has
+    /// them by, which is the document's file where each name is made
+    /// once and the file's names are among the document's ([`live`]).
+    forms: Vec<Vec<u8>>,
 }
 
 impl Docs {
@@ -600,6 +870,11 @@ impl Docs {
             .iter()
             .any(|k| x.windows(k.len()).any(|w| w == *k))
             .then_some(page);
+            if (x.windows(4).any(|w| w == b"xobj" || w == b"form"))
+                && let Ok(Some(f)) = s.form_defined(x)
+            {
+                d.forms.push(f);
+            }
             match s.again(x) {
                 Ok(Again::Do) => {}
                 Ok(Again::Skip) => d.skip.push((bound, x.clone())),
@@ -613,6 +888,16 @@ impl Docs {
         }
         d
     }
+}
+
+/// The names of the forms the pages of `ds` make ([`Docs::forms`]), none
+/// if one is made twice.
+fn forms(ds: &[Arc<Docs>]) -> Option<std::collections::BTreeSet<&[u8]>> {
+    let mut all = std::collections::BTreeSet::new();
+    ds.iter()
+        .flat_map(|d| d.forms.iter())
+        .all(|f| all.insert(f.as_slice()))
+        .then_some(all)
 }
 
 /// The live file of `walks` from base `b` ([`phitex_pdf::Layout::live`]):
@@ -637,19 +922,36 @@ fn live(
 ) -> Result<(usize, phitex_pdf::Layout, String), String> {
     let (n, bn) = (walks.len(), b.ids.len());
     let t0 = std::time::Instant::now();
-    let mut s = b.post.snapshot();
+    let mut s = b.post.session();
     s.set_files(files);
     let t_snap = t0.elapsed();
-    let mut w = b.post_writer.clone();
+    if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
+        let c = std::time::Instant::now();
+        let clock = || u64::try_from(c.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let parts: Vec<String> = s
+            .clone_timed(&clock)
+            .into_iter()
+            .filter(|p| p.1 >= 100)
+            .map(|(w, us)| format!("{w} {us} µs"))
+            .collect();
+        eprintln!(
+            "xdv pdf: live: the session's copy by part ({} grafts): {}",
+            b.post.grafts.len(),
+            parts.join(", ")
+        );
+    }
+    let mut w = b.post.w.clone();
     // (each page's operations and specials on the document; the pages to
     // write again)
     let mut again: Vec<(usize, Vec<Op>)> = Vec::new();
     let mut docs: Vec<Arc<Docs>> = Vec::with_capacity(n);
+    let mut n_walked = 0usize;
     for (i, p) in walks.iter().enumerate() {
         if i < bn && Arc::ptr_eq(p, &b.walks[i]) {
             docs.push(b.docs[i].clone());
             continue;
         }
+        n_walked += 1;
         let Some(ops) = walk(&mut w, p, defs, origins) else {
             return Err(format!("page {} is not shipped", i + 1));
         };
@@ -681,6 +983,18 @@ fn live(
     };
     if seq(&docs, |d| &d.skip) != seq(&b.docs, |d| &d.skip) {
         return Err("the document's specials on the document changed".to_owned());
+    }
+    // (each form made once by name, and every name the file has made
+    // again or kept: the file's form objects then the document's,
+    // written again where a page makes one again)
+    match (forms(&docs), forms(&b.docs)) {
+        (Some(now), Some(was)) if was.is_subset(&now) => {}
+        _ => {
+            return Err(
+                "a form made twice under one name, or a name the file has no longer made"
+                    .to_owned(),
+            );
+        }
     }
     let (outline, old_outline) = (seq(&docs, |d| &d.outline), seq(&b.docs, |d| &d.outline));
     let outline_again = outline != old_outline;
@@ -788,7 +1102,7 @@ fn live(
         (p.found, p.made)
     };
     let times = format!(
-        "the session taken {t_snap:?}, walk {t_walk:?}, the pages written {t_pages:?}, end {t_end:?} ({}; streams found compressed {} of {} bytes, compressed {} of {} bytes){}{}",
+        "the session taken {t_snap:?}, {n_walked} pages walked {t_walk:?}, the pages written {t_pages:?}, end {t_end:?} ({}; streams found compressed {} of {} bytes, compressed {} of {} bytes){}{}",
         steps.join(", "),
         found.0,
         found.1,
@@ -842,12 +1156,14 @@ pub(crate) fn file(
         date: p.date,
     };
     let ids: Vec<u64> = pages.iter().map(|x| x.raw()).collect();
+    let t_head = t0.elapsed();
     // (the pages' fonts by id, read before the last link's state is taken:
     // a read that stops the node leaves it in place)
     let mut defs = Defs::default();
     for &page in pages {
         crate::assemble::page_defs(cx, page, xe, &mut defs)?;
     }
+    let t_defs = t0.elapsed().saturating_sub(t_head);
     let files = (p.files)();
     // (the last link's state, taken: a build linking meanwhile starts
     // its own; another head of the same session's start (a font loaded
@@ -927,6 +1243,7 @@ pub(crate) fn file(
     packed_next();
     // (each page decoded once while it is the same)
     let t = std::time::Instant::now();
+    let mut n_decoded = 0usize;
     let walks: Vec<Arc<Walk>> = {
         let b = base.as_ref().map(|b| b.locked());
         let mut old: phitex_defuse::FxHashMap<u64, &Arc<Walk>> =
@@ -937,8 +1254,13 @@ pub(crate) fn file(
         pages
             .iter()
             .map(|pg| {
-                old.get(&pg.raw())
-                    .map_or_else(|| Arc::new(Walk::of(v, *pg)), |w| Arc::clone(w))
+                old.get(&pg.raw()).map_or_else(
+                    || {
+                        n_decoded += 1;
+                        Arc::new(Walk::of(v, *pg))
+                    },
+                    |w| Arc::clone(w),
+                )
             })
             .collect()
     };
@@ -971,7 +1293,7 @@ pub(crate) fn file(
             shown(cx, pages, &walks, &defs, &nums, inst);
             if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
                 eprintln!(
-                    "xdv pdf: live: {k} of {} pages written again: files checked {t_files:?}, pages decoded {t_decode:?}, link {:?} ({times}), in all {:?}",
+                    "xdv pdf: live: {k} of {} pages written again: files checked {t_files:?}, {n_decoded} pages decoded {t_decode:?}, link {:?} ({times}), in all {:?}",
                     pages.len(),
                     t.elapsed(),
                     t0.elapsed()
@@ -982,27 +1304,83 @@ pub(crate) fn file(
     }
     let r = {
         let b = base.as_ref().map(|b| b.locked());
-        fold(
-            &Fold {
-                start: &start,
-                base: b.as_deref(),
-                files: logged,
-                nums: nums.clone(),
-                mag,
-                comment: &comment,
-                defs: &defs,
-                origins: inst,
-            },
-            &ids,
-            &walks,
-        )
+        let fo = Fold {
+            start: &start,
+            base: b.as_deref(),
+            files: logged,
+            nums: nums.clone(),
+            mag,
+            comment: &comment,
+            defs: &defs,
+            origins: inst,
+        };
+        let r = fold(&fo, &ids, &walks, true);
+        // (`PHITEX_XDV_CONVERGE_CHECK`, observe: a fold that kept the
+        // base's pages from one on made again to the end, the files
+        // compared)
+        if crate::exec::obs_flag!("PHITEX_XDV_CONVERGE_CHECK")
+            && let Ok((nb, t)) = &r
+            && let Some(to) = t.to
+        {
+            let whole = fold(&fo, &ids, &walks, false);
+            let (a, b) = (
+                nb.layout.exact().unwrap_or_default(),
+                whole
+                    .map(|x| x.0.layout.exact().unwrap_or_default())
+                    .unwrap_or_default(),
+            );
+            let at = a.iter().zip(b.iter()).position(|(x, y)| x != y);
+            if let Some(k) = at {
+                // (the bytes around the first difference: the object it is in)
+                let around = |x: &[u8]| {
+                    let from = x[..k]
+                        .windows(4)
+                        .rposition(|w| w == b" obj")
+                        .map_or(k.saturating_sub(120), |p| p.saturating_sub(16));
+                    String::from_utf8_lossy(&x[from..(k + 80).min(x.len())]).into_owned()
+                };
+                eprintln!(
+                    "xdv pdf: converge check: at byte {k} (chunks end {:?}), kept: {:?}\n  whole: {:?}",
+                    nb.chunks
+                        .iter()
+                        .scan(0usize, |n, c| {
+                            *n += c.len();
+                            Some(*n)
+                        })
+                        .last(),
+                    around(&a),
+                    around(&b)
+                );
+                if let Some(d) = std::env::var_os("PHITEX_XDV_CONVERGE_DIR") {
+                    let d = std::path::PathBuf::from(d);
+                    let _ = std::fs::create_dir_all(&d);
+                    let _ = std::fs::write(d.join(format!("kept-{k}.pdf")), a.as_slice());
+                    let _ = std::fs::write(d.join(format!("whole-{k}.pdf")), b.as_slice());
+                }
+            }
+            eprintln!(
+                "xdv pdf: converge check: {} (pages {}..{} folded, the base's from {}; {} bytes)",
+                if a == b {
+                    "same".to_owned()
+                } else {
+                    format!("DIFFERENT at byte {}", at.unwrap_or(a.len().min(b.len())))
+                },
+                t.from + 1,
+                to,
+                to + 1,
+                a.len()
+            );
+        }
+        r
     };
     let (nb, t) = match r {
         Ok(x) => x,
         Err(e) => return Ok(failed(cx, &e)),
     };
+    let t_fold = t0.elapsed();
     let l = nb.layout.clone();
     let x = crate::assemble::layout_value(v, l.clone());
+    let t_value = t0.elapsed();
     *memo().locked() = Some(Memo {
         head,
         start,
@@ -1013,13 +1391,26 @@ pub(crate) fn file(
     shown(cx, pages, &walks, &defs, &nums, inst);
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
-            "xdv pdf: from page {} of {}: files checked {t_files:?}, start {t_start:?}, pages decoded {t_decode:?}, walk {:?}, xdvipdfmx pages {:?}, snapshots {:?}, end {:?}, in all {:?}",
+            "xdv pdf: from page {} of {}: {} pages folded{}, head {t_head:?}, fonts {t_defs:?}, files checked {t_files:?}, start {t_start:?}, pages decoded {t_decode:?}, fold's start {:?}, converge checks {:?}, walk {:?}, xdvipdfmx pages {:?}, snapshots {:?}, end {:?}{}, layout {:?}, value {:?}, shown {:?}, in all {:?}",
             t.from + 1,
             pages.len(),
+            t.done,
+            t.to.map_or_else(String::new, |i| format!(", the base's from page {}", i + 1))
+                + &if t.kept > 0 {
+                    format!(" and {} between", t.kept)
+                } else {
+                    String::new()
+                },
+            t.start,
+            t.converge,
             t.walk,
             t.pages,
             t.snaps,
             t.end,
+            if t.replayed { " (replayed)" } else { "" },
+            t.layout,
+            t_value.saturating_sub(t_fold),
+            t0.elapsed().saturating_sub(t_value),
             t0.elapsed()
         );
     }
@@ -1077,6 +1468,7 @@ fn exact_maker(
             },
             &ids,
             &walks,
+            true,
         );
         let (nb, _) = r.map_err(|e| phitex_pdf::PdfError::Pdf(String::new(), e))?;
         let l = nb.layout.clone();
@@ -1269,4 +1661,446 @@ fn diff(
         }
     }
     Ok(())
+}
+
+/// A XeTeX page's PDF of its own while the evaluation streams its pages
+/// (`crate::exec::Progress::set_streaming`): a child of the run that
+/// shipped it (`[page, node, i]`: the page's entry, the run's node, its
+/// place among the run's shipouts), made only while streaming. Its file
+/// is xdvipdfmx's of that page alone, on a session of its own begun from
+/// the options, config and maps the build's link begins from; the page's
+/// fonts numbered by themselves (a DVI font number is no part of a PDF).
+/// Exact where the pages before it leave no colour carried in and it
+/// draws with nothing another page makes: no `pdf:` special but those
+/// that draw nothing (annotations, links, destinations, outlines, the
+/// document's information) and literal code that names no resource.
+/// Contributes nothing.
+pub(crate) struct XdvPage {
+    pub(crate) stream: Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) watch: Arc<std::sync::RwLock<Option<crate::exec::Watch>>>,
+    pub(crate) xe: Arc<std::sync::OnceLock<crate::xetex::XeTeX>>,
+}
+
+/// The session a XeTeX page's file of its own begins from
+/// ([`XdvPage`]), by what it is made of: the values' table, `\mag`, the
+/// preamble's comment, the PDF's name and date.
+type AloneStart = Mutex<Option<((u64, i32, String, String, i64), Arc<Mutex<Session>>)>>;
+
+fn alone_start() -> &'static AloneStart {
+    static S: std::sync::OnceLock<AloneStart> = std::sync::OnceLock::new();
+    S.get_or_init(|| Mutex::new(None))
+}
+
+/// The colour stack commands among a XeTeX page's specials, in order
+/// (`color push`, `color pop`, `color` a value set; dvipdfmx's
+/// `pdf:bcolor`, `pdf:ecolor`): one stack, as xdvipdfmx keeps it.
+fn xdv_color_ops(ops: &[Op]) -> Vec<crate::exec::ColorOp> {
+    use phitex_pdf::ColorStackCmd as C;
+    let mut out = Vec::new();
+    for o in ops {
+        let Op::Special(s) = o else { continue };
+        let t = s.trim_ascii();
+        let c = if let Some(r) = t.strip_prefix(b"color") {
+            let r = r.trim_ascii();
+            if let Some(x) = r.strip_prefix(b"push") {
+                C::Push(x.trim_ascii().to_vec())
+            } else if r.starts_with(b"pop") {
+                C::Pop
+            } else {
+                C::Set(r.to_vec())
+            }
+        } else if let Some(x) = t.strip_prefix(b"pdf:bcolor") {
+            C::Push(x.trim_ascii().to_vec())
+        } else if t.starts_with(b"pdf:ecolor") {
+            C::Pop
+        } else {
+            continue;
+        };
+        out.push((0, c));
+    }
+    out
+}
+
+/// A `pdf:` special's command and the rest (`pdf: econtent`'s space
+/// skipped), none for another special.
+fn pdf_special(s: &[u8]) -> Option<(&[u8], &[u8])> {
+    let t = s.trim_ascii().strip_prefix(b"pdf:")?.trim_ascii_start();
+    // (the command's letters: `pdf:bann<<...>>` has no space after it)
+    let n = t
+        .iter()
+        .position(|c| !c.is_ascii_alphabetic())
+        .unwrap_or(t.len());
+    Some((&t[..n], t[n..].trim_ascii_start()))
+}
+
+/// Whether a special makes or adds to one of the document's named objects
+/// (`pdf:obj @x`, `pdf:put @x` but the page's own, `pdf:stream @x`,
+/// `pdf:fstream @x`): what a page's file of its own makes again first,
+/// for the pages before it ([`crate::exec::Progress::doc_specials_before`]).
+fn doc_special(s: &[u8]) -> bool {
+    let Some((cmd, rest)) = pdf_special(s) else {
+        return false;
+    };
+    let own = [
+        &b"@resources"[..],
+        b"@thispage",
+        b"@thisannot",
+        b"@prevpage",
+        b"@nextpage",
+        b"@xpos",
+        b"@ypos",
+    ];
+    matches!(cmd, b"obj" | b"put" | b"stream" | b"fstream")
+        && rest.starts_with(b"@")
+        && !own.iter().any(|o| rest.starts_with(o))
+}
+
+/// Whether a XeTeX page's specials draw only with what its own file has,
+/// the document's named objects of the pages before it made again first:
+/// none it does not know (a form used that no special of the page makes,
+/// `pdf:uxobj`; a `pdf:` special of another kind).
+fn xdv_alone_exact(ops: &[Op]) -> bool {
+    const KNOWN: &[&[u8]] = &[
+        b"bann",
+        b"eann",
+        b"ann",
+        b"dest",
+        b"out",
+        b"outline",
+        b"docinfo",
+        b"docview",
+        b"pagesize",
+        b"bcolor",
+        b"ecolor",
+        b"link",
+        b"tounicode",
+        b"mapline",
+        b"mapfile",
+        b"obj",
+        b"put",
+        b"stream",
+        b"fstream",
+        b"btrans",
+        b"etrans",
+        b"bcontent",
+        b"econtent",
+        b"literal",
+        b"code",
+        b"content",
+        b"direct",
+        b"image",
+        b"bxobj",
+        b"exobj",
+        b"bxform",
+        b"exform",
+        b"close",
+        b"bead",
+        b"thread",
+        b"names",
+        b"bgcolor",
+        b"setlinewidth",
+        b"setlinedash",
+        b"setmiterlimit",
+        b"setlinejoin",
+        b"setlinecap",
+        b"uxobj",
+        b"usexobj",
+        b"majorversion",
+        b"minorversion",
+        b"version",
+        b"pagecolor",
+    ];
+    // (the forms the page makes itself: those it may use)
+    let made: Vec<&[u8]> = ops
+        .iter()
+        .filter_map(|o| match o {
+            Op::Special(s) => pdf_special(s),
+            _ => None,
+        })
+        .filter(|(c, _)| matches!(*c, b"bxobj" | b"bxform"))
+        .filter_map(|(_, r)| r.split(u8::is_ascii_whitespace).next())
+        .collect();
+    ops.iter().all(|o| {
+        let Op::Special(s) = o else { return true };
+        let Some((cmd, rest)) = pdf_special(s) else {
+            return true;
+        };
+        if matches!(cmd, b"uxobj" | b"usexobj") {
+            let name = rest
+                .split(u8::is_ascii_whitespace)
+                .next()
+                .unwrap_or_default();
+            return made.contains(&name);
+        }
+        KNOWN.contains(&cmd)
+    })
+}
+
+/// The specials that put a page's colour stack where `start` says, at its
+/// start: the stack's entries pushed, then its current value (one stack,
+/// xdvipdfmx's; [`xdv_color_ops`]).
+fn color_prelude(start: &crate::exec::ColorStart) -> Vec<Op> {
+    let mut out = Vec::new();
+    for (_, stack, cur) in start {
+        let mut vals: Vec<&Option<Vec<u8>>> = stack.iter().collect();
+        vals.push(cur);
+        // (the bottom one the stack's own unless set: then set first)
+        if let Some(Some(v)) = vals.first() {
+            let mut sp = b"color ".to_vec();
+            sp.extend(v);
+            out.push(Op::Special(sp));
+        }
+        for v in vals.iter().skip(1) {
+            let mut sp = b"color push ".to_vec();
+            sp.extend(v.as_deref().unwrap_or(b"gray 0"));
+            out.push(Op::Special(sp));
+        }
+    }
+    out
+}
+
+impl phitex_defuse::Operation for XdvPage {
+    fn name(&self) -> &'static str {
+        "xdvpage"
+    }
+    fn contributes(
+        &self,
+        _: &[ValueId],
+        _: &phitex_defuse::Values,
+        _: phitex_defuse::Field,
+    ) -> bool {
+        false
+    }
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let _nt = crate::exec::NodeTimer::new(self.name(), cx.node().raw());
+        let v = cx.values();
+        if !self.stream.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(ValueId::UNIT);
+        }
+        let (page, node, i) = match cx.args() {
+            [p, n, i, ..] => (*p, int_of(v, *n), int_of(v, *i)),
+            _ => return Ok(ValueId::UNIT),
+        };
+        let Some(xe) = self.xe.get() else {
+            return Ok(ValueId::UNIT);
+        };
+        let Some(p) = xe.pdf.as_ref() else {
+            return Ok(ValueId::UNIT);
+        };
+        let progress = self
+            .watch
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|w| w.progress.clone());
+        let Some(progress) = progress.filter(|p| p.streams()) else {
+            return Ok(ValueId::UNIT);
+        };
+        let Some(k) = u32::try_from(i)
+            .ok()
+            .and_then(|i| progress.page_of(node.cast_unsigned(), i))
+        else {
+            return Ok(ValueId::UNIT);
+        };
+        // (the page with its sealed lines, its fonts, `\mag` and the
+        // preamble's comment: read as the end node reads them)
+        let (filled, _) = crate::assemble::fill_sealed_pages(cx, vec![page])?;
+        let Some(&page) = filled.first() else {
+            return Ok(ValueId::UNIT);
+        };
+        let mut defs = Defs::default();
+        crate::assemble::page_defs(cx, page, Some(xe), &mut defs)?;
+        let comment = crate::assemble::field(cx, "dvicomment")?
+            .map(|x| str_of(v, x))
+            .unwrap_or_default();
+        let mag =
+            i32::try_from(crate::assemble::field(cx, "param:mag")?.map_or(1000, |x| int_of(v, x)))
+                .unwrap_or(1000);
+        let w = Walk::of(v, page);
+        let nums: std::collections::BTreeMap<u32, u32> = defs
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<u32>>()
+            .into_iter()
+            .zip(1..)
+            .collect();
+        let mut dw = DviWriter::new_xdv_ops(mag, &comment);
+        dw.set_font_numbers(Arc::new(nums));
+        let Some(ops) = walk(&mut dw, &w, &defs, None) else {
+            return Ok(ValueId::UNIT);
+        };
+        progress.page_colors(k, xdv_color_ops(&ops), v);
+        progress.page_doc_specials(
+            k,
+            ops.iter()
+                .filter_map(|o| match o {
+                    Op::Special(s) if doc_special(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect(),
+        );
+        progress.stream_page(k, |start| {
+            let hash = phitex_defuse::hash_words(0x7864_7670, &[v.digest(page)]);
+            // (the document's named objects the pages before it made, made
+            // again first; the colours they leave it pushed)
+            let before = progress.doc_specials_before(k);
+            let mut all: Vec<Op> = before
+                .iter()
+                .flatten()
+                .map(|s| Op::Special(s.clone()))
+                .collect();
+            all.extend(start.map(color_prelude).unwrap_or_default());
+            all.extend(ops.iter().cloned());
+            let pdf = xdv_alone(p, v.instance(), mag, &comment, &all)?;
+            // (exact where both are known; a colour carried in and not
+            // known: drawn from none, told exact later only if none is)
+            let exact = xdv_alone_exact(&ops) && before.is_some();
+            if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") && !exact {
+                trace_not_exact(k, start, &ops);
+            }
+            // (made before the pages before it are known: made again from
+            // what they leave it, once known, `Progress::page_colors`)
+            let remake: Option<crate::exec::Remake> = start.is_none().then(|| {
+                let (p, prog, ops) = (p.clone(), progress.clone(), ops.clone());
+                let (inst, comment) = (v.instance(), comment.clone());
+                Box::new(move |_: &Values, start: &crate::exec::ColorStart| {
+                    let before = prog.doc_specials_before(k)?;
+                    let mut all: Vec<Op> = before.iter().map(|s| Op::Special(s.clone())).collect();
+                    all.extend(color_prelude(start));
+                    all.extend(ops.iter().cloned());
+                    let pdf = xdv_alone(&p, inst, mag, &comment, &all)?;
+                    Some((pdf, xdv_alone_exact(&ops)))
+                }) as crate::exec::Remake
+            });
+            Some((hash, pdf, exact, remake))
+        });
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// Why XeTeX page `k`'s file is not exact (`PHITEX_STREAM_TRACE`): the
+/// colours carried in, its first specials of a kind not known.
+fn trace_not_exact(k: u64, start: Option<&crate::exec::ColorStart>, ops: &[Op]) {
+    let why: Vec<String> = ops
+        .iter()
+        .filter_map(|o| match o {
+            Op::Special(s) if !xdv_alone_exact(std::slice::from_ref(o)) => {
+                Some(String::from_utf8_lossy(&s[..s.len().min(60)]).into_owned())
+            }
+            _ => None,
+        })
+        .take(3)
+        .collect();
+    eprintln!("stream: xdv page {k} not exact: colours {start:?}, specials {why:?}");
+}
+
+/// The PDF of a XeTeX page alone, of its operations `ops`
+/// ([`XdvPage`]).
+fn xdv_alone(p: &XdvPdf, inst: u64, mag: i32, comment: &str, ops: &[Op]) -> Option<Vec<u8>> {
+    let key = (inst, mag, comment.to_owned(), p.name.clone(), p.date);
+    let files = (p.files)();
+    let start = {
+        let mut g = alone_start().locked();
+        match g.as_ref() {
+            Some((k, s)) if *k == key => s.clone(),
+            _ => {
+                let mut s = Session::direct(
+                    options(p),
+                    files.clone(),
+                    deflate(),
+                    u32::try_from(mag).unwrap_or(0),
+                    comment.as_bytes(),
+                )
+                .ok()?;
+                s.set_batch_deflate(batch());
+                let s = Arc::new(Mutex::new(s));
+                *g = Some((key, s.clone()));
+                s
+            }
+        }
+    };
+    let mut s = start.locked().snapshot();
+    s.set_files(files);
+    let chunk: Arc<[u8]> = Arc::from(s.page_ops(ops).ok()?.pdf);
+    let (tail, _) = s.finish_recorded().ok()?;
+    let l = layout(&[chunk], &tail, &s)?;
+    l.exact().ok().map(|b| b.as_ref().clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One file whose bytes and stamp the test sets, its reads counted.
+    struct One {
+        bytes: Mutex<Arc<[u8]>>,
+        stamp: Mutex<Option<Vec<u8>>>,
+        reads: AtomicUsize,
+    }
+
+    impl Files for One {
+        fn find(&self, _: &[u8], _: Format, _: &[u8]) -> Option<Vec<u8>> {
+            Some(b"/doc/font.otf".to_vec())
+        }
+        fn read(&self, _: &[u8]) -> Option<Arc<[u8]>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            // (a fresh copy each time, as a host reading the disk gives)
+            Some(Arc::from(&**self.bytes.locked()))
+        }
+        fn stamp(&self, _: &[u8]) -> Option<Vec<u8>> {
+            self.stamp.locked().clone()
+        }
+    }
+
+    /// A link's files checked again read no file whose stamp is the one
+    /// it had when read: a font of the document's own is not read again
+    /// at every edit; a stamp that moved reads it, the same bytes keep
+    /// the link (and the new stamp, read no more), other bytes drop it.
+    #[test]
+    fn no_file_read_again_while_its_stamp_is_the_same() {
+        let f = Arc::new(One {
+            bytes: Mutex::new(Arc::from(&b"font"[..])),
+            stamp: Mutex::new(Some(b"s1".to_vec())),
+            reads: AtomicUsize::new(0),
+        });
+        let log = Log::default();
+        let logged = Logged {
+            files: f.clone(),
+            log: log.clone(),
+        };
+        let p = logged
+            .find(b"font.otf", Format::OpenType, b"dvipdfmx")
+            .unwrap();
+        logged.read(&p);
+        assert_eq!(f.reads.load(Ordering::Relaxed), 1);
+        for _ in 0..3 {
+            assert!(still(&log, &*f));
+        }
+        assert_eq!(
+            f.reads.load(Ordering::Relaxed),
+            1,
+            "read again, stamp unmoved"
+        );
+        // (touched, same bytes: read once, then known by its new stamp)
+        *f.stamp.locked() = Some(b"s2".to_vec());
+        assert!(still(&log, &*f));
+        assert!(still(&log, &*f));
+        assert_eq!(f.reads.load(Ordering::Relaxed), 2);
+        // (changed: the link's files are not the same)
+        *f.stamp.locked() = Some(b"s3".to_vec());
+        *f.bytes.locked() = Arc::from(&b"other"[..]);
+        assert!(!still(&log, &*f));
+        // (a host with no stamps: read and compared each time)
+        *f.stamp.locked() = None;
+        let log2 = Log::default();
+        let logged = Logged {
+            files: f.clone(),
+            log: log2.clone(),
+        };
+        logged.read(b"/doc/font.otf");
+        let before = f.reads.load(Ordering::Relaxed);
+        assert!(still(&log2, &*f));
+        assert_eq!(f.reads.load(Ordering::Relaxed), before + 1);
+    }
 }

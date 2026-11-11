@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use crate::api::{At, Cause, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Step, Stop};
+use crate::api::{At, Cause, Effect, FieldAt, Locality, MayDefine, NodeId, OpId, PathId, Rel, Step, Stop};
 use crate::engine::Engine;
 use crate::node::{Anchor, DefRec, Node, Placement, Product, ReadKind, ReadRec, RunRecord, State};
 use crate::order::Pos;
@@ -50,6 +50,8 @@ pub struct Ctx<'a> {
     /// Why this run was asked for, as it began (`woken_by`): a cause a
     /// re-ask stores while it runs is the next run's.
     pub(crate) woke: Option<Cause>,
+    /// My wake was more than one cause (`Node::woke_merged`, taken).
+    woke_merged: bool,
     /// My last run's placements by operation and arguments, made on the
     /// first `placed_output_or`.
     placed_keys: Option<PlacedKeys>,
@@ -58,13 +60,45 @@ pub struct Ctx<'a> {
     /// The node whose commit the run stopped to wait for (`Ctx::read`
     /// on its prediction at depth 0).
     pub(crate) wait_on: Option<NodeId>,
+    /// The stop for `wait_on` is a wait, the run having done nothing
+    /// ([`Ctx::wait_for_definer`]).
+    pub(crate) waits_only: bool,
     /// The run stopped at a read past the settling layer's frontier
     /// (`Ctx::set_frontier`): it runs again once the frontier passes it.
     pub(crate) wait_frontier: bool,
+    /// This run's distance past the frontier is noted (`Node::ahead`).
+    pub(crate) ahead_noted: bool,
+    /// Its reads of the settling layer's fields past the frontier are not
+    /// held (`Node::frontier_pass`, taken as the run begins).
+    pub(crate) frontier_pass: bool,
+    /// The stop at the frontier is the speculation window's, not a read
+    /// of the layer's (`Node::held_window`).
+    pub(crate) wait_window: bool,
+    /// The holes before me that may define what I read, found at my
+    /// run's first read before its first command
+    /// ([`Ctx::wait_for_first_definer`]).
+    first_definers: Option<Vec<(NodeId, MayDefine)>>,
     /// `Ctx::goes_on`: the run goes on from where its last run stopped.
     pub(crate) goes_on: bool,
     /// Its checks so far ([`Ctx::tick`]).
     ticks: u64,
+    /// The reads `unread` took out, each by its index in the reads as
+    /// they were then, in order: a point's count of reads made before it
+    /// ([`Ctx::reads_made`]) taken before them is moved to the record's
+    /// by [`Ctx::reads_kept_of`].
+    unread_log: Vec<usize>,
+    /// [`Ctx::read_before_placer`]: my reads of a field's reaching
+    /// definition are made before the node that placed me.
+    before_placer: Option<NodeId>,
+    /// [`Ctx::read_before_placer_over`]: the field whose association
+    /// list answers my reads first.
+    overlay: Option<Field>,
+    /// The reads of the pass [`Ctx::begin_again`] started over from that
+    /// the second pass's record keeps ([`Ctx::into_product`]).
+    passes_before: Vec<ReadRec>,
+    /// The ranges of this pass's reads that are of my own cut
+    /// ([`Ctx::own_cut_reads`]).
+    own_cut: Vec<std::ops::Range<usize>>,
 }
 
 /// The check ([`Ctx::tick`]) from which a run's reads are looked at
@@ -93,42 +127,249 @@ impl<'a> Ctx<'a> {
                 defs: Vec::new(),
                 contribs: Vec::new(),
                 reads: Vec::new(),
+                sources: Vec::new(),
                 placements: Vec::new(),
+                ranks: Vec::new(),
                 claim: 0,
+                claim_all: false,
                 effect: None,
+                place_effects: Vec::new(),
                 scope_gen: eng.scope_gen.load(std::sync::atomic::Ordering::Acquire),
+                moves_gen: eng.moves_gen.load(std::sync::atomic::Ordering::Acquire),
+                struct_gen: eng.struct_gen.load(std::sync::atomic::Ordering::SeqCst),
                 unchanged: false,
+                own_claim: false,
+                at_hole: false,
                 state: None,
                 resumed: std::cell::Cell::new(false),
                 woken_at: None,
+                on_park: false,
                 settle_now: false,
                 waits: Vec::new(),
                 frontier: None,
                 parked_on: None,
+                stood: None,
             },
             views: Vec::new(),
             ep: u64::MAX,
             follow_at: None,
             seen: FxHashMap::default(),
+            unread_log: Vec::new(),
             stop_at: None,
             woke: me.woke.lock().as_ref().map(|w| w.cause.clone()),
+            woke_merged: me.woke_merged.swap(false, std::sync::atomic::Ordering::SeqCst),
             placed_keys: None,
             last: me.run_record(),
             stuck: None,
             wait_on: None,
+            waits_only: false,
             wait_frontier: false,
+            ahead_noted: false,
+            frontier_pass: false,
+            wait_window: false,
+            first_definers: None,
             goes_on: false,
             ticks: 0,
+            before_placer: None,
+            overlay: None,
+            passes_before: Vec::new(),
+            own_cut: Vec::new(),
+        }
+    }
+
+    /// Starts the run's product again, as at its start (its wake and its
+    /// last run kept): a run that goes again from its start in the same
+    /// call (a second pass to a candidate the first asked for) commits
+    /// what that pass makes, never the first pass's placements, waits or
+    /// definitions. The first pass's first `keep` reads, those made
+    /// before the read that asked for the second pass, stay as reads only
+    /// and are filed with the second's ([`Ctx::into_product`]): where the
+    /// second pass ends is the first's choice, made on what it read, past
+    /// that candidate too (the fonts and the text that put the page
+    /// there). Dropped, nothing the choice rests on re-asked the run: a
+    /// run cut at a candidate its page no longer fires at stood until its
+    /// text was edited, then was cut elsewhere, and its continuation and
+    /// the pages after it ran again (revtex-aps-xe's edit at -j1: 234
+    /// runs for 99 nodes, 80 for 75 before). Not the read that asked, nor
+    /// any after it, nor any the client said are of the run's own cut
+    /// ([`Ctx::own_cut_reads`]: the page so far over its own items, the
+    /// pages' objects): those rest on where it is cut, a cycle and not an
+    /// input.
+    pub fn begin_again(&mut self, keep: usize) {
+        let (scope_gen, moves_gen, struct_gen) =
+            (self.product.scope_gen, self.product.moves_gen, self.product.struct_gen);
+        let fresh = Ctx::new(self.eng, self.worker, self.me);
+        let mut first = std::mem::replace(&mut self.product, fresh.product);
+        first.reads.truncate(keep);
+        for r in std::mem::take(&mut self.own_cut).into_iter().rev() {
+            if r.start < first.reads.len() {
+                first.reads.drain(r.start..r.end.min(first.reads.len()));
+            }
+        }
+        // (not its sources: a scheduling hint of the definers it read,
+        // past the read that asked too)
+        self.passes_before.extend(first.reads);
+        self.product.scope_gen = scope_gen;
+        self.product.moves_gen = moves_gen;
+        self.product.struct_gen = struct_gen;
+        self.views.clear();
+        self.follow_at = None;
+        self.seen.clear();
+        self.unread_log.clear();
+        self.stop_at = None;
+        self.placed_keys = None;
+        self.stuck = None;
+        self.wait_on = None;
+        self.waits_only = false;
+        self.wait_frontier = false;
+        self.goes_on = false;
+    }
+
+    /// [`Ctx::read_before_placer`], with the association list field
+    /// `overlay` (`[[field, value]…]`, `[field]` for a binding to
+    /// nothing), read at my own position, answering first: a field it
+    /// has a key for is answered from there, through the same path a
+    /// read asks for (the read files that path on `overlay` under its
+    /// key, and the key's presence), else before my placer. For a child
+    /// whose placer hands it the bindings it holds where the child's text
+    /// stands (a picture child: `phitex-tex`'s `pic:` field).
+    pub fn read_before_placer_over(&mut self, overlay: Field) {
+        self.before_placer = self.me.parent;
+        self.overlay = Some(overlay);
+    }
+
+    /// The answer to a read of `f` through `p` from the overlay
+    /// ([`Ctx::read_before_placer_over`]): `None` where the overlay has no
+    /// key for `f` (a read of that presence recorded), else the value
+    /// through `p` (`Some(None)`: none), the read recorded on the overlay.
+    /// An alias value there is read whole and followed, `p` applied to
+    /// what it gives.
+    fn overlay_answer(&mut self, f: Field, p: PathId) -> Result<Option<Option<ValueId>>, Stop> {
+        let Some(o) = self.overlay else {
+            return Ok(None);
+        };
+        if f == o {
+            return Ok(None);
+        }
+        let bp = self.before_placer.take();
+        self.overlay = None;
+        let r = self.overlay_answer_(o, f, p);
+        self.before_placer = bp;
+        self.overlay = Some(o);
+        r
+    }
+
+    fn overlay_answer_(&mut self, o: Field, f: Field, p: PathId) -> Result<Option<Option<ValueId>>, Stop> {
+        let has = self.eng.path(&[Step::Has(f.0)]);
+        if self.read_path(o, has)? != Some(self.values().bool(true)) {
+            return Ok(None);
+        }
+        let key = self.eng.path(&[Step::Key(f.0)]);
+        let peek = self.peek_path(o, key)?;
+        if peek.is_some_and(|x| read::alias_of(self.values(), x).is_some()) {
+            let x = self.read_path(o, key)?;
+            let y = self.follow_aliases(x)?;
+            return Ok(Some(read::apply_path(self.eng, y, p)));
+        }
+        let mut steps = vec![Step::Key(f.0)];
+        if p != PathId::WHOLE {
+            steps.extend_from_slice(self.eng.path_steps(p).unwrap_or_default());
+        }
+        let q = self.eng.path(&steps);
+        Ok(Some(self.read_path(o, q)?))
+    }
+
+    /// From now on, every read of a field's definition reaching me
+    /// (`read`, `read_path`, `read_or_path`, `read_derived`, `def_site`,
+    /// `snapshot`, `read_item`) is made, answered and filed as a
+    /// read before the node that placed me (`At::Before(placer)`), not
+    /// at my position: none of my placer's definitions, nor those of the
+    /// children it placed before me, answer it, and a change of them
+    /// asks me nothing. For a child whose text stands in the middle of
+    /// its placer's (a picture of a figure's run): what the placer had
+    /// bound before the child's place it hands over itself, and what it
+    /// defines after it the child, as in the text, never sees. My views
+    /// (`view_field`, `view`) stay mine: a field the placer defines for
+    /// me is read there, and so is my scope depth (`depth`). A node with
+    /// no placer reads at its position.
+    /// The node my reads of reaching definitions are made before
+    /// ([`Ctx::read_before_placer`]): my placer, if I read before it.
+    #[must_use]
+    pub fn reads_before(&self) -> Option<NodeId> {
+        self.before_placer
+    }
+
+    pub fn read_before_placer(&mut self) {
+        self.before_placer = self.me.parent;
+    }
+
+    /// Where a read of a definition reaching me is made
+    /// ([`Ctx::read_before_placer`]): the node it is made before, and
+    /// the anchor it is filed with.
+    fn here(&self) -> (NodeId, Anchor) {
+        match self.before_placer {
+            Some(p) => (p, Anchor::Before(p)),
+            None => (self.me.id, Anchor::Me),
+        }
+    }
+
+    /// The reads made since my read `from` ([`Ctx::reads_len`]) are of
+    /// the products of my own cut (a client's page builder over my own
+    /// items): what they answer rests on where the run is cut, so a pass
+    /// that ends at a candidate the first asked for keeps none of the
+    /// first pass's ([`Ctx::begin_again`]). Kept, a read of the page
+    /// params after my own (`tpp:param:vsize` after me, a definition my
+    /// own commit makes) re-asked me at that commit, and the page loop
+    /// waited on me for good (beamer_second_pass at -j1, no PDF).
+    pub fn own_cut_reads(&mut self, from: usize) {
+        let to = self.product.reads.len();
+        if from < to {
+            self.own_cut.push(from..to);
         }
     }
 
     /// The product, with the output.
     pub(crate) fn into_product(mut self, output: ValueId) -> Product {
         self.product.output = output;
+        // (the reads of the passes before a second, `begin_again`, but
+        // those the last pass made again with the same answer: one that
+        // answered otherwise is kept beside it)
+        let reads = std::mem::take(&mut self.passes_before);
+        if !reads.is_empty() {
+            let mut have: FxHashMap<(ReadKind, PathId, u64), ()> = self
+                .product
+                .reads
+                .iter()
+                .map(|r| ((*r.kind(), r.path(), r.seen_raw()), ()))
+                .collect();
+            let me = self.me.id;
+            for r in reads {
+                // (not a read of a pass's own product: the output of its
+                // `i`-th placement or the `i`-th sibling it claimed name
+                // that pass's placements and claims, started again with
+                // its product; nor the next contribution after me, which
+                // is what follows my own cut)
+                let own = match *r.kind() {
+                    ReadKind::Placed { .. } | ReadKind::Following { .. } => true,
+                    ReadKind::Next { after, .. } => after == Some(me),
+                    _ => false,
+                };
+                if !own && have.insert((*r.kind(), r.path(), r.seen_raw()), ()).is_none() {
+                    self.product.reads.push(r);
+                }
+            }
+        }
         self.product.woken_at = match self.woke {
             Some(Cause::Range { by, .. } | Cause::Changed { site: Some(by), .. }) => Some(by),
             _ => None,
         };
+        self.product.on_park = !self.woke_merged
+            && match &self.woke {
+                Some(Cause::Range { field, .. } | Cause::Changed { field, .. } | Cause::Rebind { field, .. }) => {
+                    *self.me.parked_on.lock() == Some(*field)
+                }
+                _ => false,
+            };
         self.product
     }
 
@@ -163,12 +404,35 @@ impl<'a> Ctx<'a> {
 
     fn record(&mut self, kind: ReadKind, path: PathId, seen: Option<ValueId>) {
         let epoch = if kind.field().is_some() { self.ep } else { u64::MAX };
-        self.product.reads.push(ReadRec {
-            kind,
-            path,
-            seen,
-            epoch,
-        });
+        self.product.reads.push(ReadRec::new(kind, path, seen, epoch));
+    }
+
+    /// The node whose definition a read got (`RunRecord::sources`).
+    fn note_source(&mut self, by: Option<NodeId>) {
+        if let Some(by) = by
+            && self.product.sources.last() != Some(&by)
+        {
+            self.product.sources.push(by);
+        }
+    }
+
+    /// How many reads my run has made so far (a mark for
+    /// [`Ctx::fields_read_since`]).
+    pub fn reads_len(&self) -> usize {
+        self.product.reads.len()
+    }
+
+    /// The fields my run read from its read `from` on (a mark of
+    /// [`Ctx::reads_len`]), with each read's index, in order (a field read
+    /// twice is listed twice): a client checking what it read after a
+    /// point against what another node may define.
+    pub fn fields_read_since(&self, from: usize) -> impl Iterator<Item = (usize, Field)> + '_ {
+        self.product
+            .reads
+            .iter()
+            .enumerate()
+            .skip(from)
+            .filter_map(|(i, r)| r.kind().field().map(|f| (i, f)))
     }
 
     /// Loads `f`'s change count before a read of it ([`ReadRec::epoch`]).
@@ -204,8 +468,10 @@ impl<'a> Ctx<'a> {
         fields.sort_unstable_by_key(|f| f.0.raw());
         fields.dedup();
         let mut pairs = Vec::with_capacity(fields.len());
+        let (at, _) = self.here();
         for f in fields {
-            let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+            let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+            self.note_source(r.by);
             if let Some(x) = r.value {
                 pairs.push(v.list(vec![f.0, x]));
             }
@@ -228,7 +494,8 @@ impl<'a> Ctx<'a> {
         // (no change count: the value was loaded before now, so the
         // commit checks the read whatever its field's count says)
         self.ep = u64::MAX;
-        self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, seen);
+        let (_, anchor) = self.here();
+        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, seen);
         self.seen.insert(f, seen);
         Ok(())
     }
@@ -240,14 +507,50 @@ impl<'a> Ctx<'a> {
         if let Some(&x) = self.seen.get(&f) {
             return Ok(x);
         }
+        if let Some(x) = self.overlay_answer(f, PathId::WHOLE)? {
+            self.seen.insert(f, x);
+            return Ok(x);
+        }
         self.before_read(f);
-        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+        self.note_source(r.by);
         self.wait_for_settling(&r)?;
-        self.hold_at_frontier(f)?;
-        self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
+        self.wait_for_routine(f, &r, at)?;
+        self.hold_at_frontier(f, at)?;
+        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
         let x = self.follow_aliases(r.value)?;
         self.seen.insert(f, x);
         Ok(x)
+    }
+
+    /// A read of a field the settling layer defines (`Engine::settle_marked`)
+    /// by a node outside it, with a page's routine between the definition
+    /// reaching me and me that has not committed: the run waits for that
+    /// routine, which may define the field before me, as at one thread,
+    /// where it runs first. Read now, the answer was the one before the
+    /// routine, and the routine's commit asked the run again and every
+    /// routine after it (floats2col at -j16 in debug builds, 221 finisher
+    /// runs for 194, a race each: text between a routine and the frontier
+    /// the page loop had passed). No cycle: the wait is on a node before
+    /// me, parked, its worker freed (`Ctx::wait_for_settling`).
+    fn wait_for_routine(&mut self, f: Field, r: &crate::read::Reaching, at: NodeId) -> Result<(), Stop> {
+        let eng = self.eng;
+        if at != self.me.id
+            || !self.has_other_threads()
+            || !eng.settle_marked(f)
+            || eng.op(self.me.op()).settles_at_quiet()
+        {
+            return Ok(());
+        }
+        let lo =
+            r.by.and_then(|b| eng.placed_node(b))
+                .map_or_else(|| read::unit_start(eng, self.me), |b| b.pos_hint());
+        if let Some(x) = read::on_one_layout(eng, || read::settling_hole_between(eng, self.me, lo)) {
+            self.wait_on = Some(x);
+            return Err(stop());
+        }
+        Ok(())
     }
 
     /// A definition reaching me that is a settling node's prediction
@@ -258,6 +561,29 @@ impl<'a> Ctx<'a> {
     /// loop is its finisher's: TeX's own chain from a routine to the text
     /// after it.
     fn wait_for_settling(&mut self, r: &crate::read::Reaching) -> Result<(), Stop> {
+        // (a definition a stale run committed, its node to run again
+        // (`Node::unwalked`): the run waits for that node's next commit,
+        // instead of going on on a value that commit takes back and
+        // running again. A page's routine ran on a float list a piece
+        // re-asked mid-run had filed, every routine after it again with
+        // it: floats2col at -j16, 765 and 3 151 finisher runs for 194,
+        // accl 27139, 27141). No wait cycle: only for a node before me
+        // in the document's order, so each such wait is on an earlier
+        // node than the waiter and none comes back round; a wait parks
+        // the run (`sched::park_waiting`) and frees its worker, and the
+        // node waited for is dirty and queued (re-asked while it ran),
+        // so it runs at -j1 too; and a quiet point walks every node's
+        // fields left unwalked before it lets the waits go, so no such
+        // wait outlives it (`sched::run_worker`'s assertion)
+        if let Some(by) = r.by
+            && by != self.me.id
+            && let Some(x) = self.eng.placed_node(by)
+            && x.transient.load(std::sync::atomic::Ordering::Acquire)
+            && x.pos_hint() < self.me.pos_hint()
+        {
+            self.wait_on = Some(by);
+            return Err(stop());
+        }
         if !r.provisional {
             return Ok(());
         }
@@ -288,17 +614,55 @@ impl<'a> Ctx<'a> {
     /// definition the read would meet (TeX's text after a page's break
     /// reads what that page's routine defined): read now, the answer is
     /// one the reader's run is thrown away for once that node comes.
-    fn hold_at_frontier(&mut self, f: Field) -> Result<(), Stop> {
+    fn hold_at_frontier(&mut self, f: Field, at: NodeId) -> Result<(), Stop> {
         use std::sync::atomic::Ordering::{Acquire, Relaxed};
         let eng = self.eng;
         let fr = eng.frontier.load(Acquire);
-        if fr == 0 || !eng.settle_marked(f) || eng.op(self.me.op()).settles_at_quiet() {
+        // (the speculation window, docs/spec-window.md: this run's distance
+        // past the frontier noted at its first read, for a refutation of
+        // it to narrow the window; past the window, held there)
+        // (a run the window let go is not held by it again: its pass,
+        // taken here; one thread runs everything in order, nothing to
+        // hold)
+        if !self.ahead_noted {
+            self.ahead_noted = true;
+            let d = crate::sched::window_distance(eng, self.me, fr);
+            self.me.ahead.store(d.map_or(0, |d| d + 1), Relaxed);
+            let pass = self.me.window_pass.swap(false, Relaxed);
+            if !pass && self.has_other_threads() && d.is_some_and(|d| crate::sched::beyond_window(eng, d)) {
+                eng.window_stats[0].fetch_add(1, Relaxed);
+                self.me.held_window.store(true, Relaxed);
+                self.wait_frontier = true;
+                self.wait_window = true;
+                return Err(stop());
+            }
+            self.me.held_window.store(false, Relaxed);
+        }
+        if fr == 0 || self.frontier_pass || !eng.settle_marked(f) || eng.op(self.me.op()).settles_at_quiet() {
             return Ok(());
         }
-        if !crate::sched::past_frontier(eng, self.me, fr) {
+        // (a read made before my placer, `Ctx::read_before_placer`, or
+        // before a node named, stands where that node does: the layer
+        // places nothing behind the frontier)
+        let past = if at == self.me.id {
+            crate::sched::past_frontier(eng, self.me, fr)
+        } else {
+            eng.placed_node(at)
+                .is_none_or(|x| crate::sched::past_frontier(eng, x, fr))
+        };
+        if !past {
             return Ok(());
         }
         eng.frontier_held.fetch_add(1, Relaxed);
+        self.me.held_window.store(false, Relaxed);
+        if crate::sched::run_log() {
+            eprintln!(
+                "frontier: read held node {} field {} at {}",
+                self.me.id.raw(),
+                self.values().render(f.0),
+                fr.saturating_sub(1)
+            );
+        }
         self.wait_frontier = true;
         Err(stop())
     }
@@ -307,6 +671,18 @@ impl<'a> Ctx<'a> {
     /// past which it may yet place nodes (`None`: it places none, every
     /// reader is free). A reader of a field the layer defines past it
     /// waits for it to pass ([`Ctx::read`]).
+    /// The speculation window is on and has never narrowed in this
+    /// evaluation (docs/spec-window.md): the page layer has refuted no run
+    /// of the text ahead of it, its routines and the text exchange nothing
+    /// a run ahead missed. Once one is refuted it stays so, whatever W
+    /// grows back to: the exchange is the document's.
+    pub fn spec_window_whole(&self) -> bool {
+        use std::sync::atomic::Ordering::Acquire;
+        self.eng.window_on.load(Acquire)
+            && self.eng.window_stats[1].load(Acquire) == 0
+            && self.eng.window.load(Acquire) >= crate::sched::WINDOW_MAX
+    }
+
     pub fn set_frontier(&mut self, at: Option<NodeId>) {
         self.product.frontier = Some(at);
     }
@@ -316,12 +692,19 @@ impl<'a> Ctx<'a> {
     /// ([`Ctx::define_alias`]).
     fn follow_aliases(&mut self, mut x: Option<ValueId>) -> Result<Option<ValueId>, Stop> {
         for _ in 0..32 {
-            let Some((g, at)) = x.and_then(|y| read::alias_of(self.values(), y)) else {
+            let Some((g, at, c)) = x.and_then(|y| read::alias_parts(self.values(), y)) else {
                 return Ok(x);
             };
-            x = match self.read_at_raw(g, At::Before(at))? {
+            let y = match self.read_at_raw(g, At::Before(at))? {
                 FieldAt::Def(y, _) => Some(y),
                 FieldAt::Unset | FieldAt::Gone => None,
+            };
+            // (an alias plus an offset, a relation on an alias: the
+            // target's integer plus it; an alias of one, the offset carried)
+            let v = self.values();
+            x = match y.and_then(|z| read::alias_parts(v, z)) {
+                Some((h, hat, k)) => Some(read::alias_value_plus(v, h, hat, k.wrapping_add(c))),
+                None => read::alias_target_plus(v, y, c),
             };
         }
         Ok(x)
@@ -374,9 +757,15 @@ impl<'a> Ctx<'a> {
                 })),
             ),
         };
-        if let (Some(x), Anchor::Before(_) | Anchor::AfterOwn(_)) = (&r, &anchor) {
+        if let (Some(x), Anchor::Before(n) | Anchor::AfterOwn(n)) = (&r, &anchor) {
+            let n = if matches!(anchor, Anchor::Before(_)) {
+                *n
+            } else {
+                self.me.id
+            };
+            self.note_source(x.by);
             self.wait_for_settling(x)?;
-            self.hold_at_frontier(f)?;
+            self.hold_at_frontier(f, n)?;
         }
         self.record(
             ReadKind::Field { f, at: anchor },
@@ -390,6 +779,39 @@ impl<'a> Ctx<'a> {
                 None => FieldAt::Unset,
             },
         })
+    }
+
+    /// My read of `f` at `at` (made by [`Ctx::read_at`]) taken as having
+    /// answered `seen`: the run went on as though `seen` were there, a
+    /// guess of what a node yet to commit defines. A definition reaching
+    /// there that is `seen` asks nothing of me; any other re-asks me, as
+    /// for a read. (The page loop's fold on a trusted give-back guess,
+    /// docs/spec-window.md: read as unset, the finisher's give-back
+    /// equal to the guess ran each page step again.)
+    pub fn read_at_as(&mut self, f: Field, at: At, seen: Option<ValueId>) {
+        let anchor = match at {
+            At::Before(n) => Anchor::Before(n),
+            At::AfterOwn(n) => Anchor::AfterOwn(n),
+            At::Final => Anchor::Final,
+            At::End(u) => Anchor::End(u),
+        };
+        // (the change count the read loaded, kept: a definition made
+        // since it has the commit check it, and one that has not leaves
+        // it to the definer's re-ask, which compares with `seen`. Checked
+        // whatever the count, a read of a give-back not made yet was found
+        // other than the guess at the reader's own commit, and ran it
+        // again: census_plain, 92 of 110 page steps run again)
+        let ep = self
+            .product
+            .reads
+            .iter()
+            .rev()
+            .find(|r| matches!(r.kind(), ReadKind::Field { f: g, at } if *g == f && *at == anchor))
+            .map_or(u64::MAX, |r| r.epoch);
+        self.unread(f);
+        self.ep = ep;
+        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, seen);
+        self.seen.insert(f, seen);
     }
 
     /// [`Ctx::read_at`] at the line's end (`At::Final`, a loop-back
@@ -412,31 +834,295 @@ impl<'a> Ctx<'a> {
         Ok(x)
     }
 
+    /// The answer `read_path` would give, with no read recorded: the run
+    /// depends on nothing of it. For a reader that looks first and then
+    /// records a narrower read covering what it used of the answer (each
+    /// element it checked: `Step::Within` of them), and goes by that
+    /// read's answer, never by this one alone.
+    pub fn peek_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {
+        self.check()?;
+        if let Some(q) = self.overlay_path(f, p) {
+            let o = self.overlay.unwrap_or(f);
+            return Ok(self.peek_at(o, q, self.me.id).flatten());
+        }
+        let (at, _) = self.here();
+        reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+        Ok(self.peek_at(f, p, at).flatten())
+    }
+
+    /// The value of `f` reaching me, with no read recorded (none where it
+    /// is an alias definition, which only a read follows): for a client
+    /// that looks first and records what it used with
+    /// [`Ctx::note_path`] (`PathId::WHOLE`).
+    pub fn peek_field(&mut self, f: Field) -> Result<Option<Option<ValueId>>, Stop> {
+        self.check()?;
+        if let Some(q) = self.overlay_path(f, PathId::WHOLE) {
+            let o = self.overlay.unwrap_or(f);
+            return Ok(self.peek_at(o, q, self.me.id));
+        }
+        let (at, _) = self.here();
+        reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+        Ok(self.peek_at(f, PathId::WHOLE, at))
+    }
+
+    /// `f` through `p` reaching node `at`, unrecorded: `None` where the
+    /// definition is an alias (only a read follows one) or none reaches
+    /// (a gone node); else the answer.
+    fn peek_at(&self, f: Field, p: PathId, at: NodeId) -> Option<Option<ValueId>> {
+        let r = reaching_at(self.eng, f, at, false)?;
+        if r.value.is_some_and(|x| read::alias_of(self.values(), x).is_some()) {
+            return None;
+        }
+        Some(read::through_at(self.eng, r, p, at, false))
+    }
+
+    /// Where the overlay ([`Ctx::read_before_placer_over`]) has a key for
+    /// `f` (looked at, unrecorded): the path on the overlay that answers
+    /// `f` through `p`.
+    fn overlay_path(&self, f: Field, p: PathId) -> Option<PathId> {
+        let o = self.overlay.filter(|&o| o != f)?;
+        let has = self.eng.path(&[Step::Has(f.0)]);
+        if self.peek_at(o, has, self.me.id).flatten() != Some(self.values().bool(true)) {
+            return None;
+        }
+        let mut steps = vec![Step::Key(f.0)];
+        if p != PathId::WHOLE {
+            steps.extend_from_slice(self.eng.path_steps(p).unwrap_or_default());
+        }
+        Some(self.eng.path(&steps))
+    }
+
+    /// Records a read of `f` through path `p` answered `seen`, as
+    /// `read_path` records one, without answering it: a client that
+    /// looked first ([`Ctx::peek_path`]) and used `seen` of the answer
+    /// files what it used here. A definition of `f` whose answer through
+    /// `p` differs from `seen` re-asks me, one already made before this
+    /// record as well (the commit checks the read whatever the field's
+    /// change count says). With an overlay, filed where the look was
+    /// answered, with the key's presence.
+    pub fn note_path(&mut self, f: Field, p: PathId, seen: Option<ValueId>) -> Result<(), Stop> {
+        self.check()?;
+        self.ep = u64::MAX;
+        if let Some(o) = self.overlay.filter(|&o| o != f) {
+            let q = self.overlay_path(f, p);
+            let has = self.eng.path(&[Step::Has(f.0)]);
+            let b = self.values().bool(q.is_some());
+            self.record(ReadKind::Field { f: o, at: Anchor::Me }, has, Some(b));
+            if let Some(q) = q {
+                self.ep = u64::MAX;
+                self.record(ReadKind::Field { f: o, at: Anchor::Me }, q, seen);
+                return Ok(());
+            }
+            self.ep = u64::MAX;
+        }
+        let (_, anchor) = self.here();
+        self.record(ReadKind::Field { f, at: anchor }, p, seen);
+        Ok(())
+    }
+
     /// `read` through a path: the run depends only on the path's answer
     /// (an alias definition: on all of it, followed).
     pub fn read_path(&mut self, f: Field, p: PathId) -> Result<Option<ValueId>, Stop> {
         self.check()?;
+        if let Some(x) = self.overlay_answer(f, p)? {
+            return Ok(x);
+        }
         self.before_read(f);
-        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+        self.note_source(r.by);
         if let Some(x) = r.value
             && read::alias_of(self.values(), x).is_some()
         {
-            self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, r.value);
+            self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
             let y = self.follow_aliases(r.value)?;
             return Ok(read::apply_path(self.eng, y, p));
         }
         let x = through(self.eng, r, p);
-        self.record(ReadKind::Field { f, at: Anchor::Me }, p, x);
+        self.record(ReadKind::Field { f, at: anchor }, p, x);
         Ok(x)
+    }
+
+    /// `read_path` of `f` through `p` by a run that looks at it only
+    /// because `elem` is an element of what path `names` gives of field
+    /// `list` reaching me (read by the run itself): a guarded read
+    /// (`Step::Member`), which holds, checked again, once `elem` has left
+    /// that list there, whatever it would answer. Where my placer's
+    /// overlay holds `f` or `list` (or either is an alias), a plain read.
+    pub fn read_path_member(
+        &mut self,
+        f: Field,
+        p: PathId,
+        list: Field,
+        names: PathId,
+        elem: ValueId,
+    ) -> Result<Option<ValueId>, Stop> {
+        self.check()?;
+        if let Some(o) = self.overlay {
+            let mut held = f == o || list == o;
+            for g in [f, list] {
+                if !held {
+                    let has = self.eng.path(&[Step::Has(g.0)]);
+                    held = self.read_path(o, has)? == Some(self.values().bool(true));
+                }
+            }
+            if held {
+                return self.read_path(f, p);
+            }
+        }
+        self.read_path_member_(f, p, list, names, elem)
+    }
+
+    fn read_path_member_(
+        &mut self,
+        f: Field,
+        p: PathId,
+        list: Field,
+        names: PathId,
+        elem: ValueId,
+    ) -> Result<Option<ValueId>, Stop> {
+        self.before_read(f);
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+        self.note_source(r.by);
+        if let Some(x) = r.value
+            && read::alias_of(self.values(), x).is_some()
+        {
+            self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
+            let y = self.follow_aliases(r.value)?;
+            return Ok(read::apply_path(self.eng, y, p));
+        }
+        let x = through(self.eng, r, p);
+        let key = (list, names, elem, p);
+        let known = self.eng.member_paths.read().get(&key).copied();
+        let q = known.unwrap_or_else(|| {
+            let v = self.values();
+            let spec = v.list(vec![list.0, v.int(i64::from(names.0)), elem]);
+            let mut steps = vec![Step::Member(spec)];
+            if p != PathId::WHOLE {
+                steps.extend_from_slice(self.eng.path_steps(p).unwrap_or_default());
+            }
+            let q = self.eng.path(&steps);
+            self.eng.member_paths.write().insert(key, q);
+            q
+        });
+        self.record(ReadKind::Field { f, at: anchor }, q, x);
+        Ok(x)
+    }
+
+    /// A derived read (`Step::Derived`): the field named `prefix`, the
+    /// digits of `v + j`, `suffix`, where `v` is the integer value of
+    /// `base` (0 where none) reaching me, read where it reaches me and
+    /// answered through `then`. The run depends on that answer alone:
+    /// recorded as a read of `base` and one of the named field, each
+    /// through the same path, whose answer either re-asks by computing the
+    /// name again (so a move of `v` that names a field holding what the
+    /// old one held leaves me standing). The answer, and the field named
+    /// now. (An alias definition on either field: a whole read of each,
+    /// followed, as `read_path` reads one.)
+    pub fn read_derived(
+        &mut self,
+        base: Field,
+        prefix: &str,
+        j: i64,
+        suffix: &str,
+        then: PathId,
+    ) -> Result<(Option<ValueId>, Field), Stop> {
+        self.check()?;
+        let v = self.values();
+        let spec = v.list(vec![base.0, v.str(prefix), v.int(j), v.str(suffix)]);
+        // (an overlay, `Ctx::read_before_placer_over`: the base and the
+        // named field read as reads are, the name made from the first)
+        if self.overlay.is_some() {
+            let b = self.read(base)?;
+            let g = read::derived_name(v, spec, b).ok_or_else(stop)?;
+            let x = self.read(g)?;
+            return Ok((read::apply_path(self.eng, x, then), g));
+        }
+        let mut steps = vec![Step::Derived(spec)];
+        if then != PathId::WHOLE {
+            steps.extend_from_slice(self.eng.path_steps(then).unwrap_or_default());
+        }
+        let p = self.eng.path(&steps);
+        self.before_read(base);
+        let ep_base = self.ep;
+        let (at, anchor) = self.here();
+        let rb = reaching_at(self.eng, base, at, false).ok_or_else(stop)?;
+        self.note_source(rb.by);
+        self.wait_for_settling(&rb)?;
+        self.hold_at_frontier(base, at)?;
+        let g = read::derived_name(v, spec, rb.value).ok_or_else(stop)?;
+        self.before_read(g);
+        let ep_g = self.ep;
+        let rg = reaching_at(self.eng, g, at, false).ok_or_else(stop)?;
+        self.note_source(rg.by);
+        self.wait_for_settling(&rg)?;
+        self.hold_at_frontier(g, at)?;
+        let aliased = |x: Option<ValueId>| x.is_some_and(|x| read::alias_of(v, x).is_some());
+        if aliased(rb.value) || aliased(rg.value) {
+            let b = self.read(base)?;
+            let g2 = read::derived_name(v, spec, b).ok_or_else(stop)?;
+            let x = self.read(g2)?;
+            return Ok((read::apply_path(self.eng, x, then), g2));
+        }
+        let x = read::through_at(self.eng, rg, p, at, false);
+        self.ep = ep_base;
+        self.record(ReadKind::Field { f: base, at: anchor }, p, x);
+        self.ep = ep_g;
+        self.record(ReadKind::Field { f: g, at: anchor }, p, x);
+        Ok((x, g))
+    }
+
+    /// `read` with one look-up, answered whole or through `p` as
+    /// `through_path` decides from the value itself: where it is true the
+    /// run depends only on `p`'s answer (recorded as `read_path` records
+    /// it, and not kept as the field's whole value, so a later `read` of
+    /// `f` records that too); where false, a whole read as `read` makes.
+    /// The value reaching me, and whether `p` was taken. (An alias
+    /// definition is read whole, followed.)
+    pub fn read_or_path(
+        &mut self,
+        f: Field,
+        p: PathId,
+        through_path: impl FnOnce(&Values, ValueId) -> bool,
+    ) -> Result<(Option<ValueId>, bool), Stop> {
+        self.check()?;
+        if let Some(&x) = self.seen.get(&f) {
+            return Ok((x, false));
+        }
+        if let Some(x) = self.overlay_answer(f, PathId::WHOLE)? {
+            self.seen.insert(f, x);
+            return Ok((x, false));
+        }
+        self.before_read(f);
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+        self.note_source(r.by);
+        self.wait_for_settling(&r)?;
+        self.hold_at_frontier(f, at)?;
+        if let Some(x) = r.value
+            && read::alias_of(self.values(), x).is_none()
+            && through_path(self.values(), x)
+        {
+            let y = read::apply_path(self.eng, Some(x), p);
+            self.record(ReadKind::Field { f, at: anchor }, p, y);
+            return Ok((Some(x), true));
+        }
+        self.record(ReadKind::Field { f, at: anchor }, PathId::WHOLE, r.value);
+        let x = self.follow_aliases(r.value)?;
+        self.seen.insert(f, x);
+        Ok((x, false))
     }
 
     /// The node whose definition of `f` reaches me (None: the environment).
     pub fn def_site(&mut self, f: Field) -> Result<Option<NodeId>, Stop> {
         self.check()?;
         self.before_read(f);
-        let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        let (at, anchor) = self.here();
+        let r = reaching_at(self.eng, f, at, false).ok_or_else(stop)?;
+        self.note_source(r.by);
         let seen = through(self.eng, r, SITE);
-        self.record(ReadKind::Field { f, at: Anchor::Me }, SITE, seen);
+        self.record(ReadKind::Field { f, at: anchor }, SITE, seen);
         Ok(r.by)
     }
 
@@ -482,7 +1168,22 @@ impl<'a> Ctx<'a> {
             f,
             loc,
             value: ValueId::UNIT,
-            rel: Some(c),
+            rel: Some(Rel::Add(c)),
+        });
+    }
+
+    /// `f` := the definition of `f` reaching me with the items of list
+    /// `items` appended by the client's append ([`Engine::set_append`]),
+    /// at a locality: a relation as [`Ctx::define_rel`]'s, recomputed in
+    /// place when the value reaching me moves (a list each node adds to,
+    /// microtype's `\\MT@font@list`, is not a chain of runs). The run need
+    /// not read `f`.
+    pub fn define_append_with(&mut self, f: Field, items: ValueId, loc: Locality) {
+        self.product.defs.push(DefRec {
+            f,
+            loc,
+            value: ValueId::UNIT,
+            rel: Some(Rel::Append(items)),
         });
     }
 
@@ -654,6 +1355,7 @@ impl<'a> Ctx<'a> {
         self.check()?;
         self.before_read(f);
         let r = reaching_at(self.eng, f, self.me.id, false).ok_or_else(stop)?;
+        self.note_source(r.by);
         self.views.push(ViewRec {
             kind: ReadKind::Field { f, at: Anchor::Me },
             path: PathId::WHOLE,
@@ -670,13 +1372,13 @@ impl<'a> Ctx<'a> {
     /// The view one step further; None where the step does not apply.
     pub fn at(&mut self, v: View, s: Step) -> Option<View> {
         let rec = self.view_rec(v)?;
-        let (kind, value, epoch) = (rec.kind.clone(), rec.value, rec.epoch);
+        let (kind, value, epoch) = (rec.kind, rec.value, rec.epoch);
         let path = self.eng.path_extend(rec.path, s);
         let x = read::step(self.eng, value, s);
         let present = self.eng.path_extend(path, Step::Present);
         let seen = Some(self.eng.values().bool(x.is_some()));
         self.ep = epoch;
-        self.record(kind.clone(), present, seen);
+        self.record(kind, present, seen);
         x?;
         self.views.push(ViewRec {
             kind,
@@ -690,7 +1392,7 @@ impl<'a> Ctx<'a> {
     /// The value at one step further, recorded as a read of that path.
     pub fn get(&mut self, v: View, s: Step) -> Option<ValueId> {
         let rec = self.view_rec(v)?;
-        let (kind, value, epoch) = (rec.kind.clone(), rec.value, rec.epoch);
+        let (kind, value, epoch) = (rec.kind, rec.value, rec.epoch);
         let path = self.eng.path_extend(rec.path, s);
         let x = read::step(self.eng, value, s);
         self.ep = epoch;
@@ -714,7 +1416,7 @@ impl<'a> Ctx<'a> {
         let Some(rec) = self.view_rec(v) else {
             return ValueId::UNIT;
         };
-        let (kind, path, value) = (rec.kind.clone(), rec.path, rec.value);
+        let (kind, path, value) = (rec.kind, rec.path, rec.value);
         self.ep = rec.epoch;
         self.record(kind, path, value);
         value.unwrap_or(ValueId::UNIT)
@@ -727,10 +1429,40 @@ impl<'a> Ctx<'a> {
         self.product.placements.len() - 1
     }
 
+    /// [`Ctx::child`], unless this run placed that very node already (a
+    /// second pass of a run over the same text): that placement's index.
+    pub fn child_once(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
+        let same = self
+            .product
+            .placements
+            .iter()
+            .position(|p| matches!(p, Placement::Child(o, a) if *o == op && a[..] == args[..]));
+        same.unwrap_or_else(|| self.child(op, args))
+    }
+
+    /// Whether this node ran before (its last record stands): a run of
+    /// an edit's evaluation on a node the build has, not a node's first.
+    pub fn ran_before(&self) -> bool {
+        self.last.is_some()
+    }
+
     /// Places a node after me and my children.
     pub fn follow(&mut self, op: OpId, args: Vec<ValueId>) -> usize {
         self.product.placements.push(Placement::Follow(op, args));
         self.product.placements.len() - 1
+    }
+
+    /// The brackets my `i`-th placement is filed with until it runs,
+    /// where its operation leaves them to its run (`Effect::Pending`):
+    /// its text is not its arguments, but I know it (a cut piece's rest,
+    /// whose continuation I made). Filed in my commit with my own: a
+    /// close my text predicted that moves into the rest leaves the depth
+    /// after the rest as it was, and the readers there stand. A guess:
+    /// the node's run files what it does.
+    pub fn predict_placed_effect(&mut self, i: usize, e: Effect) {
+        if e != Effect::Pending && e != Effect::None {
+            self.product.place_effects.push((i, e));
+        }
     }
 
     /// Places a node after `at` and its placements.
@@ -754,6 +1486,32 @@ impl<'a> Ctx<'a> {
         );
         self.product.placements.push(Placement::FollowAfterPlaced(j, op, args));
         self.product.placements.len() - 1
+    }
+
+    /// Gives my `i`-th placement of this run, one placed after another
+    /// node (`follow_after`, `follow_after_placed`), its order among the
+    /// nodes others place after that node: it stands after those of a
+    /// lower rank and before those of a higher one, wherever each placer
+    /// stands and whenever each commits. Unranked (0), it goes right
+    /// after that node's children, before every node placed after it
+    /// already. A page's finisher ranks by the page's place among the
+    /// document's fires, so a finisher placed by a loop node from a start
+    /// another one has since moved never stands before the finisher of an
+    /// earlier page after the same piece.
+    ///
+    /// # Panics
+    ///
+    /// Where `i` is not a placement this run made.
+    pub fn rank_placement(&mut self, i: usize, rank: u64) {
+        assert!(
+            i < self.product.placements.len(),
+            "rank_placement({i}): no such placement"
+        );
+        let r = &mut self.product.ranks;
+        if r.len() <= i {
+            r.resize(i + 1, 0);
+        }
+        r[i] = rank;
     }
 
     /// The output my `i`-th placement had at my last commit, if it has run.
@@ -781,12 +1539,71 @@ impl<'a> Ctx<'a> {
         x
     }
 
+    /// [`Ctx::placed_output_or`] through path `p`: the answer of `p` on
+    /// the output of the node my `i`-th placement of this run stands for,
+    /// if it has run, else on the output `guess` gives (asked only then,
+    /// None: no output); recorded as that
+    /// answer alone, so a child's output that changes elsewhere than `p`
+    /// leaves me standing, and one whose first output answers otherwise
+    /// than the guess re-asks me.
+    pub fn placed_output_path_or(
+        &mut self,
+        i: usize,
+        p: PathId,
+        guess: impl FnOnce(&Self) -> Option<ValueId>,
+    ) -> Option<ValueId> {
+        let x = match self.placed_child_output(i) {
+            Some(o) => read::apply_path(self.eng, Some(o), p),
+            None => {
+                let g = guess(self);
+                read::apply_path(self.eng, g, p)
+            }
+        };
+        self.record(ReadKind::Placed { i, guess: true }, p, x);
+        x
+    }
+
+    /// The value of `f` at the line's end (`At::Final`, a loop-back), not
+    /// recorded: for a guess that a recorded read checks
+    /// ([`Ctx::placed_output_path_or`]), never for what a run makes.
+    #[must_use]
+    pub fn peek_final(&self, f: Field) -> Option<ValueId> {
+        read::final_read(self.eng, f).value
+    }
+
+    /// The output of my last run's `i`-th placement, if it was a node of
+    /// operation `op` that has run: a guess for this run's `i`-th
+    /// placement, of `op` too, whose own node has not run (an edited
+    /// picture's child, placed anew, `Ctx::placed_output_or`). Not
+    /// recorded, a peek.
+    #[must_use]
+    pub fn last_placed_output(&self, i: usize, op: OpId) -> Option<ValueId> {
+        let c = *self.last.as_ref()?.placed.get(i)?;
+        let n = self.eng.node(c);
+        (n.op() == op && n.state() != State::Gone)
+            .then(|| n.run_record().map(|r| r.output))
+            .flatten()
+    }
+
     /// The output of the node my `i`-th placement of this run stands for
     /// (`Ctx::placed_output_or`'s), if it has run: not recorded, a peek.
     /// A run that stops for a placement's output reads it with
     /// [`Ctx::placed_output_wait`], or nothing wakes it when it comes.
     pub fn placed_output_peek(&mut self, i: usize) -> Option<ValueId> {
         self.placed_child_output(i)
+    }
+
+    /// [`Ctx::placed_output_peek`] where that node has committed its last
+    /// run and nothing has asked it again since (clean, not a guess of a
+    /// run in flight): its output is of the inputs it has now. Not
+    /// recorded, a peek.
+    pub fn placed_output_settled(&mut self, i: usize) -> Option<ValueId> {
+        self.placed_child_output(i)?;
+        let (op, args) = self.product.placements.get(i)?.key();
+        let c = *self.placed_keys.as_ref()?.get(&(op, Arc::from(args)))?;
+        let n = self.eng.node(c);
+        let r = n.run_record()?;
+        (n.state() == State::Clean && !r.provisional).then_some(r.output)
     }
 
     /// The node my `i`-th placement of this run stands for re-asks me at
@@ -848,6 +1665,7 @@ impl<'a> Ctx<'a> {
     pub fn claim(&mut self, n: usize) {
         self.me.claim_all.store(false, std::sync::atomic::Ordering::Release);
         self.product.claim = n;
+        self.product.claim_all = false;
         crate::commit::apply_claim(self.eng, self.worker, self.me, n);
     }
 
@@ -862,6 +1680,7 @@ impl<'a> Ctx<'a> {
     pub fn claim_rest(&mut self) {
         self.me.claim_all.store(true, std::sync::atomic::Ordering::Release);
         self.product.claim = usize::MAX;
+        self.product.claim_all = true;
         crate::commit::apply_claim(self.eng, self.worker, self.me, usize::MAX);
     }
 
@@ -871,6 +1690,24 @@ impl<'a> Ctx<'a> {
         let seen = n.as_ref().map(|n| read::text_value(self.eng, n));
         self.record(ReadKind::Following { i }, PathId::WHOLE, seen);
         n.map(|n| (n.op(), n.args().to_vec()))
+    }
+
+    /// Whether no `i`-th claimed sibling of operation `op` follows me (none,
+    /// or one of another operation): the end of the text `op`'s nodes are
+    /// pieces of. Found so, it is a read of that sibling's operation
+    /// ([`Ctx::following`] through its op: asked again when a sibling of
+    /// `op` comes there, not when another's text is edited); a sibling of
+    /// `op` found is no read, as a run that ends before its next sibling
+    /// reads nothing of it.
+    pub fn ends_before(&mut self, i: usize, op: OpId) -> bool {
+        let n = read::following_on(self.eng, self.me, i, &mut self.follow_at);
+        if n.as_ref().is_some_and(|n| n.op() == op) {
+            return false;
+        }
+        let path = self.path(&[Step::Index(0)]);
+        let seen = read::apply_path(self.eng, n.as_ref().map(|n| read::text_value(self.eng, n)), path);
+        self.record(ReadKind::Following { i }, path, seen);
+        true
     }
 
     /// The node of the `i`-th claimed sibling, as the `following(i)`
@@ -898,6 +1735,244 @@ impl<'a> Ctx<'a> {
         Ok(h)
     }
 
+    /// The run stopped at a hole before it ([`Ctx::hole_before`]) with
+    /// nothing to say yet: what my last run made stands as this run's
+    /// ([`Ctx::unchanged`]), filed with this run's reads (the hole among
+    /// them), where I have run before; true then. Taken back instead, its
+    /// brackets and definitions left the line until the hole filled and
+    /// came back with the next run: each such stop a change of every
+    /// reader after me (biblatex at -j4: example pieces flipping between
+    /// four scopes open and none, each flip a walk of 3.4 M readers, mc
+    /// 80562). Not my last run's state: its checkpoints count that run's
+    /// reads, which this record does not hold (a run going on from one,
+    /// or cut off at one, rested on reads it never checked: csquotes at
+    /// -j8, an example environment's body typeset as text, accl 25423).
+    /// False on a first run: nothing to keep.
+    pub fn keep_last_at_hole(&mut self) -> bool {
+        if self.last.is_none() {
+            return false;
+        }
+        self.product.unchanged = true;
+        self.product.at_hole = true;
+        true
+    }
+
+    /// Stops the run until the nearest piece of the text before me asked
+    /// again since it committed ([`read::text_to_run_before`]) commits,
+    /// when there is one: nothing is filed, my last run's products stand,
+    /// and I run again at that commit or at the quiet point. For a run
+    /// that would end the job's text at me (a fatal error, which claims
+    /// every node after me): made while the text before me is still to
+    /// run, the end rests on a guess of that text, and its claim of the
+    /// rest took back every node after me and asked their readers again,
+    /// to be undone once the text ran (biblatex at -j4, an example piece
+    /// cut from its \end reading on to the input's end: one run of 71 s,
+    /// 49 s of it the claim's re-asks, mc 80568, 80574). The page layer is
+    /// not waited for, nor a piece's first run: a fatal error on a prefix
+    /// every piece of which stands ends the job at once, no piece after
+    /// it begun.
+    pub fn wait_text_before(&mut self) -> Result<(), Stop> {
+        self.check()?;
+        if let Some(x) = read::on_one_layout(self.eng, || read::text_to_run_before(self.eng, self.me)) {
+            self.wait_on = Some(x);
+            return Err(stop());
+        }
+        Ok(())
+    }
+
+    /// At a step of my run (the client's: TeX's every few thousand
+    /// commands): where every worker is at work, I am the run of my unit
+    /// furthest ahead, and a node of my unit before me waits for a worker
+    /// ([`crate::sched::starved_by`]), I give my worker to it: I stop,
+    /// nothing filed, my last run's products standing, and run again when
+    /// that node commits. A run past a node still to run rests on a guess
+    /// of its answer, which may loop where TeX's input does not; so the
+    /// earliest work waiting is never kept from a worker by runs on
+    /// guesses after it, whatever the speed of the machine.
+    pub fn yield_to_prefix(&mut self) -> Result<(), Stop> {
+        self.check()?;
+        let Some(w) = self.worker else {
+            return Ok(());
+        };
+        if let Some(x) = crate::sched::starved_by(self.eng, w, self.me) {
+            self.wait_on = Some(x);
+            return Err(stop());
+        }
+        Ok(())
+    }
+
+    /// [`Ctx::hole_before`] where the text before me can change what I
+    /// read: the first node before me that has not committed and whose
+    /// operation may define one of `fields` (`Operation::may_define`),
+    /// None where no such node is. A node found is recorded as
+    /// `hole_before` records the first hole (its commit, or its being
+    /// taken, removed or moved, runs me again, and I look again); None is
+    /// not recorded.
+    pub fn hole_before_defining(&mut self, fields: &[Field]) -> Result<Option<NodeId>, Stop> {
+        self.check()?;
+        let (h, first) = read::on_one_layout(self.eng, || read::hole_before_defining(self.eng, self.me, fields));
+        if h.is_some() {
+            self.record(ReadKind::Hole, PathId::WHOLE, read::hole_value(self.eng, first));
+        }
+        Ok(h)
+    }
+
+    /// I stop for node `h`, a node before me that has not committed
+    /// ([`Ctx::hole_before`] found it), and run when it commits. With
+    /// `nothing_done` (no command of my run done yet) the stop is a wait,
+    /// not a run (`Report::waits`): a piece whose first command reads on
+    /// into the text after it, run before the text before it.
+    pub fn wait_for_hole(&mut self, h: NodeId, nothing_done: bool) -> Stop {
+        self.wait_on = Some(h);
+        self.waits_only = nothing_done;
+        stop()
+    }
+
+    /// Where a node before me has not committed and its operation may
+    /// define one of `fields` ([`Ctx::hole_before_defining`]): I stop,
+    /// nothing filed, and run when it commits. With `nothing_done` (the
+    /// run has done nothing yet, its first read the one that waits) the
+    /// stop is a wait, not a run (`Report::waits`): a piece run beside
+    /// the text before it that reads a name that text defines, at once.
+    pub fn wait_for_definer(&mut self, fields: &[Field], nothing_done: bool) -> Result<(), Stop> {
+        self.check()?;
+        let (h, _) = read::on_one_layout(self.eng, || read::hole_before_defining(self.eng, self.me, fields));
+        if let Some(x) = h {
+            self.wait_on = Some(x);
+            self.waits_only = nothing_done;
+            return Err(stop());
+        }
+        Ok(())
+    }
+
+    /// A read of `f` before my run's first command is done (nothing to
+    /// throw away): with the speculation window on (a clean build's
+    /// evaluation, more than one thread), where a node before me in my
+    /// unit has not committed and its operation names `f` among what it
+    /// may define, the run waits for the nearest such node and runs when
+    /// it commits: a wait, not a run (docs/spec-window.md, First reads).
+    /// The nodes are found once a run, at its first such read. Only the
+    /// order of the runs: a read let through is answered and filed as
+    /// before, and a definition that moves it re-asks it.
+    pub fn wait_for_first_definer(&mut self, f: Field) -> Result<(), Stop> {
+        use std::sync::atomic::Ordering::Acquire;
+        if !self.eng.window_on.load(Acquire)
+            || !self.eng.first_reads_on.load(Acquire)
+            || !self.has_other_threads()
+            || self.seen.contains_key(&f)
+            || !self.eng.op(self.me.op()).text()
+            || self.eng.op(self.me.op()).settles_at_quiet()
+        {
+            return Ok(());
+        }
+        let eng = self.eng;
+        let me = self.me;
+        let holes = self
+            .first_definers
+            .get_or_insert_with(|| read::on_one_layout(eng, || read::holes_naming_definitions(eng, me)));
+        if holes.is_empty() {
+            return Ok(());
+        }
+        let v = eng.values();
+        let name = v.as_str(f.0);
+        let hit = holes.iter().rev().find(|(_, m)| match m {
+            MayDefine::Names(ns) => ns.contains(&f),
+            MayDefine::Prefixes(ps) => name
+                .as_deref()
+                .is_some_and(|n| ps.iter().any(|p| n.starts_with(p.as_str()))),
+            MayDefine::Nothing | MayDefine::Any => false,
+        });
+        if let Some(&(x, _)) = hit {
+            eng.window_stats[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.wait_on = Some(x);
+            self.waits_only = true;
+            return Err(stop());
+        }
+        Ok(())
+    }
+
+    /// A read of the scope I run in before my run's first command is done
+    /// (nothing to throw away): with the speculation window on, where a
+    /// node before me in my unit has not committed and its scope brackets
+    /// are known only by running it (`Effect::Pending`), the run waits for
+    /// the nearest such node, a wait and not a run (docs/spec-window.md,
+    /// First reads). Not a node whose brackets its text predicts: the
+    /// scopes it opens and closes stand as filed.
+    pub fn wait_for_scope_opener(&mut self) -> Result<(), Stop> {
+        use std::sync::atomic::Ordering::Acquire;
+        if !self.eng.window_on.load(Acquire)
+            || !self.eng.first_reads_on.load(Acquire)
+            || !self.has_other_threads()
+            || !self.eng.op(self.me.op()).text()
+            || self.eng.op(self.me.op()).settles_at_quiet()
+        {
+            return Ok(());
+        }
+        let eng = self.eng;
+        let me = self.me;
+        if let Some(x) = read::on_one_layout(eng, || read::hole_with_pending_brackets(eng, me)) {
+            eng.window_stats[3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.wait_on = Some(x);
+            self.waits_only = true;
+            return Err(stop());
+        }
+        Ok(())
+    }
+
+    /// Whether node `n` stands past the settling layer's frontier
+    /// ([`Ctx::set_frontier`]). Not a read.
+    pub fn past_frontier(&self, n: NodeId) -> bool {
+        self.eng.placed_node(n).is_some_and(|x| {
+            crate::sched::past_frontier(
+                self.eng,
+                x,
+                self.eng.frontier.load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
+    }
+
+    /// Whether this evaluation has more than one thread: work done ahead
+    /// on a guess can stand beside what it guesses at, not only before it.
+    /// Never for what a run makes, only for how far it goes on a guess.
+    pub fn has_other_threads(&self) -> bool {
+        self.worker.is_some_and(|w| w.shared.n > 1)
+    }
+
+    /// Stops the run until I stand at the committed frontier: every node
+    /// before me in my unit has committed in this pass with no re-ask
+    /// pending (none to run, again or for the first time, none running or
+    /// committing), and the settling layer's frontier is not before me
+    /// (`Ctx::set_frontier`: the pages before me fired, their finishers
+    /// placed before me). For an effect outside the engine that a run on
+    /// a guessed state must never make, though the run is thrown away (a
+    /// shell command): made past this point, it is made on the state TeX's
+    /// own order has here. Stopped, the run is queued again when the node
+    /// waited for commits, or when the frontier passes me; the check is
+    /// made again then. A node before me that changes after this (a
+    /// loop-back's next pass, an edit) re-asks me through what I read.
+    pub fn wait_settled(&mut self) -> Result<(), Stop> {
+        use std::sync::atomic::Ordering::Acquire;
+        self.check()?;
+        let eng = self.eng;
+        if let Some(x) = read::on_one_layout(eng, || read::unsettled_before(eng, self.me)) {
+            self.wait_on = Some(x);
+            return Err(stop());
+        }
+        if crate::sched::past_frontier(eng, self.me, eng.frontier.load(Acquire)) {
+            self.wait_frontier = true;
+            return Err(stop());
+        }
+        // (and what I read before that still stands: a node before me that
+        // committed after my read and before this check has settled, and
+        // its re-ask finds no read of mine filed yet: the effect was made
+        // on the old answer, a run's commit too late to take it back.
+        // Stopped, the run begins again, every node before it settled)
+        if !self.own_reads_hold() {
+            return Err(stop());
+        }
+        Ok(())
+    }
+
     /// Narrows what I may define, for prediction. Accepted, not used by
     /// this core.
     pub fn narrow(&mut self, _m: MayDefine) {}
@@ -920,6 +1995,13 @@ impl<'a> Ctx<'a> {
         let x = self.eng.values().int(i64::from(d));
         self.record(ReadKind::Field { f, at: Anchor::Me }, PathId::WHOLE, Some(x));
         Ok(d)
+    }
+
+    /// Whether a claim took my node while this run was on its way (a
+    /// sibling's run claimed it after a worker took it to run). Not a
+    /// read.
+    pub fn claimed_away(&self) -> bool {
+        matches!(self.me.state(), State::Inert | State::RunningInert)
     }
 
     /// Always true: a run never knows it is final. Side effects belong
@@ -947,6 +2029,21 @@ impl<'a> Ctx<'a> {
     /// is nothing to keep (a prediction stands as made).
     pub fn unchanged(&mut self) {
         self.product.unchanged = true;
+    }
+
+    /// [`Ctx::unchanged`], but this run's own claim stands (none, unless
+    /// it claims), not the last run's: what the last run claimed it
+    /// decided on what this run could not get. A finisher whose page is
+    /// stale keeps what its routine defined on the page before, but not
+    /// the claim of the rest a fatal error of that routine made there:
+    /// kept, it held the text after the finisher inert, so the page
+    /// builder never folded that text again and the page stayed stale
+    /// for good, the job ended at that finisher with its hundred errors
+    /// in the log (thumbs at -j8: an overview page's routine run on
+    /// values not settled yet).
+    pub fn unchanged_unclaimed(&mut self) {
+        self.product.unchanged = true;
+        self.product.own_claim = true;
     }
 
     /// What this run defines is no decision of its settling layer
@@ -1002,18 +2099,21 @@ impl<'a> Ctx<'a> {
         st
     }
 
-    /// What my last run stored with `park`, for a run of my edited text
-    /// (woken by [`Cause::Edited`]) that goes on from a point of the text
-    /// the edit left as it was: the client looks for that point, and takes
-    /// the state with [`Ctx::goes_on_from_edit`]. `None` for another
-    /// cause, a stale state ([`Ctx::resumed`]'s rule) or none stored.
-    pub fn parked_before_edit(&self) -> Option<ValueId> {
-        if !matches!(self.woken_by(), Some(Cause::Edited))
-            || self.me.state_stale.load(std::sync::atomic::Ordering::Acquire)
-        {
-            return None;
-        }
+    /// The state my last run stored with `park`, stale or not, as a value
+    /// only: taking it neither goes on from it nor keeps any of that
+    /// run's reads (for that, [`Ctx::resumed`]).
+    pub fn last_state(&self) -> Option<ValueId> {
         self.last.as_ref().and_then(|r| r.state)
+    }
+
+    /// This run does not go on from the state [`Ctx::resumed`] offered
+    /// after all: its last run's reads are not kept with its own. A run
+    /// that took the state, then met what it must wait for and keeps its
+    /// last products standing ([`Ctx::unchanged`]), files only what it
+    /// read: keeping the last run's reads, one that moved since woke it
+    /// again at each commit of the same wait, with no end.
+    pub fn not_resumed(&self) {
+        self.product.resumed.set(false);
     }
 
     /// Whether my last run stored a state with `park` (whatever woke me).
@@ -1021,12 +2121,138 @@ impl<'a> Ctx<'a> {
         self.last.as_ref().is_some_and(|r| r.state.is_some())
     }
 
-    /// The run goes on from the state [`Ctx::parked_before_edit`] gave:
-    /// its last run's reads are kept with this run's (those it reads
-    /// again replaced), as for [`Ctx::resumed`], so a change behind the
-    /// point it went on from still asks it again.
-    pub fn goes_on_from_edit(&self) {
-        self.product.resumed.set(true);
+    /// A run woken for a read that moved finds every read of my last run
+    /// giving what it gave: a run is a function of its reads, so it would
+    /// make what that run made, and that run's definitions, contributions,
+    /// placements and output stand ([`Ctx::unchanged`]) with its reads
+    /// filed again. What moved moved back, a value on the way among the
+    /// nodes before this one that re-ran out of order, and nothing is run:
+    /// Grail's last pages' routines ran 3.8 s of hyperxmp on such wakes at
+    /// -j8 to make what they had made.
+    ///
+    /// Not for a node whose last run parked on an answer it had not got
+    /// (`Ctx::parked_on`: a page loop at a hole, woken to fold on from
+    /// where it stopped); one that ran to its end and parked a state only
+    /// for a run after an edit to go on from (a text piece's checkpoint)
+    /// made that state of its reads as it made the rest (a run that went
+    /// on from a state keeps the reads it rests on), and stands with it
+    /// (beamer: every frame after a \label typed between two frames ran
+    /// again, and its page's finisher, on the empty
+    /// `\beamer@framehypertargets` the first frame had set back; 29
+    /// frames, 240 ms at -j1). Not for one relocated (its definitions are filed where it stood:
+    /// `commit::relocate`), or refuted by its own commit (the state it
+    /// parked rests on what moved, though the reads hold now:
+    /// `resumed_reread.rs`), or asked for anything but a read (an edit, a
+    /// creation, the structure around it). A hole it met is a read like
+    /// the others: filled since, it does not hold. The output of that run,
+    /// if it stands.
+    pub(crate) fn last_run_stands(&mut self) -> Option<ValueId> {
+        if !matches!(
+            self.woke,
+            Some(
+                Cause::Changed { .. }
+                    | Cause::Range { .. }
+                    | Cause::Rebind { .. }
+                    | Cause::Output { .. }
+                    | Cause::Environment { .. }
+            )
+        ) || self.me.moved.load(std::sync::atomic::Ordering::Acquire)
+            || self.me.refuted.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        let r = self
+            .last
+            .as_ref()
+            .filter(|r| !r.provisional && (r.state.is_none() || self.me.parked_on.lock().is_none()))?;
+        let mut memo = crate::node::HoldMemo::default();
+        let moved = r.scope_moved(self.eng);
+        if let Some(i) = r
+            .reads
+            .iter()
+            .position(|rd| !r.read_holds(self.eng, self.me, &rd, moved, &mut memo))
+        {
+            // (`PHITEX_STANDS_TRACE`, profile: the first read of the last
+            // run that moved, with what it saw and what it would see now)
+            if crate::obs::enabled() && std::env::var_os("PHITEX_STANDS_TRACE").is_some() {
+                let rd = &r.reads.iter().nth(i).expect("the read found");
+                let v = &self.eng.values;
+                let now = crate::read::answer_in(self.eng, self.me, rd.kind(), rd.path(), &mut memo.fold);
+                let show =
+                    |x: Option<ValueId>| x.map_or_else(|| "-".to_owned(), |x| v.render(x).chars().take(200).collect());
+                eprintln!(
+                    "stands: node {} woken by {:?} runs: read {i} of {}: {} {:?} seen {} now {}",
+                    self.me.id.raw(),
+                    self.woke,
+                    r.reads.len(),
+                    rd.kind().field().map(|f| v.render(f.0)).unwrap_or_default(),
+                    *rd.kind(),
+                    show(rd.seen()),
+                    show(now)
+                );
+            }
+            return None;
+        }
+        let output = r.output;
+        // (its reads are the record's, filed as its readers: the commit
+        // keeps them where they are, `commit::commit_stood`)
+        self.product.stood = Some(r.clone());
+        self.product.unchanged = true;
+        Some(output)
+    }
+
+    /// Whether I ran before in this evaluation (this run is not my first
+    /// of it): what my last run left is of this evaluation's inputs, not
+    /// of the build before an edit.
+    #[must_use]
+    pub fn ran_this_evaluation(&self) -> bool {
+        self.me.runs.load(std::sync::atomic::Ordering::Relaxed) > 1
+    }
+
+    /// The value my last run defined `f` with, if it did (not a read: what
+    /// my own last run left, a peek).
+    #[must_use]
+    pub fn last_def(&self, f: Field) -> Option<ValueId> {
+        self.last
+            .as_ref()?
+            .defs
+            .iter()
+            .rev()
+            .find(|d| d.f == f && d.rel.is_none())
+            .map(|d| d.value)
+    }
+
+    /// `PHITEX_RESUME_CHECK`: my last run's and this run's reads of `f`
+    /// and definitions of it, as one line.
+    pub fn reads_of(&self, f: Field) -> String {
+        let v = &self.eng.values;
+        let show = |rs: &[ReadRec]| -> Vec<String> {
+            rs.iter()
+                .enumerate()
+                .filter(|(_, r)| r.kind().field() == Some(f))
+                .map(|(i, r)| format!("#{i} {:?} {:?}", *r.kind(), r.seen().map(|x| v.render(x))))
+                .collect()
+        };
+        let last = self.last.as_ref();
+        format!(
+            "last run reads {:?} defs {:?}; this run reads {:?} defs {:?}",
+            last.map(|r| show(&r.reads.iter().collect::<Vec<_>>()))
+                .unwrap_or_default(),
+            last.map(|r| r
+                .defs
+                .iter()
+                .filter(|d| d.f == f)
+                .map(|d| format!("{:?} {:?} {}", d.loc, d.rel, v.render(d.value)))
+                .collect::<Vec<_>>())
+                .unwrap_or_default(),
+            show(&self.product.reads),
+            self.product
+                .defs
+                .iter()
+                .filter(|d| d.f == f)
+                .map(|d| format!("{:?} {:?} {}", d.loc, d.rel, v.render(d.value)))
+                .collect::<Vec<_>>()
+        )
     }
 
     /// Whether node `a` stands before node `b` on the line (both alive). A
@@ -1035,6 +2261,20 @@ impl<'a> Ctx<'a> {
     /// or ahead (then it goes on). Not a read.
     pub fn before(&self, a: NodeId, b: NodeId) -> bool {
         self.eng.node(a).pos_hint() < self.eng.node(b).pos_hint()
+    }
+
+    /// Whether node `n`, where it stands, closes a scope after its reads
+    /// and definitions: what it ran in is out of sight from a node after
+    /// it. Not a read: a change of a node's brackets re-asks the readers it
+    /// reaches past.
+    pub fn closes_scope_after(&self, n: NodeId) -> bool {
+        self.eng.placed_node(n).is_some_and(|x| {
+            let b = x.record().map_or_else(
+                || crate::node::unpack_effect(x.effect.load(std::sync::atomic::Ordering::Acquire)).0,
+                |r| r.effect.brackets(),
+            );
+            b.closes > 0 && !b.before
+        })
     }
 
     /// Node `n`'s operation, where it stands (placed, not removed). Not a
@@ -1080,13 +2320,39 @@ impl<'a> Ctx<'a> {
     /// Forgets my reads of `f` in this run: the commit records none.
     pub fn unread(&mut self, f: Field) {
         self.seen.remove(&f);
-        self.product.reads.retain(|r| match &r.kind {
-            ReadKind::Field { f: g, .. }
-            | ReadKind::Env { f: g }
-            | ReadKind::Fold { f: g, .. }
-            | ReadKind::Next { f: g, .. } => *g != f,
-            ReadKind::Placed { .. } | ReadKind::Following { .. } | ReadKind::Hole => true,
+        let mut i = 0;
+        let log = &mut self.unread_log;
+        self.product.reads.retain(|r| {
+            let keep = match r.kind() {
+                ReadKind::Field { f: g, .. }
+                | ReadKind::Env { f: g }
+                | ReadKind::Fold { f: g, .. }
+                | ReadKind::Next { f: g, .. } => *g != f,
+                ReadKind::Placed { .. } | ReadKind::Following { .. } | ReadKind::Hole => true,
+            };
+            if keep {
+                i += 1;
+            } else {
+                log.push(i);
+            }
+            keep
         });
+    }
+
+    /// Whether this run's reads so far all still give what they gave,
+    /// and no field it read has changed since, even back
+    /// (`PHITEX_RESUME_CHECK`: at -j8 a field can move and move back
+    /// while a run reads it in two places).
+    pub fn own_reads_hold(&self) -> bool {
+        let mut memo = crate::read::FoldMemo::new();
+        self.product.reads.iter().all(|rd| {
+            matches!(rd.kind(), ReadKind::Placed { .. } | ReadKind::Hole)
+                || (crate::read::holds(self.eng, self.me, rd, &mut memo)
+                    && rd
+                        .kind()
+                        .field()
+                        .is_none_or(|f| rd.epoch == u64::MAX || self.eng.field_epoch(f) == rd.epoch))
+        })
     }
 
     /// A path interned for `read_path` and friends.
@@ -1107,6 +2373,10 @@ impl<'a> Ctx<'a> {
     /// commit, as before.
     pub fn tick(&mut self, _n: u64) -> Result<(), Stop> {
         self.check()?;
+        // (what waits behind a run gone long)
+        if let Some(w) = self.worker {
+            w.offer();
+        }
         self.ticks += 1;
         if self.ticks >= LONG_RUN_TICKS
             && (self.ticks.is_power_of_two() || self.me.stale.load(std::sync::atomic::Ordering::Acquire))
@@ -1128,13 +2398,45 @@ impl<'a> Ctx<'a> {
         let scope_moved =
             read::scoped(self.eng) && self.eng.scope_gen.load(Ordering::Acquire) != self.product.scope_gen;
         let mut memo = crate::read::FoldMemo::new();
+        // (a read of a placement's output is of this run's `i`-th placement,
+        // which the last run's `i`-th need not be: a pass that placed a
+        // child its last run did not (the read-back child after a pass
+        // read back inline) reads another node's output there. So the
+        // child this placement stands for, by its key, as the read found
+        // it: its output now, or none where it has not run (a guess, which
+        // its commit checks, `reask_parent`). Read through `holds`, a
+        // read moved on every check, the run stopped each time and never
+        // committed, and its child never ran: no progress)
+        let placed: Vec<usize> = self
+            .product
+            .reads
+            .iter()
+            .filter_map(|rd| match *rd.kind() {
+                ReadKind::Placed { i, .. } => Some(i),
+                _ => None,
+            })
+            .collect();
+        let mut outs: FxHashMap<usize, Option<ValueId>> = FxHashMap::default();
+        for i in placed {
+            if let std::collections::hash_map::Entry::Vacant(e) = outs.entry(i) {
+                e.insert(self.placed_child_output(i));
+            }
+        }
         let moved = self.product.reads.iter().any(|rd| {
-            if matches!(rd.kind, ReadKind::Following { .. }) {
+            if matches!(rd.kind(), ReadKind::Following { .. }) {
                 return false;
             }
+            if let ReadKind::Placed { i, guess } = rd.kind() {
+                return match outs.get(i).copied().flatten() {
+                    Some(o) => read::apply_path(self.eng, Some(o), rd.path()) != rd.seen(),
+                    // (no child of that key has run: a guess holds until
+                    // the child commits; a real read of none saw none)
+                    None => !guess && rd.seen().is_some(),
+                };
+            }
             if !scope_moved
-                && !matches!(rd.kind, ReadKind::Next { .. })
-                && rd.kind.field().is_some_and(|f| self.eng.field_epoch(f) == rd.epoch)
+                && !matches!(rd.kind(), ReadKind::Next { .. })
+                && rd.kind().field().is_some_and(|f| self.eng.field_epoch(f) == rd.epoch)
             {
                 return false;
             }

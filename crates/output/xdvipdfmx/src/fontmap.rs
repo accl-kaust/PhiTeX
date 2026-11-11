@@ -104,6 +104,20 @@ pub struct State {
     pub start: Option<Arc<HtTable<FontmapRec>>>,
 }
 
+/// The start's records, shared by a session's snapshots, compared as
+/// the same where they are the same records (a document's map of tens of
+/// thousands, 1.3 ms to compare whole, accl 22862).
+impl PartialEq for State {
+    fn eq(&self, o: &Self) -> bool {
+        let start = match (&self.start, &o.start) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+            (None, None) => true,
+            _ => false,
+        };
+        start && self.fontmap == o.fontmap
+    }
+}
+
 /// `pdf_init_fontmap_record`.
 pub fn pdf_init_fontmap_record(mrec: &mut FontmapRec) {
     *mrec = FontmapRec::default();

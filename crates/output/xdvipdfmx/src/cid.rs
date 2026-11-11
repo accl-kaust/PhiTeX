@@ -211,7 +211,7 @@ pub const CID_BASEFONT: &[(&[u8], &[u8], &[u8])] = &[
 ];
 
 /// cid.c's globals.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `opt_flags_cidfont` (`CIDFONT_FORCE_FIXEDPITCH`…).
     pub opt_flags_cidfont: i32,

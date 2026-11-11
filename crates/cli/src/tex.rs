@@ -4,8 +4,6 @@
 //! texmf.cnf has it), TFM files, map files, fonts and encodings, each a
 //! lookup in the `ls-R` databases, no directory walked.
 
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
@@ -32,7 +30,7 @@ pub fn kpse(progname: &str, engine: &str) -> Kpse {
     }
     let tex_dir = std::env::var_os("PATH").and_then(|p| {
         std::env::split_paths(&p)
-            .map(|d| d.join("tex"))
+            .map(|d| d.join(format!("tex{}", std::env::consts::EXE_SUFFIX)))
             .filter_map(|t| t.canonicalize().ok())
             .find(|t| t.is_file() && Some(t) != exe.as_ref())
             .and_then(|t| t.parent().map(Path::to_path_buf))
@@ -92,18 +90,14 @@ impl Files {
 }
 
 /// The cache directory: `PHITEX_CACHE_DIR`, else `$XDG_CACHE_HOME/phitex`,
-/// else `~/.cache/phitex`, else the temporary directory's.
+/// else `~/.cache/phitex` (Windows: `%LOCALAPPDATA%\phitex\cache`,
+/// [`crate::dirs`]), else the temporary directory's.
 pub fn cache_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("PHITEX_CACHE_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(d);
     }
-    if let Some(d) = std::env::var_os("XDG_CACHE_HOME").filter(|d| !d.is_empty()) {
-        return PathBuf::from(d).join("phitex");
-    }
-    if let Some(h) = std::env::var_os("HOME").filter(|h| !h.is_empty() && Path::new(h).is_dir()) {
-        return PathBuf::from(h).join(".cache").join("phitex");
-    }
-    std::env::temp_dir().join("phitex-cache")
+    crate::dirs::phitex(crate::dirs::Kind::Cache)
+        .unwrap_or_else(|| std::env::temp_dir().join("phitex-cache"))
 }
 
 /// TeX Live for one program name: the finder a build is given.
@@ -116,10 +110,16 @@ pub struct Tree {
 
 impl Tree {
     /// The tree for engine `e`: kpathsea as its program, made once (its
-    /// `texmf.cnf` and `ls-R` read at the first lookup).
-    pub fn open(e: &Engine) -> Tree {
+    /// `texmf.cnf` and `ls-R` read at the first lookup), with the search
+    /// variables `vars` set over the environment's (a `.latexmkrc`'s
+    /// TEXINPUTS, as latexmk sets it for the engine it runs).
+    pub fn open(e: &Engine, vars: &[(String, String)]) -> Tree {
+        let mut k = kpse(e.name, e.kpse_engine);
+        for (name, value) in vars {
+            k.set_var(name, value);
+        }
         Tree {
-            kpse: Mutex::new(kpse(e.name, e.kpse_engine)),
+            kpse: Mutex::new(k),
             glyph: Mutex::new(None),
         }
     }
@@ -139,10 +139,28 @@ impl Tree {
         }
     }
 
-    /// Where file `name` is, by kpathsea in the format its extension
-    /// names (pdfTeX's choices: a TFM, a VF, a map, a Type 1 font, an
-    /// encoding, else an input).
+    /// Where the file a finder's key `key` names is
+    /// ([`phitex_tex::Finder`]): the font side's by [`Tree::font`], TeX's
+    /// own by [`Tree::input`].
+    pub fn find(&self, key: &str) -> Option<PathBuf> {
+        match phitex_tex::font_name(key) {
+            Some(name) => self.font(name),
+            None => self.input(key),
+        }
+    }
+
+    /// Where TeX's file `name` is (`\\input`, `\\openin`): kpathsea's
+    /// `tex` format whatever its extension (`kpse_find_tex`).
     pub fn input(&self, name: &str) -> Option<PathBuf> {
+        let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
+        k.find_file(name.as_bytes(), Format::Tex, false)
+            .map(|b| os(&b).to_path_buf())
+    }
+
+    /// Where the font side's file `name` is, by kpathsea in the format
+    /// its extension names (pdfTeX's choices: a PK font, a TFM, a VF, a
+    /// map, a Type 1 font, an encoding, an OpenType or TrueType font).
+    pub fn font(&self, name: &str) -> Option<PathBuf> {
         if let Some((font, dpi)) = phitex_kpse::pk_name(name) {
             return self.pk(font, dpi, phitex_kpse::pk_settings(name));
         }
@@ -163,6 +181,47 @@ impl Tree {
         let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
         k.find_file(name.as_bytes(), format, false)
             .map(|b| os(&b).to_path_buf())
+    }
+}
+
+/// kpathsea's variables naming the trees TeX Live installed, or made
+/// itself (its formats, its maps, its configuration): the distribution, as
+/// a watch knows it ([`Tree::distribution`]). TEXMFHOME, the user's own
+/// files, is not among them.
+const DISTRIBUTION_VARS: [&str; 8] = [
+    "TEXMFROOT",
+    "TEXMFDIST",
+    "TEXMFMAIN",
+    "TEXMFLOCAL",
+    "TEXMFSYSVAR",
+    "TEXMFSYSCONFIG",
+    "TEXMFVAR",
+    "TEXMFCONFIG",
+];
+
+impl Tree {
+    /// The folders of the distribution's trees ([`DISTRIBUTION_VARS`]),
+    /// as named and canonical, and the cache's (the fonts the engine
+    /// made).
+    pub fn distribution(&self) -> Vec<PathBuf> {
+        let mut k = self.kpse.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut out: Vec<PathBuf> = vec![cache_dir()];
+        for var in DISTRIBUTION_VARS {
+            let Some(v) = k.var_value(var) else { continue };
+            let v = String::from_utf8_lossy(&v).replace("!!", "");
+            for d in v.split([',', ':', ';', '{', '}']) {
+                if d.starts_with('/') {
+                    out.push(PathBuf::from(d));
+                }
+            }
+        }
+        // (each as named and canonical: a path kpathsea found is under the
+        // first, one a link led to under the second)
+        let canon: Vec<PathBuf> = out.iter().filter_map(|d| d.canonicalize().ok()).collect();
+        out.extend(canon);
+        out.sort();
+        out.dedup();
+        out
     }
 }
 
@@ -242,6 +301,6 @@ const FORMATS: [Format; 8] = [
     Format::Tex,
 ];
 
-pub(crate) fn os(b: &[u8]) -> &Path {
-    Path::new(OsStr::from_bytes(b))
+pub(crate) fn os(b: &[u8]) -> std::borrow::Cow<'_, Path> {
+    phitex_kpse::path_of(b)
 }

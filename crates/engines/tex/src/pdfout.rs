@@ -355,6 +355,9 @@ pub(crate) fn note_read_time(r: &mut Run<'_, '_>, n: i64) {
             .with_list(r.contribs[i].1, |xs| xs[1])
             .unwrap_or(ValueId::UNIT);
         r.contribs[i].1 = v.list(vec![cmd, key, s, v.int(n)]);
+        if r.ops.stream.load(std::sync::atomic::Ordering::Relaxed) {
+            r.ops.stream_objs.locked().numbered(int_of(v, key), n);
+        }
     }
 }
 
@@ -396,7 +399,10 @@ pub(crate) struct PagePiece {
     wparams: WParams,
     params: Vec<ValueId>,
     margins: [i32; 3],
-    whats: BTreeMap<u32, Whatsit>,
+    whats: PageWhats,
+    /// The page's value (the `pages` entry, `crate::pages`'s `ship_out`):
+    /// what its whatsits' values are in ([`PageWhats`]).
+    page: ValueId,
     fonts: Fonts,
     /// The page's box, its sealed lines shallow (`crate::pages::seal`),
     /// and their stand-ins (by `LAZY + k`): filled in for its writer
@@ -429,9 +435,7 @@ type PieceMemo = Mutex<FxHashMap<u64, Arc<PagePiece>>>;
 /// A page's box ([`PagePiece::bx`]) and, where its sealed lines are
 /// filled in, the units they were read from ([`lines_key`]) and what the
 /// filling replaced
-/// (`crate::nodes::fill_sealed`): the lines stay filled while the units
-/// are the same (a cold build fills each page once and never puts the
-/// stand-ins back, nor drops the lines).
+/// (`crate::nodes::fill_sealed`), while it is filled ([`with_page_box`]).
 struct PageBox {
     bx: BoxNode,
     filled: Option<Lines>,
@@ -460,10 +464,26 @@ impl PageBox {
 /// its own ([`write_page_with`]).
 type Made = (phitex_pdf::PageRecord, BTreeSet<FontId>, usize);
 
-/// The pages written, by their piece's key and their sealed lines (their
-/// boxes as their pieces made them, `crate::pages::seal`): the piece is
-/// the page's shape, the lines what it holds besides.
-type RecordMemo = Mutex<FxHashMap<(u64, Lines), Arc<OnceLock<Made>>>>;
+/// The pages written, by their piece's key, with the sealed lines each
+/// was written with (their boxes as their pieces made them,
+/// `crate::pages::seal`): the piece is the page's shape, the lines what
+/// it holds besides. One a piece, the last asked: a piece whose lines
+/// moved is written again, and its earlier record (its content bytes)
+/// is dropped then, not kept to the next collection beside every other
+/// version (the `TikZ` manual's pages, written as they shipped for the
+/// viewer at each pass).
+/// With each, the identity its glyphs are kept by (value store, page in
+/// the link, `crate::origins`), dropped with the record: a page's
+/// glyphs of lines it no longer has were kept beside every other version
+/// before (the `TikZ` manual's viewer: 0.9 GB at -j16, 900 s).
+type RecordMemo = Mutex<FxHashMap<u64, (Lines, Arc<OnceLock<Made>>, Option<(u64, u64)>)>>;
+
+/// The glyphs kept of records dropped ([`RecordMemo`]).
+fn forget_glyphs(gone: impl IntoIterator<Item = Option<(u64, u64)>>) {
+    for (inst, id) in gone.into_iter().flatten() {
+        crate::origins::forget(inst, id);
+    }
+}
 
 fn records() -> &'static RecordMemo {
     static P: OnceLock<RecordMemo> = OnceLock::new();
@@ -501,8 +521,8 @@ pub(crate) fn shown_id(x: u64, h: Option<&Lines>) -> u64 {
 /// `f` of page `pc`'s box with its sealed lines filled in
 /// ([`crate::nodes::fill_sealed`], `line` giving a line's box as its
 /// piece made it from the units `h`, [`lines_key`]), the box
-/// filled in place (no copy of the page) and left so while the units
-/// are the same ([`PageBox`]); `None` where a line is not found.
+/// filled in place (no copy of the page) and put back after
+/// ([`PageBox`]); `None` where a line is not found.
 fn with_page_box<T>(
     v: &Values,
     pc: &PagePiece,
@@ -535,7 +555,14 @@ fn with_page_box<T>(
         return None;
     }
     g.filled = Some(h.clone());
-    Some(f(&g.bx))
+    let r = f(&g.bx);
+    // (the stand-ins put back once written: the record is kept by its
+    // lines, [`record_of`], so the page is written again only for other
+    // lines, or for its glyphs; kept filled, every page streamed to a
+    // viewer held its lines' lists to the end, 1.6 GB of the `TikZ`
+    // manual's at -j16)
+    g.unfill();
+    Some(r)
 }
 
 /// The record of page `pc` (key `key`), its sealed lines' units `h`
@@ -549,19 +576,32 @@ fn record_of(
     line: &mut dyn FnMut(&crate::nodes::Sealed) -> Option<ValueId>,
     glyphs: Option<u64>,
 ) -> Arc<OnceLock<Made>> {
-    let k = (key, h.clone());
+    let inst = v.instance();
+    let mut gone = Vec::new();
     let m = {
         let mut all = records().locked();
         // (the records of builds gone: dropped wholesale past a bound,
         // made again where asked)
         if all.len() > 1 << 14 {
-            all.clear();
+            gone.extend(all.drain().map(|(_, e)| e.2));
         }
-        all.entry(k).or_default().clone()
+        let e = all
+            .entry(key)
+            .or_insert_with(|| (h.clone(), Arc::default(), None));
+        if e.0 != *h {
+            gone.push(e.2.take());
+            *e = (h.clone(), Arc::default(), None);
+        }
+        if let Some(id) = glyphs
+            && e.2 != Some((inst, id))
+        {
+            gone.push(e.2.replace((inst, id)));
+        }
+        e.1.clone()
     };
+    forget_glyphs(gone);
     // (origins on: the page's glyphs as the writer shows them, kept by
     // its identity in the link, `crate::origins`)
-    let inst = v.instance();
     let tapped = |bx: &BoxNode| {
         let (made, g) = write_page_with(v, pc, bx, glyphs.is_some());
         if let (Some(id), Some(g)) = (glyphs, g) {
@@ -586,6 +626,15 @@ fn record_of(
         }
     }
     m
+}
+
+/// Whether the record of page `key` with lines `h` is made
+/// ([`record_of`]'s memo).
+fn record_made(key: u64, h: &Lines) -> bool {
+    records()
+        .locked()
+        .get(&key)
+        .is_some_and(|(l, m, _)| l == h && m.get().is_some())
 }
 
 /// The pages by key: a pure function's memo.
@@ -766,8 +815,8 @@ pub(crate) struct FontNums {
     map: BTreeMap<FontId, FontId>,
     /// The local fonts this fold gave ids ([`LINK_LOCALS`] on).
     locals: FontId,
-    /// The local fonts made anew ([`Fresh`]), by virtual font and index.
-    fresh: BTreeMap<(FontId, usize), FontId>,
+    /// The local fonts made anew ([`Fresh`]), by their path.
+    fresh: BTreeMap<(FontId, Vec<usize>), FontId>,
 }
 
 impl FontNums {
@@ -776,6 +825,10 @@ impl FontNums {
             self.next += 1;
             if id != self.next {
                 self.map.insert(id, self.next);
+            }
+            // (`PHITEX_FONTNUM_TRACE`, observe: each number as it is given)
+            if crate::exec::obs_flag!("PHITEX_FONTNUM_TRACE") {
+                eprintln!("fontnum {} {name} {size} local={local}", self.next);
             }
             self.known.push((Arc::from(name), size, id, local));
         }
@@ -826,13 +879,13 @@ impl FontNums {
             {
                 let d = match fresh {
                     Some(key) => {
-                        if let Some(&d) = self.fresh.get(&key) {
+                        if let Some(&d) = self.fresh.get(key) {
                             d
                         } else {
                             let id = LINK_LOCALS + self.locals;
                             self.locals += 1;
                             self.put(id, n, sz, true);
-                            self.fresh.insert(key, id);
+                            self.fresh.insert(key.clone(), id);
                             id
                         }
                     }
@@ -1069,6 +1122,25 @@ pub(crate) struct BaseIn {
 /// written, the version fixed).
 fn base_fold(v: &Values, b: &BaseIn, fonts: &Fonts, params: &[ValueId], wparams: WParams) -> Fold {
     let mut st = fresh(v, b.date.clone(), &b.jobname, b.g2u);
+    base_tables(v, b, fonts, &mut st);
+    if !b.first {
+        set_writer_params(&mut st, wparams);
+        page_params(v, st.params_mut(), params);
+        let empty = BoxNode::default();
+        let mut wh = |_: u32, _: bool| -> Option<Whatsit> { None };
+        let _ = st.ship_out_with(&empty, &Fonts::default(), &mut wh);
+        let _ = st.flush_chunk();
+    }
+    Fold {
+        st,
+        forms: Forms::default(),
+    }
+}
+
+/// The map files and lines, and the color stacks, read and made before
+/// the page `b` is of, on writer `st` ([`base_fold`], a page's file of its
+/// own: [`page_alone`]).
+fn base_tables(v: &Values, b: &BaseIn, fonts: &Fonts, st: &mut PdfState) {
     // (the map files and lines read before the page, as the link's writer
     // has read them there (`process_map_item`): a font the page loads has
     // their entry, as there; the files from the page's fonts,
@@ -1095,18 +1167,6 @@ fn base_fold(v: &Values, b: &BaseIn, fonts: &Fonts, params: &[ValueId], wparams:
             .map(|&t| bytes_of(&str_of(v, t)))
             .unwrap_or_default();
         let _ = st.colorstack_init(num(0) != 0, num(1) == 2, &text);
-    }
-    if !b.first {
-        set_writer_params(&mut st, wparams);
-        page_params(v, st.params_mut(), params);
-        let empty = BoxNode::default();
-        let mut wh = |_: u32, _: bool| -> Option<Whatsit> { None };
-        let _ = st.ship_out_with(&empty, &Fonts::default(), &mut wh);
-        let _ = st.flush_chunk();
-    }
-    Fold {
-        st,
-        forms: Forms::default(),
     }
 }
 
@@ -1271,17 +1331,25 @@ const LOCAL_FONTS: FontId = 0x6000_0000;
 
 /// A local font made anew where its virtual font is read in, whatever
 /// fonts there are (`auto_expand_vf`: an expanded virtual font's local
-/// fonts, each its base's expanded): the virtual font and the local
-/// font's index.
-type Fresh = Option<(FontId, usize)>;
+/// fonts, each its base's expanded): its path, the expanded virtual
+/// font of the step's own fonts it is reached from and the local fonts'
+/// indices from there. A local font so made is an expanded virtual font
+/// in turn where its base is virtual (microtype's letter-spaced
+/// `pplrc9d`, expanded): its local fonts' paths go on from its own, for
+/// its handle is the step's ([`LOCAL_FONTS`]), another on each page, and
+/// pdfTeX makes them once, where the font is first shipped.
+///
+/// Example: `pplrc9d+80ls+20`'s local font `pplrc9d+20` is `(f, [0])`,
+/// and that one's local `pplrc8r+20` is `(f, [0, 0])` on every page.
+type Fresh = Option<(FontId, Vec<usize>)>;
 const LINK_LOCALS: FontId = 0x7000_0000;
 
 impl Fonts {
     /// Local font `g`'s name and size, and whether it is made anew
     /// ([`Fresh`]), if `g` is a handle of one.
-    fn local(&self, g: FontId) -> Option<(&str, i32, Fresh)> {
+    fn local(&self, g: FontId) -> Option<(&str, i32, &Fresh)> {
         let i = usize::try_from(g.checked_sub(LOCAL_FONTS)?).ok()?;
-        self.locals.get(i).map(|(n, s, f)| (n.as_str(), *s, *f))
+        self.locals.get(i).map(|(n, s, f)| (n.as_str(), *s, f))
     }
 
     /// Font `g`'s name and size: a local font's, or one of the step's.
@@ -1392,7 +1460,7 @@ fn ps_maps() -> &'static PsCache {
 /// `pdftex.map` by PostScript name: a pure function's memo.
 pub(crate) fn default_ps_map(r: &mut Run<'_, '_>) -> R<Option<Arc<PsMap>>> {
     let v = r.v;
-    let Some(x) = r.file("pdftex.map")? else {
+    let Some(x) = r.font_file("pdftex.map")? else {
         return Ok(None);
     };
     let Some(&m) = list_of(v, x).get(1) else {
@@ -1509,25 +1577,29 @@ fn store_scaled_f(sq: i32, z: i32) -> i32 {
 
 /// A file's bytes, `None` if absent.
 pub(crate) fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Arc<[u8]>>> {
-    static M: OnceLock<Once<Arc<[u8]>>> = OnceLock::new();
     let v = r.v;
     // (the writer's lookup: a file absent here is no read-back point)
     let was = std::mem::replace(&mut r.writer_lookup, true);
-    let found = r.file(name);
+    let found = r.font_file(name);
     r.writer_lookup = was;
-    Ok(found?.and_then(|x| {
-        let &t = list_of(v, x).get(1)?;
-        // (a pure function's memo by the text's value: every page step
-        // asks for its fonts' files)
-        let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
-        Some(once(m, t.raw(), || Arc::from(bytes_of(&str_of(v, t)))))
-    }))
+    Ok(found?.and_then(|x| list_of(v, x).get(1).map(|&t| text_bytes(v, t))))
+}
+
+/// A file's text `t` as its bytes, one shared copy per text: a pure
+/// function's memo by the text's value. Every page step asks for its
+/// fonts' files, and every `\pdfximage` of a page of one PDF for that
+/// file (hwemoji's 3600 pages of one 7 MB file: a copy each, kept by
+/// each image's record to the link, held 27 GB).
+pub(crate) fn text_bytes(v: &Values, t: ValueId) -> Arc<[u8]> {
+    static M: OnceLock<Once<Arc<[u8]>>> = OnceLock::new();
+    let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
+    once(m, t.raw(), || Arc::from(bytes_of(&str_of(v, t))))
 }
 
 /// `pdftex.map`, parsed.
 fn default_map(r: &mut Run<'_, '_>) -> R<Option<Arc<Map>>> {
     let v = r.v;
-    let Some(x) = r.file("pdftex.map")? else {
+    let Some(x) = r.font_file("pdftex.map")? else {
         return Ok(None);
     };
     let Some(&m) = list_of(v, x).get(1) else {
@@ -1658,7 +1730,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
             let lname = String::from_utf8_lossy(&lf.name).into_owned();
             let g = if let Some(x) = known.iter().find(|x| x.1.name == lname && x.1.size == fs) {
                 x.0
-            } else if let Some(file) = r.file(&format!("{lname}.tfm"))? {
+            } else if let Some(file) = r.font_file(&format!("{lname}.tfm"))? {
                 let g = LOCAL_FONTS + u32::try_from(out.locals.len()).unwrap_or(0);
                 out.locals.push((lname.clone(), fs, None));
                 known.push((
@@ -1671,6 +1743,8 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
                         s: fs,
                         ls: None,
                         ex: None,
+                        nolig: false,
+                        untagged: Vec::new(),
                     },
                 ));
                 g
@@ -1710,7 +1784,15 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
             };
             let h = LOCAL_FONTS + u32::try_from(out.locals.len()).unwrap_or(0);
             let name = crate::fonts::expanded_name(&gi.name, e);
-            out.locals.push((name.clone(), gi.size, Some((f, idx))));
+            let path = match out.local(f) {
+                Some((_, _, Some((root, path)))) => {
+                    let mut path = path.clone();
+                    path.push(idx);
+                    (*root, path)
+                }
+                _ => (f, vec![idx]),
+            };
+            out.locals.push((name.clone(), gi.size, Some(path)));
             out.exp.insert(
                 h,
                 Expansion {
@@ -1739,7 +1821,7 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
         out.vf_base.insert(f, u32::try_from(b).unwrap_or(0));
     }
     let mut wanted = known;
-    if space && let Some(x) = r.file("pdftexspace.tfm")? {
+    if space && let Some(x) = r.font_file("pdftexspace.tfm")? {
         // pdfTeX loads the space font at the shipout that first needs
         // it, as the next internal font number (the engine numbers no
         // font for it)
@@ -1757,6 +1839,8 @@ fn fonts_for_with(r: &mut Run<'_, '_>, ids: &[u32], space: bool, read_in: bool) 
                 s: -1000,
                 ls: None,
                 ex: None,
+                nolig: false,
+                untagged: Vec::new(),
             },
         ));
         out.space = Some(id);
@@ -2065,9 +2149,19 @@ fn command_with(
         },
     );
     r.pdf_cmd = serial;
+    let key = i64::from_ne_bytes(key.to_ne_bytes());
+    // (while the evaluation streams its pages: the command kept for the
+    // pages drawn alone that name what it makes, [`StreamObjs`])
+    if r.ops.stream.load(std::sync::atomic::Ordering::Relaxed) {
+        let cmd = r.ops.pdf_cmds.locked().get(&serial).cloned();
+        if let Some(cmd) = cmd {
+            let c = Claim::of(v, input, serial, cmd);
+            r.ops.stream_objs.locked().claim(key, c);
+        }
+    }
     let e = v.list(vec![
         v.str("cmd"),
-        v.int(i64::from_ne_bytes(key.to_ne_bytes())),
+        v.int(key),
         v.int(i64::from_ne_bytes(serial.to_ne_bytes())),
     ]);
     line_push(r, e);
@@ -2087,6 +2181,7 @@ pub(crate) fn collect_pieces(v: &Values, live: &FxHashSet<u64>, keep: &mut dyn F
     m.retain(|k, pc| pc.inst != inst || live.contains(k));
     for pc in m.values().filter(|pc| pc.inst == inst) {
         pc.params.iter().chain(&pc.lazy).for_each(|&x| keep(x));
+        keep(pc.page);
         pc.base_in
             .g2u
             .into_iter()
@@ -2095,7 +2190,7 @@ pub(crate) fn collect_pieces(v: &Values, live: &FxHashSet<u64>, keep: &mut dyn F
             .for_each(&mut *keep);
     }
     let mut rs = records().locked();
-    rs.retain(|(k, _), _| m.contains_key(k));
+    forget_glyphs(rs.extract_if(|k, _| !m.contains_key(k)).map(|(_, e)| e.2));
 }
 
 /// At a collection: the link's memos of the last link dropped (the line,
@@ -2124,7 +2219,7 @@ pub(crate) fn prune_pieces(v: &Values, line: &[ValueId]) {
     let mut m = pieces().locked();
     m.retain(|k, pc| pc.inst != inst || keep.contains(k));
     let mut rs = records().locked();
-    rs.retain(|(k, _), _| m.contains_key(k));
+    forget_glyphs(rs.extract_if(|k, _| !m.contains_key(k)).map(|(_, e)| e.2));
 }
 
 /// The commands no record on the line names dropped ([`CmdMemo`]):
@@ -2169,6 +2264,7 @@ pub(crate) fn page_params(v: &Values, p: &mut PdfParams, xs: &[ValueId]) {
     p.obj_compress_level = param(v, xs, 13);
     p.gen_tounicode = param(v, xs, 14);
     p.pk_resolution = param(v, xs, 18);
+    p.omit_procset = param(v, xs, 19);
     let text = |k: usize| {
         xs.get(k)
             .map(|&t| bytes_of(&str_of(v, t)))
@@ -2243,7 +2339,7 @@ pub(crate) fn whatsit(v: &Values, d: ValueId) -> Option<Whatsit> {
             let ki = |j: usize| dim(k.get(j).map_or(0, |&x| int_of(v, x)));
             Whatsit::Dest {
                 id: ident(v, ys.get(1).copied()?),
-                struct_num: None,
+                struct_num: ys.get(3).map(|&n| dim(int_of(v, n))),
                 kind: match kn.as_str() {
                     "fit" => DestKind::Fit,
                     "fith" => DestKind::FitH,
@@ -2280,11 +2376,11 @@ fn some(t: Vec<u8>) -> Option<Vec<u8>> {
 }
 
 /// An identifier as [`crate::pdfprim`] scans it: `["num", n]` or
-/// `["name", text]`.
+/// `["name", text]` (a structure destination's, `snum` and `sname`).
 fn ident(v: &Values, x: ValueId) -> Ident {
     let ys = list_of(v, x);
     match ys.first().map(|&k| str_of(v, k)).as_deref() {
-        Some("name" | "struct") => Ident::Name(
+        Some("name" | "sname") => Ident::Name(
             ys.get(1)
                 .map(|&t| bytes_of(&str_of(v, t)))
                 .unwrap_or_default(),
@@ -2308,6 +2404,11 @@ fn action(v: &Values, x: ValueId) -> Option<Action> {
     }
     let file = some(text(1));
     let window = u8::try_from(ys.get(4).map_or(0, |&n| int_of(v, n))).unwrap_or(0);
+    let struct_id = ys
+        .get(5)
+        .copied()
+        .filter(|&x| x != ValueId::UNIT)
+        .map(|x| ident(v, x));
     match kind.as_str() {
         "goto" => {
             let page = ys.get(2).copied().filter(|&p| p != ValueId::UNIT);
@@ -2321,14 +2422,14 @@ fn action(v: &Values, x: ValueId) -> Option<Action> {
                         .map(|&t| bytes_of(&str_of(v, t)))
                         .unwrap_or_default(),
                     new_window: window,
-                    struct_id: None,
+                    struct_id: struct_id.clone(),
                 });
             }
             Some(Action::Goto {
                 file,
                 id: ident(v, ys.get(3).copied()?),
                 new_window: window,
-                struct_id: None,
+                struct_id,
             })
         }
         "thread" => Some(Action::Thread {
@@ -2398,16 +2499,84 @@ pub(crate) fn ship(
     ];
     let marks = mark_events(v, &bx, &resolved, side);
     page_allocs(r, ids, &bx, &side.lazy, &fonts, &side.whats, marks)?;
-    ship_apart(r, page, &p, bx, side, &resolved, fonts, margins)
+    let pictures = images_shown(r, &side.whats)?;
+    ship_apart(r, page, &p, bx, side, &resolved, fonts, margins, pictures)
 }
 
 /// The page's whatsits as the writer asks for them: a form's from the
 /// forms' table, the page's from its data.
-fn page_whatsit(forms: &Forms, whats: &BTreeMap<u32, Whatsit>, h: u32) -> Option<Whatsit> {
+fn page_whatsit(v: &Values, forms: &Forms, whats: &PageWhats, h: u32) -> Option<Whatsit> {
     if h >= FORM_HANDLES {
         return forms.whats.get(&h).cloned();
     }
-    whats.get(&h).cloned()
+    whats.get(v, h)
+}
+
+/// A page's whatsits by handle ([`PagePiece::whats`]): their values, each
+/// decoded where the writer asks for it ([`whatsit`]; a `\special` from
+/// its node's value), and the object numbers they name, found once where
+/// the page shipped ([`apart_names`]). Kept decoded, a page's whatsits
+/// took 230 MB of the `TikZ` manual's at -j1 at 660 s, most of it the
+/// map's nodes.
+#[derive(Default)]
+struct PageWhats {
+    /// By handle: the value, and whether it is a `\special`'s node.
+    at: Box<[(u32, ValueId, bool)]>,
+    /// The numbers TeX numbered they name ([`what_objnum`]), by handle.
+    named: Box<[u64]>,
+    /// The read-time numbers they name ([`rel_objnum`]), sorted, once
+    /// each.
+    rels: Box<[u64]>,
+}
+
+impl PageWhats {
+    /// Of `xs` (handle, value, a `\special`'s node), those the writer
+    /// sees.
+    fn new(v: &Values, mut xs: Vec<(u32, ValueId, bool)>) -> Self {
+        xs.sort_unstable_by_key(|e| e.0);
+        let mut named = Vec::new();
+        let mut rels = Vec::new();
+        xs.retain(|&(_, x, special)| {
+            let Some(w) = Self::decode(v, x, special) else {
+                return false;
+            };
+            named.extend(what_objnum(&w));
+            rels.extend(rel_objnum(&w));
+            true
+        });
+        rels.sort_unstable();
+        rels.dedup();
+        PageWhats {
+            at: xs.into(),
+            named: named.into(),
+            rels: rels.into(),
+        }
+    }
+
+    fn decode(v: &Values, x: ValueId, special: bool) -> Option<Whatsit> {
+        if !special {
+            return whatsit(v, x);
+        }
+        let ys = list_of(v, x);
+        (ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special")).then(|| {
+            Whatsit::Special(bytes_of(
+                &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
+            ))
+        })
+    }
+
+    fn get(&self, v: &Values, h: u32) -> Option<Whatsit> {
+        let i = self.at.binary_search_by_key(&h, |e| e.0).ok()?;
+        let (_, x, special) = self.at[i];
+        Self::decode(v, x, special)
+    }
+
+    /// Every one, by handle.
+    fn each<'a>(&'a self, v: &'a Values) -> impl Iterator<Item = Whatsit> + 'a {
+        self.at
+            .iter()
+            .filter_map(move |&(_, x, special)| Self::decode(v, x, special))
+    }
 }
 
 /// The page's parameters on `st`, as the fold's step sets them.
@@ -2435,30 +2604,22 @@ fn ship_apart(
     resolved: &FxHashMap<u32, ValueId>,
     fonts: Fonts,
     margins: [i32; 3],
+    pictures: u64,
 ) -> R<()> {
     let v = r.v;
     let (side_lazy, side_whats) = (&side.lazy, &side.whats);
-    let mut whats: BTreeMap<u32, Whatsit> = BTreeMap::new();
+    let mut whats: Vec<(u32, ValueId, bool)> = Vec::new();
     for (&h, &d) in resolved {
-        if let Some(w) = whatsit(v, d) {
-            whats.insert(h, w);
-        }
+        whats.push((h, d, false));
     }
     for (h, &w) in side_whats.iter().enumerate() {
         let Ok(h) = u32::try_from(h) else { break };
-        if whats.contains_key(&h) || resolved.contains_key(&h) {
+        if resolved.contains_key(&h) {
             continue;
         }
-        let ys = list_of(v, w);
-        if ys.first().map(|&k| str_of(v, k)).as_deref() == Some("special") {
-            whats.insert(
-                h,
-                Whatsit::Special(bytes_of(
-                    &ys.get(1).map(|&s| str_of(v, s)).unwrap_or_default(),
-                )),
-            );
-        }
+        whats.push((h, w, true));
     }
+    let whats = PageWhats::new(v, whats);
     let wparams = writer_params(r)?;
     let base_in = base_inputs(r)?;
     let mut pc = PagePiece {
@@ -2474,6 +2635,7 @@ fn ship_apart(
             filled: None,
             saved: Vec::new(),
         }),
+        page: page_v,
         lazy: side_lazy.clone(),
         bases: crate::nodes::sealed_bases(side),
         pieces: {
@@ -2502,7 +2664,7 @@ fn ship_apart(
     let maps = r
         .get_loc(crate::fields::cell::PDF_MAPS)?
         .map_or(0, ValueId::raw);
-    let pdfmap = r.file("pdftex.map")?.map_or(0, ValueId::raw);
+    let pdfmap = r.font_file("pdftex.map")?.map_or(0, ValueId::raw);
     let b = &pc.base_in;
     let mut words = vec![
         page_v.raw(),
@@ -2523,6 +2685,10 @@ fn ship_apart(
         // for among them: a run that read other ones writes another page)
         pc.fonts.digest(),
         u64::from(pc.fonts.ps.is_some()),
+        // (the pictures it shows: their bytes, which its content stream
+        // does not hold, a page showing another picture of the same size
+        // being another page to a viewer)
+        pictures,
     ];
     words.extend(pc.margins.iter().map(|&m| u64::from(m.cast_unsigned())));
     // (where its sealed lines' units are read: a page whose window moved
@@ -2616,7 +2782,7 @@ fn write_page_with(
     let local: Reloc = aliases.iter().map(|&(p, t)| (t, p)).collect();
     let (res, rec) = {
         let mut wh = |h: u32, _leaders: bool| {
-            page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &local))
+            page_whatsit(v, &forms, &pc.whats, h).map(|w| relocated(w, &local))
         };
         st.ship_recorded(bx, &pc.fonts, &mut wh)
     };
@@ -2632,7 +2798,18 @@ fn write_page_with(
 /// record is not made yet itself: it never waits for these). Final
 /// (`Operation::final_only`): it runs once the loop-backs settle, and
 /// nothing it does feeds one.
-pub(crate) struct PdfPage(pub(crate) Arc<std::sync::atomic::AtomicBool>);
+pub(crate) struct PdfPage {
+    /// Origins are made: each page's glyphs kept by its identity.
+    pub(crate) origins: Arc<std::sync::atomic::AtomicBool>,
+    /// The evaluation streams its pages (`crate::exec::Progress::set_streaming`):
+    /// a page's PDF side runs as soon as its page is shipped, and the page
+    /// wanted is told as a PDF of its own ([`page_alone`]).
+    pub(crate) stream: Arc<std::sync::atomic::AtomicBool>,
+    /// The progress the build watches now (`Ops::watch`): the pages told.
+    pub(crate) watch: Arc<std::sync::RwLock<Option<crate::exec::Watch>>>,
+    /// The read-time commands kept for the pages streamed (`Ops::stream_objs`).
+    pub(crate) objs: Arc<Mutex<StreamObjs>>,
+}
 
 /// The keys of the pages a run shipped ([`PagePiece`]s, in its shipouts'
 /// order), defined by that run and read by its [`PdfPage`] children,
@@ -2644,9 +2821,10 @@ impl phitex_defuse::Operation for PdfPage {
     fn name(&self) -> &'static str {
         "pdfpage"
     }
-    /// A pass's writer: runs once the line is quiet, once a pass.
+    /// A pass's writer: runs once the line is quiet, once a pass; while
+    /// the evaluation streams its pages, as soon as its page is shipped.
     fn final_only(&self) -> bool {
-        true
+        !self.stream.load(std::sync::atomic::Ordering::Relaxed)
     }
     fn contributes(
         &self,
@@ -2691,13 +2869,672 @@ impl phitex_defuse::Operation for PdfPage {
             // (origins on: kept by the page's identity in the link,
             // `Linked::shown`)
             let glyphs = self
-                .0
+                .origins
                 .load(std::sync::atomic::Ordering::Relaxed)
                 .then(|| shown_id(kx.raw(), Some(&h)));
-            record_of(v, key, &pc, &h, &mut line, glyphs);
+            // (and the pieces its lines came from: a source place's page
+            // found without matching, `Build::pages_of_source`)
+            if let Some(id) = glyphs {
+                crate::origins::keep_pieces(v.instance(), id, &pc.pieces);
+            }
+            let made = record_of(v, key, &pc, &h, &mut line, glyphs);
+            // (streamed: the page told, as `Build::pages` would name it,
+            // with its PDF alone, where it is wanted)
+            if self.stream.load(std::sync::atomic::Ordering::Relaxed) {
+                let progress = self
+                    .watch
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .map(|w| w.progress.clone());
+                if let Some(p) = progress.filter(|p| p.streams())
+                    && let Some(k) = u32::try_from(i)
+                        .ok()
+                        .and_then(|i| p.page_of(pc.node.cast_unsigned(), i))
+                {
+                    // (its colour stack commands in the order its walk meets
+                    // them, which the pages after it begin from: a page is
+                    // exact only where every page before it is known, its
+                    // file begun from the colours they leave it; not its
+                    // record's stacks, a walk that stops at an object the
+                    // page's own writer lacks)
+                    if let Some(ops) = with_page_box(v, &pc, &h, &mut line, |bx| {
+                        color_ops(v, &pc.whats, &bx.list)
+                    }) {
+                        if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                            eprintln!("stream: page {k} colour commands {}", ops.len());
+                        }
+                        p.page_colors(k, ops, v);
+                    }
+                    p.stream_page(k, |start| {
+                        let shown = v.int(shown_id(kx.raw(), Some(&h)).cast_signed());
+                        let hash = phitex_defuse::hash_words(0x7061_6765, &[v.digest(shown)]);
+                        let content = made.get().map(|m| m.0.content()).unwrap_or_default();
+                        let none = crate::exec::ColorStart::new();
+                        let (pdf, exact) = page_alone(
+                            v,
+                            kx,
+                            &pc,
+                            &units,
+                            &self.objs,
+                            content,
+                            start.unwrap_or(&none),
+                        )?;
+                        if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                            eprintln!(
+                                "stream: page {k} exact {exact}, {} bytes, {} commands kept",
+                                pdf.len(),
+                                self.objs.locked().len()
+                            );
+                        }
+                        // (made before the pages before it are known: made
+                        // again from the colours they carry in, once known,
+                        // on these values, `Progress::page_colors`)
+                        let remake: Option<crate::exec::Remake> = start.is_none().then(|| {
+                            let (pc, units, objs) = (pc.clone(), units.clone(), self.objs.clone());
+                            let (content, epoch) = (content.to_vec(), v.epoch());
+                            Box::new(move |v: &Values, start: &crate::exec::ColorStart| {
+                                if v.epoch() != epoch {
+                                    return None;
+                                }
+                                page_alone(v, kx, &pc, &units, &objs, &content, start)
+                            }) as crate::exec::Remake
+                        });
+                        Some((hash, pdf, exact, remake))
+                    });
+                }
+            }
         }
 
         Ok(ValueId::UNIT)
+    }
+}
+
+/// Page `kx` (its key, as the line holds it: [`XPAGES`]) as a PDF file
+/// of its own, and whether it draws the page exactly as the build's file
+/// will: the link ([`link`]) of a line of the read-time commands whose
+/// objects the page names, followed through what those objects name in
+/// turn ([`StreamObjs`]), then the page; each command's object numbered
+/// as TeX numbered it, and the page's own objects past every number it
+/// names, so that a number in its bytes (`\pdfpageresources`' `12 0 R`)
+/// names the object it names in the build's file or none. Exact where
+/// every object it draws with (an image, a form, an object its resources
+/// name, followed) was made and complete when it shipped, each on its
+/// number. Not exact (a `\pdfobj reserveobjnum` filled later, pgf's
+/// graphics states, patterns and shadings written at the document's
+/// end): drawn all the same, the names of what it lacks left without an
+/// object (a viewer draws without them: `phitex_render`). None where the
+/// writer could not write it alone.
+pub(crate) fn page_alone(
+    v: &Values,
+    kx: ValueId,
+    pc: &PagePiece,
+    units: &FxHashMap<i64, ValueId>,
+    objs: &Mutex<StreamObjs>,
+    content: &[u8],
+    colors: &crate::exec::ColorStart,
+) -> Option<(Vec<u8>, bool)> {
+    let mut params = PdfParams::default();
+    page_params(v, &mut params, &pc.params);
+    let (need, mut named, rels) = page_names(v, pc, &params, content);
+    let found = objs.locked().closure(&need, &rels);
+    named.extend(&need);
+    named.extend(&found.named);
+    let floor = named
+        .iter()
+        .copied()
+        .filter(|&n| n > 0 && n & crate::pdfprim::REL == 0)
+        .max()
+        .map_or(0, |n| usize::try_from(n).unwrap_or(0));
+    if floor > STREAM_FLOOR_MAX {
+        return None;
+    }
+    let mut line: Vec<ValueId> = Vec::with_capacity(found.cmds.len() + 1);
+    let cmds: CmdMemo = Mutex::default();
+    {
+        let mut m = cmds.locked();
+        for (key, serial, rt, cmd) in &found.cmds {
+            let mut e = vec![
+                v.str("cmd"),
+                v.int(*key),
+                v.int(i64::from_ne_bytes(serial.to_ne_bytes())),
+            ];
+            if let Some(rt) = rt {
+                e.push(v.int(*rt));
+            }
+            line.push(v.list(e));
+            m.insert(*serial, cmd.clone());
+        }
+    }
+    line.push(kx);
+    let f = EndFields {
+        date: phitex_pdf::pdf_date(0),
+        jobname: String::new(),
+        g2u: None,
+        fonts: Vec::new(),
+        seed: Vec::new(),
+        info_omit_date: 0,
+        omit_charset: 0,
+        omit_info_dict: 0,
+        suppress_ptex_info: 0,
+        ptex_use_underscore: 0,
+        pk_resolution: params.pk_resolution,
+    };
+    let mut alone = Alone {
+        base: &pc.base_in,
+        fonts: &pc.fonts,
+        colors,
+        floor,
+        missing: found
+            .missing
+            .iter()
+            .filter_map(|&n| usize::try_from(n).ok())
+            .collect(),
+        bare: false,
+        landed: std::cell::Cell::new(true),
+    };
+    // (a page its writer cannot write so, an object it draws with or
+    // names the file has not as the writer wants it: written again with
+    // none of them, its text, rules and colours, not exact)
+    for bare in [false, true] {
+        alone.bare = bare;
+        let l = link(v, &f, &line, units, None, &cmds, false, Some(&alone));
+        if l.errors.is_empty() && l.fail.is_none() {
+            let pdf = l.layout?.exact().ok().map(|b| b.as_ref().clone())?;
+            if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                eprintln!(
+                    "stream: page {} bare {bare} complete {} landed {} missing {:?} needs {:?}",
+                    pc.pj,
+                    found.complete,
+                    alone.landed.get(),
+                    found.missing,
+                    found.cmds.iter().map(|c| c.2).collect::<Vec<_>>()
+                );
+            }
+            return Some((pdf, !bare && found.complete && alone.landed.get()));
+        }
+        if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+            eprintln!(
+                "stream: page {} not written alone{}: {:?} {:?}",
+                pc.pj,
+                if bare { " without its objects" } else { "" },
+                l.errors.iter().map(|e| e.0.to_string()).collect::<Vec<_>>(),
+                l.fail.as_ref().map(ToString::to_string)
+            );
+        }
+    }
+    None
+}
+
+/// The object numbers page `pc` (its parameters `params`, its content
+/// `content`) names: those it draws with (its images, forms and objects;
+/// of those its resources name, the kinds its content draws with), those
+/// it only names (its literals', links' and annotations' texts, its
+/// attributes), and its links' and annotations' read-time ones
+/// ([`crate::pdfprim::REL`]).
+fn page_names(
+    v: &Values,
+    pc: &PagePiece,
+    params: &PdfParams,
+    content: &[u8],
+) -> (Vec<i64>, Vec<i64>, Vec<i64>) {
+    let mut need: Vec<i64> = Vec::new();
+    let mut named: Vec<i64> = Vec::new();
+    let mut rels: Vec<i64> = Vec::new();
+    for w in pc.whats.each(v) {
+        match &w {
+            Whatsit::RefObj(n) | Whatsit::RefXForm(n) | Whatsit::RefXImage(n) => {
+                need.push(i64::try_from(*n).unwrap_or(i64::MAX));
+            }
+            Whatsit::StartLink { objnum, attr, .. } => {
+                let n = objnum.cast_signed();
+                if is_rel(*objnum) {
+                    rels.push(n);
+                } else {
+                    named.push(n);
+                }
+                refs_in(attr.as_deref().unwrap_or_default(), &mut named);
+            }
+            Whatsit::Annot { objnum, data, .. } => {
+                let n = objnum.cast_signed();
+                if is_rel(*objnum) {
+                    rels.push(n);
+                } else {
+                    named.push(n);
+                }
+                refs_in(data, &mut named);
+            }
+            Whatsit::Special(t) | Whatsit::Literal(_, t) => refs_in(t, &mut named),
+            _ => {}
+        }
+    }
+    // (of the objects its resources name, those of the kinds its content
+    // draws with: pgf names its graphics states, patterns and shadings on
+    // every page, a page drawing with none of them does not need them)
+    if let Some(t) = &params.page_resources {
+        resource_refs(t, content, &mut need, &mut named);
+    }
+    for t in [&params.page_attr, &params.pages_attr]
+        .into_iter()
+        .flatten()
+    {
+        refs_in(t, &mut named);
+    }
+    (need, named, rels)
+}
+
+/// The colour stack commands of a page of `list` (its whatsits `whats`)
+/// in the order its walk meets them (boxes, leaders' boxes; a form's are
+/// the form stacks', `\pdfrefxform` not followed).
+fn color_ops(v: &Values, whats: &PageWhats, list: &[Node]) -> Vec<crate::exec::ColorOp> {
+    fn walk(v: &Values, whats: &PageWhats, list: &[Node], out: &mut Vec<crate::exec::ColorOp>) {
+        for n in list {
+            match n {
+                Node::Box(b) => walk(v, whats, &b.list, out),
+                Node::Glue(g) => {
+                    if let Some(x) = g.leader.as_deref() {
+                        walk(v, whats, std::slice::from_ref(x), out);
+                    }
+                }
+                Node::Whatsit(h, _) => {
+                    if let Some(Whatsit::ColorStack(s, c)) = whats.get(v, *h) {
+                        out.push((s, c));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(v, whats, list, &mut out);
+    out
+}
+
+/// The highest object number a page's file of its own is numbered up to
+/// ([`page_alone`]): one past it, the page is not streamed (its file's
+/// cross-reference section would hold that many entries).
+const STREAM_FLOOR_MAX: usize = 1 << 20;
+
+/// How a page's file of its own is linked ([`page_alone`]): the writer
+/// starts from the page's tables ([`base_tables`]), each command's object
+/// is given TeX's number, the page's own numbered past `floor`.
+struct Alone<'a> {
+    base: &'a BaseIn,
+    fonts: &'a Fonts,
+    /// Where its colour stacks begin (the pages before it left them so).
+    colors: &'a crate::exec::ColorStart,
+    floor: usize,
+    /// Written with none of the objects it names: no image, form, object,
+    /// annotation, link or thread.
+    bare: bool,
+    /// The images and forms it names that the file lacks: left out (a
+    /// form or image the writer cannot find stops the page).
+    missing: FxHashSet<usize>,
+    /// Every command's object got TeX's number.
+    landed: std::cell::Cell<bool>,
+}
+
+impl Alone<'_> {
+    /// Whether whatsit `w` is written: not an image or form the file
+    /// lacks, nor, written bare, anything naming an object.
+    fn keeps(&self, w: &Whatsit) -> bool {
+        match w {
+            Whatsit::RefXImage(n) | Whatsit::RefXForm(n) => !self.bare && !self.missing.contains(n),
+            Whatsit::RefObj(_)
+            | Whatsit::Annot { .. }
+            | Whatsit::StartLink { .. }
+            | Whatsit::EndLink
+            | Whatsit::Thread { .. }
+            | Whatsit::EndThread => !self.bare,
+            _ => true,
+        }
+    }
+}
+
+/// Objects numbered on `st`, none written, up to `n`.
+fn pad_objects(st: &mut PdfState, n: usize) {
+    while st.objects_numbered() < n.min(STREAM_FLOOR_MAX) {
+        st.new_objnum();
+    }
+}
+
+/// The objects resource dictionary text `t` (`\pdfpageresources`, the
+/// inside of the page's `/Resources`) names, by the kind of resource
+/// they are under (`/ExtGState`, `/Pattern`, ...): those of a kind content
+/// stream `c` draws with added to `need` (an operator that takes one:
+/// `gs`, `sh`, `scn`, `cs`, `Do`, `BDC`, `Tf`; a string's text that looks
+/// like one counts too), the others to `named`.
+fn resource_refs(t: &[u8], c: &[u8], need: &mut Vec<i64>, named: &mut Vec<i64>) {
+    let ops: FxHashSet<&[u8]> = c
+        .split(|b| b.is_ascii_whitespace() || b"[]<>()/".contains(b))
+        .filter(|w| !w.is_empty())
+        .collect();
+    // (a page whose content was not kept, one not written as plain text
+    // and rules: every kind drawn with, to be safe)
+    let all = c.is_empty();
+    let uses = |kind: &[u8]| -> bool {
+        let has = |o: &[u8]| all || ops.contains(o);
+        match kind {
+            b"ExtGState" => has(b"gs"),
+            b"Shading" => has(b"sh") || has(b"scn") || has(b"SCN"),
+            b"Pattern" => has(b"scn") || has(b"SCN"),
+            b"ColorSpace" => has(b"cs") || has(b"CS"),
+            b"XObject" => has(b"Do"),
+            b"Properties" => has(b"BDC") || has(b"DP"),
+            b"Font" => has(b"Tf"),
+            // (an entry of no kind a content stream names: drawn with, to be safe)
+            _ => true,
+        }
+    };
+    // (the words, the dictionaries' and arrays' brackets apart)
+    let mut words: Vec<&[u8]> = Vec::new();
+    let mut i = 0;
+    while i < t.len() {
+        let b = t[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+        } else if t[i..].starts_with(b"<<") || t[i..].starts_with(b">>") {
+            words.push(&t[i..i + 2]);
+            i += 2;
+        } else if b"[]".contains(&b) {
+            words.push(&t[i..=i]);
+            i += 1;
+        } else {
+            let j = t[i + 1..]
+                .iter()
+                .position(|&c| c.is_ascii_whitespace() || b"[]<>/()".contains(&c))
+                .map_or(t.len(), |k| i + 1 + k);
+            words.push(&t[i..j]);
+            i = j;
+        }
+    }
+    let (mut depth, mut kind): (i32, &[u8]) = (0, b"");
+    for (k, w) in words.iter().enumerate() {
+        match *w {
+            b"<<" | b"[" => depth += 1,
+            b">>" | b"]" => depth -= 1,
+            _ if depth == 0 && w.first() == Some(&b'/') => kind = &w[1..],
+            b"R" if k >= 2
+                && words[k - 1].iter().all(u8::is_ascii_digit)
+                && let Some(n) = std::str::from_utf8(words[k - 2])
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok()) =>
+            {
+                if uses(kind) {
+                    need.push(n);
+                } else {
+                    named.push(n);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The objects PDF text `t` names by reference (`12 0 R`), added to `out`.
+fn refs_in(t: &[u8], out: &mut Vec<i64>) {
+    let w: Vec<&[u8]> = t
+        .split(|c| c.is_ascii_whitespace() || b"[]<>/()".contains(c))
+        .filter(|w| !w.is_empty())
+        .collect();
+    for x in w.windows(3) {
+        if x[2] == b"R"
+            && x[1].iter().all(u8::is_ascii_digit)
+            && let Ok(s) = std::str::from_utf8(x[0])
+            && let Ok(n) = s.parse::<i64>()
+        {
+            out.push(n);
+        }
+    }
+}
+
+/// A read-time command kept while the evaluation streams its pages
+/// ([`StreamObjs`]): its serial and step, the number TeX read back for
+/// its object, and what that object is.
+#[derive(Clone)]
+pub(crate) struct Claim {
+    serial: u64,
+    /// What it is made of (its input's digest): two commands claiming a
+    /// number with the same make the same object.
+    made_of: u64,
+    rt: Option<i64>,
+    cmd: Arc<Cmd>,
+    /// Its object has its body once the command ran (an image, a form, an
+    /// object with its text); not a reserved number, not a link's.
+    body: bool,
+    /// `\pdfobj useobjnum n`: the body of object `n`.
+    fill: Option<i64>,
+    /// The objects it draws with: the images, forms and objects a form's
+    /// box names, those a form's resources or an object's text names.
+    needs: Vec<i64>,
+    /// Those it only names (in a form's literals, its attributes).
+    names: Vec<i64>,
+}
+
+impl Claim {
+    /// The claim of the command of `input` ([`command_with`]).
+    pub(crate) fn of(v: &Values, input: ValueId, serial: u64, cmd: Arc<Cmd>) -> Claim {
+        let xs = list_of(v, input);
+        let text = |k: usize| {
+            xs.get(k)
+                .and_then(|&t| v.with_str(t, crate::pdfprim::bytes))
+                .unwrap_or_default()
+        };
+        let int = |k: usize| xs.get(k).map_or(0, |&n| int_of(v, n));
+        let mut c = Claim {
+            serial,
+            made_of: v.digest(input),
+            rt: None,
+            cmd,
+            body: false,
+            fill: None,
+            needs: Vec::new(),
+            names: Vec::new(),
+        };
+        match xs.first().map(|&k| str_of(v, k)).as_deref() {
+            Some("ximage") => {
+                c.body = true;
+                refs_in(&text(4), &mut c.names);
+            }
+            Some("xform") => {
+                c.body = true;
+                refs_in(&text(1), &mut c.names);
+                refs_in(&text(2), &mut c.needs);
+                let mut side = Side::default();
+                if let Some(&b) = xs.get(3)
+                    && crate::nodes::decode(v, b, &mut side).is_some()
+                {
+                    for w in side.whats {
+                        let ys = list_of(v, w);
+                        match ys.first().map(|&k| str_of(v, k)).as_deref() {
+                            Some("pdf:refximage" | "pdf:refxform" | "pdf:refobj") => {
+                                c.needs.push(ys.get(1).map_or(0, |&n| int_of(v, n)));
+                            }
+                            _ => {
+                                for &y in &ys {
+                                    if let Some(t) = v.with_str(y, crate::pdfprim::bytes) {
+                                        refs_in(&t, &mut c.names);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Some("obj") => {
+                let n = int(1);
+                if n > 0 {
+                    c.fill = Some(n);
+                } else {
+                    c.body = true;
+                }
+                // (a `file` object's text is its file's bytes: not read)
+                if int(4) == 0 {
+                    refs_in(&text(5), &mut c.needs);
+                }
+                refs_in(&text(3), &mut c.needs);
+            }
+            _ => {}
+        }
+        c
+    }
+}
+
+/// The read-time commands of the evaluation that streams its pages
+/// (`crate::run::Ops::stream_objs`), by their key (their node and place,
+/// [`command_with`]: a run made again replaces its own), by the number
+/// TeX read back for their objects ([`note_read_time`]), and those that
+/// give a reserved object its body (`\pdfobj useobjnum`). A page drawn
+/// alone ([`page_alone`]) takes the commands of the objects it names.
+/// A number two commands claim is no one's: the pages that name it are
+/// not exact.
+#[derive(Default)]
+pub(crate) struct StreamObjs {
+    by_key: FxHashMap<i64, Claim>,
+    by_num: FxHashMap<i64, Vec<i64>>,
+    fills: FxHashMap<i64, Vec<i64>>,
+}
+
+/// What a page drawn alone takes ([`StreamObjs::closure`]).
+struct Found {
+    /// The commands, in their objects' order: key, serial, number, step.
+    cmds: Vec<(i64, u64, Option<i64>, Arc<Cmd>)>,
+    /// Every object it draws with was found complete.
+    complete: bool,
+    /// The numbers the commands taken name.
+    named: Vec<i64>,
+    /// The objects drawn with that were not found complete.
+    missing: Vec<i64>,
+}
+
+impl StreamObjs {
+    fn unindex(&mut self, key: i64) {
+        let Some(c) = self.by_key.get(&key) else {
+            return;
+        };
+        if let Some(n) = c.rt
+            && let Some(ks) = self.by_num.get_mut(&n)
+        {
+            ks.retain(|&k| k != key);
+        }
+        if let Some(n) = c.fill
+            && let Some(ks) = self.fills.get_mut(&n)
+        {
+            ks.retain(|&k| k != key);
+        }
+    }
+
+    /// The command of key `key` made (again).
+    pub(crate) fn claim(&mut self, key: i64, c: Claim) {
+        self.unindex(key);
+        if let Some(n) = c.fill {
+            self.fills.entry(n).or_default().push(key);
+        }
+        self.by_key.insert(key, c);
+    }
+
+    /// The command of key `key` numbered `n` by TeX.
+    pub(crate) fn numbered(&mut self, key: i64, n: i64) {
+        if let Some(old) = self.by_key.get(&key).and_then(|c| c.rt)
+            && let Some(ks) = self.by_num.get_mut(&old)
+        {
+            ks.retain(|&k| k != key);
+        }
+        if let Some(c) = self.by_key.get_mut(&key) {
+            c.rt = Some(n);
+            self.by_num.entry(n).or_default().push(key);
+        }
+    }
+
+    /// How many commands are kept.
+    pub(crate) fn len(&self) -> usize {
+        self.by_key.len()
+    }
+
+    /// The one object the commands `ks` make: one command, or several
+    /// made of the same input (a run's commands made again by another
+    /// node, a cut moved; the stale one's claim stands beside it) — the
+    /// latest of them.
+    fn one(&self, ks: Option<&Vec<i64>>) -> Option<(i64, &Claim)> {
+        let ks = ks?;
+        let &k = ks.last()?;
+        let c = self.by_key.get(&k)?;
+        ks.iter()
+            .all(|j| {
+                self.by_key
+                    .get(j)
+                    .is_some_and(|o| o.made_of == c.made_of && o.fill == c.fill)
+            })
+            .then_some((k, c))
+    }
+
+    /// The commands of the objects `need` names, followed through what
+    /// theirs need in turn, and those of the link numbers `rels`.
+    fn closure(&self, need: &[i64], rels: &[i64]) -> Found {
+        let mut out = Found {
+            cmds: Vec::new(),
+            complete: true,
+            named: Vec::new(),
+            missing: Vec::new(),
+        };
+        let mut taken: FxHashSet<i64> = FxHashSet::default();
+        let mut order: Vec<((i64, u8), i64)> = Vec::new();
+        let mut todo: Vec<i64> = need.to_vec();
+        let mut seen: FxHashSet<i64> = FxHashSet::default();
+        while let Some(n) = todo.pop() {
+            if !seen.insert(n) {
+                continue;
+            }
+            let Some((k, c)) = self.one(self.by_num.get(&n)) else {
+                if crate::exec::obs_flag!("PHITEX_STREAM_TRACE") {
+                    eprintln!(
+                        "stream: object {n}: {} commands claim it",
+                        self.by_num.get(&n).map_or(0, Vec::len)
+                    );
+                }
+                out.complete = false;
+                out.missing.push(n);
+                continue;
+            };
+            let mut take = vec![(k, c, 0u8)];
+            if !c.body {
+                if let Some((fk, f)) = self.one(self.fills.get(&n)) {
+                    take.push((fk, f, 1));
+                } else {
+                    out.complete = false;
+                    out.missing.push(n);
+                }
+            }
+            for (k, c, at) in take {
+                if taken.insert(k) {
+                    order.push(((n, at), k));
+                    todo.extend(&c.needs);
+                    out.named.extend(&c.needs);
+                    out.named.extend(&c.names);
+                }
+            }
+        }
+        // (a link's or an annotation's number: its command, which the
+        // link numbers it by, after the objects)
+        for &t in rels {
+            if let Some((k, _)) = self.one(self.by_num.get(&t))
+                && taken.insert(k)
+            {
+                order.push(((i64::MAX, 0), k));
+            }
+        }
+        order.sort_unstable();
+        for (_, k) in order {
+            if let Some(c) = self.by_key.get(&k) {
+                out.cmds.push((
+                    k,
+                    c.serial,
+                    c.rt.filter(|_| c.fill.is_none()),
+                    c.cmd.clone(),
+                ));
+            }
+        }
+        out
     }
 }
 
@@ -2711,18 +3548,24 @@ fn sealed_units(
     use phitex_defuse::Step;
     let v = cx.values();
     let mut out = FxHashMap::default();
-    let Some((after, to, at)) = &pc.places else {
-        return Ok(out);
-    };
     // (the units of its own lines only, in the finisher's window, each
-    // at its place: its piece checked)
+    // at its place: its piece checked; a finisher with no window, its
+    // page's sealed lines all from other finishers' pieces: by piece
+    // below)
     let want = &pc.pieces;
     if want.is_empty() {
         return Ok(out);
     }
     let node = crate::pages::node_of;
-    let w = cx.view_through(v.field(crate::pages::PITEMS), after.map(node), node(*to))?;
+    let (w, at) = match &pc.places {
+        Some((after, to, at)) => (
+            Some(cx.view_through(v.field(crate::pages::PITEMS), after.map(node), node(*to))?),
+            &at[..],
+        ),
+        None => (None, &[][..]),
+    };
     for &(p, i) in at.iter().filter(|x| want.binary_search(&x.0).is_ok()) {
+        let Some(w) = w else { break };
         let Some(u) = cx.at(w, Step::Index(i)) else {
             continue;
         };
@@ -2798,7 +3641,10 @@ fn shipout_fonts(v: &Values, fonts: &Fonts) -> Vec<ValueId> {
         .locals
         .iter()
         .map(|(n, sz, fresh)| match fresh {
-            Some((k, i)) => v.str(&format!("{n}@{sz}#{k}.{i}")),
+            Some((k, path)) => {
+                let path: Vec<String> = path.iter().map(ToString::to_string).collect();
+                v.str(&format!("{n}@{sz}#{k}.{}", path.join(".")))
+            }
             None => v.str(&format!("{n}@{sz}")),
         })
         .collect();
@@ -2907,7 +3753,7 @@ pub(crate) fn page_allocs(
 ) -> R<()> {
     let v = r.v;
     // (its object unless a reference or a link's action made it first:
-    // the fold knows the page's number, [`RT_PAGES`])
+    // the fold knows the page's number, [`RT_PAGE`])
     let fixed = 3;
     // (the real fonts its characters are written in, an object each
     // where none of its name was made before: its fonts that are not
@@ -2937,7 +3783,7 @@ pub(crate) fn page_allocs(
     }
     // (an auto-expanded font's object is its base's, `pdf_init_font`'s
     // second case: the base's name, `pdf_font_blink`)
-    let names: Vec<ValueId> = real
+    let mut names: Vec<ValueId> = real
         .into_iter()
         .map(|id| {
             let id = fonts
@@ -2945,9 +3791,7 @@ pub(crate) fn page_allocs(
                 .get(&id)
                 .filter(|x| x.auto && fonts.by_id.contains_key(&x.base))
                 .map_or(id, |x| x.base);
-            v.str(&String::from_utf8_lossy(phitex_pdf::FontSource::name(
-                fonts, id,
-            )))
+            v.str(&object_key(fonts, id))
         })
         .collect();
     let mut dests: Vec<ValueId> = Vec::new();
@@ -2956,9 +3800,25 @@ pub(crate) fn page_allocs(
     // first page that shows it, unless `\immediate` wrote it, with what
     // writing it makes, [`crate::pdfprim`]'s `ximage_own_info`)
     let mut images: Vec<ValueId> = Vec::new();
+    let mut group_wanted = false;
+    // (the raw objects the page names, `\pdfrefobj`, that are neither
+    // streams nor written by `\immediate`: pdfTeX writes each after the
+    // page's dictionary where a page first names it ("Write out pending
+    // raw objects", `pdf_write_obj`'s `pdf_begin_obj(k, 1)`), into an
+    // object stream where they compress)
+    let mut raw: Vec<ValueId> = Vec::new();
     for &w in side_whats {
         let xs = list_of(v, w);
         match xs.first().map(|&k| str_of(v, k)).as_deref() {
+            Some("pdf:refobj") => {
+                let n = xs.get(1).and_then(|&x| v.as_int(x)).unwrap_or(0);
+                let kind = r
+                    .get(&format!("pdf:objbody:{n}"))?
+                    .and_then(|x| v.as_int(x));
+                if kind.is_some_and(|k| k & 6 == 0) {
+                    raw.push(v.int(n));
+                }
+            }
             Some("pdf:dest") => {
                 if let Some(&id) = xs.get(1) {
                     dests.push(id);
@@ -2970,7 +3830,13 @@ pub(crate) fn page_allocs(
                 if let Some(x) = r.get(&format!("pdf:ximage:{n}"))? {
                     let at = |k: usize| crate::val::int_at(v, x, k);
                     if at(12) == 0 {
-                        images.push(v.list(vec![v.int(n), v.int(at(10)), v.int(at(11))]));
+                        group_wanted |= at(13) != 0;
+                        images.push(v.list(vec![
+                            v.int(n),
+                            v.int(at(10)),
+                            v.int(at(11)),
+                            v.int(at(13)),
+                        ]));
                     }
                 }
             }
@@ -2980,6 +3846,12 @@ pub(crate) fn page_allocs(
     let mut ship_fonts = shipout_fonts(v, fonts);
     if fonts.space.is_some() {
         ship_fonts.push(v.str("pdftexspace@0"));
+        // (and its font object, made where the page first uses it as
+        // any font's, `pdf_use_font`: the fold counted the fonts the
+        // list names only, so a page of `\pdfinterwordspaceon` spaces
+        // was an object short, tex-vpat's struct elements one number
+        // low from its first page on)
+        names.push(v.str("pdftexspace@0"));
     }
     // (the page's dictionary and resources, and each annotation it
     // writes, go into an object stream where they compress; its
@@ -2999,22 +3871,25 @@ pub(crate) fn page_allocs(
     } else {
         -1
     };
-    let rt_fonts = r.get(RT_FONTS)?.unwrap_or_else(|| v.list(Vec::new()));
-    let dests_loaded = crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") && {
-        let f = r.ops.fields.get_at(v, r.cx.values_epoch(), RT_DESTS);
-        let l = r.loc_of(f);
-        r.st.is_loaded(l)
-    };
-    let rt_dests = r.get(RT_DESTS)?.unwrap_or_else(|| v.list(Vec::new()));
-    let rt_os = r.get(RT_OS)?.unwrap_or_else(|| v.int(0));
-    let rt_pages = r.get(RT_PAGES)?.unwrap_or_else(|| v.list(Vec::new()));
+    // (what read-time commands named first is in the allocations
+    // themselves, where they named it, [`rt_named`]: the page reads none
+    // of it)
+    let rt_fonts = v.list(Vec::new());
+    let rt_dests = v.list(Vec::new());
+    // (the read-time writes into object streams before it: entries of
+    // the allocations, [`os_write`])
+    let rt_os = v.int(0);
+    let rt_pages = v.list(Vec::new());
     // (the forms the page names, written with it where nothing wrote
     // them before, and those read-time writes wrote: [`forms_named`])
     let forms: Vec<ValueId> = forms_named(r, side_whats)?
         .into_iter()
         .map(|n| v.int(n))
         .collect();
-    let rt_forms = r.get(RT_FORMS)?.unwrap_or_else(|| v.list(Vec::new()));
+    let rt_forms = v.list(Vec::new());
+    // (an image here that needs the document's transparency group: has a
+    // read-time write written it?)
+    let rt_group = group_wanted && r.get(RT_PNG_GROUP)?.is_some();
     // (where the page broke, for a page firing inside a piece: the
     // piece and its candidate, [`page_offset_at`])
     let brk = r
@@ -3042,13 +3917,11 @@ pub(crate) fn page_allocs(
         v.list(forms),
         rt_forms,
         v.list(images),
+        v.list(raw),
+        v.int(i64::from(rt_group)),
     ]);
     if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
         eprintln!("alloc: page (node {}): {}", r.cx.node().raw(), v.render(e));
-        eprintln!(
-            "alloc-src: node {} dests loaded before {dests_loaded}",
-            r.cx.node().raw()
-        );
     }
     r.contribute(ALLOCS, v.seq_unit(e));
     Ok(())
@@ -3125,7 +3998,13 @@ fn mark_events(
                         ("thread", _) if local && named => (2, id),
                         _ => (0, ValueId::UNIT),
                     };
-                    self.push(vec![v.int(1), v.int(self.cur_s), v.int(target), what]);
+                    // (a local `goto`'s structure destination, `/SD`)
+                    let sid = a
+                        .get(5)
+                        .copied()
+                        .filter(|&x| local && ak == "goto" && x != ValueId::UNIT)
+                        .unwrap_or(ValueId::UNIT);
+                    self.push(vec![v.int(1), v.int(self.cur_s), v.int(target), what, sid]);
                 }
                 "pdf:endlink" if !vertical => self.push(vec![v.int(2)]),
                 "rloff" => self.push(vec![v.int(3), v.int(0)]),
@@ -3148,26 +4027,29 @@ fn mark_events(
                 _ => {}
             }
         }
-        fn nodes(&mut self, list: &[phitex_typeset::node::Node], vertical: bool) {
+        /// `skel`: `list` is a sealed line's skeleton, its boxes all entered
+        /// (their lists there only what they hold of whatsits).
+        fn nodes(&mut self, list: &[phitex_typeset::node::Node], vertical: bool, skel: bool) {
             use phitex_typeset::node::Node;
             for p in list {
                 match p {
-                    Node::Box(b) => self.boxed(b),
+                    // (§733, §742: a box with an empty list is not entered)
+                    Node::Box(b) if skel || !b.list.is_empty() => self.boxed(b, skel),
                     Node::Whatsit(h, _) => self.what(*h, vertical),
-                    Node::Disc(d) if !vertical => self.nodes(&d.replace, false),
+                    Node::Disc(d) if !vertical => self.nodes(&d.replace, false, skel),
                     _ => {}
                 }
             }
         }
-        fn boxed(&mut self, b: &BoxNode) {
+        fn boxed(&mut self, b: &BoxNode, skel: bool) {
             use phitex_typeset::node::BoxKind;
             self.cur_s += 1;
             let vertical = b.kind == BoxKind::V;
             self.count(if vertical { 4 } else { 0 }, self.cur_s);
-            self.nodes(
-                crate::nodes::sealed_skeleton(b, self.side).unwrap_or(&b.list),
-                vertical,
-            );
+            match crate::nodes::sealed_skeleton(b, self.side) {
+                Some(list) => self.nodes(list, vertical, true),
+                None => self.nodes(&b.list, vertical, skel),
+            }
             self.cur_s -= 1;
         }
     }
@@ -3179,32 +4061,45 @@ fn mark_events(
         seg: BTreeMap::new(),
         ev: Vec::new(),
     };
-    w.boxed(bx);
+    w.boxed(bx, false);
     w.flush();
     v.list(w.ev.into_iter().map(|e| v.list(e)).collect())
+}
+
+/// What the read-time fold knows a real font's object by
+/// (`pdf_init_font`): a scalable font's TFM name, which every font of
+/// that name shares (loaded at another size), and the font itself where
+/// it is not scalable (a PK font, an object at each size: pdfTeX never
+/// shares one).
+pub(crate) fn object_key(fonts: &Fonts, id: FontId) -> String {
+    let name = String::from_utf8_lossy(phitex_pdf::FontSource::name(fonts, id)).into_owned();
+    let scalable = phitex_pdf::FontSource::map_entry(fonts, id).is_some_and(|m| !m.is_pk());
+    if scalable || fonts.vfs.contains_key(&id) {
+        name
+    } else {
+        format!("{name}\u{0}{id}")
+    }
+}
+
+/// Font `f`'s [`object_key`] as a read-time command sees it.
+pub(crate) fn read_object_key(r: &mut Run<'_, '_>, f: i64) -> R<String> {
+    let id = u32::try_from(f).unwrap_or(0);
+    let fs = fonts_for_with(r, &[id], false, false)?;
+    Ok(object_key(&fs, id))
 }
 
 /// The fonts a read-time write uses (an `\\immediate\\pdfxform`'s):
 /// an object made for each name no page shipped before and no read-time
 /// write before used (`pdf:rtfonts`, which the pages' allocations carry,
 /// [`ALLOCS`]).
-pub(crate) fn fonts_first_used(r: &mut Run<'_, '_>, names: &[String]) -> R<()> {
+pub(crate) fn fonts_first_used(r: &mut Run<'_, '_>, names: &[String]) {
     let v = r.v;
     // (named, not counted: whether a page made the font's object first
     // is the pages' fold's to say, where a read needs the count,
     // [`page_offset`]; the write itself only reaches PDF bytes)
-    let mut rt: Vec<ValueId> = r.get(RT_FONTS)?.map(|x| list_of(v, x)).unwrap_or_default();
-    let n0 = rt.len();
     for n in names {
-        let x = v.str(n);
-        if !rt.contains(&x) {
-            rt.push(x);
-        }
+        rt_named(r, RT_FONT, v.str(n));
     }
-    if rt.len() != n0 {
-        r.set(RT_FONTS, v.list(rt), true);
-    }
-    Ok(())
 }
 
 /// The allocations before this node ([`ALLOCS`]); `PHITEX_ALLOCS_TRACE`
@@ -3220,21 +4115,75 @@ fn allocs_range(r: &mut Run<'_, '_>, why: &str) -> R<ValueId> {
     Ok(r.cx.fold(v.field(ALLOCS), None, None)?)
 }
 
-/// The fonts read-time writes used ([`fonts_first_used`]).
-const RT_FONTS: &str = "pdf:rtfonts";
+/// An entry of [`ALLOCS`] a read-time command makes where it names a
+/// font, a destination, a form or a page first ([`rt_named`]): `[tag,
+/// kind, name]`.
+const RT_TAG: &str = "rt";
+const RT_FONT: i64 = 0;
+const RT_DEST: i64 = 1;
+const RT_FORM: i64 = 2;
+const RT_PAGE: i64 = 3;
+/// A read-time write into an object stream ([`os_write`]).
+const RT_OS: i64 = 4;
 
-/// The destinations read-time commands made ([`dest_first_named`]).
-const RT_DESTS: &str = "pdf:rtdests";
+/// A read-time command named `x` (kind [`RT_FONT`] …): an entry of
+/// [`ALLOCS`] where it stands, which the pages' fold counts where none
+/// was made before ([`fold_allocs`]). Not a read: the pages after it
+/// read nothing of it, only the fold of the allocations sees it in its
+/// place.
+fn rt_named(r: &mut Run<'_, '_>, kind: i64, x: ValueId) {
+    let v = r.v;
+    let e = v.list(vec![v.str(RT_TAG), v.int(kind), x]);
+    r.contribute(ALLOCS, v.seq_unit(e));
+}
 
-/// The objects read-time writes put into object streams ([`os_write`]).
-const RT_OS: &str = "pdf:rtos";
+/// How many entries of kind `kind` this run made ([`rt_named`]).
+fn rt_count(r: &Run<'_, '_>, kind: i64) -> i64 {
+    let v = r.v;
+    let f = v.field(ALLOCS);
+    let mut n = 0;
+    for (g, x) in &r.contribs {
+        if *g != f {
+            continue;
+        }
+        for e in v.seq_to_vec(*x) {
+            if let [tag, k, _] = list_of(v, e)[..]
+                && v.with_str(tag, |s| s == RT_TAG) == Some(true)
+                && int_of(v, k) == kind
+            {
+                n += 1;
+            }
+        }
+    }
+    n
+}
 
-/// The pages whose objects read-time commands made before they shipped
-/// (`\\pdfpageref`, an action's `goto page`: [`page_made_at_read_time`]).
-const RT_PAGES: &str = "pdf:rtpages";
+/// The names of kind `kind` this run's read-time commands named so far
+/// ([`rt_named`]): not in the range before it.
+fn rt_mine(r: &Run<'_, '_>, kind: i64) -> Vec<ValueId> {
+    let v = r.v;
+    let f = v.field(ALLOCS);
+    let mut out = Vec::new();
+    for (g, x) in &r.contribs {
+        if *g != f {
+            continue;
+        }
+        for e in v.seq_to_vec(*x) {
+            if let [tag, k, n] = list_of(v, e)[..]
+                && v.with_str(tag, |s| s == RT_TAG) == Some(true)
+                && int_of(v, k) == kind
+                && !out.contains(&n)
+            {
+                out.push(n);
+            }
+        }
+    }
+    out
+}
 
-/// The forms read-time writes wrote ([`forms_first_written`]).
-const RT_FORMS: &str = "pdf:rtforms";
+/// Whether a read-time write wrote the document's transparency group
+/// ([`png_group_write`]).
+const RT_PNG_GROUP: &str = "pdf:rtpnggroup";
 
 /// The forms whatsits `whats` name (`\\pdfrefxform`), with the forms
 /// their boxes name in turn: pdfTeX writes each that is not written yet
@@ -3269,10 +4218,49 @@ pub(crate) fn forms_named(r: &mut Run<'_, '_>, whats: &[ValueId]) -> R<Vec<i64>>
     Ok(out)
 }
 
+/// The bytes of the images `whats` show, directly or in the forms they
+/// name, hashed together in the order met (0: none): what a page's
+/// content stream does not hold of the pictures it draws.
+fn images_shown(r: &mut Run<'_, '_>, whats: &[ValueId]) -> R<u64> {
+    let v = r.v;
+    let mut out = 0u64;
+    let mut seen: Vec<(bool, i64)> = Vec::new();
+    let mut todo: Vec<ValueId> = whats.to_vec();
+    while let Some(w) = todo.pop() {
+        let xs = list_of(v, w);
+        let kind = xs.first().map(|&k| str_of(v, k));
+        let form = match kind.as_deref() {
+            Some("pdf:refximage") => false,
+            Some("pdf:refxform") => true,
+            _ => continue,
+        };
+        let n = xs.get(1).map_or(0, |&x| int_of(v, x));
+        if seen.contains(&(form, n)) {
+            continue;
+        }
+        seen.push((form, n));
+        if form {
+            let Some(x) = r.get(&format!("pdf:xform:{n}"))? else {
+                continue;
+            };
+            if let Some(&b) = list_of(v, x).first() {
+                let mut side = Side::default();
+                if crate::nodes::decode(v, b, &mut side).is_some() {
+                    todo.extend(side.whats);
+                }
+            }
+        } else if let Some(x) = r.get(&format!("pdf:ximage:{n}"))? {
+            let bytes = crate::val::int_at(v, x, 14).cast_unsigned();
+            out = phitex_defuse::hash_words(out.max(1), &[bytes]);
+        }
+    }
+    Ok(out)
+}
+
 /// Of forms `forms`, those no page before this run and no read-time
 /// write before wrote: an `\\immediate\\pdfxform` writes them (and
 /// itself), each a read-time object for its resources; all of them noted
-/// written ([`RT_FORMS`]), so a page after does not count them.
+/// written ([`rt_named`]), so a page after does not count them.
 pub(crate) fn forms_first_written(r: &mut Run<'_, '_>, forms: &[i64]) -> R<Vec<i64>> {
     if forms.is_empty() {
         return Ok(Vec::new());
@@ -3280,44 +4268,31 @@ pub(crate) fn forms_first_written(r: &mut Run<'_, '_>, forms: &[i64]) -> R<Vec<i
     let v = r.v;
     let range = allocs_range(r, "forms_first_written")?;
     let f = fold_allocs(v, range);
-    let mut rt: Vec<ValueId> = r.get(RT_FORMS)?.map(|x| list_of(v, x)).unwrap_or_default();
+    let mine = rt_mine(r, RT_FORM);
     let mut new = Vec::new();
     for &n in forms {
         let x = v.int(n);
-        if !f.forms.contains(&x) && !rt.contains(&x) {
+        if !f.forms.contains(&x) && !new.contains(&n) && !mine.contains(&x) {
             new.push(n);
-            rt.push(x);
+            rt_named(r, RT_FORM, x);
         }
-    }
-    if !new.is_empty() {
-        r.set(RT_FORMS, v.list(rt), true);
     }
     Ok(new)
 }
 
 /// Page `n`'s object made by a read-time command before the page
 /// shipped: the page then makes no object of its own ([`ALLOCS`]).
-pub(crate) fn page_made_at_read_time(r: &mut Run<'_, '_>, n: i64) -> R<()> {
+pub(crate) fn page_made_at_read_time(r: &mut Run<'_, '_>, n: i64) {
     let v = r.v;
-    let mut xs: Vec<ValueId> = r.get(RT_PAGES)?.map(|x| list_of(v, x)).unwrap_or_default();
-    xs.push(v.int(n));
-    r.set(RT_PAGES, v.list(xs), true);
-    Ok(())
+    rt_named(r, RT_PAGE, v.int(n));
 }
 
 /// A destination a read-time command names (an outline's `goto`):
 /// its object made where no page shipped before and no read-time command
 /// before made it (`pdf_get_obj`).
-pub(crate) fn dest_first_named(r: &mut Run<'_, '_>, id: ValueId) -> R<()> {
-    let v = r.v;
+pub(crate) fn dest_first_named(r: &mut Run<'_, '_>, id: ValueId) {
     // (named, not counted, as [`fonts_first_used`])
-    let mut rt: Vec<ValueId> = r.get(RT_DESTS)?.map(|x| list_of(v, x)).unwrap_or_default();
-    if rt.contains(&id) {
-        return Ok(());
-    }
-    rt.push(id);
-    r.set(RT_DESTS, v.list(rt), true);
-    Ok(())
+    rt_named(r, RT_DEST, id);
 }
 
 /// An object a read-time command writes now: with
@@ -3330,13 +4305,28 @@ pub(crate) fn os_write(r: &mut Run<'_, '_>) -> R<()> {
     }
     let v = r.v;
     let range = allocs_range(r, "os_write")?;
-    let pages = fold_allocs(v, range).os_written;
-    let rt = r.get(RT_OS)?.and_then(|x| v.as_int(x)).unwrap_or(0);
-    if (pages + rt) % 100 == 0 {
+    let f = fold_allocs(v, range);
+    // (the writes before it, the pages' and the read-time ones, its own
+    // run's among them: entries of the allocations, [`rt_named`])
+    let mine = rt_count(r, RT_OS);
+    if (f.os_written + f.rt_os + mine) % 100 == 0 {
         bump_cell(r)?;
     }
-    r.set(RT_OS, v.int(rt + 1), true);
+    rt_named(r, RT_OS, ValueId::UNIT);
     Ok(())
+}
+
+/// An `\\immediate\\pdfximage` that needs the document's transparency
+/// group: written with it, into an object stream, unless a page or a
+/// read-time write before wrote it.
+pub(crate) fn png_group_write(r: &mut Run<'_, '_>) -> R<()> {
+    let v = r.v;
+    let range = allocs_range(r, "png_group_write")?;
+    if fold_allocs(v, range).png_group || r.get(RT_PNG_GROUP)?.is_some() {
+        return Ok(());
+    }
+    r.set(RT_PNG_GROUP, v.int(1), true);
+    os_write(r)
 }
 
 /// A read-time object counted in the `pdf:objnum` cell, made by this
@@ -3396,14 +4386,19 @@ struct AllocFold {
     forms: Arc<BTreeSet<ValueId>>,
     /// The objects the pages wrote into object streams.
     os_written: i64,
+    /// The read-time writes into object streams ([`os_write`]).
+    rt_os: i64,
+    /// Whether the document's transparency group is written.
+    png_group: bool,
 }
 
 /// The writer's link stack and thread over the pages, as the fold of
 /// their mark events ([`mark_events`]) runs them.
 #[derive(Default)]
 struct MarkState {
-    /// Each running link's level and its action's target (kind, id).
-    links: Vec<(i64, i64, ValueId)>,
+    /// Each running link's level, its action's target (kind, id) and
+    /// its structure destination (`UNIT`: none).
+    links: Vec<(i64, i64, ValueId, ValueId)>,
     /// Running links off (`\\pdfrunninglinkoff`).
     off: bool,
     thread_level: i64,
@@ -3440,23 +4435,25 @@ impl MarkState {
             let id = |k: usize| ys.get(k).copied().unwrap_or(ValueId::UNIT);
             match n(0) {
                 0 if !self.off => {
-                    let pieces: Vec<(i64, ValueId)> = self
+                    let pieces: Vec<(i64, ValueId, ValueId)> = self
                         .links
                         .iter()
                         .filter(|l| l.0 == n(1))
-                        .map(|l| (l.1, l.2))
+                        .map(|l| (l.1, l.2, l.3))
                         .collect();
-                    for (kind, target) in pieces {
+                    for (kind, target, sid) in pieces {
                         made.objects += n(2);
                         made.compressible += n(2);
                         if n(2) > 0 {
                             made.objects += self.target(v, kind, target, dests);
+                            made.objects += self.target(v, 1, sid, dests);
                         }
                     }
                 }
                 1 => {
-                    self.links.push((n(1), n(2), id(3)));
+                    self.links.push((n(1), n(2), id(3), id(4)));
                     made.objects += self.target(v, n(2), id(3), dests);
+                    made.objects += self.target(v, 1, id(4), dests);
                 }
                 2 => {
                     self.links.pop();
@@ -3494,6 +4491,9 @@ impl MarkState {
     /// written): an object where it is named first (a page's where it
     /// has not shipped and nothing made it).
     fn target(&mut self, v: &Values, kind: i64, id: ValueId, dests: &mut BTreeSet<ValueId>) -> i64 {
+        if id == ValueId::UNIT {
+            return 0;
+        }
         let new = match kind {
             1 => dests.insert(id),
             2 => self.threads.insert(id),
@@ -3510,12 +4510,15 @@ impl MarkState {
 type AllocMemo = Mutex<FxHashMap<(u64, u64), AllocFold>>;
 
 /// The objects writing the images a page shows first makes (each
-/// image's record: its number, its objects, those in object streams),
-/// added to `objects`; those in object streams returned.
+/// image's record: its number, its objects, those in object streams,
+/// whether writing it writes the document's transparency group where
+/// nothing has: `group`, one object in a stream, numbered where it was
+/// read), added to `objects`; those in object streams returned.
 fn images_written(
     v: &Values,
     images: &[ValueId],
     seen: &mut BTreeSet<i64>,
+    group: &mut bool,
     objects: &mut i64,
 ) -> i64 {
     let mut os = 0i64;
@@ -3525,11 +4528,19 @@ fn images_written(
         if seen.insert(y(0)) {
             *objects += y(1);
             os += y(2);
+            if y(3) != 0 && !*group {
+                *group = true;
+                os += 1;
+            }
         }
     }
     os
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one fold over the pages' records: each record's objects counted in pdfTeX's order"
+)]
 fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     static M: OnceLock<AllocMemo> = OnceLock::new();
     let m = M.get_or_init(|| Mutex::new(FxHashMap::default()));
@@ -3548,9 +4559,44 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     let mut seen_ship: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_forms: BTreeSet<ValueId> = BTreeSet::new();
     let mut seen_images: BTreeSet<i64> = BTreeSet::new();
+    let mut seen_raw: BTreeSet<i64> = BTreeSet::new();
+    let mut png_group = false;
     let mut ms = MarkState::default();
-    for (pages, e) in v.seq_to_vec(range).into_iter().enumerate() {
+    let mut pages = 0usize;
+    let mut rt_os = 0i64;
+    for e in v.seq_to_vec(range) {
         let xs = list_of(v, e);
+        // (a name a read-time command used first, [`rt_named`]: an
+        // object where none was made before, or a page made, a form
+        // written)
+        if let [tag, kind, x] = xs[..]
+            && v.with_str(tag, |s| s == RT_TAG) == Some(true)
+        {
+            match int_of(v, kind) {
+                RT_FONT => {
+                    if seen.insert(x) {
+                        out.objects += 1;
+                    }
+                }
+                RT_DEST => {
+                    if seen_dest.insert(x) {
+                        out.objects += 1;
+                    }
+                }
+                RT_FORM => {
+                    seen_forms.insert(x);
+                }
+                RT_OS => {
+                    rt_os += 1;
+                }
+                _ => {
+                    ms.premade.insert(v.as_int(x).unwrap_or(0));
+                }
+            }
+            continue;
+        }
+        pages += 1;
+        let pages = pages - 1;
         let i = |k: usize| xs.get(k).and_then(|&x| v.as_int(x)).unwrap_or(0);
         let l = |k: usize| xs.get(k).map(|&x| list_of(v, x)).unwrap_or_default();
         let pno = i64::try_from(pages).unwrap_or(i64::MAX - 1) + 1;
@@ -3580,7 +4626,7 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         page_objs.push((i(5), i(10), if fixed >= 3 { out.objects + 2 } else { 0 }));
         out.objects += fixed;
         // (a pages-tree node every `pages_tree_kids_max` pages)
-        if pages % 6 == 0 {
+        if pages.is_multiple_of(6) {
             out.objects += 1;
         }
         // (the forms the page names that nothing wrote before: written
@@ -3618,17 +4664,41 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
         out.objects += made.objects;
         // (the images first shown here, written after the page: what
         // writing each makes, `pdf_write_image`)
-        let images_os = images_written(v, &l(15), &mut seen_images, &mut out.objects);
+        // (a read-time write before the page wrote the group, [`RT_PNG_GROUP`])
+        png_group |= i(17) != 0;
+        let images_os = images_written(
+            v,
+            &l(15),
+            &mut seen_images,
+            &mut png_group,
+            &mut out.objects,
+        );
         // (the read-time writes into object streams before the page
         // count toward a stream's 100; a link piece's, a bead
         // rectangle's and a destination's object go into one too)
+        // (the raw objects it names first: their numbers TeX's, read
+        // time, but each goes into an object stream with the page)
+        let raw_written = l(16)
+            .into_iter()
+            .filter(|&n| seen_raw.insert(v.as_int(n).unwrap_or(0)))
+            .count();
+        let raw_written = i64::try_from(raw_written).unwrap_or(0);
         let os = if i(4) > 0 {
-            i(4) + made.compressible + dests_written + forms_written + images_os
+            i(4) + made.compressible + dests_written + forms_written + images_os + raw_written
         } else {
             0
         };
+        if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
+            eprintln!(
+                "alloc-fold: page {pno}: os {os} (page {}, marks {}, dests {dests_written}, forms {forms_written}, images {images_os}, raw {raw_written}), written before {written}, read-time os {}, objects {}",
+                i(4),
+                made.compressible,
+                rt_os,
+                out.objects
+            );
+        }
         for _ in 0..os {
-            if (written + i(8)) % 100 == 0 {
+            if (written + rt_os) % 100 == 0 {
                 out.objects += 1;
             }
             written += 1;
@@ -3639,6 +4709,8 @@ fn fold_allocs(v: &Values, range: ValueId) -> AllocFold {
     out.dests = Arc::new(seen_dest);
     out.forms = Arc::new(seen_forms);
     out.os_written = written;
+    out.rt_os = rt_os;
+    out.png_group = png_group;
     let mut g = m.locked();
     if g.len() > 1 << 12 {
         g.clear();
@@ -3655,7 +4727,11 @@ pub(crate) fn page_offset(r: &mut Run<'_, '_>) -> R<i64> {
     let v = r.v;
     let range = allocs_range(r, "page_offset")?;
     let f = fold_allocs(v, range);
-    let (fonts, dests) = (r.get(RT_FONTS)?, r.get(RT_DESTS)?);
+    // (this run's own, not in the range before it)
+    let (fonts, dests) = (
+        Some(v.list(rt_mine(r, RT_FONT))),
+        Some(v.list(rt_mine(r, RT_DEST))),
+    );
     if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
         eprintln!(
             "alloc-offset: node {}: {} pages' records, {} objects, {} new read-time",
@@ -3669,7 +4745,7 @@ pub(crate) fn page_offset(r: &mut Run<'_, '_>) -> R<i64> {
 }
 
 /// The objects read-time writes made for fonts and destinations they
-/// named (`fonts`, `dests`: [`RT_FONTS`], [`RT_DESTS`] where the read
+/// named (`fonts`, `dests`: those of the run's own, [`rt_mine`], where the read
 /// is) after the pages of fold `f`: those no page and no read-time
 /// write before made.
 fn rt_new(v: &Values, f: &AllocFold, fonts: Option<ValueId>, dests: Option<ValueId>) -> i64 {
@@ -3709,20 +4785,8 @@ pub(crate) fn page_offset_at(r: &mut Run<'_, '_>, at: u64, c: i64) -> R<i64> {
             range = v.seq_concat(range, v.seq_unit(u));
         }
     }
-    let f = fold_allocs(v, range);
-    let mut there = |name: &str| -> R<Option<ValueId>> {
-        Ok(
-            match r
-                .cx
-                .read_at(v.field(name), phitex_defuse::At::AfterOwn(to))?
-            {
-                phitex_defuse::FieldAt::Def(x, _) => Some(x),
-                _ => None,
-            },
-        )
-    };
-    let (fonts, dests) = (there(RT_FONTS)?, there(RT_DESTS)?);
-    Ok(f.objects + rt_new(v, &f, fonts, dests))
+    // (what `at` named at read time is in the range through it)
+    Ok(fold_allocs(v, range).objects)
 }
 
 /// Font `f`'s name number as pdfTeX gives it (`\\pdffontname`): its
@@ -3797,7 +4861,14 @@ pub(crate) struct EndFields {
     /// ([`FontNums::seed`]).
     pub seed: Vec<(FontId, String, i32)>,
     pub info_omit_date: i32,
+    /// `\pdfomitcharset` and `\pdfomitinfodict`, read where pdfTeX
+    /// writes the fonts and the Info dictionary: at the end.
+    pub omit_charset: i32,
+    pub omit_info_dict: i32,
     pub suppress_ptex_info: i32,
+    /// `\pdfptexuseunderscore`: the Info dictionary's `/PTEX_Fullbanner`
+    /// for `/PTEX.Fullbanner`.
+    pub ptex_use_underscore: i32,
     /// `\pdfpkresolution`: what a font without a map entry's failure
     /// names ([`phitex_pdf::PdfError::Fail`]).
     pub pk_resolution: i32,
@@ -3971,21 +5042,20 @@ fn rel_objnum(w: &Whatsit) -> Option<u64> {
 /// found scheduled where the line's is not, and the link shipped the
 /// page again); the link gives each name the number the line gives its
 /// object.
-fn apart_names(whats: &BTreeMap<u32, Whatsit>, floor: usize) -> (usize, Vec<(usize, u64)>) {
+fn apart_names(whats: &PageWhats, floor: usize) -> (usize, Vec<(usize, u64)>) {
     // (a number TeX numbered is one of this file's: no REL bit)
     let named = whats
-        .values()
-        .filter_map(what_objnum)
+        .named
+        .iter()
+        .copied()
         .max()
         .map_or(0, |n| usize::try_from(n).unwrap_or(usize::MAX));
     let from = named.max(floor);
-    let mut rel: Vec<u64> = whats.values().filter_map(rel_objnum).collect();
-    rel.sort_unstable();
-    rel.dedup();
-    let aliases = rel
-        .into_iter()
+    let aliases = whats
+        .rels
+        .iter()
         .enumerate()
-        .map(|(i, t)| (from + 1 + i, t))
+        .map(|(i, &t)| (from + 1 + i, t))
         .collect();
     (named, aliases)
 }
@@ -4338,11 +5408,11 @@ pub(crate) fn finish_exact(
     changed: Option<&FxHashSet<i64>>,
     cmds: &CmdMemo,
 ) -> Linked {
-    let out = link(v, f, xpages, units, changed, cmds, true);
+    let out = link(v, f, xpages, units, changed, cmds, true, None);
     if crate::exec::obs_flag!("PHITEX_LINK_CHECK") {
         // (the file linked from the last link's records, and from the
         // start: the same bytes)
-        let full = link(v, f, xpages, units, None, cmds, false);
+        let full = link(v, f, xpages, units, None, cmds, false, None);
         let bytes = |l: &Linked| {
             l.layout
                 .as_ref()
@@ -4378,6 +5448,7 @@ fn link(
     changed: Option<&FxHashSet<i64>>,
     cmds: &CmdMemo,
     memo: bool,
+    alone: Option<&Alone<'_>>,
 ) -> Linked {
     let none = Linked {
         layout: None,
@@ -4393,6 +5464,11 @@ fn link(
     }
     let t0 = std::time::Instant::now();
     let mut st = fresh(v, f.date.clone(), &f.jobname, f.g2u);
+    if let Some(a) = alone {
+        base_tables(v, a.base, a.fonts, &mut st);
+        st.start_page_colors(a.colors);
+        st.hold_writes();
+    }
     let mut forms = Forms::default();
     let mut reloc = Reloc::new();
     let mut nums = FontNums::default();
@@ -4510,6 +5586,49 @@ fn link(
     // being filled: compared again once that stream is written)
     let mut os_wait: Option<usize> = None;
     let (mut t_try, mut t_snap) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+    // (the records' steps: the page's record, its fonts and names, the
+    // replay, the parts taken)
+    let mut t_step = [std::time::Duration::ZERO; 4];
+    // (the records of the pages from `start` on not made yet (an edit's
+    // pages whose lines changed), made on the executor side by side
+    // before the loop places them in order: a page's record is a pure
+    // function of its piece and its lines, [`record_of`]; those the
+    // pages' own steps are making are waited for, not made twice)
+    {
+        let tr = std::time::Instant::now();
+        // (not those the line ends with as the last link did: theirs,
+        // made already, or copied once the writer is the same there)
+        let todo: Vec<usize> = (start..xpages.len() - suffix.min(xpages.len() - start))
+            .filter(|&i| {
+                v.as_int(xpages[i]).is_some()
+                    && pcs[i].is_some()
+                    && hashes.get(i).is_some_and(|h| {
+                        h.as_ref().is_some_and(|h| {
+                            let key =
+                                u64::from_ne_bytes(v.as_int(xpages[i]).unwrap_or(0).to_ne_bytes());
+                            !record_made(key, h)
+                        })
+                    })
+            })
+            .collect();
+        let n = if todo.len() > 2 {
+            crate::exec::threads(None)
+        } else {
+            1
+        };
+        if n > 1 {
+            let mut ex = crate::exec::Inner(n);
+            crate::exec::map_on(&mut ex, todo.len(), &|j| {
+                let i = todo[j];
+                if let (Some(pc), Some(Some(h))) = (&pcs[i], hashes.get(i)) {
+                    let mut line = |s: &crate::nodes::Sealed| line_of(v, units, s);
+                    let key = u64::from_ne_bytes(v.as_int(xpages[i]).unwrap_or(0).to_ne_bytes());
+                    record_of(v, key, pc, h, &mut line, None);
+                }
+            });
+        }
+        crate::timeline::note("link: the pages' records made side by side", tr.elapsed());
+    }
     // (the object streams the records fill compressed after the loop,
     // side by side with the pages' contents, not one after another in it)
     st.defer_streams(true);
@@ -4592,6 +5711,7 @@ fn link(
             let Some(h) = hashes.get(i).cloned().flatten() else {
                 return none;
             };
+            let ts = std::time::Instant::now();
             let made = record_of(
                 v,
                 u64::from_ne_bytes(v.as_int(x).unwrap_or(0).to_ne_bytes()),
@@ -4603,18 +5723,22 @@ fn link(
             let empty = (phitex_pdf::PageRecord::default(), BTreeSet::new(), 0);
             let made = made.get().unwrap_or(&empty);
             let rec = &made.0;
+            t_step[0] += ts.elapsed();
+            let ts = std::time::Instant::now();
             let fwd = nums.resolve(&pc.fonts, Some(rec.font_loads()));
             let src = Mapped::new(&pc.fonts, &nums, &fwd);
             let fmap = |g: FontId| fwd.get(&g).copied().unwrap_or(g);
             set_page_params(v, &mut st, &pc.params, pc.margins);
+            // (a page alone: its own objects numbered past every number
+            // it names, so that none names one of them)
+            if let Some(a) = alone {
+                pad_objects(&mut st, a.floor);
+                st.write_held();
+            }
             let n0 = st.objects_numbered();
             // (a page naming an object the link numbered otherwise than
             // TeX read it is shipped with the link's number)
-            let moved = pc
-                .whats
-                .values()
-                .filter_map(what_objnum)
-                .any(|n| reloc.contains_key(&n));
+            let moved = pc.whats.named.iter().any(|n| reloc.contains_key(n));
             // (the names the page was written apart with for the
             // read-time numbers only its bytes name: the line's numbers
             // of their objects)
@@ -4624,19 +5748,27 @@ fn link(
                 .iter()
                 .filter_map(|&(p, t)| reloc.get(&t).map(|&m| (p, m)))
                 .collect();
+            t_step[1] += ts.elapsed();
+            let ts = std::time::Instant::now();
             let res = if moved {
                 Err("an object numbered otherwise at read time".to_owned())
+            } else if alone.is_some_and(|a| a.bare || !a.missing.is_empty() || !a.colors.is_empty())
+            {
+                Err("an image or form the file lacks".to_owned())
             } else if tex.len() != aliases.len() {
                 Err("an object the line does not number".to_owned())
             } else {
                 let at = |n: usize| tex.get(&n).copied().unwrap_or(n);
                 st.replay_page(rec, &src, &fmap, &at, None, &mut ps)
             };
+            t_step[2] += ts.elapsed();
             if res.is_err() {
                 // (the node that wrote the page logged the writer's
                 // error when it wrote it)
                 let mut wh = |h: u32, _leaders: bool| {
-                    page_whatsit(&forms, &pc.whats, h).map(|w| relocated(w, &reloc))
+                    page_whatsit(v, &forms, &pc.whats, h)
+                        .filter(|w| alone.is_none_or(|a| a.keeps(w)))
+                        .map(|w| relocated(w, &reloc))
                 };
                 if let Some(Err(e)) = with_page_box(v, pc, &h, &mut line, |bx| {
                     st.ship_out_with(bx, &src, &mut wh)
@@ -4681,11 +5813,22 @@ fn link(
                     set_writer_params(&mut st, c.wparams);
                     let fwd = nums.resolve(&c.fonts, None);
                     let src = Mapped::new(&c.fonts, &nums, &fwd);
+                    let rt = xs.get(3).map_or(0, |&n| int_of(v, n));
+                    // (a page alone: the command's object given the number
+                    // TeX gave it, as the build's file has it)
+                    let own = alone.filter(|_| rt > 0 && rt & crate::pdfprim::REL == 0);
+                    if own.is_some() {
+                        pad_objects(&mut st, usize::try_from(rt - 1).unwrap_or(0));
+                    }
                     let out = {
                         let mut g = c.f.locked();
                         (*g)(&mut st, &mut forms, &src, &reloc)
                     };
-                    let rt = xs.get(3).map_or(0, |&n| int_of(v, n));
+                    if let Some(a) = own
+                        && out.nums.first() != Some(&rt)
+                    {
+                        a.landed.set(false);
+                    }
                     if let (rt @ 1.., Some(&m)) = (rt, out.nums.first())
                         && let Ok(m) = usize::try_from(m)
                         && i64::try_from(m).ok() != Some(rt)
@@ -4720,8 +5863,10 @@ fn link(
                 }
             }
         }
+        let ts = std::time::Instant::now();
         st.take_parts(&mut ps);
         parts.push(ps);
+        t_step[3] += ts.elapsed();
     }
     st.defer_streams(false);
     let t_loop = t0.elapsed();
@@ -4734,6 +5879,10 @@ fn link(
     );
     crate::timeline::note("link: the resync tries", t_try);
     crate::timeline::note("link: the writer's snapshots", t_snap);
+    crate::timeline::note("link: the pages' records", t_step[0]);
+    crate::timeline::note("link: the pages' fonts and names", t_step[1]);
+    crate::timeline::note("link: the pages replayed", t_step[2]);
+    crate::timeline::note("link: the parts taken", t_step[3]);
     // (spec-final §6.1: the pages' contents whose font numbers moved,
     // rewritten and compressed apart, on the executor)
     let t_parts = std::time::Instant::now();
@@ -4776,6 +5925,7 @@ fn link(
         chunks_of.push(cs);
     }
     let t_parts = t_parts.elapsed();
+    let t_after = std::time::Instant::now();
     let mut resynced = 0usize;
     if let Some((i, j)) = resync
         && let Some(mut m) = old.take()
@@ -4817,10 +5967,13 @@ fn link(
             st.add_used_chars(c);
         }
     }
+    let t_resync = t_after.elapsed();
     for c in chunks_of.iter().flatten() {
         bytes.push(c.clone());
     }
+    let t_bytes = t_after.elapsed();
     st.refresh_digests();
+    let t_digests = t_after.elapsed();
     let end = LinkSnap {
         at: xpages.len(),
         digests: None,
@@ -4833,6 +5986,7 @@ fn link(
         placed,
         shipped,
     };
+    let t_end = t_after.elapsed();
     if memo {
         *link_memo().locked() = Some(LinkMemo {
             head,
@@ -4853,6 +6007,20 @@ fn link(
             "link: linked: after them (the tail, the xref, the bytes)",
             t0.elapsed().saturating_sub(t_loop),
         );
+        note("link: after: the last link's taken (resync)", t_resync);
+        note("link: after: the chunks", t_bytes.saturating_sub(t_resync));
+        note(
+            "link: after: the state's digests",
+            t_digests.saturating_sub(t_bytes),
+        );
+        note(
+            "link: after: the end's snapshot",
+            t_end.saturating_sub(t_digests),
+        );
+        note(
+            "link: after: kept for the next link",
+            t_after.elapsed().saturating_sub(t_end),
+        );
     }
     if crate::exec::prof_flag!("PHITEX_TEX_TIME") {
         eprintln!(
@@ -4869,7 +6037,10 @@ fn link(
         bytes.push(c);
     }
     st.params_mut().info_omit_date = f.info_omit_date;
+    st.params_mut().omit_charset = f.omit_charset;
+    st.params_mut().omit_info_dict = f.omit_info_dict;
     st.params_mut().suppress_ptex_info = f.suppress_ptex_info;
+    st.params_mut().ptex_use_underscore = f.ptex_use_underscore;
     st.params_mut().pk_resolution = f.pk_resolution;
     // the end of the file: its objects (the fonts embedded, the pages
     // tree, ...) a function of the state alone, kept by its digest (an
@@ -4883,7 +6054,9 @@ fn link(
         Some(t) => Ok(Some(t)),
         None => st.tail().map(|t| {
             let t = t.map(Arc::new);
-            if let Some(t) = &t {
+            // (a page's file of its own, [`page_alone`], keeps none: one
+            // a page would be kept for every page streamed)
+            if memo && let Some(t) = &t {
                 tails().locked().insert(key, t.clone());
             }
             t
@@ -4947,6 +6120,45 @@ fn link(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Of the objects a page's resources name, those of a kind its
+    /// content draws with are needed; the rest only named. Pgf's on every
+    /// page: a page drawing with no graphics state needs none.
+    #[test]
+    fn resources_needed_by_the_kinds_drawn_with() {
+        let res = b"/ExtGState 5 0 R /Pattern 6 0 R /ColorSpace << /pgfprgb [/Pattern /DeviceRGB] /X 9 0 R >> /Shading << /S1 7 0 R >> /Foo 8 0 R";
+        let run = |c: &[u8]| {
+            let (mut need, mut named) = (Vec::new(), Vec::new());
+            resource_refs(res, c, &mut need, &mut named);
+            need.sort_unstable();
+            named.sort_unstable();
+            (need, named)
+        };
+        assert_eq!(
+            run(b"BT /F1 10 Tf (gs) Tj ET 0 0 m 1 1 l S"),
+            (vec![5, 8], vec![6, 7, 9])
+        );
+        assert_eq!(run(b"0 0 m 1 1 l S"), (vec![8], vec![5, 6, 7, 9]));
+        assert_eq!(
+            run(b"/Pattern cs /P1 scn 0 0 1 1 re f"),
+            (vec![6, 7, 8, 9], vec![5])
+        );
+        assert_eq!(run(b"/S1 sh /G gs"), (vec![5, 7, 8], vec![6, 9]));
+        // (no content kept: every kind)
+        assert_eq!(run(b""), (vec![5, 6, 7, 8, 9], vec![]));
+    }
+
+    /// A file's text as bytes is one shared copy (every `\pdfximage` of
+    /// a page of one PDF keeps it in its record): the same allocation
+    /// for the same text, its bytes the characters'.
+    #[test]
+    fn a_files_bytes_are_one_shared_copy() {
+        let v = Values::new();
+        let t = v.str("%PDF-1.5\n\u{e9}\u{ff}");
+        let (a, b) = (text_bytes(&v, t), text_bytes(&v, t));
+        assert!(Arc::ptr_eq(&a, &b));
+        assert_eq!(&*a, b"%PDF-1.5\n\xe9\xff");
+    }
 
     #[test]
     fn a_command_record_carries_its_read_time_number() {

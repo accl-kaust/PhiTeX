@@ -4,7 +4,7 @@
 //! `SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1 etex doc.tex` (DVI) and
 //! `pdftex doc.tex` (PDF), in `oracle/fixtures/plain/ini`.
 
-mod common;
+use crate::common;
 
 use phitex_tex::Options;
 

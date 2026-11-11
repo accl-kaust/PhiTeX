@@ -74,6 +74,19 @@ pub trait Files: Send + Sync {
         let _ = name;
         None
     }
+
+    /// A key of the file at `path` (a path `find` returned, or an absolute
+    /// path from the XDV) that changes when its bytes do, read without
+    /// reading them: its size, modification and change times and inode,
+    /// as the host knows them (the CLI's `disk_stamp`). `None`: the host
+    /// has none for it (the default), and whether the file is still the
+    /// same is told by reading it again. A link that kept what it made of
+    /// a file read checks it by this key when there is one
+    /// (`phitex_tex`'s `xdvpdf::still`).
+    fn stamp(&self, path: &[u8]) -> Option<Vec<u8>> {
+        let _ = path;
+        None
+    }
 }
 
 /// `dpx_file_apply_filter`'s command: `template` with `%o` the output

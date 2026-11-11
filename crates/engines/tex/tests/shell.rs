@@ -6,7 +6,7 @@
 //! evaluation going on while a command runs, and a command refused
 //! without a hook.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -20,7 +20,9 @@ use phitex_tex::{Options, ShellHook, ShellRan};
 ///   reads `IN`;
 /// - `hl IN OUT`: as minted's `highlight`: `OUT` (a cache file) from
 ///   `IN`'s text in brackets, `IN` removed; reads `IN`;
-/// - `sleep`: 2 s, noting the jobs the build finished meanwhile.
+/// - `sleep`: 2 s, noting the jobs the build finished meanwhile;
+/// - `gone`: not run, the host says why (status 127, nothing written);
+///   any other: status 127, no why (a command that ran and failed).
 #[derive(Default)]
 struct Fake {
     /// Each call: the command and the texts of the files it read.
@@ -76,6 +78,7 @@ impl ShellHook for Fake {
                     )],
                     removed: Vec::new(),
                     read: Some(vec![arg(2)]),
+                    ..ShellRan::default()
                 }
             }
             "hl" => {
@@ -90,8 +93,14 @@ impl ShellHook for Fake {
                     wrote: vec![(arg(3), format!("\\gdef\\made{{[{t}]}}\n").into_bytes())],
                     removed: vec![arg(2)],
                     read: Some(vec![arg(2)]),
+                    ..ShellRan::default()
                 }
             }
+            "echo" => ShellRan {
+                read: Some(Vec::new()),
+                stdout: format!("{}\n", w[2..].join(" ")).into_bytes(),
+                ..ShellRan::default()
+            },
             "sleep" => {
                 let p = self.progress.lock().unwrap().clone();
                 let before = p.as_ref().map_or(0, |p| p.done());
@@ -106,6 +115,12 @@ impl ShellHook for Fake {
                     ..ShellRan::default()
                 }
             }
+            // (the host could not run it, and says why: a runner not loaded)
+            "gone" => ShellRan {
+                status: 127 << 8,
+                why: "the runner is not loaded".to_owned(),
+                ..ShellRan::default()
+            },
             _ => ShellRan {
                 status: 127 << 8,
                 ..ShellRan::default()
@@ -161,6 +176,31 @@ fn got(log: &str) -> Vec<String> {
         .collect()
 }
 
+/// A piped input (`\input|cmd`, `\openin`'s, web2c's `open_in_or_pipe`)
+/// reads the command's output as the file's text, the command allowed in
+/// restricted mode as a `\write18`'s is (hardwrap.sty's
+/// `\@@input"|kpsewhich -var-value=max_print_line"`); one not allowed
+/// leaves the stream closed. At -j1 and -j8.
+#[test]
+fn a_piped_input_reads_the_commands_output() {
+    let doc = r#"\count1=\input|"fakecmd echo 79"\relax
+\openin2=|"fakecmd echo 42" \read2 to\x \closein2
+\openin3=|"rm -rf nothing" \ifeof3 \def\y{closed}\else\def\y{open}\fi
+\immediate\write16{GOT:\the\count1,\x,\y}
+\bye
+"#;
+    for threads in [1, 8] {
+        let fake = Arc::new(Fake::default());
+        let b = common::build(
+            options("pipe", Some(fake.clone()), threads),
+            Some(&common::plain()),
+            doc,
+        );
+        let (_, log) = b.output();
+        assert_eq!(got(&log), ["79,42 ,closed"], "-j{threads}: {log}");
+    }
+}
+
 /// What a command made is read right after it in TeX's order; a call is
 /// made again only when a file it read changed: an edit of one input
 /// calls the one command that read it (the other command, the same
@@ -180,6 +220,14 @@ fn a_command_reads_what_the_job_wrote_and_its_output_is_read_after_it() {
         assert_eq!(got(&log), ["ALPHA", "BETA"], "-j{threads}: {log}");
         let n0 = fake.distinct().len();
         assert_eq!(n0, 2, "-j{threads}: {:?}", fake.distinct());
+        // (each command called once, on the file the job wrote: none on a
+        // view TeX's order never had, a file opened and not written yet)
+        assert_eq!(
+            fake.calls.lock().unwrap().len(),
+            2,
+            "-j{threads}: {:?}",
+            fake.calls.lock().unwrap()
+        );
         // (an input edited: one call more)
         b.edit(&up_doc("gamma", "beta"));
         let (dvi, log) = b.output();
@@ -189,6 +237,12 @@ fn a_command_reads_what_the_job_wrote_and_its_output_is_read_after_it() {
             n0 + 1,
             "-j{threads}: {:?}",
             fake.distinct()
+        );
+        assert_eq!(
+            fake.calls.lock().unwrap().len(),
+            3,
+            "-j{threads}: {:?}",
+            fake.calls.lock().unwrap()
         );
         let cold = common::build(
             options("up", Some(Arc::new(Fake::default())), threads),
@@ -392,6 +446,44 @@ fn a_command_is_refused_without_a_hook() {
     );
 }
 
+/// A command the host could not run, and said why (status 127, nothing
+/// written: minted's runner not loaded in the browser), is one plain
+/// diagnostic naming the program and the why, the log's line as web2c
+/// writes it; a command that failed without a why (latexminted's own
+/// failure) adds none. At -j1 and -j8.
+#[test]
+fn a_command_the_host_could_not_run_is_said_once_with_why() {
+    let doc = r"\immediate\write18{fakecmd gone x.txt}
+\immediate\write18{fakecmd broke x.txt}
+\immediate\write16{GOT:done}
+\bye
+";
+    for threads in [1, 8] {
+        let b = common::build(
+            options("gone", Some(Arc::new(Fake::default())), threads),
+            Some(&common::plain()),
+            doc,
+        );
+        let (_, log) = b.output();
+        assert_eq!(got(&log), ["done"], "-j{threads}: {log}");
+        assert!(
+            log.contains("runsystem(fakecmd gone x.txt)...executed safely (allowed)."),
+            "-j{threads}: {log}"
+        );
+        let said: Vec<String> = b
+            .diagnostics()
+            .iter()
+            .filter(|d| d.message.contains("could not run"))
+            .map(|d| d.message.clone())
+            .collect();
+        assert_eq!(
+            said,
+            ["`fakecmd' could not run here: the runner is not loaded"],
+            "-j{threads}"
+        );
+    }
+}
+
 /// A command not in the restricted list is not run, hook or not.
 #[test]
 fn a_command_not_allowed_is_not_run() {
@@ -435,4 +527,165 @@ fn the_evaluation_goes_on_while_a_command_runs() {
         during.iter().any(|&n| n >= 300),
         "jobs finished while it slept: {during:?}"
     );
+}
+
+/// A command after a page shipped as PDF (`\pdfoutput=1`), whose PDF side
+/// is a node that runs only once the line is quiet, standing before the
+/// command: the command runs once, on the file the job wrote, and the
+/// build ends. Before, the command waited for that node, which never ran
+/// before the quiet point, and the quiet point let the command go only to
+/// wait again, for ever (minted's `\write18` at the end of a document:
+/// `latexmk_minted` past 300 s at -j1 and -j8, lectures and handin-doc). At
+/// -j1 and -j8.
+#[test]
+fn a_command_after_a_pdf_page_runs_once() {
+    let doc = r"\pdfoutput=1 \def\made{none}
+Page one.\vfill\eject
+\immediate\openout3=ina.txt \immediate\write3{alpha}\immediate\closeout3
+\immediate\write18{fakecmd up ina.txt outa.tex}
+\openin1=outa.tex \ifeof1 \else\closein1 \input outa.tex \fi
+\immediate\write16{GOT:\made}
+\bye
+";
+    for threads in [1, 8] {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let fake = Arc::new(Fake::default());
+            let b = common::build(
+                options("pdfpage", Some(fake.clone()), threads),
+                Some(&common::plain()),
+                doc,
+            );
+            let (_, log) = b.output();
+            let calls = fake.calls.lock().unwrap().len();
+            let _ = tx.send((got(&log), calls, log));
+        });
+        let (got, calls, log) = rx
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .unwrap_or_else(|_| panic!("-j{threads}: the build did not end in 120 s"));
+        assert_eq!(got, ["ALPHA"], "-j{threads}: {log}");
+        assert_eq!(calls, 1, "-j{threads}");
+    }
+}
+
+/// A command answered from the memo reads only the files the call kept
+/// read: an edit of another file the job writes runs neither the command
+/// nor the run that makes it again (minted's commands on Grail read
+/// every file the job wrote, so each `.aux` change ran the run of every
+/// listing again). The run that called the host read every file it
+/// handed it, so the first edit runs it again, answered from the memo
+/// reading `inb.txt` alone; the edits after it do not. The edited builds
+/// equal cold builds of their texts.
+#[test]
+fn a_command_does_not_run_again_on_a_file_it_did_not_read() {
+    let fake = Arc::new(Fake::default());
+    let mut b = common::build(
+        options("upr", Some(fake.clone()), 1),
+        Some(&common::plain()),
+        &up_doc("alpha", "beta"),
+    );
+    assert_eq!(got(&b.output().1), ["ALPHA", "BETA"]);
+    for (k, a) in ["gamma", "delta", "epsilon"].into_iter().enumerate() {
+        b.edit(&up_doc(a, "beta"));
+        let reran: Vec<String> = b
+            .stats
+            .reruns
+            .iter()
+            .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+            .collect();
+        for r in &reran {
+            eprintln!("  {a}: rerun {r}");
+        }
+        let (dvi, log) = b.output();
+        assert_eq!(got(&log), [a.to_uppercase().as_str(), "BETA"], "{log}");
+        let cold = common::build(
+            options("upr", Some(Arc::new(Fake::default())), 1),
+            Some(&common::plain()),
+            &up_doc(a, "beta"),
+        );
+        assert_eq!(
+            common::first_difference(&dvi, &cold.output().0),
+            None,
+            "{a}"
+        );
+        assert!(
+            k == 0 || !reran.iter().any(|r| r.contains("Between them.")),
+            "{a}: the run of the command on inb.txt ran again: {reran:?}"
+        );
+    }
+    // (the command on inb.txt called once, in the first build)
+    assert_eq!(
+        fake.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.contains("inb.txt"))
+            .count(),
+        1,
+        "{:?}",
+        fake.calls.lock().unwrap()
+    );
+}
+
+/// A `\write` more to a file a run writes already leaves the names of
+/// the files the job writes as they were (a name once a run): a command
+/// answered from the memo, which reads those names, does not run again
+/// (on Grail a `\cite` of a cited key, a `\citation` more in the `.aux`,
+/// ran a minted listing's run again). The edited builds equal cold
+/// builds of their texts.
+#[test]
+fn a_write_more_to_a_written_file_does_not_run_a_command_again() {
+    let doc = |n: usize| {
+        format!(
+            r"\def\made{{none}}
+\immediate\openout5=other.txt {}\immediate\closeout5
+
+\immediate\openout4=inb.txt \immediate\write4{{beta}}\immediate\closeout4
+
+Between them.
+\immediate\write18{{fakecmd up inb.txt outb.tex}}
+\openin1=outb.tex \ifeof1 \else\closein1 \input outb.tex \fi
+{SHOW}
+\bye
+",
+            "\\immediate\\write5{x}".repeat(n)
+        )
+    };
+    let fake = Arc::new(Fake::default());
+    let mut b = common::build(
+        options("upw", Some(fake.clone()), 1),
+        Some(&common::plain()),
+        &doc(1),
+    );
+    assert_eq!(got(&b.output().1), ["BETA"]);
+    for n in [2, 3, 4] {
+        b.edit(&doc(n));
+        let reran: Vec<String> = b
+            .stats
+            .reruns
+            .iter()
+            .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+            .collect();
+        for r in &reran {
+            eprintln!("  {n}: rerun {r}");
+        }
+        let (dvi, log) = b.output();
+        assert_eq!(got(&log), ["BETA"], "{log}");
+        let cold = common::build(
+            options("upw", Some(Arc::new(Fake::default())), 1),
+            Some(&common::plain()),
+            &doc(n),
+        );
+        assert_eq!(
+            common::first_difference(&dvi, &cold.output().0),
+            None,
+            "{n}"
+        );
+        // (the first edit runs it again: its run handed the host every
+        // file, `a_command_does_not_run_again_on_a_file_it_did_not_read`)
+        assert!(
+            n == 2 || !reran.iter().any(|r| r.contains("Between them.")),
+            "{n}: the run of the command ran again: {reran:?}"
+        );
+    }
 }

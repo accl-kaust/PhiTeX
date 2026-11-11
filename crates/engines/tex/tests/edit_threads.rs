@@ -3,7 +3,7 @@
 //! calling thread alone to its end, and a one-letter edit of amsldoc that
 //! went on to rerun 1275 nodes took 26 s on one thread of 24.
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 

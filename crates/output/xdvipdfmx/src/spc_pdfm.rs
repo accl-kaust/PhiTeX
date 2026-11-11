@@ -35,7 +35,7 @@ pub const STRING_STREAM: i32 = 0;
 pub const FILE_STREAM: i32 = 1;
 
 /// `struct tounicode`: for the to-UTF16-BE conversion of text strings.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct Tounicode {
     pub cmap_id: i32,
     pub unescape_backslash: i32,
@@ -54,7 +54,7 @@ impl Default for Tounicode {
 }
 
 /// `struct spc_pdf_` (`_pdf_stat`).
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct State {
     /// Pending annotation dict.
     pub annot_dict: Option<Obj>,

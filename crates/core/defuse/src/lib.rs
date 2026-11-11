@@ -17,7 +17,10 @@
 //! # The structure (what makes it mergeless)
 //! There is no world. The line is cut into segments, bounded ranges of
 //! positions ([`order`], [`segment`]). A segment owns its nodes, its
-//! definitions, its readers, its contributions and their fold. A commit locks
+//! definitions, the fields read at its nodes, its contributions and their
+//! fold; a node's reads are in its record alone, and a walk finds the
+//! readers of a field in the records of the nodes it passes ([`guard`],
+//! [`reads`]). A commit locks
 //! the committing node's own segment and nothing else ([`commit`]); the walk
 //! forward that re-asks readers takes read locks of later segments one at a
 //! time and flips atomics on nodes. A per-field index ([`index`]) names the
@@ -65,26 +68,28 @@ mod commit;
 mod crew;
 mod ctx;
 mod engine;
+mod guard;
 mod index;
 mod lock;
 mod node;
 pub mod obs;
 mod order;
 mod read;
+mod reads;
 mod sched;
 mod segment;
 mod table;
 mod values;
 
 pub use api::{
-    At, Brackets, Cause, EditSource, Effect, EnvProvider, EvalError, FieldAt, Limits, Locality, MayDefine, Monoid,
-    NoEdits, NodeId, NodeInfo, NodeState, OpId, Operation, PathId, ProjId, Projection, Report, SeqMonoid, Settled,
-    Step, Stop, SumMonoid, Times, UnitId,
+    AppendFn, At, Brackets, Cause, EditSource, Effect, EnvProvider, EvalError, FieldAt, Limits, Locality, MayDefine,
+    Monoid, NoEdits, NodeId, NodeInfo, NodeState, OpId, Operation, PathId, ProjId, Projection, Rel, Report, SeqMonoid,
+    Settled, Step, Stop, SumMonoid, Times, UnitId,
 };
 pub use ctx::{Ctx, View};
 pub use engine::Engine;
 pub use lock::held as locks_held;
-pub use read::{alias_of, alias_value};
+pub use read::{alias_of, alias_parts, alias_target_plus, alias_value, alias_value_plus};
 
 /// The stack of every thread a run is made on (the evaluation's own and
 /// the pool's): runs nest as deep as their client allows, and TeX allows

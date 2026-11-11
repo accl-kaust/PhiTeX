@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use crate::ctx::Result;
 
 /// A file's bytes and a position.
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct MemFile {
     pub data: Arc<[u8]>,
     pub pos: usize,

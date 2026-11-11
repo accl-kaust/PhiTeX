@@ -1,0 +1,18 @@
+% A beamer document beside a .nav an older beamer wrote (its first line
+% \beamer@endinputifotherversion ends its reading at once; the TeX Live
+% manual cursolatex ships one): the page loop's piece for the first frame
+% asks for the page after it, and the run goes again from its start to
+% that candidate (a second pass). That pass committed the first pass's
+% reads and waits too, the page builder stayed stopped at it, and the
+% first frame's page was never made again at -j1: no PDF ("the pages'
+% writers ran before every page had finished").
+\documentclass[svgnames]{beamer}
+\usetheme{Warsaw}
+\begin{document}
+\begin{frame}{Licença GNU FDL}
+\end{frame}
+\begin{frame}{Bibliografia}
+\begin{thebibliography}{1}
+\end{thebibliography}
+\end{frame}
+\end{document}

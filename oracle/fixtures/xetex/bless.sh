@@ -4,19 +4,19 @@
 # -recorder), with fontconfig seeing TeX Live's OpenType and TrueType
 # fonts only (the font index the graph is given lists the same):
 #
-#   crates/phitex-flow/tests/xetex/bless.sh OUT
+#   oracle/fixtures/xetex/bless.sh OUT
 #
-# OUT/ini/NAME.{xdv,pdf,log,fls}   xetex -ini -etex on tests/xetex/ini/NAME.tex
-# OUT/plain/NAME.{xdv,log}        xetex -ini -etex on plain.tex + tests/plain/NAME.tex
-# OUT/docs/NAME.{xdv,pdf,log,fls,aux,...}  xelatex on tests/xetex/docs/NAME.tex
-#                                 and tests/latex/docs/NAME.tex (first run)
+# OUT/ini/NAME.{xdv,pdf,log,fls}   xetex -ini -etex on oracle/fixtures/xetex/ini/NAME.tex
+# OUT/plain/NAME.{xdv,log}        xetex -ini -etex on plain.tex + oracle/fixtures/plain/NAME.tex
+# OUT/docs/NAME.{xdv,pdf,log,fls,aux,...}  xelatex on oracle/fixtures/xetex/docs/NAME.tex
+#                                 and oracle/fixtures/latex/docs/NAME.tex (first run)
 # OUT/fmt/xelatex.{log,fls}       xetex -ini -etex -jobname=xelatex *xelatex.ini
 # OUT/fonts.conf, OUT/fc-list.txt the fonts xetex saw
 # OUT/versions.txt
 set -uo pipefail
 out=$(realpath -m "${1:?OUT}")
 here=$(cd "$(dirname "$0")" && pwd)
-flow=$(cd "$here/../.." && pwd)
+flow=$(cd "$here/.." && pwd)  # oracle/fixtures
 mkdir -p "$out"/{ini,plain,docs,fmt}
 export SOURCE_DATE_EPOCH=0 FORCE_SOURCE_DATE=1
 dist=$(kpsewhich -var-value TEXMFDIST)
@@ -40,10 +40,10 @@ run() { # dir name engine-args...
   (cd "$d" && "$@" < /dev/null > /dev/null 2>&1) || true
 }
 # IniTeX documents
-for f in "$flow"/tests/xetex/ini/*.tex; do
+for f in "$flow"/xetex/ini/*.tex; do
   n=$(basename "$f" .tex)
   for mode in xdv pdf; do
-    d=$tmp/ini-$n-$mode; mkdir -p "$d"; cp "$flow"/tests/xetex/ini/* "$d/"
+    d=$tmp/ini-$n-$mode; mkdir -p "$d"; cp "$flow"/xetex/ini/* "$d/"
     if [ $mode = xdv ]; then
       run "$d" "$n" xetex -ini -etex -interaction=batchmode -recorder -no-pdf "$n.tex"
       cp "$d/$n.xdv" "$d/$n.log" "$d/$n.fls" "$out/ini/" 2>/dev/null
@@ -58,12 +58,12 @@ python3 - "$flow" "$tmp/plain" <<'EOF'
 import sys, os
 flow, outd = sys.argv[1], sys.argv[2]
 os.makedirs(outd, exist_ok=True)
-s = open(f"{flow}/tests/dvi/plaintext.tex", encoding="latin-1").read()
+s = open(f"{flow}/dvi/plaintext.tex", encoding="latin-1").read()
 at = s.index("\\output={}\n")
-h = open(f"{flow}/tests/hyph/hyphen.tex", encoding="latin-1").read()
+h = open(f"{flow}/hyph/hyphen.tex", encoding="latin-1").read()
 plain = s[:at].replace("% (\\input hyphen: no hyphenation patterns on the graph yet)\n", h)
 for name in ["story", "pages", "display", "table", "hyphens"]:
-    b = open(f"{flow}/tests/plain/{name}.tex", encoding="latin-1").read()
+    b = open(f"{flow}/plain/{name}.tex", encoding="latin-1").read()
     open(f"{outd}/{name}.tex", "w", encoding="latin-1").write(plain + b)
     open(f"{outd}/{name}-default.tex", "w", encoding="latin-1").write(plain + "\\output={}\n" + b)
 EOF
@@ -77,14 +77,14 @@ d=$tmp/fmt; mkdir -p "$d"
 run "$d" xelatex xetex -ini -etex -jobname=xelatex -recorder -interaction=batchmode '*xelatex.ini'
 cp "$d/xelatex.log" "$d/xelatex.fls" "$out/fmt/" 2>/dev/null
 # LaTeX documents under xelatex (first run, no .aux)
-for f in "$flow"/tests/xetex/docs/*.tex "$flow"/tests/latex/docs/*.tex; do
+for f in "$flow"/xetex/docs/*.tex "$flow"/latex/docs/*.tex; do
   n=$(basename "$f" .tex)
   [ "$n" = umath-body ] && continue
   src=$(dirname "$f")
   for mode in xdv pdf; do
     d=$tmp/doc-$n-$mode; mkdir -p "$d"
     cp "$f" "$d/"; cp "$src"/"$n"-* "$d/" 2>/dev/null; [ "$n" = umath ] && cp "$src/umath-body.tex" "$d/"
-    [ "$src" = "$flow/tests/xetex/docs" ] && cp "$src"/xpic-* "$d/"
+    [ "$src" = "$flow/xetex/docs" ] && cp "$src"/xpic-* "$d/"
     if [ $mode = xdv ]; then
       run "$d" "$n" xelatex -interaction=batchmode -recorder -no-pdf "$n.tex"
       for x in "$d/$n".*; do case $x in *.tex) ;; *) cp "$x" "$out/docs/" ;; esac; done

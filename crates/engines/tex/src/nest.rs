@@ -210,7 +210,8 @@ impl Run<'_, '_> {
         self.nest.push(l);
     }
 
-    fn open_level(&mut self, l: &mut Level) {
+    pub(crate) fn open_level(&mut self, l: &mut Level) {
+        self.flush_bulk_codes();
         let (gid, sb, db, st) = self.st.open();
         l.gid = gid;
         l.save_base = sb;
@@ -255,6 +256,7 @@ impl Run<'_, '_> {
     /// the engine as a scope, the groups open at the end of the run):
     /// the local definitions made in their groups are the run's own.
     pub(crate) fn abandon_levels(&mut self, ls: &[Level]) {
+        self.flush_bulk_codes();
         self.muts += 1;
         if let Some(l) = ls.iter().find(|l| l.group != 0) {
             self.st.abandon(l.save_base, l.def_base, l.open_stamp);

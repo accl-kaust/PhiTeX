@@ -52,6 +52,17 @@ impl Run<'_, '_> {
         Ok(b)
     }
 
+    /// [`Run::next_ck`] for a fetch whose token is expanded at once where
+    /// it expands (a character run's lookahead, §1038, then `x_token`): a
+    /// derived name's symbol kept for its expansion ([`Run::d_ok`]).
+    pub(crate) fn next_ck_x(&mut self) -> R<bool> {
+        self.d_ok = true;
+        let b = self.get_next();
+        self.d_ok = false;
+        self.ck()?;
+        Ok(b)
+    }
+
     /// `get_next` without a `Result`: a halt is raised ([`Run::raise`]).
     #[allow(clippy::inline_always)]
     #[inline(always)]
@@ -195,6 +206,19 @@ impl Run<'_, '_> {
                 };
                 return Ok(true);
             }
+            if let Some(n) = t.as_cs()
+                && n.frozen()
+                && n.starts_with(crate::boxscope::BOX_END)
+            {
+                // a box closed with the engine scope it was in, appended
+                // outside it (`crate::boxscope`, [`Run::box_end_left`])
+                self.cur = Cur {
+                    tok: t,
+                    cmd: cmd::IGNORE,
+                    chr: crate::boxscope::BOX_END_CHR,
+                };
+                return Ok(true);
+            }
             if t == crate::expand::notexpanded_tok() {
                 // §358
                 let Some(t2) = self.next_tok()? else {
@@ -255,6 +279,17 @@ impl Run<'_, '_> {
                     }
                 }
                 self.interp_short = true;
+            } else if self.doc_ended && !self.doc_end_checked {
+                // §362 at the end of the main file: §336 checks what it
+                // ended in, as at an interpreted file's end; pdfTeX then
+                // reads what §339 inserted, and only at the end again is
+                // the job aborted (§360)
+                self.doc_end_checked = true;
+                match self.file_ended() {
+                    Ok(true) => return self.next_or_end(),
+                    Ok(false) => {}
+                    Err(h) => return self.raise(h),
+                }
             }
             return self.raise(Halt::Fatal);
         }
@@ -341,23 +376,23 @@ impl Run<'_, '_> {
                 }
                 _ => ("text", Tok::ch(2, u32::from(b'}'))),
             };
+            // (`sprint_cs(warning_index)`, §338)
             let mut cs = String::new();
-            self.show_toks_into(&mut cs, std::slice::from_ref(&w))?;
-            let msg = format!(
-                "Forbidden control sequence found while scanning {what} of {}",
-                cs.trim_end()
-            );
-            self.outer_error(msg)?;
-            self.push_toks([ins]);
+            let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
+            crate::print::sprint_cs(&mut cs, w, esc);
+            let msg = format!("Forbidden control sequence found while scanning {what} of {cs}");
+            // (§339 inserts before `error`: the context shows it)
+            self.push_inserted(ins);
+            self.runaway_error(msg, status)?;
             return Ok(());
         }
         // §336's skipping case
-        self.incomplete_if()
+        self.incomplete_if(false)
     }
 
     /// §336's skipping case: "Incomplete \if...; all text was ignored
     /// after line n", and a `\fi` inserted to end the skip.
-    pub(crate) fn incomplete_if(&mut self) -> R<()> {
+    pub(crate) fn incomplete_if(&mut self, ended: bool) -> R<()> {
         let code = self.if_codes.last().copied().unwrap_or(0);
         let name = crate::prims::PRIMS
             .iter()
@@ -367,18 +402,85 @@ impl Run<'_, '_> {
         // input included)
         let line = self.line_of_mark(self.skip_from)?;
         let msg = format!("Incomplete \\{name}; all text was ignored after line {line}");
-        self.outer_error(msg)?;
-        self.push_toks([crate::expand::frozen_fi_tok()]);
-        Ok(())
-    }
-
-    fn outer_error(&mut self, msg: String) -> R<()> {
+        // (§336's `ins_error`: the `\fi` inserted, then `error`)
+        self.push_inserted(crate::expand::frozen_fi_tok());
+        // (§336's help3, its first line another where the file ended)
+        let help = [
+            if ended {
+                "The file ended while I was skipping conditional text."
+            } else {
+                "A forbidden control sequence occurred in skipped text."
+            },
+            "This kind of error happens when you say `\\if...' and forget",
+            "the matching `\\fi'. I've inserted a `\\fi'; this might work.",
+        ];
         if self.interp.is_some() {
             self.interp_errs.push(msg);
             Ok(())
         } else {
-            self.log("error", &msg)
+            self.log_help("error", &msg, &help)
         }
+    }
+
+    /// `ins_list` (§323): `t` pushed as inserted text (§307), shown so in
+    /// an error's context.
+    pub(crate) fn push_inserted(&mut self, t: Tok) {
+        let r = self.input.arena.alloc(&[t]);
+        self.input.push_toks(r, ty::INSERTED);
+    }
+
+    /// §338's error, its runaway list before it (§306): logged where the
+    /// list's scan sees what §339 inserted ([`Run::take_runaway`]), the
+    /// context as it is now (the inserted list on top).
+    fn runaway_error(&mut self, msg: String, status: u8) -> R<()> {
+        if self.interp.is_some() {
+            self.interp_errs.push(msg);
+            return Ok(());
+        }
+        let mut marks = Vec::new();
+        let tail = self.error_tail(&[], &mut marks)?;
+        self.runaway_due = Some(crate::run::RunawayDue {
+            msg,
+            what: match status {
+                crate::run::SCAN_DEFINING => "definition",
+                crate::run::SCAN_MATCHING => "argument",
+                _ => "text",
+            },
+            tail,
+            marks,
+        });
+        Ok(())
+    }
+
+    /// The error [`Run::runaway_error`] left due, now that the list's scan
+    /// has it (`toks`; `None`: lost to a halt), logged: the runaway list,
+    /// the message, the context and §338's help.
+    pub(crate) fn take_runaway(&mut self, toks: Option<&[Tok]>) -> R<()> {
+        let Some(d) = self.runaway_due.take() else {
+            return Ok(());
+        };
+        if let Some(t) = toks {
+            self.log_runaway(d.what, t)?;
+        }
+        self.log_event("error", &d.msg)?;
+        let stop = self.error_count >= 100;
+        let mut tail = d.tail;
+        if !stop {
+            for h in RUNAWAY_HELP {
+                tail.push(crate::context::NL);
+                tail.push_str(h);
+            }
+        }
+        let k = if stop {
+            crate::log::CONTEXT_ONLY
+        } else {
+            crate::log::CONTEXT
+        };
+        self.log_lines_any(k, &tail, d.marks)?;
+        if stop {
+            self.log_hundred()?;
+        }
+        Ok(())
     }
 
     /// §336–§339 at the end of a file (§362), or of an interpreted one: a token list being
@@ -390,7 +492,7 @@ impl Run<'_, '_> {
         // (§362's `check_outer_validity` while skipping: the skip ends at
         // the file's end, §336)
         if self.in_skip {
-            self.incomplete_if()?;
+            self.incomplete_if(true)?;
             return Ok(true);
         }
         let Some((status, w)) = self.scanner else {
@@ -404,28 +506,35 @@ impl Run<'_, '_> {
             }
             _ => ("text", Tok::ch(2, u32::from(b'}'))),
         };
+        // (`sprint_cs(warning_index)`: the name as it is, LaTeX's robust
+        // `\textbf ` with its space, "use of \textbf .")
         let mut cs = String::new();
-        self.show_toks_into(&mut cs, std::slice::from_ref(&w))?;
-        let msg = format!("File ended while scanning {what} of {}", cs.trim_end());
-        if self.interp.is_some() {
-            // (a written file's text read as its read-back will read it:
-            // the error is the read-back's, [`Run::read_back`])
-            self.interp_errs.push(msg);
-        } else {
-            self.log("error", &msg)?;
-        }
-        self.push_toks([ins]);
+        let esc = i64::from(self.ipar(crate::fields::Par::escapechar)?);
+        crate::print::sprint_cs(&mut cs, w, esc);
+        let msg = format!("File ended while scanning {what} of {cs}");
+        // (§339 inserts before `error`: the context shows it; a written
+        // file's text read as its read-back will read it: the error is
+        // the read-back's, [`Run::read_back`])
+        self.push_inserted(ins);
+        self.runaway_error(msg, status)?;
         Ok(true)
     }
 
     /// The token `get_r_token` reads (§1215): a control sequence's
-    /// meaning is not looked up unless an alignment of this run watches
-    /// for `&` and `\cr` (§342); `\outer` is not checked here (§336
-    /// at `normal`).
+    /// meaning is not looked up, and where an alignment of this run
+    /// watches for `&` and `\cr` (§342) only its class is
+    /// ([`crate::val::step_projection`]: `\@tempswafalse` in a tikz-cd
+    /// matrix, `\let\if@tempswa\iffalse`, read the switch whole, and
+    /// every such cell's run ran again where an edit left it the other
+    /// way); `\outer` is not checked here (§336 at `normal`).
     pub(crate) fn get_name_token(&mut self) -> R<()> {
-        self.bare = self.aopen <= 0;
-        self.get_token();
-        self.bare = false;
+        if self.aopen <= 0 {
+            self.bare = true;
+            self.get_token();
+            self.bare = false;
+        } else {
+            self.get_token_stored();
+        }
         self.ck()
     }
 
@@ -442,8 +551,13 @@ impl Run<'_, '_> {
     #[inline]
     pub(crate) fn get_token_tok(&mut self) -> Tok {
         // (an alignment of this run counts every brace, §342: the slow
-        // path then)
-        if self.aopen == 0 {
+        // path then; so does a token made `\outer`, §357, whose meaning the
+        // slow path reads: none is unless [`crate::val::OUTER_MADE`] reaches
+        // this run, read here once)
+        if self.outer_known == crate::run::OUTER_UNREAD && !self.outer_read() {
+            return self.cur.tok;
+        }
+        if self.aopen == 0 && self.outer_known == crate::run::OUTER_NONE {
             let next = match self.input.next_plain_of_top() {
                 Some(t) => Some(t),
                 None if self.input.pop_spent_top() => self.input.next_plain_of_top(),
@@ -458,6 +572,27 @@ impl Run<'_, '_> {
         self.cur.tok
     }
 
+    /// Reads whether any macro is `\outer` for [`Run::get_token_tok`]; false
+    /// where the read raised a halt.
+    #[cold]
+    #[inline(never)]
+    fn outer_read(&mut self) -> bool {
+        match self.get(crate::val::OUTER_MADE) {
+            Ok(x) => {
+                self.outer_known = if x.is_some() {
+                    crate::run::OUTER_SOME
+                } else {
+                    crate::run::OUTER_NONE
+                };
+                true
+            }
+            Err(h) => {
+                self.raise(h);
+                false
+            }
+        }
+    }
+
     /// `get_token` for a token that is stored or matched, never expanded
     /// (a macro's arguments, a definition's parameter text and body, a
     /// token list's body, §392, §473–§479): of a control sequence's
@@ -468,11 +603,33 @@ impl Run<'_, '_> {
         self.step_reads = was;
     }
 
+    /// Whether `get_x_token` stops at the current token, a symbol, for
+    /// `\\if`'s operand ([`Run::size_stop`]).
+    #[cold]
+    #[inline(never)]
+    fn size_stop_here(&self) -> bool {
+        (self.size_stop == Some(self.expand_depth) && crate::defer::is_size(self.cur.tok))
+            || (self.reg_stop == Some(self.expand_depth)
+                && crate::defer::sym_of(self.cur.tok).is_some())
+    }
+
     /// `get_x_token` (§380): a halt is raised, never returned.
     pub(crate) fn get_x_token(&mut self) {
+        // (this call's alone: a test or `\expandafter` it expands reads
+        // its own tokens through `get_x_token` as TeX does)
+        let pic_stop = std::mem::replace(&mut self.pic_stop, false);
         loop {
+            // (a derived name's symbol is expanded through its name,
+            // [`Run::d_ok`])
+            self.d_ok = true;
             self.next_or_end();
+            self.d_ok = false;
             if self.cur.cmd <= cmd::MAX_COMMAND || self.halt.is_some() {
+                return;
+            }
+            // (a picture's `\begin` where the caller places pictures:
+            // left unexpanded, `Run::pic_stop`)
+            if pic_stop && self.pic_here() {
                 return;
             }
             // (a macro: its body goes on top here, no expansion level)
@@ -493,6 +650,14 @@ impl Run<'_, '_> {
             {
                 return;
             }
+            // (a file size's symbol as `\if`'s operand, kept:
+            // [`Run::size_stop`])
+            if self.cur.cmd == cmd::SYM
+                && (self.size_stop.is_some() || self.reg_stop.is_some())
+                && self.size_stop_here()
+            {
+                return;
+            }
             let nr = std::mem::replace(&mut self.num_reads, false);
             self.expand();
             self.num_reads = nr;
@@ -508,7 +673,9 @@ impl Run<'_, '_> {
     /// is inserted, its braces counted in the entry's `align_state`).
     pub(crate) fn get_x_or_protected(&mut self) -> R<()> {
         loop {
+            self.d_ok = true;
             self.next_or_end();
+            self.d_ok = false;
             if self.cur.cmd <= cmd::MAX_COMMAND || self.halt.is_some() {
                 return Ok(());
             }
@@ -581,7 +748,9 @@ impl Run<'_, '_> {
             if self.halt.is_some() {
                 return;
             }
+            self.d_ok = true;
             self.next_or_end();
+            self.d_ok = false;
         }
     }
 
@@ -623,7 +792,17 @@ impl Run<'_, '_> {
                     if let Some(t) = self.src_next()? {
                         return Ok(Some(t));
                     }
+                    // (a line a node boundary cut: its continuation, the
+                    // next segment of the text or of the sibling pulled
+                    // next, goes on in the state it was left in, §303; it
+                    // began in its own, so a space after a control word
+                    // the cut ended with was a space token: smartunits'
+                    // `Title={ ... \smart@version }` cut after the name)
+                    let carried = self.input.top_line().filter(|s| !s.ends).map(|s| s.state);
                     self.pop_input_level();
+                    if let Some(st) = carried {
+                        self.carry_cut_state(st);
+                    }
                 }
                 _ => {
                     // (a document file's lines are paragraph-region
@@ -636,7 +815,7 @@ impl Run<'_, '_> {
                     }
                     let f = self.input.file_mut(top);
                     if f.has_lines() {
-                        let line = f.take_line(self.xe);
+                        let line = f.take_line();
                         self.input.push_line(line);
                     } else {
                         self.pop_input_level();
@@ -644,6 +823,20 @@ impl Run<'_, '_> {
                 }
             }
         }
+    }
+
+    /// The state a cut line was left in given to its continuation: the
+    /// text's next segment where it is there, else the first segment of
+    /// the sibling pulled next ([`Run::pull`]).
+    fn carry_cut_state(&mut self, st: u8) {
+        let at = self.input.text_at;
+        if let Some(crate::input::Seg::Line(l)) = self.input.text.get_mut(at) {
+            if !l.starts {
+                l.state = st;
+            }
+            return;
+        }
+        self.cut_state = Some(st);
     }
 
     /// Pops the level on top, keeping what the command in progress found
@@ -723,6 +916,42 @@ impl Run<'_, '_> {
 
     // --------------------------------------------------------- the text
 
+    /// A read-on reads a prefix every node of which has run: where one
+    /// has not, the run stops (`Halt::Hole`), and at its first command,
+    /// nothing done, it waits for that node, a wait and not a run (plain's
+    /// story at -j16: pieces whose first command reads on ran again whole
+    /// once the text before them had run).
+    fn read_on_after_text_before(&mut self) -> R<()> {
+        if let Some(h) = self.cx.hole_before()? {
+            self.trace_read_on_hole();
+            if self.cmds <= 1 {
+                return Err(Halt::Stop(self.cx.wait_for_hole(h, true)));
+            }
+            return Err(Halt::Hole);
+        }
+        Ok(())
+    }
+
+    /// (`PHITEX_CUT_TRACE`) A read-on that meets a hole.
+    fn trace_read_on_hole(&self) {
+        if crate::exec::obs_flag!("PHITEX_CUT_TRACE") {
+            eprintln!(
+                "read-on: node {} ({}) meets a hole after {} commands, pulled {}, open span {}, eof {}, levels {}, nest {:?}",
+                self.cx.node().raw(),
+                self.op_name(),
+                self.cmds,
+                self.pulled,
+                self.open_span(),
+                self.eof,
+                self.input.levels.len(),
+                self.nest
+                    .iter()
+                    .map(|l| (l.mode, l.group, l.owns, l.list.len()))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
     /// Claims the next sibling's text (its frames go to the back of the
     /// text).
     pub(crate) fn pull(&mut self) -> R<bool> {
@@ -737,13 +966,22 @@ impl Run<'_, '_> {
                 // (a read-on is serial, TeX's chain: it reads on a prefix
                 // every node of which has run, not a mix of the
                 // definitions some have made and others have not yet)
-                if self.cx.hole_before()?.is_some() {
-                    return Err(Halt::Hole);
-                }
+                self.read_on_after_text_before()?;
                 let args = self.resolve_units(&args)?;
                 let mut segs = crate::run::decode_segs(self.v, &args);
+                // (a line cut before this sibling, left in its state:
+                // [`Run::carry_cut_state`])
+                if let Some(st) = self.cut_state.take()
+                    && let Some(crate::input::Seg::Line(l)) = segs.first_mut()
+                    && !l.starts
+                {
+                    l.state = st;
+                }
                 if let Some(n) = self.cx.followed(self.pulled) {
-                    crate::run::own_lines(&mut segs, n.raw());
+                    crate::run::own_lines(
+                        &mut segs,
+                        crate::run::lines_owner(self.v, n.raw(), &args),
+                    );
                 }
                 // (where the sibling's text begins, unless its first
                 // segment continues the line before it)
@@ -818,6 +1056,7 @@ impl Run<'_, '_> {
                 if self.top {
                     self.muts += 1;
                     self.eof = true;
+                    self.doc_ended = true;
                     Ok(false)
                 } else {
                     Err(Halt::Starve)
@@ -874,7 +1113,11 @@ impl Run<'_, '_> {
         // (one group of the run's own open is no bar: it is left to the
         // engine as the scope the given-back sibling runs in,
         // `Run::run_all`)
-        if (self.open_span() && !self.can_leave_scope()) || self.aopen != 0 {
+        if (self.open_span()
+            && !self.can_leave_scope()
+            && !(crate::boxscope::on() && self.can_leave_lists()))
+            || self.aopen != 0
+        {
             return refuse(&|| {
                 format!(
                     "open: {} nest levels, {} conditionals, {} alignments",
@@ -1067,7 +1310,6 @@ impl Run<'_, '_> {
         if let Some(l) = begun {
             self.muts += 1;
             self.lines_entered -= 1;
-            self.lines_read -= 1;
             // (and in the lines the run contributes by file,
             // `Run::doc_line_begun`, as §362 counted it there)
             if l.lineno == 0 && !l.rescanned {
@@ -1101,7 +1343,7 @@ impl Run<'_, '_> {
         state: u8,
         endch: i64,
     ) -> R<bool> {
-        let counted = (self.lines_entered, self.lines_read);
+        let counted = self.lines_entered;
         let doc_lines = self.doc_lines.clone();
         let saved = std::mem::replace(&mut self.input, crate::input::Input::new());
         let (eof, no_pull) = (self.eof, self.no_pull);
@@ -1116,7 +1358,7 @@ impl Run<'_, '_> {
                 .input
                 .top_line()
                 .is_some_and(|x| x.loc == loc && x.state == state && x.endch == endch);
-        (self.lines_entered, self.lines_read) = counted;
+        self.lines_entered = counted;
         self.doc_lines = doc_lines;
         self.input = saved;
         self.eof = eof;
@@ -1392,9 +1634,12 @@ impl Run<'_, '_> {
             && s.endch == -2
         {
             let (starts, ends) = (s.starts, s.ends);
-            // (XeTeX's `input_line`: the line's bytes made characters)
+            // (XeTeX's `input_line`: the line's bytes made characters;
+            // pdfTeX's, through a TCX's `xord`)
             if self.xe {
                 self.xe_decode_top()?;
+            } else {
+                self.tcx_decode_top()?;
             }
             // §360: `\endlinechar` as it is when the line is read goes
             // after its last character (an assignment on the line itself
@@ -1409,7 +1654,6 @@ impl Run<'_, '_> {
             if starts {
                 self.muts += 1;
                 self.lines_entered += 1;
-                self.lines_read += 1;
                 // (a `\read` line is no file's, §483: `line` stays)
                 if let Some(s) = self.input.top_line()
                     && s.lineno == 0
@@ -1560,6 +1804,14 @@ impl Run<'_, '_> {
             let mut buf = std::mem::take(&mut next.buf);
             self.xe_decode_joined(&mut buf, origin)?;
             next.buf = buf;
+        } else if !self.xe
+            && self.input.line(top).endch != -2
+            && !next.chars
+            && !next.rescanned
+            && next.buf.iter().any(|&c| c >= 0x80)
+            && let Some(t) = self.tcx()?
+        {
+            t.decode(&mut next.buf);
         }
         // (a sibling whose text began here now continues the line on top)
         for p in &mut self.pull_at {
@@ -1941,7 +2193,7 @@ impl Run<'_, '_> {
                     && let Some(n) = t.as_cs()
                 {
                     let f = Tok::cs(&format!("{n}F"));
-                    self.input.arena.set(i, f);
+                    self.input.set_tok(i, f);
                     return;
                 }
             }
@@ -2030,3 +2282,12 @@ fn hex(c: u32) -> u32 {
         c - u32::from(b'a') + 10
     }
 }
+
+/// §338's help (the runaway's): "File ended" and "Forbidden control
+/// sequence found".
+const RUNAWAY_HELP: [&str; 4] = [
+    "I suspect you have forgotten a `}', causing me",
+    "to read past where you wanted me to stop.",
+    "I'll try to recover; but if the error is serious,",
+    "you'd better type `E' or `X' now and fix your file.",
+];

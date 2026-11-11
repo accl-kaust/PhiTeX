@@ -2,7 +2,7 @@
 //! `tests/gen/linebreak.py` and holds `\showbox` of paragraphs of rules,
 //! glue, penalties, kerns and discretionaries under varied parameters.
 
-mod common;
+use crate::common;
 
 use common::{NoFonts, cases, parse_glue, show_list};
 use phitex_typeset::glue::Glue;

@@ -1,0 +1,23 @@
+% Macros defined in one case and used in another: btparse looks them up
+% lowercased, as it defines them.
+ @String{CACM = "Communications of the {ACM}" }
+ @String{CACM = "Commun. {ACM}" }
+ @String{JACM = "J. ACM" }
+
+@periodical{JCohen96,
+  editor = "Jacques Cohen",
+  title = "Special issue: Digital Libraries",
+  journal = CACM,
+  volume = "39",
+  number = "11",
+  month = nov,
+  year = "1996",
+}
+
+@Article{Cohen07,
+  author = "Sarah Cohen and Werner Nutt",
+  title = "Deciding equivalances among conjunctive aggregate queries",
+  journal = JAcm,
+  volume = 54,
+  year = 2007,
+}

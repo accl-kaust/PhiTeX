@@ -8,7 +8,7 @@
 //! text ahead of the page's finisher reads it undefined and turns until
 //! the finisher defines it.
 
-mod common;
+use crate::common;
 
 use std::time::{Duration, Instant};
 

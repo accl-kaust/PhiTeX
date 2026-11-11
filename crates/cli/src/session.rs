@@ -56,7 +56,7 @@ impl Session {
         // (kpathsea opened for the job and for the format on threads of
         // their own while the main file is read)
         let (text, tree, format_tree) = std::thread::scope(|s| {
-            let tree = s.spawn(|| Arc::new(tex::Tree::open(&job.engine)));
+            let tree = s.spawn(|| Arc::new(tex::Tree::open(&job.engine, &job.inputs)));
             let format_tree = s.spawn(|| Arc::new(tex::Tree::open_format(&job.engine)));
             let text = std::fs::read(&job.path).map_err(|e| format!("{}: {e}", job.path.display()));
             phitex_tex::timeline::lap("session: the main file read");
@@ -69,7 +69,11 @@ impl Session {
         });
         let text = text?;
         let (store, out) = Self::store_and_out(&job, note);
-        let host = Arc::new(Machine { tree, format_tree });
+        let host = Arc::new(Machine {
+            tree,
+            format_tree,
+            distribution: std::sync::OnceLock::new(),
+        });
         Ok(Session {
             live: phitex_live::session::Session::new(job, text, host, store, out.clone(), status),
             out,
@@ -93,7 +97,7 @@ impl Session {
             crate::shelf::font_index(&files)?;
         }
         let (store, out) = Self::store_and_out(&job, note);
-        let host = Arc::new(crate::shelf::ShelfHost { files });
+        let host = Arc::new(crate::shelf::ShelfHost::new(files, &job.inputs));
         Ok(Session {
             live: phitex_live::session::Session::new(job, text, host, store, out.clone(), status),
             out,
@@ -157,6 +161,9 @@ impl Session {
 struct Machine {
     tree: Arc<tex::Tree>,
     format_tree: Arc<tex::Tree>,
+    /// The distribution's folders ([`tex::Tree::distribution`]), once
+    /// asked.
+    distribution: std::sync::OnceLock<Vec<PathBuf>>,
 }
 
 impl Host for Machine {
@@ -164,8 +171,18 @@ impl Host for Machine {
         self.tree.input(name)
     }
 
+    fn locate_font(&self, name: &str) -> Option<PathBuf> {
+        self.tree.font(name)
+    }
+
     fn read(&self, path: &Path) -> Option<Vec<u8>> {
         std::fs::read(path).ok()
+    }
+
+    /// Its size, modification and change times and inode
+    /// ([`disk_stamp`]).
+    fn stamp(&self, path: &Path) -> Option<Vec<u8>> {
+        disk_stamp(path)
     }
 
     /// Whether two names are one file on disk.
@@ -180,6 +197,14 @@ impl Host for Machine {
         std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
+    /// Under one of TeX Live's trees, or the cache's fonts: as found (no
+    /// call to the system), else canonical.
+    fn distribution(&self, path: &Path) -> bool {
+        let dirs = self.distribution.get_or_init(|| self.tree.distribution());
+        let under = |p: &Path| dirs.iter().any(|d| p.starts_with(d));
+        under(path) || (path.is_absolute() && std::fs::canonicalize(path).is_ok_and(|p| under(&p)))
+    }
+
     fn has_format_file(&self, name: &str) -> bool {
         self.format_tree.input(name).is_some()
     }
@@ -188,7 +213,7 @@ impl Host for Machine {
     fn format_finder(&self) -> Option<Finder> {
         let tree = self.format_tree.clone();
         Some(Arc::new(move |name: &str| {
-            let p = tree.input(name)?;
+            let p = tree.find(name)?;
             let bytes = std::fs::read(&p).ok()?;
             Some((p.to_string_lossy().into_owned(), bytes))
         }))
@@ -200,7 +225,7 @@ impl Host for Machine {
     fn content_key(&self) -> Option<phitex_tex::ContentKey> {
         let tree = self.format_tree.clone();
         Some(Arc::new(move |name: &str| {
-            let p = tree.input(name)?.to_string_lossy().into_owned();
+            let p = tree.find(name)?.to_string_lossy().into_owned();
             let k = phitex_tex::file_stat_key(&p);
             (!k.is_empty()).then_some((p, k))
         }))
@@ -241,13 +266,16 @@ impl Host for Machine {
     /// The commands neither in process nor refused: run as processes,
     /// each in a scratch directory of its own.
     fn shell_hook(&self, job: &Job) -> Option<Arc<dyn phitex_tex::ShellHook>> {
-        Some(Arc::new(crate::shell::ProcessHook::new(
-            job.path
-                .parent()
-                .filter(|d| !d.as_os_str().is_empty())
-                .unwrap_or(Path::new(".")),
-            crate::tex::kpse("pdftex", "pdftex").exported(),
-        )))
+        Some(Arc::new(
+            crate::shell::ProcessHook::new(
+                job.path
+                    .parent()
+                    .filter(|d| !d.as_os_str().is_empty())
+                    .unwrap_or(Path::new(".")),
+                crate::tex::kpse("pdftex", "pdftex").exported(),
+            )
+            .with_vars(&job.inputs),
+        ))
     }
 
     fn xdv_files(&self, dir: &Path) -> Option<phitex_live::dvipdf::FilesFor> {
@@ -537,6 +565,91 @@ impl UpdateFile {
 ///
 /// # Errors
 /// The file system's.
+/// A file's key on disk for `r` in a watch ([`phitex_live::host::Host::stamp`]):
+/// its size, modification time and inode ([`phitex_tex::file_stat_key`]),
+/// and its change time. The change time moves at every write and no
+/// program sets it back: a file rewritten to the same size with its
+/// modification time restored (`touch -d`, an archive extracted, a
+/// checkout) keeps its other fields, not this one. None where there is
+/// no metadata.
+#[cfg(unix)]
+pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
+    use std::os::unix::fs::MetadataExt;
+    // (one stat; a file's: a folder or nothing at the name has none, and
+    // is told by reading it)
+    let m = std::fs::metadata(path).ok()?;
+    if !m.is_file() {
+        return None;
+    }
+    // ([`phitex_tex::file_stat_key`]'s fields, then the change time)
+    let ns = u64::try_from(m.mtime())
+        .unwrap_or(0)
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(u64::try_from(m.mtime_nsec()).unwrap_or(0));
+    let mut k: Vec<u8> = [m.len(), ns, m.ino()]
+        .iter()
+        .flat_map(|x| x.to_le_bytes())
+        .collect();
+    k.extend(m.ctime().to_le_bytes());
+    k.extend(m.ctime_nsec().to_le_bytes());
+    Some(k)
+}
+
+/// Windows: [`phitex_tex::file_stat_key`]'s fields, then the change time
+/// as Unix's (NTFS's `ChangeTime`, `GetFileInformationByHandleEx`'s
+/// `FileBasicInfo`, in 100 ns: every write and every time set moves it).
+#[cfg(windows)]
+#[allow(
+    unsafe_code,
+    reason = "the file's change time: Windows's API, which std does not give"
+)]
+pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_BASIC_INFO, FileBasicInfo, GetFileInformationByHandleEx,
+    };
+    let f = std::fs::File::open(path).ok()?;
+    if !f.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut info = FILE_BASIC_INFO {
+        CreationTime: 0,
+        LastAccessTime: 0,
+        LastWriteTime: 0,
+        ChangeTime: 0,
+        FileAttributes: 0,
+    };
+    // SAFETY: `f`'s handle is open for the call; `info` is a
+    // FILE_BASIC_INFO of the size given.
+    let ok = unsafe {
+        GetFileInformationByHandleEx(
+            f.as_raw_handle(),
+            FileBasicInfo,
+            (&raw mut info).cast(),
+            u32::try_from(std::mem::size_of::<FILE_BASIC_INFO>()).ok()?,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    drop(f);
+    let mut k = phitex_tex::file_stat_key(&path.to_string_lossy());
+    if k.is_empty() {
+        return None;
+    }
+    k.extend(info.ChangeTime.to_le_bytes());
+    Some(k)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn disk_stamp(path: &Path) -> Option<Vec<u8>> {
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let k = phitex_tex::file_stat_key(&path.to_string_lossy());
+    (!k.is_empty()).then_some(k)
+}
+
 pub fn compact(f: &Mutex<UpdateFile>) -> Result<bool, String> {
     let (p, layout, writes) = {
         let g = f.lock().unwrap_or_else(PoisonError::into_inner);
@@ -640,4 +753,31 @@ fn snapshots(progress: &Arc<phitex_tex::Progress>) {
                 );
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    /// A file rewritten to the same size with its modification time set
+    /// back has another key: its change time moved (`r` reads it again).
+    #[test]
+    fn a_rewrite_with_its_time_set_back_has_another_stamp() {
+        let dir = std::env::temp_dir().join(format!("phitex-stamp-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let p = dir.join("chap.tex");
+        std::fs::write(&p, "a first sentence\n").expect("write");
+        let before = super::disk_stamp(&p).expect("a stamp");
+        let mtime = std::fs::metadata(&p)
+            .and_then(|m| m.modified())
+            .expect("its time");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&p, "a other sentence\n").expect("same size");
+        std::fs::File::options()
+            .write(true)
+            .open(&p)
+            .and_then(|f| f.set_modified(mtime))
+            .expect("the time set back");
+        let after = super::disk_stamp(&p).expect("a stamp");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_ne!(before, after, "the stamp did not move");
+    }
 }

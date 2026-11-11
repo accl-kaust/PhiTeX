@@ -117,8 +117,10 @@ header:active { cursor: grabbing; }
 .probs.error { color: var(--ph-danger); } .probs.warning { color: var(--ph-warning); }
 .progress { position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; overflow: hidden; opacity: 0; transition: opacity .2s; pointer-events: none; }
 .progress.on { opacity: 1; }
-.progress::after { content: ""; position: absolute; top: 0; bottom: 0; width: 30%; background: var(--ph-progress); animation: phx-carriage 1.2s ease-in-out infinite; }
-@keyframes phx-carriage { from { left: -30%; } to { left: 100%; } }
+/* (the carriage runs only while the line shows, and by transform: a hidden one moving by left laid the page out every frame, scrolling included) */
+.progress::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 30%; background: var(--ph-progress); transform: translateX(-100%); }
+.progress.on::after { animation: phx-carriage 1.2s ease-in-out infinite; }
+@keyframes phx-carriage { from { transform: translateX(-100%); } to { transform: translateX(333.4%); } }
 .find { display: inline-flex; align-items: center; gap: 6px; }
 .find input { width: 170px; height: 24px; padding: 0 8px; font: inherit; color: var(--ph-fg); background: var(--ph-menu);
   border: 1px solid var(--ph-border); border-radius: var(--ph-radius); outline: none; }
@@ -146,8 +148,10 @@ header:active { cursor: grabbing; }
 @container (max-width: 360px) { .find input { width: 72px; } .bar { padding: 0 4px; } }
 @container (min-width: 561px) { .narrow { display: none !important; } }
 
-/* menus and popovers: plain lists in the host's menu colour */
-.menu { position: absolute; z-index: 20; min-width: 230px; max-width: calc(100% - 12px); padding: 4px 0; text-align: left;
+/* menus and popovers: plain lists in the host's menu colour; above a
+   feature tip (30): a menu is what the user just opened, and the welcome
+   tip's card covered the record menu's Clean rebuild */
+.menu { position: absolute; z-index: 31; min-width: 230px; max-width: calc(100% - 12px); padding: 4px 0; text-align: left;
   background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 4px 16px rgb(0 0 0 / 22%); }
 .menu > button, .menu .mi { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 10px; width: 100%; padding: 6px 14px; cursor: pointer; }
 .menu > button:hover, .menu > button:focus-visible { background: var(--ph-hover); }
@@ -162,6 +166,16 @@ header:active { cursor: grabbing; }
 .timing { width: 340px; padding: 12px 14px; font-variant-numeric: tabular-nums; }
 .timing .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 8px; }
 .timing .head span { color: var(--ph-fg2); }
+/* (Did you know: under the opening's step, quiet) */
+.opening .steps .hint { margin: 10px auto 0; color: var(--ph-fg2); font-size: 12px; line-height: 1.4; max-width: 420px; }
+/* (the first build beside the edits: bars as long as their times) */
+.timing .tbars { padding: 4px 12px 8px; display: grid; gap: 4px; }
+.timing .tb { display: grid; grid-template-columns: 88px 1fr auto; align-items: center; gap: 8px; font-variant-numeric: tabular-nums; }
+.timing .tb .k { color: var(--ph-fg2); }
+.timing .tb .track { height: 8px; border-radius: 4px; background: var(--ph-hover, rgb(0 0 0 / 6%)); overflow: hidden; }
+.timing .tb .track i { display: block; height: 100%; border-radius: 4px; background: var(--ph-fg2); }
+.timing .tb .track i.edit, .timing .tb .track i.median { background: var(--ph-progress, #f58f2d); }
+.timing .tb.x { display: block; color: var(--ph-fg2); font-size: 11px; }
 .timing .head b { font-size: 20px; font-weight: 600; }
 .timing .row { display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; padding: 7px 0; border-top: 1px solid var(--ph-border); }
 .timing .row .k { color: var(--ph-fg2); }
@@ -175,13 +189,22 @@ header:active { cursor: grabbing; }
 .timing .c0 { background: var(--ph-progress); } .timing .c1 { background: var(--ph-accent); } .timing .c2 { background: var(--ph-fg2); } .timing .c3 { background: var(--ph-border); }
 .timing .foot { margin-top: 8px; color: var(--ph-fg2); font-size: 12px; overflow-wrap: anywhere; }
 .timing .foot.err { color: var(--ph-danger); }
+.timing .copydbg { margin: 8px 0 0; font-size: 12px; }
 
 /* problems: Overleaf's log entries, in a popover under the bar */
+/* (the problems' filters: a kind a pill, on or off) */
+.logs .kinds { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 12px 8px; border-bottom: 1px solid var(--ph-border); }
+.logs .kinds button { all: unset; cursor: pointer; padding: 2px 9px; border: 1px solid var(--ph-border); border-radius: var(--ph-pill); font-size: 12px; font-variant-numeric: tabular-nums; }
+.logs .kinds button[aria-pressed=true] { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.logs .kinds button:hover { background: var(--ph-hover); }
+.logs .kinds button[aria-pressed=true]:hover { background: var(--ph-accent); }
 .logs { right: 6px; top: 4px; width: min(460px, calc(100% - 12px)); max-height: calc(100% - 8px); overflow: auto; padding: 0; }
 .logs > header { all: unset; display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 14px; position: sticky; top: 0; z-index: 1;
   background: var(--ph-menu); border-bottom: 1px solid var(--ph-border); font-weight: 600; }
 .diag { display: block; padding: 9px 14px 10px; border-left: 3px solid var(--sev, var(--ph-fg2)); border-bottom: 1px solid var(--ph-border); }
 .diag[data-line] { cursor: pointer; } .diag[data-line]:hover { background: var(--ph-hover); }
+.diag.more { display: flex; gap: 8px; }
+.diag.more button { font: inherit; color: var(--ph-accent, inherit); background: none; border: 1px solid var(--ph-border); border-radius: 5px; padding: 2px 8px; cursor: pointer; }
 .diag.error { --sev: var(--ph-danger); } .diag.warning { --sev: var(--ph-warning); } .diag.info { --sev: var(--ph-info); }
 .diag .where { float: right; margin-left: 10px; color: var(--ph-link); font-size: 12px; }
 .diag .text { font-weight: 600; overflow-wrap: anywhere; }
@@ -190,6 +213,12 @@ header:active { cursor: grabbing; }
 .folded { margin-top: 6px; font-size: 12px; font-weight: 400; }
 .folded summary { cursor: pointer; color: var(--ph-fg2); }
 .diags .phx-inline { margin: 0; padding: 0; list-style: none; }
+/* a problem's Copy for an AI assistant: its row's top right corner, clear when the row is pointed at or focused */
+.diag, .diags .phx-inline > li { position: relative; padding-right: 40px; }
+.copyai { all: unset; position: absolute; top: 6px; right: 8px; display: inline-flex; padding: 4px; border-radius: var(--ph-radius, 4px); color: var(--ph-fg2); opacity: .45; cursor: pointer; }
+.diag:hover .copyai, .phx-inline > li:hover .copyai, .copyai:focus-visible { opacity: 1; }
+.copyai:hover { background: var(--ph-hover); color: var(--ph-fg); }
+.copyai:focus-visible { outline: 2px solid var(--ph-link); }
 .reportbtn { all: unset; margin: 8px 14px; color: var(--ph-link); cursor: pointer; }
 .reportbtn:hover { text-decoration: underline; }
 
@@ -206,9 +235,18 @@ header:active { cursor: grabbing; }
 .diffbar button { all: unset; cursor: pointer; padding: 2px 8px; border-radius: var(--ph-radius); color: var(--ph-fg2); white-space: nowrap; }
 .diffbar button:hover:not(:disabled) { background: var(--ph-hover); color: var(--ph-fg); }
 .diffbar button:disabled { opacity: .4; cursor: default; }
+/* (Diff | Current: which pages are shown, the one shown filled; the diff's style on its half) */
+.diffbar .seg { display: inline-flex; border: 1px solid var(--ph-accent); border-radius: var(--ph-pill); overflow: hidden; }
+.diffbar .seg button { border-radius: 0; padding: 2px 10px; color: var(--ph-accent); font-weight: 600; }
+.diffbar .seg button[aria-pressed=true] { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.diffbar .seg button[aria-pressed=true]:hover:not(:disabled) { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.diffbar .seg .chev { font-weight: 400; margin-left: 2px; }
+.diffset .row.bars button { padding: 1px 10px; }
+.diffset .row.bars button[aria-checked=true] { background: var(--ph-accent); border-color: var(--ph-accent); color: var(--ph-accent-fg); }
+.diffset .row.bars button:disabled { opacity: .45; cursor: default; }
 .diffbar button.cur { background: var(--ph-hover); color: var(--ph-fg); }
 .diffbar .sep { width: 1px; align-self: stretch; margin: 2px; background: var(--ph-border); }
-.diffset { display: none; left: 50%; transform: translateX(-50%); top: 4px; width: 320px; padding: 12px; font-size: 12px; }
+.diffset { display: none; left: 50%; transform: translateX(-50%); top: 4px; width: 320px; max-height: calc(100% - 12px); overflow: auto; padding: 12px; font-size: 12px; }
 .diffset.on { display: block; }
 .diffset h4 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--ph-fg2); }
 .diffset h4:not(:first-child) { margin-top: 12px; }
@@ -238,43 +276,160 @@ header:active { cursor: grabbing; }
 .win.reopening .viewer { visibility: hidden; }
 /* (the first page's sheet up: the stage holds still under it, its width kept, so nothing scrolls behind the sheet) */
 .win.sheet-up .stage, .win.docked.sheet-up .stage { overflow: hidden; scrollbar-gutter: stable; }
-.slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+.slot { margin: 12px auto; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); container-type: inline-size; }
+/* (a page the build has not shipped alone yet: it comes at the build's end, said, not a blank sheet) */
+.slot.later::before { content: "Drawn when the build ends"; position: absolute; inset: 0; display: grid; place-items: center; color: #8a8f98; font: 500 clamp(9px, 2.6cqw, 18px)/1.3 var(--ph-font); }
 .slot canvas { display: block; width: 100%; height: 100%; margin: 0; }
+/* (a page streamed while the build runs and drawn without some of what it draws with: a quiet mark, gone when the build's page replaces it) */
+.slot.preview::after { content: "Preview: final colours and shading when the build ends"; position: absolute; left: 50%; bottom: 6px; transform: translateX(-50%); max-width: calc(100% - 12px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px; border-radius: 999px; background: rgb(20 24 31 / 55%); color: #fff; font: 500 clamp(8px, 1.7cqw, 12px)/1.5 var(--ph-font); pointer-events: none; }
 .win.dark-pdf .slot, .win.docked.pdf-dark .slot { background: ${DARK_PAGE}; }
 .win.dark-pdf .slot canvas, .win.docked.pdf-dark .slot canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-page { position: relative; width: 100%; height: 100%; background: #fff; }
 .phx-page canvas { display: block; width: 100%; height: 100%; }
 .phx-text { position: absolute; inset: 0; width: 100%; height: 100%; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
-.phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: rgb(0 100 255 / 25%); }
+/* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
+.slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
+/* a link hovered: where it goes, in a small window (viewer.ts peekShow) */
+.peek { position: absolute; z-index: 4; width: min(440px, calc(100% - 16px)); text-align: left; background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 24px rgb(0 0 0 / 22%); overflow: hidden; cursor: default; font: var(--ph-size)/1.4 var(--ph-font); }
+.peek .pv { position: relative; height: 250px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; background: #fff; }
+.peek .pv canvas { display: block; }
+.peek .pv .at { position: absolute; left: 0; width: 3px; height: 18px; background: var(--ph-accent); border-radius: 0 2px 2px 0; }
+.peek.wait .pv canvas, .peek.wait .pv .at { visibility: hidden; }
+.peek .pu { display: none; padding: 8px 10px 0; word-break: break-all; color: var(--ph-link, var(--ph-accent)); }
+.peek.url .pv { display: none; }
+.peek.url .pu { display: block; }
+.peek .pf { display: flex; justify-content: space-between; gap: 12px; padding: 5px 10px; font-size: 12px; color: var(--ph-fg2); border-top: 1px solid var(--ph-border); }
+.peek.url .pf { border-top: 0; }
+.peek .pf .pin { all: unset; cursor: pointer; display: inline-flex; align-items: center; margin-left: 8px; color: var(--ph-fg2); }
+.peek .pf .pin svg { width: 14px; height: 14px; }
+.peek .pf .pin:hover { color: var(--ph-fg); }
+.peek .pf .pin:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 2px; border-radius: 2px; }
+.peek .pf { align-items: center; }
+.peek .pf .go { all: unset; margin-left: auto; cursor: pointer; padding: 1px 10px; border-radius: var(--ph-pill); border: 1px solid var(--ph-border); color: var(--ph-fg); }
+.peek .pf .go:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.peek .pf .go:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 2px; }
+.peek .pf .go[hidden] { display: none; }
+/* a window kept open (viewer.ts peekPin): over the pages, where it was put, a bar to move it by */
+.peek.pinned { z-index: 5; box-shadow: 0 10px 32px rgb(0 0 0 / 28%); resize: both; display: flex; flex-direction: column; min-width: 240px; min-height: 120px; max-width: calc(100% - 8px); }
+/* (resized: what it shows fills it, scrolling inside) */
+.peek.pinned .pv { flex: 1 1 auto; height: auto; min-height: 60px; }
+.peek.pinned.cite .pc { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.peek.pinned .pc .cs { flex: 1 1 auto; max-height: none; min-height: 0; }
+/* (the corner kept for resizing: the footer's button clear of it) */
+.peek.pinned .pf { flex: none; padding-right: 28px; }
+.peek.pinned .pf .pin { display: none; }
+.peek .ph { display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px; cursor: move; user-select: none; touch-action: none; font-size: 12px; font-weight: 600; color: var(--ph-fg); background: var(--ph-hover, rgb(0 0 0 / 5%)); border-bottom: 1px solid var(--ph-border); }
+.peek .ph .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek .ph .x { all: unset; cursor: pointer; width: 20px; height: 20px; display: grid; place-items: center; border-radius: var(--ph-radius); color: var(--ph-fg2); font-size: 15px; }
+.peek .ph .x:hover { background: var(--ph-border); color: var(--ph-fg); }
+.peek .pc { display: none; }
+.peek.cite .pv { display: none; }
+.peek.cite .pc { display: block; }
+.peek .pc .mh { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; font-size: 12px; color: var(--ph-fg2); border-bottom: 1px solid var(--ph-border); }
+.peek .pc .mh button { all: unset; cursor: pointer; padding: 2px 10px; border-radius: var(--ph-pill); border: 1px solid var(--ph-border); color: var(--ph-fg); }
+.peek .pc .mh button:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.peek .pc .cs { position: relative; max-height: 300px; overflow-y: auto; overscroll-behavior: contain; }
+/* an entry, the same one or many: the label, title and key; who, when and where; its links */
+.peek .pc .ce { padding: 7px 12px 7px 9px; border-left: 3px solid transparent; }
+.peek .pc .ce + .ce { border-top: 1px solid var(--ph-border); }
+.peek .pc .ce.here { border-left-color: var(--ph-accent); background: color-mix(in srgb, var(--ph-accent) 7%, transparent); }
+.peek .pc .hd { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.peek .pc .hd .lab { flex: none; font-size: 12px; font-weight: 600; color: var(--ph-accent); }
+.peek .pc .hd .ti { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek .pc .hd code { flex: none; font: 10.5px/1.3 ui-monospace, "DM Mono", monospace; padding: 0 4px; border-radius: 3px; background: var(--ph-hover, rgb(0 0 0 / 6%)); color: var(--ph-fg2); }
+.peek .pc .mt { margin-top: 1px; font-size: 12px; line-height: 1.35; color: var(--ph-fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek .pc .lk { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; margin-top: 2px; font-size: 11.5px; }
+.peek .pc .lk > i { font-style: normal; color: var(--ph-fg2); }
+.peek .pc .lk button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); }
+.peek .pc .lk button:hover { text-decoration: underline; }
+.peek .pc .lk button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; border-radius: 2px; }
+/* where a jump landed, lit for a moment (viewer.ts flash): only its opacity animates */
+.slot .phx-flash { position: absolute; z-index: 2; pointer-events: none; border-radius: 3px; background: color-mix(in srgb, var(--ph-accent) 22%, transparent); box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--ph-accent) 55%, transparent); animation: phx-flash 1.5s ease-out forwards; }
+@keyframes phx-flash { 0%, 35% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .slot .phx-flash { animation-duration: 2.5s; } }
+/* Back, after a link followed: over the pages' bottom left corner */
+.pback { position: absolute; z-index: 4; left: 12px; bottom: 12px; display: flex; align-items: stretch; border-radius: var(--ph-pill); background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); box-shadow: 0 3px 12px rgb(0 0 0 / 18%); font: 12.5px/1 var(--ph-font); }
+.pback[hidden] { display: none; }
+.pback button { all: unset; cursor: pointer; padding: 7px 10px; }
+.pback .go { display: flex; gap: 6px; align-items: center; padding-left: 12px; font-weight: 600; }
+.pback .go .ar { font-size: 14px; }
+.pback .x { color: var(--ph-fg2); border-left: 1px solid var(--ph-border); padding: 7px 9px; }
+.pback { overflow: visible; }
+.pback .more, .pback .fw { border-left: 1px solid var(--ph-border); color: var(--ph-fg2); font-weight: 600; }
+.pback .more[hidden], .pback .fw[hidden] { display: none; }
+.pback.noback .go { display: none; }
+.pback.noback .fw { border-left: 0; padding-left: 12px; }
+.pback .go { border-radius: var(--ph-pill) 0 0 var(--ph-pill); }
+.pback .x { border-radius: 0 var(--ph-pill) var(--ph-pill) 0; }
+.pback .stops { position: absolute; left: 0; bottom: calc(100% + 6px); width: max-content; min-width: 300px; max-width: min(460px, 80vw); max-height: 260px; overflow-y: auto; padding: 4px 0; background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 20px rgb(0 0 0 / 20%); }
+.pback .stops[hidden] { display: none; }
+.pback .stops button { display: grid; grid-template-columns: 1fr; gap: 1px; line-height: 1.35; width: 100%; box-sizing: border-box; padding: 6px 12px; text-align: left; font-size: 12.5px; }
+.pback .stops button b { font-weight: 600; white-space: nowrap; }
+.pback .stops button b small { margin-left: 5px; font-weight: 400; color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
+.pback .stops button span { color: var(--ph-fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pback button:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.pback button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
+.win.dark-pdf .peek .pv canvas, .win.docked.pdf-dark .peek .pv canvas { filter: ${DARK_PDF_FILTER}; }
+.phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
 .slot .mark { position: absolute; pointer-events: none; border-radius: 2px; background: rgb(255 214 0 / 45%); mix-blend-mode: multiply;
   box-shadow: 0 0 0 1px rgb(232 172 0 / 80%); transition: opacity .25s, left .12s ease-out, top .12s ease-out, width .12s ease-out, height .12s ease-out; }
+/* (the text selected on the pages, one block a line: viewer.ts drawSelection) */
+.slot .mark.seltext { background: rgb(0 100 255 / 25%); mix-blend-mode: normal; border-radius: 0; }
 .slot .mark.fade { opacity: 0; transition: opacity 1.2s; }
 .slot .mark.sel { transition: none; }
 .slot .mark.fnd { background: rgb(255 214 0 / 40%); box-shadow: none; transition: none; }
 .slot .mark.fnd.cur { background: rgb(255 170 0 / 55%); box-shadow: 0 0 0 1px rgb(150 100 0 / 90%); }
 .slot .culprit { position: absolute; pointer-events: none; }
+/* (the marks along the pages' scrollbar: the problems' places and the diff's changes) */
+.smarks { position: absolute; right: 0; top: 0; bottom: 0; width: 8px; z-index: 4; pointer-events: none; }
+.smarks[hidden] { display: none; }
+.smarks i { position: absolute; right: 1px; width: 6px; height: 3px; margin-top: -1px; border-radius: 1px; pointer-events: auto; cursor: pointer; background: var(--ph-warning, #c77700); transition: transform .1s; }
+/* (a target larger than the tick: it is 3 px tall) */
+.smarks i::before { content: ""; position: absolute; inset: -4px -3px; }
+.smarks i:hover { transform: scale(1.5, 2); }
+.smarks i.error { background: var(--ph-danger, #d93025); }
+.smarks i.change { background: var(--ph-accent, #1d3e72); }
+.phx-card[data-key] { cursor: pointer; }
+/* (an overfull box's bar at its line's end, where pdflatex's draft rule goes, drawn by the viewer only, in the warning's
+   amber, as its tooltip and the underfull's outline: draft black read as a broken block, and vanished on a dark page; an underfull's hollow) */
+.slot .culprit.rule::after { display: none; }
+.slot .culprit.rule.overfull { background: rgb(199 119 0 / 85%); border-radius: 1px; }
+.slot .culprit.rule.underfull { box-shadow: inset 0 0 0 1.5px #c77700; }
 /* (a culprit hovered: its problem's message, a small tooltip under the line) */
 .ctip { position: absolute; z-index: 8; max-width: min(420px, calc(100% - 16px)); display: flex; gap: 6px; align-items: flex-start; padding: 5px 9px;
   background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius);
   box-shadow: 0 3px 12px rgb(0 0 0 / 25%); font-size: 12px; line-height: 1.35; pointer-events: none; overflow-wrap: anywhere; }
 .ctip .icon { margin-top: 1px; }
 .ctip.error .icon { color: var(--ph-danger); } .ctip.warning .icon { color: var(--ph-warning); }
+.ctip .txt { min-width: 0; text-align: left; }
+.ctip code, .ctip .ex { font: 11.5px/1.4 ui-monospace, "DejaVu Sans Mono", monospace; }
+.ctip .ex { margin: 3px 0 0; white-space: pre; overflow: hidden; text-overflow: ellipsis; opacity: .85; }
+.ctip .ex mark { background: none; color: inherit; font-weight: 600; text-decoration: underline wavy var(--ph-danger); text-underline-offset: 3px; }
+.ctip.warning .ex mark { text-decoration-color: var(--ph-warning); }
+.ctip .at { margin-top: 2px; font-size: 11px; color: var(--ph-fg2); }
+.stage.onculprit, .stage.onculprit * { cursor: pointer !important; }
 /* (a problem's culprit: a wavy line along its glyphs' foot, as an editor underlines one; no fill, the text stays readable) */
 .slot .culprit::after { content: ""; position: absolute; left: 0; right: 0; bottom: -2px; height: 3px; background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23d93025' stroke-width='1'/%3E%3C/svg%3E") repeat-x left bottom / 6px 3px; }
 .slot .culprit.warning::after { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='6' height='3'%3E%3Cpath d='M0 2.5 Q1.5 0 3 1.5 T6 0.5' fill='none' stroke='%23c77700' stroke-width='1'/%3E%3C/svg%3E"); }
 .slot .peer { position: absolute; pointer-events: none; border-radius: 2px; background: hsl(var(--hue) 70% 50% / 22%); box-shadow: inset 0 -1.5px 0 hsl(var(--hue) 70% 45%); }
-.slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 5px; border-radius: 3px 3px 3px 0; background: hsl(var(--hue) 70% 42%);
-  box-shadow: none; color: #fff; font: 600 11px/16px var(--ph-font); white-space: nowrap; z-index: 2; }
+/* (the name as large as the line it marks, so it zooms with the page; readable when far out, never a headline when close) */
+.slot .peer-tag { width: auto; height: auto; transform: translateY(-100%); padding: 0 .4em; border-radius: .25em .25em .25em 0; background: hsl(var(--hue) 70% 42%);
+  box-shadow: none; color: #fff; font: 600 clamp(7px, calc(var(--fs, .012) * 100cqw), 22px)/1.35 var(--ph-font); white-space: nowrap; z-index: 2; }
+.slot .peer-tag[data-file] { pointer-events: auto; cursor: pointer; }
+.slot .peer-tag[data-file]:hover { background: hsl(var(--hue) 70% 34%); }
 
 /* strips over the pages: plain, in the host's colours */
-.strip { position: sticky; top: 0; z-index: 2; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
+/* (over the pages' scroll, not in it: in it, a strip went with the pages when they scrolled sideways) */
+.stagebox { position: relative; flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.strips { position: absolute; top: 0; left: 0; right: 0; z-index: 2; pointer-events: none; }
+.strip { pointer-events: auto; display: none; padding: 6px 12px; text-align: left; font-size: 12px;
   background: var(--ph-menu); color: var(--ph-fg); border-bottom: 1px solid var(--ph-border); border-left: 3px solid var(--sev, var(--ph-warning)); }
-.stage.stale .banner, .approx.on { display: block; }
+.stage.stale ~ .strips .banner, .approx.on { display: block; }
 .gone { --sev: var(--ph-danger); font-weight: 600; }
-.stage.offline .gone { display: flex; align-items: baseline; gap: 8px; }
+.stage.offline ~ .strips .gone { display: flex; align-items: baseline; gap: 8px; }
 .gone .x { margin-left: auto; flex: none; cursor: pointer; border: 0; background: none; color: inherit; font: inherit; padding: 0 2px; }
 .offpill { display: none; position: absolute; top: 8px; right: 14px; z-index: 3; padding: 1px 8px; border-radius: var(--ph-pill); font-size: 12px;
   background: var(--ph-menu); color: var(--ph-danger); border: 1px solid var(--ph-border); pointer-events: none; }
@@ -283,7 +438,7 @@ header:active { cursor: grabbing; }
 /* before any page: the first page's sheet, the opening playing on it, the step under it */
 .opening { position: absolute; z-index: 3; pointer-events: none; left: 0; top: 0; width: 0; height: 0;
   transition: left .3s ease, top .3s ease, width .3s ease, height .3s ease; }
-.opening .sheet { position: absolute; inset: 0; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+.opening .sheet { position: absolute; inset: 0; background: #fff; box-shadow: 0 1px 3px rgb(0 0 0 / 18%); container-type: inline-size; }
 .opening.in .sheet { background: none; box-shadow: none; }
 .win.dark-pdf .opening .sheet, .win.docked.pdf-dark .opening .sheet { background: ${DARK_PAGE}; }
 .win.dark-pdf .opening.in .sheet, .win.docked.pdf-dark .opening.in .sheet { background: none; }
@@ -295,11 +450,13 @@ header:active { cursor: grabbing; }
 .steps .track { position: relative; height: 3px; width: min(100%, 280px); margin: 8px auto; border-radius: 2px; overflow: hidden; background: #e7e9ee; }
 .steps .track i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: #f58f2d; transition: width .3s; }
 .steps .track.unknown i { width: 30% !important; animation: phx-slide 1.2s ease-in-out infinite; }
-@keyframes phx-slide { from { left: -30%; } to { left: 100%; } }
+@keyframes phx-slide { from { transform: translateX(-100%); } to { transform: translateX(333.4%); } }
 .win.dark-pdf .steps, .win.docked.pdf-dark .steps { color: #a3a9b4; }
 .win.dark-pdf .steps .what, .win.docked.pdf-dark .steps .what { color: #e4e6ea; }
 .win.dark-pdf .steps .track, .win.docked.pdf-dark .steps .track { background: #3d4047; }
 .opening.in .steps { opacity: 0; }
+/* (an opening that says the steps itself, the animation's own part) */
+.opening.owns .steps { display: none; }
 /* a card in place of the pages (a build that stopped, an engine to choose): plain */
 .empty { padding: 40px 16px; color: var(--ph-fg2); }
 .card { max-width: 420px; margin: 0 auto; padding: 16px 18px; text-align: left; background: var(--ph-menu); color: var(--ph-fg);
@@ -351,18 +508,6 @@ header:active { cursor: grabbing; }
   background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 3px 10px rgb(0 0 0 / 25%); }
 .tip .demo .mmenu span { display: flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 2px; white-space: nowrap; }
 .tip .demo .mmenu b { margin-left: auto; padding-left: 6px; }
-
-/* the ⚡ chip: each repaint's keystroke-to-screen time over the pages' corner, the strips' numbers under it */
-.speedchip { position: absolute; right: 12px; bottom: 12px; z-index: 3; pointer-events: none; display: flex; flex-direction: column; align-items: flex-end;
-  gap: 2px; max-width: calc(100% - 24px); padding: 4px 9px; border-radius: 8px; color: #fff; background: rgb(20 24 32 / 82%);
-  box-shadow: 0 4px 12px rgb(0 0 0 / 25%); font: 700 12px/1.3 var(--ph-font); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.speedchip[hidden], .win.nospeed .speedchip { display: none; }
-.speedchip.slow b { color: #ffb366; }
-.speedchip span { overflow: hidden; text-overflow: ellipsis; max-width: 100%; font: 400 11px/1.3 ui-monospace, monospace; opacity: .85; }
-.speedchip span:empty { display: none; }
-.speedchip.flash { animation: phx-chipflash .5s ease-out; }
-@keyframes phx-chipflash { 0% { filter: brightness(1.6); } 100% { filter: none; } }
-@media (prefers-reduced-motion: reduce) { .speedchip.flash { animation: none; } }
 
 /* compare: "good" struck out, "excellent" added, then the navigator */
 .tip .demo.cmp { height: auto; padding: 10px 12px 30px; background: #fff; color: #1b222c; font: 13px/1.5 "Noto Serif", Georgia, serif; }
@@ -476,13 +621,56 @@ header:active { cursor: grabbing; }
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .byline:hover { color: var(--ph-fg); }
 .win.docked:not(.own-header) .byline { display: block; }
-/* Overleaf's own settings, docked: the main file, the debug check, the latency's details */
-.sheet-pop { right: 8px; top: 6px; width: min(340px, calc(100% - 16px)); padding: 12px; display: grid; gap: 8px; }
-.sheet-pop label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.sheet-pop select { font: inherit; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 2px 4px; max-width: 180px; }
-.sheet-pop .links { display: flex; flex-wrap: wrap; gap: 12px; }
-.sheet-pop .links button { all: unset; cursor: pointer; color: var(--ph-link); }
-.details { margin: 0; font: 11px/1.4 ui-monospace, monospace; color: var(--ph-fg2); white-space: pre-wrap; }
+/* Settings: the panel's own rows and the host's, one dialog in every host, a tab per group */
+.settings { inset: 12px auto auto 50%; translate: -50% 0; width: min(560px, calc(100% - 24px)); max-height: calc(100% - 24px); padding: 0; gap: 0; overflow: hidden; }
+.settings > header { padding: 12px 14px 0; }
+/* (the tabs wrap onto a second line when they don't fit: scrolled sideways, with no scrollbar, the last ones were out of reach) */
+.settings .stabs { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--ph-border); }
+.settings .stabs button { all: unset; cursor: pointer; white-space: nowrap; padding: 6px 8px 7px; font-size: 13px; color: var(--ph-fg2); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.settings .stabs button:hover { color: var(--ph-fg); }
+.settings .stabs button[aria-selected="true"] { color: var(--ph-fg); font-weight: 600; border-bottom-color: var(--ph-accent); }
+.settings .stabs button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
+.settings .sbody { overflow: auto; padding: 4px 0 8px; }
+.settings .srow { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "lab ctl" "help help" "err err"; align-items: center; column-gap: 16px; padding: 10px 16px; }
+.settings .srow + .srow { border-top: 1px solid var(--ph-border); }
+.settings .srow .lab { grid-area: lab; font-weight: 600; min-width: 0; }
+.settings .srow .ctl { grid-area: ctl; justify-self: end; }
+.settings .srow .help { grid-area: help; margin-top: 2px; font-size: 12px; line-height: 1.4; color: var(--ph-fg2); }
+.settings .srow .help:empty { display: none; }
+.settings .srow.off .lab, .settings .srow.off .ctl { opacity: .55; }
+.settings .srow .err { grid-area: err; margin-top: 4px; font-size: 12px; color: var(--ph-danger); }
+.settings .srow.picks { grid-template-areas: "lab ctl" "help help" "picks picks" "err err"; }
+.settings .tiles { grid-area: picks; display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 12px 10px; margin-top: 10px; }
+.settings .pick { all: unset; cursor: pointer; display: grid; gap: 6px; min-width: 0; }
+.settings .pick:disabled { cursor: default; }
+.settings .pick .lk { position: relative; display: block; aspect-ratio: 210 / 297; overflow: hidden; border-radius: 2px; background: #fff; box-shadow: 0 0 0 1px var(--ph-border); opacity: .5; transition: opacity .15s, box-shadow .15s; }
+.settings .pick .lk.dark { background: ${DARK_PAGE}; }
+.settings .pick:hover .lk { opacity: .8; }
+.settings .pick[aria-checked="true"] .lk { opacity: 1; box-shadow: 0 0 0 2px var(--ph-accent); }
+.settings .pick .lk .pg, .settings .pick .lk .sheet { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.settings .pick .lk .sheet { background: #fff; container-type: inline-size; }
+.settings .pick .lk.dark .sheet { background: ${DARK_PAGE}; }
+.settings .pick .lk .sheet.in { background: none; }
+.settings .pick .lk .phx-open { position: absolute; inset: 0; width: 100%; height: 100%; }
+.settings .pick .nm { display: flex; align-items: center; gap: 6px; font-size: 12px; line-height: 1.3; color: var(--ph-fg2); min-width: 0; }
+.settings .pick[aria-checked="true"] .nm { color: var(--ph-fg); }
+.settings .pick .box { flex: none; width: 12px; height: 12px; border-radius: 3px; box-shadow: inset 0 0 0 1.5px var(--ph-fg2); }
+.settings .pick[aria-checked="true"] .box { box-shadow: none; background: var(--ph-accent) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 6.2 5 8.6 9.6 3.6' fill='none' stroke='%23fff' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 100% no-repeat; }
+.settings .pick:focus-visible .lk { outline: 2px solid var(--ph-link); outline-offset: 2px; }
+.settings .srow .val { color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
+.settings select { font: inherit; font-size: 12px; color: var(--ph-fg); background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); padding: 3px 6px; max-width: 220px; }
+.settings .btn { padding: 3px 12px; font-size: 12px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.settings .seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: var(--ph-pill); background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.settings .seg button { all: unset; cursor: pointer; padding: 3px 11px; border-radius: var(--ph-pill); font-size: 12px; line-height: 1.4; white-space: nowrap; color: var(--ph-fg); }
+.settings .seg button:hover:not([aria-pressed="true"]):not(:disabled) { background: var(--ph-border); }
+.settings .seg button[aria-pressed="true"] { background: var(--ph-accent); color: var(--ph-accent-fg, #fff); }
+.settings .seg button:disabled { cursor: default; }
+.settings .switch { all: unset; cursor: pointer; position: relative; width: 30px; height: 18px; border-radius: 9px; background: var(--ph-border); transition: background .12s; }
+.settings .switch i { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 25%); transition: left .12s; }
+.settings .switch[aria-checked="true"] { background: var(--ph-accent); }
+.settings .switch[aria-checked="true"] i { left: 14px; }
+.settings .switch:disabled { cursor: default; }
+.settings .switch:focus-visible, .settings .seg button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; }
 
 /* docked: the panel fills the host's pane under its toolbar */
 .win.docked { position: relative; left: auto !important; top: auto !important; width: 100% !important; height: 100% !important; max-width: none; max-height: none;

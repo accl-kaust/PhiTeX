@@ -1,0 +1,11 @@
+% an included PDF page with a /Group: the page that first shows it
+% numbers the group's object, which the image's write puts into an object
+% stream; an object number TeX reads later counts it (iacrj: its logo's
+% group, /Metadata 183 for pdfTeX's 184)
+\documentclass{article}
+\usepackage{graphicx}
+\begin{document}
+\includegraphics{grp.pdf}
+\newpage
+\immediate\pdfobj{<< /After 1 >>}After the image: object \the\pdflastobj.
+\end{document}

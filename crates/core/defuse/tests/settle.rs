@@ -123,8 +123,10 @@ fn int(e: &Engine, n: phitex_defuse::NodeId) -> Option<i64> {
 
 /// Line: P1 (page: pn := 1), T1 (text: reads pn), P2 (page: pn2 := pn +
 /// 1), T2 (text: reads pn2). P1's text is edited to pn := 5. P2, a page
-/// node, is re-asked at once; T1 and T2 are held to the quiet point and
-/// run there, once each: two held, two fired, one pass.
+/// node, is re-asked at once; T1, re-asked by the edited P1, is held to
+/// the quiet point and runs there; T2, re-asked by P2, a link of the
+/// chain P1 started (`Node::run_chained`), at once: each once, one held,
+/// one fired, one pass.
 #[test]
 fn text_readers_of_a_page_value_run_once_at_the_quiet_point() {
     let o = setup();
@@ -152,8 +154,8 @@ fn text_readers_of_a_page_value_run_once_at_the_quiet_point() {
         rr + 2,
         "T1 and T2 once each: {rep:?}"
     );
-    assert_eq!(rep.held_deferred, 2, "{rep:?}");
-    assert_eq!(rep.held_fired, 2, "{rep:?}");
+    assert_eq!(rep.held_deferred, 1, "{rep:?}");
+    assert_eq!(rep.held_fired, 1, "{rep:?}");
     assert_eq!(rep.held_passes, 1, "{rep:?}");
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
@@ -193,7 +195,8 @@ fn a_held_reader_that_read_the_final_value_meanwhile_is_not_run_again() {
 
 /// A text definition read by a page node is re-asked at once, as before:
 /// A (text: a := 1), P (page: pn := a + 10), T (text: reads pn). A is
-/// edited: P runs in the same pass, T at the quiet point; one pass.
+/// edited: P runs in the same pass, and T, re-asked by P, a link of the
+/// chain the edit of A started (`Node::run_chained`), at once: no pass.
 #[test]
 fn a_page_node_reading_the_text_is_re_asked_at_once() {
     let o = setup();
@@ -208,9 +211,9 @@ fn a_page_node_reading_the_text_is_re_asked_at_once() {
     e.replace(an, o.def_op, vec![a.0, v.int(3)]);
     let rep = e.evaluate(1).unwrap();
     assert_eq!(int(e, t), Some(13), "{rep:?}");
-    assert_eq!(rep.held_deferred, 1, "{rep:?}");
-    assert_eq!(rep.held_fired, 1, "{rep:?}");
-    assert_eq!(rep.held_passes, 1, "{rep:?}");
+    assert_eq!(rep.held_deferred, 0, "{rep:?}");
+    assert_eq!(rep.held_fired, 0, "{rep:?}");
+    assert_eq!(rep.held_passes, 0, "{rep:?}");
     assert_eq!(o.def.runs.load(Ordering::SeqCst), 2);
     assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
 }
@@ -250,5 +253,532 @@ fn held_wakes_are_never_lost_on_many_workers() {
             "round {round}: {:?}",
             e.check_invariants()
         );
+    }
+}
+
+/// `[at, x]`: a page-layer node whose fold stands at node `at` (its raw
+/// id): it sets the layer's frontier there (`Ctx::set_frontier`), as the
+/// page loop does at a hole. Settles at quiet points.
+struct Front;
+
+impl Operation for Front {
+    fn name(&self) -> &'static str {
+        "front"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let a = cx.args().to_vec();
+        let at = cx.values().as_int(a[0]).and_then(|x| u64::try_from(x).ok());
+        cx.set_frontier(at.map(phitex_defuse::NodeId::from_raw));
+        Ok(a[1])
+    }
+
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+}
+
+/// A text reader past the layer's frontier, re-asked by a page value,
+/// is not held to the quiet point: it waits at the frontier
+/// (`Ctx::hold_at_frontier`) and runs once the layer is quiet, in the
+/// same pass, on what the pages before it left. Line: F (sets the
+/// frontier at A), A (text), P (page: pn := 1), T (text: reads pn). F
+/// and P edited (pn := 2): F stands the frontier at A again, P's change
+/// reaches T past it. Held, T ran again only at the next quiet point,
+/// and a routine after it read what that run left one pass later: a
+/// chain through every page, one page a pass (beautybook-en at -j4,
+/// "the page layout did not settle after 12 passes", accl 22609).
+#[test]
+fn a_text_reader_past_the_frontier_waits_there_and_is_not_held() {
+    let o = setup();
+    let (e, v) = (&o.e, o.e.values());
+    let front = e.register(Arc::new(Front));
+    let u = e.new_unit();
+    let (pn, a) = (v.field("pn"), v.field("a"));
+    let f = e.push(u, front, vec![v.int(-1), v.int(0)]);
+    let an = e.push(u, o.def_op, vec![a.0, v.int(1)]);
+    let p = e.push(u, o.page_op, vec![pn.0, v.int(1), ValueId::UNIT]);
+    let t = e.push(u, o.reader_op, vec![pn.0]);
+    e.evaluate(1).unwrap();
+    assert_eq!(int(e, t), Some(1));
+    let at = i64::try_from(an.raw()).expect("an id");
+    e.replace(f, front, vec![v.int(at), v.int(1)]);
+    e.replace(p, o.page_op, vec![pn.0, v.int(2), ValueId::UNIT]);
+    let rep = e.evaluate(1).unwrap();
+    assert_eq!(int(e, t), Some(2), "{rep:?}");
+    assert_eq!(rep.held_deferred, 0, "T past the frontier is not held: {rep:?}");
+    assert_eq!(rep.held_passes, 0, "no pass: {rep:?}");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+
+/// `[f]`: reads f and counts its runs begun.
+struct CountedReader(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Operation for CountedReader {
+    fn name(&self) -> &'static str {
+        "counted-reader"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let f = Field(cx.args()[0]);
+        Ok(cx.read(f)?.unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// A reader that stopped at the frontier once is not begun past it again:
+/// its run would stop at the same read, its work thrown away (Grail's
+/// `\end{document}` piece, 65-100 ms of commands an edit, mc 79308). Line
+/// as in the test above: the first edit's T begins, stops at the frontier
+/// and begins again; the second's begins once, with the same answer.
+#[test]
+fn a_reader_held_at_the_frontier_waits_there_before_its_next_run() {
+    let o = setup();
+    let (e, v) = (&o.e, o.e.values());
+    let front = e.register(Arc::new(Front));
+    let begun = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let reader = e.register(Arc::new(CountedReader(begun.clone())));
+    let u = e.new_unit();
+    let (pn, a) = (v.field("pn"), v.field("a"));
+    let f = e.push(u, front, vec![v.int(-1), v.int(0)]);
+    let an = e.push(u, o.def_op, vec![a.0, v.int(1)]);
+    let p = e.push(u, o.page_op, vec![pn.0, v.int(1), ValueId::UNIT]);
+    let t = e.push(u, reader, vec![pn.0]);
+    e.evaluate(1).unwrap();
+    assert_eq!(int(e, t), Some(1));
+    let at = i64::try_from(an.raw()).expect("an id");
+    let count = |x: i64, keep: i64| {
+        begun.store(0, std::sync::atomic::Ordering::Relaxed);
+        e.replace(f, front, vec![v.int(at), v.int(keep)]);
+        e.replace(p, o.page_op, vec![pn.0, v.int(x), ValueId::UNIT]);
+        let rep = e.evaluate(1).unwrap();
+        assert_eq!(int(e, t), Some(x), "{rep:?}");
+        begun.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    assert_eq!(count(2, 1), 2, "stops at the frontier, then runs");
+    assert_eq!(count(3, 2), 1, "waits for the frontier first");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+
+/// `[f, x]`: a page-layer node that predicts `f` := x and whose run
+/// panics. Settles at quiet points.
+struct PanicPage;
+
+impl Operation for PanicPage {
+    fn name(&self) -> &'static str {
+        "panic-page"
+    }
+
+    fn run(&self, _: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        panic!("a routine that fails on inputs that hold");
+    }
+
+    fn predicted_defs(&self, args: &[ValueId], _: &Values) -> Option<Vec<(Field, ValueId)>> {
+        Some(vec![(Field(args[0]), args[1])])
+    }
+
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+}
+
+/// A text reader of a page node's prediction waits for its commit
+/// (`Ctx::wait_for_settling`), but not for one whose run panicked on
+/// inputs that hold, held for the evaluation's decision: no commit of it
+/// comes, and the reader, let go at each quiet point, waited again each
+/// time, and the evaluation never ended (latex_minutes_Protokol: its
+/// readers ran 80 000 times each in 150 s, accl 22791). Here the
+/// evaluation ends, with the panic.
+#[test]
+fn a_reader_does_not_wait_for_a_page_node_whose_run_panicked() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let o = setup();
+        let (e, v) = (&o.e, o.e.values());
+        let pp = e.register(Arc::new(PanicPage));
+        let u = e.new_unit();
+        let pn = v.field("pn");
+        e.push(u, pp, vec![pn.0, v.int(1)]);
+        e.push(u, o.reader_op, vec![pn.0]);
+        let r = e.evaluate(1).map(|_| ()).map_err(|x| x.to_string());
+        let _ = tx.send(r);
+    });
+    let r = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("the evaluation ends");
+    let err = r.expect_err("the panic is the evaluation's failure");
+    assert!(err.contains("panicked"), "{err}");
+}
+
+/// `[f]`: a text node reading `f`, its output `f`'s value; keeps the
+/// cause each of its runs is told (`Ctx::woken_by`).
+struct WokeReader {
+    woke: std::sync::Mutex<Vec<Option<phitex_defuse::Cause>>>,
+}
+
+impl Operation for WokeReader {
+    fn name(&self) -> &'static str {
+        "woke-reader"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.woke.lock().unwrap().push(cx.woken_by());
+        let x = cx.read(Field(cx.args()[0]))?;
+        Ok(x.unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// `[at, f]`: a page-layer node whose frontier stands at node `at`
+/// while `f` read at its unit's end is 1, and is past everything once it
+/// is not (the loop at a hole, then past it). Settles at quiet points.
+struct FrontWhile;
+
+impl Operation for FrontWhile {
+    fn name(&self) -> &'static str {
+        "front-while"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args().to_vec();
+        let at = v.as_int(a[0]).and_then(|x| u64::try_from(x).ok());
+        let x = match cx.read_at(Field(a[1]), phitex_defuse::At::End(cx.unit()))? {
+            phitex_defuse::FieldAt::Def(x, _) => v.as_int(x),
+            _ => None,
+        };
+        cx.set_frontier(if x == Some(1) {
+            at.map(phitex_defuse::NodeId::from_raw)
+        } else {
+            None
+        });
+        Ok(ValueId::UNIT)
+    }
+
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+}
+
+/// A run held at the frontier (`Ctx::hold_at_frontier`) and released when
+/// the frontier passes it (`sched::release_frontier`) runs for the cause
+/// that woke it, not a structural one. Released as `Cause::Structure`
+/// with no site, its run was told no cause (`Ctx::woken_by`): attributed
+/// to no field (amsldoc, a paragraph added: 69 runs of 890 ms
+/// "Structure", each first woken by a changed page-layer field), and a
+/// run going on from a checkpoint before the change's site went back to
+/// its start instead. Line: F (frontier at A while `go` is 1 at the
+/// end), A, T (reads `pn`, edited), P (page: `go` := 2). F, T and P
+/// edited: F stands the frontier at A, T past it is held, P's change
+/// moves F's frontier past T, and T is released told its edit.
+#[test]
+fn a_run_released_at_the_frontier_keeps_the_cause_that_woke_it() {
+    let o = setup();
+    let (e, v) = (&o.e, o.e.values());
+    let front = e.register(Arc::new(FrontWhile));
+    let wr = Arc::new(WokeReader {
+        woke: std::sync::Mutex::new(Vec::new()),
+    });
+    let wop = e.register(wr.clone());
+    let u = e.new_unit();
+    let (pn, go, a) = (v.field("pn"), v.field("go"), v.field("a"));
+    let f = e.push(u, front, vec![v.int(-1), go.0]);
+    let an = e.push(u, o.def_op, vec![a.0, v.int(1)]);
+    let t = e.push(u, wop, vec![pn.0]);
+    let p = e.push(u, o.page_op, vec![go.0, v.int(1), ValueId::UNIT]);
+    e.push(u, o.page_op, vec![pn.0, v.int(5), ValueId::UNIT]);
+    e.evaluate(1).unwrap();
+    wr.woke.lock().unwrap().clear();
+    let held = e.frontier_held();
+    let at = i64::try_from(an.raw()).expect("an id");
+    e.replace(f, front, vec![v.int(at), go.0]);
+    e.replace(t, wop, vec![pn.0, v.int(0)]);
+    e.replace(p, o.page_op, vec![go.0, v.int(2), ValueId::UNIT]);
+    let rep = e.evaluate(1).unwrap();
+    let woke = wr.woke.lock().unwrap().clone();
+    assert!(e.frontier_held() > held, "T was held at the frontier: {woke:?} {rep:?}");
+    assert!(woke.len() >= 2, "T ran, was held, ran again: {woke:?}");
+    assert!(
+        woke.iter().all(|c| matches!(c, Some(phitex_defuse::Cause::Edited))),
+        "each run of T is told its edit: {woke:?}"
+    );
+}
+
+/// `[ms, def, reads...]`: reads each field, sleeps `ms` milliseconds,
+/// defines `def` (a field, or UNIT for none) := 1 + the sum of what it
+/// read. Keeps each run's sum once its reads are made.
+struct Slow(Arc<std::sync::Mutex<Vec<i64>>>);
+
+impl Operation for Slow {
+    fn name(&self) -> &'static str {
+        "slow"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args().to_vec();
+        let mut sum = 1;
+        for &f in &a[2..] {
+            sum += cx.read(Field(f))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+        }
+        self.0.lock().unwrap().push(sum);
+        let ms = v.as_int(a[0]).and_then(|x| u64::try_from(x).ok()).unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        let out = v.int(sum);
+        if a[1] != ValueId::UNIT {
+            cx.define(Field(a[1]), out);
+        }
+        Ok(out)
+    }
+}
+
+/// `[at, ms, f, x]`: sleeps `ms` milliseconds, then in one commit stands
+/// the frontier at node `at` (-1: none) and defines f := x, a page value.
+struct FrontPage;
+
+impl Operation for FrontPage {
+    fn name(&self) -> &'static str {
+        "front-page"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let v = cx.values();
+        let a = cx.args().to_vec();
+        let ms = v.as_int(a[1]).and_then(|x| u64::try_from(x).ok()).unwrap_or(0);
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        let at = v.as_int(a[0]).and_then(|x| u64::try_from(x).ok());
+        cx.set_frontier(at.map(phitex_defuse::NodeId::from_raw));
+        cx.define(Field(a[2]), a[3]);
+        Ok(a[3])
+    }
+
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+}
+
+/// A run held at the frontier that reads what an earlier held one
+/// defines runs after it: past the frontier with every run at work past
+/// it too, the earliest held goes first and the others in turn; at the
+/// quiet point all go together, and one that waited for an earlier one's
+/// commit (`sched::work`'s chain hold) waits on for it, not let go on its
+/// prediction with it. Let go together with it, a later one ran on what
+/// the earlier one had yet to define, and ran again once it had (beamer
+/// at -j32, a letter typed: 285 runs and 2.5 s on 2 tries of 3; this test
+/// red on every try with the quiet point letting the waiter go). Line: F
+/// (a settling node, after a sleep, in one commit: the frontier at A and
+/// the page value pn), A, S (text, slow, reads nothing the page layer
+/// defines), T1 (reads pn, slow, defines x), T2 (reads pn and x). F and
+/// S edited, at 4 threads: T1 waits for S (a long run), T2 for T1, T1 is
+/// held at the frontier F stands and let go at the quiet point after S.
+/// What T2 read is checked, not how often it began: never the new pn with
+/// T1's old x.
+#[test]
+fn runs_held_at_the_frontier_are_let_go_the_earliest_first() {
+    for _ in 0..6 {
+        let o = setup();
+        let (e, v) = (&o.e, o.e.values());
+        let front = e.register(Arc::new(FrontPage));
+        let n = || Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (cs, c1, c2) = (n(), n(), n());
+        let (s_op, t1_op, t2_op) = (
+            e.register(Arc::new(Slow(cs.clone()))),
+            e.register(Arc::new(Slow(c1.clone()))),
+            e.register(Arc::new(Slow(c2.clone()))),
+        );
+        let u = e.new_unit();
+        let (pn, a, x, y) = (v.field("pn"), v.field("a"), v.field("x"), v.field("y"));
+        let f = e.push(u, front, vec![v.int(-1), v.int(0), pn.0, v.int(1)]);
+        let an = e.push(u, o.def_op, vec![a.0, v.int(1)]);
+        let s = e.push(u, s_op, vec![v.int(0), y.0]);
+        let _t1 = e.push(u, t1_op, vec![v.int(150), x.0, pn.0]);
+        let t2 = e.push(u, t2_op, vec![v.int(0), ValueId::UNIT, pn.0, x.0]);
+        e.evaluate(4).unwrap();
+        assert_eq!(int(e, t2), Some(1 + 1 + 2));
+        let at = i64::try_from(an.raw()).expect("an id");
+        c2.lock().unwrap().clear();
+        e.replace(f, front, vec![v.int(at), v.int(30), pn.0, v.int(2)]);
+        e.replace(s, s_op, vec![v.int(400), y.0]);
+        let rep = e.evaluate(4).unwrap();
+        assert_eq!(int(e, t2), Some(1 + 2 + 3), "{rep:?}");
+        let seen = c2.lock().unwrap().clone();
+        assert!(
+            !seen.contains(&(1 + 2 + 2)),
+            "T2 went on with the new pn and T1's old x: it read {seen:?}: {rep:?}"
+        );
+        assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+    }
+}
+
+/// `[f]`: reads f before its placer (`Ctx::read_before_placer`).
+struct BeforeReader;
+
+impl Operation for BeforeReader {
+    fn name(&self) -> &'static str {
+        "before-reader"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        cx.read_before_placer();
+        Ok(cx.read(Field(cx.args()[0]))?.unwrap_or(ValueId::UNIT))
+    }
+}
+
+/// `[f]`: places a before-reader child on f, outputs its output.
+struct BeforePlacer(OpId);
+
+impl Operation for BeforePlacer {
+    fn name(&self) -> &'static str {
+        "before-placer"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let i = cx.child(self.0, vec![cx.args()[0]]);
+        Ok(cx.placed_output_or(i, ValueId::UNIT))
+    }
+}
+
+/// A child reading before its placer (a picture in a figure's run) where
+/// the layer's frontier stands at the placer is not held there: its read
+/// is made where the placer stands, before which the layer places
+/// nothing more. Held by its own position, after the placer's, its run
+/// was thrown away and made again (Grail's added figure: a 1.8 s TikZ
+/// child run twice, accl 25835). Line: F (frontier), P (page: pn := 1),
+/// Q (placer of C, reading pn). F stands the frontier at Q, P edited.
+#[test]
+fn a_child_reading_before_its_placer_is_not_held_at_its_placers_frontier() {
+    let o = setup();
+    let (e, v) = (&o.e, o.e.values());
+    let front = e.register(Arc::new(Front));
+    let child = e.register(Arc::new(BeforeReader));
+    let placer = e.register(Arc::new(BeforePlacer(child)));
+    let u = e.new_unit();
+    let pn = v.field("pn");
+    let f = e.push(u, front, vec![v.int(-1), v.int(0)]);
+    let p = e.push(u, o.page_op, vec![pn.0, v.int(1), ValueId::UNIT]);
+    let q = e.push(u, placer, vec![pn.0]);
+    e.evaluate(1).unwrap();
+    assert_eq!(int(e, q), Some(1));
+    let at = i64::try_from(q.raw()).expect("q id");
+    e.replace(f, front, vec![v.int(at), v.int(1)]);
+    e.replace(p, o.page_op, vec![pn.0, v.int(2), ValueId::UNIT]);
+    let held = e.frontier_held();
+    let rep = e.evaluate(1).unwrap();
+    assert_eq!(int(e, q), Some(2), "{rep:?}");
+    assert_eq!(e.frontier_held(), held, "the child is not held: {rep:?}");
+    assert!(e.check_invariants().is_empty(), "{:?}", e.check_invariants());
+}
+
+/// `[from, to]`: a page-layer node: defines `to` := 1 - (the value of
+/// `from` reaching it): a routine whose output flips its input. Settles
+/// at quiet points. Counts its runs.
+struct Flip(Arc<AtomicU64>);
+
+impl Operation for Flip {
+    fn name(&self) -> &'static str {
+        "flip"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        let a = cx.args().to_vec();
+        let v = cx.values();
+        let x = cx.read(Field(a[0]))?.and_then(|x| v.as_int(x)).unwrap_or(0);
+        let out = v.int(1 - x);
+        cx.define(Field(a[1]), out);
+        Ok(out)
+    }
+
+    fn settles_at_quiet(&self) -> bool {
+        true
+    }
+}
+
+/// `[from, to]`: a text node: defines `to` := the value of `from`
+/// reaching it.
+struct Copy;
+
+impl Operation for Copy {
+    fn name(&self) -> &'static str {
+        "copy"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        let a = cx.args().to_vec();
+        let x = cx.read(Field(a[0]))?.unwrap_or(ValueId::UNIT);
+        cx.define(Field(a[1]), x);
+        Ok(x)
+    }
+}
+
+/// The bound on the page layer's feedback inside a wave, where a
+/// routine's re-ask of the text after it is asked at once, not held to
+/// the quiet point (`sched::same_wave`): a re-ask goes only to readers
+/// after its definer, so a chain of them inside a wave moves on along
+/// the line and ends at its end. Here every routine flips what the text
+/// after it reads, and that text gives it to the next routine: a clean
+/// build settles in its one wave at every thread count, each routine
+/// run a bounded number of times, on one thread's values. An edit that
+/// flips the first input flips them all and settles too, in one pass:
+/// the edited node's change is held, the chain it starts is not
+/// (`Node::run_chained`). Held link by link, it moved one routine a pass,
+/// and past `Limits::settle_passes` the wakes still held were dropped
+/// with the output kept, wrong.
+#[test]
+fn routines_flipping_the_text_after_them_settle_within_a_wave() {
+    let line = |n: usize, threads: usize, edit: bool| {
+        let e = Engine::new();
+        let v = e.values();
+        let runs = Arc::new(AtomicU64::new(0));
+        let flip = e.register(Arc::new(Flip(runs.clone())));
+        let copy = e.register(Arc::new(Copy));
+        let def = e.register(Arc::new(Def {
+            runs: AtomicU64::new(0),
+        }));
+        let u = e.new_unit();
+        let first = e.push(u, def, vec![v.field("t0").0, v.int(0)]);
+        let mut outs = Vec::new();
+        for i in 0..n {
+            let (t, x, t2) = (
+                v.field(&format!("t{i}")),
+                v.field(&format!("x{i}")),
+                v.field(&format!("t{}", i + 1)),
+            );
+            e.push(u, flip, vec![t.0, x.0]);
+            outs.push(e.push(u, copy, vec![x.0, t2.0]));
+        }
+        let mut rep = e.evaluate(threads).unwrap();
+        if edit {
+            e.replace(first, def, vec![v.field("t0").0, v.int(1)]);
+            rep = e.evaluate(threads).unwrap();
+        }
+        let got: Vec<Option<i64>> = outs.iter().map(|&o| int(&e, o)).collect();
+        assert!(
+            e.check_invariants().is_empty(),
+            "-j{threads}: {:?} {rep:?}",
+            e.check_invariants()
+        );
+        (got, runs.load(Ordering::SeqCst), rep)
+    };
+    let alt = |n: usize, s: i64| {
+        (0..n)
+            .map(|i| Some(if i % 2 == 0 { 1 - s } else { s }))
+            .collect::<Vec<_>>()
+    };
+    for threads in [1, 2, 4, 8] {
+        for _ in 0..10 {
+            let n = 40;
+            let (got, runs, rep) = line(n, threads, false);
+            assert_eq!(got, alt(n, 0), "-j{threads}: {rep:?}");
+            assert_eq!(rep.held_passes, 0, "-j{threads}: one wave: {rep:?}");
+            let bound = (n * (n + 1) / 2) as u64;
+            assert!(runs <= bound, "-j{threads}: {runs} routine runs for {n}");
+            let (got, runs, rep) = line(n, threads, true);
+            assert_eq!(got, alt(n, 1), "-j{threads} edited: {rep:?}");
+            assert!(rep.held_passes <= 1, "-j{threads} edited: one pass: {rep:?}");
+            assert!(
+                runs <= 2 * (n * (n + 1) / 2) as u64,
+                "-j{threads} edited: {runs} routine runs for {n}"
+            );
+        }
     }
 }

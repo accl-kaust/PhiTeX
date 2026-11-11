@@ -1,0 +1,24 @@
+% !TEX program = etex
+% A routine's page lines kept in a box register by one routine and given back by the
+% next (\unvbox\held in the output routine): the last page's lines all come from other
+% finishers' pieces and the finisher that ships it has no sealed window of its own; its
+% page is written with the lines read by piece (was: written with the stand-ins, its
+% lines empty boxes).
+% (DVI: etex, the oracle made in the CI image)
+\vsize=200pt \maxdepth=2pt \hsize=200pt \newbox\held
+\output={\ifnum\outputpenalty=-10004 \global\setbox\held=\vbox{\unvbox255}\global\vsize=\maxdimen
+ \else\ifnum\outputpenalty=-10003 \unvbox\held \setbox0=\box255 \global\vsize=200pt
+ \else \shipout\box255 \fi\fi}
+Paragraph 0 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \vbox{}\penalty-10003
+Paragraph 1 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \vbox{}\penalty-10003
+Paragraph 2 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \vbox{}\penalty-10003
+Paragraph 3 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \vbox{}\penalty-10003
+Paragraph 4 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \vbox{}\penalty-10003
+Paragraph 5 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \vbox{}\penalty-10003
+Paragraph 6 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \vbox{}\penalty-10003
+Paragraph 7 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \vbox{}\penalty-10003
+Paragraph 8 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \vbox{}\penalty-10003
+Paragraph 9 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \vbox{}\penalty-10003
+Paragraph 10 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \vbox{}\penalty-10003
+Paragraph 11 with words enough to make two or three lines of text in a narrow column of two hundred points.\par\penalty-10004 \vbox{}\penalty-10003
+\bye

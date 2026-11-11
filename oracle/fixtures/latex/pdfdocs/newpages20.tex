@@ -1,0 +1,25 @@
+% Thirty pages made by one loop, each ended by \newpage and each
+% beginning by reading a counter the shipout hook stepped, and keeping
+% it in a macro of its own (as thumbs' overview does with ThumbsPage):
+% a serial chain from the text to the output routine and back, one page
+% at a time, where each page's text leaves a state the next page's
+% depends on. The hook also loops, so that each page's routine takes a
+% while and the text runs ahead of it.
+\documentclass{article}
+\newcounter{shipped}
+\newcount\slow
+\AddToHook{shipout/foreground}{\stepcounter{shipped}%
+  \slow=0 \loop\ifnum\slow<20000 \advance\slow by 1 \repeat}
+\newcount\pg
+\def\lastshipped{none}
+\begin{document}
+\loop\ifnum\pg<30
+  \advance\pg by 1
+  Page \the\pg\ of the loop: \theshipped\ pages shipped before it,
+  \lastshipped\ before the page before.
+  \ifodd\theshipped\ An odd number of pages shipped so far.\else An even number.\fi
+  \xdef\lastshipped{\theshipped}%
+  \newpage
+\repeat
+The end: \theshipped\ pages shipped before this one, \lastshipped\ before the page before.
+\end{document}

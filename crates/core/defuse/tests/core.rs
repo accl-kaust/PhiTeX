@@ -685,6 +685,15 @@ fn a_commit_walks_only_to_the_next_definition() {
             }
         }
         e.evaluate(4).unwrap();
+        // (the records of runs refuted at four threads, a reader run
+        // before its definition committed, stay filed until a sweep
+        // (`Engine::sweep_readers`: a collection's, or a quiet point's
+        // once they outnumber the standing ones): how many a segment
+        // holds is the first evaluation's timing, which the walk counts
+        // with the standing ones (31 and 29 under a gate's load, 4 runs
+        // in 720 on accl 22541). Swept: the walk's count is what it
+        // walks to)
+        e.collect();
         e.replace(defs[5000], o.def, vec![x, v.int(-1)]);
         let t = Instant::now();
         let r = e.evaluate(4).unwrap();
@@ -1543,4 +1552,118 @@ fn a_commit_that_places_and_contributes_allocates_nothing_under_its_lock() {
         );
     }
     assert!(e.check_invariants().is_empty());
+}
+
+/// `[f, item]`: f := the list reaching it with `item` appended, as a
+/// relation ([`Ctx::define_append_with`]); never reads f. Counts its runs.
+struct App(AtomicU64);
+
+impl Operation for App {
+    fn name(&self) -> &'static str {
+        "app"
+    }
+
+    fn run(&self, cx: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        let f = Field(cx.args()[0]);
+        let items = cx.values().list(vec![cx.args()[1]]);
+        cx.define_append_with(f, items, phitex_defuse::Locality::Local);
+        Ok(ValueId::UNIT)
+    }
+}
+
+/// A list each node adds to (microtype's `\MT@font@list`): its appenders
+/// are relations, recomputed in place when what they add to moves, not a
+/// chain of runs; a reader of the list sees what the appends make of the
+/// new start. At one and four threads.
+#[test]
+fn an_append_chain_is_recomputed_in_place() {
+    for threads in [1, 4] {
+        let e = Engine::new();
+        e.set_append(Arc::new(|input: Option<ValueId>, items: ValueId, v: &Values| {
+            let mut xs = input
+                .and_then(|x| v.with_list(x, <[ValueId]>::to_vec))
+                .unwrap_or_default();
+            xs.extend(v.with_list(items, <[ValueId]>::to_vec).unwrap_or_default());
+            v.list(xs)
+        }));
+        let def = e.register(Arc::new(Def));
+        let get = e.register(Arc::new(Get));
+        let app = Arc::new(App(AtomicU64::new(0)));
+        let ap = e.register(app.clone());
+        let v = e.values();
+        let x = f(v, "x");
+        let u = e.new_unit();
+        let d = e.push(u, def, vec![x, v.list(vec![v.str("a")])]);
+        let apps: Vec<NodeId> = ["b", "c", "d", "e"]
+            .iter()
+            .map(|s| e.push(u, ap, vec![x, v.str(s)]))
+            .collect();
+        let end = e.push(u, get, vec![x]);
+        e.evaluate(threads).unwrap();
+        let names = |e: &Engine| -> Vec<String> {
+            let v = e.values();
+            v.with_list(e.output(end).expect("ran"), <[ValueId]>::to_vec)
+                .unwrap_or_default()
+                .iter()
+                .map(|&s| v.as_str(s).unwrap_or_default().to_owned())
+                .collect()
+        };
+        assert_eq!(names(&e), ["a", "b", "c", "d", "e"], "-j{threads}");
+        let before = app.0.load(Ordering::Relaxed);
+        e.replace(d, def, vec![x, v.list(vec![v.str("z"), v.str("y")])]);
+        let r = e.evaluate(threads).unwrap();
+        assert_eq!(names(&e), ["z", "y", "b", "c", "d", "e"], "-j{threads}");
+        assert_eq!(
+            app.0.load(Ordering::Relaxed),
+            before,
+            "-j{threads}: no appender ran again: {r:?}"
+        );
+        assert!(r.relative_resolved >= 4, "-j{threads}: {r:?}");
+        e.remove(apps[1]);
+        e.evaluate(threads).unwrap();
+        assert_eq!(names(&e), ["z", "y", "b", "d", "e"], "-j{threads}");
+        assert_eq!(app.0.load(Ordering::Relaxed), before, "-j{threads}");
+        assert!(e.check_invariants().is_empty(), "-j{threads}");
+    }
+}
+
+/// An append's items (`Rel::Append`, a list the appender made) are held
+/// by its record and its segment's definition: a collection between two
+/// evaluations keeps them, and the list grown again where it moves is
+/// made of them (circuitikz's `\MT@font@list` after a section added: a
+/// resume read an item collected, observe builds stopped "used after its
+/// collection").
+#[test]
+fn an_appends_items_outlive_a_collection() {
+    let e = Engine::new();
+    e.set_append(Arc::new(|input: Option<ValueId>, items: ValueId, v: &Values| {
+        let mut xs = input
+            .and_then(|x| v.with_list(x, <[ValueId]>::to_vec))
+            .unwrap_or_default();
+        xs.extend(v.with_list(items, <[ValueId]>::to_vec).unwrap_or_default());
+        v.list(xs)
+    }));
+    let def = e.register(Arc::new(Def));
+    let get = e.register(Arc::new(Get));
+    let ap = e.register(Arc::new(App(AtomicU64::new(0))));
+    let v = e.values();
+    let x = f(v, "x");
+    let u = e.new_unit();
+    let d = e.push(u, def, vec![x, v.list(vec![v.str("a")])]);
+    for s in ["b", "c"] {
+        e.push(u, ap, vec![x, v.str(s)]);
+    }
+    let end = e.push(u, get, vec![x]);
+    e.evaluate(1).unwrap();
+    e.collect();
+    e.replace(d, def, vec![x, v.list(vec![v.str("z")])]);
+    e.evaluate(1).unwrap();
+    let names: Vec<String> = v
+        .with_list(e.output(end).expect("ran"), <[ValueId]>::to_vec)
+        .unwrap_or_default()
+        .iter()
+        .map(|&s| v.as_str(s).unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(names, ["z", "b", "c"]);
 }

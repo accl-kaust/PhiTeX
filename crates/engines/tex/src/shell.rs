@@ -6,7 +6,7 @@
 //!
 //! A command runs where it is in TeX's order, in the run that makes it
 //! ([`Run::shell_run`]): it is handed the files the job wrote and closed
-//! before it and the files earlier commands left ([`Run::shell_view`]),
+//! before it and the files earlier commands left ([`Run::shell_file`]),
 //! and what it made of each name is the run's definition of
 //! `toolout:<name>` (`crate::tools::out_field`), which a later read of
 //! that name reads, in this run or after it; a name it removed is absent
@@ -38,12 +38,23 @@ pub struct ShellRan {
     /// The names of the given files it read or looked at, if the host
     /// can tell; `None`: all of them.
     pub read: Option<Vec<String>>,
+    /// What it wrote to its standard output: the text a piped input
+    /// (`\\input|cmd`, web2c's `open_in_or_pipe`) reads.
+    pub stdout: Vec<u8>,
+    /// Why the host could not run it at all (empty: it ran, or the host
+    /// does not say): a runner that failed to load, a program not found.
+    /// With a failing status and nothing written, the engine says it
+    /// plainly, once a call (`\\write18`, a piped input); TeX's log line
+    /// stays web2c's.
+    pub why: String,
 }
 
 /// Runs the commands `\write18` allows ([`crate::Options::shell_hook`]).
-/// Called from any engine worker, possibly several at once and for a run
-/// later thrown away: a call leaves nothing behind but its [`ShellRan`],
-/// and gives the same result for the same command and files.
+/// Called from any engine worker, possibly several at once, and only for
+/// a node at the committed frontier (every node before it settled in its
+/// pass, `phitex_defuse::Ctx::wait_settled`): a call leaves nothing behind
+/// but its [`ShellRan`], and gives the same result for the same command
+/// and files.
 pub trait ShellHook: Send + Sync {
     /// Runs `command` (quoted by the engine) in a working directory
     /// holding exactly `files` (name relative to it, bytes).
@@ -87,6 +98,20 @@ pub(crate) enum Decision {
     Any(String),
     /// 2: restricted and allowed: the command runs as quoted here.
     Allowed(String),
+}
+
+/// texmfmp.c's `runpopen` (a piped input's command, `open_in_or_pipe`):
+/// as [`runsystem`] decides, but a quoted command with a `|` is not
+/// refused.
+pub(crate) fn runpopen(cmd: &str, restricted: bool, allowed: &[String]) -> Decision {
+    if !restricted {
+        return Decision::Any(cmd.to_owned());
+    }
+    match shell_cmd_is_allowed(cmd, allowed) {
+        Ok(Some(safe)) => Decision::Allowed(safe),
+        Ok(None) => Decision::Restricted,
+        Err(()) => Decision::QuotationError,
+    }
 }
 
 /// C's `isspace` in the C locale.
@@ -181,7 +206,7 @@ fn shell_cmd_is_allowed(cmd: &str, allowed: &[String]) -> Result<Option<String>,
 pub(crate) const OUTS: &str = "shellouts";
 
 /// The names the commands made or removed, in TeX's order: what a later
-/// command's view looks up ([`Run::shell_view`]).
+/// command's view looks up ([`Run::shell_file`]).
 pub(crate) const NAMES: &str = "shellnames";
 
 /// The environment's list of the names in the build's store of command
@@ -236,7 +261,13 @@ pub(crate) struct Made {
     status: i32,
     wrote: Vec<(String, String)>,
     removed: Vec<String>,
+    stdout: String,
+    /// [`ShellRan::why`].
+    why: String,
 }
+
+/// The files a call read, each with its text's key (`None`: absent).
+type Reads = Vec<(String, Option<u64>)>;
 
 /// One call remembered: the files it read with their texts' keys (`None`:
 /// absent), or all the files it was handed (`all`: the same names, the
@@ -244,7 +275,7 @@ pub(crate) struct Made {
 #[derive(Debug)]
 struct Call {
     all: bool,
-    reads: Vec<(String, Option<u64>)>,
+    reads: Reads,
     made: Arc<Made>,
 }
 
@@ -270,6 +301,16 @@ impl Memo {
                 c.reads.iter().all(|(n, k)| key(n) == *k)
             };
             same.then(|| c.made.clone())
+        })
+    }
+
+    /// The calls kept for `cmd`, latest last: each the files it read
+    /// with their texts' keys, `None` where it read all it was handed.
+    fn reads_of(&self, cmd: &str) -> Vec<(Option<Reads>, Arc<Made>)> {
+        self.0.get(cmd).map_or_else(Vec::new, |cs| {
+            cs.iter()
+                .map(|c| ((!c.all).then(|| c.reads.clone()), c.made.clone()))
+                .collect()
         })
     }
 
@@ -313,6 +354,32 @@ fn closed_text(v: &Values, entries: &[ValueId], name: &str) -> Option<String> {
         }
     }
     state.filter(|s| s.1).map(|s| s.0)
+}
+
+/// What the host's call is: the memo's answer for `cmd` over `files`
+/// where a call before read the same, else the call to make; `None` with
+/// no hook.
+enum Lookup {
+    Known(Arc<Made>),
+    Call,
+}
+
+/// The memo's answer for `cmd` over `files` (TeX's characters), else
+/// [`Lookup::Call`]; `None` with no hook.
+fn lookup(ops: &crate::run::Ops, cmd: &str, files: &[(String, String)]) -> Option<Lookup> {
+    let memo = {
+        let o = ops
+            .tool_opts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        o.shell_hook.as_ref()?;
+        o.shell_memo.clone()
+    };
+    let m = memo
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .find(cmd, files);
+    Some(m.map_or(Lookup::Call, Lookup::Known))
 }
 
 /// The host's call: its result for `cmd` over `files` (TeX's characters),
@@ -381,6 +448,8 @@ fn call(ops: &crate::run::Ops, cmd: &str, files: &[(String, String)]) -> Option<
         status: r.status,
         wrote,
         removed,
+        stdout: chars(&r.stdout),
+        why: r.why.clone(),
     });
     memo.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -409,11 +478,10 @@ impl Run<'_, '_> {
         Ok(out)
     }
 
-    /// The files a command here is handed (docs/note-shell-hook.md): each
-    /// file the job wrote and closed before here, as it wrote it, else
-    /// what the commands before here (or the store: the evaluation
-    /// before) left of it, by name.
-    pub(crate) fn shell_view(&mut self) -> R<Vec<(String, String)>> {
+    /// The names of the files a command here is handed
+    /// ([`Run::shell_file`] each): the files the job wrote before here, the
+    /// names the commands before here made or removed, the store's.
+    fn shell_names(&mut self) -> R<std::collections::BTreeSet<String>> {
         let v = self.v;
         let mut names = std::collections::BTreeSet::new();
         for f in [crate::run::WNAMES, NAMES] {
@@ -423,35 +491,140 @@ impl Run<'_, '_> {
         if let Some(s) = self.cx.env(v.field(STORE))? {
             names.extend(list_of(v, s).into_iter().map(|n| str_of(v, n)));
         }
-        let mut out = Vec::new();
-        for n in names {
-            let entries = self.fold_with_own(crate::run::stream_bucket(v, &n))?;
-            if let Some(t) = closed_text(v, &entries, &n) {
-                out.push((n, t));
-                continue;
+        Ok(names)
+    }
+
+    /// File `name` of a command's view (docs/note-shell-hook.md): as the job
+    /// wrote it, closed before here, else what the commands before here
+    /// (or the store) left of it; `None`: not handed. Reads that file's
+    /// stream alone ([`crate::run::stream_bucket`]).
+    fn shell_file(&mut self, name: &str) -> R<Option<String>> {
+        let v = self.v;
+        let entries = self.fold_with_own(crate::run::stream_bucket(v, name))?;
+        if let Some(t) = closed_text(v, &entries, name) {
+            return crate::defer::resolve_marked_run(self, &t).map(Some);
+        }
+        let made = self.get(&crate::tools::out_name(name))?;
+        Ok(made
+            .and_then(|x| list_of(v, x).get(1).copied())
+            .map(|t| str_of(v, t)))
+    }
+
+    /// The memo's answer for `cmd` read file by file: a call kept that
+    /// read some of the files, each as it is here, made what that call
+    /// made; only the files the kept calls read are read here, so a
+    /// change of a file no call read (the `.aux` a minted command never
+    /// opens) runs nothing again, not even this run. `None`: no call
+    /// kept matches (or one read all it was handed: the whole view then).
+    fn shell_memo_lazy(
+        &mut self,
+        cmd: &str,
+        names: &std::collections::BTreeSet<String>,
+    ) -> R<Option<Arc<Made>>> {
+        let memo = {
+            let o = self
+                .ops
+                .tool_opts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if o.shell_hook.is_none() {
+                return Ok(None);
             }
-            let made = self.get(&crate::tools::out_name(&n))?;
-            if let Some(t) = made.and_then(|x| list_of(v, x).get(1).copied()) {
-                out.push((n, str_of(v, t)));
+            o.shell_memo.clone()
+        };
+        let calls = memo
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reads_of(cmd);
+        let mut keys: crate::FxHashMap<String, Option<u64>> = crate::FxHashMap::default();
+        for (reads, made) in calls.into_iter().rev() {
+            let Some(reads) = reads else {
+                return Ok(None);
+            };
+            let mut same = true;
+            for (n, k) in &reads {
+                let got = if let Some(&g) = keys.get(n) {
+                    g
+                } else {
+                    let g = if names.contains(n) {
+                        self.shell_file(n)?.map(|t| text_key(&t))
+                    } else {
+                        None
+                    };
+                    keys.insert(n.clone(), g);
+                    g
+                };
+                if got != *k {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return Ok(Some(made));
             }
         }
-        Ok(out)
+        Ok(None)
     }
 
     /// A `\write18` the host runs (`cmd` quoted, [`runsystem`]), here in
     /// this run, in TeX's order: handed the files as they are here
-    /// ([`Run::shell_view`]), what it made is this run's definition of
+    /// ([`Run::shell_file`]), what it made is this run's definition of
     /// each name it wrote or removed (`toolout:<name>`, global, as a file
     /// on disk is), which the reads after it read (`Run::tool_output`),
     /// with the names ([`NAMES`]) and the results ([`OUTS`]) contributed.
     /// The host's call is memoised by the command and the files it read
     /// ([`Memo`]).
     pub(crate) fn shell_run(&mut self, cmd: &str) -> R<()> {
+        self.shell_call(cmd).map(|_| ())
+    }
+
+    /// [`Run::shell_run`]'s call, what it made given back; `None` with
+    /// no hook.
+    fn shell_call(&mut self, cmd: &str) -> R<Option<Arc<Made>>> {
         let v = self.v;
-        let files = self.shell_view()?;
-        let Some(made) = call(self.ops, cmd, &files) else {
-            return Ok(());
+        let names = self.shell_names()?;
+        let lazy = self.shell_memo_lazy(cmd, &names)?;
+        let made = if let Some(m) = lazy {
+            m
+        } else {
+            let mut files = Vec::new();
+            for n in names {
+                if let Some(t) = self.shell_file(&n)? {
+                    files.push((n, t));
+                }
+            }
+            match lookup(self.ops, cmd, &files) {
+                None => return Ok(None),
+                Some(Lookup::Known(m)) => m,
+                Some(Lookup::Call) => {
+                    // (the host runs a command only at the committed
+                    // frontier, every node before this one settled in this
+                    // pass and no page left to fire before it
+                    // (`Ctx::wait_settled`): a command acts outside the
+                    // engine, so it never runs on a view of the job's files
+                    // that TeX's own order never had, though the run on it
+                    // would be thrown away (shell's
+                    // a_command_reads_what_the_job_wrote at -j8: `fakecmd up
+                    // inb.txt` called on an inb.txt opened and closed with
+                    // its line not yet written). A view the memo answers
+                    // calls nothing: answered at once)
+                    self.cx.wait_settled()?;
+                    let Some(m) = call(self.ops, cmd, &files) else {
+                        return Ok(None);
+                    };
+                    m
+                }
+            }
         };
+        // (the host could not run the command at all and said why: one
+        // plain diagnostic, the program's own errors after it being only
+        // what follows from nothing made; a command that ran and failed,
+        // no why, keeps its own. TeX's log line stays web2c's
+        // `executed safely (allowed)`, which web2c writes too)
+        if made.status != 0 && made.wrote.is_empty() && !made.why.is_empty() {
+            let name = cmd.split_whitespace().next().unwrap_or_default();
+            self.diag(true, &format!("`{name}' could not run here: {}", made.why));
+        }
         if made.status != 0 && crate::exec::obs_flag!("PHITEX_AUX_TRACE") {
             eprintln!("shell: {cmd:?} returned {}", made.status);
         }
@@ -468,7 +641,50 @@ impl Run<'_, '_> {
             self.contribute(NAMES, v.seq_unit(name));
             self.contribute(OUTS, v.seq_unit(v.list(vec![name, x])));
         }
-        Ok(())
+        Ok(Some(made))
+    }
+
+    /// A piped input's text (`\\input|cmd`, `\\openin`'s, web2c's
+    /// `open_in_or_pipe` with shell escape on): `cmd` as [`runpopen`]
+    /// allows it, run through the host as a `\\write18` is, here in TeX's
+    /// order, its standard output read as the file's text; `None` where
+    /// the pipe does not open (the command refused, or no host to run
+    /// it), said.
+    pub(crate) fn pipe_text(&mut self, cmd: &str) -> R<Option<String>> {
+        let restricted = self.int32("shellescape")? == 2;
+        let allowed = self
+            .ops
+            .tool_opts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shell_commands
+            .clone();
+        let name = cmd.split_whitespace().next().unwrap_or_default().to_owned();
+        let quoted = match runpopen(cmd, restricted, &allowed) {
+            Decision::Any(c) | Decision::Allowed(c) => c,
+            Decision::QuotationError => {
+                self.diag(
+                    true,
+                    &format!("runpopen quotation error in command line: {cmd}"),
+                );
+                return Ok(None);
+            }
+            Decision::Restricted => {
+                self.diag(
+                    true,
+                    &format!("the piped input |{cmd}: `{name}' needs shell escape, so it was not run; to run it, build with the command-line phitex --shell-escape (never in the browser)"),
+                );
+                return Ok(None);
+            }
+        };
+        let Some(made) = self.shell_call(&quoted)? else {
+            self.diag(
+                true,
+                &format!("the piped input |{cmd}: `{name}' is a program, and this build runs none (the browser and the editors' built-in engine never run programs); to run it, build with the command-line phitex"),
+            );
+            return Ok(None);
+        };
+        Ok(Some(made.stdout.clone()))
     }
 }
 

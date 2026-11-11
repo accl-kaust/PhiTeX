@@ -44,7 +44,7 @@ Change a word and only what it touches is rebuilt. A 60-page paper in ⟨~5 ms�
 <td width="33%" valign="top">
 <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/exact-dark.png"><img src="assets/readme/exact.png" alt="Exactly as {pdf,Xe}LaTeX" width="100%"></picture><br>
 <b>Exactly as {pdf,Xe}LaTeX</b><br>
-Byte for byte, cold or after a thousand edits. Nothing changes but the wait. <!-- TODO(claim): XeLaTeX across the corpus (last full sweep 2026-10-28: 83 of 131 identical; fixes since, no fresh sweep) · Phi -->
+Byte for byte, from a clean build or after a thousand edits. Nothing changes but the wait. <!-- TODO(claim): XeLaTeX across the corpus (last full sweep 2026-10-28: 83 of 131 identical; fixes since, no fresh sweep) · Phi -->
 </td>
 <td width="33%" valign="top">
 <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/editors-dark.png"><img src="assets/readme/editors.png" alt="Any editor, Overleaf included" width="100%"></picture><br>
@@ -66,7 +66,7 @@ Without it, each package your paper uses is downloaded once, on first use, and k
 <td width="33%" valign="top">
 <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/cores-dark.png"><img src="assets/readme/cores.png" alt="Multi-threaded" width="100%"></picture><br>
 <b>Multi-threaded</b><br>
-Paragraphs, pages and the PDF are built in parallel on every core, identical at any thread count.
+Paragraphs, pages and the PDF are built in parallel with <code>-j N</code> (v1.0 runs on one thread unless asked), identical at any thread count.
 </td>
 </tr>
 </table>
@@ -84,13 +84,20 @@ with your own PDF viewer, jumping both ways as with pdflatex.
 curl -fsSL https://phitex.org/install.sh | sh
 phitex watch paper.tex
 ```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://phitex.org/install.ps1 | iex
+phitex watch paper.tex
+```
 <!-- TODO(link): install.sh needs the first GitHub release; until then, build from source below -->
 
 `phitex watch` builds your document, opens it live in your browser, and
 rebuilds on every save. Double-click the page to jump to the source.
 
 <p align="center">
-  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/cli-dark.gif"><img src="assets/readme/cli.gif" alt="phitex watch in a terminal: a cold build, then an edit rebuilt, and the page live in the browser" width="100%"></picture>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="assets/readme/cli-dark.gif"><img src="assets/readme/cli.gif" alt="phitex watch in a terminal: a clean build, then an edit rebuilt, and the page live in the browser" width="100%"></picture>
   <!-- TODO(number): the CLI GIF's figures (assets/cli.html's CONFIG and LIVE) from a real run, then scripts/readme-gifs.sh cli -->
 </p>
 
@@ -99,13 +106,15 @@ rebuilds on every save. Double-click the page to jump to the source.
 One build, start to finish. `\ref`, `\cite`, the table of contents and the
 index settle in a single run: no "run it twice", no latexmk. BibTeX, biber
 and makeindex run inside the build, and run again only when their input
-changes.
+changes. The glossaries package's lists are made as `makeglossaries` makes
+them (makeindex on `STEM.glo` and `STEM.acn` in the style `STEM.ist`),
+where `STEM.ist` exists.
 
 ```sh
 phitex build paper.tex                    # the finished PDF, like latexmk -pdf
 phitex watch paper.tex                    # live in the browser, rebuilt on save
 phitex --compat=pdflatex paper.tex        # one run, exactly as pdflatex
-phitex upgrade                            # the latest release; phitex news says what it brings
+phitex upgrade                            # the latest release, after a [Y/n] (-y: no question); phitex news says what it brings
 ```
 
 ## Works where you write
@@ -118,8 +127,8 @@ phitex upgrade                            # the latest release; phitex news says
 |---|---|---|
 | **Overleaf** | A browser extension adds a **PDF \| ⚡ Instant** switch to Overleaf's toolbar. The page follows your typing. It compiles inside your browser: your document is never sent anywhere. | [Chrome](https://chromewebstore.google.com/detail/phitex-instant-for-overle/joimneigjammmhdbgaonlepnlllceajl) · [Firefox](https://addons.mozilla.org/en-US/firefox/addon/phitex-for-overleaf-unofficial/) · [Edge](https://microsoftedge.microsoft.com/addons/detail/phitex-instant-for-overle/gkcnpagkdjaefnnpkoogdpacdmgpihpd) |
 | **VS Code** | A live page beside your editor, errors in the Problems panel, click-to-source both ways. | Marketplace <!-- TODO(link): Marketplace and Open VSX; today from source or a .vsix · Phi Frontends --> |
-| **Neovim** | `phitex.lua` (Neovim 0.11+): the page follows your cursor, diagnostics inline. | [editors/nvim](https://github.com/accl-kaust/PhiTeX-frontends/blob/dev/editors/nvim/phitex.lua) <!-- TODO(link): editors/ is on dev only, not main · Phi Frontends --> |
-| **Emacs** | `phitex.el` (Emacs 29+): the same, beside eglot or lsp-mode. | [editors/emacs](https://github.com/accl-kaust/PhiTeX-frontends/blob/dev/editors/emacs/phitex.el) |
+| **Neovim** | `phitex.lua` (Neovim 0.11+): the page follows your cursor, diagnostics inline. | [apps/editors/nvim](https://github.com/accl-kaust/PhiTeX-frontends/blob/main/apps/editors/nvim/phitex.lua) |
+| **Emacs** | `phitex.el` (Emacs 29+): the same, beside eglot or lsp-mode. | [apps/editors/emacs](https://github.com/accl-kaust/PhiTeX-frontends/blob/main/apps/editors/emacs/phitex.el) |
 | **Any LSP editor** | `phitex watch --lsp` is a language server: your buffers are built as you type, problems published, your cursor shown on the page. | built in |
 | **Any browser** | `phitex watch` serves the live page at `http://127.0.0.1`. | built in |
 | **latexmk, scripts, CI** | Under the name `pdflatex` (or `--compat=pdflatex`), PhiTeX takes pdflatex's command line and makes one run, as pdflatex would. | built in |
@@ -165,7 +174,7 @@ commits, only the nodes that read a changed value rerun. Commits are
 partitioned by position range, with no global lock and no merge step, so
 the only serial work is TeX's true dependency chain. Line breaking, page
 breaking, the output routines and the PDF writer are layers on that graph,
-and a cold build is an edit from nothing: one code path, compared byte for
+and a clean build is an edit from nothing: one code path, compared byte for
 byte with pdfTeX 1.40.29 at every thread count.
 
 ## Status
@@ -185,7 +194,10 @@ cargo test
 Contributions are welcome: bug reports, documents that break, fixes, and
 new editor integrations.
 
-- **A PDF that differs from pdflatex's is a bug.** Open an issue with the
+- **A PDF that differs from pdflatex's is a bug**, unless the difference
+  is listed in [docs/differences.md](docs/differences.md): the few places
+  where pdfTeX has a bug of its own (such as reading memory it never set)
+  and PhiTeX writes what pdfTeX means instead. Open an issue with the
   smallest `.tex` file that shows it, the command you ran, and
   `phitex --version`. If it builds with pdflatex and not with PhiTeX, that
   is a bug too.

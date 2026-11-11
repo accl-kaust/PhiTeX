@@ -179,13 +179,21 @@ impl Order {
                 continue;
             }
             let asking = ids.iter().position(|&x| x == seg).expect("the asking segment");
+            // (the window's end as it is now: `spread` absorbs a narrow
+            // last segment into the one before it and leaves it empty, its
+            // `hi` at its `lo`, and the window's end read after it fell to
+            // that segment's start; a range filed over that segment then
+            // kept its old end while its nodes moved past it into the
+            // segment before: the beamer user guide at -j1, a page
+            // finisher's fold of the index's items never asked again
+            // when the index text re-ran)
+            let hi = gs[gs.len() - 1].hi;
             {
                 // (a move of every segment of the window: under their
                 // locks, ended before them)
                 let _moving: Vec<_> = win.iter().map(|x| x.moving()).collect();
                 self.spread(eng, &win, &mut gs, n, asking, more);
             }
-            let hi = gs[gs.len() - 1].hi;
             drop(gs);
             crate::obs::long_hold("rebalance", win.len(), t_held);
             // (a range read through a moved node now reaches anywhere in
@@ -235,7 +243,7 @@ impl Order {
                     .filter(|x| !x.1.is_empty())
                     .map(|(f, _)| ((*f, 1u8), ())),
             );
-            m.extend(g.readers.keys().map(|f| ((*f, 2u8), ())));
+            m.extend(g.guarded.keys().map(|f| ((*f, 2u8), ())));
             m
         };
         let before: Vec<_> = gs.iter().map(|g| held(g)).collect();
@@ -353,8 +361,110 @@ impl Order {
             eng.bump(f);
         }
         if brackets {
-            eng.scope_changed();
+            let g = eng.scope_changed();
+            for gi in gs.iter_mut() {
+                gi.note_brackets(g, 0);
+            }
             eng.bump(eng.depth_field);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
+
+    use super::{Pos, SegId};
+    use crate::api::{Operation, Stop};
+    use crate::ctx::Ctx;
+    use crate::engine::Engine;
+    use crate::segment::RangeReader;
+    use crate::values::ValueId;
+
+    /// `[]`: nothing.
+    struct Idle;
+
+    impl Operation for Idle {
+        fn name(&self) -> &'static str {
+            "idle"
+        }
+
+        fn run(&self, _: &mut Ctx<'_>) -> Result<ValueId, Stop> {
+            Ok(ValueId::UNIT)
+        }
+    }
+
+    /// A rebalance whose window's last segment is narrow absorbs it into
+    /// the one before it, and its nodes are relabelled across both; a
+    /// range filed to end inside the absorbed segment is widened to the
+    /// window's end as it was, so the range's end node, relabelled past
+    /// the range's old end, still finds the range reader (the beamer user
+    /// guide at -j1: the window's end was read after the spread, at the
+    /// absorbed segment's start, and a page finisher's fold of the
+    /// index's items was never asked again).
+    #[test]
+    fn a_range_ending_in_an_absorbed_narrow_last_segment_is_widened() {
+        let e = Engine::new();
+        let f = e.values().field("acc");
+        let idle = e.register(Arc::new(Idle));
+        let u = e.new_unit();
+        let ids: Vec<_> = (0..44).map(|_| e.push(u, idle, Vec::new())).collect();
+        // (by hand: one segment, its first 40 nodes packed at its start,
+        // the last 4 after label 2000, then cut there into a segment B
+        // 500 labels wide, the unit's last)
+        let a = e.seg(e.node(ids[0]).seg_hint()).clone();
+        assert!(ids.iter().all(|&n| e.node(n).seg_hint() == a.id), "one segment");
+        let l = a.lo.0;
+        let label = |i: usize| {
+            if i < 40 {
+                l + 10 + 10 * i as u64
+            } else {
+                l + 2010 + 10 * (i as u64 - 40)
+            }
+        };
+        let b = {
+            let mut g = a.inner.write();
+            let old: Vec<Pos> = g.nodes.keys().copied().collect();
+            for p in &old {
+                g.nodes.remove(p);
+            }
+            for (i, &n) in ids.iter().enumerate() {
+                g.nodes.insert(Pos(label(i)), n);
+                e.node(n).pos.store(label(i), Ordering::Release);
+            }
+            let sid = SegId(u32::try_from(e.segs.reserve()).expect("segment ids"));
+            a.split_at(&mut g, &e, Pos(l + 2000), sid)
+        };
+        b.inner.write().hi = Pos(l + 2500);
+        let y = ids[40];
+        assert_eq!(e.node(y).seg_hint(), b.id);
+        // (a range from node 10 to B's first node, node 40)
+        let reader = RangeReader {
+            node: ids[0],
+            serial: 0,
+            from: Some(ids[10]),
+            to: Some(y),
+            next: false,
+            incl: true,
+            hole: false,
+            seen: Arc::from(Vec::new()),
+        };
+        let key = e
+            .ranges
+            .insert(f, vec![(Pos(label(10)), Pos(label(40)), reader)], |_| true)[0];
+        // (B alone has no room for 80: the window grows to A and B, whole)
+        assert!(e.order.rebalance(&e, b.id, 80), "the window spread");
+        assert_eq!(b.inner.read().hi, b.lo, "B absorbed into A");
+        let p = e.node(y).pos.load(Ordering::Acquire);
+        assert!(
+            p > label(40),
+            "the end node relabelled past the range's old end ({p} vs {})",
+            label(40)
+        );
+        assert!(
+            e.ranges.holding(f, Pos(p)).iter().any(|(k, _)| *k == key),
+            "the range not found at its end node's new label"
+        );
     }
 }

@@ -90,6 +90,18 @@ impl Progress {
 /// Where the records go.
 type Listener = Box<dyn Fn(&Progress) + Send + Sync>;
 
+/// Where the pages streamed go: each page made while the build runs,
+/// with the pages shipped so far ([`Meter::on_streamed`]).
+type PageListener = Box<dyn Fn(&phitex_tex::StreamedPage, u64) + Send + Sync>;
+
+/// The pages every build streams, whatever they cost.
+pub const STREAM_FIRST: u64 = 8;
+
+/// The share of a build's time its later pages streamed may take (the
+/// engine's own time making each page's file of its own): a page past
+/// [`STREAM_FIRST`] is streamed while that time is under it.
+pub const STREAM_SHARE: f64 = 0.05;
+
 #[derive(Default)]
 struct State {
     /// The evaluations begun before this build (its first pass is the
@@ -103,6 +115,12 @@ struct State {
     total: u64,
     /// The format is being made ([`Meter::format`]).
     making: bool,
+    /// When this build began ([`Meter::build_begins`]).
+    began: Option<Instant>,
+    /// The pages streamed' files being made: page, since when.
+    making_pages: Vec<(u64, Instant)>,
+    /// The time spent making them in this build.
+    streamed: Duration,
 }
 
 /// The session's progress: the records made and given to every
@@ -113,6 +131,8 @@ pub struct Meter {
     listeners: Mutex<Vec<Listener>>,
     /// Told when a package source cannot be reached ([`Meter::unreachable`]).
     unreachable: Mutex<Vec<Box<dyn Fn(&str) + Send + Sync>>>,
+    /// Told each page streamed ([`Meter::on_streamed`]).
+    pages: Mutex<Vec<PageListener>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -152,8 +172,53 @@ impl Meter {
     pub fn build_begins(&self, evaluations: u64) {
         *lock(&self.state) = State {
             base: evaluations,
+            began: Some(Instant::now()),
             ..State::default()
         };
+    }
+
+    /// Every page streamed from now on given to `f` (on the engine's
+    /// thread that made it), with the pages shipped so far: a cold build
+    /// streams its pages once anything listens ([`Meter::streams`]).
+    pub fn on_streamed(&self, f: PageListener) {
+        lock(&self.pages).push(f);
+    }
+
+    /// Whether anything listens to the pages streamed: a cold build then
+    /// streams them ([`phitex_tex::Progress::set_streaming`]).
+    pub fn streams(&self) -> bool {
+        !lock(&self.pages).is_empty()
+    }
+
+    /// Whether page `k` (from 1) is streamed: the first [`STREAM_FIRST`]
+    /// always, a later one while the pages streamed have taken under
+    /// [`STREAM_SHARE`] of the build's time so far.
+    pub fn wants(&self, k: u64) -> bool {
+        let mut s = lock(&self.state);
+        let now = Instant::now();
+        let ok = k <= STREAM_FIRST
+            || s.began
+                .is_some_and(|b| s.streamed.as_secs_f64() < STREAM_SHARE * (now - b).as_secs_f64());
+        if ok {
+            s.making_pages.retain(|x| x.0 != k);
+            s.making_pages.push((k, now));
+        }
+        ok
+    }
+
+    /// Page `p` streamed: its making's time counted, the listeners told.
+    pub fn streamed(&self, p: &phitex_tex::StreamedPage) {
+        let pages = {
+            let mut s = lock(&self.state);
+            if let Some(i) = s.making_pages.iter().position(|x| x.0 == p.page) {
+                let (_, t) = s.making_pages.swap_remove(i);
+                s.streamed += t.elapsed();
+            }
+            s.pages.max(p.page)
+        };
+        for f in lock(&self.pages).iter() {
+            f(p, pages);
+        }
     }
 
     /// The format is being made (`ready` false: told), or is ready (told
@@ -188,6 +253,13 @@ impl Meter {
     pub fn watch(self: &Arc<Self>, progress: &phitex_tex::Progress) {
         let m = self.clone();
         progress.on_page(Box::new(move |evaluation, page| m.page(evaluation, page)));
+        // (and its pages streamed, where anything listens: the build
+        // streams them, `Session::run`)
+        let (m, n) = (self.clone(), self.clone());
+        progress.on_stream(phitex_tex::StreamHook {
+            want: Box::new(move |k| m.wants(k)),
+            page: Box::new(move |p| n.streamed(&p)),
+        });
     }
 
     /// Evaluation `evaluation` reached page `page`: told, unless a record
@@ -287,6 +359,43 @@ mod tests {
             lock(&got).last().unwrap().event(),
             json!({"event": "progress", "phase": "typesetting", "pass": 2, "pages": 2})
         );
+    }
+
+    /// The first pages are always streamed; a later one only while the
+    /// pages streamed took under their share of the build's time; each
+    /// page streamed told with the pages shipped so far.
+    #[test]
+    fn pages_streamed_within_their_share() {
+        let m = Meter::default();
+        let got: Arc<Mutex<Vec<(u64, u64)>>> = Arc::default();
+        let g = got.clone();
+        assert!(!m.streams());
+        m.on_streamed(Box::new(move |p, n| lock(&g).push((p.page, n))));
+        assert!(m.streams());
+        m.build_begins(0);
+        m.page(1, 3);
+        let page = |k| phitex_tex::StreamedPage {
+            evaluation: 1,
+            page: k,
+            hash: k,
+            pdf: vec![0],
+            exact: true,
+        };
+        for k in 1..=STREAM_FIRST {
+            assert!(m.wants(k));
+            if k == 1 {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            m.streamed(&page(k));
+        }
+        // (20 ms of making in a build some 20 ms old: past its share)
+        assert!(!m.wants(STREAM_FIRST + 1));
+        assert_eq!(lock(&got)[0], (1, 3));
+        assert_eq!(lock(&got).len(), usize::try_from(STREAM_FIRST).unwrap());
+        // (a new build's share counted from none)
+        m.build_begins(1);
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(m.wants(STREAM_FIRST + 1));
     }
 
     /// A format made is told as such, and its end as typesetting from no

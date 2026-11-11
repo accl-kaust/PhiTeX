@@ -4,7 +4,7 @@
 //! growing, the watch waiting on it with no way out. The limit is 3 s here
 //! (`Options::stuck_after`).
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -12,10 +12,20 @@ use std::time::{Duration, Instant};
 use phitex_tex::Options;
 
 fn build(name: &str, threads: usize, src: &str) -> (phitex_tex::Build, Duration) {
+    build_bound(name, threads, Duration::from_secs(3), src)
+}
+
+/// [`build`] with the clock's bound at `bound`.
+fn build_bound(
+    name: &str,
+    threads: usize,
+    bound: Duration,
+    src: &str,
+) -> (phitex_tex::Build, Duration) {
     let dir = common::scratch(&format!("stuck-{name}-{threads}"));
     let opts = Options {
         threads: Some(threads),
-        stuck_after: Some(Duration::from_secs(3)),
+        stuck_after: Some(bound),
         ..common::options("./d.tex", "d", "", &dir)
     };
     let t = Instant::now();
@@ -79,13 +89,25 @@ fn a_run_that_makes_no_progress_ends_the_build_stuck() {
             m.contains("the main file byte 28"),
             "-j{threads}: the place is named, the loop's line: {m}"
         );
-        // (a loop that assigns at every step and reads no new line: the
-        // clock, 3 s here)
-        let (b, t) = build(
+        // (an edit that makes a loop that assigns at every step and reads
+        // no new line: the edit's bound, set from the cold build's time
+        // as a front end sets it (`Build::set_stuck_after`), 3 s here. A
+        // cold build has no such bound: from inside a run, a long
+        // computation reading no input (lisp-on-tex's div2, minutes) is
+        // no different, and the build's time limit stops a cold one,
+        // `a_run_past_the_memory_or_time_limit_ends_the_build_stuck`)
+        let (mut b, _) = build(
             "assign",
             threads,
-            "Before the loop.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\iftrue\\repeat\n\nAfter it.\n\n\\bye\n",
+            "Before the loop.\n\nAfter it.\n\n\\bye\n",
         );
+        assert_eq!(stuck(&b), None, "-j{threads}: the cold build ends");
+        // (1 s: the edit is found stuck at the bound, so the bound is
+        // the part's time)
+        b.set_stuck_after(Some(Duration::from_secs(1)));
+        let t = Instant::now();
+        b.edit("Before the loop.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\iftrue\\repeat\n\nAfter it.\n\n\\bye\n");
+        let t = t.elapsed();
         let m = stuck(&b).unwrap_or_else(|| panic!("-j{threads}: no stuck error after {t:?}"));
         assert!(
             m.contains("read no new line of its input"),
@@ -95,6 +117,22 @@ fn a_run_that_makes_no_progress_ends_the_build_stuck() {
             t < Duration::from_secs(30),
             "-j{threads}: stuck found after {t:?}: {m}"
         );
+    }
+    // (a cold build that computes, assigning, reading no new line for
+    // longer than the bound, then ends: not stuck, as pdflatex would
+    // finish it; lisp-on-tex's div2 was stopped so after 300 s. The bound
+    // 0.25 s and 2 000 000 steps, 1.5 s on mc: past the bound on a
+    // machine six times as fast. With the 3 s bound it took 40 000 000
+    // steps, 30 s at each thread count, the test's 70 s)
+    for threads in [1, 8] {
+        let (b, t) = build_bound(
+            "compute",
+            threads,
+            Duration::from_millis(250),
+            "Before.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\ifnum\\count1<2000000 \\repeat Counted \\the\\count1.\n\n\\bye\n",
+        );
+        assert_eq!(stuck(&b), None, "-j{threads}: after {t:?}");
+        assert!(!b.output().0.is_empty(), "-j{threads}: the output is made");
     }
     // (a document that ends is not stuck)
     let mut src = String::new();
@@ -120,13 +158,21 @@ fn a_run_past_the_memory_or_time_limit_ends_the_build_stuck() {
     // (a loop that assigns at every step and reads no new line: the
     // clock's bound is 300 s here, so only the limit under test stops it)
     let src = "Before the loop.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\iftrue\\repeat\n\nAfter it.\n\n\\bye\n";
+    // (the memory limit is the build's values': a loop that defines a new
+    // macro of a kilobyte at every step, each holding its step's number,
+    // the run's values growing past it)
+    let grows = "Before the loop.\n\n\\def\\k{0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJ}\\count1=0 \\loop\\advance\\count1 by 1 \\expandafter\\edef\\csname a\\the\\count1\\endcsname{\\the\\count1 \\k\\k\\k\\k\\k}\\iftrue\\repeat\n\nAfter it.\n\n\\bye\n";
+    // (the limit 8 MB past what a build of one paragraph holds: the
+    // format's values are the build's too)
+    let (small, _) = build_limited("memory-base", 1, None, None, "A paragraph.\n\n\\bye\n");
+    let limit = small.stats.values_bytes + (8 << 20);
     for threads in [1, 8] {
         let (b, t) = build_limited(
             "memory",
             threads,
-            Some(1 << 20),
+            Some(limit),
             Some(Duration::from_secs(600)),
-            src,
+            grows,
         );
         let m = stuck(&b).unwrap_or_else(|| {
             panic!(
@@ -174,4 +220,39 @@ fn a_run_past_the_memory_or_time_limit_ends_the_build_stuck() {
             "-j{threads}: stuck found after {t:?}: {m}"
         );
     }
+}
+
+/// The memory limit is the build's own: its values
+/// (`phitex_defuse::Limits::memory_bytes`), not the process's resident
+/// memory, which the other builds of a test binary, or anything else the
+/// process holds, share. Here the process holds 512 MB of its own
+/// beside a small build limited to 256 MB: the build ends, not stuck.
+/// Measured on the process, a build in a 32 GB job was stopped "stuck"
+/// at -j1 by its neighbours' 24 GB and wrote an empty PDF
+/// (`latexmk_corpus_protrude_koma`, `latexmk_ams_index`, `latexmk_minted`;
+/// accl 22597).
+#[test]
+fn the_memory_limit_is_the_builds_own_not_the_processs() {
+    // (written, so resident)
+    let held: Vec<u8> = vec![7; 512 << 20];
+    // (a run of a few hundred thousand commands, so the guard looks: at
+    // every heartbeat of 4096 commands)
+    let src = "A paragraph.\n\n\\count1=0 \\loop\\advance\\count1 by 1 \\ifnum\\count1<300000 \\repeat\n\nAnother.\n\n\\bye\n";
+    for threads in [1, 8] {
+        let (b, t) = build_limited(
+            "memory-own",
+            threads,
+            Some(256 << 20),
+            Some(Duration::from_secs(600)),
+            src,
+        );
+        assert_eq!(
+            stuck(&b),
+            None,
+            "-j{threads}: stuck after {t:?} with the process holding {} MB",
+            held.len() >> 20
+        );
+        assert_eq!(b.pages().len(), 1, "-j{threads}: the page");
+    }
+    assert_eq!(held[1000], 7);
 }

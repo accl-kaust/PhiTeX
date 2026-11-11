@@ -189,6 +189,10 @@ pub(crate) const PRIMS: &[(&str, u8, i32)] = &[
     ("pdfomitinfodict", cmd::ASSIGN_INT, I + 32),
     ("pdfomitprocset", cmd::ASSIGN_INT, I + 33),
     ("pdfptexuseunderscore", cmd::ASSIGN_INT, I + 34),
+    // (web2c's `synctex_code`, pdfTeX's and XeTeX's: a parameter a
+    // document sets, `\\synctex=1`; the SyncTeX file is the build's
+    // option, written from the build's own records)
+    ("synctex", cmd::ASSIGN_INT, I + 35),
     ("pdfhorigin", cmd::ASSIGN_DIMEN, D),
     ("pdfvorigin", cmd::ASSIGN_DIMEN, D + 1),
     ("pdfpagewidth", cmd::ASSIGN_DIMEN, D + 2),
@@ -430,15 +434,8 @@ fn hex_upper(b: &[u8]) -> String {
 /// File `name` as `\\pdffilesize` and its kin find it (`name.tex` first
 /// where it has no extension): `[path, text]`.
 fn file_found(r: &mut Run<'_, '_>, name: &str) -> R<Option<ValueId>> {
-    let base = name.rsplit('/').next().unwrap_or(name);
-    let mut found = None;
-    if !base.contains('.') {
-        found = r.read_file(&format!("{name}.tex"))?;
-    }
-    if found.is_none() {
-        found = r.read_file(name)?;
-    }
-    Ok(found)
+    let key = r.tex_key(name)?;
+    r.read_file(&key)
 }
 
 fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
@@ -449,17 +446,46 @@ fn file_bytes(r: &mut Run<'_, '_>, name: &str) -> R<Option<Vec<u8>>> {
     Ok(xs.get(1).map(|&t| bytes(&str_of(r.v, t))))
 }
 
+/// [`file_bytes`], the one shared copy of the file's text
+/// (`pdfout::text_bytes`): an image's, which its record keeps.
+fn file_bytes_shared(r: &mut Run<'_, '_>, name: &str) -> R<Option<std::sync::Arc<[u8]>>> {
+    let Some(x) = file_found(r, name)? else {
+        return Ok(None);
+    };
+    let xs = list_of(r.v, x);
+    Ok(xs.get(1).map(|&t| crate::pdfout::text_bytes(r.v, t)))
+}
+
+/// The modification time (seconds since the epoch) of the file on disk
+/// that TeX's file `key` ([`Run::tex_key`]) was found at, where it was found
+/// on one.
+fn file_mtime(r: &mut Run<'_, '_>, key: &str) -> R<Option<i64>> {
+    let Some(x) = r.read_file_lazy(key)? else {
+        return Ok(None);
+    };
+    let v = r.v;
+    let Some(&p) = list_of(v, x).first() else {
+        return Ok(None);
+    };
+    Ok(std::fs::metadata(str_of(v, p))
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .and_then(|d| i64::try_from(d.as_secs()).ok()))
+}
+
 /// A file's size in bytes, as [`file_bytes`] finds it. A document file
 /// the client cut (`Run::read_cut`): the size the environment holds
 /// beside it (`fsize:<name>`), so the run reads not its text: an edit
 /// inside the file that keeps its length reaches only its pieces.
 fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
-    let base = name.rsplit('/').next().unwrap_or(name);
-    let key = if base.contains('.') {
-        name.to_owned()
-    } else {
-        format!("{name}.tex")
-    };
+    let key = r.tex_key(name)?;
+    file_size_of(r, &key)
+}
+
+/// [`file_size`] of TeX's file `key` ([`Run::tex_key`], looked up once).
+fn file_size_of(r: &mut Run<'_, '_>, key: &str) -> R<Option<usize>> {
+    let key = key.to_owned();
     if r.read_cut(&key)?.is_some() {
         let v = r.v;
         if let Some(n) = r.cx.env(v.field(&format!("fsize:{key}")))? {
@@ -469,15 +495,18 @@ fn file_size(r: &mut Run<'_, '_>, name: &str) -> R<Option<usize>> {
     // (a file the job writes and reads back: its size, not its text,
     // `Run::read_written_text`)
     let was = std::mem::replace(&mut r.size_read, true);
-    let found = file_found(r, name);
+    let found = r.read_file(&key);
     r.size_read = was;
     let Some(x) = found? else {
         return Ok(None);
     };
     let v = r.v;
+    // (the text's length from its one shared copy, `pdfout::text_bytes`:
+    // graphics asks `\\pdffilesize` of an icon font's PDF at each of its
+    // thousands of pages, a count of its 5 MB of characters each)
     Ok(list_of(v, x).get(1).map(|&t| match v.as_int(t) {
         Some(n) => usize::try_from(n).unwrap_or(0),
-        None => v.with_str(t, |s| s.chars().count()).unwrap_or(0),
+        None => crate::pdfout::text_bytes(v, t).len(),
     }))
 }
 
@@ -505,7 +534,7 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
         cv::PDFTEX_BANNER => crate::pdfout::BANNER.to_owned(),
         cv::FONT_NAME | cv::FONT_OBJNUM => {
             let f = r.scan_font_ident()?;
-            let (name, obj) = font_num(r, f)?;
+            let (tag, obj) = font_num(r, f)?;
             let fid = u32::try_from(f).unwrap_or(0);
             {
                 let input = pdf_input(r, "fontobjnum", f, ValueId::UNIT)?;
@@ -518,14 +547,12 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
                         _ => crate::pdfout::CmdOut::default(),
                     }
                 })?;
-                let (name, obj) = got
-                    .and_then(|g| Some((g.at(0)?, g.at(1)?)))
-                    .unwrap_or((name, obj));
+                let obj = got.and_then(|g| g.at(1)).unwrap_or(obj);
                 if c == cv::FONT_NAME {
-                    // (pdfTeX's number: the font's, after the fonts the
+                    // (pdfTeX's number: `obj_info` of the font's object,
+                    // the font that made it, after the fonts the
                     // shipouts before loaded)
-                    let _ = name;
-                    crate::pdfout::font_tag_read(r, f)?.to_string()
+                    tag.to_string()
                 } else {
                     obj.to_string()
                 }
@@ -668,28 +695,33 @@ pub(crate) fn convert(r: &mut Run<'_, '_>, c: i32) -> R<()> {
             let job = r
                 .get_loc(crate::fields::cell::JOBNAME)?
                 .map_or_else(|| "texput".to_owned(), |x| str_of(r.v, x));
-            let base = name.rsplit('/').next().unwrap_or(&name);
-            let key = if base.contains('.') {
-                name.clone()
-            } else {
-                format!("{name}.tex")
-            };
-            // (a file found: the build's clock too, as pdfTeX's under
-            // FORCE_SOURCE_DATE gives SOURCE_DATE_EPOCH for every file
-            // (utils.c `getfilemoddate`); epstopdf-base compares an EPS's
-            // date with its PDF's and converts only a source it can date)
-            if name == format!("{job}.log")
-                || r.get(&format!("wopen:{key}"))?.is_some()
-                || file_size(r, &name)?.is_some()
-            {
+            let key = r.tex_key(&name)?;
+            // (a file found: its own time, in UTC under FORCE_SOURCE_DATE,
+            // which pins no file's date (utils.c `getfilemoddate`:
+            // `makepdftime(st_mtime, buf, use_utc)`; a tagged document
+            // embeds its `.css` with it: texlive-vpat's `/ModDate`); the
+            // build's clock for one with no time on a disk here)
+            if name == format!("{job}.log") || r.get(&format!("wopen:{key}"))?.is_some() {
                 creation_date(r)?
+            } else if file_size(r, &name)?.is_some() {
+                match file_mtime(r, &key)? {
+                    Some(t) => pdf_date(t),
+                    None => creation_date(r)?,
+                }
             } else {
                 String::new()
             }
         }
         cv::FILE_SIZE => {
             let name = ext_string(r)?;
-            file_size(r, &name)?.map_or_else(String::new, |n| n.to_string())
+            // (a written file's size as a symbol, read for presence
+            // alone: docs/spec-relative-counters.md §2.4)
+            let key = r.tex_key(&name)?;
+            if let Some(t) = crate::defer::size_symbol(r, &key)? {
+                r.push_toks([t]);
+                return Ok(());
+            }
+            file_size_of(r, &key)?.map_or_else(String::new, |n| n.to_string())
         }
         cv::MDFIVE_SUM => {
             let file = r.scan_keyword("file")?;
@@ -874,6 +906,11 @@ fn pdf_date(t: i64) -> String {
 
 /// A font's resource number and object number (`pdf_init_font`),
 /// allocated when first asked.
+/// Font `f`'s object as a read-time command makes it (`pdf_init_font`):
+/// the number in its name and its object's. A scalable font shares the
+/// object of the font of its TFM name a command made one for before
+/// (`cmr10` and `cmr10 at 12pt`: one object, named by the first font's
+/// number, pdfTeX's `obj_info`), else it makes one, named by its own.
 fn font_num(r: &mut Run<'_, '_>, f: i64) -> R<(i64, i64)> {
     let v = r.v;
     if f == 0 {
@@ -883,10 +920,17 @@ fn font_num(r: &mut Run<'_, '_>, f: i64) -> R<(i64, i64)> {
     if let Some(x) = r.get(&field)? {
         return Ok((crate::val::int_at(v, x, 0), crate::val::int_at(v, x, 1)));
     }
-    let n = r.cint(crate::fields::cell::PDF_FONTCOUNT)? + 1;
-    r.set_cell(crate::fields::cell::PDF_FONTCOUNT, v.int(n), true);
+    let key = crate::pdfout::read_object_key(r, f)?;
+    let kf = format!("pdf:fontobj:{key}");
+    if let Some(x) = r.get(&kf)? {
+        r.set(&field, x, true);
+        return Ok((crate::val::int_at(v, x, 0), crate::val::int_at(v, x, 1)));
+    }
+    let n = crate::pdfout::font_tag_read(r, f)?;
     let o = alloc_obj(r)?;
-    r.set(&field, v.list(vec![v.int(n), v.int(o)]), true);
+    let x = v.list(vec![v.int(n), v.int(o)]);
+    r.set(&field, x, true);
+    r.set(&kf, x, true);
     Ok((n, o))
 }
 
@@ -906,7 +950,7 @@ fn page_obj(r: &mut Run<'_, '_>, n: i32) -> R<i64> {
     let o = alloc_obj(r)?;
     r.set(&f, v.int(o), true);
     if pdf_mode(r)? {
-        crate::pdfout::page_made_at_read_time(r, i64::from(n))?;
+        crate::pdfout::page_made_at_read_time(r, i64::from(n));
     }
     Ok(o)
 }
@@ -928,12 +972,16 @@ fn action_target(r: &mut Run<'_, '_>, act: ValueId) -> R<()> {
     {
         let n = list_of(v, p).first().map_or(0, |&n| int_of(v, n));
         page_obj(r, i32::try_from(n).unwrap_or(0))?;
-        return Ok(());
-    }
-    if let Some(&id) = xs.get(3)
+    } else if let Some(&id) = xs.get(3)
         && !list_of(v, id).is_empty()
     {
-        crate::pdfout::dest_first_named(r, id)?;
+        crate::pdfout::dest_first_named(r, id);
+    }
+    // (then its structure destination's, `/SD`)
+    if let Some(&sid) = xs.get(5)
+        && sid != ValueId::UNIT
+    {
+        crate::pdfout::dest_first_named(r, sid);
     }
     Ok(())
 }
@@ -1016,7 +1064,9 @@ pub(crate) fn rt_before(r: &mut Run<'_, '_>, at: u64) -> R<i64> {
 /// ([`rt_before`]: the cell's, those only PDF bytes name) and this
 /// run's, and the objects the pages shipped before this run made
 /// (`pdfout::page_offset`, a fold of their write sides' allocations).
+#[track_caller]
 fn alloc_obj(r: &mut Run<'_, '_>) -> R<i64> {
+    let caller = std::panic::Location::caller();
     if r.param("pdfoutput")? > 0 {
         let me = r.cx.node().raw();
         let before = rt_before(r, me)?;
@@ -1025,7 +1075,7 @@ fn alloc_obj(r: &mut Run<'_, '_>) -> R<i64> {
         let n = before + r.rt_made + off;
         if crate::exec::obs_flag!("PHITEX_ALLOC_TRACE") {
             eprintln!(
-                "alloc-obj: node {me} number {n}: read-time before {before}, this run's {}, the pages' {off}",
+                "alloc-obj: node {me} number {n}: read-time before {before}, this run's {}, the pages' {off} at {caller}",
                 r.rt_made
             );
         }
@@ -1934,6 +1984,32 @@ pub(crate) fn code_table(r: &mut Run<'_, '_>, m: i32, f: i64) -> R<Vec<(u16, i32
         .collect())
 }
 
+/// Field `k` of font `f`'s info ([`crate::fonts::info`]) made `make` of
+/// its value there (none: past the list's end); the fields before it
+/// filled with `UNIT`.
+fn font_info_set(
+    r: &mut Run<'_, '_>,
+    f: i64,
+    k: usize,
+    make: impl FnOnce(Option<ValueId>) -> ValueId,
+) -> R<()> {
+    let v = r.v;
+    let Some(x) = r.font_get(f, crate::fields::FontCell::Info)? else {
+        return Ok(());
+    };
+    let mut xs = list_of(v, x);
+    if xs.len() < 4 {
+        return Ok(());
+    }
+    let old = xs.get(k).copied().filter(|&y| y != ValueId::UNIT);
+    if xs.len() <= k {
+        xs.resize(k + 1, ValueId::UNIT);
+    }
+    xs[k] = make(old);
+    r.font_set(f, crate::fields::FontCell::Info, v.list(xs), true);
+    Ok(())
+}
+
 /// `\lpcode` and the other font codes, read (pdfTeX §426).
 /// The character a font code of font `f` is for: XeTeX's
 /// `scan_glyph_number` for a native font (a glyph id: `/name`, `u`
@@ -2013,8 +2089,14 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
     if c == cmd::ASSIGN_FONT_INT && chr >= 2 {
         let f = r.scan_font_ident()?;
         if chr == NO_LIG {
-            // \pdfnoligatures (pdfTeX §1253)
+            // \pdfnoligatures (pdfTeX §1253, `set_no_ligatures`): the
+            // font's characters lose their lig/kern programs (the font's
+            // info marked, [`crate::fonts::Info::nolig`]; the mark was
+            // set and nothing read it: microtype's tracked small caps kept
+            // their ligatures, lie-hasse's "ff" in a section title)
             r.set(&format!("fcode:nolig:{f}"), v.int(1), true);
+            let one = v.int(1);
+            font_info_set(r, f, 7, |_| one)?;
             return Ok(true);
         }
         let ch = scan_code_index(r, f)?;
@@ -2027,6 +2109,33 @@ pub(crate) fn prefixed(r: &mut Run<'_, '_>, global: bool) -> R<bool> {
         } else {
             n.clamp(-1000, 1000)
         };
+        // (`\tagcode` below 0, pdfTeX's `set_tag_code`: the character's
+        // tags `-n` names taken off for good, 1 its lig/kern program, 2
+        // its next larger, 4 its extensible; the font's info keeps each
+        // character's taken tags, [`crate::fonts::Info::untagged`].
+        // Kept as the code only, microtype's `no ligatures={f}` of a
+        // tracked font kept the ff ligature: lie-hasse's section title)
+        if chr == TAG && n < 0 {
+            let bits = n.clamp(-7, 0).abs();
+            let c = i64::from(ch);
+            font_info_set(r, f, 8, |old| {
+                let mut xs = old.map(|x| list_of(v, x)).unwrap_or_default();
+                let mut done = false;
+                for p in xs.chunks_mut(2) {
+                    if let [k, m] = p
+                        && int_of(v, *k) == c
+                    {
+                        *m = v.int(int_of(v, *m) | i64::from(bits));
+                        done = true;
+                    }
+                }
+                if !done {
+                    xs.push(v.int(c));
+                    xs.push(v.int(i64::from(bits)));
+                }
+                v.list(xs)
+            })?;
+        }
         if tabled(chr) {
             let mut t = code_table(r, chr, f)?;
             let c = u16::try_from(ch).unwrap_or(0);
@@ -2259,9 +2368,10 @@ fn set_expand_params(
 
 /// `get_expand_font(f, e)` (pdfTeX): font `f` expanded by `e`
 /// thousandths, the font of its expanded name and size where there is
-/// one (`tfm_lookup`), else made: automatically, `f`'s metrics scaled
-/// (`auto_expand_font`, [`crate::fonts::expanded`]); else the TFM of the
-/// expanded name, a font of its own.
+/// one (`tfm_lookup`; a copy's are its own, [`crate::fonts::expanded_key`]),
+/// else made: automatically, `f`'s metrics scaled (`auto_expand_font`,
+/// [`crate::fonts::expanded`]); else the TFM of the expanded name, a font
+/// of its own.
 pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -> R<i64> {
     use crate::fields::FontCell;
     let v = r.v;
@@ -2273,10 +2383,48 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
     if !auto {
         return r.read_font_info(None, &name, i.size);
     }
-    let k = i64::from(crate::fonts::expanded_key(&i.name, i.size, e));
-    let held = crate::fonts::info(v, r.font_get(k, FontCell::Info)?)
-        .is_some_and(|j| j.name == name && j.size == i.size);
+    let base = is_font_copy(r, f)?.then(|| u32::try_from(f).unwrap_or(0));
+    let k = i64::from(crate::fonts::expanded_key(base, &i.name, i.size, e));
+    let held_info = r.font_get(k, FontCell::Info)?;
+    let held = crate::fonts::info(v, held_info).is_some_and(|j| j.name == name && j.size == i.size);
+    // (pdfTeX's `pdf_font_elink`: the ratios `f` has asked for. Its first
+    // ask for `e` goes through `load_expand_font`, whose
+    // `copy_expand_params(k, f, e)` binds the font found or made to `f`:
+    // its `pdf_font_blink`, and its protrusion and expansion codes `f`'s
+    // from then on, until another font's first ask for `e` binds it anew;
+    // a later ask of `f`'s finds it in `f`'s chain and binds nothing.
+    // easyformat (microtype): `\scshape` under `\bfseries` has no shape,
+    // and LaTeX's substitute is the bold font loaded anew after its
+    // `\pdffontexpand`, a font of its own with microtype's small-caps
+    // protrusion; its `\pdffontexpand` binds the shared `ec-lmbx10-20` and
+    // `+20` to it, and the bold text after the group, whose font asked for
+    // them before, still sets its margin kerns by the small-caps codes
+    // (pdflatex's `y` 0.299 pt, 26 of the quad, where the bold font's own
+    // code gives 37))
+    // (a list grown by appends: whether `e` is in it read as that alone,
+    // and `e` appended without reading it, `Run::append_val`, so a first
+    // ask moving to another node leaves the asks after both standing)
+    let link = r
+        .ops
+        .fields
+        .get_at(v, r.cx.values_epoch(), &format!("pdf:elink:{f}"));
+    let first = !r.val_has(link, v.int(i64::from(e)))?;
+    let note = |r: &mut Run<'_, '_>| -> R<()> {
+        if first {
+            r.append_val(link, v.int(i64::from(e)))?;
+        }
+        Ok(())
+    };
     if held {
+        if first && let Some(x) = held_info {
+            let mut xs = list_of(v, x);
+            while xs.len() < 7 {
+                xs.push(ValueId::UNIT);
+            }
+            xs[6] = v.list(vec![v.int(f), v.int(i64::from(e)), v.int(i64::from(auto))]);
+            r.font_set(k, FontCell::Info, v.list(xs), true);
+        }
+        note(r)?;
         return Ok(k);
     }
     let Some(file) = i.file else { return Ok(0) };
@@ -2302,7 +2450,13 @@ pub(crate) fn get_expand_font(r: &mut Run<'_, '_>, f: i64, e: i32, auto: bool) -
         let x = i64::from(r.font_int(f, c)?);
         r.font_set(k, c, v.int(x), true);
     }
+    note(r)?;
     Ok(k)
+}
+
+/// Whether font `f` was made by `\pdfcopyfont`.
+pub(crate) fn is_font_copy(r: &mut Run<'_, '_>, f: i64) -> R<bool> {
+    Ok(r.get(&format!("pdf:fontcopy:{f}"))?.is_some())
 }
 
 /// A new font with `f`'s metrics and name, named `t`: its key that of
@@ -2329,6 +2483,7 @@ fn copy_font(r: &mut Run<'_, '_>, f: i64, t: &str) -> R<i64> {
     }
     r.set("fontlast", v.int(nf), true);
     r.font_loaded(nf);
+    r.set(&format!("pdf:fontcopy:{nf}"), v.int(1), true);
     crate::pdfout::font_load(r, &i.name, i.size, nf);
     let mut xs = vec![
         v.str(&i.name),
@@ -2448,6 +2603,36 @@ fn action(r: &mut Run<'_, '_>) -> R<ValueId> {
     } else {
         v.str("")
     };
+    // `struct`, pdfTeX 1.40.26's structure destination (a `goto`'s
+    // `/SD`): with `file`, its text as given; else `name {…}` or `num n`,
+    // a structure destination of its own namespace (`obj_type_struct_dest`,
+    // [`struct_ident`])
+    let sid = if r.scan_keyword("struct")? {
+        if kind != "goto" {
+            r.log(
+                "error",
+                "pdfTeX error (ext1): only GoTo action can be used with `struct'",
+            )?;
+        }
+        if !str_of(v, file).is_empty() || r.scan_keyword("name")? {
+            let s = ext_value(r)?;
+            v.list(vec![v.str("sname"), s])
+        } else if r.scan_keyword("num")? {
+            let n = r.scan_int()?;
+            if n <= 0 {
+                r.log(
+                    "error",
+                    "pdfTeX error (ext1): num identifier must be positive",
+                )?;
+            }
+            v.list(vec![v.str("snum"), v.int(i64::from(n))])
+        } else {
+            r.log("error", "pdfTeX error (ext1): identifier type missing")?;
+            ValueId::UNIT
+        }
+    } else {
+        ValueId::UNIT
+    };
     let page = if kind == "goto" && r.scan_keyword("page")? {
         let n = r.scan_int()?;
         let s = ext_value(r)?;
@@ -2463,9 +2648,6 @@ fn action(r: &mut Run<'_, '_>) -> R<ValueId> {
     } else if r.scan_keyword("num")? {
         let n = r.scan_int()?;
         v.list(vec![v.str("num"), v.int(i64::from(n))])
-    } else if kind == "goto" && r.scan_keyword("struct")? {
-        let s = ext_value(r)?;
-        v.list(vec![v.str("struct"), s])
     } else {
         v.str("")
     };
@@ -2489,7 +2671,25 @@ fn action(r: &mut Run<'_, '_>) -> R<ValueId> {
         page.unwrap_or(ValueId::UNIT),
         id,
         v.int(window),
+        sid,
     ]))
+}
+
+/// A structure destination's identifier, `\pdfdest struct`'s and a
+/// `goto struct`'s: `["snum", n]` or `["sname", text]`, apart from the
+/// destinations' `["num", n]` and `["name", text]` (pdfTeX's
+/// `obj_type_struct_dest`, its own objects: `num 1` and `struct … num 1`
+/// are two).
+fn struct_ident(v: &phitex_defuse::Values, id: ValueId) -> ValueId {
+    let xs = list_of(v, id);
+    let tag = match xs.first().map(|&k| str_of(v, k)).as_deref() {
+        Some("name") => "sname",
+        _ => "snum",
+    };
+    v.list(vec![
+        v.str(tag),
+        xs.get(1).copied().unwrap_or(ValueId::UNIT),
+    ])
 }
 
 /// `\pdfdest`'s and `\pdfthread`'s identifier: `num n` or `name {…}`.
@@ -2550,6 +2750,9 @@ pub(crate) fn obj_cmd(
 /// number `useobjnum` gives, and whether the number is only reserved.
 fn obj_num_option(r: &mut Run<'_, '_>) -> R<(Option<i64>, bool)> {
     if r.scan_keyword("reserveobjnum")? {
+        // ("Scan an optional space", `\\pdfobj`'s and `\\pdfannot`'s: the
+        // space after the keyword was a space of the text)
+        r.optional_space()?;
         return Ok((None, true));
     }
     if r.scan_keyword("useobjnum")? {
@@ -2568,6 +2771,7 @@ fn num_of(got: Option<crate::pdfout::CmdOut>) -> Option<usize> {
         .and_then(|n| usize::try_from(n).ok())
 }
 
+#[track_caller]
 fn or_alloc(r: &mut Run<'_, '_>, n: Option<usize>) -> R<i64> {
     match n {
         Some(n) => Ok(i64::try_from(n).unwrap_or(0)),
@@ -2587,6 +2791,42 @@ pub(crate) fn immediate(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
         r.back_cur();
         Ok(())
     }
+}
+
+/// `check_pdfoutput` (pdfTeX §1349) for the extension `r.cur.chr`, before
+/// it scans anything: in DVI mode (`\pdfoutput` <= 0) most are
+/// `pdf_error`, fatal ("not allowed in DVI mode"); `\pdfinfo`,
+/// `\pdfcatalog`, `\pdftrailer` and `\pdftrailerid` a warning, and
+/// carried on; the others (`\pdfsavepos`, `\pdfresettimer`, ...) not
+/// checked.
+fn check_pdfoutput(r: &mut Run<'_, '_>) -> R<()> {
+    let c = r.cur.chr;
+    let error = match c {
+        ex::INFO | ex::CATALOG | ex::TRAILER | ex::TRAILER_ID => false,
+        ex::LITERAL..=ex::END_THREAD
+        | ex::SNAP_REF_POINT..=ex::SNAPY_COMP
+        | ex::NAMES..=ex::MAP_LINE
+        | ex::NOBUILTIN_TOUNICODE..=ex::SPACE_FONT => true,
+        _ => return Ok(()),
+    };
+    if pdf_mode(r)? {
+        return Ok(());
+    }
+    let name = PRIMS
+        .iter()
+        .find(|p| p.1 == cmd::EXTENSION && p.2 == c)
+        .map_or("", |p| p.0);
+    if error {
+        return r.fatal(&format!(
+            "pdfTeX error (\\{name}): not allowed in DVI mode (\\pdfoutput <= 0)"
+        ));
+    }
+    r.log(
+        "wlog",
+        &format!(
+            "pdfTeX warning (\\{name}): not allowed in DVI mode (\\pdfoutput <= 0); ignoring it"
+        ),
+    )
 }
 
 /// Whether the file is PDF (the writer's steps run).
@@ -2613,6 +2853,7 @@ pub(crate) fn extension(r: &mut Run<'_, '_>, md: &Mode) -> R<()> {
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::match_same_arms)]
 fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
+    check_pdfoutput(r)?;
     let v = r.v;
     let s = |x: &str| v.str(x);
     match r.cur.chr {
@@ -2751,7 +2992,14 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     None => alloc_obj(r)?,
                 },
             };
-            r.set(&format!("pdf:objbody:{n}"), v.int(1), true);
+            // (1, with 2 for a stream and 4 for `\immediate`: a page that
+            // names it with `\pdfrefobj` writes a raw object that is
+            // neither into an object stream, `page_allocs`)
+            let kind = 1 + 2 * i64::from(stream) + 4 * i64::from(immediate);
+            r.set(&format!("pdf:objbody:{n}"), v.int(kind), true);
+            if immediate && pdf_mode(r)? {
+                opened(r);
+            }
             // (`\immediate`, not a stream: written now, into an object
             // stream where they compress)
             if immediate && !stream && pdf_mode(r)? {
@@ -2774,7 +3022,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             let k = r.scan_register_num()?;
             // (its sealed lines' lists in it: a form's writer reads them,
             // `crate::pages::seal`)
-            let b = r.box_reg(k)?.map(|b| r.unseal(b));
+            let b = r.box_reg(k)?.map(|b| r.unseal_open(b));
             let got = if pdf_mode(r)? {
                 xform_step(r, b, at, res, immediate)?
             } else {
@@ -2784,9 +3032,10 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             // (`\immediate`: the form written now, pdfTeX §1357: its
             // resources' object, then each font it uses first)
             if immediate && pdf_mode(r)? {
+                opened(r);
                 let _ = alloc_obj(r)?;
                 let names = box_font_names(r, b)?;
-                crate::pdfout::fonts_first_used(r, &names)?;
+                crate::pdfout::fonts_first_used(r, &names);
                 // (its resources' dictionary, written into an object
                 // stream where they compress)
                 crate::pdfout::os_write(r)?;
@@ -2809,7 +3058,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                         .get(&format!("pdf:xform:{n}"))?
                         .and_then(|x| list_of(v, x).first().copied());
                     let names = box_font_names(r, fb)?;
-                    crate::pdfout::fonts_first_used(r, &names)?;
+                    crate::pdfout::fonts_first_used(r, &names);
                     crate::pdfout::os_write(r)?;
                 }
             }
@@ -3000,7 +3249,26 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
             }
         }
         ex::DEST => {
+            // `struct n` (pdfTeX 1.40.26): the structure element's object
+            // the destination names in place of its page's
+            let snum = if r.scan_keyword("struct")? {
+                let n = r.scan_int()?;
+                if n <= 0 {
+                    r.log(
+                        "error",
+                        "pdfTeX error (ext1): struct identifier must be positive",
+                    )?;
+                }
+                Some(n)
+            } else {
+                None
+            };
             let id = identifier(r)?;
+            let id = if snum.is_some() {
+                struct_ident(v, id)
+            } else {
+                id
+            };
             let kind = if r.scan_keyword("xyz")? {
                 if r.scan_keyword("zoom")? {
                     let z = r.scan_int()?;
@@ -3032,7 +3300,9 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                 r.log("error", "pdfTeX error (ext1): destination type missing")?;
                 v.list(vec![s("xyz")])
             };
-            whatsit(r, md, vec![s("pdf:dest"), id, kind]);
+            let mut w = vec![s("pdf:dest"), id, kind];
+            w.extend(snum.map(|n| v.int(i64::from(n))));
+            whatsit(r, md, w);
         }
         ex::THREAD | ex::START_THREAD => {
             // (which of the two, before the specification is scanned:
@@ -3088,6 +3358,7 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
                     .is_none_or(|x| x == ValueId::UNIT);
                 r.set_cell(crate::fields::cell::PDF_OPENACTION, oa, true);
                 if first && pdf_mode(r)? {
+                    opened(r);
                     let _ = alloc_obj(r)?;
                     crate::pdfout::os_write(r)?;
                     action_target(r, oa)?;
@@ -3204,6 +3475,13 @@ fn ext(r: &mut Run<'_, '_>, md: &Mode, immediate: bool) -> R<()> {
     Ok(())
 }
 
+/// pdfTeX's `check_pdfversion` at read time: the PDF file opened
+/// ([`crate::fields::cell::PDF_OPENED`]).
+fn opened(r: &mut Run<'_, '_>) {
+    let x = r.v.int(1);
+    r.set_cell(crate::fields::cell::PDF_OPENED, x, true);
+}
+
 /// `\pdfximage` (pdfTeX §1358, `scale_image` §1359): the image's size
 /// from its header.
 #[allow(clippy::too_many_lines)]
@@ -3243,7 +3521,7 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     }
     let rule = (w, h, d);
     let name = ext_string(r)?;
-    let data = file_bytes(r, &name)?.unwrap_or_default();
+    let data = file_bytes_shared(r, &name)?.unwrap_or_else(|| std::sync::Arc::from(&[][..]));
     let img = image_info(&data, page);
     let running = phitex_typeset::node::RUNNING;
     let (x, y, mut xr, mut yr, pdf, pages, depth) = img;
@@ -3319,14 +3597,17 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
     } else {
         None
     };
-    if let Some((_, i, _, _)) = &got {
+    // (`\pdfximagebbox`'s four: the writer's, 0 outside PDF mode)
+    let mut bbox = [0; 4];
+    if let Some((_, i, _, _, _)) = &got {
+        bbox = i.bbox;
         w = i.width;
         h = i.height;
         d = i.depth;
         pages = i.pages;
         depth = i.colordepth;
     }
-    let (wobjs, wos) = got.as_ref().map_or((0, 0), |g| (g.2, g.3));
+    let (wobjs, wos, wgroup) = got.as_ref().map_or((0, 0, false), |g| (g.2, g.3, g.4));
     let n = or_alloc(r, got.and_then(|g| g.0))?;
     // (pdfTeX's writepng, reading a PNG with an alpha channel for PDF 1.4
     // and later after the image's object: the document's transparency
@@ -3348,6 +3629,11 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
                 crate::pdfout::os_write(r)?;
             }
         }
+        // (the document's transparency group, written with the first
+        // image that needs it, into an object stream)
+        if wgroup {
+            crate::pdfout::png_group_write(r)?;
+        }
     }
     r.set(
         &format!("pdf:ximage:{n}"),
@@ -3358,13 +3644,18 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
             v.str(&name),
             v.int(i64::from(page)),
             at,
-            v.int(0),
-            v.int(0),
-            v.int(i64::from(x)),
-            v.int(i64::from(y)),
+            v.int(i64::from(bbox[0])),
+            v.int(i64::from(bbox[1])),
+            v.int(i64::from(bbox[2])),
+            v.int(i64::from(bbox[3])),
             v.int(wobjs),
             v.int(wos),
             v.int(i64::from(immediate)),
+            v.int(i64::from(wgroup)),
+            // (14: the file's bytes, hashed: a page that shows the image
+            // is another page when they change, its size or not,
+            // `crate::pdfout`'s `images_shown`)
+            v.int(phitex_defuse::hash_bytes(0x696d_6167_6500, &data).cast_signed()),
         ]),
         true,
     );
@@ -3383,8 +3674,10 @@ fn ximage(r: &mut Run<'_, '_>, immediate: bool) -> R<()> {
 }
 
 /// The image parameters `ps` (`\\pdfimagehicolor`, `\\pdfimageapplygamma`,
-/// `\\pdfgamma`, `\\pdfimagegamma`, `\\pdfinclusioncopyfonts`, from the
-/// third) on `st`.
+/// `\\pdfgamma`, `\\pdfimagegamma`, `\\pdfinclusioncopyfonts`,
+/// `\\pdfsuppressptexinfo`, `\\pdfptexuseunderscore`, from the third) on
+/// `st`: an included PDF's `/PTEX.FileName` and the others as `write_epdf`
+/// writes them.
 fn image_params(st: &mut phitex_pdf::PdfState, ps: &[i32]) {
     let p = |k: usize| ps.get(k).copied().unwrap_or(0);
     let pm = st.params_mut();
@@ -3393,6 +3686,8 @@ fn image_params(st: &mut phitex_pdf::PdfState, ps: &[i32]) {
     pm.gamma = p(4);
     pm.image_gamma = p(5);
     pm.inclusion_copy_fonts = p(6);
+    pm.suppress_ptex_info = p(7);
+    pm.ptex_use_underscore = p(8);
 }
 
 /// What TeX reads of an image (its size, pages, color depth): the
@@ -3408,7 +3703,7 @@ fn ximage_own_info(
     set: impl Fn(&mut phitex_pdf::PdfState),
     ocl: (i32, i32, i32),
     fonts: &crate::pdfout::Fonts,
-) -> Result<(phitex_pdf::XImageInfo, i64, i64), phitex_pdf::PdfError> {
+) -> Result<(phitex_pdf::XImageInfo, i64, i64, bool), phitex_pdf::PdfError> {
     let mut st = phitex_pdf::PdfState::new(phitex_pdf::PdfParams::default());
     set(&mut st);
     {
@@ -3424,14 +3719,35 @@ fn ximage_own_info(
     // (from the objects reading made on: a PNG's transparency group is
     // the read's, counted where it is read)
     let before = st.objects_numbered();
+    // (an included PDF page's `/Group`: the page that first shows the
+    // image numbers its object (`out_image`), and the image's write
+    // writes the group as that object, into an object stream at
+    // `\pdfobjcompresslevel` 2 and more (`pdf_begin_obj(group, 2)`).
+    // Shown here as there, so this writer writes it so too: one showing
+    // no page copied the group into the image's dictionary, no object
+    // for a direct one (iacrj's logo: every read-time number after page
+    // 1 one short, /Metadata 183 for 184), its object copied for one the
+    // page names indirectly (counted again on top of that: every number
+    // after the page one past pdfTeX's))
+    st.show_ximage_group(n);
     let (objs, os) = match st.write_ximage(n, fonts) {
         Ok(()) => st.objects_after(before),
         Err(_) => (0, 0),
     };
+    // (a PNG's transparency group is the document's, written once with
+    // the first image that needs it: this writer has no other image, so
+    // it wrote it; the record says so apart, for the fold to count it
+    // once. Counted with each image, every read-time number after a
+    // second such image was one past pdfTeX's where it opened an object
+    // stream (cursolatex's masks named forms one off, so the shadows
+    // lost their shadings))
+    let group = st.png_group_in_stream();
+    let os = os - usize::from(group);
     Ok((
         info,
         i64::try_from(objs).unwrap_or(0),
         i64::try_from(os).unwrap_or(0),
+        group,
     ))
 }
 
@@ -3444,17 +3760,19 @@ struct XImageScan {
     colorspace: i32,
     page_box: usize,
     name: String,
-    data: Vec<u8>,
+    data: std::sync::Arc<[u8]>,
     immediate: bool,
 }
 
 /// What [`ximage_step`] gives: the image's object number, what TeX reads
 /// of it, and the objects its write makes (all, those in object streams).
-type XImageStep = Option<(Option<usize>, phitex_pdf::XImageInfo, i64, i64)>;
+type XImageStep = Option<(Option<usize>, phitex_pdf::XImageInfo, i64, i64, bool)>;
 
 /// `\\pdfximage` as a step (pdfTeX §1358, writeimg.c `read_image`):
 /// the image's object number and what TeX reads of it.
 fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
+    // (`check_pdfversion` before `read_image`, pdftex.web)
+    opened(r);
     let v = r.v;
     let fv = r.file(&x.name)?.unwrap_or(ValueId::UNIT);
     let mut ps = Vec::new();
@@ -3466,6 +3784,8 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
         "pdfgamma",
         "pdfimagegamma",
         "pdfinclusioncopyfonts",
+        "pdfsuppressptexinfo",
+        "pdfptexuseunderscore",
     ] {
         ps.push(r.param(p)?);
     }
@@ -3507,7 +3827,7 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
                 .first()
                 .map_or_else(|| x.name.clone(), |&p| str_of(v, p)),
         ),
-        data: std::sync::Arc::from(x.data),
+        data: x.data,
         image_resolution: ps[0],
         inclusion_errorlevel: ps[1],
     };
@@ -3523,7 +3843,7 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
     // link's writer has them: `pdfout::command`'s)
     let mut fs = crate::pdfout::fonts_for(r, &[], false)?;
     crate::pdfout::image_fonts(r, &mut fs)?;
-    let (i, wobjs, wos) = match ximage_own_info(&spec, &set, ocl, &fs) {
+    let (i, wobjs, wos, wgroup) = match ximage_own_info(&spec, &set, ocl, &fs) {
         Ok(i) => i,
         Err(e) => {
             r.log("error", &e.to_string())?;
@@ -3550,7 +3870,7 @@ fn ximage_step(r: &mut Run<'_, '_>, x: XImageScan) -> R<XImageStep> {
     if let Some(e) = got.as_ref().and_then(|g| g.err.clone()) {
         r.log("error", &e)?;
     }
-    Ok(Some((num_of(got), i, wobjs, wos)))
+    Ok(Some((num_of(got), i, wobjs, wos, wgroup)))
 }
 
 /// `\\pdfxform` as a step (pdfTeX §1357): the box goes to the writer,
@@ -3665,13 +3985,14 @@ fn box_font_names(r: &mut Run<'_, '_>, b: Option<ValueId>) -> R<Vec<String>> {
         return Ok(Vec::new());
     };
     let view = r.font_view(std::slice::from_ref(&Node::Box(bx)))?;
+    let ids: Vec<u32> = view.fonts.ids();
+    // (by the key their objects have in the fold: a PK font its own)
+    let fonts = crate::pdfout::fonts_for(r, &ids, false)?;
     let mut out = Vec::new();
-    for f in view.fonts.ids() {
-        let x = r.font_get(i64::from(f), crate::fields::FontCell::Info)?;
-        if let Some(i) = crate::fonts::info(v, x)
-            && !out.contains(&i.name)
-        {
-            out.push(i.name);
+    for f in ids {
+        let k = crate::pdfout::object_key(&fonts, f);
+        if !out.contains(&k) {
+            out.push(k);
         }
     }
     Ok(out)
@@ -3683,7 +4004,7 @@ fn png_alpha(data: &[u8]) -> bool {
     data.starts_with(b"\x89PNG") && matches!(data.get(25), Some(4 | 6))
 }
 
-fn image_info(data: &[u8], page: i32) -> (i32, i32, i32, i32, bool, i32, i32) {
+fn image_info(data: &std::sync::Arc<[u8]>, page: i32) -> (i32, i32, i32, i32, bool, i32, i32) {
     if data.starts_with(b"\x89PNG")
         && let Ok(i) = phitex_codecs::png::read_info(data)
     {
@@ -3711,28 +4032,27 @@ fn image_info(data: &[u8], page: i32) -> (i32, i32, i32, i32, bool, i32, i32) {
     if data.starts_with(&[0xFF, 0xD8]) {
         return jpeg_info(data);
     }
-    if data.starts_with(b"%PDF") {
-        let arc: std::sync::Arc<[u8]> = std::sync::Arc::from(data);
-        if let Ok(doc) = phitex_codecs::pdfread::Doc::open(&arc) {
-            let n = doc.num_pages();
-            let k = usize::try_from(page.max(1) - 1).unwrap_or(0);
-            if let Some(p) = doc.page(k) {
-                let m = p.media;
-                let sp = |bp: f64| -> i32 {
-                    #[allow(clippy::cast_possible_truncation)]
-                    let x = (bp * 65781.76 + 0.5).floor() as i32;
-                    x
-                };
-                return (
-                    sp(m[2] - m[0]),
-                    sp(m[3] - m[1]),
-                    0,
-                    0,
-                    true,
-                    i32::try_from(n).unwrap_or(0),
-                    0,
-                );
-            }
+    if data.starts_with(b"%PDF")
+        && let Ok(doc) = phitex_pdf::open_doc(data)
+    {
+        let n = doc.num_pages();
+        let k = usize::try_from(page.max(1) - 1).unwrap_or(0);
+        if let Some(p) = doc.page(k) {
+            let m = p.media;
+            let sp = |bp: f64| -> i32 {
+                #[allow(clippy::cast_possible_truncation)]
+                let x = (bp * 65781.76 + 0.5).floor() as i32;
+                x
+            };
+            return (
+                sp(m[2] - m[0]),
+                sp(m[3] - m[1]),
+                0,
+                0,
+                true,
+                i32::try_from(n).unwrap_or(0),
+                0,
+            );
         }
     }
     (0, 0, 0, 0, false, 0, 0)
@@ -3814,12 +4134,12 @@ pub(crate) fn positions(r: &mut Run<'_, '_>, b: &BoxNode) -> R<Positions> {
         (r.param("hoffset")?, r.param("voffset")?)
     };
     let ph = r.param("pdfpageheight")?;
-    let page_height = if pdf {
-        if ph != 0 {
-            ph
-        } else {
-            b.height + b.depth + 2 * v0
-        }
+    // pdfTeX §1192 / "Calculate DVI page dimensions and margins", and
+    // XeTeX's: a nonzero \pdfpageheight is the page's height in both
+    let page_height = if ph != 0 {
+        ph
+    } else if pdf {
+        b.height + b.depth + 2 * v0
     } else {
         b.height + b.depth + 2 * v0 + 2 * 4_736_286
     };
@@ -3828,6 +4148,7 @@ pub(crate) fn positions(r: &mut Run<'_, '_>, b: &BoxNode) -> R<Positions> {
     let mut w = Walk {
         at: &mut at,
         width: &width,
+        dir: 0,
     };
     let cur_v = b.height + v0;
     if b.kind == BoxKind::V {
@@ -3845,6 +4166,8 @@ pub(crate) fn positions(r: &mut Run<'_, '_>, b: &BoxNode) -> R<Positions> {
 struct Walk<'a> {
     at: &'a mut phitex_defuse::FxHashMap<u32, (i32, i32)>,
     width: &'a dyn Fn(u32, u16) -> i32,
+    /// e-TeX's `cur_dir`: 1 inside a right-to-left segment.
+    dir: u8,
 }
 
 /// The glue setting state of a box (§625).
@@ -3895,24 +4218,148 @@ impl GlueRun {
     }
 }
 
+/// The widths [`phitex_pdf::lr::reverse`] asks for, on the walk.
+struct WalkWidths<'a, 'b> {
+    width: &'a dyn Fn(u32, u16) -> i32,
+    g: &'b mut GlueRun,
+}
+
+impl phitex_pdf::lr::LrWidths for WalkWidths<'_, '_> {
+    fn char_wd(&mut self, f: u32, c: u16) -> i32 {
+        (self.width)(f, c)
+    }
+
+    fn glue(&mut self, g: &GlueNode) -> i32 {
+        self.g.glue(g)
+    }
+
+    fn glue_sets(&self, g: &GlueNode) -> bool {
+        match self.g.sign {
+            GlueSign::Stretching => g.spec.stretch_order == self.g.order,
+            GlueSign::Shrinking => g.spec.shrink_order == self.g.order,
+            GlueSign::Normal => false,
+        }
+    }
+}
+
 impl Walk<'_> {
     /// `pdf_hlist_out`: `cur_h` from the left edge, on the baseline.
     fn hlist(&mut self, b: &BoxNode, left: i32, base: i32) {
         let mut g = GlueRun::new(b);
+        if self.dir == 0
+            && !b
+                .list
+                .iter()
+                .any(|n| matches!(n, Node::Math(k, _) if k.is_lr()))
+        {
+            self.hnodes(&b.list, &mut g, left, base);
+        } else {
+            self.hlist_lr(&b.list, &mut g, left, base);
+        }
+    }
+
+    /// `pdf_hlist_out` for mixed direction text, as the writer goes
+    /// through it (`phitex_pdf`'s `hlist_lr`): a position in a
+    /// right-to-left segment is where the reversed segment puts it.
+    fn hlist_lr(&mut self, list: &[Node], g: &mut GlueRun, left: i32, base: i32) {
+        use phitex_pdf::lr::{Lr, flatten_into, reverse};
+        let mut q = std::collections::VecDeque::new();
+        flatten_into(list, &mut q);
+        let mut lr: Vec<u8> = vec![0];
         let mut h = left;
-        for n in &b.list {
+        if self.dir == 1 {
+            // "Reverse the complete hlist"
+            let mut back = 0;
+            let mut rev = reverse(
+                &mut WalkWidths {
+                    width: self.width,
+                    g,
+                },
+                &mut back,
+                self.dir,
+                &mut q,
+                None,
+                &mut lr,
+            );
+            rev.push_front(Lr::N(Node::Kern(
+                -back,
+                phitex_typeset::node::KernKind::Explicit,
+            )));
+            q = rev;
+        }
+        let mut edge = h;
+        while let Some(it) = q.pop_front() {
+            match it {
+                Lr::Edge { dir, width, dist } => {
+                    h += width;
+                    edge = h + dist;
+                    self.dir = dir;
+                }
+                Lr::Fixed(x) => h += x.spec.width,
+                Lr::N(Node::Math(k, w)) => {
+                    // "Adjust the LR stack for the `hlist_out` routine"
+                    if k.is_end() {
+                        if lr.last() == Some(&k.end_type()) {
+                            lr.pop();
+                        }
+                    } else {
+                        lr.push(k.end_type());
+                        if k.dir() != self.dir {
+                            // "Reverse an hlist segment"
+                            let dir = 1 - self.dir;
+                            let mut seg = h - edge + w;
+                            let tail = Lr::Edge {
+                                dir: self.dir,
+                                width: 0,
+                                dist: 0,
+                            };
+                            let mut rev = reverse(
+                                &mut WalkWidths {
+                                    width: self.width,
+                                    g,
+                                },
+                                &mut seg,
+                                dir,
+                                &mut q,
+                                Some(tail),
+                                &mut lr,
+                            );
+                            rev.append(&mut q);
+                            rev.push_front(Lr::Edge {
+                                dir,
+                                width: w,
+                                dist: seg,
+                            });
+                            q = rev;
+                            continue;
+                        }
+                    }
+                    h += w;
+                }
+                Lr::N(n) => h = self.hnodes(std::slice::from_ref(&n), g, h, base),
+            }
+        }
+    }
+
+    /// An hlist's nodes from `h` on; where they end.
+    fn hnodes(&mut self, list: &[Node], g: &mut GlueRun, mut h: i32, base: i32) -> i32 {
+        for n in list {
             match n {
                 Node::Char { font, ch } => h += (self.width)(*font, *ch),
                 Node::Lig(l) => h += (self.width)(l.font, l.ch),
                 Node::Box(x) => {
+                    let end = h + x.width;
                     if !x.list.is_empty() {
+                        // (e-TeX: in a reversed segment a box's own list
+                        // starts at its far edge, reversed again)
+                        let at = if self.dir == 1 { end } else { h };
                         if x.kind == BoxKind::V {
-                            self.vlist(x, h, base + x.shift - x.height);
+                            self.vlist(x, at, base + x.shift - x.height);
                         } else {
-                            self.hlist(x, h, base + x.shift);
+                            self.hlist(x, at, base + x.shift);
                         }
                     }
-                    h += x.width;
+                    h = end;
                 }
                 Node::Rule(x) => h += x.width,
                 // (XeTeX's native word or glyph: `cur_h` past its width,
@@ -3924,9 +4371,13 @@ impl Walk<'_> {
                 }
                 Node::Glue(x) => h += g.glue(x),
                 Node::Kern(w, _) | Node::Math(_, w) => h += *w,
+                // (an unbroken discretionary's text: tex.web's
+                // `replace_count` nodes after it, shipped in its place)
+                Node::Disc(d) => h = self.hnodes(&d.replace, g, h, base),
                 _ => {}
             }
         }
+        h
     }
 
     /// `pdf_vlist_out`: `cur_v` from the top edge.
@@ -3940,10 +4391,15 @@ impl Walk<'_> {
                         v += x.height + x.depth;
                     } else {
                         v += x.height;
-                        if x.kind == BoxKind::V {
-                            self.vlist(x, left + x.shift, v - x.height);
+                        let at = if self.dir == 1 {
+                            left - x.shift
                         } else {
-                            self.hlist(x, left + x.shift, v);
+                            left + x.shift
+                        };
+                        if x.kind == BoxKind::V {
+                            self.vlist(x, at, v - x.height);
+                        } else {
+                            self.hlist(x, at, v);
                         }
                         v += x.depth;
                     }
@@ -4061,6 +4517,69 @@ pub(crate) fn writer_data(r: &mut Run<'_, '_>, xs: &[ValueId]) -> R<Option<Value
 #[cfg(test)]
 mod tests {
     use super::obj_cmd;
+
+    /// An RGBA PNG, `w` by 1, as bytes.
+    fn rgba_png(w: u32) -> Vec<u8> {
+        let chunk = |out: &mut Vec<u8>, kind: &[u8], data: &[u8]| {
+            out.extend_from_slice(&u32::try_from(data.len()).expect("a length").to_be_bytes());
+            let mut c = kind.to_vec();
+            c.extend_from_slice(data);
+            out.extend_from_slice(&c);
+            out.extend_from_slice(&phitex_codecs::zlib::crc32(&c).to_be_bytes());
+        };
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = w.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&1u32.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+        chunk(&mut png, b"IHDR", &ihdr);
+        let mut raw = vec![0u8];
+        for x in 0..w {
+            raw.extend_from_slice(&[u8::try_from(x % 256).expect("a byte"), 0, 0, 128]);
+        }
+        chunk(
+            &mut png,
+            b"IDAT",
+            &phitex_codecs::deflate::compress(&raw, 6),
+        );
+        chunk(&mut png, b"IEND", &[]);
+        png
+    }
+
+    /// Writing a PNG with an alpha channel makes one object after its
+    /// own, its soft mask; its transparency group, numbered where it was
+    /// read, goes into the document's object stream at
+    /// `\\pdfobjcompresslevel` 2 (an object in a stream, none of its
+    /// own). The stream it opened on the image's writer was counted as an
+    /// object: every read-time number after a page that first showed such
+    /// a PNG was one past pdfTeX's (beautybook's `/pgfsmask146` for 144).
+    #[test]
+    fn png_alpha_objects_after() {
+        let spec = phitex_pdf::ImageSpec {
+            width: -(1 << 30),
+            height: -(1 << 30),
+            depth: -(1 << 30),
+            attr: None,
+            page: 1,
+            named: None,
+            colorspace: 0,
+            page_box: phitex_pdf::PageBox::Crop,
+            name: b"a.png".to_vec(),
+            data: rgba_png(4).into(),
+            image_resolution: 0,
+            inclusion_errorlevel: 0,
+        };
+        let fonts = crate::pdfout::Fonts::default();
+        for (ocl, want) in [
+            ((2, 1, 5), (1, 0, true)),
+            ((0, 1, 5), (1, 0, false)),
+            ((2, 1, 7), (1, 0, true)),
+        ] {
+            let got = super::ximage_own_info(&spec, |_| {}, ocl, &fonts)
+                .map(|(_, o, s, g)| (o, s, g))
+                .expect("the image");
+            assert_eq!(got, want, "at {ocl:?}");
+        }
+    }
 
     /// `\pdfobj useobjnum n` names the object the link's writer made for
     /// the `reserveobjnum` TeX read back as `n`: TeX's number mapped

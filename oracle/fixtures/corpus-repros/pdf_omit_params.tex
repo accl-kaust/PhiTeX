@@ -1,0 +1,12 @@
+% TeX Live manual nddiss (pdflatex, pdfx): \pdfomitcharset leaves the
+% fonts' /CharSet out, \pdfomitinfodict the Info dictionary, and
+% \pdfomitprocset each page's /ProcSet as the page is shipped.
+\pdfomitcharset=1
+\pdfomitinfodict=1
+\documentclass{article}
+\begin{document}
+A page with its \textbf{ProcSet}.
+\clearpage
+\pdfomitprocset=1
+A page without one.
+\end{document}

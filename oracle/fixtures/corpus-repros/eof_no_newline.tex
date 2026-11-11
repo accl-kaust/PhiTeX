@@ -1,0 +1,25 @@
+% A file whose last line has no newline: the line still ends, its
+% \endlinechar read (§31). ualberta's chapter: the paragraph's end kept the
+% glue of the file's end and of its \input's line, and set the line tighter.
+\documentclass{article}
+\newcommand\ins[1]{
+	\input{#1}}
+\begin{document}
+	\ins{nonl1}
+	\ins{count}
+	\ins{nl1}
+	\ins{count}
+	\ins{nonlm}
+	\ins{count}
+	\ins{nlm}
+	\ins{count}
+\section{Plain inputs}
+\input{nonl1}
+\input{count}
+\input{nl1}
+\input{count}
+\input{nonlm}
+\input{count}
+\input{nlm}
+\input{count}
+\end{document}

@@ -1,0 +1,22 @@
+% pdfTeX 1.40.26's structure destinations: \pdfdest struct N, and a goto
+% action's struct (/SD), each of its own namespace (obj_type_struct_dest)
+\documentclass{article}
+\begin{document}
+\immediate\pdfobj{<< /Type /StructElem /S /Sect >>}
+\edef\se{\the\pdflastobj}
+\pdfdest struct \se\space name{sec} xyz
+\pdfdest struct \se\space num 3 fit
+\pdfdest name{plain} fit
+\pdfdest num 3 fith
+Section text.
+\pdfstartlink goto struct name{sec} name{plain}\relax Link\pdfendlink\
+\pdfstartlink goto struct num 3 page 1 {/Fit}\relax Page\pdfendlink\
+\pdfstartlink goto struct num 7 num 7\relax Ahead\pdfendlink\
+\pdfstartlink goto file{other.pdf} struct {/S7} name{far}\relax File\pdfendlink
+\pdfoutline goto struct num 9 name{plain} count 0 {Out}
+\newpage
+\pdfdest num 7 fit
+\pdfdest struct \se\space num 7 fitr width 1pt height 1pt depth 0pt
+\pdfdest struct \se\space num 9 xyz zoom 2000
+Second page.
+\end{document}

@@ -304,6 +304,7 @@ pub(crate) const KEPT: &[&str] = &[
     "pdfsavepos",
     "rightmarginkern",
     "rpcode",
+    "synctex",
 ];
 
 /// XeTeX's own entries of the primitive table: the renamed ones with
@@ -974,7 +975,7 @@ impl Run<'_, '_> {
     /// The input mode of the file named `name` (its `xenc:` field, set by
     /// `\XeTeXinputencoding` or at its opening from
     /// `\XeTeXdefaultencoding`; `auto` where none was).
-    fn input_mode(&mut self, name: ValueId) -> R<i64> {
+    pub(crate) fn input_mode(&mut self, name: ValueId) -> R<i64> {
         if let Some(&(_, m)) = self.xenc.iter().find(|e| e.0 == name) {
             return Ok(m);
         }
@@ -1014,12 +1015,23 @@ impl Run<'_, '_> {
     /// XeTeX's `input_line` for the line on top, just reached: its bytes
     /// made characters in its file's mode ([`decode_line`]). A line no
     /// file holds (a token list's, a pseudo file's, `\read`'s, which are
-    /// characters already) is left as it is.
+    /// characters already) is left as it is. A line made characters is
+    /// marked so ([`crate::input::Line::chars`]), an ASCII one too: a
+    /// segment joining it later is decoded on its own (`Run::join_continuation`), and
+    /// a continuation cut inside the line carries its rest as
+    /// characters, never decoded a second time where it is reached again
+    /// (`pages::piece::line_frame`: listings' `ç` read as `U+FFFD`)
     pub(crate) fn xe_decode_top(&mut self) -> R<()> {
         let Some(s) = self.input.top_line() else {
             return Ok(());
         };
-        if s.rescanned || s.chars || s.buf.iter().all(|&c| c < 0x80) {
+        if s.rescanned || s.chars {
+            return Ok(());
+        }
+        if s.buf.iter().all(|&c| c < 0x80) {
+            if let Some(s) = self.input.top_line_mut() {
+                s.chars = true;
+            }
             return Ok(());
         }
         let first = s.starts && s.origin.is_some_and(|o| o.1 == 0);

@@ -1,13 +1,21 @@
 # A release (docs/ci.md): a tag v1.6, v1.6.1, v1.61, … on main whose commit passed the
 # gate. The CLI built for Linux (x86_64, aarch64; glibc 2.35, Ubuntu
 # 22.04's) and macOS (arm64, x86_64), each a tarball phitex-<arch>-<os>.tar.gz
-# (the names phitex.org/install.sh asks for), SHA256SUMS of them, signed
+# (the names phitex.org/install.sh asks for), and Windows (x86_64), a zip
+# of phitex.exe, phitex-<arch>-windows.zip (x86_64, aarch64;
+# phitex.org/install.ps1's), SHA256SUMS of them, signed
 # with minisign, GitHub's build provenance for each, and the GitHub release
 # made with all of them.
 #
 # Signing runs in the environment `release`: its secret MINISIGN_SECRET_KEY
 # (the key file's text; MINISIGN_PASSWORD if it has one) is given only to
 # a run from a v* tag, and only after the user approves that run.
+#
+# The frontends' checks (frontends.yml) on the x86_64 Linux binary built
+# here and the browser build of this commit: Emacs, Neovim, VS Code, the
+# Overleaf extension on the mock, the demo. Neither a release nor a dry
+# run's signing goes ahead unless they pass; overleaf.com itself is a
+# manual step (docs/ci.md).
 #
 # A dry run: a push to the branch release-dry (`git push github
 # dev:release-dry`), or by hand (`gh workflow run release.yml`, once the
@@ -27,6 +35,7 @@ jobs:
     permissions:
       contents: read
       checks: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,8 +48,22 @@ jobs:
           sha=$GITHUB_SHA tag=${GITHUB_REF_NAME#v}
           st=$(gh api "repos/$GITHUB_REPOSITORY/compare/main...$sha" -q .status)
           case $st in identical | behind) ;; *) echo "$GITHUB_REF_NAME is not on main ($st)"; exit 1 ;; esac
-          gate=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/check-runs?check_name=gate" -q '[.check_runs[].conclusion] | map(select(. == "success")) | length')
-          [ "$gate" -gt 0 ] || { echo "no green gate on $sha"; exit 1; }
+          # (the gate runs on pull requests, and GitHub puts a pull request's
+          # checks on its head, so the commit merging it has none: a tag on
+          # main's merge commit passes through the merged pull request's
+          # head when the two hold the same files, any way it was merged)
+          green() { n=$(gh api "repos/$GITHUB_REPOSITORY/commits/$1/check-runs?check_name=gate" -q '[.check_runs[].conclusion] | map(select(. == "success")) | length') || exit 1; [ "$n" -gt 0 ]; }
+          tree() { gh api "repos/$GITHUB_REPOSITORY/commits/$1" -q .commit.tree.sha || exit 1; }
+          gated=
+          if green "$sha"; then gated=$sha
+          else
+            heads=$(gh api "repos/$GITHUB_REPOSITORY/commits/$sha/pulls" -q '.[] | select(.merged_at != null and .base.ref == "main") | .head.sha') || exit 1
+            for head in $heads; do
+              if [ "$(tree "$head")" = "$(tree "$sha")" ] && green "$head"; then gated=$head; break; fi
+            done
+          fi
+          [ -n "$gated" ] || { echo "no green gate on $sha, nor on a pull request merged as it with the same files"; exit 1; }
+          echo "gated: $gated"
           # (a milestone's .0 left out: Cargo's 1.61.0 is tagged 1.61, an
           # update's kept: 1.6.1 is tagged 1.6.1)
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/cli/Cargo.toml | head -1)
@@ -56,7 +79,14 @@ jobs:
           - { os: ubuntu-22.04, asset: x86_64-linux }
           - { os: ubuntu-22.04-arm, asset: aarch64-linux }
           - { os: macos-15, asset: aarch64-macos }
-          - { os: macos-15-intel, asset: x86_64-macos }
+          # (Intel Macs' binary made on Apple silicon: Xcode carries both
+          # SDKs, and Rosetta runs it for the check; GitHub's Intel runners
+          # took 39 min a build against 13)
+          - { os: macos-15, asset: x86_64-macos, target: x86_64-apple-darwin }
+          # (Windows: a zip of phitex.exe, phitex-<arch>-windows.zip, the
+          # name phitex.org/install.ps1 asks for)
+          - { os: windows-2022, asset: x86_64-windows }
+          - { os: windows-11-arm, asset: aarch64-windows }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     steps:
@@ -66,28 +96,72 @@ jobs:
       # (.cargo/config.toml links Linux with clang and mold)
       - if: runner.os == 'Linux'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq clang mold
+      # (Windows's arm64 runner: rustup and LLVM's clang, which ring needs
+      # there, set up where missing)
+      - if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            Invoke-WebRequest https://win.rustup.rs/aarch64 -OutFile "$env:RUNNER_TEMP\rustup-init.exe"
+            & "$env:RUNNER_TEMP\rustup-init.exe" -y --default-toolchain none --profile minimal
+            if ($LASTEXITCODE -ne 0) { throw 'rustup-init failed' }
+            "$env:USERPROFILE\.cargo\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          }
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path "$llvm\clang.exe")) {
+            choco install llvm -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'LLVM did not install' }
+          }
+          $llvm | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - run: rustup show active-toolchain || rustup toolchain install
-      - run: cargo build --release --locked -p phitex-cli
-      - run: |
-          ./target/release/phitex --version
-          tar -czf "phitex-${{ matrix.asset }}.tar.gz" -C target/release phitex
+      - if: matrix.target != ''
+        run: |
+          rustup target add ${{ matrix.target }}
+          softwareupdate --install-rosetta --agree-to-license
+      - shell: bash
+        run: |
+          t="${{ matrix.target }}"
+          PHITEX_BUILT_BY=release cargo build --release --locked -p phitex-cli ${t:+--target $t}
+      - if: runner.os != 'Windows'
+        run: |
+          t="${{ matrix.target }}"
+          out=target/${t:+$t/}release
+          file "$out/phitex"
+          "$out/phitex" --version
+          tar -czf "phitex-${{ matrix.asset }}.tar.gz" -C "$out" phitex
+      # (the zip by PowerShell's Compress-Archive, there on every Windows
+      # runner, arm64's too)
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = 'target/release/phitex.exe'
+          & $exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'phitex.exe does not run' }
+          Compress-Archive -Path $exe -DestinationPath 'phitex-${{ matrix.asset }}.zip' -CompressionLevel Optimal
+          Get-Item 'phitex-${{ matrix.asset }}.zip'
       - uses: actions/upload-artifact@v4
         with:
           name: phitex-${{ matrix.asset }}
-          path: phitex-${{ matrix.asset }}.tar.gz
+          path: phitex-${{ matrix.asset }}.*
+  frontends:
+    needs: build
+    uses: ./.github/workflows/frontends.yml
+    with:
+      binary: phitex-x86_64-linux
   # (a dry run: the same sums and signing, with a key made here)
   dry-run:
     if: github.ref_type != 'tag'
-    needs: build
+    needs: [build, frontends]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: phitex-*
           merge-multiple: true
       - run: |
           cd dist
-          sha256sum phitex-*.tar.gz > SHA256SUMS
+          sha256sum phitex-*.tar.gz phitex-*.zip > SHA256SUMS
           cat SHA256SUMS
           sudo apt-get update -qq && sudo apt-get install -y -qq minisign
           minisign -G -W -p "$RUNNER_TEMP/dry.pub" -s "$RUNNER_TEMP/dry.key"
@@ -96,7 +170,7 @@ jobs:
           ls -l
   publish:
     if: github.ref_type == 'tag'
-    needs: build
+    needs: [build, frontends]
     runs-on: ubuntu-24.04
     environment: release
     permissions:
@@ -110,6 +184,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: phitex-*
           merge-multiple: true
       - name: SHA256SUMS, signed
         env:
@@ -117,7 +192,7 @@ jobs:
           PASS: ${{ secrets.MINISIGN_PASSWORD }}
         run: |
           cd dist
-          sha256sum phitex-*.tar.gz > SHA256SUMS
+          sha256sum phitex-*.tar.gz phitex-*.zip > SHA256SUMS
           cat SHA256SUMS
           [ -n "$KEY" ] || { echo "no MINISIGN_SECRET_KEY: the release is not signed"; exit 1; }
           sudo apt-get update -qq && sudo apt-get install -y -qq minisign
@@ -130,7 +205,7 @@ jobs:
       # `gh attestation verify phitex-….tar.gz -R accl-kaust/PhiTeX`)
       - uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist/phitex-*.tar.gz
+          subject-path: dist/phitex-*
       - name: the release
         env:
           GH_TOKEN: ${{ github.token }}

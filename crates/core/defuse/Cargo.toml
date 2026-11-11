@@ -5,6 +5,7 @@ edition.workspace = true
 publish = false
 description = "The engine: a mergeless, parallel, incremental def-use evaluator over one line of positions, written without knowledge of TeX"
 license.workspace = true
+autotests = false
 
 [dependencies]
 crossbeam-deque = "0.8"
@@ -20,3 +21,7 @@ libc = { version = "0.2", optional = true }
 # per-node times. Off by default; release builds compile every probe out.
 profile = ["dep:libc"]
 observe = ["dep:serde", "dep:serde_json"]
+
+[[test]]
+name = "tests"
+path = "tests/tests.rs"

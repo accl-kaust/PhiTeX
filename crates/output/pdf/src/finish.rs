@@ -384,6 +384,13 @@ impl PdfState {
     pub fn flushed(&self) -> usize {
         self.flushes
     }
+    /// The colour stacks' page values a page begins from (a page
+    /// written apart after pages that left a colour pushed): each stack
+    /// named, its entries below its current value and that value (`None`:
+    /// the value the stack was made with).
+    pub fn start_page_colors(&mut self, st: &[crate::color::PageColor]) {
+        self.stacks.start_page(st);
+    }
 
     /// `\pdfcolorstackinit [page] [direct] {...}`: the new stack's
     /// number (`\pdfcolorstackinit` expands to it).
@@ -621,7 +628,7 @@ impl PdfState {
         }
         if self.p.suppress_ptex_info % 2 == 0 {
             let banner = self.p.banner.clone();
-            if self.p.ptex_use_underscore > 0 {
+            if self.p.ptex_underscore() {
                 self.print(b"/PTEX_Fullbanner ");
             } else {
                 self.print(b"/PTEX.Fullbanner ");

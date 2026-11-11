@@ -7,7 +7,7 @@
 //! keys (`keys.rs`: `r` rebuilds, `o` opens the viewer, `p` shows the
 //! errors again, `w` the warnings, `s` how the build went, `h` lists
 //! them, `q` quits; a live tree of the build's phases while it runs) and a status line below
-//! what is printed; on a pipe, the same as lines (its end quits). Every
+//! what is printed; on a pipe, the same as lines (its end is no quit). Every
 //! message the terminal shows is the viewer's too (its console). With
 //! `--lsp`, standard input and output are an editor's language client's
 //! instead (`lsp.rs`): its buffers are asked as the viewer's are, its
@@ -68,26 +68,128 @@ struct Kept {
     view: Option<View>,
     view_made: bool,
     building: Arc<AtomicBool>,
+    /// The watch's loop waits for an event ([`Here::waiting`]).
+    waiting: Arc<AtomicBool>,
     told: Arc<AtomicBool>,
+    /// The way out asks whether to write the PDF ([`Here::asking`]).
+    asking: Arc<AtomicBool>,
     /// Whether standard input is read (by the first session).
     reading: bool,
 }
 
-/// The extensions of the files a change of rebuilds.
-const SOURCES: &[&str] = &[
-    "tex", "sty", "cls", "bib", "bst", "def", "cfg", "clo", "fd", "ltx", "ist", "bbx", "cbx",
-    "lbx", "dbx", "png", "jpg", "jpeg", "pdf", "eps", "mp", "txt", "dat", "csv", "tikz", "pgf",
-    "inc",
-];
+/// What the last build read ([`phitex_live::session::Session::watched`]):
+/// a change of one of these files rebuilds, whatever its extension (an
+/// image, a `.bib`, `\input{notes.md}`, a figure another program made)
+/// and whatever folder it is in (a package found through TEXINPUTS, a
+/// chapter of `../`), and so does a file appearing under a name the build
+/// looked for and did not find. Before the first build every file of the
+/// watch's folder does (nothing is known). A change of a settings' file
+/// (`config`) resolves the target again.
+#[derive(Default)]
+struct Wanted {
+    built: bool,
+    /// Where the files read were found, canonical.
+    paths: HashSet<PathBuf>,
+    /// The names asked for, from the watch's folder.
+    names: HashSet<String>,
+    /// The settings' files ([`modern::Target::config_files`]), canonical
+    /// where they are.
+    config: HashSet<PathBuf>,
+}
 
-/// Whether a change of `p` (under `root`) is one of the project's
-/// sources: a source's extension, in no hidden directory.
-fn source(root: &Path, p: &Path) -> bool {
-    let rel = p.strip_prefix(root).unwrap_or(p);
-    !rel.components()
-        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-        && p.extension()
-            .is_some_and(|x| SOURCES.contains(&&*x.to_string_lossy().to_ascii_lowercase()))
+type WantedRef = Arc<Mutex<Wanted>>;
+
+impl Wanted {
+    fn of(w: phitex_live::session::Watched, root: &Path, config: HashSet<PathBuf>) -> Wanted {
+        Wanted {
+            built: w.built,
+            paths: w.paths.iter().map(|p| canonical(&root.join(p))).collect(),
+            names: w.names.into_iter().collect(),
+            config,
+        }
+    }
+
+    /// The settings' files `files`, as [`Wanted::config`] holds them.
+    fn config_of(files: &[PathBuf]) -> HashSet<PathBuf> {
+        files.iter().map(|p| canonical(p)).collect()
+    }
+
+    /// Whether `p` is a settings' file.
+    fn is_config(&self, p: &Path) -> bool {
+        self.config.contains(p) || self.config.contains(&canonical(p))
+    }
+
+    /// Whether a change of `p` is one the build reads: a file it read,
+    /// wherever it is, or a settings' file; else under `root`, in no
+    /// hidden folder, looked for by its name (`fig`, as
+    /// `\includegraphics{fig}` asks for `fig.png`, is asked for whole).
+    fn wants(&self, root: &Path, p: &Path) -> bool {
+        if self.is_config(p) {
+            return true;
+        }
+        let c = canonical(p);
+        if self.paths.contains(&c) || self.paths.contains(p) {
+            return true;
+        }
+        let Ok(rel) = p.strip_prefix(root) else {
+            return false;
+        };
+        if rel
+            .components()
+            .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        {
+            return false;
+        }
+        if !self.built {
+            return true;
+        }
+        let r = rel.to_string_lossy();
+        self.names.contains(r.as_ref())
+            || r.strip_suffix(".tex")
+                .is_some_and(|n| self.names.contains(n))
+    }
+
+    /// The folders outside `root` (canonical) the files of `self` are in:
+    /// watched besides it.
+    fn folders_outside(&self, root: &Path) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = self
+            .paths
+            .iter()
+            .chain(&self.config)
+            .filter(|p| !p.starts_with(root))
+            .filter_map(|p| p.parent().map(Path::to_path_buf))
+            .filter(|d| d.is_dir() && !d.starts_with(root))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+}
+
+/// `p` canonical, where it is (else as it is).
+fn canonical(p: &Path) -> PathBuf {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// The system's watcher and the folders it watches outside the watch's
+/// own (each alone, not what is below it).
+struct Watching {
+    w: notify::RecommendedWatcher,
+    /// The watch's folder, canonical.
+    root: PathBuf,
+    outside: HashSet<PathBuf>,
+}
+
+impl Watching {
+    /// The folders of `wanted`'s files outside the watch's folder
+    /// watched too, those not yet.
+    fn add(&mut self, wanted: &Wanted) {
+        for d in wanted.folders_outside(&self.root) {
+            if !self.outside.contains(&d) && self.w.watch(&d, RecursiveMode::NonRecursive).is_ok() {
+                self.outside.insert(d);
+            }
+        }
+    }
 }
 
 /// The files the watch wrote itself, with their bytes' hashes: a change
@@ -130,6 +232,7 @@ fn not_ours(ours: &Ours, changed: &mut Vec<PathBuf>) {
 /// name for a moment, and a build read then is one of an empty text.
 fn watcher(
     root: &Path,
+    wanted: WantedRef,
     ours: Ours,
     tx: mpsc::Sender<(Instant, Event)>,
 ) -> notify::Result<notify::RecommendedWatcher> {
@@ -159,7 +262,10 @@ fn watcher(
         {
             return;
         }
-        let mut changed: Vec<PathBuf> = ev.paths.into_iter().filter(|p| source(&r, p)).collect();
+        let mut changed: Vec<PathBuf> = {
+            let w = wanted.lock().unwrap_or_else(PoisonError::into_inner);
+            ev.paths.into_iter().filter(|p| w.wants(&r, p)).collect()
+        };
         if CLOSES {
             let written = matches!(
                 ev.kind,
@@ -284,10 +390,17 @@ struct Here {
     /// on the output: the watch's own loop opens that).
     url: Option<String>,
     building: Arc<AtomicBool>,
+    /// The watch's loop waits for an event: a key it would answer now.
+    /// Not waiting, it is at work (a build, a diff's, the history read,
+    /// a file written), and the keys that need nothing of that work are
+    /// answered here: q and Ctrl-C quit whatever the loop is doing.
+    waiting: Arc<AtomicBool>,
     /// The wait for the build said already (this build).
     told: Arc<AtomicBool>,
     /// For the cache's line on the way out.
     target: Target,
+    /// The watch asks a question on the way out: every key is its answer.
+    asking: Arc<AtomicBool>,
 }
 
 fn help(ui: &Ui) {
@@ -296,11 +409,37 @@ fn help(ui: &Ui) {
     }
 }
 
+/// A build runs, or the watch's loop is at other work: not waiting for
+/// keys.
+fn busy(building: &AtomicBool, waiting: &AtomicBool) -> bool {
+    building.load(Ordering::Relaxed) || !waiting.load(Ordering::Relaxed)
+}
+
+/// The next event, `wait` at most, the loop marked waiting meanwhile
+/// ([`Here::waiting`]): the only time keys go to it.
+fn wait_for(
+    rx: &mpsc::Receiver<(Instant, Event)>,
+    wait: Duration,
+    waiting: &AtomicBool,
+) -> Result<(Instant, Event), mpsc::RecvTimeoutError> {
+    waiting.store(true, Ordering::Relaxed);
+    let e = rx.recv_timeout(wait);
+    waiting.store(false, Ordering::Relaxed);
+    e
+}
+
 impl Here {
+    fn busy(&self) -> bool {
+        busy(&self.building, &self.waiting)
+    }
+
     /// Key `k` answered here (true), or for the watch's loop.
     fn answer(&self, k: Key) -> bool {
+        if self.asking.load(Ordering::Relaxed) {
+            return false;
+        }
         let ui = &self.ui;
-        let busy = self.building.load(Ordering::Relaxed);
+        let busy = self.busy();
         match k {
             Key::Help => help(ui),
             Key::Clear => ui.clear(),
@@ -313,20 +452,21 @@ impl Here {
                     ui.warning(&format!("could not start a browser: open {url}"));
                 }
             }
-            // (q or Ctrl-C while a build runs: out now, the build dropped)
+            // (q or Ctrl-C while the loop works: out now, the work dropped)
             Key::Quit if busy => {
                 ui.finish();
                 keys::restore();
-                ui.line(&ui.st.dim("stopped during a build"));
+                ui.line(&ui.st.dim("stopped while working"));
                 modern::cache_summary(&self.target, ui);
-                std::process::exit(0);
+                crate::attach::forget();
+                std::process::exit(crate::lsp::exit_status());
             }
             Key::Rebuild | Key::Problems | Key::Warnings | Key::Summary if busy => {
                 // (said once a build: a held key says nothing more)
                 if !self.told.swap(true, Ordering::Relaxed) {
                     ui.line(
                         &ui.st
-                            .dim("phitex watch: a build is running; this comes after it"),
+                            .dim("phitex watch: still working; this comes after it"),
                     );
                 }
                 return false;
@@ -339,7 +479,7 @@ impl Here {
 
 /// Standard input's keys (a terminal's, one at a time; escape sequences,
 /// the arrows', dropped) or lines, to `tx` (those not answered `here`);
-/// its end quits.
+/// a terminal's end quits, a pipe's or a file's does not.
 fn read_keys(tx: &mpsc::Sender<(Instant, Event)>, raw: bool, here: &Here) {
     if raw {
         let mut bytes = std::io::stdin().lock().bytes();
@@ -368,6 +508,10 @@ fn read_keys(tx: &mpsc::Sender<(Instant, Event)>, raw: bool, here: &Here) {
             };
             let k = t.chars().next().and_then(Key::of);
             text.clear();
+            if k == Some(Key::Suspend) {
+                keys::suspend();
+                continue;
+            }
             if let Some(k) = k
                 && !here.answer(k)
                 && tx.send((Instant::now(), Event::Key(k))).is_err()
@@ -383,7 +527,13 @@ fn read_keys(tx: &mpsc::Sender<(Instant, Event)>, raw: bool, here: &Here) {
                 return;
             }
         }
+        // (standard input not a terminal, at its end: no more keys, not
+        // a quit. `phitex watch &`, nohup, a service or a Makefile has
+        // it at its end from the start; such a watch runs until a
+        // signal, as latexmk -pvc does)
+        return;
     }
+    // (a terminal's end: it hung up)
     let _ = tx.send((Instant::now(), Event::Key(Key::Quit)));
 }
 
@@ -420,6 +570,9 @@ struct Last {
     pin_warnings: bool,
 }
 
+/// The status line's word for warnings left for when the editing pauses.
+const WARNINGS_UPDATING: &str = "warnings updating";
+
 /// The last build's warnings, as `w` shows them: at their places where
 /// the diagnostics have them, else summarised from the log by kind.
 fn show_warnings(ui: &crate::ui::Ui, st: crate::ui::Style, s: &Session, l: &Last) {
@@ -444,7 +597,7 @@ fn show_warnings(ui: &crate::ui::Ui, st: crate::ui::Style, s: &Session, l: &Last
                 ui.line(&st.green("no warnings"));
             }
             for (k, n, first) in ws {
-                ui.warning(&format!("{n} × {k:?}"));
+                ui.warning(&k.name(n));
                 for l in first {
                     ui.line(&st.dim(&format!("  {l}")));
                 }
@@ -455,7 +608,7 @@ fn show_warnings(ui: &crate::ui::Ui, st: crate::ui::Style, s: &Session, l: &Last
 }
 
 /// The quit line: `✓ 9 builds · fastest edit 9.2 ms · median 412 ms ·
-/// cold 15.38 s`.
+/// clean build 15.38 s`.
 fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
     if l.builds == 0 {
         return None;
@@ -473,7 +626,7 @@ fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
         parts.push(format!("median {}", ms(e[e.len() / 2])));
     }
     if let Some(c) = l.cold {
-        parts.push(format!("cold {}", ms(c)));
+        parts.push(format!("clean build {}", ms(c)));
     }
     let mut sc = l.screens.clone();
     sc.sort();
@@ -491,20 +644,41 @@ fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
     ))
 }
 
-/// `rows` as a tree under `head`: `├─ name  value`, the last `└─`.
+/// `rows` as a tree under `head`: `├─ name  value`, the last `└─`; a
+/// value wider than the terminal goes on under itself, broken at its
+/// ` · `s.
 fn tree(st: crate::ui::Style, head: String, rows: &[(String, String)]) -> Vec<String> {
+    let cols = crate::keys::width().unwrap_or(100).max(50);
     let mut out = vec![head];
     for (k, (name, value)) in rows.iter().enumerate() {
-        let branch = if k + 1 == rows.len() {
-            "└─"
-        } else {
-            "├─"
-        };
-        out.push(format!(
-            "  {} {} {value}",
-            st.dim(branch),
-            crate::ui::pad(name, 14, false)
-        ));
+        let last = k + 1 == rows.len();
+        let branch = if last { "└─" } else { "├─" };
+        let stem = if last { "  " } else { "│ " };
+        let room = cols.saturating_sub(2 + 3 + 15).max(20);
+        let mut lines: Vec<String> = vec![String::new()];
+        for part in value.split(" · ") {
+            let cur = lines.last_mut().expect("a line");
+            let w = crate::ui::width(cur);
+            if w == 0 {
+                cur.push_str(part);
+            } else if w + 3 + crate::ui::width(part) <= room {
+                cur.push_str(" · ");
+                cur.push_str(part);
+            } else {
+                lines.push(part.to_owned());
+            }
+        }
+        for (j, l) in lines.iter().enumerate() {
+            if j == 0 {
+                out.push(format!(
+                    "  {} {} {l}",
+                    st.dim(branch),
+                    crate::ui::pad(name, 14, false)
+                ));
+            } else {
+                out.push(format!("  {} {} {l}", st.dim(stem), " ".repeat(14)));
+            }
+        }
     }
     out
 }
@@ -527,7 +701,9 @@ fn faster(cold: Duration, wall: Duration) -> Option<String> {
 /// and the editor's connection are kept.
 pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
     let (tx, rx) = mpsc::channel::<(Instant, Event)>();
-    let lsp = lsp.map(Arc::new);
+    // (no editor on standard input: a terminal's watch, which editors
+    // may attach to all the same, `attach.rs`)
+    let lsp = Some(Arc::new(lsp.unwrap_or_else(Lsp::terminal)));
     if let Some(l) = &lsp {
         let tx = Mutex::new(tx.clone());
         l.on_configure(Box::new(move |s| {
@@ -544,7 +720,9 @@ pub fn main(t: &Target, o: &Options, ui: &Ui, lsp: Option<Lsp>) -> ! {
         view: None,
         view_made: false,
         building: Arc::default(),
+        waiting: Arc::default(),
         told: Arc::default(),
+        asking: Arc::default(),
         reading: false,
     };
     let (mut t, mut o) = (t.clone(), o.clone());
@@ -561,7 +739,7 @@ fn reconfigured(
     o: &Options,
     s: &phitex_live::lsp::Settings,
     lsp: Option<&Lsp>,
-) -> Option<(Target, Options)> {
+) -> Option<(Target, Options, PathBuf)> {
     let mut o2 = o.clone();
     if let Some(n) = s.threads {
         o2.threads = Some(n);
@@ -574,8 +752,7 @@ fn reconfigured(
             Ok(f) => o2.files = Some(f),
             Err(e) => {
                 if let Some(l) = lsp {
-                    l.server()
-                        .show_message(1, &format!("PhiTeX: the settings: {e}"));
+                    l.show_message(1, &format!("PhiTeX: the settings: {e}"));
                 }
                 return None;
             }
@@ -591,27 +768,23 @@ fn reconfigured(
     };
     let said = |e: &str| {
         if let Some(l) = lsp {
-            l.server()
-                .show_message(1, &format!("PhiTeX: the settings: {e}"));
+            l.show_message(1, &format!("PhiTeX: the settings: {e}"));
         }
     };
-    let t2 = match modern::resolve(&o2) {
+    let (t2, dir) = match modern::resolve_again(&o2) {
         Ok(t2) => t2,
         Err(e) => {
             said(&e);
             return None;
         }
     };
-    if o2.threads == o.threads && same_main(&t2.file, &t.file) && t2.files == t.files {
+    if o2.threads == o.threads
+        && same_main(&dir.join(&t2.file).to_string_lossy(), &t.file)
+        && t2.files == t.files
+    {
         return None;
     }
-    match modern::job(&t2, &o2) {
-        Ok(_) => Some((t2, o2)),
-        Err(e) => {
-            said(&e);
-            None
-        }
-    }
+    Some((t2, o2, dir))
 }
 
 /// One session of the watch, on target `t`: its builds until the watch
@@ -621,12 +794,26 @@ fn reconfigured(
 fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Options) {
     let st = ui.st;
     let lsp = kept.lsp.clone();
+    // (an editor on standard input and output, `--lsp`: no keys, no
+    // terminal of its own)
+    let on_stdio = lsp.as_ref().is_some_and(|l| l.editor());
+    // (a watch writes nothing into the folder unless asked, `--write` or
+    // `watch-write`: the pages are in the viewer. Without a viewer the file
+    // is the only way to see them; `copy-pdf` copies the file written.
+    // Writing, the PDF comes with its .synctex.gz unless that was turned off)
+    let writing = o.write || t.watch_write || !o.view || t.copy_pdf.is_some();
+    let mut t2 = t.clone();
+    if writing && !t.synctex_said {
+        t2.synctex = true;
+    }
+    let t = &t2;
     let mut job = modern::job(t, o).unwrap_or_else(|e| {
         if let Some(l) = &lsp {
             l.refuse(&e);
         }
         ui.error(&e);
-        std::process::exit(crate::EXIT_FAILED);
+        crate::attach::forget();
+        std::process::exit(crate::EXIT_USAGE);
     });
     if let Some(l) = &lsp {
         l.accept(
@@ -653,6 +840,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     for n in session::waiting_notes(&job) {
         ui.line(&format!("{}: {n}", st.yellow("note")));
     }
+    if !writing && !ui.quiet && !on_stdio {
+        ui.line(&st.dim(&format!(
+            "files: nothing written here while watching, the pages are in the viewer (a PDF viewer on {}.pdf won't update); --write or `phitex config watch-write on` writes the PDF and its .synctex.gz after each build",
+            job.jobname
+        )));
+    }
     // (a watch's readers guess past a long piece rather than wait on its
     // learned fields: an edit reruns it with the same values, and readers
     // that waited would wait for nothing; `--wait-long` is the one-shot
@@ -667,22 +860,30 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             if let Some(l) = &lsp {
                 l.refuse(&e);
             }
-            std::process::exit(crate::EXIT_FAILED);
+            crate::attach::forget();
+            std::process::exit(crate::EXIT_INTERNAL);
         });
     spin.done();
     // (no log laid out after a build; the PDF file appended an update
     // section after each edit, the exact file written when idle, but
     // with `--exact`)
     s.watching = true;
-    if !o.exact_file {
+    if writing && !o.exact_file {
         s.set_updates(Some(Arc::default()));
+    }
+    // (writing no file, the viewer's PDF kept as update sections in
+    // memory, `ViewFile`: an edit's pages linked live, not folded again
+    // from the first one changed to the end; the exact file made when idle)
+    if !writing && (o.view || on_stdio) {
+        s.view_layout = true;
     }
     // (since when the PDF file is not the exact one: written when the
     // editor has been idle for `o.idle`)
     let idle_since: std::cell::Cell<Option<Instant>> = std::cell::Cell::new(None);
-    // (the last build's origins still to be made: after it is announced,
-    // once no event waits; never on the typing path)
-    let origins_due = std::cell::Cell::new(false);
+    // (the last build's diagnostics at their places still to be made, and
+    // its evaluation's key: low priority, after the build is announced,
+    // once no event waits; an edit before then drops them)
+    let diags_due: std::cell::Cell<Option<Option<(u64, u64)>>> = std::cell::Cell::new(None);
     let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let main_file = root.join(&s.job.path);
     let main_rel = s
@@ -708,7 +909,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     let view: Option<View> = if std::mem::replace(&mut kept.view_made, true) {
         kept.view.take()
     } else if o.view {
-        match View::start(editor, o.port) {
+        match View::start(editor, o.port, &main_file) {
             Ok(v) => {
                 // (the viewer's Clear cache: its size, emptied as
                 // `phitex clean --all` empties it)
@@ -726,6 +927,40 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                         "dir": crate::cache::home_relative(&c.dir),
                         "freed": freed,
                     }))
+                }));
+                // (the viewer's preferences, the tips seen: the user's
+                // phitex.toml, so they hold on every port and browser)
+                v.on_prefs(Box::new(crate::config::prefs));
+                // (what the viewer shows that the binary holds: the news)
+                let here = root.clone();
+                // (what the Settings dialog shows of this project, set in its
+                // phitex.toml or on the command line: never written by a page)
+                let project = json!({
+                    "main": t.file,
+                    "engine": t.engine.name,
+                    "files": if t.files == crate::tex::Files::Shelf { "shelf" } else { "texlive" },
+                    "jobs": o.threads,
+                });
+                v.on_info(Box::new(move |what, req| match what {
+                    "settings" => Some(project.clone()),
+                    "news" => {
+                        crate::news::latest().map(|(v, text)| json!({"version": v, "text": text}))
+                    }
+                    // (a project file's text, for Copy for an AI assistant: a
+                    // project file only, by its name from here, at most 2 MB)
+                    "source" => {
+                        let file = req["file"].as_str()?;
+                        if file.starts_with('/') || file.split('/').any(|c| c == "..") {
+                            return None;
+                        }
+                        let p = here.join(file);
+                        if std::fs::metadata(&p).ok()?.len() > 2 << 20 {
+                            return None;
+                        }
+                        let text = std::fs::read(p).ok()?;
+                        Some(json!({"text": String::from_utf8_lossy(&text)}))
+                    }
+                    _ => None,
                 }));
                 // (the diff's picker: the project's git history)
                 let here = root.clone();
@@ -750,7 +985,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     "{}  {}  {}",
                     st.dim("viewer"),
                     st.cyan(v.url()),
-                    st.dim(if lsp.is_some() {
+                    st.dim(if on_stdio {
                         "(phitex.openViewer opens it)"
                     } else {
                         "(o opens it)"
@@ -766,8 +1001,24 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     v.on_select_source(Box::new(move |f, a, b| l.select(f, a, b)));
                 }
                 ui.event(&json!({"event": "viewer", "url": v.url()}));
-                if o.open && t.viewer.is_none() && !view::open_browser(v.url()) {
-                    ui.warning("could not start a browser");
+                if o.open && t.viewer.is_none() {
+                    // (the same document's tab left open from the last watch
+                    // joins again by itself, at the same address: a second
+                    // tab only when none came)
+                    let (url, ui2) = (v.url().to_owned(), ui.clone());
+                    let shared = v.clients_handle();
+                    std::thread::spawn(move || {
+                        let end = Instant::now() + Duration::from_millis(3500);
+                        while Instant::now() < end {
+                            if shared() > 0 {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                        if !view::open_browser(&url) {
+                            ui2.warning("could not start a browser");
+                        }
+                    });
                 }
                 Some(v)
             }
@@ -798,7 +1049,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // editor's `$/progress` and `phitex/status`)
     {
         let shown = view.as_ref().map(View::viewer);
-        let server = lsp.as_ref().map(|l| l.server().clone());
+        let server = lsp.clone();
         if shown.is_some() || server.is_some() {
             status.meter().listen(Box::new(move |p| {
                 if let Some(v) = &shown {
@@ -810,11 +1061,20 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             }));
         }
     }
+    // (the pages a cold build streams, where a viewer shows them: each
+    // drawn from its own file until the build is in)
+    if let Some(v) = view.as_ref().map(View::viewer) {
+        status.meter().on_streamed(Box::new(move |p, pages| {
+            if let Ok(k) = usize::try_from(p.page.saturating_sub(1)) {
+                v.stream_page(k, p.hash, p.pdf.clone(), pages, p.exact);
+            }
+        }));
+    }
     // (a package that could not be had, `--shelf`: said here and to the
     // editor)
     {
         let ui = Mutex::new(ui.clone());
-        let server = lsp.as_ref().map(|l| l.server().clone());
+        let server = lsp.clone();
         status.meter().on_unreachable(Box::new(move |why| {
             ui.lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -841,13 +1101,28 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     };
     let owned = |f: &str| lsp.as_ref().is_some_and(|l| l.owns(f));
     let ours: Ours = Arc::default();
-    // (kept for the watch's life: dropping it stops the events)
-    let _files = watcher(&root, ours.clone(), tx.clone()).unwrap_or_else(|e| {
-        ui.error(&format!("can't watch {}: {e}", root.display()));
-        std::process::exit(crate::EXIT_FAILED);
+    // (kept for the session's life: dropping it stops the events)
+    let config = Wanted::config_of(&t.config_files);
+    let wanted: WantedRef = Arc::new(Mutex::new(Wanted {
+        config: config.clone(),
+        ..Wanted::default()
+    }));
+    let watching = RefCell::new(Watching {
+        w: watcher(&root, wanted.clone(), ours.clone(), tx.clone()).unwrap_or_else(|e| {
+            ui.error(&format!("can't watch {}: {e}", root.display()));
+            crate::attach::forget();
+            std::process::exit(crate::EXIT_INTERNAL);
+        }),
+        root: canonical(&root),
+        outside: HashSet::new(),
     });
-    let raw = lsp.is_none() && !ui.json && keys::raw();
+    // (the settings' files outside the folder, watched from the start)
+    watching
+        .borrow_mut()
+        .add(&wanted.lock().unwrap_or_else(PoisonError::into_inner));
+    let raw = !on_stdio && !ui.json && keys::raw();
     let building = kept.building.clone();
+    let at_wait = kept.waiting.clone();
     let told = kept.told.clone();
     // (standard input read by the first session's thread, for them all)
     if !std::mem::replace(&mut kept.reading, true) {
@@ -859,10 +1134,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 .filter(|_| t.viewer.is_none())
                 .map(|v| v.url().to_owned()),
             building: building.clone(),
+            waiting: at_wait.clone(),
             told: told.clone(),
             target: t.clone(),
+            asking: kept.asking.clone(),
         };
-        match &lsp {
+        match lsp.as_ref().filter(|_| on_stdio) {
             // (the editor's `exit`, or its end: as `q`)
             Some(l) => l.serve(Box::new(move || {
                 if !here.answer(Key::Quit) {
@@ -887,7 +1164,62 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         ui.keys(keys::BAR);
     }
     let last = RefCell::new(Last::default());
-    let quit = |ui: &Ui, s: &mut Session| -> ! {
+    // (the last build when nothing is written: what the way out writes on a yes)
+    let unwritten: RefCell<Option<session::Report>> = RefCell::new(None);
+    let asking = kept.asking.clone();
+    let quit = |ui: &Ui, s: &mut Session, rx: Option<&mut mpsc::Receiver<(Instant, Event)>>| -> ! {
+        // (nothing written while watching: asked whether to write the PDF
+        // now, where a person is at the terminal; an editor's or a pipe's
+        // way out writes nothing)
+        if let (Some(rx), Some(r)) = (rx.filter(|_| raw), unwritten.borrow_mut().take()) {
+            ui.finish();
+            // (`--no-confirm`: yes, unasked)
+            let yes = o.no_confirm || {
+                asking.store(true, Ordering::Relaxed);
+                // (the cursor after the question, where the key is typed; the
+                // key said after it and the line ended, so what follows, the
+                // files written or the shell's prompt, starts a line)
+                ui.ask(&format!(
+                    "write {}.pdf and its .synctex.gz here? [y/N]",
+                    s.job.jobname
+                ));
+                let yes = loop {
+                    match rx.recv() {
+                        Ok((_, Event::Key(Key::Other('y' | 'Y')))) => break Some(true),
+                        Ok((_, Event::Key(_))) => break Some(false),
+                        Err(_) => break None,
+                        Ok(_) => {}
+                    }
+                };
+                ui.answered(yes.map(|y| if y { "y" } else { "n" }));
+                yes == Some(true)
+            };
+            if yes {
+                // (a layout no file holds, the viewer's: its exact file)
+                let mut r = r;
+                if r.out.pdf.is_empty()
+                    && let Some(l) = r.out.layout.take()
+                {
+                    match l.exact() {
+                        Ok(b) => r.out.pdf = b,
+                        Err(e) => ui.error(&format!("{e}")),
+                    }
+                }
+                match s.write(&r, true) {
+                    Ok(w) => {
+                        for (p, _) in &w.files {
+                            ui.line(&st.dim(&format!("wrote {}", p.display())));
+                        }
+                    }
+                    Err(e) => ui.error(&e),
+                }
+                match s.write_synctex() {
+                    Ok(Some((p, _))) => ui.line(&st.dim(&format!("wrote {}", p.display()))),
+                    Ok(None) => {}
+                    Err(e) => ui.error(&e),
+                }
+            }
+        }
         // (the records the builds changed, stored before the watch ends;
         // the exact PDF file and, with `--log`, the log)
         s.flush_records();
@@ -901,13 +1233,18 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         {
             ui.error(&e);
         }
+        // (a SyncTeX file the watch left for idle, written before it ends)
+        if let Err(e) = s.write_synctex() {
+            ui.error(&e);
+        }
         ui.finish();
         keys::restore();
         if let Some(l) = farewell(st, &last.borrow()) {
             ui.line(&l);
         }
         modern::cache_summary(t, ui);
-        std::process::exit(0);
+        crate::attach::forget();
+        std::process::exit(crate::lsp::exit_status());
     };
     // (the status line: the last build and the browsers watching)
     let show = |ui: &Ui, l: &Last| {
@@ -935,6 +1272,11 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     let mut account = o.report.map(|full| crate::report::Report::new(t, o, full));
     // (the last output written without errors, and its PDF for the viewer)
     let mut last_pdf = None;
+    // (the viewer's PDF as update sections, its exact file made when idle)
+    let view_file = RefCell::new(phitex_live::watch::ViewFile::default());
+    // (the viewer's diagnostics and the evaluation they were made of,
+    // `Report::settled`)
+    let last_diags: RefCell<Option<((u64, u64), Vec<serde_json::Value>)>> = RefCell::new(None);
     let mut last_hashes: Vec<u64> = Vec::new();
     // (`viewer = "zathura"`: --open starts it on the output, once)
     let open_cmd = t.viewer.clone().filter(|_| o.open);
@@ -970,7 +1312,15 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if let Some(v) = &view {
             v.building(true);
         }
-        let spin = ui.spin(format!("{what}: build {builds} ({why})"), status.clone());
+        let spin = ui.spin(
+            format!("{what}: build {builds} ({})", crate::ui::said_why(why)),
+            status.clone(),
+        );
+        // (`--json`: the build has its text and evaluates from here; an
+        // edit of the main file from now on is offered to it. Its count is
+        // `builds`: a reader waiting for a build's result by `build` is not
+        // answered by its start)
+        ui.event(&json!({"event": "started", "builds": builds, "why": why}));
         // (a build that fails inside the engine — a panic: the pieces did
         // not settle — is reported, and the watch goes on waiting)
         // (the build on this thread, the same one every build: what the
@@ -999,7 +1349,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             Err(m) => {
                 spin.done();
                 building.store(false, Ordering::Relaxed);
-                ui.failed(&format!("build {builds} ({why})"), &m);
+                ui.failed(
+                    &format!("build {builds} ({})", crate::ui::said_why(why)),
+                    &m,
+                );
                 let first = m.lines().next().unwrap_or("the engine panicked");
                 ui.event(
                     &json!({"event": "failed", "build": builds, "why": why, "message": first}),
@@ -1012,9 +1365,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     since_ms: None,
                     origins: None,
                     changed: None,
-                    diagnostics: vec![
+                    diagnostics: Some(vec![
                         json!({"severity": "error", "code": "engine", "message": first}),
-                    ],
+                    ]),
                     parts: serde_json::Map::new(),
                 };
                 if let Some(v) = &view {
@@ -1032,6 +1385,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         };
         phitex_tex::timeline::lap("watch: the build's thread joined");
         let failed = !r.out.errors.is_empty();
+        // (an edit's diagnostics at their places left for when the editing
+        // pauses, unless they are the last build's, of the same evaluation)
+        let same_eval =
+            matches!((&*last_diags.borrow(), r.settled), (Some((k, _)), Some(now)) if *k == now);
+        let pending = r.diagnostics_pending && !same_eval;
+        diags_due.set(pending.then_some(r.settled));
         // (`PHITEX_TEX_TIME`: the watch's own time after the build)
         let tw = std::time::Instant::now();
         status.set("writing files");
@@ -1042,15 +1401,26 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // or not: the pages shipped; none when nothing was shipped)
         // (an engine failure, `Report::internal`: nothing written, the
         // last good build's files kept)
-        let written = match if r.internal.is_some() {
+        let written = match if r.internal.is_some() || !writing {
             Err(String::new())
         } else {
             s.write(&r, true)
         } {
             Ok(w) => {
                 let ours = &mut *mine;
+                let top = root.canonicalize().unwrap_or_else(|_| root.clone());
                 for (p, h) in &w.files {
                     let p = p.canonicalize().unwrap_or_else(|_| root.join(p));
+                    // (the folders it went into below the root, made by
+                    // this write or not: a folder's own event, minted's
+                    // `_minted/` made, is the watch's, no source changed;
+                    // what changes in it comes as its files' events)
+                    for d in p.ancestors().skip(1) {
+                        if d == top || !d.starts_with(&top) {
+                            break;
+                        }
+                        ours.insert(d.to_path_buf(), tex::ANY_BYTES);
+                    }
                     ours.insert(p, *h);
                 }
                 w.main
@@ -1078,17 +1448,24 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if let Some(out) = &written {
             last.borrow_mut().good = Some(out.clone());
         }
+        // (the build's problems and PDF kept for the editors whether or not
+        // one is connected: one that attaches later is given them at once)
         if view.is_some() || lsp.is_some() {
+            // (a layout: the viewer's file brought to it, its last bytes
+            // and the objects that changed, nothing read from disk; the
+            // same: that PDF kept)
+            phitex_tex::timeline::lap("watch: before the viewer's PDF");
             if view.is_some() {
-                last_pdf = match phitex_live::watch::viewer_pdf(s, &r, || {
+                let mut vf = view_file.borrow_mut();
+                match phitex_live::watch::viewer_pdf(s, &r, Some(&mut vf), || {
                     written.as_ref().and_then(|p| std::fs::read(p).ok())
                 }) {
-                    Ok(p) => p,
+                    Ok(p) => last_pdf = p,
                     Err(e) => {
-                        ui.warning(&format!("the viewer's PDF of the DVI file: {e}"));
-                        None
+                        ui.warning(&format!("the viewer's PDF: {e}"));
+                        last_pdf = None;
                     }
-                };
+                }
             }
             let log = s
                 .job
@@ -1096,6 +1473,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 .join(format!("{}.log", s.job.jobname))
                 .display()
                 .to_string();
+            phitex_tex::timeline::lap("watch: the viewer's PDF");
             status.set("viewer");
             last_hashes.clone_from(&r.out.page_hashes);
             let b = Built {
@@ -1106,27 +1484,53 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 since_ms: since.map(|t| t.elapsed().as_secs_f64() * 1e3),
                 origins: None,
                 changed: None,
-                diagnostics: diagnostics(s, &r, &log),
+                diagnostics: if same_eval {
+                    // (the evaluation the last build's were made of: those)
+                    last_diags.borrow().as_ref().map(|x| x.1.clone())
+                } else if pending {
+                    // (made when the editing pauses: the last ones shown
+                    // meanwhile, its errors with them at once)
+                    (!r.out.errors.is_empty()).then(|| {
+                        phitex_live::watch::with_last_warnings(
+                            diagnostics(s, &r, &log),
+                            last_diags.borrow().as_ref().map_or(&[][..], |x| &x.1),
+                        )
+                    })
+                } else {
+                    let d = diagnostics(s, &r, &log);
+                    *last_diags.borrow_mut() = r.settled.map(|k| (k, d.clone()));
+                    Some(d)
+                },
                 parts: Built::parts_of(s, &r),
             };
-            origins_due.set(true);
+            phitex_tex::timeline::lap("watch: the viewer's build (its diagnostics, parts)");
             if let Some(v) = &view {
                 v.built(&b);
                 v.building(false);
             }
+            phitex_tex::timeline::lap("watch: the viewers told");
             if let Some(l) = &lsp {
-                l.built(&b);
                 // (what phitex.savePdf copies: the PDF file, else a DVI's
-                // PDF made for the viewer)
+                // PDF made for the viewer; set before the build is told
+                // ready, which an editor may answer with phitex.savePdf at
+                // once, on the LSP's own thread: told first, it was asked
+                // before the PDF was set, "no PDF yet", cli's
+                // watch_lsp_commands on gate 41348842123)
                 let pdf = match &written {
                     Some(p) if p.extension().is_some_and(|e| e == "pdf") => {
                         Some(crate::lsp::Pdf::File(p.clone()))
                     }
-                    _ => last_pdf.clone().map(crate::lsp::Pdf::Bytes),
+                    // (no file written: the exact file of the layout, made
+                    // when asked, not the viewer's update sections)
+                    _ => match &r.out.layout {
+                        Some(l) => Some(crate::lsp::Pdf::Layout(l.clone())),
+                        None => last_pdf.clone().map(crate::lsp::Pdf::Bytes),
+                    },
                 };
                 if pdf.is_some() {
                     l.set_pdf(pdf);
                 }
+                l.built(&b);
             }
             status.set("");
             phitex_tex::timeline::lap("watch: the viewer's PDF and its diagnostics");
@@ -1146,7 +1550,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 })
                 .collect::<Vec<_>>()
                 .join(", "),
-            None => why.to_owned(),
+            None => crate::ui::said_why(why),
         };
         let nodes = r.runs.last().map_or(0, |x| x.commands_run);
         let changed = &r.out.pages_changed;
@@ -1154,15 +1558,28 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         // keeps the last change's time to the screen)
         let noop = !failed && builds > 1 && nodes == 0 && changed.is_empty();
         let tpl = std::time::Instant::now();
-        let placed = (
-            crate::problems::shown_count(&r.diagnostics, false),
-            crate::problems::shown_count(&r.diagnostics, true),
-        );
+        // (pending: no errors, and the last warnings counted until they
+        // are made again, said to be updating)
+        let placed = if pending {
+            (
+                crate::problems::shown_count(&r.diagnostics, false),
+                last.borrow().placed.1,
+            )
+        } else if same_eval && r.diagnostics_pending {
+            last.borrow().placed
+        } else {
+            (
+                crate::problems::shown_count(&r.diagnostics, false),
+                crate::problems::shown_count(&r.diagnostics, true),
+            )
+        };
         phitex_tex::timeline::lap("watch: problems placed");
         if phitex_tex::tex_time() {
             eprintln!("watch phases: problems placed {:?}", tpl.elapsed());
         }
-        let warnings: usize = if r.diagnostics.is_empty() {
+        let warnings: usize = if pending || (same_eval && r.diagnostics_pending) {
+            placed.1
+        } else if r.diagnostics.is_empty() {
             crate::warnings::summarize(&r.log_text())
                 .iter()
                 .map(|w| w.1)
@@ -1200,16 +1617,22 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     view::ranges(changed)
                 )
             });
-            facts.push(if builds > 1 && live > 0 {
-                format!("{nodes}/{live} nodes")
-            } else {
-                format!("{nodes} nodes")
-            });
+            // (the engine's pieces run: its counters, -vv)
+            if ui.verbose > 1 {
+                facts.push(if builds > 1 && live > 0 {
+                    format!("{nodes}/{live} nodes")
+                } else {
+                    format!("{nodes} nodes")
+                });
+            }
         }
         let mut tail = Vec::new();
         let cold = last.borrow().cold;
         match cold {
-            None if !failed => last.borrow_mut().cold = Some(r.wall),
+            None if !failed => {
+                last.borrow_mut().cold = Some(r.wall);
+                crate::star::built(&main_file, ui, on_stdio);
+            }
             Some(c) if !failed && !noop => {
                 last.borrow_mut().edits.push(r.wall);
                 if let Some(x) = faster(c, r.wall) {
@@ -1226,7 +1649,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         {
             tail.push(st.cyan(&format!("{p:.1}× parallel")));
         }
-        if warnings > 0 {
+        if warnings > 0 && !pending {
             tail.push(st.yellow(&format!(
                 "{warnings} warning{} (w)",
                 if warnings == 1 { "" } else { "s" }
@@ -1250,7 +1673,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             out.push_str(&tail.join("  "));
         }
         ui.line(out.trim_end());
-        // (for `s`: the build's phases, its reuse, its parallelism)
+        // (for `s`: the build's phases, its reuse, its parallelism; the
+        // phases kept for the viewer's stats too)
+        let phases = status.take();
         {
             let mut rows = Vec::new();
             if builds > 1 && live > 0 {
@@ -1262,8 +1687,8 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             } else {
                 rows.push(("nodes".to_owned(), format!("{nodes} run")));
             }
-            for (name, d) in status.take() {
-                rows.push((name, ms(d)));
+            for (name, d) in &phases {
+                rows.push((name.clone(), ms(*d)));
             }
             if let Some(x) = r.runs.last() {
                 // (how parallel the build was, in three facts: the cores
@@ -1283,13 +1708,13 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 if x.runs > 0 {
                     #[allow(clippy::cast_precision_loss, reason = "a ratio for display")]
                     let k = x.runs as f64 / x.commands_run.max(1) as f64;
-                    p.push_str(&format!(" · {} runs for {} nodes", x.runs, x.commands_run));
+                    p.push_str(&format!(" · {} runs, {} nodes", x.runs, x.commands_run));
                     if k >= 1.05 {
                         p.push_str(&format!(" ({k:.1}×)"));
                     }
                 }
                 if !x.wasted.is_zero() && !x.busy.is_zero() {
-                    p.push_str(&format!(" · {} of {} run again", ms(x.wasted), ms(x.busy)));
+                    p.push_str(&format!(" · {} of {} redone", ms(x.wasted), ms(x.busy)));
                 }
                 rows.push(("parallel".to_owned(), p));
                 if x.rss_kb > 0 {
@@ -1305,7 +1730,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     rows.push((
                         "memory".to_owned(),
                         format!(
-                            "{} resident · {} of values · {} collection{}",
+                            "{} resident · {} values · {} collection{}",
                             gb(x.rss_kb << 10),
                             gb(x.values_bytes),
                             x.collections,
@@ -1337,7 +1762,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     rows.push((
                         "hints".to_owned(),
                         format!(
-                            "{bounded} bounded · {any} any · {} · {} → {stops} stops · {waits} pending waits",
+                            "{bounded} bounded · {any} any · {} · {} · {stops} stops · {waits} waits",
                             red(viol, "violations"),
                             red(undecl, "undeclared")
                         ),
@@ -1361,6 +1786,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             );
             last.borrow_mut().summary = tree(st, head, &rows);
         }
+        // (what `s` shows, as one object, for every build, a build that
+        // changed no page too: the viewer's "Copy debug info")
+        let build_info = build_stats(t, s, &r, builds, why, &phases);
+        if let Some(v) = &view {
+            v.stats(&build_info);
+        }
         // (the panels `s` and `w` pinned: shown after every build, so the
         // keys need not be pressed again)
         {
@@ -1370,7 +1801,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     ui.line(line);
                 }
             }
-            if l.pin_warnings {
+            if l.pin_warnings && !pending {
                 show_warnings(ui, st, s, &l);
             }
         }
@@ -1386,6 +1817,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             "pages": r.pages(),
             "pages_changed": changed,
             "nodes_run": nodes,
+            // (runs in all, a node run again counted again: past
+            // nodes_run, the work an edit did again)
+            "runs": r.runs.last().map(|x| x.runs),
+            "rounds": r.runs.last().map(|x| x.rounds),
             "absorbed": r.runs.last().map(|x| x.absorbed),
             "parallel": r.runs.last().map(|x| json!({
                 "threads": x.threads,
@@ -1413,8 +1848,10 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 },
             })),
             "wall_ms": r.wall.as_secs_f64() * 1e3,
+            "stats": build_info,
             "errors": r.out.errors,
-            "diagnostics": r.engine_diagnostics(),
+            // (none yet: the `diagnostics` event says them when made)
+            "diagnostics": (!pending).then(|| r.engine_diagnostics()),
         }));
         phitex_tex::timeline::lap("watch: the build event written");
         let trep = std::time::Instant::now();
@@ -1457,7 +1894,9 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             brief.push(format!("{n} page{}", if n == 1 { "" } else { "s" }));
         }
         brief.push(ms(r.wall));
-        if warnings > 0 {
+        if pending {
+            brief.push(WARNINGS_UPDATING.to_owned());
+        } else if warnings > 0 {
             brief.push(format!(
                 "{warnings} warning{}",
                 if warnings == 1 { "" } else { "s" }
@@ -1484,9 +1923,24 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         if phitex_tex::tex_time() {
             eprintln!("watch phases: after the event {:?}", tevent.elapsed());
         }
-        last.borrow_mut().diags = std::mem::take(&mut r.diagnostics);
-        drop(r);
+        // (pending, or the same evaluation's: the last ones kept until
+        // made; a pending build's errors for `p`)
+        let kept = same_eval && r.diagnostics_pending;
+        if if pending { failed } else { !kept } {
+            last.borrow_mut().diags = std::mem::take(&mut r.diagnostics);
+        }
+        // (nothing written: the last build kept, for the way out's question)
+        if writing {
+            drop(r);
+        } else {
+            *unwritten.borrow_mut() = Some(r);
+        }
         phitex_tex::timeline::lap("watch: the report dropped");
+        // (the files a change of rebuilds: what this build read, their
+        // folders outside the watch's watched too)
+        let w = Wanted::of(s.watched(), &root, config.clone());
+        watching.borrow_mut().add(&w);
+        *wanted.lock().unwrap_or_else(PoisonError::into_inner) = w;
         phitex_tex::timeline::end(&format!("build {builds}"));
     };
     // (what came while a build ran and it could not take: done after it)
@@ -1518,20 +1972,131 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
     // (the diff against a past version, and what the viewer asked of it)
     let mut comparing: Option<crate::compare::Compare> = None;
     let mut diff_asks: Vec<Ask> = Vec::new();
+    // (the diagnostics the last build left for later, made now: given to
+    // the viewers and the editor, counted, said as an event)
+    let late_diagnostics = |s: &Session| {
+        let Some(key) = diags_due.take() else {
+            return;
+        };
+        let ds = s.diagnostics_now();
+        let placed = (
+            crate::problems::shown_count(&ds, false),
+            crate::problems::shown_count(&ds, true),
+        );
+        let engine = ds
+            .iter()
+            .filter(|d| d.severity == phitex_tex::Severity::Diagnostic)
+            .count();
+        if view.is_some() || lsp.is_some() {
+            let d = phitex_live::watch::late_diagnostics(s, &ds);
+            if let Some(v) = &view {
+                v.set_diagnostics(&d);
+            }
+            if let Some(l) = &lsp {
+                l.diagnostics(&d);
+            }
+            *last_diags.borrow_mut() = key.map(|k| (k, d));
+        }
+        let builds = {
+            let mut l = last.borrow_mut();
+            l.placed = placed;
+            l.diags = ds;
+            if let Some((b, _)) = l.build.as_mut() {
+                let n = placed.1;
+                let now = if n == 0 {
+                    String::new()
+                } else {
+                    format!("{n} warning{}", if n == 1 { "" } else { "s" })
+                };
+                *b = b.replace(
+                    &format!(" · {WARNINGS_UPDATING}"),
+                    &if now.is_empty() {
+                        now
+                    } else {
+                        format!(" · {now}")
+                    },
+                );
+            }
+            show(ui, &l);
+            if l.pin_warnings {
+                show_warnings(ui, st, s, &l);
+            }
+            l.builds
+        };
+        ui.event(&json!({
+            "event": "diagnostics",
+            "build": builds,
+            "diagnostics": engine,
+            "warnings": placed.1,
+            "errors": placed.0,
+        }));
+    };
     // (no event for a while: the session is idle, the exact PDF file and,
     // with `--log`, the log written then; the records are stored as each
     // build settles)
     loop {
-        // (nothing waits: the last build's origins, made now)
-        if origins_due.get() && held.is_empty() {
+        // (nothing waits: the SyncTeX file, the pages' origins made for
+        // it (each page's kept answer reused): never on the typing
+        // path, dropped for the next build's when an edit comes first)
+        if s.synctex_due() && held.is_empty() {
             match rx.try_recv() {
                 Ok(e) => held.push_back(e),
                 Err(mpsc::TryRecvError::Empty) => {
-                    origins_due.set(false);
-                    if let Some(v) = &view {
-                        v.set_origins(s.origins(), None);
+                    // (made page by page, given up between two pages once
+                    // an event comes, a key too: a keystroke or a quit never
+                    // waits for it; still due then, the pages made kept for
+                    // the next try. The files' lock taken only to write it:
+                    // the watcher's events reach the loop meanwhile)
+                    let came: RefCell<Option<(Instant, Event)>> = RefCell::new(None);
+                    let stop = |_between: bool| {
+                        if came.borrow().is_some() {
+                            return true;
+                        }
+                        match rx.try_recv() {
+                            Ok(e) => {
+                                *came.borrow_mut() = Some(e);
+                                true
+                            }
+                            Err(mpsc::TryRecvError::Empty) => false,
+                            Err(mpsc::TryRecvError::Disconnected) => true,
+                        }
+                    };
+                    at_wait.store(true, Ordering::Relaxed);
+                    let t0 = Instant::now();
+                    let made = s.synctex_made_until(&stop);
+                    at_wait.store(false, Ordering::Relaxed);
+                    if let Some(e) = came.into_inner() {
+                        // (`PHITEX_TEX_TIME`: how long the event waited on it)
+                        if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+                            eprintln!(
+                                "synctex: given up for an event after {:?}, the event waited {:?}",
+                                t0.elapsed(),
+                                e.0.elapsed()
+                            );
+                        }
+                        held.push_back(e);
+                    } else if std::env::var_os("PHITEX_TEX_TIME").is_some() {
+                        eprintln!("synctex: made in {:?}", t0.elapsed());
+                    }
+                    if let Some(Some(gz)) = made {
+                        let mut mine = ours.lock().unwrap_or_else(PoisonError::into_inner);
+                        match s.put_synctex(&gz) {
+                            Ok((p, h)) => {
+                                let p = p.canonicalize().unwrap_or_else(|_| root.join(&p));
+                                mine.insert(p, h);
+                            }
+                            Err(e) => ui.error(&e),
+                        }
                     }
                 }
+                Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        // (then, nothing waiting still, the diagnostics left for later)
+        if diags_due.get().is_some() && !s.synctex_due() && held.is_empty() {
+            match rx.try_recv() {
+                Ok(e) => held.push_back(e),
+                Err(mpsc::TryRecvError::Empty) => late_diagnostics(&s),
                 Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
@@ -1540,7 +2105,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
         });
         let first = match held.pop_front() {
             Some(e) => e,
-            None => match rx.recv_timeout(wait) {
+            None => match wait_for(&rx, wait, &at_wait) {
                 Ok(e) => e,
                 Err(mpsc::RecvTimeoutError::Timeout) if idle_since.take().is_some() => {
                     // (idle: the exact PDF file written on a thread of
@@ -1563,8 +2128,25 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 })
                                 .expect("a thread");
                         }
-                        // (exact already: said all the same)
-                        _ => held.push_back((Instant::now(), Event::Compacted(b, Ok(false)))),
+                        // (no file, or exact already: the viewer's file made
+                        // exact on a thread of its own where it is not,
+                        // then said all the same)
+                        _ => match view_file.borrow().to_compact() {
+                            Some(l) => {
+                                let tx = compacted.clone();
+                                std::thread::Builder::new()
+                                    .name("phitex-watch-exact".into())
+                                    .spawn(move || {
+                                        let r =
+                                            l.exact().map(|_| false).map_err(|e| format!("{e}"));
+                                        let _ = tx.send((Instant::now(), Event::Compacted(b, r)));
+                                    })
+                                    .expect("a thread");
+                            }
+                            None => {
+                                held.push_back((Instant::now(), Event::Compacted(b, Ok(false))));
+                            }
+                        },
                     }
                     continue;
                 }
@@ -1600,11 +2182,13 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             match e {
                 Event::Configure(c) => {
                     if let Some(n) = reconfigured(t, o, &c, lsp.as_deref()) {
-                        next = Some(n);
+                        next = Some((n, "the editor's settings changed"));
                     }
                 }
                 Event::Key(k) => match k {
-                    Key::Quit => quit(ui, &mut s),
+                    Key::Quit => quit(ui, &mut s, Some(&mut rx)),
+                    // (taken by the key reader itself: `keys::suspend`)
+                    Key::Suspend => {}
                     Key::Rebuild => {
                         // (every input read again from disk: a change made
                         // outside that no event told)
@@ -1646,6 +2230,12 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                             ui.line(&e);
                         }
                     }
+                    // (asked while they wait: made now)
+                    Key::Problems | Key::Warnings
+                        if diags_due.get().is_some() && {
+                            late_diagnostics(&s);
+                            false
+                        } => {}
                     Key::Problems if last.borrow().placed.0 > 0 => {
                         let l = last.borrow();
                         for p in crate::problems::rendered_of(
@@ -1714,6 +2304,38 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     show(ui, &l);
                 }
                 Event::Files(ps) => {
+                    // (asked again of what the last build read: an event
+                    // that came while the cold build ran passed when every
+                    // file did, so a save's temporary file (written, then
+                    // renamed to the main file) or a folder the build made
+                    // would build again a document no file of changed)
+                    let (settings, ps): (Vec<PathBuf>, Vec<PathBuf>) = {
+                        let w = wanted.lock().unwrap_or_else(PoisonError::into_inner);
+                        ps.into_iter()
+                            .filter(|p| w.wants(&root, p))
+                            .partition(|p| w.is_config(p))
+                    };
+                    // (a settings' file changed (a .latexmkrc, a file it
+                    // `do`es, phitex.toml): the target resolved again, a
+                    // new session on its search paths)
+                    if !settings.is_empty() && next.is_none() {
+                        match modern::resolve_again(o) {
+                            Ok((t2, dir)) => {
+                                for w in &t2.warnings {
+                                    ui.warning(w);
+                                }
+                                next = Some(((t2, o.clone(), dir), "the settings changed"));
+                            }
+                            Err(e) => ui.error(&format!(
+                                "the settings ({}): {e}",
+                                settings
+                                    .iter()
+                                    .map(|p| p.display().to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )),
+                        }
+                    }
                     for p in ps {
                         let rel = p
                             .strip_prefix(&root)
@@ -1750,7 +2372,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 // (the file on disk is exact: written now (true), or
                 // already (false: nothing to compact, or a build since,
                 // which leaves it not exact and says nothing))
-                Event::Compacted(b, Ok(wrote)) => {
+                Event::Compacted(b, Ok(_)) => {
                     let exact = s.updates().is_none_or(|u| {
                         u.lock().unwrap_or_else(PoisonError::into_inner).is_exact()
                     });
@@ -1762,15 +2384,18 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                             "build": b,
                             "output": out.as_ref().map(|p| p.display().to_string()),
                         }));
-                        if let Some(v) = &view {
-                            match &out {
-                                Some(p) if wrote => {
-                                    if let Ok(b) = std::fs::read(p) {
-                                        v.pdf_replaced(Some(session::shared(&b)));
-                                    }
-                                }
-                                _ => v.written_exact(),
-                            }
+                    }
+                    // (the viewer's file made exact too, from the layout's
+                    // exact file the compaction made: nothing read from
+                    // disk; a build since has its own)
+                    if exact
+                        && b == last.borrow().builds
+                        && let Some(v) = &view
+                    {
+                        match view_file.borrow_mut().compact() {
+                            Ok(Some(pdf)) => v.pdf_replaced(Some(pdf)),
+                            Ok(None) => v.written_exact(),
+                            Err(e) => ui.error(&e),
                         }
                     }
                 }
@@ -1798,12 +2423,34 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 show(ui, &l);
                             }
                             Applied::Rebuild => {
+                                // (as `r`: every input read again from
+                                // disk, a change no event told)
+                                s.reread_all();
                                 why.push("asked in the viewer".to_owned());
                                 again = true;
                             }
                             Applied::Cold => {
-                                why.push("asked: a cold build".to_owned());
-                                again = true;
+                                // (Clean rebuild, "start over": a new
+                                // session on the target resolved again,
+                                // so the host's lookups go too: kpathsea's
+                                // `//` subfolders and a `.latexmkrc`'s
+                                // folders, listed when the session began,
+                                // are listed again and a folder made since
+                                // is searched. If the target can't be had
+                                // again, this session builds cold)
+                                match modern::resolve_again(o) {
+                                    Ok((t2, dir)) => {
+                                        next = Some((
+                                            (t2, o.clone(), dir),
+                                            "a clean rebuild was asked",
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        ui.error(&e);
+                                        why.push("asked: a cold build".to_owned());
+                                        again = true;
+                                    }
+                                }
                             }
                             Applied::Diff(a) => diff_asks.push(a),
                             Applied::Edited(file) => {
@@ -1825,10 +2472,16 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             {
                 ui.error(&e);
             }
-            ui.line(&st.dim("phitex watch: the editor's settings changed: a new session"));
+            let ((t2, o2, dir), why) = n;
+            ui.line(&st.dim(&format!("phitex watch: {why}: a new session")));
+            if let Err(e) = std::env::set_current_dir(&dir) {
+                ui.error(&format!("can't enter {}: {e}", dir.display()));
+                crate::attach::forget();
+                std::process::exit(crate::EXIT_INTERNAL);
+            }
             kept.rx = Some(rx);
             kept.view = view;
-            return n;
+            return (t2, o2);
         }
         // (a change the last build took while it ran: built already)
         // (r, or Rebuild in the viewer: built again whatever)
@@ -1939,6 +2592,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                                 &s.job,
                                 s.files(),
                                 Arc::new(Status::default()),
+                                writing,
                             )
                         });
                         spin.done();
@@ -1995,12 +2649,90 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
             }
         }
     }
-    quit(ui, &mut s)
+    quit(ui, &mut s, None)
 }
 
+/// Build `builds`'s stats, as `s` shows them, for the viewer's "Copy debug
+/// info" and the `build` event: one object, the same fields every build
+/// (none of them left out when nothing ran or no page changed).
+fn build_stats(
+    t: &Target,
+    s: &session::Session,
+    r: &session::Report,
+    builds: usize,
+    why: &str,
+    phases: &[(String, Duration)],
+) -> serde_json::Value {
+    let x = r.runs.last();
+    let nodes = x.map_or(0, |x| x.commands_run);
+    let live = x.map_or(0, |x| x.live as u64);
+    let phase_ms: serde_json::Map<String, serde_json::Value> = phases
+        .iter()
+        .map(|(n, d)| (n.clone(), json!(d.as_secs_f64() * 1e3)))
+        .collect();
+    json!({
+        "build": builds,
+        "why": why,
+        "version": env!("CARGO_PKG_VERSION"),
+        "engine": s.job.engine.name,
+        "files": if t.files == crate::tex::Files::Shelf { "shelf" } else { "texlive" },
+        // (the Shelf release the files are from; none: TeX Live's)
+        "files_release": (t.files == crate::tex::Files::Shelf).then(crate::shelf::release),
+        "wall_ms": r.wall.as_secs_f64() * 1e3,
+        "phases_ms": phase_ms,
+        "hints": x.map(|x| json!({
+            "bounded": x.hints[0],
+            "any": x.hints[1],
+            "violations": x.hints[2],
+            "undeclared": x.hints[3],
+            "stops": x.hints[4],
+            "pending_waits": x.hints[5],
+        })),
+        "nodes": {"ran": nodes, "kept": live.saturating_sub(nodes), "live": live},
+        "runs": x.map_or(0, |x| x.runs),
+        "rounds": x.map_or(0, |x| x.rounds),
+        "pages": r.pages(),
+        "pages_changed": r.out.pages_changed,
+        "threads": x.map_or(0, |x| x.threads),
+        "cores_busy": x.and_then(session::RunInfo::speedup),
+        "busy_ms": x.map_or(0.0, |x| x.busy.as_secs_f64() * 1e3),
+        "engine_ms": x.map_or(0.0, |x| x.engine_wall.as_secs_f64() * 1e3),
+        "wasted_ms": x.map_or(0.0, |x| x.wasted.as_secs_f64() * 1e3),
+        "resident_kb": x.map_or(0, |x| x.rss_kb),
+        "values_bytes": x.map_or(0, |x| x.values_bytes),
+        "ok": r.out.errors.is_empty(),
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stats row too wide for the terminal (no terminal in a test: 100
+    /// columns) goes on under its value, broken at its ` · `s, every
+    /// line within the width; a short one stays one line.
+    #[test]
+    fn long_rows_wrap_under_their_value() {
+        let st = crate::ui::Style {
+            color: false,
+            tty: false,
+        };
+        let long = "1 thread · 1061 runs, 458 nodes (2.3×) · 1.07 s of 3.53 s redone · and some more words here · and more";
+        let rows = vec![
+            ("parallel".to_owned(), long.to_owned()),
+            ("output".to_owned(), "0.2 ms".to_owned()),
+        ];
+        let out = tree(st, "build 10".to_owned(), &rows);
+        assert!(out.iter().all(|l| crate::ui::width(l) <= 100), "{out:#?}");
+        assert!(out.len() > 3, "{out:#?}");
+        assert!(
+            out[2].starts_with("  │ ") && out[2].contains("·"),
+            "{out:#?}"
+        );
+        assert_eq!(
+            out.last().map(String::as_str),
+            Some("  └─ output         0.2 ms")
+        );
+    }
 
     #[test]
     fn lines_as_keys() {
@@ -2008,6 +2740,17 @@ mod tests {
         assert_eq!(line_key(" q "), Key::Quit);
         assert_eq!(line_key("quit"), Key::Quit);
         assert_eq!(line_key("xyz"), Key::Other('x'));
+    }
+
+    #[test]
+    fn keys_are_answered_where_read_while_the_loop_works() {
+        let (building, waiting) = (AtomicBool::new(false), AtomicBool::new(false));
+        // (no build, but the loop at other work: a diff's build, say)
+        assert!(busy(&building, &waiting));
+        waiting.store(true, Ordering::Relaxed);
+        assert!(!busy(&building, &waiting));
+        building.store(true, Ordering::Relaxed);
+        assert!(busy(&building, &waiting));
     }
 
     #[test]

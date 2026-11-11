@@ -37,7 +37,10 @@
 //!   range?}` (a selection is the cursor with its range) or the command
 //!   `phitex.showOnPage` is [`Ask::Cursor`], in bytes of the file's text
 //!   (the buffer held here, else the file's), the glyph origins' space:
-//!   the viewer shows it from the origins.
+//!   the viewer shows it from the origins. So is the place of a
+//!   `textDocument/documentHighlight` (answered `[]`), for clients that
+//!   cannot send `phitex/cursor`: until one is seen, or from the start
+//!   with `initializationOptions.phitexCursor`.
 //! - **End.** `shutdown` answered; `exit` ends ([`Server::handle`]'s
 //!   false).
 
@@ -56,7 +59,7 @@ use crate::view::{Ask, Built};
 /// The editor protocol's version (docs/spec-editor-protocol.md §1),
 /// answered in `initialize` as `capabilities.experimental.phitex.protocol`:
 /// raised when a message the editor sends or reads changes its meaning
-/// incompatibly, so an extension can tell an older or newer `phitex lsp`
+/// incompatibly, so an extension can tell an older or newer `phitex watch --lsp`
 /// from the one it was written for and say so.
 pub const PROTOCOL: u64 = 1;
 
@@ -95,6 +98,14 @@ pub trait LspHost: Send + Sync {
     /// URI's file under the root by a link (none: as it is).
     fn canonical(&self, _path: &Path) -> Option<PathBuf> {
         None
+    }
+
+    /// The problems' kinds the user hid (`problems-hidden`, set in the
+    /// viewer's filters: `problems::kind_of`'s names), read at each
+    /// publish so a filter toggled reaches the editor with the next build;
+    /// none hidden by default.
+    fn hidden(&self) -> Vec<String> {
+        Vec::new()
     }
 
     /// Whether the project's file `name` exists (a diagnostic's file
@@ -342,6 +353,16 @@ struct Facts {
     warnings: usize,
 }
 
+/// What published diagnostics said ([`Server::publish`]).
+#[derive(Default)]
+struct Published {
+    errors: usize,
+    warnings: usize,
+    engine_failed: bool,
+    engine: Option<String>,
+    format: Option<String>,
+}
+
 /// The build under way.
 struct Run {
     began: Instant,
@@ -362,11 +383,26 @@ struct State {
     /// The documents the editor has open, by name: their texts, kept as
     /// the editor changes them (its positions are in them).
     docs: HashMap<String, String>,
+    /// The client sends `phitex/cursor` (`initializationOptions.phitexCursor`,
+    /// or one seen): `textDocument/documentHighlight` no longer moves the
+    /// pages, or each cursor move would be two forward searches.
+    own_cursor: bool,
+    /// `shutdown` came: an `exit` after it is the session's proper end.
+    shut_down: bool,
+    /// The update notice `phitex/status` carries (the host's: native, the
+    /// update check's `news.json`), none: nothing to say.
+    update: Option<Value>,
+    /// The client attached to a watch another program started (its
+    /// terminal's): `experimental.phitex.attached` in the answer.
+    attached: bool,
     /// The URIs of the last diagnostics published, not empty.
     published: HashSet<String>,
     run: Option<Run>,
     builds: u64,
     last: Facts,
+    /// The last build left its diagnostics for later: the warnings
+    /// counted are the build before's ([`Server::diagnostics`]).
+    warnings_updating: bool,
     /// The last `phitex/status` state sent.
     state: &'static str,
     viewer: Option<String>,
@@ -469,17 +505,67 @@ impl Server {
             .as_bool()
             .unwrap_or(false);
         st.settings = Settings::of(&p["initializationOptions"]);
+        st.own_cursor = p["initializationOptions"]["phitexCursor"] == true;
         if let Some(r) = root {
             st.root = r;
         }
         st.init = Some(m["id"].clone());
     }
 
+    /// The client is attached to a running watch (natively, over its
+    /// socket): said in `initialize`'s answer
+    /// (`experimental.phitex.attached`).
+    pub fn set_attached(&self) {
+        lock(&self.st).attached = true;
+    }
+
+    /// The client's text of file `name` (the watch's name), if it has it
+    /// open.
+    pub fn text(&self, name: &str) -> Option<String> {
+        lock(&self.st).docs.get(name).cloned()
+    }
+
+    /// The update notice `phitex/status` carries from now on
+    /// (`{latest, advisory, lines}`; none: nothing to say), and a status
+    /// sent with it once the session has one.
+    pub fn set_update(&self, update: Option<Value>) {
+        let state = {
+            let mut st = lock(&self.st);
+            if st.update == update {
+                return;
+            }
+            st.update = update;
+            st.state
+        };
+        if !state.is_empty() {
+            self.status(state);
+        }
+    }
+
+    /// Whether the client sent `shutdown` (an `exit` without it ends the
+    /// process with status 1, the LSP's rule).
+    pub fn shut_down(&self) -> bool {
+        lock(&self.st).shut_down
+    }
+
+    /// The files the client has open (the watch's names).
+    pub fn files(&self) -> Vec<String> {
+        lock(&self.st).docs.keys().cloned().collect()
+    }
+
     /// `initialize` answered with the server's capabilities (once).
     pub fn answer_init(&self) {
-        let Some(id) = lock(&self.st).init.take() else {
+        let (id, attached) = {
+            let mut st = lock(&self.st);
+            (st.init.take(), st.attached)
+        };
+        let Some(id) = id else {
             return;
         };
+        let mut experimental = json!({"protocol": PROTOCOL});
+        if attached {
+            experimental["attached"] = json!(true);
+        }
         self.reply(
             &id,
             json!({
@@ -488,7 +574,8 @@ impl Server {
                     "textDocumentSync": {"openClose": true, "change": 2, "save": {"includeText": false}},
                     "executeCommandProvider": {"commands": COMMANDS},
                     "documentSymbolProvider": true,
-                    "experimental": {"phitex": {"protocol": PROTOCOL}},
+                    "documentHighlightProvider": true,
+                    "experimental": {"phitex": experimental},
                 },
                 "serverInfo": {"name": "phitex", "version": env!("CARGO_PKG_VERSION")},
             }),
@@ -631,12 +718,22 @@ impl Server {
         })
     }
 
-    /// `phitex/status` with `state` and the last build's facts.
+    /// `phitex/status` with `state` and the last build's facts; none
+    /// before the session has a state (`starting` is the first).
     fn status(&self, state: &'static str) {
-        let last = {
+        if state.is_empty() {
+            return;
+        }
+        let (last, root, main, updating, update) = {
             let mut st = lock(&self.st);
             st.state = state;
-            st.last
+            (
+                st.last,
+                st.root.base.clone(),
+                st.main.clone(),
+                st.warnings_updating,
+                st.update.clone(),
+            )
         };
         self.notify(
             "phitex/status",
@@ -646,7 +743,18 @@ impl Server {
                 "pages": last.pages,
                 "errors": last.errors,
                 "warnings": last.warnings,
+                // (the last build's warnings not made yet: the count is the
+                // build before's, made again when the editing pauses)
+                "warnings_updating": updating,
                 "engine": self.host.engine(),
+                // (the folder the watch runs in and its main file: an
+                // editor opening another file of that folder uses this
+                // watch, not a second one, whatever its own root guess)
+                "root": root,
+                "main": main,
+                // (a newer release or an advisory, with the user's update
+                // check on: docs/spec-distribution.md §7)
+                "update": update,
             }),
         );
     }
@@ -772,53 +880,25 @@ impl Server {
     /// do cleared, the main file's always; its progress ended and
     /// `phitex/status` told.
     pub fn built(&self, b: &Built) {
-        let main = lock(&self.st).main.clone();
-        let mut by: HashMap<String, Vec<Value>> = HashMap::new();
-        by.insert(self.uri(&main), Vec::new());
         let mut facts = Facts {
             ms: b.ms,
             pages: b.hashes.len(),
             ..Facts::default()
         };
-        let mut engine_failed = false;
-        let (mut engine, mut format) = (None, None);
-        for d in &b.diagnostics {
-            match d["severity"].as_str() {
-                Some("error") => facts.errors += 1,
-                Some("warning") => facts.warnings += 1,
-                _ => {}
-            }
-            let message = d["message"].as_str().unwrap_or("").to_owned();
-            if d["code"] == "engine" {
-                engine_failed = true;
-                engine.get_or_insert(message);
-            } else if d["code"] == "format" {
-                format.get_or_insert(message);
-            }
-            let file = d["file"].as_str().unwrap_or(&main);
-            by.entry(self.uri(file))
-                .or_default()
-                .push(lsp_diagnostic(d));
-        }
-        let gone: Vec<String> = {
+        // (diagnostics made later, when the editing pauses: the last ones
+        // stand meanwhile, their warnings said to be updating,
+        // `Server::diagnostics`)
+        let (engine_failed, engine, format) = if let Some(d) = &b.diagnostics {
+            let p = self.publish(d);
+            lock(&self.st).warnings_updating = false;
+            (facts.errors, facts.warnings) = (p.errors, p.warnings);
+            (p.engine_failed, p.engine, p.format)
+        } else {
             let mut st = lock(&self.st);
-            let g = st.published.drain().collect();
-            for (uri, ds) in &by {
-                if !ds.is_empty() {
-                    st.published.insert(uri.clone());
-                }
-            }
-            g
+            facts.warnings = st.last.warnings;
+            st.warnings_updating = true;
+            (false, None, None)
         };
-        for g in gone {
-            by.entry(g).or_default();
-        }
-        for (uri, ds) in by {
-            self.notify(
-                "textDocument/publishDiagnostics",
-                json!({"uri": uri, "diagnostics": ds}),
-            );
-        }
         let token = {
             let mut st = lock(&self.st);
             st.last = facts;
@@ -853,6 +933,76 @@ impl Server {
                 None => self.trouble_over(t),
             }
         }
+    }
+
+    /// The diagnostics a build left for later, made now (the editing
+    /// paused): published, and the status's counts with them.
+    pub fn diagnostics(&self, d: &[Value]) {
+        let p = self.publish(d);
+        let state = {
+            let mut st = lock(&self.st);
+            st.last.errors = p.errors;
+            st.last.warnings = p.warnings;
+            st.warnings_updating = false;
+            st.state
+        };
+        self.status(state);
+    }
+
+    /// Diagnostics `d` published by file (a file that had some and has
+    /// none now told so), and what they say.
+    fn publish(&self, d: &[Value]) -> Published {
+        let main = lock(&self.st).main.clone();
+        let mut by: HashMap<String, Vec<Value>> = HashMap::new();
+        by.insert(self.uri(&main), Vec::new());
+        let mut p = Published::default();
+        let hidden = self.host.hidden();
+        for d in d {
+            match d["severity"].as_str() {
+                Some("error") => p.errors += 1,
+                Some("warning") => p.warnings += 1,
+                _ => {}
+            }
+            let message = d["message"].as_str().unwrap_or("").to_owned();
+            if d["code"] == "engine" {
+                p.engine_failed = true;
+                p.engine.get_or_insert(message);
+            } else if d["code"] == "format" {
+                p.format.get_or_insert(message);
+            }
+            // (a kind the user hid in the viewer is not published: counted
+            // in the status, not shown as the editor's problem)
+            if d["kind"]
+                .as_str()
+                .is_some_and(|k| hidden.iter().any(|h| h == k))
+            {
+                continue;
+            }
+            let file = d["file"].as_str().unwrap_or(&main);
+            by.entry(self.uri(file))
+                .or_default()
+                .push(lsp_diagnostic(d));
+        }
+        let gone: Vec<String> = {
+            let mut st = lock(&self.st);
+            let g = st.published.drain().collect();
+            for (uri, ds) in &by {
+                if !ds.is_empty() {
+                    st.published.insert(uri.clone());
+                }
+            }
+            g
+        };
+        for g in gone {
+            by.entry(g).or_default();
+        }
+        for (uri, ds) in by {
+            self.notify(
+                "textDocument/publishDiagnostics",
+                json!({"uri": uri, "diagnostics": ds}),
+            );
+        }
+        p
     }
 
     /// The editor shows `file` (from the root) at `line` and character
@@ -1052,6 +1202,7 @@ impl Server {
             }
             "exit" => return false,
             "shutdown" => {
+                lock(&self.st).shut_down = true;
                 if let Some(id) = id {
                     self.reply(id, Value::Null);
                 }
@@ -1114,10 +1265,15 @@ impl Server {
                 }
             }
             "phitex/cursor" => {
+                lock(&self.st).own_cursor = true;
                 if let Some(a) = self.cursor(p) {
                     self.host.ask(a);
                 }
             }
+            // (the cursor of a client without `phitex/cursor`: Helix, Zed
+            // and VS Code ask it as the cursor moves or rests; nothing
+            // highlighted, the place shown on the pages)
+            "textDocument/documentHighlight" => self.highlight(id, p),
             "workspace/executeCommand" => {
                 if let Some(id) = id {
                     self.command(id, p);
@@ -1130,6 +1286,24 @@ impl Server {
             }
         }
         true
+    }
+
+    /// `textDocument/documentHighlight` (`params` `p`): answered with
+    /// nothing highlighted; its place is the cursor shown on the pages
+    /// (`phitex/cursor`'s) unless the client sends its own.
+    fn highlight(&self, id: Option<&Value>, p: &Value) {
+        if let Some(id) = id {
+            self.reply(id, json!([]));
+        }
+        let own = lock(&self.st).own_cursor;
+        if !own
+            && let Some(a) = self.cursor(&json!({
+                "textDocument": p["textDocument"],
+                "position": p["position"],
+            }))
+        {
+            self.host.ask(a);
+        }
     }
 
     /// `workspace/executeCommand` request `id` answered.
@@ -1370,7 +1544,11 @@ pub fn outline(text: &str) -> Vec<Value> {
 
 /// A viewer problem (`watch::diagnostics`) as an LSP diagnostic: its
 /// line, the culprit's columns where it has an excerpt (counted in UTF-16
-/// in the excerpt's line), its help under its message.
+/// in the excerpt's line), its message and, for TeX's, TeX's context
+/// lines under it (`detail`: the line up to the error and the rest).
+/// TeX's help is the viewer's only (`help`): its advice is the
+/// interactive terminal's ("type `I' ..."), and editors show `message`
+/// inline.
 fn lsp_diagnostic(d: &Value) -> Value {
     let n = |v: &Value| v.as_u64().and_then(|n| usize::try_from(n).ok());
     let line = n(&d["line"]).unwrap_or(1).saturating_sub(1);
@@ -1382,14 +1560,13 @@ fn lsp_diagnostic(d: &Value) -> Value {
         (a, b) = (u(start), u(start + len));
     }
     let mut message = d["message"].as_str().unwrap_or("").to_owned();
-    for h in d["help"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
+    if d["code"] == "tex"
+        && let Some(context) = d["detail"].as_str()
     {
-        message.push('\n');
-        message.push_str(h);
+        for l in context.lines().map(str::trim_end).filter(|l| !l.is_empty()) {
+            message.push('\n');
+            message.push_str(l);
+        }
     }
     if message.is_empty() {
         "a problem".clone_into(&mut message);
@@ -1559,6 +1736,83 @@ mod tests {
         );
     }
 
+    /// `textDocument/documentHighlight` (answered `[]`) is the cursor of
+    /// a client without `phitex/cursor`; a client that sends it (one
+    /// seen, or `initializationOptions.phitexCursor`) has its own forward
+    /// search, and a highlight's place moves nothing.
+    #[test]
+    fn highlights_are_the_cursor_until_the_client_sends_its_own() {
+        let t = "ab cd\nef\n";
+        let open = json!({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {"textDocument": {"uri": "file:///p/a.tex", "text": t}}});
+        let at = |line: u64, character: u64| json!({"textDocument": {"uri": "file:///p/a.tex"}, "position": {"line": line, "character": character}});
+        let highlight = |id: u64, line: u64, character: u64| json!({"jsonrpc": "2.0", "id": id, "method": "textDocument/documentHighlight", "params": at(line, character)});
+        let cursor = |line: u64, character: u64| json!({"jsonrpc": "2.0", "method": "phitex/cursor", "params": at(line, character)});
+        let follow = |at: usize, word: (usize, usize), line: (usize, usize)| Ask::Cursor {
+            file: "a.tex".into(),
+            at,
+            word: Some(word),
+            line,
+            select: None,
+        };
+        // (a plain client: each highlight followed)
+        let (s, host, sent) = server();
+        init(&s, "file:///p", false);
+        let caps = lock(&sent)[0]["result"]["capabilities"].clone();
+        assert_eq!(caps["documentHighlightProvider"], true, "{caps}");
+        s.handle(&open);
+        lock(&host.0).clear();
+        lock(&sent).clear();
+        s.handle(&highlight(7, 0, 4));
+        assert_eq!(
+            lock(&sent)[0],
+            json!({"jsonrpc": "2.0", "id": 7, "result": []})
+        );
+        assert_eq!(*lock(&host.0), [follow(4, (3, 5), (0, 5))]);
+        // (then its own cursor: followed, and highlights no longer)
+        lock(&host.0).clear();
+        s.handle(&cursor(1, 1));
+        s.handle(&highlight(8, 0, 1));
+        assert_eq!(*lock(&host.0), [follow(7, (6, 8), (6, 8))]);
+        assert_eq!(lock(&sent).last().unwrap()["result"], json!([]));
+        // (a client that says so at the start: no highlight followed)
+        let (s, host, _) = server();
+        s.handle(
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "rootUri": "file:///p", "capabilities": {},
+                "initializationOptions": {"phitexCursor": true},
+            }}),
+        );
+        s.handle(&open);
+        lock(&host.0).clear();
+        s.handle(&highlight(2, 0, 4));
+        assert!(lock(&host.0).is_empty(), "{:?}", *lock(&host.0));
+        s.handle(&cursor(0, 4));
+        assert_eq!(*lock(&host.0), [follow(4, (3, 5), (0, 5))]);
+    }
+
+    /// A TeX error's diagnostic: its message and TeX's context lines,
+    /// not TeX's help (the interactive terminal's advice).
+    #[test]
+    fn diagnostics_without_the_help() {
+        let d = lsp_diagnostic(&json!({
+            "severity": "error", "code": "tex", "message": "Undefined control sequence",
+            "help": ["The control sequence at the end of the top line", "of your error message was never \\def'ed."],
+            "line": 4, "excerpt": {"text": "Hello \\hobx world", "start": 6, "len": 5},
+            "detail": "l.4 Hello \\hobx\n                world  ",
+        }));
+        assert_eq!(
+            d["message"],
+            "Undefined control sequence\nl.4 Hello \\hobx\n                world"
+        );
+        assert_eq!(d["range"]["start"], json!({"line": 3, "character": 6}));
+        assert_eq!(d["range"]["end"], json!({"line": 3, "character": 11}));
+        // (an engine's stop: its dump is not context)
+        let d = lsp_diagnostic(
+            &json!({"severity": "error", "code": "engine", "message": "it stopped", "detail": "a dump"}),
+        );
+        assert_eq!(d["message"], "it stopped");
+    }
+
     fn record(phase: Phase, pass: u64, pages: u64) -> Progress {
         Progress {
             phase,
@@ -1577,9 +1831,11 @@ mod tests {
             hashes: vec![0; pages],
             history: if errors > 0 { 2 } else { 0 },
             ms: 67.4,
-            diagnostics: (0..errors)
-                .map(|_| json!({"severity": "error", "message": "Undefined control sequence", "line": 3}))
-                .collect(),
+            diagnostics: Some(
+                (0..errors)
+                    .map(|_| json!({"severity": "error", "message": "Undefined control sequence", "line": 3}))
+                    .collect(),
+            ),
             since_ms: None,
             origins: None,
             changed: None,
@@ -1634,7 +1890,7 @@ mod tests {
         );
         assert_eq!(
             got[8]["params"],
-            json!({"state": "ready", "ms": 67.4, "pages": 3, "errors": 0, "warnings": 0, "engine": "wasm"})
+            json!({"state": "ready", "ms": 67.4, "pages": 3, "errors": 0, "warnings": 0, "warnings_updating": false, "engine": "wasm", "root": "/p", "main": "main.tex", "update": null})
         );
         // (a keystroke's build: no progress, the status after it)
         lock(&sent).clear();
@@ -1895,9 +2151,9 @@ mod tests {
         s.handle(&json!({"jsonrpc": "2.0", "id": got[0]["id"], "result": {"title": "Retry"}}));
         assert_eq!(*lock(&host.asks), [Ask::Rebuild]);
         let mut b = built(0, 1);
-        b.diagnostics = vec![
+        b.diagnostics = Some(vec![
             json!({"severity": "error", "code": "engine", "message": "it ran past its time limit"}),
-        ];
+        ]);
         lock(&sent).clear();
         s.building();
         s.built(&b);
@@ -1922,6 +2178,49 @@ mod tests {
                 .iter()
                 .any(|m| m["method"] == "window/showMessageRequest"),
             "said again"
+        );
+    }
+
+    /// A kind hidden in the viewer's filters (`problems-hidden`) is not
+    /// published to the editor; the others are, and the hidden one's
+    /// file is cleared as one with none.
+    #[test]
+    fn hidden_kinds_are_not_published() {
+        struct Hides;
+        impl LspHost for Hides {
+            fn ask(&self, _: Ask) {}
+            fn hidden(&self) -> Vec<String> {
+                vec!["underfull".into()]
+            }
+            fn engine(&self) -> &'static str {
+                "native"
+            }
+        }
+        let sent: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let k = sent.clone();
+        let s = Server::new(Box::new(move |v| lock(&k).push(v.clone())), Arc::new(Hides));
+        init(&s, "file:///p", false);
+        s.set_main("main.tex");
+        lock(&sent).clear();
+        let mut b = built(1, 0);
+        b.diagnostics = Some(vec![
+            json!({"severity": "warning", "kind": "underfull", "message": "Underfull \\hbox (badness 10000)", "line": 2}),
+            json!({"severity": "warning", "kind": "reference", "message": "Reference `x' on page 1 undefined", "line": 5}),
+        ]);
+        s.built(&b);
+        let got = lock(&sent).clone();
+        let published: Vec<&Value> = got
+            .iter()
+            .filter(|m| m["method"] == "textDocument/publishDiagnostics")
+            .flat_map(|m| m["params"]["diagnostics"].as_array().unwrap())
+            .collect();
+        assert_eq!(published.len(), 1, "{got:?}");
+        assert!(
+            published[0]["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Reference"),
+            "{got:?}"
         );
     }
 }

@@ -2,7 +2,7 @@
 //! output routine reaches the next page, and an edit that moves no page
 //! break re-runs no later page step.
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 

@@ -60,6 +60,41 @@ pub struct Config {
     /// (dev's nightly build, or a later stable release), read from the
     /// user's file only.
     pub update_channel: Option<String>,
+    /// Whether `phitex watch` writes the PDF (its `.synctex.gz`), the log
+    /// and the aux files into the folder after each build (off: nothing
+    /// there, the pages in the viewer; `--write` asks for it once).
+    pub watch_write: Option<bool>,
+    /// The viewer's feature tips seen (yours only, set by the viewer).
+    pub tips_seen: Option<Vec<String>>,
+    /// The kinds of problem the viewer does not show (yours only, set by
+    /// the viewer's filters).
+    pub problems_hidden: Option<Vec<String>>,
+    /// The engine's threads (yours only: a machine's, not a document's; 0:
+    /// the default, one), `-j` over it; read when the build starts.
+    pub threads: Option<usize>,
+    /// When the viewer's page follows an editor's place (yours only):
+    /// `cursor` as it moves, `selection` what is selected, `dblclick` a
+    /// double-click alone. See [`CHOICES`].
+    pub follow: Option<String>,
+    /// The viewer's dark pages (yours only): `off`, `on`, `theme`.
+    pub dark_pdf: Option<String>,
+    /// The viewer's loading animation (yours only): `random` (the default:
+    /// every one but Bad Apple, PhiTeX's the first time, then another each
+    /// time), `all`, those picked by name, comma separated
+    /// (`tetris,badapple`: one of them each time), or `off`. `retro` (the first Windows 98's, retired) is read as `win98`.
+    pub opening: Option<String>,
+    /// Whether the viewer underlines what each problem is about (yours only).
+    pub underline: Option<bool>,
+    /// How much of latexmk's rc files applies: `find` (the default: only
+    /// what helps the build find files) or `exact` (latexmk's engine,
+    /// output folder and options too; docs/latexmkrc.md).
+    pub latexmk: Option<String>,
+    /// Folders TeX searches before TeX Live's tree (kpathsea's syntax: a
+    /// trailing `//` searches the subfolders too), relative to the
+    /// phitex.toml's folder: `inputs = ["../common/tex//"]` (one folder:
+    /// a string).
+    #[serde(default, deserialize_with = "string_or_list")]
+    pub inputs: Option<Vec<String>>,
     /// What reading the files warned of (unknown keys).
     #[serde(skip)]
     pub warnings: Vec<String>,
@@ -84,7 +119,63 @@ const KEYS: &[&str] = &[
     "phitex",
     "update-check",
     "update-channel",
+    "watch-write",
+    "tips-seen",
+    "problems-hidden",
+    "threads",
+    "follow",
+    "dark-pdf",
+    "opening",
+    "underline",
+    "latexmk",
+    "inputs",
 ];
+
+/// The viewer's settings that are one of a few names: each key, its names.
+pub const CHOICES: &[(&str, &[&str])] = &[
+    ("follow", &["cursor", "selection", "dblclick"]),
+    ("dark-pdf", &["off", "on", "theme"]),
+    (
+        "opening",
+        &[
+            "random",
+            "all",
+            "phitex",
+            "terminal",
+            "win98",
+            "mac9",
+            "dos",
+            "typewriter",
+            "plane",
+            "ink",
+            "tetris",
+            "glyphs",
+            "kaust",
+            "badapple",
+            "off",
+            "retro",
+        ],
+    ),
+];
+
+/// `v` is one of `names`, the choices of `key`; `opening`'s may name several
+/// looks, comma separated (`random`, `all` and `off` alone).
+fn chosen(key: &str, names: &[&str], v: &str) -> bool {
+    names.contains(&v)
+        || key == "opening"
+            && v.split(',')
+                .all(|n| names.contains(&n) && !matches!(n, "random" | "all" | "off"))
+}
+
+/// What `key` may be, for an error: its names.
+fn said_names(key: &str, names: &[&str]) -> String {
+    let one = format!("one of {}", names.join(", "));
+    if key == "opening" {
+        format!("{one}, or looks comma separated")
+    } else {
+        one
+    }
+}
 
 /// `copy-pdf`'s value.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,6 +203,20 @@ fn copy_pdf<'de, D: Deserializer<'de>>(d: D) -> Result<Option<CopyPdf>, D::Error
         Raw::Bool(true) => CopyPdf::Invocation,
         Raw::Bool(false) => CopyPdf::Off,
         Raw::Dir(s) => CopyPdf::Dir(s),
+    }))
+}
+
+/// `inputs = "dir" | ["dir", ...]`.
+fn string_or_list<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Vec<String>>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum V {
+        One(String),
+        Many(Vec<String>),
+    }
+    Ok(Some(match V::deserialize(d)? {
+        V::One(s) => vec![s],
+        V::Many(v) => v,
     }))
 }
 
@@ -155,6 +260,19 @@ fn parse_named(text: &str, name: &str) -> Result<Config, String> {
             Some(n) => format!("{name}: unknown key `{k}` (did you mean `{n}`?), ignored"),
             None => format!("{name}: unknown key `{k}` (a newer PhiTeX's?), ignored"),
         });
+    }
+    for (k, names) in CHOICES {
+        if let Some(v) = table.get(*k)
+            && !v.as_str().is_some_and(|v| chosen(k, names, v))
+        {
+            return Err(format!("{name}: `{k}` is {}", said_names(k, names)));
+        }
+    }
+    // (not one of the viewer's CHOICES: a page never sets it)
+    if let Some(v) = table.get("latexmk")
+        && !v.as_str().is_some_and(|v| v == "find" || v == "exact")
+    {
+        return Err(format!("{name}: `latexmk` is find or exact"));
     }
     let mut c: Config = table.try_into().map_err(|e| said(&e))?;
     if let Some(req) = &c.phitex {
@@ -225,19 +343,20 @@ pub fn parse_size(s: &str) -> Option<u64> {
         .map(|b| b.as_u64())
 }
 
-/// The user's settings file: `$XDG_CONFIG_HOME/phitex/phitex.toml`, else
-/// `~/.config/phitex/phitex.toml`.
+/// The environment variable naming the user's settings file in place of
+/// the usual one ([`user_file`]): a test's, a CI's, a second profile's.
+pub const CONFIG_ENV: &str = "PHITEX_CONFIG";
+
+/// The user's settings file: `$PHITEX_CONFIG` where it is set (the file
+/// itself, on every system), else `$XDG_CONFIG_HOME/phitex/phitex.toml`,
+/// else `~/.config/phitex/phitex.toml` (Windows:
+/// `%APPDATA%\phitex\phitex.toml`, [`crate::dirs`]).
 #[must_use]
 pub fn user_file() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|h| !h.is_empty())
-                .map(|h| PathBuf::from(h).join(".config"))
-        })?;
-    Some(base.join("phitex").join(FILE))
+    if let Some(p) = std::env::var_os(CONFIG_ENV).filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
+    Some(crate::dirs::phitex(crate::dirs::Kind::Config)?.join(FILE))
 }
 
 /// `text` (a `phitex.toml`) with `key` set to `value`: its line
@@ -248,15 +367,25 @@ fn with_key(text: &str, key: &str, value: &str) -> Result<String, String> {
     if !KEYS.contains(&key) {
         return Err(match nearest(key) {
             Some(n) => format!("no setting '{key}': did you mean '{n}'?"),
-            None => format!("no setting '{key}' (phitex --help-all lists them)"),
+            None => format!("no setting '{key}' (phitex config lists them)"),
         });
     }
+    check(canonical(key), value)?;
+    // (a choice's names are names, `off` too: never a boolean)
+    let choice = CHOICES.iter().any(|(c, _)| *c == key);
     let v = match value {
+        _ if choice => toml::Value::String(value.to_owned()).to_string(),
         "on" | "true" => "true".to_owned(),
         "off" | "false" => "false".to_owned(),
         _ if value.parse::<i64>().is_ok() => value.to_owned(),
         _ => format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\"")),
     };
+    with_line(text, key, &v).map_err(|e| format!("{key} = {value}: {e}"))
+}
+
+/// `text` with top-level `key = v` (`v` TOML already), its line replaced
+/// or added, the rest kept; checked by reading it back.
+fn with_line(text: &str, key: &str, v: &str) -> Result<String, String> {
     let line = format!("{key} = {v}");
     let mut out = Vec::new();
     let mut done = false;
@@ -286,8 +415,191 @@ fn with_key(text: &str, key: &str, value: &str) -> Result<String, String> {
         out.push(line);
     }
     let text = out.join("\n") + "\n";
-    parse_named(&text, "phitex.toml").map_err(|e| format!("{key} = {value}: {e}"))?;
+    parse_named(&text, "phitex.toml")?;
     Ok(text)
+}
+
+/// The names `key` takes, when it takes one of a few.
+fn names_of(key: &str) -> Option<&'static [&'static str]> {
+    const ENGINES: &[&str] = &[
+        "pdflatex", "xelatex", "latex", "pdftex", "xetex", "etex", "tex",
+    ];
+    match key {
+        "engine" => Some(ENGINES),
+        "update-channel" => Some(&["stable", "nightly"]),
+        "files" => Some(&["texlive", "shelf"]),
+        "latexmk" => Some(&["find", "exact"]),
+        k => CHOICES.iter().find(|(c, _)| *c == k).map(|(_, n)| *n),
+    }
+}
+
+/// `value` checked for `key` (its own name): the error names the key
+/// and what it takes.
+fn check(key: &str, value: &str) -> Result<(), String> {
+    let switch = SWITCHES.contains(&key) || key == "shell-escape";
+    if switch && !matches!(value, "on" | "off" | "true" | "false") {
+        return Err(format!("{key} is on or off, not '{value}'"));
+    }
+    if let Some(names) = names_of(key)
+        && !chosen(key, names, value)
+    {
+        return Err(format!(
+            "{key} is {}, not '{value}'",
+            said_names(key, names)
+        ));
+    }
+    match key {
+        "threads" if value.parse::<usize>().is_err() => Err(format!(
+            "threads is a number (0 or 1: one thread), not '{value}'"
+        )),
+        "cache-limit" if parse_size(value).is_none() => Err(format!(
+            "cache-limit is a size (500MB, 4GB; 0: no cache), not '{value}'"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// `key` taken out of your `phitex.toml` (`phitex config --unset KEY`):
+/// its line gone, the rest kept; the file's path.
+pub fn unset_user(key: &str) -> Result<PathBuf, String> {
+    if !KEYS.contains(&key) {
+        return Err(match nearest(key) {
+            Some(n) => format!("no setting '{key}': did you mean '{n}'?"),
+            None => format!("no setting '{key}' (phitex config lists them)"),
+        });
+    }
+    let p = user_file().ok_or(
+        "no home directory for ~/.config/phitex/phitex.toml (or set PHITEX_CONFIG to a file)",
+    )?;
+    let old = std::fs::read_to_string(&p).unwrap_or_default();
+    let mut top = true;
+    let kept: Vec<&str> = old
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            if t.starts_with('[') {
+                top = false;
+            }
+            !(top
+                && t.split_once('=')
+                    .is_some_and(|(k, _)| canonical(k.trim().trim_matches('"')) == canonical(key)))
+        })
+        .collect();
+    let text = if kept.is_empty() {
+        String::new()
+    } else {
+        kept.join("\n") + "\n"
+    };
+    if text != old {
+        std::fs::write(&p, text).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    Ok(p)
+}
+
+/// Whether a project's `phitex.toml` may set `key` (a key alone a
+/// user's is ignored there, [`without_permissions`]).
+pub fn projects_may(key: &str) -> bool {
+    !USERS_ALONE.contains(&canonical(key))
+}
+
+/// The viewer's preferences the user's `phitex.toml` keeps (the `prefs`
+/// op): their keys, each a list of names.
+pub const PREFS: &[&str] = &["tips-seen", "problems-hidden"];
+
+/// The settings the viewer's Settings dialog sets, each on or off (in the
+/// user's file; never a command, which a page could make run: `editor`,
+/// `viewer` are the terminal's to set, as are `shell-escape` and
+/// `update-channel`). Its others: [`CHOICES`], `threads`, `cache-limit`.
+pub const SWITCHES: &[&str] = &["watch-write", "synctex", "update-check", "underline"];
+
+/// The viewer's preferences (`set`: those keys set first, each a list of
+/// names, in the user's file, its other lines kept), as JSON.
+pub fn prefs(
+    set: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Result<serde_json::Value, String> {
+    let p = user_file().ok_or(
+        "no home directory for ~/.config/phitex/phitex.toml (or set PHITEX_CONFIG to a file)",
+    )?;
+    let mut text = std::fs::read_to_string(&p).unwrap_or_default();
+    if let Some(set) = set {
+        for (k, v) in set {
+            if SWITCHES.contains(&k.as_str()) {
+                let on = v.as_bool().ok_or(format!("{k}: on or off"))?;
+                text = with_line(&text, k, if on { "true" } else { "false" })?;
+                continue;
+            }
+            if let Some((_, names)) = CHOICES.iter().find(|(c, _)| c == k) {
+                let n = v
+                    .as_str()
+                    .filter(|n| chosen(k, names, n))
+                    .ok_or(format!("{k}: {}", said_names(k, names)))?;
+                text = with_line(&text, k, &format!("\"{n}\""))?;
+                continue;
+            }
+            if k == "threads" {
+                let most = std::thread::available_parallelism().map_or(1, usize::from);
+                let n = v
+                    .as_u64()
+                    .and_then(|n| usize::try_from(n).ok())
+                    .filter(|&n| n <= most)
+                    .ok_or(format!("threads: 0 (the default, one thread) to {most}"))?;
+                text = with_line(&text, k, &n.to_string())?;
+                continue;
+            }
+            if k == "cache-limit" {
+                let t = match v {
+                    serde_json::Value::Number(n) if n.as_u64() == Some(0) => "0".to_owned(),
+                    serde_json::Value::String(t) if parse_size(t).is_some() => {
+                        toml::Value::String(t.clone()).to_string()
+                    }
+                    _ => {
+                        return Err(
+                            "cache-limit: a size (\"500MB\", \"4GB\") or 0: no cache".to_owned()
+                        );
+                    }
+                };
+                text = with_line(&text, k, &t)?;
+                continue;
+            }
+            if !PREFS.contains(&k.as_str()) {
+                return Err(format!("no preference '{k}' here"));
+            }
+            let names: Vec<String> = v
+                .as_array()
+                .ok_or(format!("{k}: a list of names"))?
+                .iter()
+                .filter_map(|n| n.as_str())
+                .filter(|n| {
+                    n.len() <= 64
+                        && n.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                })
+                .map(str::to_owned)
+                .collect();
+            let v = toml::Value::Array(names.into_iter().map(toml::Value::String).collect());
+            text = with_line(&text, k, &v.to_string())?;
+        }
+        if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+        }
+        std::fs::write(&p, &text).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    let c = parse_named(&text, &p.display().to_string())?;
+    Ok(serde_json::json!({
+        "tips-seen": c.tips_seen.unwrap_or_default(),
+        "problems-hidden": c.problems_hidden.unwrap_or_default(),
+        "watch-write": c.watch_write.unwrap_or(false),
+        "synctex": c.synctex,
+        "update-check": c.update_check.unwrap_or(false),
+        "underline": c.underline.unwrap_or(true),
+        "follow": c.follow.unwrap_or_else(|| "cursor".to_owned()),
+        "dark-pdf": c.dark_pdf.unwrap_or_else(|| "off".to_owned()),
+        "opening": c.opening.unwrap_or_else(|| "random".to_owned()),
+        "threads": c.threads.unwrap_or(0),
+        "cores": std::thread::available_parallelism().map_or(1, usize::from),
+        "cache-limit": c.cache_limit,
+        "file": crate::cache::home_relative(&p),
+    }))
 }
 
 /// `phitex config KEY VALUE`: the user's `phitex.toml` with it set (made
@@ -296,7 +608,9 @@ pub fn set_user(key: &str, value: &str) -> Result<PathBuf, String> {
     if key == "main" || key == "file" {
         return Err("`main` belongs in a project's phitex.toml, not yours".to_owned());
     }
-    let p = user_file().ok_or("no home directory for ~/.config/phitex/phitex.toml")?;
+    let p = user_file().ok_or(
+        "no home directory for ~/.config/phitex/phitex.toml (or set PHITEX_CONFIG to a file)",
+    )?;
     let old = std::fs::read_to_string(&p).unwrap_or_default();
     let new = with_key(&old, key, value)?;
     if let Some(d) = p.parent() {
@@ -304,6 +618,622 @@ pub fn set_user(key: &str, value: &str) -> Result<PathBuf, String> {
     }
     std::fs::write(&p, new).map_err(|e| format!("{}: {e}", p.display()))?;
     Ok(p)
+}
+
+/// Every setting `phitex config` lists: its key, its default, and what it
+/// does (aliases left out; `main` and `phitex` are a project's alone).
+pub const SETTINGS: &[(&str, &str, &str)] = &[
+    (
+        "main",
+        "the one .tex file with \\documentclass",
+        "the main file (a project's phitex.toml only)",
+    ),
+    (
+        "engine",
+        "pdflatex",
+        "the engine: pdflatex, xelatex, latex, pdftex, tex",
+    ),
+    (
+        "output-dir",
+        "the main file's folder",
+        "where the outputs go (TeX's -output-directory)",
+    ),
+    (
+        "shell-escape",
+        "off",
+        "let documents run any shell command (\\write18); yours only, a project's is ignored",
+    ),
+    (
+        "viewer",
+        "none",
+        "a program --open shows the PDF with (zathura, okular, ...); yours only",
+    ),
+    (
+        "editor",
+        "$PHITEX_EDITOR, else none",
+        "the editor a double-click on a page opens (code, nvim, emacsclient, ...)",
+    ),
+    (
+        "copy-pdf",
+        "off",
+        "copy the PDF after each good build: true (where phitex runs) or a folder",
+    ),
+    ("synctex", "off", "write JOB.synctex.gz beside the PDF"),
+    (
+        "cache-limit",
+        "4GB",
+        "the cache's size (\"500MB\", \"4GB\"; 0: no cache)",
+    ),
+    (
+        "files",
+        "texlive",
+        "where TeX's files come from: texlive (kpathsea) or shelf",
+    ),
+    (
+        "phitex",
+        "any",
+        "the oldest PhiTeX the project needs (\">=1.0\"; a project's only)",
+    ),
+    (
+        "update-check",
+        "off",
+        "say when a newer PhiTeX is out (yours only)",
+    ),
+    (
+        "update-channel",
+        "stable",
+        "what phitex upgrade follows: stable or nightly (yours only)",
+    ),
+    (
+        "watch-write",
+        "off",
+        "phitex watch writes the PDF (with its .synctex.gz) and the aux files here after each build",
+    ),
+    (
+        "threads",
+        "0: one thread",
+        "the engine's threads, -j over it (yours only)",
+    ),
+    (
+        "follow",
+        "cursor",
+        "when the viewer's page follows your editor: cursor, selection, dblclick (yours only)",
+    ),
+    (
+        "dark-pdf",
+        "off",
+        "the viewer's dark pages: off, on, theme (yours only)",
+    ),
+    (
+        "opening",
+        "random",
+        "the viewer's loading animation: random (all but Bad Apple), all, off, or looks comma separated (tetris,badapple) (yours only)",
+    ),
+    (
+        "underline",
+        "on",
+        "the viewer underlines what each problem is about (yours only)",
+    ),
+    (
+        "latexmk",
+        "find",
+        "how much of a .latexmkrc applies: find (its search paths) or exact (its engine, output folder and options too)",
+    ),
+    (
+        "inputs",
+        "none",
+        "folders TeX searches first, relative to phitex.toml (\"../common/tex//\": with subfolders)",
+    ),
+];
+
+/// Each setting's example value as `phitex.toml` writes it (a valid
+/// value of its type: what `phitex config --init` comments out).
+const EXAMPLES: &[(&str, &str)] = &[
+    ("main", "\"paper.tex\""),
+    ("engine", "\"pdflatex\""),
+    ("output-dir", "\"build\""),
+    ("shell-escape", "false"),
+    ("viewer", "\"zathura\""),
+    ("editor", "\"code\""),
+    ("copy-pdf", "false"),
+    ("synctex", "false"),
+    ("cache-limit", "\"4GB\""),
+    ("files", "\"texlive\""),
+    ("phitex", "\">=1.0\""),
+    ("update-check", "true"),
+    ("update-channel", "\"stable\""),
+    ("watch-write", "false"),
+    ("threads", "0"),
+    ("follow", "\"cursor\""),
+    ("dark-pdf", "\"off\""),
+    ("opening", "\"random\""),
+    ("underline", "true"),
+    ("latexmk", "\"find\""),
+    ("inputs", "[\"../common/tex//\"]"),
+];
+
+/// The settings a project's `phitex.toml` alone takes (yours ignores them).
+const PROJECTS_ALONE: &[&str] = &["main", "phitex"];
+
+/// A `phitex.toml` with every setting in it, each commented out with
+/// what it does, its default and an example value (`phitex config
+/// --init`): `yours` your file's (no project-only key), else a project's
+/// (the keys that are yours alone after the others, said to be ignored
+/// there).
+#[must_use]
+pub fn starter(yours: bool) -> String {
+    let mut out = String::new();
+    if yours {
+        out.push_str("# Your PhiTeX settings (every project's, on this machine): uncomment a line\n# to set it. A project's phitex.toml wins over these, except the ones\n# marked yours only. `phitex config` lists them as they hold.\n");
+    } else {
+        out.push_str("# This project's PhiTeX settings: uncomment a line to set it. They win\n# over your own (~/.config/phitex/phitex.toml), except the ones that are\n# yours alone. `phitex config` lists them as they hold.\n");
+    }
+    let entry = |out: &mut String, k: &str, default: &str, what: &str| {
+        let ex = EXAMPLES.iter().find(|e| e.0 == k).map_or("\"\"", |e| e.1);
+        out.push_str(&format!("\n# {what}\n# default: {default}\n# {k} = {ex}\n"));
+    };
+    let (mine, theirs): (Vec<_>, Vec<_>) = SETTINGS
+        .iter()
+        .filter(|s| !yours || !PROJECTS_ALONE.contains(&s.0))
+        .partition(|s| yours || projects_may(s.0));
+    for &&(k, default, what) in &mine {
+        entry(&mut out, k, default, what);
+    }
+    if !theirs.is_empty() {
+        out.push_str("\n# ---- yours alone: ignored in a project's phitex.toml; set them with\n# ---- `phitex config KEY VALUE` (or `phitex config --init=yours`)\n");
+        for &&(k, default, what) in &theirs {
+            entry(&mut out, k, default, what);
+        }
+    }
+    out
+}
+
+/// `phitex config --init`: [`starter`] written to `path`, never over a
+/// file that is there.
+pub fn init(path: &Path, yours: bool) -> Result<(), String> {
+    if path.exists() {
+        return Err(format!(
+            "{} is there already: phitex config KEY VALUE sets one in yours, or edit it",
+            crate::cache::home_relative(path)
+        ));
+    }
+    if let Some(d) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
+    }
+    std::fs::write(path, starter(yours)).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// One setting as `phitex config` shows it: its key, default and what
+/// it does, its value in your file and in the project's.
+pub struct Row {
+    pub key: &'static str,
+    pub default: &'static str,
+    pub what: &'static str,
+    pub user: Option<String>,
+    pub project: Option<String>,
+}
+
+/// The settings `phitex config` shows (no key: every one; a key: that
+/// one), with your file and the project's `phitex.toml` above `dir`.
+pub struct Listing {
+    pub user_file: Option<PathBuf>,
+    pub project_file: Option<PathBuf>,
+    pub rows: Vec<Row>,
+}
+
+/// [`Listing`] of `key` (none: every setting) for a run in `dir`.
+pub fn listed(key: Option<&str>, dir: &Path) -> Result<Listing, String> {
+    let read = |p: &Path| -> Result<toml::Table, String> {
+        match std::fs::read_to_string(p) {
+            Ok(t) => t
+                .parse::<toml::Table>()
+                .map_err(|e| format!("{}: {e}", p.display())),
+            Err(_) => Ok(toml::Table::new()),
+        }
+    };
+    let user_file = user_file();
+    let user = match &user_file {
+        Some(p) => read(p)?,
+        None => toml::Table::new(),
+    };
+    let project_file = find_file(dir);
+    let project = match &project_file {
+        Some(p) => read(p)?,
+        None => toml::Table::new(),
+    };
+    let chosen: Vec<&(&str, &str, &str)> = match key {
+        Some(k) => {
+            let canon = canonical(k);
+            let r: Vec<_> = SETTINGS.iter().filter(|s| s.0 == canon).collect();
+            if r.is_empty() {
+                return Err(match nearest(k) {
+                    Some(n) => format!("no setting '{k}': did you mean '{n}'?"),
+                    None => format!("no setting '{k}' (phitex config lists them)"),
+                });
+            }
+            r
+        }
+        None => SETTINGS.iter().collect(),
+    };
+    let value = |t: &toml::Table, k: &str| -> Option<String> {
+        KEYS.iter()
+            .filter(|a| canonical(a) == k)
+            .find_map(|a| t.get(*a))
+            .map(|v| match v {
+                toml::Value::String(s) => s.clone(),
+                v => v.to_string(),
+            })
+    };
+    let rows = chosen
+        .into_iter()
+        .map(|&(k, default, what)| Row {
+            key: k,
+            default,
+            what,
+            user: value(&user, k),
+            project: value(&project, k),
+        })
+        .collect();
+    Ok(Listing {
+        user_file,
+        project_file,
+        rows,
+    })
+}
+
+impl Row {
+    /// Whether the project sets a key that is yours alone (ignored there).
+    pub fn project_ignored(&self) -> bool {
+        self.project.is_some() && !projects_may(self.key)
+    }
+
+    /// The value that holds, and where it comes from: `project`, `yours`
+    /// or `default` (a project's value of a key it may not set never).
+    pub fn holds(&self) -> (String, &'static str) {
+        let project = self.project.as_ref().filter(|_| !self.project_ignored());
+        match (project, &self.user) {
+            (Some(p), _) => (p.clone(), "project"),
+            (None, Some(u)) => (u.clone(), "yours"),
+            (None, None) => (self.default.to_owned(), "default"),
+        }
+    }
+}
+
+/// `phitex config --json`: the listing as one JSON object.
+pub fn listing_json(key: Option<&str>, dir: &Path) -> Result<serde_json::Value, String> {
+    let l = listed(key, dir)?;
+    let path = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string());
+    let settings: Vec<serde_json::Value> = l
+        .rows
+        .iter()
+        .map(|r| {
+            let (value, from) = r.holds();
+            serde_json::json!({
+                "key": r.key,
+                "value": value,
+                "from": from,
+                "default": r.default,
+                "yours": r.user,
+                "project": r.project,
+                "project_ignored": r.project_ignored(),
+                "description": r.what,
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "yours": path(&l.user_file),
+        "project": path(&l.project_file),
+        "settings": settings,
+    }))
+}
+
+/// A setting's value as it holds, coloured by where it is from (the
+/// project's green, yours cyan, a default dim), and a project's value
+/// that is ignored said.
+fn now(st: crate::ui::Style, r: &Row) -> String {
+    let (v, from) = r.holds();
+    let now = match from {
+        "project" => format!("{} {}", st.green(&v), st.dim("(project)")),
+        "yours" => format!("{} {}", st.cyan(&v), st.dim("(yours)")),
+        _ => st.dim(&format!("{v} (default)")),
+    };
+    match (&r.project, r.project_ignored()) {
+        (Some(p), true) => format!(
+            "{now} {}",
+            st.yellow(&format!("(the project's {p} is ignored: yours alone)"))
+        ),
+        _ => now,
+    }
+}
+
+/// `phitex config` (no key: every setting; a key: that one): each with
+/// its value in your file and in the project's `phitex.toml` above `dir`,
+/// the one that holds, and what it does.
+pub fn listing(key: Option<&str>, dir: &Path, st: crate::ui::Style) -> Result<Vec<String>, String> {
+    let l = listed(key, dir)?;
+    let home = |p: &Option<PathBuf>| {
+        p.as_ref()
+            .map_or("none".to_owned(), |p| crate::cache::home_relative(p))
+    };
+    let mut out = vec![st.dim(&format!(
+        "yours: {} · project: {} (the project's wins)",
+        home(&l.user_file),
+        home(&l.project_file)
+    ))];
+    let w = l.rows.iter().map(|r| r.key.len()).max().unwrap_or(0);
+    // (one key: its value and the whole of what it does, two lines)
+    if key.is_some() {
+        for r in &l.rows {
+            out.push(format!(
+                "  {}  {}",
+                st.bold(&crate::ui::pad(r.key, w, false)),
+                now(st, r)
+            ));
+            out.push(format!("  {}  {}", " ".repeat(w), st.dim(r.what)));
+        }
+        return Ok(out);
+    }
+    // (every key: a line each, the ones set first, the value in a column
+    // of its own and what it does cut to the terminal's width; `phitex
+    // config KEY` says the whole of it)
+    let cols = crate::keys::width().unwrap_or(100).max(60);
+    let vw = l
+        .rows
+        .iter()
+        .map(|r| r.holds().0.chars().count().min(24))
+        .max()
+        .unwrap_or(0);
+    let row = |r: &Row| {
+        let (v, from) = r.holds();
+        let v = crate::ui::clip(&v, 24);
+        let shown = match from {
+            "project" => st.green(&crate::ui::pad(&v, vw, false)),
+            "yours" => st.cyan(&crate::ui::pad(&v, vw, false)),
+            _ => st.dim(&crate::ui::pad(&v, vw, false)),
+        };
+        let tag = match (from, &r.project, r.project_ignored()) {
+            (_, Some(p), true) => format!("the project's {p} is ignored · "),
+            ("project", ..) => "project · ".to_owned(),
+            ("yours", ..) => "yours · ".to_owned(),
+            _ => String::new(),
+        };
+        let room = cols.saturating_sub(w + vw + 8);
+        let what = crate::ui::clip(&format!("{tag}{}", r.what), room);
+        format!(
+            "  {}  {shown}  {}",
+            st.bold(&crate::ui::pad(r.key, w, false)),
+            st.dim(&what)
+        )
+    };
+    let (set, default): (Vec<&Row>, Vec<&Row>) =
+        l.rows.iter().partition(|r| r.holds().1 != "default");
+    if !set.is_empty() {
+        out.push(String::new());
+        out.push(st.bold("set"));
+        out.extend(set.iter().map(|r| row(r)));
+    }
+    out.push(String::new());
+    out.push(st.bold("defaults"));
+    out.extend(default.iter().map(|r| row(r)));
+    out.push(String::new());
+    let cmds = [
+        ("phitex config KEY", "the whole of one, and what it takes"),
+        (
+            "phitex config KEY VALUE",
+            "sets one in yours (on, off, a number or text)",
+        ),
+        ("phitex config --unset KEY", "takes one out of yours"),
+    ];
+    let cw = cmds.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
+    for (c, what) in cmds {
+        out.push(format!(
+            "  {}  {}",
+            st.cyan(&crate::ui::pad(c, cw, false)),
+            st.dim(what)
+        ));
+    }
+    Ok(out)
+}
+
+/// A key's own name (an alias's: the key it stands for).
+fn canonical(k: &str) -> &str {
+    match k {
+        "file" => "main",
+        "program" => "engine",
+        "output-directory" | "out-dir" => "output-dir",
+        k => k,
+    }
+}
+
+/// What a project's `phitex.toml` is to each key, as
+/// [`without_permissions`] treats them, checked by its test: a project folder may be anyone's,
+/// and building it, or opening it in an editor, must run nothing it names.
+/// Keys that name a program or allow one to run, or say where files are
+/// written (a folder a program reads from), are the user's.
+const USERS_ALONE: &[&str] = &[
+    "shell-escape",
+    "viewer",
+    "editor",
+    "update-check",
+    "update-channel",
+    "tips-seen",
+    "problems-hidden",
+    "threads",
+    "follow",
+    "dark-pdf",
+    "opening",
+    "underline",
+];
+/// Keys a project may set: what its build is, none naming anything to run
+/// (`engine` is one of PhiTeX's own, `tex::engine`, nothing started; the
+/// paths are kept inside the project by [`without_permissions`]).
+#[cfg(test)]
+const PROJECTS_TOO: &[&str] = &[
+    "main",
+    "file",
+    "engine",
+    "program",
+    "output-dir",
+    "output-directory",
+    "out-dir",
+    "copy-pdf",
+    "synctex",
+    "cache-limit",
+    "files",
+    "phitex",
+    "watch-write",
+    "latexmk",
+    "inputs",
+];
+
+/// Whether `dir` (relative to `root`) stays in `root`, as written and on
+/// disk: a symbolic link in a project may point anywhere.
+pub fn inside(root: &Path, dir: &str) -> bool {
+    let p = Path::new(dir);
+    if p.is_absolute()
+        || dir.starts_with('~')
+        || p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let Ok(root) = root.canonicalize() else {
+        return false;
+    };
+    // (the deepest part of it that exists: what is not there yet is made under it)
+    root.join(p)
+        .ancestors()
+        .find_map(|a| a.canonicalize().ok())
+        .is_some_and(|a| a.starts_with(&root))
+}
+
+/// A project's settings (`root` its folder) without what only the user can
+/// allow; each one dropped is said. See [`USERS_ALONE`].
+#[must_use]
+pub fn without_permissions(mut project: Config, root: &Path) -> Config {
+    let mut warnings = std::mem::take(&mut project.warnings);
+    let mut said = |key: &str, why: &str| project_warning(&mut warnings, key, why);
+    if project.shell_escape == Some(true) {
+        said(
+            "shell-escape",
+            "the document could run any command. If you trust it: --shell-escape, or `phitex config shell-escape on` for all your documents",
+        );
+    }
+    if project.viewer.is_some() {
+        said(
+            "viewer",
+            "it names a program to run. Yours: `phitex config viewer ...`",
+        );
+    }
+    if project.editor.is_some() {
+        said(
+            "editor",
+            "it names a program to run. Yours: --editor, or `phitex config editor ...`",
+        );
+    }
+    if project
+        .output_dir
+        .as_deref()
+        .is_some_and(|d| !inside(root, d))
+    {
+        said(
+            "output-dir",
+            "it is outside the project. Yours: --output-dir",
+        );
+        project.output_dir = None;
+    }
+    if let Some(CopyPdf::Dir(d)) = &project.copy_pdf
+        && !inside(root, d)
+    {
+        said("copy-pdf", "it is outside the project. Yours: --copy-pdf");
+        project.copy_pdf = None;
+    }
+    if project.threads.is_some() {
+        said(
+            "threads",
+            "they are a machine's, not a document's. Yours: -j, or `phitex config threads N`",
+        );
+    }
+    project.warnings = warnings;
+    project.shell_escape = None;
+    project.viewer = None;
+    project.editor = None;
+    project.update_check = None;
+    project.update_channel = None;
+    project.tips_seen = None;
+    project.problems_hidden = None;
+    project.threads = None;
+    project.follow = None;
+    project.dark_pdf = None;
+    project.opening = None;
+    project.underline = None;
+    project
+}
+
+fn project_warning(warnings: &mut Vec<String>, key: &str, why: &str) {
+    warnings.push(format!(
+        "`{key}` in a project's phitex.toml is ignored: {why}"
+    ));
+}
+
+/// The rc files on disk, for [`phitex_live::latexmkrc`].
+struct Disk;
+
+impl phitex_live::latexmkrc::RcFiles for Disk {
+    fn read(&self, path: &str) -> Option<String> {
+        let p = Path::new(path);
+        if !p.is_file() {
+            return None;
+        }
+        std::fs::read(p)
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+    }
+
+    /// Perl's `abs_path`: symbolic links resolved; a last part that does
+    /// not exist (`(eval 1)`, latexmk's `__FILE__`) kept on its resolved
+    /// folder.
+    fn canonical(&self, path: &str) -> String {
+        let plain = phitex_live::latexmkrc::normalize(path);
+        if let Ok(p) = std::fs::canonicalize(&plain) {
+            return p.to_string_lossy().into_owned();
+        }
+        let p = Path::new(&plain);
+        match (p.parent().map(std::fs::canonicalize), p.file_name()) {
+            (Some(Ok(dir)), Some(name)) => dir.join(name).to_string_lossy().into_owned(),
+            _ => plain,
+        }
+    }
+}
+
+/// latexmk's rc files as latexmk run in `dir` reads them (the system's,
+/// the user's, `dir`'s own), with this process's environment (its
+/// TEXINPUTS `texinputs`, where given: phitex.toml's `inputs` before it).
+pub fn latexmkrc(dir: &Path, texinputs: Option<&str>) -> phitex_live::latexmkrc::Rc {
+    use phitex_live::latexmkrc as rc;
+    let var = |n: &str| std::env::var(n).ok();
+    // (latexmk's `$HOME`: Windows's `USERPROFILE` where it is unset)
+    let home = crate::dirs::home().map(|h| h.to_string_lossy().into_owned());
+    let w = rc::Where {
+        cwd: dir.to_string_lossy().into_owned(),
+        home_config_is_dir: home
+            .as_deref()
+            .is_some_and(|h| Path::new(h).join(".config").is_dir()),
+        home,
+        xdg_config_home: var("XDG_CONFIG_HOME"),
+        latexmkrcsys: var("LATEXMKRCSYS"),
+        system_and_user: true,
+    };
+    let mut env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    if let Some(t) = texinputs {
+        env.insert("TEXINPUTS".into(), t.to_owned());
+    }
+    rc::read(&rc::order(&w), &w.cwd, &env, &Disk)
+}
+
+/// The project's `phitex.toml` at `dir` or above.
+fn find_file(dir: &Path) -> Option<PathBuf> {
+    dir.ancestors().map(|d| d.join(FILE)).find(|p| p.is_file())
 }
 
 /// The user's settings (none there: the defaults). They name no main
@@ -343,6 +1273,16 @@ impl Config {
             phitex: self.phitex.or(under.phitex),
             update_check: self.update_check.or(under.update_check),
             update_channel: self.update_channel.or(under.update_channel),
+            watch_write: self.watch_write.or(under.watch_write),
+            tips_seen: self.tips_seen.or(under.tips_seen),
+            problems_hidden: self.problems_hidden.or(under.problems_hidden),
+            threads: self.threads.or(under.threads),
+            follow: self.follow.or(under.follow),
+            dark_pdf: self.dark_pdf.or(under.dark_pdf),
+            opening: self.opening.or(under.opening),
+            underline: self.underline.or(under.underline),
+            latexmk: self.latexmk.or(under.latexmk),
+            inputs: self.inputs.or(under.inputs),
             warnings: [self.warnings, under.warnings].concat(),
         }
     }
@@ -574,6 +1514,40 @@ pub fn braced_inputs(text: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
+    /// `phitex config --init`'s file: every setting there, commented out
+    /// (it reads as no setting at all), and every line uncommented reads
+    /// as a valid phitex.toml too; a project's has the keys that are yours
+    /// alone after a note, yours has no project-only key.
+    #[test]
+    fn the_starter_file_reads_as_it_is_and_uncommented() {
+        for yours in [false, true] {
+            let t = super::starter(yours);
+            let c = super::parse(&t).expect("as written");
+            assert!(c.engine.is_none() && c.inputs.is_none(), "{t}");
+            let on: String = t
+                .lines()
+                .map(|l| match l.strip_prefix("# ") {
+                    Some(r) if r.contains(" = ") && !r.starts_with("default:") => r.to_owned(),
+                    _ => l.to_owned(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let c = super::parse(&on).unwrap_or_else(|e| panic!("uncommented: {e}\n{on}"));
+            assert!(c.warnings.is_empty(), "{:?}\n{on}", c.warnings);
+            assert_eq!(c.engine.as_deref(), Some("pdflatex"));
+            for (k, ..) in super::SETTINGS {
+                let there = t.contains(&format!("# {k} = "));
+                assert_eq!(
+                    there,
+                    !yours || !super::PROJECTS_ALONE.contains(k),
+                    "{k} in {}",
+                    if yours { "yours" } else { "the project's" }
+                );
+            }
+            assert_eq!(t.contains("---- yours alone"), !yours);
+        }
+    }
+
     #[test]
     fn a_key_set_in_place() {
         let old = "# mine\nupdate-check = false # was off\nviewer = \"zathura\"\n";
@@ -599,6 +1573,52 @@ mod tests {
 
     use super::*;
 
+    /// Every key is decided: a new one must say whether a project may set it.
+    #[test]
+    fn every_key_is_a_projects_or_the_users_alone() {
+        for k in KEYS {
+            assert!(
+                USERS_ALONE.contains(k) != PROJECTS_TOO.contains(k),
+                "{k}: in neither or both of USERS_ALONE and PROJECTS_TOO"
+            );
+        }
+    }
+
+    #[test]
+    fn a_project_allows_nothing_to_run() {
+        let dir = std::env::temp_dir().join(format!("phitex-perm-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let project = || {
+            parse(
+                "shell-escape = true\nviewer = \"./x\"\neditor = \"./x {file}\"\n\
+                 update-check = true\nupdate-channel = \"nightly\"\noutput-dir = \"/tmp/x\"\ncopy-pdf = \"../x\"\n",
+            )
+            .unwrap()
+        };
+        let c = without_permissions(project(), &dir).over(Config::default());
+        assert_eq!(c.shell_escape, None);
+        assert_eq!(c.viewer, None);
+        assert_eq!(c.editor, None);
+        assert_eq!(c.update_check, None);
+        assert_eq!(c.update_channel, None);
+        assert_eq!(c.output_dir, None);
+        assert_eq!(c.copy_pdf, None);
+        assert_eq!(c.warnings.len(), 5, "{:?}", c.warnings);
+        // (the user's own stand, a project's `false` or not)
+        let user = parse("shell-escape = true\neditor = \"vi\"\n").unwrap();
+        let c = without_permissions(parse("shell-escape = false").unwrap(), &dir).over(user);
+        assert_eq!(c.shell_escape, Some(true));
+        assert_eq!(c.editor.as_deref(), Some("vi"));
+        // (inside the project: as before; a symbolic link out of it: not)
+        assert!(inside(&dir, "out/deep"));
+        #[cfg(unix)]
+        {
+            let _ = std::os::unix::fs::symlink("/tmp", dir.join("away"));
+            assert!(!inside(&dir, "away/x"));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn toml() {
         let c = parse(
@@ -622,10 +1642,33 @@ mod tests {
                 phitex: None,
                 update_check: None,
                 update_channel: None,
+                watch_write: None,
+                tips_seen: None,
+                problems_hidden: None,
+                threads: None,
+                follow: None,
+                dark_pdf: None,
+                opening: None,
+                underline: None,
+                latexmk: None,
+                inputs: None,
                 warnings: vec![],
             }
         );
         assert_eq!(parse("synctex = false").unwrap().synctex, Some(false));
+        assert_eq!(
+            parse("latexmk = \"exact\"").unwrap().latexmk.as_deref(),
+            Some("exact")
+        );
+        assert!(parse("latexmk = \"all\"").is_err());
+        assert_eq!(
+            parse("inputs = \"../common/tex//\"").unwrap().inputs,
+            Some(vec!["../common/tex//".to_owned()])
+        );
+        assert_eq!(
+            parse("inputs = [\"a\", \"b//\"]").unwrap().inputs,
+            Some(vec!["a".to_owned(), "b//".to_owned()])
+        );
         assert_eq!(
             parse("files = \"shelf\"").unwrap().files.as_deref(),
             Some("shelf")

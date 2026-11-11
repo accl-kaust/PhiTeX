@@ -33,13 +33,13 @@ use phitex_defuse::{At, Ctx, Effect, MayDefine, Operation, Stop, ValueId, Values
 use super::*;
 
 /// A page's give-back, defined by its finisher alone:
-/// `pages:out:<piece>:<nth>` = `[piece, nth, [markers, list, \deadcycles]]`
+/// `pages:out:<owner>:<piece>:<nth>` = `[piece, nth, [markers, list, \deadcycles]]`
 /// (`SPEC.md` §3.2 "give-back"). The loop reads it through its placement
 /// ([`phitex_defuse::Ctx::placed_output_or`]); the field is for the
 /// text's tools and traces.
 pub(crate) const PAGE_OUT: &str = "pages:out";
 
-/// The finisher's arguments: `[piece, nth]`, the page's key and its
+/// The finisher's arguments: `[owner, piece, nth]`, the page's key and its
 /// placement's identity, nothing else: an argument that changed between
 /// the loop's runs would make the finisher anew. The routine's hint and
 /// the page's class it predicts by (`SPEC.md` §3.3: by routine and page
@@ -53,15 +53,17 @@ pub(crate) struct FinishArgs {
 impl FinishArgs {
     pub(crate) fn encode(&self, v: &Values) -> Vec<ValueId> {
         vec![
+            raw_value(v, Some(self.key.owner)),
             raw_value(v, Some(self.key.piece)),
             v.int(i64::from(self.key.nth)),
         ]
     }
 
     pub(crate) fn decode(v: &Values, args: &[ValueId]) -> Option<FinishArgs> {
-        let [p, n] = args else { return None };
+        let [o, p, n] = args else { return None };
         Some(FinishArgs {
             key: PageKey {
+                owner: raw_node(v, *o)?,
                 piece: raw_node(v, *p)?,
                 nth: u32::try_from(v.as_int(*n)?).ok()?,
             },
@@ -93,6 +95,22 @@ pub(crate) struct Finish(pub Shared);
 impl Operation for Finish {
     fn name(&self) -> &'static str {
         "finish"
+    }
+
+    /// No: a finisher runs its page's routine, the class of its page's
+    /// fire picking what that routine does ([`Finish::predicted_rels`]
+    /// predicts by that class). One that ships a page steps `\c@page`;
+    /// one fired at a special penalty (lineno's line numbering at
+    /// -32000) steps nothing. Learned for the operation, the one
+    /// shipping finisher's +1 on `count:0` was predicted for every
+    /// finisher not run yet, each line's among them: the finishers after
+    /// it on its page read the page number one too high until it ran,
+    /// and ran twice for each line before them (lineno: 2 153 of its
+    /// finishers' predictions of `count:0` the learned +1, 34 180 of
+    /// 39 589 re-asks of `count:0` by such a prediction, accl 22509,
+    /// 22501).
+    fn alike(&self) -> bool {
+        false
     }
 
     /// The finisher's contributions (gdefs, pages:fin, the PDF side's),
@@ -138,6 +156,8 @@ impl Operation for Finish {
         ps.extend(FINISHER_FIELDS.iter().map(|&s| s.to_owned()));
         ps.push(PAGE_OUT.to_owned());
         ps.push(RTN.to_owned());
+        ps.push(FIRE_CONFLICT.to_owned());
+        ps.push(FIRE_LEFT.to_owned());
         MayDefine::Prefixes(ps)
     }
 
@@ -151,7 +171,7 @@ impl Operation for Finish {
     /// goes on only from the give-back made on its own page
     /// (`Pages::rest_begins`), so a guess of it was never read as one and
     /// was refuted by every run that defined it (pkgrec's
-    /// `prediction_is_right_when_nothing_changed`: `pages:out:<piece>:0`
+    /// `prediction_is_right_when_nothing_changed`: `pages:out:<owner>:<piece>:0`
     /// refuted in a build where nothing else was).
     fn predicted_defs(&self, args: &[ValueId], v: &Values) -> Option<Vec<(Field, ValueId)>> {
         let r = self.predicted_defs_(args, v);
@@ -177,10 +197,25 @@ impl Operation for Finish {
         Effect::None
     }
 
+    /// (TeX's own serial chain from the text to the routine and back: the
+    /// piece goes again at once, on what the pages before it left; held to
+    /// a quiet point, a chain through the pages takes one pass a page, and
+    /// past the settling limit the output is a pass's that never settled:
+    /// texpower's links)
+    fn settles_now(&self, f: Field, values: &Values) -> bool {
+        values.with_str(f.0, |s| s.starts_with(FIRE_CONFLICT)) == Some(true)
+    }
+
     /// The page layer settles at quiet points (docs/spec-settle.md): what
     /// a finisher defines re-asks the loop and the other finishers at
     /// once, and the text at the next quiet point.
     fn settles_at_quiet(&self) -> bool {
+        true
+    }
+
+    /// A page's routine reads the counters and marks the routines of the
+    /// pages before it left.
+    fn chains(&self) -> bool {
         true
     }
 
@@ -204,6 +239,11 @@ impl Operation for Finish {
         )]
         let out = run_node(cx, o, |r| {
             let out = r.finish_page();
+            // (the lines read into bodies nothing looked at: taken back,
+            // as a piece's are)
+            if out.is_ok() {
+                r.settle_lines();
+            }
             r.report_macros(t_fin.elapsed());
             out
         });
@@ -244,17 +284,6 @@ impl Run<'_, '_> {
             None => None,
         };
         let nth = page.as_ref().map_or(0, |p| i64::from(p.nth));
-        // (the progress shown: the page the build has reached)
-        if let Some(p) = page.as_ref().filter(|p| p.normal > 0)
-            && let Some(w) = self
-                .ops
-                .watch
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-        {
-            w.progress.note_page(u64::try_from(p.normal).unwrap_or(0));
-        }
         if crate::exec::obs_flag!("PHITEX_FIN_TRACE") {
             eprintln!(
                 "fin-trace: node {} page {nth} of its piece spec {} page {}",
@@ -263,7 +292,11 @@ impl Run<'_, '_> {
                 page.is_some()
             );
         }
-        // 2. no page, or a stale one: what it published last stands
+        // 2. no page, or a stale one: what it published last stands, but
+        // for a claim of the rest its routine's fatal error made on the
+        // page before (`Ctx::unchanged_unclaimed`): that claim held the
+        // text after this node inert, so the page builder never folded it
+        // again, the page stayed stale and the claim stood to the end
         let shipped = match &page {
             Some(p) => match self.assemble_page(p)? {
                 Some(asm) => self.replay_page(p, &asm)?,
@@ -274,7 +307,7 @@ impl Run<'_, '_> {
         self.ins_fold = None;
         let first = page.as_ref().is_some_and(|f| f.prev_fire.0 == -1);
         let Some(Shipped { args: fargs, brk }) = shipped else {
-            self.cx.unchanged();
+            self.cx.unchanged_unclaimed();
             self.fin = Some(FinCtx {
                 nth,
                 first,
@@ -289,15 +322,21 @@ impl Run<'_, '_> {
             });
             return Ok(());
         };
-        // (a page fired at a forced special penalty, \outputpenalty at
-        // -10001 or below: no layout decision, TeX's own serial chain from
-        // the text to the routine and back (LaTeX's floats and marginpars
-        // taking boxes from \@freelist and giving them back at -10002):
-        // what the routine defines re-asks the text at once,
-        // docs/spec-settle.md §2)
+        // (a page fired at a forced break, \outputpenalty at -10000 or
+        // below (§1005: `pi <= eject_penalty` fires the page there): no
+        // layout decision, TeX's own serial chain from the text to the
+        // routine and back (LaTeX's floats and marginpars taking boxes
+        // from \@freelist and giving them back at -10002; a text whose
+        // every page ends in \newpage and begins by reading a counter a
+        // shipout hook stepped, thumbs' overview): what the routine
+        // defines re-asks the text at once, docs/spec-settle.md §2. Held
+        // to the quiet point, each pass advanced one page of such a chain,
+        // and a text that speculated wrong early ran out the 12 passes:
+        // thumbs-example -j4, 2 to 6 builds in 24 with two pages more
+        // than pdfTeX's 69 (accl 24561), texpower -j8 1 in 30)
         if page
             .as_ref()
-            .is_some_and(|p| p.output_penalty <= FORCED_SPECIAL)
+            .is_some_and(|p| p.output_penalty <= EJECT_PENALTY)
         {
             self.cx.settle_now();
         }
@@ -315,6 +354,12 @@ impl Run<'_, '_> {
             page_x,
             brk,
         });
+        self.fin_scope_closer = self
+            .fin
+            .as_ref()
+            .and_then(|c| c.brk)
+            .map(|b| phitex_defuse::NodeId::from_raw(u64::from_ne_bytes(b.0.to_ne_bytes())))
+            .filter(|&p| self.cx.closes_scope_after(p));
         self.preload_candidate(&fargs)?;
         if let Some(names) = crate::exec::obs_str!("PHITEX_FIN_SHOW") {
             let mut shown = Vec::new();
@@ -341,7 +386,21 @@ impl Run<'_, '_> {
             );
         }
         self.fire_page(a(1))?;
+        self.shipped = 0;
         self.run_all()?;
+        // (the progress shown: the pages shipped up to this page's
+        // firing, as a reader counts them; not the firings)
+        if let Some(p) = self.fin.as_ref().and_then(|c| c.page.as_ref())
+            && let Some(w) = self
+                .ops
+                .watch
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+        {
+            w.progress
+                .note_ships(self.cx.node().raw(), (p.normal, p.special), self.shipped);
+        }
         self.publish_page()
     }
 
@@ -358,6 +417,10 @@ impl Run<'_, '_> {
             .as_ref()
             .map(|c| c.args.clone())
             .unwrap_or_default();
+        // (what the routine itself changed, before the piece's later
+        // definitions stand over it: the piece puts these in force at
+        // the candidate, [`Run::order_after_fires`])
+        self.define_fire_conflict(&args)?;
         self.give_way(&args)?;
         let g = self.contribute_global_defs();
         self.record_finisher_defs(&args, g);
@@ -631,15 +694,16 @@ pub(crate) fn substitute_page(v: &Values, x: ValueId, from: i64, to: i64) -> Opt
 }
 
 /// A page's place among the pages a routine ran on ([`FinDefs::pages`]):
-/// its piece and the pages fired in that piece before it ([`PageKey`]
-/// as integers). No page's index among all the pages: none is an
-/// argument.
-pub(crate) type FinPageKey = (i64, i64);
+/// its loop node, its piece and the pages fired in that piece before it
+/// ([`PageKey`] as integers). No page's index among all the pages: none
+/// is an argument.
+pub(crate) type FinPageKey = (i64, i64, i64);
 
 /// [`FinPageKey`] of a finisher with arguments `args` ([`FinishArgs`]).
 pub(crate) fn fin_page_key(v: &Values, args: &[ValueId]) -> FinPageKey {
-    FinishArgs::decode(v, args).map_or((-1, 0), |a| {
+    FinishArgs::decode(v, args).map_or((-1, -1, 0), |a| {
         (
+            i64::from_ne_bytes(a.key.owner.raw().to_ne_bytes()),
             i64::from_ne_bytes(a.key.piece.raw().to_ne_bytes()),
             i64::from(a.key.nth),
         )
@@ -711,6 +775,11 @@ pub(crate) fn pen_class(p: i32) -> i32 {
 /// -10000, `\penalty-10001` and lower): a page fired there is no layout
 /// decision of the builder but the text calling its routine.
 pub(crate) const FORCED_SPECIAL: i32 = -10001;
+
+/// `eject_penalty` (§157): a penalty at or below it ends the page where
+/// it stands (§1005), `\newpage`, `\clearpage` and `\pagebreak` with it;
+/// the text ended the page, the builder chose nothing.
+pub(crate) const EJECT_PENALTY: i32 = -10000;
 
 /// [`fin_key`] of routine `t` on a page of class `pen`.
 pub(crate) fn fin_key_class(t: ValueId, pen: i32) -> u64 {
@@ -960,6 +1029,28 @@ impl Run<'_, '_> {
             x
         };
         let unit_of = |piece: i64| unit_ix.get(&piece).map(|&i| &units[i]);
+        // (§1021: the rest of insertion `x` from item `from` of its list,
+        // its top pruned; the whole where `from` is 0)
+        let rest = |x: ValueId, from: u32| -> Option<ValueId> {
+            if from == 0 {
+                return Some(x);
+            }
+            let mut side = Side::default();
+            let Some(Node::Ins(mut ins)) = nodes::decode(v, x, &mut side) else {
+                return None;
+            };
+            let tail = ins.list.split_off((from as usize).min(ins.list.len()));
+            let (rem, _) = phitex_typeset::page::prune_page_top(tail, ins.split_top_skip, false);
+            let b = phitex_typeset::pack::vpack(
+                rem.clone(),
+                Spec::Additional(0),
+                &PackParams::default(),
+            )
+            .node;
+            ins.height = b.height + b.depth;
+            ins.list = rem;
+            Some(nodes::encode(v, &Node::Ins(ins), &side))
+        };
         // (an item a source names, real)
         let item_raw = |src: Src| -> Option<ValueId> {
             match src {
@@ -974,28 +1065,10 @@ impl Run<'_, '_> {
                 }
                 Src::Rtn { page, item } => rtn_items(page).get(item as usize).copied(),
                 Src::Held { piece, item, from } => {
-                    let raw = &unit_of(piece)?.2;
-                    let x = *raw.get(item as usize)?;
-                    if from == 0 {
-                        return Some(x);
-                    }
-                    let mut side = Side::default();
-                    let Some(Node::Ins(mut ins)) = nodes::decode(v, x, &mut side) else {
-                        return None;
-                    };
-                    // (§1021: the rest of a split, its top pruned)
-                    let tail = ins.list.split_off((from as usize).min(ins.list.len()));
-                    let (rem, _) =
-                        phitex_typeset::page::prune_page_top(tail, ins.split_top_skip, false);
-                    let b = phitex_typeset::pack::vpack(
-                        rem.clone(),
-                        Spec::Additional(0),
-                        &PackParams::default(),
-                    )
-                    .node;
-                    ins.height = b.height + b.depth;
-                    ins.list = rem;
-                    Some(nodes::encode(v, &Node::Ins(ins), &side))
+                    rest(*unit_of(piece)?.2.get(item as usize)?, from)
+                }
+                Src::HeldRtn { page, item, from } => {
+                    rest(*rtn_items(page).get(item as usize)?, from)
                 }
             }
         };
@@ -1488,10 +1561,11 @@ impl Run<'_, '_> {
                     if is_page_field(&name) {
                         continue;
                     }
-                    let x = self.unseal(x);
                     out.push((f, x));
                 }
                 crate::state::Pub::Rel(c) => rels.push((f, c)),
+                // (a document piece's alone, `Run::append_def`)
+                crate::state::Pub::Append(_) => {}
             }
         }
         if let Some(x) = self.fin.as_ref().and_then(|c| c.rtn) {
@@ -1526,6 +1600,7 @@ impl Run<'_, '_> {
         self.trace_fin_rel(&page, &rels);
         let mut m = self.ops.fin_defs.locked();
         let idx = (
+            i64::from_ne_bytes(page.key.owner.raw().to_ne_bytes()),
             i64::from_ne_bytes(page.key.piece.raw().to_ne_bytes()),
             i64::from(page.key.nth),
         );
@@ -1613,7 +1688,7 @@ fn named_items(fin: &Page) -> phitex_defuse::FxHashMap<i64, Vec<u32>> {
                     crate::pages::end_sub_of(item).map_or(item, |(e, _)| e),
                 ),
                 Src::Held { piece, item, .. } => (piece, item),
-                Src::Rtn { .. } => continue,
+                Src::Rtn { .. } | Src::HeldRtn { .. } => continue,
             };
             named.entry(piece).or_default().push(ix);
         }

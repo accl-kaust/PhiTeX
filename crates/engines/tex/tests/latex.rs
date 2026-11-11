@@ -672,6 +672,48 @@ fn latex_marginpars_settle() {
     }
 }
 
+/// `pdflatex` on thirty pages made by one loop, each ended by `\newpage`
+/// and each beginning by reading a counter the shipout hook stepped
+/// (`pdfdocs/newpages20.tex`, as thumbs' overview does; the hook loops
+/// a while, so the text runs ahead of the routines): a serial chain
+/// from the text to the routine and back through a page fired at
+/// `\penalty-10000`, the text's own break. The finisher of such a page
+/// re-asks the text at once (docs/spec-settle.md §2); held to the quiet
+/// point, each pass advanced one page, and a text that speculated wrong
+/// early ran out the 12 passes ('the page layout did not settle', a
+/// page count off: thumbs-example -j4, 2 to 6 builds in 24). The PDF
+/// equals pdfTeX's at -j1, -j4 and -j8, settled, in each of three
+/// builds.
+#[test]
+fn latex_newpage_chain_settles() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let name = "newpages20";
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+        .expect("the oracle");
+    for threads in [1, 4, 8] {
+        for k in 0..3 {
+            let opts = Options {
+                threads: Some(threads),
+                ..pdf_opts(name, &dir)
+            };
+            let b = common::build(opts, Some(&prelude(true)), &src);
+            let (pdf, _) = b.output();
+            let bad: Vec<String> = b
+                .diagnostics()
+                .into_iter()
+                .map(|d| d.message)
+                .filter(|m| m.contains("did not settle"))
+                .collect();
+            eprintln!("{name} -j {threads} build {k}: {}", report(name, &b));
+            assert!(bad.is_empty(), "{name} -j {threads} build {k}: {bad:?}");
+            if let Some(d) = common::first_difference(&pdf, &want) {
+                panic!("{name} -j {threads} build {k}: pdf {d}");
+            }
+        }
+    }
+}
+
 /// `pdflatex` on a two-column article with 56 marginpars, 19 figures, 5
 /// wide figures and 7 tables (`pdfdocs/floats2col.tex`): LaTeX's output
 /// routine gives back floats, `\@freelist` and the column box at every
@@ -777,6 +819,108 @@ fn at_one_thread_no_run_is_refuted() {
     assert!(bad.is_empty(), "{bad:?}");
 }
 
+/// A picture child that refuses (a read-time object) after a paragraph
+/// of its piece broken with font expansion, whose appends to the fonts'
+/// expansion lists it started with: it drops them with its table, and
+/// the empty control sequence that `\csname\endcsname` makes `\relax`
+/// afterwards is that name's, defined in the pieces after it, at one
+/// thread and at eight (a refused child kept them, and its publication
+/// put the empty name's field at a spill location for the thread:
+/// beamertheme-arguelles' `\pdfprotrudechars` made `\relax`).
+#[test]
+#[ignore = "heavy: the LaTeX format"]
+fn a_refused_picture_child_leaves_the_empty_name_its_own() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let name = "picrefuse";
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    for threads in [1usize, 8] {
+        let opts = Options {
+            threads: Some(threads),
+            ..pdf_opts(name, &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), &src);
+        let (_, log) = b.output();
+        assert!(
+            log.contains("[counts 4 5 6]"),
+            "-j {threads}: the registers past 255 the picture's paragraph set keep their values: {}",
+            log.lines()
+                .find(|l| l.contains("[counts"))
+                .unwrap_or("no message")
+        );
+        assert!(
+            log.contains("[counts 7 8 9]"),
+            "-j {threads}: the registers past 255 the paragraph set keep their values: {}",
+            log.lines()
+                .find(|l| l.contains("[counts"))
+                .unwrap_or("no message")
+        );
+        assert!(
+            log.contains("[empty defined]"),
+            "-j {threads}: the empty name is defined after \\csname\\endcsname, as TeX has it"
+        );
+    }
+}
+
+/// A picture after a page fired inside conditionals of its piece's own
+/// (`pdfdocs/picroutine.tex`: a heading's spacing and break inside
+/// `\ifnum`, the picture in the same expansion): the page's routine draws
+/// two pictures in the shipout hook, stepping the picture counter of `tikz`,
+/// and the piece goes on past the candidate with the routine's values put
+/// in force there. The picture child reads them as its parent holds them
+/// (it read the counter from before the routine: beautybook-en's
+/// `pgfid59` twice, its page 19 frame drawn from page 14's position). The
+/// PDF is pdfTeX's at -j1, -j4 and -j8.
+#[test]
+#[ignore = "heavy: the LaTeX format"]
+fn a_picture_after_a_page_fired_in_its_piece_sees_the_routines_values() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let name = "picroutine";
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+        .expect("the oracle");
+    for threads in [1usize, 4, 8] {
+        let opts = Options {
+            threads: Some(threads),
+            ..pdf_opts(name, &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), &src);
+        let (pdf, _) = b.output();
+        if let Some(d) = common::first_difference(&pdf, &want) {
+            panic!("{name} -j {threads}: pdf {d}");
+        }
+    }
+}
+
+/// A `\csname` built from a stepped counter taken as a macro's argument
+/// (`pdfdocs/dnamearg.tex`: an `edichokey` key with hyperref, each lead
+/// linked by `\hyperref[name]`, the name built from the couplet counter;
+/// hyperref's `\hyperref[x]` is `\expandafter\label@@hyperref\csname
+/// r@x\endcsname{x}`): the argument is the one control sequence, as TeX
+/// takes it. At -j4 the derived name's token was expanded in the
+/// argument, so `\label@@hyperref` got `\r@x`'s body: a hyper reference
+/// named by a page number undefined, the anchor's name typeset, the links
+/// lost (edichokey-ex in every -j4 build). The PDF is pdfTeX's at -j1, -j4 and -j8.
+#[test]
+fn a_name_built_from_a_counter_is_one_token_as_an_argument() {
+    let dir = common::fixtures().join("latex/pdfdocs");
+    let name = "dnamearg";
+    let src = common::read(&dir.join(format!("{name}.tex")));
+    let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
+        .expect("the oracle");
+    for threads in [1usize, 4, 8] {
+        let opts = Options {
+            threads: Some(threads),
+            fixpoint: true,
+            ..pdf_opts(name, &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), &src);
+        let (pdf, _) = b.output();
+        if let Some(d) = common::first_difference(&pdf, &want) {
+            panic!("{name} -j {threads}: pdf {d}");
+        }
+    }
+}
+
 /// The page layer's work, by the engine's counters, on floats2col (the
 /// document of [`latex_twocol_floats_runs`]: twocolumn, 194 routine
 /// fires, floats and marginpars whose routines hand back `\@freelist`,
@@ -794,9 +938,18 @@ fn floats2col_routines_run_once_per_fire() {
     let want = std::fs::read(common::fixtures().join(format!("latex/pdf/{name}.pdf")))
         .expect("the oracle");
     let mut bad = Vec::new();
-    for threads in [1u64, 8] {
+    // (`PHITEX_TEST_THREADS`, a measure: the thread counts, comma
+    // separated, each its build in this process in turn)
+    let counts: Vec<u64> = std::env::var("PHITEX_TEST_THREADS").map_or_else(
+        |_| vec![1, 8, 16],
+        |x| x.split(',').filter_map(|t| t.trim().parse().ok()).collect(),
+    );
+    for threads in counts {
+        // (`PHITEX_TEST_FIXPOINT=1`, a measure: the read-back files to
+        // their fixpoint, as the CLI builds)
         let opts = Options {
             threads: Some(usize::try_from(threads).unwrap_or(1)),
+            fixpoint: std::env::var("PHITEX_TEST_FIXPOINT").is_ok_and(|x| x == "1"),
             ..pdf_opts(name, &dir)
         };
         let b = common::build(opts, Some(&prelude(true)), &src);
@@ -818,8 +971,45 @@ fn floats2col_routines_run_once_per_fire() {
             runs * 10 <= fires * 11
         };
         if !ok {
+            // (why the nodes ran again, by operation and cause, most
+            // first: what a schedule that ran them too often read)
+            let mut why: std::collections::BTreeMap<(&str, &str), u64> =
+                std::collections::BTreeMap::new();
+            for (_, op, c) in &b.stats.reruns {
+                *why.entry((op, c.as_str())).or_default() += 1;
+            }
+            let mut why: Vec<_> = why.into_iter().collect();
+            why.sort_by_key(|e| std::cmp::Reverse(e.1));
+            let why: Vec<String> = why
+                .iter()
+                .take(40)
+                .map(|((op, c), n)| format!("{n} {op} {c}"))
+                .collect();
+            // (and the nodes run again most, with what they are)
+            let mut by_node: std::collections::BTreeMap<u64, Vec<&str>> =
+                std::collections::BTreeMap::new();
+            for (n, _, c) in &b.stats.reruns {
+                by_node.entry(*n).or_default().push(c.as_str());
+            }
+            let mut by_node: Vec<_> = by_node.into_iter().collect();
+            by_node.sort_by_key(|e| std::cmp::Reverse(e.1.len()));
+            let nodes: Vec<String> = by_node
+                .iter()
+                .take(12)
+                .map(|(n, cs)| {
+                    let mut d = b.describe_node(*n);
+                    d.truncate(d.char_indices().nth(300).map_or(d.len(), |(i, _)| i));
+                    let k = cs.len();
+                    let mut cs = cs.clone();
+                    cs.sort_unstable();
+                    cs.dedup();
+                    format!("node {n} ({k} reruns: {cs:?}): {d}")
+                })
+                .collect();
             bad.push(format!(
-                "-j {threads}: {runs} finisher runs for {fires} fires"
+                "-j {threads}: {runs} finisher runs for {fires} fires; reruns:\n{}\nnodes:\n{}",
+                why.join("\n"),
+                nodes.join("\n")
             ));
         }
     }
@@ -849,8 +1039,11 @@ fn latex_environments() {
     eprintln!(
         "envs: {own} paragraph nodes ({taken} paragraphs taken by another node's run outside a box), {regions} text nodes, {pars} paragraphs ({want} outside a box)"
     );
+    // (the count is the hints' own, a slice whose hint says it is a
+    // paragraph region: `PHITEX_HINTS=any` and `adversarial` give every
+    // node another hint on purpose, and only the output must not change)
     assert!(
-        own >= want && taken == 0,
+        std::env::var_os("PHITEX_HINTS").is_some() || (own >= want && taken == 0),
         "{own} paragraph nodes for {want} paragraphs outside a box, {taken} paragraphs taken by another node's run"
     );
     let new = quack(&src, "Item 3 of the list: the quick ");
@@ -1028,6 +1221,216 @@ fn latex_input_include() {
     let new = quack(&chap1, "Paragraph 5 of chapter one: the quick ");
     let before = b.pages();
     b.edit_file("chap1.tex", Some(new.as_bytes()));
+    std::fs::write(dir.join("chap1.tex"), &new).expect("write");
+    let cold = common::build(pdf_opts("inputs", &dir), Some(&prelude(true)), &src);
+    let _ = std::fs::write(dir.join("chap1.tex"), &chap1);
+    edit_check("inputs", &b, &cold, &before);
+}
+
+/// An `\input` file read inside a `TikZ` picture (the bayesnet example's
+/// figures), edited first thing after the cold build: the PDF is a cold
+/// build's of the edited file. The first push of the environment after
+/// the cold build differed from the last pushed by every file the
+/// provider had answered, more than 64, and was set whole, which re-asks
+/// no reader: the edit ran no node (accl 25876).
+#[test]
+fn latex_input_in_picture_first_edit() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-input-pic");
+    let _ = std::fs::create_dir_all(&dir);
+    let main = "\\documentclass{article}\n\\usepackage{tikz}\n\\begin{document}\nA figure.\n\n\\begin{tikzpicture}\n\\input{drawing}\n\\end{tikzpicture}\n\nAfter it.\n\\end{document}\n";
+    let drawing = "% the drawing\n\\node[draw] (a) {first words};\n\\node[draw] (b) at (3,0) {second words};\n\\draw (a) -- (b);\n";
+    std::fs::write(dir.join("inpic.tex"), main).expect("write");
+    std::fs::write(dir.join("drawing.tex"), drawing).expect("write");
+    let mut b = common::build(pdf_opts("inpic", &dir), Some(&prelude(true)), main);
+    let before = b.pages();
+    let new = drawing.replace("first words", "first changed words");
+    b.edit_file("drawing.tex", Some(new.as_bytes()));
+    assert!(b.stats.nodes_run > 0, "the edit of drawing.tex ran no node");
+    std::fs::write(dir.join("drawing.tex"), &new).expect("write");
+    let cold = common::build(pdf_opts("inpic", &dir), Some(&prelude(true)), main);
+    let _ = std::fs::write(dir.join("drawing.tex"), drawing);
+    assert_eq!(b.pages().len(), before.len(), "the page count moved");
+    if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+        panic!("the edit differs from a cold build: {d}");
+    }
+}
+
+/// A run again costs no more than its first run: a one-word edit of a
+/// paragraph holding a `TikZ` picture of many circles (the frontends'
+/// 12-line document: 16 s an edit for a 5.8 s cold build) makes fewer
+/// values than the cold build made. The edited node's run took a
+/// checkpoint of the picture's state every 600 commands, whatever it
+/// cost; a cold run spaces them by their cost (`resume::ck_gap`).
+#[test]
+fn latex_a_rerun_costs_no_more_than_its_first_run() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-rerun-cost");
+    let _ = std::fs::create_dir_all(&dir);
+    let src = "\\documentclass{article}\n\\usepackage{tikz}\n\\begin{document}\nMost edits change one paragraph.\n\\begin{tikzpicture}\\foreach \\i in {1,...,20}{\\foreach \\j in {1,...,30}{\\draw (\\i*0.3,\\j*0.2) circle (0.05);}}\\end{tikzpicture}\n\\end{document}\n";
+    std::fs::write(dir.join("rerun.tex"), src).expect("write");
+    let empty = {
+        let b = common::build(
+            pdf_opts("rerun", &dir),
+            Some(&prelude(true)),
+            "\\documentclass{article}\\begin{document}x\\end{document}\n",
+        );
+        b.stats.values_bytes
+    };
+    let mut b = common::build(pdf_opts("rerun", &dir), Some(&prelude(true)), src);
+    let cold = b.stats.values_bytes.saturating_sub(empty);
+    let before = b.stats.values_bytes;
+    let new = src.replace("Most edits", "Many edits");
+    b.edit(&new);
+    let edit = b.stats.values_bytes.saturating_sub(before);
+    eprintln!("values: cold {cold} bytes past an empty document's, the edit {edit} more");
+    assert!(b.stats.nodes_run > 0, "the edit ran nothing");
+    assert!(
+        edit <= cold,
+        "a one-word edit made {edit} bytes of values, its cold build {cold}"
+    );
+}
+
+/// Pictures in a paragraph are children of its run, after characters
+/// and after a display too (the frontends' document: its picture ran
+/// again at every word edit of its paragraph): a word edit before them,
+/// on their own line too (a typed word moves their bytes in the file),
+/// runs no picture again, and the PDF is a cold build's.
+#[test]
+fn latex_pictures_in_a_paragraph_are_children() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-par-pics");
+    let _ = std::fs::create_dir_all(&dir);
+    let src = "\\documentclass{article}\n\\usepackage{amsmath}\n\\usepackage{tikz}\n\\begin{document}\nSome words before it.\nMore words \\begin{tikzpicture}\\draw (0,0) circle (1);\\end{tikzpicture} and after it.\n\nA paragraph with a display, most edits change one paragraph.\n\\begin{equation} t_{edit} = t_{par} + t_{page} \\end{equation}\n\\begin{tikzpicture}\\foreach \\i in {1,...,5}{\\draw (\\i*0.3,0) circle (0.05);}\\end{tikzpicture}\nAnd words after the picture.\n\\end{document}\n";
+    std::fs::write(dir.join("parpics.tex"), src).expect("write");
+    let mut b = common::build(pdf_opts("parpics", &dir), Some(&prelude(true)), src);
+    let before = b.pages();
+    let cold_pics = common::runs_of(&b, "pic");
+    for (k, (a, z)) in [
+        ("Some words", "Some other words"),
+        ("More words", "More of the words"),
+        ("most edits", "many edits"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let new = src.replace(a, z);
+        b.edit(&new);
+        let pics = common::runs_of(&b, "pic");
+        let cold = common::build(pdf_opts("parpics", &dir), Some(&prelude(true)), &new);
+        // (with lists left open, `phitex_tex::boxscope_on`, a picture is
+        // no child: its statements are nodes; the PDF below is the check)
+        if !phitex_tex::boxscope_on() {
+            assert!(
+                cold_pics >= 2,
+                "the cold build placed {cold_pics} pictures as children"
+            );
+            assert_eq!(pics, 0, "edit {k}: {pics} pictures ran again");
+        }
+        assert_eq!(b.pages().len(), before.len());
+        if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+            panic!("edit {k} differs from a cold build: {d}");
+        }
+        b.edit(src);
+    }
+}
+
+/// A picture asked again for a read late in its run (the definition of
+/// `\mymark` before it deleted: the picture, in a figure of its own
+/// file, defines it at its end now, as a first use does; put back; its
+/// value changed and put back) runs again each time, and the PDF is a
+/// cold build's.
+#[test]
+fn latex_a_picture_asked_again_runs_again() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-pic-ck");
+    let _ = std::fs::create_dir_all(&dir);
+    let src = "\\documentclass{article}\n\\usepackage{tikz}\n\\begin{document}\nFirst words.\n\n\\gdef\\mymark{marked}Second words.\n\nThird words.\n\n\\input{picfig}\n\nLast words \\mymark.\n\\end{document}\n";
+    let fig = "\\begin{figure}\n\\centering\n\\begin{tikzpicture}\n\\foreach \\i in {1,...,40}{\\foreach \\j in {1,...,30}{\\draw (\\i*0.3,\\j*0.2) circle (0.05);}}\n\\node at (0,-1) {\\ifdefined\\mymark\\else\\gdef\\mymark{marked}\\fi\\mymark};\n\\end{tikzpicture}\n\\caption{A picture.}\n\\end{figure}\n";
+    std::fs::write(dir.join("picck.tex"), src).expect("write");
+    std::fs::write(dir.join("picfig.tex"), fig).expect("write");
+    let mut b = common::build(pdf_opts("picck", &dir), Some(&prelude(true)), src);
+    let before = b.pages();
+    let cold_pics = common::runs_of(&b, "pic");
+    // (a picture is no child with lists left open: the PDFs are the check)
+    let children = !phitex_tex::boxscope_on();
+    assert!(
+        !children || cold_pics >= 1,
+        "the cold build placed no picture as a child"
+    );
+    let gone = src.replace("\\gdef\\mymark{marked}", "");
+    let other = src.replace("\\gdef\\mymark{marked}", "\\gdef\\mymark{market}");
+    for (k, text) in [&gone, src, &other, src].into_iter().enumerate() {
+        b.edit(text);
+        let pics = common::runs_of(&b, "pic");
+        assert!(
+            !children || pics >= 1,
+            "edit {k}: the picture did not run again"
+        );
+        std::fs::write(dir.join("picck.tex"), text).expect("write");
+        let cold = common::build(pdf_opts("picck", &dir), Some(&prelude(true)), text);
+        assert_eq!(b.pages().len(), before.len());
+        if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+            panic!("edit {k} differs from a cold build: {d}");
+        }
+    }
+    let _ = std::fs::write(dir.join("picck.tex"), src);
+}
+
+/// Unchanged bytes change nothing (`r` in a watch: every file the build
+/// read staged again from disk, the main text sent again; an editor
+/// saving a file unchanged): with `pdfdocs/inputs.tex`, its cut
+/// `chap1.tex` and its other files staged again with the bytes they
+/// have, nothing is staged, the main text sent again runs no node and
+/// the PDF is the one before; the cut file given as an editor's buffer
+/// with its bytes too. A real edit of `chap1.tex` after them still
+/// equals a cold build.
+#[test]
+fn latex_same_bytes_restage_runs_nothing() {
+    let src_dir = common::fixtures().join("latex/pdfdocs");
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-same-bytes");
+    let _ = std::fs::create_dir_all(&dir);
+    for f in ["inputs.tex", "chap1.tex", "chap2.tex"] {
+        std::fs::copy(src_dir.join(f), dir.join(f)).expect("copy");
+    }
+    let src = common::read(&dir.join("inputs.tex"));
+    let (mut b, _) = cold_nodes("inputs", &dir, &src);
+    let pdf = b.output().0;
+    let names: Vec<String> = b.reads().into_iter().map(|(n, _)| n).collect();
+    assert!(
+        names.iter().any(|n| n.starts_with("chap1")),
+        "chap1 not among the files read: {names:?}"
+    );
+    // (every file read, as `r` stages them: the cut one included)
+    let mut staged = Vec::new();
+    for n in &names {
+        b.stage_file(n, None);
+        if b.absorb_pending() {
+            staged.push((n.clone(), b.stats.nodes_run));
+        }
+    }
+    assert!(
+        staged.is_empty(),
+        "a same-bytes restage of {} files staged a change: {staged:?} (file, nodes run)",
+        names.len()
+    );
+    b.edit(&src);
+    assert_eq!(
+        b.stats.nodes_run, 0,
+        "{} nodes run after a same-bytes restage and the same main text",
+        b.stats.nodes_run
+    );
+    assert!(b.output().0 == pdf, "the PDF changed with nothing changed");
+    // (the cut file as an editor's buffer, its bytes; then the main text)
+    let chap1 = common::read(&dir.join("chap1.tex"));
+    b.stage_file("chap1.tex", Some(chap1.as_bytes()));
+    assert!(
+        !b.absorb_pending(),
+        "chap1.tex's same bytes staged a change"
+    );
+    b.edit(&src);
+    assert_eq!(b.stats.nodes_run, 0, "{} nodes run", b.stats.nodes_run);
+    // (a real edit after them: as a cold build)
+    let new = quack(&chap1, "Paragraph 5 of chapter one: the quick ");
+    let before = b.pages();
+    b.edit_file("chap1.tex", Some(new.as_bytes()));
+    assert!(b.stats.nodes_run > 0, "the edit of chap1.tex ran nothing");
     std::fs::write(dir.join("chap1.tex"), &new).expect("write");
     let cold = common::build(pdf_opts("inputs", &dir), Some(&prelude(true)), &src);
     let _ = std::fs::write(dir.join("chap1.tex"), &chap1);
@@ -1242,6 +1645,8 @@ latexmk_tests! {
     latexmk_corpus_center_after_item_j8: "corpus-center-after-item", 8;
     latexmk_corpus_center_small_j1: "corpus-center-small", 1;
     latexmk_corpus_center_small_j8: "corpus-center-small", 8;
+    latexmk_corpus_footnote_split_marginpar_j1: "corpus-footnote-split-marginpar", 1;
+    latexmk_corpus_footnote_split_marginpar_j8: "corpus-footnote-split-marginpar", 8;
 }
 
 /// The paragraph after `\end{center}` edited (one word): the build equals
@@ -1502,6 +1907,120 @@ fn tool_warnings_are_diagnostics() {
     );
 }
 
+/// An error in the `.bbl` BibTeX made is placed at its line there, as
+/// pdflatex's log says it (`l.5`): the diagnostic's line was found in
+/// the file's text asked of the finder, which has no `.bbl` the build
+/// made, so every error in one was at line 1 (the Overleaf extension's
+/// "TeX capacity exceeded ... at paper.bbl:1", the error on line 16).
+#[test]
+fn an_error_in_the_bbl_is_at_its_line() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("bbl-error-line");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    std::fs::write(
+        dir.join("refs.bib"),
+        "@misc{x, author = {A. Author}, title = {Tea \\undefinedmacro time}, year = 2020}\n",
+    )
+    .expect("the database");
+    let src = "\\documentclass{article}\n\\begin{document}\nSee~\\cite{x}.\n\
+               \\bibliographystyle{plain}\n\\bibliography{refs}\n\\end{document}\n";
+    std::fs::write(dir.join("be.tex"), src).expect("the document");
+    let opts = Options {
+        fixpoint: true,
+        tool_finder: Some(common::tool_finder(&dir)),
+        ..pdf_opts("be", &dir)
+    };
+    let b = common::build(opts, Some(&prelude(true)), src);
+    let ds = b.diagnostics();
+    let d = ds
+        .iter()
+        .find(|d| d.message == "Undefined control sequence")
+        .unwrap_or_else(|| panic!("the error: {ds:#?}"));
+    assert!(d.file.ends_with("be.bbl"), "{d:?}");
+    assert_eq!(d.line, 5, "{d:?}");
+    assert!(d.context.starts_with("l.5 "), "{d:?}");
+}
+
+/// An error in an `\input` file after a series of edits of it is where
+/// a cold build of the last text places it (oracle/fixtures/latex/
+/// diagshift: five texts of the edit fuzz's two-column table document,
+/// the last with an extra `&` in a table's head). A run that reads on
+/// into the next piece's lines placed their errors by the running node's
+/// move since the edits, not by that piece's: the Overleaf extension's
+/// "Extra alignment tab" a line below its row, until a refresh.
+#[test]
+fn an_input_files_error_after_edits_is_where_a_cold_build_places_it() {
+    let fx = common::fixtures().join("latex/diagshift");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latex-diagshift");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("tex")).expect("a scratch directory");
+    let src = common::read(&fx.join("main.tex"));
+    std::fs::write(dir.join("main.tex"), &src).expect("the document");
+    let text = |k: u32| std::fs::read(fx.join(format!("s{k}.tex"))).expect("a text of the file");
+    std::fs::write(dir.join("tex/D-caching.tex"), text(30)).expect("the input file");
+    let errors = |b: &phitex_tex::Build| -> Vec<(String, usize, (usize, usize), String)> {
+        b.diagnostics()
+            .into_iter()
+            .filter(|d| d.severity == phitex_tex::Severity::Error)
+            .map(|d| (d.file, d.line, d.range, d.message))
+            .collect()
+    };
+    let mut b = common::build(pdf_opts("main", &dir), Some(&prelude(true)), &src);
+    for k in 31..=34 {
+        b.edit_file("tex/D-caching.tex", Some(&text(k)));
+    }
+    std::fs::write(dir.join("tex/D-caching.tex"), text(34)).expect("the input file");
+    let cold = common::build(pdf_opts("main", &dir), Some(&prelude(true)), &src);
+    let want = errors(&cold);
+    assert!(
+        want.iter()
+            .any(|e| e.3.starts_with("Extra alignment tab") && e.1 == 47),
+        "the cold build's error at line 47: {want:#?}"
+    );
+    assert_eq!(errors(&b), want, "the edits' errors, the cold build's");
+}
+
+/// The diagnostics of an `\input` file after an edit that adds a line
+/// before them and leaves the bytes before them as many (a word made a
+/// wider character: oracle/fixtures/latex/diagshift2, the edit fuzz's
+/// longtable document) are a cold build's: their lines, and the "on input
+/// line N" of LaTeX's warnings. The diagnostics kept from the last call
+/// were found by their entry, line text and byte, not their line's
+/// number, and stayed a line early.
+#[test]
+fn an_input_files_warnings_after_a_line_is_added_are_a_cold_builds() {
+    let fx = common::fixtures().join("latex/diagshift2");
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latex-diagshift2");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("tex")).expect("a scratch directory");
+    let src = common::read(&fx.join("main.tex"));
+    std::fs::write(dir.join("main.tex"), &src).expect("the document");
+    let text = |k: u32| std::fs::read(fx.join(format!("s{k}.tex"))).expect("a text of the file");
+    std::fs::write(dir.join("tex/D-caching.tex"), text(10)).expect("the input file");
+    let shown = |b: &phitex_tex::Build| -> Vec<(String, usize, String)> {
+        let mut ds: Vec<_> = b
+            .diagnostics()
+            .into_iter()
+            .filter(|d| d.file.ends_with("D-caching.tex"))
+            .map(|d| (d.file, d.line, d.message))
+            .collect();
+        ds.sort();
+        ds
+    };
+    let mut b = common::build(pdf_opts("main", &dir), Some(&prelude(true)), &src);
+    let _ = shown(&b);
+    b.edit_file("tex/D-caching.tex", Some(&text(11)));
+    std::fs::write(dir.join("tex/D-caching.tex"), text(11)).expect("the input file");
+    let cold = common::build(pdf_opts("main", &dir), Some(&prelude(true)), &src);
+    let want = shown(&cold);
+    assert!(
+        want.iter()
+            .any(|d| d.1 == 77 && d.2.contains("on input line 77")),
+        "the cold build's warning at line 77: {want:#?}"
+    );
+    assert_eq!(shown(&b), want, "the edit's diagnostics, the cold build's");
+}
+
 /// A measure: amsldoc (`bench/amsldoc`) built as latexmk would, then
 /// one sentence added to a paragraph (its lines re-broken): the nodes
 /// that ran again and why (`PHITEX_EDIT_TEXT`: `OLD=>NEW` instead).
@@ -1563,6 +2082,8 @@ fn inputlineno_in_a_resumed_piece_is_the_file_line_below_it() {
 }
 
 /// The native runner of `\write18`'s commands, as the CLI has it.
+/// (the tests use part of it: what only the CLI calls is not dead code)
+#[allow(dead_code)]
 #[path = "../../../cli/src/shell.rs"]
 mod process_hook;
 
@@ -1835,5 +2356,1443 @@ fn latex_aux_on_disk_outside_a_fixpoint() {
             log, &pages[0].1.1,
             "{name}: the log is the one built without the .aux"
         );
+    }
+}
+
+/// `lineno`'s numbered lines: its routine is fired at a special penalty
+/// (`\penalty-32000`) at every line, gives the lines back numbered and
+/// ships nothing; only an ordinary break's routine ships a page and steps
+/// `\c@page`. Its `.aux` lines (`\@LN`) read back run the pages a second
+/// round. A finisher of a line's fire is predicted to step no counter
+/// (`Finish::alike`: no relation learned for the operation from a
+/// shipping finisher's), and one past the loop's frontier waits its turn
+/// by place (`sched::sched_key`): the finishers run a few times each, not
+/// once for every finisher placed before them on their page (lineno's
+/// manual: 60 000 finisher runs for 2 900 fires, more than 600 s where
+/// pdflatex takes 4.4 s; 92 s after).
+#[test]
+fn lineno_numbered_lines_run_their_finishers_a_few_times() {
+    use std::fmt::Write as _;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lineno-lines");
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let mut src = String::from(
+        "\\documentclass{article}\n\\usepackage{lineno}\n\\linenumbers\n\\begin{document}\nSee line \\lineref{l:last} on page \\pageref{l:last}.\n\n",
+    );
+    for i in 0..60 {
+        let _ = write!(
+            src,
+            "Paragraph {i} of numbered lines, long enough to be set as three or four lines of the article class's text width, so that the pages fill and every line has its number.\n\n"
+        );
+    }
+    src.push_str("The last line.\\linelabel{l:last}\n\\end{document}\n");
+    for threads in [1, 4] {
+        let opts = Options {
+            threads: Some(threads),
+            fixpoint: true,
+            ..pdf_opts("lines", &dir)
+        };
+        let b = common::build(opts, Some(&prelude(true)), &src);
+        let pages = b.pages().len() as u64;
+        let fin = b.stats.placements_of("finish") as u64;
+        let runs = common::runs_of(&b, "finish");
+        eprintln!(
+            "-j{threads}: {pages} pages, {fin} finishers placed, {runs} finisher runs: {}",
+            report("lines", &b)
+        );
+        let errors: Vec<String> = b
+            .diagnostics()
+            .iter()
+            .filter(|d| d.severity == phitex_tex::Severity::Error)
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(pages >= 4, "a document of several pages: {pages}");
+        assert!(fin >= 150, "a finisher per numbered line: {fin}");
+        assert!(
+            runs <= 3 * fin,
+            "-j{threads}: {runs} finisher runs for {fin} finishers placed: {}",
+            report("lines", &b)
+        );
+    }
+}
+
+/// imakeidx's `\write18{makeindex ...}` at `\printindex` is a tool node
+/// reading the `.idx` stream before it, which the pages' finishers write
+/// (`\index` entries go out at `\shipout`). It runs at the committed
+/// frontier only, once a pass: run on each guess of the stream, it ran
+/// again at every page's finisher that committed before it (amsldoc's
+/// paragraph added at -j8: 20 runs, 162 ms). A paragraph added at the
+/// start runs it at most once in each of its passes, and the edited PDF equals a
+/// cold build's. At -j8.
+#[test]
+fn an_index_tool_node_runs_once_a_pass_after_an_edit() {
+    use std::fmt::Write as _;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/index-node");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |extra: &str| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\usepackage{imakeidx}\n\\makeindex\n\\begin{document}\n",
+        );
+        s.push_str(extra);
+        for k in 0..24 {
+            let _ = write!(
+                s,
+                "\\section{{Part {k}}}\nText of part {k}\\index{{word{k}}} and more\\index{{common}}.\n\n\\newpage\n"
+            );
+        }
+        s.push_str("\\printindex\n\\end{document}\n");
+        s
+    };
+    let opts = || Options {
+        fixpoint: true,
+        threads: Some(8),
+        tool_finder: Some(common::tool_finder(&dir)),
+        ..pdf_opts("idxnode", &dir)
+    };
+    let mut b = common::build(opts(), Some(&prelude(true)), &doc(""));
+    for extra in ["An added paragraph.\n\n", "Another paragraph, longer.\n\n"] {
+        b.edit(&doc(extra));
+        let runs = b
+            .stats
+            .reruns
+            .iter()
+            .filter(|(_, op, _)| *op == "toolnode")
+            .count();
+        let cold = common::build(opts(), Some(&prelude(true)), &doc(extra));
+        assert_eq!(
+            common::first_difference(&b.output().0, &cold.output().0),
+            None,
+            "{extra:?}"
+        );
+        // (an edit's passes: the text's, the `.idx`'s round, one to
+        // settle)
+        assert!(
+            runs <= 3,
+            "{extra:?}: the index's tool node ran {runs} times"
+        );
+    }
+}
+
+/// `\begin{document}` reads the `.aux` inside the `document`
+/// environment's group, hyperref's `\newlabel`s binding each label in
+/// that group before defining it globally, and goes on past a page
+/// candidate (a box the hooks put on the page). The continuation carried
+/// the label's global value in that slot, which the resume does not keep
+/// (it reads the engine's). The rest of `\begin{document}` is a resume. A heading's
+/// text edited changes one label's value: the reader of the `.aux` runs
+/// again and the label's readers do, not the rest, which reads the label
+/// from the engine and not from the continuation (on Grail it ran again
+/// for every heading edit, 144 ms). The edited PDF equals a cold build's.
+#[test]
+fn a_heading_edit_does_not_run_the_rest_of_begin_document_again() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/heading-rest");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |title: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\usepackage{{hyperref}}\n\\AtBeginDocument{{\\null\\par\\def\\hook{{x}}\\null\\par}}\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{sec:a}}\nSee section~\\ref{{sec:b}}.\n\n\
+             \\section{{{title}}}\\label{{sec:b}}\nText of the second section.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("headrest", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc("Second"));
+        for title in ["Xsecond", "Second part", "Second"] {
+            b.edit(&doc(title));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {title}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(title));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {title}"
+            );
+            // (the `.aux`'s reader, `\begin{document}`'s node, and its
+            // rest, a resume reading `cont:<reader>:<k>`)
+            let readers: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .filter(|(n, op, _)| {
+                    *op == "exec" && b.describe_node(*n).contains("\\begin{document}")
+                })
+                .map(|(n, _, _)| format!("Changed cont:{n}:"))
+                .collect();
+            assert!(
+                !r.iter()
+                    .any(|x| readers.iter().any(|c| x.contains(c.as_str()))),
+                "-j{threads} {title}: the rest after the .aux's reader ran again: {r:?}"
+            );
+        }
+    }
+}
+
+/// `\tableofcontents` reads its `.toc` through `\IfFileExists`, which
+/// is expl3's `\file_if_exist`: it expands `\pdffilesize` of the file and
+/// tests the digits only for blankness (`\if:w \scan_stop: #1
+/// \scan_stop:`, `\tl_if_blank`). The size is a symbol standing for a
+/// non-empty digit string, read for presence alone: a heading edit,
+/// which changes the `.toc`'s size, wakes no reader on the size
+/// (`wsize:`; amsldoc's TOC resume ran again on `wsize:amsldoc.toc` at
+/// every heading edit). The `.toc` going from absent to present (a
+/// `\tableofcontents` added) runs its reader, and every edited PDF
+/// equals a cold build's.
+#[test]
+fn a_heading_edit_reads_no_file_size() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/toc-size");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |toc: bool, title: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\begin{{document}}\n{}\
+             \\section{{Intro}}\nFirst section.\n\n\
+             \\section{{{title}}}\nText of the second section.\n\n\
+             \\section{{Last}}\nThe end.\n\\end{{document}}\n",
+            if toc { "\\tableofcontents\n" } else { "" }
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("tocsize", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(true, "Second"));
+        for (toc, title) in [
+            (true, "Xsecond"),
+            (true, "Second part of it"),
+            (false, "Second"),
+            (true, "Second"),
+        ] {
+            b.edit(&doc(toc, title));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {toc} {title}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(toc, title));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {toc} {title}"
+            );
+            assert!(
+                !r.iter()
+                    .any(|x| !x.starts_with("files") && x.contains("wsize:")),
+                "-j{threads} {toc} {title}: a reader ran again on a file's size: {r:?}"
+            );
+        }
+    }
+}
+
+/// `\pdffilesize` of a file the job writes and reads back is a symbol
+/// read for presence alone (docs/spec-relative-counters.md §2.4), and
+/// every use of it answers what TeX's digits answer: printed, as a
+/// number, `\if` and `\ifcat` against a digit and against a non-digit,
+/// an undelimited argument (its first digit, the rest left), kept by
+/// `\detokenize`, expl3's `\tl_if_blank` (`\use_none:n` then an empty
+/// test), `\ifx`. The file is absent, then of sizes with two digits
+/// and with one, and empty; each build's lines are what the digits give
+/// (`N=` the number read with `\count`), and equal a cold build's.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn a_file_size_symbol_answers_as_its_digits() {
+    let doc = |body: Option<&str>| {
+        let write = body.map_or_else(String::new, |b| {
+            format!("\\newwrite\\sizf\\immediate\\openout\\sizf=\\jobname.siz\n{}\\immediate\\closeout\\sizf\n", if b.is_empty() { String::new() } else { format!("\\immediate\\write\\sizf{{{b}}}\n") })
+        });
+        format!(
+            r"\def\size{{\pdffilesize{{\jobname.siz}}}}
+\count255=0\size\relax
+\immediate\write16{{N=\the\count255.}}
+\immediate\write16{{A=\size.}}
+\immediate\write16{{B=\if\relax\size\relax Y\else N\fi.}}
+\immediate\write16{{C=\ifcat 1\size Y\else N\fi.}}
+\immediate\write16{{D=\if 1\size Y\else N\fi.}}
+\def\first#1{{(#1)}}
+\edef\sz{{\size}}
+\immediate\write16{{E=\expandafter\first\sz!.}}
+\immediate\write16{{F=\detokenize\expandafter{{\sz}}.}}
+\def\usenone#1{{}}
+\def\ifemptyo#1{{\if\relax\detokenize\expandafter{{#1}}\relax}}
+\def\gtest#1{{\immediate\write16{{G=\ifemptyo{{\usenone#1?}}Y\else N\fi.}}}}
+\expandafter\gtest\expandafter{{\sz}}
+\edef\kept{{\size}}
+\immediate\write16{{H=\ifnum0\kept>9 Y\else N\fi.}}
+\immediate\write16{{I=\expandafter\ifx\sz\relax Y\else N\fi.}}
+\immediate\write16{{J=\if\relax\kept\relax Y\else N\fi.}}
+Text.
+{write}\end{{document}}
+"
+        )
+    };
+    // (what TeX writes for a size of `n`, none where absent)
+    let want = |n: Option<u64>| -> Vec<String> {
+        let d = n.map_or_else(String::new, |n| n.to_string());
+        let (h, t) = if d.is_empty() {
+            ("", "")
+        } else {
+            d.split_at(1)
+        };
+        let yn = |b: bool| if b { "Y" } else { "N" }.to_owned();
+        // (`\ifx` of the first two digits, or of the digit and `\relax`;
+        // absent: `\relax` and `Y`)
+        let i = if d.len() >= 2 && d.as_bytes()[0] == d.as_bytes()[1] {
+            format!("{}\\relax Y", &d[2..])
+        } else {
+            "N".to_owned()
+        };
+        vec![
+            format!("N={}.", n.unwrap_or(0)),
+            format!("A={d}."),
+            format!("B={}.", yn(d.is_empty())),
+            // (`\ifcat 1` against the first digit: true, the rest then
+            // `Y`; absent: against `Y`, a letter)
+            format!(
+                "C={}.",
+                if d.is_empty() {
+                    "N".to_owned()
+                } else {
+                    format!("{t}Y")
+                }
+            ),
+            format!(
+                "D={}.",
+                if h == "1" {
+                    format!("{t}Y")
+                } else {
+                    "N".to_owned()
+                }
+            ),
+            if d.is_empty() {
+                "E=(!).".to_owned()
+            } else {
+                format!("E=({h}){t}!.")
+            },
+            format!("F={d}."),
+            format!("G={}.", yn(d.is_empty())),
+            format!("H={}.", yn(n.unwrap_or(0) > 9)),
+            format!("I={i}."),
+            format!("J={}.", yn(d.is_empty())),
+        ]
+    };
+    let lines = |log: &str| -> Vec<String> {
+        log.lines()
+            .filter(|l| l.len() > 1 && l.as_bytes()[1] == b'=' && l.ends_with('.'))
+            .map(str::to_owned)
+            .collect()
+    };
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/size-symbol");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("sizesym", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(None));
+        // (absent: a cold build that writes no such file; a build after
+        // one that wrote it finds what that wrote, as TeX does)
+        assert_eq!(lines(&b.output().1), want(None), "-j{threads}: absent");
+        for body in ["abcdefghijklm", "ab", "", "abcdefghij"] {
+            let body = Some(body);
+            b.edit(&doc(body));
+            let got = lines(&b.output().1);
+            let n = got
+                .first()
+                .and_then(|l| l.strip_prefix("N=")?.strip_suffix('.')?.parse::<u64>().ok());
+            let w = want(n);
+            assert_eq!(got, w, "-j{threads} {body:?}: the size's uses");
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(body));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {body:?}: edit differs from cold"
+            );
+            assert_eq!(
+                lines(&cold.output().1),
+                got,
+                "-j{threads} {body:?}: cold's lines"
+            );
+        }
+    }
+}
+
+/// A LaTeX document of several pages with a table of contents and
+/// citations (BibTeX), built to its fixpoint; a heading edited: the
+/// `.toc` read back moves the first page, so the page loop's first node
+/// folds again from a moved start, and its rests fold again while the
+/// pieces after them are holes. A rest whose start is not decided yet,
+/// or found stale, waits with what it made standing
+/// (`pages::pageloop`, `Run::wait_keeping`): no loop node and no finisher
+/// is made anew (on Grail every rest and finisher after the first pages
+/// was, each \cite edit, accl 23278, mc 78930: 51 finishers made anew and
+/// their routines run, 4.1 s of a 6.5 s edit), and the edited build equals
+/// a cold build of the edited text, at one and at eight threads.
+#[test]
+fn a_toc_edit_keeps_every_rest_and_finisher() {
+    let fx = common::fixtures().join("latexmk").join("bibtex");
+    let mut src = String::from(
+        "\\documentclass{article}\n\\begin{document}\n\\tableofcontents\n\\clearpage\n",
+    );
+    for s in 0..12 {
+        let _ = std::fmt::Write::write_fmt(
+            &mut src,
+            format_args!("\\section{{Section number {s}}}\\label{{s{s}}}\n"),
+        );
+        for p in 0..6 {
+            let _ = std::fmt::Write::write_fmt(
+                &mut src,
+                format_args!(
+                    "Paragraph {p} of section {s}, long enough to make a few lines of text in the article class, with a citation~\\cite{{{}}} and a reference to section~\\ref{{s{}}} on page~\\pageref{{s{}}}, so that the pages fill.\n\n",
+                    ["knuth84", "lamport94", "mittelbach04"][(s + p) % 3],
+                    (s + 5) % 12,
+                    (s + 7) % 12
+                ),
+            );
+        }
+    }
+    src.push_str("\\bibliographystyle{plain}\n\\bibliography{refs}\n\\end{document}\n");
+    let edited = src.replacen("\\section{Section number 3}", "\\section{Section number three, a longer title that takes two lines in the table of contents and in the text}", 1);
+    assert_ne!(edited, src);
+    for threads in [1, 8] {
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("toc-edit-j{threads}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        std::fs::copy(fx.join("refs.bib"), dir.join("refs.bib")).expect("the database");
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            tool_finder: Some(common::tool_finder(&dir)),
+            ..pdf_opts("tocedit", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &src);
+        let pages = b.pages().len();
+        assert!(pages >= 6, "-j{threads}: several pages: {pages}");
+        let r = common::rebuild(&mut b, &edited);
+        eprintln!(
+            "-j{threads} toc edit: {} pages, loop nodes made {} run {}, finishers made {} run {}, {} runs: {r:?}",
+            b.pages().len(),
+            r.placements_made("pages"),
+            r.runs_by_op
+                .iter()
+                .find(|x| x.0 == "pages")
+                .map_or(0, |x| x.1),
+            r.placements_made("finish"),
+            r.runs_by_op
+                .iter()
+                .find(|x| x.0 == "finish")
+                .map_or(0, |x| x.1),
+            r.runs
+        );
+        let cdir = dir.join("cold");
+        std::fs::create_dir_all(&cdir).expect("a scratch directory");
+        std::fs::copy(fx.join("refs.bib"), cdir.join("refs.bib")).expect("the database");
+        let cold = common::build(
+            Options {
+                fixpoint: true,
+                threads: Some(threads),
+                tool_finder: Some(common::tool_finder(&cdir)),
+                ..pdf_opts("tocedit", &cdir)
+            },
+            Some(&prelude(true)),
+            &edited,
+        );
+        if let Some(d) = common::first_difference(&b.output().0, &cold.output().0) {
+            panic!("-j{threads}: the edit differs from a cold build: {d}");
+        }
+        let new_pages = b.pages().len().saturating_sub(pages);
+        assert_eq!(
+            r.placements_made("pages"),
+            new_pages,
+            "-j{threads}: no loop node made anew but for a new page: {r:?}"
+        );
+        assert!(
+            r.placements_made("finish") <= new_pages,
+            "-j{threads}: no finisher made anew but for a new page: {r:?}"
+        );
+    }
+}
+
+/// The `.aux` hyperref's kind of package writes: `\providecommand` lines,
+/// each of which goes through `\def`'s body and skipped text naming
+/// `\l@ngrel@x` and `\reserved@c`, which the lines before it define. Those
+/// looks ask only whether the name is `#` or a conditional, so the file stays
+/// read back per field, and a heading's new `.aux` line runs no reader of the
+/// file's text. A line before it that does make such a name a conditional
+/// makes it the text (tested against cold).
+#[test]
+fn providecommand_lines_keep_the_aux_read_back_per_field() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/aux-provide");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |title: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\\AtBeginDocument{{\\if@filesw\
+             \\immediate\\write\\@auxout{{\\string\\providecommand\\string\\aone[1]{{}}}}\
+             \\immediate\\write\\@auxout{{\\string\\providecommand\\string\\atwo[1]{{}}}}\
+             \\immediate\\write\\@auxout{{\\string\\providecommand\\string\\athree[2]{{}}}}\\fi}}\n\
+             \\makeatother\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{a}}\nFirst, see section~\\ref{{b}}.\n\n\
+             \\section{{{title}}}\\label{{b}}\nText of the second section.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("auxprovide", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc("Second"));
+        for title in ["Xsecond", "Second part"] {
+            b.edit(&doc(title));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(title));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {title}"
+            );
+            assert!(
+                !r.iter()
+                    .any(|x| x.contains("wunit:") || x.contains("wfile:")),
+                "-j{threads} {title}: a reader of the .aux's text ran again: {r:?}"
+            );
+        }
+    }
+}
+
+/// A file the job writes and reads back itself (a listing's temporary, as
+/// tcolorbox makes for every example) is read from that file's own stream:
+/// a heading's edit moves the `.aux`'s, and no such reader runs again. All
+/// of `streams` was read: the 306-page circuitikz manual's heading edit
+/// re-ran 960 examples on it, 94 s.
+#[test]
+fn a_file_read_back_by_its_writer_reads_its_own_stream_alone() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/own-stream");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |title: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\newwrite\\w\n\\begin{{document}}\n\
+             \\tableofcontents\n\\section{{{title}}}\nText of the section.\n\n\\newpage\n\
+             Before the listing.\n\n\
+             \\immediate\\openout\\w=ex.tmp \\immediate\\write\\w{{Written and read.}}\
+             \\immediate\\closeout\\w \\input{{ex.tmp}}\n\n\
+             After the listing.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("ownstream", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc("First"));
+        for title in ["Xfirst", "First part of it", "First"] {
+            b.edit(&doc(title));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(title));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {title}"
+            );
+            assert!(
+                !r.iter().any(|x| x.contains("Range streams")),
+                "-j{threads} {title}: a reader ran again on all the streams: {r:?}"
+            );
+        }
+    }
+}
+
+/// A box's report in the log names the lines of its paragraph, and an
+/// edit above moves them: the report's number is made when the log is laid
+/// out, so the paragraph does not run again (the 306-page circuitikz
+/// manual: a paragraph added near the start re-ran 133 pieces with such a
+/// report, 3.6 s), and the log still says what a whole build's does.
+#[test]
+fn a_box_report_does_not_tie_its_paragraph_to_the_lines_above() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/report-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |above: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\begin{{document}}\n\
+             First paragraph.\n{above}\n\
+             \\newpage\n\
+             Another paragraph.\n\n\
+             \\hbox to 10pt{{Far too wide for the box it is set in.}}\n\n\
+             \\parbox{{5pt}}{{Words\nunderfullwordstoolongforitswidth}}\n\n\
+             The end.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("reportlines", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(""));
+        for above in [
+            "One line more.\n",
+            "Two lines\nmore here.\n\nAnd a paragraph.\n",
+            "",
+        ] {
+            b.edit(&doc(above));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(above));
+            let (mine, want) = (b.output(), cold.output());
+            assert_eq!(
+                common::first_difference(&mine.0, &want.0),
+                None,
+                "-j{threads} {above:?}"
+            );
+            assert_eq!(mine.1, want.1, "-j{threads} {above:?}: the log");
+            assert!(
+                mine.1.contains("at lines") || mine.1.contains("detected at line"),
+                "{}",
+                mine.1
+            );
+            assert!(
+                !r.iter()
+                    .any(|x| x.contains("wide") || x.contains("underfullwords")),
+                "-j{threads} {above:?}: a piece with a report ran again: {r:?}"
+            );
+        }
+    }
+}
+
+/// A message written to the log says "on input line" (`\PackageInfo`,
+/// `\on@line`): its number is made when the log is laid out, so a line added
+/// above does not run the piece again, and the log still says what a whole
+/// build's does. A number that goes anywhere else in such a line's expansion
+/// (a comparison, a file) is read as ever.
+#[test]
+fn a_message_on_a_line_does_not_tie_its_paragraph_to_the_lines_above() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/message-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |above: &str, body: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\\begin{{document}}\n\
+             First paragraph.\n{above}\n\
+             \\newpage\n\
+             Another paragraph.\n\n\
+             {body}\n\n\
+             The end.\n\\end{{document}}\n"
+        )
+    };
+    let quiet = "\\PackageInfo{mine}{A message\\MessageBreak over lines}\n\
+                 A paragraph.\\immediate\\write-1{twice \\the\\inputlineno, \\the\\inputlineno}\n\n\
+                 \\immediate\\write\\@unused{Direct\\on@line.}";
+    // (each of these must see the digits: its result shows them)
+    let digits = "\\immediate\\write-1{\\ifnum\\the\\inputlineno>5 past\\else before\\fi}\n\
+                  \\immediate\\write-1{\\pdfstrcmp{\\the\\inputlineno}{9}}\n\
+                  \\newwrite\\f\\immediate\\openout\\f=\\jobname.lines\n\
+                  \\immediate\\write\\f{in a file \\the\\inputlineno}\\immediate\\closeout\\f\n\
+                  \\def\\m{\\the\\inputlineno}\\immediate\\write-1{through \\m}\n\
+                  \\edef\\n{\\the\\inputlineno}\\immediate\\write-1{kept \\n}\n\
+                  Page \\the\\inputlineno.";
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("messagelines", &dir)
+        };
+        for body in [quiet, digits] {
+            let mut b = common::build(opts(), Some(&prelude(true)), &doc("", body));
+            for above in [
+                "One line more.\n",
+                "Two lines\nmore here.\n\nA paragraph.\n",
+                "",
+            ] {
+                b.edit(&doc(above, body));
+                let r: Vec<String> = b
+                    .stats
+                    .reruns
+                    .iter()
+                    .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                    .collect();
+                let cold = common::build(opts(), Some(&prelude(true)), &doc(above, body));
+                let (mine, want) = (b.output(), cold.output());
+                assert_eq!(
+                    common::first_difference(&mine.0, &want.0),
+                    None,
+                    "-j{threads} {above:?}"
+                );
+                assert_eq!(mine.1, want.1, "-j{threads} {above:?}: the log");
+                if body == quiet {
+                    assert!(mine.1.contains("on input line"), "{}", mine.1);
+                    assert!(
+                        !r.iter()
+                            .any(|x| x.contains("PackageInfo") || x.contains("A paragraph")),
+                        "-j{threads} {above:?}: {r:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The pieces of a file `\input` read their lines from where the file's
+/// text puts them, as the document's own nodes do: a box's report in one
+/// does not tie it to the lines above it in the file, and a number read
+/// from it is the line in the file at each of its reads.
+#[test]
+fn a_piece_of_an_input_file_has_its_lines_given() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/input-lines");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let part = |above: &str| {
+        format!(
+            "First paragraph.\n{above}\n\
+             \\newpage\n\
+             Another paragraph.\n\n\
+             \\hbox to 10pt{{Far too wide for the box it is set in.}}\n\n\
+             \\parbox{{5pt}}{{Words\nunderfullwordstoolongforitswidth}}\n\n\
+             Numbered \\here\\typeout{{numbered \\here}}.\n\n\
+             The end.\n"
+        )
+    };
+    // (a file that names `\\inputlineno` itself is read whole, not cut:
+    // the number read through a macro)
+    let doc = "\\documentclass{article}\n\\newcommand\\here{\\the\\inputlineno}\n\\begin{document}\n\\input{part}\n\n\
+               Between the two.\n\n\\input{part}\n\\end{document}\n";
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("inputlines", &dir)
+        };
+        std::fs::write(dir.join("part.tex"), part("")).expect("the part");
+        let mut b = common::build(opts(), Some(&prelude(true)), doc);
+        for above in [
+            "One line more.\n",
+            "Two lines\nmore here.\n\nAnd a paragraph.\n",
+            "",
+        ] {
+            let text = part(above);
+            b.edit_file("part.tex", Some(text.as_bytes()));
+            std::fs::write(dir.join("part.tex"), &text).expect("the part");
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            let cold = common::build(opts(), Some(&prelude(true)), doc);
+            let (mine, want) = (b.output(), cold.output());
+            assert_eq!(
+                common::first_difference(&mine.0, &want.0),
+                None,
+                "-j{threads} {above:?}"
+            );
+            assert_eq!(mine.1, want.1, "-j{threads} {above:?}: the log");
+            let line = 1 + text
+                .lines()
+                .position(|l| l.contains("Numbered"))
+                .expect("the line");
+            let said = format!("numbered {line}\n");
+            assert_eq!(
+                mine.1.matches(&said).count(),
+                2,
+                "-j{threads} {above:?}: {said:?} in {}",
+                mine.1
+            );
+            assert!(
+                !r.iter()
+                    .any(|x| x.contains("wide") || x.contains("underfullwords")),
+                "-j{threads} {above:?}: a piece with a report ran again: {r:?}"
+            );
+        }
+    }
+}
+
+/// LaTeX's warnings (an undefined `\ref` or `\cite`, a font shape
+/// substituted) are warning diagnostics at the command that raised them,
+/// the command with its argument the culprit, so a viewer underlines it;
+/// the rerun warning at `\end{document}`, which names nothing, has no
+/// culprit. The output is not changed by them.
+#[test]
+fn latex_warnings_are_diagnostics() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latex-warnings");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let src = "\\documentclass{article}\n\\begin{document}\n\
+               See \\ref{nosuchlabel} and \\cite[p.~3]{nosuchkey} here.\n\n\
+               Shape {\\fontshape{sc}\\bfseries bold small caps} here.\n\
+               \\end{document}\n";
+    std::fs::write(dir.join("lw.tex"), src).expect("the document");
+    let b = common::build(pdf_opts("lw", &dir), Some(&prelude(true)), src);
+    let ds = b.diagnostics();
+    for d in &ds {
+        eprintln!("{d:?}");
+    }
+    let at = |needle: &str| {
+        let d = ds
+            .iter()
+            .find(|d| d.message.contains(needle))
+            .unwrap_or_else(|| panic!("no diagnostic saying {needle:?}: {ds:#?}"));
+        assert_eq!(d.severity, phitex_tex::Severity::Warning, "{d:?}");
+        (d.line, &src[d.range.0..d.range.1], d.help.clone())
+    };
+    let r = at("Reference `nosuchlabel'");
+    assert_eq!((r.0, r.1), (3, "\\ref{nosuchlabel}"));
+    assert_eq!(at("Citation `nosuchkey'").1, "\\cite[p.~3]{nosuchkey}");
+    let (line, culprit, help) = at("Font shape `OT1/cmr/bx/sc' undefined");
+    assert_eq!((line, culprit), (5, "\\bfseries"));
+    assert!(
+        help.as_deref()
+            .is_some_and(|h| h.contains("using `OT1/cmr/bx/n' instead")),
+        "{help:?}"
+    );
+    let rerun = at("There were undefined references");
+    assert_eq!(rerun.1, "");
+    assert!(
+        ds.iter().all(|d| d.severity != phitex_tex::Severity::Error),
+        "{ds:#?}"
+    );
+}
+
+/// A file `\input` names and the run cannot find: LaTeX's error, given
+/// after the stop it ends in (`why_read_stopped`), has the `\input` with
+/// its argument as its culprit.
+#[test]
+fn a_missing_files_input_is_the_culprit() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latex-missing-file");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let src = "\\documentclass{article}\n\\begin{document}\n\
+               Include \\input{nosuchfile} here.\n\\end{document}\n";
+    std::fs::write(dir.join("mf.tex"), src).expect("the document");
+    let b = common::build(pdf_opts("mf", &dir), Some(&prelude(true)), src);
+    let ds = b.diagnostics();
+    for d in &ds {
+        eprintln!("{d:?}");
+    }
+    let d = ds
+        .iter()
+        .find(|d| d.message.contains("nosuchfile.tex' not found"))
+        .unwrap_or_else(|| panic!("no diagnostic naming the file: {ds:#?}"));
+    assert_eq!(d.severity, phitex_tex::Severity::Error);
+    assert_eq!(
+        (d.line, &src[d.range.0..d.range.1]),
+        (3, "\\input{nosuchfile}")
+    );
+}
+
+/// A `\label` added to a paragraph adds a key to the `.aux` the
+/// `\begin{document}` run reads back per field: that run reads the keys
+/// it looks up through the read-back's child (docs/spec-readback-child.md),
+/// not the key set, so it does not run again; a `\ref` to the new label
+/// finds it, and every edited PDF equals a cold build's.
+#[test]
+fn a_new_label_leaves_the_read_back_run_standing() {
+    use std::fmt::Write as _;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rb-label");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    // (pages of text between the start and the end: `\\begin{document}`'s
+    // run is not the end's, whose `\\@testdef`s compare every label)
+    let filler: String = (0..40).fold(String::new(), |mut s, i| {
+        let _ = write!(
+            s,
+            "Paragraph {i} of filler, long enough to make a line or two when set in the \
+             article class's ten point roman, and a few words more.\n\n"
+        );
+        s
+    });
+    let doc = |extra: &str, re: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\usepackage{{hyperref}}\n\
+             \\newcommand\\sect[1]{{\\section{{#1}}}}\n\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{sec:intro}}\nFirst section, see \\ref{{sec:last}}.\n\n\
+             \\section{{Middle}}\nText of the second section.{extra}\n\n{filler}\
+             \\section{{Last}}\\label{{sec:last}}\nThe end{re}.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("rblabel", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc("", ""));
+        let mut prev = "";
+        for (extra, re) in [
+            ("\\label{new}", ""),
+            ("\\label{new}", ", see \\ref{new}"),
+            ("", ""),
+            ("\\label{newer}", ""),
+        ] {
+            b.edit(&doc(extra, re));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {extra:?} {re:?}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(extra, re));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {extra:?} {re:?}"
+            );
+            // (the `\\begin{document}` run reads the keys it uses;
+            // `\\enddocument`'s piece compares every label, `\\@testdef`,
+            // so reads the key set, as TeX's does: one run at most)
+            let mut on_keys: Vec<&str> = r
+                .iter()
+                .filter(|x| {
+                    !x.starts_with("readback") && !x.starts_with("files") && x.contains("wkeys:")
+                })
+                .filter_map(|x| x.rsplit_once(" [").map(|(_, n)| n))
+                .collect();
+            on_keys.sort_unstable();
+            on_keys.dedup();
+            assert!(
+                on_keys.len() <= 1,
+                "-j{threads} {extra:?} {re:?}: the document's start read the key set again: {r:?}"
+            );
+            // (the read-back's child answers for the keys: a key added or
+            // gone runs it)
+            if extra != prev {
+                assert!(
+                    r.iter().any(|x| x.starts_with("readback")),
+                    "-j{threads} {extra:?} {re:?}: no read-back child ran: {r:?}"
+                );
+            }
+            prev = extra;
+        }
+    }
+}
+
+/// `\begin{document}`'s hooks define a name the `.aux` defines too, after
+/// the read-back point (biblatex's own names at its `\begin{document}`):
+/// the read-back's definition is made there from the child's output, then
+/// the hook's, as the inline read-back leaves them. The pass was refused
+/// and made again inline, which read the key set whole: every new
+/// `\label` ran `\begin{document}` again (biblatex's example, label 119 ms
+/// to 178 ms with the `.aux` read per field, mc 80723). It stands, the
+/// name's value is the hook's, and every edited PDF equals a cold build's.
+#[test]
+fn a_name_defined_after_the_read_back_point_keeps_the_child() {
+    use std::fmt::Write as _;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rb-defafter");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let filler: String = (0..40).fold(String::new(), |mut s, i| {
+        let _ = write!(
+            s,
+            "Paragraph {i} of filler, long enough to make a line or two when set in the \
+             article class's ten point roman, and a few words more.\n\n"
+        );
+        s
+    });
+    let doc = |extra: &str| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\
+             \\AtBeginDocument{{\\gdef\\rbkey{{hook}}\\global\\let\\rbwas\\rbkeyprev}}\n\
+             \\AtEndDocument{{\\immediate\\write\\@auxout{{\\gdef\\string\\rbkey{{aux}}\\gdef\\string\\rbkeyprev{{prev}}}}}}\n\
+             \\makeatother\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{sec:intro}}\nKey \\rbkey, was \\ifdefined\\rbwas\\rbwas\\else none\\fi.\n\n\
+             \\section{{Middle}}\nText of the second section.{extra}\n\n{filler}\
+             \\section{{Last}}\\label{{sec:last}}\nThe end, see \\ref{{sec:intro}}.\n\\end{{document}}\n"
+        )
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("rbdefafter", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(""));
+        for extra in ["\\label{new}", "", "\\label{newer}"] {
+            b.edit(&doc(extra));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} {extra:?}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(extra));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} {extra:?}"
+            );
+            let mut on_keys: Vec<&str> = r
+                .iter()
+                .filter(|x| {
+                    !x.starts_with("readback") && !x.starts_with("files") && x.contains("wkeys:")
+                })
+                .filter_map(|x| x.rsplit_once(" [").map(|(_, n)| n))
+                .collect();
+            on_keys.sort_unstable();
+            on_keys.dedup();
+            assert!(
+                on_keys.len() <= 1,
+                "-j{threads} {extra:?}: the document's start read the key set again: {r:?}"
+            );
+        }
+    }
+}
+
+/// The `.aux` sets a switch globally (KOMA-Script's
+/// `\global\csname @altsecnumformattrue\endcsname`, written where an
+/// appendix's numbers are letters) and a `\begin{document}` hook sets it
+/// back locally (KOMA's `numbers=noenddot` hook, `\@altsecnumformatfalse`),
+/// in the document's group: the hook's value stands, as with no such
+/// line. The run's local value equals the one it read before the
+/// read-back, so it published nothing, and the read-back child defined
+/// the `.aux`'s value globally after it: every section number in the
+/// biblatex manual's contents got KOMA's end dot, its `.aux` widths 2.4pt
+/// more (accl 25680).
+#[test]
+fn a_hook_setting_back_what_the_aux_set_keeps_its_value() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rb-setback");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |line: bool| {
+        format!(
+            "\\documentclass{{article}}\n\\makeatletter\n\\newif\\if@tswitch\n\
+             \\AtBeginDocument{{\\@tswitchfalse}}\n{}\
+             \\makeatother\n\\begin{{document}}\n\
+             \\section{{Intro}}\\label{{sec:intro}}\nText of the first section.\n\n\
+             \\makeatletter Switch \\if@tswitch on\\else off\\fi.\\makeatother\n\n\
+             \\section{{Last}}\nThe end, see \\ref{{sec:intro}}.\n\\end{{document}}\n",
+            if line {
+                "\\AtEndDocument{\\immediate\\write\\@auxout{\\global\\string\\csname\\space @tswitchtrue\\string\\endcsname}}\n"
+            } else {
+                ""
+            }
+        )
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("rbsetback", &dir)
+        };
+        let with = common::build(opts(), Some(&prelude(true)), &doc(true));
+        let without = common::build(opts(), Some(&prelude(true)), &doc(false));
+        assert_eq!(
+            common::first_difference(&with.output().0, &without.output().0),
+            None,
+            "-j{threads}: the .aux's switch outlived the hook's"
+        );
+    }
+}
+
+/// A long `\begin{document}` run that defines a name the `.aux` defines,
+/// after the read-back point (uspace's and `ClassicThesis`'s `\@gtempa`;
+/// such a pass was once refused and made again inline), in a round whose
+/// `.aux` changed: the run's own checks while it runs read the output of
+/// its read-back child by the placement's key, not the last run's
+/// placement at the same index (a page's node there after a pass that
+/// read back inline). Read by the index, the read moved at every check,
+/// the run stopped each time and never committed, and its child never
+/// ran: no progress (dev 1fa65f142's revert, gate run 41954286956).
+#[test]
+fn a_long_run_refusing_its_read_back_child_ends() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/rb-long");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    // (`\rbseen` is 1 the first round, 2 once `\rbprev` came back: the
+    // `.aux` changes once more after its first read-back; the hook defines
+    // `\rbkey`, which the `.aux` defines too, after the read-back point,
+    // then works long enough for the run to check its reads)
+    let doc = "\\documentclass{article}\n\\makeatletter\n\
+         \\AtBeginDocument{\\gdef\\rbkey{run}\\count@\\z@\
+         \\@whilenum\\count@<120000\\do{\\advance\\count@\\@ne\\edef\\rbtmp{\\the\\count@}}}\n\
+         \\AtEndDocument{\\immediate\\write\\@auxout{\\gdef\\string\\rbkey{aux}\
+         \\gdef\\string\\rbprev{}\\gdef\\string\\rbseen{\\ifdefined\\rbprev 2\\else 1\\fi}}}\n\
+         \\makeatother\n\\begin{document}\nSeen \\ifdefined\\rbseen\\rbseen\\else 0\\fi, key \\rbkey.\n\\end{document}\n";
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("rblong", &dir)
+        };
+        let b = common::build(opts(), Some(&prelude(true)), doc);
+        let (pdf, log) = b.output();
+        assert!(
+            !pdf.is_empty(),
+            "-j{threads}: a PDF: {}",
+            common::log_excerpt(&log)
+        );
+        assert!(
+            !log.contains("no progress"),
+            "-j{threads}: {}",
+            common::log_excerpt(&log)
+        );
+    }
+}
+
+/// showexpl's code examples under hyperref (the circuitikz manual's
+/// shape): each `LTXexample` writes its code to `\jobname.tmp` and reads
+/// it back, and after that its caption step's `\hyper@makecurrent`
+/// `\let`s `\HyperLocalCurrentHref`, which the last heading set, never
+/// looking at it. A section added before them renames every later
+/// heading's anchor; the examples' products do not change, so none may
+/// run again on that field. Each did, whole: the value its `\let`
+/// replaced was read to keep it for the lines written to the file later
+/// (`Run::note_pre`); now it is kept unseen, an alias of the value
+/// reaching the run. In the manual, 282 such runs, 24.9 s of the edit's
+/// 109 s of runs at -j8 (mc 80209, the read found by `PHITEX_LOAD_TRACE`
+/// in mc 80218 and 80224). The edited PDF equals a cold build's.
+#[test]
+fn latex_examples_do_not_run_again_on_a_renamed_anchor() {
+    use std::fmt::Write as _;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-showexpl-anchor");
+    let _ = std::fs::create_dir_all(&dir);
+    let doc = |added: bool| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\usepackage{showexpl}\n\\usepackage{hyperref}\n\\begin{document}\n",
+        );
+        if added {
+            s.push_str("\\section{An added section}\n\n");
+        }
+        for k in 0..4 {
+            let _ = write!(
+                s,
+                "\\section{{Part {k}}}\nSome text of part {k}.\n\n\\begin{{LTXexample}}\nExample {k}: \\textbf{{bold}}.\n\\end{{LTXexample}}\n\nMore text after example {k}.\n\n"
+            );
+        }
+        s.push_str("\\end{document}\n");
+        s
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("showexpl", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(false));
+        for added in [true, false] {
+            b.edit(&doc(added));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!(
+                    "  -j{threads} added {added}: rerun {}",
+                    x.chars().take(200).collect::<String>()
+                );
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(added));
+            let d = common::first_difference(&b.output().0, &cold.output().0);
+            assert!(
+                d.is_none(),
+                "-j{threads} added {added}: edit differs from cold: {d:?}"
+            );
+            let bad: Vec<&String> = r
+                .iter()
+                .filter(|x| x.contains("HyperLocalCurrentHref"))
+                .collect();
+            assert!(
+                bad.is_empty(),
+                "-j{threads} added {added}: runs again on the anchor a \\let replaces: {bad:?}"
+            );
+        }
+    }
+}
+
+/// An alignment's cells that set a switch locally (`\@tempswafalse`,
+/// `\let\if@tempswa\iffalse`: xcolor in every tikz-cd matrix cell) do not
+/// run again when an edit before them leaves the switch the other way:
+/// the name `\let` defines is read for its class alone, all an
+/// alignment's `get_next` looks at (§342), not its meaning (tikz-cd's
+/// cite edit: 14 matrices ran again on `cs:if@tempswa`, 1.07 s of
+/// 1.7 s, accl 25714). Every edited PDF equals a cold build's.
+#[test]
+fn alignment_cells_setting_a_switch_do_not_read_it() {
+    use std::fmt::Write as _;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("latex-align-switch");
+    let _ = std::fs::create_dir_all(&dir);
+    let doc = |on: bool| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\makeatletter\n\
+             \\newcommand\\setsw[1]{\\if#1y\\global\\@tempswatrue\\else\\global\\@tempswafalse\\fi}\n\
+             \\newcommand\\cellsw{\\@tempswafalse}\n\\makeatother\n\\begin{document}\n",
+        );
+        let _ = write!(
+            s,
+            "First paragraph, its switch \\setsw{{{}}} set.\n\n",
+            if on { "y" } else { "n" }
+        );
+        for k in 0..4 {
+            let _ = write!(
+                s,
+                "Text before table {k}.\n\n\\begin{{tabular}}{{ll}}\n\\cellsw a{k} & \\cellsw b{k}\\\\\n\\cellsw c{k} & d{k}\\\\\n\\end{{tabular}}\n\nText after table {k}.\n\n"
+            );
+        }
+        s.push_str("\\end{document}\n");
+        s
+    };
+    for threads in [1, 4] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("alignsw", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(false));
+        for on in [true, false] {
+            b.edit(&doc(on));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!(
+                    "  -j{threads} on {on}: rerun {}",
+                    x.chars().take(200).collect::<String>()
+                );
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(on));
+            let d = common::first_difference(&b.output().0, &cold.output().0);
+            assert!(
+                d.is_none(),
+                "-j{threads} on {on}: edit differs from cold: {d:?}"
+            );
+            let bad: Vec<&String> = r.iter().filter(|x| x.contains("if@tempswa")).collect();
+            assert!(
+                bad.is_empty(),
+                "-j{threads} on {on}: runs again on the switch the cells set: {bad:?}"
+            );
+        }
+    }
+}
+
+/// microtype's list of the fonts it has set up (`\MT@font@list`), which
+/// the first use of each font adds to (`\xdef\MT@font@list{\MT@font@list
+/// \MT@font,}`): a paragraph that first used a font deleted, the list
+/// before every later first use moves, yet each later appender adds its
+/// font to whatever list reaches it: an append relation the engine
+/// recomputes (`Run::append_def`), not a run. Only the paragraph that now
+/// first uses the deleted paragraph's font runs again on the list (Grail's
+/// `TikZ` figures each ran again, a second each). A name in the list
+/// redefined to expand reads in full where an append meets it. Every
+/// edited PDF equals a cold build's, at one and eight threads. At eight,
+/// the paragraphs after the deleted one wait for the first of them to run
+/// again (`sched::mark_front` in the engine): run beside it, they ran on
+/// the deleted paragraph's font gone and none in its place, then again on
+/// the list (3 builds in 40 on dev, accl 26125; 8 in 30 on acclnode11).
+#[test]
+fn a_font_list_append_does_not_run_again_when_the_list_moves() {
+    font_list_append("mt-append", |first| {
+        if first {
+            "A paragraph that first uses \\texttt{a typewriter font}.\n\n"
+        } else {
+            ""
+        }
+    });
+}
+
+/// [`a_font_list_append_does_not_run_again_when_the_list_moves`] with the
+/// first use edited away, its paragraph kept: its commit withdraws the
+/// font's definitions, and the paragraphs after it wait for the first of
+/// them to run again, as after a deletion (8 builds in 30 ran the appenders
+/// again on acclnode11 before).
+#[test]
+fn a_font_list_append_does_not_run_again_when_a_first_use_is_edited_away() {
+    font_list_append("mt-append-edit", |first| {
+        if first {
+            "A paragraph that first uses \\texttt{a typewriter font}.\n\n"
+        } else {
+            "A paragraph that first uses a typewriter font.\n\n"
+        }
+    });
+}
+
+/// The two font list tests: `head(first)` the document's first paragraph.
+fn font_list_append(name: &str, head: fn(bool) -> &'static str) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("latexmk")
+        .join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let doc = |first: bool| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\usepackage{microtype}\n\\makeatletter\n\
+             \\def\\L{}\\font\\fa=cmr10 \\font\\fb=cmr12\n\\makeatother\n\\begin{document}\n",
+        );
+        s.push_str(head(first));
+        for p in [
+            "The \\texttt{typewriter} again, and \\xdef\\L{\\L\\fa,}a name.",
+            "Now \\textbf{bold} type.",
+            "Then \\textit{italic} type, \\xdef\\L{\\L\\fb,}and another.",
+            "And \\textsc{small capitals}.",
+            "With {\\large a larger size} \\def\\fa{x}too.",
+            "Some \\textsf{sans serif}.",
+            "A {\\small smaller size} \\xdef\\L{\\L y,}and the list: \\meaning\\L.",
+            "Last, {\\Large a large one}.",
+        ] {
+            s.push_str(p);
+            s.push_str("\n\n");
+        }
+        s.push_str("\\end{document}\n");
+        s
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("mtappend", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(true));
+        for first in [false, true] {
+            b.edit(&doc(first));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} first {first}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(first));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} first {first}"
+            );
+            let mut on_list: Vec<&str> = r
+                .iter()
+                .filter(|x| x.contains("MT@font@list"))
+                .filter_map(|x| x.rsplit_once(" [").map(|(_, n)| n))
+                .collect();
+            on_list.sort_unstable();
+            on_list.dedup();
+            assert!(
+                on_list.len() <= 1,
+                "-j{threads} first {first}: appenders ran again on the font list: {r:?}"
+            );
+        }
+    }
+}
+
+/// pdfTeX's ratios a font has asked for (`pdf_font_elink`, the engine's
+/// `pdf:elink:<f>`) grow by each paragraph whose lines first ask for one
+/// (microtype's font expansion). A reader cares which ratios are there,
+/// not in what order they were first asked: deleting the paragraph that
+/// asked first moves the first asks to the paragraphs after it, and only
+/// those that now ask first run again on the list, never every paragraph
+/// set in the font after them. Every edited PDF equals a cold build's,
+/// at one and eight threads.
+#[test]
+fn a_fonts_expansion_list_reader_does_not_run_again_when_a_first_ask_moves() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("latexmk/elink-set");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch directory");
+    let words = "expansion stretches and shrinks the glyphs of a line a little, so that \
+                 the spaces between the words stay even where a justified paragraph is set";
+    let doc = |first: bool| {
+        let mut s = String::from(
+            "\\documentclass{article}\n\\usepackage[expansion=true,protrusion=true]{microtype}\n\
+             \\begin{document}\n",
+        );
+        if first {
+            s += "A first paragraph that asks for the ratios first: ";
+            s += words;
+            s += ".\n\n";
+        }
+        for k in 0..10 {
+            let w = if k % 2 == 0 { "\\itshape " } else { "" };
+            s += "{";
+            s += w;
+            s += "Paragraph ";
+            s += &k.to_string();
+            s += ": ";
+            s += words;
+            s += "; and again ";
+            s += words;
+            s += ".}\n\n";
+        }
+        s.push_str("\\end{document}\n");
+        s
+    };
+    for threads in [1, 8] {
+        let opts = || Options {
+            fixpoint: true,
+            threads: Some(threads),
+            ..pdf_opts("elinkset", &dir)
+        };
+        let mut b = common::build(opts(), Some(&prelude(true)), &doc(true));
+        for first in [false, true] {
+            b.edit(&doc(first));
+            let r: Vec<String> = b
+                .stats
+                .reruns
+                .iter()
+                .map(|(n, op, why)| format!("{op} {why} [{}]", b.describe_node(*n)))
+                .collect();
+            for x in &r {
+                eprintln!("  -j{threads} first {first}: rerun {x}");
+            }
+            let cold = common::build(opts(), Some(&prelude(true)), &doc(first));
+            assert_eq!(
+                common::first_difference(&b.output().0, &cold.output().0),
+                None,
+                "-j{threads} first {first}"
+            );
+            let mut on_list: Vec<&str> = r
+                .iter()
+                .filter(|x| x.contains("pdf:elink"))
+                .filter_map(|x| x.rsplit_once(" [").map(|(_, n)| n))
+                .collect();
+            on_list.sort_unstable();
+            on_list.dedup();
+            assert!(
+                on_list.len() <= 2,
+                "-j{threads} first {first}: paragraphs ran again on a font's expansion list: {r:?}"
+            );
+        }
     }
 }

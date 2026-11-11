@@ -17,7 +17,8 @@ pub enum Kind {
 }
 
 impl Kind {
-    fn name(self, n: usize) -> String {
+    /// `n` warnings of this kind, as a reader says them.
+    pub fn name(self, n: usize) -> String {
         let s = if n == 1 { "" } else { "s" };
         match self {
             Kind::UndefinedReference => format!("{n} undefined reference{s}"),

@@ -33,7 +33,7 @@ pub const PDF_RESOURCE_CATEGORIES: [(&[u8], i32); 9] = [
 pub const PDF_NUM_RESOURCE_CATEGORIES: usize = 9;
 
 /// `pdf_res` (C's `cdata` is never set: not kept).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct PdfRes {
     pub ident: Option<Vec<u8>>,
     pub flags: i32,
@@ -43,13 +43,13 @@ pub struct PdfRes {
 }
 
 /// `struct res_cache` (count/capacity: the Vec).
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct ResCache {
     pub resources: Vec<PdfRes>,
 }
 
 /// pdfresource.c's statics.
-#[derive(Clone, Debug, Default)]
+#[derive(PartialEq, Clone, Debug, Default)]
 pub struct State {
     /// `resources[PDF_NUM_RESOURCE_CATEGORIES]`.
     pub resources: [ResCache; PDF_NUM_RESOURCE_CATEGORIES],

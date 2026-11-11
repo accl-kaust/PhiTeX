@@ -31,7 +31,7 @@ pub const HTML_TAG_TYPE_CLOSE: i32 = 2;
 const M_PI: f64 = core::f64::consts::PI;
 
 /// `struct spc_html_` (`_html_state`).
-#[derive(Clone, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub struct State {
     /// `opts.extensions`.
     pub extensions: i32,
