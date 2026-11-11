@@ -142,7 +142,7 @@ pub fn pad(s: &str, w: usize, right: bool) -> String {
 }
 
 /// `s` cut to `max` characters, an ellipsis where it is cut.
-fn clip(s: &str, max: usize) -> String {
+pub fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }

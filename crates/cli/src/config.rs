@@ -836,6 +836,25 @@ pub fn listing_json(key: Option<&str>, dir: &Path) -> Result<serde_json::Value, 
     }))
 }
 
+/// A setting's value as it holds, coloured by where it is from (the
+/// project's green, yours cyan, a default dim), and a project's value
+/// that is ignored said.
+fn now(st: crate::ui::Style, r: &Row) -> String {
+    let (v, from) = r.holds();
+    let now = match from {
+        "project" => format!("{} {}", st.green(&v), st.dim("(project)")),
+        "yours" => format!("{} {}", st.cyan(&v), st.dim("(yours)")),
+        _ => st.dim(&format!("{v} (default)")),
+    };
+    match (&r.project, r.project_ignored()) {
+        (Some(p), true) => format!(
+            "{now} {}",
+            st.yellow(&format!("(the project's {p} is ignored: yours alone)"))
+        ),
+        _ => now,
+    }
+}
+
 /// `phitex config` (no key: every setting; a key: that one): each with
 /// its value in your file and in the project's `phitex.toml` above `dir`,
 /// the one that holds, and what it does.
@@ -851,31 +870,75 @@ pub fn listing(key: Option<&str>, dir: &Path, st: crate::ui::Style) -> Result<Ve
         home(&l.project_file)
     ))];
     let w = l.rows.iter().map(|r| r.key.len()).max().unwrap_or(0);
-    for r in &l.rows {
-        // (a value set stands out from the defaults: the project's green,
-        // yours cyan, a default dim with its note)
-        let (v, from) = r.holds();
-        let now = match from {
-            "project" => format!("{} {}", st.green(&v), st.dim("(project)")),
-            "yours" => format!("{} {}", st.cyan(&v), st.dim("(yours)")),
-            _ => st.dim(&format!("{v} (default)")),
-        };
-        let now = match (&r.project, r.project_ignored()) {
-            (Some(p), true) => format!(
-                "{now} {}",
-                st.yellow(&format!("(the project's {p} is ignored: yours alone)"))
-            ),
-            _ => now,
-        };
-        out.push(format!(
-            "  {}  {now}",
-            st.bold(&crate::ui::pad(r.key, w, false))
-        ));
-        out.push(format!("  {}  {}", " ".repeat(w), st.dim(r.what)));
+    // (one key: its value and the whole of what it does, two lines)
+    if key.is_some() {
+        for r in &l.rows {
+            out.push(format!(
+                "  {}  {}",
+                st.bold(&crate::ui::pad(r.key, w, false)),
+                now(st, r)
+            ));
+            out.push(format!("  {}  {}", " ".repeat(w), st.dim(r.what)));
+        }
+        return Ok(out);
     }
-    if key.is_none() {
-        out.push(st.dim(
-            "phitex config KEY VALUE sets one in yours (on, off, a number or text); phitex config --unset KEY takes it out",
+    // (every key: a line each, the ones set first, the value in a column
+    // of its own and what it does cut to the terminal's width; `phitex
+    // config KEY` says the whole of it)
+    let cols = crate::keys::width().unwrap_or(100).max(60);
+    let vw = l
+        .rows
+        .iter()
+        .map(|r| r.holds().0.chars().count().min(24))
+        .max()
+        .unwrap_or(0);
+    let row = |r: &Row| {
+        let (v, from) = r.holds();
+        let v = crate::ui::clip(&v, 24);
+        let shown = match from {
+            "project" => st.green(&crate::ui::pad(&v, vw, false)),
+            "yours" => st.cyan(&crate::ui::pad(&v, vw, false)),
+            _ => st.dim(&crate::ui::pad(&v, vw, false)),
+        };
+        let tag = match (from, &r.project, r.project_ignored()) {
+            (_, Some(p), true) => format!("the project's {p} is ignored · "),
+            ("project", ..) => "project · ".to_owned(),
+            ("yours", ..) => "yours · ".to_owned(),
+            _ => String::new(),
+        };
+        let room = cols.saturating_sub(w + vw + 8);
+        let what = crate::ui::clip(&format!("{tag}{}", r.what), room);
+        format!(
+            "  {}  {shown}  {}",
+            st.bold(&crate::ui::pad(r.key, w, false)),
+            st.dim(&what)
+        )
+    };
+    let (set, default): (Vec<&Row>, Vec<&Row>) =
+        l.rows.iter().partition(|r| r.holds().1 != "default");
+    if !set.is_empty() {
+        out.push(String::new());
+        out.push(st.bold("set"));
+        out.extend(set.iter().map(|r| row(r)));
+    }
+    out.push(String::new());
+    out.push(st.bold("defaults"));
+    out.extend(default.iter().map(|r| row(r)));
+    out.push(String::new());
+    let cmds = [
+        ("phitex config KEY", "the whole of one, and what it takes"),
+        (
+            "phitex config KEY VALUE",
+            "sets one in yours (on, off, a number or text)",
+        ),
+        ("phitex config --unset KEY", "takes one out of yours"),
+    ];
+    let cw = cmds.iter().map(|(c, _)| c.len()).max().unwrap_or(0);
+    for (c, what) in cmds {
+        out.push(format!(
+            "  {}  {}",
+            st.cyan(&crate::ui::pad(c, cw, false)),
+            st.dim(what)
         ));
     }
     Ok(out)

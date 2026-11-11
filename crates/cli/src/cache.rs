@@ -328,6 +328,15 @@ impl Cache {
         }
     }
 
+    /// What the document's part holds (what [`Cache::clear_doc`] would free).
+    pub fn doc_bytes(&self, main: &Path) -> u64 {
+        Cache {
+            dir: self.doc_dir(main),
+            limit: self.limit,
+        }
+        .usage()
+    }
+
     /// The document's part emptied; the bytes freed.
     pub fn clear_doc(&self, main: &Path) -> io::Result<u64> {
         self.remove(&self.doc_dir(main))
@@ -396,9 +405,8 @@ impl Cache {
         )
     }
 
-    /// The command that empties the whole cache, as the summary names it:
-    /// a bare `phitex clean` needs a document (an argument or a
-    /// phitex.toml's `main`) and fails without one.
+    /// The command that empties the whole cache, as the summary names it
+    /// (a bare `phitex clean` removes nothing: it shows this status).
     pub const EMPTY_IT: &'static str = "phitex clean --all";
 }
 

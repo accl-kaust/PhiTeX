@@ -211,11 +211,15 @@ enum Sub {
         #[arg(long, value_name = "KEY", conflicts_with_all = ["key", "value"])]
         unset: Option<String>,
     },
-    /// Remove a build's files (--all: the whole cache)
+    /// Remove a build's files (--all: the whole cache; no file: the
+    /// cache's status)
     Clean {
         /// The whole cache, every document's (no file then)
         #[arg(long, conflicts_with = "file")]
         all: bool,
+        /// Say what would be removed, remove nothing
+        #[arg(short = 'n', long)]
+        dry_run: bool,
         /// Where the build's outputs are (TeX's -output-directory)
         #[arg(
             short = 'o',
@@ -456,6 +460,8 @@ pub struct Options {
     pub copy_pdf: Option<config::CopyPdf>,
     pub synctex: Option<bool>,
     pub all: bool,
+    /// `clean --dry-run`: what would be removed said, nothing removed.
+    pub dry_run: bool,
     /// `--shelf`, or the editor's `files` setting (none: `phitex.toml`'s,
     /// else TeX Live).
     pub files: Option<tex::Files>,
@@ -501,12 +507,14 @@ impl Cli {
             }
             Some(Sub::Clean {
                 all,
+                dry_run,
                 output_dir,
                 file,
             }) => {
                 o.command = Some(Command::Clean);
                 o.file = file;
                 o.all = all;
+                o.dry_run = dry_run;
                 o.output_dir = output_dir;
             }
             Some(Sub::News) => o.command = Some(Command::News),
@@ -1309,20 +1317,47 @@ pub fn cache_summary(t: &Target, ui: &Ui) {
     }
 }
 
-/// `phitex clean`: the document's outputs and its part of the cache.
-fn clean(t: &Target, ui: &Ui) -> i32 {
+/// `phitex clean`: the document's outputs and its part of the cache;
+/// `dry`: said, not removed.
+fn clean(t: &Target, ui: &Ui, dry: bool) -> i32 {
     let dir = t
         .output_dir
         .as_ref()
         .map_or_else(|| PathBuf::from("."), PathBuf::from);
-    let mut n = 0;
-    for ext in CLEAN {
-        let p = dir.join(format!("{}.{ext}", t.job()));
-        if std::fs::remove_file(&p).is_ok() {
-            n += 1;
+    let there: Vec<PathBuf> = CLEAN
+        .iter()
+        .map(|ext| dir.join(format!("{}.{ext}", t.job())))
+        .filter(|p| p.is_file())
+        .collect();
+    let cache = crate::cache::Cache::open(t.cache_limit);
+    let st = ui.st;
+    if dry {
+        for p in &there {
+            ui.line(&format!("{} {}", st.dim("would remove"), p.display()));
         }
+        let held = cache
+            .as_ref()
+            .map_or(0, |c| c.doc_bytes(Path::new(&t.file)));
+        ui.line(&format!(
+            "{} {} of cache {}",
+            st.dim("would remove"),
+            crate::cache::size(held),
+            st.dim(&format!("({}'s)", t.file))
+        ));
+        ui.line(&format!(
+            "{} {} {}",
+            st.dim("nothing removed: run"),
+            st.cyan(&format!("phitex clean {}", t.file)),
+            st.dim("to remove them")
+        ));
+        ui.event(&json!({"event": "clean", "dry_run": true, "files": there.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(), "cache_bytes": held}));
+        return 0;
     }
-    let freed = match crate::cache::Cache::open(t.cache_limit) {
+    let n = there
+        .iter()
+        .filter(|p| std::fs::remove_file(p).is_ok())
+        .count();
+    let freed = match cache {
         Ok(c) => c.clear_doc(Path::new(&t.file)).unwrap_or_else(|e| {
             ui.warning(&format!("the document's cache: {e}"));
             0
@@ -1332,7 +1367,7 @@ fn clean(t: &Target, ui: &Ui) -> i32 {
             0
         }
     };
-    ui.line(&ui.st.green(&format!(
+    ui.line(&st.green(&format!(
         "removed {n} file{} and {} of cache",
         if n == 1 { "" } else { "s" },
         crate::cache::size(freed)
@@ -1341,13 +1376,72 @@ fn clean(t: &Target, ui: &Ui) -> i32 {
     0
 }
 
-/// `phitex clean --all`: the whole cache, every document's.
-fn clean_all(ui: &Ui) -> ! {
+/// A bare `phitex clean` (no file, no `--all`): nothing removed; the
+/// cache's status and what each form of the command removes, `main` the
+/// project's main file where its phitex.toml names one.
+fn clean_status(ui: &Ui, main: Option<&str>) -> ! {
+    let st = ui.st;
+    match crate::cache::Cache::open(None) {
+        Ok(c) => {
+            ui.line(&c.summary().0);
+            ui.event(&json!({"event": "cache", "dir": c.dir.display().to_string(), "bytes": c.usage(), "limit": c.limit}));
+        }
+        Err(e) => ui.warning(&e),
+    }
+    let file = main.unwrap_or("paper.tex");
+    let rows = [
+        (
+            format!("phitex clean {file}"),
+            "removes its outputs and its cache",
+        ),
+        (
+            format!("phitex clean -n {file}"),
+            "says what that would remove, removes nothing",
+        ),
+        (
+            crate::cache::Cache::EMPTY_IT.to_owned(),
+            "empties the whole cache (-n: says how much)",
+        ),
+    ];
+    let w = rows
+        .iter()
+        .map(|(c, _)| c.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (cmd, what) in &rows {
+        ui.line(&format!(
+            "  {}  {}",
+            st.cyan(&crate::ui::pad(cmd, w, false)),
+            st.dim(what)
+        ));
+    }
+    std::process::exit(0);
+}
+
+/// `phitex clean --all`: the whole cache, every document's (`dry`: said,
+/// not removed).
+fn clean_all(ui: &Ui, dry: bool) -> ! {
     let c = crate::cache::Cache::open(None).unwrap_or_else(|e| {
         ui.error(&e);
         std::process::exit(crate::EXIT_INTERNAL);
     });
     let dir = crate::cache::home_relative(&c.dir);
+    if dry {
+        let st = ui.st;
+        ui.line(&format!(
+            "{} {} of cache ({dir})",
+            st.dim("would remove"),
+            crate::cache::size(c.usage())
+        ));
+        ui.line(&format!(
+            "{} {} {}",
+            st.dim("nothing removed: run"),
+            st.cyan(crate::cache::Cache::EMPTY_IT),
+            st.dim("to empty it")
+        ));
+        ui.event(&json!({"event": "clean", "dry_run": true, "cache_bytes": c.usage()}));
+        std::process::exit(0);
+    }
     match c.clear_all() {
         Ok(b) => {
             ui.line(&ui.st.green(&format!(
@@ -1378,7 +1472,7 @@ pub fn main(args: &[String]) -> ! {
     let ui = Ui::new(Style::detect(), o.verbose, o.quiet, o.json);
     crate::ui::capture_panics(o.verbose > 0);
     if o.all {
-        clean_all(&ui);
+        clean_all(&ui, o.dry_run);
     }
     // (`PHITEX_TEX_TIME`: a cold build's phases from the process's start)
     if matches!(o.command, Some(Command::Build))
@@ -1486,23 +1580,17 @@ pub fn main(args: &[String]) -> ! {
     } else {
         None
     };
+    // (a bare `clean`: nothing removed, the cache's status and the
+    // commands, the project's main file named where phitex.toml has one)
+    if command == Command::Clean && o.file.is_none() {
+        let main = resolve(&o).ok().map(|t| t.file);
+        clean_status(&ui, main.as_deref());
+    }
     let t = resolve(&o).unwrap_or_else(|e| {
         if let Some(l) = &lsp {
             l.refuse(&e);
         }
         ui.error(&e);
-        // (a bare `clean` with no document: what it can do instead)
-        if command == Command::Clean && o.file.is_none() {
-            let st = ui.st;
-            ui.line(&format!(
-                "{} {} {} {} {}",
-                st.dim("run"),
-                st.cyan("phitex clean paper.tex"),
-                st.dim("for one document's outputs and cache, or"),
-                st.cyan(crate::cache::Cache::EMPTY_IT),
-                st.dim("for the whole cache")
-            ));
-        }
         std::process::exit(crate::EXIT_USAGE);
     });
     for w in &t.warnings {
@@ -1511,7 +1599,7 @@ pub fn main(args: &[String]) -> ! {
     phitex_tex::timeline::lap("cli: the arguments, the target (configuration read)");
     match command {
         Command::Build => std::process::exit(build(&t, &o, &ui)),
-        Command::Clean => std::process::exit(clean(&t, &ui)),
+        Command::Clean => std::process::exit(clean(&t, &ui, o.dry_run)),
         Command::Watch => crate::watch::main(&t, &o, &ui, lsp),
         // (answered before the target)
         Command::News | Command::Upgrade | Command::Config | Command::Sessions => unreachable!(),

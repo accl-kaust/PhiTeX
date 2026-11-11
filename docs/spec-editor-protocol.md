@@ -540,7 +540,7 @@ from 1 in a watch.
 | `screen` | an edit painted in the viewer without a build | `build`, `ms` |
 | `diff` | a watch's comparison with a past commit shown | `label`, `changes` (count), `errors` (count); or `error` (why it failed) |
 | `cache` | after a build, and when a watch ends | `dir`, `bytes`, `limit` (0: none) |
-| `clean` | `phitex clean` | `removed` (files), `cache_bytes` (freed); `clean --all`: `cache_bytes` only |
+| `clean` | `phitex clean` | `removed` (files), `cache_bytes` (freed); `clean --all`: `cache_bytes` only; `--dry-run`: `dry_run` true, `files` and `cache_bytes` what would go, nothing removed (a bare `phitex clean` tells `cache` instead) |
 
 **A watch's `build`:**
 

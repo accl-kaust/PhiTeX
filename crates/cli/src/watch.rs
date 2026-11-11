@@ -644,20 +644,41 @@ fn farewell(st: crate::ui::Style, l: &Last) -> Option<String> {
     ))
 }
 
-/// `rows` as a tree under `head`: `├─ name  value`, the last `└─`.
+/// `rows` as a tree under `head`: `├─ name  value`, the last `└─`; a
+/// value wider than the terminal goes on under itself, broken at its
+/// ` · `s.
 fn tree(st: crate::ui::Style, head: String, rows: &[(String, String)]) -> Vec<String> {
+    let cols = crate::keys::width().unwrap_or(100).max(50);
     let mut out = vec![head];
     for (k, (name, value)) in rows.iter().enumerate() {
-        let branch = if k + 1 == rows.len() {
-            "└─"
-        } else {
-            "├─"
-        };
-        out.push(format!(
-            "  {} {} {value}",
-            st.dim(branch),
-            crate::ui::pad(name, 14, false)
-        ));
+        let last = k + 1 == rows.len();
+        let branch = if last { "└─" } else { "├─" };
+        let stem = if last { "  " } else { "│ " };
+        let room = cols.saturating_sub(2 + 3 + 15).max(20);
+        let mut lines: Vec<String> = vec![String::new()];
+        for part in value.split(" · ") {
+            let cur = lines.last_mut().expect("a line");
+            let w = crate::ui::width(cur);
+            if w == 0 {
+                cur.push_str(part);
+            } else if w + 3 + crate::ui::width(part) <= room {
+                cur.push_str(" · ");
+                cur.push_str(part);
+            } else {
+                lines.push(part.to_owned());
+            }
+        }
+        for (j, l) in lines.iter().enumerate() {
+            if j == 0 {
+                out.push(format!(
+                    "  {} {} {l}",
+                    st.dim(branch),
+                    crate::ui::pad(name, 14, false)
+                ));
+            } else {
+                out.push(format!("  {} {} {l}", st.dim(stem), " ".repeat(14)));
+            }
+        }
     }
     out
 }
@@ -1687,13 +1708,13 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                 if x.runs > 0 {
                     #[allow(clippy::cast_precision_loss, reason = "a ratio for display")]
                     let k = x.runs as f64 / x.commands_run.max(1) as f64;
-                    p.push_str(&format!(" · {} runs for {} nodes", x.runs, x.commands_run));
+                    p.push_str(&format!(" · {} runs, {} nodes", x.runs, x.commands_run));
                     if k >= 1.05 {
                         p.push_str(&format!(" ({k:.1}×)"));
                     }
                 }
                 if !x.wasted.is_zero() && !x.busy.is_zero() {
-                    p.push_str(&format!(" · {} of {} run again", ms(x.wasted), ms(x.busy)));
+                    p.push_str(&format!(" · {} of {} redone", ms(x.wasted), ms(x.busy)));
                 }
                 rows.push(("parallel".to_owned(), p));
                 if x.rss_kb > 0 {
@@ -1709,7 +1730,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     rows.push((
                         "memory".to_owned(),
                         format!(
-                            "{} resident · {} of values · {} collection{}",
+                            "{} resident · {} values · {} collection{}",
                             gb(x.rss_kb << 10),
                             gb(x.values_bytes),
                             x.collections,
@@ -1741,7 +1762,7 @@ fn session(t: &Target, o: &Options, ui: &Ui, kept: &mut Kept) -> (Target, Option
                     rows.push((
                         "hints".to_owned(),
                         format!(
-                            "{bounded} bounded · {any} any · {} · {} → {stops} stops · {waits} pending waits",
+                            "{bounded} bounded · {any} any · {} · {} · {stops} stops · {waits} waits",
                             red(viol, "violations"),
                             red(undecl, "undeclared")
                         ),
@@ -2685,6 +2706,33 @@ fn build_stats(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stats row too wide for the terminal (no terminal in a test: 100
+    /// columns) goes on under its value, broken at its ` · `s, every
+    /// line within the width; a short one stays one line.
+    #[test]
+    fn long_rows_wrap_under_their_value() {
+        let st = crate::ui::Style {
+            color: false,
+            tty: false,
+        };
+        let long = "1 thread · 1061 runs, 458 nodes (2.3×) · 1.07 s of 3.53 s redone · and some more words here · and more";
+        let rows = vec![
+            ("parallel".to_owned(), long.to_owned()),
+            ("output".to_owned(), "0.2 ms".to_owned()),
+        ];
+        let out = tree(st, "build 10".to_owned(), &rows);
+        assert!(out.iter().all(|l| crate::ui::width(l) <= 100), "{out:#?}");
+        assert!(out.len() > 3, "{out:#?}");
+        assert!(
+            out[2].starts_with("  │ ") && out[2].contains("·"),
+            "{out:#?}"
+        );
+        assert_eq!(
+            out.last().map(String::as_str),
+            Some("  └─ output         0.2 ms")
+        );
+    }
 
     #[test]
     fn lines_as_keys() {
