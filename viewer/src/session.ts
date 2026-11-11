@@ -9,6 +9,13 @@
 // panel; in VS Code the same panel in a webview, told over messages).
 
 import { Batch, byteOffset, charOffset, textSum, type Edit } from "./edits.ts";
+
+/** One work a citation cites, as the engine read it (the `cites` op): its key, its label as the .aux has it, where its entry is typeset ([page, baseline] in the origins' points). */
+export interface CiteAnswer {
+  key: string;
+  label: string | null;
+  at: [number, number] | null;
+}
 import type { DiffReq } from "./diff.ts";
 import { ENGINES, type Engine } from "./engines.ts";
 import { report } from "./report.ts";
@@ -63,6 +70,7 @@ export type CoreReq =
   | { op: "pages" }
   | { op: "origins"; page: number }
   | { op: "page_of"; file: string; at: number }
+  | { op: "cites"; page: number; x: number; y: number }
   | { op: "trace"; on: boolean }
   | { op: "auxdump" }
   | { op: "check"; file?: string; expect?: string }
@@ -224,6 +232,8 @@ export interface PreviewSink {
   warmup?(w: { state: "preparing" | "ready"; since?: number; slow?: boolean }): void;
   /** The document's outline (its PDF's bookmarks), after each build: Options.remote's, the `outline` op's. */
   outline?(items: Entry[]): void;
+  /** The session's citation lookup, given once (the `cites` op: the citation under a point of page `k`, in the origins' points; null: none, or no answer). */
+  citesBy?(ask: (k: number, x: number, y: number) => Promise<CiteAnswer[] | null>): void;
   /** A streamed open: the pages shipped so far (null: it ended). */
   streaming?(s: { pages: number; phase: string } | null): void;
   /** A repaint is on screen, `ms` after the keystroke that made it. */
@@ -535,6 +545,7 @@ export class PreviewSession {
       onLost: core.onLost?.bind(core),
     };
     this.sink = sink;
+    sink.citesBy?.((k, x, y) => this.cites(k, x, y));
     this.o = { ...defaults, ...opts };
     host.onOpen((f0, t) => {
       const f = this.known(f0);
@@ -1134,6 +1145,18 @@ export class PreviewSession {
    * holds its step: asked every 4 ms with no end, a page gone by the next
    * build was asked for ever).
    */
+  /**
+   * The citation under point (`x`, `y`) of page `k` (the origins' points: from the page's top
+   * left, the link's middle will do), as the engine read it: each key in the \cite's order, its
+   * label from the .aux, where its entry is typeset. Null: no citation there, no answer, a core
+   * without the op (the viewer reads the pages then). Asked between builds, as page_of.
+   */
+  async cites(k: number, x: number, y: number): Promise<CiteAnswer[] | null> {
+    const r = await this.untilMade({ op: "cites", page: k, x, y }).catch(() => null);
+    const c = r?.ok ? (r.json as { cites?: unknown } | undefined)?.cites : null;
+    return Array.isArray(c) ? (c as CiteAnswer[]).filter((e) => e && typeof e.key === "string") : null;
+  }
+
   private async untilMade(req: CoreReq, stale: () => boolean = () => false): Promise<CoreRes | null> {
     let r = await this.core.request(req);
     for (let wait = 4, spent = 0; r.ok && r.json?.pending; wait = Math.min(2 * wait, 100)) {

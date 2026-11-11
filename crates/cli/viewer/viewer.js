@@ -483,7 +483,10 @@ var Viewer = class _Viewer {
       [go.hidden, go.textContent] = [!web, "Open"];
     } else {
       const [x0, y0, x1, y1] = at.link;
-      const list = this.host.cited ? this.host.cited({ k: at.k, x: (x0 + x1) / 2, y: (y0 + y1) / 2 }, to, at.link[5] ?? null) : this.citedOnPage(at.k, at.link);
+      const mid = { k: at.k, x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
+      const said2 = this.citesKnown.get(_Viewer.citeKey(mid));
+      if (said2 === void 0 && this.host.cites) void this.citesAsk(mid, at);
+      const list = said2?.length ? said2 : this.host.cited ? this.host.cited(mid, to, at.link[5] ?? null) : this.citedOnPage(at.k, at.link);
       el.classList.toggle("cite", !!list?.length);
       if (list?.length) this.peekCard(list, at.link);
       else this.peekDraw();
@@ -795,6 +798,75 @@ var Viewer = class _Viewer {
    * else the links beside it in its brackets), each entry as typeset in
    * the bibliography. Null: the link's target is no bibliography entry.
    */
+  /** The engine's answers by link (its page and middle), this build's: none (an empty list) where it has no citation; cleared by a new layout. */
+  citesKnown = /* @__PURE__ */ new Map();
+  citesAsking = /* @__PURE__ */ new Set();
+  static citeKey(m) {
+    return `${m.k},${Math.round(m.x)},${Math.round(m.y)}`;
+  }
+  /**
+   * The engine asked for the citation at `mid` (the link of `at`): its cards made from the
+   * answer, kept, and shown if the window is still on that link. An entry's page not drawn yet
+   * (its text unknown) is asked for and the answer not kept: the window shown again when the
+   * page comes asks again (the engine keeps its answers per build: that costs nothing).
+   */
+  async citesAsk(mid, at) {
+    const key = _Viewer.citeKey(mid);
+    if (this.citesAsking.has(key)) return;
+    this.citesAsking.add(key);
+    const said2 = await this.host.cites(mid.k, mid.x, mid.y).catch(() => null);
+    this.citesAsking.delete(key);
+    const list = said2?.length ? this.citedFrom(said2) : [];
+    if (!list) return;
+    this.citesKnown.set(key, list);
+    const el = this.peekEl;
+    if (!list.length || !el || el.hidden || this.peekLink !== at.link) return;
+    el.classList.add("cite");
+    this.peekCard(list, at.link);
+    this.peekPlace(at);
+  }
+  /** A label as the .aux writes it, as it reads: ties as spaces, groups' braces gone, \& and the like as their characters. */
+  static texText(s) {
+    return s.replace(/\\([&%$#_{}])/g, "$1").replace(/~/g, "\xA0").replace(/\\(?:protect|relax)\s*/g, "").replace(/[{}]/g, "").trim();
+  }
+  /** The engine's citation as cards: each entry read where it is typeset; null while one of their pages is not drawn (asked for). */
+  citedFrom(said2) {
+    const out = [];
+    let waiting = false;
+    for (const c of said2) {
+      const t = c.at ? this.slots[c.at[0]] : void 0;
+      if (c.at && t && !t.img) {
+        this.ask(c.at[0]);
+        waiting = true;
+        continue;
+      }
+      const e = c.at ? this.entryOn(c.at[0], c.at[1]) : null;
+      const aux = c.label != null ? _Viewer.texText(c.label) : null, label = e?.label || aux;
+      out.push(e ? { ..._Viewer.asCited(label ?? "", e.text, [c.at[0], e.top]), key: c.key, label: label ?? "" } : { key: c.key, label: label ?? c.key, title: c.key, authors: [], at: c.at ? [c.at[0], Math.max(0, c.at[1] - 10)] : void 0 });
+    }
+    return waiting ? null : out;
+  }
+  /** The bibliography's entry whose first line has its baseline at `y` on page `k` (the engine's place for it): its label, its text, its line's top. */
+  entryOn(k, y) {
+    const lines2 = this.pageLines(k);
+    let i = -1;
+    lines2.forEach((l, j) => l.y0 - 2 <= y && y <= l.y1 + 2 && (i < 0 || l.y0 > lines2[i].y0) && (i = j));
+    if (i < 0) {
+      const near = lines2.map((l, j) => [Math.abs((l.y0 + l.y1) / 2 - y), j]).sort((a, b) => a[0] - b[0])[0];
+      if (!near || near[0] > 12) return null;
+      i = near[1];
+    }
+    const first = lines2[i], out = [first.t], lead = first.y1 - first.y0;
+    for (let j = i + 1, last = first; j < lines2.length && out.length < 8; j++) {
+      const l = lines2[j];
+      if (_Viewer.LABEL.test(l.t) || l.y0 - last.y1 > lead * 0.9 || /^\d+$/.test(l.t) || Math.abs(l.x0 - first.x0) < 1 && !_Viewer.LABEL.test(first.t)) break;
+      out.push(l.t);
+      last = l;
+    }
+    const text = out.reduce((a, l) => /[a-z]-$/.test(a) && /^[a-z]/.test(l) ? a.slice(0, -1) + l : `${a} ${l}`);
+    const m = _Viewer.LABEL.exec(text);
+    return { label: m ? m[1] : "", text: m ? text.slice(m[0].length) : text, top: first.y0 };
+  }
   citedOnPage(k, link) {
     if (typeof link[4] !== "number") return null;
     const t = this.slots[link[4]];
@@ -1326,6 +1398,7 @@ var Viewer = class _Viewer {
    * those of `previews` marked as previews (streamed, drawn without some of what they draw with).
    */
   layout(hashes, previews) {
+    this.citesKnown.clear();
     this.previews = previews ?? /* @__PURE__ */ new Set();
     while (this.slots.length > hashes.length) {
       const s = this.slots.pop();
@@ -4617,7 +4690,7 @@ var OVERLEAF_WORDS = {
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
-var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true };
+var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true, built: [] };
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
@@ -4974,6 +5047,8 @@ var Panel = class {
       link: ev.onLink ? (u) => ev.onLink(u) : void 0,
       // (only where the host has a source lookup: else the viewer reads the citation from the pages)
       cited: ev.onCited ? (from2, to, top) => ev.onCited(from2, to, top) : void 0,
+      // (the engine's reading of a citation: the session's, given by it (citesBy); none yet, the pages')
+      cites: (k, x, y) => this.citesAsk?.(k, x, y) ?? Promise.resolve(null),
       openAt: ev.onOpenAt ? (k, top) => ev.onOpenAt(k, top) : void 0,
       // (Back by the mouse's back button and Alt+←: the tab's history in a browser tab (the watch, the demo),
       // the button's events in VS Code's webview; Overleaf's are the browser's, they leave the project)
@@ -5039,7 +5114,7 @@ var Panel = class {
     this.paints = 0;
     this.walk = null;
     this.opened = false;
-    this.sheetUp();
+    this.sheetUp(true);
     this.win.classList.toggle("reopening", !!this.anim);
   }
   /**
@@ -5112,7 +5187,7 @@ var Panel = class {
     this.wasShown = on;
     this.host.style.display = display;
     if (on && !was) this.redraw();
-    if (on && !this.last) this.step(this.firstStep(), void 0, "");
+    if (on && !this.last) this.step(this.firstStep(), void 0, "", false);
   }
   wasShown;
   save() {
@@ -5741,11 +5816,12 @@ var Panel = class {
     };
     this.hintTimer = setTimeout(show, 2e3);
   }
-  step(what, pct, detail = "") {
+  /** The sheet's step, said; `raise`: a build's step (the sheet put up if it isn't), else said only (the panel shown, nothing built yet). */
+  step(what, pct, detail = "", raise = true) {
     if (!this.firstPending()) return;
     this.walkTo(what);
-    this.sheetUp();
-    this.hints(true);
+    if (raise) this.sheetUp();
+    if (this.anim) this.hints(true);
     const el = this.$("#opening");
     this.stepNow = what;
     el.querySelector(".what").textContent = what;
@@ -5756,25 +5832,51 @@ var Panel = class {
     this.anim?.step?.(what, pct, detail);
     this.renderStatus();
   }
-  /** The sheet up, the opening playing on it (once per panel: a later rebuild has pages). */
-  sheetUp() {
+  /**
+   * The sheet up, the opening playing on it (once per panel: a later rebuild has pages),
+   * at a build's step; `now`: a Rebuild asked for. Put up once the stage is laid out, at the
+   * page's own place and size (before, it could come up at 0 x 0 in the corner).
+   */
+  sheetUp(now = false) {
     if (this.opened || this.anim || !this.wasShown) return;
+    const st = this.$("#stage");
+    if (st.clientWidth < 40 || st.clientHeight < 40) return void requestAnimationFrame(() => this.firstPending() && this.sheetUp(now));
     const el = this.$("#opening");
     el.hidden = false;
     el.classList.remove("in");
     this.win.classList.add("sheet-up");
     if (this.prefs.zoom === "fit") this.zoomNow = "page";
+    el.style.transition = "none";
     this.fitSheet();
+    void el.offsetWidth;
+    el.style.transition = "";
     const dark = this.sheetDark();
     const sheet = el.querySelector(".sheet");
     const first = !this.seenIds.has("opening");
-    const { id, anim } = play(this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop());
+    const warm = !now && this.prefs.built.includes(this.builtKey());
+    const { id, anim } = play(warm ? "off" : this.look, first, this.lastLook, sheet, dark, (this.mainFiles.main ?? this.doc ?? "document.tex").split("/").pop());
     this.anim = anim;
-    this.lastLook = id;
+    if (!warm) this.lastLook = id;
     if (id !== "off") this.seen(["opening"]);
     el.classList.toggle("owns", !!anim.step);
     if (anim.step) anim.step(this.firstStep(), void 0, "");
     this.animSince = performance.now();
+    this.hints(true);
+  }
+  /** This document's key among the built ones: the page's address (the project, the watch's document) and the main file, hashed (FNV-1a). */
+  builtKey() {
+    const loc = this.win.ownerDocument.defaultView?.location;
+    const s = `${loc?.host ?? ""}${loc?.pathname ?? ""}|${this.mainFiles.main ?? this.doc ?? ""}`;
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+    return (h >>> 0).toString(36);
+  }
+  /** This document's first page shown: built here, its next open plays no opening (the newest 200 kept). */
+  builtHere() {
+    const k = this.builtKey(), was = this.prefs.built ?? [];
+    if (was[0] === k) return;
+    this.prefs.built = [k, ...was.filter((x) => x !== k)].slice(0, 200);
+    this.save();
   }
   /** The pages are dark (Dark PDF): an opening's sheet is too. */
   sheetDark() {
@@ -5786,6 +5888,11 @@ var Panel = class {
   fitSheet() {
     const el = this.$("#opening");
     if (el.hidden || this.ending) return;
+    const slot = this.$("#viewer").querySelector(".slot");
+    if (slot && slot.offsetWidth > 40) {
+      const r = slot.getBoundingClientRect(), b = this.$(".body").getBoundingClientRect();
+      return void Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${r.top - b.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+    }
     const st = this.$("#stage");
     const room = { w: st.clientWidth - 24, h: st.clientHeight - 24 };
     let h = room.h, w = h * 210 / 297;
@@ -5835,6 +5942,7 @@ var Panel = class {
     this.win.classList.remove("sheet-up");
     if (was) {
       this.opened = true;
+      this.builtHere();
       this.stepNow = "";
       this.renderStatus();
       setTimeout(() => this.tips("unseen"), 600);
@@ -6005,6 +6113,11 @@ var Panel = class {
     return !!this.contents && this.win.classList.contains("side-on");
   }
   /** The document's outline (its PDF's bookmarks), from the host after each build. */
+  /** The session's citation lookup (PreviewSink.citesBy: the engine's `cites` op), the viewer's for its citation cards. */
+  citesAsk;
+  citesBy(ask2) {
+    this.citesAsk = ask2;
+  }
   outline(items) {
     this.contents?.set(items);
     this.contents?.at(this.at);
@@ -7107,6 +7220,7 @@ var Panel = class {
     this.$("#empty").hidden = true;
     this.$("#stage").classList.remove("stale");
     this.viewer.layout(hashes, previews);
+    this.fitSheet();
     if (this.at >= hashes.length) this.at = Math.max(0, hashes.length - 1);
     if (hashes.length) this.sheetDown();
     this.nav();
@@ -7162,6 +7276,7 @@ var Panel = class {
     this.$("#stage").classList.toggle("fit", (this.zoomNow ?? this.prefs.zoom) === "fit");
     if (this.viewer.pages <= k) this.viewer.layout(Array.from({ length: Math.max(n, k + 1) }, (_, i) => i === k && hash || `?${i}`));
     this.viewer.set(k, img, hash ?? null);
+    this.builtHere();
     this.sheetDown();
     this.renderStatus();
     this.nav();
@@ -7571,6 +7686,7 @@ var PreviewSession = class {
       onLost: core.onLost?.bind(core)
     };
     this.sink = sink;
+    sink.citesBy?.((k, x, y) => this.cites(k, x, y));
     this.o = { ...defaults, ...opts };
     host2.onOpen((f0, t) => {
       const f = this.known(f0);
@@ -8087,6 +8203,17 @@ var PreviewSession = class {
    * holds its step: asked every 4 ms with no end, a page gone by the next
    * build was asked for ever).
    */
+  /**
+   * The citation under point (`x`, `y`) of page `k` (the origins' points: from the page's top
+   * left, the link's middle will do), as the engine read it: each key in the \cite's order, its
+   * label from the .aux, where its entry is typeset. Null: no citation there, no answer, a core
+   * without the op (the viewer reads the pages then). Asked between builds, as page_of.
+   */
+  async cites(k, x, y) {
+    const r = await this.untilMade({ op: "cites", page: k, x, y }).catch(() => null);
+    const c = r?.ok ? r.json?.cites : null;
+    return Array.isArray(c) ? c.filter((e) => e && typeof e.key === "string") : null;
+  }
   async untilMade(req, stale = () => false) {
     let r = await this.core.request(req);
     for (let wait = 4, spent = 0; r.ok && r.json?.pending; wait = Math.min(2 * wait, 100)) {

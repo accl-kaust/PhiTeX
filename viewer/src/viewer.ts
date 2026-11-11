@@ -4,6 +4,7 @@
 // core). The page most in view is the one an edit paints first.
 
 import type { Link, PageImage } from "./types.ts";
+import type { CiteAnswer } from "./session.ts";
 import { LAYER_LINES } from "./text.ts";
 
 export interface ViewerHost {
@@ -43,6 +44,12 @@ export interface ViewerHost {
    * order cited. Null: not a citation (a \ref's link shows the page).
    */
   cited?(from: { k: number; x: number; y: number }, to: number, top: number | null): Cited[] | null;
+  /**
+   * The engine's reading of the citation under a point (the session's `cites` op: each key, its
+   * label, where its entry is typeset), or null (none there, no answer): the cards then come
+   * from it, the pages' reading shown till it answers and where it has none.
+   */
+  cites?(k: number, x: number, y: number): Promise<CiteAnswer[] | null>;
   /** A page box's CSS size at `cssWidth` (on whole device pixels). */
   box(d: { w: number; h: number }, cssWidth: number): [number, number];
 }
@@ -377,7 +384,11 @@ export class Viewer {
       [go.hidden, go.textContent] = [!web, "Open"];
     } else {
       const [x0, y0, x1, y1] = at.link;
-      const list = this.host.cited ? this.host.cited({ k: at.k, x: (x0 + x1) / 2, y: (y0 + y1) / 2 }, to, at.link[5] ?? null) : this.citedOnPage(at.k, at.link);
+      const mid = { k: at.k, x: (x0 + x1) / 2, y: (y0 + y1) / 2 };
+      // (the engine's answer, once it has one for this link; till then, and where it has none, the pages' reading)
+      const said = this.citesKnown.get(Viewer.citeKey(mid));
+      if (said === undefined && this.host.cites) void this.citesAsk(mid, at);
+      const list = said?.length ? said : this.host.cited ? this.host.cited(mid, to, at.link[5] ?? null) : this.citedOnPage(at.k, at.link);
       el.classList.toggle("cite", !!list?.length);
       if (list?.length) this.peekCard(list, at.link);
       else this.peekDraw();
@@ -750,6 +761,86 @@ export class Viewer {
    * else the links beside it in its brackets), each entry as typeset in
    * the bibliography. Null: the link's target is no bibliography entry.
    */
+  /** The engine's answers by link (its page and middle), this build's: none (an empty list) where it has no citation; cleared by a new layout. */
+  private citesKnown = new Map<string, Cited[]>();
+  private citesAsking = new Set<string>();
+  private static citeKey(m: { k: number; x: number; y: number }): string {
+    return `${m.k},${Math.round(m.x)},${Math.round(m.y)}`;
+  }
+
+  /**
+   * The engine asked for the citation at `mid` (the link of `at`): its cards made from the
+   * answer, kept, and shown if the window is still on that link. An entry's page not drawn yet
+   * (its text unknown) is asked for and the answer not kept: the window shown again when the
+   * page comes asks again (the engine keeps its answers per build: that costs nothing).
+   */
+  private async citesAsk(mid: { k: number; x: number; y: number }, at: { k: number; link: Link }): Promise<void> {
+    const key = Viewer.citeKey(mid);
+    if (this.citesAsking.has(key)) return;
+    this.citesAsking.add(key);
+    const said = await this.host.cites!(mid.k, mid.x, mid.y).catch(() => null);
+    this.citesAsking.delete(key);
+    const list = said?.length ? this.citedFrom(said) : [];
+    if (!list) return;
+    this.citesKnown.set(key, list);
+    const el = this.peekEl;
+    if (!list.length || !el || el.hidden || this.peekLink !== at.link) return;
+    el.classList.add("cite");
+    this.peekCard(list, at.link);
+    this.peekPlace(at);
+  }
+
+  /** A label as the .aux writes it, as it reads: ties as spaces, groups' braces gone, \& and the like as their characters. */
+  private static texText(s: string): string {
+    return s.replace(/\\([&%$#_{}])/g, "$1").replace(/~/g, "\u00a0").replace(/\\(?:protect|relax)\s*/g, "").replace(/[{}]/g, "").trim();
+  }
+
+  /** The engine's citation as cards: each entry read where it is typeset; null while one of their pages is not drawn (asked for). */
+  private citedFrom(said: CiteAnswer[]): Cited[] | null {
+    const out: Cited[] = [];
+    let waiting = false;
+    for (const c of said) {
+      const t = c.at ? this.slots[c.at[0]] : undefined;
+      if (c.at && t && !t.img) {
+        this.ask(c.at[0]);
+        waiting = true;
+        continue;
+      }
+      const e = c.at ? this.entryOn(c.at[0], c.at[1]) : null;
+      // (no entry read there: the key and its label, still a card)
+      // (the label as the page prints it, where the entry has one ([1] in a numbered list):
+      // what the reader sees; else the .aux's (natbib's "Knuth and Plass (1981)" for every style))
+      const aux = c.label != null ? Viewer.texText(c.label) : null, label = e?.label || aux;
+      out.push(e ? { ...Viewer.asCited(label ?? "", e.text, [c.at![0], e.top]), key: c.key, label: label ?? "" } : { key: c.key, label: label ?? c.key, title: c.key, authors: [], at: c.at ? [c.at[0], Math.max(0, c.at[1] - 10)] : undefined });
+    }
+    return waiting ? null : out;
+  }
+
+  /** The bibliography's entry whose first line has its baseline at `y` on page `k` (the engine's place for it): its label, its text, its line's top. */
+  private entryOn(k: number, y: number): { label: string; text: string; top: number } | null {
+    const lines = this.pageLines(k);
+    // (the lowest line that starts above the baseline and reaches it: the entry's own, not
+    // a heading just above it (References over the first entry reached the first's baseline too))
+    let i = -1;
+    lines.forEach((l, j) => l.y0 - 2 <= y && y <= l.y1 + 2 && (i < 0 || l.y0 > lines[i].y0) && (i = j));
+    if (i < 0) {
+      const near = lines.map((l, j) => [Math.abs((l.y0 + l.y1) / 2 - y), j] as const).sort((a, b) => a[0] - b[0])[0];
+      if (!near || near[0] > 12) return null;
+      i = near[1];
+    }
+    const first = lines[i], out = [first.t], lead = first.y1 - first.y0;
+    for (let j = i + 1, last = first; j < lines.length && out.length < 8; j++) {
+      const l = lines[j];
+      // (the next entry: a label, a gap, a hanging indent's return to the margin)
+      if (Viewer.LABEL.test(l.t) || l.y0 - last.y1 > lead * 0.9 || /^\d+$/.test(l.t) || (Math.abs(l.x0 - first.x0) < 1 && !Viewer.LABEL.test(first.t))) break;
+      out.push(l.t);
+      last = l;
+    }
+    const text = out.reduce((a, l) => (/[a-z]-$/.test(a) && /^[a-z]/.test(l) ? a.slice(0, -1) + l : `${a} ${l}`));
+    const m = Viewer.LABEL.exec(text);
+    return { label: m ? m[1] : "", text: m ? text.slice(m[0].length) : text, top: first.y0 };
+  }
+
   private citedOnPage(k: number, link: Link): Cited[] | null {
     if (typeof link[4] !== "number") return null;
     // (the target page not drawn yet: its text unknown; asked for, the window shown again when it comes (set))
@@ -1354,6 +1445,8 @@ export class Viewer {
    * those of `previews` marked as previews (streamed, drawn without some of what they draw with).
    */
   layout(hashes: string[], previews?: ReadonlySet<string>): void {
+    // (a new build's: the engine's answers were the last one's)
+    this.citesKnown.clear();
     this.previews = previews ?? new Set();
     while (this.slots.length > hashes.length) {
       const s = this.slots.pop()!;
