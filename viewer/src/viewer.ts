@@ -15,6 +15,17 @@ export interface ViewerHost {
   need(k: number): void | Promise<void>;
   /** The page most in view changed. */
   inView(k: number): void;
+  /** Ctrl+click (⌘ on a Mac) or a middle click on a link: the same viewer in a new tab, at page `k`, `top` points down it (absent: such a click follows the link here). */
+  openAt?(k: number, top: number | null): void;
+  /**
+   * How the mouse's back button and Alt+← go Back after a link: "history",
+   * a page in a browser's tab (the watch, the demo): each link followed an
+   * entry of the tab's history, its back (any: the mouse's button, which
+   * Firefox gives the page no event for, Alt+←, the toolbar's) is Back;
+   * "buttons", a page with no history of its own (VS Code's webview): the
+   * button's own events. None (Overleaf): they stay the browser's.
+   */
+  backWith?: "history" | "buttons";
   /** CSS pixels per PDF point at the current zoom (1 is 100%). */
   scale(): number;
   /** Text selected on the pages: its boxes by page, in PDF points from each page's top left. */
@@ -25,8 +36,44 @@ export interface ViewerHost {
   peer?(file: string, pos: number): void;
   /** A click on a link to a web address (http, https or mailto): opened by the host (absent: in a new tab). */
   link?(uri: string): void;
+  /**
+   * What the citation under the pointer cites: every entry of its \cite
+   * (from the source: the link's place, page `from.k` at `from.x`,
+   * `from.y`, mapped back to its \cite{a,b,c}, ranges and all), in the
+   * order cited. Null: not a citation (a \ref's link shows the page).
+   */
+  cited?(from: { k: number; x: number; y: number }, to: number, top: number | null): Cited[] | null;
   /** A page box's CSS size at `cssWidth` (on whole device pixels). */
   box(d: { w: number; h: number }, cssWidth: number): [number, number];
+}
+
+/** A bibliography entry, as the host reads it (the project's .bib): a link's window shows it as a card. */
+export interface Cited {
+  /** Its BibTeX key, and its label as the document prints it ("2", "Knuth, 1984"). */
+  key: string;
+  label: string;
+  title: string;
+  authors: string[];
+  /** Where it appeared (journal, book's publisher, conference) and when. */
+  venue?: string;
+  year?: string;
+  doi?: string;
+  url?: string;
+  /** The entry as written in the .bib: Copy BibTeX's. */
+  bibtex?: string;
+  /** Where the bibliography prints it: page, and points down it (a click there goes there). */
+  at?: [number, number | null];
+}
+
+/** A place the view was: its top's page, how far down it (0 to 1), the first words of the line there. */
+interface Stop {
+  k: number;
+  fy: number;
+  words: string;
+  /** What was clicked there to leave it ("[2, 4]", "Figure 1", "[2] The TeXbook"): none for a place Back or Forward left. */
+  via?: string;
+  /** That link's box, in points on its page (Back lights it). */
+  mark?: { k: number; box: [number, number, number, number] };
 }
 
 interface Slot {
@@ -35,6 +82,33 @@ interface Slot {
   hash: string;
   drawn: string | null;
   img: PageImage | null;
+}
+
+/**
+ * Where a page's ink is across it, as fractions of its width (the left
+ * of its leftmost mark, the right of its rightmost): read once from a
+ * small copy of its bitmap, kept with it; a blank page is all of it.
+ */
+const spans = new WeakMap<HTMLCanvasElement, [number, number]>();
+function inkSpan(c: HTMLCanvasElement): [number, number] {
+  const kept = spans.get(c);
+  if (kept) return kept;
+  const w = 160, h = Math.max(1, Math.round((c.height / c.width) * w));
+  const t = document.createElement("canvas");
+  t.width = w;
+  t.height = h;
+  const g = t.getContext("2d", { willReadFrequently: true })!;
+  g.drawImage(c, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data;
+  let l = w, r = -1;
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      if (d[i] + d[i + 1] + d[i + 2] < 600) (l = Math.min(l, x)), (r = Math.max(r, x));
+    }
+  const out: [number, number] = r < l ? [0, 1] : [l / w, (r + 1) / w];
+  spans.set(c, out);
+  return out;
 }
 
 /** A US Letter page, in PDF points, until a page says otherwise. */
@@ -170,15 +244,485 @@ export class Viewer {
         else window.open(to, "_blank", "noopener");
         return;
       }
-      this.goToPlace(to, hit[5] ?? null);
+      if (this.newTab(e, to, hit[5] ?? null)) return;
+      const slot = (e.target as Element).closest<HTMLElement>(".slot");
+      this.follow(to, hit[5] ?? null, slot ? this.linkText(Number(slot.dataset.k), hit) : "", slot ? { k: Number(slot.dataset.k), link: hit } : undefined);
     });
+    // (a middle click on a link: a new tab, as a browser's)
+    root.addEventListener("auxclick", (e) => {
+      const hit = e.button === 1 ? this.linkAt(e) : null;
+      if (hit && typeof hit[4] === "number" && this.newTab(e, hit[4], hit[5] ?? null, true)) e.preventDefault();
+    });
+    // (the middle button's own scroll mode not started on a link the host opens in a new tab)
+    root.addEventListener("mousedown", (e) => e.button === 1 && this.host.openAt && this.linkAt(e) && e.preventDefault());
     // (over a link, the hand: a class on its page, which print.ts makes win
     // over the text layer's own text cursor; a link is nearly always text,
     // so a cursor set on the page alone never showed)
     root.addEventListener("mousemove", (e) => {
       const el = (e.target as Element).closest<HTMLElement>(".slot");
-      if (el) el.classList.toggle("on-link", !!this.linkAt(e));
+      const hit = this.linkAt(e);
+      if (el) el.classList.toggle("on-link", !!hit);
+      this.pointer = [e.clientX, e.clientY];
+      this.hover(hit, el, e);
     });
+    root.addEventListener("mouseleave", () => this.hover(null, null));
+    const doc = root.ownerDocument;
+    doc.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") this.peekHide();
+      else if (host.backWith === "buttons" && e.altKey && e.key === "ArrowLeft" && this.past.length) (e.preventDefault(), this.back());
+      else if (host.backWith === "buttons" && e.altKey && e.key === "ArrowRight" && this.future.length) (e.preventDefault(), this.forward());
+    });
+    // (the window's link gone from under the pointer by other means than a
+    // move: the pages scrolled (a wheel, a key, a jump), the tab left, the
+    // pointer out of the window: closed, it was left up over the pages)
+    scroller.addEventListener("scroll", () => this.peekEl && !this.peekEl.hidden && !this.peekEl.matches(":hover") && this.peekHide(), { passive: true });
+    doc.addEventListener("visibilitychange", () => this.peekHide());
+    doc.defaultView?.addEventListener("blur", () => this.peekHide());
+    doc.documentElement.addEventListener("mouseleave", () => this.peekHide());
+    // (anywhere else the pointer goes, over the panel's bars too: not the link, not the window, it closes)
+    doc.addEventListener("pointermove", (e) => {
+      if (!this.peekEl || this.peekEl.hidden || !this.peekLink) return;
+      const path = e.composedPath();
+      if (path.includes(this.peekEl) || path.includes(root)) return;
+      this.peekAt = null;
+      this.peekHide();
+    }, { passive: true });
+    // (the tab's back and forward: to a links' entry n jumps in, the view
+    // moved there, back or forward as many steps as it is from here)
+    if (host.backWith === "history")
+      doc.defaultView?.addEventListener("popstate", (e) => {
+        const n = (e.state as { phitexBack?: number } | null)?.phitexBack;
+        if (n === undefined) return;
+        while (this.past.length > n) this.step(-1);
+        while (this.past.length < n && this.future.length) this.step(1);
+      });
+    // (the mouse's back and forward buttons where no history has them: 3, 4)
+    if (host.backWith === "buttons")
+      for (const t of ["mousedown", "mouseup", "auxclick"] as const)
+        doc.addEventListener(t, (e) => {
+          const go = e.button === 3 ? -1 : e.button === 4 ? 1 : 0;
+          if (!go || !(go < 0 ? this.past : this.future).length) return;
+          e.preventDefault();
+          if (t === "mouseup") go < 0 ? this.back() : this.forward();
+        });
+  }
+
+  // ---- Link previews: a link hovered, the place it goes to shown in a small window on that page ----
+
+  /** Links previewed on hover (the host's setting). */
+  peeks = true;
+  private peekEl: HTMLElement | null = null;
+  /** The link the window is for (or is about to be), its page and where its box is on it. */
+  private peekAt: { link: Link; k: number } | null = null;
+  private peekTimer: ReturnType<typeof setTimeout> | undefined;
+  private peekHiding: ReturnType<typeof setTimeout> | undefined;
+
+  /**
+   * The pointer over `hit` (a link on page slot `el`), or off every link:
+   * the window shown once it rests 350 ms on one (80 ms when a window is up
+   * already: moving along a list of citations), gone 250 ms after it leaves
+   * the link and the window both.
+   */
+  private hover(hit: Link | null, el: HTMLElement | null, e?: MouseEvent): void {
+    if (!this.peeks) return;
+    const up = !!this.peekEl && !this.peekEl.hidden;
+    if (hit && this.peekAt?.link === hit) return void clearTimeout(this.peekHiding);
+    clearTimeout(this.peekTimer);
+    if (!hit || !el || !e) {
+      this.peekAt = null;
+      // (off the link: gone at once, unless the pointer is on its way into the window, between the two)
+      if (up) this.onTheWay() ? this.peekSoon(150) : this.peekHide();
+      return;
+    }
+    const at = { link: hit, k: Number(el.dataset.k) };
+    this.peekAt = at;
+    this.peekTimer = setTimeout(() => this.peekAt === at && this.peekShow(at), up ? 80 : 350);
+  }
+
+  /** The window up for `at`: a web address said, a place in the document shown, its page asked for if not drawn yet. */
+  private peekShow(at: { link: Link; k: number }): void {
+    clearTimeout(this.peekHiding);
+    const el = this.peekEl ?? this.peekMake();
+    this.peekLink = at.link;
+    this.peekFrom = at.k;
+    const to = at.link[4];
+    el.classList.toggle("url", typeof to === "string");
+    // (shown before it is drawn: a hidden window has no width to draw at, and keeps no scroll)
+    el.hidden = false;
+    if (typeof to === "string") {
+      el.querySelector(".pu")!.textContent = to;
+      el.querySelector(".where")!.textContent = /^(https?:|mailto:)/i.test(to) ? "Opens in your browser" : "Not followed (not a web address)";
+    } else {
+      const [x0, y0, x1, y1] = at.link;
+      const list = this.host.cited ? this.host.cited({ k: at.k, x: (x0 + x1) / 2, y: (y0 + y1) / 2 }, to, at.link[5] ?? null) : this.citedOnPage(at.k, at.link);
+      el.classList.toggle("cite", !!list?.length);
+      if (list?.length) this.peekCard(list, at.link);
+      else this.peekDraw();
+    }
+    this.peekPlace(at);
+  }
+
+  /** The window, made once: in the scroller, so it scrolls with the link it is for. */
+  private peekMake(): HTMLElement {
+    const el = document.createElement("div");
+    el.className = "peek";
+    el.setAttribute("role", "tooltip");
+    el.hidden = true;
+    el.innerHTML = `<div class="pv"><canvas></canvas><i class="at"></i></div><div class="pc"></div><div class="pu"></div><div class="pf"><span class="where"></span><span class="go">Click to go there</span></div>`;
+    el.addEventListener("mouseenter", () => clearTimeout(this.peekHiding));
+    // (out of the window: gone, after a moment to land back on its link)
+    el.addEventListener("mouseleave", () => this.peekSoon(100));
+    // (a click in it: there, as the link's own click goes)
+    el.addEventListener("click", (e) => {
+      // (a card's own buttons: theirs, not the window's)
+      const b = (e.target as Element).closest<HTMLElement>("[data-act]");
+      if (b) return void this.peekAct(b, e);
+      const ce = (e.target as Element).closest<HTMLElement>(".ce");
+      if (ce) return void this.peekGo(Number(ce.dataset.i), e);
+      // (the link read before the window goes: hiding it forgets which it was)
+      const link = this.peekShown, from = this.peekFrom;
+      const to = link?.[4];
+      if (typeof to === "number" && this.newTab(e, to, link?.[5] ?? null)) return;
+      this.peekHide();
+      if (typeof to === "number") this.follow(to, link?.[5] ?? null, link ? this.linkText(from, link) : "", link ? { k: from, link } : undefined);
+      else if (typeof to === "string" && /^(https?:|mailto:)/i.test(to)) this.host.link ? this.host.link(to) : window.open(to, "_blank", "noopener");
+    });
+    this.scroller.append(el);
+    return (this.peekEl = el);
+  }
+
+  /** The link the window shows now. */
+  private get peekShown(): Link | null {
+    return this.peekEl && !this.peekEl.hidden ? (this.peekLink ?? null) : null;
+  }
+  private peekLink: Link | null = null;
+  /** The page the window's link is on. */
+  private peekFrom = 0;
+
+  /**
+   * What a link on page `k` refers to, as the reader sees it: the text
+   * layer's characters inside its box, widened to the whole reference: a
+   * citation's numbers to its brackets ("4" of "[2, 4]" is "[2, 4]"), a
+   * bare number to the word before it ("1" is "Figure 1", "page 2").
+   * Back's list says it was clicked.
+   */
+  private linkText(k: number, link: Link): string {
+    const s = this.slots[k];
+    if (!s) return "";
+    const b = s.el.getBoundingClientRect(), sx = b.width / this.size.w, sy = b.height / this.size.h;
+    const [l, t, r, bt] = [b.left + link[0] * sx, b.top + link[1] * sy, b.left + link[2] * sx, b.top + link[3] * sy];
+    for (const el of s.el.querySelectorAll<SVGTextElement>("text")) {
+      const tr = el.getBoundingClientRect();
+      if (tr.right < l || tr.left > r || tr.bottom < t || tr.top > bt) continue;
+      const m = el.getScreenCTM(), text = el.textContent ?? "";
+      if (!m) continue;
+      // (the characters whose middles are inside the box: the first and the last)
+      let a = -1, z = -1;
+      for (let i = 0, n = Math.min(el.getNumberOfChars(), text.length); i < n; i++) {
+        const e = el.getExtentOfChar(i);
+        const p = new DOMPoint(e.x + e.width / 2, e.y + e.height / 2).matrixTransform(m);
+        if (p.x >= l && p.x <= r && p.y >= t && p.y <= bt) (a < 0 && (a = i)), (z = i);
+      }
+      if (a < 0) continue;
+      // (a citation's: out over its numbers, commas, dashes and spaces to the brackets round them)
+      const inCite = /[\d,;\s–-]/;
+      let x = a, y = z;
+      while (x > 0 && inCite.test(text[x - 1])) x--;
+      while (y < text.length - 1 && inCite.test(text[y + 1])) y++;
+      if (x > 0 && "[(".includes(text[x - 1]) && y < text.length - 1 && "])".includes(text[y + 1])) return text.slice(x - 1, y + 2).replace(/\s+/g, " ");
+      const got = text.slice(a, z + 1).trim();
+      // (a bare number: with the word before it, "Figure 1", "Section 2.1", "page 3")
+      if (/^[\dA-Z.]+$/.test(got)) {
+        const before = /([A-Za-z]+)[~\s\u00a0]*$/.exec(text.slice(0, a));
+        if (before) return `${before[1]} ${got}`;
+      }
+      return got.replace(/\s+/g, " ");
+    }
+    return "";
+  }
+
+  /** The window placed under the link's box (over it, where there is no room under), inside the view. */
+  private peekPlace(at: { link: Link; k: number }): void {
+    const el = this.peekEl!, s = this.slots[at.k];
+    if (!s) return;
+    this.peekLink = at.link;
+    const b = s.el.getBoundingClientRect(), v = this.scroller.getBoundingClientRect();
+    const sx = b.width / this.size.w, sy = b.height / this.size.h;
+    const [x0, y0, , y1] = at.link;
+    const w = el.offsetWidth, h = el.offsetHeight;
+    const left = Math.max(v.left + 8, Math.min(b.left + x0 * sx - 24, v.right - w - 8));
+    const below = b.top + y1 * sy + 6, above = b.top + y0 * sy - h - 6;
+    const top = below + h <= v.bottom - 8 || above < v.top + 8 ? below : above;
+    el.style.left = `${left - v.left + this.scroller.scrollLeft}px`;
+    el.style.top = `${top - v.top + this.scroller.scrollTop}px`;
+    // (the strip from the link to the window, in the view's coordinates: a pointer in it is on its way in)
+    const lx0 = b.left + x0 * sx, lx1 = b.left + at.link[2] * sx, ly0 = b.top + y0 * sy, ly1 = b.top + y1 * sy;
+    this.peekWay = top === below ? [Math.min(lx0, left), ly0, Math.max(lx1, left + w), top + 4] : [Math.min(lx0, left), top + h - 4, Math.max(lx1, left + w), ly1];
+  }
+
+  /** The pointer's last place over the pages (view coordinates), and the strip between the window's link and it. */
+  private pointer: [number, number] = [0, 0];
+  private peekWay: [number, number, number, number] = [0, 0, 0, 0];
+
+  /** The pointer is between the link and its window, on its way in. */
+  private onTheWay(): boolean {
+    const [x, y] = this.pointer, [l, t, r, b] = this.peekWay;
+    return x >= l && x <= r && y >= t && y <= b;
+  }
+
+  /**
+   * The target page drawn in the window, the full page's width at the
+   * window's, scrolled so the place is near its top, a bar beside it; a
+   * page not drawn yet is asked for, and drawn here when it comes (set).
+   */
+  private peekDraw(): void {
+    const el = this.peekEl, link = this.peekLink ?? this.peekAt?.link;
+    if (!el || !link || typeof link[4] !== "number") return;
+    const k = link[4], top = link[5] ?? 0, s = this.slots[k];
+    const pv = el.querySelector<HTMLElement>(".pv")!, c = pv.querySelector("canvas")!;
+    el.classList.toggle("wait", !s?.img);
+    if (!s?.img) {
+      el.querySelector(".where")!.textContent = `Page ${k + 1} · drawing…`;
+      if (s) this.ask(k);
+      return;
+    }
+    el.querySelector(".where")!.textContent = `Page ${k + 1}`;
+    const img = s.img, W = pv.clientWidth || 420, dpr = window.devicePixelRatio || 1;
+    const all = img.canvas instanceof HTMLCanvasElement ? [img.canvas] : [...img.canvas.querySelectorAll("canvas")];
+    // (the page's printed width, its margins left out, at the window's: the
+    // text at a size to read, not the whole sheet's width shrunk)
+    const base = all.find((b) => !b.classList.contains("phx-tile") && b.width);
+    const [il, ir] = base ? inkSpan(base) : [0, 1];
+    const pad = 10 / img.w, l = Math.max(0, il - pad), r = Math.min(1, ir + pad);
+    const PW = W / (r - l), H = Math.round((PW * img.h) / img.w), X = -l * PW;
+    c.style.width = `${W}px`;
+    c.style.height = `${H}px`;
+    c.width = Math.round(W * dpr);
+    c.height = Math.round(H * dpr);
+    const g = c.getContext("2d")!;
+    g.fillStyle = "#fff";
+    g.fillRect(0, 0, c.width, c.height);
+    g.setTransform(dpr, 0, 0, dpr, X * dpr, 0);
+    g.imageSmoothingQuality = "high";
+    // (the page's own bitmaps: the whole page, and a zoom's sharper part over it where there is one)
+    for (const b of all) {
+      if (!b.width) continue;
+      const tile = b.classList.contains("phx-tile");
+      const f = (v: string) => (parseFloat(v) || 0) / 100;
+      const [bl, bt, bw, bh] = tile ? [f(b.style.left), f(b.style.top), f(b.style.width), f(b.style.height)] : [0, 0, 1, 1];
+      g.drawImage(b, bl * PW, bt * H, bw * PW, bh * H);
+    }
+    const y = (top / img.h) * H;
+    pv.querySelector<HTMLElement>(".at")!.style.top = `${y}px`;
+    pv.scrollTop = Math.max(0, y - 28);
+  }
+
+  /** The window gone `ms` on, unless the pointer comes back to it or its link (one timer: a later leave restarts it, never a second). */
+  private peekSoon(ms: number): void {
+    clearTimeout(this.peekHiding);
+    this.peekHiding = setTimeout(() => this.peekHide(), ms);
+  }
+
+  /**
+   * A citation's card: one entry, whole (its label and key, title,
+   * authors, where and when, its DOI or address, Copy BibTeX); several (a
+   * \cite of many, a range), a list of them, the one under the pointer
+   * marked, each a click to its place in the bibliography.
+   */
+  private peekCard(list: Cited[], link: Link): void {
+    const el = this.peekEl!, pc = el.querySelector<HTMLElement>(".pc")!;
+    const esc = (t: string) => t.replace(/[&<>"]/g, (ch) => `&#${ch.charCodeAt(0)};`);
+    const names = (a: string[]) => (a.length > 4 ? `${a.slice(0, 3).join(", ")} and ${a.length - 3} others` : a.length > 1 ? `${a.slice(0, -1).join(", ")} and ${a.at(-1)}` : (a[0] ?? ""));
+    const here = (c: Cited) => list.length > 1 && !!c.at && c.at[0] === link[4] && c.at[1] === (link[5] ?? null);
+    // (each entry whole, one or many: its label and key, title, authors, where and when, its DOI or address, Copy BibTeX, Go)
+    // (each entry the same, one or many: three lines, the label, title and key; who, when and where; its links)
+    const card = (c: Cited, i: number) => {
+      const doi = c.doi ? `https://doi.org/${c.doi}` : "";
+      return (
+        `<section class="ce${here(c) ? " here" : ""}" data-i="${i}">` +
+        `<div class="hd">${c.label ? `<span class="lab">[${esc(c.label)}]</span>` : ""}<span class="ti">${esc(c.title)}</span>${c.key ? `<code>${esc(c.key)}</code>` : ""}</div>` +
+        // (the year next to the names: a long line cut at its end keeps it)
+        `<div class="mt">${[[c.authors.length && esc(names(c.authors)), c.year && esc(c.year)].filter(Boolean).join(", "), c.venue && `<i>${esc(c.venue)}</i>`].filter(Boolean).join(" · ")}</div>` +
+        `<div class="lk">` +
+        [doi ? `<button type="button" data-act="open" data-u="${esc(doi)}">DOI</button>` : c.url ? `<button type="button" data-act="open" data-u="${esc(c.url)}">${esc(c.url.replace(/^https?:\/\//, "").split("/")[0])}</button>` : "", c.bibtex ? `<button type="button" data-act="bib" data-i="${i}">Copy BibTeX</button>` : "", c.at ? `<button type="button" data-act="go" data-i="${i}">Go to it</button>` : ""].filter(Boolean).join("<i>·</i>") +
+        `</div></section>`
+      );
+    };
+    const bibs = list.filter((c) => c.bibtex).length;
+    pc.innerHTML =
+      (list.length > 1 ? `<div class="mh"><span>${list.length} works cited here</span>${bibs > 1 ? `<button type="button" data-act="bib" data-i="all">Copy all BibTeX (${bibs})</button>` : ""}</div>` : "") +
+      `<div class="cs">${list.map(card).join("")}</div>`;
+    this.peekList = list;
+    // (the one under the pointer in view, in the list's own scroll: scrollIntoView
+    // scrolled the pages too, and a scroll of the pages closes the window)
+    const cs = pc.querySelector<HTMLElement>(".cs")!, h = pc.querySelector<HTMLElement>(".ce.here");
+    cs.scrollTop = 0;
+    if (h && h.offsetTop + h.offsetHeight > cs.clientHeight) cs.scrollTop = h.offsetTop - 8;
+    const pages = [...new Set(list.map((c) => c.at?.[0]).filter((k): k is number => k !== undefined))];
+    el.querySelector(".where")!.textContent = `References · page ${pages.length ? pages.map((k) => k + 1).join(", ") : Number(link[4]) + 1}`;
+    el.querySelector(".go")!.textContent = list.length > 1 ? "Click one to go there" : "Click to go there";
+  }
+  private peekList: Cited[] = [];
+
+  // ---- A citation read from the pages themselves: the bibliography as typeset ----
+
+  /** Page `k`'s text lines (the text layer's), in points from its top left, top to bottom. */
+  private pageLines(k: number): { t: string; x0: number; y0: number; x1: number; y1: number }[] {
+    const s = this.slots[k];
+    if (!s) return [];
+    const b = s.el.getBoundingClientRect(), sx = this.size.w / b.width, sy = this.size.h / b.height;
+    return [...s.el.querySelectorAll("text")]
+      .map((t) => {
+        const r = t.getBoundingClientRect();
+        return { t: (t.textContent ?? "").replace(/\s+/g, " ").trim(), x0: (r.left - b.left) * sx, y0: (r.top - b.top) * sy, x1: (r.right - b.left) * sx, y1: (r.bottom - b.top) * sy };
+      })
+      .filter((l) => l.t)
+      .sort((a, c) => a.y0 - c.y0 || a.x0 - c.x0);
+  }
+
+  /** An entry's label, where the bibliography prints one at its line's start ("[4]", "[Knu84]"). */
+  private static LABEL = /^\[([^\]]{1,12})\]\s*/;
+
+  /**
+   * The bibliography entry at page `k`, `top` points down it: its lines
+   * from there to the next entry (a line starting with a label, or a gap
+   * wider than a line), as one text. Null: no bibliography there (a
+   * \ref's target: the page is shown instead).
+   */
+  private entryAt(k: number, top: number): { label: string; text: string } | null {
+    const lines = this.pageLines(k);
+    const i = lines.findIndex((l) => l.y1 > top + 1);
+    if (i < 0) return null;
+    const first = lines[i];
+    // (a bibliography: its entries labelled, or a References heading above it on this page)
+    const labelled = Viewer.LABEL.exec(first.t);
+    const heading = lines.slice(0, i).some((l) => /^(references|bibliography|works cited|literature)$/i.test(l.t));
+    if (!labelled && !heading) return null;
+    const out = [first.t];
+    const lead = first.y1 - first.y0;
+    for (let j = i + 1, last = first; j < lines.length && out.length < 8; j++) {
+      const l = lines[j];
+      if (Viewer.LABEL.test(l.t) || l.y0 - last.y1 > lead * 0.9 || /^\d+$/.test(l.t)) break;
+      out.push(l.t);
+      last = l;
+    }
+    // (lines joined, a word broken at a line's end mended)
+    const text = out.reduce((a, l) => (/[a-z]-$/.test(a) && /^[a-z]/.test(l) ? a.slice(0, -1) + l : `${a} ${l}`));
+    const m = Viewer.LABEL.exec(text);
+    return { label: m ? m[1] : "", text: m ? text.slice(m[0].length) : text };
+  }
+
+  /** Where the bibliography prints the entry labelled `label`: near page `near` (its other entries' page), its line's start. */
+  private findLabel(label: string, near: number): [number, number] | null {
+    for (const k of [near, near + 1, near - 1, near + 2]) {
+      const l = this.pageLines(k).find((l) => l.t.startsWith(`[${label}]`));
+      if (l) return [k, l.y0];
+    }
+    return null;
+  }
+
+  /**
+   * An entry's text as a card: authors, title, where and when, the
+   * usual "Authors. Title. Venue, year." of a bibliography style, its DOI
+   * and address where it prints them. Sentences end at ". " but not at an
+   * initial's ("D. E. Knuth").
+   */
+  private static asCited(label: string, text: string, at: [number, number]): Cited {
+    const doi = /\b(10\.\d{4,9}\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
+    const url = /(https?:\/\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
+    const years = [...text.matchAll(/\b(1[5-9]\d\d|20\d\d)[a-z]?\b/g)];
+    const year = years.at(-1)?.[0];
+    const parts: string[] = [];
+    let cur = "";
+    for (const w of text.split(" ")) {
+      cur = cur ? `${cur} ${w}` : w;
+      // (a sentence's end: a full stop after a word longer than an initial)
+      if (/[^.\s]{2,}[.?!]$/.test(w) && !/^(et|al|ed|eds|vol|no|pp|Proc|Trans|Jr|Inc)\.$/i.test(w)) (parts.push(cur), (cur = ""));
+    }
+    if (cur) parts.push(cur);
+    const authors = (parts[0] ?? "").replace(/\.$/, "").split(/,\s*(?:and\s+)?|\s+and\s+/).map((a) => a.trim()).filter(Boolean);
+    const title = (parts[1] ?? parts[0] ?? text).replace(/\.$/, "");
+    const venue = parts.slice(2).join(" ").replace(/\.$/, "").replace(new RegExp(`,?\\s*${year ?? "^$"}\\s*$`), "") || undefined;
+    return { key: "", label, title, authors: parts.length > 1 ? authors : [], venue, year, doi, url, at };
+  }
+
+  /**
+   * What the citation under the pointer cites, read from the pages: the
+   * citation's whole text ("[1, 3–5]": its numbers, ranges filled in;
+   * else the links beside it in its brackets), each entry as typeset in
+   * the bibliography. Null: the link's target is no bibliography entry.
+   */
+  private citedOnPage(k: number, link: Link): Cited[] | null {
+    if (typeof link[4] !== "number") return null;
+    // (the target page not drawn yet: its text unknown; asked for, the window shown again when it comes (set))
+    const t = this.slots[link[4]];
+    if (t && !t.img) return void this.ask(link[4]), null;
+    const own = this.entryAt(link[4], link[5] ?? 0);
+    if (!own) return null;
+    const near = link[4];
+    const group = this.linkText(k, link);
+    const inner = /^[[(](.*)[\])]$/.exec(group)?.[1] ?? "";
+    // (a numeric citation: every number, a range's too)
+    if (/^[\d,;\s–-]+$/.test(inner)) {
+      const labels: string[] = [];
+      for (const part of inner.split(/[,;]/)) {
+        const r = /^\s*(\d+)\s*[–-]\s*(\d+)\s*$/.exec(part);
+        if (r) for (let n = Number(r[1]); n <= Number(r[2]) && labels.length < 200; n++) labels.push(String(n));
+        else if (part.trim()) labels.push(part.trim());
+      }
+      const out: Cited[] = [];
+      for (const n of labels) {
+        const at = n === own.label ? ([near, link[5] ?? 0] as [number, number]) : this.findLabel(n, near);
+        const e = at && this.entryAt(at[0], at[1]);
+        if (at && e) out.push(Viewer.asCited(e.label || n, e.text, at));
+      }
+      return out.length ? out : [Viewer.asCited(own.label, own.text, [near, link[5] ?? 0])];
+    }
+    // (else: the links on this page inside the citation's brackets, each its entry)
+    const s = this.slots[k];
+    const img = s?.img;
+    const list: Cited[] = [];
+    if (img?.links && group.length > 3) {
+      const line = img.links.filter((l) => Math.abs((l[1] + l[3]) / 2 - (link[1] + link[3]) / 2) < 3 && Math.abs(l[0] - link[0]) < 200 && typeof l[4] === "number");
+      for (const l of line.sort((a, b) => a[0] - b[0])) {
+        const e = this.entryAt(l[4] as number, l[5] ?? 0);
+        if (e && !list.some((c) => c.at![0] === l[4] && c.at![1] === (l[5] ?? 0))) list.push(Viewer.asCited(e.label, e.text, [l[4] as number, l[5] ?? 0]));
+      }
+    }
+    return list.length ? list : [Viewer.asCited(own.label, own.text, [near, link[5] ?? 0])];
+  }
+
+  /** The list's entry `i` followed: its place in the bibliography (Back returns). */
+  private peekGo(i: number, e?: MouseEvent): void {
+    const c = this.peekList[i], link = this.peekLink, from = this.peekFrom;
+    if (c?.at && e && this.newTab(e, c.at[0], c.at[1])) return;
+    this.peekHide();
+    if (c?.at) this.follow(c.at[0], c.at[1], `[${c.label}] ${c.title}`, link ? { k: from, link } : undefined);
+  }
+
+  /** A card's button: its address opened (the host's, as a link's), its BibTeX copied. */
+  private peekAct(b: HTMLElement, e?: MouseEvent): void {
+    if (b.dataset.act === "go") return this.peekGo(Number(b.dataset.i), e);
+    if (b.dataset.act === "open") {
+      const u = b.dataset.u!;
+      return this.host.link ? this.host.link(u) : void window.open(u, "_blank", "noopener");
+    }
+    const i = b.dataset.i;
+    const bib = (i === "all" ? this.peekList : i ? [this.peekList[Number(i)]] : this.peekList).map((c) => c?.bibtex).filter(Boolean).join("\n\n");
+    void navigator.clipboard?.writeText(bib).then(() => {
+      const was = b.textContent;
+      b.textContent = "Copied";
+      setTimeout(() => (b.textContent = was), 1200);
+    });
+  }
+
+  /** The window gone. */
+  private peekHide(): void {
+    clearTimeout(this.peekTimer);
+    clearTimeout(this.peekHiding);
+    this.peekAt = null;
+    this.peekLink = null;
+    if (this.peekEl) this.peekEl.hidden = true;
   }
 
   /** The link under a pointer event (its page's, from MuPDF), if any. */
@@ -194,6 +738,210 @@ export class Viewer {
   }
 
   /** Scroll to page `k`, `top` points from its top (null: its top). */
+  // ---- Back and forward: a link followed, where the view was is kept, as a browser's history ----
+
+  /** Where the view was before each jump, the latest last (Back's), and where Back left (Forward's, the next last). */
+  private past: Stop[] = [];
+  private future: Stop[] = [];
+  private backEl: HTMLElement | null = null;
+
+  /** Where the view is now: its top's page and how far down it, and the first words of the line there (the list says them). */
+  private here(): Stop | null {
+    const v = this.scroller.getBoundingClientRect();
+    const at = this.pointAt(v.left + v.width / 2, v.top + 12);
+    if (!at) return null;
+    // (the text layer's line nearest the view's top: what was being read)
+    let words = "", far = Infinity;
+    const y = v.top + 12;
+    for (const t of this.slots[at.k]?.el.querySelectorAll("text") ?? []) {
+      const r = t.getBoundingClientRect();
+      if (r.bottom < y - 4 || !t.textContent?.trim()) continue;
+      const d = Math.abs(r.top - y);
+      if (d < far) (far = d), (words = t.textContent.trim());
+      if (r.top > y + 120) break;
+    }
+    return { k: at.k, fy: at.fy, words: words.length > 48 ? `${words.slice(0, 47)}…` : words };
+  }
+
+  /** The view at `t`. */
+  private toStop(t: Stop): void {
+    const s = this.slots[t.k];
+    if (s) this.scroller.scrollTo({ top: s.el.offsetTop + t.fy * s.el.offsetHeight - 12, behavior: "auto" });
+  }
+
+  /** A link followed: where the view is now kept (Back returns to it; Forward's forgotten, as a browser's), then there. */
+  follow(k: number, top: number | null, via = "", from?: { k: number; link: Link }): void {
+    const now = this.here();
+    if (now) {
+      now.via = via;
+      if (from) now.mark = { k: from.k, box: [from.link[0], from.link[1], from.link[2], from.link[3]] };
+      this.past.push(now);
+      this.future = [];
+      // (an entry of the tab's history each jump, n: the jumps before it. The
+      // entry the page was at is marked first, 0, so a back to it is told)
+      if (this.host.backWith === "history") {
+        const h = this.scroller.ownerDocument.defaultView!.history;
+        if ((h.state as { phitexBack?: number } | null)?.phitexBack === undefined) h.replaceState({ ...(h.state ?? {}), phitexBack: 0 }, "");
+        h.pushState({ phitexBack: this.past.length }, "");
+      }
+    }
+    this.peekHide();
+    this.goToPlace(k, top);
+    this.flash(k, top);
+    this.backShown();
+  }
+
+  /**
+   * Where a jump landed, lit for a moment: the text layer's lines at
+   * `top` on page `k` (an entry, an equation, a caption's first lines),
+   * else a band there; a soft accent fading in 1.5 s. A tab in the
+   * background (a Ctrl+click's) lights it once it is shown, not unseen.
+   */
+  private flash(k: number, top: number | null, exact?: [number, number, number, number]): void {
+    const doc = this.scroller.ownerDocument;
+    if (doc.visibilityState !== "visible") {
+      const go = () => doc.visibilityState === "visible" && (doc.removeEventListener("visibilitychange", go), this.flash(k, top, exact));
+      return void doc.addEventListener("visibilitychange", go);
+    }
+    const s = this.slots[k];
+    if (!s) return;
+    s.el.querySelector(".phx-flash")?.remove();
+    const y0 = top ?? 0, b = s.el.getBoundingClientRect(), sy = this.size.h / b.height, sx = this.size.w / b.width;
+    // (the lines that start within 30 points under the target, the first with any text: their box, in points)
+    let box: [number, number, number, number] | null = exact ?? null;
+    for (const t of exact ? [] : s.el.querySelectorAll("text")) {
+      if (!t.textContent?.trim()) continue;
+      const r = t.getBoundingClientRect(), ty = (r.top - b.top) * sy, tb = (r.bottom - b.top) * sy;
+      if (tb < y0 - 2 || ty > y0 + 30) continue;
+      const [l, rr] = [(r.left - b.left) * sx, (r.right - b.left) * sx];
+      box = box ? [Math.min(box[0], l), Math.min(box[1], ty), Math.max(box[2], rr), Math.max(box[3], tb)] : [l, ty, rr, tb];
+    }
+    const [l, t, r, bt] = box ?? [this.size.w * 0.1, y0, this.size.w * 0.9, y0 + 24];
+    const f = document.createElement("div");
+    f.className = "phx-flash";
+    const pad = exact ? 2 : 3;
+    Object.assign(f.style, { left: `${((l - pad) / this.size.w) * 100}%`, top: `${((t - pad) / this.size.h) * 100}%`, width: `${((r - l + 2 * pad) / this.size.w) * 100}%`, height: `${((bt - t + 2 * pad) / this.size.h) * 100}%` });
+    f.addEventListener("animationend", () => f.remove());
+    s.el.append(f);
+  }
+
+  /** One step back (-1) or forward (1): where the view is goes to the other side. */
+  private step(d: -1 | 1): void {
+    const [from, to] = d < 0 ? [this.past, this.future] : [this.future, this.past];
+    const t = from.pop();
+    if (!t) return;
+    const now = this.here();
+    if (now) to.push(now);
+    this.toStop(t);
+    // (where it lands, lit: the link clicked there to leave it, else the line at the place)
+    if (t.mark) this.flash(t.mark.k, null, t.mark.box);
+    else this.flash(t.k, t.fy * this.size.h);
+    this.backShown();
+  }
+
+  /** `n` steps back (negative) or forward: through the tab's history where there is one (popstate then steps, so the two stay one). */
+  private go(n: number): void {
+    if (!n) return;
+    if (this.host.backWith === "history") return this.scroller.ownerDocument.defaultView!.history.go(n);
+    for (let i = 0; i < Math.abs(n); i++) this.step(n < 0 ? -1 : 1);
+  }
+
+  /**
+   * A click that asks for a new tab (Ctrl, ⌘ on a Mac, or the middle
+   * button: `middle`) where the host has one: page `k` opened there, this
+   * view left as it is, the window too (another can be opened from it).
+   */
+  private newTab(e: MouseEvent, k: number, top: number | null, middle = false): boolean {
+    if (!this.host.openAt || !(middle || e.ctrlKey || e.metaKey)) return false;
+    e.preventDefault();
+    this.host.openAt(k, top);
+    return true;
+  }
+
+  /** Where a view opened at a place starts (page, points down it): gone to once that page is drawn and the pages have their size. */
+  private startPlace: { k: number; top: number | null } | null = null;
+
+  /** Start at page `k`, `top` points down it (a tab opened by a Ctrl+click): now if that page is drawn, else once it is. */
+  startAt(k: number, top: number | null): void {
+    this.startPlace = { k, top };
+    this.startIfReady();
+  }
+
+  private startIfReady(): void {
+    const p = this.startPlace;
+    if (!p || !this.slots[p.k] || !this.slots.some((s) => s.img)) return;
+    this.startPlace = null;
+    // (there, and lit once this tab is shown: opened in the background, not before)
+    requestAnimationFrame(() => (this.goToPlace(p.k, p.top), requestAnimationFrame(() => this.flash(p.k, p.top))));
+  }
+
+  /** Back where the view was before the last link followed. */
+  back(): boolean {
+    if (!this.past.length) return false;
+    this.go(-1);
+    return true;
+  }
+
+  /** Forward where Back left. */
+  forward(): boolean {
+    if (!this.future.length) return false;
+    this.go(1);
+    return true;
+  }
+
+  /**
+   * The Back pill over the pages' corner while there is history: Back (to
+   * the page it says), the earlier stops' list (its count: each a click to
+   * go straight there), Forward where Back left one, × to forget them.
+   */
+  private backShown(): void {
+    if (!this.backEl) {
+      const b = (this.backEl = document.createElement("div"));
+      b.className = "pback";
+      b.innerHTML = `<button type="button" class="go"><span class="ar">←</span><span class="t"></span></button><button type="button" class="more" aria-haspopup="menu"></button><button type="button" class="fw" aria-label="Forward">→</button><button type="button" class="x" aria-label="Forget">×</button><div class="stops" role="menu" hidden></div>`;
+      b.querySelector(".go")!.addEventListener("click", () => this.back());
+      b.querySelector(".fw")!.addEventListener("click", () => this.forward());
+      b.querySelector(".x")!.addEventListener("click", () => ((this.past = []), (this.future = []), this.backShown()));
+      const list = b.querySelector<HTMLElement>(".stops")!;
+      b.querySelector(".more")!.addEventListener("click", () => {
+        list.hidden = !list.hidden;
+        if (list.hidden) return;
+        // (most recent first: the n-th, n steps back)
+        list.innerHTML = this.past
+          .map((t, i) => [t, this.past.length - i] as const)
+          .reverse()
+          .map(([, n]) => `<button type="button" role="menuitem" data-n="${n}"><b></b><span></span></button>`)
+          .join("");
+        // (each: what was clicked there, then where it was, page and line)
+        list.querySelectorAll<HTMLElement>("[data-n]").forEach((e, i) => {
+          const t = this.past[this.past.length - 1 - i];
+          e.querySelector("b")!.textContent = t.via ? `Clicked ${t.via}` : `Page ${t.k + 1}`;
+          e.querySelector("span")!.textContent = [`page ${t.k + 1}`, t.words && `“${t.words}”`].filter(Boolean).join(" · ");
+        });
+      });
+      list.addEventListener("click", (e) => {
+        const n = (e.target as Element).closest<HTMLElement>("[data-n]")?.dataset.n;
+        if (!n) return;
+        list.hidden = true;
+        this.go(-Number(n));
+      });
+      b.ownerDocument.addEventListener("pointerdown", (e) => !e.composedPath().includes(b) && (list.hidden = true));
+      (this.scroller.parentElement ?? this.scroller).append(b);
+    }
+    const b = this.backEl, t = this.past.at(-1);
+    b.hidden = !t && !this.future.length;
+    b.classList.toggle("noback", !t);
+    b.querySelector<HTMLElement>(".stops")!.hidden = true;
+    b.querySelector<HTMLElement>(".fw")!.hidden = !this.future.length;
+    const more = b.querySelector<HTMLElement>(".more")!;
+    more.hidden = this.past.length < 2;
+    more.textContent = `+${this.past.length - 1} ▾`;
+    more.title = "Every place before, to go straight back to one";
+    b.querySelector(".t")!.textContent = t ? `Back to page ${t.k + 1}` : "Back";
+    b.querySelector<HTMLElement>(".go")!.title = this.host.backWith ? "Back (the mouse's back button, Alt+←)" : "Back";
+    b.querySelector<HTMLElement>(".fw")!.title = this.host.backWith ? "Forward (the mouse's forward button, Alt+→)" : "Forward";
+  }
+
   goToPlace(k: number, top: number | null): void {
     const s = this.slots[k];
     if (!s) return;
@@ -558,6 +1306,12 @@ export class Viewer {
     if (img.w && img.h) this.size = { w: img.w, h: img.h };
     s.img = img;
     this.waits(s);
+    // (a tab opened at a place: there once the pages have their size)
+    if (this.startPlace) queueMicrotask(() => this.startIfReady());
+    // (the page a link's window waits for, or shows: shown again with it, a
+    // citation's cards now readable from its text, a page view drawn)
+    const pl = this.peekShown;
+    if (pl && pl[4] === k) queueMicrotask(() => this.peekShown === pl && this.peekShow({ link: pl, k: this.peekFrom }));
     // (the first page's size known: the pages at it, drawn again if coarser)
     if (resized) queueMicrotask(() => this.redraw());
     s.drawn = hash ?? s.hash;

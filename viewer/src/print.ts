@@ -290,6 +290,67 @@ header:active { cursor: grabbing; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
 /* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
 .slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
+/* a link hovered: where it goes, in a small window (viewer.ts peekShow) */
+.peek { position: absolute; z-index: 4; width: min(440px, calc(100% - 16px)); text-align: left; background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 24px rgb(0 0 0 / 22%); overflow: hidden; cursor: pointer; font: var(--ph-size)/1.4 var(--ph-font); }
+.peek .pv { position: relative; height: 250px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; background: #fff; }
+.peek .pv canvas { display: block; }
+.peek .pv .at { position: absolute; left: 0; width: 3px; height: 18px; background: var(--ph-accent); border-radius: 0 2px 2px 0; }
+.peek.wait .pv canvas, .peek.wait .pv .at { visibility: hidden; }
+.peek .pu { display: none; padding: 8px 10px 0; word-break: break-all; color: var(--ph-link, var(--ph-accent)); }
+.peek.url .pv { display: none; }
+.peek.url .pu { display: block; }
+.peek .pf { display: flex; justify-content: space-between; gap: 12px; padding: 5px 10px; font-size: 12px; color: var(--ph-fg2); border-top: 1px solid var(--ph-border); }
+.peek.url .pf { border-top: 0; }
+.peek.url .go { display: none; }
+.peek .pc { display: none; }
+.peek.cite .pv { display: none; }
+.peek.cite .pc { display: block; }
+.peek .pc .mh { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; font-size: 12px; color: var(--ph-fg2); border-bottom: 1px solid var(--ph-border); }
+.peek .pc .mh button { all: unset; cursor: pointer; padding: 2px 10px; border-radius: var(--ph-pill); border: 1px solid var(--ph-border); color: var(--ph-fg); }
+.peek .pc .mh button:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.peek .pc .cs { position: relative; max-height: 300px; overflow-y: auto; overscroll-behavior: contain; }
+/* an entry, the same one or many: the label, title and key; who, when and where; its links */
+.peek .pc .ce { padding: 7px 12px 7px 9px; border-left: 3px solid transparent; cursor: pointer; }
+.peek .pc .ce + .ce { border-top: 1px solid var(--ph-border); }
+.peek .pc .ce:hover { background: var(--ph-hover, rgb(0 0 0 / 4%)); }
+.peek .pc .ce.here { border-left-color: var(--ph-accent); background: color-mix(in srgb, var(--ph-accent) 7%, transparent); }
+.peek .pc .hd { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.peek .pc .hd .lab { flex: none; font-size: 12px; font-weight: 600; color: var(--ph-accent); }
+.peek .pc .hd .ti { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek .pc .hd code { flex: none; font: 10.5px/1.3 ui-monospace, "DM Mono", monospace; padding: 0 4px; border-radius: 3px; background: var(--ph-hover, rgb(0 0 0 / 6%)); color: var(--ph-fg2); }
+.peek .pc .mt { margin-top: 1px; font-size: 12px; line-height: 1.35; color: var(--ph-fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek .pc .lk { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; margin-top: 2px; font-size: 11.5px; }
+.peek .pc .lk > i { font-style: normal; color: var(--ph-fg2); }
+.peek .pc .lk button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); }
+.peek .pc .lk button:hover { text-decoration: underline; }
+.peek .pc .lk button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; border-radius: 2px; }
+/* where a jump landed, lit for a moment (viewer.ts flash): only its opacity animates */
+.slot .phx-flash { position: absolute; z-index: 2; pointer-events: none; border-radius: 3px; background: color-mix(in srgb, var(--ph-accent) 22%, transparent); box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--ph-accent) 55%, transparent); animation: phx-flash 1.5s ease-out forwards; }
+@keyframes phx-flash { 0%, 35% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .slot .phx-flash { animation-duration: 2.5s; } }
+/* Back, after a link followed: over the pages' bottom left corner */
+.pback { position: absolute; z-index: 4; left: 12px; bottom: 12px; display: flex; align-items: stretch; border-radius: var(--ph-pill); background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); box-shadow: 0 3px 12px rgb(0 0 0 / 18%); font: 12.5px/1 var(--ph-font); }
+.pback[hidden] { display: none; }
+.pback button { all: unset; cursor: pointer; padding: 7px 10px; }
+.pback .go { display: flex; gap: 6px; align-items: center; padding-left: 12px; font-weight: 600; }
+.pback .go .ar { font-size: 14px; }
+.pback .x { color: var(--ph-fg2); border-left: 1px solid var(--ph-border); padding: 7px 9px; }
+.pback { overflow: visible; }
+.pback .more, .pback .fw { border-left: 1px solid var(--ph-border); color: var(--ph-fg2); font-weight: 600; }
+.pback .more[hidden], .pback .fw[hidden] { display: none; }
+.pback.noback .go { display: none; }
+.pback.noback .fw { border-left: 0; padding-left: 12px; }
+.pback .go { border-radius: var(--ph-pill) 0 0 var(--ph-pill); }
+.pback .x { border-radius: 0 var(--ph-pill) var(--ph-pill) 0; }
+.pback .stops { position: absolute; left: 0; bottom: calc(100% + 6px); width: max-content; min-width: 300px; max-width: min(460px, 80vw); max-height: 260px; overflow-y: auto; padding: 4px 0; background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 20px rgb(0 0 0 / 20%); }
+.pback .stops[hidden] { display: none; }
+.pback .stops button { display: grid; grid-template-columns: 1fr; gap: 1px; line-height: 1.35; width: 100%; box-sizing: border-box; padding: 6px 12px; text-align: left; font-size: 12.5px; }
+.pback .stops button b { font-weight: 600; white-space: nowrap; }
+.pback .stops button b small { margin-left: 5px; font-weight: 400; color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
+.pback .stops button span { color: var(--ph-fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pback button:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.pback button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
+.win.dark-pdf .peek .pv canvas, .win.docked.pdf-dark .peek .pv canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
 .stage.offline .slot { opacity: .4; pointer-events: none; }

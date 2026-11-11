@@ -317,6 +317,8 @@ const panel = new Panel(
     // (Settings: the watch's rows, from and into the user's phitex.toml)
     settings: () => watchSettings(),
     // (the panel's own choices: the user's phitex.toml too, never this browser's)
+    // (Ctrl+click on a link: this viewer in a new tab, its address saying where: #at=PAGE,POINTS)
+    onOpenAt: (k, top) => void window.open(`${location.pathname}${location.search}#at=${k + 1},${Math.round(top ?? 0)}`, "_blank"),
     onPref: async (key, value) => {
       const r = await sock.request({ op: "prefs", set: { [key]: value } });
       return r.ok ? undefined : `Not saved: ${r.error ?? "the watch did not answer"}`;
@@ -384,6 +386,11 @@ const panel = new Panel(
     },
   },
 );
+// (a tab opened at a place, #at=PAGE,POINTS: the pages start there)
+{
+  const at = /^#at=(\d+),(\d+)$/.exec(location.hash);
+  if (at) panel.startAt(Number(at[1]) - 1, Number(at[2]));
+}
 // (the whole window: docked in a pane that fills it)
 const pane = document.createElement("div");
 pane.style.cssText = "position:fixed;inset:0";

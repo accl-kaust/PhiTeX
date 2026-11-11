@@ -17,7 +17,7 @@ import { sentence } from "./words.ts";
 import { KINDS, kindOf, type Diagnostic, type Kind } from "./diagnostics.ts";
 import type { PackageState } from "./packages.ts";
 import { ENGINES, errorNeeds, type Engine } from "./engines.ts";
-import { Viewer } from "./viewer.ts";
+import { Viewer, type Cited } from "./viewer.ts";
 import { VIEWER_CSS } from "./css.ts";
 import { PRINT_CSS } from "./print.ts";
 import { PROBLEMS_CSS, problemNode, type Problem } from "./problems.ts";
@@ -129,6 +129,10 @@ export interface ViewPrefs {
 }
 
 export interface PanelEvents {
+  /** Ctrl+click or a middle click on a link: the same viewer opened in a new tab at page `k`, `top` points down it (absent: such a click follows the link here). */
+  onOpenAt?(k: number, top: number | null): void;
+  /** What the citation under the pointer cites (Viewer's `cited`: its \cite's entries, from the source and the .bib). */
+  onCited?(from: { k: number; x: number; y: number }, to: number, top: number | null): Cited[] | null;
   /** The page in view changed (the one an edit paints first). */
   onPage(p: number): void;
   /**
@@ -697,6 +701,12 @@ export class Panel {
       peer: ev.onGotoRange ? (file, pos) => ev.onGotoRange!(file, pos, pos, true) : undefined,
       selected: (sel) => ev.onSelectPage?.(sel),
       link: ev.onLink ? (u) => ev.onLink!(u) : undefined,
+      // (only where the host has a source lookup: else the viewer reads the citation from the pages)
+      cited: ev.onCited ? (from, to, top) => ev.onCited!(from, to, top) : undefined,
+      openAt: ev.onOpenAt ? (k, top) => ev.onOpenAt!(k, top) : undefined,
+      // (Back by the mouse's back button and Alt+←: the tab's history in a browser tab (the watch, the demo),
+      // the button's events in VS Code's webview; Overleaf's are the browser's, they leave the project)
+      backWith: this.kind === "watch" ? "history" : this.kind === "vscode" ? "buttons" : undefined,
     });
     this.extras(opts);
     this.darkPdf("off");
@@ -2498,6 +2508,11 @@ export class Panel {
       { title: "Packages", rows: [] },
       { title: "Updates and tips", rows: tips },
     ];
+  }
+
+  /** Start the pages at page `k`, `top` points down it (a tab opened at a place: its address said where). */
+  startAt(k: number, top: number | null): void {
+    this.viewer.startAt(k, top);
   }
 
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */

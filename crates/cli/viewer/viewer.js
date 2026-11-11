@@ -249,8 +249,29 @@ function search(pages2, q, max = 1e3) {
 }
 
 // viewer/src/viewer.ts
+var spans = /* @__PURE__ */ new WeakMap();
+function inkSpan(c) {
+  const kept = spans.get(c);
+  if (kept) return kept;
+  const w = 160, h = Math.max(1, Math.round(c.height / c.width * w));
+  const t = document.createElement("canvas");
+  t.width = w;
+  t.height = h;
+  const g = t.getContext("2d", { willReadFrequently: true });
+  g.drawImage(c, 0, 0, w, h);
+  const d = g.getImageData(0, 0, w, h).data;
+  let l = w, r = -1;
+  for (let y = 0; y < h; y++)
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      if (d[i] + d[i + 1] + d[i + 2] < 600) l = Math.min(l, x), r = Math.max(r, x);
+    }
+  const out = r < l ? [0, 1] : [l / w, (r + 1) / w];
+  spans.set(c, out);
+  return out;
+}
 var LETTER = { w: 612, h: 792 };
-var Viewer = class {
+var Viewer = class _Viewer {
   slots = [];
   size = LETTER;
   visible = /* @__PURE__ */ new Set();
@@ -358,12 +379,414 @@ var Viewer = class {
         else window.open(to, "_blank", "noopener");
         return;
       }
-      this.goToPlace(to, hit[5] ?? null);
+      if (this.newTab(e, to, hit[5] ?? null)) return;
+      const slot = e.target.closest(".slot");
+      this.follow(to, hit[5] ?? null, slot ? this.linkText(Number(slot.dataset.k), hit) : "", slot ? { k: Number(slot.dataset.k), link: hit } : void 0);
     });
+    root.addEventListener("auxclick", (e) => {
+      const hit = e.button === 1 ? this.linkAt(e) : null;
+      if (hit && typeof hit[4] === "number" && this.newTab(e, hit[4], hit[5] ?? null, true)) e.preventDefault();
+    });
+    root.addEventListener("mousedown", (e) => e.button === 1 && this.host.openAt && this.linkAt(e) && e.preventDefault());
     root.addEventListener("mousemove", (e) => {
       const el = e.target.closest(".slot");
-      if (el) el.classList.toggle("on-link", !!this.linkAt(e));
+      const hit = this.linkAt(e);
+      if (el) el.classList.toggle("on-link", !!hit);
+      this.pointer = [e.clientX, e.clientY];
+      this.hover(hit, el, e);
     });
+    root.addEventListener("mouseleave", () => this.hover(null, null));
+    const doc = root.ownerDocument;
+    doc.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") this.peekHide();
+      else if (host2.backWith === "buttons" && e.altKey && e.key === "ArrowLeft" && this.past.length) e.preventDefault(), this.back();
+      else if (host2.backWith === "buttons" && e.altKey && e.key === "ArrowRight" && this.future.length) e.preventDefault(), this.forward();
+    });
+    scroller.addEventListener("scroll", () => this.peekEl && !this.peekEl.hidden && !this.peekEl.matches(":hover") && this.peekHide(), { passive: true });
+    doc.addEventListener("visibilitychange", () => this.peekHide());
+    doc.defaultView?.addEventListener("blur", () => this.peekHide());
+    doc.documentElement.addEventListener("mouseleave", () => this.peekHide());
+    doc.addEventListener("pointermove", (e) => {
+      if (!this.peekEl || this.peekEl.hidden || !this.peekLink) return;
+      const path = e.composedPath();
+      if (path.includes(this.peekEl) || path.includes(root)) return;
+      this.peekAt = null;
+      this.peekHide();
+    }, { passive: true });
+    if (host2.backWith === "history")
+      doc.defaultView?.addEventListener("popstate", (e) => {
+        const n = e.state?.phitexBack;
+        if (n === void 0) return;
+        while (this.past.length > n) this.step(-1);
+        while (this.past.length < n && this.future.length) this.step(1);
+      });
+    if (host2.backWith === "buttons")
+      for (const t of ["mousedown", "mouseup", "auxclick"])
+        doc.addEventListener(t, (e) => {
+          const go = e.button === 3 ? -1 : e.button === 4 ? 1 : 0;
+          if (!go || !(go < 0 ? this.past : this.future).length) return;
+          e.preventDefault();
+          if (t === "mouseup") go < 0 ? this.back() : this.forward();
+        });
+  }
+  // ---- Link previews: a link hovered, the place it goes to shown in a small window on that page ----
+  /** Links previewed on hover (the host's setting). */
+  peeks = true;
+  peekEl = null;
+  /** The link the window is for (or is about to be), its page and where its box is on it. */
+  peekAt = null;
+  peekTimer;
+  peekHiding;
+  /**
+   * The pointer over `hit` (a link on page slot `el`), or off every link:
+   * the window shown once it rests 350 ms on one (80 ms when a window is up
+   * already: moving along a list of citations), gone 250 ms after it leaves
+   * the link and the window both.
+   */
+  hover(hit, el, e) {
+    if (!this.peeks) return;
+    const up = !!this.peekEl && !this.peekEl.hidden;
+    if (hit && this.peekAt?.link === hit) return void clearTimeout(this.peekHiding);
+    clearTimeout(this.peekTimer);
+    if (!hit || !el || !e) {
+      this.peekAt = null;
+      if (up) this.onTheWay() ? this.peekSoon(150) : this.peekHide();
+      return;
+    }
+    const at = { link: hit, k: Number(el.dataset.k) };
+    this.peekAt = at;
+    this.peekTimer = setTimeout(() => this.peekAt === at && this.peekShow(at), up ? 80 : 350);
+  }
+  /** The window up for `at`: a web address said, a place in the document shown, its page asked for if not drawn yet. */
+  peekShow(at) {
+    clearTimeout(this.peekHiding);
+    const el = this.peekEl ?? this.peekMake();
+    this.peekLink = at.link;
+    this.peekFrom = at.k;
+    const to = at.link[4];
+    el.classList.toggle("url", typeof to === "string");
+    el.hidden = false;
+    if (typeof to === "string") {
+      el.querySelector(".pu").textContent = to;
+      el.querySelector(".where").textContent = /^(https?:|mailto:)/i.test(to) ? "Opens in your browser" : "Not followed (not a web address)";
+    } else {
+      const [x0, y0, x1, y1] = at.link;
+      const list = this.host.cited ? this.host.cited({ k: at.k, x: (x0 + x1) / 2, y: (y0 + y1) / 2 }, to, at.link[5] ?? null) : this.citedOnPage(at.k, at.link);
+      el.classList.toggle("cite", !!list?.length);
+      if (list?.length) this.peekCard(list, at.link);
+      else this.peekDraw();
+    }
+    this.peekPlace(at);
+  }
+  /** The window, made once: in the scroller, so it scrolls with the link it is for. */
+  peekMake() {
+    const el = document.createElement("div");
+    el.className = "peek";
+    el.setAttribute("role", "tooltip");
+    el.hidden = true;
+    el.innerHTML = `<div class="pv"><canvas></canvas><i class="at"></i></div><div class="pc"></div><div class="pu"></div><div class="pf"><span class="where"></span><span class="go">Click to go there</span></div>`;
+    el.addEventListener("mouseenter", () => clearTimeout(this.peekHiding));
+    el.addEventListener("mouseleave", () => this.peekSoon(100));
+    el.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-act]");
+      if (b) return void this.peekAct(b, e);
+      const ce = e.target.closest(".ce");
+      if (ce) return void this.peekGo(Number(ce.dataset.i), e);
+      const link = this.peekShown, from2 = this.peekFrom;
+      const to = link?.[4];
+      if (typeof to === "number" && this.newTab(e, to, link?.[5] ?? null)) return;
+      this.peekHide();
+      if (typeof to === "number") this.follow(to, link?.[5] ?? null, link ? this.linkText(from2, link) : "", link ? { k: from2, link } : void 0);
+      else if (typeof to === "string" && /^(https?:|mailto:)/i.test(to)) this.host.link ? this.host.link(to) : window.open(to, "_blank", "noopener");
+    });
+    this.scroller.append(el);
+    return this.peekEl = el;
+  }
+  /** The link the window shows now. */
+  get peekShown() {
+    return this.peekEl && !this.peekEl.hidden ? this.peekLink ?? null : null;
+  }
+  peekLink = null;
+  /** The page the window's link is on. */
+  peekFrom = 0;
+  /**
+   * What a link on page `k` refers to, as the reader sees it: the text
+   * layer's characters inside its box, widened to the whole reference: a
+   * citation's numbers to its brackets ("4" of "[2, 4]" is "[2, 4]"), a
+   * bare number to the word before it ("1" is "Figure 1", "page 2").
+   * Back's list says it was clicked.
+   */
+  linkText(k, link) {
+    const s = this.slots[k];
+    if (!s) return "";
+    const b = s.el.getBoundingClientRect(), sx = b.width / this.size.w, sy = b.height / this.size.h;
+    const [l, t, r, bt] = [b.left + link[0] * sx, b.top + link[1] * sy, b.left + link[2] * sx, b.top + link[3] * sy];
+    for (const el of s.el.querySelectorAll("text")) {
+      const tr = el.getBoundingClientRect();
+      if (tr.right < l || tr.left > r || tr.bottom < t || tr.top > bt) continue;
+      const m = el.getScreenCTM(), text = el.textContent ?? "";
+      if (!m) continue;
+      let a = -1, z = -1;
+      for (let i = 0, n = Math.min(el.getNumberOfChars(), text.length); i < n; i++) {
+        const e = el.getExtentOfChar(i);
+        const p = new DOMPoint(e.x + e.width / 2, e.y + e.height / 2).matrixTransform(m);
+        if (p.x >= l && p.x <= r && p.y >= t && p.y <= bt) a < 0 && (a = i), z = i;
+      }
+      if (a < 0) continue;
+      const inCite = /[\d,;\s–-]/;
+      let x = a, y = z;
+      while (x > 0 && inCite.test(text[x - 1])) x--;
+      while (y < text.length - 1 && inCite.test(text[y + 1])) y++;
+      if (x > 0 && "[(".includes(text[x - 1]) && y < text.length - 1 && "])".includes(text[y + 1])) return text.slice(x - 1, y + 2).replace(/\s+/g, " ");
+      const got = text.slice(a, z + 1).trim();
+      if (/^[\dA-Z.]+$/.test(got)) {
+        const before = /([A-Za-z]+)[~\s\u00a0]*$/.exec(text.slice(0, a));
+        if (before) return `${before[1]} ${got}`;
+      }
+      return got.replace(/\s+/g, " ");
+    }
+    return "";
+  }
+  /** The window placed under the link's box (over it, where there is no room under), inside the view. */
+  peekPlace(at) {
+    const el = this.peekEl, s = this.slots[at.k];
+    if (!s) return;
+    this.peekLink = at.link;
+    const b = s.el.getBoundingClientRect(), v = this.scroller.getBoundingClientRect();
+    const sx = b.width / this.size.w, sy = b.height / this.size.h;
+    const [x0, y0, , y1] = at.link;
+    const w = el.offsetWidth, h = el.offsetHeight;
+    const left = Math.max(v.left + 8, Math.min(b.left + x0 * sx - 24, v.right - w - 8));
+    const below = b.top + y1 * sy + 6, above = b.top + y0 * sy - h - 6;
+    const top = below + h <= v.bottom - 8 || above < v.top + 8 ? below : above;
+    el.style.left = `${left - v.left + this.scroller.scrollLeft}px`;
+    el.style.top = `${top - v.top + this.scroller.scrollTop}px`;
+    const lx0 = b.left + x0 * sx, lx1 = b.left + at.link[2] * sx, ly0 = b.top + y0 * sy, ly1 = b.top + y1 * sy;
+    this.peekWay = top === below ? [Math.min(lx0, left), ly0, Math.max(lx1, left + w), top + 4] : [Math.min(lx0, left), top + h - 4, Math.max(lx1, left + w), ly1];
+  }
+  /** The pointer's last place over the pages (view coordinates), and the strip between the window's link and it. */
+  pointer = [0, 0];
+  peekWay = [0, 0, 0, 0];
+  /** The pointer is between the link and its window, on its way in. */
+  onTheWay() {
+    const [x, y] = this.pointer, [l, t, r, b] = this.peekWay;
+    return x >= l && x <= r && y >= t && y <= b;
+  }
+  /**
+   * The target page drawn in the window, the full page's width at the
+   * window's, scrolled so the place is near its top, a bar beside it; a
+   * page not drawn yet is asked for, and drawn here when it comes (set).
+   */
+  peekDraw() {
+    const el = this.peekEl, link = this.peekLink ?? this.peekAt?.link;
+    if (!el || !link || typeof link[4] !== "number") return;
+    const k = link[4], top = link[5] ?? 0, s = this.slots[k];
+    const pv = el.querySelector(".pv"), c = pv.querySelector("canvas");
+    el.classList.toggle("wait", !s?.img);
+    if (!s?.img) {
+      el.querySelector(".where").textContent = `Page ${k + 1} \xB7 drawing\u2026`;
+      if (s) this.ask(k);
+      return;
+    }
+    el.querySelector(".where").textContent = `Page ${k + 1}`;
+    const img = s.img, W2 = pv.clientWidth || 420, dpr = window.devicePixelRatio || 1;
+    const all = img.canvas instanceof HTMLCanvasElement ? [img.canvas] : [...img.canvas.querySelectorAll("canvas")];
+    const base = all.find((b) => !b.classList.contains("phx-tile") && b.width);
+    const [il, ir] = base ? inkSpan(base) : [0, 1];
+    const pad = 10 / img.w, l = Math.max(0, il - pad), r = Math.min(1, ir + pad);
+    const PW = W2 / (r - l), H2 = Math.round(PW * img.h / img.w), X = -l * PW;
+    c.style.width = `${W2}px`;
+    c.style.height = `${H2}px`;
+    c.width = Math.round(W2 * dpr);
+    c.height = Math.round(H2 * dpr);
+    const g = c.getContext("2d");
+    g.fillStyle = "#fff";
+    g.fillRect(0, 0, c.width, c.height);
+    g.setTransform(dpr, 0, 0, dpr, X * dpr, 0);
+    g.imageSmoothingQuality = "high";
+    for (const b of all) {
+      if (!b.width) continue;
+      const tile = b.classList.contains("phx-tile");
+      const f = (v) => (parseFloat(v) || 0) / 100;
+      const [bl, bt, bw, bh] = tile ? [f(b.style.left), f(b.style.top), f(b.style.width), f(b.style.height)] : [0, 0, 1, 1];
+      g.drawImage(b, bl * PW, bt * H2, bw * PW, bh * H2);
+    }
+    const y = top / img.h * H2;
+    pv.querySelector(".at").style.top = `${y}px`;
+    pv.scrollTop = Math.max(0, y - 28);
+  }
+  /** The window gone `ms` on, unless the pointer comes back to it or its link (one timer: a later leave restarts it, never a second). */
+  peekSoon(ms) {
+    clearTimeout(this.peekHiding);
+    this.peekHiding = setTimeout(() => this.peekHide(), ms);
+  }
+  /**
+   * A citation's card: one entry, whole (its label and key, title,
+   * authors, where and when, its DOI or address, Copy BibTeX); several (a
+   * \cite of many, a range), a list of them, the one under the pointer
+   * marked, each a click to its place in the bibliography.
+   */
+  peekCard(list, link) {
+    const el = this.peekEl, pc = el.querySelector(".pc");
+    const esc = (t) => t.replace(/[&<>"]/g, (ch) => `&#${ch.charCodeAt(0)};`);
+    const names = (a) => a.length > 4 ? `${a.slice(0, 3).join(", ")} and ${a.length - 3} others` : a.length > 1 ? `${a.slice(0, -1).join(", ")} and ${a.at(-1)}` : a[0] ?? "";
+    const here = (c) => list.length > 1 && !!c.at && c.at[0] === link[4] && c.at[1] === (link[5] ?? null);
+    const card = (c, i) => {
+      const doi = c.doi ? `https://doi.org/${c.doi}` : "";
+      return `<section class="ce${here(c) ? " here" : ""}" data-i="${i}"><div class="hd">${c.label ? `<span class="lab">[${esc(c.label)}]</span>` : ""}<span class="ti">${esc(c.title)}</span>${c.key ? `<code>${esc(c.key)}</code>` : ""}</div><div class="mt">${[[c.authors.length && esc(names(c.authors)), c.year && esc(c.year)].filter(Boolean).join(", "), c.venue && `<i>${esc(c.venue)}</i>`].filter(Boolean).join(" \xB7 ")}</div><div class="lk">` + [doi ? `<button type="button" data-act="open" data-u="${esc(doi)}">DOI</button>` : c.url ? `<button type="button" data-act="open" data-u="${esc(c.url)}">${esc(c.url.replace(/^https?:\/\//, "").split("/")[0])}</button>` : "", c.bibtex ? `<button type="button" data-act="bib" data-i="${i}">Copy BibTeX</button>` : "", c.at ? `<button type="button" data-act="go" data-i="${i}">Go to it</button>` : ""].filter(Boolean).join("<i>\xB7</i>") + `</div></section>`;
+    };
+    const bibs = list.filter((c) => c.bibtex).length;
+    pc.innerHTML = (list.length > 1 ? `<div class="mh"><span>${list.length} works cited here</span>${bibs > 1 ? `<button type="button" data-act="bib" data-i="all">Copy all BibTeX (${bibs})</button>` : ""}</div>` : "") + `<div class="cs">${list.map(card).join("")}</div>`;
+    this.peekList = list;
+    const cs = pc.querySelector(".cs"), h = pc.querySelector(".ce.here");
+    cs.scrollTop = 0;
+    if (h && h.offsetTop + h.offsetHeight > cs.clientHeight) cs.scrollTop = h.offsetTop - 8;
+    const pages2 = [...new Set(list.map((c) => c.at?.[0]).filter((k) => k !== void 0))];
+    el.querySelector(".where").textContent = `References \xB7 page ${pages2.length ? pages2.map((k) => k + 1).join(", ") : Number(link[4]) + 1}`;
+    el.querySelector(".go").textContent = list.length > 1 ? "Click one to go there" : "Click to go there";
+  }
+  peekList = [];
+  // ---- A citation read from the pages themselves: the bibliography as typeset ----
+  /** Page `k`'s text lines (the text layer's), in points from its top left, top to bottom. */
+  pageLines(k) {
+    const s = this.slots[k];
+    if (!s) return [];
+    const b = s.el.getBoundingClientRect(), sx = this.size.w / b.width, sy = this.size.h / b.height;
+    return [...s.el.querySelectorAll("text")].map((t) => {
+      const r = t.getBoundingClientRect();
+      return { t: (t.textContent ?? "").replace(/\s+/g, " ").trim(), x0: (r.left - b.left) * sx, y0: (r.top - b.top) * sy, x1: (r.right - b.left) * sx, y1: (r.bottom - b.top) * sy };
+    }).filter((l) => l.t).sort((a, c) => a.y0 - c.y0 || a.x0 - c.x0);
+  }
+  /** An entry's label, where the bibliography prints one at its line's start ("[4]", "[Knu84]"). */
+  static LABEL = /^\[([^\]]{1,12})\]\s*/;
+  /**
+   * The bibliography entry at page `k`, `top` points down it: its lines
+   * from there to the next entry (a line starting with a label, or a gap
+   * wider than a line), as one text. Null: no bibliography there (a
+   * \ref's target: the page is shown instead).
+   */
+  entryAt(k, top) {
+    const lines2 = this.pageLines(k);
+    const i = lines2.findIndex((l) => l.y1 > top + 1);
+    if (i < 0) return null;
+    const first = lines2[i];
+    const labelled = _Viewer.LABEL.exec(first.t);
+    const heading = lines2.slice(0, i).some((l) => /^(references|bibliography|works cited|literature)$/i.test(l.t));
+    if (!labelled && !heading) return null;
+    const out = [first.t];
+    const lead = first.y1 - first.y0;
+    for (let j = i + 1, last = first; j < lines2.length && out.length < 8; j++) {
+      const l = lines2[j];
+      if (_Viewer.LABEL.test(l.t) || l.y0 - last.y1 > lead * 0.9 || /^\d+$/.test(l.t)) break;
+      out.push(l.t);
+      last = l;
+    }
+    const text = out.reduce((a, l) => /[a-z]-$/.test(a) && /^[a-z]/.test(l) ? a.slice(0, -1) + l : `${a} ${l}`);
+    const m = _Viewer.LABEL.exec(text);
+    return { label: m ? m[1] : "", text: m ? text.slice(m[0].length) : text };
+  }
+  /** Where the bibliography prints the entry labelled `label`: near page `near` (its other entries' page), its line's start. */
+  findLabel(label, near) {
+    for (const k of [near, near + 1, near - 1, near + 2]) {
+      const l = this.pageLines(k).find((l2) => l2.t.startsWith(`[${label}]`));
+      if (l) return [k, l.y0];
+    }
+    return null;
+  }
+  /**
+   * An entry's text as a card: authors, title, where and when, the
+   * usual "Authors. Title. Venue, year." of a bibliography style, its DOI
+   * and address where it prints them. Sentences end at ". " but not at an
+   * initial's ("D. E. Knuth").
+   */
+  static asCited(label, text, at) {
+    const doi = /\b(10\.\d{4,9}\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
+    const url = /(https?:\/\/[^\s,;]+[^\s,;.])/.exec(text)?.[1];
+    const years = [...text.matchAll(/\b(1[5-9]\d\d|20\d\d)[a-z]?\b/g)];
+    const year = years.at(-1)?.[0];
+    const parts = [];
+    let cur = "";
+    for (const w of text.split(" ")) {
+      cur = cur ? `${cur} ${w}` : w;
+      if (/[^.\s]{2,}[.?!]$/.test(w) && !/^(et|al|ed|eds|vol|no|pp|Proc|Trans|Jr|Inc)\.$/i.test(w)) parts.push(cur), cur = "";
+    }
+    if (cur) parts.push(cur);
+    const authors = (parts[0] ?? "").replace(/\.$/, "").split(/,\s*(?:and\s+)?|\s+and\s+/).map((a) => a.trim()).filter(Boolean);
+    const title = (parts[1] ?? parts[0] ?? text).replace(/\.$/, "");
+    const venue = parts.slice(2).join(" ").replace(/\.$/, "").replace(new RegExp(`,?\\s*${year ?? "^$"}\\s*$`), "") || void 0;
+    return { key: "", label, title, authors: parts.length > 1 ? authors : [], venue, year, doi, url, at };
+  }
+  /**
+   * What the citation under the pointer cites, read from the pages: the
+   * citation's whole text ("[1, 3–5]": its numbers, ranges filled in;
+   * else the links beside it in its brackets), each entry as typeset in
+   * the bibliography. Null: the link's target is no bibliography entry.
+   */
+  citedOnPage(k, link) {
+    if (typeof link[4] !== "number") return null;
+    const t = this.slots[link[4]];
+    if (t && !t.img) return void this.ask(link[4]), null;
+    const own = this.entryAt(link[4], link[5] ?? 0);
+    if (!own) return null;
+    const near = link[4];
+    const group = this.linkText(k, link);
+    const inner = /^[[(](.*)[\])]$/.exec(group)?.[1] ?? "";
+    if (/^[\d,;\s–-]+$/.test(inner)) {
+      const labels = [];
+      for (const part3 of inner.split(/[,;]/)) {
+        const r = /^\s*(\d+)\s*[–-]\s*(\d+)\s*$/.exec(part3);
+        if (r) for (let n = Number(r[1]); n <= Number(r[2]) && labels.length < 200; n++) labels.push(String(n));
+        else if (part3.trim()) labels.push(part3.trim());
+      }
+      const out = [];
+      for (const n of labels) {
+        const at = n === own.label ? [near, link[5] ?? 0] : this.findLabel(n, near);
+        const e = at && this.entryAt(at[0], at[1]);
+        if (at && e) out.push(_Viewer.asCited(e.label || n, e.text, at));
+      }
+      return out.length ? out : [_Viewer.asCited(own.label, own.text, [near, link[5] ?? 0])];
+    }
+    const s = this.slots[k];
+    const img = s?.img;
+    const list = [];
+    if (img?.links && group.length > 3) {
+      const line = img.links.filter((l) => Math.abs((l[1] + l[3]) / 2 - (link[1] + link[3]) / 2) < 3 && Math.abs(l[0] - link[0]) < 200 && typeof l[4] === "number");
+      for (const l of line.sort((a, b) => a[0] - b[0])) {
+        const e = this.entryAt(l[4], l[5] ?? 0);
+        if (e && !list.some((c) => c.at[0] === l[4] && c.at[1] === (l[5] ?? 0))) list.push(_Viewer.asCited(e.label, e.text, [l[4], l[5] ?? 0]));
+      }
+    }
+    return list.length ? list : [_Viewer.asCited(own.label, own.text, [near, link[5] ?? 0])];
+  }
+  /** The list's entry `i` followed: its place in the bibliography (Back returns). */
+  peekGo(i, e) {
+    const c = this.peekList[i], link = this.peekLink, from2 = this.peekFrom;
+    if (c?.at && e && this.newTab(e, c.at[0], c.at[1])) return;
+    this.peekHide();
+    if (c?.at) this.follow(c.at[0], c.at[1], `[${c.label}] ${c.title}`, link ? { k: from2, link } : void 0);
+  }
+  /** A card's button: its address opened (the host's, as a link's), its BibTeX copied. */
+  peekAct(b, e) {
+    if (b.dataset.act === "go") return this.peekGo(Number(b.dataset.i), e);
+    if (b.dataset.act === "open") {
+      const u = b.dataset.u;
+      return this.host.link ? this.host.link(u) : void window.open(u, "_blank", "noopener");
+    }
+    const i = b.dataset.i;
+    const bib = (i === "all" ? this.peekList : i ? [this.peekList[Number(i)]] : this.peekList).map((c) => c?.bibtex).filter(Boolean).join("\n\n");
+    void navigator.clipboard?.writeText(bib).then(() => {
+      const was = b.textContent;
+      b.textContent = "Copied";
+      setTimeout(() => b.textContent = was, 1200);
+    });
+  }
+  /** The window gone. */
+  peekHide() {
+    clearTimeout(this.peekTimer);
+    clearTimeout(this.peekHiding);
+    this.peekAt = null;
+    this.peekLink = null;
+    if (this.peekEl) this.peekEl.hidden = true;
   }
   /** The link under a pointer event (its page's, from MuPDF), if any. */
   linkAt(e) {
@@ -377,6 +800,183 @@ var Viewer = class {
     return img.links.find((l) => x >= l[0] && x <= l[2] && y >= l[1] && y <= l[3]) ?? null;
   }
   /** Scroll to page `k`, `top` points from its top (null: its top). */
+  // ---- Back and forward: a link followed, where the view was is kept, as a browser's history ----
+  /** Where the view was before each jump, the latest last (Back's), and where Back left (Forward's, the next last). */
+  past = [];
+  future = [];
+  backEl = null;
+  /** Where the view is now: its top's page and how far down it, and the first words of the line there (the list says them). */
+  here() {
+    const v = this.scroller.getBoundingClientRect();
+    const at = this.pointAt(v.left + v.width / 2, v.top + 12);
+    if (!at) return null;
+    let words2 = "", far = Infinity;
+    const y = v.top + 12;
+    for (const t of this.slots[at.k]?.el.querySelectorAll("text") ?? []) {
+      const r = t.getBoundingClientRect();
+      if (r.bottom < y - 4 || !t.textContent?.trim()) continue;
+      const d = Math.abs(r.top - y);
+      if (d < far) far = d, words2 = t.textContent.trim();
+      if (r.top > y + 120) break;
+    }
+    return { k: at.k, fy: at.fy, words: words2.length > 48 ? `${words2.slice(0, 47)}\u2026` : words2 };
+  }
+  /** The view at `t`. */
+  toStop(t) {
+    const s = this.slots[t.k];
+    if (s) this.scroller.scrollTo({ top: s.el.offsetTop + t.fy * s.el.offsetHeight - 12, behavior: "auto" });
+  }
+  /** A link followed: where the view is now kept (Back returns to it; Forward's forgotten, as a browser's), then there. */
+  follow(k, top, via = "", from2) {
+    const now = this.here();
+    if (now) {
+      now.via = via;
+      if (from2) now.mark = { k: from2.k, box: [from2.link[0], from2.link[1], from2.link[2], from2.link[3]] };
+      this.past.push(now);
+      this.future = [];
+      if (this.host.backWith === "history") {
+        const h = this.scroller.ownerDocument.defaultView.history;
+        if (h.state?.phitexBack === void 0) h.replaceState({ ...h.state ?? {}, phitexBack: 0 }, "");
+        h.pushState({ phitexBack: this.past.length }, "");
+      }
+    }
+    this.peekHide();
+    this.goToPlace(k, top);
+    this.flash(k, top);
+    this.backShown();
+  }
+  /**
+   * Where a jump landed, lit for a moment: the text layer's lines at
+   * `top` on page `k` (an entry, an equation, a caption's first lines),
+   * else a band there; a soft accent fading in 1.5 s. A tab in the
+   * background (a Ctrl+click's) lights it once it is shown, not unseen.
+   */
+  flash(k, top, exact) {
+    const doc = this.scroller.ownerDocument;
+    if (doc.visibilityState !== "visible") {
+      const go = () => doc.visibilityState === "visible" && (doc.removeEventListener("visibilitychange", go), this.flash(k, top, exact));
+      return void doc.addEventListener("visibilitychange", go);
+    }
+    const s = this.slots[k];
+    if (!s) return;
+    s.el.querySelector(".phx-flash")?.remove();
+    const y0 = top ?? 0, b = s.el.getBoundingClientRect(), sy = this.size.h / b.height, sx = this.size.w / b.width;
+    let box = exact ?? null;
+    for (const t2 of exact ? [] : s.el.querySelectorAll("text")) {
+      if (!t2.textContent?.trim()) continue;
+      const r2 = t2.getBoundingClientRect(), ty = (r2.top - b.top) * sy, tb = (r2.bottom - b.top) * sy;
+      if (tb < y0 - 2 || ty > y0 + 30) continue;
+      const [l2, rr] = [(r2.left - b.left) * sx, (r2.right - b.left) * sx];
+      box = box ? [Math.min(box[0], l2), Math.min(box[1], ty), Math.max(box[2], rr), Math.max(box[3], tb)] : [l2, ty, rr, tb];
+    }
+    const [l, t, r, bt] = box ?? [this.size.w * 0.1, y0, this.size.w * 0.9, y0 + 24];
+    const f = document.createElement("div");
+    f.className = "phx-flash";
+    const pad = exact ? 2 : 3;
+    Object.assign(f.style, { left: `${(l - pad) / this.size.w * 100}%`, top: `${(t - pad) / this.size.h * 100}%`, width: `${(r - l + 2 * pad) / this.size.w * 100}%`, height: `${(bt - t + 2 * pad) / this.size.h * 100}%` });
+    f.addEventListener("animationend", () => f.remove());
+    s.el.append(f);
+  }
+  /** One step back (-1) or forward (1): where the view is goes to the other side. */
+  step(d) {
+    const [from2, to] = d < 0 ? [this.past, this.future] : [this.future, this.past];
+    const t = from2.pop();
+    if (!t) return;
+    const now = this.here();
+    if (now) to.push(now);
+    this.toStop(t);
+    if (t.mark) this.flash(t.mark.k, null, t.mark.box);
+    else this.flash(t.k, t.fy * this.size.h);
+    this.backShown();
+  }
+  /** `n` steps back (negative) or forward: through the tab's history where there is one (popstate then steps, so the two stay one). */
+  go(n) {
+    if (!n) return;
+    if (this.host.backWith === "history") return this.scroller.ownerDocument.defaultView.history.go(n);
+    for (let i = 0; i < Math.abs(n); i++) this.step(n < 0 ? -1 : 1);
+  }
+  /**
+   * A click that asks for a new tab (Ctrl, ⌘ on a Mac, or the middle
+   * button: `middle`) where the host has one: page `k` opened there, this
+   * view left as it is, the window too (another can be opened from it).
+   */
+  newTab(e, k, top, middle = false) {
+    if (!this.host.openAt || !(middle || e.ctrlKey || e.metaKey)) return false;
+    e.preventDefault();
+    this.host.openAt(k, top);
+    return true;
+  }
+  /** Where a view opened at a place starts (page, points down it): gone to once that page is drawn and the pages have their size. */
+  startPlace = null;
+  /** Start at page `k`, `top` points down it (a tab opened by a Ctrl+click): now if that page is drawn, else once it is. */
+  startAt(k, top) {
+    this.startPlace = { k, top };
+    this.startIfReady();
+  }
+  startIfReady() {
+    const p = this.startPlace;
+    if (!p || !this.slots[p.k] || !this.slots.some((s) => s.img)) return;
+    this.startPlace = null;
+    requestAnimationFrame(() => (this.goToPlace(p.k, p.top), requestAnimationFrame(() => this.flash(p.k, p.top))));
+  }
+  /** Back where the view was before the last link followed. */
+  back() {
+    if (!this.past.length) return false;
+    this.go(-1);
+    return true;
+  }
+  /** Forward where Back left. */
+  forward() {
+    if (!this.future.length) return false;
+    this.go(1);
+    return true;
+  }
+  /**
+   * The Back pill over the pages' corner while there is history: Back (to
+   * the page it says), the earlier stops' list (its count: each a click to
+   * go straight there), Forward where Back left one, × to forget them.
+   */
+  backShown() {
+    if (!this.backEl) {
+      const b2 = this.backEl = document.createElement("div");
+      b2.className = "pback";
+      b2.innerHTML = `<button type="button" class="go"><span class="ar">\u2190</span><span class="t"></span></button><button type="button" class="more" aria-haspopup="menu"></button><button type="button" class="fw" aria-label="Forward">\u2192</button><button type="button" class="x" aria-label="Forget">\xD7</button><div class="stops" role="menu" hidden></div>`;
+      b2.querySelector(".go").addEventListener("click", () => this.back());
+      b2.querySelector(".fw").addEventListener("click", () => this.forward());
+      b2.querySelector(".x").addEventListener("click", () => (this.past = [], this.future = [], this.backShown()));
+      const list = b2.querySelector(".stops");
+      b2.querySelector(".more").addEventListener("click", () => {
+        list.hidden = !list.hidden;
+        if (list.hidden) return;
+        list.innerHTML = this.past.map((t2, i) => [t2, this.past.length - i]).reverse().map(([, n]) => `<button type="button" role="menuitem" data-n="${n}"><b></b><span></span></button>`).join("");
+        list.querySelectorAll("[data-n]").forEach((e, i) => {
+          const t2 = this.past[this.past.length - 1 - i];
+          e.querySelector("b").textContent = t2.via ? `Clicked ${t2.via}` : `Page ${t2.k + 1}`;
+          e.querySelector("span").textContent = [`page ${t2.k + 1}`, t2.words && `\u201C${t2.words}\u201D`].filter(Boolean).join(" \xB7 ");
+        });
+      });
+      list.addEventListener("click", (e) => {
+        const n = e.target.closest("[data-n]")?.dataset.n;
+        if (!n) return;
+        list.hidden = true;
+        this.go(-Number(n));
+      });
+      b2.ownerDocument.addEventListener("pointerdown", (e) => !e.composedPath().includes(b2) && (list.hidden = true));
+      (this.scroller.parentElement ?? this.scroller).append(b2);
+    }
+    const b = this.backEl, t = this.past.at(-1);
+    b.hidden = !t && !this.future.length;
+    b.classList.toggle("noback", !t);
+    b.querySelector(".stops").hidden = true;
+    b.querySelector(".fw").hidden = !this.future.length;
+    const more = b.querySelector(".more");
+    more.hidden = this.past.length < 2;
+    more.textContent = `+${this.past.length - 1} \u25BE`;
+    more.title = "Every place before, to go straight back to one";
+    b.querySelector(".t").textContent = t ? `Back to page ${t.k + 1}` : "Back";
+    b.querySelector(".go").title = this.host.backWith ? "Back (the mouse's back button, Alt+\u2190)" : "Back";
+    b.querySelector(".fw").title = this.host.backWith ? "Forward (the mouse's forward button, Alt+\u2192)" : "Forward";
+  }
   goToPlace(k, top) {
     const s = this.slots[k];
     if (!s) return;
@@ -701,6 +1301,9 @@ var Viewer = class {
     if (img.w && img.h) this.size = { w: img.w, h: img.h };
     s.img = img;
     this.waits(s);
+    if (this.startPlace) queueMicrotask(() => this.startIfReady());
+    const pl = this.peekShown;
+    if (pl && pl[4] === k) queueMicrotask(() => this.peekShown === pl && this.peekShow({ link: pl, k: this.peekFrom }));
     if (resized) queueMicrotask(() => this.redraw());
     s.drawn = hash ?? s.hash;
     this.toPaint.add(s);
@@ -1273,6 +1876,67 @@ header:active { cursor: grabbing; }
 .phx-text text { fill: transparent; white-space: pre; cursor: text; font-family: sans-serif; }
 /* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
 .slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
+/* a link hovered: where it goes, in a small window (viewer.ts peekShow) */
+.peek { position: absolute; z-index: 4; width: min(440px, calc(100% - 16px)); text-align: left; background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 24px rgb(0 0 0 / 22%); overflow: hidden; cursor: pointer; font: var(--ph-size)/1.4 var(--ph-font); }
+.peek .pv { position: relative; height: 250px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; background: #fff; }
+.peek .pv canvas { display: block; }
+.peek .pv .at { position: absolute; left: 0; width: 3px; height: 18px; background: var(--ph-accent); border-radius: 0 2px 2px 0; }
+.peek.wait .pv canvas, .peek.wait .pv .at { visibility: hidden; }
+.peek .pu { display: none; padding: 8px 10px 0; word-break: break-all; color: var(--ph-link, var(--ph-accent)); }
+.peek.url .pv { display: none; }
+.peek.url .pu { display: block; }
+.peek .pf { display: flex; justify-content: space-between; gap: 12px; padding: 5px 10px; font-size: 12px; color: var(--ph-fg2); border-top: 1px solid var(--ph-border); }
+.peek.url .pf { border-top: 0; }
+.peek.url .go { display: none; }
+.peek .pc { display: none; }
+.peek.cite .pv { display: none; }
+.peek.cite .pc { display: block; }
+.peek .pc .mh { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; font-size: 12px; color: var(--ph-fg2); border-bottom: 1px solid var(--ph-border); }
+.peek .pc .mh button { all: unset; cursor: pointer; padding: 2px 10px; border-radius: var(--ph-pill); border: 1px solid var(--ph-border); color: var(--ph-fg); }
+.peek .pc .mh button:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.peek .pc .cs { position: relative; max-height: 300px; overflow-y: auto; overscroll-behavior: contain; }
+/* an entry, the same one or many: the label, title and key; who, when and where; its links */
+.peek .pc .ce { padding: 7px 12px 7px 9px; border-left: 3px solid transparent; cursor: pointer; }
+.peek .pc .ce + .ce { border-top: 1px solid var(--ph-border); }
+.peek .pc .ce:hover { background: var(--ph-hover, rgb(0 0 0 / 4%)); }
+.peek .pc .ce.here { border-left-color: var(--ph-accent); background: color-mix(in srgb, var(--ph-accent) 7%, transparent); }
+.peek .pc .hd { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.peek .pc .hd .lab { flex: none; font-size: 12px; font-weight: 600; color: var(--ph-accent); }
+.peek .pc .hd .ti { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek .pc .hd code { flex: none; font: 10.5px/1.3 ui-monospace, "DM Mono", monospace; padding: 0 4px; border-radius: 3px; background: var(--ph-hover, rgb(0 0 0 / 6%)); color: var(--ph-fg2); }
+.peek .pc .mt { margin-top: 1px; font-size: 12px; line-height: 1.35; color: var(--ph-fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek .pc .lk { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 5px; margin-top: 2px; font-size: 11.5px; }
+.peek .pc .lk > i { font-style: normal; color: var(--ph-fg2); }
+.peek .pc .lk button { all: unset; cursor: pointer; color: var(--ph-link, var(--ph-accent)); }
+.peek .pc .lk button:hover { text-decoration: underline; }
+.peek .pc .lk button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 1px; border-radius: 2px; }
+/* where a jump landed, lit for a moment (viewer.ts flash): only its opacity animates */
+.slot .phx-flash { position: absolute; z-index: 2; pointer-events: none; border-radius: 3px; background: color-mix(in srgb, var(--ph-accent) 22%, transparent); box-shadow: 0 0 0 1.5px color-mix(in srgb, var(--ph-accent) 55%, transparent); animation: phx-flash 1.5s ease-out forwards; }
+@keyframes phx-flash { 0%, 35% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .slot .phx-flash { animation-duration: 2.5s; } }
+/* Back, after a link followed: over the pages' bottom left corner */
+.pback { position: absolute; z-index: 4; left: 12px; bottom: 12px; display: flex; align-items: stretch; border-radius: var(--ph-pill); background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); box-shadow: 0 3px 12px rgb(0 0 0 / 18%); font: 12.5px/1 var(--ph-font); }
+.pback[hidden] { display: none; }
+.pback button { all: unset; cursor: pointer; padding: 7px 10px; }
+.pback .go { display: flex; gap: 6px; align-items: center; padding-left: 12px; font-weight: 600; }
+.pback .go .ar { font-size: 14px; }
+.pback .x { color: var(--ph-fg2); border-left: 1px solid var(--ph-border); padding: 7px 9px; }
+.pback { overflow: visible; }
+.pback .more, .pback .fw { border-left: 1px solid var(--ph-border); color: var(--ph-fg2); font-weight: 600; }
+.pback .more[hidden], .pback .fw[hidden] { display: none; }
+.pback.noback .go { display: none; }
+.pback.noback .fw { border-left: 0; padding-left: 12px; }
+.pback .go { border-radius: var(--ph-pill) 0 0 var(--ph-pill); }
+.pback .x { border-radius: 0 var(--ph-pill) var(--ph-pill) 0; }
+.pback .stops { position: absolute; left: 0; bottom: calc(100% + 6px); width: max-content; min-width: 300px; max-width: min(460px, 80vw); max-height: 260px; overflow-y: auto; padding: 4px 0; background: var(--ph-menu); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 20px rgb(0 0 0 / 20%); }
+.pback .stops[hidden] { display: none; }
+.pback .stops button { display: grid; grid-template-columns: 1fr; gap: 1px; line-height: 1.35; width: 100%; box-sizing: border-box; padding: 6px 12px; text-align: left; font-size: 12.5px; }
+.pback .stops button b { font-weight: 600; white-space: nowrap; }
+.pback .stops button b small { margin-left: 5px; font-weight: 400; color: var(--ph-fg2); font-variant-numeric: tabular-nums; }
+.pback .stops button span { color: var(--ph-fg2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pback button:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.pback button:focus-visible { outline: 2px solid var(--ph-link); outline-offset: -2px; }
+.win.dark-pdf .peek .pv canvas, .win.docked.pdf-dark .peek .pv canvas { filter: ${DARK_PDF_FILTER}; }
 .phx-text ::selection { fill: transparent; color: transparent; -webkit-text-fill-color: transparent; background: transparent; }
 .stage.stale .slot { opacity: .45; filter: grayscale(1); }
 .stage.offline .slot { opacity: .4; pointer-events: none; }
@@ -4205,7 +4869,13 @@ var Panel = class {
       dbl: (k, x, y) => ev.onSyncSource?.(k, x, y),
       peer: ev.onGotoRange ? (file, pos) => ev.onGotoRange(file, pos, pos, true) : void 0,
       selected: (sel) => ev.onSelectPage?.(sel),
-      link: ev.onLink ? (u) => ev.onLink(u) : void 0
+      link: ev.onLink ? (u) => ev.onLink(u) : void 0,
+      // (only where the host has a source lookup: else the viewer reads the citation from the pages)
+      cited: ev.onCited ? (from2, to, top) => ev.onCited(from2, to, top) : void 0,
+      openAt: ev.onOpenAt ? (k, top) => ev.onOpenAt(k, top) : void 0,
+      // (Back by the mouse's back button and Alt+←: the tab's history in a browser tab (the watch, the demo),
+      // the button's events in VS Code's webview; Overleaf's are the browser's, they leave the project)
+      backWith: this.kind === "watch" ? "history" : this.kind === "vscode" ? "buttons" : void 0
     });
     this.extras(opts);
     this.darkPdf("off");
@@ -5784,6 +6454,10 @@ var Panel = class {
       { title: "Packages", rows: [] },
       { title: "Updates and tips", rows: tips }
     ];
+  }
+  /** Start the pages at page `k`, `top` points down it (a tab opened at a place: its address said where). */
+  startAt(k, top) {
+    this.viewer.startAt(k, top);
   }
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
   viewPrefs(p) {
@@ -8583,6 +9257,8 @@ var panel = new Panel(
     // (Settings: the watch's rows, from and into the user's phitex.toml)
     settings: () => watchSettings(),
     // (the panel's own choices: the user's phitex.toml too, never this browser's)
+    // (Ctrl+click on a link: this viewer in a new tab, its address saying where: #at=PAGE,POINTS)
+    onOpenAt: (k, top) => void window.open(`${location.pathname}${location.search}#at=${k + 1},${Math.round(top ?? 0)}`, "_blank"),
     onPref: async (key, value) => {
       const r = await sock.request({ op: "prefs", set: { [key]: value } });
       return r.ok ? void 0 : `Not saved: ${r.error ?? "the watch did not answer"}`;
@@ -8648,6 +9324,10 @@ var panel = new Panel(
     }
   }
 );
+{
+  const at = /^#at=(\d+),(\d+)$/.exec(location.hash);
+  if (at) panel.startAt(Number(at[1]) - 1, Number(at[2]));
+}
 var pane = document.createElement("div");
 pane.style.cssText = "position:fixed;inset:0";
 document.body.append(pane);
