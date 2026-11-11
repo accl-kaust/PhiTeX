@@ -1,7 +1,9 @@
 // "Did you know" while a first build runs (panel.ts, under the opening's
 // step): PhiTeX's features and a little LaTeX, each checked true. A hint
 // may name the hosts it holds in (a key only the watch's page has). The
-// user's list will grow; keep each one short, true and checked.
+// user's list will grow; keep each one short, true and checked. A key
+// is named in words, never as its character: after "Did you know?" a
+// bare ? (or `) reads as punctuation.
 
 export interface Hint {
   text: string;
@@ -12,8 +14,8 @@ export interface Hint {
 export const HINTS: Hint[] = [
   { text: "Double-click a word on the page to go to its source." },
   { text: "Builds run by themselves as you type: Rebuild is for a change made outside the editor." },
-  { text: "Press ` to see everything phitex watch printed in the terminal.", hosts: ["watch"] },
-  { text: "Press ? over the pages for the keyboard shortcuts.", hosts: ["watch"] },
+  { text: "The backtick key shows everything phitex watch printed in the terminal.", hosts: ["watch"] },
+  { text: "The question-mark key, over the pages, lists the keyboard shortcuts.", hosts: ["watch"] },
   { text: "Compare shows what changed since an earlier version, marked as latexdiff marks it.", hosts: ["watch", "vscode"] },
   { text: "Put \\label after \\caption: \\ref then gives the figure's number, not the section's." },
   { text: "A ~ is a space the line never breaks at: Figure~\\ref{fig:plot}." },

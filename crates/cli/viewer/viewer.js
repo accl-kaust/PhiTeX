@@ -3785,8 +3785,8 @@ function firstPage(cv, dark) {
 var HINTS = [
   { text: "Double-click a word on the page to go to its source." },
   { text: "Builds run by themselves as you type: Rebuild is for a change made outside the editor." },
-  { text: "Press ` to see everything phitex watch printed in the terminal.", hosts: ["watch"] },
-  { text: "Press ? over the pages for the keyboard shortcuts.", hosts: ["watch"] },
+  { text: "The backtick key shows everything phitex watch printed in the terminal.", hosts: ["watch"] },
+  { text: "The question-mark key, over the pages, lists the keyboard shortcuts.", hosts: ["watch"] },
   { text: "Compare shows what changed since an earlier version, marked as latexdiff marks it.", hosts: ["watch", "vscode"] },
   { text: "Put \\label after \\caption: \\ref then gives the figure's number, not the section's." },
   { text: "A ~ is a space the line never breaks at: Figure~\\ref{fig:plot}." },
