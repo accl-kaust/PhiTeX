@@ -102,6 +102,7 @@ export const COMMITS_CSS = `
 .phx-commits .row.inrange { background: rgba(62,99,221,.10); }
 .phx-commits .row.from, .phx-commits .row.to { background: rgba(62,99,221,.22); }
 .phx-commits .row.drag { background: rgba(62,99,221,.16); }
+.phx-commits .row.aim { box-shadow: inset 3px 0 0 rgba(62,99,221,.55); }
 .phx-commits svg { flex: none; overflow: visible; }
 .phx-commits .txt { overflow: hidden; text-overflow: ellipsis; padding-left: 4px; }
 .phx-commits .sha { font: 11px ui-monospace, monospace; opacity: .65; margin-right: 6px; }
@@ -159,8 +160,10 @@ export class Commits {
     this.el.addEventListener("pointermove", (e) => {
       if (this.anchor === null || this.drag) return;
       const over = this.rowAt(e.clientX, e.clientY);
-      if (over !== null) this.paintDrag({ from: this.anchor, over, moved: over !== this.anchor });
+      if (over !== null) this.paintDrag({ from: this.anchor, over, moved: over !== this.anchor }, "aim");
     });
+    // (the pointer gone: nothing aimed at)
+    this.el.addEventListener("pointerleave", () => this.anchor !== null && !this.drag && this.paintDrag(null, "aim"));
     this.el.addEventListener("dblclick", (e) => {
       this.anchor = null;
       this.paintDrag();
@@ -300,12 +303,20 @@ export class Commits {
     this.el.addEventListener("pointerup", up);
   }
 
-  /** The rows a drag spans, marked as it goes. */
-  private paintDrag(d = this.drag): void {
+  /**
+   * The rows a drag spans, marked as it goes (`drag`: filled, a range being chosen), or
+   * those a second click would choose, from the first end to the pointer (`aim`: a bar at
+   * their edge only). Filled as a drag's were, they read as a range chosen: with From
+   * clicked and To the working tree already, a pointer passing over the rows seemed to
+   * have selected them.
+   */
+  private paintDrag(d = this.drag, kind: "drag" | "aim" = "drag"): void {
     const [a, b] = d ? [Math.min(d.from, d.over), Math.max(d.from, d.over)] : [0, -2];
     for (const r of this.el.querySelectorAll<HTMLElement>(".row")) {
       const i = r.dataset.i === undefined ? -1 : Number(r.dataset.i);
-      r.classList.toggle("drag", !!d?.moved && i >= a && i <= b);
+      const on = !!d?.moved && i >= a && i <= b;
+      r.classList.toggle("drag", kind === "drag" && on);
+      r.classList.toggle("aim", kind === "aim" && on);
     }
   }
 
