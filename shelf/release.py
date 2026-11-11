@@ -12,7 +12,9 @@ From build/<LABEL>/ (build.py's: packs/, index.tsv, meta.json) into
 
     <DIR>/<LABEL>/h/<pack>-<hash>.pack     every kept pack, named by its content
     <DIR>/<LABEL>/index-<release>.tsv.gz   path <TAB> pack <TAB> deps... <TAB> sum (released pack names)
-    <DIR>/<LABEL>/packs-<release>.tsv.gz   pack <TAB> sha256 <TAB> bytes: every pack of the release
+    <DIR>/<LABEL>/packs-<release>[-<hash>].tsv.gz  pack <TAB> sha256 <TAB> bytes: every pack of
+                                           the release (a table changed later, its formats
+                                           added: named by its content, `write_table`)
     <DIR>/<LABEL>/release-<release>.json   that release's release.json, kept
     <DIR>/<LABEL>/release.json             the current release, below
 
@@ -105,6 +107,20 @@ def pack(files: list[tuple[str, bytes]]) -> bytes:
 FORMAT_NAME = re.compile(r"^[a-z]+-[0-9a-f]{16}-[0-9a-f]{16}$")
 
 
+def write_table(rel: Path, release: str, table: str) -> str:
+    """`table` written as `release`'s pack table, named by its content
+    (`packs-<release>-<sha256 12>.tsv.gz`), its name returned: the site's
+    files are cached as `immutable` (public/_headers), so a table that
+    changes after its release is made (its formats added) is a new file.
+    Rewritten under its old name, the CDN and every browser kept the
+    first copy: v1.0's formats, missing from it, were refused by every
+    client (scripts/fetch-live.py's `write_table` too)."""
+    data = gzip.compress(table.encode(), 9, mtime=0)
+    name = f"packs-{release}-{hashlib.sha256(data).hexdigest()[:12]}.tsv.gz"
+    (rel / name).write_bytes(data)
+    return name
+
+
 def formats(label: str, rel: Path, src: Path) -> None:
     """The formats in `src` (a session store's formats/ directory, the
     CLI's: NAME holding the engine's 32-byte key, then its state) published
@@ -134,7 +150,7 @@ def formats(label: str, rel: Path, src: Path) -> None:
         raise SystemExit(f"--formats {src}: no format there")
     doc["formats"] = dict(sorted(have.items()))
     doc["packs"] = sum(1 for line in table.splitlines() if line)
-    (rel / doc["pack_table"]).write_bytes(gzip.compress(table.encode(), 9, mtime=0))
+    doc["pack_table"] = write_table(rel, release, table)
     text = json.dumps(doc, indent=1) + "\n"
     (rel / f"release-{release}.json").write_text(text)
     (rel / "release.json").write_text(text)

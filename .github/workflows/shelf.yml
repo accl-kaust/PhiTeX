@@ -121,6 +121,31 @@ jobs:
           done
           [ -z "$miss" ] || { echo "v1.shelf.phitex.org does not serve the formats $miss"; exit 1; }
           echo "v1.shelf.phitex.org serves the formats $WANT"
+      # (as a client takes them, through the CDN: release.json's pack
+      # table holds every pack it names a format, and each pack served
+      # is what that table says: the v1.0 clean deploy's table, rewritten
+      # under its cached name, lacked them, and every client refused the
+      # formats while the origin was right)
+      - name: formats as a client takes them
+        run: |
+          python3 - <<'PY'
+          import gzip, hashlib, json, sys, urllib.request
+          base = "https://v1.shelf.phitex.org/tl2026/"
+          get = lambda p: urllib.request.urlopen(urllib.request.Request(base + p, headers={"User-Agent": "phitex-shelf-check"}), timeout=300).read()
+          doc = json.loads(get("release.json"))
+          table = {l.split("\t")[0]: l.split("\t")[1:] for l in gzip.decompress(get(doc["pack_table"])).decode().splitlines() if l}
+          bad = []
+          for name, pack in (doc.get("formats") or {}).items():
+              if pack not in table:
+                  bad.append(f"{name}: {pack} not in {doc['pack_table']}")
+                  continue
+              raw = get(f"h/{pack}.pack")
+              if hashlib.sha256(raw).hexdigest() != table[pack][0] or len(raw) != int(table[pack][1]):
+                  bad.append(f"{name}: {pack} served is not what {doc['pack_table']} says")
+          if bad:
+              sys.exit("a client refuses these formats:\n  " + "\n  ".join(bad))
+          print(f"{len(doc.get('formats') or {})} formats taken as a client takes them ({doc['pack_table']})")
+          PY
       - name: PhiTeX names it
         if: inputs.formats_commit == ''
         env:

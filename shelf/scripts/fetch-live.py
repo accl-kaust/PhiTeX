@@ -24,13 +24,21 @@ import gzip
 import hashlib
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 
-def get(url: str) -> bytes | None:
+def get(url: str, fresh: bool = False) -> bytes | None:
+    """`url`'s bytes, none: not served. `fresh`: the origin's, past every
+    cache (a query of its own): what is not named by its content (the
+    release files, a pack table before 11-11, rewritten in place under
+    `immutable` while the CDN kept the first copy: the v1.0 clean
+    deploy's table, without the formats it named, served stale for days)."""
+    if fresh:
+        url += f"?fresh={time.time_ns()}"
     # (a user agent of its own: Cloudflare answers urllib's default,
     # "Python-urllib/3.x", with 403 Forbidden, and the release stopped
     # before it began, GitHub run 41293613277)
@@ -44,15 +52,25 @@ def get(url: str) -> bytes | None:
         raise
 
 
+def write_table(rel: Path, release: str, table: str) -> str:
+    """`table` written as the release's pack table, named by its content
+    (`packs-<release>-<sha256 12>.tsv.gz`): the site's files are cached
+    as `immutable`, so a table that changes is a new file, never the old
+    name rewritten (release.py's `write_table`)."""
+    data = gzip.compress(table.encode(), 9, mtime=0)
+    name = f"packs-{release}-{hashlib.sha256(data).hexdigest()[:12]}.tsv.gz"
+    (rel / name).write_bytes(data)
+    return name
+
+
 def drop_formats(rel: Path, doc: dict, gone: set[str]) -> None:
     """`gone` (format names) out of the release `doc` (its
     release-<release>.json, and release.json when it is the current one)
     and out of its pack table."""
     packs = {doc["formats"][f] for f in gone}
     doc["formats"] = {f: p for f, p in doc["formats"].items() if f not in gone}
-    table = rel / doc["pack_table"]
-    lines = [l for l in gzip.decompress(table.read_bytes()).decode().splitlines() if l and l.split("\t")[0] not in packs]
-    table.write_bytes(gzip.compress("".join(l + "\n" for l in lines).encode(), 9, mtime=0))
+    lines = [l for l in gzip.decompress((rel / doc["pack_table"]).read_bytes()).decode().splitlines() if l and l.split("\t")[0] not in packs]
+    doc["pack_table"] = write_table(rel, doc["release"], "".join(l + "\n" for l in lines))
     doc["packs"] = len(lines)
     text = json.dumps(doc, indent=1) + "\n"
     (rel / f"release-{doc['release']}.json").write_text(text)
@@ -66,7 +84,7 @@ def main() -> None:
     clean = sys.argv[4:] == ["--clean"]
     base, rel = f"{url}/{label}", out / label
     (rel / "h").mkdir(parents=True, exist_ok=True)
-    cur = get(f"{base}/release.json")
+    cur = get(f"{base}/release.json", fresh=True)
     if cur is None:
         raise SystemExit(f"{base}/release.json: not found")
     current = json.loads(cur)
@@ -76,13 +94,13 @@ def main() -> None:
     docs: list[dict] = []
     for i in range(n if clean else 1, n + 1):
         name = f"{label}.{i}"
-        b = get(f"{base}/release-{name}.json")
+        b = get(f"{base}/release-{name}.json", fresh=True)
         if b is None:
             continue
         doc = json.loads(b)
         (rel / f"release-{name}.json").write_bytes(b)
         for key in ("index", "pack_table"):
-            data = get(f"{base}/{doc[key]}")
+            data = get(f"{base}/{doc[key]}", fresh=True)
             if data is None:
                 raise SystemExit(f"{base}/{doc[key]}: named by release-{name}.json, not served")
             (rel / doc[key]).write_bytes(data)
