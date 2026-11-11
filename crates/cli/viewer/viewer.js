@@ -814,10 +814,24 @@ var Viewer = class _Viewer {
     const key = _Viewer.citeKey(mid);
     if (this.citesAsking.has(key)) return;
     this.citesAsking.add(key);
-    const said2 = await this.host.cites(mid.k, mid.x, mid.y).catch(() => null);
+    const group = this.citeGroup(at.k, at.link);
+    const answers = await Promise.all(group.map((l) => this.host.cites(at.k, (l[0] + l[2]) / 2, (l[1] + l[3]) / 2).catch(() => null)));
+    const seen = /* @__PURE__ */ new Set();
+    const said2 = answers.flatMap((a) => a ?? []).filter((c) => !seen.has(c.key) && (seen.add(c.key), true));
     this.citesAsking.delete(key);
     const list = said2?.length ? this.citedFrom(said2) : [];
     if (!list) return;
+    for (const m of this.linkText(at.k, at.link).matchAll(/(\d+)\s*[–-]\s*(\d+)/g)) {
+      const [lo, hi] = [Number(m[1]), Number(m[2])];
+      if (!list.some((c) => c.label === m[1]) || !list.some((c) => c.label === m[2]) || hi - lo > 200) continue;
+      const near = list.find((c) => c.at)?.at?.[0] ?? at.k;
+      for (let n = lo + 1; n < hi; n++) {
+        if (list.some((c) => c.label === String(n))) continue;
+        const pos = this.findLabel(String(n), near), e = pos && this.entryAt(pos[0], pos[1]);
+        if (pos && e) list.push(_Viewer.asCited(e.label || String(n), e.text, pos));
+      }
+      list.sort((a, b) => (Number(a.label) || 0) - (Number(b.label) || 0));
+    }
     this.citesKnown.set(key, list);
     const el = this.peekEl;
     if (!list.length || !el || el.hidden || this.peekLink !== at.link) return;
@@ -828,6 +842,50 @@ var Viewer = class _Viewer {
   /** A label as the .aux writes it, as it reads: ties as spaces, groups' braces gone, \& and the like as their characters. */
   static texText(s) {
     return s.replace(/\\([&%$#_{}])/g, "$1").replace(/~/g, "\xA0").replace(/\\(?:protect|relax)\s*/g, "").replace(/[{}]/g, "").trim();
+  }
+  /**
+   * The citation's links: the hyperref citation links (their destination `cite.KEY`, the
+   * frame's 7th element) inside the brackets round `link` on page `k`, as linkText finds
+   * them, in order; `link` alone where it has no brackets or no such neighbours.
+   */
+  citeGroup(k, link) {
+    const dest = (l) => l[6];
+    const isCite = (l) => typeof dest(l) === "string" && dest(l).startsWith("cite.");
+    const span = this.bracketSpan(k, link);
+    const links = this.slots[k]?.img?.links ?? [];
+    if (!span || !isCite(link)) return [link];
+    const mid = (link[1] + link[3]) / 2;
+    const group = links.filter((l) => isCite(l) && l[1] <= mid && mid <= l[3] && (l[0] + l[2]) / 2 >= span[0] && (l[0] + l[2]) / 2 <= span[1]);
+    return group.length ? group.sort((a, b) => a[0] - b[0]) : [link];
+  }
+  /** The brackets round a citation's link, as page points from left to right ([x0, x1]), or null (none). */
+  bracketSpan(k, link) {
+    const s = this.slots[k];
+    if (!s) return null;
+    const b = s.el.getBoundingClientRect(), sx = b.width / this.size.w, sy = b.height / this.size.h;
+    const [l, t, r, bt] = [b.left + link[0] * sx, b.top + link[1] * sy, b.left + link[2] * sx, b.top + link[3] * sy];
+    for (const el of s.el.querySelectorAll("text")) {
+      const tr = el.getBoundingClientRect();
+      if (tr.right < l || tr.left > r || tr.bottom < t || tr.top > bt) continue;
+      const m = el.getScreenCTM(), text = el.textContent ?? "";
+      if (!m) continue;
+      const n = Math.min(el.getNumberOfChars(), text.length);
+      const px = (i) => new DOMPoint(el.getExtentOfChar(i).x, 0).matrixTransform(m).x;
+      let a = -1, z = -1;
+      for (let i = 0; i < n; i++) {
+        const e2 = el.getExtentOfChar(i), p = new DOMPoint(e2.x + e2.width / 2, e2.y + e2.height / 2).matrixTransform(m);
+        if (p.x >= l && p.x <= r && p.y >= t && p.y <= bt) a < 0 && (a = i), z = i;
+      }
+      if (a < 0) continue;
+      let x = a, y = z;
+      while (x > 0 && !"[(".includes(text[x - 1]) && !"])".includes(text[x - 1])) x--;
+      while (y < n - 1 && !"])".includes(text[y + 1]) && !"[(".includes(text[y + 1])) y++;
+      if (x === 0 || y === n - 1 || !"[(".includes(text[x - 1]) || !"])".includes(text[y + 1])) return null;
+      const e = el.getExtentOfChar(y + 1);
+      const x1 = new DOMPoint(e.x + e.width, 0).matrixTransform(m).x;
+      return [(px(x - 1) - b.left) / sx, (x1 - b.left) / sx];
+    }
+    return null;
   }
   /** The engine's citation as cards: each entry read where it is typeset; null while one of their pages is not drawn (asked for). */
   citedFrom(said2) {
