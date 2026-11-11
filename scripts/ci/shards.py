@@ -49,6 +49,9 @@ SPLIT_J = {"manuals"}
 # GATE_EDITS_PAR, GATE_TEST_PAR; the model only, the shards' runs keep
 # their own settings)
 LANES = {"j1": 4, "oracle": 4, "edits": 4, "latex": 4}
+# (the -j a corpus document not split by -j weighs its builds at: the
+# gate's GATE_RESEARCH_JOBS)
+MODEL_JOBS = (1, 4)
 # (the sweep's time limit: a build past it is stopped there)
 LIMIT = 300.0
 
@@ -87,7 +90,7 @@ def units(family, items, jobs, times):
     together (one oracle for all of them); an edited document or a test
     (a name, not a document) one item."""
     t = times.get(family, {})
-    js = [int(x) for x in str(jobs).split(",")] if jobs else [1]
+    js = [int(x) for x in str(jobs).split(",")] if jobs else list(MODEL_JOBS)
     med = statistics.median(t.values()) if t else 1.0
 
     def get(k):
@@ -109,7 +112,10 @@ def units(family, items, jobs, times):
         elif family == "edits":
             out.append((c["id"], c, None, [("edits", get(c["id"]))]))
         else:
-            ph = [(f"j{j}", get(f"{c['id']} -j{j}")) for j in js] + [("oracle", get(f"{c['id']} oracle"))]
+            # (at the gate's -j, whichever -j this run builds at: the
+            # oracle's slices (manuals.py, no -j) and the sweep's shard
+            # are the same documents)
+            ph = [(f"j{j}", get(f"{c['id']} -j{j}")) for j in MODEL_JOBS] + [("oracle", get(f"{c['id']} oracle"))]
             out.append((c["id"], c, None, ph))
     return out
 
@@ -165,8 +171,8 @@ def take(family, items, shard, jobs, times=None):
 def mine(family, items, shard, jobs, times=None):
     """Shard K/N of a corpus family's documents: [(doc, [j...])] in the
     list's order, the -j each is built at here (every -j of JOBS but for a
-    family of SPLIT_J). No shard: everything."""
-    js = [int(x) for x in str(jobs).split(",")] if jobs else [1]
+    family of SPLIT_J; no JOBS, the gate's). No shard: everything."""
+    js = [int(x) for x in str(jobs).split(",")] if jobs else list(MODEL_JOBS)
     if not shard:
         return [(c, js) for c in items]
     by = {}
@@ -176,7 +182,8 @@ def mine(family, items, shard, jobs, times=None):
 
 
 def docs(family, items, shard, times=None):
-    """Shard K/N as documents alone (a family not split by -j)."""
+    """Shard K/N as documents alone, at the gate's -j: those with a build
+    in it (a manual's oracle wherever one of its builds is)."""
     return [c for c, _ in mine(family, items, shard, None, times)]
 
 
@@ -258,6 +265,14 @@ def check_family(family, ks, names=None):
             if len(got) != 1:
                 reds.append(f"{family}: {name}{'' if j is None else ' -j%d' % j} is in {len(got)} shards {got}, not one")
     reds += [f"{family}: {x} -j{j} is in a shard but not in the list" for x, j in sorted(set(seen) - want, key=str)]
+    if family != "latex":
+        # (each user of a shard its same documents: the sweep and the
+        # verdict (with the -j) and the oracle (without))
+        for k in range(n):
+            a = [c["id"] for c, _ in mine(family, items, f"{k}/{n}", jobs, times)]
+            b = [c["id"] for c in docs(family, items, f"{k}/{n}", times)]
+            if a != b:
+                reds.append(f"{family}: shard {k}/{n} is not the same documents with and without the -j: {sorted(set(a) ^ set(b))[:5]}")
     return reds
 
 
