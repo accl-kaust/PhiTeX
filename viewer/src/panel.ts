@@ -12,7 +12,7 @@
 // and zoom remembered; a build that ships nothing keeps the last good page,
 // dimmed, with why; problems jump to their line.
 
-import type { PageImage, Status } from "./session.ts";
+import type { CiteAnswer, PageImage, Status } from "./session.ts";
 import { sentence } from "./words.ts";
 import { KINDS, kindOf, type Diagnostic, type Kind } from "./diagnostics.ts";
 import type { PackageState } from "./packages.ts";
@@ -710,6 +710,8 @@ export class Panel {
       link: ev.onLink ? (u) => ev.onLink!(u) : undefined,
       // (only where the host has a source lookup: else the viewer reads the citation from the pages)
       cited: ev.onCited ? (from, to, top) => ev.onCited!(from, to, top) : undefined,
+      // (the engine's reading of a citation: the session's, given by it (citesBy); none yet, the pages')
+      cites: (k, x, y) => this.citesAsk?.(k, x, y) ?? Promise.resolve(null),
       openAt: ev.onOpenAt ? (k, top) => ev.onOpenAt!(k, top) : undefined,
       // (Back by the mouse's back button and Alt+←: the tab's history in a browser tab (the watch, the demo),
       // the button's events in VS Code's webview; Overleaf's are the browser's, they leave the project)
@@ -1951,6 +1953,12 @@ export class Panel {
   }
 
   /** The document's outline (its PDF's bookmarks), from the host after each build. */
+  /** The session's citation lookup (PreviewSink.citesBy: the engine's `cites` op), the viewer's for its citation cards. */
+  private citesAsk?: (k: number, x: number, y: number) => Promise<CiteAnswer[] | null>;
+  citesBy(ask: (k: number, x: number, y: number) => Promise<CiteAnswer[] | null>): void {
+    this.citesAsk = ask;
+  }
+
   outline(items: Entry[]): void {
     this.contents?.set(items);
     this.contents?.at(this.at);
