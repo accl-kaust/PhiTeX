@@ -1,7 +1,7 @@
 //! A tool, not a gate: builds the file `PHITEX_PROBE` (INITEX, or after
 //! plain with `PHITEX_PROBE_PLAIN`) and prints its log.
 
-mod common;
+use crate::common;
 
 #[test]
 fn probe() {

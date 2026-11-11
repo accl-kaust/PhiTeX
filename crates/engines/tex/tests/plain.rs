@@ -1,6 +1,6 @@
 //! Gates 2 and 3: plain TeX documents; the DVI file equals TeX's.
 
-mod common;
+use crate::common;
 
 fn gate(dir: &str, body: &str, default: bool, plain: bool) -> Result<String, String> {
     let fx = common::fixtures().join(dir);

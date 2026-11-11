@@ -4,7 +4,7 @@
 
 #![allow(clippy::many_single_char_names)]
 
-mod common;
+use crate::common;
 
 /// The byte ranges of the words (runs of ASCII letters not after `\`).
 fn words(s: &str) -> Vec<(usize, usize)> {

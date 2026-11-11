@@ -2,7 +2,7 @@
 //! TeX's do, shipped from finishers the pieces place; an edit that moves
 //! no page break keeps the earlier pages.
 
-mod common;
+use crate::common;
 
 /// The number of pages a DVI file's postamble records.
 fn dvi_total_pages(dvi: &[u8]) -> usize {

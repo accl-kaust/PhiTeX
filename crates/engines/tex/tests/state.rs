@@ -3,7 +3,7 @@
 //! layer values read as symbols, page-dependent macros predicted from
 //! the page number. Plain TeX, with cold builds as the oracle.
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 

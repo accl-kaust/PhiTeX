@@ -4,7 +4,7 @@
 //! growing, the watch waiting on it with no way out. The limit is 3 s here
 //! (`Options::stuck_after`).
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};

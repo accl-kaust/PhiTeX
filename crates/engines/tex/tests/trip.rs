@@ -7,7 +7,7 @@
 //! that overflow capacities on purpose are not comparable (we do not
 //! emulate capacities), so each run is time-capped. Heavy: ignored.
 
-mod common;
+use crate::common;
 
 use phitex_tex::Options;
 

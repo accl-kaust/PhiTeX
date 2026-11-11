@@ -5,7 +5,7 @@
 //! - `profile_latex_hello`: the LaTeX `hello` document after
 //!   `latex.ini` (the prelude, expl3-code.tex included), no time limit.
 
-mod common;
+use crate::common;
 
 // the CLI's allocator: with the system's, concurrent page steps
 // contend in it and the measures do not show the binary's scaling

@@ -3,7 +3,7 @@
 //! round's publication, settled when a round publishes what the one
 //! before did.
 
-mod common;
+use crate::common;
 
 use phitex_tex::Options;
 

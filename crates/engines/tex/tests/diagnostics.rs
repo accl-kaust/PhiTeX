@@ -1,7 +1,7 @@
 //! `Build::diagnostics`: TeX's errors and warnings and the engine's
 //! evaluation errors, each at its place in a file.
 
-mod common;
+use crate::common;
 
 use phitex_tex::{Build, Diagnostic, Options, Severity};
 

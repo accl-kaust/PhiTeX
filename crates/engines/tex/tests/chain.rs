@@ -1,7 +1,7 @@
 //! The critical chain of plain documents, classified by cause: the
 //! measure for the chain work (`PHITEX_CHAIN=1` prints every link).
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeMap;
 

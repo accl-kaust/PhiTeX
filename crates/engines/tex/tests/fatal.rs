@@ -4,7 +4,7 @@
 //! engine (fontspec under pdflatex): 754035 runs, 9.6 GB resident, 88 s,
 //! for a build that pdfTeX ends in a second.
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 

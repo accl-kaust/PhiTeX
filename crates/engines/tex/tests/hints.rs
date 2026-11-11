@@ -2,7 +2,7 @@
 //! early and used late lets readers between them wait on nothing of it;
 //! plain fixtures are mostly bounded; nothing violates a hint.
 
-mod common;
+use crate::common;
 
 use std::sync::Mutex;
 

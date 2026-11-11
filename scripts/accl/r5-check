@@ -4,7 +4,7 @@
 # (scripts/accl/edit-classes, amsldoc -j 1 md5 in it).
 #   scripts/accl/accl submit cmd bash scripts/accl/r5-check '<cargo test args>' ...
 # each argument one `cargo test -p phitex-tex -p phitex-source` call's
-# arguments, e.g. '--lib incr::' or '--test edits a_link_removed'.
+# arguments, e.g. '--lib incr::' or '--test suites edits::a_link_removed'.
 set -u
 cd "$(dirname "$0")/../.."
 export CARGO_BUILD_JOBS=16

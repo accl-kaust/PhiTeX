@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 description = "The phitex command line: TeX documents built and watched"
+autotests = false
 
 [[bin]]
 name = "phitex"
@@ -70,3 +71,7 @@ workspace = true
 [dev-dependencies]
 # (the viewer's text layer read back from the PDFs the tests write)
 phitex-render = { path = "../output/render" }
+
+[[test]]
+name = "tests"
+path = "tests/tests.rs"

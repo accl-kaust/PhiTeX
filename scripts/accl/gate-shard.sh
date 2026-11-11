@@ -392,8 +392,9 @@ case $shard in
     # hold the other's lock)
     cache_on
     if [[ $parts == *" main "* ]]; then
-      a=()
-      for s in latex $SUITES; do a+=(--test "$s"); done
+      # (phitex-tex's latex and suites programs: the suites one program,
+      # each suite a module of it)
+      a=(--test latex --test suites)
       # (and the PDF writer's update test, which reads back a watch's
       # update files: the para and big shards run it on theirs)
       ( { $T "${a[@]}" --no-run --message-format=json-render-diagnostics && { [ ! -f crates/output/pdf/tests/update.rs ] || cargo test --profile fastdev -p phitex-pdf --test update --no-run --message-format=json-render-diagnostics; }; } > "$r/build-tests.json" 2> "$r/build-tests.txt"; echo "EXIT $?" >> "$r/build-tests.txt" ) &
@@ -484,7 +485,7 @@ for l in open(sys.argv[1]):
         shutil.copy2(m["executable"], os.path.join(sys.argv[2], "bin", t["name"]))
         bins.append(t["name"] + "\t" + m["executable"])
 open(os.path.join(sys.argv[2], "list.txt"), "w").write("".join(x + "\n" for x in sorted(set(lst))))
-open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in sorted(set(bins))))' "$r/build-wtests.json" "$r/store.tmp/wtests" "latex $SUITES"
+open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in sorted(set(bins))))' "$r/build-wtests.json" "$r/store.tmp/wtests" "latex suites"
         [ -s "$r/store.tmp/wtests/list.txt" ] || red "build (the tests shard's): no test binary"
         cp target-wtests/fastdev/examples/otf-index "$r/store.tmp/wtests/otf-index" || red "build (the tests shard's): no otf-index"
       fi
@@ -495,21 +496,24 @@ open(os.path.join(sys.argv[2], "bins.txt"), "w").write("".join(x + "\n" for x in
     ;;
   suites)
     fetched
+    # (one program, tests/suites.rs, each suite a module of it: a lane a
+    # suite, its tests those named `SUITE::…`)
+    "$w/bin/tests/suites" --list 2>/dev/null | sed -n 's/: test$//p' | sort > "$w/all-suites.txt"
+    "$w/bin/tests/suites" --list --ignored 2>/dev/null | sed -n 's/: test$//p' | sort > "$w/ign-suites.txt"
+    [ -s "$w/all-suites.txt" ] || red "suites: the suites program lists no test"
     for s in $SUITES; do
-      "$w/bin/tests/$s" --list 2>/dev/null | sed -n 's/: test$//p' | sort > "$w/all-$s.txt"
-      "$w/bin/tests/$s" --list --ignored 2>/dev/null | sed -n 's/: test$//p' | sort > "$w/ign-$s.txt"
-      comm -23 "$w/all-$s.txt" "$w/ign-$s.txt" > "$w/run-$s.txt"
+      comm -23 "$w/all-suites.txt" "$w/ign-suites.txt" | grep "^$s::" > "$w/run-$s.txt" || red "suites: no test in the suite $s"
     done
     # (every suite at once: their tests share the GATE_TEST_PAR slots
     # each suite has; a suite's wall is its first start to its last end)
     for s in $SUITES; do
-      ( s0=$(date +%s); GATE_TEST_PAR=${GATE_SUITE_PAR:-2} runtests "$w/bin/tests/$s" "$s::" "$w/run-$s.txt" "$r/t-$s"; echo "$s $(( $(date +%s) - s0 ))" >> "$r/suite-walls.txt" ) &
+      ( s0=$(date +%s); GATE_TEST_PAR=${GATE_SUITE_PAR:-2} runtests "$w/bin/tests/suites" "suites::" "$w/run-$s.txt" "$r/t-$s"; echo "$s $(( $(date +%s) - s0 ))" >> "$r/suite-walls.txt" ) &
     done
     wait
     # (the reds are written by the subshells' runtests into red.txt; the
     # status from it)
     grep -q . "$r/red.txt" && status=red
-    for s in $SUITES; do walls "$r/t-$s" "$s::"; done > "$r/suite-test-walls.txt"
+    for s in $SUITES; do walls "$r/t-$s" "suites::"; done > "$r/suite-test-walls.txt"
     ;;
   tests)
     # (the build shard's other test binaries, wtests/list.txt: the

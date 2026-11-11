@@ -2,7 +2,7 @@
 //! the latest one, equal to a cold build of it, and says which version
 //! it is for.
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};

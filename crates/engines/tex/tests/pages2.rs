@@ -5,7 +5,7 @@
 //! rewrite beside `pages/SPEC.md`; the old suites (`pages`, `page_steps`,
 //! `plain`, `edits`, `pdftex`, `latex`) are its gate.
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 

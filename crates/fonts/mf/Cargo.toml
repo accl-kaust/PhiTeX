@@ -5,9 +5,14 @@ edition.workspace = true
 license.workspace = true
 publish = false
 description = "METAFONT, ported from mf.web with web2c's mf.ch"
+autotests = false
 
 [dependencies]
 phitex-gftopk = { path = "../gftopk" }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "tests"
+path = "tests/tests.rs"
