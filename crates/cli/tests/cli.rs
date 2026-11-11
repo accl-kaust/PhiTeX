@@ -5541,7 +5541,7 @@ fn watch_cites_under_a_point() {
     // (plain TeX, its own \\cite and \\bibitem, the labels in the .aux
     // as LaTeX writes them: a test binary's LaTeX format takes minutes)
     let text = plain()
-        + "\\immediate\\openout1=doc.aux \\immediate\\write1{\\string\\bibcite{knuth}{1}}\\immediate\\write1{\\string\\bibcite{lamport}{2}}\\immediate\\closeout1\n\\def\\cite#1{[1, 2]}\n\\def\\bibitem#1{\\par}\nPlain words first. See \\cite{knuth,lamport} here.\\par\n\\bibitem{knuth} Donald Knuth. The TeXbook.\n\\bibitem{lamport} Leslie Lamport. LaTeX.\n\\bye\n";
+        + "\\immediate\\openout1=doc.aux \\immediate\\write1{\\string\\bibcite{knuth}{1}}\\immediate\\write1{\\string\\bibcite{lamport}{2}}\\immediate\\write1{\\string\\bibcite{texbook}{{3}{1984}{{Knuth}}{{}}}}\\immediate\\closeout1\n\\def\\cite#1{[1, 2]}\n\\def\\citep#1{(Knuth, 1984; Lamport, 1994)}\n\\def\\bibitem#1{\\par}\nPlain words first. See \\cite{knuth,lamport} here.\\par\nThe system itself is in \\citep{texbook,lamport} today.\\par\n\\bibitem{knuth} Donald Knuth. Breaking paragraphs.\n\\bibitem{texbook} Donald Knuth. The TeXbook, 1984.\n\\bibitem{lamport} Leslie Lamport. LaTeX, 1994.\n\\bye\n";
     let dir = scratch("watch-cites");
     std::fs::write(dir.join("doc.tex"), &text).expect("the document");
     let root = dir.canonicalize().expect("the directory");
@@ -5655,6 +5655,55 @@ fn watch_cites_under_a_point() {
         cites[1]["at"][1].as_f64() > cites[0]["at"][1].as_f64(),
         "lamport's entry after knuth's: {got}"
     );
+    // (a citation's words that are in the bibliography too, matched
+    // there: the citation all the same, on its words and its punctuation)
+    let at_word = |what: &str, nth: usize| {
+        let from = u32::try_from(text.find("today").expect("the line")).unwrap();
+        // (glyphs on the \\citep line: the ones left of "today")
+        let today = (0..file.len())
+            .find(|&i| file[i] == doc && start[i] >= from)
+            .expect("today's glyph");
+        let base = ys[today];
+        let mut on: Vec<usize> = (0..file.len()).filter(|&i| ys[i] == base).collect();
+        on.sort_by(|&a, &b| f32::from_bits(xs[a]).total_cmp(&f32::from_bits(xs[b])));
+        let _ = what;
+        let i = on[nth];
+        (f32::from_bits(xs[i]), f32::from_bits(ys[i]))
+    };
+    let line_len = {
+        let from = u32::try_from(text.find("today").expect("the line")).unwrap();
+        let today = (0..file.len())
+            .find(|&i| file[i] == doc && start[i] >= from)
+            .expect("today's glyph");
+        (0..file.len()).filter(|&i| ys[i] == ys[today]).count()
+    };
+    // ("The system itself is in" is 19 glyphs, then "(Knuth, 1984;
+    // Lamport, 1994)", 25 more, then "today.")
+    for (what, nth) in [("(", 19), ("K", 20), ("1984", 26), ("L", 31), (")", 43)] {
+        assert!(nth < line_len, "{line_len} glyphs on the line");
+        let (wx, wy) = at_word(what, nth);
+        let a = ask(
+            &mut viewer,
+            json!({"op": "cites", "page": 0, "x": wx + 1.0, "y": wy - 2.0}),
+        );
+        let keys: Vec<&str> = a["json"]["cites"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{what}: {a}"))
+            .iter()
+            .filter_map(|e| e["key"].as_str())
+            .collect();
+        assert_eq!(keys, ["texbook", "lamport"], "on {what}: {a}");
+        assert_eq!(a["json"]["cites"][0]["number"], "3", "{a}");
+        assert_eq!(a["json"]["cites"][0]["label"], "Knuth (1984)", "{a}");
+    }
+    for (what, nth) in [("in", 18), ("today", 44)] {
+        let (wx, wy) = at_word(what, nth);
+        let a = ask(
+            &mut viewer,
+            json!({"op": "cites", "page": 0, "x": wx + 1.0, "y": wy - 2.0}),
+        );
+        assert_eq!(a["json"]["cites"], json!(null), "the prose's {what}: {a}");
+    }
     // (other text, a page not there, a point off every glyph: none)
     let (px, py) = at("Plain words");
     let p = ask(

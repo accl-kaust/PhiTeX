@@ -1572,10 +1572,7 @@ impl Session {
                 };
                 d(a).total_cmp(&d(b))
             })?;
-        let file = files.get(usize::try_from(*g.file.get(near)?).ok()?)?;
-        let text = self.source(file)?;
-        let at = usize::try_from(*g.start.get(near)?).ok()?;
-        let keys = crate::cites::cite_at(&text, at)?;
+        let keys = self.cite_on_line(&files, &g, near)?;
         // (the .aux as the build left it, at its fixed point, whether or
         // not the outputs are written; else as the output directory has it)
         let name = format!("{}.aux", self.job.jobname);
@@ -1591,6 +1588,7 @@ impl Session {
             })
             .unwrap_or_default();
         let labels = crate::cites::bibcites(&aux);
+        let numbers = crate::cites::bibnumbers(&aux);
         let entries = self.bib_entries(&files, &keys);
         Some(Value::Array(
             keys.iter()
@@ -1598,11 +1596,91 @@ impl Session {
                     json!({
                         "key": key,
                         "label": labels.get(key),
+                        "number": numbers.get(key),
                         "at": entries.get(key).map(|(p, y)| json!([p, y])),
                     })
                 })
                 .collect(),
         ))
+    }
+
+    /// The keys of the citation glyph `near` of page `g` belongs to: its
+    /// own origin's where that is in a citation; else its line's. A
+    /// citation's words that are in the bibliography too (`(Knuth, 1984;
+    /// Lamport, 1994)`), or in its macro's body, were matched there; only
+    /// some of its glyphs carry the call's range. So a glyph between two of
+    /// one citation's is its; one beside a citation's is too, unless it,
+    /// or a glyph between them, is the prose around it (its origin just
+    /// before the call, or just after: prose flows in the source).
+    fn cite_on_line(
+        &self,
+        files: &[String],
+        g: &phitex_tex::PageOrigins,
+        near: usize,
+    ) -> Option<Vec<String>> {
+        /// A glyph of the line: a citation's (its file, its call's bytes,
+        /// its keys), or another's (its file and byte, none: no origin).
+        #[derive(Clone, PartialEq)]
+        enum Kind {
+            Cite(u32, usize, usize, Vec<String>),
+            Text(Option<(u32, usize)>),
+        }
+        let mut texts: HashMap<u32, Option<Vec<u8>>> = HashMap::new();
+        let mut kind = |i: usize| -> Kind {
+            let (Some(&fi), Some(&s)) = (g.file.get(i), g.start.get(i)) else {
+                return Kind::Text(None);
+            };
+            let Ok(s) = usize::try_from(s) else {
+                return Kind::Text(None);
+            };
+            let t = texts.entry(fi).or_insert_with(|| {
+                files
+                    .get(usize::try_from(fi).ok()?)
+                    .and_then(|f| self.source(f))
+            });
+            match t.as_deref().and_then(|t| crate::cites::cite_around(t, s)) {
+                Some((a, b, keys)) => Kind::Cite(fi, a, b, keys),
+                None => Kind::Text(Some((fi, s))),
+            }
+        };
+        if let Kind::Cite(.., keys) = kind(near) {
+            return Some(keys);
+        }
+        // (the line: the glyphs whose baseline is near's, left to right)
+        let base = *g.y.get(near)?;
+        let mut line: Vec<usize> = (0..g.len())
+            .filter(|&i| i < g.x.len() && g.y.get(i).is_some_and(|&y| (y - base).abs() < 1.0))
+            .collect();
+        line.sort_by(|&a, &b| g.x[a].total_cmp(&g.x[b]));
+        let class: Vec<Kind> = line.iter().map(|&i| kind(i)).collect();
+        let at = line.iter().position(|&i| i == near)?;
+        let cite_at = |j: usize| match &class[j] {
+            Kind::Cite(f, a, b, keys) => Some((*f, *a, *b, keys.clone())),
+            Kind::Text(_) => None,
+        };
+        let left = (0..at).rev().find_map(|j| cite_at(j).map(|c| (j, c)));
+        let right = (at + 1..class.len()).find_map(|j| cite_at(j).map(|c| (j, c)));
+        // (between two glyphs of one citation: its own)
+        if let (Some((_, l)), Some((_, r))) = (&left, &right)
+            && (l.0, l.1) == (r.0, r.1)
+        {
+            return Some(l.3.clone());
+        }
+        // (the prose around a citation flows in the source: before it, just
+        // before the call; after it, just after. A glyph matched elsewhere
+        // (the macro's body, the bibliography) is the citation's beside it.)
+        let flows = |j: usize, f: u32, lo: usize, hi: usize| matches!(class[j], Kind::Text(Some((tf, s))) if tf == f && s >= lo && s < hi);
+        if let Some((lj, (f, _, b, keys))) = &left
+            && (lj + 1..=at).all(|j| !flows(j, *f, *b, b.saturating_add(2000)))
+        {
+            return Some(keys.clone());
+        }
+        if let Some((rj, (f, a, _, keys))) = &right
+            && (at..*rj).all(|j| !flows(j, *f, a.saturating_sub(2000), *a))
+        {
+            return Some(keys.clone());
+        }
+        None
     }
 
     /// Where each of `keys`' bibliography entries is typeset: the page
@@ -1654,8 +1732,12 @@ impl Session {
                 }
                 // (the first glyph of the entry: from its \bibitem on, the
                 // nearest after it)
+                // (matched glyphs only: a synthesized one, the heading
+                // `thebibliography` makes before its first entry, carries
+                // a range that may be the entry's)
                 let first = (0..g.len())
                     .filter(|&i| g.file.get(i) == Some(fi))
+                    .filter(|&i| g.synth.get(i).is_none_or(|&x| x == 0))
                     .filter_map(|i| {
                         let s = usize::try_from(*g.start.get(i)?).ok()?;
                         (s >= *start && s < *end).then_some((s, i))

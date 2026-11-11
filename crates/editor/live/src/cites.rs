@@ -14,6 +14,13 @@ use std::collections::HashMap;
 /// such command.
 #[must_use]
 pub fn cite_at(text: &[u8], at: usize) -> Option<Vec<String>> {
+    cite_around(text, at).map(|(_, _, keys)| keys)
+}
+
+/// [`cite_at`] with the command's bytes, `start..end`: which citation of
+/// the text a byte is in (two glyphs of one citation have the same).
+#[must_use]
+pub fn cite_around(text: &[u8], at: usize) -> Option<(usize, usize, Vec<String>)> {
     // (from the nearest backslash before `at` back, a command at a time:
     // the first that is a citation spanning `at` answers)
     let from = at.saturating_sub(600);
@@ -23,7 +30,7 @@ pub fn cite_at(text: &[u8], at: usize) -> Option<Vec<String>> {
             && let Some((end, keys)) = command(text, k)
             && at < end
         {
-            return Some(keys);
+            return Some((k, end, keys));
         }
         if k <= from {
             return None;
@@ -126,6 +133,44 @@ pub fn bibcites(aux: &str) -> HashMap<String, String> {
             continue;
         };
         out.insert(key, label(&aux[i + 1..e2 - 1]));
+        at = e2;
+    }
+    out
+}
+
+/// Each key's number from an `.aux`'s `\bibcite`: natbib's first group
+/// (`{{N}{YEAR}...}`), or a plain label that is a number; what a numbered
+/// style prints (`[1]`) where [`bibcites`]' label is natbib's author-year.
+#[must_use]
+pub fn bibnumbers(aux: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let b = aux.as_bytes();
+    let mut at = 0;
+    while let Some(k) = aux[at..].find("\\bibcite{") {
+        let s = at + k + "\\bibcite".len();
+        let Some(e1) = group(b, s, b'{', b'}') else {
+            break;
+        };
+        let key = aux[s + 1..e1 - 1].to_owned();
+        let mut i = e1;
+        while b.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        let Some(e2) = (b.get(i) == Some(&b'{'))
+            .then(|| group(b, i, b'{', b'}'))
+            .flatten()
+        else {
+            at = e1;
+            continue;
+        };
+        let v = aux[i + 1..e2 - 1].trim();
+        let n = match v.strip_prefix('{') {
+            Some(r) => r.split('}').next().unwrap_or("").trim(),
+            None => v,
+        };
+        if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) {
+            out.insert(key, n.to_owned());
+        }
         at = e2;
     }
     out
@@ -256,6 +301,10 @@ mod tests {
         assert_eq!(l["knuth81"], "1");
         assert_eq!(l["kp"], "Knuth and Plass (1981)");
         assert_eq!(l["x"], "Anon");
+        let n = bibnumbers(aux);
+        assert_eq!(n["knuth81"], "1");
+        assert_eq!(n["kp"], "2");
+        assert_eq!(n["x"], "3");
     }
 
     /// No input breaks them: random bytes (invalid UTF-8 too), every cut
@@ -293,6 +342,7 @@ mod tests {
             }
             let text = String::from_utf8_lossy(t);
             let _ = bibcites(&text);
+            let _ = bibnumbers(&text);
             let _ = bibitem_at(t, "k");
             let _ = bibitem_at(t, "");
             for at in [0, 1, t.len(), t.len() + 5] {
