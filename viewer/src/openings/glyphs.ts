@@ -8,6 +8,7 @@
 
 import { html } from "../html.ts";
 import { layer, loop, ending, PAPER, INK, RIBBON, type Opening } from "./kit.ts";
+import { keyed } from "../hints.ts";
 
 const GLYPHS = [..."∑∫∂∇πφΦαβγλμσθ√∞≈≠≤≥§¶{}[]\\$&^_#%ﬁﬂ"];
 
@@ -160,7 +161,7 @@ export function glyphs(box: HTMLElement, dark: boolean): Opening {
     requestAnimationFrame(() => (w.style.transition = ""));
   };
   const lander = window.setInterval(land, 400);
-  const hint = (text: string) => ($(".hint").textContent = `Did you know? ${text}`);
+  const hint = (text: string) => keyed($(".hint"), text, "Did you know? ");
   return ending(el, () => {
     out = performance.now() - t0;
     // (the page's text block: lines from a fifth of the way down, a line's height apart)

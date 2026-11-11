@@ -2450,6 +2450,40 @@ function crtOff(el) {
   return 520;
 }
 
+// viewer/src/hints.ts
+var HINTS = [
+  { text: "Double-click a word on the page to go to its source." },
+  { text: "Builds run by themselves as you type: Rebuild is for a change made outside the editor." },
+  { text: "Press {`} to see everything phitex watch printed in the terminal.", hosts: ["watch"] },
+  { text: "Press {?} over the pages for the keyboard shortcuts.", hosts: ["watch"] },
+  { text: "Compare shows what changed since an earlier version, marked as latexdiff marks it.", hosts: ["watch", "vscode"] },
+  { text: "Put \\label after \\caption: \\ref then gives the figure's number, not the section's." },
+  { text: "A ~ is a space the line never breaks at: Figure~\\ref{fig:plot}." },
+  { text: "You can pick your favourite loading animation, or turn them off, in Settings \u203A Appearance." },
+  { text: "Donald Knuth began TeX in 1977; its version number gets one more digit of \u03C0 at each release (3.141592653)." }
+];
+function hintsFor(host2) {
+  return HINTS.filter((h) => !h.hosts || h.hosts.includes(host2)).map((h) => h.text);
+}
+function plain(text) {
+  return text.replace(/\{([^{}]+)\}/g, "[$1]");
+}
+function keyed(el, text, before = "") {
+  if (!document.getElementById("phx-keycap")) {
+    const st = document.createElement("style");
+    st.id = "phx-keycap";
+    st.textContent = `kbd.phx-key { display: inline-block; min-width: 1.1em; padding: 0 .35em; margin: 0 .1em;
+      font: inherit; font-style: normal; font-weight: 600; line-height: 1.35; text-align: center;
+      border: 1px solid currentColor; border-bottom-width: 2px; border-radius: .3em; opacity: .9; }`;
+    document.head.append(st);
+  }
+  const parts = text.split(/\{([^{}]+)\}/);
+  el.replaceChildren(
+    before,
+    ...parts.map((t, k) => k % 2 ? Object.assign(document.createElement("kbd"), { className: "phx-key", textContent: t }) : t)
+  );
+}
+
 // viewer/src/openings/win98.ts
 var RESTORED = { left: 9, top: 15, width: 82, height: 66 };
 function win98(box, doc = "document.tex") {
@@ -2515,7 +2549,7 @@ function win98(box, doc = "document.tex") {
     fill.style.width = pct === void 0 ? "" : `calc(${Math.round(pct / 5) * 5}% - 4px)`;
   };
   const hint = (text) => {
-    tip.querySelector("span").textContent = text;
+    keyed(tip.querySelector("span"), text);
     tip.classList.remove("on");
     void tip.offsetWidth;
     tip.classList.add("on");
@@ -2610,7 +2644,7 @@ function mac9(box, doc = "document.tex") {
     fill.style.width = pct === void 0 ? "" : `${pct}%`;
   };
   const hint = (text) => {
-    bal.querySelector("span").textContent = text;
+    keyed(bal.querySelector("span"), text);
     const w = $(".w").getBoundingClientRect(), b = box.getBoundingClientRect();
     bal.style.top = `calc(${w.bottom - b.top}px + 2.6cqw)`;
     bal.classList.add("on");
@@ -2711,7 +2745,7 @@ function terminal(box, doc = "document.tex") {
         if (s) s.textContent = SPIN[++spin % SPIN.length];
       }, 80);
   });
-  const hint = (text) => later(() => cur?.el.before(Object.assign(document.createElement("div"), { className: "l h", textContent: `# ${text}` })));
+  const hint = (text) => later(() => cur?.el.before(Object.assign(document.createElement("div"), { className: "l h", textContent: `# ${plain(text)}` })));
   const cleanup = () => (clearTimeout(timer), clearInterval(spinner));
   return ending(
     el,
@@ -2781,7 +2815,7 @@ function dos(box) {
   };
   const hint = (text) => {
     tip.style.visibility = "visible";
-    tip.querySelector("span").textContent = text;
+    tip.querySelector("span").textContent = plain(text);
   };
   return ending(
     el,
@@ -2879,7 +2913,7 @@ function typewriter(box, dark, doc = "document.tex") {
     if (pkg && !pkgs.has(pkg)) pkgs.add(pkg), type(...chars(`${pkgs.size > 1 ? "," : ""} ${pkg}`));
     if (/^Page \d+/.test(detail) && detail !== page) page = detail, type(...chars(` p.${detail.slice(5)}`));
   };
-  const hint = (text) => type("\n", "\n", { red: true }, ...chars(`Did you know? ${text}`), { red: false }, "\n");
+  const hint = (text) => type("\n", "\n", { red: true }, ...chars(`Did you know? ${plain(text)}`), { red: false }, "\n");
   return ending(el, () => (clearTimeout(timer), el.classList.add("out"), 520), () => clearTimeout(timer), { step, hint });
 }
 
@@ -2944,7 +2978,7 @@ function ink(box, dark) {
     }
     size(pct !== void 0 ? 0.25 + 0.6 * (pct / 100) : seen.size ? 0.9 : 0.12);
   };
-  const hint = (text) => write($(".hint"), `Did you know? ${text}`);
+  const hint = (text) => write($(".hint"), `Did you know? ${plain(text)}`);
   return ending(
     el,
     () => {
@@ -3098,13 +3132,12 @@ function tetris(box, dark) {
   const tick = $(".tick span");
   let ticking = false, waiting = null;
   tick.addEventListener("animationiteration", () => {
-    if (waiting) tick.textContent = waiting, waiting = null;
+    if (waiting) keyed(tick, waiting, "Did you know? "), waiting = null;
   });
   const hint = (text) => {
-    const t = `Did you know? ${text}`;
-    if (ticking) return void (waiting = t);
+    if (ticking) return void (waiting = text);
     ticking = true;
-    tick.textContent = t;
+    keyed(tick, text, "Did you know? ");
     tick.style.animation = "none";
     void tick.offsetWidth;
     tick.style.animation = "";
@@ -3240,7 +3273,7 @@ function plane(box, dark) {
     $(".det").textContent = detail;
     want = k === 0 ? 0 : k === 1 ? 2.6 * ((pct ?? 0) / 100) : 3;
   };
-  const hint = (text) => $(".hint").textContent = `Did you know? ${text}`;
+  const hint = (text) => keyed($(".hint"), text, "Did you know? ");
   return ending(
     el,
     () => {
@@ -3388,7 +3421,7 @@ function glyphs(box, dark) {
     requestAnimationFrame(() => w.style.transition = "");
   };
   const lander = window.setInterval(land, 400);
-  const hint = (text) => $(".hint").textContent = `Did you know? ${text}`;
+  const hint = (text) => keyed($(".hint"), text, "Did you know? ");
   return ending(el, () => {
     out = performance.now() - t0;
     const lh = W2 * 0.0162 * 1.25 * 1.6;
@@ -3457,7 +3490,7 @@ function kaust(box, dark) {
     for (let i = 0; i < k; i++) fill(i, 100);
     fill(k, pct !== void 0 ? pct : "run");
   };
-  const hint = (text) => $(".hint").textContent = `Did you know? ${text}`;
+  const hint = (text) => keyed($(".hint"), text, "Did you know? ");
   return ending(
     el,
     () => {
@@ -3665,7 +3698,7 @@ function badapple(box, dark) {
     $(".what").textContent = what;
     $(".det").textContent = detail;
   };
-  const hint = (text) => $(".hint").textContent = `Did you know? ${text}`;
+  const hint = (text) => keyed($(".hint"), text, "Did you know? ");
   return ending(
     el,
     (page) => {
@@ -3779,22 +3812,6 @@ function firstPage(cv, dark) {
     }
     y += lead * 0.6;
   }
-}
-
-// viewer/src/hints.ts
-var HINTS = [
-  { text: "Double-click a word on the page to go to its source." },
-  { text: "Builds run by themselves as you type: Rebuild is for a change made outside the editor." },
-  { text: "The backtick key shows everything phitex watch printed in the terminal.", hosts: ["watch"] },
-  { text: "The question-mark key, over the pages, lists the keyboard shortcuts.", hosts: ["watch"] },
-  { text: "Compare shows what changed since an earlier version, marked as latexdiff marks it.", hosts: ["watch", "vscode"] },
-  { text: "Put \\label after \\caption: \\ref then gives the figure's number, not the section's." },
-  { text: "A ~ is a space the line never breaks at: Figure~\\ref{fig:plot}." },
-  { text: "You can pick your favourite loading animation, or turn them off, in Settings \u203A Appearance." },
-  { text: "Donald Knuth began TeX in 1977; its version number gets one more digit of \u03C0 at each release (3.141592653)." }
-];
-function hintsFor(host2) {
-  return HINTS.filter((h) => !h.hosts || h.hosts.includes(host2)).map((h) => h.text);
 }
 
 // viewer/src/panel.ts
@@ -4946,7 +4963,7 @@ var Panel = class {
     const show = () => {
       const text = list[this.hintAt++ % list.length];
       if (this.anim?.hint) this.anim.hint(text);
-      else el.textContent = `Did you know? ${text}`, el.hidden = false;
+      else keyed(el, text, "Did you know? "), el.hidden = false;
       this.hintTimer = setTimeout(show, 7e3);
     };
     this.hintTimer = setTimeout(show, 2e3);

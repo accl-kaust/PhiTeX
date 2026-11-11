@@ -12,6 +12,7 @@
 
 import { html } from "../html.ts";
 import { layer, ending, PAPER, INK, type Opening } from "./kit.ts";
+import { keyed } from "../hints.ts";
 
 type P = [number, number];
 // (the sheet's six corners, nose up about its middle: the top's middle, top right, bottom right, the bottom's middle, bottom left, top left)
@@ -158,7 +159,7 @@ export function plane(box: HTMLElement, dark: boolean): Opening {
     // (the folds: none while the project is read, then as far as the packages have come, the last one for typesetting)
     want = k === 0 ? 0 : k === 1 ? 2.6 * ((pct ?? 0) / 100) : 3;
   };
-  const hint = (text: string) => ($(".hint").textContent = `Did you know? ${text}`);
+  const hint = (text: string) => keyed($(".hint"), text, "Did you know? ");
   return ending(
     el,
     () => {

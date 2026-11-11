@@ -28,7 +28,7 @@ import { KEYS, bindKeys, typing } from "./keys.ts";
 import { REPORT_TO } from "./report.ts";
 import type { Opening } from "./opening.ts";
 import { LOOKS, lookFrom, lookOf, looksIn, play, preview as lookPreview, type OpeningLook } from "./openings/index.ts";
-import { hintsFor } from "./hints.ts";
+import { hintsFor, keyed } from "./hints.ts";
 
 /** How long a build may ship no page before the last good one is dimmed (typing through `{`). */
 const STALE_GRACE_MS = 1000;
@@ -1575,7 +1575,7 @@ export class Panel {
       const text = list[this.hintAt++ % list.length];
       // (an opening that says the steps itself says this too)
       if (this.anim?.hint) this.anim.hint(text);
-      else (el.textContent = `Did you know? ${text}`), (el.hidden = false);
+      else keyed(el, text, "Did you know? "), (el.hidden = false);
       this.hintTimer = setTimeout(show, 7000);
     };
     this.hintTimer = setTimeout(show, 2000);

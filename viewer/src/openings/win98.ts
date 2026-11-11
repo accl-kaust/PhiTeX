@@ -10,6 +10,7 @@
 
 import { html } from "../html.ts";
 import { layer, ending, type Opening } from "./kit.ts";
+import { keyed } from "../hints.ts";
 
 /** The PDF's window before it is maximized, in percent of the sheet: its page area (the frame and bars around it). */
 const RESTORED = { left: 9, top: 15, width: 82, height: 66 };
@@ -78,7 +79,7 @@ export function win98(box: HTMLElement, doc = "document.tex"): Opening {
     fill.style.width = pct === undefined ? "" : `calc(${Math.round(pct / 5) * 5}% - 4px)`;
   };
   const hint = (text: string) => {
-    tip.querySelector("span")!.textContent = text;
+    keyed(tip.querySelector("span")!, text);
     tip.classList.remove("on");
     void tip.offsetWidth;
     tip.classList.add("on");

@@ -7,6 +7,7 @@
 
 import { html } from "../html.ts";
 import { layer, ending, crt, type Opening } from "./kit.ts";
+import { plain } from "../hints.ts";
 
 const COLS = 26;
 
@@ -63,7 +64,7 @@ export function dos(box: HTMLElement): Opening {
   };
   const hint = (text: string) => {
     tip.style.visibility = "visible";
-    tip.querySelector("span")!.textContent = text;
+    tip.querySelector("span")!.textContent = plain(text);
   };
   return ending(
     el,

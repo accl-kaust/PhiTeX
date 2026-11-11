@@ -9,6 +9,7 @@
 
 import { html } from "../html.ts";
 import { layer, ending, type Opening } from "./kit.ts";
+import { keyed } from "../hints.ts";
 
 const RESTORED = { left: 8, top: 17, width: 84, height: 66 };
 const DESK = "#6a6fb3";
@@ -74,7 +75,7 @@ export function mac9(box: HTMLElement, doc = "document.tex"): Opening {
     fill.style.width = pct === undefined ? "" : `${pct}%`;
   };
   const hint = (text: string) => {
-    bal.querySelector("span")!.textContent = text;
+    keyed(bal.querySelector("span")!, text);
     // (Balloon Help points at what it is about: hung under the progress window, its tail on the window's edge)
     const w = $(".w").getBoundingClientRect(), b = box.getBoundingClientRect();
     bal.style.top = `calc(${w.bottom - b.top}px + 2.6cqw)`;

@@ -10,6 +10,7 @@
 import { html, svgArt } from "../html.ts";
 import { layer, ending, wipe, RIBBON, PAPER, type Opening } from "./kit.ts";
 import { LOCKUP, SEEDS } from "../opening-art.ts";
+import { keyed } from "../hints.ts";
 
 /** A logo's <svg> (the build's art), of class `cls`, hidden from readers. */
 const art = (markup: string, cls: string) => {
@@ -73,7 +74,7 @@ export function kaust(box: HTMLElement, dark: boolean): Opening {
     for (let i = 0; i < k; i++) fill(i, 100);
     fill(k, pct !== undefined ? pct : "run");
   };
-  const hint = (text: string) => ($(".hint").textContent = `Did you know? ${text}`);
+  const hint = (text: string) => keyed($(".hint"), text, "Did you know? ");
   return ending(
     el,
     () => {

@@ -13,6 +13,7 @@
 import { html } from "../html.ts";
 import { layer, ending, loop, PAPER, type Opening } from "./kit.ts";
 import { FRAMES, W, H, FPS, DATA } from "./badapple-data.ts";
+import { keyed } from "../hints.ts";
 
 /** The frames as paths, read once (every sheet after the first plays them at once). */
 let frames: Promise<Path2D[]> | null = null;
@@ -226,7 +227,7 @@ export function badapple(box: HTMLElement, dark: boolean): Opening {
     $(".what").textContent = what;
     $(".det").textContent = detail;
   };
-  const hint = (text: string) => ($(".hint").textContent = `Did you know? ${text}`);
+  const hint = (text: string) => keyed($(".hint"), text, "Did you know? ");
   return ending(
     el,
     (page) => {

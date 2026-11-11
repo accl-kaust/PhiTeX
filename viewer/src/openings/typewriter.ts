@@ -6,6 +6,7 @@
 
 import { html } from "../html.ts";
 import { layer, ending, PAPER, type Opening } from "./kit.ts";
+import { plain } from "../hints.ts";
 
 export function typewriter(box: HTMLElement, dark: boolean, doc = "document.tex"): Opening {
   const el = layer(
@@ -92,6 +93,6 @@ export function typewriter(box: HTMLElement, dark: boolean, doc = "document.tex"
     if (pkg && !pkgs.has(pkg)) (pkgs.add(pkg), type(...chars(`${pkgs.size > 1 ? "," : ""} ${pkg}`)));
     if (/^Page \d+/.test(detail) && detail !== page) (page = detail), type(...chars(` p.${detail.slice(5)}`));
   };
-  const hint = (text: string) => type("\n", "\n", { red: true }, ...chars(`Did you know? ${text}`), { red: false }, "\n");
+  const hint = (text: string) => type("\n", "\n", { red: true }, ...chars(`Did you know? ${plain(text)}`), { red: false }, "\n");
   return ending(el, () => (clearTimeout(timer), el.classList.add("out"), 520), () => clearTimeout(timer), { step, hint });
 }

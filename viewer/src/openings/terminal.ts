@@ -7,6 +7,7 @@
 
 import { html, type Slot } from "../html.ts";
 import { layer, ending, crt, crtOff, type Opening } from "./kit.ts";
+import { plain } from "../hints.ts";
 
 const SPIN = "|/-\\";
 const BAR = 16;
@@ -82,7 +83,7 @@ export function terminal(box: HTMLElement, doc = "document.tex"): Opening {
           if (s) s.textContent = SPIN[++spin % SPIN.length];
         }, 80);
     });
-  const hint = (text: string) => later(() => cur?.el.before(Object.assign(document.createElement("div"), { className: "l h", textContent: `# ${text}` })));
+  const hint = (text: string) => later(() => cur?.el.before(Object.assign(document.createElement("div"), { className: "l h", textContent: `# ${plain(text)}` })));
   const cleanup = () => (clearTimeout(timer), clearInterval(spinner));
   return ending(
     el,

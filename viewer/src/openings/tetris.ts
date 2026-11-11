@@ -7,6 +7,7 @@
 
 import { html } from "../html.ts";
 import { layer, loop, ending, RIBBON, PAPER, INK, type Opening } from "./kit.ts";
+import { keyed } from "../hints.ts";
 
 const COLS = 10;
 const SHAPES = [
@@ -162,13 +163,12 @@ export function tetris(box: HTMLElement, dark: boolean): Opening {
   const tick = $(".tick span");
   let ticking = false, waiting: string | null = null;
   tick.addEventListener("animationiteration", () => {
-    if (waiting) (tick.textContent = waiting), (waiting = null);
+    if (waiting) keyed(tick, waiting, "Did you know? "), (waiting = null);
   });
   const hint = (text: string) => {
-    const t = `Did you know? ${text}`;
-    if (ticking) return void (waiting = t);
+    if (ticking) return void (waiting = text);
     ticking = true;
-    tick.textContent = t;
+    keyed(tick, text, "Did you know? ");
     tick.style.animation = "none";
     void tick.offsetWidth;
     tick.style.animation = "";

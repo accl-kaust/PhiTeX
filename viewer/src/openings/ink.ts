@@ -7,6 +7,7 @@
 
 import { html } from "../html.ts";
 import { layer, ending, hole, INK, PAPER, type Opening } from "./kit.ts";
+import { plain } from "../hints.ts";
 
 /** Where the drops land: the blot's centre, a third of the way down. */
 const AT = 34;
@@ -73,7 +74,7 @@ export function ink(box: HTMLElement, dark: boolean): Opening {
     }
     size(pct !== undefined ? 0.25 + 0.6 * (pct / 100) : seen.size ? 0.9 : 0.12);
   };
-  const hint = (text: string) => write($(".hint"), `Did you know? ${text}`);
+  const hint = (text: string) => write($(".hint"), `Did you know? ${plain(text)}`);
   return ending(
     el,
     () => {
