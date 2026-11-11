@@ -76,7 +76,7 @@ const TURN_EVERY: std::time::Duration = std::time::Duration::from_millis(40);
 /// document's): the engine's tick ([`phitex_tex::Progress::on_tick`])
 /// and the files read ([`crate::live::Shelf`]).
 pub(crate) fn let_host_in() {
-    if THREADED || !STEPPING.load(std::sync::atomic::Ordering::Relaxed) {
+    if THREADED || !STEPPING.load(std::sync::atomic::Ordering::Relaxed) || !ON_STEP.get() {
         return;
     }
     let now = std::time::Instant::now();
@@ -85,6 +85,28 @@ pub(crate) fn let_host_in() {
     }
     event_text(r#"{"event":"yield"}"#);
     LAST.with(|l| l.set(Some(std::time::Instant::now())));
+}
+
+thread_local! {
+    /// `ph_step`'s own build is what runs now, not a call the host made
+    /// in its turn while that build was suspended ([`host_turn`]): only
+    /// the build may yield. A JSPI host suspends at a yield only inside
+    /// `ph_step` (entered through `WebAssembly.promising`); a yield made
+    /// inside another export (`ph_provide` reading the files, as it gave
+    /// one the build looked for, in the host's task between its turn's
+    /// end and the build's resumption) suspended outside it: the
+    /// browser's SuspendError, the open lost (a .latexmkrc's `//` search
+    /// path, Chrome).
+    static ON_STEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A host's call (every export but `ph_step`): no yield made while it
+/// runs ([`ON_STEP`]), the build's own state given back after it.
+pub(crate) fn host_turn<R>(f: impl FnOnce() -> R) -> R {
+    let was = ON_STEP.replace(false);
+    let r = f();
+    ON_STEP.set(was);
+    r
 }
 
 thread_local! {
@@ -574,7 +596,9 @@ pub(crate) fn step_once() -> i32 {
     };
     STEPPING.store(true, Relaxed);
     LAST.with(|l| l.set(Some(std::time::Instant::now())));
+    ON_STEP.set(true);
     step(&mut doc, &output);
+    ON_STEP.set(false);
     STEPPING.store(false, Relaxed);
     // (closed in a turn of the host's while it ran: dropped)
     let closed = lock(&wake.state).1;

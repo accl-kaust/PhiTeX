@@ -3,7 +3,9 @@
 //! pointers into slices and calling the crate's safe function of that
 //! name. Every pointer the host passes is a range it got from `ph_alloc`
 //! and wrote; every pointer this passes out is read by the host before
-//! its import returns.
+//! its import returns. Every export but `ph_step` (and the memory's)
+//! runs as a host's turn ([`session::host_turn`]): the build's yields
+//! are made on `ph_step`'s stack alone.
 
 use std::alloc::Layout;
 
@@ -125,14 +127,18 @@ pub extern "C" fn ph_provide(
     data_len: usize,
     found: i32,
 ) {
-    let file = (found != 0).then(|| (text(path, path_len), bytes(data, data_len).to_vec()));
-    session::provide(&text(name, name_len), file);
+    session::host_turn(|| {
+        let file = (found != 0).then(|| (text(path, path_len), bytes(data, data_len).to_vec()));
+        session::provide(&text(name, name_len), file);
+    });
 }
 
 /// [`session::pack`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_pack(id: *const u8, id_len: usize, data: *const u8, data_len: usize, ok: i32) {
-    session::pack(&text(id, id_len), (ok != 0).then(|| bytes(data, data_len)));
+    session::host_turn(|| {
+        session::pack(&text(id, id_len), (ok != 0).then(|| bytes(data, data_len)));
+    });
 }
 
 /// [`session::stored`].
@@ -144,16 +150,20 @@ pub extern "C" fn ph_stored(
     data_len: usize,
     found: i32,
 ) {
-    session::stored(
-        &text(key, key_len),
-        (found != 0).then(|| bytes(data, data_len)),
-    );
+    session::host_turn(|| {
+        session::stored(
+            &text(key, key_len),
+            (found != 0).then(|| bytes(data, data_len)),
+        );
+    });
 }
 
 /// [`session::shell_done`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_shell_done(id: u32, frame: *const u8, len: usize) {
-    session::shell_done(id, bytes(frame, len));
+    session::host_turn(|| {
+        session::shell_done(id, bytes(frame, len));
+    });
 }
 
 /// [`session::set_index`].
@@ -168,18 +178,20 @@ pub extern "C" fn ph_set_index(
     bundled: *const u8,
     bundled_len: usize,
 ) -> i32 {
-    session::set_index(
-        bytes(tsv, tsv_len),
-        bytes(release, release_len),
-        bytes(table, table_len),
-        &text(bundled, bundled_len),
-    )
+    session::host_turn(|| {
+        session::set_index(
+            bytes(tsv, tsv_len),
+            bytes(release, release_len),
+            bytes(table, table_len),
+            &text(bundled, bundled_len),
+        )
+    })
 }
 
 /// [`session::open`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_open(p: *const u8, n: usize) -> i32 {
-    session::open(bytes(p, n))
+    session::host_turn(|| session::open(bytes(p, n)))
 }
 
 /// [`session::step_once`].
@@ -191,47 +203,49 @@ pub extern "C" fn ph_step() -> i32 {
 /// [`session::close`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_close() {
-    session::close();
+    session::host_turn(|| {
+        session::close();
+    });
 }
 
 /// [`session::request`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_request(p: *const u8, n: usize) -> i32 {
-    session::request(bytes(p, n))
+    session::host_turn(|| session::request(bytes(p, n)))
 }
 
 /// [`session::lsp_message`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_lsp(p: *const u8, n: usize) -> i32 {
-    session::lsp_message(bytes(p, n))
+    session::host_turn(|| session::lsp_message(bytes(p, n)))
 }
 
 /// [`session::main_output`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_main_output() -> i32 {
-    session::main_output()
+    session::host_turn(session::main_output)
 }
 
 /// [`session::pdf`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_pdf() -> i32 {
-    session::pdf()
+    session::host_turn(session::pdf)
 }
 
 /// [`session::file`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_file(p: *const u8, n: usize) -> i32 {
-    session::file(&text(p, n))
+    session::host_turn(|| session::file(&text(p, n)))
 }
 
 /// [`session::strips`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_strips(p: *const u8, n: usize) -> i32 {
-    session::strips(&text(p, n))
+    session::host_turn(|| session::strips(&text(p, n)))
 }
 
 /// [`session::frame`].
 #[unsafe(no_mangle)]
 pub extern "C" fn ph_frame(p: *const u8, n: usize) -> i32 {
-    session::frame(bytes(p, n))
+    session::host_turn(|| session::frame(bytes(p, n)))
 }
