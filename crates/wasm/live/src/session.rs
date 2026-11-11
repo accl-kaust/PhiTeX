@@ -65,13 +65,13 @@ fn tell_panics() {
 const TURN_EVERY: std::time::Duration = std::time::Duration::from_millis(40);
 
 /// Without threads, while a step builds: the host's turn, at most every
-/// [`TURN_EVERY`], as the event `{"event":"yield"}`. A host that switches
-/// stacks (JSPI: `ph_step` entered as `WebAssembly.promising`, the
-/// `event` import a `WebAssembly.Suspending` that answers this event with
-/// a promise) answers the requests that came meanwhile (`ph_request`,
+/// [`TURN_EVERY`], as the import `phitex.yield()` (no arguments; no
+/// event). A host that switches stacks (JSPI: `ph_step` entered as
+/// `WebAssembly.promising`, the `yield` import a `WebAssembly.Suspending`
+/// that answers with a promise) answers the requests that came meanwhile (`ph_request`,
 /// `ph_frame`, `ph_strips`, `ph_lsp`) before the step goes on: the pages
 /// the build streamed drawn while it runs, as the old core's slices let
-/// it. A host that does not ignores the event. Called with no lock held
+/// it. A host that does not makes `yield` a no-op. Called with no lock held
 /// that those answers take (the viewer's, the files', the open
 /// document's): the engine's tick ([`phitex_tex::Progress::on_tick`])
 /// and the files read ([`crate::live::Shelf`]).
@@ -83,7 +83,7 @@ pub(crate) fn let_host_in() {
     if LAST.with(|l| l.get().is_some_and(|t| now - t < TURN_EVERY)) {
         return;
     }
-    event_text(r#"{"event":"yield"}"#);
+    abi::yield_turn();
     LAST.with(|l| l.set(Some(std::time::Instant::now())));
 }
 
@@ -96,7 +96,9 @@ thread_local! {
     /// one the build looked for, in the host's task between its turn's
     /// end and the build's resumption) suspended outside it: the
     /// browser's SuspendError, the open lost (a .latexmkrc's `//` search
-    /// path, Chrome).
+    /// path, Chrome). (The yield is its own import, never `event`: V8
+    /// throws at a Suspending import called outside `promising`, so the
+    /// events every export tells go through a plain one.)
     static ON_STEP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -242,6 +244,7 @@ pub(crate) fn set_index(tsv: &[u8], release: &[u8], table: &[u8], bundled: &str)
 /// not JSON; 2: no session thread; 3: an engine not known, why in the
 /// answer's bytes); the session thread builds and tells its events. A
 /// document open before is closed.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn open(req: &[u8]) -> i32 {
     // (a step under way, in the host's turn: the open waits for its end)
     if STEPPING.load(std::sync::atomic::Ordering::Relaxed) {
@@ -382,7 +385,7 @@ pub(crate) fn open(req: &[u8]) -> i32 {
 struct Latexmk {
     /// TEXINPUTS's search (none: the default).
     search: Option<crate::files::Search>,
-    /// `exact`: the engine ($pdf_mode, $pdflatex) and SyncTeX.
+    /// `exact`: the engine (`$pdf_mode`, `$pdflatex`) and `SyncTeX`.
     engine: Option<String>,
     synctex: Option<bool>,
     /// What was not applied, each a line naming the file and the line.

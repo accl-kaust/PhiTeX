@@ -32,9 +32,18 @@ unsafe extern "C" {
     /// returning).
     #[link_name = "store_put"]
     fn host_store_put(key: *const u8, key_len: usize, data: *const u8, data_len: usize);
-    /// Tells the host of an event: JSON.
+    /// Tells the host of an event: JSON. A plain import: called on any
+    /// stack, in any export.
     #[link_name = "event"]
     fn host_event(json: *const u8, len: usize);
+    /// The host's turn while a step builds (`session::let_host_in`),
+    /// called on `ph_step`'s stack alone. A JSPI host wraps this import
+    /// alone as a `WebAssembly.Suspending` (V8 throws `SuspendError` at any
+    /// call of a Suspending import outside `WebAssembly.promising`, even
+    /// one that returns no promise: so never `event`); any other host
+    /// makes it a no-op.
+    #[link_name = "yield"]
+    fn host_yield();
     /// The language server's message to the editor: JSON-RPC, unframed.
     #[link_name = "lsp"]
     fn host_lsp(json: *const u8, len: usize);
@@ -68,6 +77,11 @@ pub fn store_put(key: &str, data: &[u8]) {
 pub fn event(json: &str) {
     // SAFETY: as `want`.
     unsafe { host_event(json.as_ptr(), json.len()) }
+}
+
+pub fn yield_turn() {
+    // SAFETY: no arguments; the host may switch stacks and come back.
+    unsafe { host_yield() }
 }
 
 pub fn lsp(json: &str) {
