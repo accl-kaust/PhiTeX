@@ -557,6 +557,114 @@ pub(crate) fn assert_siblings_hold(eng: &Engine) {
     }
 }
 
+/// (debug, observe) The claims at a settled evaluation's end: each
+/// taken node held by a live claimer whose walk reaches it, each claimer's
+/// walk from itself to its last taken sibling holding every sibling it
+/// takes there, and no taken node's definitions or contributions filed at
+/// its place. A line per breach: a unit held twice, or by none, is a
+/// claim race (the `TikZ` manual at -j16 typeset a table's first row
+/// twice, its unit in a rest's claim and on the line on its own).
+#[cfg(any(debug_assertions, feature = "observe"))]
+pub(crate) fn claims_breaches(eng: &Engine) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut walked: FxHashSet<(NodeId, NodeId)> = FxHashSet::default();
+    let mut taken: Vec<(NodeId, Option<NodeId>)> = Vec::new();
+    for i in 0..eng.nodes.len() {
+        let Some(n) = eng.nodes.get(i) else { continue };
+        if n.state() == State::Gone || n.pos_hint() == Pos(0) {
+            continue;
+        }
+        if n.taken() {
+            taken.push((n.id, n.claimer()));
+            match n.claimer().and_then(|c| eng.placed_node(c)) {
+                None => out.push(format!(
+                    "node {:?} taken with no live claimer ({:?})",
+                    n.id,
+                    n.claimer()
+                )),
+                Some(c) if c.state() == State::Gone => {
+                    out.push(format!("node {:?} taken by {:?}, gone", n.id, c.id));
+                }
+                Some(_) => {}
+            }
+            if let Some(seg) = eng.seg_for_pos(n.pos_hint()) {
+                let inner = seg.inner.read();
+                let p = n.pos_hint();
+                if inner.defs.values().any(|m| m.get(&p).is_some_and(|d| d.by == n.id))
+                    || (inner.nodes.get(&p) == Some(&n.id) && inner.contribs.values().any(|m| m.get(&p).is_some()))
+                {
+                    out.push(format!(
+                        "node {:?} taken by {:?} with definitions or contributions filed at its place",
+                        n.id,
+                        n.claimer()
+                    ));
+                }
+            }
+        }
+        // (its walk: every sibling it takes from itself to its claim's end)
+        let Some(end) = n.claim_end.load(Ordering::Acquire).checked_sub(1).map(NodeId::from_raw) else {
+            continue;
+        };
+        let all = n.claim_all.load(Ordering::Acquire);
+        let mut ps = read::SiblingParents::of(n);
+        let mut cur = Some(n.seg_hint());
+        let mut lower = Some(n.pos_hint());
+        let mut reached = false;
+        'segs: while let Some(sid) = cur {
+            let seg = eng.seg(sid);
+            if seg.unit != n.unit {
+                break;
+            }
+            let inner = seg.inner.read();
+            let lo = lower.map_or(Unbounded, Excluded);
+            for (_, id) in inner.nodes.range((lo, Unbounded)) {
+                let x = eng.node(*id);
+                let takes = if all {
+                    let op = eng.op(x.op());
+                    x.state() != State::Gone && op.sibling() && op.text() && !x.held_before(eng, n.id, n.pos_hint())
+                } else {
+                    ps.takes(eng, x)
+                };
+                if takes {
+                    walked.insert((n.id, x.id));
+                }
+                if takes && (x.claimer() != Some(n.id) || !x.taken()) {
+                    out.push(format!(
+                        "claimer {:?} (claim to {:?}) passes over {:?}, held by {:?}, taken {}",
+                        n.id,
+                        end,
+                        x.id,
+                        x.claimer(),
+                        x.taken()
+                    ));
+                }
+                if x.id == end {
+                    reached = true;
+                    break 'segs;
+                }
+            }
+            let lo = seg.lo;
+            drop(inner);
+            lower = None;
+            cur = eng.order.next(sid, lo);
+        }
+        if !reached {
+            out.push(format!(
+                "claimer {:?}'s claim end {:?} not after it on the line",
+                n.id, end
+            ));
+        }
+    }
+    for (x, c) in taken {
+        if let Some(c) = c
+            && !walked.contains(&(c, x))
+        {
+            out.push(format!("node {x:?} taken by {c:?}, outside that claim's walk"));
+        }
+    }
+    out
+}
+
 /// Index changes made under a segment's lock, applied before it is let go
 /// (a field-index shard under it, as a split takes one): applied after
 /// it, one commit's removal of a segment's last definition of a field
@@ -2403,13 +2511,12 @@ pub(crate) fn commit(eng: &Engine, w: &Worker, node: &Arc<Node>, mut p: Product)
     // for a run not woken by the answer it parked on, which a change
     // before it ran may have merged into its wake)
     let asked = node.asked.swap(false, Ordering::SeqCst);
-    // (the line's structure changed since the run began, `Engine::struct_gen`:
-    // its kept reads of its siblings checked again. Read after the record's
-    // install: a change counted after this read wakes this node through
-    // its new record, `wake_puller`, and one counted before is seen here;
-    // a kept sibling read checked only where the waker saw the old record
-    // was stale: the `TikZ` manual at -j16, a rest's next unit a line short,
-    // an arrow tips table typeset twice over)
+    // (its reads of its siblings filed with the nodes they passed, then
+    // the line's structure count read, `Engine::struct_gen`: moved since
+    // the run began, those reads are checked again. A change counted after
+    // this read finds them filed, `check_pullers`, and one counted before
+    // is seen here)
+    file_pullers(eng, node, serial, &reads[..]);
     let struct_moved = eng.struct_gen.load(Ordering::SeqCst) != p.struct_gen;
     if !file_all && (asked || scope_moved || !p.on_park) {
         unchecked.extend(reads.iter().enumerate().filter(|(_, r)| r.filed()).map(|(i, _)| i));
@@ -3005,6 +3112,8 @@ fn walk_here(
 /// (the one earlier segment `file_predicted` could not look at), and their
 /// readers re-asked.
 pub(crate) fn settle_predictions(eng: &Engine, w: Option<&Worker>, n: &Arc<Node>, st: &mut CommitStats) {
+    // (the runs whose reads of their siblings passed where it went)
+    check_inserted(eng, w, n);
     if n.has_brackets.load(Ordering::Acquire) {
         let (b, _) = unpack_effect(n.effect.load(Ordering::Acquire));
         reask_after_effect(eng, w, n, n.pos_hint(), Brackets::default(), b, st);
@@ -4564,6 +4673,10 @@ fn retract_products(eng: &Engine, w: Option<&Worker>, node: &Arc<Node>, remove: 
     // (whatever it holds, committed or claimed by a run that never
     // committed: a node removed or taken claims nothing)
     release_claimed(eng, w, node);
+    // (removed: the runs that read their siblings over it)
+    if remove {
+        check_pullers(eng, w, node, None);
+    }
     eng.note_stats(w, &st);
     rec.map(|r| r.placed.clone()).unwrap_or_default()
 }
@@ -4663,6 +4776,7 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     let mut freed: Vec<Arc<Node>> = Vec::new();
     let mut taken_holes: Vec<Arc<Node>> = Vec::new();
     let mut taken_now: Vec<NodeId> = Vec::new();
+    let mut handed: Vec<NodeId> = Vec::new();
     let mut stops: Vec<(Field, RangeKey, RangeReader)> = Vec::new();
     // (what it held before, up to there; what it holds now, to here)
     let old_end = me
@@ -4748,6 +4862,9 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
                     if s.claimer().is_some_and(|c| c != me.id) && s.taken() {
                         s.claimer.store(me.id.raw() + 1, Ordering::Release);
                         eng.structure_changed();
+                        // (held now from before the nodes between: those
+                        // read it as a free sibling, see below)
+                        handed.push(s.id);
                     } else if s.take() {
                         s.claimer.store(me.id.raw() + 1, Ordering::Release);
                         eng.structure_changed();
@@ -4809,7 +4926,7 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     // past it went on for ever on what the held ones were to change:
     // csquotes at -j8 3 builds in 320, mhchem at -j4 5 in 60, a run on
     // without end, 340 parked on 337 taken, accl 25662, mc 80815)
-    for n in taken_now {
+    for &n in &taken_now {
         crate::sched::release_waiting(eng, w, n);
     }
     // (a claimer removed or taken while its run went on claims nothing:
@@ -4836,8 +4953,14 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
         file_effect(eng, w, s, None, &mut st);
     }
     eng.note_stats(w, &st);
+    // (each it gave back, took or took over: the runs that read their
+    // siblings over it answer otherwise now, a claim of theirs or of
+    // another before them)
     for s in &releases {
-        wake_puller(eng, w, s, me.id);
+        check_pullers(eng, w, s, Some(me.id));
+    }
+    for &id in taken_now.iter().chain(&handed) {
+        check_pullers(eng, w, eng.node(id), Some(me.id));
     }
     for s in freed {
         enqueue(
@@ -4853,56 +4976,214 @@ fn claim_walk(eng: &Engine, w: Option<&Worker>, me: &Node, want: usize, leave: b
     }
 }
 
-/// The nearest node before `s` that would take it as a sibling, not
-/// inert and not `except`, re-asked where its last run read its
-/// siblings (`Ctx::following`): `s` held by another's claim was passed
-/// over when it read them, and now it is free that answer moved; its
-/// commit checked the answer while `s` was still held.
-fn wake_puller(eng: &Engine, w: Option<&Worker>, s: &Node, except: NodeId) {
-    let mut cur = Some(s.seg_hint());
-    let mut upper = Some(s.pos_hint());
+/// The runs that read their siblings over `s` (`Node::pullers`), but
+/// `except`, each asked again whose answer moved: `s` was taken, given
+/// back, held by another claim, removed or its text replaced. Each such
+/// read is filed with every node it passed (`file_pullers`), so a change
+/// of any finds it, whatever lies between it and the reader. (Woken, the
+/// nearest node before `s` that would take it alone missed a reader
+/// behind a closer one, its own placements between: a rest that read the
+/// unit a claim before it then took kept it as its next unit, typeset
+/// twice, the `TikZ` manual at -j16, an arrow tips table's first row.)
+/// After the change and its count (`Engine::structure_changed`): a read
+/// filed after this looks finds the count moved at its commit.
+pub(crate) fn check_pullers(eng: &Engine, w: Option<&Worker>, s: &Node, except: Option<NodeId>) {
+    let ps: Vec<(NodeId, u32)> = s.pullers.lock().clone();
+    for (id, serial) in ps {
+        if Some(id) == except || !live(eng, id, serial) {
+            continue;
+        }
+        let x = eng.node(id);
+        // (one passed over as no sibling of it stays passed over)
+        if !read::SiblingParents::of(x).may_take(eng, s) {
+            note_skipped(eng, x, serial, s.id);
+            continue;
+        }
+        check_puller(eng, w, x, s.id);
+    }
+}
+
+/// `x`, a run that read its siblings, asked again if it is not clean (its
+/// commit or its next run checks, `sched::mark_stale`) or one of those
+/// reads moved.
+fn check_puller(eng: &Engine, w: Option<&Worker>, x: &Arc<Node>, by: NodeId) {
+    if x.state() != State::Clean || !following_holds(eng, x) {
+        mark_stale(
+            eng,
+            w,
+            x,
+            Wake {
+                by: Some(by),
+                cause: Cause::Structure,
+                at_ns: eng.now_ns(),
+            },
+        );
+    }
+}
+
+/// Whether `x`'s recorded reads of its siblings answer now as they did.
+pub(crate) fn following_holds(eng: &Engine, x: &Node) -> bool {
+    x.record().is_some_and(|r| {
+        let mut at = None;
+        r.reads.iter().all(|rd| match *rd.kind() {
+            ReadKind::Following { i } => {
+                let n = read::following_on(eng, x, i, &mut at);
+                read::apply_path(eng, n.map(|n| read::text_value(eng, &n)), rd.path()) == rd.seen()
+            }
+            _ => true,
+        })
+    })
+}
+
+/// (debug) The runs a change passed over as no sibling of theirs
+/// (`SiblingParents::may_take`) whose sibling reads answered otherwise
+/// then, by engine, node and serial, with the node changed: another
+/// change, a sibling's, asks each again, or a quiet point finds it so
+/// still and fails (`assert_skipped_hold`).
+#[cfg(debug_assertions)]
+pub(crate) static SKIPPED: crate::lock::Mx<Option<Skipped>> = crate::lock::Mx::new(None);
+
+/// (debug) `SKIPPED`'s map: (engine, node, serial) to the node changed.
+#[cfg(debug_assertions)]
+pub(crate) type Skipped = FxHashMap<(usize, NodeId, u32), NodeId>;
+
+/// (debug) `x` passed over by a change of `s`, as no sibling of it: noted
+/// if its sibling reads answer otherwise now (`SKIPPED`).
+#[cfg_attr(not(debug_assertions), allow(unused_variables))]
+fn note_skipped(eng: &Engine, x: &Node, serial: u32, s: NodeId) {
+    #[cfg(debug_assertions)]
+    if x.state() == State::Clean && !following_holds(eng, x) {
+        SKIPPED
+            .lock()
+            .get_or_insert_with(FxHashMap::default)
+            .insert((std::ptr::from_ref(eng) as usize, x.id, serial), s);
+    }
+}
+
+/// (debug) At a quiet point: each run a change passed over as no sibling
+/// of its own, its sibling reads answering otherwise then, answers as it
+/// read now, or is no longer that run.
+#[cfg(debug_assertions)]
+pub(crate) fn assert_skipped_hold(eng: &Engine) {
+    let me = std::ptr::from_ref(eng) as usize;
+    let mine: Vec<((usize, NodeId, u32), NodeId)> = {
+        let mut g = SKIPPED.lock();
+        let Some(m) = g.as_mut() else {
+            return;
+        };
+        let keys: Vec<_> = m.keys().filter(|k| k.0 == me).copied().collect();
+        keys.into_iter().filter_map(|k| m.remove(&k).map(|s| (k, s))).collect()
+    };
+    for ((_, id, serial), s) in mine {
+        let x = eng.node(id);
+        assert!(
+            !live(eng, id, serial) || x.state() != State::Clean || following_holds(eng, x),
+            "node {} serial {serial}: a change of node {}, passed over as no sibling of it, moved its reads of its siblings",
+            id.raw(),
+            s.raw()
+        );
+    }
+}
+
+/// A node put on the line: the runs whose reads of their siblings passed
+/// where it went checked (`check_pullers`), those filed with the node
+/// before it, and that node if it is one. A read passes every node from
+/// its reader on, so one that passed the new node's place passed the node
+/// before it, or began there.
+pub(crate) fn check_inserted(eng: &Engine, w: Option<&Worker>, n: &Node) {
+    if n.state() == State::Gone || !eng.op(n.op()).sibling() {
+        return;
+    }
+    let mut cur = Some(n.seg_hint());
+    let mut upper = Some(n.pos_hint());
     while let Some(sid) = cur {
         let seg = eng.seg(sid);
-        if seg.unit != s.unit {
+        if seg.unit != n.unit {
             return;
         }
-        let found = {
+        let prev = {
             let inner = seg.inner.read();
             let hi = upper.map_or(Unbounded, Excluded);
-            let mut found = None;
-            for (_, id) in inner.nodes.range((Unbounded, hi)).rev() {
-                let x = eng.node(*id);
-                if x.id == except || x.state() == State::Gone || x.taken() {
+            inner.nodes.range((Unbounded, hi)).next_back().map(|(_, &id)| id)
+        };
+        if let Some(p) = prev {
+            let pn = eng.node(p);
+            for (id, serial) in pn.pullers.lock().clone() {
+                let x = eng.node(id);
+                if !live(eng, id, serial) {
                     continue;
                 }
-                if read::SiblingParents::of(x).takes(eng, s) || s.parent == Some(x.id) {
-                    found = Some(x.clone());
-                    break;
+                if read::SiblingParents::of(x).may_take(eng, n) {
+                    check_puller(eng, w, x, n.id);
+                } else {
+                    note_skipped(eng, x, serial, n.id);
                 }
             }
-            found
-        };
-        if let Some(x) = found {
-            let pulled = x
-                .record()
-                .is_some_and(|r| r.reads.iter().any(|rd| matches!(rd.kind(), ReadKind::Following { .. })));
-            if pulled {
-                mark_stale(
-                    eng,
-                    w,
-                    &x,
-                    Wake {
-                        by: Some(s.id),
-                        cause: Cause::Structure,
-                        at_ns: eng.now_ns(),
-                    },
-                );
+            if read::SiblingParents::of(pn).may_take(eng, n)
+                && pn
+                    .record()
+                    .is_some_and(|r| r.reads.iter().any(|rd| matches!(rd.kind(), ReadKind::Following { .. })))
+            {
+                check_puller(eng, w, pn, n.id);
             }
             return;
         }
         upper = None;
         cur = eng.order.prev(sid, seg.lo);
     }
+}
+
+/// The nodes `m`'s claim holds: from it up to its claim's end
+/// (`Node::claim_end`), those whose claimer it is.
+fn held_by(eng: &Engine, m: &Node) -> Vec<Arc<Node>> {
+    let Some(end) = m.claim_end.load(Ordering::Acquire).checked_sub(1).map(NodeId::from_raw) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cur = Some(m.seg_hint());
+    let mut lower = Some(m.pos_hint());
+    while let Some(sid) = cur {
+        let seg = eng.seg(sid);
+        if seg.unit != m.unit {
+            break;
+        }
+        {
+            let inner = seg.inner.read();
+            for (_, id) in inner.nodes.range((lower.map_or(Unbounded, Excluded), Unbounded)) {
+                let x = eng.node(*id);
+                if x.claimer() == Some(m.id) {
+                    out.push(x.clone());
+                }
+                if *id == end {
+                    return out;
+                }
+            }
+        }
+        lower = None;
+        cur = eng.order.next(sid, seg.lo);
+    }
+    out
+}
+
+/// Files a run's reads of its siblings (`Ctx::following`) with every node
+/// they passed (`read::following_passed`), with its serial: a change of
+/// one of those asks it again where its answer moved (`check_pullers`).
+/// Filed before its commit reads the structure's count
+/// (`Engine::struct_gen`): a change counted after that finds it filed.
+fn file_pullers(eng: &Engine, node: &Node, serial: u32, reads: &[crate::node::ReadRec]) {
+    let Some(i) = reads
+        .iter()
+        .filter_map(|r| match *r.kind() {
+            ReadKind::Following { i } => Some(i),
+            _ => None,
+        })
+        .max()
+    else {
+        return;
+    };
+    read::following_passed(eng, node, i, |n| {
+        push_pruned(&mut n.pullers.lock(), (node.id, serial), |x| live(eng, x.0, x.1));
+    });
 }
 
 /// Puts a built node on the line after `after` (a label in the gap, the
@@ -5295,6 +5576,9 @@ pub(crate) fn relocate(
     let mut first = true;
     let mut landed: Vec<Arc<Node>> = Vec::with_capacity(movers.len());
     for m in movers {
+        // (what it holds, where it stands now: moved past a reader, each
+        // is held before that reader or no more, `Node::held_before`)
+        let held = held_by(eng, &m);
         let Some(left) = lift(eng, &m) else {
             continue;
         };
@@ -5332,6 +5616,7 @@ pub(crate) fn relocate(
             unfile_placed(eng, w, rec.as_deref());
             // (a node removed claims nothing: what it holds goes back)
             release_leaving(eng, w, &m);
+            check_pullers(eng, w, &m, None);
             continue;
         };
         first = false;
@@ -5352,6 +5637,13 @@ pub(crate) fn relocate(
         }
         // then the old place
         lifted_walks(eng, w, &m, left, st);
+        // (the runs that read their siblings over it where it stood, and
+        // over where it stands now)
+        check_pullers(eng, w, &m, None);
+        check_inserted(eng, w, &m);
+        for h in &held {
+            check_pullers(eng, w, h, None);
+        }
         hi = hi.max(npos);
         landed.push(m);
     }
