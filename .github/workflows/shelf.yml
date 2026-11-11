@@ -27,6 +27,10 @@ on:
         description: "a PhiTeX commit: only add its formats to the release served now"
         type: string
         default: ""
+      clean:
+        description: "with formats_commit: serve the current release alone, with only that commit's formats (earlier releases and identities dropped)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -55,7 +59,8 @@ jobs:
       - run: docker pull -q "$IMAGE"
       - env:
           FORMATS_COMMIT: ${{ inputs.formats_commit }}
-        run: docker run --rm -v "$PWD:/src" -w /src -e CARGO_BUILD_JOBS=4 -e FORMATS_COMMIT "$IMAGE" bash -c 'shelf/scripts/release.sh; st=$?; chmod -R a+rX out shelf/public; exit $st'
+          CLEAN: ${{ inputs.clean && '1' || '' }}
+        run: docker run --rm -v "$PWD:/src" -w /src -e CARGO_BUILD_JOBS=4 -e FORMATS_COMMIT -e CLEAN "$IMAGE" bash -c 'shelf/scripts/release.sh; st=$?; chmod -R a+rX out shelf/public; exit $st'
       - id: made
         run: |
           echo "release=$(cat out/shelf-results/release.txt)" >> "$GITHUB_OUTPUT"

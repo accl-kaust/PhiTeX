@@ -14,6 +14,10 @@
 #
 # LABEL (default tl2026), SHELF_HOST (default https://v1.shelf.phitex.org).
 #
+# CLEAN=1 (with FORMATS_COMMIT only): a clean start, the site the served
+# release alone with only FORMATS_COMMIT's formats (scripts/fetch-live.py
+# --clean): the earlier releases and engine identities no longer served.
+#
 # FORMATS_COMMIT=<PhiTeX commit>: no new release, no TeX Live fetched; the
 # formats of that commit's PhiTeX (its engine identity) added to the
 # release the host serves now. That commit's phitex is built, checked
@@ -34,7 +38,13 @@ json() { python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get(sys.
 
 # (1) what the host serves now: the new release is numbered after it, and
 # the deployment keeps it (a Pages deployment replaces the whole site)
-python3 scripts/fetch-live.py "$host" "$label" releases-v1
+if [ -n "${CLEAN:-}" ]; then
+  [ -n "${FORMATS_COMMIT:-}" ] || { echo "CLEAN needs FORMATS_COMMIT (a clean start keeps the served release)" >&2; exit 1; }
+  rm -rf "releases-v1/$label"
+  python3 scripts/fetch-live.py "$host" "$label" releases-v1 --clean
+else
+  python3 scripts/fetch-live.py "$host" "$label" releases-v1
+fi
 old=$(json "releases-v1/$label/release.json" release)
 min=$(json "releases-v1/$label/release.json" min_extension)
 echo "served: $old (min_extension $min) $(date +%T)"
