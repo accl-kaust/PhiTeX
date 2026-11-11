@@ -66,8 +66,9 @@ md5; one that differs gets its oracle built in the job for the first
 differing object, and an oracle built there whose md5 is not the pinned
 one is said (the image is not the one pinned from). Every manual is red
 unless identical, but those in `ci/manuals-not-identical.tsv` (its id, a
-tab, the cause, as the user decides): they run and are reported apart
-(`known-red.txt`), and one identical again is said. A manual in
+tab, the cause, as the user decides; `ID -jJ` names its results at
+-j J alone, a difference at another -j still red): they run and are
+reported apart (`known-red.txt`), and one identical again is said. A manual in
 `ci/manuals-slow.tsv` is identical at -j1 and -j4 given time but slower
 than its limit (the sweep's 300 s, or its own `time_limit_s`, pdflatex's
 wall on the gate's runner): a speed item, not a correctness one (the

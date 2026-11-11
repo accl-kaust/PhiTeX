@@ -324,7 +324,9 @@ def cmd_run(args):
     args.documented_rows = documented_rows(args.documented)
     args.known_ids = set()
     if args.known:
-        args.known_ids = {l.split()[0] for l in open(args.known) if l.strip() and not l.startswith("#")}
+        # (a line naming `ID -jJ` is known at that -j alone: the others
+        # still get their oracle, verdict.py says them red)
+        args.known_ids = {l.split("\t")[0] for l in open(args.known) if l.strip() and not l.startswith("#")}
     items = manuals.shard(manuals.load_list(args.list), args.shard)
     engines, tools = set(args.engines.split(",")), set(args.tools.split(","))
     items = [c for c in items if c["engine"] in engines and not (set(c.get("tools", [])) - tools)]

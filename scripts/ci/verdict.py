@@ -11,7 +11,8 @@ times out, an oracle that fails, a result that is missing (never a pass
 of nothing). A document in --known (ci/manuals-not-identical.tsv: its
 id, a tab, why it is not identical) is not red: its line goes to
 --known-out with its cause, and one now identical at every -j is said
-there too. A document in --slow (ci/manuals-slow.tsv: its id, a tab,
+there too. Listed as `ID -jJ`, only its results at -j J are known: at
+another -j it is red as any. A document in --slow (ci/manuals-slow.tsv: its id, a tab,
 its measured times) is identical given time but slower than the limit:
 a build of it that only ran past its time limit is not red, its line
 goes to --known-out as "slow (listed)", and one within the limit at
@@ -73,7 +74,7 @@ def main():
             try:
                 r = json.loads((Path(a.out) / f"{d['id']}-j{j}.json").read_text())
             except (OSError, ValueError):
-                bad.append(("missing", f"{d['id']} -j{j}{lane}: no result"))
+                bad.append(("missing", j, f"{d['id']} -j{j}{lane}: no result"))
                 continue
             # (documented: differs from the oracle only where
             # ci/manuals-pdftex-bugs.tsv lets it, pdfTeX's bug not copied)
@@ -82,17 +83,26 @@ def main():
             if r.get("status") == "no-oracle":
                 no_oracle = f"{d['id']}{lane}: no oracle: {r.get('note')}"
                 continue
-            bad.append((r.get("status"), line(d, j, r, lane)))
+            bad.append((r.get("status"), j, line(d, j, r, lane)))
         if no_oracle:
-            bad.insert(0, ("no-oracle", no_oracle))
+            bad.insert(0, ("no-oracle", None, no_oracle))
+        # (one known at a -j alone, `ID -jJ`: its results there go apart, the rest stay)
+        for j in a.jobs.split(","):
+            why = known.get(f"{d['id']} -j{j}")
+            if why is None:
+                continue
+            kout.extend(f"{b} (known at -j{j}: {why})" for _, bj, b in bad if bj == j)
+            if not any(bj == j for _, bj, _ in bad):
+                kout.append(f"{d['id']}{lane}: identical now at -j {j} (known at -j{j}: {why})")
+            bad = [x for x in bad if x[1] != j]
         if d["id"] in known:
-            kout.extend(f"{b} (known: {known[d['id']]})" for _, b in bad)
+            kout.extend(f"{b} (known: {known[d['id']]})" for _, _, b in bad)
             if not bad:
                 kout.append(f"{d['id']}{lane}: identical now at -j {a.jobs} (known: {known[d['id']]})")
         elif d["id"] in slow:
             # (a slow one: its timeouts are expected and go apart; a PDF
             # that differs, an error, a missing result stay red)
-            for st, b in bad:
+            for st, _, b in bad:
                 if st == "timeout":
                     kout.append(f"slow (listed): {b} (slow: {slow[d['id']]})")
                 else:
@@ -100,7 +110,7 @@ def main():
             if not bad:
                 kout.append(f"{d['id']}{lane}: within its limit now at -j {a.jobs} (slow: {slow[d['id']]})")
         else:
-            for _, b in bad:
+            for _, _, b in bad:
                 print(a.prefix + b)
     if a.known_out:
         Path(a.known_out).write_text("".join(a.prefix + x + "\n" for x in kout))
