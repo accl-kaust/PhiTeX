@@ -413,13 +413,16 @@ var Viewer = class _Viewer {
       this.peekAt = null;
       this.peekHide();
     }, { passive: true });
-    if (host2.backWith === "history")
+    if (host2.backWith === "history") {
+      this.hAt = doc.defaultView?.history.state?.phitexBack ?? 0;
       doc.defaultView?.addEventListener("popstate", (e) => {
-        const n = e.state?.phitexBack;
-        if (n === void 0) return;
-        while (this.past.length > n) this.step(-1);
-        while (this.past.length < n && this.future.length) this.step(1);
+        const n = e.state?.phitexBack ?? 0;
+        let d = n - this.hAt;
+        this.hAt = n;
+        for (; d < 0 && this.past.length; d++) this.step(-1);
+        for (; d > 0 && this.future.length; d--) this.step(1);
       });
+    }
     if (host2.backWith === "buttons")
       for (const t of ["mousedown", "mouseup", "auxclick"])
         doc.addEventListener(t, (e) => {
@@ -432,6 +435,12 @@ var Viewer = class _Viewer {
   // ---- Link previews: a link hovered, the place it goes to shown in a small window on that page ----
   /** Links previewed on hover (the host's setting). */
   peeks = true;
+  /** Back and Forward after a jump (the pill, the history, the mouse's buttons): the host's setting. */
+  backs = true;
+  /** Where a jump lands lit for a moment: the host's setting. */
+  flashes = true;
+  /** Ctrl+click or a middle click opens a new tab (where the host has one): the host's setting. */
+  newTabs = true;
   peekEl = null;
   /** The link the window is for (or is about to be), its page and where its box is on it. */
   peekAt = null;
@@ -469,7 +478,9 @@ var Viewer = class _Viewer {
     el.hidden = false;
     if (typeof to === "string") {
       el.querySelector(".pu").textContent = to;
-      el.querySelector(".where").textContent = /^(https?:|mailto:)/i.test(to) ? "Opens in your browser" : "Not followed (not a web address)";
+      const web = /^(https?:|mailto:)/i.test(to), go = el.querySelector(".go");
+      el.querySelector(".where").textContent = web ? "Opens in your browser" : "Not followed (not a web address)";
+      [go.hidden, go.textContent] = [!web, "Open"];
     } else {
       const [x0, y0, x1, y1] = at.link;
       const list = this.host.cited ? this.host.cited({ k: at.k, x: (x0 + x1) / 2, y: (y0 + y1) / 2 }, to, at.link[5] ?? null) : this.citedOnPage(at.k, at.link);
@@ -485,23 +496,83 @@ var Viewer = class _Viewer {
     el.className = "peek";
     el.setAttribute("role", "tooltip");
     el.hidden = true;
-    el.innerHTML = `<div class="pv"><canvas></canvas><i class="at"></i></div><div class="pc"></div><div class="pu"></div><div class="pf"><span class="where"></span><span class="go">Click to go there</span></div>`;
-    el.addEventListener("mouseenter", () => clearTimeout(this.peekHiding));
-    el.addEventListener("mouseleave", () => this.peekSoon(100));
+    el.innerHTML = `<div class="pv"><canvas></canvas><i class="at"></i></div><div class="pc"></div><div class="pu"></div><div class="pf"><span class="where"></span><button type="button" class="go" data-jump>Go there</button><button type="button" class="pin" data-pin title="Keep it open (a window of its own, moved by its bar)" aria-label="Keep it open"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 1.6 14.4 6.2l-1.1 1.1-1-.3-2.6 2.6.2 2.6-1.1 1.1-2.6-2.6-3.2 3.2-.7-.7 3.2-3.2-2.6-2.6L4 6.4l2.6.2 2.6-2.6-.3-1z" fill="currentColor"/></svg></button></div>`;
+    el.addEventListener("mouseenter", () => el === this.peekEl && clearTimeout(this.peekHiding));
+    el.addEventListener("mouseleave", () => el === this.peekEl && this.peekSoon(100));
     el.addEventListener("click", (e) => {
+      if (e.target.closest("[data-pin]")) return void this.peekPin();
+      if (e.target.closest(".ph")) return;
+      const st = this.stateOf(el);
       const b = e.target.closest("[data-act]");
-      if (b) return void this.peekAct(b, e);
-      const ce = e.target.closest(".ce");
-      if (ce) return void this.peekGo(Number(ce.dataset.i), e);
-      const link = this.peekShown, from2 = this.peekFrom;
+      if (b) return void this.peekAct(b, e, st);
+      if (!e.target.closest("[data-jump]")) return;
+      const { link, from: from2 } = st;
       const to = link?.[4];
       if (typeof to === "number" && this.newTab(e, to, link?.[5] ?? null)) return;
-      this.peekHide();
+      if (el === this.peekEl) this.peekHide();
       if (typeof to === "number") this.follow(to, link?.[5] ?? null, link ? this.linkText(from2, link) : "", link ? { k: from2, link } : void 0);
       else if (typeof to === "string" && /^(https?:|mailto:)/i.test(to)) this.host.link ? this.host.link(to) : window.open(to, "_blank", "noopener");
     });
     this.scroller.append(el);
     return this.peekEl = el;
+  }
+  /** What window `el` shows: the hover window's now, or what a pinned one showed when it was pinned. */
+  stateOf(el) {
+    return el === this.peekEl ? { link: this.peekLink, from: this.peekFrom, list: this.peekList } : this.pinned.get(el) ?? { link: null, from: 0, list: [] };
+  }
+  pinned = /* @__PURE__ */ new WeakMap();
+  /**
+   * The hover window kept open as a window of its own: over the pages,
+   * where it is, staying while they scroll; a bar to move it by, with what
+   * it shows and × to close it. Everything in it works as before (scroll,
+   * Go to it, DOI, Copy BibTeX); the next link hovered opens a new window.
+   */
+  peekPin() {
+    const el = this.peekEl;
+    if (!el || el.hidden) return;
+    this.pinned.set(el, this.stateOf(el));
+    clearTimeout(this.peekTimer);
+    clearTimeout(this.peekHiding);
+    const box = this.scroller.parentElement ?? this.scroller, b = box.getBoundingClientRect(), r = el.getBoundingClientRect();
+    box.append(el);
+    const h = Math.min(r.height, b.height - 16), t = Math.max(0, Math.min(r.top - b.top, b.height - h - 8));
+    Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${t}px`, width: `${r.width}px`, height: `${h}px` });
+    el.classList.add("pinned");
+    el.setAttribute("role", "dialog");
+    const what = el.classList.contains("cite") ? el.querySelector(".mh span")?.textContent ?? el.querySelector(".ti")?.textContent ?? "" : el.classList.contains("url") ? el.querySelector(".pu")?.textContent ?? "" : el.querySelector(".where")?.textContent ?? "";
+    const bar2 = document.createElement("div");
+    bar2.className = "ph";
+    bar2.innerHTML = `<span class="t"></span><button type="button" class="x" aria-label="Close" title="Close">\xD7</button>`;
+    bar2.querySelector(".t").textContent = what;
+    el.prepend(bar2);
+    bar2.querySelector(".x").addEventListener("click", (e) => (e.stopPropagation(), el.remove()));
+    bar2.addEventListener("pointerdown", (e) => {
+      if (e.target.closest(".x")) return;
+      e.preventDefault();
+      bar2.setPointerCapture(e.pointerId);
+      const [x0, y0, l0, t0] = [e.clientX, e.clientY, parseFloat(el.style.left), parseFloat(el.style.top)];
+      const move = (m) => {
+        const w = box.clientWidth - el.offsetWidth, h2 = box.clientHeight - 30;
+        el.style.left = `${Math.max(0, Math.min(w, l0 + m.clientX - x0))}px`;
+        el.style.top = `${Math.max(0, Math.min(h2, t0 + m.clientY - y0))}px`;
+      };
+      const up = () => (bar2.removeEventListener("pointermove", move), bar2.removeEventListener("pointerup", up));
+      bar2.addEventListener("pointermove", move);
+      bar2.addEventListener("pointerup", up);
+    });
+    if (!el.classList.contains("cite") && !el.classList.contains("url")) {
+      let t2, w = el.offsetWidth;
+      new ResizeObserver(() => {
+        if (!el.isConnected || el.offsetWidth === w) return;
+        w = el.offsetWidth;
+        clearTimeout(t2);
+        t2 = setTimeout(() => this.peekDraw(el, this.pinned.get(el)?.link ?? void 0, true), 120);
+      }).observe(el);
+    }
+    this.peekEl = null;
+    this.peekLink = null;
+    this.peekAt = null;
+    this.peekList = [];
   }
   /** The link the window shows now. */
   get peekShown() {
@@ -578,9 +649,9 @@ var Viewer = class _Viewer {
    * window's, scrolled so the place is near its top, a bar beside it; a
    * page not drawn yet is asked for, and drawn here when it comes (set).
    */
-  peekDraw() {
-    const el = this.peekEl, link = this.peekLink ?? this.peekAt?.link;
+  peekDraw(el = this.peekEl, link = this.peekLink ?? this.peekAt?.link, keep = false) {
     if (!el || !link || typeof link[4] !== "number") return;
+    const pvKeep = el.querySelector(".pv"), was = keep && pvKeep.scrollHeight ? pvKeep.scrollTop / pvKeep.scrollHeight : -1;
     const k = link[4], top = link[5] ?? 0, s = this.slots[k];
     const pv = el.querySelector(".pv"), c = pv.querySelector("canvas");
     el.classList.toggle("wait", !s?.img);
@@ -590,6 +661,7 @@ var Viewer = class _Viewer {
       return;
     }
     el.querySelector(".where").textContent = `Page ${k + 1}`;
+    Object.assign(el.querySelector(".go"), { hidden: false, textContent: "Go there" });
     const img = s.img, W2 = pv.clientWidth || 420, dpr = window.devicePixelRatio || 1;
     const all = img.canvas instanceof HTMLCanvasElement ? [img.canvas] : [...img.canvas.querySelectorAll("canvas")];
     const base = all.find((b) => !b.classList.contains("phx-tile") && b.width);
@@ -614,7 +686,7 @@ var Viewer = class _Viewer {
     }
     const y = top / img.h * H2;
     pv.querySelector(".at").style.top = `${y}px`;
-    pv.scrollTop = Math.max(0, y - 28);
+    pv.scrollTop = was >= 0 ? was * pv.scrollHeight : Math.max(0, y - 28);
   }
   /** The window gone `ms` on, unless the pointer comes back to it or its link (one timer: a later leave restarts it, never a second). */
   peekSoon(ms) {
@@ -644,7 +716,7 @@ var Viewer = class _Viewer {
     if (h && h.offsetTop + h.offsetHeight > cs.clientHeight) cs.scrollTop = h.offsetTop - 8;
     const pages2 = [...new Set(list.map((c) => c.at?.[0]).filter((k) => k !== void 0))];
     el.querySelector(".where").textContent = `References \xB7 page ${pages2.length ? pages2.map((k) => k + 1).join(", ") : Number(link[4]) + 1}`;
-    el.querySelector(".go").textContent = list.length > 1 ? "Click one to go there" : "Click to go there";
+    Object.assign(el.querySelector(".go"), { hidden: list.length > 1, textContent: "Go there" });
   }
   peekList = [];
   // ---- A citation read from the pages themselves: the bibliography as typeset ----
@@ -760,21 +832,21 @@ var Viewer = class _Viewer {
     return list.length ? list : [_Viewer.asCited(own.label, own.text, [near, link[5] ?? 0])];
   }
   /** The list's entry `i` followed: its place in the bibliography (Back returns). */
-  peekGo(i, e) {
-    const c = this.peekList[i], link = this.peekLink, from2 = this.peekFrom;
+  peekGo(i, e, st = { link: this.peekLink, from: this.peekFrom, list: this.peekList }) {
+    const c = st.list[i], { link, from: from2 } = st;
     if (c?.at && e && this.newTab(e, c.at[0], c.at[1])) return;
-    this.peekHide();
+    if (st.list === this.peekList) this.peekHide();
     if (c?.at) this.follow(c.at[0], c.at[1], `[${c.label}] ${c.title}`, link ? { k: from2, link } : void 0);
   }
   /** A card's button: its address opened (the host's, as a link's), its BibTeX copied. */
-  peekAct(b, e) {
-    if (b.dataset.act === "go") return this.peekGo(Number(b.dataset.i), e);
+  peekAct(b, e, st = { link: this.peekLink, from: this.peekFrom, list: this.peekList }) {
+    if (b.dataset.act === "go") return this.peekGo(Number(b.dataset.i), e, st);
     if (b.dataset.act === "open") {
       const u = b.dataset.u;
       return this.host.link ? this.host.link(u) : void window.open(u, "_blank", "noopener");
     }
     const i = b.dataset.i;
-    const bib = (i === "all" ? this.peekList : i ? [this.peekList[Number(i)]] : this.peekList).map((c) => c?.bibtex).filter(Boolean).join("\n\n");
+    const bib = (i === "all" ? st.list : i ? [st.list[Number(i)]] : st.list).map((c) => c?.bibtex).filter(Boolean).join("\n\n");
     void navigator.clipboard?.writeText(bib).then(() => {
       const was = b.textContent;
       b.textContent = "Copied";
@@ -829,7 +901,7 @@ var Viewer = class _Viewer {
   }
   /** A link followed: where the view is now kept (Back returns to it; Forward's forgotten, as a browser's), then there. */
   follow(k, top, via = "", from2) {
-    const now = this.here();
+    const now = this.backs ? this.here() : null;
     if (now) {
       now.via = via;
       if (from2) now.mark = { k: from2.k, box: [from2.link[0], from2.link[1], from2.link[2], from2.link[3]] };
@@ -837,8 +909,8 @@ var Viewer = class _Viewer {
       this.future = [];
       if (this.host.backWith === "history") {
         const h = this.scroller.ownerDocument.defaultView.history;
-        if (h.state?.phitexBack === void 0) h.replaceState({ ...h.state ?? {}, phitexBack: 0 }, "");
-        h.pushState({ phitexBack: this.past.length }, "");
+        if (h.state?.phitexBack === void 0) h.replaceState({ ...h.state ?? {}, phitexBack: this.hAt }, "");
+        h.pushState({ phitexBack: ++this.hAt }, "");
       }
     }
     this.peekHide();
@@ -853,6 +925,7 @@ var Viewer = class _Viewer {
    * background (a Ctrl+click's) lights it once it is shown, not unseen.
    */
   flash(k, top, exact) {
+    if (!this.flashes) return;
     const doc = this.scroller.ownerDocument;
     if (doc.visibilityState !== "visible") {
       const go = () => doc.visibilityState === "visible" && (doc.removeEventListener("visibilitychange", go), this.flash(k, top, exact));
@@ -878,6 +951,8 @@ var Viewer = class _Viewer {
     f.addEventListener("animationend", () => f.remove());
     s.el.append(f);
   }
+  /** The tab's history entry the view is at (history hosts): each jump's one past the last. */
+  hAt = 0;
   /** One step back (-1) or forward (1): where the view is goes to the other side. */
   step(d) {
     const [from2, to] = d < 0 ? [this.past, this.future] : [this.future, this.past];
@@ -902,7 +977,7 @@ var Viewer = class _Viewer {
    * view left as it is, the window too (another can be opened from it).
    */
   newTab(e, k, top, middle = false) {
-    if (!this.host.openAt || !(middle || e.ctrlKey || e.metaKey)) return false;
+    if (!this.host.openAt || !this.newTabs || !(middle || e.ctrlKey || e.metaKey)) return false;
     e.preventDefault();
     this.host.openAt(k, top);
     return true;
@@ -937,6 +1012,12 @@ var Viewer = class _Viewer {
    * the page it says), the earlier stops' list (its count: each a click to
    * go straight there), Forward where Back left one, × to forget them.
    */
+  /** Back and Forward turned off: what they kept forgotten, the pill gone. */
+  backsOff() {
+    this.past = [];
+    this.future = [];
+    this.backShown();
+  }
   backShown() {
     if (!this.backEl) {
       const b2 = this.backEl = document.createElement("div");
@@ -1878,7 +1959,7 @@ header:active { cursor: grabbing; }
 /* (a link under the pointer, viewer.ts: the hand, over the text's cursor) */
 .slot.on-link, .slot.on-link .phx-text text { cursor: pointer; }
 /* a link hovered: where it goes, in a small window (viewer.ts peekShow) */
-.peek { position: absolute; z-index: 4; width: min(440px, calc(100% - 16px)); text-align: left; background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 24px rgb(0 0 0 / 22%); overflow: hidden; cursor: pointer; font: var(--ph-size)/1.4 var(--ph-font); }
+.peek { position: absolute; z-index: 4; width: min(440px, calc(100% - 16px)); text-align: left; background: var(--ph-menu); color: var(--ph-fg); border: 1px solid var(--ph-border); border-radius: var(--ph-radius); box-shadow: 0 6px 24px rgb(0 0 0 / 22%); overflow: hidden; cursor: default; font: var(--ph-size)/1.4 var(--ph-font); }
 .peek .pv { position: relative; height: 250px; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; background: #fff; }
 .peek .pv canvas { display: block; }
 .peek .pv .at { position: absolute; left: 0; width: 3px; height: 18px; background: var(--ph-accent); border-radius: 0 2px 2px 0; }
@@ -1888,7 +1969,28 @@ header:active { cursor: grabbing; }
 .peek.url .pu { display: block; }
 .peek .pf { display: flex; justify-content: space-between; gap: 12px; padding: 5px 10px; font-size: 12px; color: var(--ph-fg2); border-top: 1px solid var(--ph-border); }
 .peek.url .pf { border-top: 0; }
-.peek.url .go { display: none; }
+.peek .pf .pin { all: unset; cursor: pointer; display: inline-flex; align-items: center; margin-left: 8px; color: var(--ph-fg2); }
+.peek .pf .pin svg { width: 14px; height: 14px; }
+.peek .pf .pin:hover { color: var(--ph-fg); }
+.peek .pf .pin:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 2px; border-radius: 2px; }
+.peek .pf { align-items: center; }
+.peek .pf .go { all: unset; margin-left: auto; cursor: pointer; padding: 1px 10px; border-radius: var(--ph-pill); border: 1px solid var(--ph-border); color: var(--ph-fg); }
+.peek .pf .go:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); }
+.peek .pf .go:focus-visible { outline: 2px solid var(--ph-link); outline-offset: 2px; }
+.peek .pf .go[hidden] { display: none; }
+/* a window kept open (viewer.ts peekPin): over the pages, where it was put, a bar to move it by */
+.peek.pinned { z-index: 5; box-shadow: 0 10px 32px rgb(0 0 0 / 28%); resize: both; display: flex; flex-direction: column; min-width: 240px; min-height: 120px; max-width: calc(100% - 8px); }
+/* (resized: what it shows fills it, scrolling inside) */
+.peek.pinned .pv { flex: 1 1 auto; height: auto; min-height: 60px; }
+.peek.pinned.cite .pc { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.peek.pinned .pc .cs { flex: 1 1 auto; max-height: none; min-height: 0; }
+/* (the corner kept for resizing: the footer's button clear of it) */
+.peek.pinned .pf { flex: none; padding-right: 28px; }
+.peek.pinned .pf .pin { display: none; }
+.peek .ph { display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 10px; cursor: move; user-select: none; touch-action: none; font-size: 12px; font-weight: 600; color: var(--ph-fg); background: var(--ph-hover, rgb(0 0 0 / 5%)); border-bottom: 1px solid var(--ph-border); }
+.peek .ph .t { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.peek .ph .x { all: unset; cursor: pointer; width: 20px; height: 20px; display: grid; place-items: center; border-radius: var(--ph-radius); color: var(--ph-fg2); font-size: 15px; }
+.peek .ph .x:hover { background: var(--ph-border); color: var(--ph-fg); }
 .peek .pc { display: none; }
 .peek.cite .pv { display: none; }
 .peek.cite .pc { display: block; }
@@ -1897,9 +1999,8 @@ header:active { cursor: grabbing; }
 .peek .pc .mh button:hover { background: var(--ph-hover, rgb(0 0 0 / 6%)); }
 .peek .pc .cs { position: relative; max-height: 300px; overflow-y: auto; overscroll-behavior: contain; }
 /* an entry, the same one or many: the label, title and key; who, when and where; its links */
-.peek .pc .ce { padding: 7px 12px 7px 9px; border-left: 3px solid transparent; cursor: pointer; }
+.peek .pc .ce { padding: 7px 12px 7px 9px; border-left: 3px solid transparent; }
 .peek .pc .ce + .ce { border-top: 1px solid var(--ph-border); }
-.peek .pc .ce:hover { background: var(--ph-hover, rgb(0 0 0 / 4%)); }
 .peek .pc .ce.here { border-left-color: var(--ph-accent); background: color-mix(in srgb, var(--ph-accent) 7%, transparent); }
 .peek .pc .hd { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
 .peek .pc .hd .lab { flex: none; font-size: 12px; font-weight: 600; color: var(--ph-accent); }
@@ -4516,7 +4617,7 @@ var OVERLEAF_WORDS = {
 function safeColor(c, or) {
   return typeof c === "string" && /^#[0-9a-fA-F]{6}$/.test(c) ? c : or;
 }
-var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false };
+var DEFAULTS = { x: null, y: null, w: 440, h: 620, zoom: "fit", collapsed: false, details: false, peeks: true, backs: true, flashes: true, newTabs: true };
 function pageBox(d, cssWidth, dpr = globalThis.devicePixelRatio || 1) {
   const snap = (x) => Math.ceil(x * dpr) / dpr;
   return [snap(cssWidth), snap(d.h * cssWidth / d.w)];
@@ -4903,6 +5004,7 @@ var Panel = class {
       this.prefs = { ...DEFAULTS, ...p };
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
+      this.linksShown();
     });
   }
   /** The menus and popovers by their buttons. */
@@ -6450,6 +6552,7 @@ var Panel = class {
     return [
       { title: "Preview", rows: preview2 },
       { title: "Appearance", rows: look2 },
+      { title: "Links", rows: this.linkRows() },
       { title: "Warnings/Errors", rows: problems },
       { title: "Build", rows: build2 },
       { title: "Packages", rows: [] },
@@ -6459,6 +6562,27 @@ var Panel = class {
   /** Start the pages at page `k`, `top` points down it (a tab opened at a place: its address said where). */
   startAt(k, top) {
     this.viewer.startAt(k, top);
+  }
+  /** The links' switches (PanelPrefs) given to the viewer. */
+  linksShown() {
+    const v = this.viewer, p = this.prefs;
+    [v.peeks, v.backs, v.flashes, v.newTabs] = [p.peeks, p.backs, p.flashes, p.newTabs];
+    if (!p.backs) v.backsOff();
+  }
+  /** Settings' Links: each feature of the links on or off, kept with the panel's own choices (every host's). */
+  linkRows() {
+    const sw = (k) => (on) => {
+      this.prefs[k] = on === true;
+      this.linksShown();
+      this.save();
+    };
+    const rows = [
+      { id: "peeks", label: "Preview links on hover", help: "A window over a link shows where it goes: the page, a citation's works, an address. Its pin keeps it open, moved and resized as you like", kind: "toggle", value: this.prefs.peeks, set: sw("peeks") },
+      { id: "backs", label: "Back and Forward after a jump", help: "A Back button in the corner once you follow a link, with the places before it; the mouse's back and forward buttons", kind: "toggle", value: this.prefs.backs, set: sw("backs") },
+      { id: "flashes", label: "Light up where a jump lands", help: "What a link pointed at lit for a moment", kind: "toggle", value: this.prefs.flashes, set: sw("flashes") }
+    ];
+    if (this.ev.onOpenAt) rows.push({ id: "newTabs", label: "Ctrl+click opens a new tab", help: "A link Ctrl+clicked (\u2318 on a Mac) or middle-clicked opens this preview in a new tab at its target", kind: "toggle", value: this.prefs.newTabs, set: sw("newTabs") });
+    return rows;
   }
   /** The panel's own choices as the host keeps them (ViewPrefs): applied, not told back. */
   viewPrefs(p) {
@@ -8895,11 +9019,13 @@ var ROW = 24;
 var LANE = 12;
 var COLORS = ["#3e63dd", "#e5484d", "#30a46c", "#f5a524", "#8e4ec6", "#12a594", "#d6409f", "#978365"];
 var COMMITS_CSS = `
-.phx-commits { font: 12px system-ui, sans-serif; overflow: auto; }
+.phx-commits { font: 12px system-ui, sans-serif; overflow: auto; user-select: none; -webkit-user-select: none; }
+.phx-commits .row.drag { background: rgba(62,99,221,.12); }
 .phx-commits .row { display: flex; align-items: center; height: ${ROW}px; cursor: pointer; white-space: nowrap; }
 .phx-commits .row:hover { background: rgba(127,127,127,.12); }
 .phx-commits .row.inrange { background: rgba(62,99,221,.10); }
 .phx-commits .row.from, .phx-commits .row.to { background: rgba(62,99,221,.22); }
+.phx-commits .row.drag { background: rgba(62,99,221,.16); }
 .phx-commits svg { flex: none; overflow: visible; }
 .phx-commits .txt { overflow: hidden; text-overflow: ellipsis; padding-left: 4px; }
 .phx-commits .sha { font: 11px ui-monospace, monospace; opacity: .65; margin-right: 6px; }
@@ -8925,6 +9051,8 @@ var Commits = class {
   /** The pair chosen (ids; `to` null: the working tree). */
   from = null;
   to = null;
+  /** A range's first end, clicked (a row; -1 the working tree), the second not yet: the rows to the pointer marked as it moves. */
+  anchor = null;
   page = 200;
   constructor(root, host2) {
     this.host = host2;
@@ -8932,7 +9060,15 @@ var Commits = class {
     this.el.className = "phx-commits";
     root.append(this.el);
     this.el.addEventListener("click", (e) => this.click(e));
+    this.el.addEventListener("pointerdown", (e) => this.dragFrom(e));
+    this.el.addEventListener("pointermove", (e) => {
+      if (this.anchor === null || this.drag) return;
+      const over = this.rowAt(e.clientX, e.clientY);
+      if (over !== null) this.paintDrag({ from: this.anchor, over, moved: over !== this.anchor });
+    });
     this.el.addEventListener("dblclick", (e) => {
+      this.anchor = null;
+      this.paintDrag();
       const c = this.at(e.target);
       if (c && c.parents.length) this.choose(c.parents[0], c.id);
     });
@@ -8970,11 +9106,36 @@ var Commits = class {
     this.error = "";
     return this.load();
   }
+  /** Mark a pair: nothing compared until it is confirmed (run). */
   choose(from2, to) {
     this.from = from2;
     this.to = to;
     this.render();
-    this.host.pick(from2, to);
+    const word = (rev, none) => {
+      if (!rev) return none;
+      const c = this.commits[this.find(rev)];
+      return c ? `${c.short} ${c.subject}` : rev.slice(0, 7);
+    };
+    this.host.marked?.(from2, to, { from: word(from2, ""), to: word(to, "the working tree") });
+  }
+  /** An end cleared (the host's ×): From, none marked; To, the working tree again. */
+  clear(end) {
+    this.anchor = null;
+    this.paintDrag();
+    if (end === "from") this.choose(null, null);
+    else this.choose(this.from, null);
+  }
+  /** The range between two rows (-1 the working tree), whichever order: the older end From, the newer To. */
+  range(a, b) {
+    const [newer, older] = a < b ? [a, b] : [b, a];
+    if (older < 0) return;
+    this.choose(this.commits[older].id, newer < 0 ? null : this.commits[newer].id);
+  }
+  /** The pair marked, compared (the host's Compare, Enter); false if no From is marked yet. */
+  run() {
+    if (!this.from) return false;
+    this.host.pick(this.from, this.to);
+    return true;
   }
   at(t) {
     const row = t.closest(".row[data-i]");
@@ -8986,21 +9147,77 @@ var Commits = class {
     if (rev === "HEAD") return this.commits.findIndex((c) => c.refs.some((r) => r.kind === "head"));
     return this.commits.findIndex((c) => c.id.startsWith(rev) || c.refs.some((r) => r.name === rev));
   }
+  /** A drag across the rows: where it began (a row's index; -1 the working tree), and whether it left that row. */
+  drag = null;
+  /** A drag just chose: the click that ends it is not a click. */
+  dragged = false;
+  /** The row under a point: a commit's index, -1 the working tree's, null none. */
+  rowAt(x, y) {
+    const root = this.el.getRootNode();
+    const row = (root.elementFromPoint?.(x, y) ?? document.elementFromPoint(x, y))?.closest(".row");
+    if (!row || !this.el.contains(row)) return null;
+    return row.dataset.i === void 0 ? -1 : Number(row.dataset.i);
+  }
+  dragFrom(e) {
+    if (e.button !== 0) return;
+    const at = this.rowAt(e.clientX, e.clientY);
+    if (at === null) return;
+    e.preventDefault();
+    this.drag = { from: at, over: at, moved: false };
+    const move = (m) => {
+      const over = this.rowAt(m.clientX, m.clientY);
+      if (!this.drag || over === null || over === this.drag.over) return;
+      this.drag.over = over;
+      if (!this.drag.moved && over !== this.drag.from) this.el.setPointerCapture(m.pointerId);
+      this.drag.moved ||= over !== this.drag.from;
+      this.paintDrag();
+    };
+    const up = () => {
+      this.el.removeEventListener("pointermove", move);
+      this.el.removeEventListener("pointerup", up);
+      const d = this.drag;
+      this.drag = null;
+      this.paintDrag();
+      if (!d?.moved) return;
+      this.dragged = true;
+      this.anchor = null;
+      this.range(d.from, d.over);
+    };
+    this.el.addEventListener("pointermove", move);
+    this.el.addEventListener("pointerup", up);
+  }
+  /** The rows a drag spans, marked as it goes. */
+  paintDrag(d = this.drag) {
+    const [a, b] = d ? [Math.min(d.from, d.over), Math.max(d.from, d.over)] : [0, -2];
+    for (const r of this.el.querySelectorAll(".row")) {
+      const i = r.dataset.i === void 0 ? -1 : Number(r.dataset.i);
+      r.classList.toggle("drag", !!d?.moved && i >= a && i <= b);
+    }
+  }
   click(e) {
+    if (this.dragged) return void (this.dragged = false);
     const t = e.target;
     if (t.closest("[data-more]")) return void this.load();
     const row = t.closest(".row");
     if (!row || e.detail > 1) return;
-    const c = this.at(t);
+    const c = this.at(t), i = c ? this.commits.indexOf(c) : -1;
     if (e.shiftKey) {
+      this.anchor = null;
       if (!c) return this.choose(this.from ?? "HEAD", null);
-      const fi2 = this.find(this.from), ti2 = this.commits.indexOf(c);
-      const from2 = fi2 > ti2 ? this.commits[fi2].id : c.parents[0] ?? c.id;
+      const fi = this.find(this.from);
+      const from2 = fi > i ? this.commits[fi].id : c.parents[0] ?? c.id;
       return this.choose(from2, c.id);
     }
-    if (!c) return;
-    const ti = this.find(this.to), fi = this.commits.indexOf(c);
-    this.choose(c.id, this.to && ti >= 0 && ti < fi ? this.commits[ti].id : null);
+    if (this.anchor === null || this.anchor === i) {
+      this.anchor = this.anchor === i ? null : i;
+      if (this.anchor !== null && c) this.choose(c.id, null);
+      this.paintDrag();
+      return;
+    }
+    const a = this.anchor;
+    this.anchor = null;
+    this.paintDrag();
+    this.range(a, i);
   }
   render() {
     const scroll = this.el.scrollTop;
@@ -9016,7 +9233,7 @@ var Commits = class {
     const fi = this.find(this.from);
     const ti = this.to ? this.find(this.to) : -1;
     const tree = this.from !== null && !this.to;
-    const top = html`<div class="row${tree ? " to" : ""}" title="Shift-click: diff the working tree"><svg width="${W2}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 4}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${tree ? html`<span class="end">TO</span>` : ""}<i>the working tree</i></span></div>`;
+    const top = html`<div class="row${tree ? " to" : ""}" title="Shift-click: To, the files as they are"><svg width="${W2}" height="${ROW}"><circle cx="${x(0)}" cy="${ROW / 2}" r="4" fill="none" stroke="#888" stroke-dasharray="2 2"/><line x1="${x(0)}" y1="${ROW / 2 + 4}" x2="${x(0)}" y2="${ROW * 1.5}" stroke="#888" stroke-dasharray="2 2"/></svg><span class="txt">${tree ? html`<span class="end">TO</span>` : ""}<i>the working tree</i></span></div>`;
     const lines2 = this.commits.map((c, i) => {
       const r = rows[i];
       const col = COLORS[r.lane % COLORS.length];
@@ -9417,29 +9634,84 @@ document.head.append(Object.assign(document.createElement("style"), {
 #phx-pick header b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #phx-pick header small { grid-column: 1 / -1; color: var(--fg2); font-size: 12px; }
 #phx-pick .phx-commits { flex: 1; min-height: 0; }
-#phx-pick header button { grid-row: 1; grid-column: 2; border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; }
-#phx-pick header button:hover { background: var(--hover); }`
+#phx-pick header .close { grid-row: 1; grid-column: 2; }
+#phx-pick .ends { grid-column: 1 / -1; display: flex; align-items: center; gap: 8px; margin: 6px 0 2px; min-width: 0; }
+#phx-pick .ends .end { flex: 1 1 0; min-width: 0; display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; }
+#phx-pick .ends .end.set, #phx-pick .ends .end.t { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+#phx-pick .ends i { font-style: normal; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--accent); }
+#phx-pick .ends .v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#phx-pick .ends .f:not(.set) .v { color: var(--fg2); }
+#phx-pick .ends .x { all: unset; cursor: pointer; width: 18px; height: 18px; display: grid; place-items: center; border-radius: 50%; color: var(--fg2); font-size: 14px; }
+#phx-pick .ends .x[hidden] { display: none; }
+#phx-pick .ends .x:hover { background: var(--hover); color: var(--fg); }
+#phx-pick .ends .arrow { color: var(--fg2); }
+#phx-pick .ask { order: 2; flex: none; display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--line); background: var(--bg); transition: background .2s; }
+#phx-pick .ask.asking { background: color-mix(in srgb, var(--accent) 14%, var(--bg)); }
+#phx-pick .ask .q { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg2); }
+#phx-pick .ask.asking .q { color: var(--fg); font-weight: 600; }
+#phx-pick .ask .no { display: none; }
+#phx-pick .ask.asking .no { display: inline-block; }
+#phx-pick .ask .yes:disabled { opacity: .45; cursor: default; }
+#phx-pick .ask button { border: 1px solid var(--line); background: var(--bg); color: var(--fg); border-radius: 9999px; padding: 2px 12px; cursor: pointer; font: inherit; }
+#phx-pick .ask .yes { background: var(--accent); border-color: var(--accent); color: var(--bg); font-weight: 600; }
+#phx-pick .ask.nudge { animation: phx-nudge .35s; }
+@keyframes phx-nudge { 0%, 100% { transform: none; } 25% { transform: translateX(-4px); } 75% { transform: translateX(4px); } }
+#phx-pick header button { border: 1px solid var(--line); background: none; color: var(--fg); border-radius: 9999px; padding: 1px 10px; cursor: pointer; font: inherit; font-size: 12px; white-space: nowrap; }
+#phx-pick header button:hover { background: var(--hover); }
+`
 }));
 var pick;
 var graph;
-var closePick = () => {
-  if (pick) pick.hidden = true;
+var marked = "";
+var compared = "";
+var closePick = (ask2 = true) => {
+  if (!pick || pick.hidden) return;
+  const bar2 = pick.querySelector(".ask");
+  if (ask2 && marked && marked !== compared && !bar2.classList.contains("asking")) {
+    bar2.classList.add("asking");
+    bar2.classList.remove("nudge");
+    void bar2.offsetWidth;
+    bar2.classList.add("nudge");
+    bar2.querySelector(".yes").focus();
+    return;
+  }
+  bar2.classList.remove("asking", "nudge");
+  pick.hidden = true;
 };
 function openPick() {
   if (pick && !pick.hidden) return closePick();
   if (!pick) {
     pick = document.createElement("div");
     pick.id = "phx-pick";
-    pick.innerHTML = `<header><b>Compare with an earlier version</b><small>Click: from \xB7 Shift+click: to (else the files as they are) \xB7 Double-click: a commit's own changes</small><button type="button">Close</button></header>`;
-    pick.querySelector("button").onclick = closePick;
+    pick.innerHTML = `<header><b>Compare with an earlier version</b><button type="button" class="close">Close</button><div class="ends"><span class="end f"><i>From</i><span class="v">click a commit</span><button type="button" class="x" data-end="from" aria-label="Clear From" hidden>\xD7</button></span><span class="arrow">\u2192</span><span class="end t"><i>To</i><span class="v">the working tree</span><button type="button" class="x" data-end="to" aria-label="To the working tree" hidden>\xD7</button></span></div><small>Click one end, then the other (or drag between them) \xB7 Double-click: a commit's own changes</small></header><div class="ask"><span class="q">Choose From and To</span><button type="button" class="no">Don't compare</button><button type="button" class="yes" disabled>Compare</button></div>`;
+    pick.querySelector(".close").onclick = () => closePick();
+    for (const x of pick.querySelectorAll(".ends .x")) x.onclick = () => graph?.clear(x.dataset.end);
+    const ask2 = pick.querySelector(".ask");
+    ask2.querySelector(".yes").onclick = () => graph?.run();
+    ask2.querySelector(".no").onclick = () => closePick(false);
     document.body.append(pick);
     graph = new Commits(pick, {
       load: async (skip, limit) => {
         const r = await sock.request({ op: "diff_log", skip, limit });
         return r.ok ? r.json?.commits ?? [] : r.error ?? "no git repository here";
       },
+      marked: (from2, to, w) => {
+        marked = from2 ? `${from2}..${to ?? ""}` : "";
+        const f = pick.querySelector(".ends .f"), t = pick.querySelector(".ends .t");
+        f.querySelector(".v").textContent = from2 ? w.from : "click a commit";
+        f.classList.toggle("set", !!from2);
+        f.querySelector(".x").hidden = !from2;
+        t.querySelector(".v").textContent = w.to;
+        t.querySelector(".x").hidden = !to;
+        ask2.querySelector(".q").textContent = from2 ? `Compare ${w.from.split(" ")[0]} \u2192 ${to ? w.to.split(" ")[0] : "the working tree"}${marked === compared ? " (shown now)" : ""}` : "Choose From and To";
+        ask2.querySelector(".yes").disabled = !from2;
+        if (!from2) ask2.classList.remove("asking");
+      },
       pick: (from2, to) => {
-        closePick();
+        compared = `${from2}..${to ?? ""}`;
+        const q = pick.querySelector(".ask .q");
+        if (!q.textContent.endsWith(" (shown now)")) q.textContent += " (shown now)";
+        closePick(false);
         const short = (id) => id.slice(0, 7);
         void controls.start({ from: from2, to }, short(from2), to ? `to ${short(to)}` : "working tree");
       }
@@ -9447,9 +9719,15 @@ function openPick() {
     void graph.load();
   }
   pick.hidden = false;
+  pick.querySelector(".ask").classList.remove("asking", "nudge");
 }
+addEventListener("pointerdown", (e) => {
+  if (!pick || pick.hidden || e.composedPath().some((n) => n === pick || n.id === "b-compare")) return;
+  closePick();
+}, { capture: true });
 addEventListener("keydown", (e) => {
   if (e.key === "Escape" && pick && !pick.hidden) closePick(), e.stopImmediatePropagation();
+  else if (e.key === "Enter" && pick && !pick.hidden && !e.target?.closest?.("button") && graph?.run()) e.preventDefault(), e.stopImmediatePropagation();
 }, { capture: true });
 var printFrame;
 var printPdf = async () => {

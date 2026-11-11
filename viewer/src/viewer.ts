@@ -76,6 +76,13 @@ interface Stop {
   mark?: { k: number; box: [number, number, number, number] };
 }
 
+/** What a link's window shows: its link, the page it is on, a citation's entries. */
+interface PeekState {
+  link: Link | null;
+  from: number;
+  list: Cited[];
+}
+
 interface Slot {
   el: HTMLElement;
   /** The hash the page has now, and the one drawn (null: not drawn). */
@@ -289,13 +296,19 @@ export class Viewer {
     }, { passive: true });
     // (the tab's back and forward: to a links' entry n jumps in, the view
     // moved there, back or forward as many steps as it is from here)
-    if (host.backWith === "history")
+    // (by how far the tab went, not to a count of stops: a trail forgotten (×, Back
+    // turned off) or a page reloaded keeps the tab's entries, whose counts then
+    // no longer match the trail, and a Back by count went nowhere)
+    if (host.backWith === "history") {
+      this.hAt = (doc.defaultView?.history.state as { phitexBack?: number } | null)?.phitexBack ?? 0;
       doc.defaultView?.addEventListener("popstate", (e) => {
-        const n = (e.state as { phitexBack?: number } | null)?.phitexBack;
-        if (n === undefined) return;
-        while (this.past.length > n) this.step(-1);
-        while (this.past.length < n && this.future.length) this.step(1);
+        const n = (e.state as { phitexBack?: number } | null)?.phitexBack ?? 0;
+        let d = n - this.hAt;
+        this.hAt = n;
+        for (; d < 0 && this.past.length; d++) this.step(-1);
+        for (; d > 0 && this.future.length; d--) this.step(1);
       });
+    }
     // (the mouse's back and forward buttons where no history has them: 3, 4)
     if (host.backWith === "buttons")
       for (const t of ["mousedown", "mouseup", "auxclick"] as const)
@@ -311,6 +324,12 @@ export class Viewer {
 
   /** Links previewed on hover (the host's setting). */
   peeks = true;
+  /** Back and Forward after a jump (the pill, the history, the mouse's buttons): the host's setting. */
+  backs = true;
+  /** Where a jump lands lit for a moment: the host's setting. */
+  flashes = true;
+  /** Ctrl+click or a middle click opens a new tab (where the host has one): the host's setting. */
+  newTabs = true;
   private peekEl: HTMLElement | null = null;
   /** The link the window is for (or is about to be), its page and where its box is on it. */
   private peekAt: { link: Link; k: number } | null = null;
@@ -353,7 +372,9 @@ export class Viewer {
     el.hidden = false;
     if (typeof to === "string") {
       el.querySelector(".pu")!.textContent = to;
-      el.querySelector(".where")!.textContent = /^(https?:|mailto:)/i.test(to) ? "Opens in your browser" : "Not followed (not a web address)";
+      const web = /^(https?:|mailto:)/i.test(to), go = el.querySelector<HTMLElement>(".go")!;
+      el.querySelector(".where")!.textContent = web ? "Opens in your browser" : "Not followed (not a web address)";
+      [go.hidden, go.textContent] = [!web, "Open"];
     } else {
       const [x0, y0, x1, y1] = at.link;
       const list = this.host.cited ? this.host.cited({ k: at.k, x: (x0 + x1) / 2, y: (y0 + y1) / 2 }, to, at.link[5] ?? null) : this.citedOnPage(at.k, at.link);
@@ -370,27 +391,99 @@ export class Viewer {
     el.className = "peek";
     el.setAttribute("role", "tooltip");
     el.hidden = true;
-    el.innerHTML = `<div class="pv"><canvas></canvas><i class="at"></i></div><div class="pc"></div><div class="pu"></div><div class="pf"><span class="where"></span><span class="go">Click to go there</span></div>`;
-    el.addEventListener("mouseenter", () => clearTimeout(this.peekHiding));
+    el.innerHTML = `<div class="pv"><canvas></canvas><i class="at"></i></div><div class="pc"></div><div class="pu"></div><div class="pf"><span class="where"></span><button type="button" class="go" data-jump>Go there</button><button type="button" class="pin" data-pin title="Keep it open (a window of its own, moved by its bar)" aria-label="Keep it open"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 1.6 14.4 6.2l-1.1 1.1-1-.3-2.6 2.6.2 2.6-1.1 1.1-2.6-2.6-3.2 3.2-.7-.7 3.2-3.2-2.6-2.6L4 6.4l2.6.2 2.6-2.6-.3-1z" fill="currentColor"/></svg></button></div>`;
+    // (the hover window's timers: a pinned one stays, whatever the pointer does)
+    el.addEventListener("mouseenter", () => el === this.peekEl && clearTimeout(this.peekHiding));
     // (out of the window: gone, after a moment to land back on its link)
-    el.addEventListener("mouseleave", () => this.peekSoon(100));
-    // (a click in it: there, as the link's own click goes)
+    el.addEventListener("mouseleave", () => el === this.peekEl && this.peekSoon(100));
+    // (a click in it: nothing, but on its buttons: the footer's Go there (Open for an address),
+    // a card's Go to it, DOI, Copy BibTeX; the pin. The window is read, scrolled, moved, resized:
+    // never a link itself)
     el.addEventListener("click", (e) => {
+      if ((e.target as Element).closest("[data-pin]")) return void this.peekPin();
+      // (a pinned window's bar: moved by, closed by, never a link)
+      if ((e.target as Element).closest(".ph")) return;
+      const st = this.stateOf(el);
       // (a card's own buttons: theirs, not the window's)
       const b = (e.target as Element).closest<HTMLElement>("[data-act]");
-      if (b) return void this.peekAct(b, e);
-      const ce = (e.target as Element).closest<HTMLElement>(".ce");
-      if (ce) return void this.peekGo(Number(ce.dataset.i), e);
+      if (b) return void this.peekAct(b, e, st);
+      if (!(e.target as Element).closest("[data-jump]")) return;
       // (the link read before the window goes: hiding it forgets which it was)
-      const link = this.peekShown, from = this.peekFrom;
+      const { link, from } = st;
       const to = link?.[4];
       if (typeof to === "number" && this.newTab(e, to, link?.[5] ?? null)) return;
-      this.peekHide();
+      // (the hover window goes with the jump; a pinned one stays where it was put)
+      if (el === this.peekEl) this.peekHide();
       if (typeof to === "number") this.follow(to, link?.[5] ?? null, link ? this.linkText(from, link) : "", link ? { k: from, link } : undefined);
       else if (typeof to === "string" && /^(https?:|mailto:)/i.test(to)) this.host.link ? this.host.link(to) : window.open(to, "_blank", "noopener");
     });
     this.scroller.append(el);
     return (this.peekEl = el);
+  }
+
+  /** What window `el` shows: the hover window's now, or what a pinned one showed when it was pinned. */
+  private stateOf(el: HTMLElement): PeekState {
+    return el === this.peekEl ? { link: this.peekLink, from: this.peekFrom, list: this.peekList } : (this.pinned.get(el) ?? { link: null, from: 0, list: [] });
+  }
+  private pinned = new WeakMap<HTMLElement, PeekState>();
+
+  /**
+   * The hover window kept open as a window of its own: over the pages,
+   * where it is, staying while they scroll; a bar to move it by, with what
+   * it shows and × to close it. Everything in it works as before (scroll,
+   * Go to it, DOI, Copy BibTeX); the next link hovered opens a new window.
+   */
+  private peekPin(): void {
+    const el = this.peekEl;
+    if (!el || el.hidden) return;
+    this.pinned.set(el, this.stateOf(el));
+    clearTimeout(this.peekTimer);
+    clearTimeout(this.peekHiding);
+    // (out of the scroller, into its frame: where it is on screen, kept there, at
+    // the size it has, inside the frame, its corner in reach to resize it by)
+    const box = (this.scroller.parentElement ?? this.scroller), b = box.getBoundingClientRect(), r = el.getBoundingClientRect();
+    box.append(el);
+    const h = Math.min(r.height, b.height - 16), t = Math.max(0, Math.min(r.top - b.top, b.height - h - 8));
+    Object.assign(el.style, { left: `${r.left - b.left}px`, top: `${t}px`, width: `${r.width}px`, height: `${h}px` });
+    el.classList.add("pinned");
+    el.setAttribute("role", "dialog");
+    const what = el.classList.contains("cite") ? (el.querySelector(".mh span")?.textContent ?? el.querySelector(".ti")?.textContent ?? "") : el.classList.contains("url") ? (el.querySelector(".pu")?.textContent ?? "") : (el.querySelector(".where")?.textContent ?? "");
+    const bar = document.createElement("div");
+    bar.className = "ph";
+    bar.innerHTML = `<span class="t"></span><button type="button" class="x" aria-label="Close" title="Close">×</button>`;
+    bar.querySelector(".t")!.textContent = what;
+    el.prepend(bar);
+    bar.querySelector(".x")!.addEventListener("click", (e) => (e.stopPropagation(), el.remove()));
+    // (moved by its bar: kept inside the frame)
+    bar.addEventListener("pointerdown", (e) => {
+      if ((e.target as Element).closest(".x")) return;
+      e.preventDefault();
+      bar.setPointerCapture(e.pointerId);
+      const [x0, y0, l0, t0] = [e.clientX, e.clientY, parseFloat(el.style.left), parseFloat(el.style.top)];
+      const move = (m: PointerEvent) => {
+        const w = box.clientWidth - el.offsetWidth, h = box.clientHeight - 30;
+        el.style.left = `${Math.max(0, Math.min(w, l0 + m.clientX - x0))}px`;
+        el.style.top = `${Math.max(0, Math.min(h, t0 + m.clientY - y0))}px`;
+      };
+      const up = () => (bar.removeEventListener("pointermove", move), bar.removeEventListener("pointerup", up));
+      bar.addEventListener("pointermove", move);
+      bar.addEventListener("pointerup", up);
+    });
+    // (resized by its corner: a page's view drawn again at the new width, sharp, once the drag rests)
+    if (!el.classList.contains("cite") && !el.classList.contains("url")) {
+      let t: ReturnType<typeof setTimeout> | undefined, w = el.offsetWidth;
+      new ResizeObserver(() => {
+        if (!el.isConnected || el.offsetWidth === w) return;
+        w = el.offsetWidth;
+        clearTimeout(t);
+        t = setTimeout(() => this.peekDraw(el, this.pinned.get(el)?.link ?? undefined, true), 120);
+      }).observe(el);
+    }
+    // (the next hover a new window: this one is no longer the hover window)
+    this.peekEl = null;
+    this.peekLink = null;
+    this.peekAt = null;
+    this.peekList = [];
   }
 
   /** The link the window shows now. */
@@ -477,9 +570,10 @@ export class Viewer {
    * window's, scrolled so the place is near its top, a bar beside it; a
    * page not drawn yet is asked for, and drawn here when it comes (set).
    */
-  private peekDraw(): void {
-    const el = this.peekEl, link = this.peekLink ?? this.peekAt?.link;
+  private peekDraw(el = this.peekEl, link = this.peekLink ?? this.peekAt?.link, keep = false): void {
     if (!el || !link || typeof link[4] !== "number") return;
+    // (a pinned window resized: drawn again at its new width, scrolled to the same place)
+    const pvKeep = el.querySelector<HTMLElement>(".pv")!, was = keep && pvKeep.scrollHeight ? pvKeep.scrollTop / pvKeep.scrollHeight : -1;
     const k = link[4], top = link[5] ?? 0, s = this.slots[k];
     const pv = el.querySelector<HTMLElement>(".pv")!, c = pv.querySelector("canvas")!;
     el.classList.toggle("wait", !s?.img);
@@ -489,6 +583,7 @@ export class Viewer {
       return;
     }
     el.querySelector(".where")!.textContent = `Page ${k + 1}`;
+    Object.assign(el.querySelector<HTMLElement>(".go")!, { hidden: false, textContent: "Go there" });
     const img = s.img, W = pv.clientWidth || 420, dpr = window.devicePixelRatio || 1;
     const all = img.canvas instanceof HTMLCanvasElement ? [img.canvas] : [...img.canvas.querySelectorAll("canvas")];
     // (the page's printed width, its margins left out, at the window's: the
@@ -516,7 +611,7 @@ export class Viewer {
     }
     const y = (top / img.h) * H;
     pv.querySelector<HTMLElement>(".at")!.style.top = `${y}px`;
-    pv.scrollTop = Math.max(0, y - 28);
+    pv.scrollTop = was >= 0 ? was * pv.scrollHeight : Math.max(0, y - 28);
   }
 
   /** The window gone `ms` on, unless the pointer comes back to it or its link (one timer: a later leave restarts it, never a second). */
@@ -562,7 +657,8 @@ export class Viewer {
     if (h && h.offsetTop + h.offsetHeight > cs.clientHeight) cs.scrollTop = h.offsetTop - 8;
     const pages = [...new Set(list.map((c) => c.at?.[0]).filter((k): k is number => k !== undefined))];
     el.querySelector(".where")!.textContent = `References · page ${pages.length ? pages.map((k) => k + 1).join(", ") : Number(link[4]) + 1}`;
-    el.querySelector(".go")!.textContent = list.length > 1 ? "Click one to go there" : "Click to go there";
+    // (one work: the footer's Go there; several: each card's own Go to it)
+    Object.assign(el.querySelector<HTMLElement>(".go")!, { hidden: list.length > 1, textContent: "Go there" });
   }
   private peekList: Cited[] = [];
 
@@ -695,22 +791,23 @@ export class Viewer {
   }
 
   /** The list's entry `i` followed: its place in the bibliography (Back returns). */
-  private peekGo(i: number, e?: MouseEvent): void {
-    const c = this.peekList[i], link = this.peekLink, from = this.peekFrom;
+  private peekGo(i: number, e?: MouseEvent, st: PeekState = { link: this.peekLink, from: this.peekFrom, list: this.peekList }): void {
+    const c = st.list[i], { link, from } = st;
     if (c?.at && e && this.newTab(e, c.at[0], c.at[1])) return;
-    this.peekHide();
+    // (from a pinned window: it stays; the hover window goes)
+    if (st.list === this.peekList) this.peekHide();
     if (c?.at) this.follow(c.at[0], c.at[1], `[${c.label}] ${c.title}`, link ? { k: from, link } : undefined);
   }
 
   /** A card's button: its address opened (the host's, as a link's), its BibTeX copied. */
-  private peekAct(b: HTMLElement, e?: MouseEvent): void {
-    if (b.dataset.act === "go") return this.peekGo(Number(b.dataset.i), e);
+  private peekAct(b: HTMLElement, e?: MouseEvent, st: PeekState = { link: this.peekLink, from: this.peekFrom, list: this.peekList }): void {
+    if (b.dataset.act === "go") return this.peekGo(Number(b.dataset.i), e, st);
     if (b.dataset.act === "open") {
       const u = b.dataset.u!;
       return this.host.link ? this.host.link(u) : void window.open(u, "_blank", "noopener");
     }
     const i = b.dataset.i;
-    const bib = (i === "all" ? this.peekList : i ? [this.peekList[Number(i)]] : this.peekList).map((c) => c?.bibtex).filter(Boolean).join("\n\n");
+    const bib = (i === "all" ? st.list : i ? [st.list[Number(i)]] : st.list).map((c) => c?.bibtex).filter(Boolean).join("\n\n");
     void navigator.clipboard?.writeText(bib).then(() => {
       const was = b.textContent;
       b.textContent = "Copied";
@@ -773,7 +870,7 @@ export class Viewer {
 
   /** A link followed: where the view is now kept (Back returns to it; Forward's forgotten, as a browser's), then there. */
   follow(k: number, top: number | null, via = "", from?: { k: number; link: Link }): void {
-    const now = this.here();
+    const now = this.backs ? this.here() : null;
     if (now) {
       now.via = via;
       if (from) now.mark = { k: from.k, box: [from.link[0], from.link[1], from.link[2], from.link[3]] };
@@ -783,8 +880,8 @@ export class Viewer {
       // entry the page was at is marked first, 0, so a back to it is told)
       if (this.host.backWith === "history") {
         const h = this.scroller.ownerDocument.defaultView!.history;
-        if ((h.state as { phitexBack?: number } | null)?.phitexBack === undefined) h.replaceState({ ...(h.state ?? {}), phitexBack: 0 }, "");
-        h.pushState({ phitexBack: this.past.length }, "");
+        if ((h.state as { phitexBack?: number } | null)?.phitexBack === undefined) h.replaceState({ ...(h.state ?? {}), phitexBack: this.hAt }, "");
+        h.pushState({ phitexBack: ++this.hAt }, "");
       }
     }
     this.peekHide();
@@ -800,6 +897,7 @@ export class Viewer {
    * background (a Ctrl+click's) lights it once it is shown, not unseen.
    */
   private flash(k: number, top: number | null, exact?: [number, number, number, number]): void {
+    if (!this.flashes) return;
     const doc = this.scroller.ownerDocument;
     if (doc.visibilityState !== "visible") {
       const go = () => doc.visibilityState === "visible" && (doc.removeEventListener("visibilitychange", go), this.flash(k, top, exact));
@@ -826,6 +924,9 @@ export class Viewer {
     f.addEventListener("animationend", () => f.remove());
     s.el.append(f);
   }
+
+  /** The tab's history entry the view is at (history hosts): each jump's one past the last. */
+  private hAt = 0;
 
   /** One step back (-1) or forward (1): where the view is goes to the other side. */
   private step(d: -1 | 1): void {
@@ -854,7 +955,7 @@ export class Viewer {
    * view left as it is, the window too (another can be opened from it).
    */
   private newTab(e: MouseEvent, k: number, top: number | null, middle = false): boolean {
-    if (!this.host.openAt || !(middle || e.ctrlKey || e.metaKey)) return false;
+    if (!this.host.openAt || !this.newTabs || !(middle || e.ctrlKey || e.metaKey)) return false;
     e.preventDefault();
     this.host.openAt(k, top);
     return true;
@@ -896,6 +997,13 @@ export class Viewer {
    * the page it says), the earlier stops' list (its count: each a click to
    * go straight there), Forward where Back left one, × to forget them.
    */
+  /** Back and Forward turned off: what they kept forgotten, the pill gone. */
+  backsOff(): void {
+    this.past = [];
+    this.future = [];
+    this.backShown();
+  }
+
   private backShown(): void {
     if (!this.backEl) {
       const b = (this.backEl = document.createElement("div"));
