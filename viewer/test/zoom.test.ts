@@ -158,3 +158,15 @@ test("a page streamed not exact is marked a preview until the build's page repla
   v.layout(["a", "b", "c2"], new Set(["c"]));
   assert.ok(!cls(2).contains("preview") && !cls(1).contains("later"));
 });
+
+test("a zoom kept is always a zoom: NaN, Infinity, out of range or a stray word is Fit, or clamped", async () => {
+  const { zoomOf } = await import("../src/panel.ts");
+  // (a NaN kept with the panel's prefs made every page's scale NaN: stretched bitmaps, no zoom, every load)
+  for (const bad of ["NaN", NaN, "Infinity", Infinity, -Infinity, "", "  ", "page-width", null, undefined, {}]) assert.equal(zoomOf(bad), "fit", String(bad));
+  assert.equal(zoomOf("fit"), "fit");
+  assert.equal(zoomOf("page"), "page");
+  assert.equal(zoomOf("1.5"), "1.5");
+  assert.equal(zoomOf(1.25), "1.25");
+  assert.equal(zoomOf("0.01"), "0.25");
+  assert.equal(zoomOf("100"), "8");
+});

@@ -351,6 +351,16 @@ const copyBtn = (i: number) =>
 const icon = (name: string, size = 18) =>
   html`<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`.firstElementChild!;
 
+/** The zoom panel prefs keep: "fit", "page", or a scale from 0.25 to 8 as a string. Anything else
+ * (NaN, Infinity, a number out of range, a word no menu has) is "fit": a zoom that is not a
+ * number made every page's scale NaN, the pages stretched bitmaps and every zoom NaN again, kept
+ * with the prefs from one load to the next. */
+export function zoomOf(z: unknown): string {
+  if (z === "fit" || z === "page") return z;
+  const n = typeof z === "number" ? z : typeof z === "string" && z.trim() ? Number(z) : NaN;
+  return Number.isFinite(n) ? String(Math.min(8, Math.max(0.25, n))) : "fit";
+}
+
 /** The zooms the menu offers: fit the width, the whole page, then percentages. */
 const ZOOMS: [string, string][] = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
 
@@ -745,6 +755,8 @@ export class Panel {
     this.renderStatus();
     store?.load().then((p) => {
       this.prefs = { ...DEFAULTS, ...p };
+      // (a zoom kept that is no zoom: Fit, and kept so)
+      if (this.prefs.zoom !== zoomOf(this.prefs.zoom)) (this.prefs.zoom = zoomOf(this.prefs.zoom)), this.save();
       // (a size saved while hidden, by an older version)
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
@@ -1924,12 +1936,16 @@ export class Panel {
   /** The stage's client size, kept by its ResizeObserver (null until it is first laid out). */
   private stageSize: { w: number; h: number } | null = null;
   private scale(): number {
-    const z = this.zoomNow ?? this.prefs.zoom;
+    const z = zoomOf(this.zoomNow ?? this.prefs.zoom);
     if (z !== "fit" && z !== "page") return Number(z);
     const st = (this.stageSize ??= { w: this.$("#stage").clientWidth, h: this.$("#stage").clientHeight });
-    const width = Math.max(st.w - 40, 200) / ((this.last?.w ?? 595) * (96 / 72));
-    if (z === "fit") return width;
-    return Math.min(width, Math.max(st.h - 24, 100) / ((this.last?.h ?? 842) * (96 / 72)));
+    // (sizes that are sizes only: a page of no width yet, a stage not laid out, made Fit's scale
+    // Infinity or NaN, and a zoom from it NaN; then A4 and the least room)
+    const real = (v: number | undefined, or: number) => (v !== undefined && Number.isFinite(v) && v > 0 ? v : or);
+    const pw = real(this.last?.w, 595), ph = real(this.last?.h, 842);
+    const width = Math.max(real(st.w, 0) - 40, 200) / (pw * (96 / 72));
+    const s = z === "fit" ? width : Math.min(width, Math.max(real(st.h, 0) - 24, 100) / (ph * (96 / 72)));
+    return Math.min(8, Math.max(0.25, s));
   }
 
     goPage(k: number): void {
@@ -2150,7 +2166,7 @@ export class Panel {
 
   zoomTo(z: string): void {
     this.zoomNow = null;
-    this.prefs.zoom = z;
+    this.prefs.zoom = zoomOf(z);
     this.zoomShown();
     this.save();
     this.redraw();
@@ -2237,7 +2253,7 @@ export class Panel {
    * another zoom asked for, the transform gone.
    */
   private zoomLay(g: NonNullable<Panel["gesture"]>, final = false): void {
-    this.prefs.zoom = String(Number((g.from * g.f).toFixed(4)));
+    this.prefs.zoom = zoomOf(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
     const v = this.$("#viewer");
     if (!final) {

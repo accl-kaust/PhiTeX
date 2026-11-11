@@ -4783,6 +4783,11 @@ var PATHS = {
 };
 var copyBtn = (i) => html`<button type="button" class="copyai" data-i="${i}" title="Copy for an AI assistant: this problem with its source around it, the preamble, the other problems and the log, to paste into the assistant you use (nothing is sent anywhere)" aria-label="Copy for an AI assistant">${icon("copy", 16)}</button>`;
 var icon = (name, size = 18) => html`<svg class="icon" viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true"><path fill="currentColor" d="${PATHS[name]}"/></svg>`.firstElementChild;
+function zoomOf(z) {
+  if (z === "fit" || z === "page") return z;
+  const n = typeof z === "number" ? z : typeof z === "string" && z.trim() ? Number(z) : NaN;
+  return Number.isFinite(n) ? String(Math.min(8, Math.max(0.25, n))) : "fit";
+}
 var ZOOMS = [["fit", "Page width"], ["page", "Whole page"], ["0.5", "50%"], ["0.75", "75%"], ["1", "100%"], ["1.25", "125%"], ["1.5", "150%"], ["2", "200%"], ["3", "300%"]];
 var mb = (b) => b ? ` \xB7 ${b < 1048576 ? `${Math.max(1, Math.round(b / 1024))} KB` : `${(b / 1048576).toFixed(1)} MB`}` : "";
 var dur = (ms) => ms < 10 ? `${ms.toFixed(1)} ms` : ms < 1e3 ? `${Math.round(ms)} ms` : `${(ms / 1e3).toFixed(ms < 1e4 ? 1 : 0)} s`;
@@ -5137,6 +5142,7 @@ var Panel = class {
     this.renderStatus();
     store?.load().then((p) => {
       this.prefs = { ...DEFAULTS, ...p };
+      if (this.prefs.zoom !== zoomOf(this.prefs.zoom)) this.prefs.zoom = zoomOf(this.prefs.zoom), this.save();
       if (this.prefs.w < 300 || this.prefs.h < 180) Object.assign(this.prefs, { w: DEFAULTS.w, h: DEFAULTS.h });
       this.place();
       this.linksShown();
@@ -6149,12 +6155,14 @@ var Panel = class {
   /** The stage's client size, kept by its ResizeObserver (null until it is first laid out). */
   stageSize = null;
   scale() {
-    const z = this.zoomNow ?? this.prefs.zoom;
+    const z = zoomOf(this.zoomNow ?? this.prefs.zoom);
     if (z !== "fit" && z !== "page") return Number(z);
     const st = this.stageSize ??= { w: this.$("#stage").clientWidth, h: this.$("#stage").clientHeight };
-    const width = Math.max(st.w - 40, 200) / ((this.last?.w ?? 595) * (96 / 72));
-    if (z === "fit") return width;
-    return Math.min(width, Math.max(st.h - 24, 100) / ((this.last?.h ?? 842) * (96 / 72)));
+    const real = (v, or) => v !== void 0 && Number.isFinite(v) && v > 0 ? v : or;
+    const pw = real(this.last?.w, 595), ph = real(this.last?.h, 842);
+    const width = Math.max(real(st.w, 0) - 40, 200) / (pw * (96 / 72));
+    const s = z === "fit" ? width : Math.min(width, Math.max(real(st.h, 0) - 24, 100) / (ph * (96 / 72)));
+    return Math.min(8, Math.max(0.25, s));
   }
   goPage(k) {
     this.viewer.goTo(k);
@@ -6344,7 +6352,7 @@ var Panel = class {
   }
   zoomTo(z) {
     this.zoomNow = null;
-    this.prefs.zoom = z;
+    this.prefs.zoom = zoomOf(z);
     this.zoomShown();
     this.save();
     this.redraw();
@@ -6422,7 +6430,7 @@ var Panel = class {
    * another zoom asked for, the transform gone.
    */
   zoomLay(g, final = false) {
-    this.prefs.zoom = String(Number((g.from * g.f).toFixed(4)));
+    this.prefs.zoom = zoomOf(Number((g.from * g.f).toFixed(4)));
     this.zoomShown();
     const v = this.$("#viewer");
     if (!final) {
