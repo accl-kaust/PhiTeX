@@ -46,6 +46,7 @@
     clippy::struct_excessive_bools
 )]
 
+pub mod cites;
 pub mod document;
 pub mod dvipdf;
 pub mod failure;

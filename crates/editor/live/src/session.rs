@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use phitex_tex::{Build, Finder, Options};
+use serde_json::{Value, json};
 
 use crate::host::{Host, Key, Records, Sink, Store};
 use crate::tex::{self, Engine};
@@ -1543,6 +1544,131 @@ impl Session {
             .filter(|_| self.job.origins || self.job.synctex)
             .map(|b| b.pages_of_source(file, u32::try_from(at).unwrap_or(u32::MAX)))
             .unwrap_or_default()
+    }
+
+    /// The citation page `k` (from 0) shows at point (`x`, `y`) (the
+    /// origins' coordinates): the keys of the `\cite`-family command the
+    /// glyph nearest the point was typeset from, in its order, each with
+    /// its label from the build's `.aux` (none: not there) and where its
+    /// entry is (`[page, y]`, the first glyph of its `\bibitem` in the
+    /// `.bbl`; none: not found). None: no citation there, or nothing to
+    /// tell it by (no build, no origins, a file not readable): never an
+    /// error, whatever the document holds (`crate::cites`).
+    #[must_use]
+    pub fn cites_at(&self, k: usize, x: f32, y: f32) -> Option<Value> {
+        let (files, page) = self.page_origins(k)?;
+        let g = page?;
+        // (the glyph nearest the point, by its box's middle: a citation's
+        // own, synthesized ones too, which carry the call's range)
+        let near = (0..g.len())
+            .filter(|&i| i < g.x.len() && i < g.y.len())
+            .min_by(|&a, &b| {
+                let d = |i: usize| {
+                    let w = g.w.get(i).copied().unwrap_or(0.0);
+                    let h = g.size.get(i).copied().unwrap_or(0.0);
+                    let dx = g.x[i] + w / 2.0 - x;
+                    let dy = g.y[i] - h / 3.0 - y;
+                    dx * dx + dy * dy
+                };
+                d(a).total_cmp(&d(b))
+            })?;
+        let file = files.get(usize::try_from(*g.file.get(near)?).ok()?)?;
+        let text = self.source(file)?;
+        let at = usize::try_from(*g.start.get(near)?).ok()?;
+        let keys = crate::cites::cite_at(&text, at)?;
+        // (the .aux as the build left it, at its fixed point, whether or
+        // not the outputs are written; else as the output directory has it)
+        let name = format!("{}.aux", self.job.jobname);
+        let aux = self
+            .build
+            .as_ref()
+            .and_then(|b| b.files().into_iter().find(|(n, _)| *n == name))
+            .map(|(_, t)| t)
+            .or_else(|| {
+                self.sink
+                    .get(&name)
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+            })
+            .unwrap_or_default();
+        let labels = crate::cites::bibcites(&aux);
+        let entries = self.bib_entries(&files, &keys);
+        Some(Value::Array(
+            keys.iter()
+                .map(|key| {
+                    json!({
+                        "key": key,
+                        "label": labels.get(key),
+                        "at": entries.get(key).map(|(p, y)| json!([p, y])),
+                    })
+                })
+                .collect(),
+        ))
+    }
+
+    /// Where each of `keys`' bibliography entries is typeset: the page
+    /// (from 0) and the `y` of the first glyph made from its `\bibitem`
+    /// (in a `.bbl`, else in the document's own files; the pages looked
+    /// at from the last, where a bibliography is; at most 40 of them).
+    fn bib_entries(&self, files: &[String], keys: &[String]) -> HashMap<String, (usize, f32)> {
+        let mut out = HashMap::new();
+        // (the `.bbl`s, then the citing files: a bibliography typed in
+        // the document, `thebibliography` with no BibTeX)
+        let mut starts: Vec<(&String, u32, usize, usize)> = Vec::new();
+        let order = files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.ends_with(".bbl"))
+            .chain(
+                files
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, f)| !f.ends_with(".bbl")),
+            );
+        for (i, f) in order.take(8) {
+            if starts.len() == keys.len() {
+                break;
+            }
+            let (Ok(fi), Some(text)) = (u32::try_from(i), self.source(f)) else {
+                continue;
+            };
+            for k in keys {
+                if starts.iter().any(|(s, ..)| *s == k) {
+                    continue;
+                }
+                if let Some(a) = crate::cites::bibitem_at(&text, k) {
+                    starts.push((k, fi, a, crate::cites::entry_end(&text, a)));
+                }
+            }
+        }
+        let pages = self.page_hashes.len();
+        for k in (0..pages).rev().take(40) {
+            if out.len() == starts.len() {
+                break;
+            }
+            let Some((_, Some(g))) = self.page_origins(k) else {
+                continue;
+            };
+            for (key, fi, start, end) in &starts {
+                if out.contains_key(*key) {
+                    continue;
+                }
+                // (the first glyph of the entry: from its \bibitem on, the
+                // nearest after it)
+                let first = (0..g.len())
+                    .filter(|&i| g.file.get(i) == Some(fi))
+                    .filter_map(|i| {
+                        let s = usize::try_from(*g.start.get(i)?).ok()?;
+                        (s >= *start && s < *end).then_some((s, i))
+                    })
+                    .min();
+                if let Some((_, i)) = first
+                    && let Some(&y) = g.y.get(i)
+                {
+                    out.insert((*key).clone(), (k, y));
+                }
+            }
+        }
+        out
     }
 
     /// Page `k`'s glyph origins (0 the first), made for that page alone

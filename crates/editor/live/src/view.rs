@@ -165,6 +165,15 @@ pub enum Ask {
         file: String,
         at: usize,
     },
+    /// The citation a point of page `page` (from 0) shows wanted (the
+    /// `cites` op: its keys, labels and entries), `x` and `y` the point
+    /// in the origins' coordinates as `f32` bits: made by the session's
+    /// owner and given back with [`Viewer::put_cites`].
+    Cites {
+        page: usize,
+        x: u32,
+        y: u32,
+    },
     /// Build again from nothing: the session's build dropped, its format
     /// kept (the editor's `phitex.rebuild`).
     Cold,
@@ -248,6 +257,8 @@ struct Pages {
     /// The pages a source place's lines were placed on, by file and byte,
     /// made when asked ([`Ask::PageOf`]) for this build.
     placed: std::collections::HashMap<(String, usize), Vec<usize>>,
+    /// The `cites` answers made for this build, by page and point.
+    cites: std::collections::HashMap<(usize, u32, u32), Value>,
 }
 
 /// A viewer's state and its requests' answers.
@@ -821,6 +832,13 @@ impl Viewer {
         lock(&self.pages).placed.insert((file, at), pages);
     }
 
+    /// The citation at a point of a page, made when asked
+    /// ([`Ask::Cites`]), for the `cites` op: `{"cites": [...]}`, or
+    /// `{"cites": null}` (no citation there).
+    pub fn put_cites(&self, page: usize, x: u32, y: u32, answer: Value) {
+        lock(&self.pages).cites.insert((page, x, y), answer);
+    }
+
     pub fn take_asks(&self) -> Vec<Ask> {
         std::mem::take(&mut *lock(&self.asks))
     }
@@ -962,6 +980,7 @@ impl Viewer {
         // the `origins` op; never on the typing path)
         pages.origins.clone_from(&b.origins);
         pages.placed.clear();
+        pages.cites.clear();
         pages.made = b
             .origins
             .as_ref()
@@ -1201,6 +1220,29 @@ impl Viewer {
                 } else {
                     drop(p);
                     let a = Ask::PageOf { file, at };
+                    let queued = lock(&s.asks).contains(&a);
+                    if !queued {
+                        s.ask(a);
+                    }
+                    ok(json!({"pending": true}))
+                }
+            }
+            // (the citation under a point: `{"op":"cites","page":K,"x":X,
+            // "y":Y}`, made when asked, by the session's owner: the
+            // viewer asks again, as for `page_of`)
+            "cites" => {
+                let num = |k: &str| req.get(k).and_then(Value::as_f64).unwrap_or(f64::NAN);
+                #[allow(clippy::cast_possible_truncation, reason = "a point on a page")]
+                let (x, y) = ((num("x") as f32).to_bits(), (num("y") as f32).to_bits());
+                let page = page.unwrap_or(usize::MAX);
+                let p = lock(&s.pages);
+                if let Some(v) = p.cites.get(&(page, x, y)) {
+                    ok(v.clone())
+                } else if page >= p.hashes.len() {
+                    ok(json!({"cites": null}))
+                } else {
+                    drop(p);
+                    let a = Ask::Cites { page, x, y };
                     let queued = lock(&s.asks).contains(&a);
                     if !queued {
                         s.ask(a);

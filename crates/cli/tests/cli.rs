@@ -5527,3 +5527,159 @@ fn watch_streaming_writes_the_clean_builds_file() {
         "the streaming watch's file differs: {differ:?}"
     );
 }
+
+/// The viewer's `cites` op (citation cards): a point on a citation's
+/// glyphs gives the `\cite`'s keys in its order, each with its label
+/// from the `.aux` and the page and height of its `\bibitem`; a point on
+/// other text gives none; a page or point that is not there gives none,
+/// never an error.
+#[test]
+#[allow(clippy::too_many_lines, reason = "one watch's session, in order")]
+fn watch_cites_under_a_point() {
+    use serde_json::json;
+    let _one = one();
+    // (plain TeX, its own \\cite and \\bibitem, the labels in the .aux
+    // as LaTeX writes them: a test binary's LaTeX format takes minutes)
+    let text = plain()
+        + "\\immediate\\openout1=doc.aux \\immediate\\write1{\\string\\bibcite{knuth}{1}}\\immediate\\write1{\\string\\bibcite{lamport}{2}}\\immediate\\closeout1\n\\def\\cite#1{[1, 2]}\n\\def\\bibitem#1{\\par}\nPlain words first. See \\cite{knuth,lamport} here.\\par\n\\bibitem{knuth} Donald Knuth. The TeXbook.\n\\bibitem{lamport} Leslie Lamport. LaTeX.\n\\bye\n";
+    let dir = scratch("watch-cites");
+    std::fs::write(dir.join("doc.tex"), &text).expect("the document");
+    let root = dir.canonicalize().expect("the directory");
+    let mut child = command(Path::new(env!("CARGO_BIN_EXE_phitex")), &dir)
+        .args(["watch", "--lsp", "--ini", "--etex", "doc.tex"])
+        .env("XDG_RUNTIME_DIR", &dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("phitex watch runs");
+    let mut to = child.stdin.take().expect("its input");
+    let rx = lsp_messages(child.stdout.take().expect("its output"));
+    let mut seen = Vec::new();
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "processId": null, "rootUri": format!("file://{}", root.display()), "capabilities": {}}}),
+    );
+    lsp_until(&rx, &mut seen, |m| m["id"] == 1);
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}),
+    );
+    let logged = lsp_until(&rx, &mut seen, |m| {
+        m["method"] == "window/logMessage"
+            && m["params"]["message"]
+                .as_str()
+                .is_some_and(|t| t.contains("http://127.0.0.1:"))
+    });
+    let msg = logged["params"]["message"].as_str().unwrap_or_default();
+    let url: String = msg[msg.find("http://").expect("the URL")..]
+        .chars()
+        .take_while(|c| !c.is_whitespace())
+        .collect();
+    let mut viewer = Viewer::connect(&url);
+    viewer.until(|v| v["event"] == "settled");
+    // (asked again while pending, as a browser asks)
+    let mut id = 10;
+    let mut ask = |viewer: &mut Viewer, req: serde_json::Value| {
+        let end = Instant::now() + Duration::from_secs(60);
+        loop {
+            id += 1;
+            let mut r = req.clone();
+            r["id"] = json!(id);
+            let a = viewer.ask(&r);
+            if a["json"]["pending"] != json!(true) || Instant::now() > end {
+                return a;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let orig = ask(&mut viewer, json!({"op": "origins", "page": 0}))["json"].clone();
+    let words = |k: &str| -> Vec<u32> {
+        let s = orig[k].as_str().expect("base64");
+        let val = |c: u8| match c {
+            b'A'..=b'Z' => u32::from(c - b'A'),
+            b'a'..=b'z' => u32::from(c - b'a') + 26,
+            b'0'..=b'9' => u32::from(c - b'0') + 52,
+            b'+' => 62,
+            _ => 63,
+        };
+        let mut bytes = Vec::new();
+        for ch in s.as_bytes().chunks(4) {
+            let n = ch.iter().take_while(|&&c| c != b'=').count();
+            let mut acc = 0u32;
+            for (i, &c) in ch.iter().enumerate() {
+                acc |= if i < n { val(c) } else { 0 } << (18 - 6 * i);
+            }
+            let b = acc.to_be_bytes();
+            bytes.extend_from_slice(&b[1..n.max(1)]);
+        }
+        bytes
+            .chunks(4)
+            .filter(|w| w.len() == 4)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .collect()
+    };
+    let files = orig["files"].as_array().expect("files").clone();
+    let doc = u32::try_from(files.iter().position(|f| f == "doc.tex").expect("doc.tex")).unwrap();
+    let (file, start, xs, ys) = (words("file"), words("start"), words("x"), words("y"));
+    let at = |what: &str| {
+        let from = u32::try_from(text.find(what).expect("in the text")).unwrap();
+        let to = from + u32::try_from(what.len()).unwrap();
+        let i = (0..file.len())
+            .find(|&i| file[i] == doc && start[i] >= from && start[i] < to)
+            .unwrap_or_else(|| panic!("a glyph from {what:?}: {orig}"));
+        (f32::from_bits(xs[i]), f32::from_bits(ys[i]))
+    };
+    let (cx, cy) = at("\\cite{knuth,lamport}");
+    let got = ask(
+        &mut viewer,
+        json!({"op": "cites", "page": 0, "x": cx + 1.0, "y": cy - 2.0}),
+    );
+    let cites = got["json"]["cites"]
+        .as_array()
+        .unwrap_or_else(|| panic!("cites: {got}"))
+        .clone();
+    let keys: Vec<&str> = cites.iter().filter_map(|e| e["key"].as_str()).collect();
+    assert_eq!(keys, ["knuth", "lamport"], "{got}");
+    assert_eq!(cites[0]["label"], "1", "{got}");
+    assert_eq!(cites[1]["label"], "2", "{got}");
+    assert_eq!(cites[0]["at"][0], 0, "the entry's page: {got}");
+    assert!(
+        cites[0]["at"][1]
+            .as_f64()
+            .is_some_and(|ey| ey > f64::from(cy)),
+        "the entry below the citation: {got}"
+    );
+    assert!(
+        cites[1]["at"][1].as_f64() > cites[0]["at"][1].as_f64(),
+        "lamport's entry after knuth's: {got}"
+    );
+    // (other text, a page not there, a point off every glyph: none)
+    let (px, py) = at("Plain words");
+    let p = ask(
+        &mut viewer,
+        json!({"op": "cites", "page": 0, "x": px + 1.0, "y": py - 2.0}),
+    );
+    assert_eq!(p["json"]["cites"], json!(null), "{p}");
+    let n = ask(
+        &mut viewer,
+        json!({"op": "cites", "page": 7, "x": 1, "y": 1}),
+    );
+    assert_eq!(n["json"]["cites"], json!(null), "{n}");
+    let bad = ask(&mut viewer, json!({"op": "cites", "page": 0, "x": "x"}));
+    assert!(
+        bad["json"]["cites"].is_null() || bad["json"]["cites"].is_array(),
+        "{bad}"
+    );
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "id": 9, "method": "shutdown", "params": null}),
+    );
+    lsp_until(&rx, &mut seen, |m| m["id"] == 9);
+    lsp_send(
+        &mut to,
+        &json!({"jsonrpc": "2.0", "method": "exit", "params": null}),
+    );
+    let _ = child.wait();
+}

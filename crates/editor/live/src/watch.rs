@@ -120,6 +120,15 @@ impl Edits {
                 }
                 return Applied::Nothing;
             }
+            // (the citation under a point, when asked: no cards rather
+            // than an error, whatever the document holds)
+            Ask::Cites { page, x, y } => {
+                if let Some(v) = viewer {
+                    let cites = s.cites_at(page, f32::from_bits(x), f32::from_bits(y));
+                    v.put_cites(page, x, y, json!({ "cites": cites }));
+                }
+                return Applied::Nothing;
+            }
             // (a page's origins, made for that page alone, when asked)
             Ask::Origins(k) => {
                 if let Some(v) = viewer {
