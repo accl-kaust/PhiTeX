@@ -1,7 +1,7 @@
 //! Gate 1: `oracle/fixtures/core/*.tex` under INITEX; the log's lines
 //! from `(./core.tex` on equal TeX's.
 
-mod common;
+use crate::common;
 
 const PRELUDE: &str = "\\catcode`\\{=1 \\catcode`\\}=2 \\catcode`\\$=3 \\catcode`\\&=4 \\catcode`\\#=6 \\catcode`\\^=7 \\catcode`\\~=13 \\hsize=468pt \\vsize=643pt \\parindent=20pt \\maxdepth=4pt \\baselineskip=12pt \\topskip=10pt \\tolerance=200 \\linepenalty=10 %\n";
 

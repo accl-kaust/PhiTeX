@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 description = "pdfTeX's PDF backend: pages from shipped boxes, Type 1 fonts embedded and subset"
+autotests = false
 
 [features]
 # timing lines (`PHITEX_TEX_TIME`), compiled out of other builds
@@ -19,3 +20,11 @@ phitex-typeset = { path = "../../core/typeset" }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "tests"
+path = "tests/tests.rs"
+
+[[test]]
+name = "update"
+path = "tests/update.rs"

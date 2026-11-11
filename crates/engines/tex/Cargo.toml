@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 publish = false
 description = "TeX's semantics on the reduction core: 21-bit tokens, expansion, macros, conditionals, registers, groups, modes; the Engine trait the engines implement"
+autotests = false
 
 [dependencies]
 phitex-defuse = { path = "../../core/defuse" }
@@ -47,3 +48,15 @@ tikv-jemallocator = "0.6"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "latex"
+path = "tests/latex.rs"
+
+[[test]]
+name = "suites"
+path = "tests/suites.rs"
+
+[[test]]
+name = "tests"
+path = "tests/tests.rs"

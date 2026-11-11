@@ -7,7 +7,7 @@
 //! Plain TeX with a `\usepackage` that `\input`s `NAME.sty` (the loads
 //! are sliced as LaTeX's are: one node each).
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 

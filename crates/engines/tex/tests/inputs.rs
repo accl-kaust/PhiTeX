@@ -3,7 +3,7 @@
 //! TeX's, each paragraph of an input file is about one node, and an
 //! edit of one word in an input file reruns only that file's region.
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

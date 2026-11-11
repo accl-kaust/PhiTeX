@@ -4,7 +4,7 @@
 //! in place, a moved page fire relocates it and keeps its finisher, and an
 //! edit history ends where a cold build does.
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 

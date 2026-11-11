@@ -6,7 +6,7 @@
 //! evaluation going on while a command runs, and a command refused
 //! without a hook.
 
-mod common;
+use crate::common;
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;

@@ -5,7 +5,7 @@
 //! frame of the run's Rust stack, so the deepest legal nesting must fit
 //! the stack of every thread the engine runs on (`WORKER_STACK`).
 
-mod common;
+use crate::common;
 
 use phitex_tex::Options;
 

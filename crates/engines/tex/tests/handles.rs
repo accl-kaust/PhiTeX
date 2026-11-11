@@ -3,7 +3,7 @@
 //! parameters, registers) in later evaluations, each equal to a cold
 //! build of its text.
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 

@@ -4,7 +4,7 @@
 //! that tests or typesets it does. Plain TeX, where `\count0` is the
 //! page number and the oracle is a cold build of the same text.
 
-mod common;
+use crate::common;
 
 use std::fmt::Write as _;
 

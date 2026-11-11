@@ -9,7 +9,8 @@
 //! `PHITEX_GATE=NAME` runs that case alone; `PHITEX_GATE_OUT=DIR`
 //! writes each XDV made there.
 
-mod common;
+use crate::common;
+#[path = "fcindex/mod.rs"]
 mod fcindex;
 
 use std::path::Path;
