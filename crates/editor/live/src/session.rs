@@ -470,6 +470,9 @@ pub struct Session {
     /// The machine: the files the build reads (the CLI's kpathsea), the
     /// services it calls.
     host: Arc<dyn Host>,
+    /// The format the running build is making (its name), none: it took
+    /// one ([`Session::format_unpublished`]).
+    making_format: Arc<Mutex<Option<String>>>,
     /// The bytes kept between sessions (none: nothing kept).
     store: Option<Records>,
     /// Where the outputs go.
@@ -646,6 +649,7 @@ impl Session {
             built_text: None,
             page_hashes: Vec::new(),
             host,
+            making_format: Arc::default(),
             store: store.map(Records::new),
             sink,
             builds: 0,
@@ -915,6 +919,9 @@ impl Session {
                 {
                     let (status, name) = (self.status.clone(), self.job.engine.name);
                     let making = std::sync::atomic::AtomicBool::new(false);
+                    let made = self.making_format.clone();
+                    *made.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                    let format = prelude.as_deref().map(|t| self.format_name(t));
                     progress.on_format(Box::new(move |ready| {
                         use std::sync::atomic::Ordering::Relaxed;
                         if ready {
@@ -924,6 +931,9 @@ impl Session {
                             status.set("typesetting");
                         } else {
                             making.store(true, Relaxed);
+                            made.lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .clone_from(&format);
                             status.relabel(format!("making {name} format"));
                         }
                         status.meter().format(ready);
@@ -1226,6 +1236,9 @@ impl Session {
         } else {
             b.diagnostics()
         };
+        if let Some(d) = self.format_unpublished() {
+            diagnostics.push(d);
+        }
         // (the engine's warnings at no place: the page layout not
         // settled; the front ends print them)
         let warnings: Vec<String> = diagnostics
@@ -1594,6 +1607,37 @@ impl Session {
                 dir.clone(),
             ),
             live: self.sink.updates() || self.view_layout,
+        })
+    }
+
+    /// The warning, at no place, of a build that made its format though
+    /// the release publishes one of that name ([`Host::publishes_format`]):
+    /// the release's could not be had or did not hold (a pack table
+    /// without it, a format made for another engine), and every first
+    /// build of this engine is slow until that is fixed. Said once, on
+    /// the build that made it; none otherwise.
+    fn format_unpublished(&self) -> Option<phitex_tex::Diagnostic> {
+        let name = self
+            .making_format
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()?;
+        if !self.host.publishes_format(&name) {
+            return None;
+        }
+        Some(phitex_tex::Diagnostic {
+            file: self.job.file.clone(),
+            range: (0, 0),
+            line: 0,
+            severity: phitex_tex::Severity::Warning,
+            message: format!(
+                "PhiTeX could not use the prebuilt {} format and made its own: the PDF is right, \
+                 but this first build was slow. Update PhiTeX; if it happens again, open an issue \
+                 at https://github.com/accl-kaust/PhiTeX/issues/new/choose (format {name})",
+                self.job.engine.name
+            ),
+            context: String::new(),
+            help: None,
         })
     }
 

@@ -619,6 +619,10 @@ impl Host for ShelfHost {
         self.files.published_format(name)
     }
 
+    fn publishes_format(&self, name: &str) -> bool {
+        self.files.publishes_format(name)
+    }
+
     /// BibTeX's and makeindex's files, the format's suffix added where the
     /// name has none: the project's, else Shelf's.
     /// METAFONT's runs (on Shelf's sources) kept in the cache directory.

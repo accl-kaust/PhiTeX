@@ -150,7 +150,16 @@ impl Host for Shelf {
     /// without fetching them ([`Files::key`]).
     fn content_key(&self) -> Option<phitex_tex::ContentKey> {
         let (f, e) = (self.files.clone(), self.engine);
-        Some(Arc::new(move |name: &str| f.key(name, e)))
+        // (a font's key, `phitex_tex::FONT_KEY` and its file's name, as
+        // the format's files are found (`format_finder`) and as the CLI
+        // keys them: taken whole, no font of a format had a key, each
+        // read and hashed, its pack fetched, on every warm start)
+        Some(Arc::new(move |key: &str| {
+            match phitex_tex::font_name(key) {
+                Some(n) => f.key_in(n, phitex_shelf::format_of(n), e),
+                None => f.key_in(key, "tex", e),
+            }
+        }))
     }
 
     /// The format's files: Shelf's only, as the CLI's `--shelf` builds a format
@@ -171,6 +180,10 @@ impl Host for Shelf {
     /// The release's own format of that name, when the store's is none or stale.
     fn published_format(&self, name: &str) -> Option<Vec<u8>> {
         self.files.published_format(name, self.engine)
+    }
+
+    fn publishes_format(&self, name: &str) -> bool {
+        self.files.publishes_format(name, self.engine)
     }
 
     /// BibTeX's and makeindex's files, as kpathsea finds them in their

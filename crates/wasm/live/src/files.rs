@@ -339,16 +339,26 @@ impl Files {
         self.shelf(engine)?.published_format(name)
     }
 
-    /// `name`'s content key without fetching it (Shelf's: its content sum and
+    /// Whether the release publishes a format named `name`, nothing fetched.
+    pub fn publishes_format(self: &Arc<Self>, name: &str, engine: &'static str) -> bool {
+        self.shelf(engine).is_some_and(|f| f.publishes_format(name))
+    }
+
+    /// `name`'s content key in kpathsea format `format`, without fetching it (Shelf's: its content sum and
     /// path), for a warm start's check; none: the host's.
-    pub fn key(self: &Arc<Self>, name: &str, engine: &'static str) -> Option<(String, Vec<u8>)> {
+    pub fn key_in(
+        self: &Arc<Self>,
+        name: &str,
+        format: &str,
+        engine: &'static str,
+    ) -> Option<(String, Vec<u8>)> {
         let s = self.lock();
         let ix = s.index.clone()?;
         if Self::hosts(&s, &ix, name, engine) {
             return None;
         }
         drop(s);
-        self.shelf(engine)?.key(name)
+        self.shelf(engine)?.key_in(name, format)
     }
 
     fn by_name<'a>(&'a self, mut s: MutexGuard<'a, State>, name: &str) -> Option<Kept> {

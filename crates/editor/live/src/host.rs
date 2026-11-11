@@ -116,6 +116,15 @@ pub trait Host: Send + Sync {
         None
     }
 
+    /// Whether the files' release publishes a format named `name`
+    /// ([`Host::published_format`]'s): a build that made that format
+    /// anyway tells the user so (the release's could not be had or did
+    /// not hold: the release is wrong, or this PhiTeX is not the one it
+    /// was made for).
+    fn publishes_format(&self, _name: &str) -> bool {
+        false
+    }
+
     /// The tools' support files (bibliography styles and databases, index
     /// styles).
     fn tool_finder(&self) -> Option<ToolFinder> {

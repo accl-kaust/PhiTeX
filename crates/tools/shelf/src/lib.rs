@@ -614,6 +614,13 @@ impl Files {
         Some((format!("{TL}{rel}"), key))
     }
 
+    /// Whether the release publishes a format named `name`
+    /// ([`Files::published_format`]'s), nothing fetched.
+    #[must_use]
+    pub fn publishes_format(&self, name: &str) -> bool {
+        self.index.format_pack(name).is_some()
+    }
+
     /// The format the release publishes as `name` ([`Index::format_pack`]:
     /// made by the release for this engine's identity, so good on its
     /// files): its pack fetched and checked against the pack table, the
